@@ -52,16 +52,16 @@ curl -X POST http://localhost:8000/analyze \
 uv tool install rootcoz
 export ROOTCOZ_SERVER=http://localhost:8000
 
-rcz health
-rcz analyze --job-name my-job --build-number 42
-rcz results list
-rcz admin token-usage              # Summary dashboard
-rcz admin token-usage --group-by model  # Grouped breakdown
-rcz admin token-usage --job-id <uuid>   # Per-job usage
-rcz admin token-usage --period month --format csv  # CSV export
+rootcoz health
+rootcoz analyze --job-name my-job --build-number 42
+rootcoz results list
+rootcoz admin token-usage              # Summary dashboard
+rootcoz admin token-usage --group-by model  # Grouped breakdown
+rootcoz admin token-usage --job-id <uuid>   # Per-job usage
+rootcoz admin token-usage --period month --format csv  # CSV export
 ```
 
-Run `rcz --help` for all commands.
+Run `rootcoz --help` for all commands.
 
 ## API
 
@@ -86,7 +86,7 @@ Users can receive browser push notifications when @mentioned in comments. The se
 Subscribe/unsubscribe is browser-only (managed via the web UI). To list users available for @mentions:
 
 ```bash
-rcz mentionable-users
+rootcoz mentionable-users
 ```
 
 ## OAuth Proxy / SSO Integration

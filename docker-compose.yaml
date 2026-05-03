@@ -1,19 +1,19 @@
 # RootCoz
-# AI-powered Jenkins failure analysis with a React web UI, REST API, and rcz CLI.
+# AI-powered Jenkins failure analysis with a React web UI, REST API, and rootcoz CLI.
 #
 # Access methods:
 #   - Web UI:  http://localhost:8000 (dashboard, reports, history)
 #   - API:     http://localhost:8000/analyze, /results, /history, etc.
-#   - CLI:     rcz health, rcz results list, rcz analyze --job-name my-job --build-number 42
+#   - CLI:     rootcoz health, rootcoz results list, rootcoz analyze --job-name my-job --build-number 42
 #
 # Usage:
 #   1. Copy .env.example to .env and configure your values
 #   2. Run: docker compose up -d
 #
-# CLI Tool (rcz):
+# CLI Tool (rootcoz):
 #   Install: uv tool install rootcoz
 #   Configure: export ROOTCOZ_SERVER=http://localhost:8000
-#   Docs: rcz --help
+#   Docs: rootcoz --help
 #
 # Configuration:
 #   - Replace placeholder values directly in this file, OR

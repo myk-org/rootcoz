@@ -5,9 +5,9 @@
 # Server-specific settings override defaults.
 #
 # Usage:
-#   rcz --server dev results dashboard
-#   rcz --server prod results dashboard
-#   rcz results dashboard  # uses default server
+#   rootcoz --server dev results dashboard
+#   rootcoz --server prod results dashboard
+#   rootcoz results dashboard  # uses default server
 
 [default]
 server = "dev"  # Default server name

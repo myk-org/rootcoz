@@ -73,7 +73,7 @@ uvx --with tox-uv tox -e frontend   # Frontend only
 - **Backend**: Python + FastAPI + TinyDB
 - **Frontend**: Vite + React 19 + TypeScript + Tailwind CSS + shadcn/ui (in `/frontend/`)
 - **AI Integration**: CLI-based (Claude CLI, Gemini CLI, Cursor Agent CLI) — no SDK dependencies, provider-agnostic, `AI_PROVIDER` env var selects provider
-- **CLI**: `rcz` CLI tool for querying the API — run `rcz --help` for available commands
+- **CLI**: `rootcoz` CLI tool for querying the API — run `rootcoz --help` for available commands
 
 ### Frontend Patterns
 
@@ -101,7 +101,7 @@ Never pre-feed data to the AI in the prompt. Give the AI tools (API endpoints, s
 
 ### CLI Parity
 
-Every new API endpoint MUST also be supported via the `rcz` CLI tool. When adding a new endpoint:
+Every new API endpoint MUST also be supported via the `rootcoz` CLI tool. When adding a new endpoint:
 1. Add the client method to `src/rootcoz/cli/client.py`
 2. Add the CLI command to `src/rootcoz/cli/main.py`
 3. Add tests for both in `tests/test_cli_client.py` and `tests/test_cli_main.py`

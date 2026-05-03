@@ -24,8 +24,8 @@ dependencies = [
 ]
 
 [project.scripts]
-rootcoz = "rootcoz.main:run"
-rcz = "rootcoz.cli.main:app"
+rootcoz-server = "rootcoz.main:run"
+rootcoz = "rootcoz.cli.main:app"
 
 [project.optional-dependencies]
 tests = [

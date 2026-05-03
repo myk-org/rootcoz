@@ -45,7 +45,7 @@ export function ReportPage() {
 
 function CliCommand({ jobId }: { jobId: string }) {
   const { isCopied, copy } = useClipboard()
-  const command = `rcz results show ${jobId} --json`
+  const command = `rootcoz results show ${jobId} --json`
 
   return (
     <p className="flex items-center gap-1.5">
