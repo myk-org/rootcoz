@@ -1,0 +1,536 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="light">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Copy Common Analysis Recipes - jenkins-job-insight</title>
+    <meta name="description" content="Turn failing Jenkins jobs into clear answers, collaborative reviews, and ready-to-file bugs.">
+    <link rel="stylesheet" href="assets/style.css">
+    <script>try{var t=localStorage.getItem('theme');if(t==='dark')document.documentElement.setAttribute('data-theme','dark')}catch(e){}</script>
+    <link rel="alternate" type="text/plain" title="LLM Documentation Index" href="llms.txt">
+    <link rel="alternate" type="text/plain" title="LLM Full Documentation" href="llms-full.txt">
+</head>
+<body>
+    <aside class="sidebar" id="sidebar">
+        <div class="sidebar-header">
+            <a href="index.html" class="sidebar-logo">jenkins-job-insight</a>
+            <p class="sidebar-tagline">Turn failing Jenkins jobs into clear answers, collaborative reviews, and ready-to-file bugs.</p>
+        </div>
+
+        <div class="sidebar-search">
+            <input type="text" id="search-input" placeholder="Search... (⌘K)" autocomplete="off" readonly>
+            <div id="search-results" class="search-results"></div>
+        </div>
+
+        <nav class="sidebar-nav">
+            
+            <div class="nav-group">
+                <h3 class="nav-group-title">Getting Started</h3>
+                <ul class="nav-group-pages">
+                    
+                    <li>
+                        <a href="analyze-your-first-jenkins-job.html"
+                           class="nav-link">
+                            Analyze Your First Jenkins Job
+                        </a>
+                    </li>
+                    
+                </ul>
+            </div>
+            
+            <div class="nav-group">
+                <h3 class="nav-group-title">User Guides</h3>
+                <ul class="nav-group-pages">
+                    
+                    <li>
+                        <a href="configure-your-profile-and-notifications.html"
+                           class="nav-link">
+                            Configure Your Profile and Notifications
+                        </a>
+                    </li>
+                    
+                    <li>
+                        <a href="analyze-a-jenkins-job.html"
+                           class="nav-link">
+                            Analyze a Jenkins Job
+                        </a>
+                    </li>
+                    
+                    <li>
+                        <a href="review-and-classify-failures.html"
+                           class="nav-link">
+                            Review and Classify Failures
+                        </a>
+                    </li>
+                    
+                    <li>
+                        <a href="investigate-failure-history.html"
+                           class="nav-link">
+                            Investigate Failure History
+                        </a>
+                    </li>
+                    
+                    <li>
+                        <a href="customize-ai-analysis.html"
+                           class="nav-link">
+                            Customize AI Analysis
+                        </a>
+                    </li>
+                    
+                    <li>
+                        <a href="create-github-issues-and-jira-bugs.html"
+                           class="nav-link">
+                            Create GitHub Issues and Jira Bugs
+                        </a>
+                    </li>
+                    
+                    <li>
+                        <a href="push-classifications-to-report-portal.html"
+                           class="nav-link">
+                            Push Classifications to Report Portal
+                        </a>
+                    </li>
+                    
+                    <li>
+                        <a href="organize-jobs-with-metadata.html"
+                           class="nav-link">
+                            Organize Jobs with Metadata
+                        </a>
+                    </li>
+                    
+                    <li>
+                        <a href="manage-users-access-and-token-usage.html"
+                           class="nav-link">
+                            Manage Users, Access, and Token Usage
+                        </a>
+                    </li>
+                    
+                </ul>
+            </div>
+            
+            <div class="nav-group">
+                <h3 class="nav-group-title">Recipes</h3>
+                <ul class="nav-group-pages">
+                    
+                    <li>
+                        <a href="copy-common-analysis-recipes.html"
+                           class="nav-link active" aria-current="page">
+                            Copy Common Analysis Recipes
+                        </a>
+                    </li>
+                    
+                    <li>
+                        <a href="copy-common-deployment-recipes.html"
+                           class="nav-link">
+                            Copy Common Deployment Recipes
+                        </a>
+                    </li>
+                    
+                </ul>
+            </div>
+            
+            <div class="nav-group">
+                <h3 class="nav-group-title">Reference</h3>
+                <ul class="nav-group-pages">
+                    
+                    <li>
+                        <a href="cli-command-reference.html"
+                           class="nav-link">
+                            CLI Command Reference
+                        </a>
+                    </li>
+                    
+                    <li>
+                        <a href="rest-api-reference.html"
+                           class="nav-link">
+                            REST API Reference
+                        </a>
+                    </li>
+                    
+                    <li>
+                        <a href="configuration-and-environment-reference.html"
+                           class="nav-link">
+                            Configuration and Environment Reference
+                        </a>
+                    </li>
+                    
+                </ul>
+            </div>
+            
+        </nav>
+    </aside>
+
+    <div class="main-wrapper">
+        <header class="top-bar">
+            <div class="top-bar-left">
+                <button class="sidebar-toggle" id="sidebar-toggle" aria-label="Toggle sidebar" aria-expanded="false">
+                    <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
+                        <path d="M3 5h14M3 10h14M3 15h14" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+                    </svg>
+                </button>
+                <a href="index.html" class="top-bar-title">jenkins-job-insight</a>
+            </div>
+            <div class="top-bar-spacer"></div>
+            <div class="top-bar-right">
+                <button class="top-bar-search-btn" id="search-trigger" aria-label="Search">
+                    <kbd>&#8984;K</kbd> Search
+                </button>
+                <a href="https://github.com/myk-org/docsfy" target="_blank" rel="noopener" class="docsfy-badge" title="Generated with docsfy">
+                    ⚡ docs<span class="brand-accent">fy</span>
+                </a>
+                
+                <a href="https://github.com/myk-org/jenkins-job-insight.git" target="_blank" rel="noopener noreferrer" class="top-bar-github" id="github-link" data-repo-url="https://github.com/myk-org/jenkins-job-insight.git">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><path d="M12 0c-6.626 0-12 5.373-12 12 0 5.302 3.438 9.8 8.207 11.387.599.111.793-.261.793-.577v-2.234c-3.338.726-4.033-1.416-4.033-1.416-.546-1.387-1.333-1.756-1.333-1.756-1.089-.745.083-.729.083-.729 1.205.084 1.839 1.237 1.839 1.237 1.07 1.834 2.807 1.304 3.492.997.107-.775.418-1.305.762-1.604-2.665-.305-5.467-1.334-5.467-5.931 0-1.311.469-2.381 1.236-3.221-.124-.303-.535-1.524.117-3.176 0 0 1.008-.322 3.301 1.23.957-.266 1.983-.399 3.003-.404 1.02.005 2.047.138 3.006.404 2.291-1.552 3.297-1.23 3.297-1.23.653 1.653.242 2.874.118 3.176.77.84 1.235 1.911 1.235 3.221 0 4.609-2.807 5.624-5.479 5.921.43.372.823 1.102.823 2.222v3.293c0 .319.192.694.801.576 4.765-1.589 8.199-6.086 8.199-11.386 0-6.627-5.373-12-12-12z"/></svg>
+                    <span class="github-stars" id="github-stars" title="GitHub stars"></span>
+                </a>
+                
+                <button class="theme-toggle" id="theme-toggle" aria-label="Toggle theme">
+                    <svg class="icon-sun" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+                        <circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/>
+                    </svg>
+                    <svg class="icon-moon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+                        <path d="M21 12.79A9 9 0 1111.21 3 7 7 0 0021 12.79z"/>
+                    </svg>
+                </button>
+            </div>
+        </header>
+
+        <main class="content">
+            
+            <article class="article">
+                <div class="article-body">
+                    <!-- SECURITY: |safe is intentional. Content is AI-generated markdown
+                         converted to HTML server-side by the markdown library, not
+                         user-supplied input. XSS risk is minimal and accepted since
+                         the AI generates the content, not end users. -->
+                    <h1 id="copy-common-analysis-recipes">Copy Common Analysis Recipes</h1>
+<p>These short recipes cover the most common ways to queue and tune analysis runs from <code>jji</code> or <code>curl</code>.</p>
+<blockquote>
+<p><strong>Tip:</strong> For the full flag list, request fields, and reusable defaults, see <a href="cli-command-reference.html">CLI Command Reference</a>, <a href="rest-api-reference.html">REST API Reference</a>, and <a href="configuration-and-environment-reference.html">Configuration and Environment Reference</a>.</p>
+<p><strong>Note:</strong> <code>GET /results/{job_id}</code> returns <code>202</code> while a job is still <code>pending</code>, <code>waiting</code>, or <code>running</code>.</p>
+</blockquote>
+<h2 id="queue-a-jenkins-analysis-from-the-cli">Queue a Jenkins analysis from the CLI</h2>
+<p>Use this when you want to kick off analysis now and poll for the final result from a shell script.</p>
+<div class="highlight"><pre><span></span><code><span class="nv">server</span><span class="o">=</span>https://jji.example.com
+
+<span class="nv">job_id</span><span class="o">=</span><span class="s2">&quot;</span><span class="k">$(</span>
+<span class="w">  </span>jji<span class="w"> </span>--server<span class="w"> </span><span class="s2">&quot;</span><span class="nv">$server</span><span class="s2">&quot;</span><span class="w"> </span>--user<span class="w"> </span>alex<span class="w"> </span>--json<span class="w"> </span>analyze<span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--job-name<span class="w"> </span>qe/nightly/api-tests<span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--build-number<span class="w"> </span><span class="m">1842</span><span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--provider<span class="w"> </span>claude<span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--model<span class="w"> </span>opus-4<span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--jenkins-url<span class="w"> </span>https://jenkins.ci.example.com<span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--jenkins-user<span class="w"> </span>svc-jji<span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--jenkins-password<span class="w"> </span>jenkins-api-token-123<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span><span class="p">|</span><span class="w"> </span>python3<span class="w"> </span>-c<span class="w"> </span><span class="s1">&#39;import json,sys; print(json.load(sys.stdin)[&quot;job_id&quot;])&#39;</span>
+<span class="k">)</span><span class="s2">&quot;</span>
+
+<span class="k">while</span><span class="w"> </span>:<span class="p">;</span><span class="w"> </span><span class="k">do</span>
+<span class="w">  </span><span class="nv">result</span><span class="o">=</span><span class="s2">&quot;</span><span class="k">$(</span>jji<span class="w"> </span>--server<span class="w"> </span><span class="s2">&quot;</span><span class="nv">$server</span><span class="s2">&quot;</span><span class="w"> </span>--user<span class="w"> </span>alex<span class="w"> </span>--json<span class="w"> </span>status<span class="w"> </span><span class="s2">&quot;</span><span class="nv">$job_id</span><span class="s2">&quot;</span><span class="k">)</span><span class="s2">&quot;</span>
+<span class="w">  </span><span class="nv">status</span><span class="o">=</span><span class="s2">&quot;</span><span class="k">$(</span>python3<span class="w"> </span>-c<span class="w"> </span><span class="s1">&#39;import json,sys; print(json.load(sys.stdin)[&quot;status&quot;])&#39;</span><span class="w"> </span><span class="o">&lt;&lt;&lt;</span><span class="s2">&quot;</span><span class="nv">$result</span><span class="s2">&quot;</span><span class="k">)</span><span class="s2">&quot;</span>
+<span class="w">  </span><span class="o">[</span><span class="w"> </span><span class="s2">&quot;</span><span class="nv">$status</span><span class="s2">&quot;</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">&quot;completed&quot;</span><span class="w"> </span><span class="o">]</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="o">[</span><span class="w"> </span><span class="s2">&quot;</span><span class="nv">$status</span><span class="s2">&quot;</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">&quot;failed&quot;</span><span class="w"> </span><span class="o">]</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="k">break</span>
+<span class="w">  </span>sleep<span class="w"> </span><span class="m">15</span>
+<span class="k">done</span>
+
+<span class="nb">printf</span><span class="w"> </span><span class="s1">&#39;%s\n&#39;</span><span class="w"> </span><span class="s2">&quot;</span><span class="nv">$result</span><span class="s2">&quot;</span>
+</code></pre></div>
+
+<p>This submits <code>jji analyze</code>, captures the returned <code>job_id</code>, and polls until the job reaches a terminal state. Use it for terminal automation, cron jobs, or wrapper scripts that need the final JSON document instead of the initial queued response.</p>
+<ul>
+<li>Use <code>jji --server "$server" --user alex status "$job_id"</code> if you only want a quick human-readable status check.</li>
+</ul>
+<h2 id="queue-a-jenkins-analysis-from-the-rest-api">Queue a Jenkins analysis from the REST API</h2>
+<p>Use this when you want the same background flow from <code>curl</code> or another HTTP client.</p>
+<div class="highlight"><pre><span></span><code><span class="nv">server</span><span class="o">=</span>https://jji.example.com
+
+<span class="nv">response</span><span class="o">=</span><span class="s2">&quot;</span><span class="k">$(</span>
+<span class="w">  </span>curl<span class="w"> </span>-sS<span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--cookie<span class="w"> </span><span class="s2">&quot;jji_username=alex&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--header<span class="w"> </span><span class="s1">&#39;Content-Type: application/json&#39;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--data<span class="w"> </span><span class="s1">&#39;{&quot;job_name&quot;:&quot;qe/nightly/api-tests&quot;,&quot;build_number&quot;:1842,&quot;ai_provider&quot;:&quot;claude&quot;,&quot;ai_model&quot;:&quot;opus-4&quot;,&quot;jenkins_url&quot;:&quot;https://jenkins.ci.example.com&quot;,&quot;jenkins_user&quot;:&quot;svc-jji&quot;,&quot;jenkins_password&quot;:&quot;jenkins-api-token-123&quot;}&#39;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">    </span><span class="s2">&quot;</span><span class="nv">$server</span><span class="s2">/analyze&quot;</span>
+<span class="k">)</span><span class="s2">&quot;</span>
+
+<span class="nv">job_id</span><span class="o">=</span><span class="s2">&quot;</span><span class="k">$(</span>python3<span class="w"> </span>-c<span class="w"> </span><span class="s1">&#39;import json,sys; print(json.load(sys.stdin)[&quot;job_id&quot;])&#39;</span><span class="w"> </span><span class="o">&lt;&lt;&lt;</span><span class="s2">&quot;</span><span class="nv">$response</span><span class="s2">&quot;</span><span class="k">)</span><span class="s2">&quot;</span>
+
+<span class="k">while</span><span class="w"> </span>:<span class="p">;</span><span class="w"> </span><span class="k">do</span>
+<span class="w">  </span><span class="nv">result</span><span class="o">=</span><span class="s2">&quot;</span><span class="k">$(</span>curl<span class="w"> </span>-sS<span class="w"> </span>--cookie<span class="w"> </span><span class="s2">&quot;jji_username=alex&quot;</span><span class="w"> </span><span class="s2">&quot;</span><span class="nv">$server</span><span class="s2">/results/</span><span class="nv">$job_id</span><span class="s2">&quot;</span><span class="k">)</span><span class="s2">&quot;</span>
+<span class="w">  </span><span class="nv">status</span><span class="o">=</span><span class="s2">&quot;</span><span class="k">$(</span>python3<span class="w"> </span>-c<span class="w"> </span><span class="s1">&#39;import json,sys; print(json.load(sys.stdin)[&quot;status&quot;])&#39;</span><span class="w"> </span><span class="o">&lt;&lt;&lt;</span><span class="s2">&quot;</span><span class="nv">$result</span><span class="s2">&quot;</span><span class="k">)</span><span class="s2">&quot;</span>
+<span class="w">  </span><span class="o">[</span><span class="w"> </span><span class="s2">&quot;</span><span class="nv">$status</span><span class="s2">&quot;</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">&quot;completed&quot;</span><span class="w"> </span><span class="o">]</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="o">[</span><span class="w"> </span><span class="s2">&quot;</span><span class="nv">$status</span><span class="s2">&quot;</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">&quot;failed&quot;</span><span class="w"> </span><span class="o">]</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="k">break</span>
+<span class="w">  </span>sleep<span class="w"> </span><span class="m">15</span>
+<span class="k">done</span>
+
+<span class="nb">printf</span><span class="w"> </span><span class="s1">&#39;%s\n&#39;</span><span class="w"> </span><span class="s2">&quot;</span><span class="nv">$result</span><span class="s2">&quot;</span>
+</code></pre></div>
+
+<p>This posts to <code>/analyze</code>, saves the queued <code>job_id</code>, and polls <code>/results/{job_id}</code> until the run finishes. Use it when you want a copy-pasteable API-only flow without relying on a saved CLI profile.</p>
+<h2 id="wait-for-jenkins-to-finish-before-analysis-from-the-cli">Wait for Jenkins to finish before analysis from the CLI</h2>
+<p>Use this when the Jenkins build is still running and you want JJI to wait before it starts analysis.</p>
+<div class="highlight"><pre><span></span><code>jji<span class="w"> </span>--server<span class="w"> </span>https://jji.example.com<span class="w"> </span>--user<span class="w"> </span>alex<span class="w"> </span>analyze<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--job-name<span class="w"> </span>qe/nightly/api-tests<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--build-number<span class="w"> </span><span class="m">1842</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--provider<span class="w"> </span>claude<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--model<span class="w"> </span>opus-4<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--jenkins-url<span class="w"> </span>https://jenkins.ci.example.com<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--jenkins-user<span class="w"> </span>svc-jji<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--jenkins-password<span class="w"> </span>jenkins-api-token-123<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--wait<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--poll-interval<span class="w"> </span><span class="m">2</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--max-wait<span class="w"> </span><span class="m">90</span>
+</code></pre></div>
+
+<p>This queues the job immediately, then keeps it in the server-side <code>waiting</code> state until Jenkins reports that the build is done. Use it when your analysis request may arrive before test execution has completed.</p>
+<ul>
+<li>Set <code>--max-wait 0</code> to wait indefinitely.</li>
+<li><code>--poll-interval</code> is in minutes.</li>
+</ul>
+<h2 id="wait-for-jenkins-to-finish-before-analysis-from-the-rest-api">Wait for Jenkins to finish before analysis from the REST API</h2>
+<p>Use this when you need the same Jenkins-wait behavior from an HTTP request.</p>
+<div class="highlight"><pre><span></span><code>curl<span class="w"> </span>-sS<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--cookie<span class="w"> </span><span class="s2">&quot;jji_username=alex&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--header<span class="w"> </span><span class="s1">&#39;Content-Type: application/json&#39;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--data<span class="w"> </span><span class="s1">&#39;{&quot;job_name&quot;:&quot;qe/nightly/api-tests&quot;,&quot;build_number&quot;:1842,&quot;ai_provider&quot;:&quot;claude&quot;,&quot;ai_model&quot;:&quot;opus-4&quot;,&quot;jenkins_url&quot;:&quot;https://jenkins.ci.example.com&quot;,&quot;jenkins_user&quot;:&quot;svc-jji&quot;,&quot;jenkins_password&quot;:&quot;jenkins-api-token-123&quot;,&quot;wait_for_completion&quot;:true,&quot;poll_interval_minutes&quot;:2,&quot;max_wait_minutes&quot;:90}&#39;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>https://jji.example.com/analyze
+</code></pre></div>
+
+<p>This sends the wait settings directly in the <code>/analyze</code> body, so the queued job pauses in JJI until Jenkins finishes or the timeout is reached. It is useful for chatops bots, webhooks, or scripts that submit analysis as soon as a build is triggered.</p>
+<ul>
+<li>Set <code>"max_wait_minutes": 0</code> to wait with no deadline.</li>
+</ul>
+<h2 id="add-peer-review-from-the-cli">Add peer review from the CLI</h2>
+<p>Use this when you want the primary model to debate the result with one or more peer models.</p>
+<div class="highlight"><pre><span></span><code>jji<span class="w"> </span>--server<span class="w"> </span>https://jji.example.com<span class="w"> </span>--user<span class="w"> </span>alex<span class="w"> </span>analyze<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--job-name<span class="w"> </span>qe/nightly/api-tests<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--build-number<span class="w"> </span><span class="m">1842</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--provider<span class="w"> </span>claude<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--model<span class="w"> </span>opus-4<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--jenkins-url<span class="w"> </span>https://jenkins.ci.example.com<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--jenkins-user<span class="w"> </span>svc-jji<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--jenkins-password<span class="w"> </span>jenkins-api-token-123<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--peers<span class="w"> </span><span class="s2">&quot;cursor:gpt-5.4-xhigh,gemini:gemini-2.5-pro&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--peer-analysis-max-rounds<span class="w"> </span><span class="m">5</span>
+</code></pre></div>
+
+<p>This runs the main analysis with <code>claude:opus-4</code> and sends the result through peer-review rounds with the listed peer models. Use it for noisy failures, release blockers, or any run where you want more than one model to challenge the first answer.</p>
+<ul>
+<li><code>--peer-analysis-max-rounds</code> accepts values from <code>1</code> to <code>10</code>.</li>
+</ul>
+<h2 id="add-peer-review-from-the-rest-api">Add peer review from the REST API</h2>
+<p>Use this when you want peer analysis from <code>curl</code> or an API client.</p>
+<div class="highlight"><pre><span></span><code>curl<span class="w"> </span>-sS<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--cookie<span class="w"> </span><span class="s2">&quot;jji_username=alex&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--header<span class="w"> </span><span class="s1">&#39;Content-Type: application/json&#39;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--data<span class="w"> </span><span class="s1">&#39;{&quot;job_name&quot;:&quot;qe/nightly/api-tests&quot;,&quot;build_number&quot;:1842,&quot;ai_provider&quot;:&quot;claude&quot;,&quot;ai_model&quot;:&quot;opus-4&quot;,&quot;jenkins_url&quot;:&quot;https://jenkins.ci.example.com&quot;,&quot;jenkins_user&quot;:&quot;svc-jji&quot;,&quot;jenkins_password&quot;:&quot;jenkins-api-token-123&quot;,&quot;peer_ai_configs&quot;:[{&quot;ai_provider&quot;:&quot;cursor&quot;,&quot;ai_model&quot;:&quot;gpt-5.4-xhigh&quot;},{&quot;ai_provider&quot;:&quot;gemini&quot;,&quot;ai_model&quot;:&quot;gemini-2.5-pro&quot;}],&quot;peer_analysis_max_rounds&quot;:5}&#39;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>https://jji.example.com/analyze
+</code></pre></div>
+
+<p>This sends the peer-review models as <code>peer_ai_configs</code> and limits the debate to five rounds. Use it when your automation layer works directly against the API and you want consistent multi-model review behavior.</p>
+<ul>
+<li>Send <code>"peer_ai_configs": []</code> to disable a server default just for one request.</li>
+</ul>
+<h2 id="add-extra-repository-context-from-the-cli">Add extra repository context from the CLI</h2>
+<p>Use this when the failure only makes sense if the AI can inspect related repos alongside the test repo.</p>
+<div class="highlight"><pre><span></span><code>jji<span class="w"> </span>--server<span class="w"> </span>https://jji.example.com<span class="w"> </span>--user<span class="w"> </span>alex<span class="w"> </span>analyze<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--job-name<span class="w"> </span>qe/nightly/api-tests<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--build-number<span class="w"> </span><span class="m">1842</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--provider<span class="w"> </span>claude<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--model<span class="w"> </span>opus-4<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--jenkins-url<span class="w"> </span>https://jenkins.ci.example.com<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--jenkins-user<span class="w"> </span>svc-jji<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--jenkins-password<span class="w"> </span>jenkins-api-token-123<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--tests-repo-url<span class="w"> </span>https://github.com/acme/api-tests.git:release-4.18<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--additional-repos<span class="w"> </span><span class="s2">&quot;infra:https://github.com/acme/infra.git:release-4.18,product:https://github.com/acme/product.git:main&quot;</span>
+</code></pre></div>
+
+<p>This clones the main test repo and the named extra repos into one shared workspace before analysis starts. Use it when the failure depends on product code, deployment code, or shared infrastructure that lives outside the test repo.</p>
+<ul>
+<li>Keep extra repo names short and stable, such as <code>infra</code> or <code>product</code>, because those names become workspace directory names.</li>
+<li>For a private extra repo on the CLI, append <code>@token</code>, for example <code>infra:https://github.com/acme/infra.git:release-4.18@ghp_exampleinfra123</code>.</li>
+</ul>
+<h2 id="add-extra-repository-context-from-the-rest-api">Add extra repository context from the REST API</h2>
+<p>Use this when you need the same multi-repo workspace through the API.</p>
+<div class="highlight"><pre><span></span><code>curl<span class="w"> </span>-sS<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--cookie<span class="w"> </span><span class="s2">&quot;jji_username=alex&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--header<span class="w"> </span><span class="s1">&#39;Content-Type: application/json&#39;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--data<span class="w"> </span><span class="s1">&#39;{&quot;job_name&quot;:&quot;qe/nightly/api-tests&quot;,&quot;build_number&quot;:1842,&quot;ai_provider&quot;:&quot;claude&quot;,&quot;ai_model&quot;:&quot;opus-4&quot;,&quot;jenkins_url&quot;:&quot;https://jenkins.ci.example.com&quot;,&quot;jenkins_user&quot;:&quot;svc-jji&quot;,&quot;jenkins_password&quot;:&quot;jenkins-api-token-123&quot;,&quot;tests_repo_url&quot;:&quot;https://github.com/acme/api-tests.git:release-4.18&quot;,&quot;additional_repos&quot;:[{&quot;name&quot;:&quot;infra&quot;,&quot;url&quot;:&quot;https://github.com/acme/infra.git&quot;,&quot;ref&quot;:&quot;release-4.18&quot;},{&quot;name&quot;:&quot;product&quot;,&quot;url&quot;:&quot;https://github.com/acme/product.git&quot;,&quot;ref&quot;:&quot;main&quot;}]}&#39;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>https://jji.example.com/analyze
+</code></pre></div>
+
+<p>This sends the extra repos as structured <code>additional_repos</code> entries, each with its own name and optional ref. Use it when your analysis caller already has repo metadata and you want to pass it directly instead of encoding it into one CLI string.</p>
+<ul>
+<li>Add <code>"token":"ghp_exampleinfra123"</code> to an extra repo object when the clone needs token-based access.</li>
+<li>Send <code>"additional_repos": []</code> to disable a server default for one request.</li>
+</ul>
+<h2 id="analyze-against-a-self-signed-jenkins-from-the-cli">Analyze against a self-signed Jenkins from the CLI</h2>
+<p>Use this when JJI can reach Jenkins but certificate validation fails against an internal or self-signed TLS endpoint.</p>
+<div class="highlight"><pre><span></span><code>jji<span class="w"> </span>--server<span class="w"> </span>https://jji.example.com<span class="w"> </span>--user<span class="w"> </span>alex<span class="w"> </span>analyze<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--job-name<span class="w"> </span>qe/nightly/api-tests<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--build-number<span class="w"> </span><span class="m">1842</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--provider<span class="w"> </span>claude<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--model<span class="w"> </span>opus-4<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--jenkins-url<span class="w"> </span>https://jenkins.ci.example.com<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--jenkins-user<span class="w"> </span>svc-jji<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--jenkins-password<span class="w"> </span>jenkins-api-token-123<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--no-jenkins-ssl-verify
+</code></pre></div>
+
+<p>This disables certificate verification only for the Jenkins API calls used by this analysis request. Use it for one-off runs against internal Jenkins instances with self-signed or privately issued certificates.</p>
+<ul>
+<li>If the JJI server itself has a self-signed cert, use the CLI's global <code>--insecure</code> or <code>--no-verify-ssl</code> option instead.</li>
+</ul>
+<h2 id="analyze-against-a-self-signed-jenkins-from-the-rest-api">Analyze against a self-signed Jenkins from the REST API</h2>
+<p>Use this when you need the same Jenkins TLS override in an API request.</p>
+<div class="highlight"><pre><span></span><code>curl<span class="w"> </span>-sS<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--cookie<span class="w"> </span><span class="s2">&quot;jji_username=alex&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--header<span class="w"> </span><span class="s1">&#39;Content-Type: application/json&#39;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--data<span class="w"> </span><span class="s1">&#39;{&quot;job_name&quot;:&quot;qe/nightly/api-tests&quot;,&quot;build_number&quot;:1842,&quot;ai_provider&quot;:&quot;claude&quot;,&quot;ai_model&quot;:&quot;opus-4&quot;,&quot;jenkins_url&quot;:&quot;https://jenkins.ci.example.com&quot;,&quot;jenkins_user&quot;:&quot;svc-jji&quot;,&quot;jenkins_password&quot;:&quot;jenkins-api-token-123&quot;,&quot;jenkins_ssl_verify&quot;:false}&#39;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>https://jji.example.com/analyze
+</code></pre></div>
+
+<p>This passes <code>jenkins_ssl_verify: false</code> in the request body so the server skips Jenkins certificate verification for this run. It is the API equivalent of <code>--no-jenkins-ssl-verify</code>.</p>
+<h2 id="force-analysis-for-a-build-that-passed-from-the-cli">Force analysis for a build that passed from the CLI</h2>
+<p>Use this when Jenkins says the build succeeded but you still want JJI to inspect it.</p>
+<div class="highlight"><pre><span></span><code>jji<span class="w"> </span>--server<span class="w"> </span>https://jji.example.com<span class="w"> </span>--user<span class="w"> </span>alex<span class="w"> </span>analyze<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--job-name<span class="w"> </span>qe/nightly/api-tests<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--build-number<span class="w"> </span><span class="m">1842</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--provider<span class="w"> </span>claude<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--model<span class="w"> </span>opus-4<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--jenkins-url<span class="w"> </span>https://jenkins.ci.example.com<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--jenkins-user<span class="w"> </span>svc-jji<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--jenkins-password<span class="w"> </span>jenkins-api-token-123<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--force
+</code></pre></div>
+
+<p>By default, JJI returns early on <code>SUCCESS</code> builds with a short "Build passed successfully" summary and no failure analysis. <code>--force</code> bypasses that early return so you can inspect suspicious passes, flaky-success cases, or unexpected console output.</p>
+<ul>
+<li>If you want this behavior as a reusable default, move it into server configuration or environment defaults described in <a href="configuration-and-environment-reference.html">Configuration and Environment Reference</a>.</li>
+</ul>
+<h2 id="force-analysis-for-a-build-that-passed-from-the-rest-api">Force analysis for a build that passed from the REST API</h2>
+<p>Use this when you want the same passed-build override from an HTTP request.</p>
+<div class="highlight"><pre><span></span><code>curl<span class="w"> </span>-sS<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--cookie<span class="w"> </span><span class="s2">&quot;jji_username=alex&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--header<span class="w"> </span><span class="s1">&#39;Content-Type: application/json&#39;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--data<span class="w"> </span><span class="s1">&#39;{&quot;job_name&quot;:&quot;qe/nightly/api-tests&quot;,&quot;build_number&quot;:1842,&quot;ai_provider&quot;:&quot;claude&quot;,&quot;ai_model&quot;:&quot;opus-4&quot;,&quot;jenkins_url&quot;:&quot;https://jenkins.ci.example.com&quot;,&quot;jenkins_user&quot;:&quot;svc-jji&quot;,&quot;jenkins_password&quot;:&quot;jenkins-api-token-123&quot;,&quot;force&quot;:true}&#39;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>https://jji.example.com/analyze
+</code></pre></div>
+
+<p>This sets <code>force: true</code> on the <code>/analyze</code> request so the server keeps going even when Jenkins reports <code>SUCCESS</code>. Use it when a passing build still needs AI inspection for debugging or audit reasons.</p>
+<h2 id="related-pages">Related Pages</h2>
+<ul>
+<li><a href="analyze-a-jenkins-job.html">Analyze a Jenkins Job</a></li>
+<li><a href="customize-ai-analysis.html">Customize AI Analysis</a></li>
+<li><a href="cli-command-reference.html">CLI Command Reference</a></li>
+<li><a href="rest-api-reference.html">REST API Reference</a></li>
+<li><a href="configuration-and-environment-reference.html">Configuration and Environment Reference</a></li>
+</ul>
+                </div>
+            </article>
+            <nav class="page-nav">
+                
+                <a href="manage-users-access-and-token-usage.html" class="page-nav-link page-nav-prev">
+                    <span class="page-nav-label">Previous</span>
+                    <span class="page-nav-title">Manage Users, Access, and Token Usage</span>
+                </a>
+                
+                
+                <a href="copy-common-deployment-recipes.html" class="page-nav-link page-nav-next">
+                    <span class="page-nav-label">Next</span>
+                    <span class="page-nav-title">Copy Common Deployment Recipes</span>
+                </a>
+                
+            </nav>
+            
+            <aside class="toc-sidebar">
+                <div class="toc-container">
+                    <h3>On this page</h3>
+                    <div class="toc">
+<ul>
+<li><a href="#queue-a-jenkins-analysis-from-the-cli">Queue a Jenkins analysis from the CLI</a></li>
+<li><a href="#queue-a-jenkins-analysis-from-the-rest-api">Queue a Jenkins analysis from the REST API</a></li>
+<li><a href="#wait-for-jenkins-to-finish-before-analysis-from-the-cli">Wait for Jenkins to finish before analysis from the CLI</a></li>
+<li><a href="#wait-for-jenkins-to-finish-before-analysis-from-the-rest-api">Wait for Jenkins to finish before analysis from the REST API</a></li>
+<li><a href="#add-peer-review-from-the-cli">Add peer review from the CLI</a></li>
+<li><a href="#add-peer-review-from-the-rest-api">Add peer review from the REST API</a></li>
+<li><a href="#add-extra-repository-context-from-the-cli">Add extra repository context from the CLI</a></li>
+<li><a href="#add-extra-repository-context-from-the-rest-api">Add extra repository context from the REST API</a></li>
+<li><a href="#analyze-against-a-self-signed-jenkins-from-the-cli">Analyze against a self-signed Jenkins from the CLI</a></li>
+<li><a href="#analyze-against-a-self-signed-jenkins-from-the-rest-api">Analyze against a self-signed Jenkins from the REST API</a></li>
+<li><a href="#force-analysis-for-a-build-that-passed-from-the-cli">Force analysis for a build that passed from the CLI</a></li>
+<li><a href="#force-analysis-for-a-build-that-passed-from-the-rest-api">Force analysis for a build that passed from the REST API</a></li>
+<li><a href="#related-pages">Related Pages</a></li>
+</ul>
+</div>
+
+                </div>
+            </aside>
+            
+
+        </main>
+
+        <footer class="page-footer">
+            
+            <span class="footer-version">Generated from version 3.2.0</span>
+            <span class="footer-sep">&middot;</span>
+            
+            Generated with <a href="https://github.com/myk-org/docsfy" target="_blank" rel="noopener">docs<span class="brand-accent">fy</span></a>
+            <span class="footer-sep">&middot;</span>
+            <span class="footer-llm">LLM-friendly: <a href="llms.txt">llms.txt</a> &middot; <a href="llms-full.txt">llms-full.txt</a></span>
+        </footer>
+    </div>
+
+    <div class="sidebar-overlay" id="sidebar-overlay"></div>
+
+    <script src="assets/theme.js"></script>
+    <script src="assets/search.js"></script>
+    <script src="assets/copy.js"></script>
+    <script src="assets/callouts.js"></script>
+    <script src="assets/scrollspy.js"></script>
+    <script src="assets/codelabels.js"></script>
+    <script src="assets/github.js"></script>
+    <script>
+(function() {
+    var toggle = document.getElementById('sidebar-toggle');
+    var sidebar = document.getElementById('sidebar');
+    var overlay = document.getElementById('sidebar-overlay');
+    if (toggle && sidebar) {
+        toggle.addEventListener('click', function() {
+            sidebar.classList.toggle('open');
+            if (overlay) overlay.classList.toggle('open');
+            var expanded = sidebar.classList.contains('open');
+            toggle.setAttribute('aria-expanded', expanded ? 'true' : 'false');
+        });
+    }
+    if (overlay) {
+        overlay.addEventListener('click', function() {
+            sidebar.classList.remove('open');
+            overlay.classList.remove('open');
+            if (toggle) toggle.setAttribute('aria-expanded', 'false');
+        });
+    }
+})();
+</script>
+<script>
+(function() {
+    var sidebar = document.querySelector('.sidebar-nav') || document.querySelector('.sidebar');
+    if (!sidebar) return;
+
+    // Restore scroll position
+    var saved = sessionStorage.getItem('sidebar-scroll');
+    if (saved) sidebar.scrollTop = parseInt(saved, 10);
+
+    // Save scroll position before navigating
+    sidebar.addEventListener('scroll', function() {
+        sessionStorage.setItem('sidebar-scroll', sidebar.scrollTop.toString());
+    });
+
+    // Also scroll active link into view if no saved position
+    if (!saved) {
+        var active = sidebar.querySelector('.nav-link.active');
+        if (active) {
+            active.scrollIntoView({ block: 'center', behavior: 'instant' });
+        }
+    }
+})();
+</script>
+</body>
+</html>

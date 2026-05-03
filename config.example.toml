@@ -1,0 +1,62 @@
+# JJI CLI Configuration
+# Location: $XDG_CONFIG_HOME/jji/config.toml (default: ~/.config/jji/config.toml)
+#
+# [defaults] section provides global defaults for all servers.
+# Server-specific settings override defaults.
+#
+# Usage:
+#   jji --server dev results dashboard
+#   jji --server prod results dashboard
+#   jji results dashboard  # uses default server
+
+[default]
+server = "dev"  # Default server name
+
+[defaults]
+# Global defaults -- all servers inherit these
+jenkins_url = "https://jenkins.example.com"
+jenkins_user = "your-jenkins-user"
+jenkins_password = "your-jenkins-token"  # pragma: allowlist secret
+jenkins_ssl_verify = true
+tests_repo_url = "https://github.com/your-org/your-tests"
+ai_provider = "claude"
+ai_model = "claude-opus-4-6[1m]"
+ai_cli_timeout = 10
+# Peer analysis (multi-AI consensus)
+# peers = "cursor:gpt-5.4-xhigh,gemini:gemini-2.5-pro"
+# peer_analysis_max_rounds = 3
+# Monitoring
+wait_for_completion = true
+poll_interval_minutes = 2
+max_wait_minutes = 0  # 0 = no limit (wait forever)
+# Jira
+jira_url = "https://your-jira.atlassian.net"
+jira_email = "you@example.com"
+jira_api_token = "your-jira-token"
+jira_pat = ""
+jira_project_key = "PROJ"
+jira_ssl_verify = true
+jira_max_results = 50
+enable_jira = true
+# GitHub
+github_token = "ghp_your-github-token"
+
+[servers.dev]
+url = "http://localhost:8000"
+username = "your-username"
+no_verify_ssl = false
+# Inherits all defaults above, can override:
+jenkins_ssl_verify = false
+
+[servers.staging]
+url = "https://staging-jji.example.com"
+username = "admin"
+no_verify_ssl = true
+
+[servers.prod]
+url = "https://jji.example.com"
+username = "jdoe"
+no_verify_ssl = false
+# Inherits all defaults, overrides ai_provider:
+ai_provider = "cursor"
+ai_model = "gpt-5.4-xhigh"

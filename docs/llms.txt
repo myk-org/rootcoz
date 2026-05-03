@@ -1,0 +1,30 @@
+# jenkins-job-insight
+
+> Turn failing Jenkins jobs into clear answers, collaborative reviews, and ready-to-file bugs.
+
+## Getting Started
+
+- [Analyze Your First Jenkins Job](analyze-your-first-jenkins-job.md): Start JJI with Docker or a local install, connect Jenkins and an AI provider, and open your first failure report in about a minute.
+
+## User Guides
+
+- [Configure Your Profile and Notifications](configure-your-profile-and-notifications.md): Choose your display name, save personal GitHub or Jira tokens for cross-browser use, and enable browser notifications for @mentions.
+- [Analyze a Jenkins Job](analyze-a-jenkins-job.md): Submit analyses from the dashboard, REST API, or `jji`, track queued jobs through the status view, and rerun builds when you need fresh results.
+- [Review and Classify Failures](review-and-classify-failures.md): Work through grouped failures, nested child jobs, comments, mentions, reviewed states, and manual classification overrides in the report view.
+- [Investigate Failure History](investigate-failure-history.md): Search past failures by test, signature, job, or classification so you can spot recurring breakage and separate noise from real regressions.
+- [Customize AI Analysis](customize-ai-analysis.md): Choose providers and models, add peer reviewers, pass extra repositories, tune prompts, and control artifact and timeout behavior for better explanations.
+- [Create GitHub Issues and Jira Bugs](create-github-issues-and-jira-bugs.md): Preview issue text, check likely duplicates, select the right repo or Jira project, and create tickets directly from a failure.
+- [Push Classifications to Report Portal](push-classifications-to-report-portal.md): Match analyzed failures to a Report Portal launch and publish classifications, including how to understand unmatched or partial results.
+- [Organize Jobs with Metadata](organize-jobs-with-metadata.md): Assign team, tier, version, and labels to jobs, preview automatic matches, and use metadata filters to focus dashboards and triage queues.
+- [Manage Users, Access, and Token Usage](manage-users-access-and-token-usage.md): Bootstrap admins, rotate API keys, enforce allow lists, change roles, and monitor AI token usage on a shared instance.
+
+## Recipes
+
+- [Copy Common Analysis Recipes](copy-common-analysis-recipes.md): Use ready-made CLI and API snippets for background analysis, waiting for Jenkins, peer review, extra repo context, self-signed Jenkins, and forced analysis.
+- [Copy Common Deployment Recipes](copy-common-deployment-recipes.md): Use working container and platform patterns for Docker Compose, dev mode, reverse-proxy deployments, health checks, metrics, and OpenShift alerts.
+
+## Reference
+
+- [CLI Command Reference](cli-command-reference.md): Look up `jji` commands, options, output modes, and profile-driven usage.
+- [REST API Reference](rest-api-reference.md): Look up endpoints, request fields, status codes, and response shapes across analysis, history, comments, auth, notifications, metadata, and admin APIs.
+- [Configuration and Environment Reference](configuration-and-environment-reference.md): Look up server env vars, `config.toml` profile fields, request overrides, metadata rules, and integration settings.

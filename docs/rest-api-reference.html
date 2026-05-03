@@ -1,0 +1,3050 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="light">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>REST API Reference - jenkins-job-insight</title>
+    <meta name="description" content="Turn failing Jenkins jobs into clear answers, collaborative reviews, and ready-to-file bugs.">
+    <link rel="stylesheet" href="assets/style.css">
+    <script>try{var t=localStorage.getItem('theme');if(t==='dark')document.documentElement.setAttribute('data-theme','dark')}catch(e){}</script>
+    <link rel="alternate" type="text/plain" title="LLM Documentation Index" href="llms.txt">
+    <link rel="alternate" type="text/plain" title="LLM Full Documentation" href="llms-full.txt">
+</head>
+<body>
+    <aside class="sidebar" id="sidebar">
+        <div class="sidebar-header">
+            <a href="index.html" class="sidebar-logo">jenkins-job-insight</a>
+            <p class="sidebar-tagline">Turn failing Jenkins jobs into clear answers, collaborative reviews, and ready-to-file bugs.</p>
+        </div>
+
+        <div class="sidebar-search">
+            <input type="text" id="search-input" placeholder="Search... (⌘K)" autocomplete="off" readonly>
+            <div id="search-results" class="search-results"></div>
+        </div>
+
+        <nav class="sidebar-nav">
+            
+            <div class="nav-group">
+                <h3 class="nav-group-title">Getting Started</h3>
+                <ul class="nav-group-pages">
+                    
+                    <li>
+                        <a href="analyze-your-first-jenkins-job.html"
+                           class="nav-link">
+                            Analyze Your First Jenkins Job
+                        </a>
+                    </li>
+                    
+                </ul>
+            </div>
+            
+            <div class="nav-group">
+                <h3 class="nav-group-title">User Guides</h3>
+                <ul class="nav-group-pages">
+                    
+                    <li>
+                        <a href="configure-your-profile-and-notifications.html"
+                           class="nav-link">
+                            Configure Your Profile and Notifications
+                        </a>
+                    </li>
+                    
+                    <li>
+                        <a href="analyze-a-jenkins-job.html"
+                           class="nav-link">
+                            Analyze a Jenkins Job
+                        </a>
+                    </li>
+                    
+                    <li>
+                        <a href="review-and-classify-failures.html"
+                           class="nav-link">
+                            Review and Classify Failures
+                        </a>
+                    </li>
+                    
+                    <li>
+                        <a href="investigate-failure-history.html"
+                           class="nav-link">
+                            Investigate Failure History
+                        </a>
+                    </li>
+                    
+                    <li>
+                        <a href="customize-ai-analysis.html"
+                           class="nav-link">
+                            Customize AI Analysis
+                        </a>
+                    </li>
+                    
+                    <li>
+                        <a href="create-github-issues-and-jira-bugs.html"
+                           class="nav-link">
+                            Create GitHub Issues and Jira Bugs
+                        </a>
+                    </li>
+                    
+                    <li>
+                        <a href="push-classifications-to-report-portal.html"
+                           class="nav-link">
+                            Push Classifications to Report Portal
+                        </a>
+                    </li>
+                    
+                    <li>
+                        <a href="organize-jobs-with-metadata.html"
+                           class="nav-link">
+                            Organize Jobs with Metadata
+                        </a>
+                    </li>
+                    
+                    <li>
+                        <a href="manage-users-access-and-token-usage.html"
+                           class="nav-link">
+                            Manage Users, Access, and Token Usage
+                        </a>
+                    </li>
+                    
+                </ul>
+            </div>
+            
+            <div class="nav-group">
+                <h3 class="nav-group-title">Recipes</h3>
+                <ul class="nav-group-pages">
+                    
+                    <li>
+                        <a href="copy-common-analysis-recipes.html"
+                           class="nav-link">
+                            Copy Common Analysis Recipes
+                        </a>
+                    </li>
+                    
+                    <li>
+                        <a href="copy-common-deployment-recipes.html"
+                           class="nav-link">
+                            Copy Common Deployment Recipes
+                        </a>
+                    </li>
+                    
+                </ul>
+            </div>
+            
+            <div class="nav-group">
+                <h3 class="nav-group-title">Reference</h3>
+                <ul class="nav-group-pages">
+                    
+                    <li>
+                        <a href="cli-command-reference.html"
+                           class="nav-link">
+                            CLI Command Reference
+                        </a>
+                    </li>
+                    
+                    <li>
+                        <a href="rest-api-reference.html"
+                           class="nav-link active" aria-current="page">
+                            REST API Reference
+                        </a>
+                    </li>
+                    
+                    <li>
+                        <a href="configuration-and-environment-reference.html"
+                           class="nav-link">
+                            Configuration and Environment Reference
+                        </a>
+                    </li>
+                    
+                </ul>
+            </div>
+            
+        </nav>
+    </aside>
+
+    <div class="main-wrapper">
+        <header class="top-bar">
+            <div class="top-bar-left">
+                <button class="sidebar-toggle" id="sidebar-toggle" aria-label="Toggle sidebar" aria-expanded="false">
+                    <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
+                        <path d="M3 5h14M3 10h14M3 15h14" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+                    </svg>
+                </button>
+                <a href="index.html" class="top-bar-title">jenkins-job-insight</a>
+            </div>
+            <div class="top-bar-spacer"></div>
+            <div class="top-bar-right">
+                <button class="top-bar-search-btn" id="search-trigger" aria-label="Search">
+                    <kbd>&#8984;K</kbd> Search
+                </button>
+                <a href="https://github.com/myk-org/docsfy" target="_blank" rel="noopener" class="docsfy-badge" title="Generated with docsfy">
+                    ⚡ docs<span class="brand-accent">fy</span>
+                </a>
+                
+                <a href="https://github.com/myk-org/jenkins-job-insight.git" target="_blank" rel="noopener noreferrer" class="top-bar-github" id="github-link" data-repo-url="https://github.com/myk-org/jenkins-job-insight.git">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><path d="M12 0c-6.626 0-12 5.373-12 12 0 5.302 3.438 9.8 8.207 11.387.599.111.793-.261.793-.577v-2.234c-3.338.726-4.033-1.416-4.033-1.416-.546-1.387-1.333-1.756-1.333-1.756-1.089-.745.083-.729.083-.729 1.205.084 1.839 1.237 1.839 1.237 1.07 1.834 2.807 1.304 3.492.997.107-.775.418-1.305.762-1.604-2.665-.305-5.467-1.334-5.467-5.931 0-1.311.469-2.381 1.236-3.221-.124-.303-.535-1.524.117-3.176 0 0 1.008-.322 3.301 1.23.957-.266 1.983-.399 3.003-.404 1.02.005 2.047.138 3.006.404 2.291-1.552 3.297-1.23 3.297-1.23.653 1.653.242 2.874.118 3.176.77.84 1.235 1.911 1.235 3.221 0 4.609-2.807 5.624-5.479 5.921.43.372.823 1.102.823 2.222v3.293c0 .319.192.694.801.576 4.765-1.589 8.199-6.086 8.199-11.386 0-6.627-5.373-12-12-12z"/></svg>
+                    <span class="github-stars" id="github-stars" title="GitHub stars"></span>
+                </a>
+                
+                <button class="theme-toggle" id="theme-toggle" aria-label="Toggle theme">
+                    <svg class="icon-sun" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+                        <circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/>
+                    </svg>
+                    <svg class="icon-moon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+                        <path d="M21 12.79A9 9 0 1111.21 3 7 7 0 0021 12.79z"/>
+                    </svg>
+                </button>
+            </div>
+        </header>
+
+        <main class="content">
+            
+            <article class="article">
+                <div class="article-body">
+                    <!-- SECURITY: |safe is intentional. Content is AI-generated markdown
+                         converted to HTML server-side by the markdown library, not
+                         user-supplied input. XSS risk is minimal and accepted since
+                         the AI generates the content, not end users. -->
+                    <h1 id="rest-api-reference">REST API Reference</h1>
+<blockquote>
+<p><strong>Note:</strong> When a request field says <code>server default</code>, omitting it uses the server's configured value. See <a href="configuration-and-environment-reference.html">Configuration and Environment Reference</a> for the server-side defaults and environment variables.
+</p>
+<p><strong>Note:</strong> This page covers the live analysis, history, comments, auth-state, notifications, metadata, and admin APIs. For issue preview/create endpoints, see <a href="create-github-issues-and-jira-bugs.html">Create GitHub Issues and Jira Bugs</a>. For Report Portal endpoints, see <a href="push-classifications-to-report-portal.html">Push Classifications to Report Portal</a>. For deployment health and metrics, see <a href="copy-common-deployment-recipes.html">Copy Common Deployment Recipes</a>.</p>
+</blockquote>
+<h2 id="common-conventions">Common conventions</h2>
+<ul>
+<li>Examples use <code>http://localhost:8000</code>.</li>
+<li>Admin-only endpoints return <code>403 Forbidden</code> without admin access.</li>
+<li>Current-user endpoints return <code>401 Unauthorized</code> when no current username is available.</li>
+<li>Non-admin write endpoints can also return <code>403 Forbidden</code> when the server allow list rejects the caller.</li>
+<li>Validation errors return <code>422 Unprocessable Entity</code> with a FastAPI-style error array.</li>
+<li>For <code>GET /results/{job_id}</code>, send <code>Accept: application/json</code> when you want API JSON instead of the browser UI route behavior.</li>
+</ul>
+<div class="highlight"><pre><span></span><code><span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;detail&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span>
+<span class="w">    </span><span class="p">{</span>
+<span class="w">      </span><span class="nt">&quot;type&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;int_parsing&quot;</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;loc&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="s2">&quot;body&quot;</span><span class="p">,</span><span class="w"> </span><span class="s2">&quot;build_number&quot;</span><span class="p">],</span>
+<span class="w">      </span><span class="nt">&quot;msg&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;Input should be a valid integer&quot;</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;input&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;not-a-number&quot;</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">  </span><span class="p">]</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<h3 id="queued-job-response">Queued job response</h3>
+<p>Returned by <code>POST /analyze</code> and <code>POST /re-analyze/{job_id}</code>.</p>
+<table>
+<thead>
+<tr>
+<th>Name</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>status</code></td>
+<td>string</td>
+<td>n/a</td>
+<td>Always <code>queued</code>.</td>
+</tr>
+<tr>
+<td><code>job_id</code></td>
+<td>string</td>
+<td>n/a</td>
+<td>Server-generated job UUID.</td>
+</tr>
+<tr>
+<td><code>message</code></td>
+<td>string</td>
+<td>n/a</td>
+<td>Polling hint that includes the result path.</td>
+</tr>
+<tr>
+<td><code>base_url</code></td>
+<td>string</td>
+<td><code>""</code></td>
+<td>Trusted public base URL when configured; otherwise empty.</td>
+</tr>
+<tr>
+<td><code>result_url</code></td>
+<td>string</td>
+<td>n/a</td>
+<td>Relative or absolute URL for the stored result.</td>
+</tr>
+</tbody>
+</table>
+<div class="highlight"><pre><span></span><code><span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;status&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;queued&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;job_id&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;8d0f0a65-6b52-4eb9-8dc5-9e3c38f6f6a6&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;message&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;Analysis job queued. Poll /results/8d0f0a65-6b52-4eb9-8dc5-9e3c38f6f6a6 for status.&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;base_url&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;result_url&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;/results/8d0f0a65-6b52-4eb9-8dc5-9e3c38f6f6a6&quot;</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<h3 id="stored-result-envelope">Stored result envelope</h3>
+<p>Returned by <code>GET /results/{job_id}</code>.</p>
+<table>
+<thead>
+<tr>
+<th>Name</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>job_id</code></td>
+<td>string</td>
+<td>n/a</td>
+<td>Analysis job ID.</td>
+</tr>
+<tr>
+<td><code>jenkins_url</code></td>
+<td>string</td>
+<td><code>""</code></td>
+<td>Jenkins build URL for Jenkins-backed analyses.</td>
+</tr>
+<tr>
+<td><code>status</code></td>
+<td>string</td>
+<td>n/a</td>
+<td>Top-level job state: <code>pending</code>, <code>waiting</code>, <code>running</code>, <code>completed</code>, or <code>failed</code>.</td>
+</tr>
+<tr>
+<td><code>result</code></td>
+<td>object | null</td>
+<td>n/a</td>
+<td>Stored result payload. Secrets are stripped from <code>request_params</code> before response.</td>
+</tr>
+<tr>
+<td><code>created_at</code></td>
+<td>string</td>
+<td>n/a</td>
+<td>Job creation timestamp.</td>
+</tr>
+<tr>
+<td><code>completed_at</code></td>
+<td>string | null</td>
+<td><code>null</code></td>
+<td>Completion timestamp when available.</td>
+</tr>
+<tr>
+<td><code>analysis_started_at</code></td>
+<td>string | null</td>
+<td><code>null</code></td>
+<td>Analysis-start timestamp when available.</td>
+</tr>
+<tr>
+<td><code>base_url</code></td>
+<td>string</td>
+<td><code>""</code></td>
+<td>Trusted public base URL when configured; otherwise empty.</td>
+</tr>
+<tr>
+<td><code>result_url</code></td>
+<td>string</td>
+<td>n/a</td>
+<td>Relative or absolute result URL.</td>
+</tr>
+<tr>
+<td><code>capabilities</code></td>
+<td>object</td>
+<td>n/a</td>
+<td>Same capability flags returned by <code>GET /api/capabilities</code>.</td>
+</tr>
+</tbody>
+</table>
+<div class="highlight"><pre><span></span><code><span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;job_id&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;8d0f0a65-6b52-4eb9-8dc5-9e3c38f6f6a6&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;jenkins_url&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;https://jenkins.example.com/job/my-pipeline/42/&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;status&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;completed&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;result&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nt">&quot;job_name&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;my-pipeline&quot;</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;build_number&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">42</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;summary&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;1 failure analyzed&quot;</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;ai_provider&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;claude&quot;</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;ai_model&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;opus-4&quot;</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;failures&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[],</span>
+<span class="w">    </span><span class="nt">&quot;request_params&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="nt">&quot;ai_provider&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;claude&quot;</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;ai_model&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;opus-4&quot;</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;tests_repo_url&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;https://github.com/acme/tests&quot;</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;tests_repo_ref&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;&quot;</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">  </span><span class="p">},</span>
+<span class="w">  </span><span class="nt">&quot;created_at&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;2026-04-27 09:20:00&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;completed_at&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;2026-04-27 09:21:10&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;analysis_started_at&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;2026-04-27 09:20:05&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;base_url&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;result_url&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;/results/8d0f0a65-6b52-4eb9-8dc5-9e3c38f6f6a6&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;capabilities&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nt">&quot;github_issues_enabled&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">true</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;jira_issues_enabled&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">true</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;server_github_token&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">true</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;server_jira_token&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">true</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;server_jira_email&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">true</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;server_jira_project_key&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;ACME&quot;</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;reportportal&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">false</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;reportportal_project&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;&quot;</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<h2 id="analysis">Analysis</h2>
+<blockquote>
+<p><strong>Note:</strong> For task-oriented usage and option combinations, see <a href="analyze-a-jenkins-job.html">Analyze a Jenkins Job</a>, <a href="customize-ai-analysis.html">Customize AI Analysis</a>, and <a href="copy-common-analysis-recipes.html">Copy Common Analysis Recipes</a>.</p>
+</blockquote>
+<h3 id="shared-analysis-override-fields">Shared analysis override fields</h3>
+<p>Used by <code>POST /analyze</code>, <code>POST /analyze-failures</code>, and <code>POST /re-analyze/{job_id}</code>.</p>
+<table>
+<thead>
+<tr>
+<th>Name</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>tests_repo_url</code></td>
+<td>string | null</td>
+<td>server default</td>
+<td>Repository URL cloned for analysis context. A <code>:ref</code> suffix is accepted.</td>
+</tr>
+<tr>
+<td><code>ai_provider</code></td>
+<td>string</td>
+<td>server default</td>
+<td>AI provider: <code>claude</code>, <code>gemini</code>, or <code>cursor</code>.</td>
+</tr>
+<tr>
+<td><code>ai_model</code></td>
+<td>string | null</td>
+<td>server default</td>
+<td>AI model identifier.</td>
+</tr>
+<tr>
+<td><code>enable_jira</code></td>
+<td>boolean | null</td>
+<td>auto</td>
+<td>Enables or disables Jira match enrichment for this request.</td>
+</tr>
+<tr>
+<td><code>ai_cli_timeout</code></td>
+<td>integer | null</td>
+<td>server default</td>
+<td>AI CLI timeout in minutes.</td>
+</tr>
+<tr>
+<td><code>jira_url</code></td>
+<td>string | null</td>
+<td>server default</td>
+<td>Jira base URL override.</td>
+</tr>
+<tr>
+<td><code>jira_email</code></td>
+<td>string | null</td>
+<td>server default</td>
+<td>Jira Cloud email override.</td>
+</tr>
+<tr>
+<td><code>jira_api_token</code></td>
+<td>string | null</td>
+<td>server default</td>
+<td>Jira Cloud API token override.</td>
+</tr>
+<tr>
+<td><code>jira_pat</code></td>
+<td>string | null</td>
+<td>server default</td>
+<td>Jira Server/DC PAT override.</td>
+</tr>
+<tr>
+<td><code>jira_project_key</code></td>
+<td>string | null</td>
+<td>server default</td>
+<td>Jira project key override.</td>
+</tr>
+<tr>
+<td><code>jira_ssl_verify</code></td>
+<td>boolean | null</td>
+<td>server default</td>
+<td>Jira SSL verification override.</td>
+</tr>
+<tr>
+<td><code>jira_max_results</code></td>
+<td>integer | null</td>
+<td>server default</td>
+<td>Max Jira matches to fetch.</td>
+</tr>
+<tr>
+<td><code>raw_prompt</code></td>
+<td>string | null</td>
+<td>none</td>
+<td>Extra prompt text appended for this request.</td>
+</tr>
+<tr>
+<td><code>github_token</code></td>
+<td>string | null</td>
+<td>server default</td>
+<td>GitHub token used for private-repo comment enrichment.</td>
+</tr>
+<tr>
+<td><code>peer_ai_configs</code></td>
+<td>array<object> | null</td>
+<td>server default</td>
+<td>Peer review AI configs. Use <code>[]</code> to disable peer analysis for this request.</td>
+</tr>
+<tr>
+<td><code>peer_analysis_max_rounds</code></td>
+<td>integer</td>
+<td>server default</td>
+<td>Max peer-debate rounds. Only applied when the field is present.</td>
+</tr>
+<tr>
+<td><code>additional_repos</code></td>
+<td>array<object> | null</td>
+<td>server default</td>
+<td>Additional repositories cloned for AI context. Use <code>[]</code> to disable server defaults for this request.</td>
+</tr>
+</tbody>
+</table>
+<h4 id="peer_ai_configs"><code>peer_ai_configs[]</code></h4>
+<table>
+<thead>
+<tr>
+<th>Name</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>ai_provider</code></td>
+<td>string</td>
+<td>required</td>
+<td><code>claude</code>, <code>gemini</code>, or <code>cursor</code>.</td>
+</tr>
+<tr>
+<td><code>ai_model</code></td>
+<td>string</td>
+<td>required</td>
+<td>Non-blank model identifier.</td>
+</tr>
+</tbody>
+</table>
+<h4 id="additional_repos"><code>additional_repos[]</code></h4>
+<table>
+<thead>
+<tr>
+<th>Name</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>name</code></td>
+<td>string</td>
+<td>required</td>
+<td>Unique directory name used inside the analysis workspace.</td>
+</tr>
+<tr>
+<td><code>url</code></td>
+<td>string</td>
+<td>required</td>
+<td>Repository URL to clone.</td>
+</tr>
+<tr>
+<td><code>ref</code></td>
+<td>string</td>
+<td><code>""</code></td>
+<td>Branch or tag to check out. Empty string means the remote default branch.</td>
+</tr>
+<tr>
+<td><code>token</code></td>
+<td>string | null</td>
+<td><code>null</code></td>
+<td>Clone token for private repositories.</td>
+</tr>
+</tbody>
+</table>
+<blockquote>
+<p><strong>Tip:</strong> <code>additional_repos[].name</code> must be unique, must not contain path separators, must not contain <code>..</code>, and must not start with <code>.</code>.</p>
+</blockquote>
+<div class="highlight"><pre><span></span><code><span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;tests_repo_url&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;https://github.com/acme/tests:main&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;ai_provider&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;claude&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;ai_model&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;opus-4&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;peer_ai_configs&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span>
+<span class="w">    </span><span class="p">{</span>
+<span class="w">      </span><span class="nt">&quot;ai_provider&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;gemini&quot;</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;ai_model&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;2.5-pro&quot;</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">  </span><span class="p">],</span>
+<span class="w">  </span><span class="nt">&quot;peer_analysis_max_rounds&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">2</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;additional_repos&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span>
+<span class="w">    </span><span class="p">{</span>
+<span class="w">      </span><span class="nt">&quot;name&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;service&quot;</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;url&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;https://github.com/acme/service&quot;</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;ref&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;main&quot;</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">  </span><span class="p">]</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<h3 id="analyze-body-fields"><code>/analyze</code> body fields</h3>
+<table>
+<thead>
+<tr>
+<th>Name</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>job_name</code></td>
+<td>string</td>
+<td>required</td>
+<td>Jenkins job name. Folder-style names such as <code>folder/subfolder/job</code> are supported.</td>
+</tr>
+<tr>
+<td><code>build_number</code></td>
+<td>integer</td>
+<td>required</td>
+<td>Jenkins build number.</td>
+</tr>
+<tr>
+<td><code>force</code></td>
+<td>boolean</td>
+<td>server default</td>
+<td>Forces analysis even when the Jenkins build succeeded.</td>
+</tr>
+<tr>
+<td><code>wait_for_completion</code></td>
+<td>boolean</td>
+<td>server default</td>
+<td>Waits for the Jenkins build to finish before analysis.</td>
+</tr>
+<tr>
+<td><code>poll_interval_minutes</code></td>
+<td>integer</td>
+<td>server default</td>
+<td>Poll interval, in minutes, when waiting for build completion.</td>
+</tr>
+<tr>
+<td><code>max_wait_minutes</code></td>
+<td>integer</td>
+<td>server default</td>
+<td>Max wait time in minutes. <code>0</code> means no limit.</td>
+</tr>
+<tr>
+<td><code>jenkins_url</code></td>
+<td>string | null</td>
+<td>server default</td>
+<td>Jenkins base URL override.</td>
+</tr>
+<tr>
+<td><code>jenkins_user</code></td>
+<td>string | null</td>
+<td>server default</td>
+<td>Jenkins username override.</td>
+</tr>
+<tr>
+<td><code>jenkins_password</code></td>
+<td>string | null</td>
+<td>server default</td>
+<td>Jenkins password or API token override.</td>
+</tr>
+<tr>
+<td><code>jenkins_ssl_verify</code></td>
+<td>boolean | null</td>
+<td>server default</td>
+<td>Jenkins SSL verification override.</td>
+</tr>
+<tr>
+<td><code>jenkins_timeout</code></td>
+<td>integer | null</td>
+<td>server default</td>
+<td>Jenkins API timeout in seconds.</td>
+</tr>
+<tr>
+<td><code>jenkins_artifacts_max_size_mb</code></td>
+<td>integer | null</td>
+<td>server default</td>
+<td>Max artifact payload size downloaded for AI context.</td>
+</tr>
+<tr>
+<td><code>get_job_artifacts</code></td>
+<td>boolean | null</td>
+<td>server default</td>
+<td>Enables or disables artifact download for this request.</td>
+</tr>
+</tbody>
+</table>
+<div class="highlight"><pre><span></span><code><span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;job_name&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;folder/my-pipeline&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;build_number&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">42</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;ai_provider&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;claude&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;ai_model&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;opus-4&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;wait_for_completion&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">true</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;poll_interval_minutes&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">2</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<h3 id="analyze-failures-input-objects"><code>/analyze-failures</code> input objects</h3>
+<h4 id="failures"><code>failures[]</code></h4>
+<table>
+<thead>
+<tr>
+<th>Name</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>test_name</code></td>
+<td>string</td>
+<td>required</td>
+<td>Fully qualified test name.</td>
+</tr>
+<tr>
+<td><code>error_message</code></td>
+<td>string</td>
+<td><code>""</code></td>
+<td>Failure message.</td>
+</tr>
+<tr>
+<td><code>stack_trace</code></td>
+<td>string</td>
+<td><code>""</code></td>
+<td>Full stack trace.</td>
+</tr>
+<tr>
+<td><code>duration</code></td>
+<td>number</td>
+<td><code>0.0</code></td>
+<td>Test duration in seconds.</td>
+</tr>
+<tr>
+<td><code>status</code></td>
+<td>string</td>
+<td><code>FAILED</code></td>
+<td>Failure status label.</td>
+</tr>
+</tbody>
+</table>
+<h4 id="request-fields">Request fields</h4>
+<table>
+<thead>
+<tr>
+<th>Name</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>failures</code></td>
+<td>array<object> | null</td>
+<td>none</td>
+<td>Raw failures to analyze. Required unless <code>raw_xml</code> is provided.</td>
+</tr>
+<tr>
+<td><code>raw_xml</code></td>
+<td>string | null</td>
+<td>none</td>
+<td>Raw JUnit XML. Required unless <code>failures</code> is provided.</td>
+</tr>
+</tbody>
+</table>
+<div class="highlight"><pre><span></span><code><span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;failures&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span>
+<span class="w">    </span><span class="p">{</span>
+<span class="w">      </span><span class="nt">&quot;test_name&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;tests.test_auth.test_login&quot;</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;error_message&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;assert False&quot;</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;stack_trace&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;File tests/test_auth.py, line 42&quot;</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">  </span><span class="p">],</span>
+<span class="w">  </span><span class="nt">&quot;ai_provider&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;claude&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;ai_model&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;opus-4&quot;</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<h3 id="post-analyze"><code>POST /analyze</code></h3>
+<p>Submit a Jenkins build for asynchronous analysis.</p>
+<table>
+<thead>
+<tr>
+<th>Name</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Body</td>
+<td>object</td>
+<td>required</td>
+<td>Shared analysis override fields plus <code>/analyze</code> body fields.</td>
+</tr>
+</tbody>
+</table>
+<p>Return value/effect:</p>
+<ul>
+<li><code>202 Accepted</code> returns the queued job response.</li>
+<li><code>400 Bad Request</code> when AI provider/model configuration is missing or invalid.</li>
+<li><code>403 Forbidden</code> when the allow list rejects the caller.</li>
+<li><code>422 Unprocessable Entity</code> for validation errors.</li>
+</ul>
+<div class="highlight"><pre><span></span><code>curl<span class="w"> </span>-X<span class="w"> </span>POST<span class="w"> </span>http://localhost:8000/analyze<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-H<span class="w"> </span><span class="s1">&#39;Content-Type: application/json&#39;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-d<span class="w"> </span><span class="s1">&#39;{</span>
+<span class="s1">    &quot;job_name&quot;: &quot;folder/my-pipeline&quot;,</span>
+<span class="s1">    &quot;build_number&quot;: 42,</span>
+<span class="s1">    &quot;ai_provider&quot;: &quot;claude&quot;,</span>
+<span class="s1">    &quot;ai_model&quot;: &quot;opus-4&quot;</span>
+<span class="s1">  }&#39;</span>
+</code></pre></div>
+
+<h3 id="post-analyze-failures"><code>POST /analyze-failures</code></h3>
+<p>Analyze raw failures or raw JUnit XML without Jenkins polling.</p>
+<table>
+<thead>
+<tr>
+<th>Name</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Body</td>
+<td>object</td>
+<td>required</td>
+<td>Shared analysis override fields plus <code>/analyze-failures</code> input fields.</td>
+</tr>
+</tbody>
+</table>
+<p>Return value/effect:</p>
+<ul>
+<li><code>200 OK</code> returns a direct-analysis result object with <code>job_id</code>, <code>status</code>, <code>summary</code>, <code>ai_provider</code>, <code>ai_model</code>, <code>failures</code>, optional <code>enriched_xml</code>, optional <code>token_usage</code>, plus <code>base_url</code> and <code>result_url</code>.</li>
+<li><code>status</code> inside the response body is <code>completed</code> or <code>failed</code>.</li>
+<li><code>400 Bad Request</code> for invalid XML or invalid/missing AI configuration.</li>
+<li><code>422 Unprocessable Entity</code> when both <code>failures</code> and <code>raw_xml</code> are supplied, when neither is supplied, or when nested validation fails.</li>
+<li>If <code>raw_xml</code> contains no failures, the endpoint still returns <code>200</code> with <code>status: "completed"</code> and the original XML in <code>enriched_xml</code>.</li>
+</ul>
+<div class="highlight"><pre><span></span><code>curl<span class="w"> </span>-X<span class="w"> </span>POST<span class="w"> </span>http://localhost:8000/analyze-failures<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-H<span class="w"> </span><span class="s1">&#39;Content-Type: application/json&#39;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-d<span class="w"> </span><span class="s1">&#39;{</span>
+<span class="s1">    &quot;failures&quot;: [</span>
+<span class="s1">      {</span>
+<span class="s1">        &quot;test_name&quot;: &quot;tests.test_auth.test_login&quot;,</span>
+<span class="s1">        &quot;error_message&quot;: &quot;assert False&quot;,</span>
+<span class="s1">        &quot;stack_trace&quot;: &quot;File tests/test_auth.py, line 42&quot;</span>
+<span class="s1">      }</span>
+<span class="s1">    ],</span>
+<span class="s1">    &quot;ai_provider&quot;: &quot;claude&quot;,</span>
+<span class="s1">    &quot;ai_model&quot;: &quot;opus-4&quot;</span>
+<span class="s1">  }&#39;</span>
+</code></pre></div>
+
+<h3 id="post-re-analyzejob_id"><code>POST /re-analyze/{job_id}</code></h3>
+<p>Queue a fresh analysis for an existing result, reusing the original stored request parameters and applying any override fields supplied in the body.</p>
+<table>
+<thead>
+<tr>
+<th>Name</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>job_id</code></td>
+<td>string</td>
+<td>required</td>
+<td>Existing analysis job ID to reuse as the source request.</td>
+</tr>
+<tr>
+<td>Body</td>
+<td>object</td>
+<td><code>{}</code></td>
+<td>Shared analysis override fields only. Omitted fields reuse the stored request parameters.</td>
+</tr>
+</tbody>
+</table>
+<p>Return value/effect:</p>
+<ul>
+<li><code>202 Accepted</code> returns the queued job response for the new job ID.</li>
+<li><code>400 Bad Request</code> when the stored result has no reusable <code>request_params</code> or cannot be reconstructed.</li>
+<li><code>404 Not Found</code> when the source <code>job_id</code> does not exist.</li>
+<li><code>403 Forbidden</code> when the allow list rejects the caller.</li>
+<li><code>422 Unprocessable Entity</code> for override-field validation errors.</li>
+</ul>
+<div class="highlight"><pre><span></span><code>curl<span class="w"> </span>-X<span class="w"> </span>POST<span class="w"> </span>http://localhost:8000/re-analyze/8d0f0a65-6b52-4eb9-8dc5-9e3c38f6f6a6<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-H<span class="w"> </span><span class="s1">&#39;Content-Type: application/json&#39;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-d<span class="w"> </span><span class="s1">&#39;{</span>
+<span class="s1">    &quot;ai_provider&quot;: &quot;gemini&quot;,</span>
+<span class="s1">    &quot;ai_model&quot;: &quot;2.5-pro&quot;</span>
+<span class="s1">  }&#39;</span>
+</code></pre></div>
+
+<h3 id="get-resultsjob_id"><code>GET /results/{job_id}</code></h3>
+<p>Fetch the stored result envelope for a queued, running, completed, or failed job.</p>
+<table>
+<thead>
+<tr>
+<th>Name</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>job_id</code></td>
+<td>string</td>
+<td>required</td>
+<td>Analysis job ID.</td>
+</tr>
+<tr>
+<td><code>Accept</code> header</td>
+<td>string</td>
+<td><code>application/json</code></td>
+<td>Use <code>application/json</code> for API JSON responses.</td>
+</tr>
+</tbody>
+</table>
+<p>Return value/effect:</p>
+<ul>
+<li><code>200 OK</code> returns the stored result envelope when the job is completed or failed.</li>
+<li><code>202 Accepted</code> returns the same envelope shape while the job is still <code>pending</code>, <code>waiting</code>, or <code>running</code>.</li>
+<li><code>404 Not Found</code> when the job does not exist.</li>
+<li><code>result.request_params</code> is included when available, but secret fields and <code>additional_repos[].token</code> are removed from the response.</li>
+</ul>
+<blockquote>
+<p><strong>Note:</strong> Browser-style HTML requests can redirect to UI routes instead of returning JSON.</p>
+</blockquote>
+<div class="highlight"><pre><span></span><code>curl<span class="w"> </span>http://localhost:8000/results/8d0f0a65-6b52-4eb9-8dc5-9e3c38f6f6a6<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-H<span class="w"> </span><span class="s1">&#39;Accept: application/json&#39;</span>
+</code></pre></div>
+
+<h3 id="get-results"><code>GET /results</code></h3>
+<p>List recent analysis jobs.</p>
+<table>
+<thead>
+<tr>
+<th>Name</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>limit</code></td>
+<td>integer</td>
+<td><code>50</code></td>
+<td>Max number of rows to return. Maximum <code>100</code>.</td>
+</tr>
+</tbody>
+</table>
+<p>Return value/effect:</p>
+<ul>
+<li><code>200 OK</code> returns an array of recent result summaries.</li>
+<li>Each item includes <code>job_id</code>, <code>jenkins_url</code>, <code>status</code>, and <code>created_at</code>.</li>
+<li><code>422 Unprocessable Entity</code> when <code>limit</code> exceeds <code>100</code> or fails validation.</li>
+</ul>
+<div class="highlight"><pre><span></span><code>curl<span class="w"> </span><span class="s1">&#39;http://localhost:8000/results?limit=10&#39;</span>
+</code></pre></div>
+
+<h3 id="get-apidashboard"><code>GET /api/dashboard</code></h3>
+<p>List dashboard entries with summary fields extracted from stored results.</p>
+<table>
+<thead>
+<tr>
+<th>Name</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>None</td>
+<td>n/a</td>
+<td>n/a</td>
+<td>No request parameters.</td>
+</tr>
+</tbody>
+</table>
+<p>Return value/effect:</p>
+<ul>
+<li><code>200 OK</code> returns an array of dashboard entries.</li>
+<li>Every item includes <code>job_id</code>, <code>jenkins_url</code>, <code>status</code>, <code>created_at</code>, <code>completed_at</code>, <code>analysis_started_at</code>, <code>reviewed_count</code>, and <code>comment_count</code>.</li>
+<li>Items can also include <code>job_name</code>, <code>build_number</code>, <code>failure_count</code>, <code>child_job_count</code>, <code>summary</code>, and <code>error</code> when those values exist in <code>result_json</code>.</li>
+</ul>
+<div class="highlight"><pre><span></span><code>curl<span class="w"> </span>http://localhost:8000/api/dashboard
+</code></pre></div>
+
+<h3 id="get-apicapabilities"><code>GET /api/capabilities</code></h3>
+<p>Return server-level feature and credential flags used by the UI.</p>
+<table>
+<thead>
+<tr>
+<th>Name</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>None</td>
+<td>n/a</td>
+<td>n/a</td>
+<td>No request parameters.</td>
+</tr>
+</tbody>
+</table>
+<p>Return value/effect:</p>
+<ul>
+<li><code>200 OK</code> returns:</li>
+<li><code>github_issues_enabled</code></li>
+<li><code>jira_issues_enabled</code></li>
+<li><code>server_github_token</code></li>
+<li><code>server_jira_token</code></li>
+<li><code>server_jira_email</code></li>
+<li><code>server_jira_project_key</code></li>
+<li><code>reportportal</code></li>
+<li><code>reportportal_project</code></li>
+</ul>
+<div class="highlight"><pre><span></span><code>curl<span class="w"> </span>http://localhost:8000/api/capabilities
+</code></pre></div>
+
+<h2 id="comments-and-review">Comments and review</h2>
+<blockquote>
+<p><strong>Note:</strong> For UI workflow details, see <a href="review-and-classify-failures.html">Review and Classify Failures</a>.</p>
+</blockquote>
+<h3 id="get-resultsjob_idcomments"><code>GET /results/{job_id}/comments</code></h3>
+<p>Return all stored comments and review states for a job.</p>
+<table>
+<thead>
+<tr>
+<th>Name</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>job_id</code></td>
+<td>string</td>
+<td>required</td>
+<td>Analysis job ID.</td>
+</tr>
+</tbody>
+</table>
+<p>Return value/effect:</p>
+<ul>
+<li><code>200 OK</code> returns:</li>
+<li><code>comments</code>: array of comment objects with <code>id</code>, <code>job_id</code>, <code>test_name</code>, <code>child_job_name</code>, <code>child_build_number</code>, <code>comment</code>, <code>error_signature</code>, <code>username</code>, and <code>created_at</code></li>
+<li><code>reviews</code>: object keyed by <code>test_name</code> for top-level failures, or <code>child_job_name#child_build_number::test_name</code> for child-job failures</li>
+<li>Review values include <code>reviewed</code>, <code>username</code>, and <code>updated_at</code>.</li>
+</ul>
+<div class="highlight"><pre><span></span><code>curl<span class="w"> </span>http://localhost:8000/results/job-123/comments
+</code></pre></div>
+
+<h3 id="post-resultsjob_idcomments"><code>POST /results/{job_id}/comments</code></h3>
+<p>Add a comment to one stored failure.</p>
+<table>
+<thead>
+<tr>
+<th>Name</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>job_id</code></td>
+<td>string</td>
+<td>required</td>
+<td>Analysis job ID.</td>
+</tr>
+<tr>
+<td><code>test_name</code></td>
+<td>string</td>
+<td>required</td>
+<td>Failure test name.</td>
+</tr>
+<tr>
+<td><code>comment</code></td>
+<td>string</td>
+<td>required</td>
+<td>Comment body.</td>
+</tr>
+<tr>
+<td><code>child_job_name</code></td>
+<td>string</td>
+<td><code>""</code></td>
+<td>Child job name for nested failures.</td>
+</tr>
+<tr>
+<td><code>child_build_number</code></td>
+<td>integer</td>
+<td><code>0</code></td>
+<td>Child build scope. <code>0</code> acts as a wildcard when <code>child_job_name</code> is supplied.</td>
+</tr>
+</tbody>
+</table>
+<p>Return value/effect:</p>
+<ul>
+<li><code>201 Created</code> returns <code>{ "id": &lt;comment_id&gt; }</code>.</li>
+<li><code>400 Bad Request</code> when the test name is not present in the stored result or comment creation fails validation.</li>
+<li><code>404 Not Found</code> when the job does not exist.</li>
+<li><code>403 Forbidden</code> when the allow list rejects the caller.</li>
+<li>When push notifications are configured, <code>@mentions</code> in the comment trigger best-effort notification fan-out.</li>
+</ul>
+<div class="highlight"><pre><span></span><code>curl<span class="w"> </span>-X<span class="w"> </span>POST<span class="w"> </span>http://localhost:8000/results/job-123/comments<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-H<span class="w"> </span><span class="s1">&#39;Content-Type: application/json&#39;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-d<span class="w"> </span><span class="s1">&#39;{</span>
+<span class="s1">    &quot;test_name&quot;: &quot;tests.test_auth.test_login&quot;,</span>
+<span class="s1">    &quot;comment&quot;: &quot;Opened ACME-123 for this failure.&quot;</span>
+<span class="s1">  }&#39;</span>
+</code></pre></div>
+
+<h3 id="delete-resultsjob_idcommentscomment_id"><code>DELETE /results/{job_id}/comments/{comment_id}</code></h3>
+<p>Delete one comment.</p>
+<table>
+<thead>
+<tr>
+<th>Name</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>job_id</code></td>
+<td>string</td>
+<td>required</td>
+<td>Analysis job ID.</td>
+</tr>
+<tr>
+<td><code>comment_id</code></td>
+<td>integer</td>
+<td>required</td>
+<td>Comment ID.</td>
+</tr>
+</tbody>
+</table>
+<p>Return value/effect:</p>
+<ul>
+<li><code>200 OK</code> returns <code>{ "status": "deleted" }</code>.</li>
+<li><code>401 Unauthorized</code> when no current username is available.</li>
+<li><code>404 Not Found</code> when the comment is missing, or when a non-admin caller tries to delete a comment they do not own.</li>
+<li><code>403 Forbidden</code> when the allow list rejects the caller.</li>
+<li>Admin callers can delete any comment for the job.</li>
+</ul>
+<div class="highlight"><pre><span></span><code>curl<span class="w"> </span>-X<span class="w"> </span>DELETE<span class="w"> </span>http://localhost:8000/results/job-123/comments/17
+</code></pre></div>
+
+<h3 id="put-resultsjob_idreviewed"><code>PUT /results/{job_id}/reviewed</code></h3>
+<p>Set or clear the reviewed state for one failure.</p>
+<table>
+<thead>
+<tr>
+<th>Name</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>job_id</code></td>
+<td>string</td>
+<td>required</td>
+<td>Analysis job ID.</td>
+</tr>
+<tr>
+<td><code>test_name</code></td>
+<td>string</td>
+<td>required</td>
+<td>Failure test name.</td>
+</tr>
+<tr>
+<td><code>reviewed</code></td>
+<td>boolean</td>
+<td>required</td>
+<td><code>true</code> marks the failure reviewed; <code>false</code> clears it.</td>
+</tr>
+<tr>
+<td><code>child_job_name</code></td>
+<td>string</td>
+<td><code>""</code></td>
+<td>Child job name for nested failures.</td>
+</tr>
+<tr>
+<td><code>child_build_number</code></td>
+<td>integer</td>
+<td><code>0</code></td>
+<td>Child build scope. <code>0</code> acts as a wildcard when <code>child_job_name</code> is supplied.</td>
+</tr>
+</tbody>
+</table>
+<p>Return value/effect:</p>
+<ul>
+<li><code>200 OK</code> returns <code>{ "status": "ok", "reviewed_by": "&lt;username-or-empty&gt;" }</code>.</li>
+<li><code>400 Bad Request</code> when the test is not present in the stored result.</li>
+<li><code>404 Not Found</code> when the job does not exist.</li>
+<li><code>403 Forbidden</code> when the allow list rejects the caller.</li>
+</ul>
+<div class="highlight"><pre><span></span><code>curl<span class="w"> </span>-X<span class="w"> </span>PUT<span class="w"> </span>http://localhost:8000/results/job-123/reviewed<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-H<span class="w"> </span><span class="s1">&#39;Content-Type: application/json&#39;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-d<span class="w"> </span><span class="s1">&#39;{</span>
+<span class="s1">    &quot;test_name&quot;: &quot;tests.test_auth.test_login&quot;,</span>
+<span class="s1">    &quot;reviewed&quot;: true</span>
+<span class="s1">  }&#39;</span>
+</code></pre></div>
+
+<h3 id="get-resultsjob_idreview-status"><code>GET /results/{job_id}/review-status</code></h3>
+<p>Return dashboard-style review counts for one job.</p>
+<table>
+<thead>
+<tr>
+<th>Name</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>job_id</code></td>
+<td>string</td>
+<td>required</td>
+<td>Analysis job ID.</td>
+</tr>
+</tbody>
+</table>
+<p>Return value/effect:</p>
+<ul>
+<li><code>200 OK</code> returns:</li>
+<li><code>total_failures</code></li>
+<li><code>reviewed_count</code></li>
+<li><code>comment_count</code></li>
+<li>If the job has no stored result, the counts are <code>0</code>.</li>
+</ul>
+<div class="highlight"><pre><span></span><code>curl<span class="w"> </span>http://localhost:8000/results/job-123/review-status
+</code></pre></div>
+
+<h3 id="post-resultsjob_idenrich-comments"><code>POST /results/{job_id}/enrich-comments</code></h3>
+<p>Resolve live status information for GitHub pull requests, GitHub issues, and Jira keys found inside stored comments.</p>
+<table>
+<thead>
+<tr>
+<th>Name</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>job_id</code></td>
+<td>string</td>
+<td>required</td>
+<td>Analysis job ID.</td>
+</tr>
+</tbody>
+</table>
+<p>Return value/effect:</p>
+<ul>
+<li><code>200 OK</code> returns <code>{ "enrichments": { ... } }</code>.</li>
+<li><code>enrichments</code> is keyed by comment ID string.</li>
+<li>Each value is an array of objects with:</li>
+<li><code>type</code>: <code>github_pr</code>, <code>github_issue</code>, or <code>jira</code></li>
+<li><code>key</code>: tracker-specific identifier such as <code>owner/repo#123</code> or <code>ACME-123</code></li>
+<li><code>status</code>: tracker status string</li>
+<li><code>403 Forbidden</code> when the allow list rejects the caller.</li>
+</ul>
+<div class="highlight"><pre><span></span><code>curl<span class="w"> </span>-X<span class="w"> </span>POST<span class="w"> </span>http://localhost:8000/results/job-123/enrich-comments
+</code></pre></div>
+
+<h3 id="put-resultsjob_idoverride-classification"><code>PUT /results/{job_id}/override-classification</code></h3>
+<p>Override the primary classification for one failure group inside a stored result.</p>
+<table>
+<thead>
+<tr>
+<th>Name</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>job_id</code></td>
+<td>string</td>
+<td>required</td>
+<td>Analysis job ID.</td>
+</tr>
+<tr>
+<td><code>test_name</code></td>
+<td>string</td>
+<td>required</td>
+<td>Failure test name used to identify the group.</td>
+</tr>
+<tr>
+<td><code>classification</code></td>
+<td>string</td>
+<td>required</td>
+<td>One of <code>CODE ISSUE</code>, <code>PRODUCT BUG</code>, or <code>INFRASTRUCTURE</code>.</td>
+</tr>
+<tr>
+<td><code>child_job_name</code></td>
+<td>string</td>
+<td><code>""</code></td>
+<td>Child job name for nested failures.</td>
+</tr>
+<tr>
+<td><code>child_build_number</code></td>
+<td>integer</td>
+<td><code>0</code></td>
+<td>Child build number. When <code>child_job_name</code> is set for this endpoint, a non-zero build number is required.</td>
+</tr>
+</tbody>
+</table>
+<p>Return value/effect:</p>
+<ul>
+<li><code>200 OK</code> returns <code>{ "status": "ok", "classification": "&lt;value&gt;" }</code>.</li>
+<li>The override is applied to all failures in the same error-signature group within the job.</li>
+<li><code>400 Bad Request</code> when the job exists but the target failure cannot be resolved, or when child-job scoping is invalid.</li>
+<li><code>404 Not Found</code> when the job does not exist.</li>
+<li><code>403 Forbidden</code> when the allow list rejects the caller.</li>
+<li><code>422 Unprocessable Entity</code> when <code>classification</code> is not one of the allowed values.</li>
+</ul>
+<div class="highlight"><pre><span></span><code>curl<span class="w"> </span>-X<span class="w"> </span>PUT<span class="w"> </span>http://localhost:8000/results/job-123/override-classification<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-H<span class="w"> </span><span class="s1">&#39;Content-Type: application/json&#39;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-d<span class="w"> </span><span class="s1">&#39;{</span>
+<span class="s1">    &quot;test_name&quot;: &quot;tests.test_auth.test_login&quot;,</span>
+<span class="s1">    &quot;classification&quot;: &quot;PRODUCT BUG&quot;</span>
+<span class="s1">  }&#39;</span>
+</code></pre></div>
+
+<h2 id="history">History</h2>
+<blockquote>
+<p><strong>Note:</strong> For investigative workflows and interpretation guidance, see <a href="investigate-failure-history.html">Investigate Failure History</a>.</p>
+</blockquote>
+<h3 id="get-historyfailures"><code>GET /history/failures</code></h3>
+<p>List failure-history rows with pagination and optional filters.</p>
+<table>
+<thead>
+<tr>
+<th>Name</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>search</code></td>
+<td>string</td>
+<td><code>""</code></td>
+<td>Free-text search across <code>test_name</code>, <code>error_message</code>, and <code>job_name</code>.</td>
+</tr>
+<tr>
+<td><code>job_name</code></td>
+<td>string</td>
+<td><code>""</code></td>
+<td>Exact <code>job_name</code> filter.</td>
+</tr>
+<tr>
+<td><code>classification</code></td>
+<td>string</td>
+<td><code>""</code></td>
+<td>Exact classification filter.</td>
+</tr>
+<tr>
+<td><code>limit</code></td>
+<td>integer</td>
+<td><code>50</code></td>
+<td>Max rows to return. Maximum <code>200</code>.</td>
+</tr>
+<tr>
+<td><code>offset</code></td>
+<td>integer</td>
+<td><code>0</code></td>
+<td>Number of rows to skip. Minimum <code>0</code>.</td>
+</tr>
+</tbody>
+</table>
+<p>Return value/effect:</p>
+<ul>
+<li><code>200 OK</code> returns:</li>
+<li><code>failures</code>: array of rows with <code>id</code>, <code>job_id</code>, <code>job_name</code>, <code>build_number</code>, <code>test_name</code>, <code>error_message</code>, <code>error_signature</code>, <code>classification</code>, <code>child_job_name</code>, <code>child_build_number</code>, and <code>analyzed_at</code></li>
+<li><code>total</code>: total row count before pagination</li>
+<li><code>422 Unprocessable Entity</code> for query validation errors.</li>
+</ul>
+<div class="highlight"><pre><span></span><code>curl<span class="w"> </span><span class="s1">&#39;http://localhost:8000/history/failures?job_name=my-pipeline&amp;classification=FLAKY&amp;limit=25&amp;offset=0&#39;</span>
+</code></pre></div>
+
+<h3 id="get-historytesttest_name"><code>GET /history/test/{test_name}</code></h3>
+<p>Return historical statistics and recent failure rows for one test.</p>
+<table>
+<thead>
+<tr>
+<th>Name</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>test_name</code></td>
+<td>string</td>
+<td>required</td>
+<td>Test name path parameter.</td>
+</tr>
+<tr>
+<td><code>limit</code></td>
+<td>integer</td>
+<td><code>20</code></td>
+<td>Max recent runs to return. Maximum <code>100</code>.</td>
+</tr>
+<tr>
+<td><code>job_name</code></td>
+<td>string</td>
+<td><code>""</code></td>
+<td>Exact job-name filter.</td>
+</tr>
+<tr>
+<td><code>exclude_job_id</code></td>
+<td>string</td>
+<td><code>""</code></td>
+<td>Excludes rows from one analysis job.</td>
+</tr>
+</tbody>
+</table>
+<p>Return value/effect:</p>
+<ul>
+<li><code>200 OK</code> returns:</li>
+<li><code>test_name</code></li>
+<li><code>total_runs</code></li>
+<li><code>failures</code></li>
+<li><code>passes</code></li>
+<li><code>failure_rate</code></li>
+<li><code>first_seen</code></li>
+<li><code>last_seen</code></li>
+<li><code>last_classification</code></li>
+<li><code>classifications</code></li>
+<li><code>recent_runs</code></li>
+<li><code>comments</code></li>
+<li><code>consecutive_failures</code></li>
+<li><code>note</code></li>
+<li><code>passes</code> and <code>failure_rate</code> can be <code>null</code> when no <code>job_name</code> filter is supplied and the endpoint cannot compute a pass denominator.</li>
+<li>When no matching history exists, the response still returns <code>200</code> with zeroed counts and empty collections.</li>
+</ul>
+<div class="highlight"><pre><span></span><code>curl<span class="w"> </span><span class="s1">&#39;http://localhost:8000/history/test/tests.test_auth.test_login?limit=10&amp;job_name=my-pipeline&#39;</span>
+</code></pre></div>
+
+<h3 id="get-historysearch"><code>GET /history/search</code></h3>
+<p>Find failures that share one error signature.</p>
+<table>
+<thead>
+<tr>
+<th>Name</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>signature</code></td>
+<td>string</td>
+<td>required</td>
+<td>Error-signature hash to search.</td>
+</tr>
+<tr>
+<td><code>exclude_job_id</code></td>
+<td>string</td>
+<td><code>""</code></td>
+<td>Excludes rows from one analysis job.</td>
+</tr>
+</tbody>
+</table>
+<p>Return value/effect:</p>
+<ul>
+<li><code>200 OK</code> returns:</li>
+<li><code>signature</code></li>
+<li><code>total_occurrences</code></li>
+<li><code>unique_tests</code></li>
+<li><code>tests</code>: array of <code>{ "test_name": "...", "occurrences": &lt;int&gt; }</code></li>
+<li><code>last_classification</code></li>
+<li><code>comments</code>: array of <code>{ "comment": "...", "username": "...", "created_at": "..." }</code></li>
+<li><code>422 Unprocessable Entity</code> when <code>signature</code> is omitted.</li>
+</ul>
+<div class="highlight"><pre><span></span><code>curl<span class="w"> </span><span class="s1">&#39;http://localhost:8000/history/search?signature=abc123def456&#39;</span>
+</code></pre></div>
+
+<h3 id="get-historystatsjob_name"><code>GET /history/stats/{job_name}</code></h3>
+<p>Return aggregate failure statistics for one Jenkins job name.</p>
+<table>
+<thead>
+<tr>
+<th>Name</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>job_name</code></td>
+<td>string</td>
+<td>required</td>
+<td>Jenkins job name path parameter.</td>
+</tr>
+<tr>
+<td><code>exclude_job_id</code></td>
+<td>string</td>
+<td><code>""</code></td>
+<td>Excludes rows from one analysis job.</td>
+</tr>
+</tbody>
+</table>
+<p>Return value/effect:</p>
+<ul>
+<li><code>200 OK</code> returns:</li>
+<li><code>job_name</code></li>
+<li><code>total_builds_analyzed</code></li>
+<li><code>builds_with_failures</code></li>
+<li><code>overall_failure_rate</code></li>
+<li><code>most_common_failures</code>: array of <code>{ "test_name": "...", "count": &lt;int&gt;, "classification": "..." }</code></li>
+<li><code>recent_trend</code>: <code>stable</code>, <code>improving</code>, or <code>worsening</code></li>
+<li>If no history exists for the job, the endpoint still returns <code>200</code> with zeroed counters and <code>recent_trend: "stable"</code>.</li>
+</ul>
+<div class="highlight"><pre><span></span><code>curl<span class="w"> </span><span class="s1">&#39;http://localhost:8000/history/stats/my-pipeline&#39;</span>
+</code></pre></div>
+
+<h3 id="post-historyclassify"><code>POST /history/classify</code></h3>
+<p>Create a history classification record for one test.</p>
+<table>
+<thead>
+<tr>
+<th>Name</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>test_name</code></td>
+<td>string</td>
+<td>required</td>
+<td>Test name to classify.</td>
+</tr>
+<tr>
+<td><code>classification</code></td>
+<td>string</td>
+<td>required</td>
+<td>One of <code>FLAKY</code>, <code>REGRESSION</code>, <code>INFRASTRUCTURE</code>, <code>KNOWN_BUG</code>, or <code>INTERMITTENT</code>.</td>
+</tr>
+<tr>
+<td><code>reason</code></td>
+<td>string</td>
+<td><code>""</code></td>
+<td>Free-text reason.</td>
+</tr>
+<tr>
+<td><code>job_name</code></td>
+<td>string</td>
+<td><code>""</code></td>
+<td>Job name scope stored on the classification record.</td>
+</tr>
+<tr>
+<td><code>references</code></td>
+<td>string</td>
+<td><code>""</code></td>
+<td>Reference text such as Jira keys or URLs.</td>
+</tr>
+<tr>
+<td><code>job_id</code></td>
+<td>string</td>
+<td>required</td>
+<td>Analysis job ID that the classification is tied to.</td>
+</tr>
+<tr>
+<td><code>child_build_number</code></td>
+<td>integer</td>
+<td><code>0</code></td>
+<td>Child build scope. <code>0</code> acts as the wildcard value.</td>
+</tr>
+</tbody>
+</table>
+<p>Return value/effect:</p>
+<ul>
+<li><code>201 Created</code> returns <code>{ "id": &lt;classification_id&gt; }</code>.</li>
+<li><code>400 Bad Request</code> when <code>test_name</code> is blank or when <code>KNOWN_BUG</code> is sent without non-empty <code>references</code>.</li>
+<li><code>403 Forbidden</code> when the allow list rejects the caller.</li>
+<li><code>422 Unprocessable Entity</code> for validation errors.</li>
+</ul>
+<blockquote>
+<p><strong>Warning:</strong> <code>classification: "KNOWN_BUG"</code> requires a non-empty <code>references</code> value.</p>
+</blockquote>
+<div class="highlight"><pre><span></span><code>curl<span class="w"> </span>-X<span class="w"> </span>POST<span class="w"> </span>http://localhost:8000/history/classify<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-H<span class="w"> </span><span class="s1">&#39;Content-Type: application/json&#39;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-d<span class="w"> </span><span class="s1">&#39;{</span>
+<span class="s1">    &quot;test_name&quot;: &quot;tests.test_auth.test_login&quot;,</span>
+<span class="s1">    &quot;classification&quot;: &quot;FLAKY&quot;,</span>
+<span class="s1">    &quot;reason&quot;: &quot;Intermittent network timeout&quot;,</span>
+<span class="s1">    &quot;job_id&quot;: &quot;job-123&quot;</span>
+<span class="s1">  }&#39;</span>
+</code></pre></div>
+
+<h3 id="get-historyclassifications"><code>GET /history/classifications</code></h3>
+<p>List visible primary classification records.</p>
+<table>
+<thead>
+<tr>
+<th>Name</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>test_name</code></td>
+<td>string</td>
+<td><code>""</code></td>
+<td>Exact test-name filter.</td>
+</tr>
+<tr>
+<td><code>classification</code></td>
+<td>string</td>
+<td><code>""</code></td>
+<td>Exact classification filter.</td>
+</tr>
+<tr>
+<td><code>job_name</code></td>
+<td>string</td>
+<td><code>""</code></td>
+<td>Exact job-name filter.</td>
+</tr>
+<tr>
+<td><code>parent_job_name</code></td>
+<td>string</td>
+<td><code>""</code></td>
+<td>Exact parent-job-name filter.</td>
+</tr>
+<tr>
+<td><code>job_id</code></td>
+<td>string</td>
+<td><code>""</code></td>
+<td>Exact job-ID filter.</td>
+</tr>
+</tbody>
+</table>
+<p>Return value/effect:</p>
+<ul>
+<li><code>200 OK</code> returns <code>{ "classifications": [...] }</code>.</li>
+<li>Each classification row includes <code>id</code>, <code>test_name</code>, <code>job_name</code>, <code>parent_job_name</code>, <code>classification</code>, <code>reason</code>, <code>references_info</code>, <code>created_by</code>, <code>job_id</code>, <code>child_build_number</code>, and <code>created_at</code>.</li>
+<li>This endpoint returns the visible primary-domain records used for stored failure overrides.</li>
+</ul>
+<div class="highlight"><pre><span></span><code>curl<span class="w"> </span><span class="s1">&#39;http://localhost:8000/history/classifications?classification=PRODUCT%20BUG&#39;</span>
+</code></pre></div>
+
+<h2 id="auth-state-and-saved-user-tokens">Auth state and saved user tokens</h2>
+<blockquote>
+<p><strong>Note:</strong> This section documents the live auth-state and saved-token endpoints. For user bootstrap, API keys, and role-management workflows, see <a href="manage-users-access-and-token-usage.html">Manage Users, Access, and Token Usage</a>. For tracker-specific profile workflows, see <a href="configure-your-profile-and-notifications.html">Configure Your Profile and Notifications</a>.</p>
+</blockquote>
+<h3 id="get-apiauthme"><code>GET /api/auth/me</code></h3>
+<p>Return the current request's resolved user identity.</p>
+<table>
+<thead>
+<tr>
+<th>Name</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>None</td>
+<td>n/a</td>
+<td>n/a</td>
+<td>No request parameters.</td>
+</tr>
+</tbody>
+</table>
+<p>Return value/effect:</p>
+<ul>
+<li><code>200 OK</code> returns:</li>
+<li><code>username</code></li>
+<li><code>role</code></li>
+<li><code>is_admin</code></li>
+<li>The endpoint also returns <code>200</code> when no current user exists; in that case <code>username</code> is empty and <code>is_admin</code> is <code>false</code>.</li>
+</ul>
+<div class="highlight"><pre><span></span><code><span class="kd">const</span><span class="w"> </span><span class="nx">res</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">fetch</span><span class="p">(</span><span class="s2">&quot;/api/auth/me&quot;</span><span class="p">,</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">credentials</span><span class="o">:</span><span class="w"> </span><span class="s2">&quot;include&quot;</span><span class="w"> </span><span class="p">});</span>
+<span class="nx">console</span><span class="p">.</span><span class="nx">log</span><span class="p">(</span><span class="k">await</span><span class="w"> </span><span class="nx">res</span><span class="p">.</span><span class="nx">json</span><span class="p">());</span>
+</code></pre></div>
+
+<h3 id="post-apiauthlogout"><code>POST /api/auth/logout</code></h3>
+<p>Clear the current admin-auth state.</p>
+<table>
+<thead>
+<tr>
+<th>Name</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>None</td>
+<td>n/a</td>
+<td>n/a</td>
+<td>No request parameters.</td>
+</tr>
+</tbody>
+</table>
+<p>Return value/effect:</p>
+<ul>
+<li><code>200 OK</code> returns <code>{ "ok": true }</code>.</li>
+</ul>
+<div class="highlight"><pre><span></span><code><span class="kd">const</span><span class="w"> </span><span class="nx">res</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">fetch</span><span class="p">(</span><span class="s2">&quot;/api/auth/logout&quot;</span><span class="p">,</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="nx">method</span><span class="o">:</span><span class="w"> </span><span class="s2">&quot;POST&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nx">credentials</span><span class="o">:</span><span class="w"> </span><span class="s2">&quot;include&quot;</span>
+<span class="p">});</span>
+<span class="nx">console</span><span class="p">.</span><span class="nx">log</span><span class="p">(</span><span class="k">await</span><span class="w"> </span><span class="nx">res</span><span class="p">.</span><span class="nx">json</span><span class="p">());</span>
+</code></pre></div>
+
+<h3 id="get-apiusertokens"><code>GET /api/user/tokens</code></h3>
+<p>Return the current user's saved tracker tokens.</p>
+<table>
+<thead>
+<tr>
+<th>Name</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>None</td>
+<td>n/a</td>
+<td>n/a</td>
+<td>No request parameters.</td>
+</tr>
+</tbody>
+</table>
+<p>Return value/effect:</p>
+<ul>
+<li><code>200 OK</code> returns <code>{ "github_token": "...", "jira_email": "...", "jira_token": "..." }</code>.</li>
+<li>If the current username is unknown to the database, the endpoint still returns <code>200</code> with empty strings for all three fields.</li>
+<li><code>401 Unauthorized</code> when no current user exists.</li>
+</ul>
+<div class="highlight"><pre><span></span><code><span class="kd">const</span><span class="w"> </span><span class="nx">res</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">fetch</span><span class="p">(</span><span class="s2">&quot;/api/user/tokens&quot;</span><span class="p">,</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">credentials</span><span class="o">:</span><span class="w"> </span><span class="s2">&quot;include&quot;</span><span class="w"> </span><span class="p">});</span>
+<span class="nx">console</span><span class="p">.</span><span class="nx">log</span><span class="p">(</span><span class="k">await</span><span class="w"> </span><span class="nx">res</span><span class="p">.</span><span class="nx">json</span><span class="p">());</span>
+</code></pre></div>
+
+<h3 id="put-apiusertokens"><code>PUT /api/user/tokens</code></h3>
+<p>Merge non-empty token fields into the current user's saved token record.</p>
+<table>
+<thead>
+<tr>
+<th>Name</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>github_token</code></td>
+<td>string</td>
+<td>omitted</td>
+<td>GitHub personal access token.</td>
+</tr>
+<tr>
+<td><code>jira_email</code></td>
+<td>string</td>
+<td>omitted</td>
+<td>Jira Cloud email.</td>
+</tr>
+<tr>
+<td><code>jira_token</code></td>
+<td>string</td>
+<td>omitted</td>
+<td>Jira token.</td>
+</tr>
+</tbody>
+</table>
+<p>Return value/effect:</p>
+<ul>
+<li><code>200 OK</code> returns <code>{ "ok": true }</code>.</li>
+<li>Only non-empty fields in the request body are written.</li>
+<li>Omitted fields are left unchanged.</li>
+<li><code>401 Unauthorized</code> when no current user exists.</li>
+<li><code>404 Not Found</code> when the current username does not exist in the database.</li>
+</ul>
+<blockquote>
+<p><strong>Warning:</strong> Blank-string values are not persisted as clears; only non-empty values are written.</p>
+</blockquote>
+<div class="highlight"><pre><span></span><code><span class="kd">const</span><span class="w"> </span><span class="nx">res</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">fetch</span><span class="p">(</span><span class="s2">&quot;/api/user/tokens&quot;</span><span class="p">,</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="nx">method</span><span class="o">:</span><span class="w"> </span><span class="s2">&quot;PUT&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nx">credentials</span><span class="o">:</span><span class="w"> </span><span class="s2">&quot;include&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nx">headers</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="s2">&quot;Content-Type&quot;</span><span class="o">:</span><span class="w"> </span><span class="s2">&quot;application/json&quot;</span><span class="w"> </span><span class="p">},</span>
+<span class="w">  </span><span class="nx">body</span><span class="o">:</span><span class="w"> </span><span class="nb">JSON</span><span class="p">.</span><span class="nx">stringify</span><span class="p">({</span>
+<span class="w">    </span><span class="nx">github_token</span><span class="o">:</span><span class="w"> </span><span class="s2">&quot;ghp_example&quot;</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">jira_email</span><span class="o">:</span><span class="w"> </span><span class="s2">&quot;alice@example.com&quot;</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">jira_token</span><span class="o">:</span><span class="w"> </span><span class="s2">&quot;jira-example&quot;</span>
+<span class="w">  </span><span class="p">})</span>
+<span class="p">});</span>
+<span class="nx">console</span><span class="p">.</span><span class="nx">log</span><span class="p">(</span><span class="k">await</span><span class="w"> </span><span class="nx">res</span><span class="p">.</span><span class="nx">json</span><span class="p">());</span>
+</code></pre></div>
+
+<h2 id="notifications-and-mentions">Notifications and mentions</h2>
+<blockquote>
+<p><strong>Note:</strong> For end-user setup and browser flow details, see <a href="configure-your-profile-and-notifications.html">Configure Your Profile and Notifications</a>.</p>
+</blockquote>
+<h3 id="get-apinotificationsvapid-public-key"><code>GET /api/notifications/vapid-public-key</code></h3>
+<p>Return the public VAPID key used by browser push subscriptions.</p>
+<table>
+<thead>
+<tr>
+<th>Name</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>None</td>
+<td>n/a</td>
+<td>n/a</td>
+<td>No request parameters.</td>
+</tr>
+</tbody>
+</table>
+<p>Return value/effect:</p>
+<ul>
+<li><code>200 OK</code> returns <code>{ "vapid_public_key": "..." }</code>.</li>
+<li><code>404 Not Found</code> when Web Push is not configured.</li>
+<li><code>503 Service Unavailable</code> when push support is enabled but the VAPID keys are unavailable.</li>
+</ul>
+<div class="highlight"><pre><span></span><code><span class="kd">const</span><span class="w"> </span><span class="nx">res</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">fetch</span><span class="p">(</span><span class="s2">&quot;/api/notifications/vapid-public-key&quot;</span><span class="p">);</span>
+<span class="nx">console</span><span class="p">.</span><span class="nx">log</span><span class="p">(</span><span class="k">await</span><span class="w"> </span><span class="nx">res</span><span class="p">.</span><span class="nx">json</span><span class="p">());</span>
+</code></pre></div>
+
+<h3 id="post-apinotificationssubscribe"><code>POST /api/notifications/subscribe</code></h3>
+<p>Register or update one push subscription for the current user.</p>
+<table>
+<thead>
+<tr>
+<th>Name</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>endpoint</code></td>
+<td>string</td>
+<td>required</td>
+<td>HTTPS push endpoint URL. Maximum length <code>2048</code>.</td>
+</tr>
+<tr>
+<td><code>p256dh_key</code></td>
+<td>string</td>
+<td>required</td>
+<td>Client public key. Maximum length <code>256</code>.</td>
+</tr>
+<tr>
+<td><code>auth_key</code></td>
+<td>string</td>
+<td>required</td>
+<td>Client auth secret. Maximum length <code>256</code>.</td>
+</tr>
+</tbody>
+</table>
+<p>Return value/effect:</p>
+<ul>
+<li><code>200 OK</code> returns <code>{ "status": "subscribed" }</code>.</li>
+<li>The subscription is upserted by <code>endpoint</code>.</li>
+<li>The server keeps at most <code>10</code> subscriptions per user and drops the oldest extras.</li>
+<li><code>401 Unauthorized</code> when no current user exists.</li>
+<li><code>404 Not Found</code> when Web Push is not configured.</li>
+<li><code>403 Forbidden</code> when the allow list rejects the caller.</li>
+<li><code>422 Unprocessable Entity</code> when validation fails, including non-HTTPS endpoints.</li>
+</ul>
+<div class="highlight"><pre><span></span><code><span class="kd">const</span><span class="w"> </span><span class="nx">res</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">fetch</span><span class="p">(</span><span class="s2">&quot;/api/notifications/subscribe&quot;</span><span class="p">,</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="nx">method</span><span class="o">:</span><span class="w"> </span><span class="s2">&quot;POST&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nx">credentials</span><span class="o">:</span><span class="w"> </span><span class="s2">&quot;include&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nx">headers</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="s2">&quot;Content-Type&quot;</span><span class="o">:</span><span class="w"> </span><span class="s2">&quot;application/json&quot;</span><span class="w"> </span><span class="p">},</span>
+<span class="w">  </span><span class="nx">body</span><span class="o">:</span><span class="w"> </span><span class="nb">JSON</span><span class="p">.</span><span class="nx">stringify</span><span class="p">({</span>
+<span class="w">    </span><span class="nx">endpoint</span><span class="o">:</span><span class="w"> </span><span class="s2">&quot;https://push.example.com/sub/abc123&quot;</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">p256dh_key</span><span class="o">:</span><span class="w"> </span><span class="s2">&quot;p256dh-test&quot;</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">auth_key</span><span class="o">:</span><span class="w"> </span><span class="s2">&quot;auth-test&quot;</span>
+<span class="w">  </span><span class="p">})</span>
+<span class="p">});</span>
+<span class="nx">console</span><span class="p">.</span><span class="nx">log</span><span class="p">(</span><span class="k">await</span><span class="w"> </span><span class="nx">res</span><span class="p">.</span><span class="nx">json</span><span class="p">());</span>
+</code></pre></div>
+
+<h3 id="post-apinotificationsunsubscribe"><code>POST /api/notifications/unsubscribe</code></h3>
+<p>Remove one push subscription for the current user.</p>
+<table>
+<thead>
+<tr>
+<th>Name</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>endpoint</code></td>
+<td>string</td>
+<td>required</td>
+<td>HTTPS push endpoint URL. Maximum length <code>2048</code>.</td>
+</tr>
+</tbody>
+</table>
+<p>Return value/effect:</p>
+<ul>
+<li><code>200 OK</code> returns <code>{ "status": "unsubscribed" }</code>.</li>
+<li><code>401 Unauthorized</code> when no current user exists.</li>
+<li><code>404 Not Found</code> when Web Push is not configured or when the endpoint is not owned by the current user.</li>
+<li><code>403 Forbidden</code> when the allow list rejects the caller.</li>
+<li><code>422 Unprocessable Entity</code> when validation fails, including non-HTTPS endpoints.</li>
+</ul>
+<div class="highlight"><pre><span></span><code><span class="kd">const</span><span class="w"> </span><span class="nx">res</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">fetch</span><span class="p">(</span><span class="s2">&quot;/api/notifications/unsubscribe&quot;</span><span class="p">,</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="nx">method</span><span class="o">:</span><span class="w"> </span><span class="s2">&quot;POST&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nx">credentials</span><span class="o">:</span><span class="w"> </span><span class="s2">&quot;include&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nx">headers</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="s2">&quot;Content-Type&quot;</span><span class="o">:</span><span class="w"> </span><span class="s2">&quot;application/json&quot;</span><span class="w"> </span><span class="p">},</span>
+<span class="w">  </span><span class="nx">body</span><span class="o">:</span><span class="w"> </span><span class="nb">JSON</span><span class="p">.</span><span class="nx">stringify</span><span class="p">({</span>
+<span class="w">    </span><span class="nx">endpoint</span><span class="o">:</span><span class="w"> </span><span class="s2">&quot;https://push.example.com/sub/abc123&quot;</span>
+<span class="w">  </span><span class="p">})</span>
+<span class="p">});</span>
+<span class="nx">console</span><span class="p">.</span><span class="nx">log</span><span class="p">(</span><span class="k">await</span><span class="w"> </span><span class="nx">res</span><span class="p">.</span><span class="nx">json</span><span class="p">());</span>
+</code></pre></div>
+
+<h3 id="get-apiusersmentions"><code>GET /api/users/mentions</code></h3>
+<p>Return comments that mention the current user.</p>
+<table>
+<thead>
+<tr>
+<th>Name</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>offset</code></td>
+<td>integer</td>
+<td><code>0</code></td>
+<td>Pagination offset. Negative values are clamped to <code>0</code>.</td>
+</tr>
+<tr>
+<td><code>limit</code></td>
+<td>integer</td>
+<td><code>50</code></td>
+<td>Pagination size. Values above <code>200</code> are clamped to <code>200</code>.</td>
+</tr>
+<tr>
+<td><code>unread_only</code></td>
+<td>boolean-like string</td>
+<td><code>false</code></td>
+<td>Truthy values: <code>true</code>, <code>1</code>, <code>yes</code>.</td>
+</tr>
+</tbody>
+</table>
+<p>Return value/effect:</p>
+<ul>
+<li><code>200 OK</code> returns:</li>
+<li><code>mentions</code>: array of mention objects with <code>id</code>, <code>job_id</code>, <code>test_name</code>, <code>child_job_name</code>, <code>child_build_number</code>, <code>comment</code>, <code>username</code>, <code>created_at</code>, and <code>is_read</code></li>
+<li><code>total</code></li>
+<li><code>unread_count</code></li>
+<li><code>401 Unauthorized</code> when no current user exists.</li>
+<li><code>403 Forbidden</code> when the allow list rejects the caller.</li>
+<li><code>400 Bad Request</code> when <code>offset</code> or <code>limit</code> is not an integer.</li>
+</ul>
+<div class="highlight"><pre><span></span><code><span class="kd">const</span><span class="w"> </span><span class="nx">res</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">fetch</span><span class="p">(</span><span class="s2">&quot;/api/users/mentions?unread_only=true&amp;limit=20&quot;</span><span class="p">,</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="nx">credentials</span><span class="o">:</span><span class="w"> </span><span class="s2">&quot;include&quot;</span>
+<span class="p">});</span>
+<span class="nx">console</span><span class="p">.</span><span class="nx">log</span><span class="p">(</span><span class="k">await</span><span class="w"> </span><span class="nx">res</span><span class="p">.</span><span class="nx">json</span><span class="p">());</span>
+</code></pre></div>
+
+<h3 id="post-apiusersmentionsread"><code>POST /api/users/mentions/read</code></h3>
+<p>Mark specific mention rows as read for the current user.</p>
+<table>
+<thead>
+<tr>
+<th>Name</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>comment_ids</code></td>
+<td>array<integer></td>
+<td>required</td>
+<td>Non-empty list of comment IDs. Booleans are rejected.</td>
+</tr>
+</tbody>
+</table>
+<p>Return value/effect:</p>
+<ul>
+<li><code>200 OK</code> returns <code>{ "ok": true }</code>.</li>
+<li><code>401 Unauthorized</code> when no current user exists.</li>
+<li><code>403 Forbidden</code> when the allow list rejects the caller.</li>
+<li><code>400 Bad Request</code> when <code>comment_ids</code> is missing, empty, or contains non-integers.</li>
+</ul>
+<div class="highlight"><pre><span></span><code><span class="kd">const</span><span class="w"> </span><span class="nx">res</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">fetch</span><span class="p">(</span><span class="s2">&quot;/api/users/mentions/read&quot;</span><span class="p">,</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="nx">method</span><span class="o">:</span><span class="w"> </span><span class="s2">&quot;POST&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nx">credentials</span><span class="o">:</span><span class="w"> </span><span class="s2">&quot;include&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nx">headers</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="s2">&quot;Content-Type&quot;</span><span class="o">:</span><span class="w"> </span><span class="s2">&quot;application/json&quot;</span><span class="w"> </span><span class="p">},</span>
+<span class="w">  </span><span class="nx">body</span><span class="o">:</span><span class="w"> </span><span class="nb">JSON</span><span class="p">.</span><span class="nx">stringify</span><span class="p">({</span><span class="w"> </span><span class="nx">comment_ids</span><span class="o">:</span><span class="w"> </span><span class="p">[</span><span class="mf">12</span><span class="p">,</span><span class="w"> </span><span class="mf">15</span><span class="p">]</span><span class="w"> </span><span class="p">})</span>
+<span class="p">});</span>
+<span class="nx">console</span><span class="p">.</span><span class="nx">log</span><span class="p">(</span><span class="k">await</span><span class="w"> </span><span class="nx">res</span><span class="p">.</span><span class="nx">json</span><span class="p">());</span>
+</code></pre></div>
+
+<h3 id="post-apiusersmentionsread-all"><code>POST /api/users/mentions/read-all</code></h3>
+<p>Mark every unread mention as read for the current user.</p>
+<table>
+<thead>
+<tr>
+<th>Name</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>None</td>
+<td>n/a</td>
+<td>n/a</td>
+<td>No request parameters.</td>
+</tr>
+</tbody>
+</table>
+<p>Return value/effect:</p>
+<ul>
+<li><code>200 OK</code> returns <code>{ "marked_read": &lt;count&gt; }</code>.</li>
+<li><code>401 Unauthorized</code> when no current user exists.</li>
+<li><code>403 Forbidden</code> when the allow list rejects the caller.</li>
+</ul>
+<div class="highlight"><pre><span></span><code><span class="kd">const</span><span class="w"> </span><span class="nx">res</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">fetch</span><span class="p">(</span><span class="s2">&quot;/api/users/mentions/read-all&quot;</span><span class="p">,</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="nx">method</span><span class="o">:</span><span class="w"> </span><span class="s2">&quot;POST&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nx">credentials</span><span class="o">:</span><span class="w"> </span><span class="s2">&quot;include&quot;</span>
+<span class="p">});</span>
+<span class="nx">console</span><span class="p">.</span><span class="nx">log</span><span class="p">(</span><span class="k">await</span><span class="w"> </span><span class="nx">res</span><span class="p">.</span><span class="nx">json</span><span class="p">());</span>
+</code></pre></div>
+
+<h3 id="get-apiusersmentionsunread-count"><code>GET /api/users/mentions/unread-count</code></h3>
+<p>Return the unread-mention badge count for the current user.</p>
+<table>
+<thead>
+<tr>
+<th>Name</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>None</td>
+<td>n/a</td>
+<td>n/a</td>
+<td>No request parameters.</td>
+</tr>
+</tbody>
+</table>
+<p>Return value/effect:</p>
+<ul>
+<li><code>200 OK</code> returns <code>{ "count": &lt;int&gt; }</code>.</li>
+<li><code>401 Unauthorized</code> when no current user exists.</li>
+<li><code>403 Forbidden</code> when the allow list rejects the caller.</li>
+</ul>
+<div class="highlight"><pre><span></span><code><span class="kd">const</span><span class="w"> </span><span class="nx">res</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">fetch</span><span class="p">(</span><span class="s2">&quot;/api/users/mentions/unread-count&quot;</span><span class="p">,</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="nx">credentials</span><span class="o">:</span><span class="w"> </span><span class="s2">&quot;include&quot;</span>
+<span class="p">});</span>
+<span class="nx">console</span><span class="p">.</span><span class="nx">log</span><span class="p">(</span><span class="k">await</span><span class="w"> </span><span class="nx">res</span><span class="p">.</span><span class="nx">json</span><span class="p">());</span>
+</code></pre></div>
+
+<h3 id="get-apiusersmentionable"><code>GET /api/users/mentionable</code></h3>
+<p>Return the list of usernames that can be mentioned.</p>
+<table>
+<thead>
+<tr>
+<th>Name</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>None</td>
+<td>n/a</td>
+<td>n/a</td>
+<td>No request parameters.</td>
+</tr>
+</tbody>
+</table>
+<p>Return value/effect:</p>
+<ul>
+<li><code>200 OK</code> returns <code>{ "usernames": ["alice", "bob", ...] }</code>.</li>
+<li><code>401 Unauthorized</code> when no current user exists.</li>
+<li><code>403 Forbidden</code> when the allow list rejects the caller.</li>
+</ul>
+<div class="highlight"><pre><span></span><code><span class="kd">const</span><span class="w"> </span><span class="nx">res</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">fetch</span><span class="p">(</span><span class="s2">&quot;/api/users/mentionable&quot;</span><span class="p">,</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="nx">credentials</span><span class="o">:</span><span class="w"> </span><span class="s2">&quot;include&quot;</span>
+<span class="p">});</span>
+<span class="nx">console</span><span class="p">.</span><span class="nx">log</span><span class="p">(</span><span class="k">await</span><span class="w"> </span><span class="nx">res</span><span class="p">.</span><span class="nx">json</span><span class="p">());</span>
+</code></pre></div>
+
+<h2 id="metadata">Metadata</h2>
+<blockquote>
+<p><strong>Note:</strong> For end-user metadata workflows and examples, see <a href="organize-jobs-with-metadata.html">Organize Jobs with Metadata</a>.</p>
+</blockquote>
+<h3 id="get-apijobsmetadata"><code>GET /api/jobs/metadata</code></h3>
+<p>List all stored job metadata, optionally filtered.</p>
+<table>
+<thead>
+<tr>
+<th>Name</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>team</code></td>
+<td>string</td>
+<td><code>""</code></td>
+<td>Exact team filter.</td>
+</tr>
+<tr>
+<td><code>tier</code></td>
+<td>string</td>
+<td><code>""</code></td>
+<td>Exact tier filter.</td>
+</tr>
+<tr>
+<td><code>version</code></td>
+<td>string</td>
+<td><code>""</code></td>
+<td>Exact version filter.</td>
+</tr>
+<tr>
+<td><code>label</code></td>
+<td>string (repeatable)</td>
+<td>none</td>
+<td>Label filter. Repeating the parameter requires all listed labels to be present.</td>
+</tr>
+</tbody>
+</table>
+<p>Return value/effect:</p>
+<ul>
+<li><code>200 OK</code> returns an array of metadata objects with <code>job_name</code>, <code>team</code>, <code>tier</code>, <code>version</code>, and <code>labels</code>.</li>
+</ul>
+<div class="highlight"><pre><span></span><code>curl<span class="w"> </span><span class="s1">&#39;http://localhost:8000/api/jobs/metadata?team=platform&amp;label=nightly&amp;label=smoke&#39;</span>
+</code></pre></div>
+
+<h3 id="get-apijobsjob_namepathmetadata"><code>GET /api/jobs/{job_name:path}/metadata</code></h3>
+<p>Return one metadata object.</p>
+<table>
+<thead>
+<tr>
+<th>Name</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>job_name</code></td>
+<td>string</td>
+<td>required</td>
+<td>Jenkins job name. Path-style folder names are supported.</td>
+</tr>
+</tbody>
+</table>
+<p>Return value/effect:</p>
+<ul>
+<li><code>200 OK</code> returns <code>{ "job_name": "...", "team": "...", "tier": "...", "version": "...", "labels": [...] }</code>.</li>
+<li><code>404 Not Found</code> when no metadata exists for the job.</li>
+</ul>
+<div class="highlight"><pre><span></span><code>curl<span class="w"> </span>http://localhost:8000/api/jobs/folder/subfolder/my-job/metadata
+</code></pre></div>
+
+<h3 id="put-apijobsjob_namepathmetadata"><code>PUT /api/jobs/{job_name:path}/metadata</code></h3>
+<p>Create or update one metadata record.</p>
+<table>
+<thead>
+<tr>
+<th>Name</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>job_name</code></td>
+<td>string</td>
+<td>required</td>
+<td>Jenkins job name.</td>
+</tr>
+<tr>
+<td><code>team</code></td>
+<td>string | null</td>
+<td>omitted</td>
+<td>Team value to write.</td>
+</tr>
+<tr>
+<td><code>tier</code></td>
+<td>string | null</td>
+<td>omitted</td>
+<td>Tier value to write.</td>
+</tr>
+<tr>
+<td><code>version</code></td>
+<td>string | null</td>
+<td>omitted</td>
+<td>Version value to write.</td>
+</tr>
+<tr>
+<td><code>labels</code></td>
+<td>array<string></td>
+<td>omitted</td>
+<td>Label array to write.</td>
+</tr>
+</tbody>
+</table>
+<p>Return value/effect:</p>
+<ul>
+<li><code>200 OK</code> returns the stored metadata object.</li>
+<li>Omitted fields are preserved from the existing record.</li>
+<li><code>403 Forbidden</code> without admin access.</li>
+</ul>
+<div class="highlight"><pre><span></span><code>curl<span class="w"> </span>-X<span class="w"> </span>PUT<span class="w"> </span>http://localhost:8000/api/jobs/my-job/metadata<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-H<span class="w"> </span><span class="s1">&#39;Authorization: Bearer &lt;admin-bearer-token&gt;&#39;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-H<span class="w"> </span><span class="s1">&#39;Content-Type: application/json&#39;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-d<span class="w"> </span><span class="s1">&#39;{</span>
+<span class="s1">    &quot;team&quot;: &quot;platform&quot;,</span>
+<span class="s1">    &quot;tier&quot;: &quot;critical&quot;,</span>
+<span class="s1">    &quot;labels&quot;: [&quot;nightly&quot;, &quot;smoke&quot;]</span>
+<span class="s1">  }&#39;</span>
+</code></pre></div>
+
+<h3 id="delete-apijobsjob_namepathmetadata"><code>DELETE /api/jobs/{job_name:path}/metadata</code></h3>
+<p>Delete one metadata record.</p>
+<table>
+<thead>
+<tr>
+<th>Name</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>job_name</code></td>
+<td>string</td>
+<td>required</td>
+<td>Jenkins job name.</td>
+</tr>
+</tbody>
+</table>
+<p>Return value/effect:</p>
+<ul>
+<li><code>200 OK</code> returns <code>{ "status": "deleted", "job_name": "..." }</code>.</li>
+<li><code>404 Not Found</code> when no metadata exists for the job.</li>
+<li><code>403 Forbidden</code> without admin access.</li>
+</ul>
+<div class="highlight"><pre><span></span><code>curl<span class="w"> </span>-X<span class="w"> </span>DELETE<span class="w"> </span>http://localhost:8000/api/jobs/my-job/metadata<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-H<span class="w"> </span><span class="s1">&#39;Authorization: Bearer &lt;admin-bearer-token&gt;&#39;</span>
+</code></pre></div>
+
+<h3 id="put-apijobsmetadatabulk"><code>PUT /api/jobs/metadata/bulk</code></h3>
+<p>Bulk upsert metadata records.</p>
+<table>
+<thead>
+<tr>
+<th>Name</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>items</code></td>
+<td>array<object></td>
+<td>required</td>
+<td>Array of <code>1</code> to <code>1000</code> metadata rows. Each row has <code>job_name</code>, <code>team</code>, <code>tier</code>, <code>version</code>, and <code>labels</code>.</td>
+</tr>
+</tbody>
+</table>
+<p>Return value/effect:</p>
+<ul>
+<li><code>200 OK</code> returns <code>{ "updated": &lt;count&gt; }</code>.</li>
+<li><code>403 Forbidden</code> without admin access.</li>
+<li><code>422 Unprocessable Entity</code> when validation fails or a row is missing <code>job_name</code>.</li>
+</ul>
+<blockquote>
+<p><strong>Warning:</strong> Bulk import is a full row replace for each item. Optional fields omitted from an item are stored as <code>null</code> or <code>[]</code>, not preserved from an existing row.</p>
+</blockquote>
+<div class="highlight"><pre><span></span><code>curl<span class="w"> </span>-X<span class="w"> </span>PUT<span class="w"> </span>http://localhost:8000/api/jobs/metadata/bulk<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-H<span class="w"> </span><span class="s1">&#39;Authorization: Bearer &lt;admin-bearer-token&gt;&#39;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-H<span class="w"> </span><span class="s1">&#39;Content-Type: application/json&#39;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-d<span class="w"> </span><span class="s1">&#39;{</span>
+<span class="s1">    &quot;items&quot;: [</span>
+<span class="s1">      {</span>
+<span class="s1">        &quot;job_name&quot;: &quot;job-a&quot;,</span>
+<span class="s1">        &quot;team&quot;: &quot;alpha&quot;</span>
+<span class="s1">      },</span>
+<span class="s1">      {</span>
+<span class="s1">        &quot;job_name&quot;: &quot;job-b&quot;,</span>
+<span class="s1">        &quot;team&quot;: &quot;beta&quot;,</span>
+<span class="s1">        &quot;labels&quot;: [&quot;ci&quot;]</span>
+<span class="s1">      }</span>
+<span class="s1">    ]</span>
+<span class="s1">  }&#39;</span>
+</code></pre></div>
+
+<h3 id="get-apijobsmetadatarules"><code>GET /api/jobs/metadata/rules</code></h3>
+<p>Return the configured metadata-rule file name and normalized rule list.</p>
+<table>
+<thead>
+<tr>
+<th>Name</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>None</td>
+<td>n/a</td>
+<td>n/a</td>
+<td>No request parameters.</td>
+</tr>
+</tbody>
+</table>
+<p>Return value/effect:</p>
+<ul>
+<li><code>200 OK</code> returns:</li>
+<li><code>rules_file</code>: basename of the configured rules file, or <code>null</code></li>
+<li><code>rules</code>: normalized rule array</li>
+<li>Each rule can contain:</li>
+<li><code>pattern</code></li>
+<li><code>team</code></li>
+<li><code>tier</code></li>
+<li><code>version</code></li>
+<li><code>labels</code></li>
+</ul>
+<div class="highlight"><pre><span></span><code>curl<span class="w"> </span>http://localhost:8000/api/jobs/metadata/rules
+</code></pre></div>
+
+<h3 id="post-apijobsmetadatarulespreview"><code>POST /api/jobs/metadata/rules/preview</code></h3>
+<p>Preview the metadata that the current rule set would assign to one job name.</p>
+<table>
+<thead>
+<tr>
+<th>Name</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>job_name</code></td>
+<td>string</td>
+<td>required</td>
+<td>Jenkins job name to test against the loaded rules.</td>
+</tr>
+</tbody>
+</table>
+<p>Return value/effect:</p>
+<ul>
+<li><code>200 OK</code> returns:</li>
+<li><code>job_name</code></li>
+<li><code>matched</code></li>
+<li><code>metadata</code>: object or <code>null</code></li>
+<li><code>422 Unprocessable Entity</code> when <code>job_name</code> is missing, blank, or not a string.</li>
+</ul>
+<div class="highlight"><pre><span></span><code>curl<span class="w"> </span>-X<span class="w"> </span>POST<span class="w"> </span>http://localhost:8000/api/jobs/metadata/rules/preview<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-H<span class="w"> </span><span class="s1">&#39;Content-Type: application/json&#39;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-d<span class="w"> </span><span class="s1">&#39;{</span>
+<span class="s1">    &quot;job_name&quot;: &quot;team-a/nightly&quot;</span>
+<span class="s1">  }&#39;</span>
+</code></pre></div>
+
+<h3 id="get-apidashboardfiltered"><code>GET /api/dashboard/filtered</code></h3>
+<p>Return dashboard entries with attached metadata and optional metadata filters.</p>
+<table>
+<thead>
+<tr>
+<th>Name</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>team</code></td>
+<td>string</td>
+<td><code>""</code></td>
+<td>Exact team filter.</td>
+</tr>
+<tr>
+<td><code>tier</code></td>
+<td>string</td>
+<td><code>""</code></td>
+<td>Exact tier filter.</td>
+</tr>
+<tr>
+<td><code>version</code></td>
+<td>string</td>
+<td><code>""</code></td>
+<td>Exact version filter.</td>
+</tr>
+<tr>
+<td><code>label</code></td>
+<td>string (repeatable)</td>
+<td>none</td>
+<td>Label filter. Repeating the parameter requires all listed labels to be present.</td>
+</tr>
+</tbody>
+</table>
+<p>Return value/effect:</p>
+<ul>
+<li><code>200 OK</code> returns the same dashboard entry shape as <code>GET /api/dashboard</code>.</li>
+<li>Every returned job also includes <code>metadata</code>, which is either a metadata object or <code>null</code>.</li>
+<li>Without filters, the endpoint returns all dashboard jobs with metadata attached.</li>
+</ul>
+<div class="highlight"><pre><span></span><code>curl<span class="w"> </span><span class="s1">&#39;http://localhost:8000/api/dashboard/filtered?team=platform&amp;label=nightly&#39;</span>
+</code></pre></div>
+
+<h2 id="admin">Admin</h2>
+<blockquote>
+<p><strong>Note:</strong> For admin workflows and operational guidance, see <a href="manage-users-access-and-token-usage.html">Manage Users, Access, and Token Usage</a>.</p>
+</blockquote>
+<h3 id="delete-apiresultsbulk"><code>DELETE /api/results/bulk</code></h3>
+<p>Delete multiple analysis jobs and their related data in one request.</p>
+<table>
+<thead>
+<tr>
+<th>Name</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>job_ids</code></td>
+<td>array<string></td>
+<td>required</td>
+<td>Array of <code>1</code> to <code>500</code> job IDs. Duplicate IDs are de-duplicated while preserving order.</td>
+</tr>
+</tbody>
+</table>
+<p>Return value/effect:</p>
+<ul>
+<li><code>200 OK</code> returns:</li>
+<li><code>deleted</code>: array of deleted job IDs</li>
+<li><code>failed</code>: array of <code>{ "job_id": "...", "reason": "..." }</code></li>
+<li><code>total</code>: number of unique job IDs processed</li>
+<li><code>403 Forbidden</code> without admin access.</li>
+<li><code>422 Unprocessable Entity</code> for validation errors.</li>
+</ul>
+<div class="highlight"><pre><span></span><code>curl<span class="w"> </span>-X<span class="w"> </span>DELETE<span class="w"> </span>http://localhost:8000/api/results/bulk<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-H<span class="w"> </span><span class="s1">&#39;Authorization: Bearer &lt;admin-bearer-token&gt;&#39;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-H<span class="w"> </span><span class="s1">&#39;Content-Type: application/json&#39;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-d<span class="w"> </span><span class="s1">&#39;{</span>
+<span class="s1">    &quot;job_ids&quot;: [&quot;job-1&quot;, &quot;job-2&quot;]</span>
+<span class="s1">  }&#39;</span>
+</code></pre></div>
+
+<h3 id="delete-resultsjob_id"><code>DELETE /results/{job_id}</code></h3>
+<p>Delete one analysis job and all related data.</p>
+<table>
+<thead>
+<tr>
+<th>Name</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>job_id</code></td>
+<td>string</td>
+<td>required</td>
+<td>Analysis job ID.</td>
+</tr>
+</tbody>
+</table>
+<p>Return value/effect:</p>
+<ul>
+<li><code>200 OK</code> returns <code>{ "status": "deleted", "job_id": "..." }</code>.</li>
+<li><code>404 Not Found</code> when the job does not exist.</li>
+<li><code>403 Forbidden</code> without admin access.</li>
+</ul>
+<div class="highlight"><pre><span></span><code>curl<span class="w"> </span>-X<span class="w"> </span>DELETE<span class="w"> </span>http://localhost:8000/results/job-123<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-H<span class="w"> </span><span class="s1">&#39;Authorization: Bearer &lt;admin-bearer-token&gt;&#39;</span>
+</code></pre></div>
+
+<h3 id="get-apiadmintoken-usage"><code>GET /api/admin/token-usage</code></h3>
+<p>Return aggregated AI token-usage totals with optional filters and grouping.</p>
+<table>
+<thead>
+<tr>
+<th>Name</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>start_date</code></td>
+<td>string</td>
+<td>none</td>
+<td>Lower bound for <code>created_at</code>.</td>
+</tr>
+<tr>
+<td><code>end_date</code></td>
+<td>string</td>
+<td>none</td>
+<td>Upper bound for <code>created_at</code>. A date-only value such as <code>2026-04-27</code> is expanded to the end of that day.</td>
+</tr>
+<tr>
+<td><code>ai_provider</code></td>
+<td>string</td>
+<td>none</td>
+<td>Exact provider filter.</td>
+</tr>
+<tr>
+<td><code>ai_model</code></td>
+<td>string</td>
+<td>none</td>
+<td>Exact model filter.</td>
+</tr>
+<tr>
+<td><code>call_type</code></td>
+<td>string</td>
+<td>none</td>
+<td>Exact call-type filter.</td>
+</tr>
+<tr>
+<td><code>group_by</code></td>
+<td>string</td>
+<td>none</td>
+<td>One of <code>provider</code>, <code>model</code>, <code>call_type</code>, <code>day</code>, <code>week</code>, <code>month</code>, or <code>job</code>.</td>
+</tr>
+</tbody>
+</table>
+<p>Return value/effect:</p>
+<ul>
+<li><code>200 OK</code> returns:</li>
+<li><code>total_input_tokens</code></li>
+<li><code>total_output_tokens</code></li>
+<li><code>total_cache_read_tokens</code></li>
+<li><code>total_cache_write_tokens</code></li>
+<li><code>total_cost_usd</code></li>
+<li><code>total_calls</code></li>
+<li><code>total_duration_ms</code></li>
+<li><code>breakdown</code></li>
+<li><code>breakdown</code> is empty when <code>group_by</code> is omitted.</li>
+<li>When present, each breakdown row includes <code>group_key</code>, <code>input_tokens</code>, <code>output_tokens</code>, <code>cache_read_tokens</code>, <code>cache_write_tokens</code>, <code>cost_usd</code>, <code>call_count</code>, and <code>avg_duration_ms</code>.</li>
+<li><code>403 Forbidden</code> without admin access.</li>
+<li><code>422 Unprocessable Entity</code> when <code>group_by</code> is not one of the supported values.</li>
+</ul>
+<div class="highlight"><pre><span></span><code>curl<span class="w"> </span><span class="s1">&#39;http://localhost:8000/api/admin/token-usage?group_by=provider&amp;start_date=2026-04-01&amp;end_date=2026-04-30&#39;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-H<span class="w"> </span><span class="s1">&#39;Authorization: Bearer &lt;admin-bearer-token&gt;&#39;</span>
+</code></pre></div>
+
+<h3 id="get-apiadmintoken-usagesummary"><code>GET /api/admin/token-usage/summary</code></h3>
+<p>Return dashboard-oriented token-usage summaries.</p>
+<table>
+<thead>
+<tr>
+<th>Name</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>None</td>
+<td>n/a</td>
+<td>n/a</td>
+<td>No request parameters.</td>
+</tr>
+</tbody>
+</table>
+<p>Return value/effect:</p>
+<ul>
+<li><code>200 OK</code> returns:</li>
+<li><code>today</code></li>
+<li><code>this_week</code></li>
+<li><code>this_month</code></li>
+<li><code>top_models</code></li>
+<li><code>top_jobs</code></li>
+<li>Period objects include <code>calls</code>, <code>tokens</code>, <code>input_tokens</code>, <code>output_tokens</code>, and <code>cost_usd</code>.</li>
+<li><code>top_models</code> rows include <code>model</code>, <code>calls</code>, and <code>cost_usd</code>.</li>
+<li><code>top_jobs</code> rows include <code>job_id</code>, <code>calls</code>, and <code>cost_usd</code>.</li>
+<li><code>403 Forbidden</code> without admin access.</li>
+</ul>
+<div class="highlight"><pre><span></span><code>curl<span class="w"> </span>http://localhost:8000/api/admin/token-usage/summary<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-H<span class="w"> </span><span class="s1">&#39;Authorization: Bearer &lt;admin-bearer-token&gt;&#39;</span>
+</code></pre></div>
+
+<h3 id="get-apiadmintoken-usagejob_id"><code>GET /api/admin/token-usage/{job_id}</code></h3>
+<p>Return raw token-usage records for one analysis job.</p>
+<table>
+<thead>
+<tr>
+<th>Name</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>job_id</code></td>
+<td>string</td>
+<td>required</td>
+<td>Analysis job ID.</td>
+</tr>
+</tbody>
+</table>
+<p>Return value/effect:</p>
+<ul>
+<li><code>200 OK</code> returns:</li>
+<li><code>job_id</code></li>
+<li><code>records</code>: array of rows with <code>id</code>, <code>job_id</code>, <code>created_at</code>, <code>ai_provider</code>, <code>ai_model</code>, <code>call_type</code>, <code>input_tokens</code>, <code>output_tokens</code>, <code>cache_read_tokens</code>, <code>cache_write_tokens</code>, <code>total_tokens</code>, <code>cost_usd</code>, <code>duration_ms</code>, <code>prompt_chars</code>, and <code>response_chars</code></li>
+<li><code>404 Not Found</code> when no token-usage rows exist for the job.</li>
+<li><code>403 Forbidden</code> without admin access.</li>
+</ul>
+<div class="highlight"><pre><span></span><code>curl<span class="w"> </span>http://localhost:8000/api/admin/token-usage/job-123<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-H<span class="w"> </span><span class="s1">&#39;Authorization: Bearer &lt;admin-bearer-token&gt;&#39;</span>
+</code></pre></div>
+
+<h3 id="post-apiadminusers"><code>POST /api/admin/users</code></h3>
+<p>Create a new admin user and return its generated API key.</p>
+<table>
+<thead>
+<tr>
+<th>Name</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>username</code></td>
+<td>string</td>
+<td>required</td>
+<td>New admin username. Must be 2 to 50 characters, start with an alphanumeric character, and only contain letters, digits, <code>.</code>, <code>_</code>, or <code>-</code>.</td>
+</tr>
+</tbody>
+</table>
+<p>Return value/effect:</p>
+<ul>
+<li><code>200 OK</code> returns <code>{ "username": "...", "api_key": "...", "role": "admin" }</code>.</li>
+<li><code>400 Bad Request</code> when the username is invalid, already taken, or reserved.</li>
+<li><code>403 Forbidden</code> without admin access.</li>
+</ul>
+<div class="highlight"><pre><span></span><code>curl<span class="w"> </span>-X<span class="w"> </span>POST<span class="w"> </span>http://localhost:8000/api/admin/users<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-H<span class="w"> </span><span class="s1">&#39;Authorization: Bearer &lt;admin-bearer-token&gt;&#39;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-H<span class="w"> </span><span class="s1">&#39;Content-Type: application/json&#39;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-d<span class="w"> </span><span class="s1">&#39;{</span>
+<span class="s1">    &quot;username&quot;: &quot;newadmin&quot;</span>
+<span class="s1">  }&#39;</span>
+</code></pre></div>
+
+<h3 id="get-apiadminusers"><code>GET /api/admin/users</code></h3>
+<p>List tracked users.</p>
+<table>
+<thead>
+<tr>
+<th>Name</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>None</td>
+<td>n/a</td>
+<td>n/a</td>
+<td>No request parameters.</td>
+</tr>
+</tbody>
+</table>
+<p>Return value/effect:</p>
+<ul>
+<li><code>200 OK</code> returns <code>{ "users": [...] }</code>.</li>
+<li>Each user row includes <code>id</code>, <code>username</code>, <code>role</code>, <code>created_at</code>, and <code>last_seen</code>.</li>
+<li><code>403 Forbidden</code> without admin access.</li>
+</ul>
+<div class="highlight"><pre><span></span><code>curl<span class="w"> </span>http://localhost:8000/api/admin/users<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-H<span class="w"> </span><span class="s1">&#39;Authorization: Bearer &lt;admin-bearer-token&gt;&#39;</span>
+</code></pre></div>
+
+<h3 id="delete-apiadminusersusername"><code>DELETE /api/admin/users/{username}</code></h3>
+<p>Delete one admin user.</p>
+<table>
+<thead>
+<tr>
+<th>Name</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>username</code></td>
+<td>string</td>
+<td>required</td>
+<td>Admin username to delete.</td>
+</tr>
+</tbody>
+</table>
+<p>Return value/effect:</p>
+<ul>
+<li><code>200 OK</code> returns <code>{ "deleted": "&lt;username&gt;" }</code>.</li>
+<li><code>400 Bad Request</code> when the request would delete the caller's own account or the last admin user.</li>
+<li><code>404 Not Found</code> when the named admin user does not exist.</li>
+<li><code>403 Forbidden</code> without admin access.</li>
+</ul>
+<div class="highlight"><pre><span></span><code>curl<span class="w"> </span>-X<span class="w"> </span>DELETE<span class="w"> </span>http://localhost:8000/api/admin/users/oldadmin<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-H<span class="w"> </span><span class="s1">&#39;Authorization: Bearer &lt;admin-bearer-token&gt;&#39;</span>
+</code></pre></div>
+
+<h3 id="put-apiadminusersusernamerole"><code>PUT /api/admin/users/{username}/role</code></h3>
+<p>Change one tracked user's role.</p>
+<table>
+<thead>
+<tr>
+<th>Name</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>username</code></td>
+<td>string</td>
+<td>required</td>
+<td>Username to update.</td>
+</tr>
+<tr>
+<td><code>role</code></td>
+<td>string</td>
+<td>required</td>
+<td>Target role: <code>admin</code> or <code>user</code>.</td>
+</tr>
+</tbody>
+</table>
+<p>Return value/effect:</p>
+<ul>
+<li><code>200 OK</code> returns <code>{ "username": "...", "role": "..." }</code>.</li>
+<li>When promoting to <code>admin</code>, the response also includes <code>api_key</code>.</li>
+<li>Demoting an admin to <code>user</code> removes their admin key and invalidates their active sessions.</li>
+<li><code>400 Bad Request</code> when the caller targets themself, requests the current role, uses an invalid role, targets the reserved <code>admin</code> user, or attempts to demote the last admin.</li>
+<li><code>404 Not Found</code> when the user does not exist.</li>
+<li><code>403 Forbidden</code> without admin access.</li>
+</ul>
+<div class="highlight"><pre><span></span><code>curl<span class="w"> </span>-X<span class="w"> </span>PUT<span class="w"> </span>http://localhost:8000/api/admin/users/alice/role<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-H<span class="w"> </span><span class="s1">&#39;Authorization: Bearer &lt;admin-bearer-token&gt;&#39;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-H<span class="w"> </span><span class="s1">&#39;Content-Type: application/json&#39;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-d<span class="w"> </span><span class="s1">&#39;{</span>
+<span class="s1">    &quot;role&quot;: &quot;admin&quot;</span>
+<span class="s1">  }&#39;</span>
+</code></pre></div>
+
+<h3 id="post-apiadminusersusernamerotate-key"><code>POST /api/admin/users/{username}/rotate-key</code></h3>
+<p>Rotate or set an admin user's API key.</p>
+<table>
+<thead>
+<tr>
+<th>Name</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>username</code></td>
+<td>string</td>
+<td>required</td>
+<td>Admin username whose key will be rotated.</td>
+</tr>
+<tr>
+<td><code>new_key</code></td>
+<td>string | null</td>
+<td>auto-generate</td>
+<td>Optional replacement key. Must be at least 16 characters when supplied.</td>
+</tr>
+</tbody>
+</table>
+<p>Return value/effect:</p>
+<ul>
+<li><code>200 OK</code> returns <code>{ "username": "...", "new_api_key": "..." }</code>.</li>
+<li>Existing sessions for that admin user are invalidated.</li>
+<li><code>400 Bad Request</code> for invalid JSON or invalid key input.</li>
+<li><code>404 Not Found</code> when the admin user does not exist.</li>
+<li><code>403 Forbidden</code> without admin access.</li>
+</ul>
+<div class="highlight"><pre><span></span><code>curl<span class="w"> </span>-X<span class="w"> </span>POST<span class="w"> </span>http://localhost:8000/api/admin/users/alice/rotate-key<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-H<span class="w"> </span><span class="s1">&#39;Authorization: Bearer &lt;admin-bearer-token&gt;&#39;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-H<span class="w"> </span><span class="s1">&#39;Content-Type: application/json&#39;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-d<span class="w"> </span><span class="s1">&#39;{</span>
+<span class="s1">    &quot;new_key&quot;: &quot;a-very-long-custom-admin-key&quot;</span>
+<span class="s1">  }&#39;</span>
+</code></pre></div>
+
+<h2 id="related-pages">Related Pages</h2>
+<ul>
+<li><a href="cli-command-reference.html">CLI Command Reference</a></li>
+<li><a href="analyze-a-jenkins-job.html">Analyze a Jenkins Job</a></li>
+<li><a href="investigate-failure-history.html">Investigate Failure History</a></li>
+<li><a href="manage-users-access-and-token-usage.html">Manage Users, Access, and Token Usage</a></li>
+<li><a href="configuration-and-environment-reference.html">Configuration and Environment Reference</a></li>
+</ul>
+                </div>
+            </article>
+            <nav class="page-nav">
+                
+                <a href="cli-command-reference.html" class="page-nav-link page-nav-prev">
+                    <span class="page-nav-label">Previous</span>
+                    <span class="page-nav-title">CLI Command Reference</span>
+                </a>
+                
+                
+                <a href="configuration-and-environment-reference.html" class="page-nav-link page-nav-next">
+                    <span class="page-nav-label">Next</span>
+                    <span class="page-nav-title">Configuration and Environment Reference</span>
+                </a>
+                
+            </nav>
+            
+            <aside class="toc-sidebar">
+                <div class="toc-container">
+                    <h3>On this page</h3>
+                    <div class="toc">
+<ul>
+<li><a href="#common-conventions">Common conventions</a><ul>
+<li><a href="#queued-job-response">Queued job response</a></li>
+<li><a href="#stored-result-envelope">Stored result envelope</a></li>
+</ul>
+</li>
+<li><a href="#analysis">Analysis</a><ul>
+<li><a href="#shared-analysis-override-fields">Shared analysis override fields</a></li>
+<li><a href="#analyze-body-fields">/analyze body fields</a></li>
+<li><a href="#analyze-failures-input-objects">/analyze-failures input objects</a></li>
+<li><a href="#post-analyze">POST /analyze</a></li>
+<li><a href="#post-analyze-failures">POST /analyze-failures</a></li>
+<li><a href="#post-re-analyzejob_id">POST /re-analyze/{job_id}</a></li>
+<li><a href="#get-resultsjob_id">GET /results/{job_id}</a></li>
+<li><a href="#get-results">GET /results</a></li>
+<li><a href="#get-apidashboard">GET /api/dashboard</a></li>
+<li><a href="#get-apicapabilities">GET /api/capabilities</a></li>
+</ul>
+</li>
+<li><a href="#comments-and-review">Comments and review</a><ul>
+<li><a href="#get-resultsjob_idcomments">GET /results/{job_id}/comments</a></li>
+<li><a href="#post-resultsjob_idcomments">POST /results/{job_id}/comments</a></li>
+<li><a href="#delete-resultsjob_idcommentscomment_id">DELETE /results/{job_id}/comments/{comment_id}</a></li>
+<li><a href="#put-resultsjob_idreviewed">PUT /results/{job_id}/reviewed</a></li>
+<li><a href="#get-resultsjob_idreview-status">GET /results/{job_id}/review-status</a></li>
+<li><a href="#post-resultsjob_idenrich-comments">POST /results/{job_id}/enrich-comments</a></li>
+<li><a href="#put-resultsjob_idoverride-classification">PUT /results/{job_id}/override-classification</a></li>
+</ul>
+</li>
+<li><a href="#history">History</a><ul>
+<li><a href="#get-historyfailures">GET /history/failures</a></li>
+<li><a href="#get-historytesttest_name">GET /history/test/{test_name}</a></li>
+<li><a href="#get-historysearch">GET /history/search</a></li>
+<li><a href="#get-historystatsjob_name">GET /history/stats/{job_name}</a></li>
+<li><a href="#post-historyclassify">POST /history/classify</a></li>
+<li><a href="#get-historyclassifications">GET /history/classifications</a></li>
+</ul>
+</li>
+<li><a href="#auth-state-and-saved-user-tokens">Auth state and saved user tokens</a><ul>
+<li><a href="#get-apiauthme">GET /api/auth/me</a></li>
+<li><a href="#post-apiauthlogout">POST /api/auth/logout</a></li>
+<li><a href="#get-apiusertokens">GET /api/user/tokens</a></li>
+<li><a href="#put-apiusertokens">PUT /api/user/tokens</a></li>
+</ul>
+</li>
+<li><a href="#notifications-and-mentions">Notifications and mentions</a><ul>
+<li><a href="#get-apinotificationsvapid-public-key">GET /api/notifications/vapid-public-key</a></li>
+<li><a href="#post-apinotificationssubscribe">POST /api/notifications/subscribe</a></li>
+<li><a href="#post-apinotificationsunsubscribe">POST /api/notifications/unsubscribe</a></li>
+<li><a href="#get-apiusersmentions">GET /api/users/mentions</a></li>
+<li><a href="#post-apiusersmentionsread">POST /api/users/mentions/read</a></li>
+<li><a href="#post-apiusersmentionsread-all">POST /api/users/mentions/read-all</a></li>
+<li><a href="#get-apiusersmentionsunread-count">GET /api/users/mentions/unread-count</a></li>
+<li><a href="#get-apiusersmentionable">GET /api/users/mentionable</a></li>
+</ul>
+</li>
+<li><a href="#metadata">Metadata</a><ul>
+<li><a href="#get-apijobsmetadata">GET /api/jobs/metadata</a></li>
+<li><a href="#get-apijobsjob_namepathmetadata">GET /api/jobs/{job_name:path}/metadata</a></li>
+<li><a href="#put-apijobsjob_namepathmetadata">PUT /api/jobs/{job_name:path}/metadata</a></li>
+<li><a href="#delete-apijobsjob_namepathmetadata">DELETE /api/jobs/{job_name:path}/metadata</a></li>
+<li><a href="#put-apijobsmetadatabulk">PUT /api/jobs/metadata/bulk</a></li>
+<li><a href="#get-apijobsmetadatarules">GET /api/jobs/metadata/rules</a></li>
+<li><a href="#post-apijobsmetadatarulespreview">POST /api/jobs/metadata/rules/preview</a></li>
+<li><a href="#get-apidashboardfiltered">GET /api/dashboard/filtered</a></li>
+</ul>
+</li>
+<li><a href="#admin">Admin</a><ul>
+<li><a href="#delete-apiresultsbulk">DELETE /api/results/bulk</a></li>
+<li><a href="#delete-resultsjob_id">DELETE /results/{job_id}</a></li>
+<li><a href="#get-apiadmintoken-usage">GET /api/admin/token-usage</a></li>
+<li><a href="#get-apiadmintoken-usagesummary">GET /api/admin/token-usage/summary</a></li>
+<li><a href="#get-apiadmintoken-usagejob_id">GET /api/admin/token-usage/{job_id}</a></li>
+<li><a href="#post-apiadminusers">POST /api/admin/users</a></li>
+<li><a href="#get-apiadminusers">GET /api/admin/users</a></li>
+<li><a href="#delete-apiadminusersusername">DELETE /api/admin/users/{username}</a></li>
+<li><a href="#put-apiadminusersusernamerole">PUT /api/admin/users/{username}/role</a></li>
+<li><a href="#post-apiadminusersusernamerotate-key">POST /api/admin/users/{username}/rotate-key</a></li>
+</ul>
+</li>
+<li><a href="#related-pages">Related Pages</a></li>
+</ul>
+</div>
+
+                </div>
+            </aside>
+            
+
+        </main>
+
+        <footer class="page-footer">
+            
+            <span class="footer-version">Generated from version 3.2.0</span>
+            <span class="footer-sep">&middot;</span>
+            
+            Generated with <a href="https://github.com/myk-org/docsfy" target="_blank" rel="noopener">docs<span class="brand-accent">fy</span></a>
+            <span class="footer-sep">&middot;</span>
+            <span class="footer-llm">LLM-friendly: <a href="llms.txt">llms.txt</a> &middot; <a href="llms-full.txt">llms-full.txt</a></span>
+        </footer>
+    </div>
+
+    <div class="sidebar-overlay" id="sidebar-overlay"></div>
+
+    <script src="assets/theme.js"></script>
+    <script src="assets/search.js"></script>
+    <script src="assets/copy.js"></script>
+    <script src="assets/callouts.js"></script>
+    <script src="assets/scrollspy.js"></script>
+    <script src="assets/codelabels.js"></script>
+    <script src="assets/github.js"></script>
+    <script>
+(function() {
+    var toggle = document.getElementById('sidebar-toggle');
+    var sidebar = document.getElementById('sidebar');
+    var overlay = document.getElementById('sidebar-overlay');
+    if (toggle && sidebar) {
+        toggle.addEventListener('click', function() {
+            sidebar.classList.toggle('open');
+            if (overlay) overlay.classList.toggle('open');
+            var expanded = sidebar.classList.contains('open');
+            toggle.setAttribute('aria-expanded', expanded ? 'true' : 'false');
+        });
+    }
+    if (overlay) {
+        overlay.addEventListener('click', function() {
+            sidebar.classList.remove('open');
+            overlay.classList.remove('open');
+            if (toggle) toggle.setAttribute('aria-expanded', 'false');
+        });
+    }
+})();
+</script>
+<script>
+(function() {
+    var sidebar = document.querySelector('.sidebar-nav') || document.querySelector('.sidebar');
+    if (!sidebar) return;
+
+    // Restore scroll position
+    var saved = sessionStorage.getItem('sidebar-scroll');
+    if (saved) sidebar.scrollTop = parseInt(saved, 10);
+
+    // Save scroll position before navigating
+    sidebar.addEventListener('scroll', function() {
+        sessionStorage.setItem('sidebar-scroll', sidebar.scrollTop.toString());
+    });
+
+    // Also scroll active link into view if no saved position
+    if (!saved) {
+        var active = sidebar.querySelector('.nav-link.active');
+        if (active) {
+            active.scrollIntoView({ block: 'center', behavior: 'instant' });
+        }
+    }
+})();
+</script>
+</body>
+</html>

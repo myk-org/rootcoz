@@ -1,0 +1,14 @@
+[flake8]
+select=M511
+
+exclude =
+    doc,
+    .tox,
+    .git,
+    *.yml,
+    Pipfile.*,
+    docs/*,
+    .cache/*
+
+per-file-ignores =
+    src/jenkins_job_insight/cli/main.py:M511

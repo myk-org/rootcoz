@@ -1,0 +1,42 @@
+skipsdist = true
+envlist = ["backend", "frontend"]
+
+[env.backend]
+description = "Run Python tests"
+commands = [
+  [
+    "uv",
+    "run",
+    "--extra",
+    "tests",
+    "pytest",
+    "-n",
+    "auto",
+    "tests/",
+    "-q",
+  ],
+]
+allowlist_externals = ["uv"]
+
+[env.frontend]
+commands = [
+  [
+    "npm",
+    "ci",
+    "--no-audit",
+    "--no-fund",
+  ],
+  [
+    "npx",
+    "vite",
+    "build",
+  ],
+  [
+    "npm",
+    "test",
+  ],
+]
+description = "Run frontend build and tests"
+skip_install = true
+allowlist_externals = ["npm", "npx"]
+change_dir = "frontend"

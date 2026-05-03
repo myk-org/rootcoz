@@ -1,0 +1,526 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="light">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Analyze a Jenkins Job - jenkins-job-insight</title>
+    <meta name="description" content="Turn failing Jenkins jobs into clear answers, collaborative reviews, and ready-to-file bugs.">
+    <link rel="stylesheet" href="assets/style.css">
+    <script>try{var t=localStorage.getItem('theme');if(t==='dark')document.documentElement.setAttribute('data-theme','dark')}catch(e){}</script>
+    <link rel="alternate" type="text/plain" title="LLM Documentation Index" href="llms.txt">
+    <link rel="alternate" type="text/plain" title="LLM Full Documentation" href="llms-full.txt">
+</head>
+<body>
+    <aside class="sidebar" id="sidebar">
+        <div class="sidebar-header">
+            <a href="index.html" class="sidebar-logo">jenkins-job-insight</a>
+            <p class="sidebar-tagline">Turn failing Jenkins jobs into clear answers, collaborative reviews, and ready-to-file bugs.</p>
+        </div>
+
+        <div class="sidebar-search">
+            <input type="text" id="search-input" placeholder="Search... (⌘K)" autocomplete="off" readonly>
+            <div id="search-results" class="search-results"></div>
+        </div>
+
+        <nav class="sidebar-nav">
+            
+            <div class="nav-group">
+                <h3 class="nav-group-title">Getting Started</h3>
+                <ul class="nav-group-pages">
+                    
+                    <li>
+                        <a href="analyze-your-first-jenkins-job.html"
+                           class="nav-link">
+                            Analyze Your First Jenkins Job
+                        </a>
+                    </li>
+                    
+                </ul>
+            </div>
+            
+            <div class="nav-group">
+                <h3 class="nav-group-title">User Guides</h3>
+                <ul class="nav-group-pages">
+                    
+                    <li>
+                        <a href="configure-your-profile-and-notifications.html"
+                           class="nav-link">
+                            Configure Your Profile and Notifications
+                        </a>
+                    </li>
+                    
+                    <li>
+                        <a href="analyze-a-jenkins-job.html"
+                           class="nav-link active" aria-current="page">
+                            Analyze a Jenkins Job
+                        </a>
+                    </li>
+                    
+                    <li>
+                        <a href="review-and-classify-failures.html"
+                           class="nav-link">
+                            Review and Classify Failures
+                        </a>
+                    </li>
+                    
+                    <li>
+                        <a href="investigate-failure-history.html"
+                           class="nav-link">
+                            Investigate Failure History
+                        </a>
+                    </li>
+                    
+                    <li>
+                        <a href="customize-ai-analysis.html"
+                           class="nav-link">
+                            Customize AI Analysis
+                        </a>
+                    </li>
+                    
+                    <li>
+                        <a href="create-github-issues-and-jira-bugs.html"
+                           class="nav-link">
+                            Create GitHub Issues and Jira Bugs
+                        </a>
+                    </li>
+                    
+                    <li>
+                        <a href="push-classifications-to-report-portal.html"
+                           class="nav-link">
+                            Push Classifications to Report Portal
+                        </a>
+                    </li>
+                    
+                    <li>
+                        <a href="organize-jobs-with-metadata.html"
+                           class="nav-link">
+                            Organize Jobs with Metadata
+                        </a>
+                    </li>
+                    
+                    <li>
+                        <a href="manage-users-access-and-token-usage.html"
+                           class="nav-link">
+                            Manage Users, Access, and Token Usage
+                        </a>
+                    </li>
+                    
+                </ul>
+            </div>
+            
+            <div class="nav-group">
+                <h3 class="nav-group-title">Recipes</h3>
+                <ul class="nav-group-pages">
+                    
+                    <li>
+                        <a href="copy-common-analysis-recipes.html"
+                           class="nav-link">
+                            Copy Common Analysis Recipes
+                        </a>
+                    </li>
+                    
+                    <li>
+                        <a href="copy-common-deployment-recipes.html"
+                           class="nav-link">
+                            Copy Common Deployment Recipes
+                        </a>
+                    </li>
+                    
+                </ul>
+            </div>
+            
+            <div class="nav-group">
+                <h3 class="nav-group-title">Reference</h3>
+                <ul class="nav-group-pages">
+                    
+                    <li>
+                        <a href="cli-command-reference.html"
+                           class="nav-link">
+                            CLI Command Reference
+                        </a>
+                    </li>
+                    
+                    <li>
+                        <a href="rest-api-reference.html"
+                           class="nav-link">
+                            REST API Reference
+                        </a>
+                    </li>
+                    
+                    <li>
+                        <a href="configuration-and-environment-reference.html"
+                           class="nav-link">
+                            Configuration and Environment Reference
+                        </a>
+                    </li>
+                    
+                </ul>
+            </div>
+            
+        </nav>
+    </aside>
+
+    <div class="main-wrapper">
+        <header class="top-bar">
+            <div class="top-bar-left">
+                <button class="sidebar-toggle" id="sidebar-toggle" aria-label="Toggle sidebar" aria-expanded="false">
+                    <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
+                        <path d="M3 5h14M3 10h14M3 15h14" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+                    </svg>
+                </button>
+                <a href="index.html" class="top-bar-title">jenkins-job-insight</a>
+            </div>
+            <div class="top-bar-spacer"></div>
+            <div class="top-bar-right">
+                <button class="top-bar-search-btn" id="search-trigger" aria-label="Search">
+                    <kbd>&#8984;K</kbd> Search
+                </button>
+                <a href="https://github.com/myk-org/docsfy" target="_blank" rel="noopener" class="docsfy-badge" title="Generated with docsfy">
+                    ⚡ docs<span class="brand-accent">fy</span>
+                </a>
+                
+                <a href="https://github.com/myk-org/jenkins-job-insight.git" target="_blank" rel="noopener noreferrer" class="top-bar-github" id="github-link" data-repo-url="https://github.com/myk-org/jenkins-job-insight.git">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><path d="M12 0c-6.626 0-12 5.373-12 12 0 5.302 3.438 9.8 8.207 11.387.599.111.793-.261.793-.577v-2.234c-3.338.726-4.033-1.416-4.033-1.416-.546-1.387-1.333-1.756-1.333-1.756-1.089-.745.083-.729.083-.729 1.205.084 1.839 1.237 1.839 1.237 1.07 1.834 2.807 1.304 3.492.997.107-.775.418-1.305.762-1.604-2.665-.305-5.467-1.334-5.467-5.931 0-1.311.469-2.381 1.236-3.221-.124-.303-.535-1.524.117-3.176 0 0 1.008-.322 3.301 1.23.957-.266 1.983-.399 3.003-.404 1.02.005 2.047.138 3.006.404 2.291-1.552 3.297-1.23 3.297-1.23.653 1.653.242 2.874.118 3.176.77.84 1.235 1.911 1.235 3.221 0 4.609-2.807 5.624-5.479 5.921.43.372.823 1.102.823 2.222v3.293c0 .319.192.694.801.576 4.765-1.589 8.199-6.086 8.199-11.386 0-6.627-5.373-12-12-12z"/></svg>
+                    <span class="github-stars" id="github-stars" title="GitHub stars"></span>
+                </a>
+                
+                <button class="theme-toggle" id="theme-toggle" aria-label="Toggle theme">
+                    <svg class="icon-sun" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+                        <circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/>
+                    </svg>
+                    <svg class="icon-moon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+                        <path d="M21 12.79A9 9 0 1111.21 3 7 7 0 0021 12.79z"/>
+                    </svg>
+                </button>
+            </div>
+        </header>
+
+        <main class="content">
+            
+            <article class="article">
+                <div class="article-body">
+                    <!-- SECURITY: |safe is intentional. Content is AI-generated markdown
+                         converted to HTML server-side by the markdown library, not
+                         user-supplied input. XSS risk is minimal and accepted since
+                         the AI generates the content, not end users. -->
+                    <h1 id="analyze-a-jenkins-job">Analyze a Jenkins Job</h1>
+<p>Run analysis against a Jenkins build, follow it from queue to report, and start another pass when you need updated output or different AI settings. This gets you from a job name and build number to a usable result quickly, without losing the original run when you retry.</p>
+<blockquote>
+<p><strong>Note:</strong> The web UI uses the dashboard to monitor and reopen analyses. New Jenkins analyses are submitted through <code>jji</code> or the REST API, then tracked from the dashboard and live status view.</p>
+</blockquote>
+<h2 id="prerequisites">Prerequisites</h2>
+<ul>
+<li>A reachable JJI server.</li>
+<li>A Jenkins job name and build number.</li>
+<li>Jenkins access and an AI provider/model already configured on the server, or passed on the request.</li>
+<li>For the browser, a username in the web app if prompted.</li>
+<li>For <code>jji</code>, either pass <code>--server</code> and <code>--user</code>, or use a default CLI server profile.</li>
+<li>If your server uses an allow list, use a permitted username.</li>
+</ul>
+<h2 id="quick-example">Quick Example</h2>
+<div class="highlight"><pre><span></span><code>jji<span class="w"> </span>--server<span class="w"> </span>http://localhost:8000<span class="w"> </span>--user<span class="w"> </span>alice<span class="w"> </span>analyze<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--job-name<span class="w"> </span><span class="s2">&quot;my-job&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--build-number<span class="w"> </span><span class="m">42</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--provider<span class="w"> </span>claude<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--model<span class="w"> </span>opus
+
+jji<span class="w"> </span>--server<span class="w"> </span>http://localhost:8000<span class="w"> </span>--user<span class="w"> </span>alice<span class="w"> </span>status<span class="w"> </span>&lt;job-id&gt;
+
+jji<span class="w"> </span>--server<span class="w"> </span>http://localhost:8000<span class="w"> </span>--user<span class="w"> </span>alice<span class="w"> </span>re-analyze<span class="w"> </span>&lt;job-id&gt;
+</code></pre></div>
+
+<p>The first command queues the analysis and prints a new <code>job_id</code> plus a poll link. Use that <code>job_id</code> in the next commands to watch the run or queue another analysis of the same Jenkins build.</p>
+<blockquote>
+<p><strong>Tip:</strong> If you already set a default CLI server profile, you can usually omit <code>--server</code> and <code>--user</code>. See <a href="configuration-and-environment-reference.html">Configuration and Environment Reference</a> for details.</p>
+</blockquote>
+<h2 id="step-by-step">Step-by-Step</h2>
+<ol>
+<li>Queue the analysis.</li>
+</ol>
+<div class="highlight"><pre><span></span><code>jji<span class="w"> </span>--server<span class="w"> </span>http://localhost:8000<span class="w"> </span>--user<span class="w"> </span>alice<span class="w"> </span>analyze<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--job-name<span class="w"> </span><span class="s2">&quot;my-job&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--build-number<span class="w"> </span><span class="m">42</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--provider<span class="w"> </span>claude<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--model<span class="w"> </span>opus
+</code></pre></div>
+
+<p>JJI returns immediately with <code>queued</code>, a new <code>job_id</code>, and a <code>result_url</code>. Keep the <code>job_id</code>; you will use it to watch the run and open the finished report.</p>
+<ol>
+<li>Watch the run from the status view or dashboard.</li>
+</ol>
+<div class="highlight"><pre><span></span><code>jji<span class="w"> </span>--server<span class="w"> </span>http://localhost:8000<span class="w"> </span>--user<span class="w"> </span>alice<span class="w"> </span>status<span class="w"> </span>&lt;job-id&gt;
+</code></pre></div>
+
+<p>Open the dashboard in your browser to watch the same run live. Active rows open the status view, and both the dashboard and status view refresh automatically.</p>
+<table>
+<thead>
+<tr>
+<th>Status</th>
+<th>What it means</th>
+<th>What to do</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>queued</code></td>
+<td>JJI accepted the request</td>
+<td>Save the <code>job_id</code></td>
+</tr>
+<tr>
+<td><code>pending</code></td>
+<td>The analysis is waiting in JJI's queue</td>
+<td>Keep watching</td>
+</tr>
+<tr>
+<td><code>waiting</code></td>
+<td>JJI is waiting for Jenkins to finish the build</td>
+<td>Let the build finish, or change wait settings on a new submission</td>
+</tr>
+<tr>
+<td><code>running</code></td>
+<td>AI analysis is in progress</td>
+<td>Stay on the status view</td>
+</tr>
+<tr>
+<td><code>completed</code></td>
+<td>The report is ready</td>
+<td>Open the result</td>
+</tr>
+<tr>
+<td><code>failed</code></td>
+<td>The run stopped before completing</td>
+<td>Read the error and decide whether to rerun</td>
+</tr>
+<tr>
+<td><code>Timed Out</code></td>
+<td>The web UI recognized an AI timeout</td>
+<td>Rerun with a longer AI timeout or a different model</td>
+</tr>
+</tbody>
+</table>
+<blockquote>
+<p><strong>Note:</strong> <code>Timed Out</code> is a web UI label for AI-analysis timeouts. The API and CLI still report the underlying run as <code>failed</code>.</p>
+</blockquote>
+<ol>
+<li>Open the finished result.</li>
+</ol>
+<div class="highlight"><pre><span></span><code>jji<span class="w"> </span>--server<span class="w"> </span>http://localhost:8000<span class="w"> </span>--user<span class="w"> </span>alice<span class="w"> </span>results<span class="w"> </span>show<span class="w"> </span>&lt;job-id&gt;
+</code></pre></div>
+
+<p>In the browser, click the completed row in the dashboard. If you open the returned <code>result_url</code> before the run finishes, JJI redirects you to the live status view automatically.</p>
+<p>See <a href="investigate-failure-history.html">Investigate Failure History</a> for details if you need to compare recurring failures across builds. See <a href="create-github-issues-and-jira-bugs.html">Create GitHub Issues and Jira Bugs</a> for details if the result should become a ticket.</p>
+<ol>
+<li>Run it again when you need another pass.</li>
+</ol>
+<div class="highlight"><pre><span></span><code>jji<span class="w"> </span>--server<span class="w"> </span>http://localhost:8000<span class="w"> </span>--user<span class="w"> </span>alice<span class="w"> </span>re-analyze<span class="w"> </span>&lt;job-id&gt;
+</code></pre></div>
+
+<p>Use this when you want the fastest retry with the same saved settings. JJI creates a new analysis record and a new <code>job_id</code>, but it keeps the same Jenkins job and build number.</p>
+<p>Use the <code>Re-Analyze</code> button on a failed status page or a completed report when you need to change AI settings before retrying. That path can override provider/model, AI timeout, prompt, repo context, Jira settings, and peer-review settings.</p>
+<blockquote>
+<p><strong>Warning:</strong> <code>Re-Analyze</code> does not trigger a new Jenkins build. If you need fresh Jenkins output, rerun the job in Jenkins first and then submit the new build number with <code>jji analyze</code> or <code>POST /analyze</code>.</p>
+</blockquote>
+<h2 id="advanced-usage">Advanced Usage</h2>
+<h3 id="submit-through-the-rest-api">Submit Through the REST API</h3>
+<div class="highlight"><pre><span></span><code>curl<span class="w"> </span>-sS<span class="w"> </span>-X<span class="w"> </span>POST<span class="w"> </span><span class="s2">&quot;http://localhost:8000/analyze&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-H<span class="w"> </span><span class="s2">&quot;Content-Type: application/json&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-H<span class="w"> </span><span class="s2">&quot;Cookie: jji_username=alice&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-d<span class="w"> </span><span class="s1">&#39;{&quot;job_name&quot;:&quot;my-job&quot;,&quot;build_number&quot;:42,&quot;ai_provider&quot;:&quot;claude&quot;,&quot;ai_model&quot;:&quot;opus&quot;}&#39;</span>
+</code></pre></div>
+
+<p>Poll the returned job with <code>GET /results/&lt;job-id&gt;</code> until it reaches <code>completed</code> or <code>failed</code>. While a run is still active, <code>GET /results/&lt;job-id&gt;</code> returns HTTP <code>202</code>; once it finishes, it returns HTTP <code>200</code>.</p>
+<h3 id="re-analyze-through-the-rest-api-with-overrides">Re-Analyze Through the REST API With Overrides</h3>
+<div class="highlight"><pre><span></span><code>curl<span class="w"> </span>-sS<span class="w"> </span>-X<span class="w"> </span>POST<span class="w"> </span><span class="s2">&quot;http://localhost:8000/re-analyze/&lt;job-id&gt;&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-H<span class="w"> </span><span class="s2">&quot;Content-Type: application/json&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-H<span class="w"> </span><span class="s2">&quot;Cookie: jji_username=alice&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-d<span class="w"> </span><span class="s1">&#39;{&quot;ai_provider&quot;:&quot;claude&quot;,&quot;ai_model&quot;:&quot;opus&quot;,&quot;ai_cli_timeout&quot;:20}&#39;</span>
+</code></pre></div>
+
+<p>Use this when the quick CLI rerun is too limited. The rerun keeps the original Jenkins job and build number, but lets you override the shared analysis fields that the endpoint accepts.</p>
+<h3 id="pick-the-right-rerun-path">Pick the Right Rerun Path</h3>
+<table>
+<thead>
+<tr>
+<th>If you need to...</th>
+<th>Use</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Retry the same Jenkins build with the same saved settings</td>
+<td><code>jji re-analyze &lt;job-id&gt;</code></td>
+</tr>
+<tr>
+<td>Retry the same Jenkins build with different AI settings</td>
+<td>The <code>Re-Analyze</code> button or <code>POST /re-analyze/&lt;job-id&gt;</code></td>
+</tr>
+<tr>
+<td>Analyze a newer Jenkins build</td>
+<td>A fresh <code>jji analyze</code> or <code>POST /analyze</code> request with the new build number</td>
+</tr>
+<tr>
+<td>Change Jenkins wait behavior</td>
+<td>A fresh <code>jji analyze</code> or <code>POST /analyze</code> request</td>
+</tr>
+<tr>
+<td>Script against the full status payload</td>
+<td><code>jji --json status &lt;job-id&gt;</code></td>
+</tr>
+</tbody>
+</table>
+<h3 id="useful-jji-analyze-flags">Useful <code>jji analyze</code> Flags</h3>
+<table>
+<thead>
+<tr>
+<th>Need</th>
+<th>Option</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Skip waiting for Jenkins and queue the analysis immediately</td>
+<td><code>--no-wait</code></td>
+</tr>
+<tr>
+<td>Wait for Jenkins, but poll less often</td>
+<td><code>--poll-interval 5</code></td>
+</tr>
+<tr>
+<td>Stop waiting after a fixed amount of time</td>
+<td><code>--max-wait 30</code></td>
+</tr>
+<tr>
+<td>Analyze a build even if Jenkins marked it successful</td>
+<td><code>--force</code></td>
+</tr>
+</tbody>
+</table>
+<p>The live status view can show more than one phase on longer runs, including waiting for Jenkins, analyzing test failures, analyzing child jobs, Jira enrichment, peer-review rounds, and the final save step. The progress log is persisted, so refreshing the page does not erase what has already happened.</p>
+<p>See <a href="cli-command-reference.html">CLI Command Reference</a> for details on every command and flag. See <a href="rest-api-reference.html">REST API Reference</a> for details on every request field and status code. See <a href="configuration-and-environment-reference.html">Configuration and Environment Reference</a> for details on reusable CLI server profiles and server defaults.</p>
+<h2 id="troubleshooting">Troubleshooting</h2>
+<ul>
+<li>You cannot see <code>Re-Analyze</code>: wait for the run to fail or complete. Active runs stay on the live status flow.</li>
+<li><code>400</code> when you submit a run usually means the request is missing required fields such as <code>job_name</code>, <code>build_number</code>, <code>ai_provider</code>, or <code>ai_model</code>, or the build number is not numeric.</li>
+<li><code>403</code> from the API or <code>Access denied</code> in the browser usually means your user is not allowed to use this server or view that job.</li>
+<li><code>Job not found</code> usually means the <code>job_id</code> is wrong or the analysis was deleted.</li>
+<li><code>Timed Out</code> in the web UI means the AI analysis timed out. Retry with a longer AI timeout or a different model.</li>
+<li>After a server restart, jobs that were still <code>waiting</code> resume automatically. Jobs that were already <code>pending</code> or <code>running</code> should be requeued.</li>
+</ul>
+<h2 id="related-pages">Related Pages</h2>
+<ul>
+<li><a href="analyze-your-first-jenkins-job.html">Analyze Your First Jenkins Job</a></li>
+<li><a href="customize-ai-analysis.html">Customize AI Analysis</a></li>
+<li><a href="review-and-classify-failures.html">Review and Classify Failures</a></li>
+<li><a href="investigate-failure-history.html">Investigate Failure History</a></li>
+<li><a href="create-github-issues-and-jira-bugs.html">Create GitHub Issues and Jira Bugs</a></li>
+</ul>
+                </div>
+            </article>
+            <nav class="page-nav">
+                
+                <a href="configure-your-profile-and-notifications.html" class="page-nav-link page-nav-prev">
+                    <span class="page-nav-label">Previous</span>
+                    <span class="page-nav-title">Configure Your Profile and Notifications</span>
+                </a>
+                
+                
+                <a href="review-and-classify-failures.html" class="page-nav-link page-nav-next">
+                    <span class="page-nav-label">Next</span>
+                    <span class="page-nav-title">Review and Classify Failures</span>
+                </a>
+                
+            </nav>
+            
+            <aside class="toc-sidebar">
+                <div class="toc-container">
+                    <h3>On this page</h3>
+                    <div class="toc">
+<ul>
+<li><a href="#prerequisites">Prerequisites</a></li>
+<li><a href="#quick-example">Quick Example</a></li>
+<li><a href="#step-by-step">Step-by-Step</a></li>
+<li><a href="#advanced-usage">Advanced Usage</a><ul>
+<li><a href="#submit-through-the-rest-api">Submit Through the REST API</a></li>
+<li><a href="#re-analyze-through-the-rest-api-with-overrides">Re-Analyze Through the REST API With Overrides</a></li>
+<li><a href="#pick-the-right-rerun-path">Pick the Right Rerun Path</a></li>
+<li><a href="#useful-jji-analyze-flags">Useful jji analyze Flags</a></li>
+</ul>
+</li>
+<li><a href="#troubleshooting">Troubleshooting</a></li>
+<li><a href="#related-pages">Related Pages</a></li>
+</ul>
+</div>
+
+                </div>
+            </aside>
+            
+
+        </main>
+
+        <footer class="page-footer">
+            
+            <span class="footer-version">Generated from version 3.2.0</span>
+            <span class="footer-sep">&middot;</span>
+            
+            Generated with <a href="https://github.com/myk-org/docsfy" target="_blank" rel="noopener">docs<span class="brand-accent">fy</span></a>
+            <span class="footer-sep">&middot;</span>
+            <span class="footer-llm">LLM-friendly: <a href="llms.txt">llms.txt</a> &middot; <a href="llms-full.txt">llms-full.txt</a></span>
+        </footer>
+    </div>
+
+    <div class="sidebar-overlay" id="sidebar-overlay"></div>
+
+    <script src="assets/theme.js"></script>
+    <script src="assets/search.js"></script>
+    <script src="assets/copy.js"></script>
+    <script src="assets/callouts.js"></script>
+    <script src="assets/scrollspy.js"></script>
+    <script src="assets/codelabels.js"></script>
+    <script src="assets/github.js"></script>
+    <script>
+(function() {
+    var toggle = document.getElementById('sidebar-toggle');
+    var sidebar = document.getElementById('sidebar');
+    var overlay = document.getElementById('sidebar-overlay');
+    if (toggle && sidebar) {
+        toggle.addEventListener('click', function() {
+            sidebar.classList.toggle('open');
+            if (overlay) overlay.classList.toggle('open');
+            var expanded = sidebar.classList.contains('open');
+            toggle.setAttribute('aria-expanded', expanded ? 'true' : 'false');
+        });
+    }
+    if (overlay) {
+        overlay.addEventListener('click', function() {
+            sidebar.classList.remove('open');
+            overlay.classList.remove('open');
+            if (toggle) toggle.setAttribute('aria-expanded', 'false');
+        });
+    }
+})();
+</script>
+<script>
+(function() {
+    var sidebar = document.querySelector('.sidebar-nav') || document.querySelector('.sidebar');
+    if (!sidebar) return;
+
+    // Restore scroll position
+    var saved = sessionStorage.getItem('sidebar-scroll');
+    if (saved) sidebar.scrollTop = parseInt(saved, 10);
+
+    // Save scroll position before navigating
+    sidebar.addEventListener('scroll', function() {
+        sessionStorage.setItem('sidebar-scroll', sidebar.scrollTop.toString());
+    });
+
+    // Also scroll active link into view if no saved position
+    if (!saved) {
+        var active = sidebar.querySelector('.nav-link.active');
+        if (active) {
+            active.scrollIntoView({ block: 'center', behavior: 'instant' });
+        }
+    }
+})();
+</script>
+</body>
+</html>

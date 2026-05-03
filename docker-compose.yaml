@@ -1,0 +1,135 @@
+# Jenkins Job Insight
+# AI-powered Jenkins failure analysis with a React web UI, REST API, and jji CLI.
+#
+# Access methods:
+#   - Web UI:  http://localhost:8000 (dashboard, reports, history)
+#   - API:     http://localhost:8000/analyze, /results, /history, etc.
+#   - CLI:     jji health, jji results list, jji analyze --job-name my-job --build-number 42
+#
+# Usage:
+#   1. Copy .env.example to .env and configure your values
+#   2. Run: docker compose up -d
+#
+# CLI Tool (jji):
+#   Install: uv tool install jenkins-job-insight
+#   Configure: export JJI_SERVER=http://localhost:8000
+#   Docs: jji --help
+#
+# Configuration:
+#   - Replace placeholder values directly in this file, OR
+#   - Use a .env file (recommended for sensitive values)
+
+services:
+  jenkins-job-insight:
+    # Build from local Dockerfile
+    build:
+      context: .
+      dockerfile: Dockerfile
+
+    # Container name for easier management
+    container_name: jenkins-job-insight
+
+    # Ports: Web UI + API served on the same port
+    ports:
+      - "8000:8000"   # Web UI (React) + REST API
+      # Dev mode: Vite HMR for frontend hot-reload (uncomment with DEV_MODE=true)
+      # - "5173:5173"
+
+    # Persist SQLite database across container restarts
+    # The ./data directory on host maps to /data in container
+    volumes:
+      - ./data:/data
+      # Optional: Mount gcloud credentials for Vertex AI authentication
+      # Uncomment if using CLAUDE_CODE_USE_VERTEX=1 with Application Default Credentials
+      # - ~/.config/gcloud:/home/appuser/.config/gcloud:ro
+      # Dev mode: mount source for hot-reload (uncomment with DEV_MODE=true)
+      # - ./src:/app/src
+      # - ./frontend:/app/frontend
+
+
+    # Restart policy: container restarts unless explicitly stopped
+    restart: unless-stopped
+
+    # Health check configuration
+    # Verifies the service is responding on /health endpoint
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+    # Environment variables
+    # Option 1: Use .env file (recommended)
+    env_file:
+      - .env
+
+    # Option 2: Define variables directly (shown as examples/defaults)
+    # Uncomment and configure if not using .env file
+    environment:
+      # ===================
+      # Jenkins Configuration (Required)
+      # ===================
+      - JENKINS_URL=${JENKINS_URL:-https://jenkins.example.com}
+      - JENKINS_USER=${JENKINS_USER:-your-username}
+      - JENKINS_PASSWORD=${JENKINS_PASSWORD:-your-api-token}
+
+      # ===================
+      # AI CLI Configuration
+      # ===================
+      # AI_PROVIDER: claude, gemini, or cursor
+      - AI_PROVIDER=${AI_PROVIDER:?AI_PROVIDER is required}
+      - AI_MODEL=${AI_MODEL:?AI_MODEL is required}
+
+      # Claude CLI - Option 1: API Key
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+
+      # Claude CLI - Option 2: Vertex AI
+      - CLAUDE_CODE_USE_VERTEX=${CLAUDE_CODE_USE_VERTEX:-}
+      - CLOUD_ML_REGION=${CLOUD_ML_REGION:-us-east5}
+      - ANTHROPIC_VERTEX_PROJECT_ID=${ANTHROPIC_VERTEX_PROJECT_ID:-}
+
+      # Gemini CLI - API Key
+      - GEMINI_API_KEY=${GEMINI_API_KEY:-}
+
+      # Cursor Agent CLI - API key
+      # - CURSOR_API_KEY=${CURSOR_API_KEY:-}
+
+      # AI CLI timeout in minutes (default: 10)
+      - AI_CLI_TIMEOUT=${AI_CLI_TIMEOUT:-10}
+
+      # ===================
+      # Optional Configuration
+      # ===================
+
+
+      # Enable debug mode for verbose logging
+      - DEBUG=${DEBUG:-false}
+
+      # Logging level (DEBUG, INFO, WARNING, ERROR)
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+
+      # ===================
+      # Optional Defaults (can be overridden per-request)
+      # ===================
+      - TESTS_REPO_URL=${TESTS_REPO_URL:-}
+      # SSL verification for Jenkins (set to false for self-signed certs)
+      - JENKINS_SSL_VERIFY=${JENKINS_SSL_VERIFY:-true}
+
+      # ===================
+      # Jira Integration (Optional)
+      # ===================
+      # Uncomment to enable Jira bug deduplication
+      # - JIRA_URL=${JIRA_URL:-}
+      # - JIRA_EMAIL=${JIRA_EMAIL:-}
+      # - JIRA_API_TOKEN=${JIRA_API_TOKEN:-}
+      # - JIRA_PAT=${JIRA_PAT:-}
+      # - JIRA_PROJECT_KEY=${JIRA_PROJECT_KEY:-}
+      # - JIRA_SSL_VERIFY=${JIRA_SSL_VERIFY:-true}
+      # - JIRA_MAX_RESULTS=${JIRA_MAX_RESULTS:-5}
+
+      # ===================
+      # Dev Mode (Optional)
+      # ===================
+      # Dev mode: enable uvicorn hot-reload
+      # - DEV_MODE=${DEV_MODE:-false}

@@ -1,0 +1,71 @@
+---
+default_language_version:
+  python: python3
+
+ci:
+  autofix_prs: false
+  autoupdate_commit_msg: "ci: [pre-commit.ci] pre-commit autoupdate"
+
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: check-added-large-files
+      - id: check-docstring-first
+      - id: check-executables-have-shebangs
+      - id: check-merge-conflict
+      - id: check-symlinks
+      - id: detect-private-key
+      - id: mixed-line-ending
+      - id: debug-statements
+      - id: trailing-whitespace
+        args: [--markdown-linebreak-ext=md] # Do not process Markdown files.
+        exclude: ^docs/
+      - id: end-of-file-fixer
+        exclude: ^docs/
+      - id: check-ast
+      - id: check-builtin-literals
+      - id: check-toml
+
+  - repo: https://github.com/PyCQA/flake8
+    rev: 7.3.0
+    hooks:
+      - id: flake8
+        args: [--config=.flake8]
+        additional_dependencies:
+          [git+https://github.com/RedHatQE/flake8-plugins.git, flake8-mutable]
+
+  - repo: https://github.com/Yelp/detect-secrets
+    rev: v1.5.0
+    hooks:
+      - id: detect-secrets
+        exclude: ^docs/
+
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.15.11
+    hooks:
+      - id: ruff
+      - id: ruff-format
+
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.30.0
+    hooks:
+      - id: gitleaks
+
+  - repo: https://github.com/pre-commit/mirrors-mypy
+    rev: v1.20.1
+    hooks:
+      - id: mypy
+        exclude: (tests/)
+        additional_dependencies:
+          [types-requests, types-PyYAML, types-colorama, types-aiofiles, pydantic]
+
+  - repo: https://github.com/pre-commit/mirrors-eslint
+    rev: v10.2.1
+    hooks:
+      - id: eslint
+        files: \.js$
+        exclude: (eslint\.config\.js|^docs/|^frontend/)
+        args: [--fix]
+        additional_dependencies:
+          - eslint@9.38.0

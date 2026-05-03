@@ -1,0 +1,2005 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="light">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Configuration and Environment Reference - jenkins-job-insight</title>
+    <meta name="description" content="Turn failing Jenkins jobs into clear answers, collaborative reviews, and ready-to-file bugs.">
+    <link rel="stylesheet" href="assets/style.css">
+    <script>try{var t=localStorage.getItem('theme');if(t==='dark')document.documentElement.setAttribute('data-theme','dark')}catch(e){}</script>
+    <link rel="alternate" type="text/plain" title="LLM Documentation Index" href="llms.txt">
+    <link rel="alternate" type="text/plain" title="LLM Full Documentation" href="llms-full.txt">
+</head>
+<body>
+    <aside class="sidebar" id="sidebar">
+        <div class="sidebar-header">
+            <a href="index.html" class="sidebar-logo">jenkins-job-insight</a>
+            <p class="sidebar-tagline">Turn failing Jenkins jobs into clear answers, collaborative reviews, and ready-to-file bugs.</p>
+        </div>
+
+        <div class="sidebar-search">
+            <input type="text" id="search-input" placeholder="Search... (⌘K)" autocomplete="off" readonly>
+            <div id="search-results" class="search-results"></div>
+        </div>
+
+        <nav class="sidebar-nav">
+            
+            <div class="nav-group">
+                <h3 class="nav-group-title">Getting Started</h3>
+                <ul class="nav-group-pages">
+                    
+                    <li>
+                        <a href="analyze-your-first-jenkins-job.html"
+                           class="nav-link">
+                            Analyze Your First Jenkins Job
+                        </a>
+                    </li>
+                    
+                </ul>
+            </div>
+            
+            <div class="nav-group">
+                <h3 class="nav-group-title">User Guides</h3>
+                <ul class="nav-group-pages">
+                    
+                    <li>
+                        <a href="configure-your-profile-and-notifications.html"
+                           class="nav-link">
+                            Configure Your Profile and Notifications
+                        </a>
+                    </li>
+                    
+                    <li>
+                        <a href="analyze-a-jenkins-job.html"
+                           class="nav-link">
+                            Analyze a Jenkins Job
+                        </a>
+                    </li>
+                    
+                    <li>
+                        <a href="review-and-classify-failures.html"
+                           class="nav-link">
+                            Review and Classify Failures
+                        </a>
+                    </li>
+                    
+                    <li>
+                        <a href="investigate-failure-history.html"
+                           class="nav-link">
+                            Investigate Failure History
+                        </a>
+                    </li>
+                    
+                    <li>
+                        <a href="customize-ai-analysis.html"
+                           class="nav-link">
+                            Customize AI Analysis
+                        </a>
+                    </li>
+                    
+                    <li>
+                        <a href="create-github-issues-and-jira-bugs.html"
+                           class="nav-link">
+                            Create GitHub Issues and Jira Bugs
+                        </a>
+                    </li>
+                    
+                    <li>
+                        <a href="push-classifications-to-report-portal.html"
+                           class="nav-link">
+                            Push Classifications to Report Portal
+                        </a>
+                    </li>
+                    
+                    <li>
+                        <a href="organize-jobs-with-metadata.html"
+                           class="nav-link">
+                            Organize Jobs with Metadata
+                        </a>
+                    </li>
+                    
+                    <li>
+                        <a href="manage-users-access-and-token-usage.html"
+                           class="nav-link">
+                            Manage Users, Access, and Token Usage
+                        </a>
+                    </li>
+                    
+                </ul>
+            </div>
+            
+            <div class="nav-group">
+                <h3 class="nav-group-title">Recipes</h3>
+                <ul class="nav-group-pages">
+                    
+                    <li>
+                        <a href="copy-common-analysis-recipes.html"
+                           class="nav-link">
+                            Copy Common Analysis Recipes
+                        </a>
+                    </li>
+                    
+                    <li>
+                        <a href="copy-common-deployment-recipes.html"
+                           class="nav-link">
+                            Copy Common Deployment Recipes
+                        </a>
+                    </li>
+                    
+                </ul>
+            </div>
+            
+            <div class="nav-group">
+                <h3 class="nav-group-title">Reference</h3>
+                <ul class="nav-group-pages">
+                    
+                    <li>
+                        <a href="cli-command-reference.html"
+                           class="nav-link">
+                            CLI Command Reference
+                        </a>
+                    </li>
+                    
+                    <li>
+                        <a href="rest-api-reference.html"
+                           class="nav-link">
+                            REST API Reference
+                        </a>
+                    </li>
+                    
+                    <li>
+                        <a href="configuration-and-environment-reference.html"
+                           class="nav-link active" aria-current="page">
+                            Configuration and Environment Reference
+                        </a>
+                    </li>
+                    
+                </ul>
+            </div>
+            
+        </nav>
+    </aside>
+
+    <div class="main-wrapper">
+        <header class="top-bar">
+            <div class="top-bar-left">
+                <button class="sidebar-toggle" id="sidebar-toggle" aria-label="Toggle sidebar" aria-expanded="false">
+                    <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
+                        <path d="M3 5h14M3 10h14M3 15h14" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+                    </svg>
+                </button>
+                <a href="index.html" class="top-bar-title">jenkins-job-insight</a>
+            </div>
+            <div class="top-bar-spacer"></div>
+            <div class="top-bar-right">
+                <button class="top-bar-search-btn" id="search-trigger" aria-label="Search">
+                    <kbd>&#8984;K</kbd> Search
+                </button>
+                <a href="https://github.com/myk-org/docsfy" target="_blank" rel="noopener" class="docsfy-badge" title="Generated with docsfy">
+                    ⚡ docs<span class="brand-accent">fy</span>
+                </a>
+                
+                <a href="https://github.com/myk-org/jenkins-job-insight.git" target="_blank" rel="noopener noreferrer" class="top-bar-github" id="github-link" data-repo-url="https://github.com/myk-org/jenkins-job-insight.git">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><path d="M12 0c-6.626 0-12 5.373-12 12 0 5.302 3.438 9.8 8.207 11.387.599.111.793-.261.793-.577v-2.234c-3.338.726-4.033-1.416-4.033-1.416-.546-1.387-1.333-1.756-1.333-1.756-1.089-.745.083-.729.083-.729 1.205.084 1.839 1.237 1.839 1.237 1.07 1.834 2.807 1.304 3.492.997.107-.775.418-1.305.762-1.604-2.665-.305-5.467-1.334-5.467-5.931 0-1.311.469-2.381 1.236-3.221-.124-.303-.535-1.524.117-3.176 0 0 1.008-.322 3.301 1.23.957-.266 1.983-.399 3.003-.404 1.02.005 2.047.138 3.006.404 2.291-1.552 3.297-1.23 3.297-1.23.653 1.653.242 2.874.118 3.176.77.84 1.235 1.911 1.235 3.221 0 4.609-2.807 5.624-5.479 5.921.43.372.823 1.102.823 2.222v3.293c0 .319.192.694.801.576 4.765-1.589 8.199-6.086 8.199-11.386 0-6.627-5.373-12-12-12z"/></svg>
+                    <span class="github-stars" id="github-stars" title="GitHub stars"></span>
+                </a>
+                
+                <button class="theme-toggle" id="theme-toggle" aria-label="Toggle theme">
+                    <svg class="icon-sun" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+                        <circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/>
+                    </svg>
+                    <svg class="icon-moon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+                        <path d="M21 12.79A9 9 0 1111.21 3 7 7 0 0021 12.79z"/>
+                    </svg>
+                </button>
+            </div>
+        </header>
+
+        <main class="content">
+            
+            <article class="article">
+                <div class="article-body">
+                    <!-- SECURITY: |safe is intentional. Content is AI-generated markdown
+                         converted to HTML server-side by the markdown library, not
+                         user-supplied input. XSS risk is minimal and accepted since
+                         the AI generates the content, not end users. -->
+                    <h1 id="configuration-and-environment-reference">Configuration and Environment Reference</h1>
+<p>Server configuration uses environment variables on the server, profile fields in the <code>jji</code> client config file, and per-request override fields on analysis endpoints.</p>
+<h2 id="configuration-precedence">Configuration Precedence</h2>
+<h3 id="server-side-analysis-resolution">Server-side analysis resolution</h3>
+<table>
+<thead>
+<tr>
+<th>Source</th>
+<th>Scope</th>
+<th>Effect</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Request body override fields</td>
+<td><code>POST /analyze</code>, <code>POST /analyze-failures</code></td>
+<td>Overrides server defaults for one request only.</td>
+</tr>
+<tr>
+<td>Server environment variables</td>
+<td>FastAPI server process</td>
+<td>Supplies the server-wide defaults used when a request omits an override.</td>
+</tr>
+<tr>
+<td>Application defaults</td>
+<td>Built into the code</td>
+<td>Used only when neither the request nor the environment provides a value.</td>
+</tr>
+</tbody>
+</table>
+<div class="highlight"><pre><span></span><code><span class="nb">export</span><span class="w"> </span><span class="nv">AI_PROVIDER</span><span class="o">=</span>claude
+<span class="nb">export</span><span class="w"> </span><span class="nv">AI_MODEL</span><span class="o">=</span>sonnet
+<span class="nb">export</span><span class="w"> </span><span class="nv">JENKINS_TIMEOUT</span><span class="o">=</span><span class="m">30</span>
+</code></pre></div>
+
+<div class="highlight"><pre><span></span><code><span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;job_name&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;folder/job-name&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;build_number&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">1042</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;ai_provider&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;gemini&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;ai_model&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;gemini-2.5-pro&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;jenkins_timeout&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">60</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<h3 id="cli-resolution">CLI resolution</h3>
+<table>
+<thead>
+<tr>
+<th>Source</th>
+<th>Scope</th>
+<th>Effect</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>CLI flags and <code>JJI_*</code> environment variables</td>
+<td>Current <code>jji</code> invocation</td>
+<td>Highest-priority client-side settings.</td>
+</tr>
+<tr>
+<td><code>config.toml</code> selected server profile</td>
+<td>Current <code>jji</code> invocation</td>
+<td>Supplies defaults for that named server.</td>
+</tr>
+<tr>
+<td><code>config.toml</code> <code>[defaults]</code></td>
+<td>Current <code>jji</code> invocation</td>
+<td>Supplies shared defaults merged into every named server.</td>
+</tr>
+<tr>
+<td>Remote server configuration</td>
+<td>Server-side</td>
+<td>Still applies after the CLI sends the request.</td>
+</tr>
+</tbody>
+</table>
+<blockquote>
+<p><strong>Note:</strong> If <code>--server</code> or <code>JJI_SERVER</code> is a full <code>http://</code> or <code>https://</code> URL, <code>jji</code> does not load any profile defaults from <code>config.toml</code> for that connection.</p>
+</blockquote>
+<div class="highlight"><pre><span></span><code><span class="nb">export</span><span class="w"> </span><span class="nv">JJI_SERVER</span><span class="o">=</span>prod
+<span class="nb">export</span><span class="w"> </span><span class="nv">JJI_USERNAME</span><span class="o">=</span>alice
+jji<span class="w"> </span>--api-key<span class="w"> </span><span class="s2">&quot;jji_example_admin_key&quot;</span><span class="w"> </span>results<span class="w"> </span>list
+</code></pre></div>
+
+<h2 id="server-environment-variables">Server Environment Variables</h2>
+<blockquote>
+<p><strong>Note:</strong> Optional string settings treat blank or whitespace-only values as unset.</p>
+</blockquote>
+<h3 id="storage-and-runtime">Storage and Runtime</h3>
+<table>
+<thead>
+<tr>
+<th>Name</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+<th>Effect</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>DB_PATH</code></td>
+<td>path</td>
+<td><code>/data/results.db</code></td>
+<td>Filesystem location of the SQLite database file.</td>
+<td>The directory must exist and be writable; health checks report a database error if access fails.</td>
+</tr>
+<tr>
+<td><code>JJI_ENCRYPTION_KEY</code></td>
+<td>string</td>
+<td>auto-generated file key</td>
+<td>Secret used for encrypting sensitive values at rest and for hashing delegated admin API keys.</td>
+<td>If unset, JJI creates and reuses a persistent key file under <code>$XDG_DATA_HOME/jji/.encryption_key</code> or <code>~/.local/share/jji/.encryption_key</code>.</td>
+</tr>
+<tr>
+<td><code>PORT</code></td>
+<td>integer</td>
+<td><code>8000</code></td>
+<td>HTTP port for the FastAPI server.</td>
+<td>Must be between <code>1</code> and <code>65535</code>; the same value is used for Uvicorn and internal self-calls made by the AI workflow.</td>
+</tr>
+<tr>
+<td><code>DEBUG</code></td>
+<td>boolean</td>
+<td><code>false</code></td>
+<td>Debug mode toggle.</td>
+<td>When <code>true</code>, the Python entry point enables Uvicorn reload.</td>
+</tr>
+<tr>
+<td><code>LOG_LEVEL</code></td>
+<td>string</td>
+<td><code>INFO</code></td>
+<td>Log level passed to application loggers.</td>
+<td>Controls server log verbosity across the app.</td>
+</tr>
+<tr>
+<td><code>DEV_MODE</code></td>
+<td>boolean</td>
+<td><code>false</code></td>
+<td>Container development-mode toggle.</td>
+<td>In the container entrypoint, <code>true</code> starts the Vite dev server on <code>5173</code> and adds Uvicorn reload flags.</td>
+</tr>
+<tr>
+<td><code>PUBLIC_BASE_URL</code></td>
+<td>URL</td>
+<td>unset</td>
+<td>Trusted public origin for absolute links.</td>
+<td>When unset, JJI emits relative links and does not trust request host headers.</td>
+</tr>
+<tr>
+<td><code>XDG_DATA_HOME</code></td>
+<td>path</td>
+<td><code>~/.local/share</code></td>
+<td>Base directory for generated persistent data files.</td>
+<td>Used for the fallback encryption key file and fallback VAPID key file.</td>
+</tr>
+<tr>
+<td><code>XDG_CONFIG_HOME</code></td>
+<td>path</td>
+<td><code>~/.config</code></td>
+<td>Base directory for user configuration files.</td>
+<td>Sets the base path for <code>jji</code> config at <code>$XDG_CONFIG_HOME/jji/config.toml</code>.</td>
+</tr>
+</tbody>
+</table>
+<div class="highlight"><pre><span></span><code><span class="nb">export</span><span class="w"> </span><span class="nv">DB_PATH</span><span class="o">=</span><span class="s2">&quot;/srv/jji/state/results.sqlite3&quot;</span>
+<span class="nb">export</span><span class="w"> </span><span class="nv">JJI_ENCRYPTION_KEY</span><span class="o">=</span><span class="s2">&quot;replace-with-a-stable-secret&quot;</span>
+<span class="nb">export</span><span class="w"> </span><span class="nv">PORT</span><span class="o">=</span><span class="m">8080</span>
+<span class="nb">export</span><span class="w"> </span><span class="nv">PUBLIC_BASE_URL</span><span class="o">=</span><span class="s2">&quot;https://jji.example.com&quot;</span>
+<span class="nb">export</span><span class="w"> </span><span class="nv">LOG_LEVEL</span><span class="o">=</span>DEBUG
+</code></pre></div>
+
+<p>See <a href="copy-common-deployment-recipes.html">Copy Common Deployment Recipes</a> for deployment examples.</p>
+<h3 id="access-sessions-and-identity">Access, Sessions, and Identity</h3>
+<table>
+<thead>
+<tr>
+<th>Name</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+<th>Effect</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>ADMIN_KEY</code></td>
+<td>string</td>
+<td>unset</td>
+<td>Bootstrap secret for the built-in <code>admin</code> login path.</td>
+<td>Enables initial admin sign-in with username <code>admin</code> at <code>/api/auth/login</code>.</td>
+</tr>
+<tr>
+<td><code>ALLOWED_USERS</code></td>
+<td>comma-separated string</td>
+<td>unset</td>
+<td>Allow list for users who can create or modify data.</td>
+<td>Empty means open access; usernames are normalized to lowercase; admins bypass the list.</td>
+</tr>
+<tr>
+<td><code>SECURE_COOKIES</code></td>
+<td>boolean</td>
+<td><code>true</code></td>
+<td>Cookie security toggle.</td>
+<td>Adds the <code>Secure</code> attribute to <code>jji_session</code> and <code>jji_username</code> cookies.</td>
+</tr>
+<tr>
+<td><code>TRUST_PROXY_HEADERS</code></td>
+<td>boolean</td>
+<td><code>false</code></td>
+<td>Reverse-proxy identity toggle.</td>
+<td>Trusts <code>X-Forwarded-User</code> and mirrors it into the current request user and the <code>jji_username</code> cookie; <code>admin</code> is reserved and rejected from the proxy header.</td>
+</tr>
+</tbody>
+</table>
+<div class="highlight"><pre><span></span><code><span class="nb">export</span><span class="w"> </span><span class="nv">ADMIN_KEY</span><span class="o">=</span><span class="s2">&quot;replace-with-a-bootstrap-secret&quot;</span>
+<span class="nb">export</span><span class="w"> </span><span class="nv">ALLOWED_USERS</span><span class="o">=</span><span class="s2">&quot;alice,bob,release-bot&quot;</span>
+<span class="nb">export</span><span class="w"> </span><span class="nv">SECURE_COOKIES</span><span class="o">=</span><span class="nb">false</span>
+<span class="nb">export</span><span class="w"> </span><span class="nv">TRUST_PROXY_HEADERS</span><span class="o">=</span><span class="nb">true</span>
+</code></pre></div>
+
+<h3 id="jenkins-defaults">Jenkins Defaults</h3>
+<table>
+<thead>
+<tr>
+<th>Name</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+<th>Effect</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>JENKINS_URL</code></td>
+<td>URL</td>
+<td>unset</td>
+<td>Default Jenkins base URL.</td>
+<td>Used when <code>/analyze</code> omits <code>jenkins_url</code>.</td>
+</tr>
+<tr>
+<td><code>JENKINS_USER</code></td>
+<td>string</td>
+<td>unset</td>
+<td>Default Jenkins username.</td>
+<td>Used when <code>/analyze</code> omits <code>jenkins_user</code>.</td>
+</tr>
+<tr>
+<td><code>JENKINS_PASSWORD</code></td>
+<td>string</td>
+<td>unset</td>
+<td>Default Jenkins password or API token.</td>
+<td>Used when <code>/analyze</code> omits <code>jenkins_password</code>.</td>
+</tr>
+<tr>
+<td><code>JENKINS_SSL_VERIFY</code></td>
+<td>boolean</td>
+<td><code>true</code></td>
+<td>Jenkins TLS verification toggle.</td>
+<td><code>false</code> allows self-signed certificates.</td>
+</tr>
+<tr>
+<td><code>JENKINS_TIMEOUT</code></td>
+<td>integer</td>
+<td><code>30</code></td>
+<td>Jenkins API timeout in seconds.</td>
+<td>Used for Jenkins API requests when the request omits <code>jenkins_timeout</code>.</td>
+</tr>
+<tr>
+<td><code>TESTS_REPO_URL</code></td>
+<td>string</td>
+<td>unset</td>
+<td>Default tests repository URL.</td>
+<td>Used for repository context when the request omits <code>tests_repo_url</code>; accepts an optional <code>:ref</code> suffix.</td>
+</tr>
+<tr>
+<td><code>WAIT_FOR_COMPLETION</code></td>
+<td>boolean</td>
+<td><code>true</code></td>
+<td>Default wait behavior for <code>/analyze</code>.</td>
+<td>When <code>true</code>, a queued analysis can remain in <code>waiting</code> until Jenkins finishes the build.</td>
+</tr>
+<tr>
+<td><code>POLL_INTERVAL_MINUTES</code></td>
+<td>integer</td>
+<td><code>2</code></td>
+<td>Default poll interval while waiting.</td>
+<td>Controls how often JJI rechecks Jenkins status.</td>
+</tr>
+<tr>
+<td><code>MAX_WAIT_MINUTES</code></td>
+<td>integer</td>
+<td><code>0</code></td>
+<td>Default maximum wait duration.</td>
+<td><code>0</code> means no wait limit.</td>
+</tr>
+<tr>
+<td><code>FORCE_ANALYSIS</code></td>
+<td>boolean</td>
+<td><code>false</code></td>
+<td>Default force-analysis toggle.</td>
+<td>Allows analysis to run even when Jenkins reports <code>SUCCESS</code>.</td>
+</tr>
+<tr>
+<td><code>GET_JOB_ARTIFACTS</code></td>
+<td>boolean</td>
+<td><code>true</code></td>
+<td>Default artifact-download toggle.</td>
+<td>When <code>true</code>, JJI downloads build artifacts for analysis context.</td>
+</tr>
+<tr>
+<td><code>JENKINS_ARTIFACTS_MAX_SIZE_MB</code></td>
+<td>integer</td>
+<td><code>500</code></td>
+<td>Maximum total artifact download size, in MB.</td>
+<td>Caps artifact collection per job.</td>
+</tr>
+</tbody>
+</table>
+<div class="highlight"><pre><span></span><code><span class="nb">export</span><span class="w"> </span><span class="nv">JENKINS_URL</span><span class="o">=</span><span class="s2">&quot;https://jenkins.example.com&quot;</span>
+<span class="nb">export</span><span class="w"> </span><span class="nv">JENKINS_USER</span><span class="o">=</span><span class="s2">&quot;ci-bot&quot;</span>
+<span class="nb">export</span><span class="w"> </span><span class="nv">JENKINS_PASSWORD</span><span class="o">=</span><span class="s2">&quot;replace-with-a-token&quot;</span>
+<span class="nb">export</span><span class="w"> </span><span class="nv">JENKINS_SSL_VERIFY</span><span class="o">=</span><span class="nb">false</span>
+<span class="nb">export</span><span class="w"> </span><span class="nv">TESTS_REPO_URL</span><span class="o">=</span><span class="s2">&quot;https://gitlab.internal:8443/qa/tests:main&quot;</span>
+<span class="nb">export</span><span class="w"> </span><span class="nv">WAIT_FOR_COMPLETION</span><span class="o">=</span><span class="nb">true</span>
+<span class="nb">export</span><span class="w"> </span><span class="nv">POLL_INTERVAL_MINUTES</span><span class="o">=</span><span class="m">3</span>
+<span class="nb">export</span><span class="w"> </span><span class="nv">MAX_WAIT_MINUTES</span><span class="o">=</span><span class="m">45</span>
+<span class="nb">export</span><span class="w"> </span><span class="nv">GET_JOB_ARTIFACTS</span><span class="o">=</span><span class="nb">true</span>
+<span class="nb">export</span><span class="w"> </span><span class="nv">JENKINS_ARTIFACTS_MAX_SIZE_MB</span><span class="o">=</span><span class="m">750</span>
+</code></pre></div>
+
+<h3 id="ai-defaults">AI Defaults</h3>
+<table>
+<thead>
+<tr>
+<th>Name</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+<th>Effect</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>AI_PROVIDER</code></td>
+<td>string</td>
+<td>unset</td>
+<td>Default AI provider. Valid values: <code>claude</code>, <code>gemini</code>, <code>cursor</code>.</td>
+<td>Required unless the request body provides <code>ai_provider</code>.</td>
+</tr>
+<tr>
+<td><code>AI_MODEL</code></td>
+<td>string</td>
+<td>unset</td>
+<td>Default AI model identifier.</td>
+<td>Required unless the request body provides <code>ai_model</code>.</td>
+</tr>
+<tr>
+<td><code>AI_CLI_TIMEOUT</code></td>
+<td>integer</td>
+<td><code>10</code></td>
+<td>Timeout for each provider CLI call, in minutes.</td>
+<td>Applies to AI subprocess execution.</td>
+</tr>
+<tr>
+<td><code>PEER_AI_CONFIGS</code></td>
+<td>string</td>
+<td>unset</td>
+<td>Default peer set in <code>provider:model,provider:model</code> format.</td>
+<td>Enables peer analysis when the request omits <code>peer_ai_configs</code>; blank disables the default.</td>
+</tr>
+<tr>
+<td><code>PEER_ANALYSIS_MAX_ROUNDS</code></td>
+<td>integer</td>
+<td><code>3</code></td>
+<td>Maximum peer debate rounds.</td>
+<td>Must be between <code>1</code> and <code>10</code>.</td>
+</tr>
+<tr>
+<td><code>ADDITIONAL_REPOS</code></td>
+<td>string</td>
+<td>unset</td>
+<td>Default extra repo list in <code>name:url</code>, <code>name:url:ref</code>, or <code>name:url:ref@token</code> format.</td>
+<td>Clones extra repositories beside the tests repo when the request omits <code>additional_repos</code>. Duplicate names are rejected.</td>
+</tr>
+</tbody>
+</table>
+<div class="highlight"><pre><span></span><code><span class="nb">export</span><span class="w"> </span><span class="nv">AI_PROVIDER</span><span class="o">=</span>claude
+<span class="nb">export</span><span class="w"> </span><span class="nv">AI_MODEL</span><span class="o">=</span>sonnet
+<span class="nb">export</span><span class="w"> </span><span class="nv">AI_CLI_TIMEOUT</span><span class="o">=</span><span class="m">20</span>
+<span class="nb">export</span><span class="w"> </span><span class="nv">PEER_AI_CONFIGS</span><span class="o">=</span><span class="s2">&quot;gemini:gemini-2.5-pro,cursor:gpt-5.4-xhigh&quot;</span>
+<span class="nb">export</span><span class="w"> </span><span class="nv">PEER_ANALYSIS_MAX_ROUNDS</span><span class="o">=</span><span class="m">5</span>
+<span class="nb">export</span><span class="w"> </span><span class="nv">ADDITIONAL_REPOS</span><span class="o">=</span><span class="s2">&quot;product:https://github.com/acme/product:release-4.18,infra:https://github.com/acme/infra@ghp_example&quot;</span>
+</code></pre></div>
+
+<blockquote>
+<p><strong>Note:</strong> <code>PEER_AI_CONFIGS</code> and <code>ADDITIONAL_REPOS</code> are parsed when a request resolves them. Invalid values fail that analysis request instead of being ignored.</p>
+</blockquote>
+<h3 id="provider-cli-environment">Provider CLI Environment</h3>
+<table>
+<thead>
+<tr>
+<th>Name</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+<th>Effect</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>ANTHROPIC_API_KEY</code></td>
+<td>string</td>
+<td>unset</td>
+<td>Authentication token for the Claude CLI.</td>
+<td>Read by the external Claude CLI process.</td>
+</tr>
+<tr>
+<td><code>CLAUDE_CODE_USE_VERTEX</code></td>
+<td>string</td>
+<td>unset</td>
+<td>Vertex toggle for the Claude CLI.</td>
+<td>Set to <code>1</code> to use Vertex-backed Claude auth.</td>
+</tr>
+<tr>
+<td><code>CLOUD_ML_REGION</code></td>
+<td>string</td>
+<td>unset</td>
+<td>Google Cloud region for Vertex-backed Claude auth.</td>
+<td>Used only when the Claude CLI runs in Vertex mode.</td>
+</tr>
+<tr>
+<td><code>ANTHROPIC_VERTEX_PROJECT_ID</code></td>
+<td>string</td>
+<td>unset</td>
+<td>Google Cloud project ID for Vertex-backed Claude auth.</td>
+<td>Used only when the Claude CLI runs in Vertex mode.</td>
+</tr>
+<tr>
+<td><code>GEMINI_API_KEY</code></td>
+<td>string</td>
+<td>unset</td>
+<td>Authentication token for the Gemini CLI.</td>
+<td>Read by the external Gemini CLI process.</td>
+</tr>
+<tr>
+<td><code>CURSOR_API_KEY</code></td>
+<td>string</td>
+<td>unset</td>
+<td>Authentication token for the Cursor CLI.</td>
+<td>Read by the external Cursor CLI process.</td>
+</tr>
+</tbody>
+</table>
+<div class="highlight"><pre><span></span><code><span class="nb">export</span><span class="w"> </span><span class="nv">ANTHROPIC_API_KEY</span><span class="o">=</span><span class="s2">&quot;replace-with-an-anthropic-key&quot;</span>
+<span class="nb">export</span><span class="w"> </span><span class="nv">GEMINI_API_KEY</span><span class="o">=</span><span class="s2">&quot;replace-with-a-gemini-key&quot;</span>
+<span class="nb">export</span><span class="w"> </span><span class="nv">CURSOR_API_KEY</span><span class="o">=</span><span class="s2">&quot;replace-with-a-cursor-key&quot;</span>
+</code></pre></div>
+
+<blockquote>
+<p><strong>Note:</strong> These variables are consumed by the provider CLIs that JJI launches. They are not modeled as FastAPI settings fields.</p>
+</blockquote>
+<h3 id="jira-integration">Jira Integration</h3>
+<table>
+<thead>
+<tr>
+<th>Name</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+<th>Effect</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>JIRA_URL</code></td>
+<td>URL</td>
+<td>unset</td>
+<td>Jira base URL.</td>
+<td>Required for Jira enrichment and Jira helper APIs.</td>
+</tr>
+<tr>
+<td><code>JIRA_EMAIL</code></td>
+<td>string</td>
+<td>unset</td>
+<td>Jira Cloud email.</td>
+<td>If set, Jira auth is treated as Cloud mode.</td>
+</tr>
+<tr>
+<td><code>JIRA_API_TOKEN</code></td>
+<td>string</td>
+<td>unset</td>
+<td>Jira Cloud API token.</td>
+<td>Preferred credential in Cloud mode; fallback credential in Server/Data Center mode.</td>
+</tr>
+<tr>
+<td><code>JIRA_PAT</code></td>
+<td>string</td>
+<td>unset</td>
+<td>Jira personal access token.</td>
+<td>Preferred credential in Server/Data Center mode; fallback credential in Cloud mode.</td>
+</tr>
+<tr>
+<td><code>JIRA_PROJECT_KEY</code></td>
+<td>string</td>
+<td>unset</td>
+<td>Default Jira project key.</td>
+<td>Scopes Jira enrichment and default project selection.</td>
+</tr>
+<tr>
+<td><code>JIRA_SSL_VERIFY</code></td>
+<td>boolean</td>
+<td><code>true</code></td>
+<td>Jira TLS verification toggle.</td>
+<td><code>false</code> allows self-signed certificates.</td>
+</tr>
+<tr>
+<td><code>JIRA_MAX_RESULTS</code></td>
+<td>integer</td>
+<td><code>5</code></td>
+<td>Maximum Jira matches returned per search.</td>
+<td>Caps enrichment search results.</td>
+</tr>
+<tr>
+<td><code>ENABLE_JIRA</code></td>
+<td>boolean</td>
+<td>auto</td>
+<td>Analysis-time Jira enrichment toggle.</td>
+<td><code>false</code> disables enrichment; unset enables it only when Jira URL, a usable credential, and a project key are present.</td>
+</tr>
+<tr>
+<td><code>ENABLE_JIRA_ISSUES</code></td>
+<td>boolean</td>
+<td><code>true</code></td>
+<td>Jira issue-creation feature toggle.</td>
+<td>Independent of <code>ENABLE_JIRA</code>; <code>false</code> disables Jira issue creation.</td>
+</tr>
+</tbody>
+</table>
+<div class="highlight"><pre><span></span><code><span class="nb">export</span><span class="w"> </span><span class="nv">JIRA_URL</span><span class="o">=</span><span class="s2">&quot;https://jira.example.com&quot;</span>
+<span class="nb">export</span><span class="w"> </span><span class="nv">JIRA_EMAIL</span><span class="o">=</span><span class="s2">&quot;alice@example.com&quot;</span>
+<span class="nb">export</span><span class="w"> </span><span class="nv">JIRA_API_TOKEN</span><span class="o">=</span><span class="s2">&quot;replace-with-a-jira-token&quot;</span>
+<span class="nb">export</span><span class="w"> </span><span class="nv">JIRA_PROJECT_KEY</span><span class="o">=</span><span class="s2">&quot;PROJ&quot;</span>
+<span class="nb">export</span><span class="w"> </span><span class="nv">JIRA_MAX_RESULTS</span><span class="o">=</span><span class="m">10</span>
+<span class="nb">export</span><span class="w"> </span><span class="nv">ENABLE_JIRA</span><span class="o">=</span><span class="nb">true</span>
+<span class="nb">export</span><span class="w"> </span><span class="nv">ENABLE_JIRA_ISSUES</span><span class="o">=</span><span class="nb">true</span>
+</code></pre></div>
+
+<blockquote>
+<p><strong>Note:</strong> Auth selection is mode-aware: Cloud mode prefers <code>JIRA_API_TOKEN</code>; Server/Data Center mode prefers <code>JIRA_PAT</code>.</p>
+</blockquote>
+<h3 id="github-integration">GitHub Integration</h3>
+<table>
+<thead>
+<tr>
+<th>Name</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+<th>Effect</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>GITHUB_TOKEN</code></td>
+<td>string</td>
+<td>unset</td>
+<td>Default GitHub token.</td>
+<td>Used for GitHub-side lookups and as the server-side credential source for GitHub operations.</td>
+</tr>
+<tr>
+<td><code>ENABLE_GITHUB_ISSUES</code></td>
+<td>boolean</td>
+<td><code>true</code></td>
+<td>GitHub issue-creation feature toggle.</td>
+<td><code>false</code> disables GitHub issue creation; when enabled, the repo URL and token can still come from request-time inputs instead of server defaults.</td>
+</tr>
+</tbody>
+</table>
+<div class="highlight"><pre><span></span><code><span class="nb">export</span><span class="w"> </span><span class="nv">GITHUB_TOKEN</span><span class="o">=</span><span class="s2">&quot;replace-with-a-github-token&quot;</span>
+<span class="nb">export</span><span class="w"> </span><span class="nv">ENABLE_GITHUB_ISSUES</span><span class="o">=</span><span class="nb">true</span>
+</code></pre></div>
+
+<h3 id="report-portal">Report Portal</h3>
+<table>
+<thead>
+<tr>
+<th>Name</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+<th>Effect</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>REPORTPORTAL_URL</code></td>
+<td>URL</td>
+<td>unset</td>
+<td>Report Portal base URL.</td>
+<td>Required to enable push integration.</td>
+</tr>
+<tr>
+<td><code>REPORTPORTAL_API_TOKEN</code></td>
+<td>string</td>
+<td>unset</td>
+<td>Report Portal API token.</td>
+<td>Authenticates Report Portal API calls.</td>
+</tr>
+<tr>
+<td><code>REPORTPORTAL_PROJECT</code></td>
+<td>string</td>
+<td>unset</td>
+<td>Report Portal project name.</td>
+<td>Target project used for launch matching and updates.</td>
+</tr>
+<tr>
+<td><code>REPORTPORTAL_VERIFY_SSL</code></td>
+<td>boolean</td>
+<td><code>true</code></td>
+<td>Report Portal TLS verification toggle.</td>
+<td><code>false</code> allows self-signed certificates.</td>
+</tr>
+<tr>
+<td><code>ENABLE_REPORTPORTAL</code></td>
+<td>boolean</td>
+<td>auto</td>
+<td>Report Portal feature toggle.</td>
+<td><code>false</code> disables the integration; unset enables it only when URL, token, and project are all present.</td>
+</tr>
+</tbody>
+</table>
+<div class="highlight"><pre><span></span><code><span class="nb">export</span><span class="w"> </span><span class="nv">REPORTPORTAL_URL</span><span class="o">=</span><span class="s2">&quot;https://reportportal.example.com&quot;</span>
+<span class="nb">export</span><span class="w"> </span><span class="nv">REPORTPORTAL_API_TOKEN</span><span class="o">=</span><span class="s2">&quot;replace-with-an-rp-token&quot;</span>
+<span class="nb">export</span><span class="w"> </span><span class="nv">REPORTPORTAL_PROJECT</span><span class="o">=</span><span class="s2">&quot;qe-gating&quot;</span>
+<span class="nb">export</span><span class="w"> </span><span class="nv">ENABLE_REPORTPORTAL</span><span class="o">=</span><span class="nb">true</span>
+</code></pre></div>
+
+<p>See <a href="push-classifications-to-report-portal.html">Push Classifications to Report Portal</a> for usage details.</p>
+<h3 id="web-push-and-alerting">Web Push and Alerting</h3>
+<table>
+<thead>
+<tr>
+<th>Name</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+<th>Effect</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>VAPID_PUBLIC_KEY</code></td>
+<td>string</td>
+<td>auto-generated</td>
+<td>Public VAPID key for browser push subscriptions.</td>
+<td>When both VAPID keys are unset, JJI generates and persists a key pair.</td>
+</tr>
+<tr>
+<td><code>VAPID_PRIVATE_KEY</code></td>
+<td>string</td>
+<td>auto-generated</td>
+<td>Private VAPID key for browser push subscriptions.</td>
+<td>Must be provided together with <code>VAPID_PUBLIC_KEY</code> if you want fixed keys.</td>
+</tr>
+<tr>
+<td><code>VAPID_CLAIM_EMAIL</code></td>
+<td>string</td>
+<td><code>mailto:noreply@jji.local</code></td>
+<td>Contact email used in VAPID claims.</td>
+<td>Used for both fixed and generated key pairs.</td>
+</tr>
+<tr>
+<td><code>SLACK_WEBHOOK_URL</code></td>
+<td>URL</td>
+<td>unset</td>
+<td>Slack incoming-webhook URL.</td>
+<td>Enables Slack alert delivery; non-HTTPS values are flagged as configuration warnings.</td>
+</tr>
+<tr>
+<td><code>SMTP_HOST</code></td>
+<td>string</td>
+<td>unset</td>
+<td>SMTP host for email alerts.</td>
+<td>Required for email alert delivery.</td>
+</tr>
+<tr>
+<td><code>SMTP_PORT</code></td>
+<td>integer</td>
+<td><code>587</code></td>
+<td>SMTP port for email alerts.</td>
+<td>Port <code>587</code> enables <code>STARTTLS</code>.</td>
+</tr>
+<tr>
+<td><code>SMTP_USER</code></td>
+<td>string</td>
+<td>unset</td>
+<td>SMTP username.</td>
+<td>Used for SMTP authentication when paired with <code>SMTP_PASSWORD</code>.</td>
+</tr>
+<tr>
+<td><code>SMTP_PASSWORD</code></td>
+<td>string</td>
+<td>unset</td>
+<td>SMTP password.</td>
+<td>Used for SMTP authentication when paired with <code>SMTP_USER</code>.</td>
+</tr>
+<tr>
+<td><code>SMTP_FROM</code></td>
+<td>string</td>
+<td>derived</td>
+<td>Sender address for email alerts.</td>
+<td>Defaults to <code>SMTP_USER</code>, or <code>jji@&lt;SMTP_HOST&gt;</code> when <code>SMTP_USER</code> is blank.</td>
+</tr>
+<tr>
+<td><code>ALERT_EMAIL_TO</code></td>
+<td>string</td>
+<td>unset</td>
+<td>Recipient address for email alerts.</td>
+<td>Required together with <code>SMTP_HOST</code> to send email alerts.</td>
+</tr>
+</tbody>
+</table>
+<div class="highlight"><pre><span></span><code><span class="nb">export</span><span class="w"> </span><span class="nv">VAPID_CLAIM_EMAIL</span><span class="o">=</span><span class="s2">&quot;mailto:jji-admin@example.com&quot;</span>
+<span class="nb">export</span><span class="w"> </span><span class="nv">SLACK_WEBHOOK_URL</span><span class="o">=</span><span class="s2">&quot;https://hooks.slack.com/services/example&quot;</span>
+<span class="nb">export</span><span class="w"> </span><span class="nv">SMTP_HOST</span><span class="o">=</span><span class="s2">&quot;smtp.example.com&quot;</span>
+<span class="nb">export</span><span class="w"> </span><span class="nv">SMTP_PORT</span><span class="o">=</span><span class="m">587</span>
+<span class="nb">export</span><span class="w"> </span><span class="nv">SMTP_USER</span><span class="o">=</span><span class="s2">&quot;jji-alerts@example.com&quot;</span>
+<span class="nb">export</span><span class="w"> </span><span class="nv">SMTP_PASSWORD</span><span class="o">=</span><span class="s2">&quot;replace-with-an-smtp-password&quot;</span>
+<span class="nb">export</span><span class="w"> </span><span class="nv">ALERT_EMAIL_TO</span><span class="o">=</span><span class="s2">&quot;oncall@example.com&quot;</span>
+</code></pre></div>
+
+<blockquote>
+<p><strong>Warning:</strong> Set both <code>VAPID_PUBLIC_KEY</code> and <code>VAPID_PRIVATE_KEY</code> together if you want fixed keys. A partial pair is treated as invalid, and JJI falls back to generated keys.</p>
+</blockquote>
+<h3 id="metadata-rules-file">Metadata Rules File</h3>
+<table>
+<thead>
+<tr>
+<th>Name</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+<th>Effect</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>METADATA_RULES_FILE</code></td>
+<td>path</td>
+<td>unset</td>
+<td>Path to a YAML or JSON rules file for automatic job metadata assignment.</td>
+<td>Loaded once and cached for the process lifetime; file changes take effect after a server restart.</td>
+</tr>
+</tbody>
+</table>
+<div class="highlight"><pre><span></span><code><span class="nb">export</span><span class="w"> </span><span class="nv">METADATA_RULES_FILE</span><span class="o">=</span><span class="s2">&quot;/etc/jji/metadata-rules.yaml&quot;</span>
+</code></pre></div>
+
+<h2 id="jji-profile-file-configtoml"><code>jji</code> Profile File: <code>config.toml</code></h2>
+<p><code>jji</code> looks for its profile file at <code>$XDG_CONFIG_HOME/jji/config.toml</code> or <code>~/.config/jji/config.toml</code> when <code>XDG_CONFIG_HOME</code> is unset.</p>
+<p>See <a href="cli-command-reference.html">CLI Command Reference</a> for command syntax.</p>
+<h3 id="top-level-sections">Top-Level Sections</h3>
+<table>
+<thead>
+<tr>
+<th>Section</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+<th>Effect</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>[default]</code></td>
+<td>table</td>
+<td>absent</td>
+<td>Holds the default profile name.</td>
+<td>Used when <code>--server</code> and <code>JJI_SERVER</code> are both absent.</td>
+</tr>
+<tr>
+<td><code>[defaults]</code></td>
+<td>table</td>
+<td>absent</td>
+<td>Shared profile values.</td>
+<td>Merged into every <code>[servers.&lt;name&gt;]</code> entry before that server is used.</td>
+</tr>
+<tr>
+<td><code>[servers.&lt;name&gt;]</code></td>
+<td>table</td>
+<td>absent</td>
+<td>Named server profile.</td>
+<td>Supplies a concrete server URL and client-side defaults.</td>
+</tr>
+</tbody>
+</table>
+<h3 id="default-fields"><code>[default]</code> Fields</h3>
+<table>
+<thead>
+<tr>
+<th>Name</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+<th>Effect</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>server</code></td>
+<td>string</td>
+<td>unset</td>
+<td>Name of the default profile.</td>
+<td>Must be a non-empty trimmed string.</td>
+</tr>
+</tbody>
+</table>
+<div class="highlight"><pre><span></span><code><span class="k">[default]</span>
+<span class="n">server</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">&quot;prod&quot;</span>
+</code></pre></div>
+
+<h3 id="defaults-and-serversname-common-fields"><code>[defaults]</code> and <code>[servers.&lt;name&gt;]</code> Common Fields</h3>
+<blockquote>
+<p><strong>Note:</strong> <code>[defaults]</code> supports the same fields as <code>[servers.&lt;name&gt;]</code> except <code>server</code>. <code>url</code> can be defined in either place as long as each resolved profile ends up with a non-empty URL.</p>
+</blockquote>
+<h4 id="connection-and-auth">Connection and Auth</h4>
+<table>
+<thead>
+<tr>
+<th>Name</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+<th>Effect</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>url</code></td>
+<td>string</td>
+<td>unset</td>
+<td>Base URL of the JJI server.</td>
+<td>Required after defaults are merged.</td>
+</tr>
+<tr>
+<td><code>username</code></td>
+<td>string</td>
+<td><code>""</code></td>
+<td>Default username sent by <code>jji</code>.</td>
+<td>Used for comments, reviews, and other user-attributed actions.</td>
+</tr>
+<tr>
+<td><code>no_verify_ssl</code></td>
+<td>boolean</td>
+<td><code>false</code></td>
+<td>Disable TLS verification for the CLI HTTP client.</td>
+<td>Affects only the CLI connection to JJI, not Jenkins/Jira/Report Portal integration settings.</td>
+</tr>
+<tr>
+<td><code>api_key</code></td>
+<td>string</td>
+<td><code>""</code></td>
+<td>Default admin API key for the CLI.</td>
+<td>Sent as the bearer token when a command needs admin access.</td>
+</tr>
+</tbody>
+</table>
+<h4 id="analysis-defaults">Analysis Defaults</h4>
+<table>
+<thead>
+<tr>
+<th>Name</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+<th>Effect</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>jenkins_url</code></td>
+<td>string</td>
+<td><code>""</code></td>
+<td>Default Jenkins base URL.</td>
+<td>Sent only when the command does not pass <code>--jenkins-url</code>.</td>
+</tr>
+<tr>
+<td><code>jenkins_user</code></td>
+<td>string</td>
+<td><code>""</code></td>
+<td>Default Jenkins username.</td>
+<td>Sent only when the command does not pass <code>--jenkins-user</code>.</td>
+</tr>
+<tr>
+<td><code>jenkins_password</code></td>
+<td>string</td>
+<td><code>""</code></td>
+<td>Default Jenkins password or API token.</td>
+<td>Sent only when the command does not pass <code>--jenkins-password</code>.</td>
+</tr>
+<tr>
+<td><code>jenkins_ssl_verify</code></td>
+<td>boolean</td>
+<td>unset</td>
+<td>Default Jenkins TLS verification flag.</td>
+<td>When omitted, the CLI leaves the server default unchanged.</td>
+</tr>
+<tr>
+<td><code>jenkins_timeout</code></td>
+<td>integer</td>
+<td><code>0</code></td>
+<td>Default Jenkins timeout override.</td>
+<td><code>0</code> means "do not send a value; let the server use its own default".</td>
+</tr>
+<tr>
+<td><code>tests_repo_url</code></td>
+<td>string</td>
+<td><code>""</code></td>
+<td>Default tests repository URL.</td>
+<td>Supports the same <code>url:ref</code> format as the server environment variable.</td>
+</tr>
+<tr>
+<td><code>ai_provider</code></td>
+<td>string</td>
+<td><code>""</code></td>
+<td>Default AI provider.</td>
+<td>Sent only when the command does not pass <code>--ai-provider</code>.</td>
+</tr>
+<tr>
+<td><code>ai_model</code></td>
+<td>string</td>
+<td><code>""</code></td>
+<td>Default AI model.</td>
+<td>Sent only when the command does not pass <code>--ai-model</code>.</td>
+</tr>
+<tr>
+<td><code>ai_cli_timeout</code></td>
+<td>integer</td>
+<td><code>0</code></td>
+<td>Default AI CLI timeout override.</td>
+<td><code>0</code> means "do not send a value; let the server use its own default".</td>
+</tr>
+<tr>
+<td><code>peers</code></td>
+<td>string</td>
+<td><code>""</code></td>
+<td>Default peer config list.</td>
+<td>Uses the same <code>provider:model,provider:model</code> format as <code>PEER_AI_CONFIGS</code>.</td>
+</tr>
+<tr>
+<td><code>peer_analysis_max_rounds</code></td>
+<td>integer</td>
+<td><code>0</code></td>
+<td>Default peer-round override.</td>
+<td><code>0</code> means "do not send a value"; non-zero values must be between <code>1</code> and <code>10</code> when used.</td>
+</tr>
+<tr>
+<td><code>additional_repos</code></td>
+<td>string</td>
+<td><code>""</code></td>
+<td>Default extra repo list.</td>
+<td>Uses the same <code>name:url</code>, <code>name:url:ref</code>, or <code>name:url:ref@token</code> format as <code>ADDITIONAL_REPOS</code>.</td>
+</tr>
+<tr>
+<td><code>wait_for_completion</code></td>
+<td>boolean</td>
+<td>unset</td>
+<td>Default wait toggle for <code>jji analyze</code>.</td>
+<td>When omitted, the CLI leaves the server default unchanged.</td>
+</tr>
+<tr>
+<td><code>poll_interval_minutes</code></td>
+<td>integer</td>
+<td><code>0</code></td>
+<td>Default poll-interval override.</td>
+<td><code>0</code> means "do not send a value".</td>
+</tr>
+<tr>
+<td><code>max_wait_minutes</code></td>
+<td>integer</td>
+<td><code>0</code></td>
+<td>Default max-wait override.</td>
+<td><code>0</code> means "do not send a value"; this is not the same as explicitly sending <code>0</code> in the API request body.</td>
+</tr>
+<tr>
+<td><code>force</code></td>
+<td>boolean</td>
+<td>unset</td>
+<td>Default force-analysis toggle.</td>
+<td>When omitted, the CLI leaves the server default unchanged.</td>
+</tr>
+</tbody>
+</table>
+<h4 id="integration-defaults">Integration Defaults</h4>
+<table>
+<thead>
+<tr>
+<th>Name</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+<th>Effect</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>jira_url</code></td>
+<td>string</td>
+<td><code>""</code></td>
+<td>Default Jira base URL.</td>
+<td>Sent only when the command does not pass <code>--jira-url</code>.</td>
+</tr>
+<tr>
+<td><code>jira_email</code></td>
+<td>string</td>
+<td><code>""</code></td>
+<td>Default Jira Cloud email.</td>
+<td>Sent only when the command does not pass <code>--jira-email</code>.</td>
+</tr>
+<tr>
+<td><code>jira_api_token</code></td>
+<td>string</td>
+<td><code>""</code></td>
+<td>Default Jira Cloud token.</td>
+<td>Used for analysis requests that send Jira settings.</td>
+</tr>
+<tr>
+<td><code>jira_pat</code></td>
+<td>string</td>
+<td><code>""</code></td>
+<td>Default Jira personal access token.</td>
+<td>Used for analysis requests that send Jira settings.</td>
+</tr>
+<tr>
+<td><code>jira_token</code></td>
+<td>string</td>
+<td><code>""</code></td>
+<td>Generic Jira token alias for CLI flows that accept a single Jira token field.</td>
+<td>Used by Jira helper commands that do not split Cloud and Server/Data Center auth into separate options.</td>
+</tr>
+<tr>
+<td><code>jira_project_key</code></td>
+<td>string</td>
+<td><code>""</code></td>
+<td>Default Jira project key.</td>
+<td>Used as the default project selection.</td>
+</tr>
+<tr>
+<td><code>jira_security_level</code></td>
+<td>string</td>
+<td><code>""</code></td>
+<td>Default Jira security level name for CLI Jira operations that accept it.</td>
+<td>Used only by commands that support Jira security-level input.</td>
+</tr>
+<tr>
+<td><code>jira_ssl_verify</code></td>
+<td>boolean</td>
+<td>unset</td>
+<td>Default Jira TLS verification flag.</td>
+<td>When omitted, the CLI leaves the server default unchanged.</td>
+</tr>
+<tr>
+<td><code>jira_max_results</code></td>
+<td>integer</td>
+<td><code>0</code></td>
+<td>Default Jira max-results override.</td>
+<td><code>0</code> means "do not send a value".</td>
+</tr>
+<tr>
+<td><code>enable_jira</code></td>
+<td>boolean</td>
+<td>unset</td>
+<td>Default Jira enrichment toggle.</td>
+<td>When omitted, the CLI leaves the server default unchanged.</td>
+</tr>
+<tr>
+<td><code>github_token</code></td>
+<td>string</td>
+<td><code>""</code></td>
+<td>Default GitHub token.</td>
+<td>Used for analysis-time GitHub lookups and GitHub CLI flows that need a token.</td>
+</tr>
+<tr>
+<td><code>github_repo_url</code></td>
+<td>string</td>
+<td><code>""</code></td>
+<td>Default GitHub repository URL for CLI GitHub operations that need a target repo.</td>
+<td>Used only by commands that accept a GitHub repository URL.</td>
+</tr>
+</tbody>
+</table>
+<div class="highlight"><pre><span></span><code><span class="k">[default]</span>
+<span class="n">server</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">&quot;prod&quot;</span>
+
+<span class="k">[defaults]</span>
+<span class="n">username</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">&quot;alice&quot;</span>
+<span class="n">no_verify_ssl</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="kc">false</span>
+<span class="n">jenkins_url</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">&quot;https://jenkins.example.com&quot;</span>
+<span class="n">ai_provider</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">&quot;claude&quot;</span>
+<span class="n">ai_model</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">&quot;sonnet&quot;</span>
+<span class="n">tests_repo_url</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">&quot;https://github.com/acme/tests:main&quot;</span>
+<span class="n">jira_url</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">&quot;https://jira.example.com&quot;</span>
+<span class="n">jira_project_key</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">&quot;PROJ&quot;</span>
+
+<span class="k">[servers.dev]</span>
+<span class="n">url</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">&quot;http://localhost:8000&quot;</span>
+<span class="n">no_verify_ssl</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="kc">true</span>
+<span class="n">jenkins_ssl_verify</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="kc">false</span>
+
+<span class="k">[servers.prod]</span>
+<span class="n">url</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">&quot;https://jji.example.com&quot;</span>
+<span class="n">api_key</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">&quot;replace-with-an-admin-api-key&quot;</span>
+<span class="n">github_token</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">&quot;replace-with-a-github-token&quot;</span>
+<span class="n">peers</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">&quot;gemini:gemini-2.5-pro&quot;</span>
+<span class="n">peer_analysis_max_rounds</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">5</span>
+<span class="n">additional_repos</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">&quot;product:https://github.com/acme/product:release-4.18&quot;</span>
+</code></pre></div>
+
+<h3 id="cli-environment-variables-and-global-flags">CLI Environment Variables and Global Flags</h3>
+<table>
+<thead>
+<tr>
+<th>Name</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+<th>Effect</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>JJI_SERVER</code> / <code>--server</code></td>
+<td>string</td>
+<td>unset</td>
+<td>Server profile name or full JJI URL.</td>
+<td>A full URL bypasses <code>config.toml</code> profile defaults for that connection.</td>
+</tr>
+<tr>
+<td><code>JJI_USERNAME</code> / <code>--user</code></td>
+<td>string</td>
+<td><code>""</code></td>
+<td>CLI username.</td>
+<td>Overrides <code>config.toml</code> <code>username</code>.</td>
+</tr>
+<tr>
+<td><code>JJI_API_KEY</code> / <code>--api-key</code></td>
+<td>string</td>
+<td><code>""</code></td>
+<td>Admin bearer token.</td>
+<td>Overrides <code>config.toml</code> <code>api_key</code>.</td>
+</tr>
+<tr>
+<td><code>JJI_NO_VERIFY_SSL</code> / <code>--no-verify-ssl</code></td>
+<td>boolean</td>
+<td>unset</td>
+<td>Disable TLS verification for the CLI HTTP client.</td>
+<td>Overrides <code>config.toml</code> <code>no_verify_ssl</code>.</td>
+</tr>
+<tr>
+<td><code>--verify-ssl</code></td>
+<td>boolean</td>
+<td>unset</td>
+<td>Force TLS verification on.</td>
+<td>Overrides <code>--no-verify-ssl</code>, <code>--insecure</code>, and <code>config.toml</code> <code>no_verify_ssl</code>.</td>
+</tr>
+<tr>
+<td><code>--insecure</code></td>
+<td>boolean</td>
+<td><code>false</code></td>
+<td>Alias for <code>--no-verify-ssl</code>.</td>
+<td>Forces TLS verification off for the CLI HTTP client.</td>
+</tr>
+</tbody>
+</table>
+<div class="highlight"><pre><span></span><code><span class="nb">export</span><span class="w"> </span><span class="nv">JJI_SERVER</span><span class="o">=</span>prod
+<span class="nb">export</span><span class="w"> </span><span class="nv">JJI_USERNAME</span><span class="o">=</span>alice
+<span class="nb">export</span><span class="w"> </span><span class="nv">JJI_API_KEY</span><span class="o">=</span><span class="s2">&quot;replace-with-an-admin-api-key&quot;</span>
+
+jji<span class="w"> </span>--verify-ssl<span class="w"> </span>health
+jji<span class="w"> </span>--server<span class="w"> </span>https://jji.example.com<span class="w"> </span>--user<span class="w"> </span>release-bot<span class="w"> </span>results<span class="w"> </span>list
+</code></pre></div>
+
+<h2 id="analysis-request-override-fields">Analysis Request Override Fields</h2>
+<p>This section documents the configuration-bearing request fields for <code>POST /analyze</code> and <code>POST /analyze-failures</code>.</p>
+<p>See <a href="rest-api-reference.html">REST API Reference</a> for required non-configuration fields such as <code>job_name</code>, <code>build_number</code>, <code>failures</code>, and <code>raw_xml</code>.</p>
+<blockquote>
+<p><strong>Note:</strong> For <code>force</code>, <code>wait_for_completion</code>, <code>poll_interval_minutes</code>, <code>max_wait_minutes</code>, and <code>peer_analysis_max_rounds</code>, omitting the JSON key keeps the server value. Sending the key applies the request value, even if that value matches the schema default.</p>
+</blockquote>
+<h3 id="shared-override-fields">Shared Override Fields</h3>
+<table>
+<thead>
+<tr>
+<th>Name</th>
+<th>Type</th>
+<th>Default When Omitted</th>
+<th>Description</th>
+<th>Effect</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>tests_repo_url</code></td>
+<td>string</td>
+<td>server default</td>
+<td>Tests repository URL.</td>
+<td>Overrides <code>TESTS_REPO_URL</code> for one request; supports an optional <code>:ref</code> suffix.</td>
+</tr>
+<tr>
+<td><code>ai_provider</code></td>
+<td><code>claude \| gemini \| cursor</code></td>
+<td>server default</td>
+<td>AI provider for this request.</td>
+<td>Overrides <code>AI_PROVIDER</code>; request fails if neither the request nor the server provides a provider.</td>
+</tr>
+<tr>
+<td><code>ai_model</code></td>
+<td>string</td>
+<td>server default</td>
+<td>AI model for this request.</td>
+<td>Overrides <code>AI_MODEL</code>; request fails if neither the request nor the server provides a model.</td>
+</tr>
+<tr>
+<td><code>enable_jira</code></td>
+<td>boolean</td>
+<td>server auto-detection</td>
+<td>Analysis-time Jira enrichment toggle.</td>
+<td>Overrides the server decision for this request only.</td>
+</tr>
+<tr>
+<td><code>ai_cli_timeout</code></td>
+<td>integer <code>&gt; 0</code></td>
+<td>server default</td>
+<td>AI CLI timeout in minutes.</td>
+<td>Overrides <code>AI_CLI_TIMEOUT</code>.</td>
+</tr>
+<tr>
+<td><code>jira_url</code></td>
+<td>string</td>
+<td>server default</td>
+<td>Jira base URL.</td>
+<td>Overrides <code>JIRA_URL</code>.</td>
+</tr>
+<tr>
+<td><code>jira_email</code></td>
+<td>string</td>
+<td>server default</td>
+<td>Jira Cloud email.</td>
+<td>Overrides <code>JIRA_EMAIL</code>.</td>
+</tr>
+<tr>
+<td><code>jira_api_token</code></td>
+<td>string</td>
+<td>server default</td>
+<td>Jira Cloud API token.</td>
+<td>Overrides <code>JIRA_API_TOKEN</code>.</td>
+</tr>
+<tr>
+<td><code>jira_pat</code></td>
+<td>string</td>
+<td>server default</td>
+<td>Jira personal access token.</td>
+<td>Overrides <code>JIRA_PAT</code>.</td>
+</tr>
+<tr>
+<td><code>jira_project_key</code></td>
+<td>string</td>
+<td>server default</td>
+<td>Jira project key.</td>
+<td>Overrides <code>JIRA_PROJECT_KEY</code>.</td>
+</tr>
+<tr>
+<td><code>jira_ssl_verify</code></td>
+<td>boolean</td>
+<td>server default</td>
+<td>Jira TLS verification flag.</td>
+<td>Overrides <code>JIRA_SSL_VERIFY</code>.</td>
+</tr>
+<tr>
+<td><code>jira_max_results</code></td>
+<td>integer <code>&gt; 0</code></td>
+<td>server default</td>
+<td>Maximum Jira matches returned per search.</td>
+<td>Overrides <code>JIRA_MAX_RESULTS</code>.</td>
+</tr>
+<tr>
+<td><code>raw_prompt</code></td>
+<td>string</td>
+<td>none</td>
+<td>Extra prompt text for this request.</td>
+<td>Appended to the analysis prompt for this request only.</td>
+</tr>
+<tr>
+<td><code>github_token</code></td>
+<td>string</td>
+<td>server default</td>
+<td>GitHub token for this request.</td>
+<td>Overrides <code>GITHUB_TOKEN</code> for GitHub-side lookups used during analysis.</td>
+</tr>
+<tr>
+<td><code>peer_ai_configs</code></td>
+<td>array of <code>AiConfigEntry</code></td>
+<td>server default</td>
+<td>Peer review configuration list.</td>
+<td>Overrides <code>PEER_AI_CONFIGS</code>; send <code>[]</code> to disable inherited peers.</td>
+</tr>
+<tr>
+<td><code>peer_analysis_max_rounds</code></td>
+<td>integer <code>1..10</code></td>
+<td>server default</td>
+<td>Maximum debate rounds.</td>
+<td>Overrides <code>PEER_ANALYSIS_MAX_ROUNDS</code> only when the key is explicitly present.</td>
+</tr>
+<tr>
+<td><code>additional_repos</code></td>
+<td>array of <code>AdditionalRepo</code></td>
+<td>server default</td>
+<td>Extra repositories for analysis context.</td>
+<td>Overrides <code>ADDITIONAL_REPOS</code>; send <code>[]</code> to disable inherited extra repos.</td>
+</tr>
+</tbody>
+</table>
+<h4 id="peer_ai_configs"><code>peer_ai_configs[]</code></h4>
+<table>
+<thead>
+<tr>
+<th>Name</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+<th>Effect</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>ai_provider</code></td>
+<td><code>claude \| gemini \| cursor</code></td>
+<td>none</td>
+<td>Peer provider name.</td>
+<td>Selects the provider for that peer reviewer.</td>
+</tr>
+<tr>
+<td><code>ai_model</code></td>
+<td>string</td>
+<td>none</td>
+<td>Peer model identifier.</td>
+<td>Must be non-blank after trimming.</td>
+</tr>
+</tbody>
+</table>
+<h4 id="additional_repos"><code>additional_repos[]</code></h4>
+<table>
+<thead>
+<tr>
+<th>Name</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+<th>Effect</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>name</code></td>
+<td>string</td>
+<td>none</td>
+<td>Logical repo name.</td>
+<td>Used as the cloned directory name; must be unique within the array and cannot contain path separators, <code>..</code>, or a leading <code>.</code>.</td>
+</tr>
+<tr>
+<td><code>url</code></td>
+<td>URL</td>
+<td>none</td>
+<td>Repository URL to clone.</td>
+<td>Must be a valid absolute URL.</td>
+</tr>
+<tr>
+<td><code>ref</code></td>
+<td>string</td>
+<td><code>""</code></td>
+<td>Branch or tag name.</td>
+<td>Empty means the remote default branch.</td>
+</tr>
+<tr>
+<td><code>token</code></td>
+<td>string or <code>null</code></td>
+<td><code>null</code></td>
+<td>Token for cloning a private repo.</td>
+<td>Used only for repository access; stored encrypted when request parameters are persisted.</td>
+</tr>
+</tbody>
+</table>
+<div class="highlight"><pre><span></span><code><span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;job_name&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;folder/job-name&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;build_number&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">1042</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;ai_provider&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;claude&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;ai_model&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;sonnet&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;tests_repo_url&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;https://github.com/acme/tests:main&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;peer_ai_configs&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span>
+<span class="w">    </span><span class="p">{</span>
+<span class="w">      </span><span class="nt">&quot;ai_provider&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;gemini&quot;</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;ai_model&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;gemini-2.5-pro&quot;</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">  </span><span class="p">],</span>
+<span class="w">  </span><span class="nt">&quot;peer_analysis_max_rounds&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">5</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;additional_repos&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span>
+<span class="w">    </span><span class="p">{</span>
+<span class="w">      </span><span class="nt">&quot;name&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;product&quot;</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;url&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;https://github.com/acme/product&quot;</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;ref&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;release-4.18&quot;</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">  </span><span class="p">]</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<div class="highlight"><pre><span></span><code><span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;raw_xml&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;&lt;testsuite&gt;...&lt;/testsuite&gt;&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;ai_provider&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;cursor&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;ai_model&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;gpt-5.4-xhigh&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;peer_ai_configs&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[],</span>
+<span class="w">  </span><span class="nt">&quot;additional_repos&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[]</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<h3 id="post-analyze-only-override-fields"><code>POST /analyze</code>-Only Override Fields</h3>
+<table>
+<thead>
+<tr>
+<th>Name</th>
+<th>Type</th>
+<th>Default When Omitted</th>
+<th>Description</th>
+<th>Effect</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>jenkins_url</code></td>
+<td>string</td>
+<td>server default</td>
+<td>Jenkins base URL.</td>
+<td>Overrides <code>JENKINS_URL</code>.</td>
+</tr>
+<tr>
+<td><code>jenkins_user</code></td>
+<td>string</td>
+<td>server default</td>
+<td>Jenkins username.</td>
+<td>Overrides <code>JENKINS_USER</code>.</td>
+</tr>
+<tr>
+<td><code>jenkins_password</code></td>
+<td>string</td>
+<td>server default</td>
+<td>Jenkins password or API token.</td>
+<td>Overrides <code>JENKINS_PASSWORD</code>.</td>
+</tr>
+<tr>
+<td><code>jenkins_ssl_verify</code></td>
+<td>boolean</td>
+<td>server default</td>
+<td>Jenkins TLS verification flag.</td>
+<td>Overrides <code>JENKINS_SSL_VERIFY</code>.</td>
+</tr>
+<tr>
+<td><code>jenkins_timeout</code></td>
+<td>integer <code>&gt; 0</code></td>
+<td>server default</td>
+<td>Jenkins API timeout in seconds.</td>
+<td>Overrides <code>JENKINS_TIMEOUT</code>.</td>
+</tr>
+<tr>
+<td><code>jenkins_artifacts_max_size_mb</code></td>
+<td>integer <code>&gt; 0</code></td>
+<td>server default</td>
+<td>Artifact size cap for this request.</td>
+<td>Overrides <code>JENKINS_ARTIFACTS_MAX_SIZE_MB</code>.</td>
+</tr>
+<tr>
+<td><code>get_job_artifacts</code></td>
+<td>boolean</td>
+<td>server default</td>
+<td>Artifact-download toggle for this request.</td>
+<td>Overrides <code>GET_JOB_ARTIFACTS</code>.</td>
+</tr>
+<tr>
+<td><code>force</code></td>
+<td>boolean</td>
+<td>server default</td>
+<td>Force-analysis toggle.</td>
+<td>Overrides <code>FORCE_ANALYSIS</code> only when the key is explicitly present.</td>
+</tr>
+<tr>
+<td><code>wait_for_completion</code></td>
+<td>boolean</td>
+<td>server default</td>
+<td>Wait toggle for this request.</td>
+<td>Overrides <code>WAIT_FOR_COMPLETION</code> only when the key is explicitly present.</td>
+</tr>
+<tr>
+<td><code>poll_interval_minutes</code></td>
+<td>integer <code>&gt; 0</code></td>
+<td>server default</td>
+<td>Poll interval while waiting.</td>
+<td>Overrides <code>POLL_INTERVAL_MINUTES</code> only when the key is explicitly present.</td>
+</tr>
+<tr>
+<td><code>max_wait_minutes</code></td>
+<td>integer <code>&gt;= 0</code></td>
+<td>server default</td>
+<td>Maximum wait duration.</td>
+<td>Overrides <code>MAX_WAIT_MINUTES</code> only when the key is explicitly present; explicit <code>0</code> means no wait limit.</td>
+</tr>
+</tbody>
+</table>
+<div class="highlight"><pre><span></span><code><span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;job_name&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;folder/job-name&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;build_number&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">1042</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;jenkins_url&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;https://jenkins.example.com&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;jenkins_user&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;ci-bot&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;jenkins_password&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;replace-with-a-token&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;wait_for_completion&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">false</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;force&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">true</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;get_job_artifacts&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">false</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<h2 id="metadata-rules-file-format">Metadata Rules File Format</h2>
+<p>The file referenced by <code>METADATA_RULES_FILE</code> can be either:</p>
+<table>
+<thead>
+<tr>
+<th>Name</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+<th>Effect</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Top-level <code>metadata_rules</code> key</td>
+<td>array of rule objects</td>
+<td>none</td>
+<td>Standard wrapper form for YAML or JSON.</td>
+<td>JJI loads the array under <code>metadata_rules</code>.</td>
+</tr>
+<tr>
+<td>Bare top-level array</td>
+<td>array of rule objects</td>
+<td>none</td>
+<td>Shorthand form for YAML or JSON.</td>
+<td>JJI treats the entire file as the rules list.</td>
+</tr>
+</tbody>
+</table>
+<h3 id="rule-object-fields">Rule Object Fields</h3>
+<table>
+<thead>
+<tr>
+<th>Name</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+<th>Effect</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>pattern</code></td>
+<td>string</td>
+<td>none</td>
+<td>Match expression for the Jenkins job name.</td>
+<td>Required. Treated as a glob unless it contains a named regex capture group such as <code>(?P&lt;version&gt;...)</code>.</td>
+</tr>
+<tr>
+<td><code>team</code></td>
+<td>string</td>
+<td>unset</td>
+<td>Team value to assign.</td>
+<td>First matching rule wins for this field.</td>
+</tr>
+<tr>
+<td><code>tier</code></td>
+<td>string</td>
+<td>unset</td>
+<td>Tier value to assign.</td>
+<td>First matching rule wins for this field.</td>
+</tr>
+<tr>
+<td><code>version</code></td>
+<td>string</td>
+<td>unset</td>
+<td>Version value to assign.</td>
+<td>First matching rule wins for this field.</td>
+</tr>
+<tr>
+<td><code>labels</code></td>
+<td>string or array of strings</td>
+<td>unset</td>
+<td>Labels to assign.</td>
+<td>Labels accumulate across all matching rules and duplicates are removed.</td>
+</tr>
+</tbody>
+</table>
+<h3 id="matching-rules">Matching Rules</h3>
+<table>
+<thead>
+<tr>
+<th>Rule</th>
+<th>Effect</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Glob matching</td>
+<td>Used for patterns that do not contain <code>(?P&lt;...&gt;)</code>.</td>
+</tr>
+<tr>
+<td>Regex matching</td>
+<td>Used only when the pattern contains at least one named capture group.</td>
+</tr>
+<tr>
+<td>Named capture groups</td>
+<td>Captured values become metadata fields with the same names.</td>
+</tr>
+<tr>
+<td>Explicit field precedence</td>
+<td>Explicit <code>team</code>, <code>tier</code>, or <code>version</code> values override regex-captured values from the same rule.</td>
+</tr>
+<tr>
+<td>Scalar merge strategy</td>
+<td><code>team</code>, <code>tier</code>, and <code>version</code> use first-match-wins.</td>
+</tr>
+<tr>
+<td>Label merge strategy</td>
+<td><code>labels</code> accumulate from every matching rule.</td>
+</tr>
+<tr>
+<td>Reload behavior</td>
+<td>Rules are cached for the process lifetime; restart the server to pick up file changes.</td>
+</tr>
+</tbody>
+</table>
+<blockquote>
+<p><strong>Warning:</strong> A pattern like <code>^job-.*$</code> is still treated as a glob. To force regex mode, include at least one named capture group such as <code>(?P&lt;version&gt;...)</code>.</p>
+</blockquote>
+<div class="highlight"><pre><span></span><code><span class="nt">metadata_rules</span><span class="p">:</span>
+<span class="w">  </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">pattern</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;release-*&quot;</span>
+<span class="w">    </span><span class="nt">labels</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="s">&quot;release&quot;</span><span class="p p-Indicator">]</span>
+
+<span class="w">  </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">pattern</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;console-t1-*&quot;</span>
+<span class="w">    </span><span class="nt">team</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;console&quot;</span>
+<span class="w">    </span><span class="nt">tier</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;t1&quot;</span>
+
+<span class="w">  </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">pattern</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;^console-(?P&lt;version&gt;\\d+\\.\\d+)-(?P&lt;tier&gt;t[12])$&quot;</span>
+<span class="w">    </span><span class="nt">team</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;console&quot;</span>
+<span class="w">    </span><span class="nt">labels</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="s">&quot;versioned&quot;</span><span class="p p-Indicator">]</span>
+</code></pre></div>
+
+<p>See <a href="rest-api-reference.html">REST API Reference</a> for metadata preview endpoints and <a href="cli-command-reference.html">CLI Command Reference</a> for metadata-related CLI commands.</p>
+<h2 id="related-pages">Related Pages</h2>
+<ul>
+<li><a href="copy-common-deployment-recipes.html">Copy Common Deployment Recipes</a></li>
+<li><a href="customize-ai-analysis.html">Customize AI Analysis</a></li>
+<li><a href="manage-users-access-and-token-usage.html">Manage Users, Access, and Token Usage</a></li>
+<li><a href="cli-command-reference.html">CLI Command Reference</a></li>
+<li><a href="rest-api-reference.html">REST API Reference</a></li>
+</ul>
+                </div>
+            </article>
+            <nav class="page-nav">
+                
+                <a href="rest-api-reference.html" class="page-nav-link page-nav-prev">
+                    <span class="page-nav-label">Previous</span>
+                    <span class="page-nav-title">REST API Reference</span>
+                </a>
+                
+                
+                <div></div>
+                
+            </nav>
+            
+            <aside class="toc-sidebar">
+                <div class="toc-container">
+                    <h3>On this page</h3>
+                    <div class="toc">
+<ul>
+<li><a href="#configuration-precedence">Configuration Precedence</a><ul>
+<li><a href="#server-side-analysis-resolution">Server-side analysis resolution</a></li>
+<li><a href="#cli-resolution">CLI resolution</a></li>
+</ul>
+</li>
+<li><a href="#server-environment-variables">Server Environment Variables</a><ul>
+<li><a href="#storage-and-runtime">Storage and Runtime</a></li>
+<li><a href="#access-sessions-and-identity">Access, Sessions, and Identity</a></li>
+<li><a href="#jenkins-defaults">Jenkins Defaults</a></li>
+<li><a href="#ai-defaults">AI Defaults</a></li>
+<li><a href="#provider-cli-environment">Provider CLI Environment</a></li>
+<li><a href="#jira-integration">Jira Integration</a></li>
+<li><a href="#github-integration">GitHub Integration</a></li>
+<li><a href="#report-portal">Report Portal</a></li>
+<li><a href="#web-push-and-alerting">Web Push and Alerting</a></li>
+<li><a href="#metadata-rules-file">Metadata Rules File</a></li>
+</ul>
+</li>
+<li><a href="#jji-profile-file-configtoml">jji Profile File: config.toml</a><ul>
+<li><a href="#top-level-sections">Top-Level Sections</a></li>
+<li><a href="#default-fields">[default] Fields</a></li>
+<li><a href="#defaults-and-serversname-common-fields">[defaults] and [servers.&lt;name&gt;] Common Fields</a></li>
+<li><a href="#cli-environment-variables-and-global-flags">CLI Environment Variables and Global Flags</a></li>
+</ul>
+</li>
+<li><a href="#analysis-request-override-fields">Analysis Request Override Fields</a><ul>
+<li><a href="#shared-override-fields">Shared Override Fields</a></li>
+<li><a href="#post-analyze-only-override-fields">POST /analyze-Only Override Fields</a></li>
+</ul>
+</li>
+<li><a href="#metadata-rules-file-format">Metadata Rules File Format</a><ul>
+<li><a href="#rule-object-fields">Rule Object Fields</a></li>
+<li><a href="#matching-rules">Matching Rules</a></li>
+</ul>
+</li>
+<li><a href="#related-pages">Related Pages</a></li>
+</ul>
+</div>
+
+                </div>
+            </aside>
+            
+
+        </main>
+
+        <footer class="page-footer">
+            
+            <span class="footer-version">Generated from version 3.2.0</span>
+            <span class="footer-sep">&middot;</span>
+            
+            Generated with <a href="https://github.com/myk-org/docsfy" target="_blank" rel="noopener">docs<span class="brand-accent">fy</span></a>
+            <span class="footer-sep">&middot;</span>
+            <span class="footer-llm">LLM-friendly: <a href="llms.txt">llms.txt</a> &middot; <a href="llms-full.txt">llms-full.txt</a></span>
+        </footer>
+    </div>
+
+    <div class="sidebar-overlay" id="sidebar-overlay"></div>
+
+    <script src="assets/theme.js"></script>
+    <script src="assets/search.js"></script>
+    <script src="assets/copy.js"></script>
+    <script src="assets/callouts.js"></script>
+    <script src="assets/scrollspy.js"></script>
+    <script src="assets/codelabels.js"></script>
+    <script src="assets/github.js"></script>
+    <script>
+(function() {
+    var toggle = document.getElementById('sidebar-toggle');
+    var sidebar = document.getElementById('sidebar');
+    var overlay = document.getElementById('sidebar-overlay');
+    if (toggle && sidebar) {
+        toggle.addEventListener('click', function() {
+            sidebar.classList.toggle('open');
+            if (overlay) overlay.classList.toggle('open');
+            var expanded = sidebar.classList.contains('open');
+            toggle.setAttribute('aria-expanded', expanded ? 'true' : 'false');
+        });
+    }
+    if (overlay) {
+        overlay.addEventListener('click', function() {
+            sidebar.classList.remove('open');
+            overlay.classList.remove('open');
+            if (toggle) toggle.setAttribute('aria-expanded', 'false');
+        });
+    }
+})();
+</script>
+<script>
+(function() {
+    var sidebar = document.querySelector('.sidebar-nav') || document.querySelector('.sidebar');
+    if (!sidebar) return;
+
+    // Restore scroll position
+    var saved = sessionStorage.getItem('sidebar-scroll');
+    if (saved) sidebar.scrollTop = parseInt(saved, 10);
+
+    // Save scroll position before navigating
+    sidebar.addEventListener('scroll', function() {
+        sessionStorage.setItem('sidebar-scroll', sidebar.scrollTop.toString());
+    });
+
+    // Also scroll active link into view if no saved position
+    if (!saved) {
+        var active = sidebar.querySelector('.nav-link.active');
+        if (active) {
+            active.scrollIntoView({ block: 'center', behavior: 'instant' });
+        }
+    }
+})();
+</script>
+</body>
+</html>

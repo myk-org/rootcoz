@@ -1,0 +1,423 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="light">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Investigate Failure History - jenkins-job-insight</title>
+    <meta name="description" content="Turn failing Jenkins jobs into clear answers, collaborative reviews, and ready-to-file bugs.">
+    <link rel="stylesheet" href="assets/style.css">
+    <script>try{var t=localStorage.getItem('theme');if(t==='dark')document.documentElement.setAttribute('data-theme','dark')}catch(e){}</script>
+    <link rel="alternate" type="text/plain" title="LLM Documentation Index" href="llms.txt">
+    <link rel="alternate" type="text/plain" title="LLM Full Documentation" href="llms-full.txt">
+</head>
+<body>
+    <aside class="sidebar" id="sidebar">
+        <div class="sidebar-header">
+            <a href="index.html" class="sidebar-logo">jenkins-job-insight</a>
+            <p class="sidebar-tagline">Turn failing Jenkins jobs into clear answers, collaborative reviews, and ready-to-file bugs.</p>
+        </div>
+
+        <div class="sidebar-search">
+            <input type="text" id="search-input" placeholder="Search... (⌘K)" autocomplete="off" readonly>
+            <div id="search-results" class="search-results"></div>
+        </div>
+
+        <nav class="sidebar-nav">
+            
+            <div class="nav-group">
+                <h3 class="nav-group-title">Getting Started</h3>
+                <ul class="nav-group-pages">
+                    
+                    <li>
+                        <a href="analyze-your-first-jenkins-job.html"
+                           class="nav-link">
+                            Analyze Your First Jenkins Job
+                        </a>
+                    </li>
+                    
+                </ul>
+            </div>
+            
+            <div class="nav-group">
+                <h3 class="nav-group-title">User Guides</h3>
+                <ul class="nav-group-pages">
+                    
+                    <li>
+                        <a href="configure-your-profile-and-notifications.html"
+                           class="nav-link">
+                            Configure Your Profile and Notifications
+                        </a>
+                    </li>
+                    
+                    <li>
+                        <a href="analyze-a-jenkins-job.html"
+                           class="nav-link">
+                            Analyze a Jenkins Job
+                        </a>
+                    </li>
+                    
+                    <li>
+                        <a href="review-and-classify-failures.html"
+                           class="nav-link">
+                            Review and Classify Failures
+                        </a>
+                    </li>
+                    
+                    <li>
+                        <a href="investigate-failure-history.html"
+                           class="nav-link active" aria-current="page">
+                            Investigate Failure History
+                        </a>
+                    </li>
+                    
+                    <li>
+                        <a href="customize-ai-analysis.html"
+                           class="nav-link">
+                            Customize AI Analysis
+                        </a>
+                    </li>
+                    
+                    <li>
+                        <a href="create-github-issues-and-jira-bugs.html"
+                           class="nav-link">
+                            Create GitHub Issues and Jira Bugs
+                        </a>
+                    </li>
+                    
+                    <li>
+                        <a href="push-classifications-to-report-portal.html"
+                           class="nav-link">
+                            Push Classifications to Report Portal
+                        </a>
+                    </li>
+                    
+                    <li>
+                        <a href="organize-jobs-with-metadata.html"
+                           class="nav-link">
+                            Organize Jobs with Metadata
+                        </a>
+                    </li>
+                    
+                    <li>
+                        <a href="manage-users-access-and-token-usage.html"
+                           class="nav-link">
+                            Manage Users, Access, and Token Usage
+                        </a>
+                    </li>
+                    
+                </ul>
+            </div>
+            
+            <div class="nav-group">
+                <h3 class="nav-group-title">Recipes</h3>
+                <ul class="nav-group-pages">
+                    
+                    <li>
+                        <a href="copy-common-analysis-recipes.html"
+                           class="nav-link">
+                            Copy Common Analysis Recipes
+                        </a>
+                    </li>
+                    
+                    <li>
+                        <a href="copy-common-deployment-recipes.html"
+                           class="nav-link">
+                            Copy Common Deployment Recipes
+                        </a>
+                    </li>
+                    
+                </ul>
+            </div>
+            
+            <div class="nav-group">
+                <h3 class="nav-group-title">Reference</h3>
+                <ul class="nav-group-pages">
+                    
+                    <li>
+                        <a href="cli-command-reference.html"
+                           class="nav-link">
+                            CLI Command Reference
+                        </a>
+                    </li>
+                    
+                    <li>
+                        <a href="rest-api-reference.html"
+                           class="nav-link">
+                            REST API Reference
+                        </a>
+                    </li>
+                    
+                    <li>
+                        <a href="configuration-and-environment-reference.html"
+                           class="nav-link">
+                            Configuration and Environment Reference
+                        </a>
+                    </li>
+                    
+                </ul>
+            </div>
+            
+        </nav>
+    </aside>
+
+    <div class="main-wrapper">
+        <header class="top-bar">
+            <div class="top-bar-left">
+                <button class="sidebar-toggle" id="sidebar-toggle" aria-label="Toggle sidebar" aria-expanded="false">
+                    <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
+                        <path d="M3 5h14M3 10h14M3 15h14" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+                    </svg>
+                </button>
+                <a href="index.html" class="top-bar-title">jenkins-job-insight</a>
+            </div>
+            <div class="top-bar-spacer"></div>
+            <div class="top-bar-right">
+                <button class="top-bar-search-btn" id="search-trigger" aria-label="Search">
+                    <kbd>&#8984;K</kbd> Search
+                </button>
+                <a href="https://github.com/myk-org/docsfy" target="_blank" rel="noopener" class="docsfy-badge" title="Generated with docsfy">
+                    ⚡ docs<span class="brand-accent">fy</span>
+                </a>
+                
+                <a href="https://github.com/myk-org/jenkins-job-insight.git" target="_blank" rel="noopener noreferrer" class="top-bar-github" id="github-link" data-repo-url="https://github.com/myk-org/jenkins-job-insight.git">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><path d="M12 0c-6.626 0-12 5.373-12 12 0 5.302 3.438 9.8 8.207 11.387.599.111.793-.261.793-.577v-2.234c-3.338.726-4.033-1.416-4.033-1.416-.546-1.387-1.333-1.756-1.333-1.756-1.089-.745.083-.729.083-.729 1.205.084 1.839 1.237 1.839 1.237 1.07 1.834 2.807 1.304 3.492.997.107-.775.418-1.305.762-1.604-2.665-.305-5.467-1.334-5.467-5.931 0-1.311.469-2.381 1.236-3.221-.124-.303-.535-1.524.117-3.176 0 0 1.008-.322 3.301 1.23.957-.266 1.983-.399 3.003-.404 1.02.005 2.047.138 3.006.404 2.291-1.552 3.297-1.23 3.297-1.23.653 1.653.242 2.874.118 3.176.77.84 1.235 1.911 1.235 3.221 0 4.609-2.807 5.624-5.479 5.921.43.372.823 1.102.823 2.222v3.293c0 .319.192.694.801.576 4.765-1.589 8.199-6.086 8.199-11.386 0-6.627-5.373-12-12-12z"/></svg>
+                    <span class="github-stars" id="github-stars" title="GitHub stars"></span>
+                </a>
+                
+                <button class="theme-toggle" id="theme-toggle" aria-label="Toggle theme">
+                    <svg class="icon-sun" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+                        <circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/>
+                    </svg>
+                    <svg class="icon-moon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+                        <path d="M21 12.79A9 9 0 1111.21 3 7 7 0 0021 12.79z"/>
+                    </svg>
+                </button>
+            </div>
+        </header>
+
+        <main class="content">
+            
+            <article class="article">
+                <div class="article-body">
+                    <!-- SECURITY: |safe is intentional. Content is AI-generated markdown
+                         converted to HTML server-side by the markdown library, not
+                         user-supplied input. XSS risk is minimal and accepted since
+                         the AI generates the content, not end users. -->
+                    <h1 id="investigate-failure-history">Investigate Failure History</h1>
+<p>Use failure history when you want to answer "have we seen this before?" before you reclassify a failure or file a bug. Looking across earlier runs helps you separate recurring noise from a real new breakage.</p>
+<h2 id="prerequisites">Prerequisites</h2>
+<ul>
+<li>At least one completed analysis in JJI. See <a href="analyze-a-jenkins-job.html">Analyze a Jenkins Job</a> for details.</li>
+<li>Access to the web app or a configured <code>jji</code> CLI. See <a href="cli-command-reference.html">CLI Command Reference</a> for details.</li>
+<li>A browser username if you want to use the web UI. See <a href="configure-your-profile-and-notifications.html">Configure Your Profile and Notifications</a> for details.</li>
+</ul>
+<h2 id="quick-example">Quick Example</h2>
+<div class="highlight"><pre><span></span><code>jji<span class="w"> </span><span class="nb">history</span><span class="w"> </span>failures
+</code></pre></div>
+
+<p>Start here when you want the newest recorded failures across all analyzed jobs, then narrow the list by test, classification, job, or signature.</p>
+<h2 id="step-by-step">Step-by-step</h2>
+<blockquote>
+<p><strong>Tip:</strong> Use the browser to browse and open results quickly. Switch to <code>jji</code> when you need an exact job filter, signature search, or JSON output.</p>
+</blockquote>
+<table>
+<thead>
+<tr>
+<th>You want to know...</th>
+<th>Fastest path</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>What has been failing lately?</td>
+<td><code>History</code> in the web app or <code>jji history failures</code></td>
+</tr>
+<tr>
+<td>How often does one test fail in one job?</td>
+<td><code>jji history test TEST_NAME --job-name JOB_NAME</code></td>
+</tr>
+<tr>
+<td>Do several tests share one failure pattern?</td>
+<td><code>jji history search --signature SIGNATURE</code></td>
+</tr>
+<tr>
+<td>Is one Jenkins job getting noisier overall?</td>
+<td><code>jji history stats JOB_NAME</code></td>
+</tr>
+</tbody>
+</table>
+<ol>
+<li>Start with the broad list.</li>
+</ol>
+<p><code>bash
+   jji history failures --limit 50</code></p>
+<p>In the browser, open <code>History</code> to scan the latest failures. Use the search box to narrow the list, use the classification picker to focus on one category, click a row to open the full result, or click the test name to open that test's history page.</p>
+<ol>
+<li>Drill into one test.</li>
+</ol>
+<p><code>bash
+   jji history test tests.network.TestDNS.test_lookup --job-name ocp-4.16-e2e</code></p>
+<p>Use this when one failure keeps reappearing and you want to know whether it is specific to one job. The test view shows recent runs, the latest classification, related comments, and timestamps such as first seen and last seen.</p>
+<blockquote>
+<p><strong>Note:</strong> If you want pass counts or a failure rate, include <code>--job-name</code>. Without a job filter, the single-test view can still show failure history, but it may not have enough context to calculate a full pass/fail rate.</p>
+</blockquote>
+<ol>
+<li>Check whether the same root cause hits multiple tests.</li>
+</ol>
+<p><code>bash
+   jji history search --signature sig-abc</code></p>
+<p>Run this when several failures look related and you already have a signature value. The default output shows how many times that signature appeared and which tests share it, so you can tell whether you are looking at one repeated failure mode or several unrelated problems.</p>
+<ol>
+<li>Measure job-wide noise before you decide it is a regression.</li>
+</ol>
+<p><code>bash
+   jji history stats ocp-e2e</code></p>
+<p>This gives you the number of analyzed builds, how many of them had failures, and the most common failing tests for that job. Use it when the question is "is this job unhealthy lately?" rather than "what happened to this one test?"</p>
+<ol>
+<li>Narrow the list to what you actually need to triage.</li>
+</ol>
+<p><code>bash
+   jji history failures --job-name ocp-e2e --classification "REGRESSION"</code></p>
+<p>This is a good last step before taking action. If the pattern looks stable and already explained, continue with <a href="review-and-classify-failures.html">Review and Classify Failures</a>; if it points to a new defect, continue with <a href="create-github-issues-and-jira-bugs.html">Create GitHub Issues and Jira Bugs</a>.</p>
+<h2 id="advanced-usage">Advanced Usage</h2>
+<div class="highlight"><pre><span></span><code>jji<span class="w"> </span><span class="nb">history</span><span class="w"> </span>failures<span class="w"> </span>--search<span class="w"> </span><span class="s2">&quot;DNS resolution failed&quot;</span>
+</code></pre></div>
+
+<p>Use <code>--search</code> when you only have a fragment of the failure in front of you. It is the quickest way to get back to the right test or result before you decide whether you need a deeper job or signature lookup.</p>
+<div class="highlight"><pre><span></span><code>jji<span class="w"> </span><span class="nb">history</span><span class="w"> </span>failures<span class="w"> </span>--job-name<span class="w"> </span>ocp-e2e<span class="w"> </span>--classification<span class="w"> </span><span class="s2">&quot;FLAKY&quot;</span><span class="w"> </span>--limit<span class="w"> </span><span class="m">50</span><span class="w"> </span>--offset<span class="w"> </span><span class="m">50</span>
+</code></pre></div>
+
+<p>Combine exact job filtering, classification filtering, and pagination when the browser list is too broad. The classification filter accepts <code>CODE ISSUE</code>, <code>PRODUCT BUG</code>, <code>FLAKY</code>, <code>REGRESSION</code>, <code>INFRASTRUCTURE</code>, <code>KNOWN_BUG</code>, and <code>INTERMITTENT</code>.</p>
+<div class="highlight"><pre><span></span><code>jji<span class="w"> </span><span class="nb">history</span><span class="w"> </span><span class="nb">test</span><span class="w"> </span>tests.TestA.test_one<span class="w"> </span>--job-name<span class="w"> </span>ocp-e2e<span class="w"> </span>--exclude-job-id<span class="w"> </span>job-99
+jji<span class="w"> </span><span class="nb">history</span><span class="w"> </span>search<span class="w"> </span>--signature<span class="w"> </span>sig-abc<span class="w"> </span>--exclude-job-id<span class="w"> </span>job-99
+jji<span class="w"> </span><span class="nb">history</span><span class="w"> </span>stats<span class="w"> </span>ocp-e2e<span class="w"> </span>--exclude-job-id<span class="w"> </span>job-99
+</code></pre></div>
+
+<p>Use <code>--exclude-job-id</code> when you are triaging one active result and want to compare it against older history without counting the current run. This makes it easier to decide whether the current failure is genuinely new.</p>
+<div class="highlight"><pre><span></span><code>jji<span class="w"> </span>--json<span class="w"> </span><span class="nb">history</span><span class="w"> </span>stats<span class="w"> </span>ocp-e2e
+jji<span class="w"> </span>--json<span class="w"> </span><span class="nb">history</span><span class="w"> </span>search<span class="w"> </span>--signature<span class="w"> </span>sig-abc
+</code></pre></div>
+
+<p>Use JSON output for scripting, dashboards, or when you want fields that are not shown in the default table view. For example, <code>jji --json history stats</code> includes the recent trend value for the job. See <a href="rest-api-reference.html">REST API Reference</a> if you want to automate the same workflows over HTTP.</p>
+<blockquote>
+<p><strong>Tip:</strong> In the browser, you can sort the current page by test, job, classification, or date. Use pagination to move through older results.</p>
+</blockquote>
+<h2 id="troubleshooting">Troubleshooting</h2>
+<ul>
+<li><strong><code>Failure rate</code> shows <code>N/A</code>, or the per-test totals do not look useful.</strong> Run <code>jji history test TEST_NAME --job-name JOB_NAME</code> so JJI can estimate pass/fail math for one job.</li>
+<li><strong>Signature search returns nothing.</strong> Make sure you are using the signature value, not the human-readable error message. If all you have is the error text, start with <code>jji history failures --search "..."</code>.</li>
+<li><strong>The CLI says no server was specified.</strong> Add <code>--server</code>, set <code>JJI_SERVER</code>, or configure a default CLI profile. See <a href="cli-command-reference.html">CLI Command Reference</a> for details.</li>
+<li><strong>History looks empty right after you start a new analysis.</strong> Wait for the analysis to complete, then try again. If you do not have any completed analyses yet, start with <a href="analyze-a-jenkins-job.html">Analyze a Jenkins Job</a>.</li>
+</ul>
+<h2 id="related-pages">Related Pages</h2>
+<ul>
+<li><a href="review-and-classify-failures.html">Review and Classify Failures</a></li>
+<li><a href="analyze-a-jenkins-job.html">Analyze a Jenkins Job</a></li>
+<li><a href="create-github-issues-and-jira-bugs.html">Create GitHub Issues and Jira Bugs</a></li>
+<li><a href="cli-command-reference.html">CLI Command Reference</a></li>
+<li><a href="rest-api-reference.html">REST API Reference</a></li>
+</ul>
+                </div>
+            </article>
+            <nav class="page-nav">
+                
+                <a href="review-and-classify-failures.html" class="page-nav-link page-nav-prev">
+                    <span class="page-nav-label">Previous</span>
+                    <span class="page-nav-title">Review and Classify Failures</span>
+                </a>
+                
+                
+                <a href="customize-ai-analysis.html" class="page-nav-link page-nav-next">
+                    <span class="page-nav-label">Next</span>
+                    <span class="page-nav-title">Customize AI Analysis</span>
+                </a>
+                
+            </nav>
+            
+            <aside class="toc-sidebar">
+                <div class="toc-container">
+                    <h3>On this page</h3>
+                    <div class="toc">
+<ul>
+<li><a href="#prerequisites">Prerequisites</a></li>
+<li><a href="#quick-example">Quick Example</a></li>
+<li><a href="#step-by-step">Step-by-step</a></li>
+<li><a href="#advanced-usage">Advanced Usage</a></li>
+<li><a href="#troubleshooting">Troubleshooting</a></li>
+<li><a href="#related-pages">Related Pages</a></li>
+</ul>
+</div>
+
+                </div>
+            </aside>
+            
+
+        </main>
+
+        <footer class="page-footer">
+            
+            <span class="footer-version">Generated from version 3.2.0</span>
+            <span class="footer-sep">&middot;</span>
+            
+            Generated with <a href="https://github.com/myk-org/docsfy" target="_blank" rel="noopener">docs<span class="brand-accent">fy</span></a>
+            <span class="footer-sep">&middot;</span>
+            <span class="footer-llm">LLM-friendly: <a href="llms.txt">llms.txt</a> &middot; <a href="llms-full.txt">llms-full.txt</a></span>
+        </footer>
+    </div>
+
+    <div class="sidebar-overlay" id="sidebar-overlay"></div>
+
+    <script src="assets/theme.js"></script>
+    <script src="assets/search.js"></script>
+    <script src="assets/copy.js"></script>
+    <script src="assets/callouts.js"></script>
+    <script src="assets/scrollspy.js"></script>
+    <script src="assets/codelabels.js"></script>
+    <script src="assets/github.js"></script>
+    <script>
+(function() {
+    var toggle = document.getElementById('sidebar-toggle');
+    var sidebar = document.getElementById('sidebar');
+    var overlay = document.getElementById('sidebar-overlay');
+    if (toggle && sidebar) {
+        toggle.addEventListener('click', function() {
+            sidebar.classList.toggle('open');
+            if (overlay) overlay.classList.toggle('open');
+            var expanded = sidebar.classList.contains('open');
+            toggle.setAttribute('aria-expanded', expanded ? 'true' : 'false');
+        });
+    }
+    if (overlay) {
+        overlay.addEventListener('click', function() {
+            sidebar.classList.remove('open');
+            overlay.classList.remove('open');
+            if (toggle) toggle.setAttribute('aria-expanded', 'false');
+        });
+    }
+})();
+</script>
+<script>
+(function() {
+    var sidebar = document.querySelector('.sidebar-nav') || document.querySelector('.sidebar');
+    if (!sidebar) return;
+
+    // Restore scroll position
+    var saved = sessionStorage.getItem('sidebar-scroll');
+    if (saved) sidebar.scrollTop = parseInt(saved, 10);
+
+    // Save scroll position before navigating
+    sidebar.addEventListener('scroll', function() {
+        sessionStorage.setItem('sidebar-scroll', sidebar.scrollTop.toString());
+    });
+
+    // Also scroll active link into view if no saved position
+    if (!saved) {
+        var active = sidebar.querySelector('.nav-link.active');
+        if (active) {
+            active.scrollIntoView({ block: 'center', behavior: 'instant' });
+        }
+    }
+})();
+</script>
+</body>
+</html>

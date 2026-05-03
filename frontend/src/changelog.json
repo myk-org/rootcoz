@@ -1,0 +1,13 @@
+[
+  {
+    "version": "3.2.0",
+    "date": "2026-04-26",
+    "entries": [
+      { "title": "@Mentions & Notifications", "description": "Get notified when someone mentions you in a comment. View all your mentions in the new Mentions tab." },
+      { "title": "Filter jobs by metadata", "description": "Filter dashboard jobs by team, tier, version, and custom labels." },
+      { "title": "Force analysis on successful builds", "description": "Re-analyze passing builds to catch flaky tests." },
+      { "title": "Monitoring & alerting", "description": "Prometheus metrics, Slack and email alerts for server error spikes." },
+      { "title": "AI token usage dashboard", "description": "Admin dashboard showing AI token consumption per job and provider." }
+    ]
+  }
+]
