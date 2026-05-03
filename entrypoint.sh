@@ -5,12 +5,13 @@
 # ~/.config non-writable. XDG_CONFIG_HOME redirects config writes
 # to a writable location.
 
-# Symlink cursor config dir to PVC mount so agent login writes persist
-if [ -d /cursor-credentials ]; then
+# Cursor auth: create config dir (owned by runtime UID so chmod works)
+# and symlink auth.json to the PVC mount for persistence
+if [ -d /home/appuser/.cursor-auth ]; then
     _cursor_cfg="${XDG_CONFIG_HOME:-/home/appuser/.config}/cursor"
-    mkdir -p "$(dirname "$_cursor_cfg")"
-    rm -rf "$_cursor_cfg"
-    ln -sfn /cursor-credentials "$_cursor_cfg"
+    mkdir -p "$_cursor_cfg"
+    chmod 0700 "$_cursor_cfg"
+    ln -sf /home/appuser/.cursor-auth/auth.json "$_cursor_cfg/auth.json"
 fi
 
 # Resolve PORT with a default so the exec-form CMD (which cannot expand
