@@ -152,3 +152,50 @@ export function clearTokens(): void {
     // Storage unavailable — silently ignore
   }
 }
+
+/**
+ * One-time migration from legacy jji_* keys to rootcoz_*.
+ * Copies values and removes the old keys so migration runs only once.
+ */
+function migrateLegacyKeys(): void {
+  // Migrate localStorage keys
+  const LEGACY_MAP: Record<string, string> = {
+    jji_github_token: 'rootcoz_github_token',
+    jji_jira_token: 'rootcoz_jira_token',
+    jji_jira_email: 'rootcoz_jira_email',
+    jji_is_admin: 'rootcoz_is_admin',
+    jji_role: 'rootcoz_role',
+  }
+  try {
+    for (const [oldKey, newKey] of Object.entries(LEGACY_MAP)) {
+      const oldVal = localStorage.getItem(oldKey)
+      if (oldVal !== null && localStorage.getItem(newKey) === null) {
+        localStorage.setItem(newKey, oldVal)
+      }
+      // Always remove old key (even if new key already exists)
+      localStorage.removeItem(oldKey)
+    }
+  } catch {
+    // Storage unavailable
+  }
+
+  // Migrate jji_username cookie → rootcoz_username cookie
+  const oldCookieMatch = document.cookie.match(
+    /(?:^|;\s*)jji_username=([^;]*)/
+  )
+  if (oldCookieMatch) {
+    const oldValue = oldCookieMatch[1]
+    // Only migrate if new cookie doesn't exist
+    const newCookieMatch = document.cookie.match(
+      /(?:^|;\s*)rootcoz_username=([^;]*)/
+    )
+    if (!newCookieMatch) {
+      document.cookie = `rootcoz_username=${oldValue}; path=/; max-age=${365 * 24 * 60 * 60}; SameSite=Lax`
+    }
+    // Clear old cookie
+    document.cookie = 'jji_username=; path=/; max-age=0; SameSite=Lax'
+  }
+}
+
+// Run migration on module load
+migrateLegacyKeys()

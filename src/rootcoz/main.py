@@ -688,6 +688,25 @@ class ErrorTrackingMiddleware(BaseHTTPMiddleware):
         return response
 
 
+# Legacy cookie names from the jenkins-job-insight era.
+# Read as fallback so existing sessions survive the rename;
+# cleared once the new cookie is set.
+_LEGACY_COOKIE_MAP: dict[str, str] = {
+    "rootcoz_username": "jji_username",
+    "rootcoz_session": "jji_session",
+}
+
+
+def _read_cookie(request: Request, name: str) -> str:
+    """Read cookie with legacy fallback."""
+    value = request.cookies.get(name, "")
+    if not value:
+        legacy = _LEGACY_COOKIE_MAP.get(name)
+        if legacy:
+            value = request.cookies.get(legacy, "")
+    return value
+
+
 def _set_username_cookie(response: Response, username: str, *, secure: bool) -> None:
     """Set the rootcoz_username cookie with consistent attributes."""
     response.set_cookie(
@@ -698,6 +717,8 @@ def _set_username_cookie(response: Response, username: str, *, secure: bool) -> 
         samesite="lax",
         secure=secure,
     )
+    # Clear legacy cookie after migration
+    response.delete_cookie("jji_username", path="/")
 
 
 class AuthMiddleware(BaseHTTPMiddleware):
@@ -742,12 +763,12 @@ class AuthMiddleware(BaseHTTPMiddleware):
             if proxy_username and proxy_username.lower() != "admin":
                 # Session auth takes precedence over X-Forwarded-User —
                 # only check when an SSO redirect would otherwise fire.
-                session_token = request.cookies.get("rootcoz_session")
+                session_token = _read_cookie(request, "rootcoz_session")
                 if session_token and await storage.get_session(session_token):
                     return await call_next(request)
                 # SSO user hitting /register — redirect to dashboard
                 response = RedirectResponse(url="/", status_code=303)
-                if request.cookies.get("rootcoz_username", "") != proxy_username:
+                if _read_cookie(request, "rootcoz_username") != proxy_username:
                     _set_username_cookie(
                         response, proxy_username, secure=settings.secure_cookies
                     )
@@ -759,7 +780,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
         authenticated_admin = False
 
         # 1. Check session cookie (rootcoz_session) — admin session
-        session_token = request.cookies.get("rootcoz_session")
+        session_token = _read_cookie(request, "rootcoz_session")
         if session_token:
             session = await storage.get_session(session_token)
             if session:
@@ -817,7 +838,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
 
         # 4. Fall back to rootcoz_username cookie (regular users)
         if not username:
-            cookie_username = request.cookies.get("rootcoz_username", "")
+            cookie_username = _read_cookie(request, "rootcoz_username")
             if cookie_username.lower() == "admin":
                 # Reserved username — only valid via session/bearer auth
                 cookie_username = ""
@@ -851,7 +872,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
         # Set rootcoz_username cookie from X-Forwarded-User header (SSO)
         if getattr(request.state, "set_proxy_cookie", None):
             proxy_cookie_value = request.state.set_proxy_cookie
-            if request.cookies.get("rootcoz_username", "") != proxy_cookie_value:
+            if _read_cookie(request, "rootcoz_username") != proxy_cookie_value:
                 _set_username_cookie(
                     response, proxy_cookie_value, secure=settings.secure_cookies
                 )
@@ -870,6 +891,13 @@ class AuthMiddleware(BaseHTTPMiddleware):
                     samesite="strict",
                     secure=settings.secure_cookies,
                     max_age=storage.SESSION_TTL_SECONDS,
+                )
+                # Clear legacy cookie after migration
+                response.delete_cookie(
+                    "jji_session",
+                    httponly=True,
+                    samesite="strict",
+                    secure=settings.secure_cookies,
                 )
 
         return response
@@ -4399,6 +4427,13 @@ async def login(request: Request) -> JSONResponse:
         secure=settings.secure_cookies,
         max_age=storage.SESSION_TTL_SECONDS,
     )
+    # Clear legacy cookie after migration
+    response.delete_cookie(
+        "jji_session",
+        httponly=True,
+        samesite="strict",
+        secure=settings.secure_cookies,
+    )
     # Also set rootcoz_username cookie for compatibility
     response.set_cookie(
         "rootcoz_username",
@@ -4407,6 +4442,7 @@ async def login(request: Request) -> JSONResponse:
         secure=settings.secure_cookies,
         max_age=365 * 24 * 60 * 60,
     )
+    response.delete_cookie("jji_username", path="/")
     logger.info(f"[AUDIT] Login success: user='{username}' is_admin={is_admin}")
     return response
 
@@ -4414,13 +4450,19 @@ async def login(request: Request) -> JSONResponse:
 @app.post("/api/auth/logout")
 async def logout(request: Request) -> JSONResponse:
     """Clear admin session."""
-    session_token = request.cookies.get("rootcoz_session")
+    session_token = _read_cookie(request, "rootcoz_session")
     if session_token:
         await storage.delete_session(session_token)
     settings = get_settings()
     response = JSONResponse(content={"ok": True})
     response.delete_cookie(
         "rootcoz_session",
+        httponly=True,
+        samesite="strict",
+        secure=settings.secure_cookies,
+    )
+    response.delete_cookie(
+        "jji_session",
         httponly=True,
         samesite="strict",
         secure=settings.secure_cookies,
