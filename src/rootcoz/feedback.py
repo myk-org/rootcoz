@@ -2,7 +2,7 @@
 
 Accepts user feedback (bug report or feature request), uses AI to
 format it into a well-structured GitHub issue, scrubs sensitive data
-from attached logs, and creates the issue in myk-org/jenkins-job-insight.
+from attached logs, and creates the issue in myk-org/rootcoz.
 """
 
 import json
@@ -12,10 +12,10 @@ import re
 from simple_logger.logger import get_logger
 
 from ai_cli_runner import call_ai_cli
-from jenkins_job_insight.analyzer import PROVIDER_CLI_FLAGS
-from jenkins_job_insight.bug_creation import GITHUB_AI_FOOTER, create_github_issue
-from jenkins_job_insight.config import Settings
-from jenkins_job_insight.models import (
+from rootcoz.analyzer import PROVIDER_CLI_FLAGS
+from rootcoz.bug_creation import GITHUB_AI_FOOTER, create_github_issue
+from rootcoz.config import Settings
+from rootcoz.models import (
     FeedbackPreviewResponse,
     FeedbackRequest,
     FeedbackResponse,
@@ -23,7 +23,7 @@ from jenkins_job_insight.models import (
 
 logger = get_logger(name=__name__, level=os.environ.get("LOG_LEVEL", "INFO"))
 
-_FEEDBACK_REPO_URL = "https://github.com/myk-org/jenkins-job-insight"
+_FEEDBACK_REPO_URL = "https://github.com/myk-org/rootcoz"
 
 # Patterns for sensitive data scrubbing.
 # Order matters: more specific patterns first to avoid partial matches.
@@ -135,7 +135,7 @@ async def format_feedback_with_ai(
     context = "\n\n".join(context_parts)
 
     prompt = f"""You are formatting user-submitted feedback into a well-structured GitHub issue
-for the jenkins-job-insight project (https://github.com/myk-org/jenkins-job-insight).
+for the rootcoz project (https://github.com/myk-org/rootcoz).
 
 First, determine whether this feedback is a BUG REPORT or a FEATURE REQUEST based on the content.
 Set the "labels" field accordingly: ["bug"] for bug reports, ["enhancement"] for feature requests.

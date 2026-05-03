@@ -25,10 +25,10 @@ export function collectChildExpandKeys(
   const keys: string[] = []
   for (const child of children ?? []) {
     const hashId = childJobHashId(child.job_name, child.build_number, parentHashId)
-    keys.push(`jji-expand-${resultJobId}-${hashId}`)
+    keys.push(`rootcoz-expand-${resultJobId}-${hashId}`)
     const childGroups = groupFailures(child.failures ?? [], `child-${hashId}`)
     for (const g of childGroups) {
-      keys.push(`jji-expand-${resultJobId}-${g.id}`)
+      keys.push(`rootcoz-expand-${resultJobId}-${g.id}`)
     }
     keys.push(...collectChildExpandKeys(child.failed_children ?? [], resultJobId, hashId))
   }

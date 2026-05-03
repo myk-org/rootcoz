@@ -6,7 +6,7 @@ from xml.etree import ElementTree as ET
 from xml.etree.ElementTree import Element
 
 if TYPE_CHECKING:
-    from jenkins_job_insight.models import TestFailure
+    from rootcoz.models import TestFailure
 
 import httpx
 from defusedxml.ElementTree import fromstring as safe_fromstring
@@ -90,7 +90,7 @@ def extract_test_failures(raw_xml: str) -> list[TestFailure]:
     Raises:
         xml.etree.ElementTree.ParseError: If the XML is malformed.
     """
-    from jenkins_job_insight.models import TestFailure
+    from rootcoz.models import TestFailure
 
     raw_failures = extract_failures_from_xml(raw_xml)
     return [
@@ -200,14 +200,14 @@ def enrich_junit_xml_via_server(
     ai_model: str,
     timeout: int = 600,
 ) -> dict[str, Any]:
-    """Send raw JUnit XML to a JJI server for AI analysis and enrichment.
+    """Send raw JUnit XML to a rootcoz server for AI analysis and enrichment.
 
     Posts the XML content to the /analyze-failures endpoint. The server
     extracts failures, runs AI analysis, and returns the enriched XML
     with analysis results injected back into it.
 
     Args:
-        server_url: Base URL of the JJI server (e.g., "http://localhost:8000").
+        server_url: Base URL of the rootcoz server (e.g., "http://localhost:8000").
         raw_xml: JUnit XML content as a string.
         ai_provider: AI provider to use (claude, gemini, or cursor).
         ai_model: AI model name.

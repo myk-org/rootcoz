@@ -1,4 +1,4 @@
-"""Tests for the JJI CLI client."""
+"""Tests for the rootcoz CLI client."""
 
 import json
 from unittest.mock import patch
@@ -6,28 +6,28 @@ from unittest.mock import patch
 import httpx
 import pytest
 
-from jenkins_job_insight.cli.client import JJIClient, JJIError
+from rootcoz.cli.client import RootCozClient, RootCozError
 from tests.conftest import (
     CLI_TEST_BASE_URL as BASE_URL,
     make_test_client as _make_client,
 )
 
 
-class TestJJIError:
+class TestRootCozError:
     def test_error_stores_status_and_detail(self):
-        err = JJIError(status_code=404, detail="Job not found")
+        err = RootCozError(status_code=404, detail="Job not found")
         assert err.status_code == 404
         assert err.detail == "Job not found"
         assert "404" in str(err)
         assert "Job not found" in str(err)
 
     def test_error_without_detail(self):
-        err = JJIError(status_code=500)
+        err = RootCozError(status_code=500)
         assert err.status_code == 500
         assert err.detail == ""
 
 
-class TestJJIClientHealth:
+class TestRootCozClientHealth:
     def test_health(self):
         client = _make_client(
             lambda request: httpx.Response(200, json={"status": "healthy"})
@@ -40,12 +40,12 @@ class TestJJIClientHealth:
             raise httpx.ConnectError("Connection refused")
 
         client = _make_client(raise_connect_error)
-        with pytest.raises(JJIError) as exc_info:
+        with pytest.raises(RootCozError) as exc_info:
             client.health()
         assert exc_info.value.status_code == 0
 
 
-class TestJJIClientResults:
+class TestRootCozClientResults:
     def test_list_results(self):
         sample_results = [
             {
@@ -78,7 +78,7 @@ class TestJJIClientResults:
         client = _make_client(
             lambda request: httpx.Response(404, json={"detail": "Job not found"})
         )
-        with pytest.raises(JJIError) as exc_info:
+        with pytest.raises(RootCozError) as exc_info:
             client.get_result("nonexistent")
         assert exc_info.value.status_code == 404
 
@@ -107,7 +107,7 @@ class TestJJIClientResults:
         assert result["total"] == 2
 
 
-class TestJJIClientDashboard:
+class TestRootCozClientDashboard:
     def test_dashboard(self):
         """Test dashboard returns all jobs."""
 
@@ -124,7 +124,7 @@ class TestJJIClientDashboard:
         assert result[0]["job_id"] == "test-1"
 
 
-class TestJJIClientAnalyze:
+class TestRootCozClientAnalyze:
     def test_analyze(self):
         response_data = {
             "status": "queued",
@@ -143,7 +143,7 @@ class TestJJIClientAnalyze:
         assert result["job_id"] == "new-job-1"
 
 
-class TestJJIClientHistory:
+class TestRootCozClientHistory:
     def test_get_test_history(self):
         sample = {"test_name": "tests.TestA.test_one", "failures": 3, "recent_runs": []}
 
@@ -193,7 +193,7 @@ class TestJJIClientHistory:
         assert "failures" in result
 
 
-class TestJJIClientClassifications:
+class TestRootCozClientClassifications:
     def test_classify_test(self):
         response_data = {"id": 1}
 
@@ -227,7 +227,7 @@ class TestJJIClientClassifications:
         assert "classifications" in result
 
 
-class TestJJIClientComments:
+class TestRootCozClientComments:
     def test_get_comments(self):
         sample = {"comments": [], "reviews": {}}
 
@@ -265,23 +265,23 @@ class TestJJIClientComments:
         assert result["status"] == "deleted"
 
 
-class TestJJIClientTimeout:
+class TestRootCozClientTimeout:
     def test_timeout_raises_error(self):
         def raise_timeout(request):
             raise httpx.ReadTimeout("Read timed out")
 
         client = _make_client(raise_timeout)
-        with pytest.raises(JJIError) as exc_info:
+        with pytest.raises(RootCozError) as exc_info:
             client.health()
         assert exc_info.value.status_code == 0
         assert "timed out" in exc_info.value.detail.lower()
 
 
-class TestJJIClientUsername:
+class TestRootCozClientUsername:
     def test_username_sent_as_cookie(self):
         def check_cookie(request):
             assert request.headers.get("cookie") is not None
-            assert "jji_username=testuser" in request.headers.get("cookie", "")
+            assert "rootcoz_username=testuser" in request.headers.get("cookie", "")
             return httpx.Response(200, json={"status": "deleted", "job_id": "abc"})
 
         client = _make_client(check_cookie, username="testuser")
@@ -290,14 +290,14 @@ class TestJJIClientUsername:
 
 class TestMalformedUrl:
     def test_malformed_url_error(self):
-        """Malformed URLs should raise JJIError, not raw httpx exception."""
-        client = JJIClient(server_url="not-a-valid-url")
-        with pytest.raises(JJIError) as exc_info:
+        """Malformed URLs should raise RootCozError, not raw httpx exception."""
+        client = RootCozClient(server_url="not-a-valid-url")
+        with pytest.raises(RootCozError) as exc_info:
             client.health()
         assert exc_info.value.status_code == 0
 
 
-class TestJJIClientBugCreation:
+class TestRootCozClientBugCreation:
     def test_preview_github_issue(self):
         response_data = {
             "title": "Fix: login handler",
@@ -416,7 +416,7 @@ class TestJJIClientBugCreation:
         assert result["title"] == "Fix"
 
 
-class TestJJIClientCapabilities:
+class TestRootCozClientCapabilities:
     def test_capabilities(self):
         def handler(request):
             assert request.method == "GET"
@@ -431,7 +431,7 @@ class TestJJIClientCapabilities:
         assert result["jira_issues_enabled"] is False
 
 
-class TestJJIClientMentionableUsers:
+class TestRootCozClientMentionableUsers:
     def test_get_mentionable_users(self):
         def handler(request):
             assert request.method == "GET"
@@ -453,7 +453,7 @@ class TestJJIClientMentionableUsers:
         assert result["usernames"] == []
 
 
-class TestJJIClientMentions:
+class TestRootCozClientMentions:
     def test_get_mentions(self):
         payload = {
             "mentions": [{"id": 1, "comment": "@alice hi", "username": "bob"}],
@@ -507,7 +507,7 @@ class TestJJIClientMentions:
         assert result["marked_read"] == 5
 
 
-class TestJJIClientAiConfigs:
+class TestRootCozClientAiConfigs:
     def test_get_ai_configs(self):
         sample = [
             {"ai_provider": "claude", "ai_model": "opus-4"},
@@ -533,7 +533,7 @@ class TestJJIClientAiConfigs:
         assert result == []
 
 
-class TestJJIClientPreviewWithAiConfig:
+class TestRootCozClientPreviewWithAiConfig:
     def test_preview_github_issue_with_ai_config(self):
         def handler(request):
             body = json.loads(request.content)
@@ -589,7 +589,7 @@ class TestJJIClientPreviewWithAiConfig:
         )
 
 
-class TestJJIClientIssueTokens:
+class TestRootCozClientIssueTokens:
     def test_preview_github_issue_with_tokens(self):
         def handler(request):
             assert request.method == "POST"
@@ -780,7 +780,7 @@ class TestJJIClientIssueTokens:
         assert result["key"] == "PROJ-2"
 
 
-class TestJJIClientCrossCredentialLeakage:
+class TestRootCozClientCrossCredentialLeakage:
     """Verify that GitHub methods never include Jira credentials and vice versa."""
 
     def test_preview_github_issue_excludes_jira_credentials(self):
@@ -878,7 +878,7 @@ class TestJJIClientCrossCredentialLeakage:
         )
 
 
-class TestJJIClientReview:
+class TestRootCozClientReview:
     def test_get_review_status(self):
         sample = {"total_failures": 5, "reviewed_count": 3, "comment_count": 7}
 
@@ -939,7 +939,7 @@ class TestJJIClientReview:
         assert result["enriched"] == 3
 
 
-class TestJJIClientExcludeJobId:
+class TestRootCozClientExcludeJobId:
     def test_get_test_history_with_exclude(self):
         def handler(request):
             assert request.method == "GET"
@@ -974,7 +974,7 @@ class TestJJIClientExcludeJobId:
         client.get_job_stats("j", exclude_job_id="job-99")
 
 
-class TestJJIClientClassificationsParentJobName:
+class TestRootCozClientClassificationsParentJobName:
     def test_get_classifications_with_parent_job_name(self):
         def handler(request):
             assert request.method == "GET"
@@ -985,25 +985,25 @@ class TestJJIClientClassificationsParentJobName:
         client.get_classifications(parent_job_name="parent-job")
 
 
-class TestJJIClientVerifySSL:
+class TestRootCozClientVerifySSL:
     def test_verify_ssl_default_true(self):
         """Client should verify SSL by default."""
-        with patch("jenkins_job_insight.cli.client.httpx.Client") as mock_httpx:
-            JJIClient(server_url=BASE_URL)
+        with patch("rootcoz.cli.client.httpx.Client") as mock_httpx:
+            RootCozClient(server_url=BASE_URL)
             _, kwargs = mock_httpx.call_args
             assert kwargs.get("verify", True) is True
 
     def test_verify_ssl_false_passes_to_httpx(self):
         """Client should pass verify=False to httpx when verify_ssl=False."""
-        with patch("jenkins_job_insight.cli.client.httpx.Client") as mock_httpx:
-            JJIClient(server_url=BASE_URL, verify_ssl=False)
+        with patch("rootcoz.cli.client.httpx.Client") as mock_httpx:
+            RootCozClient(server_url=BASE_URL, verify_ssl=False)
             _, kwargs = mock_httpx.call_args
             assert kwargs["verify"] is False
 
     def test_verify_ssl_true_passes_to_httpx(self):
         """Client should pass verify=True to httpx when verify_ssl=True."""
-        with patch("jenkins_job_insight.cli.client.httpx.Client") as mock_httpx:
-            JJIClient(server_url=BASE_URL, verify_ssl=True)
+        with patch("rootcoz.cli.client.httpx.Client") as mock_httpx:
+            RootCozClient(server_url=BASE_URL, verify_ssl=True)
             _, kwargs = mock_httpx.call_args
             assert kwargs.get("verify", True) is True
 
@@ -1015,7 +1015,7 @@ def _parse_analyze_request(request):
     return json.loads(request.content)
 
 
-class TestJJIClientAnalyzeAdditionalRepos:
+class TestRootCozClientAnalyzeAdditionalRepos:
     def test_analyze_passes_additional_repos(self):
         """additional_repos is forwarded in the request body."""
         repos = [{"name": "infra", "url": "https://github.com/org/infra"}]
@@ -1030,7 +1030,7 @@ class TestJJIClientAnalyzeAdditionalRepos:
         assert result["status"] == "queued"
 
 
-class TestJJIClientAnalyzeExtras:
+class TestRootCozClientAnalyzeExtras:
     def test_analyze_with_ai_provider(self):
         def handler(request):
             body = _parse_analyze_request(request)
@@ -1142,7 +1142,7 @@ class TestJJIClientAnalyzeExtras:
         assert result["status"] == "queued"
 
 
-class TestJJIClientValidateToken:
+class TestRootCozClientValidateToken:
     def test_validate_github_token(self):
         def handler(request):
             assert request.method == "POST"
@@ -1204,7 +1204,7 @@ class TestJJIClientValidateToken:
         client.validate_token(token_type="jira", token="jira-tok")  # noqa: S106
 
 
-class TestJJIClientJiraProjects:
+class TestRootCozClientJiraProjects:
     def test_jira_projects(self):
         def handler(request):
             assert request.method == "POST"
@@ -1217,7 +1217,7 @@ class TestJJIClientJiraProjects:
         assert result[0]["key"] == "PROJ"
 
 
-class TestJJIClientJiraSecurityLevels:
+class TestRootCozClientJiraSecurityLevels:
     def test_jira_security_levels(self):
         def handler(request):
             assert request.method == "POST"
@@ -1250,7 +1250,7 @@ class TestJJIClientJiraSecurityLevels:
         assert result == []
 
 
-class TestJJIClientReAnalyze:
+class TestRootCozClientReAnalyze:
     def test_re_analyze(self):
         response_data = {
             "status": "queued",
@@ -1271,7 +1271,7 @@ class TestJJIClientReAnalyze:
         assert result["job_id"] == "new-reanalysis-1"
 
 
-class TestJJIClientPushReportPortal:
+class TestRootCozClientPushReportPortal:
     def test_push_reportportal(self):
         response_data = {
             "pushed": 3,
@@ -1316,12 +1316,12 @@ class TestJJIClientPushReportPortal:
             return httpx.Response(400, json={"detail": "Report Portal is disabled"})
 
         client = _make_client(handler)
-        with pytest.raises(JJIError) as exc_info:
+        with pytest.raises(RootCozError) as exc_info:
             client.push_reportportal("job-123")
         assert exc_info.value.status_code == 400
 
 
-class TestJJIClientAuth:
+class TestRootCozClientAuth:
     def test_login(self):
         def handler(request):
             assert request.method == "POST"
@@ -1366,12 +1366,12 @@ class TestJJIClientAuth:
         client = _make_client(
             lambda request: httpx.Response(401, json={"detail": "Invalid credentials"})
         )
-        with pytest.raises(JJIError) as exc_info:
+        with pytest.raises(RootCozError) as exc_info:
             client.login("admin", "wrong-key")
         assert exc_info.value.status_code == 401
 
 
-class TestJJIClientAdminUsers:
+class TestRootCozClientAdminUsers:
     def test_admin_list_users(self):
         def handler(request):
             assert request.method == "GET"
@@ -1459,7 +1459,7 @@ class TestJJIClientAdminUsers:
                 403, json={"detail": "Admin access required"}
             )
         )
-        with pytest.raises(JJIError) as exc_info:
+        with pytest.raises(RootCozError) as exc_info:
             client.admin_create_user("newadmin")
         assert exc_info.value.status_code == 403
 
@@ -1533,7 +1533,7 @@ class TestTokenUsage:
                 403, json={"detail": "Admin access required"}
             )
         )
-        with pytest.raises(JJIError) as exc_info:
+        with pytest.raises(RootCozError) as exc_info:
             client.get_token_usage()
         assert exc_info.value.status_code == 403
 
@@ -1604,12 +1604,12 @@ class TestAnalyzeCommentIntent:
         client = _make_client(
             lambda request: httpx.Response(500, json={"detail": "Internal error"})
         )
-        with pytest.raises(JJIError) as exc_info:
+        with pytest.raises(RootCozError) as exc_info:
             client.analyze_comment_intent(comment="test")
         assert exc_info.value.status_code == 500
 
 
-class TestJJIClientAiModels:
+class TestRootCozClientAiModels:
     def test_list_ai_models_empty_string_provider_omits_query_param(self):
         def handler(request):
             assert request.method == "GET"
@@ -1671,7 +1671,7 @@ class TestJJIClientAiModels:
         assert result["models"] == []
 
 
-class TestJJIClientApiKeyHeader:
+class TestRootCozClientApiKeyHeader:
     def test_api_key_sent_as_bearer_header(self):
         def check_header(request):
             auth = request.headers.get("authorization", "")

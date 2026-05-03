@@ -10,8 +10,8 @@ import os
 from simple_logger.logger import get_logger
 
 from ai_cli_runner import call_ai_cli
-from jenkins_job_insight.analyzer import PROVIDER_CLI_FLAGS
-from jenkins_job_insight.token_tracking import record_ai_usage
+from rootcoz.analyzer import PROVIDER_CLI_FLAGS
+from rootcoz.token_tracking import record_ai_usage
 
 logger = get_logger(name=__name__, level=os.environ.get("LOG_LEVEL", "INFO"))
 

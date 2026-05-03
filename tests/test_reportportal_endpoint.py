@@ -18,7 +18,7 @@ def _rp_disabled_env():
         "AI_MODEL": "test-model",
     }
     with patch.dict(os.environ, env, clear=True):
-        from jenkins_job_insight.config import get_settings
+        from rootcoz.config import get_settings
 
         get_settings.cache_clear()
         yield
@@ -37,10 +37,10 @@ def _rp_enabled_env():
         "REPORTPORTAL_URL": "http://rp.example.com",
         "REPORTPORTAL_API_TOKEN": "rp-token",  # pragma: allowlist secret
         "REPORTPORTAL_PROJECT": "my-project",
-        "PUBLIC_BASE_URL": "https://jji.example.com",
+        "PUBLIC_BASE_URL": "https://rootcoz.example.com",
     }
     with patch.dict(os.environ, env, clear=True):
-        from jenkins_job_insight.config import get_settings
+        from rootcoz.config import get_settings
 
         get_settings.cache_clear()
         yield
@@ -51,7 +51,7 @@ class TestPushReportPortalEndpoint:
     """Test POST /results/{job_id}/push-reportportal."""
 
     def test_returns_400_when_rp_disabled(self, _rp_disabled_env):
-        from jenkins_job_insight.main import app
+        from rootcoz.main import app
 
         client = TestClient(app, raise_server_exceptions=False)
         response = client.post("/results/some-job-id/push-reportportal")
@@ -59,19 +59,19 @@ class TestPushReportPortalEndpoint:
         detail = response.json()["detail"].lower()
         assert "disabled" in detail or "not configured" in detail
 
-    @patch("jenkins_job_insight.main.get_result")
+    @patch("rootcoz.main.get_result")
     def test_returns_404_when_job_not_found(self, mock_get_result, _rp_enabled_env):
         mock_get_result.return_value = None
-        from jenkins_job_insight.main import app
+        from rootcoz.main import app
 
         client = TestClient(app, raise_server_exceptions=False)
         response = client.post("/results/nonexistent-id/push-reportportal")
         assert response.status_code == 404
 
     @patch(
-        "jenkins_job_insight.main.ReportPortalClient",
+        "rootcoz.main.ReportPortalClient",
     )
-    @patch("jenkins_job_insight.main.get_result")
+    @patch("rootcoz.main.get_result")
     def test_returns_422_on_invalid_stored_failures(
         self, mock_get_result, mock_rp_class, _rp_enabled_env
     ):
@@ -89,18 +89,16 @@ class TestPushReportPortalEndpoint:
         mock_rp.__exit__ = MagicMock(return_value=False)
         mock_rp_class.return_value = mock_rp
 
-        from jenkins_job_insight.main import app
+        from rootcoz.main import app
 
         client = TestClient(app, raise_server_exceptions=False)
         response = client.post("/results/corrupt-job/push-reportportal")
         assert response.status_code == 422
         assert "validation error" in response.json()["detail"].lower()
 
-    @patch(
-        "jenkins_job_insight.main.get_history_classification", new_callable=AsyncMock
-    )
-    @patch("jenkins_job_insight.main.get_result")
-    @patch("jenkins_job_insight.main.ReportPortalClient")
+    @patch("rootcoz.main.get_history_classification", new_callable=AsyncMock)
+    @patch("rootcoz.main.get_result")
+    @patch("rootcoz.main.ReportPortalClient")
     def test_returns_result_on_success(
         self, mock_rp_class, mock_get_result, mock_get_cls, _rp_enabled_env
     ):
@@ -143,7 +141,7 @@ class TestPushReportPortalEndpoint:
         }
         mock_rp_class.return_value = mock_rp
 
-        from jenkins_job_insight.main import app
+        from rootcoz.main import app
 
         client = TestClient(app, raise_server_exceptions=False)
         response = client.post("/results/some-job-id/push-reportportal")
@@ -152,11 +150,9 @@ class TestPushReportPortalEndpoint:
         assert data["pushed"] == 1
         mock_rp.__exit__.assert_called_once()
 
-    @patch(
-        "jenkins_job_insight.main.get_history_classification", new_callable=AsyncMock
-    )
-    @patch("jenkins_job_insight.main.get_result")
-    @patch("jenkins_job_insight.main.ReportPortalClient")
+    @patch("rootcoz.main.get_history_classification", new_callable=AsyncMock)
+    @patch("rootcoz.main.get_result")
+    @patch("rootcoz.main.ReportPortalClient")
     def test_infrastructure_classification_passed_to_rp(
         self, mock_rp_class, mock_get_result, mock_get_cls, _rp_enabled_env
     ):
@@ -201,7 +197,7 @@ class TestPushReportPortalEndpoint:
         }
         mock_rp_class.return_value = mock_rp
 
-        from jenkins_job_insight.main import app
+        from rootcoz.main import app
 
         client = TestClient(app, raise_server_exceptions=False)
         response = client.post("/results/some-job-id/push-reportportal")
@@ -215,15 +211,13 @@ class TestPushReportPortalEndpoint:
         )
         assert history_arg.get("test_infra") == "INFRASTRUCTURE"
 
-    @patch(
-        "jenkins_job_insight.main.get_history_classification", new_callable=AsyncMock
-    )
-    @patch("jenkins_job_insight.main.get_result")
-    @patch("jenkins_job_insight.main.ReportPortalClient")
+    @patch("rootcoz.main.get_history_classification", new_callable=AsyncMock)
+    @patch("rootcoz.main.get_result")
+    @patch("rootcoz.main.ReportPortalClient")
     def test_no_overlap_returns_error(
         self, mock_rp_class, mock_get_result, mock_get_cls, _rp_enabled_env
     ):
-        """When RP items and JJI failures have no name overlap, return an error."""
+        """When RP items and rootcoz failures have no name overlap, return an error."""
         mock_get_cls.return_value = ""
         mock_get_result.return_value = {
             "result": {
@@ -252,7 +246,7 @@ class TestPushReportPortalEndpoint:
         mock_rp.match_failures.return_value = []  # no overlap
         mock_rp_class.return_value = mock_rp
 
-        from jenkins_job_insight.main import app
+        from rootcoz.main import app
 
         client = TestClient(app, raise_server_exceptions=False)
         response = client.post("/results/some-job-id/push-reportportal")
@@ -264,14 +258,14 @@ class TestPushReportPortalEndpoint:
         # Test names are in server logs only, not user-facing
         assert "test_beta" not in data["errors"][0]
 
-    @patch("jenkins_job_insight.main.ReportPortalClient")
-    @patch("jenkins_job_insight.main.get_result")
+    @patch("rootcoz.main.ReportPortalClient")
+    @patch("rootcoz.main.get_result")
     def test_verify_ssl_passed_to_rp_client(
         self, mock_get_result, mock_rp_class, _rp_enabled_env
     ):
         """REPORTPORTAL_VERIFY_SSL is forwarded to the ReportPortalClient."""
         with patch.dict(os.environ, {"REPORTPORTAL_VERIFY_SSL": "false"}):
-            from jenkins_job_insight.config import get_settings
+            from rootcoz.config import get_settings
 
             get_settings.cache_clear()
             mock_get_result.return_value = {
@@ -303,7 +297,7 @@ class TestPushReportPortalEndpoint:
             }
             mock_rp_class.return_value = mock_rp
 
-            from jenkins_job_insight.main import app
+            from rootcoz.main import app
 
             client = TestClient(app, raise_server_exceptions=False)
             client.post("/results/some-job/push-reportportal")
@@ -314,11 +308,9 @@ class TestPushReportPortalEndpoint:
             assert call_kwargs["verify_ssl"] is False
             get_settings.cache_clear()
 
-    @patch(
-        "jenkins_job_insight.main.get_history_classification", new_callable=AsyncMock
-    )
-    @patch("jenkins_job_insight.main.get_result")
-    @patch("jenkins_job_insight.main.ReportPortalClient")
+    @patch("rootcoz.main.get_history_classification", new_callable=AsyncMock)
+    @patch("rootcoz.main.get_result")
+    @patch("rootcoz.main.ReportPortalClient")
     def test_child_job_push_uses_child_data(
         self, mock_rp_class, mock_get_result, mock_get_cls, _rp_enabled_env
     ):
@@ -371,7 +363,7 @@ class TestPushReportPortalEndpoint:
         }
         mock_rp_class.return_value = mock_rp
 
-        from jenkins_job_insight.main import app
+        from rootcoz.main import app
 
         client = TestClient(app, raise_server_exceptions=False)
         response = client.post(
@@ -386,7 +378,7 @@ class TestPushReportPortalEndpoint:
             "child-job", "https://jenkins.example.com/job/child-job/42/"
         )
 
-    @patch("jenkins_job_insight.main.get_result")
+    @patch("rootcoz.main.get_result")
     def test_child_job_not_found_returns_400(self, mock_get_result, _rp_enabled_env):
         """Returns 400 when the specified child job doesn't exist."""
         mock_get_result.return_value = {
@@ -400,7 +392,7 @@ class TestPushReportPortalEndpoint:
             },
         }
 
-        from jenkins_job_insight.main import app
+        from rootcoz.main import app
 
         client = TestClient(app, raise_server_exceptions=False)
         response = client.post(
@@ -410,11 +402,9 @@ class TestPushReportPortalEndpoint:
         assert response.status_code == 400
         assert "not found" in response.json()["detail"].lower()
 
-    @patch(
-        "jenkins_job_insight.main.get_history_classification", new_callable=AsyncMock
-    )
-    @patch("jenkins_job_insight.main.get_result")
-    @patch("jenkins_job_insight.main.ReportPortalClient")
+    @patch("rootcoz.main.get_history_classification", new_callable=AsyncMock)
+    @patch("rootcoz.main.get_result")
+    @patch("rootcoz.main.ReportPortalClient")
     def test_child_job_report_url_contains_anchor(
         self, mock_rp_class, mock_get_result, mock_get_cls, _rp_enabled_env
     ):
@@ -467,7 +457,7 @@ class TestPushReportPortalEndpoint:
         }
         mock_rp_class.return_value = mock_rp
 
-        from jenkins_job_insight.main import app
+        from rootcoz.main import app
 
         client = TestClient(app, raise_server_exceptions=False)
         response = client.post(
@@ -480,11 +470,9 @@ class TestPushReportPortalEndpoint:
         report_url = push_call[0][1]  # second positional arg
         assert "#child-child-job-10" in report_url
 
-    @patch(
-        "jenkins_job_insight.main.get_history_classification", new_callable=AsyncMock
-    )
-    @patch("jenkins_job_insight.main.get_result")
-    @patch("jenkins_job_insight.main.ReportPortalClient")
+    @patch("rootcoz.main.get_history_classification", new_callable=AsyncMock)
+    @patch("rootcoz.main.get_result")
+    @patch("rootcoz.main.ReportPortalClient")
     def test_nested_child_job_push(
         self, mock_rp_class, mock_get_result, mock_get_cls, _rp_enabled_env
     ):
@@ -545,7 +533,7 @@ class TestPushReportPortalEndpoint:
         }
         mock_rp_class.return_value = mock_rp
 
-        from jenkins_job_insight.main import app
+        from rootcoz.main import app
 
         client = TestClient(app, raise_server_exceptions=False)
         response = client.post(
@@ -564,8 +552,8 @@ class TestPushReportPortalEndpoint:
 class TestRPPushHTTPErrors:
     """Verify HTTP errors from RP API return proper error responses, not 500."""
 
-    @patch("jenkins_job_insight.main.ReportPortalClient")
-    @patch("jenkins_job_insight.main.get_result")
+    @patch("rootcoz.main.ReportPortalClient")
+    @patch("rootcoz.main.get_result")
     def test_find_launch_401_returns_200_with_error(
         self, mock_get_result, mock_rp_class, _rp_enabled_env
     ):
@@ -597,7 +585,7 @@ class TestRPPushHTTPErrors:
         )
         mock_rp_class.return_value = mock_rp
 
-        from jenkins_job_insight.main import app
+        from rootcoz.main import app
 
         client = TestClient(app, raise_server_exceptions=False)
         response = client.post("/results/job1/push-reportportal")
@@ -608,8 +596,8 @@ class TestRPPushHTTPErrors:
         assert "401" in body["errors"][0]
         assert "Full authentication is required" in body["errors"][0]
 
-    @patch("jenkins_job_insight.main.ReportPortalClient")
-    @patch("jenkins_job_insight.main.get_result")
+    @patch("rootcoz.main.ReportPortalClient")
+    @patch("rootcoz.main.get_result")
     def test_find_launch_connection_error_returns_200_with_error(
         self, mock_get_result, mock_rp_class, _rp_enabled_env
     ):
@@ -633,7 +621,7 @@ class TestRPPushHTTPErrors:
         mock_rp.find_launch.side_effect = ConnectionError("connection refused")
         mock_rp_class.return_value = mock_rp
 
-        from jenkins_job_insight.main import app
+        from rootcoz.main import app
 
         client = TestClient(app, raise_server_exceptions=False)
         response = client.post("/results/job2/push-reportportal")
@@ -644,8 +632,8 @@ class TestRPPushHTTPErrors:
         assert "Error" in body["errors"][0]
         assert "searching RP launches" in body["errors"][0]
 
-    @patch("jenkins_job_insight.main.ReportPortalClient")
-    @patch("jenkins_job_insight.main.get_result")
+    @patch("rootcoz.main.ReportPortalClient")
+    @patch("rootcoz.main.get_result")
     def test_get_failed_items_error_returns_200_with_error(
         self, mock_get_result, mock_rp_class, _rp_enabled_env
     ):
@@ -678,7 +666,7 @@ class TestRPPushHTTPErrors:
         )
         mock_rp_class.return_value = mock_rp
 
-        from jenkins_job_insight.main import app
+        from rootcoz.main import app
 
         client = TestClient(app, raise_server_exceptions=False)
         response = client.post("/results/job1/push-reportportal")
@@ -691,8 +679,8 @@ class TestRPPushHTTPErrors:
         assert "Access denied" in body["errors"][0]
         assert "fetching failed items" in body["errors"][0]
 
-    @patch("jenkins_job_insight.main.ReportPortalClient")
-    @patch("jenkins_job_insight.main.get_result")
+    @patch("rootcoz.main.ReportPortalClient")
+    @patch("rootcoz.main.get_result")
     def test_match_failures_error_returns_200_with_error(
         self, mock_get_result, mock_rp_class, _rp_enabled_env
     ):
@@ -718,7 +706,7 @@ class TestRPPushHTTPErrors:
         mock_rp.match_failures.side_effect = TypeError("unexpected None")
         mock_rp_class.return_value = mock_rp
 
-        from jenkins_job_insight.main import app
+        from rootcoz.main import app
 
         client = TestClient(app, raise_server_exceptions=False)
         response = client.post("/results/job2/push-reportportal")
@@ -730,9 +718,9 @@ class TestRPPushHTTPErrors:
         assert "Error" in body["errors"][0]
         assert "matching RP items" in body["errors"][0]
 
-    @patch("jenkins_job_insight.main.logger")
-    @patch("jenkins_job_insight.main.ReportPortalClient")
-    @patch("jenkins_job_insight.main.get_result")
+    @patch("rootcoz.main.logger")
+    @patch("rootcoz.main.ReportPortalClient")
+    @patch("rootcoz.main.get_result")
     def test_get_failed_items_error_log_includes_build_number(
         self, mock_get_result, mock_rp_class, mock_logger, _rp_enabled_env
     ):
@@ -766,7 +754,7 @@ class TestRPPushHTTPErrors:
         )
         mock_rp_class.return_value = mock_rp
 
-        from jenkins_job_insight.main import app
+        from rootcoz.main import app
 
         client = TestClient(app, raise_server_exceptions=False)
         response = client.post("/results/job1/push-reportportal")
@@ -782,9 +770,9 @@ class TestRPPushHTTPErrors:
         rendered = log_fmt % log_args
         assert "77" in rendered, f"build_number (77) missing from error log: {rendered}"
 
-    @patch("jenkins_job_insight.main.logger")
-    @patch("jenkins_job_insight.main.ReportPortalClient")
-    @patch("jenkins_job_insight.main.get_result")
+    @patch("rootcoz.main.logger")
+    @patch("rootcoz.main.ReportPortalClient")
+    @patch("rootcoz.main.get_result")
     def test_match_failures_error_log_includes_build_number(
         self, mock_get_result, mock_rp_class, mock_logger, _rp_enabled_env
     ):
@@ -811,7 +799,7 @@ class TestRPPushHTTPErrors:
         mock_rp.match_failures.side_effect = TypeError("unexpected None")
         mock_rp_class.return_value = mock_rp
 
-        from jenkins_job_insight.main import app
+        from rootcoz.main import app
 
         client = TestClient(app, raise_server_exceptions=False)
         response = client.post("/results/job2/push-reportportal")
@@ -827,12 +815,10 @@ class TestRPPushHTTPErrors:
         rendered = log_fmt % log_args
         assert "88" in rendered, f"build_number (88) missing from error log: {rendered}"
 
-    @patch("jenkins_job_insight.main.logger")
-    @patch(
-        "jenkins_job_insight.main.get_history_classification", new_callable=AsyncMock
-    )
-    @patch("jenkins_job_insight.main.ReportPortalClient")
-    @patch("jenkins_job_insight.main.get_result")
+    @patch("rootcoz.main.logger")
+    @patch("rootcoz.main.get_history_classification", new_callable=AsyncMock)
+    @patch("rootcoz.main.ReportPortalClient")
+    @patch("rootcoz.main.get_result")
     def test_push_classifications_error_log_includes_build_number(
         self, mock_get_result, mock_rp_class, mock_get_cls, mock_logger, _rp_enabled_env
     ):
@@ -867,7 +853,7 @@ class TestRPPushHTTPErrors:
         mock_rp.push_classifications.side_effect = RuntimeError("network timeout")
         mock_rp_class.return_value = mock_rp
 
-        from jenkins_job_insight.main import app
+        from rootcoz.main import app
 
         client = TestClient(app, raise_server_exceptions=False)
         response = client.post("/results/job3/push-reportportal")
@@ -883,14 +869,14 @@ class TestRPPushHTTPErrors:
         rendered = log_fmt % log_args
         assert "99" in rendered, f"build_number (99) missing from error log: {rendered}"
 
-    @patch("jenkins_job_insight.main.logger")
-    @patch("jenkins_job_insight.main.ReportPortalClient")
-    @patch("jenkins_job_insight.main.get_result")
+    @patch("rootcoz.main.logger")
+    @patch("rootcoz.main.ReportPortalClient")
+    @patch("rootcoz.main.get_result")
     def test_ambiguous_launch_returns_200_with_error(
         self, mock_get_result, mock_rp_class, mock_logger, _rp_enabled_env
     ):
         """AmbiguousLaunchError from find_launch returns errors and logs WARNING."""
-        from jenkins_job_insight.reportportal import AmbiguousLaunchError
+        from rootcoz.reportportal import AmbiguousLaunchError
 
         mock_get_result.return_value = {
             "result": {
@@ -915,7 +901,7 @@ class TestRPPushHTTPErrors:
         )
         mock_rp_class.return_value = mock_rp
 
-        from jenkins_job_insight.main import app
+        from rootcoz.main import app
 
         client = TestClient(app, raise_server_exceptions=False)
         response = client.post("/results/job1/push-reportportal")
@@ -938,9 +924,9 @@ class TestRPPushHTTPErrors:
         ]
         assert not error_calls, "Should NOT log ambiguous launch at ERROR"
 
-    @patch("jenkins_job_insight.main.logger")
-    @patch("jenkins_job_insight.main.ReportPortalClient")
-    @patch("jenkins_job_insight.main.get_result")
+    @patch("rootcoz.main.logger")
+    @patch("rootcoz.main.ReportPortalClient")
+    @patch("rootcoz.main.get_result")
     def test_rp_client_constructor_failure_returns_200_with_error(
         self, mock_get_result, mock_rp_class, mock_logger, _rp_enabled_env
     ):
@@ -960,7 +946,7 @@ class TestRPPushHTTPErrors:
         }
         mock_rp_class.side_effect = ConnectionError("Name resolution failed")
 
-        from jenkins_job_insight.main import app
+        from rootcoz.main import app
 
         client = TestClient(app, raise_server_exceptions=False)
         response = client.post("/results/job3/push-reportportal")
@@ -987,8 +973,8 @@ class TestRPPushHTTPErrors:
 class TestRPPushEarlyGuard:
     """Verify early exit when there are no failures to push."""
 
-    @patch("jenkins_job_insight.main.ReportPortalClient")
-    @patch("jenkins_job_insight.main.get_result")
+    @patch("rootcoz.main.ReportPortalClient")
+    @patch("rootcoz.main.get_result")
     def test_empty_failures_skips_rp_calls(
         self, mock_get_result, mock_rp_class, _rp_enabled_env
     ):
@@ -1001,7 +987,7 @@ class TestRPPushEarlyGuard:
             }
         }
 
-        from jenkins_job_insight.main import app
+        from rootcoz.main import app
 
         client = TestClient(app, raise_server_exceptions=False)
         response = client.post("/results/job1/push-reportportal")
@@ -1012,8 +998,8 @@ class TestRPPushEarlyGuard:
         assert "No failures to push" in body["errors"][0]
         mock_rp_class.assert_not_called()
 
-    @patch("jenkins_job_insight.main.ReportPortalClient")
-    @patch("jenkins_job_insight.main.get_result")
+    @patch("rootcoz.main.ReportPortalClient")
+    @patch("rootcoz.main.get_result")
     def test_missing_failures_key_skips_rp_calls(
         self, mock_get_result, mock_rp_class, _rp_enabled_env
     ):
@@ -1025,7 +1011,7 @@ class TestRPPushEarlyGuard:
             }
         }
 
-        from jenkins_job_insight.main import app
+        from rootcoz.main import app
 
         client = TestClient(app, raise_server_exceptions=False)
         response = client.post("/results/job1/push-reportportal")
@@ -1036,8 +1022,8 @@ class TestRPPushEarlyGuard:
         assert "No failures to push" in body["errors"][0]
         mock_rp_class.assert_not_called()
 
-    @patch("jenkins_job_insight.main.ReportPortalClient")
-    @patch("jenkins_job_insight.main.get_result")
+    @patch("rootcoz.main.ReportPortalClient")
+    @patch("rootcoz.main.get_result")
     def test_child_job_empty_failures_skips_rp_calls(
         self, mock_get_result, mock_rp_class, _rp_enabled_env
     ):
@@ -1070,7 +1056,7 @@ class TestRPPushEarlyGuard:
             },
         }
 
-        from jenkins_job_insight.main import app
+        from rootcoz.main import app
 
         client = TestClient(app, raise_server_exceptions=False)
         response = client.post(
@@ -1088,9 +1074,9 @@ class TestRPPushEarlyGuard:
 class TestRPPushDebugLogging:
     """Verify normal-state RP paths log at DEBUG, not ERROR."""
 
-    @patch("jenkins_job_insight.main.logger")
-    @patch("jenkins_job_insight.main.ReportPortalClient")
-    @patch("jenkins_job_insight.main.get_result")
+    @patch("rootcoz.main.logger")
+    @patch("rootcoz.main.ReportPortalClient")
+    @patch("rootcoz.main.get_result")
     def test_no_failed_items_logs_debug(
         self, mock_get_result, mock_rp_class, mock_logger, _rp_enabled_env
     ):
@@ -1114,7 +1100,7 @@ class TestRPPushDebugLogging:
         mock_rp.get_failed_items.return_value = []
         mock_rp_class.return_value = mock_rp
 
-        from jenkins_job_insight.main import app
+        from rootcoz.main import app
 
         client = TestClient(app, raise_server_exceptions=False)
         response = client.post("/results/job1/push-reportportal")
@@ -1135,9 +1121,9 @@ class TestRPPushDebugLogging:
         ]
         assert not error_calls, "Should NOT log 'no failed items' at ERROR"
 
-    @patch("jenkins_job_insight.main.logger")
-    @patch("jenkins_job_insight.main.ReportPortalClient")
-    @patch("jenkins_job_insight.main.get_result")
+    @patch("rootcoz.main.logger")
+    @patch("rootcoz.main.ReportPortalClient")
+    @patch("rootcoz.main.get_result")
     def test_empty_failures_early_guard_does_not_log_error(
         self, mock_get_result, mock_rp_class, mock_logger, _rp_enabled_env
     ):
@@ -1150,7 +1136,7 @@ class TestRPPushDebugLogging:
             }
         }
 
-        from jenkins_job_insight.main import app
+        from rootcoz.main import app
 
         client = TestClient(app, raise_server_exceptions=False)
         response = client.post("/results/job2/push-reportportal")
@@ -1168,7 +1154,7 @@ class TestCapabilitiesEndpoint:
     """Test that capabilities includes reportportal."""
 
     def test_capabilities_includes_rp_disabled(self, _rp_disabled_env):
-        from jenkins_job_insight.main import app
+        from rootcoz.main import app
 
         client = TestClient(app, raise_server_exceptions=False)
         response = client.get("/api/capabilities")
@@ -1179,7 +1165,7 @@ class TestCapabilitiesEndpoint:
         assert data["reportportal_project"] == ""
 
     def test_capabilities_includes_rp_enabled(self, _rp_enabled_env):
-        from jenkins_job_insight.main import app
+        from rootcoz.main import app
 
         client = TestClient(app, raise_server_exceptions=False)
         response = client.get("/api/capabilities")
@@ -1205,7 +1191,7 @@ class TestRPErrorMessage:
 
     def test_dict_body_extracts_message_field(self, _rp_enabled_env):
         """When RP returns a JSON dict with 'message', extract it for user."""
-        from jenkins_job_insight.main import _rp_error_message
+        from rootcoz.main import _rp_error_message
 
         exc = self._make_exc_with_response(json_return={"message": "Token expired"})
         user_msg, _log_msg = _rp_error_message(exc, "finding launch")
@@ -1215,7 +1201,7 @@ class TestRPErrorMessage:
 
     def test_dict_body_without_message_shows_status_only(self, _rp_enabled_env):
         """When RP returns a JSON dict without 'message', user sees status only."""
-        from jenkins_job_insight.main import _rp_error_message
+        from rootcoz.main import _rp_error_message
 
         exc = self._make_exc_with_response(
             json_return={"error": "something else"},
@@ -1230,7 +1216,7 @@ class TestRPErrorMessage:
 
     def test_list_body_shows_status_only(self, _rp_enabled_env):
         """When RP returns a JSON array, user sees status only (no crash)."""
-        from jenkins_job_insight.main import _rp_error_message
+        from rootcoz.main import _rp_error_message
 
         exc = self._make_exc_with_response(
             json_return=["error1", "error2"],
@@ -1244,7 +1230,7 @@ class TestRPErrorMessage:
 
     def test_string_body_shows_status_only(self, _rp_enabled_env):
         """When RP returns a plain JSON string, user sees status only."""
-        from jenkins_job_insight.main import _rp_error_message
+        from rootcoz.main import _rp_error_message
 
         exc = self._make_exc_with_response(
             json_return="just a string",
@@ -1257,7 +1243,7 @@ class TestRPErrorMessage:
 
     def test_json_parse_failure_shows_status_only(self, _rp_enabled_env):
         """When resp.json() raises, user sees status only, log has raw text."""
-        from jenkins_job_insight.main import _rp_error_message
+        from rootcoz.main import _rp_error_message
 
         resp = MagicMock()
         resp.status_code = 502
@@ -1273,7 +1259,7 @@ class TestRPErrorMessage:
 
     def test_no_response_shows_operation_only(self, _rp_enabled_env):
         """When exc has no .response, user sees operation only; log has detail."""
-        from jenkins_job_insight.main import _rp_error_message
+        from rootcoz.main import _rp_error_message
 
         exc = ConnectionError("connection refused")
         user_msg, log_msg = _rp_error_message(exc, "connecting")
@@ -1285,7 +1271,7 @@ class TestRPErrorMessage:
 
     def test_rp_message_shown_to_user_but_raw_body_only_in_log(self, _rp_enabled_env):
         """RP JSON message goes to user; full response body only in log."""
-        from jenkins_job_insight.main import _rp_error_message
+        from rootcoz.main import _rp_error_message
 
         exc = self._make_exc_with_response(
             json_return={"message": "Access denied"},
@@ -1302,21 +1288,21 @@ class TestRpPushErrorResult:
 
     def test_message_preserved_as_is(self, _rp_enabled_env):
         """Error message is returned verbatim — no context suffix."""
-        from jenkins_job_insight.main import _rp_push_error_result
+        from rootcoz.main import _rp_push_error_result
 
         result = _rp_push_error_result("Some error")
         assert result["errors"] == ["Some error"]
 
     def test_launch_id_preserved(self, _rp_enabled_env):
         """launch_id is set correctly."""
-        from jenkins_job_insight.main import _rp_push_error_result
+        from rootcoz.main import _rp_push_error_result
 
         result = _rp_push_error_result("Some error", launch_id=99)
         assert result["launch_id"] == 99
         assert result["errors"] == ["Some error"]
 
-    @patch("jenkins_job_insight.main.ReportPortalClient")
-    @patch("jenkins_job_insight.main.get_result")
+    @patch("rootcoz.main.ReportPortalClient")
+    @patch("rootcoz.main.get_result")
     def test_early_guard_error_is_clean(
         self, mock_get_result, mock_rp_class, _rp_enabled_env
     ):
@@ -1330,7 +1316,7 @@ class TestRpPushErrorResult:
             }
         }
 
-        from jenkins_job_insight.main import app
+        from rootcoz.main import app
 
         client = TestClient(app, raise_server_exceptions=False)
         response = client.post("/results/job1/push-reportportal")
@@ -1340,8 +1326,8 @@ class TestRpPushErrorResult:
         assert "No failures to push" in body["errors"][0]
         assert "(job=" not in body["errors"][0]
 
-    @patch("jenkins_job_insight.main.ReportPortalClient")
-    @patch("jenkins_job_insight.main.get_result")
+    @patch("rootcoz.main.ReportPortalClient")
+    @patch("rootcoz.main.get_result")
     def test_find_launch_error_is_clean(
         self, mock_get_result, mock_rp_class, _rp_enabled_env
     ):
@@ -1366,7 +1352,7 @@ class TestRpPushErrorResult:
         mock_rp.find_launch.side_effect = ConnectionError("refused")
         mock_rp_class.return_value = mock_rp
 
-        from jenkins_job_insight.main import app
+        from rootcoz.main import app
 
         client = TestClient(app, raise_server_exceptions=False)
         response = client.post("/results/job1/push-reportportal")
@@ -1374,8 +1360,8 @@ class TestRpPushErrorResult:
         assert "searching RP launches" in body["errors"][0]
         assert "(job=" not in body["errors"][0]
 
-    @patch("jenkins_job_insight.main.ReportPortalClient")
-    @patch("jenkins_job_insight.main.get_result")
+    @patch("rootcoz.main.ReportPortalClient")
+    @patch("rootcoz.main.get_result")
     def test_no_launch_found_is_clean(
         self, mock_get_result, mock_rp_class, _rp_enabled_env
     ):
@@ -1400,7 +1386,7 @@ class TestRpPushErrorResult:
         mock_rp.find_launch.return_value = None
         mock_rp_class.return_value = mock_rp
 
-        from jenkins_job_insight.main import app
+        from rootcoz.main import app
 
         client = TestClient(app, raise_server_exceptions=False)
         response = client.post("/results/job1/push-reportportal")
@@ -1412,8 +1398,8 @@ class TestRpPushErrorResult:
         )
         assert "(job=" not in body["errors"][0]
 
-    @patch("jenkins_job_insight.main.ReportPortalClient")
-    @patch("jenkins_job_insight.main.get_result")
+    @patch("rootcoz.main.ReportPortalClient")
+    @patch("rootcoz.main.get_result")
     def test_get_failed_items_error_is_clean(
         self, mock_get_result, mock_rp_class, _rp_enabled_env
     ):
@@ -1439,7 +1425,7 @@ class TestRpPushErrorResult:
         mock_rp.get_failed_items.side_effect = RuntimeError("network err")
         mock_rp_class.return_value = mock_rp
 
-        from jenkins_job_insight.main import app
+        from rootcoz.main import app
 
         client = TestClient(app, raise_server_exceptions=False)
         response = client.post("/results/job1/push-reportportal")
@@ -1447,8 +1433,8 @@ class TestRpPushErrorResult:
         assert "fetching failed items" in body["errors"][0]
         assert "(job=" not in body["errors"][0]
 
-    @patch("jenkins_job_insight.main.ReportPortalClient")
-    @patch("jenkins_job_insight.main.get_result")
+    @patch("rootcoz.main.ReportPortalClient")
+    @patch("rootcoz.main.get_result")
     def test_match_failures_error_is_clean(
         self, mock_get_result, mock_rp_class, _rp_enabled_env
     ):
@@ -1475,7 +1461,7 @@ class TestRpPushErrorResult:
         mock_rp.match_failures.side_effect = TypeError("boom")
         mock_rp_class.return_value = mock_rp
 
-        from jenkins_job_insight.main import app
+        from rootcoz.main import app
 
         client = TestClient(app, raise_server_exceptions=False)
         response = client.post("/results/job1/push-reportportal")
@@ -1483,8 +1469,8 @@ class TestRpPushErrorResult:
         assert "matching RP items" in body["errors"][0]
         assert "(job=" not in body["errors"][0]
 
-    @patch("jenkins_job_insight.main.ReportPortalClient")
-    @patch("jenkins_job_insight.main.get_result")
+    @patch("rootcoz.main.ReportPortalClient")
+    @patch("rootcoz.main.get_result")
     def test_no_overlap_error_is_clean(
         self, mock_get_result, mock_rp_class, _rp_enabled_env
     ):
@@ -1513,7 +1499,7 @@ class TestRpPushErrorResult:
         mock_rp.match_failures.return_value = []
         mock_rp_class.return_value = mock_rp
 
-        from jenkins_job_insight.main import app
+        from rootcoz.main import app
 
         client = TestClient(app, raise_server_exceptions=False)
         response = client.post("/results/job1/push-reportportal")
@@ -1521,11 +1507,9 @@ class TestRpPushErrorResult:
         assert "No overlap" in body["errors"][0]
         assert "(job=" not in body["errors"][0]
 
-    @patch(
-        "jenkins_job_insight.main.get_history_classification", new_callable=AsyncMock
-    )
-    @patch("jenkins_job_insight.main.ReportPortalClient")
-    @patch("jenkins_job_insight.main.get_result")
+    @patch("rootcoz.main.get_history_classification", new_callable=AsyncMock)
+    @patch("rootcoz.main.ReportPortalClient")
+    @patch("rootcoz.main.get_result")
     def test_push_classifications_error_is_clean(
         self, mock_get_result, mock_rp_class, mock_get_cls, _rp_enabled_env
     ):
@@ -1560,7 +1544,7 @@ class TestRpPushErrorResult:
         mock_rp.push_classifications.side_effect = RuntimeError("timeout")
         mock_rp_class.return_value = mock_rp
 
-        from jenkins_job_insight.main import app
+        from rootcoz.main import app
 
         client = TestClient(app, raise_server_exceptions=False)
         response = client.post("/results/job1/push-reportportal")
@@ -1568,8 +1552,8 @@ class TestRpPushErrorResult:
         assert "pushing classifications" in body["errors"][0]
         assert "(job=" not in body["errors"][0]
 
-    @patch("jenkins_job_insight.main.ReportPortalClient")
-    @patch("jenkins_job_insight.main.get_result")
+    @patch("rootcoz.main.ReportPortalClient")
+    @patch("rootcoz.main.get_result")
     def test_constructor_failure_is_clean(
         self, mock_get_result, mock_rp_class, _rp_enabled_env
     ):
@@ -1590,7 +1574,7 @@ class TestRpPushErrorResult:
         }
         mock_rp_class.side_effect = ConnectionError("DNS failed")
 
-        from jenkins_job_insight.main import app
+        from rootcoz.main import app
 
         client = TestClient(app, raise_server_exceptions=False)
         response = client.post("/results/job1/push-reportportal")

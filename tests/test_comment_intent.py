@@ -8,7 +8,7 @@ from unittest.mock import patch
 import pytest
 from ai_cli_runner import AIResult
 
-from jenkins_job_insight import storage
+from rootcoz import storage
 from tests.conftest import build_test_env
 
 
@@ -22,7 +22,7 @@ def _mock_settings(temp_db_path: Path):
         GEMINI_API_KEY="test-key",  # noqa: S106  # pragma: allowlist secret
     )
     with patch.dict(os.environ, env, clear=True):
-        from jenkins_job_insight.config import get_settings
+        from rootcoz.config import get_settings
 
         get_settings.cache_clear()
         try:
@@ -37,7 +37,7 @@ def client(_mock_settings, temp_db_path: Path):
     with patch.object(storage, "DB_PATH", temp_db_path):
         from starlette.testclient import TestClient
 
-        from jenkins_job_insight.main import app
+        from rootcoz.main import app
 
         with TestClient(app) as c:
             yield c
@@ -123,7 +123,7 @@ class TestAnalyzeCommentIntent:
         )
         with (
             patch("ai_cli_runner.call_ai_cli", return_value=ai_response),
-            patch("jenkins_job_insight.token_tracking.record_ai_usage") as mock_record,
+            patch("rootcoz.token_tracking.record_ai_usage") as mock_record,
         ):
             response = client.post(
                 "/api/analyze-comment-intent",
@@ -180,7 +180,7 @@ class TestAnalyzeCommentIntentJobFallback:
         env.pop("AI_PROVIDER", None)
         env.pop("AI_MODEL", None)
         with patch.dict(os.environ, env, clear=True):
-            from jenkins_job_insight.config import get_settings
+            from rootcoz.config import get_settings
 
             get_settings.cache_clear()
             try:
@@ -191,7 +191,7 @@ class TestAnalyzeCommentIntentJobFallback:
     @pytest.fixture
     def client_no_ai(self, _mock_settings_no_ai, temp_db_path: Path):
         """Test client without server-level AI config."""
-        from jenkins_job_insight import main as main_mod
+        from rootcoz import main as main_mod
 
         with (
             patch.object(storage, "DB_PATH", temp_db_path),
@@ -200,7 +200,7 @@ class TestAnalyzeCommentIntentJobFallback:
         ):
             from starlette.testclient import TestClient
 
-            from jenkins_job_insight.main import app
+            from rootcoz.main import app
 
             with TestClient(app) as c:
                 yield c
@@ -302,7 +302,7 @@ class TestAnalyzeCommentIntentJobFallback:
         self, _mock_settings, temp_db_path: Path
     ) -> None:
         """Server-level env AI config takes precedence over job's stored config."""
-        from jenkins_job_insight import main as main_mod
+        from rootcoz import main as main_mod
 
         self._store_job_with_ai_config(
             temp_db_path, "job-789", "claude", "claude-sonnet-4-20250514"
@@ -318,7 +318,7 @@ class TestAnalyzeCommentIntentJobFallback:
         ):
             from starlette.testclient import TestClient
 
-            from jenkins_job_insight.main import app
+            from rootcoz.main import app
 
             with TestClient(app) as client_env:
                 with patch(

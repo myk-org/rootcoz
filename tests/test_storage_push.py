@@ -5,7 +5,7 @@ from unittest.mock import patch
 
 import pytest
 
-from jenkins_job_insight import storage
+from rootcoz import storage
 
 
 @pytest.fixture

@@ -5,7 +5,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from jenkins_job_insight.notifications import send_mention_notifications
+from rootcoz.notifications import send_mention_notifications
 
 
 class TestSendMentionNotifications:
@@ -15,7 +15,7 @@ class TestSendMentionNotifications:
     async def test_self_mention_filtered(self) -> None:
         """Comment author mentioning themselves should not trigger any push."""
         with patch(
-            "jenkins_job_insight.notifications.get_push_subscriptions_for_users",
+            "rootcoz.notifications.get_push_subscriptions_for_users",
             new_callable=AsyncMock,
         ) as mock_get:
             await send_mention_notifications(
@@ -33,11 +33,11 @@ class TestSendMentionNotifications:
         """Author is removed from a mixed mentioned list before subscription lookup."""
         with (
             patch(
-                "jenkins_job_insight.notifications.get_push_subscriptions_for_users",
+                "rootcoz.notifications.get_push_subscriptions_for_users",
                 new_callable=AsyncMock,
                 return_value=[],
             ) as mock_get,
-            patch("jenkins_job_insight.notifications.webpush"),
+            patch("rootcoz.notifications.webpush"),
         ):
             await send_mention_notifications(
                 mentioned_usernames=["alice", "bob"],
@@ -53,7 +53,7 @@ class TestSendMentionNotifications:
     async def test_empty_mentioned_list(self) -> None:
         """Empty mentioned list should return early without fetching subscriptions."""
         with patch(
-            "jenkins_job_insight.notifications.get_push_subscriptions_for_users",
+            "rootcoz.notifications.get_push_subscriptions_for_users",
             new_callable=AsyncMock,
         ) as mock_get:
             await send_mention_notifications(
@@ -71,12 +71,12 @@ class TestSendMentionNotifications:
         """When no subscriptions exist for mentioned users, return early."""
         with (
             patch(
-                "jenkins_job_insight.notifications.get_push_subscriptions_for_users",
+                "rootcoz.notifications.get_push_subscriptions_for_users",
                 new_callable=AsyncMock,
                 return_value=[],
             ),
             patch(
-                "jenkins_job_insight.notifications.webpush",
+                "rootcoz.notifications.webpush",
             ) as mock_webpush,
         ):
             await send_mention_notifications(
@@ -102,12 +102,12 @@ class TestSendMentionNotifications:
         ]
         with (
             patch(
-                "jenkins_job_insight.notifications.get_push_subscriptions_for_users",
+                "rootcoz.notifications.get_push_subscriptions_for_users",
                 new_callable=AsyncMock,
                 return_value=subscriptions,
             ),
             patch(
-                "jenkins_job_insight.notifications.asyncio.to_thread",
+                "rootcoz.notifications.asyncio.to_thread",
                 new_callable=AsyncMock,
             ) as mock_to_thread,
         ):
@@ -118,7 +118,7 @@ class TestSendMentionNotifications:
                 test_name="test_foo",
                 vapid_private_key="fake-key",  # pragma: allowlist secret
                 vapid_claim_email="admin@example.com",
-                public_base_url="https://jji.example.com",
+                public_base_url="https://rootcoz.example.com",
             )
             mock_to_thread.assert_called_once()
             call_args = mock_to_thread.call_args
@@ -131,7 +131,7 @@ class TestSendMentionNotifications:
             payload = json.loads(call_args.kwargs["data"])
             assert payload["title"] == "Mentioned by @alice"
             assert "test_foo" in payload["body"]
-            assert payload["url"] == "https://jji.example.com/report/job-1"
+            assert payload["url"] == "https://rootcoz.example.com/report/job-1"
 
     @pytest.mark.asyncio
     async def test_stale_subscriptions_cleaned_up(self) -> None:
@@ -154,17 +154,17 @@ class TestSendMentionNotifications:
 
         with (
             patch(
-                "jenkins_job_insight.notifications.get_push_subscriptions_for_users",
+                "rootcoz.notifications.get_push_subscriptions_for_users",
                 new_callable=AsyncMock,
                 return_value=subscriptions,
             ),
             patch(
-                "jenkins_job_insight.notifications.asyncio.to_thread",
+                "rootcoz.notifications.asyncio.to_thread",
                 new_callable=AsyncMock,
                 side_effect=exc,
             ),
             patch(
-                "jenkins_job_insight.notifications.delete_stale_push_subscriptions",
+                "rootcoz.notifications.delete_stale_push_subscriptions",
                 new_callable=AsyncMock,
             ) as mock_delete,
         ):
@@ -184,7 +184,7 @@ class TestSendMentionNotifications:
     async def test_errors_do_not_propagate(self) -> None:
         """Any unexpected error is caught and logged, never raised."""
         with patch(
-            "jenkins_job_insight.notifications.get_push_subscriptions_for_users",
+            "rootcoz.notifications.get_push_subscriptions_for_users",
             new_callable=AsyncMock,
             side_effect=RuntimeError("DB connection failed"),
         ):
@@ -217,12 +217,12 @@ class TestSendMentionNotifications:
         ]
         with (
             patch(
-                "jenkins_job_insight.notifications.get_push_subscriptions_for_users",
+                "rootcoz.notifications.get_push_subscriptions_for_users",
                 new_callable=AsyncMock,
                 return_value=subscriptions,
             ),
             patch(
-                "jenkins_job_insight.notifications.asyncio.to_thread",
+                "rootcoz.notifications.asyncio.to_thread",
                 new_callable=AsyncMock,
             ) as mock_to_thread,
         ):
@@ -255,17 +255,17 @@ class TestSendMentionNotifications:
 
         with (
             patch(
-                "jenkins_job_insight.notifications.get_push_subscriptions_for_users",
+                "rootcoz.notifications.get_push_subscriptions_for_users",
                 new_callable=AsyncMock,
                 return_value=subscriptions,
             ),
             patch(
-                "jenkins_job_insight.notifications.asyncio.to_thread",
+                "rootcoz.notifications.asyncio.to_thread",
                 new_callable=AsyncMock,
                 side_effect=exc,
             ),
             patch(
-                "jenkins_job_insight.notifications.delete_stale_push_subscriptions",
+                "rootcoz.notifications.delete_stale_push_subscriptions",
                 new_callable=AsyncMock,
             ) as mock_delete,
         ):
@@ -294,12 +294,12 @@ class TestSendMentionNotifications:
         ]
         with (
             patch(
-                "jenkins_job_insight.notifications.get_push_subscriptions_for_users",
+                "rootcoz.notifications.get_push_subscriptions_for_users",
                 new_callable=AsyncMock,
                 return_value=subscriptions,
             ),
             patch(
-                "jenkins_job_insight.notifications.asyncio.to_thread",
+                "rootcoz.notifications.asyncio.to_thread",
                 new_callable=AsyncMock,
             ) as mock_to_thread,
         ):

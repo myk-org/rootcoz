@@ -1,6 +1,6 @@
-"""Report Portal integration for pushing JJI classifications into RP test items.
+"""Report Portal integration for pushing rootcoz classifications into RP test items.
 
-Maps JJI AI classifications to Report Portal defect types and pushes
+Maps rootcoz AI classifications to Report Portal defect types and pushes
 classification results, analysis text, and Jira matches into RP launches.
 """
 
@@ -17,7 +17,7 @@ from reportportal_client import RPClient
 from simple_logger.logger import get_logger
 
 if TYPE_CHECKING:
-    from jenkins_job_insight.models import FailureAnalysis
+    from rootcoz.models import FailureAnalysis
 
 logger = get_logger(name=__name__, level=os.environ.get("LOG_LEVEL", "INFO"))
 _RPCLIENT_INIT_LOCK = threading.Lock()
@@ -61,7 +61,7 @@ class AmbiguousLaunchError(Exception):
         )
 
 
-# JJI classification -> RP defect type category
+# rootcoz classification -> RP defect type category
 _CLASSIFICATION_MAP: dict[str, str] = {
     "PRODUCT BUG": "PRODUCT_BUG",
     "CODE ISSUE": "AUTOMATION_BUG",
@@ -78,7 +78,7 @@ _DEFAULT_LOCATORS: dict[str, str] = {
 
 
 class ReportPortalClient:
-    """Client for pushing JJI classifications into Report Portal.
+    """Client for pushing rootcoz classifications into Report Portal.
 
     Uses the ``reportportal-client`` package to communicate with the RP API.
     Supports the context manager protocol for automatic cleanup.
@@ -130,13 +130,13 @@ class ReportPortalClient:
         history_classification: str | None = None,
         locators: dict[str, str] | None = None,
     ) -> str | None:
-        """Map a JJI classification to an RP defect type locator.
+        """Map a rootcoz classification to an RP defect type locator.
 
         If *history_classification* is ``INFRASTRUCTURE``, maps to System Issue
         regardless of the AI classification.
 
         Args:
-            classification: JJI AI classification (e.g. ``PRODUCT BUG``).
+            classification: rootcoz AI classification (e.g. ``PRODUCT BUG``).
             history_classification: Optional history classification from
                 test_classifications table.
             locators: Project-specific defect type locators. Falls back
@@ -272,28 +272,28 @@ class ReportPortalClient:
     def match_failures(
         self,
         rp_items: list[dict],
-        jji_failures: list[FailureAnalysis],
+        rcz_failures: list[FailureAnalysis],
     ) -> list[tuple[dict, FailureAnalysis]]:
-        """Match RP test items to JJI failure analyses by test name.
+        """Match RP test items to rootcoz failure analyses by test name.
 
-        Multiple RP items CAN match the same JJI failure (e.g. when a
+        Multiple RP items CAN match the same rootcoz failure (e.g. when a
         flaky test fails multiple times in the same launch).
 
         Matching strategy (in order):
         1. Exact match on ``name`` or ``codeRef``
-        2. Dotted-suffix match on ``name`` in either direction: JJI FQN
+        2. Dotted-suffix match on ``name`` in either direction: rootcoz FQN
            ends with ``.{rp_name}`` *or* RP name ends with
-           ``.{jji_name}``.
-        3. Dotted-suffix match on ``codeRef`` in either direction: JJI
+           ``.{rcz_name}``.
+        3. Dotted-suffix match on ``codeRef`` in either direction: rootcoz
            FQN ends with ``.{rp_codeRef}`` *or* RP codeRef ends with
-           ``.{jji_name}``.
+           ``.{rcz_name}``.
 
         Args:
             rp_items: List of RP item dicts.
-            jji_failures: List of JJI FailureAnalysis objects.
+            rcz_failures: List of rootcoz FailureAnalysis objects.
 
         Returns:
-            List of ``(rp_item, jji_failure)`` tuples.
+            List of ``(rp_item, rcz_failure)`` tuples.
         """
         matched: list[tuple[dict, FailureAnalysis]] = []
 
@@ -301,23 +301,23 @@ class ReportPortalClient:
             rp_name = rp_item.get("name", "")
             rp_code_ref = rp_item.get("codeRef", "")
 
-            for failure in jji_failures:
-                jji_name = failure.test_name
+            for failure in rcz_failures:
+                rcz_name = failure.test_name
 
                 # Exact match on name or codeRef
-                if jji_name == rp_name or (rp_code_ref and jji_name == rp_code_ref):
+                if rcz_name == rp_name or (rp_code_ref and rcz_name == rp_code_ref):
                     matched.append((rp_item, failure))
                     break
 
                 # Dotted-suffix match in either direction (see docstring)
-                if jji_name.endswith(f".{rp_name}") or rp_name.endswith(f".{jji_name}"):
+                if rcz_name.endswith(f".{rp_name}") or rp_name.endswith(f".{rcz_name}"):
                     matched.append((rp_item, failure))
                     break
 
                 # Dotted-suffix match against codeRef
                 if rp_code_ref and (
-                    jji_name.endswith(f".{rp_code_ref}")
-                    or rp_code_ref.endswith(f".{jji_name}")
+                    rcz_name.endswith(f".{rp_code_ref}")
+                    or rp_code_ref.endswith(f".{rcz_name}")
                 ):
                     matched.append((rp_item, failure))
                     break
@@ -330,16 +330,16 @@ class ReportPortalClient:
         report_url: str,
         history_classifications: dict[str, str] | None = None,
     ) -> dict:
-        """Push JJI classifications into RP test items.
+        """Push rootcoz classifications into RP test items.
 
         For each matched pair, builds an issue update with:
-        - Defect type locator mapped from JJI classification
-        - Comment with link to JJI report page
+        - Defect type locator mapped from rootcoz classification
+        - Comment with link to rootcoz report page
         - External system issues for Jira matches (if present)
 
         Args:
-            matched_pairs: List of ``(rp_item, jji_failure)`` tuples.
-            report_url: URL to the JJI report page.
+            matched_pairs: List of ``(rp_item, rcz_failure)`` tuples.
+            report_url: URL to the rootcoz report page.
             history_classifications: Optional mapping of test name to
                 history classification (e.g. ``INFRASTRUCTURE``).
 
@@ -390,9 +390,7 @@ class ReportPortalClient:
                 continue
 
             # Build comment
-            comment = (
-                f"See AI failure analysis under: [JJI Failure Analysis]({report_url})"
-            )
+            comment = f"See AI failure analysis under: [rootcoz Failure Analysis]({report_url})"
 
             # Build issue update payload (RP API uses camelCase)
             issue_payload: dict = {

@@ -17,7 +17,7 @@ from pydantic import HttpUrl
 from simple_logger.logger import get_logger
 
 if TYPE_CHECKING:
-    from jenkins_job_insight.models import AdditionalRepo
+    from rootcoz.models import AdditionalRepo
 
 logger = get_logger(name=__name__, level=os.environ.get("LOG_LEVEL", "INFO"))
 

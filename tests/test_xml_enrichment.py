@@ -4,7 +4,7 @@ from xml.etree import ElementTree as ET
 
 import pytest
 
-from jenkins_job_insight.xml_enrichment import (
+from rootcoz.xml_enrichment import (
     apply_analysis_to_xml,
     extract_failures_from_xml,
 )

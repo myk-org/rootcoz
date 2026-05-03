@@ -6,7 +6,7 @@ from unittest.mock import patch
 import pytest
 
 from ai_cli_runner import AIResult
-from jenkins_job_insight.models import AiConfigEntry, TestFailure
+from rootcoz.models import AiConfigEntry, TestFailure
 
 
 # ---------------------------------------------------------------------------
@@ -37,18 +37,14 @@ async def _run_peer_analysis(
     """Helper to run analyze_failure_group_with_peers with mocked CLI."""
     from unittest.mock import AsyncMock
 
-    from jenkins_job_insight.models import AiConfigEntry, TestFailure
-    from jenkins_job_insight.peer_analysis import analyze_failure_group_with_peers
+    from rootcoz.models import AiConfigEntry, TestFailure
+    from rootcoz.peer_analysis import analyze_failure_group_with_peers
 
     monkeypatch.setattr(
-        "jenkins_job_insight.peer_analysis._call_ai_cli_with_retry", cli_side_effect
+        "rootcoz.peer_analysis._call_ai_cli_with_retry", cli_side_effect
     )
-    monkeypatch.setattr(
-        "jenkins_job_insight.analyzer._call_ai_cli_with_retry", cli_side_effect
-    )
-    monkeypatch.setattr(
-        "jenkins_job_insight.peer_analysis.update_progress_phase", AsyncMock()
-    )
+    monkeypatch.setattr("rootcoz.analyzer._call_ai_cli_with_retry", cli_side_effect)
+    monkeypatch.setattr("rootcoz.peer_analysis.update_progress_phase", AsyncMock())
 
     if peer_configs is None:
         peer_configs = [AiConfigEntry(ai_provider="gemini", ai_model="pro")]
@@ -117,8 +113,8 @@ def _make_peer_json_response(
 class TestCheckConsensus:
     def test_check_consensus_all_agree(self) -> None:
         """All non-failed peers agree with orchestrator -> True."""
-        from jenkins_job_insight.peer_analysis import _check_consensus
-        from jenkins_job_insight.models import PeerRound
+        from rootcoz.peer_analysis import _check_consensus
+        from rootcoz.models import PeerRound
 
         rounds = [
             PeerRound(
@@ -144,8 +140,8 @@ class TestCheckConsensus:
 
     def test_check_consensus_disagreement(self) -> None:
         """At least one peer disagrees -> False."""
-        from jenkins_job_insight.peer_analysis import _check_consensus
-        from jenkins_job_insight.models import PeerRound
+        from rootcoz.peer_analysis import _check_consensus
+        from rootcoz.models import PeerRound
 
         rounds = [
             PeerRound(
@@ -171,8 +167,8 @@ class TestCheckConsensus:
 
     def test_check_consensus_no_valid_peers(self) -> None:
         """All peers failed (agrees=None) -> False."""
-        from jenkins_job_insight.peer_analysis import _check_consensus
-        from jenkins_job_insight.models import PeerRound
+        from rootcoz.peer_analysis import _check_consensus
+        from rootcoz.models import PeerRound
 
         rounds = [
             PeerRound(
@@ -198,8 +194,8 @@ class TestCheckConsensus:
 
     def test_check_consensus_failed_peer_excluded(self) -> None:
         """One peer failed (None), remaining peer agrees -> True."""
-        from jenkins_job_insight.peer_analysis import _check_consensus
-        from jenkins_job_insight.models import PeerRound
+        from rootcoz.peer_analysis import _check_consensus
+        from rootcoz.models import PeerRound
 
         rounds = [
             PeerRound(
@@ -229,8 +225,8 @@ class TestCheckConsensus:
         A peer that self-reports agrees=True but has a different classification
         should NOT count as consensus.
         """
-        from jenkins_job_insight.peer_analysis import _check_consensus
-        from jenkins_job_insight.models import PeerRound
+        from rootcoz.peer_analysis import _check_consensus
+        from rootcoz.models import PeerRound
 
         # Peer says agrees=True but classification differs from orchestrator
         rounds = [
@@ -249,8 +245,8 @@ class TestCheckConsensus:
 
     def test_check_consensus_classification_match_overrides_disagrees(self) -> None:
         """Peer that says disagrees but has matching classification -> consensus True."""
-        from jenkins_job_insight.peer_analysis import _check_consensus
-        from jenkins_job_insight.models import PeerRound
+        from rootcoz.peer_analysis import _check_consensus
+        from rootcoz.models import PeerRound
 
         rounds = [
             PeerRound(
@@ -267,8 +263,8 @@ class TestCheckConsensus:
 
     def test_check_consensus_case_insensitive(self) -> None:
         """Classification comparison is case-insensitive."""
-        from jenkins_job_insight.peer_analysis import _check_consensus
-        from jenkins_job_insight.models import PeerRound
+        from rootcoz.peer_analysis import _check_consensus
+        from rootcoz.models import PeerRound
 
         rounds = [
             PeerRound(
@@ -285,8 +281,8 @@ class TestCheckConsensus:
 
     def test_check_consensus_whitespace_tolerance(self) -> None:
         """Classification comparison tolerates leading/trailing whitespace."""
-        from jenkins_job_insight.peer_analysis import _check_consensus
-        from jenkins_job_insight.models import PeerRound
+        from rootcoz.peer_analysis import _check_consensus
+        from rootcoz.models import PeerRound
 
         rounds = [
             PeerRound(
@@ -309,32 +305,32 @@ class TestCheckConsensus:
 
 class TestNormalizeClassification:
     def test_normalizes_lowercase(self) -> None:
-        from jenkins_job_insight.peer_analysis import _normalize_classification
+        from rootcoz.peer_analysis import _normalize_classification
 
         assert _normalize_classification("code issue") == "CODE ISSUE"
 
     def test_normalizes_mixed_case(self) -> None:
-        from jenkins_job_insight.peer_analysis import _normalize_classification
+        from rootcoz.peer_analysis import _normalize_classification
 
         assert _normalize_classification("Product Bug") == "PRODUCT BUG"
 
     def test_strips_whitespace(self) -> None:
-        from jenkins_job_insight.peer_analysis import _normalize_classification
+        from rootcoz.peer_analysis import _normalize_classification
 
         assert _normalize_classification("  CODE ISSUE  ") == "CODE ISSUE"
 
     def test_already_normalized(self) -> None:
-        from jenkins_job_insight.peer_analysis import _normalize_classification
+        from rootcoz.peer_analysis import _normalize_classification
 
         assert _normalize_classification("PRODUCT BUG") == "PRODUCT BUG"
 
     def test_collapses_internal_whitespace(self) -> None:
-        from jenkins_job_insight.peer_analysis import _normalize_classification
+        from rootcoz.peer_analysis import _normalize_classification
 
         assert _normalize_classification("CODE   ISSUE") == "CODE ISSUE"
 
     def test_handles_none_input(self) -> None:
-        from jenkins_job_insight.peer_analysis import _normalize_classification
+        from rootcoz.peer_analysis import _normalize_classification
 
         assert _normalize_classification(None) == ""
 
@@ -347,7 +343,7 @@ class TestNormalizeClassification:
 class TestParsePeerResponse:
     def test_parse_peer_response_valid_json(self) -> None:
         """Valid JSON string is parsed correctly."""
-        from jenkins_job_insight.peer_analysis import _parse_peer_response
+        from rootcoz.peer_analysis import _parse_peer_response
 
         raw = _make_peer_json_response(agrees=True, classification="CODE ISSUE")
         result = _parse_peer_response(raw)
@@ -357,7 +353,7 @@ class TestParsePeerResponse:
 
     def test_parse_peer_response_json_in_text(self) -> None:
         """JSON embedded in markdown code block is extracted."""
-        from jenkins_job_insight.peer_analysis import _parse_peer_response
+        from rootcoz.peer_analysis import _parse_peer_response
 
         raw = f"Here is my analysis:\n```json\n{_make_peer_json_response()}\n```\n"
         result = _parse_peer_response(raw)
@@ -366,7 +362,7 @@ class TestParsePeerResponse:
 
     def test_parse_peer_response_unparseable(self) -> None:
         """Completely unparseable text returns _failed marker."""
-        from jenkins_job_insight.peer_analysis import _parse_peer_response
+        from rootcoz.peer_analysis import _parse_peer_response
 
         result = _parse_peer_response("I cannot provide JSON output sorry")
         assert result["_failed"] is True
@@ -385,7 +381,7 @@ class TestParsePeerResponse:
         self, raw_json: str, description: str
     ) -> None:
         """Non-dict JSON (string, array, number, etc.) returns _failed marker."""
-        from jenkins_job_insight.peer_analysis import _parse_peer_response
+        from rootcoz.peer_analysis import _parse_peer_response
 
         result = _parse_peer_response(raw_json)
         assert result.get("_failed") is True, (
@@ -394,7 +390,7 @@ class TestParsePeerResponse:
 
     def test_parse_peer_response_non_dict_in_code_block(self) -> None:
         """Non-dict JSON inside markdown code block returns _failed marker."""
-        from jenkins_job_insight.peer_analysis import _parse_peer_response
+        from rootcoz.peer_analysis import _parse_peer_response
 
         raw = '```json\n["not", "a", "dict"]\n```'
         result = _parse_peer_response(raw)
@@ -402,7 +398,7 @@ class TestParsePeerResponse:
 
     def test_parse_peer_response_non_dict_brace_extraction(self) -> None:
         """When brace extraction yields a valid dict, it should succeed."""
-        from jenkins_job_insight.peer_analysis import _parse_peer_response
+        from rootcoz.peer_analysis import _parse_peer_response
 
         # This has leading text but valid JSON dict inside
         raw = f"Some preamble text {_make_peer_json_response()}"
@@ -412,7 +408,7 @@ class TestParsePeerResponse:
 
     def test_parse_peer_response_json_in_second_code_block(self) -> None:
         """JSON dict in a later fenced block is found when the first block is non-dict JSON."""
-        from jenkins_job_insight.peer_analysis import _parse_peer_response
+        from rootcoz.peer_analysis import _parse_peer_response
 
         valid_json = _make_peer_json_response(
             agrees=False, classification="PRODUCT BUG"
@@ -486,7 +482,7 @@ class TestParsePeerResponse:
         self, preamble, agrees, classification, reasoning, suggested_changes
     ) -> None:
         """JSON is correctly extracted when prefatory text contains curly braces."""
-        from jenkins_job_insight.peer_analysis import _parse_peer_response
+        from rootcoz.peer_analysis import _parse_peer_response
 
         raw = preamble + _make_peer_json_response(
             agrees=agrees,
@@ -502,7 +498,7 @@ class TestParsePeerResponse:
 
     def test_parse_peer_response_trailing_text_after_json(self) -> None:
         """JSON followed by trailing text is still parsed correctly."""
-        from jenkins_job_insight.peer_analysis import _parse_peer_response
+        from rootcoz.peer_analysis import _parse_peer_response
 
         raw = (
             _make_peer_json_response(
@@ -519,7 +515,7 @@ class TestParsePeerResponse:
 
     def test_parse_peer_response_nested_object_not_returned(self) -> None:
         """Inner nested objects are skipped; the root peer response is returned."""
-        from jenkins_job_insight.peer_analysis import _parse_peer_response
+        from rootcoz.peer_analysis import _parse_peer_response
 
         # JSON with a nested object — iterating from last '{' should NOT
         # return the inner {"nested": true} dict.
@@ -536,7 +532,7 @@ class TestParsePeerResponse:
 
     def test_parse_peer_response_wrong_shape_dict_falls_through(self) -> None:
         """Top-level JSON dict without peer keys falls through to later strategies."""
-        from jenkins_job_insight.peer_analysis import _parse_peer_response
+        from rootcoz.peer_analysis import _parse_peer_response
 
         # The AI wraps its response in extra metadata — Strategy 1 should
         # reject the top-level dict (no peer keys) and Strategy 3 should
@@ -554,7 +550,7 @@ class TestParsePeerResponse:
 
     def test_parse_peer_response_wrapper_with_peer_key_falls_through(self) -> None:
         """Wrapper dict with a top-level peer key does not short-circuit parsing."""
-        from jenkins_job_insight.peer_analysis import _parse_peer_response
+        from rootcoz.peer_analysis import _parse_peer_response
 
         # A wrapper that has 'classification' at top level but the real peer
         # payload is nested under 'response'. Strategy 1 should reject the
@@ -581,7 +577,7 @@ class TestParsePeerResponse:
 class TestBuildFailureSummary:
     def test_no_stack_trace_in_summary(self) -> None:
         """Failure summary should NOT contain stack trace -- peers have repo access."""
-        from jenkins_job_insight.peer_analysis import _build_failure_summary
+        from rootcoz.peer_analysis import _build_failure_summary
 
         failures = [_make_failure(stack_trace="at com.example.Foo.bar(Foo.java:10)")]
         summary = _build_failure_summary(failures, error_signature="abc123")
@@ -590,7 +586,7 @@ class TestBuildFailureSummary:
 
     def test_failure_summary_contains_essentials(self) -> None:
         """Failure summary includes error signature, test names, and error message."""
-        from jenkins_job_insight.peer_analysis import _build_failure_summary
+        from rootcoz.peer_analysis import _build_failure_summary
 
         failures = [
             _make_failure(
@@ -608,7 +604,7 @@ class TestBuildFailureSummary:
 class TestBuildPeerReviewPrompt:
     def test_build_peer_review_prompt_contains_framing(self) -> None:
         """Prompt contains AI-to-AI anti-sycophancy framing."""
-        from jenkins_job_insight.peer_analysis import _build_peer_review_prompt
+        from rootcoz.peer_analysis import _build_peer_review_prompt
 
         prompt = _build_peer_review_prompt(
             failure_summary="Test failed with assertion error",
@@ -621,7 +617,7 @@ class TestBuildPeerReviewPrompt:
 
     def test_build_peer_review_prompt_contains_analysis(self) -> None:
         """Prompt contains the orchestrator's analysis for review."""
-        from jenkins_job_insight.peer_analysis import _build_peer_review_prompt
+        from rootcoz.peer_analysis import _build_peer_review_prompt
 
         prompt = _build_peer_review_prompt(
             failure_summary="Test failed with assertion error",
@@ -646,8 +642,8 @@ class TestAnalyzeWithPeers:
         """All peers agree in round 1 -> consensus reached, 1 round used."""
         from unittest.mock import AsyncMock
 
-        from jenkins_job_insight.models import AnalysisDetail
-        from jenkins_job_insight.peer_analysis import analyze_failure_group_with_peers
+        from rootcoz.models import AnalysisDetail
+        from rootcoz.peer_analysis import analyze_failure_group_with_peers
 
         peer_response = _make_peer_json_response(
             agrees=True, classification="CODE ISSUE"
@@ -674,11 +670,11 @@ class TestAnalyzeWithPeers:
 
         with (
             patch(
-                "jenkins_job_insight.peer_analysis._run_single_ai_analysis",
+                "rootcoz.peer_analysis._run_single_ai_analysis",
                 mock_orchestrator,
             ),
             patch(
-                "jenkins_job_insight.peer_analysis._call_ai_cli_with_retry",
+                "rootcoz.peer_analysis._call_ai_cli_with_retry",
                 side_effect=mock_peer_call,
             ),
         ):
@@ -703,8 +699,8 @@ class TestAnalyzeWithPeers:
         """Peers disagree round 1, main AI revises, consensus round 2."""
         from unittest.mock import AsyncMock
 
-        from jenkins_job_insight.models import AnalysisDetail
-        from jenkins_job_insight.peer_analysis import analyze_failure_group_with_peers
+        from rootcoz.models import AnalysisDetail
+        from rootcoz.peer_analysis import analyze_failure_group_with_peers
 
         main_response_r2 = _make_ai_json_response(
             classification="PRODUCT BUG",
@@ -754,11 +750,11 @@ class TestAnalyzeWithPeers:
 
         with (
             patch(
-                "jenkins_job_insight.peer_analysis._run_single_ai_analysis",
+                "rootcoz.peer_analysis._run_single_ai_analysis",
                 mock_orchestrator,
             ),
             patch(
-                "jenkins_job_insight.peer_analysis._call_ai_cli_with_retry",
+                "rootcoz.peer_analysis._call_ai_cli_with_retry",
                 side_effect=mock_peer_and_revision_call,
             ),
         ):
@@ -783,8 +779,8 @@ class TestAnalyzeWithPeers:
         """When revision call fails, previous valid analysis is kept."""
         from unittest.mock import AsyncMock
 
-        from jenkins_job_insight.models import AnalysisDetail
-        from jenkins_job_insight.peer_analysis import analyze_failure_group_with_peers
+        from rootcoz.models import AnalysisDetail
+        from rootcoz.peer_analysis import analyze_failure_group_with_peers
 
         # Orchestrator initial: CODE ISSUE
         mock_orchestrator = AsyncMock(
@@ -830,11 +826,11 @@ class TestAnalyzeWithPeers:
 
         with (
             patch(
-                "jenkins_job_insight.peer_analysis._run_single_ai_analysis",
+                "rootcoz.peer_analysis._run_single_ai_analysis",
                 mock_orchestrator,
             ),
             patch(
-                "jenkins_job_insight.peer_analysis._call_ai_cli_with_retry",
+                "rootcoz.peer_analysis._call_ai_cli_with_retry",
                 side_effect=mock_peer_and_revision_call,
             ),
         ):
@@ -862,8 +858,8 @@ class TestAnalyzeWithPeers:
         """When revision call raises an exception, prior analysis is preserved."""
         from unittest.mock import AsyncMock
 
-        from jenkins_job_insight.models import AnalysisDetail
-        from jenkins_job_insight.peer_analysis import analyze_failure_group_with_peers
+        from rootcoz.models import AnalysisDetail
+        from rootcoz.peer_analysis import analyze_failure_group_with_peers
 
         mock_orchestrator = AsyncMock(
             return_value=(
@@ -908,11 +904,11 @@ class TestAnalyzeWithPeers:
 
         with (
             patch(
-                "jenkins_job_insight.peer_analysis._run_single_ai_analysis",
+                "rootcoz.peer_analysis._run_single_ai_analysis",
                 mock_orchestrator,
             ),
             patch(
-                "jenkins_job_insight.peer_analysis._call_ai_cli_with_retry",
+                "rootcoz.peer_analysis._call_ai_cli_with_retry",
                 side_effect=mock_peer_and_revision_call,
             ),
         ):
@@ -943,8 +939,8 @@ class TestAnalyzeWithPeers:
         non-empty fields from the prior analysis are preserved (merged forward)."""
         from unittest.mock import AsyncMock
 
-        from jenkins_job_insight.models import AnalysisDetail
-        from jenkins_job_insight.peer_analysis import analyze_failure_group_with_peers
+        from rootcoz.models import AnalysisDetail
+        from rootcoz.peer_analysis import analyze_failure_group_with_peers
 
         # Revision returns same classification but drops code_fix and artifacts_evidence
         revision_response = json.dumps(
@@ -1008,11 +1004,11 @@ class TestAnalyzeWithPeers:
 
         with (
             patch(
-                "jenkins_job_insight.peer_analysis._run_single_ai_analysis",
+                "rootcoz.peer_analysis._run_single_ai_analysis",
                 mock_orchestrator,
             ),
             patch(
-                "jenkins_job_insight.peer_analysis._call_ai_cli_with_retry",
+                "rootcoz.peer_analysis._call_ai_cli_with_retry",
                 side_effect=mock_peer_and_revision_call,
             ),
         ):
@@ -1047,8 +1043,8 @@ class TestAnalyzeWithPeers:
         the prior analysis details are preserved (not replaced with empty string)."""
         from unittest.mock import AsyncMock
 
-        from jenkins_job_insight.models import AnalysisDetail
-        from jenkins_job_insight.peer_analysis import analyze_failure_group_with_peers
+        from rootcoz.models import AnalysisDetail
+        from rootcoz.peer_analysis import analyze_failure_group_with_peers
 
         # Revision returns same classification but drops ALL fields including details
         revision_response = json.dumps(
@@ -1108,11 +1104,11 @@ class TestAnalyzeWithPeers:
 
         with (
             patch(
-                "jenkins_job_insight.peer_analysis._run_single_ai_analysis",
+                "rootcoz.peer_analysis._run_single_ai_analysis",
                 mock_orchestrator,
             ),
             patch(
-                "jenkins_job_insight.peer_analysis._call_ai_cli_with_retry",
+                "rootcoz.peer_analysis._call_ai_cli_with_retry",
                 side_effect=mock_peer_and_revision_call,
             ),
         ):
@@ -1144,8 +1140,8 @@ class TestAnalyzeWithPeers:
         the merge-forward path (preserving structured fields from prior analysis)."""
         from unittest.mock import AsyncMock
 
-        from jenkins_job_insight.models import AnalysisDetail
-        from jenkins_job_insight.peer_analysis import analyze_failure_group_with_peers
+        from rootcoz.models import AnalysisDetail
+        from rootcoz.peer_analysis import analyze_failure_group_with_peers
 
         # Revision returns same classification but with different casing
         # and drops code_fix and artifacts_evidence
@@ -1205,11 +1201,11 @@ class TestAnalyzeWithPeers:
 
         with (
             patch(
-                "jenkins_job_insight.peer_analysis._run_single_ai_analysis",
+                "rootcoz.peer_analysis._run_single_ai_analysis",
                 mock_orchestrator,
             ),
             patch(
-                "jenkins_job_insight.peer_analysis._call_ai_cli_with_retry",
+                "rootcoz.peer_analysis._call_ai_cli_with_retry",
                 side_effect=mock_peer_and_revision_call,
             ),
         ):
@@ -1242,8 +1238,8 @@ class TestAnalyzeWithPeers:
         """Peers never agree; exhausts max_rounds with consensus=False."""
         from unittest.mock import AsyncMock
 
-        from jenkins_job_insight.models import AnalysisDetail
-        from jenkins_job_insight.peer_analysis import analyze_failure_group_with_peers
+        from rootcoz.models import AnalysisDetail
+        from rootcoz.peer_analysis import analyze_failure_group_with_peers
 
         main_response = _make_ai_json_response(classification="CODE ISSUE")
         peer_disagree = _make_peer_json_response(
@@ -1276,11 +1272,11 @@ class TestAnalyzeWithPeers:
 
         with (
             patch(
-                "jenkins_job_insight.peer_analysis._run_single_ai_analysis",
+                "rootcoz.peer_analysis._run_single_ai_analysis",
                 mock_orchestrator,
             ),
             patch(
-                "jenkins_job_insight.peer_analysis._call_ai_cli_with_retry",
+                "rootcoz.peer_analysis._call_ai_cli_with_retry",
                 side_effect=mock_peer_and_revision_call,
             ),
         ):
@@ -1332,8 +1328,8 @@ class TestAnalyzeWithPeers:
         """agrees_with_orchestrator is derived from classification match, not the peer's self-reported agrees field."""
         from unittest.mock import AsyncMock
 
-        from jenkins_job_insight.models import AnalysisDetail
-        from jenkins_job_insight.peer_analysis import analyze_failure_group_with_peers
+        from rootcoz.models import AnalysisDetail
+        from rootcoz.peer_analysis import analyze_failure_group_with_peers
 
         mock_orchestrator = AsyncMock(
             return_value=(
@@ -1362,11 +1358,11 @@ class TestAnalyzeWithPeers:
 
         with (
             patch(
-                "jenkins_job_insight.peer_analysis._run_single_ai_analysis",
+                "rootcoz.peer_analysis._run_single_ai_analysis",
                 mock_orchestrator,
             ),
             patch(
-                "jenkins_job_insight.peer_analysis._call_ai_cli_with_retry",
+                "rootcoz.peer_analysis._call_ai_cli_with_retry",
                 side_effect=mock_peer_call,
             ),
         ):
@@ -1396,8 +1392,8 @@ class TestAnalyzeWithPeers:
         """One peer fails, remaining peer agrees -> consensus=True."""
         from unittest.mock import AsyncMock
 
-        from jenkins_job_insight.models import AnalysisDetail
-        from jenkins_job_insight.peer_analysis import analyze_failure_group_with_peers
+        from rootcoz.models import AnalysisDetail
+        from rootcoz.peer_analysis import analyze_failure_group_with_peers
 
         mock_orchestrator = AsyncMock(
             return_value=(
@@ -1428,11 +1424,11 @@ class TestAnalyzeWithPeers:
 
         with (
             patch(
-                "jenkins_job_insight.peer_analysis._run_single_ai_analysis",
+                "rootcoz.peer_analysis._run_single_ai_analysis",
                 mock_orchestrator,
             ),
             patch(
-                "jenkins_job_insight.peer_analysis._call_ai_cli_with_retry",
+                "rootcoz.peer_analysis._call_ai_cli_with_retry",
                 side_effect=mock_peer_call,
             ),
         ):
@@ -1460,8 +1456,8 @@ class TestAnalyzeWithPeers:
         """Progress phase is updated before each peer round and orchestrator revision."""
         from unittest.mock import AsyncMock
 
-        from jenkins_job_insight.models import AnalysisDetail
-        from jenkins_job_insight.peer_analysis import analyze_failure_group_with_peers
+        from rootcoz.models import AnalysisDetail
+        from rootcoz.peer_analysis import analyze_failure_group_with_peers
 
         main_response = _make_ai_json_response(classification="CODE ISSUE")
         peer_disagree = _make_peer_json_response(
@@ -1510,15 +1506,15 @@ class TestAnalyzeWithPeers:
 
         with (
             patch(
-                "jenkins_job_insight.peer_analysis._run_single_ai_analysis",
+                "rootcoz.peer_analysis._run_single_ai_analysis",
                 mock_orchestrator,
             ),
             patch(
-                "jenkins_job_insight.peer_analysis._call_ai_cli_with_retry",
+                "rootcoz.peer_analysis._call_ai_cli_with_retry",
                 side_effect=mock_peer_and_revision_call,
             ),
             patch(
-                "jenkins_job_insight.peer_analysis.update_progress_phase",
+                "rootcoz.peer_analysis.update_progress_phase",
                 side_effect=capture_phase,
             ),
         ):
@@ -1542,8 +1538,8 @@ class TestAnalyzeWithPeers:
         """When group_label is provided, progress phases include the group info."""
         from unittest.mock import AsyncMock
 
-        from jenkins_job_insight.models import AnalysisDetail
-        from jenkins_job_insight.peer_analysis import analyze_failure_group_with_peers
+        from rootcoz.models import AnalysisDetail
+        from rootcoz.peer_analysis import analyze_failure_group_with_peers
 
         main_response = _make_ai_json_response(classification="CODE ISSUE")
         peer_disagree = _make_peer_json_response(
@@ -1589,15 +1585,15 @@ class TestAnalyzeWithPeers:
 
         with (
             patch(
-                "jenkins_job_insight.peer_analysis._run_single_ai_analysis",
+                "rootcoz.peer_analysis._run_single_ai_analysis",
                 mock_orchestrator,
             ),
             patch(
-                "jenkins_job_insight.peer_analysis._call_ai_cli_with_retry",
+                "rootcoz.peer_analysis._call_ai_cli_with_retry",
                 side_effect=mock_peer_and_revision_call,
             ),
             patch(
-                "jenkins_job_insight.peer_analysis.update_progress_phase",
+                "rootcoz.peer_analysis.update_progress_phase",
                 side_effect=capture_phase,
             ),
         ):
@@ -1622,8 +1618,8 @@ class TestAnalyzeWithPeers:
         """When group_label is empty, progress phases have no group suffix."""
         from unittest.mock import AsyncMock
 
-        from jenkins_job_insight.models import AnalysisDetail
-        from jenkins_job_insight.peer_analysis import analyze_failure_group_with_peers
+        from rootcoz.models import AnalysisDetail
+        from rootcoz.peer_analysis import analyze_failure_group_with_peers
 
         peer_agree = _make_peer_json_response(agrees=True, classification="CODE ISSUE")
 
@@ -1653,15 +1649,15 @@ class TestAnalyzeWithPeers:
 
         with (
             patch(
-                "jenkins_job_insight.peer_analysis._run_single_ai_analysis",
+                "rootcoz.peer_analysis._run_single_ai_analysis",
                 mock_orchestrator,
             ),
             patch(
-                "jenkins_job_insight.peer_analysis._call_ai_cli_with_retry",
+                "rootcoz.peer_analysis._call_ai_cli_with_retry",
                 side_effect=mock_peer_call,
             ),
             patch(
-                "jenkins_job_insight.peer_analysis.update_progress_phase",
+                "rootcoz.peer_analysis.update_progress_phase",
                 side_effect=capture_phase,
             ),
         ):
@@ -1686,8 +1682,8 @@ class TestAnalyzeWithPeers:
         """Peer returning an invalid classification (not CODE ISSUE or PRODUCT BUG) is excluded."""
         from unittest.mock import AsyncMock
 
-        from jenkins_job_insight.models import AnalysisDetail
-        from jenkins_job_insight.peer_analysis import analyze_failure_group_with_peers
+        from rootcoz.models import AnalysisDetail
+        from rootcoz.peer_analysis import analyze_failure_group_with_peers
 
         mock_orchestrator = AsyncMock(
             return_value=(
@@ -1731,11 +1727,11 @@ class TestAnalyzeWithPeers:
 
         with (
             patch(
-                "jenkins_job_insight.peer_analysis._run_single_ai_analysis",
+                "rootcoz.peer_analysis._run_single_ai_analysis",
                 mock_orchestrator,
             ),
             patch(
-                "jenkins_job_insight.peer_analysis._call_ai_cli_with_retry",
+                "rootcoz.peer_analysis._call_ai_cli_with_retry",
                 side_effect=mock_peer_call,
             ),
         ):
@@ -1838,8 +1834,8 @@ class TestAnalyzeWithPeers:
         """When job_id is empty, update_progress_phase should not be called."""
         from unittest.mock import AsyncMock
 
-        from jenkins_job_insight.models import AnalysisDetail
-        from jenkins_job_insight.peer_analysis import analyze_failure_group_with_peers
+        from rootcoz.models import AnalysisDetail
+        from rootcoz.peer_analysis import analyze_failure_group_with_peers
 
         peer_response = _make_peer_json_response(
             agrees=True, classification="CODE ISSUE"
@@ -1866,15 +1862,15 @@ class TestAnalyzeWithPeers:
 
         with (
             patch(
-                "jenkins_job_insight.peer_analysis._run_single_ai_analysis",
+                "rootcoz.peer_analysis._run_single_ai_analysis",
                 mock_orchestrator,
             ),
             patch(
-                "jenkins_job_insight.peer_analysis._call_ai_cli_with_retry",
+                "rootcoz.peer_analysis._call_ai_cli_with_retry",
                 side_effect=mock_peer_call,
             ),
             patch(
-                "jenkins_job_insight.peer_analysis.update_progress_phase",
+                "rootcoz.peer_analysis.update_progress_phase",
                 new_callable=AsyncMock,
             ) as mock_update,
         ):
@@ -1991,9 +1987,9 @@ class TestAnalyzeWithPeers:
 
     def test_build_peer_review_prompt_includes_other_peers(self) -> None:
         """When other_peer_responses is provided, prompt includes their responses."""
-        from jenkins_job_insight.peer_analysis import _build_peer_review_prompt
+        from rootcoz.peer_analysis import _build_peer_review_prompt
 
-        from jenkins_job_insight.peer_analysis import PeerResponseSummary
+        from rootcoz.peer_analysis import PeerResponseSummary
 
         other_responses: list[PeerResponseSummary] = [
             PeerResponseSummary(
@@ -2027,7 +2023,7 @@ class TestAnalyzeWithPeers:
 
     def test_build_peer_review_prompt_no_other_peers_round_1(self) -> None:
         """When other_peer_responses is None (round 1), no other peer section appears."""
-        from jenkins_job_insight.peer_analysis import _build_peer_review_prompt
+        from rootcoz.peer_analysis import _build_peer_review_prompt
 
         prompt = _build_peer_review_prompt(
             failure_summary="Test failed",
@@ -2043,8 +2039,8 @@ class TestAnalyzeWithPeers:
         """In round 2, each peer's prompt includes the other peer's round 1 response."""
         from unittest.mock import AsyncMock
 
-        from jenkins_job_insight.models import AnalysisDetail
-        from jenkins_job_insight.peer_analysis import analyze_failure_group_with_peers
+        from rootcoz.models import AnalysisDetail
+        from rootcoz.peer_analysis import analyze_failure_group_with_peers
 
         mock_orchestrator = AsyncMock(
             return_value=(
@@ -2103,11 +2099,11 @@ class TestAnalyzeWithPeers:
 
         with (
             patch(
-                "jenkins_job_insight.peer_analysis._run_single_ai_analysis",
+                "rootcoz.peer_analysis._run_single_ai_analysis",
                 mock_orchestrator,
             ),
             patch(
-                "jenkins_job_insight.peer_analysis._call_ai_cli_with_retry",
+                "rootcoz.peer_analysis._call_ai_cli_with_retry",
                 side_effect=mock_calls,
             ),
         ):
@@ -2135,8 +2131,8 @@ class TestAnalyzeWithPeers:
         """Each peer in round 2 sees the other peer's response but NOT its own."""
         from unittest.mock import AsyncMock
 
-        from jenkins_job_insight.models import AnalysisDetail
-        from jenkins_job_insight.peer_analysis import analyze_failure_group_with_peers
+        from rootcoz.models import AnalysisDetail
+        from rootcoz.peer_analysis import analyze_failure_group_with_peers
 
         mock_orchestrator = AsyncMock(
             return_value=(
@@ -2191,11 +2187,11 @@ class TestAnalyzeWithPeers:
 
         with (
             patch(
-                "jenkins_job_insight.peer_analysis._run_single_ai_analysis",
+                "rootcoz.peer_analysis._run_single_ai_analysis",
                 mock_orchestrator,
             ),
             patch(
-                "jenkins_job_insight.peer_analysis._call_ai_cli_with_retry",
+                "rootcoz.peer_analysis._call_ai_cli_with_retry",
                 side_effect=mock_calls,
             ),
         ):
@@ -2231,8 +2227,8 @@ class TestAnalyzeWithPeers:
         """Failed peer entries from round 1 must NOT appear in round 2 prompts."""
         from unittest.mock import AsyncMock
 
-        from jenkins_job_insight.models import AnalysisDetail
-        from jenkins_job_insight.peer_analysis import analyze_failure_group_with_peers
+        from rootcoz.models import AnalysisDetail
+        from rootcoz.peer_analysis import analyze_failure_group_with_peers
 
         mock_orchestrator = AsyncMock(
             return_value=(
@@ -2286,11 +2282,11 @@ class TestAnalyzeWithPeers:
 
         with (
             patch(
-                "jenkins_job_insight.peer_analysis._run_single_ai_analysis",
+                "rootcoz.peer_analysis._run_single_ai_analysis",
                 mock_orchestrator,
             ),
             patch(
-                "jenkins_job_insight.peer_analysis._call_ai_cli_with_retry",
+                "rootcoz.peer_analysis._call_ai_cli_with_retry",
                 side_effect=mock_calls,
             ),
         ):
@@ -2321,8 +2317,8 @@ class TestAnalyzeWithPeers:
         """Revision returning an invalid classification preserves the prior valid analysis."""
         from unittest.mock import AsyncMock
 
-        from jenkins_job_insight.models import AnalysisDetail
-        from jenkins_job_insight.peer_analysis import analyze_failure_group_with_peers
+        from rootcoz.models import AnalysisDetail
+        from rootcoz.peer_analysis import analyze_failure_group_with_peers
 
         # Main AI returns valid classification
         mock_orchestrator = AsyncMock(
@@ -2377,11 +2373,11 @@ class TestAnalyzeWithPeers:
 
         with (
             patch(
-                "jenkins_job_insight.peer_analysis._run_single_ai_analysis",
+                "rootcoz.peer_analysis._run_single_ai_analysis",
                 mock_orchestrator,
             ),
             patch(
-                "jenkins_job_insight.peer_analysis._call_ai_cli_with_retry",
+                "rootcoz.peer_analysis._call_ai_cli_with_retry",
                 side_effect=mock_calls,
             ),
         ):
@@ -2406,8 +2402,8 @@ class TestAnalyzeWithPeers:
         """Duplicate (provider, model) peers must all be called, not deduplicated."""
         from unittest.mock import AsyncMock
 
-        from jenkins_job_insight.models import AnalysisDetail
-        from jenkins_job_insight.peer_analysis import analyze_failure_group_with_peers
+        from rootcoz.models import AnalysisDetail
+        from rootcoz.peer_analysis import analyze_failure_group_with_peers
 
         mock_orchestrator = AsyncMock(
             return_value=(
@@ -2443,11 +2439,11 @@ class TestAnalyzeWithPeers:
 
         with (
             patch(
-                "jenkins_job_insight.peer_analysis._run_single_ai_analysis",
+                "rootcoz.peer_analysis._run_single_ai_analysis",
                 mock_orchestrator,
             ),
             patch(
-                "jenkins_job_insight.peer_analysis._call_ai_cli_with_retry",
+                "rootcoz.peer_analysis._call_ai_cli_with_retry",
                 side_effect=mock_peer_call,
             ),
         ):
@@ -2485,8 +2481,8 @@ class TestAnalyzeWithPeers:
         """
         from unittest.mock import AsyncMock
 
-        from jenkins_job_insight.models import AnalysisDetail
-        from jenkins_job_insight.peer_analysis import analyze_failure_group_with_peers
+        from rootcoz.models import AnalysisDetail
+        from rootcoz.peer_analysis import analyze_failure_group_with_peers
 
         mock_orchestrator = AsyncMock(
             return_value=(
@@ -2550,11 +2546,11 @@ class TestAnalyzeWithPeers:
 
         with (
             patch(
-                "jenkins_job_insight.peer_analysis._run_single_ai_analysis",
+                "rootcoz.peer_analysis._run_single_ai_analysis",
                 mock_orchestrator,
             ),
             patch(
-                "jenkins_job_insight.peer_analysis._call_ai_cli_with_retry",
+                "rootcoz.peer_analysis._call_ai_cli_with_retry",
                 side_effect=mock_calls,
             ),
         ):
@@ -2598,8 +2594,8 @@ class TestAnalyzeWithPeers:
         not all responses from the same provider+model."""
         from unittest.mock import AsyncMock
 
-        from jenkins_job_insight.models import AnalysisDetail
-        from jenkins_job_insight.peer_analysis import analyze_failure_group_with_peers
+        from rootcoz.models import AnalysisDetail
+        from rootcoz.peer_analysis import analyze_failure_group_with_peers
 
         mock_orchestrator = AsyncMock(
             return_value=(
@@ -2666,11 +2662,11 @@ class TestAnalyzeWithPeers:
 
         with (
             patch(
-                "jenkins_job_insight.peer_analysis._run_single_ai_analysis",
+                "rootcoz.peer_analysis._run_single_ai_analysis",
                 mock_orchestrator,
             ),
             patch(
-                "jenkins_job_insight.peer_analysis._call_ai_cli_with_retry",
+                "rootcoz.peer_analysis._call_ai_cli_with_retry",
                 side_effect=mock_calls,
             ),
         ):

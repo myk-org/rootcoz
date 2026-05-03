@@ -4,7 +4,7 @@ import httpx
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from jenkins_job_insight.comment_enrichment import (
+from rootcoz.comment_enrichment import (
     detect_github_issues,
     detect_github_prs,
     detect_jira_keys,
@@ -116,9 +116,7 @@ class TestFetchGitHubPRStatus:
         mock_response.status_code = 200
         mock_response.json.return_value = {"state": "closed", "merged": True}
 
-        with patch(
-            "jenkins_job_insight.comment_enrichment.httpx.AsyncClient"
-        ) as mock_client:
+        with patch("rootcoz.comment_enrichment.httpx.AsyncClient") as mock_client:
             mock_instance = AsyncMock()
             mock_instance.get.return_value = mock_response
             mock_instance.__aenter__ = AsyncMock(return_value=mock_instance)
@@ -134,9 +132,7 @@ class TestFetchGitHubPRStatus:
         mock_response.status_code = 200
         mock_response.json.return_value = {"state": "open", "merged": False}
 
-        with patch(
-            "jenkins_job_insight.comment_enrichment.httpx.AsyncClient"
-        ) as mock_client:
+        with patch("rootcoz.comment_enrichment.httpx.AsyncClient") as mock_client:
             mock_instance = AsyncMock()
             mock_instance.get.return_value = mock_response
             mock_instance.__aenter__ = AsyncMock(return_value=mock_instance)
@@ -151,9 +147,7 @@ class TestFetchGitHubPRStatus:
         mock_response = MagicMock()
         mock_response.status_code = 404
 
-        with patch(
-            "jenkins_job_insight.comment_enrichment.httpx.AsyncClient"
-        ) as mock_client:
+        with patch("rootcoz.comment_enrichment.httpx.AsyncClient") as mock_client:
             mock_instance = AsyncMock()
             mock_instance.get.return_value = mock_response
             mock_instance.__aenter__ = AsyncMock(return_value=mock_instance)
@@ -171,9 +165,7 @@ class TestFetchGitHubIssueStatus:
         mock_response.status_code = 200
         mock_response.json.return_value = {"state": "open"}
 
-        with patch(
-            "jenkins_job_insight.comment_enrichment.httpx.AsyncClient"
-        ) as mock_client:
+        with patch("rootcoz.comment_enrichment.httpx.AsyncClient") as mock_client:
             mock_instance = AsyncMock()
             mock_instance.get.return_value = mock_response
             mock_instance.__aenter__ = AsyncMock(return_value=mock_instance)
@@ -189,9 +181,7 @@ class TestFetchGitHubIssueStatus:
         mock_response.status_code = 200
         mock_response.json.return_value = {"state": "closed"}
 
-        with patch(
-            "jenkins_job_insight.comment_enrichment.httpx.AsyncClient"
-        ) as mock_client:
+        with patch("rootcoz.comment_enrichment.httpx.AsyncClient") as mock_client:
             mock_instance = AsyncMock()
             mock_instance.get.return_value = mock_response
             mock_instance.__aenter__ = AsyncMock(return_value=mock_instance)
@@ -206,9 +196,7 @@ class TestFetchGitHubIssueStatus:
         mock_response = MagicMock()
         mock_response.status_code = 404
 
-        with patch(
-            "jenkins_job_insight.comment_enrichment.httpx.AsyncClient"
-        ) as mock_client:
+        with patch("rootcoz.comment_enrichment.httpx.AsyncClient") as mock_client:
             mock_instance = AsyncMock()
             mock_instance.get.return_value = mock_response
             mock_instance.__aenter__ = AsyncMock(return_value=mock_instance)
@@ -224,9 +212,7 @@ class TestFetchGitHubIssueStatus:
         mock_response.status_code = 200
         mock_response.json.return_value = {"state": "open"}
 
-        with patch(
-            "jenkins_job_insight.comment_enrichment.httpx.AsyncClient"
-        ) as mock_client:
+        with patch("rootcoz.comment_enrichment.httpx.AsyncClient") as mock_client:
             mock_instance = AsyncMock()
             mock_instance.get.return_value = mock_response
             mock_instance.__aenter__ = AsyncMock(return_value=mock_instance)
@@ -243,9 +229,7 @@ class TestFetchGitHubIssueStatus:
 
     @pytest.mark.asyncio
     async def test_fetch_issue_network_error(self):
-        with patch(
-            "jenkins_job_insight.comment_enrichment.httpx.AsyncClient"
-        ) as mock_client:
+        with patch("rootcoz.comment_enrichment.httpx.AsyncClient") as mock_client:
             mock_instance = AsyncMock()
             mock_instance.get.side_effect = httpx.ConnectError("connection refused")
             mock_instance.__aenter__ = AsyncMock(return_value=mock_instance)
@@ -271,9 +255,7 @@ class TestFetchJiraTicketStatus:
             ]
         }
 
-        with patch(
-            "jenkins_job_insight.comment_enrichment.httpx.AsyncClient"
-        ) as mock_client:
+        with patch("rootcoz.comment_enrichment.httpx.AsyncClient") as mock_client:
             mock_instance = AsyncMock()
             mock_instance.get.return_value = mock_response
             mock_instance.__aenter__ = AsyncMock(return_value=mock_instance)
@@ -305,9 +287,7 @@ class TestFetchJiraTicketStatus:
             ]
         }
 
-        with patch(
-            "jenkins_job_insight.comment_enrichment.httpx.AsyncClient"
-        ) as mock_client:
+        with patch("rootcoz.comment_enrichment.httpx.AsyncClient") as mock_client:
             mock_instance = AsyncMock()
             mock_instance.get.side_effect = [v3_response, v2_response]
             mock_instance.__aenter__ = AsyncMock(return_value=mock_instance)
@@ -328,9 +308,7 @@ class TestFetchJiraTicketStatus:
         mock_response = MagicMock()
         mock_response.status_code = 403
 
-        with patch(
-            "jenkins_job_insight.comment_enrichment.httpx.AsyncClient"
-        ) as mock_client:
+        with patch("rootcoz.comment_enrichment.httpx.AsyncClient") as mock_client:
             mock_instance = AsyncMock()
             mock_instance.get.return_value = mock_response
             mock_instance.__aenter__ = AsyncMock(return_value=mock_instance)
@@ -347,9 +325,7 @@ class TestFetchJiraTicketStatus:
     @pytest.mark.asyncio
     async def test_returns_none_on_exception(self):
         """Network errors return None gracefully."""
-        with patch(
-            "jenkins_job_insight.comment_enrichment.httpx.AsyncClient"
-        ) as mock_client:
+        with patch("rootcoz.comment_enrichment.httpx.AsyncClient") as mock_client:
             mock_instance = AsyncMock()
             mock_instance.get.side_effect = httpx.ConnectError("connection refused")
             mock_instance.__aenter__ = AsyncMock(return_value=mock_instance)
@@ -370,9 +346,7 @@ class TestFetchJiraTicketStatus:
         mock_response.status_code = 200
         mock_response.json.return_value = {"issues": []}
 
-        with patch(
-            "jenkins_job_insight.comment_enrichment.httpx.AsyncClient"
-        ) as mock_client:
+        with patch("rootcoz.comment_enrichment.httpx.AsyncClient") as mock_client:
             mock_instance = AsyncMock()
             mock_instance.get.return_value = mock_response
             mock_instance.__aenter__ = AsyncMock(return_value=mock_instance)

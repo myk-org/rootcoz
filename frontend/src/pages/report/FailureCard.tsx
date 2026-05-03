@@ -97,7 +97,7 @@ export function FailureCard({ group, jobId, childJobName, childBuildNumber, inde
   const scopedChildBuildNumber = childBuildNumber ?? 0
   const { githubIssuesEnabled, jiraIssuesEnabled, serverJiraProjectKey, comments, reviews, aiConfigs, result, classifications } = useReportState()
   const dispatch = useReportDispatch()
-  const expandKey = `jji-expand-${jobId}-${scopedChildJobName}-${scopedChildBuildNumber}-${group.id}`
+  const expandKey = `rootcoz-expand-${jobId}-${scopedChildJobName}-${scopedChildBuildNumber}-${group.id}`
   const [expanded, setExpanded] = useSessionState<boolean>(expandKey, false)
   const [bugTarget, setBugTarget] = useState<'github' | 'jira' | null>(null)
   const [reviewingAll, setReviewingAll] = useState(false)
@@ -213,7 +213,7 @@ export function FailureCard({ group, jobId, childJobName, childBuildNumber, inde
       }
 
       // Notify AllReviewedPrompt to check if all failures are now reviewed
-      setTimeout(() => window.dispatchEvent(new CustomEvent('jji:review-changed', { detail: { jobId } })), 100)
+      setTimeout(() => window.dispatchEvent(new CustomEvent('rootcoz:review-changed', { detail: { jobId } })), 100)
     } finally {
       setReviewingAll(false)
     }

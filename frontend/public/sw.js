@@ -11,7 +11,7 @@ self.addEventListener('push', (event) => {
   } catch {
     data = {};
   }
-  const title = data.title || 'JJI Notification';
+  const title = data.title || 'RootCoz Notification';
   const options = {
     body: data.body || '',
     icon: '/favicon.svg',

@@ -1,7 +1,7 @@
-"""JJI CLI configuration file support.
+"""rootcoz CLI configuration file support.
 
-Loads named server configurations from $XDG_CONFIG_HOME/jji/config.toml
-(defaults to ~/.config/jji/config.toml when XDG_CONFIG_HOME is unset).
+Loads named server configurations from $XDG_CONFIG_HOME/rootcoz/config.toml
+(defaults to ~/.config/rootcoz/config.toml when XDG_CONFIG_HOME is unset).
 """
 
 import os
@@ -11,7 +11,7 @@ from pathlib import Path
 
 _xdg = os.environ.get("XDG_CONFIG_HOME", "")
 _XDG_CONFIG_HOME = Path(_xdg) if _xdg else Path.home() / ".config"
-CONFIG_DIR = _XDG_CONFIG_HOME / "jji"
+CONFIG_DIR = _XDG_CONFIG_HOME / "rootcoz"
 CONFIG_FILE = CONFIG_DIR / "config.toml"
 
 
@@ -87,7 +87,7 @@ def load_config(path: Path | None = None) -> dict:
 
     Args:
         path: Override config file path (used by tests). Defaults to
-            ~/.config/jji/config.toml.
+            ~/.config/rootcoz/config.toml.
 
     Returns:
         Parsed TOML as a dict, or empty dict if file does not exist.

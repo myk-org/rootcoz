@@ -5,7 +5,7 @@ from unittest.mock import patch
 
 import pytest
 
-from jenkins_job_insight.encryption import (
+from rootcoz.encryption import (
     RESPONSE_REDACTED_KEYS,
     SENSITIVE_KEYS,
     _ENCRYPTED_PREFIX,
@@ -19,18 +19,18 @@ from jenkins_job_insight.encryption import (
 @pytest.fixture
 def _stable_encryption_key():
     """Pin the encryption key so tests are deterministic."""
-    with patch.dict(os.environ, {"JJI_ENCRYPTION_KEY": "test-secret-key"}):
+    with patch.dict(os.environ, {"ROOTCOZ_ENCRYPTION_KEY": "test-secret-key"}):
         yield
 
 
 @pytest.fixture
 def fallback_key_env(tmp_path):
-    """Patch env to remove JJI_ENCRYPTION_KEY and set XDG_DATA_HOME to tmp_path.
+    """Patch env to remove ROOTCOZ_ENCRYPTION_KEY and set XDG_DATA_HOME to tmp_path.
 
     Yields inside the patched environment so tests run with the
     file-based fallback key mechanism.
     """
-    env = {k: v for k, v in os.environ.items() if k != "JJI_ENCRYPTION_KEY"}
+    env = {k: v for k, v in os.environ.items() if k != "ROOTCOZ_ENCRYPTION_KEY"}
     env["XDG_DATA_HOME"] = str(tmp_path)
     with patch.dict(os.environ, env, clear=True):
         yield
@@ -114,10 +114,10 @@ class TestKeyChange:
     """Decryption with a different key leaves the ciphertext in place."""
 
     def test_changed_key_preserves_ciphertext(self, sample_params) -> None:
-        with patch.dict(os.environ, {"JJI_ENCRYPTION_KEY": "key-A"}):
+        with patch.dict(os.environ, {"ROOTCOZ_ENCRYPTION_KEY": "key-A"}):
             encrypted = encrypt_sensitive_fields(sample_params)
 
-        with patch.dict(os.environ, {"JJI_ENCRYPTION_KEY": "key-B"}):
+        with patch.dict(os.environ, {"ROOTCOZ_ENCRYPTION_KEY": "key-B"}):
             decrypted = decrypt_sensitive_fields(encrypted)
 
         # Decryption silently fails; encrypted value is kept.
@@ -127,7 +127,7 @@ class TestKeyChange:
 
 
 class TestFileBasedFallbackKey:
-    """Without JJI_ENCRYPTION_KEY an auto-generated file key is used."""
+    """Without ROOTCOZ_ENCRYPTION_KEY an auto-generated file key is used."""
 
     def test_round_trip_without_env_key(self, sample_params, fallback_key_env) -> None:
         encrypted = encrypt_sensitive_fields(sample_params)
@@ -144,7 +144,7 @@ class TestFileBasedFallbackKey:
                 assert encrypted[key] != original
 
     def test_key_file_created_on_first_use(self, tmp_path, fallback_key_env) -> None:
-        key_file = tmp_path / "jji" / ".encryption_key"
+        key_file = tmp_path / "rootcoz" / ".encryption_key"
         assert not key_file.exists()
         key = _get_or_create_key_file()
         assert key_file.exists()
@@ -163,7 +163,7 @@ class TestFileBasedFallbackKey:
         import secrets as _secrets
 
         existing_key = _secrets.token_urlsafe(32)
-        key_file = tmp_path / "jji" / ".encryption_key"
+        key_file = tmp_path / "rootcoz" / ".encryption_key"
         key_file.parent.mkdir(parents=True, exist_ok=True)
 
         # Simulate the TOCTOU race: the file does not exist when checked,
@@ -176,7 +176,7 @@ class TestFileBasedFallbackKey:
             raise FileExistsError
 
         with patch(
-            "jenkins_job_insight.encryption.os.open", side_effect=race_side_effect
+            "rootcoz.encryption.os.open", side_effect=race_side_effect
         ) as mock_os_open:
             assert _get_or_create_key_file() == existing_key
             mock_os_open.assert_called()

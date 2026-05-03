@@ -5,7 +5,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from jenkins_job_insight.ai_models import AIModelCache, _model_id_to_display_name
+from rootcoz.ai_models import AIModelCache, _model_id_to_display_name
 
 
 # -- Display name helper ------------------------------------------------------
@@ -191,7 +191,7 @@ class TestCursorSubprocess:
         mock_proc.returncode = 0
 
         with patch(
-            "jenkins_job_insight.ai_models.asyncio.create_subprocess_exec",
+            "rootcoz.ai_models.asyncio.create_subprocess_exec",
             return_value=mock_proc,
         ):
             result = await cache._list_cursor_models()
@@ -207,7 +207,7 @@ class TestCursorSubprocess:
         mock_proc.kill = MagicMock()
 
         with patch(
-            "jenkins_job_insight.ai_models.asyncio.create_subprocess_exec",
+            "rootcoz.ai_models.asyncio.create_subprocess_exec",
             return_value=mock_proc,
         ):
             result = await cache._list_cursor_models()
@@ -219,7 +219,7 @@ class TestCursorSubprocess:
         cache = AIModelCache()
 
         with patch(
-            "jenkins_job_insight.ai_models.asyncio.create_subprocess_exec",
+            "rootcoz.ai_models.asyncio.create_subprocess_exec",
             side_effect=FileNotFoundError("agent not found"),
         ):
             result = await cache._list_cursor_models()
@@ -234,7 +234,7 @@ class TestCursorSubprocess:
         mock_proc.returncode = 1
 
         with patch(
-            "jenkins_job_insight.ai_models.asyncio.create_subprocess_exec",
+            "rootcoz.ai_models.asyncio.create_subprocess_exec",
             return_value=mock_proc,
         ):
             result = await cache._list_cursor_models()
@@ -246,7 +246,7 @@ class TestCursorSubprocess:
         cache = AIModelCache()
 
         with patch(
-            "jenkins_job_insight.ai_models.asyncio.create_subprocess_exec",
+            "rootcoz.ai_models.asyncio.create_subprocess_exec",
             side_effect=OSError("unexpected"),
         ):
             result = await cache._list_cursor_models()

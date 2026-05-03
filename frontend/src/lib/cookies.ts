@@ -1,11 +1,11 @@
-const COOKIE_NAME = 'jji_username'
-const GITHUB_TOKEN_KEY = 'jji_github_token'
-const JIRA_TOKEN_KEY = 'jji_jira_token'
-const JIRA_EMAIL_KEY = 'jji_jira_email'
+const COOKIE_NAME = 'rootcoz_username'
+const GITHUB_TOKEN_KEY = 'rootcoz_github_token'
+const JIRA_TOKEN_KEY = 'rootcoz_jira_token'
+const JIRA_EMAIL_KEY = 'rootcoz_jira_email'
 // Display-only UI hints — NOT an authorization boundary.
 // All admin gating is enforced server-side in AuthMiddleware.
-const ADMIN_KEY = 'jji_is_admin'
-const ROLE_KEY = 'jji_role'
+const ADMIN_KEY = 'rootcoz_is_admin'
+const ROLE_KEY = 'rootcoz_role'
 
 /** Detects values that look like they've been URL-encoded (e.g. %40, %25). */
 const ENCODED_PATTERN = /%[0-9A-Fa-f]{2}/

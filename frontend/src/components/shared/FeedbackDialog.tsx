@@ -281,7 +281,7 @@ export function FeedbackDialog({ open, onOpenChange }: FeedbackDialogProps) {
           <div className="flex flex-col items-center gap-4 py-8">
             <p className="text-sm text-text-secondary">AI is not configured on this server. You can open an issue manually:</p>
             <a
-              href="https://github.com/myk-org/jenkins-job-insight/issues/new"
+              href="https://github.com/myk-org/rootcoz/issues/new"
               target="_blank"
               rel="noopener noreferrer"
               className="flex items-center gap-1 text-sm text-text-link hover:underline"

@@ -4,7 +4,7 @@ import userEvent from '@testing-library/user-event'
 import { WhatsNewDialog } from '../WhatsNewDialog'
 import changelog from '@/changelog.json'
 
-const LS_KEY = 'jji_last_seen_changelog_version'
+const LS_KEY = 'rootcoz_last_seen_changelog_version'
 
 describe('WhatsNewDialog', () => {
   beforeEach(() => {

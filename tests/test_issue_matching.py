@@ -3,7 +3,7 @@
 from unittest.mock import AsyncMock, patch
 
 from ai_cli_runner import AIResult
-from jenkins_job_insight.issue_matching import filter_issue_matches_with_ai
+from rootcoz.issue_matching import filter_issue_matches_with_ai
 
 
 class TestFilterIssueMatchesWithAi:
@@ -34,12 +34,12 @@ class TestFilterIssueMatchesWithAi:
 
         with (
             patch(
-                "jenkins_job_insight.issue_matching.call_ai_cli",
+                "rootcoz.issue_matching.call_ai_cli",
                 new_callable=AsyncMock,
                 return_value=ai_response,
             ),
             patch(
-                "jenkins_job_insight.issue_matching.record_ai_usage",
+                "rootcoz.issue_matching.record_ai_usage",
                 new_callable=AsyncMock,
             ),
         ):
@@ -78,12 +78,12 @@ class TestFilterIssueMatchesWithAi:
 
         with (
             patch(
-                "jenkins_job_insight.issue_matching.call_ai_cli",
+                "rootcoz.issue_matching.call_ai_cli",
                 new_callable=AsyncMock,
                 return_value=ai_response,
             ),
             patch(
-                "jenkins_job_insight.issue_matching.record_ai_usage",
+                "rootcoz.issue_matching.record_ai_usage",
                 new_callable=AsyncMock,
             ),
         ):
@@ -108,12 +108,12 @@ class TestFilterIssueMatchesWithAi:
 
         with (
             patch(
-                "jenkins_job_insight.issue_matching.call_ai_cli",
+                "rootcoz.issue_matching.call_ai_cli",
                 new_callable=AsyncMock,
                 return_value=ai_response,
             ),
             patch(
-                "jenkins_job_insight.issue_matching.record_ai_usage",
+                "rootcoz.issue_matching.record_ai_usage",
                 new_callable=AsyncMock,
             ),
         ):
@@ -140,12 +140,12 @@ class TestFilterIssueMatchesWithAi:
 
         with (
             patch(
-                "jenkins_job_insight.issue_matching.call_ai_cli",
+                "rootcoz.issue_matching.call_ai_cli",
                 new_callable=AsyncMock,
                 return_value=ai_response,
             ),
             patch(
-                "jenkins_job_insight.issue_matching.record_ai_usage",
+                "rootcoz.issue_matching.record_ai_usage",
                 new_callable=AsyncMock,
             ),
         ):
@@ -178,12 +178,12 @@ class TestFilterIssueMatchesWithAi:
 
         with (
             patch(
-                "jenkins_job_insight.issue_matching.call_ai_cli",
+                "rootcoz.issue_matching.call_ai_cli",
                 new_callable=AsyncMock,
                 return_value=ai_response,
             ),
             patch(
-                "jenkins_job_insight.issue_matching.record_ai_usage",
+                "rootcoz.issue_matching.record_ai_usage",
                 new_callable=AsyncMock,
             ),
         ):
@@ -210,12 +210,12 @@ class TestFilterIssueMatchesWithAi:
 
         with (
             patch(
-                "jenkins_job_insight.issue_matching.call_ai_cli",
+                "rootcoz.issue_matching.call_ai_cli",
                 new_callable=AsyncMock,
                 return_value=ai_response,
             ),
             patch(
-                "jenkins_job_insight.issue_matching.record_ai_usage",
+                "rootcoz.issue_matching.record_ai_usage",
                 new_callable=AsyncMock,
             ),
         ):
@@ -242,12 +242,12 @@ class TestFilterIssueMatchesWithAi:
 
         with (
             patch(
-                "jenkins_job_insight.issue_matching.call_ai_cli",
+                "rootcoz.issue_matching.call_ai_cli",
                 new_callable=AsyncMock,
                 return_value=ai_response,
             ),
             patch(
-                "jenkins_job_insight.issue_matching.record_ai_usage",
+                "rootcoz.issue_matching.record_ai_usage",
                 new_callable=AsyncMock,
             ),
         ):
@@ -275,12 +275,12 @@ class TestFilterIssueMatchesWithAi:
 
         with (
             patch(
-                "jenkins_job_insight.issue_matching.call_ai_cli",
+                "rootcoz.issue_matching.call_ai_cli",
                 new_callable=AsyncMock,
                 return_value=ai_response,
             ),
             patch(
-                "jenkins_job_insight.issue_matching.record_ai_usage",
+                "rootcoz.issue_matching.record_ai_usage",
                 new_callable=AsyncMock,
             ),
         ):
@@ -307,12 +307,12 @@ class TestFilterIssueMatchesWithAi:
 
         with (
             patch(
-                "jenkins_job_insight.issue_matching.call_ai_cli",
+                "rootcoz.issue_matching.call_ai_cli",
                 new_callable=AsyncMock,
                 return_value=ai_response,
             ),
             patch(
-                "jenkins_job_insight.issue_matching.record_ai_usage",
+                "rootcoz.issue_matching.record_ai_usage",
                 new_callable=AsyncMock,
             ) as mock_record,
         ):
@@ -344,12 +344,12 @@ class TestFilterIssueMatchesWithAi:
 
         with (
             patch(
-                "jenkins_job_insight.issue_matching.call_ai_cli",
+                "rootcoz.issue_matching.call_ai_cli",
                 new_callable=AsyncMock,
                 return_value=ai_response,
             ),
             patch(
-                "jenkins_job_insight.issue_matching.record_ai_usage",
+                "rootcoz.issue_matching.record_ai_usage",
                 new_callable=AsyncMock,
             ) as mock_record,
         ):

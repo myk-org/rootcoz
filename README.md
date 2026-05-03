@@ -1,12 +1,12 @@
-# Jenkins Job Insight
+# RootCoz
 
 AI-powered Jenkins failure analysis -- classifies test failures as code issues or product bugs.
 
-**[Documentation](https://myk-org.github.io/jenkins-job-insight/)** -- configuration, API reference, integrations, and more.
+**[Documentation](https://myk-org.github.io/rootcoz/)** -- configuration, API reference, integrations, and more.
 
 ## Prerequisites
 
-An AI provider CLI must be installed and authenticated: [Claude](https://docs.anthropic.com/en/docs/claude-code), [Gemini](https://github.com/google-gemini/gemini-cli), or [Cursor](https://docs.cursor.com/agent). See [docs](https://myk-org.github.io/jenkins-job-insight/ai-provider-setup.html) for setup details.
+An AI provider CLI must be installed and authenticated: [Claude](https://docs.anthropic.com/en/docs/claude-code), [Gemini](https://github.com/google-gemini/gemini-cli), or [Cursor](https://docs.cursor.com/agent). See [docs](https://myk-org.github.io/rootcoz/ai-provider-setup.html) for setup details.
 
 ## Quick Start
 
@@ -18,7 +18,7 @@ docker run -d -p 8000:8000 -v ./data:/data \
   -e JENKINS_PASSWORD=your-api-token \
   -e AI_PROVIDER=claude \
   -e AI_MODEL=your-model-name \
-  ghcr.io/myk-org/jenkins-job-insight:latest
+  ghcr.io/myk-org/rootcoz:latest
 ```
 
 ### Analysis Tuning
@@ -31,7 +31,7 @@ docker run -d -p 8000:8000 -v ./data:/data \
 - Environment variable: `MAX_CONCURRENT_AI_CALLS`
 - API request field: `max_concurrent_ai_calls`
 - CLI flag: `--max-concurrent`
-- Config file (`~/.config/jji/config.toml`): `max_concurrent_ai_calls`
+- Config file (`~/.config/rootcoz/config.toml`): `max_concurrent_ai_calls`
 
 Example API override:
 
@@ -49,19 +49,19 @@ curl -X POST http://localhost:8000/analyze \
 ## CLI
 
 ```bash
-uv tool install jenkins-job-insight
-export JJI_SERVER=http://localhost:8000
+uv tool install rootcoz
+export ROOTCOZ_SERVER=http://localhost:8000
 
-jji health
-jji analyze --job-name my-job --build-number 42
-jji results list
-jji admin token-usage              # Summary dashboard
-jji admin token-usage --group-by model  # Grouped breakdown
-jji admin token-usage --job-id <uuid>   # Per-job usage
-jji admin token-usage --period month --format csv  # CSV export
+rcz health
+rcz analyze --job-name my-job --build-number 42
+rcz results list
+rcz admin token-usage              # Summary dashboard
+rcz admin token-usage --group-by model  # Grouped breakdown
+rcz admin token-usage --job-id <uuid>   # Per-job usage
+rcz admin token-usage --period month --format csv  # CSV export
 ```
 
-Run `jji --help` for all commands.
+Run `rcz --help` for all commands.
 
 ## API
 
@@ -71,7 +71,7 @@ Run `jji --help` for all commands.
 | `GET /api/admin/token-usage/summary` | Dashboard summary: today/week/month stats (admin only) |
 | `GET /api/admin/token-usage/{job_id}` | Per-job token usage breakdown (admin only) |
 
-See the [API reference](https://myk-org.github.io/jenkins-job-insight/) for all endpoints.
+See the [API reference](https://myk-org.github.io/rootcoz/) for all endpoints.
 
 ## Web Push Notifications
 
@@ -86,29 +86,29 @@ Users can receive browser push notifications when @mentioned in comments. The se
 Subscribe/unsubscribe is browser-only (managed via the web UI). To list users available for @mentions:
 
 ```bash
-jji mentionable-users
+rcz mentionable-users
 ```
 
 ## OAuth Proxy / SSO Integration
 
-When deployed behind an OAuth proxy (e.g., OpenShift `oauth-proxy`), JJI can automatically identify users from the `X-Forwarded-User` header set by the proxy, eliminating the need for manual registration.
+When deployed behind an OAuth proxy (e.g., OpenShift `oauth-proxy`), RootCoz can automatically identify users from the `X-Forwarded-User` header set by the proxy, eliminating the need for manual registration.
 
 ### Configuration
 
-Set the following environment variable on the JJI server:
+Set the following environment variable on the RootCoz server:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `TRUST_PROXY_HEADERS` | `false` | Trust `X-Forwarded-User` header for user identification |
 
-> **Security:** Only enable `TRUST_PROXY_HEADERS` when JJI is behind a trusted reverse proxy that sets the `X-Forwarded-User` header. If enabled without a proxy, any client can spoof the header.
+> **Security:** Only enable `TRUST_PROXY_HEADERS` when RootCoz is behind a trusted reverse proxy that sets the `X-Forwarded-User` header. If enabled without a proxy, any client can spoof the header.
 
 ### Behavior
 
 When `TRUST_PROXY_HEADERS=true` and `X-Forwarded-User` is present:
 
-1. The header value is used as the JJI username
-2. A `jji_username` cookie is automatically set so all downstream code works unchanged
+1. The header value is used as the RootCoz username
+2. A `rootcoz_username` cookie is automatically set so all downstream code works unchanged
 3. The `/register` page redirects to the dashboard (no manual registration needed)
 4. Admin sessions and Bearer tokens still take precedence over the header
 
@@ -117,7 +117,7 @@ When the header is absent, the standard cookie-based registration flow is used (
 ### Example: OpenShift OAuth Proxy
 
 ```yaml
-# In your Deployment, add to the JJI app container (not the oauth-proxy sidecar):
+# In your Deployment, add to the RootCoz app container (not the oauth-proxy sidecar):
 env:
   - name: TRUST_PROXY_HEADERS
     value: "true"
@@ -126,12 +126,12 @@ env:
 ## Development
 
 ```bash
-git clone https://github.com/myk-org/jenkins-job-insight.git
-cd jenkins-job-insight
+git clone https://github.com/myk-org/rootcoz.git
+cd rootcoz
 uvx --with tox-uv tox
 ```
 
-See the [development guide](https://myk-org.github.io/jenkins-job-insight/development-and-testing.html) for full setup.
+See the [development guide](https://myk-org.github.io/rootcoz/development-and-testing.html) for full setup.
 
 ## License
 

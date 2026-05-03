@@ -16,7 +16,7 @@ interface ExternalNavLink {
 }
 
 const EXTERNAL_NAV_LINKS: ExternalNavLink[] = [
-  { href: 'https://myk-org.github.io/jenkins-job-insight/', label: 'User Guide', title: 'User Guide', icon: BookOpen },
+  { href: 'https://myk-org.github.io/rootcoz/', label: 'User Guide', title: 'User Guide', icon: BookOpen },
 ]
 
 const BASE_NAV_LINKS = [
@@ -141,7 +141,7 @@ export function NavBar() {
             to="/"
             className="font-display text-lg font-bold tracking-tight text-text-primary"
           >
-            JJI
+            RootCoz
           </Link>
           <nav className="flex items-center gap-1">
             {navLinks.map(({ to, label }) => (

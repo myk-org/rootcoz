@@ -1,12 +1,12 @@
-"""HTTP client for the jenkins-job-insight REST API."""
+"""HTTP client for the rootcoz REST API."""
 
 from typing import Any
 
 import httpx
 
 
-class JJIError(Exception):
-    """Error from the JJI API or connection failure."""
+class RootCozError(Exception):
+    """Error from the rootcoz API or connection failure."""
 
     def __init__(self, status_code: int = 0, detail: str = ""):
         self.status_code = status_code
@@ -17,14 +17,14 @@ class JJIError(Exception):
         super().__init__(msg)
 
 
-class JJIClient:
-    """Synchronous client for the jenkins-job-insight REST API.
+class RootCozClient:
+    """Synchronous client for the rootcoz REST API.
 
-    All methods return parsed JSON dicts. Raises JJIError on HTTP
+    All methods return parsed JSON dicts. Raises RootCozError on HTTP
     errors or connection failures.
 
     Args:
-        server_url: Base URL of the JJI server (required).
+        server_url: Base URL of the rootcoz server (required).
         timeout: Request timeout in seconds.
         username: Username sent as a cookie for authenticated actions.
         verify_ssl: Whether to verify SSL certificates (default True).
@@ -41,7 +41,7 @@ class JJIClient:
         self.server_url = server_url.rstrip("/")
         cookies = {}
         if username:
-            cookies["jji_username"] = username
+            cookies["rootcoz_username"] = username
         headers = {}
         if api_key:
             headers["Authorization"] = f"Bearer {api_key}"
@@ -75,7 +75,7 @@ class JJIClient:
             Parsed JSON response.
 
         Raises:
-            JJIError: On HTTP errors or connection failures.
+            RootCozError: On HTTP errors or connection failures.
         """
         # Strip None values from params
         if params:
@@ -84,12 +84,12 @@ class JJIClient:
         try:
             response = self._client.request(method, path, params=params, json=json)
         except httpx.TimeoutException as exc:
-            raise JJIError(
+            raise RootCozError(
                 status_code=0,
                 detail=f"Request timed out: {exc}",
             ) from exc
         except httpx.RequestError as exc:
-            raise JJIError(
+            raise RootCozError(
                 status_code=0,
                 detail=f"Cannot connect to {self.server_url}: {exc}",
             ) from exc
@@ -101,7 +101,7 @@ class JJIClient:
                 detail = body.get("detail", str(body))
             except (ValueError, KeyError):
                 detail = response.text
-            raise JJIError(
+            raise RootCozError(
                 status_code=response.status_code,
                 detail=detail,
             )
@@ -166,7 +166,7 @@ class JJIClient:
         """
         try:
             return self._request("GET", "/api/health", accept_statuses=(200, 503))
-        except JJIError as exc:
+        except RootCozError as exc:
             if exc.status_code == 404:
                 return self._request("GET", "/health")
             raise

@@ -11,26 +11,24 @@ import httpx
 from simple_logger.logger import get_logger
 
 from ai_cli_runner import call_ai_cli
-from jenkins_job_insight.analyzer import PROVIDER_CLI_FLAGS
-from jenkins_job_insight.config import Settings
-from jenkins_job_insight.models import (
+from rootcoz.analyzer import PROVIDER_CLI_FLAGS
+from rootcoz.config import Settings
+from rootcoz.models import (
     AnalysisDetail,
     CodeFix,
     FailureAnalysis,
     ProductBugReport,
 )
-from jenkins_job_insight.token_tracking import record_ai_usage
+from rootcoz.token_tracking import record_ai_usage
 
 logger = get_logger(name=__name__, level=os.environ.get("LOG_LEVEL", "INFO"))
 
 # AI attribution footers appended to all generated issues.
 GITHUB_AI_FOOTER = (
-    "\n\n---\n"
-    "*Generated using AI with [JJI](https://github.com/myk-org/jenkins-job-insight)*"
+    "\n\n---\n*Generated using AI with [rootcoz](https://github.com/myk-org/rootcoz)*"
 )
 JIRA_AI_FOOTER = (
-    "\n\n----\n"
-    "_Generated using AI with [JJI|https://github.com/myk-org/jenkins-job-insight]_"
+    "\n\n----\n_Generated using AI with [rootcoz|https://github.com/myk-org/rootcoz]_"
 )
 
 
@@ -603,7 +601,7 @@ async def search_jira_duplicates(
         return []
 
     try:
-        from jenkins_job_insight.jira import JiraClient
+        from rootcoz.jira import JiraClient
 
         # Extract meaningful keywords from title
         query_words = title.split()

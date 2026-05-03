@@ -5,7 +5,7 @@ from datetime import datetime
 import pytest
 from pydantic import ValidationError
 
-from jenkins_job_insight.models import (
+from rootcoz.models import (
     AdditionalRepo,
     AiConfigEntry,
     AnalysisDetail,

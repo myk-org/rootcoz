@@ -7,7 +7,7 @@ import os
 from pywebpush import WebPushException, webpush
 from simple_logger.logger import get_logger
 
-from jenkins_job_insight.storage import (
+from rootcoz.storage import (
     delete_stale_push_subscriptions,
     get_push_subscriptions_for_users,
 )

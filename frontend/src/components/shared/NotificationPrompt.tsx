@@ -11,7 +11,7 @@ import { Button } from '@/components/ui/button'
 import { subscribeToPush, getVapidPublicKey, hasActivePushSubscription, getPushSubscriptionState } from '@/lib/notifications'
 import { Bell } from 'lucide-react'
 
-const ASKED_KEY = 'jji_notifications_asked'
+const ASKED_KEY = 'rootcoz_notifications_asked'
 const SHOW_DELAY_MS = 1500
 
 function wasAlreadyAsked(): boolean {

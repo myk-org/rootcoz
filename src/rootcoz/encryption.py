@@ -1,10 +1,10 @@
 """Symmetric encryption for sensitive fields stored in the database.
 
 Uses Fernet (AES-128-CBC + HMAC-SHA256) from the ``cryptography`` package.
-The encryption key is derived from the ``JJI_ENCRYPTION_KEY`` environment
+The encryption key is derived from the ``ROOTCOZ_ENCRYPTION_KEY`` environment
 variable.  When the variable is unset, a random key is auto-generated on
-first use and persisted to ``~/.local/share/jji/.encryption_key`` (or
-``$XDG_DATA_HOME/jji/.encryption_key``).  The key file is created with
+first use and persisted to ``~/.local/share/rootcoz/.encryption_key`` (or
+``$XDG_DATA_HOME/rootcoz/.encryption_key``).  The key file is created with
 mode 0600 so that only the owning user can read it.
 
 Sensitive fields (passwords, tokens, emails) are encrypted before being
@@ -98,15 +98,15 @@ def _ensure_private_key_file(key_file: Path) -> None:
 def _get_or_create_key_file() -> str:
     """Return a persistent random key from a local file, creating it on first use.
 
-    The key file is stored at ``$XDG_DATA_HOME/jji/.encryption_key``
-    (defaults to ``~/.local/share/jji/.encryption_key``) and is only
+    The key file is stored at ``$XDG_DATA_HOME/rootcoz/.encryption_key``
+    (defaults to ``~/.local/share/rootcoz/.encryption_key``) and is only
     readable by the owning user (mode 0600).
     """
     key_dir = (
         Path(os.environ.get("XDG_DATA_HOME", ""))
         if os.environ.get("XDG_DATA_HOME")
         else Path.home() / ".local" / "share"
-    ) / "jji"
+    ) / "rootcoz"
     key_file = key_dir / ".encryption_key"
     if key_file.exists():
         _ensure_private_key_file(key_file)
@@ -129,14 +129,14 @@ def _get_or_create_key_file() -> str:
 
 def _resolve_encryption_secret() -> str:
     """Return the raw encryption secret (env var or file-based fallback)."""
-    return os.environ.get("JJI_ENCRYPTION_KEY", "") or _get_or_create_key_file()
+    return os.environ.get("ROOTCOZ_ENCRYPTION_KEY", "") or _get_or_create_key_file()
 
 
 def get_hmac_secret() -> str:
     """Return the HMAC secret for API key hashing.
 
     Uses the same secret as Fernet at-rest encryption
-    (``JJI_ENCRYPTION_KEY`` or auto-generated file key).
+    (``ROOTCOZ_ENCRYPTION_KEY`` or auto-generated file key).
     Rotating this secret invalidates all stored API key hashes.
     """
     return _resolve_encryption_secret()

@@ -1,10 +1,10 @@
-"""jji -- CLI tool for the jenkins-job-insight REST API."""
+"""rootcoz -- CLI tool for the rootcoz REST API."""
 
 import typer
 
-from jenkins_job_insight.cli.client import JJIClient, JJIError
-from jenkins_job_insight.config import parse_additional_repos, parse_peer_configs
-from jenkins_job_insight.cli.config import (
+from rootcoz.cli.client import RootCozClient, RootCozError
+from rootcoz.config import parse_additional_repos, parse_peer_configs
+from rootcoz.cli.config import (
     CONFIG_FILE,
     ServerConfig,
     get_default_server_name,
@@ -12,13 +12,13 @@ from jenkins_job_insight.cli.config import (
     list_servers,
     load_config,
 )
-from jenkins_job_insight.cli.output import print_output
+from rootcoz.cli.output import print_output
 
 # -- App and sub-command groups -----------------------------------------------
 
 app = typer.Typer(
-    name="jji",
-    help="CLI for the jenkins-job-insight REST API.",
+    name="rootcoz",
+    help="CLI for the rootcoz REST API.",
     no_args_is_help=True,
 )
 
@@ -30,7 +30,7 @@ comments_app = typer.Typer(
 classifications_app = typer.Typer(
     help="List test classifications.", no_args_is_help=True
 )
-config_app = typer.Typer(help="Manage JJI configuration.")
+config_app = typer.Typer(help="Manage rootcoz configuration.")
 auth_app = typer.Typer(help="Authentication commands.", no_args_is_help=True)
 admin_app = typer.Typer(help="Admin management commands.", no_args_is_help=True)
 admin_users_app = typer.Typer(help="Manage admin users.", no_args_is_help=True)
@@ -64,23 +64,23 @@ def _set_json(json_output: bool) -> None:
         _state["json"] = True
 
 
-def _get_client(server_url: str = "", username: str = "") -> JJIClient:
-    """Build (or return cached) JJIClient from global state."""
+def _get_client(server_url: str = "", username: str = "") -> RootCozClient:
+    """Build (or return cached) RootCozClient from global state."""
     url = server_url or _state.get("server_url", "")
     uname = username or _state.get("username", "")
     verify_ssl = not _state.get("no_verify_ssl", False)
     api_key = _state.get("api_key", "")
-    return JJIClient(
+    return RootCozClient(
         server_url=url, username=uname, verify_ssl=verify_ssl, api_key=api_key
     )
 
 
-def _handle_error(err: JJIError) -> None:
-    """Print a JJIError and exit with code 1."""
+def _handle_error(err: RootCozError) -> None:
+    """Print a RootCozError and exit with code 1."""
     typer.echo(f"Error: {err}", err=True)
     if err.status_code == 401:
         typer.echo(
-            "Hint: Use --api-key or set JJI_API_KEY to authenticate as admin.",
+            "Hint: Use --api-key or set ROOTCOZ_API_KEY to authenticate as admin.",
             err=True,
         )
     elif err.status_code == 403:
@@ -92,7 +92,7 @@ def _handle_error(err: JJIError) -> None:
             )
         else:
             typer.echo(
-                "Hint: This action requires admin access. Use --api-key or set JJI_API_KEY.",
+                "Hint: This action requires admin access. Use --api-key or set ROOTCOZ_API_KEY.",
                 err=True,
             )
     raise typer.Exit(code=1)
@@ -108,7 +108,7 @@ def _run_client_command(
 ):
     """Execute a client request with standard json/table scaffolding.
 
-    Handles ``_set_json``, ``_get_client``, ``JJIError`` handling, and output
+    Handles ``_set_json``, ``_get_client``, ``RootCozError`` handling, and output
     formatting.  Returns the response data for callers that need post-processing.
 
     When *emit_output* is ``False``, JSON output is still emitted (``--json``
@@ -118,7 +118,7 @@ def _run_client_command(
     _set_json(json_output)
     try:
         data = request_fn(_get_client())
-    except JJIError as err:
+    except RootCozError as err:
         _handle_error(err)
     if _state.get("json", False):
         print_output(data, columns=[], as_json=True)
@@ -156,13 +156,13 @@ def _resolve_server(
 
     Priority (highest to lowest):
       1. CLI flags / environment variables
-      2. Config file ($XDG_CONFIG_HOME/jji/config.toml)
+      2. Config file ($XDG_CONFIG_HOME/rootcoz/config.toml)
 
     Args:
-        server: Value from --server / JJI_SERVER (may be a URL or
+        server: Value from --server / ROOTCOZ_SERVER (may be a URL or
             a config server name, or empty).
-        username: Value from --user / JJI_USERNAME.
-        no_verify_ssl: Value from --no-verify-ssl / JJI_NO_VERIFY_SSL.
+        username: Value from --user / ROOTCOZ_USERNAME.
+        no_verify_ssl: Value from --no-verify-ssl / ROOTCOZ_NO_VERIFY_SSL.
             None means "inherit from config profile".
 
     Returns:
@@ -204,7 +204,7 @@ def _resolve_server(
         return cfg.url, username, no_verify_ssl, cfg
 
     typer.echo(
-        "Error: No server specified. Use --server, set JJI_SERVER, "
+        "Error: No server specified. Use --server, set ROOTCOZ_SERVER, "
         f"or configure {CONFIG_FILE}",
         err=True,
     )
@@ -218,7 +218,7 @@ def main_callback(
         None,
         "--server",
         "-s",
-        envvar="JJI_SERVER",
+        envvar="ROOTCOZ_SERVER",
         help="Server name from config or URL (required unless configured in config).",
     ),
     json_output: bool = typer.Option(
@@ -229,19 +229,19 @@ def main_callback(
     username: str = typer.Option(
         "",
         "--user",
-        envvar="JJI_USERNAME",
+        envvar="ROOTCOZ_USERNAME",
         help="Username displayed in comments and reviews.",
     ),
     api_key: str = typer.Option(
         "",
         "--api-key",
-        envvar="JJI_API_KEY",
+        envvar="ROOTCOZ_API_KEY",
         help="Admin API key for Bearer token authentication.",
     ),
     no_verify_ssl: bool | None = typer.Option(
         None,
         "--no-verify-ssl",
-        envvar="JJI_NO_VERIFY_SSL",
+        envvar="ROOTCOZ_NO_VERIFY_SSL",
         help="Disable SSL certificate verification for HTTPS connections.",
     ),
     verify_ssl: bool | None = typer.Option(
@@ -255,7 +255,7 @@ def main_callback(
         help="Alias for --no-verify-ssl.",
     ),
 ):
-    """jji -- CLI for the jenkins-job-insight REST API."""
+    """rootcoz -- CLI for the rootcoz REST API."""
     _state["json"] = json_output
 
     # Merge --insecure / --verify-ssl into no_verify_ssl.
@@ -375,7 +375,7 @@ def results_show(
     try:
         client = _get_client()
         data = client.get_result(job_id)
-    except JJIError as err:
+    except RootCozError as err:
         _handle_error(err)
 
     if full or _state.get("json", False):
@@ -465,7 +465,7 @@ def results_delete(
                     chunk_data = client.delete_jobs_bulk(chunk)
                     deleted.extend(chunk_data.get("deleted", []))
                     failed.extend(chunk_data.get("failed", []))
-                except JJIError as err:
+                except RootCozError as err:
                     if err.status_code in (401, 403):
                         raise
                     failed.extend(
@@ -481,7 +481,7 @@ def results_delete(
                 )
                 for f in failed:
                     typer.echo(f"  Failed: {f['job_id']} - {f['reason']}", err=True)
-    except JJIError as err:
+    except RootCozError as err:
         _handle_error(err)
 
 
@@ -873,7 +873,7 @@ def analyze(
     try:
         client = _get_client()
         data = client.analyze(job_name, build_number, **extras)
-    except JJIError as err:
+    except RootCozError as err:
         _handle_error(err)
 
     if _state.get("json", False):
@@ -914,7 +914,7 @@ def status(
     try:
         client = _get_client()
         data = client.get_result(job_id)
-    except JJIError as err:
+    except RootCozError as err:
         _handle_error(err)
     if _state.get("json"):
         print_output(data, columns=[], as_json=True)
@@ -946,7 +946,7 @@ def history_test(
         data = client.get_test_history(
             test_name, limit=limit, job_name=job_name, exclude_job_id=exclude_job_id
         )
-    except JJIError as err:
+    except RootCozError as err:
         _handle_error(err)
 
     if _state.get("json", False):
@@ -993,7 +993,7 @@ def history_search(
     try:
         client = _get_client()
         data = client.search_by_signature(signature, exclude_job_id=exclude_job_id)
-    except JJIError as err:
+    except RootCozError as err:
         _handle_error(err)
 
     if _state.get("json", False):
@@ -1024,7 +1024,7 @@ def history_stats(
     try:
         client = _get_client()
         data = client.get_job_stats(job_name, exclude_job_id=exclude_job_id)
-    except JJIError as err:
+    except RootCozError as err:
         _handle_error(err)
 
     if _state.get("json", False):
@@ -1066,7 +1066,7 @@ def history_failures(
             limit=limit,
             offset=offset,
         )
-    except JJIError as err:
+    except RootCozError as err:
         _handle_error(err)
 
     if _state.get("json", False):
@@ -1120,7 +1120,7 @@ def classify(
             references=references,
             child_build_number=child_build,
         )
-    except JJIError as err:
+    except RootCozError as err:
         _handle_error(err)
     if _state.get("json", False):
         print_output(data, columns=[], as_json=True)
@@ -1153,7 +1153,7 @@ def classifications_list(
             parent_job_name=parent_job_name,
             job_id=job_id,
         )
-    except JJIError as err:
+    except RootCozError as err:
         _handle_error(err)
 
     if _state.get("json", False):
@@ -1190,7 +1190,7 @@ def comments_list(
     try:
         client = _get_client()
         data = client.get_comments(job_id)
-    except JJIError as err:
+    except RootCozError as err:
         _handle_error(err)
 
     if _state.get("json", False):
@@ -1228,7 +1228,7 @@ def comments_add(
             child_job_name=child_job_name,
             child_build_number=child_build_number,
         )
-    except JJIError as err:
+    except RootCozError as err:
         _handle_error(err)
     if _state.get("json", False):
         print_output(data, columns=[], as_json=True)
@@ -1247,7 +1247,7 @@ def comments_delete(
     try:
         client = _get_client()
         data = client.delete_comment(job_id, comment_id)
-    except JJIError as err:
+    except RootCozError as err:
         _handle_error(err)
     if _state.get("json", False):
         print_output(data, columns=[], as_json=True)
@@ -1345,7 +1345,7 @@ def ai_configs(
     try:
         client = _get_client()
         data = client.get_ai_configs()
-    except JJIError as err:
+    except RootCozError as err:
         _handle_error(err)
 
     if _state.get("json", False):
@@ -1390,7 +1390,7 @@ def ai_models_cmd(
     try:
         client = _get_client()
         data = client.list_ai_models(provider=provider)
-    except JJIError as err:
+    except RootCozError as err:
         _handle_error(err)
 
     if _state.get("json", False):
@@ -1452,7 +1452,7 @@ def mentions_cmd(
     try:
         client = _get_client()
         data = client.get_mentions(limit=limit, offset=offset, unread_only=unread)
-    except JJIError as err:
+    except RootCozError as err:
         _handle_error(err)
 
     if _state.get("json", False):
@@ -1658,7 +1658,7 @@ def preview_issue(
                 jira_security_level=_jira_security_level,
                 issue_prompt=issue_prompt,
             )
-    except JJIError as err:
+    except RootCozError as err:
         _handle_error(err)
 
     if _state.get("json", False):
@@ -1684,7 +1684,7 @@ def get_issue_prompt(
     try:
         client = _get_client()
         data = client.get_issue_prompt(job_id=job_id)
-    except JJIError as err:
+    except RootCozError as err:
         _handle_error(err)
 
     if _state.get("json", False):
@@ -1786,7 +1786,7 @@ def create_issue(
                 jira_security_level=_jira_security_level,
                 jira_issue_type=jira_issue_type,
             )
-    except JJIError as err:
+    except RootCozError as err:
         _handle_error(err)
 
     if _state.get("json", False):
@@ -1839,7 +1839,7 @@ def push_rp_cmd(
     ),
     json_output: bool = _JSON_OPTION,
 ):
-    """Push JJI classifications into Report Portal test items."""
+    """Push rootcoz classifications into Report Portal test items."""
     data = _run_client_command(
         json_output,
         lambda c: c.push_reportportal(
@@ -1890,7 +1890,7 @@ def override_classification_cmd(
             child_job_name=child_job_name,
             child_build_number=child_build_number,
         )
-    except JJIError as err:
+    except RootCozError as err:
         _handle_error(err)
 
     if _state.get("json", False):
@@ -1920,7 +1920,7 @@ def analyze_comment_intent_cmd(
         data = client.analyze_comment_intent(
             comment=comment, job_id=job_id, ai_provider=ai_provider, ai_model=ai_model
         )
-    except JJIError as err:
+    except RootCozError as err:
         _handle_error(err)
 
     if _state.get("json", False):
@@ -1944,8 +1944,8 @@ def auth_login(
 ):
     """Validate admin credentials. This does not persist a session.
 
-    For persistent auth, set api_key in ~/.config/jji/config.toml or use
-    --api-key / JJI_API_KEY on each command.
+    For persistent auth, set api_key in ~/.config/rootcoz/config.toml or use
+    --api-key / ROOTCOZ_API_KEY on each command.
     """
     data = _run_client_command(
         json_output,
@@ -2290,7 +2290,7 @@ def token_usage_cmd(
                 _print_token_usage_csv([totals] if totals else [])
         else:
             _print_token_usage_table(data)
-    except JJIError as err:
+    except RootCozError as err:
         _handle_error(err)
 
 
@@ -2416,7 +2416,7 @@ def metadata_import(
     try:
         client = _get_client()
         data = client.bulk_set_metadata(items)
-    except JJIError as err:
+    except RootCozError as err:
         _handle_error(err)
 
     if _state.get("json", False):
@@ -2483,7 +2483,7 @@ def metadata_preview(
 
 @config_app.callback(invoke_without_command=True)
 def config_callback(ctx: typer.Context):
-    """Manage JJI configuration."""
+    """Manage rootcoz configuration."""
     if ctx.invoked_subcommand is None:
         ctx.invoke(config_show)
 
@@ -2531,8 +2531,8 @@ def config_completion(
 
     rc_file = "~/.zshrc" if shell == "zsh" else "~/.bashrc"
     typer.echo(f"# Add to {rc_file}:")
-    typer.echo("if command -v jji &> /dev/null; then")
-    typer.echo(f'  eval "$(jji --show-completion {shell})"')
+    typer.echo("if command -v rootcoz &> /dev/null; then")
+    typer.echo(f'  eval "$(rootcoz --show-completion {shell})"')
     typer.echo("fi")
 
 

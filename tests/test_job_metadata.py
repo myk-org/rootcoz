@@ -9,9 +9,9 @@ import httpx
 import pytest
 from typer.testing import CliRunner
 
-from jenkins_job_insight import storage
-from jenkins_job_insight.cli.config import ServerConfig
-from jenkins_job_insight.cli.main import app as cli_app
+from rootcoz import storage
+from rootcoz.cli.config import ServerConfig
+from rootcoz.cli.main import app as cli_app
 from tests.conftest import CLI_TEST_BASE_URL, make_test_client
 
 
@@ -200,7 +200,7 @@ def mock_settings(temp_db_path):
         "DB_PATH": str(temp_db_path),
     }
     with patch.dict(os.environ, env, clear=True):
-        from jenkins_job_insight.config import get_settings
+        from rootcoz.config import get_settings
 
         get_settings.cache_clear()
         try:
@@ -213,7 +213,7 @@ def mock_settings(temp_db_path):
 def api_client(mock_settings, temp_db_path: Path):
     with patch.object(storage, "DB_PATH", temp_db_path):
         from starlette.testclient import TestClient
-        from jenkins_job_insight.main import app
+        from rootcoz.main import app
 
         with TestClient(app) as client:
             # Inject admin auth header for mutation endpoints
@@ -400,7 +400,7 @@ def noauth_client(mock_settings, temp_db_path: Path):
     """Test client with NO admin credentials."""
     with patch.object(storage, "DB_PATH", temp_db_path):
         from starlette.testclient import TestClient
-        from jenkins_job_insight.main import app
+        from rootcoz.main import app
 
         with TestClient(app) as client:
             yield client
@@ -527,14 +527,14 @@ class TestMetadataCLICommands:
         with (
             patch.dict(
                 os.environ,
-                {"JJI_SERVER": CLI_TEST_BASE_URL},
+                {"ROOTCOZ_SERVER": CLI_TEST_BASE_URL},
                 clear=True,
             ),
             patch(
-                "jenkins_job_insight.cli.main.get_server_config",
+                "rootcoz.cli.main.get_server_config",
                 return_value=ServerConfig(url=CLI_TEST_BASE_URL),
             ),
-            patch("jenkins_job_insight.cli.main._get_client") as mock_get,
+            patch("rootcoz.cli.main._get_client") as mock_get,
         ):
             client = MagicMock()
             mock_get.return_value = client

@@ -3,10 +3,10 @@
 VAPID keys are read from environment variables (VAPID_PUBLIC_KEY,
 VAPID_PRIVATE_KEY). When not set, a key pair is auto-generated on
 first use and persisted alongside the database (parent of DB_PATH).
-Falls back to $XDG_DATA_HOME/jji/ or ~/.local/share/jji/ when
+Falls back to $XDG_DATA_HOME/rootcoz/ or ~/.local/share/rootcoz/ when
 DB_PATH is not set.
 
-The claim email defaults to 'mailto:noreply@jji.local' if
+The claim email defaults to 'mailto:noreply@rootcoz.local' if
 VAPID_CLAIM_EMAIL is not set.
 """
 
@@ -22,14 +22,14 @@ from simple_logger.logger import get_logger
 
 logger = get_logger(name=__name__, level=os.environ.get("LOG_LEVEL", "INFO"))
 
-DEFAULT_CLAIM_EMAIL = "mailto:noreply@jji.local"
+DEFAULT_CLAIM_EMAIL = "mailto:noreply@rootcoz.local"
 
 
 def _get_data_dir() -> Path:
     """Return the data directory for persistent files.
 
     Uses the parent directory of DB_PATH (same volume as the database).
-    Falls back to $XDG_DATA_HOME/jji/ or ~/.local/share/jji/.
+    Falls back to $XDG_DATA_HOME/rootcoz/ or ~/.local/share/rootcoz/.
     """
     db_path = os.getenv("DB_PATH", "")
     if db_path:
@@ -39,7 +39,7 @@ def _get_data_dir() -> Path:
         Path(os.environ.get("XDG_DATA_HOME", ""))
         if os.environ.get("XDG_DATA_HOME")
         else Path.home() / ".local" / "share"
-    ) / "jji"
+    ) / "rootcoz"
 
 
 def _generate_vapid_keys() -> dict:
@@ -102,8 +102,8 @@ def _ensure_private_key_file(key_file: Path) -> None:
 def _get_or_create_vapid_keys() -> dict:
     """Return VAPID keys from file, generating on first use.
 
-    The key file is stored at ``$XDG_DATA_HOME/jji/.vapid_keys.json``
-    (defaults to ``~/.local/share/jji/.vapid_keys.json``) and is only
+    The key file is stored at ``$XDG_DATA_HOME/rootcoz/.vapid_keys.json``
+    (defaults to ``~/.local/share/rootcoz/.vapid_keys.json``) and is only
     readable by the owning user (mode 0600).
 
     Returns dict with ``public_key`` and ``private_key``.

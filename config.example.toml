@@ -1,13 +1,13 @@
-# JJI CLI Configuration
-# Location: $XDG_CONFIG_HOME/jji/config.toml (default: ~/.config/jji/config.toml)
+# RootCoz CLI Configuration
+# Location: $XDG_CONFIG_HOME/rootcoz/config.toml (default: ~/.config/rootcoz/config.toml)
 #
 # [defaults] section provides global defaults for all servers.
 # Server-specific settings override defaults.
 #
 # Usage:
-#   jji --server dev results dashboard
-#   jji --server prod results dashboard
-#   jji results dashboard  # uses default server
+#   rcz --server dev results dashboard
+#   rcz --server prod results dashboard
+#   rcz results dashboard  # uses default server
 
 [default]
 server = "dev"  # Default server name
@@ -49,12 +49,12 @@ no_verify_ssl = false
 jenkins_ssl_verify = false
 
 [servers.staging]
-url = "https://staging-jji.example.com"
+url = "https://staging-rootcoz.example.com"
 username = "admin"
 no_verify_ssl = true
 
 [servers.prod]
-url = "https://jji.example.com"
+url = "https://rootcoz.example.com"
 username = "jdoe"
 no_verify_ssl = false
 # Inherits all defaults, overrides ai_provider:

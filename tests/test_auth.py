@@ -8,8 +8,8 @@ from unittest.mock import patch
 import pytest
 from fastapi.testclient import TestClient
 
-from jenkins_job_insight import storage
-from jenkins_job_insight.config import get_settings
+from rootcoz import storage
+from rootcoz.config import get_settings
 
 
 @pytest.fixture
@@ -29,14 +29,14 @@ def client(_init_db, temp_db_path):
         os.environ,
         {
             "ADMIN_KEY": "test-admin-key-16chars",  # pragma: allowlist secret
-            "JJI_ENCRYPTION_KEY": "test-encryption-key-for-hmac",  # pragma: allowlist secret
+            "ROOTCOZ_ENCRYPTION_KEY": "test-encryption-key-for-hmac",  # pragma: allowlist secret
             "SECURE_COOKIES": "false",
             "DB_PATH": str(temp_db_path),
         },
     ):
         get_settings.cache_clear()
         with patch.object(storage, "DB_PATH", temp_db_path):
-            from jenkins_job_insight.main import app
+            from rootcoz.main import app
 
             with TestClient(app) as c:
                 yield c
@@ -87,7 +87,7 @@ class TestAuthLogin:
         assert data["username"] == "admin"
         assert data["is_admin"] is True
         assert data["role"] == "admin"
-        assert "jji_session" in resp.cookies
+        assert "rootcoz_session" in resp.cookies
 
     def test_admin_login_wrong_key(self, client):
         resp = client.post(
@@ -122,7 +122,7 @@ class TestAuthMe:
         assert data["role"] == "admin"
 
     def test_me_as_regular_user(self, client):
-        resp = client.get("/api/auth/me", cookies={"jji_username": "testuser"})
+        resp = client.get("/api/auth/me", cookies={"rootcoz_username": "testuser"})
         assert resp.status_code == 200
         data = resp.json()
         assert data["username"] == "testuser"
@@ -168,7 +168,7 @@ class TestAdminUsers:
         resp = client.post(
             "/api/admin/users",
             json={"username": "newadmin"},
-            cookies={"jji_username": "regular"},
+            cookies={"rootcoz_username": "regular"},
         )
         assert resp.status_code == 403
 
@@ -179,7 +179,7 @@ class TestAdminUsers:
         assert "users" in resp.json()
 
     def test_list_users_requires_admin(self, client):
-        resp = client.get("/api/admin/users", cookies={"jji_username": "regular"})
+        resp = client.get("/api/admin/users", cookies={"rootcoz_username": "regular"})
         assert resp.status_code == 403
 
     def test_delete_admin_user(self, client):
@@ -219,7 +219,7 @@ class TestDeleteJobAdminOnly:
     def test_delete_job_requires_admin(self, client):
         """Regular users cannot delete jobs."""
         resp = client.delete(
-            "/results/fake-job-id", cookies={"jji_username": "regular"}
+            "/results/fake-job-id", cookies={"rootcoz_username": "regular"}
         )
         assert resp.status_code == 403
 
@@ -243,7 +243,7 @@ class TestBulkDeleteAdminOnly:
             "DELETE",
             "/api/results/bulk",
             json={"job_ids": ["a", "b"]},
-            cookies={"jji_username": "regular"},
+            cookies={"rootcoz_username": "regular"},
         )
         assert resp.status_code == 403
 
@@ -317,7 +317,7 @@ class TestBearerTokenAuth:
         """Bearer token with non-admin user API key sets username correctly."""
         import aiosqlite
 
-        from jenkins_job_insight.storage import generate_api_key, hash_api_key
+        from rootcoz.storage import generate_api_key, hash_api_key
 
         raw_key = generate_api_key()
         key_hash = hash_api_key(raw_key)
@@ -431,7 +431,7 @@ class TestChangeUserRole:
         resp = client.put(
             "/api/admin/users/someone/role",
             json={"role": "admin"},
-            cookies={"jji_username": "regular"},
+            cookies={"rootcoz_username": "regular"},
         )
         assert resp.status_code == 403
 
@@ -479,7 +479,7 @@ class TestUserTokens:
     def test_save_and_get_tokens(self, client):
         """Tokens round-trip through encrypt/decrypt."""
         # Track a user first
-        client.get("/api/dashboard", cookies={"jji_username": "tokenuser"})
+        client.get("/api/dashboard", cookies={"rootcoz_username": "tokenuser"})
         _wait_for_user_tracked(client, "tokenuser")
         # Save tokens
         resp = client.put(
@@ -489,11 +489,11 @@ class TestUserTokens:
                 "jira_email": "a@b.com",
                 "jira_token": "jira_tok",
             },
-            cookies={"jji_username": "tokenuser"},
+            cookies={"rootcoz_username": "tokenuser"},
         )
         assert resp.status_code == 200
         # Get tokens back
-        resp = client.get("/api/user/tokens", cookies={"jji_username": "tokenuser"})
+        resp = client.get("/api/user/tokens", cookies={"rootcoz_username": "tokenuser"})
         assert resp.status_code == 200
         data = resp.json()
         assert data["github_token"] == "ghp_test123"  # noqa: S105
@@ -510,7 +510,7 @@ class TestUserTokens:
 
     def test_get_tokens_nonexistent_user(self, client):
         """Non-tracked user gets empty tokens."""
-        resp = client.get("/api/user/tokens", cookies={"jji_username": "ghost"})
+        resp = client.get("/api/user/tokens", cookies={"rootcoz_username": "ghost"})
         assert resp.status_code == 200
         data = resp.json()
         assert data["github_token"] == ""
@@ -525,7 +525,7 @@ class TestUserTokens:
 
     def test_save_partial_tokens(self, client):
         """Saving one token should NOT wipe others."""
-        client.get("/api/dashboard", cookies={"jji_username": "partial"})
+        client.get("/api/dashboard", cookies={"rootcoz_username": "partial"})
         _wait_for_user_tracked(client, "partial")
 
         # Save all three tokens
@@ -536,18 +536,18 @@ class TestUserTokens:
                 "jira_email": "orig@test.com",
                 "jira_token": "jira_orig",
             },
-            cookies={"jji_username": "partial"},
+            cookies={"rootcoz_username": "partial"},
         )
 
         # Now update ONLY github_token
         client.put(
             "/api/user/tokens",
             json={"github_token": "ghp_updated"},
-            cookies={"jji_username": "partial"},
+            cookies={"rootcoz_username": "partial"},
         )
 
         # Verify jira tokens were NOT wiped
-        resp = client.get("/api/user/tokens", cookies={"jji_username": "partial"})
+        resp = client.get("/api/user/tokens", cookies={"rootcoz_username": "partial"})
         data = resp.json()
         assert data["github_token"] == "ghp_updated"  # noqa: S105
         assert data["jira_email"] == "orig@test.com"  # NOT wiped
@@ -559,12 +559,12 @@ class TestUserTokens:
 
         import aiosqlite
 
-        client.get("/api/dashboard", cookies={"jji_username": "enctest"})
+        client.get("/api/dashboard", cookies={"rootcoz_username": "enctest"})
         _wait_for_user_tracked(client, "enctest")
         client.put(
             "/api/user/tokens",
             json={"github_token": "ghp_secret_value"},
-            cookies={"jji_username": "enctest"},
+            cookies={"rootcoz_username": "enctest"},
         )
 
         # Read raw DB value
@@ -659,7 +659,7 @@ class TestAdminDeleteComment:
         # "bob" tries to delete alice's comment — should fail
         resp = client.delete(
             f"/results/test-job-2/comments/{comment_id}",
-            cookies={"jji_username": "bob"},
+            cookies={"rootcoz_username": "bob"},
         )
         assert resp.status_code == 404  # Not found (not owned by bob)
 
@@ -668,7 +668,7 @@ class TestUserTracking:
     def test_regular_user_tracked(self, client):
         """Regular user activity is tracked in the users table."""
         # Make a request as a regular user
-        client.get("/api/dashboard", cookies={"jji_username": "trackeduser"})
+        client.get("/api/dashboard", cookies={"rootcoz_username": "trackeduser"})
         # Poll until the fire-and-forget task completes
         _wait_for_user_tracked(client, "trackeduser")
 
@@ -751,7 +751,7 @@ class TestSessionRenewalMiddleware:
     """Integration tests for session renewal in AuthMiddleware."""
 
     def test_authenticated_request_refreshes_session_cookie(self, client, temp_db_path):
-        """An authenticated request should return a refreshed jji_session cookie
+        """An authenticated request should return a refreshed rootcoz_session cookie
         when less than 50% of the session TTL remains."""
         import aiosqlite
 
@@ -764,7 +764,7 @@ class TestSessionRenewalMiddleware:
             },
         )
         assert login_resp.status_code == 200
-        session_cookie = login_resp.cookies.get("jji_session")
+        session_cookie = login_resp.cookies.get("rootcoz_session")
         assert session_cookie
 
         # Shorten expiry so <50% TTL remains, triggering renewal
@@ -785,12 +785,12 @@ class TestSessionRenewalMiddleware:
         asyncio.run(shorten_expiry())
 
         # Make an authenticated request
-        resp = client.get("/api/auth/me", cookies={"jji_session": session_cookie})
+        resp = client.get("/api/auth/me", cookies={"rootcoz_session": session_cookie})
         assert resp.status_code == 200
         assert resp.json()["is_admin"] is True
 
-        # The response should have a refreshed jji_session cookie
-        refreshed = resp.cookies.get("jji_session")
+        # The response should have a refreshed rootcoz_session cookie
+        refreshed = resp.cookies.get("rootcoz_session")
         assert refreshed is not None
         # The cookie value should be the same token (renewal doesn't rotate)
         assert refreshed == session_cookie
@@ -806,16 +806,16 @@ class TestSessionRenewalMiddleware:
             },
         )
         assert login_resp.status_code == 200
-        session_cookie = login_resp.cookies.get("jji_session")
+        session_cookie = login_resp.cookies.get("rootcoz_session")
         assert session_cookie
 
         # Make an authenticated request — no renewal expected
-        resp = client.get("/api/auth/me", cookies={"jji_session": session_cookie})
+        resp = client.get("/api/auth/me", cookies={"rootcoz_session": session_cookie})
         assert resp.status_code == 200
         assert resp.json()["is_admin"] is True
 
         # No refreshed cookie should be set (renewal was skipped)
-        refreshed = resp.cookies.get("jji_session")
+        refreshed = resp.cookies.get("rootcoz_session")
         assert refreshed is None
 
     def test_session_renewal_updates_db_expiry(self, client, temp_db_path):
@@ -830,7 +830,7 @@ class TestSessionRenewalMiddleware:
                 "api_key": "test-admin-key-16chars",  # pragma: allowlist secret
             },
         )
-        session_cookie = login_resp.cookies.get("jji_session")
+        session_cookie = login_resp.cookies.get("rootcoz_session")
         token_hash = storage._hash_session_token(session_cookie)
 
         # Read initial expiry
@@ -863,7 +863,7 @@ class TestSessionRenewalMiddleware:
         shortened_expires = asyncio.run(get_expiry())
 
         # Make an authenticated request — middleware should renew
-        client.get("/api/auth/me", cookies={"jji_session": session_cookie})
+        client.get("/api/auth/me", cookies={"rootcoz_session": session_cookie})
 
         # Poll until the renewal updates the DB (now synchronous, should be immediate)
         deadline = time.monotonic() + 2.0
@@ -889,7 +889,7 @@ class TestSessionRenewalMiddleware:
                 "api_key": "test-admin-key-16chars",  # pragma: allowlist secret
             },
         )
-        session_cookie = login_resp.cookies.get("jji_session")
+        session_cookie = login_resp.cookies.get("rootcoz_session")
         token_hash = storage._hash_session_token(session_cookie)
 
         # Manually expire the session in the DB
@@ -904,13 +904,13 @@ class TestSessionRenewalMiddleware:
         asyncio.run(expire_session())
 
         # Make a request with the expired session — should NOT be admin
-        resp = client.get("/api/auth/me", cookies={"jji_session": session_cookie})
+        resp = client.get("/api/auth/me", cookies={"rootcoz_session": session_cookie})
         assert resp.status_code == 200
         data = resp.json()
         assert data["is_admin"] is False
 
-        # The response should NOT have a refreshed jji_session cookie
-        assert "jji_session" not in resp.cookies
+        # The response should NOT have a refreshed rootcoz_session cookie
+        assert "rootcoz_session" not in resp.cookies
 
         # Verify the session is still expired in DB (not renewed)
         async def check_still_expired():
@@ -936,7 +936,7 @@ class TestProxyHeaders:
             os.environ,
             {
                 "ADMIN_KEY": "test-admin-key-16chars",  # pragma: allowlist secret
-                "JJI_ENCRYPTION_KEY": "test-encryption-key-for-hmac",  # pragma: allowlist secret
+                "ROOTCOZ_ENCRYPTION_KEY": "test-encryption-key-for-hmac",  # pragma: allowlist secret
                 "SECURE_COOKIES": "false",
                 "DB_PATH": str(temp_db_path),
                 "TRUST_PROXY_HEADERS": "true",
@@ -944,7 +944,7 @@ class TestProxyHeaders:
         ):
             get_settings.cache_clear()
             with patch.object(storage, "DB_PATH", temp_db_path):
-                from jenkins_job_insight.main import app
+                from rootcoz.main import app
 
                 with TestClient(app) as c:
                     yield c
@@ -975,25 +975,25 @@ class TestProxyHeaders:
         assert data["role"] == "user"
 
     def test_header_sets_cookie(self, proxy_client):
-        """X-Forwarded-User sets jji_username cookie on the response."""
+        """X-Forwarded-User sets rootcoz_username cookie on the response."""
         resp = proxy_client.get(
             "/api/auth/me",
             headers={"X-Forwarded-User": "sso-user"},
         )
         assert resp.status_code == 200
-        assert resp.cookies.get("jji_username") == "sso-user"
+        assert resp.cookies.get("rootcoz_username") == "sso-user"
 
     def test_cookie_flow_works_without_header(self, proxy_client):
         """Existing cookie-based flow still works when header is absent."""
         resp = proxy_client.get(
             "/api/auth/me",
-            cookies={"jji_username": "cookie-user"},
+            cookies={"rootcoz_username": "cookie-user"},
         )
         assert resp.status_code == 200
         data = resp.json()
         assert data["username"] == "cookie-user"
         # No proxy cookie should be set when using regular cookie flow
-        assert "jji_username" not in resp.cookies
+        assert "rootcoz_username" not in resp.cookies
 
     def test_header_admin_reserved(self, proxy_client):
         """X-Forwarded-User with 'admin' is rejected (reserved username)."""
@@ -1015,7 +1015,7 @@ class TestProxyHeaders:
         )
         assert resp.status_code == 303
         assert resp.headers["location"] == "/"
-        assert resp.cookies.get("jji_username") == "sso-user"
+        assert resp.cookies.get("rootcoz_username") == "sso-user"
 
     def test_register_admin_no_redirect(self, proxy_client):
         """SSO user 'admin' hitting /register must NOT redirect (prevents loop)."""
@@ -1026,7 +1026,7 @@ class TestProxyHeaders:
                 follow_redirects=False,
             )
             assert resp.status_code != 303, f"admin variant '{name}' caused redirect"
-            assert resp.cookies.get("jji_username") is None
+            assert resp.cookies.get("rootcoz_username") is None
 
     def test_register_no_redirect_without_header(self, proxy_client):
         """Non-SSO user can access /register normally (no SSO redirect)."""
@@ -1061,8 +1061,8 @@ class TestProxyHeaders:
         )
         # Should NOT redirect (session user is already authenticated)
         assert resp.status_code != 303
-        # The jji_username cookie should NOT be overwritten with header_user
-        assert resp.cookies.get("jji_username") != "header_user"
+        # The rootcoz_username cookie should NOT be overwritten with header_user
+        assert resp.cookies.get("rootcoz_username") != "header_user"
 
     def test_empty_header_ignored(self, proxy_client):
         """Empty X-Forwarded-User header is treated as absent."""
@@ -1073,4 +1073,4 @@ class TestProxyHeaders:
         assert resp.status_code == 200
         data = resp.json()
         assert data["username"] == ""
-        assert "jji_username" not in resp.cookies
+        assert "rootcoz_username" not in resp.cookies

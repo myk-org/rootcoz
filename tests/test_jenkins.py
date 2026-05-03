@@ -4,13 +4,13 @@ from unittest.mock import patch
 
 import pytest
 
-from jenkins_job_insight.jenkins import JenkinsClient
+from rootcoz.jenkins import JenkinsClient
 
 
 class TestJenkinsClientInit:
     """Tests for JenkinsClient initialization."""
 
-    @patch("jenkins_job_insight.jenkins.jenkins.Jenkins.__init__", return_value=None)
+    @patch("rootcoz.jenkins.jenkins.Jenkins.__init__", return_value=None)
     def test_timeout_passed_to_parent(self, mock_init):
         """Test that timeout parameter is passed to parent Jenkins class."""
         JenkinsClient(
@@ -26,7 +26,7 @@ class TestJenkinsClientInit:
             timeout=60,
         )
 
-    @patch("jenkins_job_insight.jenkins.jenkins.Jenkins.__init__", return_value=None)
+    @patch("rootcoz.jenkins.jenkins.Jenkins.__init__", return_value=None)
     def test_default_timeout(self, mock_init):
         """Test that default timeout is 30 seconds."""
         JenkinsClient(

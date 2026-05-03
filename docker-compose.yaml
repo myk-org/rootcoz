@@ -1,33 +1,33 @@
-# Jenkins Job Insight
-# AI-powered Jenkins failure analysis with a React web UI, REST API, and jji CLI.
+# RootCoz
+# AI-powered Jenkins failure analysis with a React web UI, REST API, and rcz CLI.
 #
 # Access methods:
 #   - Web UI:  http://localhost:8000 (dashboard, reports, history)
 #   - API:     http://localhost:8000/analyze, /results, /history, etc.
-#   - CLI:     jji health, jji results list, jji analyze --job-name my-job --build-number 42
+#   - CLI:     rcz health, rcz results list, rcz analyze --job-name my-job --build-number 42
 #
 # Usage:
 #   1. Copy .env.example to .env and configure your values
 #   2. Run: docker compose up -d
 #
-# CLI Tool (jji):
-#   Install: uv tool install jenkins-job-insight
-#   Configure: export JJI_SERVER=http://localhost:8000
-#   Docs: jji --help
+# CLI Tool (rcz):
+#   Install: uv tool install rootcoz
+#   Configure: export ROOTCOZ_SERVER=http://localhost:8000
+#   Docs: rcz --help
 #
 # Configuration:
 #   - Replace placeholder values directly in this file, OR
 #   - Use a .env file (recommended for sensitive values)
 
 services:
-  jenkins-job-insight:
+  rootcoz:
     # Build from local Dockerfile
     build:
       context: .
       dockerfile: Dockerfile
 
     # Container name for easier management
-    container_name: jenkins-job-insight
+    container_name: rootcoz
 
     # Ports: Web UI + API served on the same port
     ports:

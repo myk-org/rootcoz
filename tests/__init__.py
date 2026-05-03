@@ -1,1 +1,1 @@
-"""Test suite for jenkins-job-insight."""
+"""Test suite for rootcoz."""
