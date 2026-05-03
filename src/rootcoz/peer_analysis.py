@@ -13,7 +13,7 @@ from typing import Any, Coroutine, TypedDict
 from ai_cli_runner import AIResult, run_parallel_with_limit
 from simple_logger.logger import get_logger
 
-from jenkins_job_insight.analyzer import (
+from rootcoz.analyzer import (
     PROVIDER_CLI_FLAGS,
     _build_prompt_sections,
     _call_ai_cli_with_retry,
@@ -21,15 +21,15 @@ from jenkins_job_insight.analyzer import (
     _run_single_ai_analysis,
     _JSON_RESPONSE_SCHEMA,
 )
-from jenkins_job_insight.models import (
+from rootcoz.models import (
     AiConfigEntry,
     FailureAnalysis,
     PeerDebate,
     PeerRound,
     TestFailure,
 )
-from jenkins_job_insight.storage import update_progress_phase
-from jenkins_job_insight.token_tracking import record_ai_usage
+from rootcoz.storage import update_progress_phase
+from rootcoz.token_tracking import record_ai_usage
 
 logger = get_logger(name=__name__, level=os.environ.get("LOG_LEVEL", "INFO"))
 

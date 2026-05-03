@@ -25,12 +25,12 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from pydantic import BaseModel, Field, SecretStr, ValidationError
 from simple_logger.logger import get_logger
 
-from jenkins_job_insight.logging_context import JobIdFilter, job_id_var
-from jenkins_job_insight.ai_models import model_cache
-from jenkins_job_insight.llm_pricing import pricing_cache
+from rootcoz.logging_context import JobIdFilter, job_id_var
+from rootcoz.ai_models import model_cache
+from rootcoz.llm_pricing import pricing_cache
 
 from ai_cli_runner import VALID_AI_PROVIDERS, run_parallel_with_limit
-from jenkins_job_insight.analyzer import (
+from rootcoz.analyzer import (
     JOB_INSIGHT_ISSUE_PROMPT_FILENAME,
     clone_additional_repos,
     resolve_additional_repos,
@@ -39,29 +39,29 @@ from jenkins_job_insight.analyzer import (
     format_exception_with_type,
     get_failure_signature,
 )
-from jenkins_job_insight.config import (
+from rootcoz.config import (
     Settings,
     get_settings,
     parse_peer_configs,
     parse_repo_ref,
 )
-from jenkins_job_insight.encryption import (
+from rootcoz.encryption import (
     SENSITIVE_KEYS,
     decrypt_sensitive_fields,
     encrypt_sensitive_fields,
 )
-from jenkins_job_insight.github_issues import enrich_with_tests_repo_matches
-from jenkins_job_insight.jira import enrich_with_jira_matches
-from jenkins_job_insight.token_tracking import build_token_usage_summary
-from jenkins_job_insight.monitoring import (
+from rootcoz.github_issues import enrich_with_tests_repo_matches
+from rootcoz.jira import enrich_with_jira_matches
+from rootcoz.token_tracking import build_token_usage_summary
+from rootcoz.monitoring import (
     build_health_response,
     dispatch_alert,
     error_tracker,
     render_prometheus_metrics,
     validate_startup_config,
 )
-from jenkins_job_insight.reportportal import AmbiguousLaunchError, ReportPortalClient
-from jenkins_job_insight.bug_creation import (
+from rootcoz.reportportal import AmbiguousLaunchError, ReportPortalClient
+from rootcoz.bug_creation import (
     _parse_github_repo_url,
     create_github_issue,
     create_jira_bug,
@@ -70,14 +70,14 @@ from jenkins_job_insight.bug_creation import (
     search_github_duplicates,
     search_jira_duplicates,
 )
-from jenkins_job_insight.feedback import (
+from rootcoz.feedback import (
     create_feedback_from_preview,
     generate_feedback_preview,
 )
-from jenkins_job_insight.comment_enrichment import detect_mentions
-from jenkins_job_insight.notifications import send_mention_notifications
-from jenkins_job_insight.vapid import get_vapid_config
-from jenkins_job_insight.models import (
+from rootcoz.comment_enrichment import detect_mentions
+from rootcoz.notifications import send_mention_notifications
+from rootcoz.vapid import get_vapid_config
+from rootcoz.models import (
     AddCommentRequest,
     AnalyzeCommentRequest,
     AnalyzeCommentResponse,
@@ -103,22 +103,22 @@ from jenkins_job_insight.models import (
     SetReviewedRequest,
     UnsubscribeRequest,
 )
-from jenkins_job_insight.utils import (
+from rootcoz.utils import (
     _is_sensitive_key,
     mask_sensitive_fields,
 )
-from jenkins_job_insight.xml_enrichment import (
+from rootcoz.xml_enrichment import (
     build_enriched_xml,
     extract_test_failures,
 )
-from jenkins_job_insight.repository import (
+from rootcoz.repository import (
     RepositoryManager,
     _redact_url,
     derive_test_repo_name,
 )
-from jenkins_job_insight.request_resolution import resolve_tests_repo_token
-from jenkins_job_insight import storage
-from jenkins_job_insight.storage import (
+from rootcoz.request_resolution import resolve_tests_repo_token
+from rootcoz import storage
+from rootcoz.storage import (
     get_ai_configs,
     get_effective_classification,
     get_history_classification,
@@ -631,7 +631,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(
-    title="Jenkins Job Insight",
+    title="rootcoz",
     description="Analyzes Jenkins job failures and classifies them as code or product issues",
     version="0.1.0",
     lifespan=lifespan,
@@ -663,7 +663,7 @@ class ErrorTrackingMiddleware(BaseHTTPMiddleware):
                 task = asyncio.create_task(
                     dispatch_alert(
                         "high_error_rate",
-                        f"\u26a0\ufe0f JJI high 5xx error rate: {server_error_rate:.0%} "
+                        f"\u26a0\ufe0f rootcoz high 5xx error rate: {server_error_rate:.0%} "
                         f"({server_errors}/{total_requests} requests "
                         f"in {snap['window_seconds']}s window)",
                     )
@@ -688,16 +688,37 @@ class ErrorTrackingMiddleware(BaseHTTPMiddleware):
         return response
 
 
+# Legacy cookie names from the jenkins-job-insight era.
+# Read as fallback so existing sessions survive the rename;
+# cleared once the new cookie is set.
+_LEGACY_COOKIE_MAP: dict[str, str] = {
+    "rootcoz_username": "jji_username",
+    "rootcoz_session": "jji_session",
+}
+
+
+def _read_cookie(request: Request, name: str) -> str:
+    """Read cookie with legacy fallback."""
+    value = request.cookies.get(name, "")
+    if not value:
+        legacy = _LEGACY_COOKIE_MAP.get(name)
+        if legacy:
+            value = request.cookies.get(legacy, "")
+    return value
+
+
 def _set_username_cookie(response: Response, username: str, *, secure: bool) -> None:
-    """Set the jji_username cookie with consistent attributes."""
+    """Set the rootcoz_username cookie with consistent attributes."""
     response.set_cookie(
-        "jji_username",
+        "rootcoz_username",
         username,
         path="/",
         max_age=365 * 24 * 60 * 60,
         samesite="lax",
         secure=secure,
     )
+    # Clear legacy cookie after migration
+    response.delete_cookie("jji_username", path="/")
 
 
 class AuthMiddleware(BaseHTTPMiddleware):
@@ -742,12 +763,12 @@ class AuthMiddleware(BaseHTTPMiddleware):
             if proxy_username and proxy_username.lower() != "admin":
                 # Session auth takes precedence over X-Forwarded-User —
                 # only check when an SSO redirect would otherwise fire.
-                session_token = request.cookies.get("jji_session")
+                session_token = _read_cookie(request, "rootcoz_session")
                 if session_token and await storage.get_session(session_token):
                     return await call_next(request)
                 # SSO user hitting /register — redirect to dashboard
                 response = RedirectResponse(url="/", status_code=303)
-                if request.cookies.get("jji_username", "") != proxy_username:
+                if _read_cookie(request, "rootcoz_username") != proxy_username:
                     _set_username_cookie(
                         response, proxy_username, secure=settings.secure_cookies
                     )
@@ -758,8 +779,8 @@ class AuthMiddleware(BaseHTTPMiddleware):
         username = ""
         authenticated_admin = False
 
-        # 1. Check session cookie (jji_session) — admin session
-        session_token = request.cookies.get("jji_session")
+        # 1. Check session cookie (rootcoz_session) — admin session
+        session_token = _read_cookie(request, "rootcoz_session")
         if session_token:
             session = await storage.get_session(session_token)
             if session:
@@ -812,12 +833,12 @@ class AuthMiddleware(BaseHTTPMiddleware):
         if not username and proxy_username:
             if proxy_username.lower() != "admin":
                 username = proxy_username
-                # Flag that we need to set the jji_username cookie on the response
+                # Flag that we need to set the rootcoz_username cookie on the response
                 request.state.set_proxy_cookie = proxy_username
 
-        # 4. Fall back to jji_username cookie (regular users)
+        # 4. Fall back to rootcoz_username cookie (regular users)
         if not username:
-            cookie_username = request.cookies.get("jji_username", "")
+            cookie_username = _read_cookie(request, "rootcoz_username")
             if cookie_username.lower() == "admin":
                 # Reserved username — only valid via session/bearer auth
                 cookie_username = ""
@@ -848,28 +869,35 @@ class AuthMiddleware(BaseHTTPMiddleware):
 
         response = await call_next(request)
 
-        # Set jji_username cookie from X-Forwarded-User header (SSO)
+        # Set rootcoz_username cookie from X-Forwarded-User header (SSO)
         if getattr(request.state, "set_proxy_cookie", None):
             proxy_cookie_value = request.state.set_proxy_cookie
-            if request.cookies.get("jji_username", "") != proxy_cookie_value:
+            if _read_cookie(request, "rootcoz_username") != proxy_cookie_value:
                 _set_username_cookie(
                     response, proxy_cookie_value, secure=settings.secure_cookies
                 )
 
         # Refresh session cookie max_age if session was renewed
         if getattr(request.state, "renew_session_token", None):
-            # Skip if downstream handler already set/cleared jji_session
+            # Skip if downstream handler already set/cleared rootcoz_session
             # (e.g., login sets a new session, logout deletes it)
             path = request.url.path
             if path not in ("/api/auth/login", "/api/auth/logout"):
                 settings = get_settings()
                 response.set_cookie(
-                    "jji_session",
+                    "rootcoz_session",
                     request.state.renew_session_token,
                     httponly=True,
                     samesite="strict",
                     secure=settings.secure_cookies,
                     max_age=storage.SESSION_TTL_SECONDS,
+                )
+                # Clear legacy cookie after migration
+                response.delete_cookie(
+                    "jji_session",
+                    httponly=True,
+                    samesite="strict",
+                    secure=settings.secure_cookies,
                 )
 
         return response
@@ -1295,8 +1323,8 @@ async def _wait_for_jenkins_completion(
     """
     import jenkins
 
-    from jenkins_job_insight.jenkins import JenkinsClient
-    from jenkins_job_insight.utils import is_jenkins_connectivity_error
+    from rootcoz.jenkins import JenkinsClient
+    from rootcoz.utils import is_jenkins_connectivity_error
 
     client = JenkinsClient(
         url=jenkins_url,
@@ -2418,7 +2446,7 @@ async def enrich_comments(
     """Fetch live statuses for GitHub PRs and Jira tickets found in comments."""
     _check_allow_list(request)
     logger.debug(f"POST /results/{job_id}/enrich-comments")
-    from jenkins_job_insight.comment_enrichment import (
+    from rootcoz.comment_enrichment import (
         detect_github_issues,
         detect_github_prs,
         detect_jira_keys,
@@ -3052,7 +3080,7 @@ async def create_github_issue_endpoint(
     username = request.state.username
     issue_body = body.body
     if username:
-        issue_body += f"\n\n---\n_Reported by: {username} via jenkins-job-insight_"
+        issue_body += f"\n\n---\n_Reported by: {username} via rootcoz_"
 
     tests_repo_url = _resolve_github_repo_url(
         body.github_repo_url, settings, _result_data
@@ -3141,7 +3169,7 @@ async def create_jira_bug_endpoint(
     username = request.state.username
     bug_body = body.body
     if username:
-        bug_body += f"\n\n----\nReported by: {username} via jenkins-job-insight"
+        bug_body += f"\n\n----\nReported by: {username} via rootcoz"
 
     try:
         effective_jira_settings = _build_effective_jira_settings(
@@ -3211,9 +3239,9 @@ async def push_to_reportportal(
     settings: Settings = Depends(get_settings),
     _: None = Depends(_bind_job_id),
 ) -> dict:
-    """Push JJI classifications into Report Portal test items.
+    """Push rootcoz classifications into Report Portal test items.
 
-    Finds the matching RP launch, matches failed items to JJI failures,
+    Finds the matching RP launch, matches failed items to rootcoz failures,
     and updates each item's defect type and comment.
     """
     _check_allow_list(request)
@@ -3350,7 +3378,7 @@ async def _execute_rp_push(
     """Shared logic for pushing classifications to Report Portal.
 
     Creates a ReportPortalClient, finds the matching launch, matches
-    failed items to JJI failures, and pushes classifications.
+    failed items to rootcoz failures, and pushes classifications.
 
     Args:
         job_id: The analysis job identifier.
@@ -3499,7 +3527,7 @@ async def _execute_rp_push(
 
         # Build FailureAnalysis objects from stored result
         try:
-            jji_failures = [FailureAnalysis.model_validate(f) for f in failures_data]
+            rcz_failures = [FailureAnalysis.model_validate(f) for f in failures_data]
         except ValidationError as exc:
             raise HTTPException(
                 status_code=422,
@@ -3508,7 +3536,7 @@ async def _execute_rp_push(
 
         try:
             matched = await asyncio.to_thread(
-                rp_client.match_failures, failed_items, jji_failures
+                rp_client.match_failures, failed_items, rcz_failures
             )
         except Exception as exc:
             user_msg, log_msg = _rp_error_message(exc, "matching RP items to failures")
@@ -3520,19 +3548,19 @@ async def _execute_rp_push(
                 launch_id=launch_id,
             )
 
-        if not matched and failed_items and jji_failures:
+        if not matched and failed_items and rcz_failures:
             rp_names = [item.get("name", "") for item in failed_items]
-            jji_names = [f.test_name for f in jji_failures]
+            rcz_names = [f.test_name for f in rcz_failures]
             # Full diagnostic detail for server logs only
             log_detail = (
                 f"No overlap between {len(failed_items)} RP item(s)"
-                f" and {len(jji_failures)} JJI failure(s)."
+                f" and {len(rcz_failures)} rootcoz failure(s)."
                 f" RP items: {', '.join(rp_names)}."
-                f" JJI tests: {', '.join(jji_names)}."
+                f" rootcoz tests: {', '.join(rcz_names)}."
             )
             return _log_and_return_rp_error(
                 f"No overlap between {len(failed_items)} RP item(s)"
-                f" and {len(jji_failures)} JJI failure(s).",
+                f" and {len(rcz_failures)} rootcoz failure(s).",
                 log_msg=log_detail,
                 job_name=job_name,
                 build_number=build_number,
@@ -3884,7 +3912,7 @@ async def list_jira_projects(
 
     effective_settings, _ = result
 
-    from jenkins_job_insight.jira import JiraClient
+    from rootcoz.jira import JiraClient
 
     projects: list[dict] = []
     try:
@@ -3923,7 +3951,7 @@ async def list_jira_security_levels(
 
     effective_settings, _ = result
 
-    from jenkins_job_insight.jira import JiraClient
+    from rootcoz.jira import JiraClient
 
     try:
         async with JiraClient(effective_settings) as client:
@@ -4392,21 +4420,29 @@ async def login(request: Request) -> JSONResponse:
         }
     )
     response.set_cookie(
-        "jji_session",
+        "rootcoz_session",
         session_token,
         httponly=True,
         samesite="strict",
         secure=settings.secure_cookies,
         max_age=storage.SESSION_TTL_SECONDS,
     )
-    # Also set jji_username cookie for compatibility
+    # Clear legacy cookie after migration
+    response.delete_cookie(
+        "jji_session",
+        httponly=True,
+        samesite="strict",
+        secure=settings.secure_cookies,
+    )
+    # Also set rootcoz_username cookie for compatibility
     response.set_cookie(
-        "jji_username",
+        "rootcoz_username",
         username,
         samesite="lax",
         secure=settings.secure_cookies,
         max_age=365 * 24 * 60 * 60,
     )
+    response.delete_cookie("jji_username", path="/")
     logger.info(f"[AUDIT] Login success: user='{username}' is_admin={is_admin}")
     return response
 
@@ -4414,11 +4450,17 @@ async def login(request: Request) -> JSONResponse:
 @app.post("/api/auth/logout")
 async def logout(request: Request) -> JSONResponse:
     """Clear admin session."""
-    session_token = request.cookies.get("jji_session")
+    session_token = _read_cookie(request, "rootcoz_session")
     if session_token:
         await storage.delete_session(session_token)
     settings = get_settings()
     response = JSONResponse(content={"ok": True})
+    response.delete_cookie(
+        "rootcoz_session",
+        httponly=True,
+        samesite="strict",
+        secure=settings.secure_cookies,
+    )
     response.delete_cookie(
         "jji_session",
         httponly=True,
@@ -4817,7 +4859,7 @@ async def preview_metadata_rules(body: dict) -> dict:
         raise HTTPException(status_code=422, detail="job_name is required")
     job_name = job_name.strip()
 
-    from jenkins_job_insight.metadata_rules import match_job_metadata
+    from rootcoz.metadata_rules import match_job_metadata
 
     settings = get_settings()
     rules = settings.metadata_rules
@@ -5035,7 +5077,7 @@ async def analyze_comment_intent(
 
     from ai_cli_runner import call_ai_cli
 
-    from jenkins_job_insight.analyzer import PROVIDER_CLI_FLAGS
+    from rootcoz.analyzer import PROVIDER_CLI_FLAGS
 
     prompt = """You are analyzing a comment left on a test failure report.
 Does this comment imply the failure has been reviewed or resolved?
@@ -5069,7 +5111,7 @@ Respond with ONLY a JSON object:
         output_format="json",
     )
 
-    from jenkins_job_insight.token_tracking import record_ai_usage
+    from rootcoz.token_tracking import record_ai_usage
 
     await record_ai_usage(
         job_id="comment-intent",
@@ -5202,6 +5244,4 @@ def run() -> None:
     import uvicorn
 
     reload = os.getenv("DEBUG", "").lower() == "true"
-    uvicorn.run(
-        "jenkins_job_insight.main:app", host="0.0.0.0", port=APP_PORT, reload=reload
-    )
+    uvicorn.run("rootcoz.main:app", host="0.0.0.0", port=APP_PORT, reload=reload)

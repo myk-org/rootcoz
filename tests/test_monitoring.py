@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import httpx
 import pytest
 
-from jenkins_job_insight.monitoring import (
+from rootcoz.monitoring import (
     AlertThrottler,
     ErrorRateTracker,
     _RollingCounter,
@@ -146,9 +146,7 @@ class TestHealthChecks:
         async def mock_get(url, **kwargs):
             return mock_resp
 
-        with patch(
-            "jenkins_job_insight.monitoring.httpx.AsyncClient"
-        ) as mock_client_cls:
+        with patch("rootcoz.monitoring.httpx.AsyncClient") as mock_client_cls:
             mock_client = AsyncMock()
             mock_client.get = mock_get
             mock_client.__aenter__ = AsyncMock(return_value=mock_client)
@@ -162,9 +160,7 @@ class TestHealthChecks:
         settings.jenkins_url = "https://jenkins.example.com"
         settings.jenkins_ssl_verify = False
 
-        with patch(
-            "jenkins_job_insight.monitoring.httpx.AsyncClient"
-        ) as mock_client_cls:
+        with patch("rootcoz.monitoring.httpx.AsyncClient") as mock_client_cls:
             mock_client = AsyncMock()
             mock_client.get = AsyncMock(side_effect=httpx.ConnectError("fail"))
             mock_client.__aenter__ = AsyncMock(return_value=mock_client)
@@ -240,7 +236,7 @@ class TestStartupConfigValidation:
         env = {
             "AI_PROVIDER": "claude",
             "AI_MODEL": "test-model",
-            "JJI_ENCRYPTION_KEY": "test-key",
+            "ROOTCOZ_ENCRYPTION_KEY": "test-key",
             "DB_PATH": db_path,
             "JENKINS_URL": "https://jenkins.example.com",
             "JIRA_URL": "https://jira.example.com",
@@ -268,7 +264,7 @@ class TestStartupConfigValidation:
             os.environ, {"AI_PROVIDER": "claude", "AI_MODEL": "test"}, clear=True
         ):
             result = validate_startup_config()
-        assert any("JJI_ENCRYPTION_KEY" in w for w in result.warnings)
+        assert any("ROOTCOZ_ENCRYPTION_KEY" in w for w in result.warnings)
 
     def test_bad_slack_url(self):
         with patch.dict(
@@ -363,7 +359,7 @@ class TestSlackAlert:
         assert result is False
 
     async def test_success(self):
-        with patch("jenkins_job_insight.monitoring.httpx.AsyncClient") as mock_cls:
+        with patch("rootcoz.monitoring.httpx.AsyncClient") as mock_cls:
             mock_client = AsyncMock()
             mock_resp = MagicMock()
             mock_resp.status_code = 200
@@ -377,7 +373,7 @@ class TestSlackAlert:
         assert result is True
 
     async def test_failure_swallowed(self):
-        with patch("jenkins_job_insight.monitoring.httpx.AsyncClient") as mock_cls:
+        with patch("rootcoz.monitoring.httpx.AsyncClient") as mock_cls:
             mock_client = AsyncMock()
             mock_client.post = AsyncMock(side_effect=Exception("network error"))
             mock_client.__aenter__ = AsyncMock(return_value=mock_client)
@@ -409,7 +405,7 @@ class TestEmailAlert:
         assert result is False
 
     def test_smtp_failure_swallowed(self):
-        with patch("jenkins_job_insight.monitoring.smtplib.SMTP") as mock_smtp:
+        with patch("rootcoz.monitoring.smtplib.SMTP") as mock_smtp:
             mock_smtp.side_effect = Exception("SMTP error")
             result = send_email_alert(
                 "subject",
@@ -429,7 +425,7 @@ class TestDispatchAlert:
     """Tests for dispatch_alert."""
 
     async def test_dispatch_sends_to_all_channels(self):
-        from jenkins_job_insight import monitoring
+        from rootcoz import monitoring
 
         monitoring.alert_throttler.reset()
         original_slack = monitoring.send_slack_alert
@@ -448,7 +444,7 @@ class TestDispatchAlert:
             monitoring.alert_throttler.reset()
 
     async def test_dispatch_throttled(self, monkeypatch):
-        from jenkins_job_insight import monitoring
+        from rootcoz import monitoring
 
         monitoring.alert_throttler.reset()
         monkeypatch.setattr(monitoring.alert_throttler, "cooldown_seconds", 9999.0)
@@ -473,17 +469,17 @@ class TestPrometheusMetrics:
 
     def test_basic_output(self):
         text = render_prometheus_metrics()
-        assert "jji_requests_total" in text
-        assert "jji_errors_total" in text
-        assert "jji_error_rate" in text
+        assert "rootcoz_requests_total" in text
+        assert "rootcoz_errors_total" in text
+        assert "rootcoz_error_rate" in text
 
     def test_format_with_errors(self):
         tracker = ErrorRateTracker(window_seconds=60.0)
         tracker.record_request(200)
         tracker.record_request(500)
-        with patch("jenkins_job_insight.monitoring.error_tracker", tracker):
+        with patch("rootcoz.monitoring.error_tracker", tracker):
             text = render_prometheus_metrics()
-        assert "jji_errors_by_class" in text
+        assert "rootcoz_errors_by_class" in text
         assert "5xx" in text
 
 
@@ -499,7 +495,7 @@ class TestHealthEndpointIntegration:
     def test_client(self, temp_db_path):
         from unittest.mock import patch as mock_patch
 
-        from jenkins_job_insight import storage
+        from rootcoz import storage
 
         env = {
             "JENKINS_USER": "testuser",
@@ -508,20 +504,20 @@ class TestHealthEndpointIntegration:
             "DB_PATH": str(temp_db_path),
         }
         with mock_patch.dict(os.environ, env, clear=True):
-            from jenkins_job_insight.config import get_settings
+            from rootcoz.config import get_settings
 
             get_settings.cache_clear()
             try:
                 with (
                     mock_patch.object(storage, "DB_PATH", temp_db_path),
                     mock_patch(
-                        "jenkins_job_insight.monitoring.check_jenkins",
+                        "rootcoz.monitoring.check_jenkins",
                         new_callable=AsyncMock,
                         return_value={"status": "not_configured"},
                     ),
                 ):
                     from starlette.testclient import TestClient
-                    from jenkins_job_insight.main import app
+                    from rootcoz.main import app
 
                     with TestClient(app) as client:
                         yield client
@@ -545,5 +541,5 @@ class TestHealthEndpointIntegration:
     def test_metrics_endpoint(self, test_client):
         response = test_client.get("/metrics")
         assert response.status_code == 200
-        assert "jji_requests_total" in response.text
+        assert "rootcoz_requests_total" in response.text
         assert "text/plain" in response.headers["content-type"]

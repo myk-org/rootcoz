@@ -5,7 +5,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 from ai_cli_runner import AIResult, AITokenUsage
 
-from jenkins_job_insight.token_tracking import (
+from rootcoz.token_tracking import (
     build_token_usage_summary,
     record_ai_usage,
 )
@@ -30,7 +30,7 @@ class TestRecordAiUsage:
         result = AIResult(success=True, text="analysis output", usage=usage)
 
         with patch(
-            "jenkins_job_insight.token_tracking.storage.record_token_usage",
+            "rootcoz.token_tracking.storage.record_token_usage",
             new_callable=AsyncMock,
         ) as mock_record:
             await record_ai_usage(
@@ -61,7 +61,7 @@ class TestRecordAiUsage:
         assert result.usage is None
 
         with patch(
-            "jenkins_job_insight.token_tracking.storage.record_token_usage",
+            "rootcoz.token_tracking.storage.record_token_usage",
             new_callable=AsyncMock,
         ) as mock_record:
             await record_ai_usage(
@@ -95,7 +95,7 @@ class TestRecordAiUsage:
         result = AIResult(success=True, text="output", usage=usage)
 
         with patch(
-            "jenkins_job_insight.token_tracking.storage.record_token_usage",
+            "rootcoz.token_tracking.storage.record_token_usage",
             new_callable=AsyncMock,
         ) as mock_record:
             await record_ai_usage(job_id="", result=result, call_type="analysis")
@@ -110,7 +110,7 @@ class TestRecordAiUsage:
         result = AIResult(success=True, text="output", usage=usage)
 
         with patch(
-            "jenkins_job_insight.token_tracking.storage.record_token_usage",
+            "rootcoz.token_tracking.storage.record_token_usage",
             new_callable=AsyncMock,
             side_effect=RuntimeError("DB unavailable"),
         ):
@@ -124,7 +124,7 @@ class TestRecordAiUsage:
         result = AIResult(success=True, text="output", usage=usage)
 
         with patch(
-            "jenkins_job_insight.token_tracking.storage.record_token_usage",
+            "rootcoz.token_tracking.storage.record_token_usage",
             new_callable=AsyncMock,
         ) as mock_record:
             await record_ai_usage(
@@ -149,7 +149,7 @@ class TestRecordAiUsage:
         result = AIResult(success=True, text=long_text, usage=usage)
 
         with patch(
-            "jenkins_job_insight.token_tracking.storage.record_token_usage",
+            "rootcoz.token_tracking.storage.record_token_usage",
             new_callable=AsyncMock,
         ) as mock_record:
             await record_ai_usage(job_id="job-1", result=result, call_type="analysis")
@@ -163,7 +163,7 @@ class TestBuildTokenUsageSummary:
     async def test_returns_none_when_no_records(self) -> None:
         """Returns None when no records exist."""
         with patch(
-            "jenkins_job_insight.token_tracking.storage.get_token_usage_for_job",
+            "rootcoz.token_tracking.storage.get_token_usage_for_job",
             new_callable=AsyncMock,
             return_value=[],
         ):
@@ -200,7 +200,7 @@ class TestBuildTokenUsageSummary:
             },
         ]
         with patch(
-            "jenkins_job_insight.token_tracking.storage.get_token_usage_for_job",
+            "rootcoz.token_tracking.storage.get_token_usage_for_job",
             new_callable=AsyncMock,
             return_value=records,
         ):
@@ -249,7 +249,7 @@ class TestBuildTokenUsageSummary:
             },
         ]
         with patch(
-            "jenkins_job_insight.token_tracking.storage.get_token_usage_for_job",
+            "rootcoz.token_tracking.storage.get_token_usage_for_job",
             new_callable=AsyncMock,
             return_value=records,
         ):
@@ -264,7 +264,7 @@ class TestBuildTokenUsageSummary:
     async def test_returns_none_on_storage_error(self) -> None:
         """Returns None when storage raises an exception."""
         with patch(
-            "jenkins_job_insight.token_tracking.storage.get_token_usage_for_job",
+            "rootcoz.token_tracking.storage.get_token_usage_for_job",
             new_callable=AsyncMock,
             side_effect=RuntimeError("DB error"),
         ):
@@ -289,7 +289,7 @@ class TestBuildTokenUsageSummary:
             },
         ]
         with patch(
-            "jenkins_job_insight.token_tracking.storage.get_token_usage_for_job",
+            "rootcoz.token_tracking.storage.get_token_usage_for_job",
             new_callable=AsyncMock,
             return_value=records,
         ):

@@ -234,7 +234,7 @@ class Settings(BaseSettings):
     # Admin authentication
     admin_key: str = Field(
         default="", repr=False
-    )  # JJI_ADMIN_KEY — bootstraps admin superuser
+    )  # ROOTCOZ_ADMIN_KEY — bootstraps admin superuser
     secure_cookies: bool = True  # Set to False for local HTTP dev
 
     # Trust reverse-proxy headers (e.g., X-Forwarded-User from OAuth proxy).
@@ -401,7 +401,7 @@ class Settings(BaseSettings):
             object.__setattr__(self, "_vapid_config_cache", True)
             return True
 
-        from jenkins_job_insight.vapid import get_vapid_config
+        from rootcoz.vapid import get_vapid_config
 
         result = bool(get_vapid_config())
         object.__setattr__(self, "_vapid_config_cache", result)
@@ -425,7 +425,7 @@ class Settings(BaseSettings):
             return []
 
         try:
-            from jenkins_job_insight.metadata_rules import load_metadata_rules
+            from rootcoz.metadata_rules import load_metadata_rules
 
             rules = load_metadata_rules(path)
         except Exception:  # noqa: BLE001 — never crash the app on bad rule config

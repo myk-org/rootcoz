@@ -1,4 +1,4 @@
-"""Output formatting helpers for the jji CLI."""
+"""Output formatting helpers for the rootcoz CLI."""
 
 import json
 

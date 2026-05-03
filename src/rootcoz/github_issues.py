@@ -16,9 +16,9 @@ from collections.abc import Sequence
 import httpx
 from simple_logger.logger import get_logger
 
-from jenkins_job_insight.config import Settings
-from jenkins_job_insight.issue_matching import filter_issue_matches_with_ai
-from jenkins_job_insight.models import (
+from rootcoz.config import Settings
+from rootcoz.issue_matching import filter_issue_matches_with_ai
+from rootcoz.models import (
     AnalysisDetail,
     CodeFix,
     FailureAnalysis,

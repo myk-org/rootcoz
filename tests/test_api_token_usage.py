@@ -7,8 +7,8 @@ from unittest.mock import patch
 import pytest
 from fastapi.testclient import TestClient
 
-from jenkins_job_insight import storage
-from jenkins_job_insight.config import get_settings
+from rootcoz import storage
+from rootcoz.config import get_settings
 
 
 @pytest.fixture
@@ -26,14 +26,14 @@ def client(_init_db, temp_db_path):
         os.environ,
         {
             "ADMIN_KEY": "test-admin-key-16chars",  # pragma: allowlist secret
-            "JJI_ENCRYPTION_KEY": "test-encryption-key-for-hmac",  # pragma: allowlist secret
+            "ROOTCOZ_ENCRYPTION_KEY": "test-encryption-key-for-hmac",  # pragma: allowlist secret
             "SECURE_COOKIES": "false",
             "DB_PATH": str(temp_db_path),
         },
     ):
         get_settings.cache_clear()
         with patch.object(storage, "DB_PATH", temp_db_path):
-            from jenkins_job_insight.main import app
+            from rootcoz.main import app
 
             with TestClient(app) as c:
                 yield c

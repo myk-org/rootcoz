@@ -10,7 +10,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from jenkins_job_insight import storage
+from rootcoz import storage
 
 
 # ---------------------------------------------------------------------------
@@ -36,7 +36,7 @@ def mock_settings(temp_db_path: Path):
         "DB_PATH": str(temp_db_path),
     }
     with patch.dict(os.environ, env, clear=True):
-        from jenkins_job_insight.config import get_settings
+        from rootcoz.config import get_settings
 
         get_settings.cache_clear()
         try:
@@ -51,7 +51,7 @@ def test_client(mock_settings, temp_db_path: Path):
     with patch.object(storage, "DB_PATH", temp_db_path):
         from starlette.testclient import TestClient
 
-        from jenkins_job_insight.main import app
+        from rootcoz.main import app
 
         with TestClient(app) as client:
             yield client
@@ -238,7 +238,7 @@ class TestGetMentionsEndpoint:
             await storage.init_db()
             await _add_comment(temp_db_path, "Hey @testuser look", username="bob")
 
-        test_client.cookies.set("jji_username", "testuser")
+        test_client.cookies.set("rootcoz_username", "testuser")
         response = test_client.get("/api/users/mentions")
         assert response.status_code == 200
         data = response.json()
@@ -258,7 +258,7 @@ class TestGetMentionsEndpoint:
         """unread_only query flag is forwarded to storage as True."""
         with patch.object(storage, "DB_PATH", temp_db_path):
             await storage.init_db()
-        test_client.cookies.set("jji_username", "testuser")
+        test_client.cookies.set("rootcoz_username", "testuser")
         with patch.object(
             storage,
             "get_mentions_for_user",
@@ -280,7 +280,7 @@ class TestMarkReadEndpoint:
             await storage.init_db()
             cid = await _add_comment(temp_db_path, "Hey @testuser", username="bob")
 
-        test_client.cookies.set("jji_username", "testuser")
+        test_client.cookies.set("rootcoz_username", "testuser")
         response = test_client.post(
             "/api/users/mentions/read",
             json={"comment_ids": [cid]},
@@ -291,7 +291,7 @@ class TestMarkReadEndpoint:
 
     async def test_mark_read_rejects_empty_list(self, test_client) -> None:
         """POST with empty comment_ids returns 400."""
-        test_client.cookies.set("jji_username", "testuser")
+        test_client.cookies.set("rootcoz_username", "testuser")
         response = test_client.post(
             "/api/users/mentions/read",
             json={"comment_ids": []},
@@ -301,7 +301,7 @@ class TestMarkReadEndpoint:
 
     async def test_mark_read_rejects_non_int(self, test_client) -> None:
         """POST with non-integer comment_ids returns 400."""
-        test_client.cookies.set("jji_username", "testuser")
+        test_client.cookies.set("rootcoz_username", "testuser")
         response = test_client.post(
             "/api/users/mentions/read",
             json={"comment_ids": ["abc"]},
@@ -313,7 +313,7 @@ class TestMarkReadEndpoint:
         """POST with boolean comment_ids returns 400."""
         with patch.object(storage, "DB_PATH", temp_db_path):
             await storage.init_db()
-        test_client.cookies.set("jji_username", "testuser")
+        test_client.cookies.set("rootcoz_username", "testuser")
         response = test_client.post(
             "/api/users/mentions/read",
             json={"comment_ids": [True, 2]},
@@ -338,7 +338,7 @@ class TestMarkReadEndpoint:
             # Comment mentions @other, NOT @testuser
             cid = await _add_comment(temp_db_path, "Hey @other look", username="bob")
 
-        test_client.cookies.set("jji_username", "testuser")
+        test_client.cookies.set("rootcoz_username", "testuser")
         # Marking succeeds (INSERT OR IGNORE) but creates a junk row
         response = test_client.post(
             "/api/users/mentions/read",
@@ -416,7 +416,7 @@ class TestMarkAllReadEndpoint:
             await _add_comment(temp_db_path, "Hey @testuser one", username="bob")
             await _add_comment(temp_db_path, "Hey @testuser two", username="charlie")
 
-        test_client.cookies.set("jji_username", "testuser")
+        test_client.cookies.set("rootcoz_username", "testuser")
         response = test_client.post("/api/users/mentions/read-all")
         assert response.status_code == 200
         data = response.json()
@@ -434,14 +434,14 @@ class TestGetMentionsEndpointValidation:
 
     async def test_invalid_offset(self, test_client) -> None:
         """Non-numeric offset returns 400."""
-        test_client.cookies.set("jji_username", "testuser")
+        test_client.cookies.set("rootcoz_username", "testuser")
         response = test_client.get("/api/users/mentions?offset=abc")
         assert response.status_code == 400
         test_client.cookies.clear()
 
     async def test_invalid_limit(self, test_client) -> None:
         """Non-numeric limit returns 400."""
-        test_client.cookies.set("jji_username", "testuser")
+        test_client.cookies.set("rootcoz_username", "testuser")
         response = test_client.get("/api/users/mentions?limit=xyz")
         assert response.status_code == 400
         test_client.cookies.clear()
@@ -452,7 +452,7 @@ class TestGetMentionsEndpointValidation:
         """Negative offset is clamped to 0."""
         with patch.object(storage, "DB_PATH", temp_db_path):
             await storage.init_db()
-        test_client.cookies.set("jji_username", "testuser")
+        test_client.cookies.set("rootcoz_username", "testuser")
         with patch.object(
             storage,
             "get_mentions_for_user",
@@ -469,7 +469,7 @@ class TestGetMentionsEndpointValidation:
         """Limit > 200 is clamped to 200."""
         with patch.object(storage, "DB_PATH", temp_db_path):
             await storage.init_db()
-        test_client.cookies.set("jji_username", "testuser")
+        test_client.cookies.set("rootcoz_username", "testuser")
         with patch.object(
             storage,
             "get_mentions_for_user",
@@ -510,7 +510,7 @@ class TestUnreadCountEndpoint:
             await storage.init_db()
             await _add_comment(temp_db_path, "Hey @testuser", username="bob")
 
-        test_client.cookies.set("jji_username", "testuser")
+        test_client.cookies.set("rootcoz_username", "testuser")
         response = test_client.get("/api/users/mentions/unread-count")
         assert response.status_code == 200
         assert response.json()["count"] == 1
@@ -555,7 +555,7 @@ class TestMentionRegexParity:
     @pytest.mark.parametrize("text,expected", PARITY_CASES)
     def test_detect_mentions_parity(self, text, expected):
         """Verify Python detect_mentions matches shared test cases."""
-        from jenkins_job_insight.comment_enrichment import detect_mentions
+        from rootcoz.comment_enrichment import detect_mentions
 
         result = detect_mentions(text)
         assert result == expected, f"Input: {text!r}, expected {expected}, got {result}"

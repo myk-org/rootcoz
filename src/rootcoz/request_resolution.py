@@ -8,8 +8,8 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from jenkins_job_insight.config import Settings
-    from jenkins_job_insight.models import BaseAnalysisRequest
+    from rootcoz.config import Settings
+    from rootcoz.models import BaseAnalysisRequest
 
 
 def resolve_tests_repo_token(body: BaseAnalysisRequest, merged: Settings) -> str:

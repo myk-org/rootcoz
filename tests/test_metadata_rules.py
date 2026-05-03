@@ -9,9 +9,9 @@ import httpx
 import pytest
 from typer.testing import CliRunner
 
-from jenkins_job_insight import storage
-from jenkins_job_insight.cli.main import app as cli_app
-from jenkins_job_insight.metadata_rules import (
+from rootcoz import storage
+from rootcoz.cli.main import app as cli_app
+from rootcoz.metadata_rules import (
     load_metadata_rules,
     match_job_metadata,
 )
@@ -323,8 +323,8 @@ class TestMetadataRulesAPI:
             metadata_rules=rules, metadata_rules_file="/data/rules.yaml"
         )
 
-        with patch("jenkins_job_insight.main.get_settings", return_value=mock_settings):
-            from jenkins_job_insight.main import app as fastapi_app
+        with patch("rootcoz.main.get_settings", return_value=mock_settings):
+            from rootcoz.main import app as fastapi_app
 
             async with httpx.AsyncClient(
                 transport=httpx.ASGITransport(app=fastapi_app),
@@ -342,8 +342,8 @@ class TestMetadataRulesAPI:
             metadata_rules=rules, metadata_rules_file="/data/rules.yaml"
         )
 
-        with patch("jenkins_job_insight.main.get_settings", return_value=mock_settings):
-            from jenkins_job_insight.main import app as fastapi_app
+        with patch("rootcoz.main.get_settings", return_value=mock_settings):
+            from rootcoz.main import app as fastapi_app
 
             async with httpx.AsyncClient(
                 transport=httpx.ASGITransport(app=fastapi_app),
@@ -363,8 +363,8 @@ class TestMetadataRulesAPI:
             metadata_rules=[{"pattern": "test-*", "team": "qa"}]
         )
 
-        with patch("jenkins_job_insight.main.get_settings", return_value=mock_settings):
-            from jenkins_job_insight.main import app as fastapi_app
+        with patch("rootcoz.main.get_settings", return_value=mock_settings):
+            from rootcoz.main import app as fastapi_app
 
             async with httpx.AsyncClient(
                 transport=httpx.ASGITransport(app=fastapi_app),
@@ -382,8 +382,8 @@ class TestMetadataRulesAPI:
     async def test_preview_missing_job_name(self) -> None:
         mock_settings = _make_mock_settings()
 
-        with patch("jenkins_job_insight.main.get_settings", return_value=mock_settings):
-            from jenkins_job_insight.main import app as fastapi_app
+        with patch("rootcoz.main.get_settings", return_value=mock_settings):
+            from rootcoz.main import app as fastapi_app
 
             async with httpx.AsyncClient(
                 transport=httpx.ASGITransport(app=fastapi_app),
@@ -398,8 +398,8 @@ class TestMetadataRulesAPI:
     async def test_preview_non_string_job_name(self) -> None:
         mock_settings = _make_mock_settings()
 
-        with patch("jenkins_job_insight.main.get_settings", return_value=mock_settings):
-            from jenkins_job_insight.main import app as fastapi_app
+        with patch("rootcoz.main.get_settings", return_value=mock_settings):
+            from rootcoz.main import app as fastapi_app
 
             async with httpx.AsyncClient(
                 transport=httpx.ASGITransport(app=fastapi_app),
@@ -414,8 +414,8 @@ class TestMetadataRulesAPI:
     async def test_preview_whitespace_only_job_name(self) -> None:
         mock_settings = _make_mock_settings()
 
-        with patch("jenkins_job_insight.main.get_settings", return_value=mock_settings):
-            from jenkins_job_insight.main import app as fastapi_app
+        with patch("rootcoz.main.get_settings", return_value=mock_settings):
+            from rootcoz.main import app as fastapi_app
 
             async with httpx.AsyncClient(
                 transport=httpx.ASGITransport(app=fastapi_app),
@@ -432,7 +432,7 @@ class TestMetadataRulesAPI:
 
 
 class TestMetadataRulesClient:
-    """Tests for JJIClient metadata rules methods."""
+    """Tests for RootCozClient metadata rules methods."""
 
     def test_list_metadata_rules(self) -> None:
         response_data = {
@@ -475,13 +475,13 @@ class TestMetadataRulesCLI:
     def _invoke(self, args: list[str], handler) -> object:
         runner = CliRunner()
         with (
-            patch.dict(os.environ, {"JJI_SERVER": "http://test-server"}),
+            patch.dict(os.environ, {"ROOTCOZ_SERVER": "http://test-server"}),
             patch(
-                "jenkins_job_insight.cli.main.get_server_config",
+                "rootcoz.cli.main.get_server_config",
                 return_value=None,
             ),
             patch(
-                "jenkins_job_insight.cli.main._get_client",
+                "rootcoz.cli.main._get_client",
                 return_value=make_test_client(handler),
             ),
         ):
@@ -592,7 +592,7 @@ class TestSettingsMetadataRules:
             },
             clear=False,
         ):
-            from jenkins_job_insight.config import Settings
+            from rootcoz.config import Settings
 
             s = Settings()
             assert s.metadata_rules == []
@@ -612,7 +612,7 @@ class TestSettingsMetadataRules:
             },
             clear=False,
         ):
-            from jenkins_job_insight.config import Settings
+            from rootcoz.config import Settings
 
             s = Settings()
             assert len(s.metadata_rules) == 1
@@ -629,7 +629,7 @@ class TestSettingsMetadataRules:
             },
             clear=False,
         ):
-            from jenkins_job_insight.config import Settings
+            from rootcoz.config import Settings
 
             s = Settings()
             assert s.metadata_rules == []

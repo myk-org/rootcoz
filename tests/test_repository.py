@@ -6,7 +6,7 @@ import git.exc
 import pytest
 from git.exc import GitCommandError
 
-from jenkins_job_insight.repository import (
+from rootcoz.repository import (
     RepositoryManager,
     _is_commit_sha,
     repo_name_from_url,
@@ -21,7 +21,7 @@ class TestRepositoryManager:
         manager = RepositoryManager()
         assert manager.temp_dirs == []
 
-    @patch("jenkins_job_insight.repository.Repo")
+    @patch("rootcoz.repository.Repo")
     def test_clone_creates_temp_directory(self, mock_repo: MagicMock) -> None:
         """Test that clone creates a temporary directory."""
         manager = RepositoryManager()
@@ -37,7 +37,7 @@ class TestRepositoryManager:
         # Cleanup
         manager.cleanup()
 
-    @patch("jenkins_job_insight.repository.Repo")
+    @patch("rootcoz.repository.Repo")
     def test_clone_with_custom_depth(self, mock_repo: MagicMock) -> None:
         """Test that clone passes correct depth parameter."""
         manager = RepositoryManager()
@@ -53,7 +53,7 @@ class TestRepositoryManager:
         # Cleanup
         manager.cleanup()
 
-    @patch("jenkins_job_insight.repository.Repo")
+    @patch("rootcoz.repository.Repo")
     def test_clone_multiple_repos(self, mock_repo: MagicMock) -> None:
         """Test cloning multiple repositories."""
         manager = RepositoryManager()
@@ -70,7 +70,7 @@ class TestRepositoryManager:
         # Cleanup
         manager.cleanup()
 
-    @patch("jenkins_job_insight.repository.Repo")
+    @patch("rootcoz.repository.Repo")
     def test_cleanup_removes_directories(self, _mock_repo: MagicMock) -> None:
         """Test that cleanup removes all temporary directories."""
         manager = RepositoryManager()
@@ -89,7 +89,7 @@ class TestRepositoryManager:
         assert not path2.exists()
         assert manager.temp_dirs == []
 
-    @patch("jenkins_job_insight.repository.Repo")
+    @patch("rootcoz.repository.Repo")
     def test_cleanup_handles_missing_directory(self, _mock_repo: MagicMock) -> None:
         """Test that cleanup handles already deleted directories gracefully."""
         manager = RepositoryManager()
@@ -103,7 +103,7 @@ class TestRepositoryManager:
         manager.cleanup()
         assert manager.temp_dirs == []
 
-    @patch("jenkins_job_insight.repository.Repo")
+    @patch("rootcoz.repository.Repo")
     def test_context_manager_enter(self, _mock_repo: MagicMock) -> None:
         """Test context manager __enter__ returns self."""
         manager = RepositoryManager()
@@ -111,7 +111,7 @@ class TestRepositoryManager:
         with manager as ctx:
             assert ctx is manager
 
-    @patch("jenkins_job_insight.repository.Repo")
+    @patch("rootcoz.repository.Repo")
     def test_context_manager_cleanup_on_exit(self, _mock_repo: MagicMock) -> None:
         """Test context manager cleans up on exit."""
         path = None
@@ -122,7 +122,7 @@ class TestRepositoryManager:
         # Directory should be cleaned up after context manager exits
         assert not path.exists()
 
-    @patch("jenkins_job_insight.repository.Repo")
+    @patch("rootcoz.repository.Repo")
     def test_context_manager_cleanup_on_exception(self, _mock_repo: MagicMock) -> None:
         """Test context manager cleans up even when exception occurs."""
         path = None
@@ -137,7 +137,7 @@ class TestRepositoryManager:
         assert path is not None
         assert not path.exists()
 
-    @patch("jenkins_job_insight.repository.Repo")
+    @patch("rootcoz.repository.Repo")
     def test_clone_uses_jenkins_insight_prefix(self, _mock_repo: MagicMock) -> None:
         """Test that cloned directories are under jenkins-insight base path."""
         manager = RepositoryManager()
@@ -151,21 +151,21 @@ class TestRepositoryManager:
         # Cleanup
         manager.cleanup()
 
-    @patch("jenkins_job_insight.repository.Repo")
+    @patch("rootcoz.repository.Repo")
     def test_clone_rejects_file_url(self, _mock_repo: MagicMock) -> None:
         """Test that clone rejects file:// URLs."""
         manager = RepositoryManager()
         with pytest.raises(ValueError, match="Only https:// and git://"):
             manager.clone("file:///etc/passwd")
 
-    @patch("jenkins_job_insight.repository.Repo")
+    @patch("rootcoz.repository.Repo")
     def test_clone_rejects_ssh_url(self, _mock_repo: MagicMock) -> None:
         """Test that clone rejects ssh:// URLs."""
         manager = RepositoryManager()
         with pytest.raises(ValueError, match="Only https:// and git://"):
             manager.clone("ssh://git@github.com/org/repo")
 
-    @patch("jenkins_job_insight.repository.Repo")
+    @patch("rootcoz.repository.Repo")
     def test_clone_real_failure_handling(self, mock_repo: MagicMock) -> None:
         """Test that clone raises error for invalid repository."""
         mock_repo.clone_from.side_effect = git.exc.GitCommandError("clone", 128)
@@ -181,7 +181,7 @@ class TestRepositoryManager:
 class TestCloneInto:
     """Tests for RepositoryManager.clone_into."""
 
-    @patch("jenkins_job_insight.repository.Repo")
+    @patch("rootcoz.repository.Repo")
     def test_clone_into_creates_directory(self, mock_repo: MagicMock, tmp_path) -> None:
         """Test that clone_into creates the target directory and clones."""
         manager = RepositoryManager()
@@ -193,7 +193,7 @@ class TestCloneInto:
             "https://github.com/org/repo", target, depth=1
         )
 
-    @patch("jenkins_job_insight.repository.Repo")
+    @patch("rootcoz.repository.Repo")
     def test_clone_into_not_tracked_for_cleanup(
         self, _mock_repo: MagicMock, tmp_path
     ) -> None:
@@ -222,7 +222,7 @@ class TestCloneWithSslRetry:
     def test_clone_into_retries_on_ssl_error(self, tmp_path) -> None:
         """clone_into retries with GIT_SSL_NO_VERIFY on cert failure."""
         manager = RepositoryManager()
-        with patch("jenkins_job_insight.repository.Repo.clone_from") as mock_clone:
+        with patch("rootcoz.repository.Repo.clone_from") as mock_clone:
             mock_clone.side_effect = [
                 GitCommandError(
                     "git clone",
@@ -241,7 +241,7 @@ class TestCloneWithSslRetry:
     def test_clone_into_does_not_retry_on_other_errors(self, tmp_path) -> None:
         """Non-SSL errors are not retried."""
         manager = RepositoryManager()
-        with patch("jenkins_job_insight.repository.Repo.clone_from") as mock_clone:
+        with patch("rootcoz.repository.Repo.clone_from") as mock_clone:
             mock_clone.side_effect = GitCommandError(
                 "git clone", 128, stderr="repository not found"
             )
@@ -252,7 +252,7 @@ class TestCloneWithSslRetry:
     def test_clone_into_succeeds_without_retry(self, tmp_path) -> None:
         """Successful clone doesn't trigger retry."""
         manager = RepositoryManager()
-        with patch("jenkins_job_insight.repository.Repo.clone_from") as mock_clone:
+        with patch("rootcoz.repository.Repo.clone_from") as mock_clone:
             mock_clone.return_value = MagicMock()
             target = tmp_path / "repo"
             target.mkdir()
@@ -262,7 +262,7 @@ class TestCloneWithSslRetry:
     def test_clone_retries_on_ssl_error(self, tmp_path) -> None:
         """clone() retries with GIT_SSL_NO_VERIFY on SSL cert failure."""
         manager = RepositoryManager()
-        with patch("jenkins_job_insight.repository.Repo.clone_from") as mock_clone:
+        with patch("rootcoz.repository.Repo.clone_from") as mock_clone:
             mock_clone.side_effect = [
                 GitCommandError(
                     "git clone",
@@ -280,7 +280,7 @@ class TestCloneWithSslRetry:
     def test_clone_does_not_retry_on_other_errors(self) -> None:
         """clone() non-SSL errors are not retried."""
         manager = RepositoryManager()
-        with patch("jenkins_job_insight.repository.Repo.clone_from") as mock_clone:
+        with patch("rootcoz.repository.Repo.clone_from") as mock_clone:
             mock_clone.side_effect = GitCommandError(
                 "git clone", 128, stderr="repository not found"
             )
@@ -292,7 +292,7 @@ class TestCloneWithSslRetry:
     def test_clone_retries_on_certificate_keyword(self) -> None:
         """clone() retries when stderr contains 'certificate'."""
         manager = RepositoryManager()
-        with patch("jenkins_job_insight.repository.Repo.clone_from") as mock_clone:
+        with patch("rootcoz.repository.Repo.clone_from") as mock_clone:
             mock_clone.side_effect = [
                 GitCommandError(
                     "git clone",
@@ -376,15 +376,15 @@ class TestDeriveTestRepoName:
 
     def test_no_collision(self) -> None:
         """When no additional repos, returns derived name from URL."""
-        from jenkins_job_insight.repository import derive_test_repo_name
+        from rootcoz.repository import derive_test_repo_name
 
         name = derive_test_repo_name("https://github.com/org/my-tests.git", [])
         assert name == "my-tests"
 
     def test_collision_falls_back(self) -> None:
         """When derived name collides with an additional repo, returns 'tests-repo-1'."""
-        from jenkins_job_insight.repository import derive_test_repo_name
-        from jenkins_job_insight.models import AdditionalRepo
+        from rootcoz.repository import derive_test_repo_name
+        from rootcoz.models import AdditionalRepo
 
         additional = [
             AdditionalRepo.model_validate(
@@ -396,8 +396,8 @@ class TestDeriveTestRepoName:
 
     def test_no_collision_different_name(self) -> None:
         """No collision when additional repo has a different name."""
-        from jenkins_job_insight.repository import derive_test_repo_name
-        from jenkins_job_insight.models import AdditionalRepo
+        from rootcoz.repository import derive_test_repo_name
+        from rootcoz.models import AdditionalRepo
 
         additional = [
             AdditionalRepo.model_validate(
@@ -409,22 +409,22 @@ class TestDeriveTestRepoName:
 
     def test_empty_additional_repos(self) -> None:
         """Empty additional repos list causes no collision."""
-        from jenkins_job_insight.repository import derive_test_repo_name
+        from rootcoz.repository import derive_test_repo_name
 
         name = derive_test_repo_name("https://github.com/org/repo", [])
         assert name == "repo"
 
     def test_none_additional_repos(self) -> None:
         """None additional repos list causes no collision."""
-        from jenkins_job_insight.repository import derive_test_repo_name
+        from rootcoz.repository import derive_test_repo_name
 
         name = derive_test_repo_name("https://github.com/org/repo", None)
         assert name == "repo"
 
     def test_fallback_also_avoids_collision(self) -> None:
         """Fallback name avoids collision with 'tests-repo-1' too."""
-        from jenkins_job_insight.repository import derive_test_repo_name
-        from jenkins_job_insight.models import AdditionalRepo
+        from rootcoz.repository import derive_test_repo_name
+        from rootcoz.models import AdditionalRepo
 
         repos = [
             AdditionalRepo.model_validate(
@@ -441,7 +441,7 @@ class TestDeriveTestRepoName:
 
     def test_reserved_name_falls_back(self) -> None:
         """Test repo URL with reserved basename gets a fallback name."""
-        from jenkins_job_insight.repository import derive_test_repo_name
+        from rootcoz.repository import derive_test_repo_name
 
         result = derive_test_repo_name("https://github.com/org/build-artifacts", [])
         assert result != "build-artifacts"
@@ -449,7 +449,7 @@ class TestDeriveTestRepoName:
 
     def test_reserved_name_falls_back_with_none_additional(self) -> None:
         """Reserved name is blocked even when additional_repos is None."""
-        from jenkins_job_insight.repository import derive_test_repo_name
+        from rootcoz.repository import derive_test_repo_name
 
         result = derive_test_repo_name("https://github.com/org/build-artifacts", None)
         assert result != "build-artifacts"
@@ -457,8 +457,8 @@ class TestDeriveTestRepoName:
 
     def test_uuid_fallback_logs_warning(self) -> None:
         """When all 99 numeric candidates are taken, UUID fallback logs a warning."""
-        from jenkins_job_insight.repository import derive_test_repo_name
-        from jenkins_job_insight.models import AdditionalRepo
+        from rootcoz.repository import derive_test_repo_name
+        from rootcoz.models import AdditionalRepo
 
         # Create additional repos that collide with the base name and all 99 numeric fallbacks
         repos = [
@@ -473,7 +473,7 @@ class TestDeriveTestRepoName:
                 ),
             )
 
-        with patch("jenkins_job_insight.repository.logger") as mock_logger:
+        with patch("rootcoz.repository.logger") as mock_logger:
             result = derive_test_repo_name("https://github.com/org/my-repo", repos)
 
         assert result.startswith("tests-repo-")
@@ -495,7 +495,7 @@ class TestCloneWithSslRetryCleanup:
         partial_file = target / "partial-object"
         partial_file.write_text("partial data")
 
-        with patch("jenkins_job_insight.repository.Repo.clone_from") as mock_clone:
+        with patch("rootcoz.repository.Repo.clone_from") as mock_clone:
             mock_clone.side_effect = [
                 GitCommandError(
                     "git clone",
@@ -517,7 +517,7 @@ class TestRedactUrl:
 
     def test_no_credentials(self) -> None:
         """URL without credentials is returned unchanged."""
-        from jenkins_job_insight.repository import _redact_url
+        from rootcoz.repository import _redact_url
 
         assert (
             _redact_url("https://github.com/org/repo") == "https://github.com/org/repo"
@@ -525,7 +525,7 @@ class TestRedactUrl:
 
     def test_username_and_password_redacted(self) -> None:
         """Username and password are replaced with ***."""
-        from jenkins_job_insight.repository import _redact_url
+        from rootcoz.repository import _redact_url
 
         result = _redact_url("https://user:pass@github.com/org/repo")
         assert "user" not in result
@@ -534,7 +534,7 @@ class TestRedactUrl:
 
     def test_username_only_redacted(self) -> None:
         """Username-only auth is redacted."""
-        from jenkins_job_insight.repository import _redact_url
+        from rootcoz.repository import _redact_url
 
         result = _redact_url("https://token@github.com/org/repo")
         assert "token" not in result
@@ -542,7 +542,7 @@ class TestRedactUrl:
 
     def test_preserves_port(self) -> None:
         """Port is preserved when credentials are redacted."""
-        from jenkins_job_insight.repository import _redact_url
+        from rootcoz.repository import _redact_url
 
         result = _redact_url("https://user:pass@github.com:8443/org/repo")
         assert ":8443" in result
@@ -550,7 +550,7 @@ class TestRedactUrl:
 
     def test_git_protocol(self) -> None:
         """git:// URLs without credentials are unchanged."""
-        from jenkins_job_insight.repository import _redact_url
+        from rootcoz.repository import _redact_url
 
         assert _redact_url("git://github.com/org/repo") == "git://github.com/org/repo"
 
@@ -558,12 +558,12 @@ class TestRedactUrl:
 class TestCloneBranchParameter:
     """Tests for passing branch parameter through clone functions."""
 
-    @patch("jenkins_job_insight.repository.Repo")
+    @patch("rootcoz.repository.Repo")
     def test_clone_with_ssl_retry_passes_branch(
         self, mock_repo: MagicMock, tmp_path
     ) -> None:
         """_clone_with_ssl_retry passes branch to Repo.clone_from when non-empty."""
-        from jenkins_job_insight.repository import _clone_with_ssl_retry
+        from rootcoz.repository import _clone_with_ssl_retry
 
         clone_dir = tmp_path / "repo"
         clone_dir.mkdir()
@@ -574,12 +574,12 @@ class TestCloneBranchParameter:
             "https://example.com/repo", clone_dir, depth=1, branch="develop"
         )
 
-    @patch("jenkins_job_insight.repository.Repo")
+    @patch("rootcoz.repository.Repo")
     def test_clone_with_ssl_retry_no_branch_when_empty(
         self, mock_repo: MagicMock, tmp_path
     ) -> None:
         """_clone_with_ssl_retry does NOT pass branch when empty string."""
-        from jenkins_job_insight.repository import _clone_with_ssl_retry
+        from rootcoz.repository import _clone_with_ssl_retry
 
         clone_dir = tmp_path / "repo"
         clone_dir.mkdir()
@@ -588,12 +588,12 @@ class TestCloneBranchParameter:
             "https://example.com/repo", clone_dir, depth=1
         )
 
-    @patch("jenkins_job_insight.repository.Repo")
+    @patch("rootcoz.repository.Repo")
     def test_clone_with_ssl_retry_default_no_branch(
         self, mock_repo: MagicMock, tmp_path
     ) -> None:
         """_clone_with_ssl_retry without branch arg does not pass branch."""
-        from jenkins_job_insight.repository import _clone_with_ssl_retry
+        from rootcoz.repository import _clone_with_ssl_retry
 
         clone_dir = tmp_path / "repo"
         clone_dir.mkdir()
@@ -604,9 +604,9 @@ class TestCloneBranchParameter:
 
     def test_clone_with_ssl_retry_passes_branch_on_ssl_retry(self, tmp_path) -> None:
         """branch is passed in BOTH the initial and SSL retry Repo.clone_from calls."""
-        from jenkins_job_insight.repository import _clone_with_ssl_retry
+        from rootcoz.repository import _clone_with_ssl_retry
 
-        with patch("jenkins_job_insight.repository.Repo.clone_from") as mock_clone:
+        with patch("rootcoz.repository.Repo.clone_from") as mock_clone:
             mock_clone.side_effect = [
                 GitCommandError(
                     "git clone",
@@ -630,7 +630,7 @@ class TestCloneBranchParameter:
             assert second_call[1].get("branch") == "main"
             assert second_call[1].get("env", {}).get("GIT_SSL_NO_VERIFY") == "1"
 
-    @patch("jenkins_job_insight.repository.Repo")
+    @patch("rootcoz.repository.Repo")
     def test_clone_into_passes_branch(self, mock_repo: MagicMock, tmp_path) -> None:
         """clone_into forwards branch to _clone_with_ssl_retry."""
         manager = RepositoryManager()
@@ -642,7 +642,7 @@ class TestCloneBranchParameter:
             "https://github.com/org/repo", target, depth=1, branch="feature-x"
         )
 
-    @patch("jenkins_job_insight.repository.Repo")
+    @patch("rootcoz.repository.Repo")
     def test_clone_into_no_branch_when_empty(
         self, mock_repo: MagicMock, tmp_path
     ) -> None:
@@ -654,7 +654,7 @@ class TestCloneBranchParameter:
             "https://github.com/org/repo", target, depth=1
         )
 
-    @patch("jenkins_job_insight.repository.Repo")
+    @patch("rootcoz.repository.Repo")
     def test_clone_passes_branch(self, mock_repo: MagicMock) -> None:
         """clone forwards branch to _clone_with_ssl_retry."""
         manager = RepositoryManager()
@@ -664,7 +664,7 @@ class TestCloneBranchParameter:
         assert call_kwargs["branch"] == "release-1.0"
         manager.cleanup()
 
-    @patch("jenkins_job_insight.repository.Repo")
+    @patch("rootcoz.repository.Repo")
     def test_clone_no_branch_when_empty(self, mock_repo: MagicMock) -> None:
         """clone does not pass branch when empty string."""
         manager = RepositoryManager()
@@ -679,7 +679,7 @@ class TestInjectTokenIntoUrl:
     """Tests for _inject_token_into_url helper."""
 
     def test_injects_token_into_https_url(self) -> None:
-        from jenkins_job_insight.repository import _inject_token_into_url
+        from rootcoz.repository import _inject_token_into_url
 
         result = _inject_token_into_url(
             "https://github.com/org/repo",
@@ -689,7 +689,7 @@ class TestInjectTokenIntoUrl:
         assert result == expected
 
     def test_replaces_existing_credentials(self) -> None:
-        from jenkins_job_insight.repository import _inject_token_into_url
+        from rootcoz.repository import _inject_token_into_url
 
         result = _inject_token_into_url(
             "https://user:pass@github.com/org/repo",  # pragma: allowlist secret
@@ -700,7 +700,7 @@ class TestInjectTokenIntoUrl:
         assert "x-token-auth:new_token@github.com" in result  # pragma: allowlist secret
 
     def test_preserves_port(self) -> None:
-        from jenkins_job_insight.repository import _inject_token_into_url
+        from rootcoz.repository import _inject_token_into_url
 
         result = _inject_token_into_url(
             "https://gitlab.internal:8443/org/repo",
@@ -711,7 +711,7 @@ class TestInjectTokenIntoUrl:
         )  # pragma: allowlist secret
 
     def test_ignores_non_https_url(self) -> None:
-        from jenkins_job_insight.repository import _inject_token_into_url
+        from rootcoz.repository import _inject_token_into_url
 
         result = _inject_token_into_url(
             "git://github.com/org/repo",
@@ -720,13 +720,13 @@ class TestInjectTokenIntoUrl:
         assert result == "git://github.com/org/repo"
 
     def test_empty_token_returns_original(self) -> None:
-        from jenkins_job_insight.repository import _inject_token_into_url
+        from rootcoz.repository import _inject_token_into_url
 
         result = _inject_token_into_url("https://github.com/org/repo", "")
         assert result == "https://github.com/org/repo"
 
     def test_preserves_path_and_suffix(self) -> None:
-        from jenkins_job_insight.repository import _inject_token_into_url
+        from rootcoz.repository import _inject_token_into_url
 
         result = _inject_token_into_url(
             "https://github.com/org/repo.git",
@@ -786,7 +786,7 @@ class TestIsCommitSha:
 class TestCloneShaFlow:
     """Tests for SHA-based clone flow (full clone + checkout)."""
 
-    @patch("jenkins_job_insight.repository.Repo")
+    @patch("rootcoz.repository.Repo")
     def test_clone_with_sha_uses_full_clone_and_checkout(
         self, mock_repo_cls: MagicMock
     ) -> None:
@@ -807,7 +807,7 @@ class TestCloneShaFlow:
         mock_instance.git.checkout.assert_called_once_with(sha)
         manager.cleanup()
 
-    @patch("jenkins_job_insight.repository.Repo")
+    @patch("rootcoz.repository.Repo")
     def test_clone_with_branch_uses_depth_and_branch(
         self, mock_repo_cls: MagicMock
     ) -> None:
@@ -823,7 +823,7 @@ class TestCloneShaFlow:
         mock_repo_cls.return_value.git.checkout.assert_not_called()
         manager.cleanup()
 
-    @patch("jenkins_job_insight.repository.Repo")
+    @patch("rootcoz.repository.Repo")
     def test_clone_into_with_sha_uses_full_clone_and_checkout(
         self, mock_repo_cls: MagicMock, tmp_path
     ) -> None:
@@ -844,7 +844,7 @@ class TestCloneShaFlow:
         # checkout with SHA
         mock_instance.git.checkout.assert_called_once_with(sha)
 
-    @patch("jenkins_job_insight.repository.Repo")
+    @patch("rootcoz.repository.Repo")
     def test_clone_into_with_branch_uses_depth_and_branch(
         self, mock_repo_cls: MagicMock, tmp_path
     ) -> None:
@@ -860,7 +860,7 @@ class TestCloneShaFlow:
             "https://github.com/org/repo", target, depth=1, branch="develop"
         )
 
-    @patch("jenkins_job_insight.repository.Repo")
+    @patch("rootcoz.repository.Repo")
     def test_clone_into_sha_with_token_scrubs_credentials(
         self, mock_repo_cls: MagicMock, tmp_path
     ) -> None:
@@ -877,7 +877,7 @@ class TestCloneShaFlow:
 
         with (
             patch("shutil.which", return_value="/usr/bin/git"),
-            patch("jenkins_job_insight.repository.subprocess") as mock_subprocess,
+            patch("rootcoz.repository.subprocess") as mock_subprocess,
         ):
             mock_run = mock_subprocess.run
             manager.clone_into(
@@ -904,7 +904,7 @@ class TestCloneShaFlow:
         target.mkdir()
 
         mock_instance = MagicMock()
-        with patch("jenkins_job_insight.repository.Repo") as mock_repo_cls:
+        with patch("rootcoz.repository.Repo") as mock_repo_cls:
             mock_repo_cls.return_value = mock_instance
             mock_repo_cls.clone_from = MagicMock()
             mock_clone = mock_repo_cls.clone_from
@@ -933,7 +933,7 @@ class TestCloneShaFlow:
 class TestCloneIntoWithToken:
     """Tests for clone_into with token parameter."""
 
-    @patch("jenkins_job_insight.repository.Repo")
+    @patch("rootcoz.repository.Repo")
     def test_clone_into_with_token_injects_into_url(
         self, mock_repo: MagicMock, tmp_path
     ) -> None:
@@ -952,7 +952,7 @@ class TestCloneIntoWithToken:
             depth=1,
         )
 
-    @patch("jenkins_job_insight.repository.Repo")
+    @patch("rootcoz.repository.Repo")
     def test_clone_into_without_token(self, mock_repo: MagicMock, tmp_path) -> None:
         """clone_into without token uses original URL."""
         manager = RepositoryManager()
@@ -962,7 +962,7 @@ class TestCloneIntoWithToken:
             "https://github.com/org/repo", target, depth=1
         )
 
-    @patch("jenkins_job_insight.repository.Repo")
+    @patch("rootcoz.repository.Repo")
     def test_clone_into_with_none_token(self, mock_repo: MagicMock, tmp_path) -> None:
         """clone_into with None token uses original URL."""
         manager = RepositoryManager()

@@ -47,8 +47,8 @@ export function AllReviewedPrompt({ jobId }: AllReviewedPromptProps) {
         }
       })
     }
-    window.addEventListener('jji:review-changed', onReviewChanged)
-    return () => window.removeEventListener('jji:review-changed', onReviewChanged)
+    window.addEventListener('rootcoz:review-changed', onReviewChanged)
+    return () => window.removeEventListener('rootcoz:review-changed', onReviewChanged)
   }, [jobId]) // re-subscribe when jobId changes
 
   // Reset on navigation

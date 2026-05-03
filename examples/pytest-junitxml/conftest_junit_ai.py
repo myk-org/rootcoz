@@ -1,7 +1,7 @@
 """
 Standalone conftest.py for enriching JUnit XML with AI failure analysis.
 
-Sends the raw JUnit XML to a jenkins-job-insight server for AI analysis
+Sends the raw JUnit XML to a rootcoz server for AI analysis
 and writes the enriched XML back to the same file.
 
 Usage:
@@ -9,16 +9,16 @@ Usage:
     2. Rename conftest_junit_ai.py to conftest.py
     3. Install dependencies: pip install requests python-dotenv
     4. Create a .env file or set environment variables:
-       - JJI_SERVER: jenkins-job-insight server URL (required)
-       - JJI_AI_PROVIDER: AI provider - claude, gemini, or cursor (default: claude)
-       - JJI_AI_MODEL: AI model (default: claude-opus-4-6[1m])
-       - JJI_TIMEOUT: request timeout in seconds (default: 600)
+       - ROOTCOZ_SERVER: rootcoz server URL (required)
+       - ROOTCOZ_AI_PROVIDER: AI provider - claude, gemini, or cursor (default: claude)
+       - ROOTCOZ_AI_MODEL: AI model (default: claude-opus-4-6[1m])
+       - ROOTCOZ_TIMEOUT: request timeout in seconds (default: 600)
     5. Run: pytest --junitxml=report.xml --analyze-with-ai
 
 Requirements:
     - requests
     - python-dotenv
-    - A running jenkins-job-insight server
+    - A running rootcoz server
 """
 
 import logging
@@ -27,17 +27,17 @@ import pytest
 
 from conftest_junit_ai_utils import enrich_junit_xml, setup_ai_analysis
 
-logger = logging.getLogger("jenkins-job-insight")
+logger = logging.getLogger("rootcoz")
 
 
 def pytest_addoption(parser):
     """Add --analyze-with-ai CLI option."""
-    group = parser.getgroup("jenkins-job-insight", "AI-powered failure analysis")
+    group = parser.getgroup("rootcoz", "AI-powered failure analysis")
     group.addoption(
         "--analyze-with-ai",
         action="store_true",
         default=False,
-        help="Enrich JUnit XML with AI-powered failure analysis from jenkins-job-insight",
+        help="Enrich JUnit XML with AI-powered failure analysis from rootcoz",
     )
 
 

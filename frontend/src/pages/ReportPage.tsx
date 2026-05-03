@@ -45,7 +45,7 @@ export function ReportPage() {
 
 function CliCommand({ jobId }: { jobId: string }) {
   const { isCopied, copy } = useClipboard()
-  const command = `jji results show ${jobId} --json`
+  const command = `rootcoz results show ${jobId} --json`
 
   return (
     <p className="flex items-center gap-1.5">
@@ -221,7 +221,7 @@ function ReportContent() {
   }, [jobId, fetchComments, state.commentDraftCount, state.error, state.result])
 
   // Preserve scroll position across F5 refreshes
-  const scrollKey = `jji-scroll-${jobId}`
+  const scrollKey = `rootcoz-scroll-${jobId}`
 
   // Restore scroll after data loads (not on mount — skeleton is too short)
   useEffect(() => {
@@ -326,7 +326,7 @@ function ReportContent() {
 
   // Expand/collapse all for top-level failure cards
   const getFailureKeys = useCallback(
-    () => (result ? groups.map((g) => `jji-expand-${result.job_id}-${g.id}`) : []),
+    () => (result ? groups.map((g) => `rootcoz-expand-${result.job_id}-${g.id}`) : []),
     [groups, result],
   )
   const { remountKey: failureRemountKey, expandAll: expandAllFailures, collapseAll: collapseAllFailures } =

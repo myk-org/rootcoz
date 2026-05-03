@@ -9,8 +9,8 @@ from unittest.mock import MagicMock, Mock
 
 import pytest
 
-from jenkins_job_insight import jenkins_artifacts
-from jenkins_job_insight.jenkins_artifacts import (
+from rootcoz import jenkins_artifacts
+from rootcoz.jenkins_artifacts import (
     build_artifacts_context,
     cleanup_extract_dir,
     download_artifact,

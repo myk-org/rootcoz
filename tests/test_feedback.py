@@ -8,9 +8,9 @@ import pytest
 from ai_cli_runner import AIResult
 from fastapi.testclient import TestClient
 
-from jenkins_job_insight import storage
-from jenkins_job_insight.config import get_settings
-from jenkins_job_insight.feedback import (
+from rootcoz import storage
+from rootcoz.config import get_settings
+from rootcoz.feedback import (
     _build_fallback_feedback,
     _derive_fallback_labels,
     _parse_json_response,
@@ -20,7 +20,7 @@ from jenkins_job_insight.feedback import (
     generate_feedback_preview,
     scrub_sensitive_data,
 )
-from jenkins_job_insight.models import (
+from rootcoz.models import (
     FailedApiCall,
     FeedbackPreviewResponse,
     FeedbackRequest,
@@ -31,7 +31,7 @@ from jenkins_job_insight.models import (
 _TEST_GITHUB_TOKEN = "test-token-placeholder"  # noqa: S105
 
 _GITHUB_FOOTER_MARKER = (
-    "Generated using AI with [JJI](https://github.com/myk-org/jenkins-job-insight)"
+    "Generated using AI with [rootcoz](https://github.com/myk-org/rootcoz)"
 )
 
 
@@ -288,7 +288,7 @@ class TestFormatFeedbackWithAi:
                 "labels": ["bug"],
             }
         )
-        with patch("jenkins_job_insight.feedback.call_ai_cli") as mock_ai:
+        with patch("rootcoz.feedback.call_ai_cli") as mock_ai:
             mock_ai.return_value = AIResult(success=True, text=ai_response)
             title, body, labels = await format_feedback_with_ai(
                 req, settings, ai_provider="claude", ai_model="test-model"
@@ -308,7 +308,7 @@ class TestFormatFeedbackWithAi:
                 "labels": ["enhancement"],
             }
         )
-        with patch("jenkins_job_insight.feedback.call_ai_cli") as mock_ai:
+        with patch("rootcoz.feedback.call_ai_cli") as mock_ai:
             mock_ai.return_value = AIResult(success=True, text=ai_response)
             title, _, labels = await format_feedback_with_ai(
                 req, settings, ai_provider="claude", ai_model="test-model"
@@ -320,7 +320,7 @@ class TestFormatFeedbackWithAi:
         req = FeedbackRequest(
             description="Add export to CSV",
         )
-        with patch("jenkins_job_insight.feedback.call_ai_cli") as mock_ai:
+        with patch("rootcoz.feedback.call_ai_cli") as mock_ai:
             mock_ai.return_value = AIResult(success=False, text="CLI error")
             title, body, labels = await format_feedback_with_ai(
                 req, settings, ai_provider="claude", ai_model="test-model"
@@ -333,7 +333,7 @@ class TestFormatFeedbackWithAi:
         req = FeedbackRequest(
             description="Something broke",
         )
-        with patch("jenkins_job_insight.feedback.call_ai_cli") as mock_ai:
+        with patch("rootcoz.feedback.call_ai_cli") as mock_ai:
             mock_ai.return_value = AIResult(success=True, text="not json at all")
             title, _, labels = await format_feedback_with_ai(
                 req, settings, ai_provider="claude", ai_model="test-model"
@@ -356,7 +356,7 @@ class TestFormatFeedbackWithAi:
             )
             + "\n```"
         )
-        with patch("jenkins_job_insight.feedback.call_ai_cli") as mock_ai:
+        with patch("rootcoz.feedback.call_ai_cli") as mock_ai:
             mock_ai.return_value = AIResult(success=True, text=ai_response)
             title, _, labels = await format_feedback_with_ai(
                 req, settings, ai_provider="claude", ai_model="test-model"
@@ -377,9 +377,7 @@ class TestFormatFeedbackWithAi:
             captured_prompt = prompt
             return AIResult(success=False, text="fail")
 
-        with patch(
-            "jenkins_job_insight.feedback.call_ai_cli", side_effect=capture_call
-        ):
+        with patch("rootcoz.feedback.call_ai_cli", side_effect=capture_call):
             await format_feedback_with_ai(
                 req, settings, ai_provider="claude", ai_model="test-model"
             )
@@ -398,7 +396,7 @@ class TestFormatFeedbackWithAi:
                 "body": "Some body",
             }
         )
-        with patch("jenkins_job_insight.feedback.call_ai_cli") as mock_ai:
+        with patch("rootcoz.feedback.call_ai_cli") as mock_ai:
             mock_ai.return_value = AIResult(success=True, text=ai_response)
             _, _, labels = await format_feedback_with_ai(
                 req, settings, ai_provider="claude", ai_model="test-model"
@@ -409,7 +407,7 @@ class TestFormatFeedbackWithAi:
         req = FeedbackRequest(
             description="Something broke",
         )
-        with patch("jenkins_job_insight.feedback.call_ai_cli") as mock_ai:
+        with patch("rootcoz.feedback.call_ai_cli") as mock_ai:
             mock_ai.side_effect = RuntimeError("AI down")
             title, _, labels = await format_feedback_with_ai(
                 req, settings, ai_provider="claude", ai_model="test-model"
@@ -422,7 +420,7 @@ class TestFormatFeedbackWithAi:
             description="Page crashed",
             console_errors=["TypeError: x is not a function"],
         )
-        with patch("jenkins_job_insight.feedback.call_ai_cli") as mock_ai:
+        with patch("rootcoz.feedback.call_ai_cli") as mock_ai:
             mock_ai.return_value = AIResult(success=False, text="fail")
             _, _, labels = await format_feedback_with_ai(
                 req, settings, ai_provider="claude", ai_model="test-model"
@@ -436,7 +434,7 @@ class TestFormatFeedbackWithAi:
                 FailedApiCall(status=500, endpoint="/api/x", error="err")
             ],
         )
-        with patch("jenkins_job_insight.feedback.call_ai_cli") as mock_ai:
+        with patch("rootcoz.feedback.call_ai_cli") as mock_ai:
             mock_ai.side_effect = RuntimeError("AI down")
             _, _, labels = await format_feedback_with_ai(
                 req, settings, ai_provider="claude", ai_model="test-model"
@@ -446,7 +444,7 @@ class TestFormatFeedbackWithAi:
     async def test_ai_returns_blank_title_uses_fallback(self, settings):
         req = FeedbackRequest(description="Some feedback")
         ai_response = json.dumps({"title": "", "body": "Details", "labels": ["bug"]})
-        with patch("jenkins_job_insight.feedback.call_ai_cli") as mock_ai:
+        with patch("rootcoz.feedback.call_ai_cli") as mock_ai:
             mock_ai.return_value = AIResult(success=True, text=ai_response)
             title, _, labels = await format_feedback_with_ai(
                 req, settings, ai_provider="claude", ai_model="test-model"
@@ -478,9 +476,7 @@ class TestGenerateFeedbackPreview:
         req = FeedbackRequest(
             description="Dashboard crashes",
         )
-        with patch(
-            "jenkins_job_insight.feedback.format_feedback_with_ai"
-        ) as mock_format:
+        with patch("rootcoz.feedback.format_feedback_with_ai") as mock_format:
             mock_format.return_value = (
                 "Dashboard crash on load",
                 "## Bug\n\nDetails...",
@@ -499,9 +495,7 @@ class TestGenerateFeedbackPreview:
         req = FeedbackRequest(
             description="Add dark mode",
         )
-        with patch(
-            "jenkins_job_insight.feedback.format_feedback_with_ai"
-        ) as mock_format:
+        with patch("rootcoz.feedback.format_feedback_with_ai") as mock_format:
             mock_format.return_value = (
                 "Add dark mode support",
                 "## Feature\n\nDark mode...",
@@ -538,9 +532,9 @@ class TestCreateFeedbackFromPreview:
             return s
 
     async def test_creates_issue_with_labels(self, settings):
-        with patch("jenkins_job_insight.feedback.create_github_issue") as mock_create:
+        with patch("rootcoz.feedback.create_github_issue") as mock_create:
             mock_create.return_value = {
-                "url": "https://github.com/myk-org/jenkins-job-insight/issues/42",
+                "url": "https://github.com/myk-org/rootcoz/issues/42",
                 "number": 42,
                 "title": "Dashboard crash on load",
             }
@@ -558,13 +552,11 @@ class TestCreateFeedbackFromPreview:
 
         mock_create.assert_called_once()
         call_kwargs = mock_create.call_args.kwargs
-        assert (
-            call_kwargs["repo_url"] == "https://github.com/myk-org/jenkins-job-insight"
-        )
+        assert call_kwargs["repo_url"] == "https://github.com/myk-org/rootcoz"
         assert call_kwargs["labels"] == ["bug"]
 
     async def test_uses_correct_repo_url(self, settings):
-        with patch("jenkins_job_insight.feedback.create_github_issue") as mock_create:
+        with patch("rootcoz.feedback.create_github_issue") as mock_create:
             mock_create.return_value = {
                 "url": "https://github.com/x/y/issues/1",
                 "number": 1,
@@ -580,7 +572,7 @@ class TestCreateFeedbackFromPreview:
         mock_create.assert_called_once()
         assert (
             mock_create.call_args.kwargs["repo_url"]
-            == "https://github.com/myk-org/jenkins-job-insight"
+            == "https://github.com/myk-org/rootcoz"
         )
 
 
@@ -609,10 +601,7 @@ class TestCreateFeedbackIssue:
         """Extract and validate common call_args from create_github_issue mock."""
         mock_create.assert_called_once()
         call_kwargs = mock_create.call_args.kwargs
-        assert (
-            call_kwargs.get("repo_url")
-            == "https://github.com/myk-org/jenkins-job-insight"
-        )
+        assert call_kwargs.get("repo_url") == "https://github.com/myk-org/rootcoz"
         assert call_kwargs.get("github_token") is not None
         if expected_labels is not None:
             assert call_kwargs.get("labels") == expected_labels
@@ -623,10 +612,8 @@ class TestCreateFeedbackIssue:
             description="Dashboard crashes",
         )
         with (
-            patch(
-                "jenkins_job_insight.feedback.format_feedback_with_ai"
-            ) as mock_format,
-            patch("jenkins_job_insight.feedback.create_github_issue") as mock_create,
+            patch("rootcoz.feedback.format_feedback_with_ai") as mock_format,
+            patch("rootcoz.feedback.create_github_issue") as mock_create,
         ):
             mock_format.return_value = (
                 "Dashboard crash on load",
@@ -634,7 +621,7 @@ class TestCreateFeedbackIssue:
                 ["bug"],
             )
             mock_create.return_value = {
-                "url": "https://github.com/myk-org/jenkins-job-insight/issues/42",
+                "url": "https://github.com/myk-org/rootcoz/issues/42",
                 "number": 42,
                 "title": "Dashboard crash on load",
             }
@@ -652,10 +639,8 @@ class TestCreateFeedbackIssue:
             description="Add dark mode",
         )
         with (
-            patch(
-                "jenkins_job_insight.feedback.format_feedback_with_ai"
-            ) as mock_format,
-            patch("jenkins_job_insight.feedback.create_github_issue") as mock_create,
+            patch("rootcoz.feedback.format_feedback_with_ai") as mock_format,
+            patch("rootcoz.feedback.create_github_issue") as mock_create,
         ):
             mock_format.return_value = (
                 "Add dark mode support",
@@ -663,7 +648,7 @@ class TestCreateFeedbackIssue:
                 ["enhancement"],
             )
             mock_create.return_value = {
-                "url": "https://github.com/myk-org/jenkins-job-insight/issues/99",
+                "url": "https://github.com/myk-org/rootcoz/issues/99",
                 "number": 99,
                 "title": "Add dark mode support",
             }
@@ -677,10 +662,8 @@ class TestCreateFeedbackIssue:
             description="test",
         )
         with (
-            patch(
-                "jenkins_job_insight.feedback.format_feedback_with_ai"
-            ) as mock_format,
-            patch("jenkins_job_insight.feedback.create_github_issue") as mock_create,
+            patch("rootcoz.feedback.format_feedback_with_ai") as mock_format,
+            patch("rootcoz.feedback.create_github_issue") as mock_create,
         ):
             mock_format.return_value = ("Title", "Body", ["enhancement"])
             mock_create.return_value = {
@@ -724,7 +707,7 @@ class TestFeedbackEndpoint:
             not in {
                 "GITHUB_TOKEN",
                 "ADMIN_KEY",
-                "JJI_ENCRYPTION_KEY",
+                "ROOTCOZ_ENCRYPTION_KEY",
                 "ALLOWED_USERS",
                 "ENABLE_GITHUB_ISSUES",
                 "AI_PROVIDER",
@@ -743,14 +726,14 @@ class TestFeedbackEndpoint:
             env["AI_MODEL"] = ai_model
         with patch.dict(os.environ, env, clear=True):
             get_settings.cache_clear()
-            import jenkins_job_insight.main as _main_mod
+            import rootcoz.main as _main_mod
 
             with (
                 patch.object(storage, "DB_PATH", temp_db_path),
                 patch.object(_main_mod, "AI_PROVIDER", ai_provider),
                 patch.object(_main_mod, "AI_MODEL", ai_model),
             ):
-                from jenkins_job_insight.main import app
+                from rootcoz.main import app
 
                 with TestClient(app) as c:
                     yield c
@@ -787,9 +770,7 @@ class TestFeedbackEndpoint:
 
     def test_preview_successful(self, _init_db, temp_db_path):
         for client in self._make_client(temp_db_path, github_token=_TEST_GITHUB_TOKEN):
-            with patch(
-                "jenkins_job_insight.feedback.format_feedback_with_ai"
-            ) as mock_format:
+            with patch("rootcoz.feedback.format_feedback_with_ai") as mock_format:
                 mock_format.return_value = ("Test title", "Test body", ["bug"])
                 resp = client.post(
                     "/api/feedback/preview",
@@ -807,9 +788,7 @@ class TestFeedbackEndpoint:
 
     def test_preview_feature_returns_enhancement_label(self, _init_db, temp_db_path):
         for client in self._make_client(temp_db_path, github_token=_TEST_GITHUB_TOKEN):
-            with patch(
-                "jenkins_job_insight.feedback.format_feedback_with_ai"
-            ) as mock_format:
+            with patch("rootcoz.feedback.format_feedback_with_ai") as mock_format:
                 mock_format.return_value = (
                     "Feature title",
                     "Feature body",
@@ -842,11 +821,9 @@ class TestFeedbackEndpoint:
 
     def test_create_successful(self, _init_db, temp_db_path):
         for client in self._make_client(temp_db_path, github_token=_TEST_GITHUB_TOKEN):
-            with patch(
-                "jenkins_job_insight.feedback.create_github_issue"
-            ) as mock_create:
+            with patch("rootcoz.feedback.create_github_issue") as mock_create:
                 mock_create.return_value = {
-                    "url": "https://github.com/myk-org/jenkins-job-insight/issues/10",
+                    "url": "https://github.com/myk-org/rootcoz/issues/10",
                     "number": 10,
                     "title": "Test title",
                 }
@@ -866,11 +843,9 @@ class TestFeedbackEndpoint:
 
     def test_create_with_empty_labels(self, _init_db, temp_db_path):
         for client in self._make_client(temp_db_path, github_token=_TEST_GITHUB_TOKEN):
-            with patch(
-                "jenkins_job_insight.feedback.create_github_issue"
-            ) as mock_create:
+            with patch("rootcoz.feedback.create_github_issue") as mock_create:
                 mock_create.return_value = {
-                    "url": "https://github.com/myk-org/jenkins-job-insight/issues/11",
+                    "url": "https://github.com/myk-org/rootcoz/issues/11",
                     "number": 11,
                     "title": "No labels",
                 }

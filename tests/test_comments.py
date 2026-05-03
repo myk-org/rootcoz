@@ -6,7 +6,7 @@ from unittest.mock import patch
 import aiosqlite
 import pytest
 
-from jenkins_job_insight import storage
+from rootcoz import storage
 
 
 @pytest.fixture
@@ -129,7 +129,7 @@ class TestReviewedToggle:
 class TestReviewStatus:
     async def test_get_review_status(self, setup_test_db):
         with patch.object(storage, "DB_PATH", setup_test_db):
-            from jenkins_job_insight.models import (
+            from rootcoz.models import (
                 AnalysisDetail,
                 AnalysisResult,
                 FailureAnalysis,

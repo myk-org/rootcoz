@@ -1,4 +1,4 @@
-"""Health monitoring, error rate tracking, and alerting for jenkins-job-insight.
+"""Health monitoring, error rate tracking, and alerting for rootcoz.
 
 Provides:
 - Rolling-window error rate counters (thread-safe, in-memory)
@@ -31,7 +31,7 @@ def _get_app_version() -> str:
     try:
         from importlib.metadata import version
 
-        return version("jenkins-job-insight")
+        return version("rootcoz")
     except Exception:  # noqa: BLE001
         return "unknown"
 
@@ -383,11 +383,11 @@ def validate_startup_config() -> StartupConfigResult:
         )
 
     # Encryption key (critical for production)
-    if not os.getenv("JJI_ENCRYPTION_KEY"):
+    if not os.getenv("ROOTCOZ_ENCRYPTION_KEY"):
         findings.append(
             _ConfigFinding(
                 "warning",
-                "JJI_ENCRYPTION_KEY is not set. A file-based key will be auto-generated. "
+                "ROOTCOZ_ENCRYPTION_KEY is not set. A file-based key will be auto-generated. "
                 "Set this env var for production deployments.",
             )
         )
@@ -569,7 +569,7 @@ def send_email_alert(
         port = smtp_port or int(os.getenv("SMTP_PORT", "587"))
         user = smtp_user or os.getenv("SMTP_USER", "")
         password = smtp_password or os.getenv("SMTP_PASSWORD", "")
-        from_addr = smtp_from or os.getenv("SMTP_FROM", user or f"jji@{host}")
+        from_addr = smtp_from or os.getenv("SMTP_FROM", user or f"rootcoz@{host}")
         msg = EmailMessage()
         msg["Subject"] = subject
         msg["From"] = from_addr
@@ -628,7 +628,7 @@ async def dispatch_alert(
         logger.debug("Alert throttled for event_type=%s", event_type)
         return
     try:
-        email_subject = subject or f"[JJI Alert] {event_type}"
+        email_subject = subject or f"[rootcoz Alert] {event_type}"
         await asyncio.gather(
             send_slack_alert(message),
             send_email_alert_async(email_subject, message),
@@ -661,36 +661,38 @@ def render_prometheus_metrics(
     snap = error_tracker.snapshot()
     lines: list[str] = []
 
-    lines.append("# HELP jji_requests_total Total requests in the rolling window.")
-    lines.append("# TYPE jji_requests_total gauge")
-    lines.append(f"jji_requests_total {snap['total_requests']}")
+    lines.append("# HELP rootcoz_requests_total Total requests in the rolling window.")
+    lines.append("# TYPE rootcoz_requests_total gauge")
+    lines.append(f"rootcoz_requests_total {snap['total_requests']}")
 
-    lines.append("# HELP jji_errors_total Total errors in the rolling window.")
-    lines.append("# TYPE jji_errors_total gauge")
-    lines.append(f"jji_errors_total {snap['total_errors']}")
+    lines.append("# HELP rootcoz_errors_total Total errors in the rolling window.")
+    lines.append("# TYPE rootcoz_errors_total gauge")
+    lines.append(f"rootcoz_errors_total {snap['total_errors']}")
 
-    lines.append("# HELP jji_error_rate Error rate in the rolling window (0-1).")
-    lines.append("# TYPE jji_error_rate gauge")
-    lines.append(f"jji_error_rate {snap['error_rate']}")
+    lines.append("# HELP rootcoz_error_rate Error rate in the rolling window (0-1).")
+    lines.append("# TYPE rootcoz_error_rate gauge")
+    lines.append(f"rootcoz_error_rate {snap['error_rate']}")
 
     lines.append(
-        "# HELP jji_errors_by_class Errors by HTTP status class in the rolling window."
+        "# HELP rootcoz_errors_by_class Errors by HTTP status class in the rolling window."
     )
-    lines.append("# TYPE jji_errors_by_class gauge")
+    lines.append("# TYPE rootcoz_errors_by_class gauge")
     for cls, count in sorted(snap["error_counts"].items()):
-        lines.append(f'jji_errors_by_class{{status_class="{cls}"}} {count}')
+        lines.append(f'rootcoz_errors_by_class{{status_class="{cls}"}} {count}')
 
     if health_up is not None:
         lines.append(
-            "# HELP jji_health_up Whether the application is healthy (1) or unhealthy (0)."
+            "# HELP rootcoz_health_up Whether the application is healthy (1) or unhealthy (0)."
         )
-        lines.append("# TYPE jji_health_up gauge")
-        lines.append(f"jji_health_up {health_up}")
+        lines.append("# TYPE rootcoz_health_up gauge")
+        lines.append(f"rootcoz_health_up {health_up}")
 
     if active_analyses is not None:
-        lines.append("# HELP jji_active_analyses Number of currently active analyses.")
-        lines.append("# TYPE jji_active_analyses gauge")
-        lines.append(f"jji_active_analyses {active_analyses}")
+        lines.append(
+            "# HELP rootcoz_active_analyses Number of currently active analyses."
+        )
+        lines.append("# TYPE rootcoz_active_analyses gauge")
+        lines.append(f"rootcoz_active_analyses {active_analyses}")
 
     lines.append("")
     return "\n".join(lines)

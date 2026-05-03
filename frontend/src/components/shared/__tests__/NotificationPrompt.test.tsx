@@ -18,7 +18,7 @@ const mockGetVapid = vi.mocked(getVapidPublicKey)
 const mockSubscribe = vi.mocked(subscribeToPush)
 const mockHasActiveSub = vi.mocked(hasActivePushSubscription)
 
-const ASKED_KEY = 'jji_notifications_asked'
+const ASKED_KEY = 'rootcoz_notifications_asked'
 
 describe('NotificationPrompt', () => {
   beforeEach(() => {

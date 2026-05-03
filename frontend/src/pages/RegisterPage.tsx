@@ -29,7 +29,7 @@ export function RegisterPage() {
               <path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
             </svg>
           </div>
-          <h1 className="font-display text-xl font-bold tracking-tight text-text-primary">Jenkins Job Insight</h1>
+          <h1 className="font-display text-xl font-bold tracking-tight text-text-primary">RootCoz</h1>
           <p className="mt-1 text-sm text-text-tertiary">Set up your profile to continue</p>
         </div>
         {/* Form */}

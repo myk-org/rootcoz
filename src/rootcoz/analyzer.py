@@ -20,16 +20,16 @@ import jenkins
 from fastapi import HTTPException
 from simple_logger.logger import get_logger
 
-from jenkins_job_insight.config import Settings, parse_additional_repos, parse_repo_ref
-from jenkins_job_insight.request_resolution import resolve_tests_repo_token
-from jenkins_job_insight.jenkins_artifacts import (
+from rootcoz.config import Settings, parse_additional_repos, parse_repo_ref
+from rootcoz.request_resolution import resolve_tests_repo_token
+from rootcoz.jenkins_artifacts import (
     cleanup_extract_dir,
     process_build_artifacts,
 )
-from jenkins_job_insight.jenkins import JenkinsClient
+from rootcoz.jenkins import JenkinsClient
 from pydantic import HttpUrl
 
-from jenkins_job_insight.models import (
+from rootcoz.models import (
     AdditionalRepo,
     AnalysisDetail,
     AnalysisResult,
@@ -41,13 +41,13 @@ from jenkins_job_insight.models import (
     ProductBugReport,
     TestFailure,
 )
-from jenkins_job_insight.repository import (
+from rootcoz.repository import (
     RepositoryManager,
     _redact_url,
     derive_test_repo_name,
 )
-from jenkins_job_insight.storage import update_progress_phase
-from jenkins_job_insight.token_tracking import record_ai_usage
+from rootcoz.storage import update_progress_phase
+from rootcoz.token_tracking import record_ai_usage
 
 logger = get_logger(name=__name__, level=os.environ.get("LOG_LEVEL", "INFO"))
 
@@ -773,7 +773,7 @@ def handle_jenkins_exception(
                 detail=f"Jenkins error: {e!s}",
             )
 
-    from jenkins_job_insight.utils import is_jenkins_connectivity_error
+    from rootcoz.utils import is_jenkins_connectivity_error
 
     if is_jenkins_connectivity_error(e):
         logger.error(f"Jenkins unreachable for {job_name} #{build_number}: {e!s}")
@@ -1242,8 +1242,8 @@ async def analyze_failure_group(
     )
 
     if peer_ai_configs:
-        from jenkins_job_insight.models import AiConfigEntry
-        from jenkins_job_insight.peer_analysis import analyze_failure_group_with_peers
+        from rootcoz.models import AiConfigEntry
+        from rootcoz.peer_analysis import analyze_failure_group_with_peers
 
         configs = [
             AiConfigEntry(**c) if isinstance(c, dict) else c for c in peer_ai_configs

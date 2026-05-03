@@ -12,7 +12,7 @@ from pydantic import (
     model_validator,
 )
 
-from jenkins_job_insight.repository import RESERVED_REPO_NAMES
+from rootcoz.repository import RESERVED_REPO_NAMES
 
 
 class AiConfigEntry(BaseModel):
@@ -763,7 +763,7 @@ class ReportPortalPushResult(BaseModel):
     pushed: int = Field(description="Number of items successfully updated")
     unmatched: list[str] = Field(
         default_factory=list,
-        description="RP item names that could not be matched to JJI failures or mapped to a defect type",
+        description="RP item names that could not be matched to rootcoz failures or mapped to a defect type",
     )
     errors: list[str] = Field(
         default_factory=list,

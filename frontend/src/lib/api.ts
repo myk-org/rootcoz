@@ -1,4 +1,4 @@
-/** Centralized fetch wrapper for the JJI API. */
+/** Centralized fetch wrapper for the RootCoz API. */
 
 // -- Failed API call tracking ------------------------------------
 

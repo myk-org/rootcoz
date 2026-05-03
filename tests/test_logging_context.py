@@ -2,7 +2,7 @@
 
 import logging
 
-from jenkins_job_insight.logging_context import JobIdFilter, job_id_var
+from rootcoz.logging_context import JobIdFilter, job_id_var
 
 
 class TestJobIdFilter:

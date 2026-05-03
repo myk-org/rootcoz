@@ -6,7 +6,7 @@ import httpx
 import pytest
 from ai_cli_runner import AIResult
 
-from jenkins_job_insight.models import (
+from rootcoz.models import (
     AnalysisDetail,
     CodeFix,
     CreateIssueRequest,
@@ -18,10 +18,10 @@ _TEST_GITHUB_TOKEN = "ghp_test"  # noqa: S105
 
 # Expected footer substrings for assertion checks.
 _GITHUB_FOOTER_MARKER = (
-    "Generated using AI with [JJI](https://github.com/myk-org/jenkins-job-insight)"
+    "Generated using AI with [rootcoz](https://github.com/myk-org/rootcoz)"
 )
 _JIRA_FOOTER_MARKER = (
-    "Generated using AI with [JJI|https://github.com/myk-org/jenkins-job-insight]"
+    "Generated using AI with [rootcoz|https://github.com/myk-org/rootcoz]"
 )
 
 
@@ -70,9 +70,9 @@ def product_bug_failure() -> FailureAnalysis:
 
 class TestGenerateGithubIssueContent:
     async def test_generates_title_and_body(self, code_issue_failure):
-        from jenkins_job_insight.bug_creation import generate_github_issue_content
+        from rootcoz.bug_creation import generate_github_issue_content
 
-        with patch("jenkins_job_insight.bug_creation.call_ai_cli") as mock_ai:
+        with patch("rootcoz.bug_creation.call_ai_cli") as mock_ai:
             mock_ai.return_value = AIResult(
                 success=True,
                 text="Fix: login handler missing ValueError catch\n\n"
@@ -89,7 +89,7 @@ class TestGenerateGithubIssueContent:
 
             result = await generate_github_issue_content(
                 failure=code_issue_failure,
-                report_url="https://jji.example.com/results/job-123",
+                report_url="https://rootcoz.example.com/results/job-123",
                 ai_provider="claude",
                 ai_model="sonnet",
             )
@@ -99,14 +99,14 @@ class TestGenerateGithubIssueContent:
             assert _GITHUB_FOOTER_MARKER in result["body"]
 
     async def test_fallback_on_ai_failure(self, code_issue_failure):
-        from jenkins_job_insight.bug_creation import generate_github_issue_content
+        from rootcoz.bug_creation import generate_github_issue_content
 
-        with patch("jenkins_job_insight.bug_creation.call_ai_cli") as mock_ai:
+        with patch("rootcoz.bug_creation.call_ai_cli") as mock_ai:
             mock_ai.return_value = AIResult(success=False, text="AI CLI timed out")
 
             result = await generate_github_issue_content(
                 failure=code_issue_failure,
-                report_url="https://jji.example.com/results/job-123",
+                report_url="https://rootcoz.example.com/results/job-123",
                 ai_provider="claude",
                 ai_model="sonnet",
             )
@@ -117,9 +117,9 @@ class TestGenerateGithubIssueContent:
             assert _GITHUB_FOOTER_MARKER in result["body"]
 
     async def test_fallback_includes_code_fix(self, code_issue_failure):
-        from jenkins_job_insight.bug_creation import generate_github_issue_content
+        from rootcoz.bug_creation import generate_github_issue_content
 
-        with patch("jenkins_job_insight.bug_creation.call_ai_cli") as mock_ai:
+        with patch("rootcoz.bug_creation.call_ai_cli") as mock_ai:
             mock_ai.return_value = AIResult(success=False, text="AI CLI timed out")
 
             result = await generate_github_issue_content(
@@ -135,9 +135,9 @@ class TestGenerateGithubIssueContent:
 
 class TestGenerateJiraBugContent:
     async def test_generates_summary_and_description(self, product_bug_failure):
-        from jenkins_job_insight.bug_creation import generate_jira_bug_content
+        from rootcoz.bug_creation import generate_jira_bug_content
 
-        with patch("jenkins_job_insight.bug_creation.call_ai_cli") as mock_ai:
+        with patch("rootcoz.bug_creation.call_ai_cli") as mock_ai:
             mock_ai.return_value = AIResult(
                 success=True,
                 text="DNS resolution timeout on internal resolver\n\n"
@@ -149,7 +149,7 @@ class TestGenerateJiraBugContent:
 
             result = await generate_jira_bug_content(
                 failure=product_bug_failure,
-                report_url="https://jji.example.com/results/job-456",
+                report_url="https://rootcoz.example.com/results/job-456",
                 ai_provider="claude",
                 ai_model="sonnet",
             )
@@ -158,9 +158,9 @@ class TestGenerateJiraBugContent:
             assert _JIRA_FOOTER_MARKER in result["body"]
 
     async def test_fallback_on_ai_failure(self, product_bug_failure):
-        from jenkins_job_insight.bug_creation import generate_jira_bug_content
+        from rootcoz.bug_creation import generate_jira_bug_content
 
-        with patch("jenkins_job_insight.bug_creation.call_ai_cli") as mock_ai:
+        with patch("rootcoz.bug_creation.call_ai_cli") as mock_ai:
             mock_ai.return_value = AIResult(success=False, text="error")
 
             result = await generate_jira_bug_content(
@@ -176,7 +176,7 @@ class TestGenerateJiraBugContent:
 
 class TestSearchGithubDuplicates:
     async def test_finds_similar_issues(self):
-        from jenkins_job_insight.bug_creation import search_github_duplicates
+        from rootcoz.bug_creation import search_github_duplicates
 
         mock_response = httpx.Response(
             200,
@@ -192,7 +192,7 @@ class TestSearchGithubDuplicates:
                 ],
             },
         )
-        with patch("jenkins_job_insight.bug_creation.httpx.AsyncClient") as MockClient:
+        with patch("rootcoz.bug_creation.httpx.AsyncClient") as MockClient:
             mock_client = AsyncMock()
             mock_client.get.return_value = mock_response
             mock_client.__aenter__ = AsyncMock(return_value=mock_client)
@@ -208,9 +208,9 @@ class TestSearchGithubDuplicates:
             assert results[0]["number"] == 42
 
     async def test_returns_empty_on_error(self):
-        from jenkins_job_insight.bug_creation import search_github_duplicates
+        from rootcoz.bug_creation import search_github_duplicates
 
-        with patch("jenkins_job_insight.bug_creation.httpx.AsyncClient") as MockClient:
+        with patch("rootcoz.bug_creation.httpx.AsyncClient") as MockClient:
             mock_client = AsyncMock()
             mock_client.get.side_effect = httpx.RequestError("Connection refused")
             mock_client.__aenter__ = AsyncMock(return_value=mock_client)
@@ -225,7 +225,7 @@ class TestSearchGithubDuplicates:
             assert results == []
 
     async def test_returns_empty_on_bad_url(self):
-        from jenkins_job_insight.bug_creation import search_github_duplicates
+        from rootcoz.bug_creation import search_github_duplicates
 
         results = await search_github_duplicates(
             title="Login fails",
@@ -242,7 +242,7 @@ def _mock_request() -> httpx.Request:
 
 class TestCreateGithubIssue:
     async def test_creates_issue(self):
-        from jenkins_job_insight.bug_creation import create_github_issue
+        from rootcoz.bug_creation import create_github_issue
 
         mock_response = httpx.Response(
             201,
@@ -253,7 +253,7 @@ class TestCreateGithubIssue:
             },
             request=_mock_request(),
         )
-        with patch("jenkins_job_insight.bug_creation.httpx.AsyncClient") as MockClient:
+        with patch("rootcoz.bug_creation.httpx.AsyncClient") as MockClient:
             mock_client = AsyncMock()
             mock_client.post.return_value = mock_response
             mock_client.__aenter__ = AsyncMock(return_value=mock_client)
@@ -274,7 +274,7 @@ class TestCreateGithubIssue:
             assert _GITHUB_FOOTER_MARKER in posted_body
 
     async def test_creates_issue_with_labels(self):
-        from jenkins_job_insight.bug_creation import create_github_issue
+        from rootcoz.bug_creation import create_github_issue
 
         mock_response = httpx.Response(
             201,
@@ -285,7 +285,7 @@ class TestCreateGithubIssue:
             },
             request=_mock_request(),
         )
-        with patch("jenkins_job_insight.bug_creation.httpx.AsyncClient") as MockClient:
+        with patch("rootcoz.bug_creation.httpx.AsyncClient") as MockClient:
             mock_client = AsyncMock()
             mock_client.post.return_value = mock_response
             mock_client.__aenter__ = AsyncMock(return_value=mock_client)
@@ -308,7 +308,7 @@ class TestCreateGithubIssue:
 
 class TestCreateJiraBug:
     async def test_creates_bug(self):
-        from jenkins_job_insight.bug_creation import create_jira_bug
+        from rootcoz.bug_creation import create_jira_bug
 
         mock_settings = MagicMock()
         mock_settings.jira_url = "https://jira.example.com"
@@ -327,7 +327,7 @@ class TestCreateJiraBug:
             },
             request=_mock_request(),
         )
-        with patch("jenkins_job_insight.bug_creation.httpx.AsyncClient") as MockClient:
+        with patch("rootcoz.bug_creation.httpx.AsyncClient") as MockClient:
             mock_client = AsyncMock()
             mock_client.post.return_value = mock_response
             mock_client.__aenter__ = AsyncMock(return_value=mock_client)
@@ -350,7 +350,7 @@ class TestCreateJiraBug:
 
     async def test_creates_bug_server_dc(self):
         """Test Jira Server/DC auth (Bearer PAT, no email)."""
-        from jenkins_job_insight.bug_creation import create_jira_bug
+        from rootcoz.bug_creation import create_jira_bug
 
         mock_settings = MagicMock()
         mock_settings.jira_url = "https://jira-server.example.com"
@@ -366,7 +366,7 @@ class TestCreateJiraBug:
             json={"key": "PROJ-789"},
             request=_mock_request(),
         )
-        with patch("jenkins_job_insight.bug_creation.httpx.AsyncClient") as MockClient:
+        with patch("rootcoz.bug_creation.httpx.AsyncClient") as MockClient:
             mock_client = AsyncMock()
             mock_client.post.return_value = mock_response
             mock_client.__aenter__ = AsyncMock(return_value=mock_client)
@@ -382,7 +382,7 @@ class TestCreateJiraBug:
 
     async def test_creates_bug_with_custom_issue_type(self):
         """Test creating a Jira issue with a custom issue type."""
-        from jenkins_job_insight.bug_creation import create_jira_bug
+        from rootcoz.bug_creation import create_jira_bug
 
         mock_settings = MagicMock()
         mock_settings.jira_url = "https://jira.example.com"
@@ -398,7 +398,7 @@ class TestCreateJiraBug:
             json={"key": "PROJ-999"},
             request=_mock_request(),
         )
-        with patch("jenkins_job_insight.bug_creation.httpx.AsyncClient") as MockClient:
+        with patch("rootcoz.bug_creation.httpx.AsyncClient") as MockClient:
             mock_client = AsyncMock()
             mock_client.post.return_value = mock_response
             mock_client.__aenter__ = AsyncMock(return_value=mock_client)
@@ -420,7 +420,7 @@ class TestCreateJiraBug:
 
     async def test_creates_bug_default_issue_type(self):
         """Test that default issue type is 'Bug' when not specified."""
-        from jenkins_job_insight.bug_creation import create_jira_bug
+        from rootcoz.bug_creation import create_jira_bug
 
         mock_settings = MagicMock()
         mock_settings.jira_url = "https://jira.example.com"
@@ -436,7 +436,7 @@ class TestCreateJiraBug:
             json={"key": "PROJ-100"},
             request=_mock_request(),
         )
-        with patch("jenkins_job_insight.bug_creation.httpx.AsyncClient") as MockClient:
+        with patch("rootcoz.bug_creation.httpx.AsyncClient") as MockClient:
             mock_client = AsyncMock()
             mock_client.post.return_value = mock_response
             mock_client.__aenter__ = AsyncMock(return_value=mock_client)
@@ -464,14 +464,14 @@ class TestCreateJiraBug:
 
 class TestParseGithubRepoUrl:
     def test_standard_url(self):
-        from jenkins_job_insight.bug_creation import _parse_github_repo_url
+        from rootcoz.bug_creation import _parse_github_repo_url
 
         owner, repo = _parse_github_repo_url("https://github.com/myorg/myrepo")
         assert owner == "myorg"
         assert repo == "myrepo"
 
     def test_url_with_git_suffix(self):
-        from jenkins_job_insight.bug_creation import _parse_github_repo_url
+        from rootcoz.bug_creation import _parse_github_repo_url
 
         owner, repo = _parse_github_repo_url("https://github.com/myorg/myrepo.git")
         assert owner == "myorg"
@@ -479,7 +479,7 @@ class TestParseGithubRepoUrl:
 
     def test_url_with_dots_in_repo_name(self):
         """Finding 5: Repo names with dots should be parsed correctly."""
-        from jenkins_job_insight.bug_creation import _parse_github_repo_url
+        from rootcoz.bug_creation import _parse_github_repo_url
 
         owner, repo = _parse_github_repo_url("https://github.com/org/my.repo")
         assert owner == "org"
@@ -487,14 +487,14 @@ class TestParseGithubRepoUrl:
 
     def test_url_with_dots_and_git_suffix(self):
         """Finding 5: Repo names with dots AND .git suffix."""
-        from jenkins_job_insight.bug_creation import _parse_github_repo_url
+        from rootcoz.bug_creation import _parse_github_repo_url
 
         owner, repo = _parse_github_repo_url("https://github.com/org/my.repo.git")
         assert owner == "org"
         assert repo == "my.repo"
 
     def test_invalid_url(self):
-        from jenkins_job_insight.bug_creation import _parse_github_repo_url
+        from rootcoz.bug_creation import _parse_github_repo_url
 
         with pytest.raises(ValueError, match="Cannot parse"):
             _parse_github_repo_url("not-a-url")
@@ -502,7 +502,7 @@ class TestParseGithubRepoUrl:
 
 class TestBuildFailbackContent:
     def test_github_fallback_with_product_bug(self, product_bug_failure):
-        from jenkins_job_insight.bug_creation import (
+        from rootcoz.bug_creation import (
             _build_failure_context,
             _build_fallback_github_content,
         )
@@ -515,7 +515,7 @@ class TestBuildFailbackContent:
         assert "test_resolve" in result["body"]
 
     def test_jira_fallback_with_product_bug(self, product_bug_failure):
-        from jenkins_job_insight.bug_creation import (
+        from rootcoz.bug_creation import (
             _build_failure_context,
             _build_fallback_jira_content,
         )
@@ -526,7 +526,7 @@ class TestBuildFailbackContent:
         assert "h2." in result["body"]
 
     def test_github_fallback_without_product_bug(self, code_issue_failure):
-        from jenkins_job_insight.bug_creation import (
+        from rootcoz.bug_creation import (
             _build_failure_context,
             _build_fallback_github_content,
         )
@@ -570,7 +570,7 @@ class TestAiFooterNotDoubled:
     """Verify footer deduplication: content that already has the footer is not doubled."""
 
     async def test_github_footer_not_doubled(self):
-        from jenkins_job_insight.bug_creation import (
+        from rootcoz.bug_creation import (
             GITHUB_AI_FOOTER,
             create_github_issue,
         )
@@ -586,7 +586,7 @@ class TestAiFooterNotDoubled:
             },
             request=_mock_request(),
         )
-        with patch("jenkins_job_insight.bug_creation.httpx.AsyncClient") as MockClient:
+        with patch("rootcoz.bug_creation.httpx.AsyncClient") as MockClient:
             mock_client = AsyncMock()
             mock_client.post.return_value = mock_response
             mock_client.__aenter__ = AsyncMock(return_value=mock_client)
@@ -603,7 +603,7 @@ class TestAiFooterNotDoubled:
             assert posted_body.count(_GITHUB_FOOTER_MARKER) == 1
 
     async def test_jira_footer_not_doubled(self):
-        from jenkins_job_insight.bug_creation import JIRA_AI_FOOTER, create_jira_bug
+        from rootcoz.bug_creation import JIRA_AI_FOOTER, create_jira_bug
 
         body_with_footer = "h2. Details\nSome content" + JIRA_AI_FOOTER
 
@@ -621,7 +621,7 @@ class TestAiFooterNotDoubled:
             json={"key": "PROJ-999"},
             request=_mock_request(),
         )
-        with patch("jenkins_job_insight.bug_creation.httpx.AsyncClient") as MockClient:
+        with patch("rootcoz.bug_creation.httpx.AsyncClient") as MockClient:
             mock_client = AsyncMock()
             mock_client.post.return_value = mock_response
             mock_client.__aenter__ = AsyncMock(return_value=mock_client)

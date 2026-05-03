@@ -7,8 +7,8 @@ from unittest.mock import patch
 import pytest
 from fastapi.testclient import TestClient
 
-from jenkins_job_insight import storage
-from jenkins_job_insight.config import Settings, get_settings
+from rootcoz import storage
+from rootcoz.config import Settings, get_settings
 
 
 @pytest.fixture
@@ -44,7 +44,7 @@ def _make_client(temp_db_path, allowed_users: str = "", admin_key: str = ""):
     env = {
         k: v
         for k, v in os.environ.items()
-        if k not in {"ALLOWED_USERS", "ADMIN_KEY", "JJI_ENCRYPTION_KEY"}
+        if k not in {"ALLOWED_USERS", "ADMIN_KEY", "ROOTCOZ_ENCRYPTION_KEY"}
     }
     env["SECURE_COOKIES"] = "false"
     env["DB_PATH"] = str(temp_db_path)
@@ -52,11 +52,11 @@ def _make_client(temp_db_path, allowed_users: str = "", admin_key: str = ""):
         env["ALLOWED_USERS"] = allowed_users
     if admin_key:
         env["ADMIN_KEY"] = admin_key
-        env["JJI_ENCRYPTION_KEY"] = "test-key-for-hmac"  # pragma: allowlist secret
+        env["ROOTCOZ_ENCRYPTION_KEY"] = "test-key-for-hmac"  # pragma: allowlist secret
     with patch.dict(os.environ, env, clear=True):
         get_settings.cache_clear()
         with patch.object(storage, "DB_PATH", temp_db_path):
-            from jenkins_job_insight.main import app
+            from rootcoz.main import app
 
             with TestClient(app) as c:
                 yield c
@@ -137,7 +137,7 @@ class TestOpenAccess:
         resp = client_open.post(
             "/results/job-open/comments",
             json={"test_name": "test_foo", "comment": "looks good"},
-            cookies={"jji_username": "anyone"},
+            cookies={"rootcoz_username": "anyone"},
         )
         assert resp.status_code == 201
 
@@ -149,7 +149,7 @@ class TestRestrictedAccess:
         resp = client_restricted.post(
             "/results/job-1/comments",
             json={"test_name": "test_foo", "comment": "fix coming"},
-            cookies={"jji_username": "alice"},
+            cookies={"rootcoz_username": "alice"},
         )
         assert resp.status_code == 201
 
@@ -158,7 +158,7 @@ class TestRestrictedAccess:
         resp = client_restricted.post(
             "/results/job-1/comments",
             json={"test_name": "test_foo", "comment": "fix coming"},
-            cookies={"jji_username": "Alice"},
+            cookies={"rootcoz_username": "Alice"},
         )
         assert resp.status_code == 201
 
@@ -166,7 +166,7 @@ class TestRestrictedAccess:
         resp = client_restricted.post(
             "/results/job-1/comments",
             json={"test_name": "test_foo", "comment": "not allowed"},
-            cookies={"jji_username": "charlie"},
+            cookies={"rootcoz_username": "charlie"},
         )
         assert resp.status_code == 403
         assert "allow list" in resp.json()["detail"].lower()
@@ -194,7 +194,7 @@ class TestRestrictedAccess:
         resp = client_restricted.put(
             "/results/job-1/reviewed",
             json={"test_name": "test_foo", "reviewed": True},
-            cookies={"jji_username": "charlie"},
+            cookies={"rootcoz_username": "charlie"},
         )
         assert resp.status_code == 403
 
@@ -202,7 +202,7 @@ class TestRestrictedAccess:
         resp = client_restricted.put(
             "/results/job-1/reviewed",
             json={"test_name": "test_foo", "reviewed": True},
-            cookies={"jji_username": "bob"},
+            cookies={"rootcoz_username": "bob"},
         )
         assert resp.status_code == 200
 
@@ -210,7 +210,7 @@ class TestRestrictedAccess:
         resp = client_restricted.put(
             "/results/job-1/override-classification",
             json={"test_name": "test_foo", "classification": "PRODUCT BUG"},
-            cookies={"jji_username": "charlie"},
+            cookies={"rootcoz_username": "charlie"},
         )
         assert resp.status_code == 403
 
@@ -218,7 +218,7 @@ class TestRestrictedAccess:
         resp = client_restricted.put(
             "/results/job-1/override-classification",
             json={"test_name": "test_foo", "classification": "PRODUCT BUG"},
-            cookies={"jji_username": "alice"},
+            cookies={"rootcoz_username": "alice"},
         )
         assert resp.status_code == 200
 
@@ -230,7 +230,7 @@ class TestRestrictedAccess:
                 "classification": "FLAKY",
                 "job_id": "job-1",
             },
-            cookies={"jji_username": "charlie"},
+            cookies={"rootcoz_username": "charlie"},
         )
         assert resp.status_code == 403
 
@@ -242,7 +242,7 @@ class TestRestrictedAccess:
                 "classification": "FLAKY",
                 "job_id": "job-1",
             },
-            cookies={"jji_username": "bob"},
+            cookies={"rootcoz_username": "bob"},
         )
         assert resp.status_code == 201
 
@@ -250,7 +250,7 @@ class TestRestrictedAccess:
         """GET endpoints are not restricted by allow list."""
         resp = client_restricted.get(
             "/results/job-1",
-            cookies={"jji_username": "charlie"},
+            cookies={"rootcoz_username": "charlie"},
             headers={"Accept": "application/json"},
         )
         # Should be 200 (found), NOT 403
@@ -260,7 +260,7 @@ class TestRestrictedAccess:
         """GET comments endpoint is not restricted."""
         resp = client_restricted.get(
             "/results/job-1/comments",
-            cookies={"jji_username": "charlie"},
+            cookies={"rootcoz_username": "charlie"},
         )
         assert resp.status_code == 200
 
@@ -268,7 +268,7 @@ class TestRestrictedAccess:
         """Non-admin API key user passes ALLOWED_USERS check when in allow list."""
         import aiosqlite
 
-        from jenkins_job_insight.storage import generate_api_key, hash_api_key
+        from rootcoz.storage import generate_api_key, hash_api_key
 
         raw_key = generate_api_key()
         key_hash = hash_api_key(raw_key)
@@ -303,7 +303,7 @@ class TestRestrictedAccess:
         """Non-admin API key user NOT in allow list gets 403."""
         import aiosqlite
 
-        from jenkins_job_insight.storage import generate_api_key, hash_api_key
+        from rootcoz.storage import generate_api_key, hash_api_key
 
         raw_key = generate_api_key()
         key_hash = hash_api_key(raw_key)

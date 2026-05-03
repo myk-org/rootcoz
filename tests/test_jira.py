@@ -7,14 +7,14 @@ from unittest.mock import AsyncMock, patch
 import httpx
 import pytest
 
-from jenkins_job_insight.config import Settings
-from jenkins_job_insight.jira import (
+from rootcoz.config import Settings
+from rootcoz.jira import (
     JiraClient,
     _collect_product_bug_reports,
     _extract_text_from_adf,
     enrich_with_jira_matches,
 )
-from jenkins_job_insight.models import (
+from rootcoz.models import (
     AnalysisDetail,
     FailureAnalysis,
     JiraMatch,
@@ -517,7 +517,7 @@ class TestEnrichWithJiraMatches:
         self, product_bug_no_keywords, jira_settings
     ) -> None:
         """Does nothing when PRODUCT BUG has no search keywords."""
-        with patch("jenkins_job_insight.jira.JiraClient") as mock_client_cls:
+        with patch("rootcoz.jira.JiraClient") as mock_client_cls:
             await enrich_with_jira_matches([product_bug_no_keywords], jira_settings)
             mock_client_cls.assert_not_called()
 
@@ -541,7 +541,7 @@ class TestEnrichWithJiraMatches:
             ),
         ]
 
-        with patch("jenkins_job_insight.jira.JiraClient") as mock_client_cls:
+        with patch("rootcoz.jira.JiraClient") as mock_client_cls:
             mock_instance = AsyncMock()
             mock_instance.search = AsyncMock(return_value=mock_candidates)
             mock_instance.__aenter__ = AsyncMock(return_value=mock_instance)
@@ -549,7 +549,7 @@ class TestEnrichWithJiraMatches:
             mock_client_cls.return_value = mock_instance
 
             with patch(
-                "jenkins_job_insight.jira._filter_matches_with_ai",
+                "rootcoz.jira._filter_matches_with_ai",
                 new_callable=AsyncMock,
                 return_value=mock_ai_matches,
             ):
@@ -577,7 +577,7 @@ class TestEnrichWithJiraMatches:
             },
         ]
 
-        with patch("jenkins_job_insight.jira.JiraClient") as mock_client_cls:
+        with patch("rootcoz.jira.JiraClient") as mock_client_cls:
             mock_instance = AsyncMock()
             mock_instance.search = AsyncMock(return_value=mock_candidates)
             mock_instance.__aenter__ = AsyncMock(return_value=mock_instance)
@@ -617,7 +617,7 @@ class TestEnrichWithJiraMatches:
             ),
         )
 
-        with patch("jenkins_job_insight.jira.JiraClient") as mock_client_cls:
+        with patch("rootcoz.jira.JiraClient") as mock_client_cls:
             mock_instance = AsyncMock()
             mock_instance.search = AsyncMock(return_value=[])
             mock_instance.__aenter__ = AsyncMock(return_value=mock_instance)
@@ -630,7 +630,7 @@ class TestEnrichWithJiraMatches:
 
     async def test_never_raises(self, product_bug_failure, jira_settings) -> None:
         """Jira errors are caught and logged, never raised."""
-        with patch("jenkins_job_insight.jira.JiraClient") as mock_client_cls:
+        with patch("rootcoz.jira.JiraClient") as mock_client_cls:
             mock_instance = AsyncMock()
             mock_instance.search = AsyncMock(
                 side_effect=httpx.ConnectError("Connection refused")

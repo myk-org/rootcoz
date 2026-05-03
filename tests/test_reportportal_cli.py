@@ -3,7 +3,7 @@
 import httpx
 import pytest
 
-from jenkins_job_insight.cli.client import JJIError
+from rootcoz.cli.client import RootCozError
 from tests.conftest import make_test_client as _make_client
 
 
@@ -32,7 +32,7 @@ class TestPushReportPortal:
             return httpx.Response(400, json={"detail": "Report Portal is disabled"})
 
         client = _make_client(handler)
-        with pytest.raises(JJIError) as exc_info:
+        with pytest.raises(RootCozError) as exc_info:
             client.push_reportportal("job-123")
         assert exc_info.value.status_code == 400
 
@@ -41,6 +41,6 @@ class TestPushReportPortal:
             return httpx.Response(404, json={"detail": "Job not found"})
 
         client = _make_client(handler)
-        with pytest.raises(JJIError) as exc_info:
+        with pytest.raises(RootCozError) as exc_info:
             client.push_reportportal("job-123")
         assert exc_info.value.status_code == 404

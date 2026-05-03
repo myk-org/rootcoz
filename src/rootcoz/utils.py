@@ -1,4 +1,4 @@
-"""Shared utilities for jenkins-job-insight."""
+"""Shared utilities for rootcoz."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ from typing import Any
 import jenkins
 import requests.exceptions
 
-from jenkins_job_insight.encryption import SENSITIVE_KEYS
+from rootcoz.encryption import SENSITIVE_KEYS
 
 
 #: Combined tuple of exception types that indicate a transient Jenkins
@@ -45,7 +45,7 @@ def mask_sensitive_fields(data: Any) -> Any:
     """Return a deep copy of *data* with sensitive field values masked.
 
     Handles nested dicts and lists.  A field is considered sensitive when
-    its key appears in :data:`~jenkins_job_insight.encryption.SENSITIVE_KEYS`
+    its key appears in :data:`~rootcoz.encryption.SENSITIVE_KEYS`
     or when the key contains ``password``, ``token``, ``secret``, or ``key``
     (case-insensitive).
 

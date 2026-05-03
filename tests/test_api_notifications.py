@@ -9,8 +9,8 @@ import contextlib
 import pytest
 from fastapi.testclient import TestClient
 
-from jenkins_job_insight import storage
-from jenkins_job_insight.config import get_settings
+from rootcoz import storage
+from rootcoz.config import get_settings
 
 
 def _nullcontext():
@@ -48,12 +48,12 @@ def _make_client(
         get_settings.cache_clear()
         with patch.object(storage, "DB_PATH", temp_db_path):
             ctx = (
-                patch("jenkins_job_insight.vapid.get_vapid_config", return_value={})
+                patch("rootcoz.vapid.get_vapid_config", return_value={})
                 if disable_vapid_auto
                 else _nullcontext()
             )
             with ctx:
-                from jenkins_job_insight.main import app
+                from rootcoz.main import app
 
                 with TestClient(app) as c:
                     try:
@@ -97,7 +97,7 @@ class TestVapidPublicKey:
 
     def test_returns_503_when_keys_unavailable(self, client_with_push):
         """Returns 503 when web_push_enabled is True but VAPID keys become unavailable."""
-        with patch("jenkins_job_insight.main.get_vapid_config", return_value={}):
+        with patch("rootcoz.main.get_vapid_config", return_value={}):
             resp = client_with_push.get("/api/notifications/vapid-public-key")
             assert resp.status_code == 503
             assert "unavailable" in resp.json()["detail"].lower()
@@ -114,7 +114,7 @@ class TestSubscribeNotifications:
                 "p256dh_key": "p256dh-test",  # pragma: allowlist secret  # gitleaks:allow
                 "auth_key": "auth-test",  # pragma: allowlist secret  # gitleaks:allow
             },
-            cookies={"jji_username": "alice"},
+            cookies={"rootcoz_username": "alice"},
         )
         assert resp.status_code == 200
         assert resp.json()["status"] == "subscribed"
@@ -139,7 +139,7 @@ class TestSubscribeNotifications:
                 "p256dh_key": "p256dh-test",  # pragma: allowlist secret  # gitleaks:allow
                 "auth_key": "auth-test",  # pragma: allowlist secret  # gitleaks:allow
             },
-            cookies={"jji_username": "alice"},
+            cookies={"rootcoz_username": "alice"},
         )
         assert resp.status_code == 404
 
@@ -156,13 +156,13 @@ class TestUnsubscribeNotifications:
                 "p256dh_key": "p256dh-test",  # pragma: allowlist secret  # gitleaks:allow
                 "auth_key": "auth-test",  # pragma: allowlist secret  # gitleaks:allow
             },
-            cookies={"jji_username": "alice"},
+            cookies={"rootcoz_username": "alice"},
         )
         # Then unsubscribe
         resp = client_with_push.post(
             "/api/notifications/unsubscribe",
             json={"endpoint": "https://push.example.com/sub/unsub-test"},
-            cookies={"jji_username": "alice"},
+            cookies={"rootcoz_username": "alice"},
         )
         assert resp.status_code == 200
         assert resp.json()["status"] == "unsubscribed"
@@ -171,7 +171,7 @@ class TestUnsubscribeNotifications:
         resp = client_with_push.post(
             "/api/notifications/unsubscribe",
             json={"endpoint": "https://push.example.com/sub/nonexistent"},
-            cookies={"jji_username": "alice"},
+            cookies={"rootcoz_username": "alice"},
         )
         assert resp.status_code == 404
         assert "not found" in resp.json()["detail"].lower()
@@ -186,13 +186,13 @@ class TestUnsubscribeNotifications:
                 "p256dh_key": "p256dh-test",  # pragma: allowlist secret  # gitleaks:allow
                 "auth_key": "auth-test",  # pragma: allowlist secret  # gitleaks:allow
             },
-            cookies={"jji_username": "alice"},
+            cookies={"rootcoz_username": "alice"},
         )
         # bob tries to unsubscribe alice's endpoint
         resp = client_with_push.post(
             "/api/notifications/unsubscribe",
             json={"endpoint": "https://push.example.com/sub/alice-only"},
-            cookies={"jji_username": "bob"},
+            cookies={"rootcoz_username": "bob"},
         )
         assert resp.status_code == 404
         assert "not found" in resp.json()["detail"].lower()
@@ -208,7 +208,7 @@ class TestUnsubscribeNotifications:
         resp = client_no_push.post(
             "/api/notifications/unsubscribe",
             json={"endpoint": "https://push.example.com/sub/test-1"},
-            cookies={"jji_username": "alice"},
+            cookies={"rootcoz_username": "alice"},
         )
         assert resp.status_code == 404
 
@@ -224,7 +224,7 @@ class TestEndpointHttpsValidation:
                 "p256dh_key": "p256dh-test",  # pragma: allowlist secret  # gitleaks:allow
                 "auth_key": "auth-test",  # pragma: allowlist secret  # gitleaks:allow
             },
-            cookies={"jji_username": "alice"},
+            cookies={"rootcoz_username": "alice"},
         )
         assert resp.status_code == 422
 
@@ -232,7 +232,7 @@ class TestEndpointHttpsValidation:
         resp = client_with_push.post(
             "/api/notifications/unsubscribe",
             json={"endpoint": "http://push.example.com/sub/insecure"},
-            cookies={"jji_username": "alice"},
+            cookies={"rootcoz_username": "alice"},
         )
         assert resp.status_code == 422
 
@@ -245,7 +245,7 @@ class TestMentionableUsers:
         # Make a request as alice to trigger user tracking, then wait
         client_with_push.get(
             "/api/notifications/vapid-public-key",
-            cookies={"jji_username": "alice"},
+            cookies={"rootcoz_username": "alice"},
         )
         # Give background task time to track user
         import time
@@ -254,7 +254,7 @@ class TestMentionableUsers:
 
         resp = client_with_push.get(
             "/api/users/mentionable",
-            cookies={"jji_username": "alice"},
+            cookies={"rootcoz_username": "alice"},
         )
         assert resp.status_code == 200
         data = resp.json()
@@ -311,10 +311,10 @@ class TestCommentMentionNotification:
         ):
             get_settings.cache_clear()
             with patch(
-                "jenkins_job_insight.main.send_mention_notifications",
+                "rootcoz.main.send_mention_notifications",
                 new_callable=AsyncMock,
             ) as mock_send:
-                from jenkins_job_insight.main import app
+                from rootcoz.main import app
 
                 with TestClient(app) as client:
                     resp = client.post(
@@ -323,7 +323,7 @@ class TestCommentMentionNotification:
                             "test_name": "test_foo",
                             "comment": "Hey @bob, can you check this?",
                         },
-                        cookies={"jji_username": "alice"},
+                        cookies={"rootcoz_username": "alice"},
                     )
                     assert resp.status_code == 201
                     import time
@@ -361,10 +361,10 @@ class TestCommentMentionNotification:
         ):
             get_settings.cache_clear()
             with patch(
-                "jenkins_job_insight.main.send_mention_notifications",
+                "rootcoz.main.send_mention_notifications",
                 new_callable=AsyncMock,
             ) as mock_send:
-                from jenkins_job_insight.main import app
+                from rootcoz.main import app
 
                 with TestClient(app) as client:
                     resp = client.post(
@@ -373,7 +373,7 @@ class TestCommentMentionNotification:
                             "test_name": "test_foo",
                             "comment": "Looks good, no issues here.",
                         },
-                        cookies={"jji_username": "alice"},
+                        cookies={"rootcoz_username": "alice"},
                     )
                     assert resp.status_code == 201
                     import time

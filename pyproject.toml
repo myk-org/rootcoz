@@ -1,7 +1,7 @@
 [project]
-name = "jenkins-job-insight"
+name = "rootcoz"
 version = "3.2.0"
-description = "Jenkins job insight and analysis tool"
+description = "AI-powered root cause analysis for CI/CD test failures"
 requires-python = ">=3.12"
 dependencies = [
   "ai-cli-runner>=0.1.1",
@@ -24,8 +24,8 @@ dependencies = [
 ]
 
 [project.scripts]
-jenkins-job-insight = "jenkins_job_insight.main:run"
-jji = "jenkins_job_insight.cli.main:app"
+rootcoz-server = "rootcoz.main:run"
+rootcoz = "rootcoz.cli.main:app"
 
 [project.optional-dependencies]
 tests = [
@@ -44,4 +44,4 @@ testpaths = ["tests"]
 pythonpath = ["src"]
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/jenkins_job_insight"]
+packages = ["src/rootcoz"]

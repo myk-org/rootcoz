@@ -1,4 +1,4 @@
-"""Tests for jji CLI commands using typer test runner."""
+"""Tests for rootcoz CLI commands using typer test runner."""
 
 import json
 import os
@@ -10,9 +10,9 @@ import pytest
 import typer.main
 from typer.testing import CliRunner
 
-from jenkins_job_insight.cli.client import JJIError
-from jenkins_job_insight.cli.config import ServerConfig
-from jenkins_job_insight.cli.main import app
+from rootcoz.cli.client import RootCozError
+from rootcoz.cli.config import ServerConfig
+from rootcoz.cli.main import app
 
 runner = CliRunner()
 
@@ -64,9 +64,9 @@ _FAKE_GITHUB_CLI_OVERRIDE = "ghp_cli_override"  # noqa: S105  # pragma: allowlis
 
 @pytest.fixture
 def mock_client():
-    """Provide a mocked JJIClient for all CLI tests.
+    """Provide a mocked RootcozClient for all CLI tests.
 
-    Sets JJI_SERVER so the main_callback does not exit early,
+    Sets ROOTCOZ_SERVER so the main_callback does not exit early,
     patches _get_client so no real HTTP calls are made,
     and stubs get_server_config to prevent local config.toml from
     injecting unexpected defaults.
@@ -75,16 +75,16 @@ def mock_client():
         patch.dict(
             os.environ,
             {
-                **{k: v for k, v in os.environ.items() if not k.startswith("JJI_")},
-                "JJI_SERVER": _TEST_SERVER,
+                **{k: v for k, v in os.environ.items() if not k.startswith("ROOTCOZ_")},
+                "ROOTCOZ_SERVER": _TEST_SERVER,
             },
             clear=True,
         ),
         patch(
-            "jenkins_job_insight.cli.main.get_server_config",
+            "rootcoz.cli.main.get_server_config",
             return_value=ServerConfig(url=_TEST_SERVER),
         ),
-        patch("jenkins_job_insight.cli.main._get_client") as mock_get,
+        patch("rootcoz.cli.main._get_client") as mock_get,
     ):
         client = MagicMock()
         mock_get.return_value = client
@@ -505,8 +505,8 @@ class TestCommentsCommands:
 class TestServerFlag:
     def test_custom_server(self):
         with (
-            patch("jenkins_job_insight.cli.main._get_client") as mock_get,
-            patch("jenkins_job_insight.cli.main._state", {}) as mock_state,
+            patch("rootcoz.cli.main._get_client") as mock_get,
+            patch("rootcoz.cli.main._state", {}) as mock_state,
         ):
             client = MagicMock()
             client.health.return_value = {"status": "healthy"}
@@ -519,11 +519,11 @@ class TestServerFlag:
 
     def test_missing_server(self):
         """CLI exits with error when no server is configured."""
-        env = {k: v for k, v in os.environ.items() if k != "JJI_SERVER"}
+        env = {k: v for k, v in os.environ.items() if k != "ROOTCOZ_SERVER"}
         with (
-            patch("jenkins_job_insight.cli.main._state", {}),
+            patch("rootcoz.cli.main._state", {}),
             patch.dict(os.environ, env, clear=True),
-            patch("jenkins_job_insight.cli.main.get_server_config", return_value=None),
+            patch("rootcoz.cli.main.get_server_config", return_value=None),
         ):
             result = runner.invoke(app, ["health"])
             assert result.exit_code == 1
@@ -532,7 +532,7 @@ class TestServerFlag:
 
 class TestErrorHandling:
     def test_connection_error(self, mock_client):
-        mock_client.health.side_effect = JJIError(
+        mock_client.health.side_effect = RootCozError(
             status_code=0, detail="Connection refused"
         )
         result = runner.invoke(app, ["health"])
@@ -540,7 +540,7 @@ class TestErrorHandling:
         assert "Connection" in result.output or "Error" in result.output
 
     def test_http_error(self, mock_client):
-        mock_client.get_result.side_effect = JJIError(
+        mock_client.get_result.side_effect = RootCozError(
             status_code=404, detail="Job not found"
         )
         result = runner.invoke(app, ["results", "show", "nonexistent"])
@@ -549,17 +549,17 @@ class TestErrorHandling:
 
     def test_401_error_hints_about_api_key_flag(self, mock_client):
         """_handle_error should hint about --api-key when server returns 401."""
-        mock_client.delete_job.side_effect = JJIError(
+        mock_client.delete_job.side_effect = RootCozError(
             status_code=401, detail="Please register a username first"
         )
         result = runner.invoke(app, ["results", "delete", "job-123"])
         assert result.exit_code == 1
         assert "--api-key" in result.output
-        assert "JJI_API_KEY" in result.output
+        assert "ROOTCOZ_API_KEY" in result.output
 
     def test_403_error_hints_about_admin_access(self, mock_client):
         """_handle_error should hint about admin access when server returns 403."""
-        mock_client.delete_job.side_effect = JJIError(
+        mock_client.delete_job.side_effect = RootCozError(
             status_code=403, detail="Admin access required"
         )
         result = runner.invoke(app, ["results", "delete", "job-123"])
@@ -569,7 +569,7 @@ class TestErrorHandling:
 
     def test_403_allow_list_hints_about_allow_list(self, mock_client):
         """_handle_error should hint about allow list when detail mentions it."""
-        mock_client.add_comment.side_effect = JJIError(
+        mock_client.add_comment.side_effect = RootCozError(
             status_code=403,
             detail="User not allowed. Contact an administrator to be added to the allow list.",
         )
@@ -1134,9 +1134,9 @@ class TestAiModelsCommand:
         assert "No models found" in result.output
 
     def test_ai_models_error(self, mock_client):
-        from jenkins_job_insight.cli.client import JJIError
+        from rootcoz.cli.client import RootCozError
 
-        mock_client.list_ai_models.side_effect = JJIError(
+        mock_client.list_ai_models.side_effect = RootCozError(
             status_code=500, detail="Server error"
         )
         result = runner.invoke(app, ["ai-models"])
@@ -1730,13 +1730,15 @@ class TestNoVerifySSL:
         """--no-verify-ssl should cause _get_client to create client with verify_ssl=False."""
         with (
             patch.dict(
-                os.environ, {"JJI_SERVER": _TEST_SERVER, "JJI_USERNAME": ""}, clear=True
+                os.environ,
+                {"ROOTCOZ_SERVER": _TEST_SERVER, "ROOTCOZ_USERNAME": ""},
+                clear=True,
             ),
             patch(
-                "jenkins_job_insight.cli.main.get_server_config",
+                "rootcoz.cli.main.get_server_config",
                 return_value=ServerConfig(url=_TEST_SERVER),
             ),
-            patch("jenkins_job_insight.cli.main.JJIClient") as mock_cls,
+            patch("rootcoz.cli.main.RootCozClient") as mock_cls,
         ):
             mock_instance = MagicMock()
             mock_instance.health.return_value = {"status": "healthy"}
@@ -1750,15 +1752,17 @@ class TestNoVerifySSL:
     def test_without_no_verify_ssl_flag(self):
         """Without --no-verify-ssl, client should be created with verify_ssl=True."""
         with (
-            patch("jenkins_job_insight.cli.main._state", {}),
+            patch("rootcoz.cli.main._state", {}),
             patch.dict(
-                os.environ, {"JJI_SERVER": _TEST_SERVER, "JJI_USERNAME": ""}, clear=True
+                os.environ,
+                {"ROOTCOZ_SERVER": _TEST_SERVER, "ROOTCOZ_USERNAME": ""},
+                clear=True,
             ),
             patch(
-                "jenkins_job_insight.cli.main.get_server_config",
+                "rootcoz.cli.main.get_server_config",
                 return_value=ServerConfig(url=_TEST_SERVER),
             ),
-            patch("jenkins_job_insight.cli.main.JJIClient") as mock_cls,
+            patch("rootcoz.cli.main.RootCozClient") as mock_cls,
         ):
             mock_instance = MagicMock()
             mock_instance.health.return_value = {"status": "healthy"}
@@ -1770,22 +1774,22 @@ class TestNoVerifySSL:
             )
 
     def test_no_verify_ssl_env_var(self):
-        """JJI_NO_VERIFY_SSL env var should enable SSL skip."""
+        """ROOTCOZ_NO_VERIFY_SSL env var should enable SSL skip."""
         with (
             patch.dict(
                 os.environ,
                 {
-                    "JJI_SERVER": _TEST_SERVER,
-                    "JJI_NO_VERIFY_SSL": "true",
-                    "JJI_USERNAME": "",
+                    "ROOTCOZ_SERVER": _TEST_SERVER,
+                    "ROOTCOZ_NO_VERIFY_SSL": "true",
+                    "ROOTCOZ_USERNAME": "",
                 },
                 clear=True,
             ),
             patch(
-                "jenkins_job_insight.cli.main.get_server_config",
+                "rootcoz.cli.main.get_server_config",
                 return_value=ServerConfig(url=_TEST_SERVER),
             ),
-            patch("jenkins_job_insight.cli.main.JJIClient") as mock_cls,
+            patch("rootcoz.cli.main.RootCozClient") as mock_cls,
         ):
             mock_instance = MagicMock()
             mock_instance.health.return_value = {"status": "healthy"}
@@ -1882,10 +1886,10 @@ class TestAnalyzeConfigDefaults:
         config = cfg or self._FULL_CONFIG
         with (
             patch(
-                "jenkins_job_insight.cli.main.get_server_config",
+                "rootcoz.cli.main.get_server_config",
                 return_value=config,
             ),
-            patch("jenkins_job_insight.cli.main._get_client") as mock_client_fn,
+            patch("rootcoz.cli.main._get_client") as mock_client_fn,
             patch.dict(os.environ, {}, clear=True),
         ):
             client = MagicMock()
@@ -2143,10 +2147,10 @@ class TestAnalyzePeerFlags:
         )
         with (
             patch(
-                "jenkins_job_insight.cli.main.get_server_config",
+                "rootcoz.cli.main.get_server_config",
                 return_value=cfg,
             ),
-            patch("jenkins_job_insight.cli.main._get_client") as mock_client_fn,
+            patch("rootcoz.cli.main._get_client") as mock_client_fn,
             patch.dict(os.environ, {}, clear=True),
         ):
             client = MagicMock()
@@ -2168,10 +2172,10 @@ class TestAnalyzePeerFlags:
         )
         with (
             patch(
-                "jenkins_job_insight.cli.main.get_server_config",
+                "rootcoz.cli.main.get_server_config",
                 return_value=cfg,
             ),
-            patch("jenkins_job_insight.cli.main._get_client") as mock_client_fn,
+            patch("rootcoz.cli.main._get_client") as mock_client_fn,
             patch.dict(os.environ, {}, clear=True),
         ):
             client = MagicMock()
@@ -2196,10 +2200,10 @@ class TestAnalyzePeerFlags:
         )
         with (
             patch(
-                "jenkins_job_insight.cli.main.get_server_config",
+                "rootcoz.cli.main.get_server_config",
                 return_value=cfg,
             ),
-            patch("jenkins_job_insight.cli.main._get_client") as mock_client_fn,
+            patch("rootcoz.cli.main._get_client") as mock_client_fn,
             patch.dict(os.environ, {}, clear=True),
         ):
             client = MagicMock()
@@ -2231,10 +2235,10 @@ class TestAnalyzePeerFlags:
         )
         with (
             patch(
-                "jenkins_job_insight.cli.main.get_server_config",
+                "rootcoz.cli.main.get_server_config",
                 return_value=cfg,
             ),
-            patch("jenkins_job_insight.cli.main._get_client") as mock_client_fn,
+            patch("rootcoz.cli.main._get_client") as mock_client_fn,
             patch.dict(os.environ, {}, clear=True),
         ):
             client = MagicMock()
@@ -2268,10 +2272,10 @@ class TestAnalyzePeerFlags:
         )
         with (
             patch(
-                "jenkins_job_insight.cli.main.get_server_config",
+                "rootcoz.cli.main.get_server_config",
                 return_value=cfg,
             ),
-            patch("jenkins_job_insight.cli.main._get_client") as mock_client_fn,
+            patch("rootcoz.cli.main._get_client") as mock_client_fn,
             patch.dict(os.environ, {}, clear=True),
         ):
             client = MagicMock()
@@ -2327,10 +2331,10 @@ class TestAnalyzePeerFlags:
         )
         with (
             patch(
-                "jenkins_job_insight.cli.main.get_server_config",
+                "rootcoz.cli.main.get_server_config",
                 return_value=cfg,
             ),
-            patch("jenkins_job_insight.cli.main._get_client") as mock_client_fn,
+            patch("rootcoz.cli.main._get_client") as mock_client_fn,
             patch.dict(os.environ, {}, clear=True),
         ):
             client = MagicMock()
@@ -2351,10 +2355,10 @@ class TestAnalyzePeerFlags:
         )
         with (
             patch(
-                "jenkins_job_insight.cli.main.get_server_config",
+                "rootcoz.cli.main.get_server_config",
                 return_value=cfg,
             ),
-            patch("jenkins_job_insight.cli.main._get_client") as mock_client_fn,
+            patch("rootcoz.cli.main._get_client") as mock_client_fn,
             patch.dict(os.environ, {}, clear=True),
         ):
             client = MagicMock()
@@ -2433,10 +2437,10 @@ class TestAnalyzeAdditionalReposFlags:
         )
         with (
             patch(
-                "jenkins_job_insight.cli.main.get_server_config",
+                "rootcoz.cli.main.get_server_config",
                 return_value=cfg,
             ),
-            patch("jenkins_job_insight.cli.main._get_client") as mock_client_fn,
+            patch("rootcoz.cli.main._get_client") as mock_client_fn,
             patch.dict(os.environ, {}, clear=True),
         ):
             client = MagicMock()
@@ -2571,10 +2575,10 @@ class TestAnalyzeForceFlag:
         cfg = ServerConfig(url=_TEST_SERVER, force=True)
         with (
             patch(
-                "jenkins_job_insight.cli.main.get_server_config",
+                "rootcoz.cli.main.get_server_config",
                 return_value=cfg,
             ),
-            patch("jenkins_job_insight.cli.main._get_client") as mock_fn,
+            patch("rootcoz.cli.main._get_client") as mock_fn,
             patch.dict(os.environ, {}, clear=True),
         ):
             client = MagicMock()
@@ -2593,10 +2597,10 @@ class TestAnalyzeForceFlag:
         cfg = ServerConfig(url=_TEST_SERVER, force=True)
         with (
             patch(
-                "jenkins_job_insight.cli.main.get_server_config",
+                "rootcoz.cli.main.get_server_config",
                 return_value=cfg,
             ),
-            patch("jenkins_job_insight.cli.main._get_client") as mock_fn,
+            patch("rootcoz.cli.main._get_client") as mock_fn,
             patch.dict(os.environ, {}, clear=True),
         ):
             client = MagicMock()
@@ -2759,7 +2763,7 @@ class TestReAnalyzeCommand:
         assert parsed["job_id"] == "new-1"
 
     def test_re_analyze_error(self, mock_client):
-        mock_client.re_analyze.side_effect = JJIError(
+        mock_client.re_analyze.side_effect = RootCozError(
             status_code=404, detail="Job not found"
         )
         result = runner.invoke(app, ["re-analyze", "nonexistent"])
@@ -2798,7 +2802,7 @@ class TestPushRpCommand:
         assert parsed["launch_id"] == 42
 
     def test_push_rp_error(self, mock_client):
-        mock_client.push_reportportal.side_effect = JJIError(
+        mock_client.push_reportportal.side_effect = RootCozError(
             status_code=400, detail="Report Portal is disabled"
         )
         result = runner.invoke(app, ["push-rp", "job-123"])
@@ -2876,7 +2880,7 @@ class TestAuthLoginCommand:
         assert parsed["is_admin"] is True
 
     def test_auth_login_error(self, mock_client):
-        mock_client.login.side_effect = JJIError(status_code=401, detail="Invalid")
+        mock_client.login.side_effect = RootCozError(status_code=401, detail="Invalid")
         result = runner.invoke(
             app,
             ["auth", "login", "--username", "admin", "--api-key", "bad"],  # noqa: S106
@@ -2976,7 +2980,7 @@ class TestAdminUsersCreateCommand:
         assert parsed["api_key"] == "not-a-real-key"  # pragma: allowlist secret
 
     def test_admin_users_create_error(self, mock_client):
-        mock_client.admin_create_user.side_effect = JJIError(
+        mock_client.admin_create_user.side_effect = RootCozError(
             status_code=403, detail="Admin access required"
         )
         result = runner.invoke(app, ["admin", "users", "create", "newadmin"])
@@ -3041,7 +3045,7 @@ class TestAdminUsersRotateKeyCommand:
         assert parsed["new_api_key"] == "not-a-real-key"  # pragma: allowlist secret
 
     def test_admin_users_rotate_key_error(self, mock_client):
-        mock_client.admin_rotate_key.side_effect = JJIError(
+        mock_client.admin_rotate_key.side_effect = RootCozError(
             status_code=404, detail="User not found"
         )
         result = runner.invoke(app, ["admin", "users", "rotate-key", "nonexistent"])
@@ -3223,7 +3227,7 @@ class TestTokenUsageCommand:
         assert "claude" in result.output
 
     def test_token_usage_error_403(self, mock_client):
-        mock_client.get_token_usage_summary.side_effect = JJIError(
+        mock_client.get_token_usage_summary.side_effect = RootCozError(
             status_code=403, detail="Admin access required"
         )
         result = runner.invoke(app, ["admin", "token-usage"])
@@ -3332,14 +3336,14 @@ class TestApiKeyOption:
         with (
             patch.dict(
                 os.environ,
-                {"JJI_SERVER": _TEST_SERVER, "JJI_USERNAME": ""},
+                {"ROOTCOZ_SERVER": _TEST_SERVER, "ROOTCOZ_USERNAME": ""},
                 clear=True,
             ),
             patch(
-                "jenkins_job_insight.cli.main.get_server_config",
+                "rootcoz.cli.main.get_server_config",
                 return_value=ServerConfig(url=_TEST_SERVER),
             ),
-            patch("jenkins_job_insight.cli.main.JJIClient") as mock_cls,
+            patch("rootcoz.cli.main.RootCozClient") as mock_cls,
         ):
             mock_instance = MagicMock()
             mock_instance.health.return_value = {"status": "healthy"}
@@ -3365,10 +3369,10 @@ class TestApiKeyOption:
         with (
             patch.dict(os.environ, {}, clear=True),
             patch(
-                "jenkins_job_insight.cli.main.get_server_config",
+                "rootcoz.cli.main.get_server_config",
                 return_value=cfg,
             ),
-            patch("jenkins_job_insight.cli.main.JJIClient") as mock_cls,
+            patch("rootcoz.cli.main.RootCozClient") as mock_cls,
         ):
             mock_instance = MagicMock()
             mock_instance.health.return_value = {"status": "healthy"}
@@ -3391,10 +3395,10 @@ class TestApiKeyOption:
         with (
             patch.dict(os.environ, {}, clear=True),
             patch(
-                "jenkins_job_insight.cli.main.get_server_config",
+                "rootcoz.cli.main.get_server_config",
                 return_value=cfg,
             ),
-            patch("jenkins_job_insight.cli.main.JJIClient") as mock_cls,
+            patch("rootcoz.cli.main.RootCozClient") as mock_cls,
         ):
             mock_instance = MagicMock()
             mock_instance.health.return_value = {"status": "healthy"}

@@ -281,7 +281,7 @@ describe('FeedbackDialog', () => {
       expect(screen.getByText(/AI is not configured on this server/)).toBeInTheDocument()
     )
     const link = screen.getByRole('link', { name: /open a new issue/i })
-    expect(link).toHaveAttribute('href', 'https://github.com/myk-org/jenkins-job-insight/issues/new')
+    expect(link).toHaveAttribute('href', 'https://github.com/myk-org/rootcoz/issues/new')
     expect(link).toHaveAttribute('target', '_blank')
     // Should show Close button in footer, not Try Again
     const closeButtons = screen.getAllByRole('button', { name: /close/i })

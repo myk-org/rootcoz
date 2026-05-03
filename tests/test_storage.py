@@ -6,7 +6,7 @@ from unittest.mock import patch
 import aiosqlite
 import pytest
 
-from jenkins_job_insight import storage
+from rootcoz import storage
 
 
 @pytest.fixture

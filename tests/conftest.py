@@ -1,4 +1,4 @@
-"""Shared fixtures for jenkins-job-insight tests."""
+"""Shared fixtures for rootcoz tests."""
 
 import os
 import tempfile
@@ -11,9 +11,9 @@ import httpx
 from ai_cli_runner import AIResult
 import pytest
 
-from jenkins_job_insight.cli.client import JJIClient
-from jenkins_job_insight.config import Settings
-from jenkins_job_insight.models import (
+from rootcoz.cli.client import RootCozClient
+from rootcoz.config import Settings
+from rootcoz.models import (
     AnalysisDetail,
     AnalysisResult,
     AnalyzeRequest,
@@ -43,8 +43,8 @@ def make_test_client(
     handler: Callable[[httpx.Request], httpx.Response],
     username: str = "",
     api_key: str = "",
-) -> JJIClient:
-    """Create a JJIClient with a mock transport for testing.
+) -> RootCozClient:
+    """Create a RootCozClient with a mock transport for testing.
 
     The mock httpx.Client is created with base_url set so that
     relative paths (e.g. "/health") resolve correctly.
@@ -53,7 +53,7 @@ def make_test_client(
     """
     cookies = {}
     if username:
-        cookies["jji_username"] = username
+        cookies["rootcoz_username"] = username
     headers = {}
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
@@ -64,7 +64,7 @@ def make_test_client(
         cookies=cookies,
         headers=headers,
     )
-    client = JJIClient(CLI_TEST_BASE_URL, username=username, api_key=api_key)
+    client = RootCozClient(CLI_TEST_BASE_URL, username=username, api_key=api_key)
     client._client.close()
     client._client = mock_http
     return client
@@ -191,7 +191,7 @@ def mock_jenkins_client() -> MagicMock:
 @pytest.fixture
 def mock_ai_cli() -> Generator[MagicMock, None, None]:
     """Mock the call_ai_cli function."""
-    with patch("jenkins_job_insight.analyzer.call_ai_cli") as mock:
+    with patch("rootcoz.analyzer.call_ai_cli") as mock:
         mock.return_value = AIResult(
             success=True,
             text='{"classification": "CODE ISSUE", "affected_tests": ["test_example"], "details": "The test failed due to a missing configuration.", "code_fix": {"file": "tests/test_example.py", "line": "42", "change": "Add the missing import statement"}}',

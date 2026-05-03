@@ -6,8 +6,8 @@ import httpx
 import pytest
 from ai_cli_runner import AIResult, AITokenUsage
 
-from jenkins_job_insight.llm_pricing import LLMPricingCache
-from jenkins_job_insight.token_tracking import record_ai_usage
+from rootcoz.llm_pricing import LLMPricingCache
+from rootcoz.token_tracking import record_ai_usage
 
 
 SAMPLE_PRICING_DATA = {
@@ -319,7 +319,7 @@ class TestLLMPricingCache:
             request=httpx.Request("GET", "https://example.com"),
         )
 
-        with patch("jenkins_job_insight.llm_pricing.httpx.AsyncClient") as mock_client:
+        with patch("rootcoz.llm_pricing.httpx.AsyncClient") as mock_client:
             mock_client.return_value.__aenter__ = AsyncMock(
                 return_value=mock_client.return_value
             )
@@ -336,7 +336,7 @@ class TestLLMPricingCache:
         """Fetch failure is logged but never raises."""
         cache = LLMPricingCache()
 
-        with patch("jenkins_job_insight.llm_pricing.httpx.AsyncClient") as mock_client:
+        with patch("rootcoz.llm_pricing.httpx.AsyncClient") as mock_client:
             mock_client.return_value.__aenter__ = AsyncMock(
                 return_value=mock_client.return_value
             )
@@ -361,7 +361,7 @@ class TestLLMPricingCache:
             request=httpx.Request("GET", "https://example.com"),
         )
 
-        with patch("jenkins_job_insight.llm_pricing.httpx.AsyncClient") as mock_client:
+        with patch("rootcoz.llm_pricing.httpx.AsyncClient") as mock_client:
             mock_client.return_value.__aenter__ = AsyncMock(
                 return_value=mock_client.return_value
             )
@@ -390,10 +390,10 @@ class TestRecordAiUsageCostCalculation:
 
         with (
             patch(
-                "jenkins_job_insight.token_tracking.storage.record_token_usage",
+                "rootcoz.token_tracking.storage.record_token_usage",
                 new_callable=AsyncMock,
             ) as mock_record,
-            patch("jenkins_job_insight.token_tracking.pricing_cache") as mock_cache,
+            patch("rootcoz.token_tracking.pricing_cache") as mock_cache,
         ):
             await record_ai_usage(job_id="job-123", result=result, call_type="analysis")
 
@@ -416,10 +416,10 @@ class TestRecordAiUsageCostCalculation:
 
         with (
             patch(
-                "jenkins_job_insight.token_tracking.storage.record_token_usage",
+                "rootcoz.token_tracking.storage.record_token_usage",
                 new_callable=AsyncMock,
             ) as mock_record,
-            patch("jenkins_job_insight.token_tracking.pricing_cache") as mock_cache,
+            patch("rootcoz.token_tracking.pricing_cache") as mock_cache,
         ):
             mock_cache.calculate_cost.return_value = 0.055
             await record_ai_usage(job_id="job-123", result=result, call_type="analysis")
@@ -448,10 +448,10 @@ class TestRecordAiUsageCostCalculation:
 
         with (
             patch(
-                "jenkins_job_insight.token_tracking.storage.record_token_usage",
+                "rootcoz.token_tracking.storage.record_token_usage",
                 new_callable=AsyncMock,
             ) as mock_record,
-            patch("jenkins_job_insight.token_tracking.pricing_cache") as mock_cache,
+            patch("rootcoz.token_tracking.pricing_cache") as mock_cache,
         ):
             mock_cache.calculate_cost.return_value = None
             await record_ai_usage(job_id="job-123", result=result, call_type="analysis")
@@ -472,10 +472,10 @@ class TestRecordAiUsageCostCalculation:
 
         with (
             patch(
-                "jenkins_job_insight.token_tracking.storage.record_token_usage",
+                "rootcoz.token_tracking.storage.record_token_usage",
                 new_callable=AsyncMock,
             ) as mock_record,
-            patch("jenkins_job_insight.token_tracking.pricing_cache") as mock_cache,
+            patch("rootcoz.token_tracking.pricing_cache") as mock_cache,
         ):
             mock_cache.calculate_cost.side_effect = RuntimeError("unexpected")
             await record_ai_usage(job_id="job-123", result=result, call_type="analysis")
@@ -490,10 +490,10 @@ class TestRecordAiUsageCostCalculation:
 
         with (
             patch(
-                "jenkins_job_insight.token_tracking.storage.record_token_usage",
+                "rootcoz.token_tracking.storage.record_token_usage",
                 new_callable=AsyncMock,
             ) as mock_record,
-            patch("jenkins_job_insight.token_tracking.pricing_cache") as mock_cache,
+            patch("rootcoz.token_tracking.pricing_cache") as mock_cache,
         ):
             await record_ai_usage(
                 job_id="job-123",
@@ -522,10 +522,10 @@ class TestRecordAiUsageCostCalculation:
 
         with (
             patch(
-                "jenkins_job_insight.token_tracking.storage.record_token_usage",
+                "rootcoz.token_tracking.storage.record_token_usage",
                 new_callable=AsyncMock,
             ),
-            patch("jenkins_job_insight.token_tracking.pricing_cache") as mock_cache,
+            patch("rootcoz.token_tracking.pricing_cache") as mock_cache,
         ):
             mock_cache.calculate_cost.return_value = 0.07
             await record_ai_usage(job_id="job-123", result=result, call_type="analysis")

@@ -2,6 +2,7 @@
 
 These functions handle server communication and XML enrichment.
 They are not tied to pytest and can be used independently.
+
 """
 
 import logging
@@ -11,7 +12,7 @@ from pathlib import Path
 import requests
 from dotenv import load_dotenv
 
-logger = logging.getLogger("jenkins-job-insight")
+logger = logging.getLogger("rootcoz")
 
 
 def is_dry_run(config) -> bool:
@@ -22,8 +23,8 @@ def is_dry_run(config) -> bool:
 def setup_ai_analysis(session) -> None:
     """Configure AI analysis for test failure reporting.
 
-    Loads .env, validates JJI_SERVER, and sets defaults for AI provider/model.
-    Disables analysis if JJI_SERVER is missing or if pytest was invoked
+    Loads .env, validates ROOTCOZ_SERVER, and sets defaults for AI provider/model.
+    Disables analysis if ROOTCOZ_SERVER is missing or if pytest was invoked
     with --collectonly or --setupplan.
 
     Args:
@@ -37,22 +38,22 @@ def setup_ai_analysis(session) -> None:
 
     logger.info("Setting up AI-powered test failure analysis")
 
-    if not os.environ.get("JJI_SERVER"):
+    if not os.environ.get("ROOTCOZ_SERVER"):
         logger.warning(
-            "JJI_SERVER is not set. Analyze with AI features will be disabled."
+            "ROOTCOZ_SERVER is not set. Analyze with AI features will be disabled."
         )
         session.config.option.analyze_with_ai = False
     else:
-        if not os.environ.get("JJI_AI_PROVIDER"):
+        if not os.environ.get("ROOTCOZ_AI_PROVIDER"):
             logger.warning(
-                "JJI_AI_PROVIDER is not set. Set it explicitly (e.g., 'claude', 'gemini', 'cursor')."
+                "ROOTCOZ_AI_PROVIDER is not set. Set it explicitly (e.g., 'claude', 'gemini', 'cursor')."
             )
             session.config.option.analyze_with_ai = False
             return
 
-        if not os.environ.get("JJI_AI_MODEL"):
+        if not os.environ.get("ROOTCOZ_AI_MODEL"):
             logger.warning(
-                "JJI_AI_MODEL is not set. Set it explicitly to the desired model name."
+                "ROOTCOZ_AI_MODEL is not set. Set it explicitly to the desired model name."
             )
             session.config.option.analyze_with_ai = False
 
@@ -61,7 +62,7 @@ def enrich_junit_xml(session) -> None:
     """Read JUnit XML, send to server for analysis, write enriched XML back.
 
     Reads the JUnit XML that pytest generated, POSTs the raw content to the
-    JJI server's /analyze-failures endpoint, and writes the enriched XML
+    RootCoz server's /analyze-failures endpoint, and writes the enriched XML
     (with analysis results) back to the same file.
 
     Args:
@@ -82,21 +83,21 @@ def enrich_junit_xml(session) -> None:
         )
         return
 
-    ai_provider = os.environ.get("JJI_AI_PROVIDER", "")
-    ai_model = os.environ.get("JJI_AI_MODEL", "")
+    ai_provider = os.environ.get("ROOTCOZ_AI_PROVIDER", "")
+    ai_model = os.environ.get("ROOTCOZ_AI_MODEL", "")
     if not ai_provider or not ai_model:
         logger.warning(
-            "JJI_AI_PROVIDER and JJI_AI_MODEL must be set, skipping AI analysis enrichment"
+            "ROOTCOZ_AI_PROVIDER and ROOTCOZ_AI_MODEL must be set, skipping AI analysis enrichment"
         )
         return
 
-    server_url = os.environ.get("JJI_SERVER", "")
+    server_url = os.environ.get("ROOTCOZ_SERVER", "")
     raw_xml = xml_path.read_text()
 
     try:
-        timeout_value = int(os.environ.get("JJI_TIMEOUT", "600"))
+        timeout_value = int(os.environ.get("ROOTCOZ_TIMEOUT", "600"))
     except ValueError:
-        logger.warning("Invalid JJI_TIMEOUT value, using default 600 seconds")
+        logger.warning("Invalid ROOTCOZ_TIMEOUT value, using default 600 seconds")
         timeout_value = 600
 
     try:

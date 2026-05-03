@@ -3,7 +3,7 @@
 import os
 from unittest.mock import patch
 
-from jenkins_job_insight.config import Settings
+from rootcoz.config import Settings
 from tests.conftest import build_test_env as _build_env
 
 
@@ -66,7 +66,7 @@ class TestReportPortalSettings:
             settings = Settings(_env_file=None)
             assert not settings.reportportal_enabled
 
-    @patch("jenkins_job_insight.config.logger")
+    @patch("rootcoz.config.logger")
     def test_rp_warns_when_explicitly_enabled_but_url_missing(self, mock_logger):
         """When enable_reportportal=True but url is missing, warn."""
         env = _build_env(
@@ -81,7 +81,7 @@ class TestReportPortalSettings:
         warn_msg = mock_logger.warning.call_args[0][0]
         assert "REPORTPORTAL_URL" in warn_msg
 
-    @patch("jenkins_job_insight.config.logger")
+    @patch("rootcoz.config.logger")
     def test_rp_warns_when_explicitly_enabled_but_token_missing(self, mock_logger):
         env = _build_env(
             ENABLE_REPORTPORTAL="true",
@@ -95,7 +95,7 @@ class TestReportPortalSettings:
         warn_msg = mock_logger.warning.call_args[0][0]
         assert "REPORTPORTAL_API_TOKEN" in warn_msg
 
-    @patch("jenkins_job_insight.config.logger")
+    @patch("rootcoz.config.logger")
     def test_rp_warns_when_explicitly_enabled_but_project_missing(self, mock_logger):
         env = _build_env(
             ENABLE_REPORTPORTAL="true",

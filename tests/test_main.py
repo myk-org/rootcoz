@@ -9,12 +9,12 @@ import httpx
 import jenkins
 import pytest
 
-from jenkins_job_insight import storage
+from rootcoz import storage
 from pydantic import SecretStr
 
-from jenkins_job_insight.config import Settings
-from jenkins_job_insight.encryption import encrypt_sensitive_fields
-from jenkins_job_insight.models import (
+from rootcoz.config import Settings
+from rootcoz.encryption import encrypt_sensitive_fields
+from rootcoz.models import (
     AiConfigEntry,
     AnalysisDetail,
     AnalysisResult,
@@ -29,7 +29,7 @@ FAKE_GITHUB_TOKEN = "not-a-real-token"  # noqa: S105  # pragma: allowlist secret
 @contextmanager
 def _with_github_issue_config():
     """Temporarily enable GitHub issue creation settings for tests."""
-    from jenkins_job_insight.config import get_settings
+    from rootcoz.config import get_settings
 
     with patch.dict(
         os.environ,
@@ -59,7 +59,7 @@ def _enable_feature(prop_name: str):
     """
     from contextlib import ExitStack
 
-    from jenkins_job_insight.config import get_settings
+    from rootcoz.config import get_settings
 
     # Map computed properties to the env vars that endpoint guards check
     raw_env_patches: dict[str, dict[str, str]] = {
@@ -126,7 +126,7 @@ def mock_settings(temp_db_path: Path):
     }
     with patch.dict(os.environ, env, clear=True):
         # Clear the lru_cache to use fresh settings
-        from jenkins_job_insight.config import get_settings
+        from rootcoz.config import get_settings
 
         get_settings.cache_clear()
         try:
@@ -140,7 +140,7 @@ def test_client(mock_settings, temp_db_path: Path):
     """Create a test client with mocked dependencies."""
     with patch.object(storage, "DB_PATH", temp_db_path):
         from starlette.testclient import TestClient
-        from jenkins_job_insight.main import app
+        from rootcoz.main import app
 
         with TestClient(app) as client:
             yield client
@@ -166,7 +166,7 @@ class TestAnalyzeEndpoint:
 
     def test_analyze_async_returns_queued(self, test_client) -> None:
         """Test that async analyze returns queued status."""
-        with patch("jenkins_job_insight.main.process_analysis_with_id"):
+        with patch("rootcoz.main.process_analysis_with_id"):
             response = test_client.post(
                 "/analyze",
                 json={
@@ -238,7 +238,7 @@ class TestAnalyzeEndpoint:
         The status page needs AI provider/model and peer configs from
         request_params regardless of whether the job is resumable.
         """
-        with patch("jenkins_job_insight.main.process_analysis_with_id"):
+        with patch("rootcoz.main.process_analysis_with_id"):
             response = test_client.post(
                 "/analyze",
                 json={
@@ -276,18 +276,18 @@ class TestBaseUrlDetection:
 
     def test_base_url_from_public_base_url(self, mock_settings, temp_db_path) -> None:
         """PUBLIC_BASE_URL takes precedence over any request header."""
-        from jenkins_job_insight.config import get_settings
+        from rootcoz.config import get_settings
 
         os.environ["PUBLIC_BASE_URL"] = "https://myapp.example.com"
         get_settings.cache_clear()
         try:
             with patch.object(storage, "DB_PATH", temp_db_path):
                 from starlette.testclient import TestClient
-                from jenkins_job_insight.main import app
+                from rootcoz.main import app
 
                 with (
                     TestClient(app) as client,
-                    patch("jenkins_job_insight.main.process_analysis_with_id"),
+                    patch("rootcoz.main.process_analysis_with_id"),
                 ):
                     response = client.post(
                         "/analyze",
@@ -311,18 +311,18 @@ class TestBaseUrlDetection:
         self, mock_settings, temp_db_path
     ) -> None:
         """PUBLIC_BASE_URL trailing slash is stripped."""
-        from jenkins_job_insight.config import get_settings
+        from rootcoz.config import get_settings
 
         os.environ["PUBLIC_BASE_URL"] = "https://myapp.example.com:8443/"
         get_settings.cache_clear()
         try:
             with patch.object(storage, "DB_PATH", temp_db_path):
                 from starlette.testclient import TestClient
-                from jenkins_job_insight.main import app
+                from rootcoz.main import app
 
                 with (
                     TestClient(app) as client,
-                    patch("jenkins_job_insight.main.process_analysis_with_id"),
+                    patch("rootcoz.main.process_analysis_with_id"),
                 ):
                     response = client.post(
                         "/analyze",
@@ -337,7 +337,7 @@ class TestBaseUrlDetection:
 
     def test_base_url_empty_without_public_base_url(self, test_client) -> None:
         """Without PUBLIC_BASE_URL, base_url is empty (relative paths)."""
-        with patch("jenkins_job_insight.main.process_analysis_with_id"):
+        with patch("rootcoz.main.process_analysis_with_id"):
             response = test_client.post(
                 "/analyze",
                 json=self._analyze_body(),
@@ -354,7 +354,7 @@ class TestBaseUrlDetection:
 
     def test_base_url_ignores_forwarded_headers(self, test_client) -> None:
         """Request headers are not trusted for building public URLs."""
-        with patch("jenkins_job_insight.main.process_analysis_with_id"):
+        with patch("rootcoz.main.process_analysis_with_id"):
             response = test_client.post(
                 "/analyze",
                 json=self._analyze_body(),
@@ -385,19 +385,19 @@ class TestAnalyzeFailuresEndpoint:
             ),
         )
 
-        with patch("jenkins_job_insight.main.RepositoryManager") as mock_repo_cls:
+        with patch("rootcoz.main.RepositoryManager") as mock_repo_cls:
             mock_repo_instance = mock_repo_cls.return_value
             mock_repo_instance.clone.return_value = None
             mock_repo_instance.cleanup.return_value = None
 
             with patch(
-                "jenkins_job_insight.main.analyze_failure_group",
+                "rootcoz.main.analyze_failure_group",
                 new_callable=AsyncMock,
             ) as mock_analyze_group:
                 mock_analyze_group.return_value = [mock_analysis]
 
                 with patch(
-                    "jenkins_job_insight.main.run_parallel_with_limit",
+                    "rootcoz.main.run_parallel_with_limit",
                     new_callable=AsyncMock,
                 ) as mock_parallel:
 
@@ -446,8 +446,8 @@ class TestAnalyzeFailuresEndpoint:
     def test_analyze_failures_missing_ai_provider(self, test_client) -> None:
         """Test that missing AI provider (no env var, no body param) returns 400."""
         with (
-            patch("jenkins_job_insight.main.AI_PROVIDER", ""),
-            patch("jenkins_job_insight.main.AI_MODEL", ""),
+            patch("rootcoz.main.AI_PROVIDER", ""),
+            patch("rootcoz.main.AI_MODEL", ""),
         ):
             response = test_client.post(
                 "/analyze-failures",
@@ -467,8 +467,8 @@ class TestAnalyzeFailuresEndpoint:
     def test_analyze_failures_missing_ai_model(self, test_client) -> None:
         """Test that missing AI model returns 400."""
         with (
-            patch("jenkins_job_insight.main.AI_PROVIDER", ""),
-            patch("jenkins_job_insight.main.AI_MODEL", ""),
+            patch("rootcoz.main.AI_PROVIDER", ""),
+            patch("rootcoz.main.AI_MODEL", ""),
         ):
             response = test_client.post(
                 "/analyze-failures",
@@ -487,17 +487,17 @@ class TestAnalyzeFailuresEndpoint:
 
     def test_analyze_failures_handles_analysis_exception(self, test_client) -> None:
         """Test that when analyze_failure_group raises, endpoint returns status 'failed'."""
-        with patch("jenkins_job_insight.main.RepositoryManager") as mock_repo_cls:
+        with patch("rootcoz.main.RepositoryManager") as mock_repo_cls:
             mock_repo_instance = mock_repo_cls.return_value
             mock_repo_instance.clone.return_value = None
             mock_repo_instance.cleanup.return_value = None
 
             with patch(
-                "jenkins_job_insight.main.get_failure_signature",
+                "rootcoz.main.get_failure_signature",
                 return_value="sig-a",
             ):
                 with patch(
-                    "jenkins_job_insight.main.run_parallel_with_limit",
+                    "rootcoz.main.run_parallel_with_limit",
                     new_callable=AsyncMock,
                 ) as mock_parallel:
 
@@ -543,17 +543,17 @@ class TestAnalyzeFailuresEndpoint:
             ),
         )
 
-        with patch("jenkins_job_insight.main.RepositoryManager") as mock_repo_cls:
+        with patch("rootcoz.main.RepositoryManager") as mock_repo_cls:
             mock_repo_instance = mock_repo_cls.return_value
             mock_repo_instance.clone.return_value = None
             mock_repo_instance.cleanup.return_value = None
 
             with patch(
-                "jenkins_job_insight.main.get_failure_signature",
+                "rootcoz.main.get_failure_signature",
                 side_effect=["sig-a", "sig-b"],
             ):
                 with patch(
-                    "jenkins_job_insight.main.run_parallel_with_limit",
+                    "rootcoz.main.run_parallel_with_limit",
                     new_callable=AsyncMock,
                 ) as mock_parallel:
 
@@ -568,11 +568,11 @@ class TestAnalyzeFailuresEndpoint:
                     mock_parallel.side_effect = run_partial_failure
 
                     with patch(
-                        "jenkins_job_insight.main.save_result",
+                        "rootcoz.main.save_result",
                         new_callable=AsyncMock,
                     ):
                         with patch(
-                            "jenkins_job_insight.main.update_status",
+                            "rootcoz.main.update_status",
                             new_callable=AsyncMock,
                         ):
                             response = test_client.post(
@@ -627,7 +627,7 @@ class TestAnalyzeFailuresEndpoint:
             ),
         )
 
-        with patch("jenkins_job_insight.main.RepositoryManager") as mock_repo_cls:
+        with patch("rootcoz.main.RepositoryManager") as mock_repo_cls:
             mock_repo_instance = mock_repo_cls.return_value
             mock_repo_instance.clone.return_value = None
             mock_repo_instance.cleanup.return_value = None
@@ -635,11 +635,11 @@ class TestAnalyzeFailuresEndpoint:
             # Return same signature for first two failures, different for third
             signatures = iter(["sig-a", "sig-a", "sig-b"])
             with patch(
-                "jenkins_job_insight.main.get_failure_signature",
+                "rootcoz.main.get_failure_signature",
                 side_effect=lambda f: next(signatures),
             ):
                 with patch(
-                    "jenkins_job_insight.main.analyze_failure_group",
+                    "rootcoz.main.analyze_failure_group",
                     new_callable=AsyncMock,
                 ) as mock_analyze_group:
                     mock_analyze_group.side_effect = [
@@ -648,7 +648,7 @@ class TestAnalyzeFailuresEndpoint:
                     ]
 
                     with patch(
-                        "jenkins_job_insight.main.run_parallel_with_limit",
+                        "rootcoz.main.run_parallel_with_limit",
                         new_callable=AsyncMock,
                     ) as mock_parallel:
                         # Simulate run_parallel_with_limit calling the coroutines
@@ -720,13 +720,13 @@ class TestAnalyzeFailuresRawXml:
             ),
         )
 
-        with patch("jenkins_job_insight.main.RepositoryManager") as mock_repo_cls:
+        with patch("rootcoz.main.RepositoryManager") as mock_repo_cls:
             mock_repo_instance = mock_repo_cls.return_value
             mock_repo_instance.clone.return_value = None
             mock_repo_instance.cleanup.return_value = None
 
             with patch(
-                "jenkins_job_insight.main.run_parallel_with_limit",
+                "rootcoz.main.run_parallel_with_limit",
                 new_callable=AsyncMock,
             ) as mock_parallel:
 
@@ -821,13 +821,13 @@ class TestAnalyzeFailuresRawXml:
             ),
         )
 
-        with patch("jenkins_job_insight.main.RepositoryManager") as mock_repo_cls:
+        with patch("rootcoz.main.RepositoryManager") as mock_repo_cls:
             mock_repo_instance = mock_repo_cls.return_value
             mock_repo_instance.clone.return_value = None
             mock_repo_instance.cleanup.return_value = None
 
             with patch(
-                "jenkins_job_insight.main.run_parallel_with_limit",
+                "rootcoz.main.run_parallel_with_limit",
                 new_callable=AsyncMock,
             ) as mock_parallel:
 
@@ -868,13 +868,13 @@ class TestAnalyzeFailuresRawXml:
             ),
         )
 
-        with patch("jenkins_job_insight.main.RepositoryManager") as mock_repo_cls:
+        with patch("rootcoz.main.RepositoryManager") as mock_repo_cls:
             mock_repo_instance = mock_repo_cls.return_value
             mock_repo_instance.clone.return_value = None
             mock_repo_instance.cleanup.return_value = None
 
             with patch(
-                "jenkins_job_insight.main.run_parallel_with_limit",
+                "rootcoz.main.run_parallel_with_limit",
                 new_callable=AsyncMock,
             ) as mock_parallel:
 
@@ -998,7 +998,7 @@ class TestAppLifespan:
         """Test that database is initialized on app startup."""
         with patch.object(storage, "DB_PATH", temp_db_path):
             from starlette.testclient import TestClient
-            from jenkins_job_insight.main import app
+            from rootcoz.main import app
 
             with TestClient(app):
                 # After startup, DB should exist with results table
@@ -1013,7 +1013,7 @@ class TestOpenAPISchema:
         response = test_client.get("/openapi.json")
         assert response.status_code == 200
         schema = response.json()
-        assert schema["info"]["title"] == "Jenkins Job Insight"
+        assert schema["info"]["title"] == "rootcoz"
         assert schema["info"]["version"] == "0.1.0"
 
     def test_docs_available(self, test_client) -> None:
@@ -1077,7 +1077,7 @@ class TestApiDashboardEndpoint:
     def test_api_dashboard_calls_storage(self, test_client) -> None:
         """Test that the endpoint delegates to list_results_for_dashboard."""
         with patch(
-            "jenkins_job_insight.main.list_results_for_dashboard",
+            "rootcoz.main.list_results_for_dashboard",
             new_callable=AsyncMock,
         ) as mock_list:
             mock_list.return_value = []
@@ -1146,7 +1146,7 @@ class TestFaviconEndpoint:
 class TestCommentEndpoints:
     @pytest.mark.asyncio
     async def test_add_comment(self, test_client):
-        from jenkins_job_insight import storage
+        from rootcoz import storage
 
         result_data = {
             "status": "completed",
@@ -1171,7 +1171,7 @@ class TestCommentEndpoints:
 
     @pytest.mark.asyncio
     async def test_get_comments(self, test_client):
-        from jenkins_job_insight import storage
+        from rootcoz import storage
 
         result_data = {
             "status": "completed",
@@ -1205,7 +1205,7 @@ class TestCommentEndpoints:
 
     @pytest.mark.asyncio
     async def test_add_comment_invalid_test_name(self, test_client):
-        from jenkins_job_insight import storage
+        from rootcoz import storage
 
         result_data = {
             "status": "completed",
@@ -1231,7 +1231,7 @@ class TestCommentEndpoints:
 class TestReviewedEndpoint:
     @pytest.mark.asyncio
     async def test_set_reviewed(self, test_client):
-        from jenkins_job_insight import storage
+        from rootcoz import storage
 
         result_data = {
             "status": "completed",
@@ -1248,7 +1248,7 @@ class TestReviewedEndpoint:
             "job-rev-1", "http://jenkins", "completed", result_data
         )
         reviewer_name = "test-reviewer"
-        test_client.cookies.set("jji_username", reviewer_name)
+        test_client.cookies.set("rootcoz_username", reviewer_name)
         response = test_client.put(
             "/results/job-rev-1/reviewed",
             json={"test_name": "test_foo", "reviewed": True},
@@ -1276,7 +1276,7 @@ class TestReviewedEndpoint:
 class TestReviewStatusEndpoint:
     @pytest.mark.asyncio
     async def test_get_review_status(self, test_client):
-        from jenkins_job_insight import storage
+        from rootcoz import storage
 
         result_data = {
             "status": "completed",
@@ -1408,7 +1408,7 @@ class TestGetIssuePrompt:
             text="Include product version info",
             request=httpx.Request("GET", "https://api.github.com"),
         )
-        with patch("jenkins_job_insight.main.httpx.AsyncClient") as MockClient:
+        with patch("rootcoz.main.httpx.AsyncClient") as MockClient:
             mock_client_instance = AsyncMock()
             MockClient.return_value.__aenter__ = AsyncMock(
                 return_value=mock_client_instance
@@ -1462,7 +1462,7 @@ class TestGetIssuePrompt:
         await storage.save_result(
             "job-ip-neterr", "http://jenkins", "completed", result_data
         )
-        with patch("jenkins_job_insight.main.httpx.AsyncClient") as MockClient:
+        with patch("rootcoz.main.httpx.AsyncClient") as MockClient:
             mock_client_instance = AsyncMock()
             MockClient.return_value.__aenter__ = AsyncMock(
                 return_value=mock_client_instance
@@ -1498,7 +1498,7 @@ class TestGetIssuePrompt:
             text="Not Found",
             request=httpx.Request("GET", "https://api.github.com"),
         )
-        with patch("jenkins_job_insight.main.httpx.AsyncClient") as MockClient:
+        with patch("rootcoz.main.httpx.AsyncClient") as MockClient:
             mock_client_instance = AsyncMock()
             MockClient.return_value.__aenter__ = AsyncMock(
                 return_value=mock_client_instance
@@ -1541,7 +1541,7 @@ class TestGetIssuePrompt:
             text="Private repo prompt",
             request=httpx.Request("GET", "https://api.github.com"),
         )
-        with patch("jenkins_job_insight.main.httpx.AsyncClient") as MockClient:
+        with patch("rootcoz.main.httpx.AsyncClient") as MockClient:
             mock_client_instance = AsyncMock()
             MockClient.return_value.__aenter__ = AsyncMock(
                 return_value=mock_client_instance
@@ -1584,16 +1584,12 @@ class TestPreviewGithubIssue:
             "job-preview-gh", "http://jenkins", "completed", result_data
         )
         with _enable_feature("github_issues_enabled"):
-            with patch(
-                "jenkins_job_insight.main.generate_github_issue_content"
-            ) as mock_gen:
+            with patch("rootcoz.main.generate_github_issue_content") as mock_gen:
                 mock_gen.return_value = {
                     "title": "Fix: login handler missing catch",
                     "body": "## Test Failure\n\nDetails...",
                 }
-                with patch(
-                    "jenkins_job_insight.main.search_github_duplicates"
-                ) as mock_dup:
+                with patch("rootcoz.main.search_github_duplicates") as mock_dup:
                     mock_dup.return_value = []
                     response = test_client.post(
                         "/results/job-preview-gh/preview-github-issue",
@@ -1612,7 +1608,7 @@ class TestPreviewGithubIssue:
     @pytest.mark.asyncio
     async def test_preview_disabled_returns_403(self, test_client):
         """Preview returns 403 when GitHub issues are disabled."""
-        from jenkins_job_insight.config import get_settings
+        from rootcoz.config import get_settings
 
         with patch.dict(
             os.environ,
@@ -1697,13 +1693,9 @@ class TestPreviewGithubIssue:
             "job-prompt-gh", "http://jenkins", "completed", result_data
         )
         with _enable_feature("github_issues_enabled"):
-            with patch(
-                "jenkins_job_insight.main.generate_github_issue_content"
-            ) as mock_gen:
+            with patch("rootcoz.main.generate_github_issue_content") as mock_gen:
                 mock_gen.return_value = {"title": "T", "body": "B"}
-                with patch(
-                    "jenkins_job_insight.main.search_github_duplicates"
-                ) as mock_dup:
+                with patch("rootcoz.main.search_github_duplicates") as mock_dup:
                     mock_dup.return_value = []
                     response = test_client.post(
                         "/results/job-prompt-gh/preview-github-issue",
@@ -1741,16 +1733,12 @@ class TestPreviewJiraBug:
             "job-preview-jira", "http://jenkins", "completed", result_data
         )
         with _enable_feature("jira_enabled"):
-            with patch(
-                "jenkins_job_insight.main.generate_jira_bug_content"
-            ) as mock_gen:
+            with patch("rootcoz.main.generate_jira_bug_content") as mock_gen:
                 mock_gen.return_value = {
                     "title": "DNS timeout on internal resolver",
                     "body": "h2. Summary\n\nDNS resolution fails",
                 }
-                with patch(
-                    "jenkins_job_insight.main.search_jira_duplicates"
-                ) as mock_dup:
+                with patch("rootcoz.main.search_jira_duplicates") as mock_dup:
                     mock_dup.return_value = []
                     response = test_client.post(
                         "/results/job-preview-jira/preview-jira-bug",
@@ -1768,7 +1756,7 @@ class TestPreviewJiraBug:
     @pytest.mark.asyncio
     async def test_preview_disabled_returns_403(self, test_client):
         """Preview returns 403 when Jira is disabled."""
-        from jenkins_job_insight.config import get_settings
+        from rootcoz.config import get_settings
 
         with patch.dict(
             os.environ,
@@ -1812,13 +1800,9 @@ class TestPreviewJiraBug:
             "job-prompt-jira", "http://jenkins", "completed", result_data
         )
         with _enable_feature("jira_enabled"):
-            with patch(
-                "jenkins_job_insight.main.generate_jira_bug_content"
-            ) as mock_gen:
+            with patch("rootcoz.main.generate_jira_bug_content") as mock_gen:
                 mock_gen.return_value = {"title": "T", "body": "B"}
-                with patch(
-                    "jenkins_job_insight.main.search_jira_duplicates"
-                ) as mock_dup:
+                with patch("rootcoz.main.search_jira_duplicates") as mock_dup:
                     mock_dup.return_value = []
                     response = test_client.post(
                         "/results/job-prompt-jira/preview-jira-bug",
@@ -1852,13 +1836,13 @@ class TestCreateGithubIssue:
         await storage.save_result(
             "job-create-gh", "http://jenkins", "completed", result_data
         )
-        with patch("jenkins_job_insight.main.create_github_issue") as mock_create:
+        with patch("rootcoz.main.create_github_issue") as mock_create:
             mock_create.return_value = {
                 "url": "https://github.com/org/repo/issues/99",
                 "number": 99,
             }
             with _with_github_issue_config():
-                test_client.cookies.set("jji_username", "testuser")
+                test_client.cookies.set("rootcoz_username", "testuser")
                 response = test_client.post(
                     "/results/job-create-gh/create-github-issue",
                     json={
@@ -1882,7 +1866,7 @@ class TestCreateGithubIssue:
     @pytest.mark.asyncio
     async def test_create_disabled_returns_403(self, test_client):
         """Creating a GitHub issue when disabled returns 403."""
-        from jenkins_job_insight.config import get_settings
+        from rootcoz.config import get_settings
 
         result_data = {
             "status": "completed",
@@ -1943,14 +1927,14 @@ class TestCreateJiraBug:
         await storage.save_result(
             "job-create-jira", "http://jenkins", "completed", result_data
         )
-        with patch("jenkins_job_insight.main.create_jira_bug") as mock_create:
+        with patch("rootcoz.main.create_jira_bug") as mock_create:
             mock_create.return_value = {
                 "key": "PROJ-456",
                 "url": "https://jira.example.com/browse/PROJ-456",
             }
             # Mock settings to have jira_enabled=True
             with _enable_feature("jira_enabled"):
-                test_client.cookies.set("jji_username", "testuser")
+                test_client.cookies.set("rootcoz_username", "testuser")
                 response = test_client.post(
                     "/results/job-create-jira/create-jira-bug",
                     json={
@@ -1974,7 +1958,7 @@ class TestCreateJiraBug:
     @pytest.mark.asyncio
     async def test_create_jira_disabled_returns_403(self, test_client):
         """Creating a Jira bug when Jira is disabled returns 403."""
-        from jenkins_job_insight.config import get_settings
+        from rootcoz.config import get_settings
 
         result_data = {
             "status": "completed",
@@ -2034,9 +2018,7 @@ class TestOverrideClassification:
         await storage.save_result(
             "job-override-1", "http://jenkins", "completed", result_data
         )
-        with patch(
-            "jenkins_job_insight.storage.override_classification"
-        ) as mock_override:
+        with patch("rootcoz.storage.override_classification") as mock_override:
             response = test_client.put(
                 "/results/job-override-1/override-classification",
                 json={
@@ -2144,7 +2126,7 @@ class TestOverrideClassification:
             "job-override-infra", "http://jenkins", "completed", result_data
         )
         with patch(
-            "jenkins_job_insight.storage.override_classification",
+            "rootcoz.storage.override_classification",
             return_value=["test_deploy_check"],
         ) as mock_override:
             response = test_client.put(
@@ -2190,9 +2172,9 @@ class TestBugCreationIntegration:
             "job-integ-gh", "http://jenkins", "completed", result_data
         )
         with (
-            patch("jenkins_job_insight.main.generate_github_issue_content") as mock_gen,
-            patch("jenkins_job_insight.main.search_github_duplicates") as mock_dup,
-            patch("jenkins_job_insight.main.create_github_issue") as mock_create,
+            patch("rootcoz.main.generate_github_issue_content") as mock_gen,
+            patch("rootcoz.main.search_github_duplicates") as mock_dup,
+            patch("rootcoz.main.create_github_issue") as mock_create,
             _enable_feature("github_issues_enabled"),
         ):
             mock_gen.return_value = {"title": "Bug title", "body": "Bug body"}
@@ -2289,7 +2271,7 @@ class TestCreateGithubIssueApiErrors:
         await storage.save_result(
             "job-gh-err", "http://jenkins", "completed", result_data
         )
-        with patch("jenkins_job_insight.main.create_github_issue") as mock_create:
+        with patch("rootcoz.main.create_github_issue") as mock_create:
             mock_create.side_effect = httpx.HTTPStatusError(
                 "Internal Server Error",
                 request=httpx.Request("POST", "https://api.github.com"),
@@ -2326,7 +2308,7 @@ class TestCreateGithubIssueApiErrors:
         await storage.save_result(
             "job-gh-net-err", "http://jenkins", "completed", result_data
         )
-        with patch("jenkins_job_insight.main.create_github_issue") as mock_create:
+        with patch("rootcoz.main.create_github_issue") as mock_create:
             mock_create.side_effect = httpx.RequestError(
                 "Connection refused",
                 request=httpx.Request("POST", "https://api.github.com"),
@@ -2366,7 +2348,7 @@ class TestCreateJiraBugApiErrors:
         await storage.save_result(
             "job-jira-err", "http://jenkins", "completed", result_data
         )
-        with patch("jenkins_job_insight.main.create_jira_bug") as mock_create:
+        with patch("rootcoz.main.create_jira_bug") as mock_create:
             mock_create.side_effect = httpx.HTTPStatusError(
                 "Internal Server Error",
                 request=httpx.Request("POST", "https://jira.example.com"),
@@ -2403,7 +2385,7 @@ class TestCreateJiraBugApiErrors:
         await storage.save_result(
             "job-jira-net-err", "http://jenkins", "completed", result_data
         )
-        with patch("jenkins_job_insight.main.create_jira_bug") as mock_create:
+        with patch("rootcoz.main.create_jira_bug") as mock_create:
             mock_create.side_effect = httpx.RequestError(
                 "Connection refused",
                 request=httpx.Request("POST", "https://jira.example.com"),
@@ -2511,9 +2493,7 @@ class TestClassifyEndpoint:
         async def _boom(*args, **kwargs):
             raise ValueError("bad value")
 
-        monkeypatch.setattr(
-            "jenkins_job_insight.main.storage.set_test_classification", _boom
-        )
+        monkeypatch.setattr("rootcoz.main.storage.set_test_classification", _boom)
         resp = test_client.post(
             "/history/classify",
             json={
@@ -2532,14 +2512,14 @@ class TestWaitForJenkinsCompletion:
     @pytest.mark.asyncio
     async def test_already_completed_returns_true(self) -> None:
         """Job that is already finished returns True on first poll."""
-        with patch("jenkins_job_insight.jenkins.JenkinsClient") as mock_cls:
+        with patch("rootcoz.jenkins.JenkinsClient") as mock_cls:
             mock_client = mock_cls.return_value
             mock_client.get_build_info_safe.return_value = {
                 "building": False,
                 "result": "SUCCESS",
             }
 
-            from jenkins_job_insight.main import _wait_for_jenkins_completion
+            from rootcoz.main import _wait_for_jenkins_completion
 
             result, error = await _wait_for_jenkins_completion(
                 jenkins_url="https://jenkins.example.com",
@@ -2561,11 +2541,9 @@ class TestWaitForJenkinsCompletion:
         fake_monotonic, fake_sleep = fake_clock
 
         with (
-            patch("jenkins_job_insight.jenkins.JenkinsClient") as mock_cls,
-            patch("jenkins_job_insight.main.asyncio.sleep", side_effect=fake_sleep),
-            patch(
-                "jenkins_job_insight.main._time.monotonic", side_effect=fake_monotonic
-            ),
+            patch("rootcoz.jenkins.JenkinsClient") as mock_cls,
+            patch("rootcoz.main.asyncio.sleep", side_effect=fake_sleep),
+            patch("rootcoz.main._time.monotonic", side_effect=fake_monotonic),
         ):
             mock_client = mock_cls.return_value
             mock_client.get_build_info_safe.side_effect = [
@@ -2574,7 +2552,7 @@ class TestWaitForJenkinsCompletion:
                 {"building": False, "result": "FAILURE"},
             ]
 
-            from jenkins_job_insight.main import _wait_for_jenkins_completion
+            from rootcoz.main import _wait_for_jenkins_completion
 
             result, error = await _wait_for_jenkins_completion(
                 jenkins_url="https://jenkins.example.com",
@@ -2604,16 +2582,14 @@ class TestWaitForJenkinsCompletion:
         fake_monotonic, fake_sleep = fake_clock
 
         with (
-            patch("jenkins_job_insight.jenkins.JenkinsClient") as mock_cls,
-            patch("jenkins_job_insight.main.asyncio.sleep", side_effect=fake_sleep),
-            patch(
-                "jenkins_job_insight.main._time.monotonic", side_effect=fake_monotonic
-            ),
+            patch("rootcoz.jenkins.JenkinsClient") as mock_cls,
+            patch("rootcoz.main.asyncio.sleep", side_effect=fake_sleep),
+            patch("rootcoz.main._time.monotonic", side_effect=fake_monotonic),
         ):
             mock_client = mock_cls.return_value
             mock_client.get_build_info_safe.return_value = {"building": True}
 
-            from jenkins_job_insight.main import _wait_for_jenkins_completion
+            from rootcoz.main import _wait_for_jenkins_completion
 
             result, error = await _wait_for_jenkins_completion(
                 jenkins_url="https://jenkins.example.com",
@@ -2639,11 +2615,9 @@ class TestWaitForJenkinsCompletion:
         fake_monotonic, fake_sleep = fake_clock
 
         with (
-            patch("jenkins_job_insight.jenkins.JenkinsClient") as mock_cls,
-            patch("jenkins_job_insight.main.asyncio.sleep", side_effect=fake_sleep),
-            patch(
-                "jenkins_job_insight.main._time.monotonic", side_effect=fake_monotonic
-            ),
+            patch("rootcoz.jenkins.JenkinsClient") as mock_cls,
+            patch("rootcoz.main.asyncio.sleep", side_effect=fake_sleep),
+            patch("rootcoz.main._time.monotonic", side_effect=fake_monotonic),
         ):
             mock_client = mock_cls.return_value
             mock_client.get_build_info_safe.side_effect = [
@@ -2651,7 +2625,7 @@ class TestWaitForJenkinsCompletion:
                 {"building": False, "result": "SUCCESS"},
             ]
 
-            from jenkins_job_insight.main import _wait_for_jenkins_completion
+            from rootcoz.main import _wait_for_jenkins_completion
 
             result, error = await _wait_for_jenkins_completion(
                 jenkins_url="https://jenkins.example.com",
@@ -2669,11 +2643,11 @@ class TestWaitForJenkinsCompletion:
     @pytest.mark.asyncio
     async def test_non_transient_error_stops_polling(self) -> None:
         """Non-transient errors (e.g. bad credentials) stop polling immediately."""
-        with patch("jenkins_job_insight.jenkins.JenkinsClient") as mock_cls:
+        with patch("rootcoz.jenkins.JenkinsClient") as mock_cls:
             mock_client = mock_cls.return_value
             mock_client.get_build_info_safe.side_effect = ValueError("bad credentials")
 
-            from jenkins_job_insight.main import _wait_for_jenkins_completion
+            from rootcoz.main import _wait_for_jenkins_completion
 
             result, error = await _wait_for_jenkins_completion(
                 jenkins_url="https://jenkins.example.com",
@@ -2692,13 +2666,13 @@ class TestWaitForJenkinsCompletion:
     @pytest.mark.asyncio
     async def test_job_not_found_returns_false_immediately(self) -> None:
         """NotFoundException (404) is permanent and stops polling immediately."""
-        with patch("jenkins_job_insight.jenkins.JenkinsClient") as mock_cls:
+        with patch("rootcoz.jenkins.JenkinsClient") as mock_cls:
             mock_client = mock_cls.return_value
             mock_client.get_build_info_safe.side_effect = jenkins.NotFoundException(
                 "job[my-job] does not exist"
             )
 
-            from jenkins_job_insight.main import _wait_for_jenkins_completion
+            from rootcoz.main import _wait_for_jenkins_completion
 
             result, error = await _wait_for_jenkins_completion(
                 jenkins_url="https://jenkins.example.com",
@@ -2721,10 +2695,8 @@ class TestWaitForJenkinsCompletion:
     async def test_unlimited_wait_polls_until_complete(self) -> None:
         """max_wait_minutes=0 polls indefinitely until job completes."""
         with (
-            patch("jenkins_job_insight.jenkins.JenkinsClient") as mock_cls,
-            patch(
-                "jenkins_job_insight.main.asyncio.sleep", new_callable=AsyncMock
-            ) as mock_sleep,
+            patch("rootcoz.jenkins.JenkinsClient") as mock_cls,
+            patch("rootcoz.main.asyncio.sleep", new_callable=AsyncMock) as mock_sleep,
         ):
             mock_client = mock_cls.return_value
             mock_client.get_build_info_safe.side_effect = [
@@ -2734,7 +2706,7 @@ class TestWaitForJenkinsCompletion:
                 {"building": False, "result": "SUCCESS"},
             ]
 
-            from jenkins_job_insight.main import _wait_for_jenkins_completion
+            from rootcoz.main import _wait_for_jenkins_completion
 
             result, error = await _wait_for_jenkins_completion(
                 jenkins_url="https://jenkins.example.com",
@@ -2759,8 +2731,8 @@ class TestProcessAnalysisWaiting:
     @pytest.mark.asyncio
     async def test_wait_for_completion_true_waits(self) -> None:
         """When wait_for_completion=True, sets status to 'waiting' and polls."""
-        from jenkins_job_insight.main import process_analysis_with_id
-        from jenkins_job_insight.models import AnalyzeRequest
+        from rootcoz.main import process_analysis_with_id
+        from rootcoz.models import AnalyzeRequest
 
         body = AnalyzeRequest(
             job_name="my-job",
@@ -2787,29 +2759,27 @@ class TestProcessAnalysisWaiting:
 
         with (
             patch(
-                "jenkins_job_insight.main._wait_for_jenkins_completion",
+                "rootcoz.main._wait_for_jenkins_completion",
                 new_callable=AsyncMock,
                 return_value=(True, ""),
             ) as mock_wait,
-            patch("jenkins_job_insight.main.update_status", side_effect=capture_status),
+            patch("rootcoz.main.update_status", side_effect=capture_status),
             patch(
-                "jenkins_job_insight.main.update_progress_phase",
+                "rootcoz.main.update_progress_phase",
+                new_callable=AsyncMock,
+            ),
+            patch("rootcoz.main.analyze_job", new_callable=AsyncMock) as mock_analyze,
+            patch("rootcoz.main._resolve_enable_jira", return_value=False),
+            patch(
+                "rootcoz.main.populate_failure_history",
                 new_callable=AsyncMock,
             ),
             patch(
-                "jenkins_job_insight.main.analyze_job", new_callable=AsyncMock
-            ) as mock_analyze,
-            patch("jenkins_job_insight.main._resolve_enable_jira", return_value=False),
-            patch(
-                "jenkins_job_insight.main.populate_failure_history",
+                "rootcoz.main.storage.make_classifications_visible",
                 new_callable=AsyncMock,
             ),
             patch(
-                "jenkins_job_insight.main.storage.make_classifications_visible",
-                new_callable=AsyncMock,
-            ),
-            patch(
-                "jenkins_job_insight.main._preserve_request_params",
+                "rootcoz.main._preserve_request_params",
                 new_callable=AsyncMock,
             ),
         ):
@@ -2826,8 +2796,8 @@ class TestProcessAnalysisWaiting:
     @pytest.mark.asyncio
     async def test_wait_for_completion_false_skips_waiting(self) -> None:
         """When wait_for_completion=False, skip waiting entirely."""
-        from jenkins_job_insight.main import process_analysis_with_id
-        from jenkins_job_insight.models import AnalyzeRequest
+        from rootcoz.main import process_analysis_with_id
+        from rootcoz.models import AnalyzeRequest
 
         body = AnalyzeRequest(
             job_name="my-job",
@@ -2848,28 +2818,26 @@ class TestProcessAnalysisWaiting:
 
         with (
             patch(
-                "jenkins_job_insight.main._wait_for_jenkins_completion",
+                "rootcoz.main._wait_for_jenkins_completion",
                 new_callable=AsyncMock,
             ) as mock_wait,
-            patch("jenkins_job_insight.main.update_status", side_effect=capture_status),
+            patch("rootcoz.main.update_status", side_effect=capture_status),
             patch(
-                "jenkins_job_insight.main.update_progress_phase",
+                "rootcoz.main.update_progress_phase",
+                new_callable=AsyncMock,
+            ),
+            patch("rootcoz.main.analyze_job", new_callable=AsyncMock) as mock_analyze,
+            patch("rootcoz.main._resolve_enable_jira", return_value=False),
+            patch(
+                "rootcoz.main.populate_failure_history",
                 new_callable=AsyncMock,
             ),
             patch(
-                "jenkins_job_insight.main.analyze_job", new_callable=AsyncMock
-            ) as mock_analyze,
-            patch("jenkins_job_insight.main._resolve_enable_jira", return_value=False),
-            patch(
-                "jenkins_job_insight.main.populate_failure_history",
+                "rootcoz.main.storage.make_classifications_visible",
                 new_callable=AsyncMock,
             ),
             patch(
-                "jenkins_job_insight.main.storage.make_classifications_visible",
-                new_callable=AsyncMock,
-            ),
-            patch(
-                "jenkins_job_insight.main._preserve_request_params",
+                "rootcoz.main._preserve_request_params",
                 new_callable=AsyncMock,
             ),
         ):
@@ -2886,8 +2854,8 @@ class TestProcessAnalysisWaiting:
     @pytest.mark.asyncio
     async def test_wait_timeout_marks_failed(self) -> None:
         """When waiting times out, the job is marked as failed."""
-        from jenkins_job_insight.main import process_analysis_with_id
-        from jenkins_job_insight.models import AnalyzeRequest
+        from rootcoz.main import process_analysis_with_id
+        from rootcoz.models import AnalyzeRequest
 
         body = AnalyzeRequest(
             job_name="my-job",
@@ -2913,23 +2881,21 @@ class TestProcessAnalysisWaiting:
 
         with (
             patch(
-                "jenkins_job_insight.main._wait_for_jenkins_completion",
+                "rootcoz.main._wait_for_jenkins_completion",
                 new_callable=AsyncMock,
                 return_value=(
                     False,
                     "Timed out waiting for Jenkins job my-job #1 after 10 minutes",
                 ),
             ),
-            patch("jenkins_job_insight.main.update_status", side_effect=capture_status),
+            patch("rootcoz.main.update_status", side_effect=capture_status),
             patch(
-                "jenkins_job_insight.main.update_progress_phase",
+                "rootcoz.main.update_progress_phase",
                 new_callable=AsyncMock,
             ),
+            patch("rootcoz.main.analyze_job", new_callable=AsyncMock) as mock_analyze,
             patch(
-                "jenkins_job_insight.main.analyze_job", new_callable=AsyncMock
-            ) as mock_analyze,
-            patch(
-                "jenkins_job_insight.main._preserve_request_params",
+                "rootcoz.main._preserve_request_params",
                 new_callable=AsyncMock,
             ) as mock_preserve,
         ):
@@ -2950,8 +2916,8 @@ class TestProcessAnalysisWaiting:
     @pytest.mark.asyncio
     async def test_no_jenkins_url_skips_waiting(self) -> None:
         """When jenkins_url is empty, skip waiting even if wait_for_completion=True."""
-        from jenkins_job_insight.main import process_analysis_with_id
-        from jenkins_job_insight.models import AnalyzeRequest
+        from rootcoz.main import process_analysis_with_id
+        from rootcoz.models import AnalyzeRequest
 
         body = AnalyzeRequest(
             job_name="my-job",
@@ -2974,28 +2940,26 @@ class TestProcessAnalysisWaiting:
 
         with (
             patch(
-                "jenkins_job_insight.main._wait_for_jenkins_completion",
+                "rootcoz.main._wait_for_jenkins_completion",
                 new_callable=AsyncMock,
             ) as mock_wait,
-            patch("jenkins_job_insight.main.update_status", side_effect=capture_status),
+            patch("rootcoz.main.update_status", side_effect=capture_status),
             patch(
-                "jenkins_job_insight.main.update_progress_phase",
+                "rootcoz.main.update_progress_phase",
+                new_callable=AsyncMock,
+            ),
+            patch("rootcoz.main.analyze_job", new_callable=AsyncMock) as mock_analyze,
+            patch("rootcoz.main._resolve_enable_jira", return_value=False),
+            patch(
+                "rootcoz.main.populate_failure_history",
                 new_callable=AsyncMock,
             ),
             patch(
-                "jenkins_job_insight.main.analyze_job", new_callable=AsyncMock
-            ) as mock_analyze,
-            patch("jenkins_job_insight.main._resolve_enable_jira", return_value=False),
-            patch(
-                "jenkins_job_insight.main.populate_failure_history",
+                "rootcoz.main.storage.make_classifications_visible",
                 new_callable=AsyncMock,
             ),
             patch(
-                "jenkins_job_insight.main.storage.make_classifications_visible",
-                new_callable=AsyncMock,
-            ),
-            patch(
-                "jenkins_job_insight.main._preserve_request_params",
+                "rootcoz.main._preserve_request_params",
                 new_callable=AsyncMock,
             ),
         ):
@@ -3016,8 +2980,8 @@ class TestBuildRequestParams:
 
     def test_serializes_all_fields(self, mock_settings) -> None:
         """All expected fields are present in the returned dict."""
-        from jenkins_job_insight.main import _build_request_params
-        from jenkins_job_insight.models import AnalyzeRequest
+        from rootcoz.main import _build_request_params
+        from rootcoz.models import AnalyzeRequest
 
         body = AnalyzeRequest(
             job_name="my-job",
@@ -3040,9 +3004,9 @@ class TestBuildRequestParams:
         """SecretStr values are encrypted, not stored as plaintext."""
         from pydantic import SecretStr
 
-        from jenkins_job_insight.encryption import SENSITIVE_KEYS, _ENCRYPTED_PREFIX
-        from jenkins_job_insight.main import _build_request_params
-        from jenkins_job_insight.models import AnalyzeRequest
+        from rootcoz.encryption import SENSITIVE_KEYS, _ENCRYPTED_PREFIX
+        from rootcoz.main import _build_request_params
+        from rootcoz.models import AnalyzeRequest
 
         body = AnalyzeRequest(
             job_name="j",
@@ -3072,13 +3036,13 @@ class TestReconstructFromParams:
         Uses _build_request_params to produce the persisted payload, validating
         the round-trip serializer/encryption contract.
         """
-        from jenkins_job_insight.config import get_settings
-        from jenkins_job_insight.main import (
+        from rootcoz.config import get_settings
+        from rootcoz.main import (
             _build_request_params,
             _merge_settings,
             _reconstruct_from_params,
         )
-        from jenkins_job_insight.models import AnalyzeRequest
+        from rootcoz.models import AnalyzeRequest
 
         settings = get_settings()
         body_in = AnalyzeRequest(
@@ -3112,7 +3076,7 @@ class TestReconstructFromParams:
 
     def test_missing_optional_fields_use_defaults(self, mock_settings) -> None:
         """Minimal request_params still produce valid objects."""
-        from jenkins_job_insight.main import _reconstruct_from_params
+        from rootcoz.main import _reconstruct_from_params
 
         result_data = {
             "job_name": "j",
@@ -3128,7 +3092,7 @@ class TestReconstructFromParams:
 
     def test_reconstruct_rehydrates_tests_repo_ref(self, mock_settings) -> None:
         """tests_repo_ref is recomposed with tests_repo_url during reconstruction."""
-        from jenkins_job_insight.main import _reconstruct_from_params
+        from rootcoz.main import _reconstruct_from_params
 
         result_data = {
             "job_name": "j",
@@ -3152,9 +3116,9 @@ class TestResumeWaitingJobs:
 
     async def test_resumes_valid_waiting_job(self, mock_settings) -> None:
         """A waiting job with valid request_params spawns a background task."""
-        from jenkins_job_insight.config import get_settings
-        from jenkins_job_insight.main import _build_request_params, _resume_waiting_jobs
-        from jenkins_job_insight.models import AnalyzeRequest
+        from rootcoz.config import get_settings
+        from rootcoz.main import _build_request_params, _resume_waiting_jobs
+        from rootcoz.models import AnalyzeRequest
 
         settings = get_settings()
         body_in = AnalyzeRequest(
@@ -3179,7 +3143,7 @@ class TestResumeWaitingJobs:
             }
         ]
         with patch(
-            "jenkins_job_insight.main.process_analysis_with_id",
+            "rootcoz.main.process_analysis_with_id",
             new_callable=AsyncMock,
         ) as mock_process:
             await _resume_waiting_jobs(waiting_jobs)
@@ -3197,7 +3161,7 @@ class TestResumeWaitingJobs:
         self, mock_settings, temp_db_path: Path
     ) -> None:
         """Waiting job without request_params is marked as failed."""
-        from jenkins_job_insight.main import _resume_waiting_jobs
+        from rootcoz.main import _resume_waiting_jobs
 
         with patch.object(storage, "DB_PATH", temp_db_path):
             await storage.init_db()
@@ -3256,9 +3220,9 @@ class TestLifespanResumesWaitingJobs:
         """Waiting jobs are resumed (not failed) when the app starts."""
         import json
 
-        from jenkins_job_insight.config import get_settings
-        from jenkins_job_insight.main import _build_request_params
-        from jenkins_job_insight.models import AnalyzeRequest
+        from rootcoz.config import get_settings
+        from rootcoz.main import _build_request_params
+        from rootcoz.models import AnalyzeRequest
 
         settings = get_settings()
         body_in = AnalyzeRequest(
@@ -3287,7 +3251,7 @@ class TestLifespanResumesWaitingJobs:
 
         with patch.object(storage, "DB_PATH", temp_db_path):
             with patch(
-                "jenkins_job_insight.main.process_analysis_with_id",
+                "rootcoz.main.process_analysis_with_id",
                 new_callable=AsyncMock,
             ) as mock_process:
                 import threading
@@ -3302,11 +3266,9 @@ class TestLifespanResumesWaitingJobs:
 
                 mock_process.side_effect = _signal_and_call
                 # Patch away the startup delay so the deferred task runs immediately
-                with patch(
-                    "jenkins_job_insight.main.asyncio.sleep", new_callable=AsyncMock
-                ):
+                with patch("rootcoz.main.asyncio.sleep", new_callable=AsyncMock):
                     from starlette.testclient import TestClient
-                    from jenkins_job_insight.main import app
+                    from rootcoz.main import app
 
                     with TestClient(app):
                         called_event.wait(timeout=5)
@@ -3338,7 +3300,7 @@ class TestLifespanResumesWaitingJobs:
 
         with patch.object(storage, "DB_PATH", temp_db_path):
             from starlette.testclient import TestClient
-            from jenkins_job_insight.main import app
+            from rootcoz.main import app
 
             with TestClient(app):
                 pass
@@ -3362,7 +3324,7 @@ class TestPeerAnalysisParams:
 
     def test_analyze_with_peer_ai_configs_in_body(self, test_client) -> None:
         """POST /analyze with peer_ai_configs passes them to process_analysis_with_id."""
-        with patch("jenkins_job_insight.main.process_analysis_with_id") as mock_process:
+        with patch("rootcoz.main.process_analysis_with_id") as mock_process:
             response = test_client.post(
                 "/analyze",
                 json={
@@ -3389,7 +3351,7 @@ class TestPeerAnalysisParams:
 
     def test_analyze_without_peers_backward_compatible(self, test_client) -> None:
         """POST /analyze without peer fields works unchanged."""
-        with patch("jenkins_job_insight.main.process_analysis_with_id") as mock_process:
+        with patch("rootcoz.main.process_analysis_with_id") as mock_process:
             response = test_client.post(
                 "/analyze",
                 json={
@@ -3407,8 +3369,8 @@ class TestPeerAnalysisParams:
 
     def test_analyze_merge_settings_peer_analysis_max_rounds(self, test_client) -> None:
         """peer_analysis_max_rounds in request body overrides env default via _merge_settings."""
-        from jenkins_job_insight.main import _merge_settings
-        from jenkins_job_insight.models import AnalyzeRequest
+        from rootcoz.main import _merge_settings
+        from rootcoz.models import AnalyzeRequest
 
         body = AnalyzeRequest(
             job_name="test",
@@ -3425,8 +3387,8 @@ class TestPeerAnalysisParams:
         self,
     ) -> None:
         """Omitted peer_analysis_max_rounds in request preserves non-default server setting."""
-        from jenkins_job_insight.main import _merge_settings
-        from jenkins_job_insight.models import AnalyzeRequest
+        from rootcoz.main import _merge_settings
+        from rootcoz.models import AnalyzeRequest
 
         body = AnalyzeRequest(
             job_name="test",
@@ -3442,8 +3404,8 @@ class TestPeerAnalysisParams:
 
     def test_merge_settings_max_concurrent_ai_calls_override(self) -> None:
         """max_concurrent_ai_calls in request body overrides env default via _merge_settings."""
-        from jenkins_job_insight.main import _merge_settings
-        from jenkins_job_insight.models import AnalyzeRequest
+        from rootcoz.main import _merge_settings
+        from rootcoz.models import AnalyzeRequest
 
         body = AnalyzeRequest(
             job_name="test",
@@ -3460,8 +3422,8 @@ class TestPeerAnalysisParams:
         self,
     ) -> None:
         """Omitted max_concurrent_ai_calls preserves the existing server setting."""
-        from jenkins_job_insight.main import _merge_settings
-        from jenkins_job_insight.models import AnalyzeRequest
+        from rootcoz.main import _merge_settings
+        from rootcoz.models import AnalyzeRequest
 
         body = AnalyzeRequest(
             job_name="test",
@@ -3475,8 +3437,8 @@ class TestPeerAnalysisParams:
 
     def test_resolve_peer_ai_configs_none_uses_env(self, test_client) -> None:
         """When peer_ai_configs is None in request, _resolve_peer_ai_configs falls back to env default."""
-        from jenkins_job_insight.main import _merge_settings, _resolve_peer_ai_configs
-        from jenkins_job_insight.models import AnalyzeRequest
+        from rootcoz.main import _merge_settings, _resolve_peer_ai_configs
+        from rootcoz.models import AnalyzeRequest
 
         body = AnalyzeRequest(
             job_name="test",
@@ -3492,8 +3454,8 @@ class TestPeerAnalysisParams:
 
     def test_resolve_peer_ai_configs_uses_env_when_set(self, test_client) -> None:
         """When PEER_AI_CONFIGS env var is set and request omits peer_ai_configs, env default is used."""
-        from jenkins_job_insight.main import _resolve_peer_ai_configs
-        from jenkins_job_insight.models import AnalyzeRequest
+        from rootcoz.main import _resolve_peer_ai_configs
+        from rootcoz.models import AnalyzeRequest
 
         body = AnalyzeRequest(
             job_name="test",
@@ -3512,8 +3474,8 @@ class TestPeerAnalysisParams:
 
     def test_resolve_peer_ai_configs_explicit_empty_disables_peers(self) -> None:
         """Explicit peer_ai_configs=[] disables peers even when PEER_AI_CONFIGS env var is set."""
-        from jenkins_job_insight.main import _resolve_peer_ai_configs
-        from jenkins_job_insight.models import AnalyzeRequest
+        from rootcoz.main import _resolve_peer_ai_configs
+        from rootcoz.models import AnalyzeRequest
 
         body = AnalyzeRequest(
             job_name="test",
@@ -3530,13 +3492,13 @@ class TestPeerAnalysisParams:
 
     def test_build_reconstruct_roundtrip_peer_params(self, mock_settings) -> None:
         """peer_ai_configs and peer_analysis_max_rounds round-trip through build/reconstruct."""
-        from jenkins_job_insight.config import get_settings
-        from jenkins_job_insight.main import (
+        from rootcoz.config import get_settings
+        from rootcoz.main import (
             _build_request_params,
             _merge_settings,
             _reconstruct_from_params,
         )
-        from jenkins_job_insight.models import AnalyzeRequest
+        from rootcoz.models import AnalyzeRequest
 
         settings = get_settings()
         peer_configs = [
@@ -3581,19 +3543,19 @@ class TestPeerAnalysisParams:
             ),
         )
 
-        with patch("jenkins_job_insight.main.RepositoryManager") as mock_repo_cls:
+        with patch("rootcoz.main.RepositoryManager") as mock_repo_cls:
             mock_repo_instance = mock_repo_cls.return_value
             mock_repo_instance.clone.return_value = None
             mock_repo_instance.cleanup.return_value = None
 
             with patch(
-                "jenkins_job_insight.main.analyze_failure_group",
+                "rootcoz.main.analyze_failure_group",
                 new_callable=AsyncMock,
             ) as mock_analyze_group:
                 mock_analyze_group.return_value = [mock_analysis]
 
                 with patch(
-                    "jenkins_job_insight.main.run_parallel_with_limit",
+                    "rootcoz.main.run_parallel_with_limit",
                     new_callable=AsyncMock,
                 ) as mock_parallel:
 
@@ -3638,8 +3600,8 @@ class TestPeerAnalysisParams:
         self, mock_settings
     ) -> None:
         """_build_request_params stores the resolved peer configs, not raw body."""
-        from jenkins_job_insight.main import _build_request_params
-        from jenkins_job_insight.models import AnalyzeRequest
+        from rootcoz.main import _build_request_params
+        from rootcoz.models import AnalyzeRequest
 
         # Body has peer_ai_configs=None (not provided by caller)
         body = AnalyzeRequest(
@@ -3667,12 +3629,12 @@ class TestPeerAnalysisParams:
 
     def test_reconstruct_uses_stored_peer_configs_directly(self, mock_settings) -> None:
         """_reconstruct_from_params uses stored peer_ai_configs without re-resolving from env."""
-        from jenkins_job_insight.main import (
+        from rootcoz.main import (
             _build_request_params,
             _merge_settings,
             _reconstruct_from_params,
         )
-        from jenkins_job_insight.models import AnalyzeRequest
+        from rootcoz.models import AnalyzeRequest
 
         settings = Settings()
         body_in = AnalyzeRequest(
@@ -3702,12 +3664,12 @@ class TestPeerAnalysisParams:
 
     def test_reconstruct_empty_peer_configs_preserved(self, mock_settings) -> None:
         """When peer_ai_configs was explicitly disabled ([]), reconstruction preserves empty list."""
-        from jenkins_job_insight.main import (
+        from rootcoz.main import (
             _build_request_params,
             _merge_settings,
             _reconstruct_from_params,
         )
-        from jenkins_job_insight.models import AnalyzeRequest
+        from rootcoz.models import AnalyzeRequest
 
         settings = Settings()
         body_in = AnalyzeRequest(
@@ -3733,7 +3695,7 @@ class TestPeerAnalysisParams:
 
     def test_reconstruct_legacy_job_missing_peer_key(self, mock_settings) -> None:
         """Legacy waiting jobs without peer_ai_configs key get [] (disabled), not None."""
-        from jenkins_job_insight.main import _reconstruct_from_params
+        from rootcoz.main import _reconstruct_from_params
 
         # Simulate a legacy stored job that predates the peer analysis feature
         legacy_params = {
@@ -3760,8 +3722,8 @@ class TestProgressPhaseTracking:
     @pytest.mark.asyncio
     async def test_progress_phases_with_jenkins_wait(self) -> None:
         """When waiting for Jenkins, progress phases include waiting_for_jenkins and analyzing."""
-        from jenkins_job_insight.main import process_analysis_with_id
-        from jenkins_job_insight.models import AnalyzeRequest
+        from rootcoz.main import process_analysis_with_id
+        from rootcoz.models import AnalyzeRequest
 
         body = AnalyzeRequest(
             job_name="my-job",
@@ -3788,29 +3750,27 @@ class TestProgressPhaseTracking:
 
         with (
             patch(
-                "jenkins_job_insight.main._wait_for_jenkins_completion",
+                "rootcoz.main._wait_for_jenkins_completion",
                 new_callable=AsyncMock,
                 return_value=(True, ""),
             ),
-            patch("jenkins_job_insight.main.update_status", new_callable=AsyncMock),
+            patch("rootcoz.main.update_status", new_callable=AsyncMock),
             patch(
-                "jenkins_job_insight.main.update_progress_phase",
+                "rootcoz.main.update_progress_phase",
                 side_effect=capture_phase,
             ),
+            patch("rootcoz.main.analyze_job", new_callable=AsyncMock) as mock_analyze,
+            patch("rootcoz.main._resolve_enable_jira", return_value=False),
             patch(
-                "jenkins_job_insight.main.analyze_job", new_callable=AsyncMock
-            ) as mock_analyze,
-            patch("jenkins_job_insight.main._resolve_enable_jira", return_value=False),
-            patch(
-                "jenkins_job_insight.main.populate_failure_history",
+                "rootcoz.main.populate_failure_history",
                 new_callable=AsyncMock,
             ),
             patch(
-                "jenkins_job_insight.main.storage.make_classifications_visible",
+                "rootcoz.main.storage.make_classifications_visible",
                 new_callable=AsyncMock,
             ),
             patch(
-                "jenkins_job_insight.main._preserve_request_params",
+                "rootcoz.main._preserve_request_params",
                 new_callable=AsyncMock,
             ),
         ):
@@ -3830,8 +3790,8 @@ class TestProgressPhaseTracking:
     @pytest.mark.asyncio
     async def test_progress_phases_without_jenkins_wait(self) -> None:
         """When not waiting for Jenkins, phases skip waiting_for_jenkins."""
-        from jenkins_job_insight.main import process_analysis_with_id
-        from jenkins_job_insight.models import AnalyzeRequest
+        from rootcoz.main import process_analysis_with_id
+        from rootcoz.models import AnalyzeRequest
 
         body = AnalyzeRequest(
             job_name="my-job",
@@ -3851,25 +3811,23 @@ class TestProgressPhaseTracking:
             phases.append(phase)
 
         with (
-            patch("jenkins_job_insight.main.update_status", new_callable=AsyncMock),
+            patch("rootcoz.main.update_status", new_callable=AsyncMock),
             patch(
-                "jenkins_job_insight.main.update_progress_phase",
+                "rootcoz.main.update_progress_phase",
                 side_effect=capture_phase,
             ),
+            patch("rootcoz.main.analyze_job", new_callable=AsyncMock) as mock_analyze,
+            patch("rootcoz.main._resolve_enable_jira", return_value=False),
             patch(
-                "jenkins_job_insight.main.analyze_job", new_callable=AsyncMock
-            ) as mock_analyze,
-            patch("jenkins_job_insight.main._resolve_enable_jira", return_value=False),
-            patch(
-                "jenkins_job_insight.main.populate_failure_history",
+                "rootcoz.main.populate_failure_history",
                 new_callable=AsyncMock,
             ),
             patch(
-                "jenkins_job_insight.main.storage.make_classifications_visible",
+                "rootcoz.main.storage.make_classifications_visible",
                 new_callable=AsyncMock,
             ),
             patch(
-                "jenkins_job_insight.main._preserve_request_params",
+                "rootcoz.main._preserve_request_params",
                 new_callable=AsyncMock,
             ),
         ):
@@ -3887,8 +3845,8 @@ class TestProgressPhaseTracking:
     @pytest.mark.asyncio
     async def test_progress_phases_with_jira_enrichment(self) -> None:
         """When Jira enrichment is enabled, progress includes enriching_jira phase."""
-        from jenkins_job_insight.main import process_analysis_with_id
-        from jenkins_job_insight.models import AnalyzeRequest
+        from rootcoz.main import process_analysis_with_id
+        from rootcoz.models import AnalyzeRequest
 
         body = AnalyzeRequest(
             job_name="my-job",
@@ -3908,29 +3866,27 @@ class TestProgressPhaseTracking:
             phases.append(phase)
 
         with (
-            patch("jenkins_job_insight.main.update_status", new_callable=AsyncMock),
+            patch("rootcoz.main.update_status", new_callable=AsyncMock),
             patch(
-                "jenkins_job_insight.main.update_progress_phase",
+                "rootcoz.main.update_progress_phase",
                 side_effect=capture_phase,
             ),
+            patch("rootcoz.main.analyze_job", new_callable=AsyncMock) as mock_analyze,
+            patch("rootcoz.main._resolve_enable_jira", return_value=True),
             patch(
-                "jenkins_job_insight.main.analyze_job", new_callable=AsyncMock
-            ) as mock_analyze,
-            patch("jenkins_job_insight.main._resolve_enable_jira", return_value=True),
-            patch(
-                "jenkins_job_insight.main._enrich_result_with_jira",
+                "rootcoz.main._enrich_result_with_jira",
                 new_callable=AsyncMock,
             ),
             patch(
-                "jenkins_job_insight.main.populate_failure_history",
+                "rootcoz.main.populate_failure_history",
                 new_callable=AsyncMock,
             ),
             patch(
-                "jenkins_job_insight.main.storage.make_classifications_visible",
+                "rootcoz.main.storage.make_classifications_visible",
                 new_callable=AsyncMock,
             ),
             patch(
-                "jenkins_job_insight.main._preserve_request_params",
+                "rootcoz.main._preserve_request_params",
                 new_callable=AsyncMock,
             ),
         ):
@@ -3948,8 +3904,8 @@ class TestProgressPhaseTracking:
     @pytest.mark.asyncio
     async def test_progress_phase_exception_does_not_crash_analysis(self) -> None:
         """update_progress_phase raising an exception must not abort the analysis."""
-        from jenkins_job_insight.main import process_analysis_with_id
-        from jenkins_job_insight.models import AnalyzeRequest
+        from rootcoz.main import process_analysis_with_id
+        from rootcoz.models import AnalyzeRequest
 
         body = AnalyzeRequest(
             job_name="my-job",
@@ -3964,27 +3920,23 @@ class TestProgressPhaseTracking:
         )
 
         with (
+            patch("rootcoz.main.update_status", new_callable=AsyncMock) as mock_status,
             patch(
-                "jenkins_job_insight.main.update_status", new_callable=AsyncMock
-            ) as mock_status,
-            patch(
-                "jenkins_job_insight.main.update_progress_phase",
+                "rootcoz.main.update_progress_phase",
                 side_effect=RuntimeError("DB connection lost"),
             ),
+            patch("rootcoz.main.analyze_job", new_callable=AsyncMock) as mock_analyze,
+            patch("rootcoz.main._resolve_enable_jira", return_value=False),
             patch(
-                "jenkins_job_insight.main.analyze_job", new_callable=AsyncMock
-            ) as mock_analyze,
-            patch("jenkins_job_insight.main._resolve_enable_jira", return_value=False),
-            patch(
-                "jenkins_job_insight.main.populate_failure_history",
+                "rootcoz.main.populate_failure_history",
                 new_callable=AsyncMock,
             ),
             patch(
-                "jenkins_job_insight.main.storage.make_classifications_visible",
+                "rootcoz.main.storage.make_classifications_visible",
                 new_callable=AsyncMock,
             ),
             patch(
-                "jenkins_job_insight.main._preserve_request_params",
+                "rootcoz.main._preserve_request_params",
                 new_callable=AsyncMock,
             ),
         ):
@@ -4015,8 +3967,8 @@ class TestRequestParamsPreservation:
         self, temp_db_path: Path
     ) -> None:
         """request_params saved initially must survive when analysis completes."""
-        from jenkins_job_insight.main import process_analysis_with_id
-        from jenkins_job_insight.models import AnalyzeRequest
+        from rootcoz.main import process_analysis_with_id
+        from rootcoz.models import AnalyzeRequest
 
         body = AnalyzeRequest(
             job_name="my-job",
@@ -4057,19 +4009,19 @@ class TestRequestParamsPreservation:
 
             with (
                 patch(
-                    "jenkins_job_insight.main.analyze_job",
+                    "rootcoz.main.analyze_job",
                     new_callable=AsyncMock,
                 ) as mock_analyze,
                 patch(
-                    "jenkins_job_insight.main._resolve_enable_jira",
+                    "rootcoz.main._resolve_enable_jira",
                     return_value=False,
                 ),
                 patch(
-                    "jenkins_job_insight.main.populate_failure_history",
+                    "rootcoz.main.populate_failure_history",
                     new_callable=AsyncMock,
                 ),
                 patch(
-                    "jenkins_job_insight.main.storage.make_classifications_visible",
+                    "rootcoz.main.storage.make_classifications_visible",
                     new_callable=AsyncMock,
                 ),
             ):
@@ -4117,8 +4069,8 @@ class TestRequestParamsPreservation:
         self, temp_db_path: Path
     ) -> None:
         """request_params saved initially must survive when analysis fails."""
-        from jenkins_job_insight.main import process_analysis_with_id
-        from jenkins_job_insight.models import AnalyzeRequest
+        from rootcoz.main import process_analysis_with_id
+        from rootcoz.models import AnalyzeRequest
 
         body = AnalyzeRequest(
             job_name="my-job",
@@ -4152,7 +4104,7 @@ class TestRequestParamsPreservation:
             )
 
             with patch(
-                "jenkins_job_insight.main.analyze_job",
+                "rootcoz.main.analyze_job",
                 new_callable=AsyncMock,
                 side_effect=RuntimeError("AI CLI crashed"),
             ):
@@ -4179,18 +4131,18 @@ class TestRequestParamsPreservation:
             ),
         )
 
-        with patch("jenkins_job_insight.main.RepositoryManager") as mock_repo_cls:
+        with patch("rootcoz.main.RepositoryManager") as mock_repo_cls:
             mock_repo_instance = mock_repo_cls.return_value
             mock_repo_instance.clone.return_value = None
             mock_repo_instance.cleanup.return_value = None
 
             with (
                 patch(
-                    "jenkins_job_insight.main.analyze_failure_group",
+                    "rootcoz.main.analyze_failure_group",
                     new_callable=AsyncMock,
                 ) as mock_analyze_group,
                 patch(
-                    "jenkins_job_insight.main.run_parallel_with_limit",
+                    "rootcoz.main.run_parallel_with_limit",
                     new_callable=AsyncMock,
                 ) as mock_parallel,
             ):
@@ -4248,7 +4200,7 @@ class TestReAnalyzeEndpoint:
     @pytest.mark.asyncio
     async def test_re_analyze_no_request_params(self, test_client) -> None:
         """Re-analyze returns 400 when original has no request_params."""
-        from jenkins_job_insight import storage
+        from rootcoz import storage
 
         # Save a result WITHOUT request_params
         await storage.save_result(
@@ -4264,7 +4216,7 @@ class TestReAnalyzeEndpoint:
     @pytest.mark.asyncio
     async def test_re_analyze_success(self, test_client) -> None:
         """Re-analyze returns 202 with new job_id when original has request_params."""
-        from jenkins_job_insight import storage
+        from rootcoz import storage
 
         # Save a result WITH request_params (mimicking a completed analysis)
         result_data = {
@@ -4290,7 +4242,7 @@ class TestReAnalyzeEndpoint:
             "completed",
             result_data,
         )
-        with patch("jenkins_job_insight.main.process_analysis_with_id") as mock_process:
+        with patch("rootcoz.main.process_analysis_with_id") as mock_process:
             response = test_client.post("/re-analyze/job-reanalyze-ok", json={})
         assert response.status_code == 202
         data = response.json()
@@ -4307,7 +4259,7 @@ class TestBuildEffectiveJiraSettings:
 
     def test_no_user_token_returns_original(self):
         """When no user token, original settings returned unchanged."""
-        from jenkins_job_insight.main import _build_effective_jira_settings
+        from rootcoz.main import _build_effective_jira_settings
 
         settings = Settings()
         result = _build_effective_jira_settings(settings, "", "")
@@ -4315,7 +4267,7 @@ class TestBuildEffectiveJiraSettings:
 
     def test_user_token_clears_server_pat(self):
         """User token clears server PAT so it takes precedence."""
-        from jenkins_job_insight.main import _build_effective_jira_settings
+        from rootcoz.main import _build_effective_jira_settings
 
         settings = Settings(
             jira_url="https://jira.example.com",
@@ -4329,7 +4281,7 @@ class TestBuildEffectiveJiraSettings:
 
     def test_user_token_without_email_clears_server_email(self):
         """User token without email clears server email to avoid mismatched Cloud auth."""
-        from jenkins_job_insight.main import _build_effective_jira_settings
+        from rootcoz.main import _build_effective_jira_settings
 
         settings = Settings(
             jira_url="https://jira.example.com",
@@ -4343,7 +4295,7 @@ class TestBuildEffectiveJiraSettings:
 
     def test_user_token_with_email_sets_both(self):
         """User token with email sets both for Cloud auth."""
-        from jenkins_job_insight.main import _build_effective_jira_settings
+        from rootcoz.main import _build_effective_jira_settings
 
         settings = Settings(
             jira_url="https://jira.example.com",
@@ -4358,7 +4310,7 @@ class TestBuildEffectiveJiraSettings:
 
     def test_original_settings_not_mutated(self):
         """model_copy must not mutate the original Settings instance."""
-        from jenkins_job_insight.main import _build_effective_jira_settings
+        from rootcoz.main import _build_effective_jira_settings
 
         settings = Settings(
             jira_url="https://jira.example.com",
@@ -4377,7 +4329,7 @@ class TestValidateToken:
 
     @pytest.mark.asyncio
     async def test_github_valid_token(self, test_client):
-        with patch("jenkins_job_insight.main.httpx.AsyncClient") as mock_client_class:
+        with patch("rootcoz.main.httpx.AsyncClient") as mock_client_class:
             mock_resp = MagicMock()
             mock_resp.status_code = 200
             mock_resp.raise_for_status = MagicMock()
@@ -4400,7 +4352,7 @@ class TestValidateToken:
     async def test_github_invalid_token(self, test_client):
         import httpx
 
-        with patch("jenkins_job_insight.main.httpx.AsyncClient") as mock_client_class:
+        with patch("rootcoz.main.httpx.AsyncClient") as mock_client_class:
             mock_resp = MagicMock()
             mock_resp.status_code = 401
             mock_resp.raise_for_status.side_effect = httpx.HTTPStatusError(
@@ -4452,13 +4404,13 @@ class TestJiraProjectsEndpoint:
     @pytest.mark.asyncio
     async def test_returns_projects(self, test_client):
         """Returns project list from JiraClient.list_projects."""
-        from jenkins_job_insight.main import app, get_settings
+        from rootcoz.main import app, get_settings
 
         projects = [{"key": "PROJ", "name": "My Project"}]
         jira_settings = _build_wait_settings(jira_url="https://jira.example.com")
         app.dependency_overrides[get_settings] = lambda: jira_settings
         try:
-            with patch("jenkins_job_insight.jira.JiraClient") as MockJiraClient:
+            with patch("rootcoz.jira.JiraClient") as MockJiraClient:
                 mock_client = AsyncMock()
                 mock_client.list_projects = AsyncMock(return_value=projects)
                 mock_client.__aenter__ = AsyncMock(return_value=mock_client)
@@ -4488,7 +4440,7 @@ class TestJiraSecurityLevelsEndpoint:
 
     def test_no_token_returns_empty(self, test_client):
         """No jira_token returns empty list."""
-        from jenkins_job_insight.main import app, get_settings
+        from rootcoz.main import app, get_settings
 
         jira_settings = _build_wait_settings(jira_url="https://jira.example.com")
         app.dependency_overrides[get_settings] = lambda: jira_settings
@@ -4504,13 +4456,13 @@ class TestJiraSecurityLevelsEndpoint:
     @pytest.mark.asyncio
     async def test_returns_security_levels(self, test_client):
         """Returns security levels from JiraClient.list_security_levels."""
-        from jenkins_job_insight.main import app, get_settings
+        from rootcoz.main import app, get_settings
 
         levels = [{"id": "10", "name": "Internal", "description": "Internal only"}]
         jira_settings = _build_wait_settings(jira_url="https://jira.example.com")
         app.dependency_overrides[get_settings] = lambda: jira_settings
         try:
-            with patch("jenkins_job_insight.jira.JiraClient") as MockJiraClient:
+            with patch("rootcoz.jira.JiraClient") as MockJiraClient:
                 mock_client = AsyncMock()
                 mock_client.list_security_levels = AsyncMock(return_value=levels)
                 mock_client.__aenter__ = AsyncMock(return_value=mock_client)
@@ -4537,8 +4489,8 @@ class TestMergeSettingsForce:
 
     def test_force_true_in_request_sets_force_analysis(self) -> None:
         """When request.force=True is explicitly set, merged settings have force_analysis=True."""
-        from jenkins_job_insight.main import _merge_settings
-        from jenkins_job_insight.models import AnalyzeRequest
+        from rootcoz.main import _merge_settings
+        from rootcoz.models import AnalyzeRequest
 
         body = AnalyzeRequest(
             job_name="test",
@@ -4551,8 +4503,8 @@ class TestMergeSettingsForce:
 
     def test_force_false_in_request_sets_force_analysis_false(self) -> None:
         """When request.force=False is explicitly set, merged settings have force_analysis=False."""
-        from jenkins_job_insight.main import _merge_settings
-        from jenkins_job_insight.models import AnalyzeRequest
+        from rootcoz.main import _merge_settings
+        from rootcoz.models import AnalyzeRequest
 
         body = AnalyzeRequest(
             job_name="test",
@@ -4568,8 +4520,8 @@ class TestMergeSettingsForce:
 
     def test_force_omitted_preserves_settings_default(self) -> None:
         """When force is omitted from request, settings.force_analysis is preserved."""
-        from jenkins_job_insight.main import _merge_settings
-        from jenkins_job_insight.models import AnalyzeRequest
+        from rootcoz.main import _merge_settings
+        from rootcoz.models import AnalyzeRequest
 
         body = AnalyzeRequest(
             job_name="test",
@@ -4583,8 +4535,8 @@ class TestMergeSettingsForce:
 
     def test_force_omitted_default_false(self) -> None:
         """When force is omitted and settings default, force_analysis is False."""
-        from jenkins_job_insight.main import _merge_settings
-        from jenkins_job_insight.models import AnalyzeRequest
+        from rootcoz.main import _merge_settings
+        from rootcoz.models import AnalyzeRequest
 
         body = AnalyzeRequest(
             job_name="test",

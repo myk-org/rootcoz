@@ -5,15 +5,15 @@ from unittest.mock import MagicMock, patch
 import pytest
 import requests as _requests
 
-import jenkins_job_insight.reportportal as rp_module
-from jenkins_job_insight.reportportal import ReportPortalClient
+import rootcoz.reportportal as rp_module
+from rootcoz.reportportal import ReportPortalClient
 
 
 # -- Classification mapping tests -------------------------------------------
 
 
 class TestClassificationMapping:
-    """Test JJI-to-RP classification mapping."""
+    """Test rootcoz-to-RP classification mapping."""
 
     def test_product_bug_maps_to_product_bug(self):
         client = ReportPortalClient(
@@ -249,7 +249,7 @@ class TestFindLaunch:
         assert result == 20
 
     def test_raises_ambiguous_launch_error(self):
-        from jenkins_job_insight.reportportal import AmbiguousLaunchError
+        from rootcoz.reportportal import AmbiguousLaunchError
 
         client = ReportPortalClient(
             url="http://rp.example.com", token="tok", project="proj"
@@ -380,31 +380,31 @@ class TestGetFailedItems:
 
 
 class TestMatchFailures:
-    """Test matching RP items to JJI failures."""
+    """Test matching RP items to rootcoz failures."""
 
     def test_exact_match_by_name(self):
         client = ReportPortalClient(
             url="http://rp.example.com", token="tok", project="proj"
         )
         rp_items = [{"id": 1, "name": "test_login_success"}]
-        jji_failures = [
+        rootcoz_failures = [
             MagicMock(test_name="test_login_success"),
         ]
-        result = client.match_failures(rp_items, jji_failures)
+        result = client.match_failures(rp_items, rootcoz_failures)
         assert len(result) == 1
         assert result[0][0]["id"] == 1
         assert result[0][1].test_name == "test_login_success"
 
     def test_suffix_match(self):
-        """RP items often have short names; JJI has FQN."""
+        """RP items often have short names; rootcoz has FQN."""
         client = ReportPortalClient(
             url="http://rp.example.com", token="tok", project="proj"
         )
         rp_items = [{"id": 1, "name": "test_login_success"}]
-        jji_failures = [
+        rootcoz_failures = [
             MagicMock(test_name="tests.auth.TestAuth.test_login_success"),
         ]
-        result = client.match_failures(rp_items, jji_failures)
+        result = client.match_failures(rp_items, rootcoz_failures)
         assert len(result) == 1
 
     def test_match_by_code_ref(self):
@@ -418,10 +418,10 @@ class TestMatchFailures:
                 "codeRef": "tests.auth.TestAuth.test_login_success",
             }
         ]
-        jji_failures = [
+        rootcoz_failures = [
             MagicMock(test_name="tests.auth.TestAuth.test_login_success"),
         ]
-        result = client.match_failures(rp_items, jji_failures)
+        result = client.match_failures(rp_items, rootcoz_failures)
         assert len(result) == 1
 
     def test_no_match(self):
@@ -429,10 +429,10 @@ class TestMatchFailures:
             url="http://rp.example.com", token="tok", project="proj"
         )
         rp_items = [{"id": 1, "name": "test_something_else"}]
-        jji_failures = [
+        rootcoz_failures = [
             MagicMock(test_name="test_login_success"),
         ]
-        result = client.match_failures(rp_items, jji_failures)
+        result = client.match_failures(rp_items, rootcoz_failures)
         assert len(result) == 0
 
 
@@ -517,7 +517,7 @@ class TestPushClassifications:
         matched = [({"id": 100, "name": "test_login"}, failure)]
 
         result = client.push_classifications(
-            matched, "http://jji.example.com/results/abc-123"
+            matched, "http://rootcoz.example.com/results/abc-123"
         )
         assert result["pushed"] == 1
         assert result["errors"] == []
@@ -548,7 +548,7 @@ class TestPushClassifications:
         matched = [({"id": 101, "name": "test_import"}, failure)]
 
         result = client.push_classifications(
-            matched, "http://jji.example.com/results/abc-123"
+            matched, "http://rootcoz.example.com/results/abc-123"
         )
         assert result["pushed"] == 1
 
@@ -578,7 +578,7 @@ class TestPushClassifications:
 
         result = client.push_classifications(
             matched,
-            "http://jji.example.com/results/abc-123",
+            "http://rootcoz.example.com/results/abc-123",
             history_classifications={"test_network": "INFRASTRUCTURE"},
         )
         assert result["pushed"] == 1
@@ -610,7 +610,7 @@ class TestPushClassifications:
         matched = [({"id": 103, "name": "test_x"}, failure)]
 
         result = client.push_classifications(
-            matched, "http://jji.example.com/results/abc-123"
+            matched, "http://rootcoz.example.com/results/abc-123"
         )
         assert result["pushed"] == 0
         assert len(result["unmatched"]) == 1
@@ -641,7 +641,7 @@ class TestPushClassifications:
         matched = [({"id": 104, "name": "test_jira"}, failure)]
 
         result = client.push_classifications(
-            matched, "http://jji.example.com/results/abc-123"
+            matched, "http://rootcoz.example.com/results/abc-123"
         )
         assert result["pushed"] == 1
         # Verify PUT payload includes external issues
@@ -671,7 +671,7 @@ class TestPushClassifications:
         matched = [({"name": "test_no_id"}, failure)]
 
         result = client.push_classifications(
-            matched, "http://jji.example.com/results/abc-123"
+            matched, "http://rootcoz.example.com/results/abc-123"
         )
         assert result["pushed"] == 0
         assert len(result["errors"]) == 1
@@ -696,7 +696,7 @@ class TestPushClassifications:
         matched = [({"id": 105, "name": "test_err"}, failure)]
 
         result = client.push_classifications(
-            matched, "http://jji.example.com/results/abc-123"
+            matched, "http://rootcoz.example.com/results/abc-123"
         )
         assert result["pushed"] == 0
         assert len(result["errors"]) == 1
@@ -707,13 +707,13 @@ class TestPushClassifications:
         )
         client.get_defect_type_locators = MagicMock(return_value={})
         result = client.push_classifications(
-            [], "http://jji.example.com/results/abc-123"
+            [], "http://rootcoz.example.com/results/abc-123"
         )
         assert result["pushed"] == 0
         assert result["errors"] == []
         assert result["unmatched"] == []
 
-    @patch("jenkins_job_insight.reportportal.logger")
+    @patch("rootcoz.reportportal.logger")
     def test_http_error_extracts_rp_message(self, mock_logger):
         """HTTPError responses extract the RP JSON message field into errors."""
         mock_error_response = MagicMock()
@@ -733,7 +733,7 @@ class TestPushClassifications:
         failure = self._make_failure("PRODUCT BUG", "Bug")
         matched = [({"id": 200, "name": "test_x"}, failure)]
         result = client.push_classifications(
-            matched, "http://jji.example.com/results/abc"
+            matched, "http://rootcoz.example.com/results/abc"
         )
         assert result["pushed"] == 0
         assert len(result["errors"]) == 1
@@ -753,7 +753,7 @@ class TestPushClassifications:
         # Response body included in ERROR log (not separate DEBUG)
         assert '{"message": "Not a launch owner"}' in log_msg
 
-    @patch("jenkins_job_insight.reportportal.logger")
+    @patch("rootcoz.reportportal.logger")
     def test_generic_exception_uses_type_name(self, mock_logger):
         """Non-HTTP exceptions use type(exc).__name__ in the error."""
         client, _ = self._setup_push_client(
@@ -764,7 +764,7 @@ class TestPushClassifications:
         failure = self._make_failure("PRODUCT BUG", "Bug")
         matched = [({"id": 201, "name": "test_y"}, failure)]
         result = client.push_classifications(
-            matched, "http://jji.example.com/results/abc"
+            matched, "http://rootcoz.example.com/results/abc"
         )
         assert result["pushed"] == 0
         assert len(result["errors"]) == 1

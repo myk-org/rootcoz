@@ -9,9 +9,9 @@ import os
 from ai_cli_runner import AIResult
 from simple_logger.logger import get_logger
 
-from jenkins_job_insight import storage
-from jenkins_job_insight.llm_pricing import pricing_cache
-from jenkins_job_insight.models import TokenUsageEntry, TokenUsageSummary
+from rootcoz import storage
+from rootcoz.llm_pricing import pricing_cache
+from rootcoz.models import TokenUsageEntry, TokenUsageSummary
 
 logger = get_logger(name=__name__, level=os.environ.get("LOG_LEVEL", "INFO"))
 

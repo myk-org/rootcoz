@@ -1,4 +1,4 @@
-# Gitleaks configuration for jenkins-job-insight
+# Gitleaks configuration for rootcoz
 # https://github.com/gitleaks/gitleaks#configuration
 
 [extend]

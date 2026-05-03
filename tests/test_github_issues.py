@@ -7,15 +7,15 @@ from unittest.mock import AsyncMock, patch
 import httpx
 import pytest
 
-from jenkins_job_insight.config import Settings
-from jenkins_job_insight.github_issues import (
+from rootcoz.config import Settings
+from rootcoz.github_issues import (
     _CODE_ISSUE_CLASSIFICATIONS,
     _collect_code_fix_reports,
     _parse_github_repo_url,
     enrich_with_tests_repo_matches,
     search_github_issues,
 )
-from jenkins_job_insight.models import (
+from rootcoz.models import (
     AnalysisDetail,
     CodeFix,
     FailureAnalysis,
@@ -152,7 +152,7 @@ class TestSearchGitHubIssues:
             request=httpx.Request("GET", "https://api.github.com/search/issues"),
         )
 
-        with patch("jenkins_job_insight.github_issues.httpx.AsyncClient") as mock_cls:
+        with patch("rootcoz.github_issues.httpx.AsyncClient") as mock_cls:
             mock_client = AsyncMock()
             mock_client.get = AsyncMock(return_value=mock_response)
             mock_client.__aenter__ = AsyncMock(return_value=mock_client)
@@ -196,7 +196,7 @@ class TestSearchGitHubIssues:
             request=httpx.Request("GET", "https://api.github.com/search/issues"),
         )
 
-        with patch("jenkins_job_insight.github_issues.httpx.AsyncClient") as mock_cls:
+        with patch("rootcoz.github_issues.httpx.AsyncClient") as mock_cls:
             mock_client = AsyncMock()
             mock_client.get = AsyncMock(return_value=mock_response)
             mock_client.__aenter__ = AsyncMock(return_value=mock_client)
@@ -215,7 +215,7 @@ class TestSearchGitHubIssues:
 
     async def test_network_error_returns_empty(self) -> None:
         """Network errors return empty list (never raises)."""
-        with patch("jenkins_job_insight.github_issues.httpx.AsyncClient") as mock_cls:
+        with patch("rootcoz.github_issues.httpx.AsyncClient") as mock_cls:
             mock_client = AsyncMock()
             mock_client.get = AsyncMock(
                 side_effect=httpx.ConnectError("Connection refused")
@@ -236,7 +236,7 @@ class TestSearchGitHubIssues:
             request=httpx.Request("GET", "https://api.github.com/search/issues"),
         )
 
-        with patch("jenkins_job_insight.github_issues.httpx.AsyncClient") as mock_cls:
+        with patch("rootcoz.github_issues.httpx.AsyncClient") as mock_cls:
             mock_client = AsyncMock()
             mock_client.get = AsyncMock(return_value=mock_response)
             mock_client.__aenter__ = AsyncMock(return_value=mock_client)
@@ -324,9 +324,7 @@ class TestEnrichWithTestsRepoMatches:
         self, code_issue_no_keywords, settings_with_tests_repo
     ) -> None:
         """Does nothing when CODE ISSUE has no search keywords."""
-        with patch(
-            "jenkins_job_insight.github_issues.search_github_issues"
-        ) as mock_search:
+        with patch("rootcoz.github_issues.search_github_issues") as mock_search:
             await enrich_with_tests_repo_matches(
                 [code_issue_no_keywords], settings_with_tests_repo
             )
@@ -353,12 +351,12 @@ class TestEnrichWithTestsRepoMatches:
 
         with (
             patch(
-                "jenkins_job_insight.github_issues.search_github_issues",
+                "rootcoz.github_issues.search_github_issues",
                 new_callable=AsyncMock,
                 return_value=mock_candidates,
             ),
             patch(
-                "jenkins_job_insight.github_issues.filter_issue_matches_with_ai",
+                "rootcoz.github_issues.filter_issue_matches_with_ai",
                 new_callable=AsyncMock,
                 return_value=mock_evaluations,
             ),
@@ -393,7 +391,7 @@ class TestEnrichWithTestsRepoMatches:
         ]
 
         with patch(
-            "jenkins_job_insight.github_issues.search_github_issues",
+            "rootcoz.github_issues.search_github_issues",
             new_callable=AsyncMock,
             return_value=mock_candidates,
         ):
@@ -438,7 +436,7 @@ class TestEnrichWithTestsRepoMatches:
         )
 
         with patch(
-            "jenkins_job_insight.github_issues.search_github_issues",
+            "rootcoz.github_issues.search_github_issues",
             new_callable=AsyncMock,
             return_value=[],
         ) as mock_search:
@@ -452,7 +450,7 @@ class TestEnrichWithTestsRepoMatches:
     ) -> None:
         """GitHub errors are caught and logged, never raised."""
         with patch(
-            "jenkins_job_insight.github_issues.search_github_issues",
+            "rootcoz.github_issues.search_github_issues",
             new_callable=AsyncMock,
             side_effect=httpx.ConnectError("Connection refused"),
         ):
@@ -505,7 +503,7 @@ class TestEnrichWithTestsRepoMatches:
         ]
 
         with patch(
-            "jenkins_job_insight.github_issues.search_github_issues",
+            "rootcoz.github_issues.search_github_issues",
             new_callable=AsyncMock,
             return_value=mock_candidates,
         ):

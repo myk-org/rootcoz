@@ -73,13 +73,13 @@ uvx --with tox-uv tox -e frontend   # Frontend only
 - **Backend**: Python + FastAPI + TinyDB
 - **Frontend**: Vite + React 19 + TypeScript + Tailwind CSS + shadcn/ui (in `/frontend/`)
 - **AI Integration**: CLI-based (Claude CLI, Gemini CLI, Cursor Agent CLI) — no SDK dependencies, provider-agnostic, `AI_PROVIDER` env var selects provider
-- **CLI**: `jji` CLI tool for querying the API — run `jji --help` for available commands
+- **CLI**: `rootcoz` CLI tool for querying the API — run `rootcoz --help` for available commands
 
 ### Frontend Patterns
 
 - **State**: Page-scoped `useReducer` (e.g., `ReportContext` for the report page) — each page owns its own context; do NOT introduce global state (Redux, Zustand, etc.)
 - **API**: Centralized `api.get/post/put/delete` wrapper in `lib/api.ts` — do NOT use raw `fetch` calls
-- **User identification**: Cookie-based (`jji_username`), display-only — NOT an authentication/authorization boundary
+- **User identification**: Cookie-based (`rootcoz_username`), display-only — NOT an authentication/authorization boundary
 
 ### Auto-Generated Documentation
 
@@ -101,9 +101,9 @@ Never pre-feed data to the AI in the prompt. Give the AI tools (API endpoints, s
 
 ### CLI Parity
 
-Every new API endpoint MUST also be supported via the `jji` CLI tool. When adding a new endpoint:
-1. Add the client method to `src/jenkins_job_insight/cli/client.py`
-2. Add the CLI command to `src/jenkins_job_insight/cli/main.py`
+Every new API endpoint MUST also be supported via the `rootcoz` CLI tool. When adding a new endpoint:
+1. Add the client method to `src/rootcoz/cli/client.py`
+2. Add the CLI command to `src/rootcoz/cli/main.py`
 3. Add tests for both in `tests/test_cli_client.py` and `tests/test_cli_main.py`
 
 ### Failure Deduplication
@@ -145,7 +145,7 @@ For request-tunable analysis settings, keep these interfaces in sync:
 1. Environment variable (server-level default)
 2. API payload field (per-request override)
 3. CLI option (command-line flag)
-4. Config file (`~/.config/jji/config.toml` per-server setting)
+4. Config file (`~/.config/rootcoz/config.toml` per-server setting)
 
 Client-only transport settings and server-only deployment settings stay scoped to their owning interface.
 
@@ -157,12 +157,12 @@ When adding a new analysis setting:
 5. Add the field to `ServerConfig` in `cli/config.py`
 
 Exceptions (server-level only, no payload equivalent):
-- `ADMIN_KEY` — server-only bootstrap secret for admin superuser authentication; never expose via request payloads, CLI flags, or shared config files. Rotating `ADMIN_KEY` only affects the bootstrap admin login — delegated admin API keys use `JJI_ENCRYPTION_KEY` for HMAC hashing and are not affected by `ADMIN_KEY` rotation.
-- `ALLOWED_USERS` — server-only comma-separated allow list of usernames permitted to create/modify data; empty = open access (backward compatible); admin users always bypass; never expose via request payloads or CLI flags. Note: this is a trusted-network access guard, not a cryptographic security boundary — enforcement reads the client-supplied `jji_username` cookie, so protection relies on network-level trust rather than server-verified identity
+- `ADMIN_KEY` — server-only bootstrap secret for admin superuser authentication; never expose via request payloads, CLI flags, or shared config files. Rotating `ADMIN_KEY` only affects the bootstrap admin login — delegated admin API keys use `ROOTCOZ_ENCRYPTION_KEY` for HMAC hashing and are not affected by `ADMIN_KEY` rotation.
+- `ALLOWED_USERS` — server-only comma-separated allow list of usernames permitted to create/modify data; empty = open access (backward compatible); admin users always bypass; never expose via request payloads or CLI flags. Note: this is a trusted-network access guard, not a cryptographic security boundary — enforcement reads the client-supplied `rootcoz_username` cookie, so protection relies on network-level trust rather than server-verified identity
 - `DEBUG` — server reload toggle
 - `ENABLE_GITHUB_ISSUES` — server capability toggle for GitHub issue creation
 - `ENABLE_REPORTPORTAL` — server capability toggle for Report Portal integration
-- `JJI_ENCRYPTION_KEY` — server-only secret for at-rest encryption AND HMAC secret for delegated admin API key hashes; never expose via request payloads, CLI flags, or shared config files. **Rotating this key invalidates both encrypted data (tokens) and all stored delegated admin API key hashes** — operators must re-issue delegated admin API keys after rotation
+- `ROOTCOZ_ENCRYPTION_KEY` — server-only secret for at-rest encryption AND HMAC secret for delegated admin API key hashes; never expose via request payloads, CLI flags, or shared config files. **Rotating this key invalidates both encrypted data (tokens) and all stored delegated admin API key hashes** — operators must re-issue delegated admin API keys after rotation
 - `LOG_LEVEL` — server log verbosity
 - `PUBLIC_BASE_URL` — trusted server-only origin for building absolute links; never derive from request headers to prevent host-header injection
 - `METADATA_RULES_FILE` — server-only path to metadata classification rules file
@@ -182,4 +182,4 @@ Sensitive data (passwords, API tokens, credentials) must be:
 
 Sensitive fields: `jenkins_password`, `jenkins_user`, `jira_api_token`, `jira_pat`, `jira_email`, `github_token`, `tests_repo_token`, `reportportal_api_token`, `vapid_private_key`
 
-Encryption uses Fernet (AES-128-CBC + HMAC-SHA256). Set `JJI_ENCRYPTION_KEY` env var for production; falls back to an auto-generated file-based key under `$XDG_DATA_HOME/jji/.encryption_key` (default: `~/.local/share/jji/.encryption_key`) for development.
+Encryption uses Fernet (AES-128-CBC + HMAC-SHA256). Set `ROOTCOZ_ENCRYPTION_KEY` env var for production; falls back to an auto-generated file-based key under `$XDG_DATA_HOME/rootcoz/.encryption_key` (default: `~/.local/share/rootcoz/.encryption_key`) for development.

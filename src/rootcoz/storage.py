@@ -15,12 +15,12 @@ from typing import get_args
 import aiosqlite
 from simple_logger.logger import get_logger
 
-from jenkins_job_insight.comment_enrichment import detect_mentions
-from jenkins_job_insight.encryption import (
+from rootcoz.comment_enrichment import detect_mentions
+from rootcoz.encryption import (
     get_hmac_secret,
     strip_sensitive_from_response,
 )
-from jenkins_job_insight.models import (
+from rootcoz.models import (
     HistoryClassificationLiteral,
     OverrideClassificationLiteral,
 )
@@ -59,7 +59,7 @@ def validate_api_key(key: str) -> None:
 def hash_api_key(key: str) -> str:
     """Hash an API key with HMAC-SHA256 for storage.
 
-    Uses the encryption key (JJI_ENCRYPTION_KEY) as the HMAC secret,
+    Uses the encryption key (ROOTCOZ_ENCRYPTION_KEY) as the HMAC secret,
     which is stable across ADMIN_KEY rotations.
 
     Args:
@@ -74,7 +74,7 @@ def hash_api_key(key: str) -> str:
 
 def generate_api_key() -> str:
     """Generate a random API key."""
-    return f"jji_{secrets.token_urlsafe(32)}"
+    return f"rootcoz_{secrets.token_urlsafe(32)}"
 
 
 def _hash_session_token(token: str) -> str:
@@ -2781,7 +2781,7 @@ async def save_user_tokens(
 
     Pass empty string to clear a field. Omit (None) to leave unchanged.
     """
-    from jenkins_job_insight.encryption import encrypt_value
+    from rootcoz.encryption import encrypt_value
 
     updates = []
     params: list[str] = []
@@ -2809,7 +2809,7 @@ async def save_user_tokens(
 
 async def get_user_tokens(username: str) -> dict[str, str]:
     """Get decrypted user tokens. Returns dict with github_token, jira_email, jira_token."""
-    from jenkins_job_insight.encryption import decrypt_value
+    from rootcoz.encryption import decrypt_value
 
     async with aiosqlite.connect(DB_PATH) as db:
         cursor = await db.execute(
@@ -3039,7 +3039,7 @@ async def auto_assign_job_metadata(
         )
         return None
 
-    from jenkins_job_insight.metadata_rules import match_job_metadata
+    from rootcoz.metadata_rules import match_job_metadata
 
     matched = match_job_metadata(job_name, rules)
     if matched is None:

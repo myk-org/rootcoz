@@ -11,4 +11,4 @@ exclude =
     .cache/*
 
 per-file-ignores =
-    src/jenkins_job_insight/cli/main.py:M511
+    src/rootcoz/cli/main.py:M511

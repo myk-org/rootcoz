@@ -24,7 +24,7 @@ interface ChildJobSectionProps {
 export function ChildJobSection({ child, jobId, depth = 0, activeHash, parentHashId }: ChildJobSectionProps) {
   const state = useReportState()
   const hashId = childJobHashId(child.job_name, child.build_number, parentHashId)
-  const expandKey = `jji-expand-${jobId}-${hashId}`
+  const expandKey = `rootcoz-expand-${jobId}-${hashId}`
   const sectionRef = useRef<HTMLDivElement>(null)
   const [expanded, setExpanded] = useSessionState<boolean>(expandKey, false)
 
@@ -74,7 +74,7 @@ export function ChildJobSection({ child, jobId, depth = 0, activeHash, parentHas
 
   // Expand/collapse all failure cards within this child job
   const getFailureKeys = useCallback(
-    () => groups.map((g) => `jji-expand-${jobId}-${g.id}`),
+    () => groups.map((g) => `rootcoz-expand-${jobId}-${g.id}`),
     [groups, jobId],
   )
   const { remountKey: failureRemountKey, expandAll: expandAllFailures, collapseAll: collapseAllFailures } =

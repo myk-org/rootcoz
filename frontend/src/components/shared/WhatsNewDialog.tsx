@@ -11,7 +11,7 @@ import { Button } from '@/components/ui/button'
 import { Sparkles } from 'lucide-react'
 import changelog from '@/changelog.json'
 
-const LS_KEY = 'jji_last_seen_changelog_version'
+const LS_KEY = 'rootcoz_last_seen_changelog_version'
 
 /** Changelog sorted by date descending — robust to ordering in changelog.json */
 const sortedChangelog = [...changelog].sort((a, b) => b.date.localeCompare(a.date))

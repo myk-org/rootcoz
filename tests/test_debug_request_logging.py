@@ -7,7 +7,7 @@ from unittest.mock import patch
 
 import pytest
 
-from jenkins_job_insight.utils import mask_sensitive_fields
+from rootcoz.utils import mask_sensitive_fields
 
 
 # ---------------------------------------------------------------------------
@@ -155,7 +155,7 @@ class TestMaskSensitiveFields:
                 "input": None,
             },
         ]
-        from jenkins_job_insight.main import _mask_pydantic_error
+        from rootcoz.main import _mask_pydantic_error
 
         masked = [_mask_pydantic_error(e) for e in pydantic_errors]
         # Sensitive field input should be masked
@@ -181,7 +181,7 @@ def _mock_settings(temp_db_path):
         "DB_PATH": str(temp_db_path),
     }
     with patch.dict(os.environ, env, clear=True):
-        from jenkins_job_insight.config import get_settings
+        from rootcoz.config import get_settings
 
         get_settings.cache_clear()
         try:
@@ -195,8 +195,8 @@ def test_client(_mock_settings, temp_db_path: Path):
     """Create a synchronous test client with mocked DB path."""
     from starlette.testclient import TestClient
 
-    from jenkins_job_insight import storage
-    from jenkins_job_insight.main import app
+    from rootcoz import storage
+    from rootcoz.main import app
 
     with patch.object(storage, "DB_PATH", temp_db_path):
         with TestClient(app) as client:
@@ -210,7 +210,7 @@ def _capture_debug_logs(caplog):
     capture them.  We temporarily add the caplog handler and set the
     logger level to DEBUG.
     """
-    from jenkins_job_insight.main import logger as main_logger
+    from rootcoz.main import logger as main_logger
 
     original_level = main_logger.level
     main_logger.setLevel(logging.DEBUG)
@@ -237,7 +237,7 @@ def test_middleware_logs_masked_body(test_client, caplog):
             test_client.post(
                 "/analyze",
                 json=payload,
-                cookies={"jji_username": "testuser"},
+                cookies={"rootcoz_username": "testuser"},
             )
 
         debug_messages = [
@@ -268,7 +268,7 @@ def test_validation_error_logged_at_debug(test_client, caplog):
             resp = test_client.post(
                 "/analyze",
                 json=payload,
-                cookies={"jji_username": "testuser"},
+                cookies={"rootcoz_username": "testuser"},
             )
 
         assert resp.status_code == 422
@@ -293,7 +293,7 @@ def test_get_requests_not_logged(test_client, caplog):
         with caplog.at_level(logging.DEBUG):
             test_client.get(
                 "/health",
-                cookies={"jji_username": "testuser"},
+                cookies={"rootcoz_username": "testuser"},
             )
 
         debug_messages = [

@@ -120,4 +120,4 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
 # This is required for OpenShift where containers run as an arbitrary UID
 # and may not have write access to the .venv directory.
 ENTRYPOINT ["/app/entrypoint.sh"]
-CMD ["uv", "run", "--no-sync", "uvicorn", "jenkins_job_insight.main:app", "--host", "0.0.0.0"]
+CMD ["uv", "run", "--no-sync", "uvicorn", "rootcoz.main:app", "--host", "0.0.0.0"]

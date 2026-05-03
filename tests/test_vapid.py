@@ -4,7 +4,7 @@ import json
 import os
 from unittest.mock import patch
 
-from jenkins_job_insight.vapid import (
+from rootcoz.vapid import (
     DEFAULT_CLAIM_EMAIL,
     _generate_vapid_keys,
     _get_or_create_vapid_keys,
@@ -37,7 +37,7 @@ class TestGetOrCreateVapidKeys:
     def test_creates_key_file_on_first_use(self, tmp_path):
         with patch.dict(os.environ, {"XDG_DATA_HOME": str(tmp_path)}, clear=False):
             keys = _get_or_create_vapid_keys()
-        key_file = tmp_path / "jji" / ".vapid_keys.json"
+        key_file = tmp_path / "rootcoz" / ".vapid_keys.json"
         assert key_file.exists()
         stored = json.loads(key_file.read_text())
         assert stored["public_key"] == keys["public_key"]
@@ -52,15 +52,15 @@ class TestGetOrCreateVapidKeys:
     def test_file_permissions_0600(self, tmp_path):
         with patch.dict(os.environ, {"XDG_DATA_HOME": str(tmp_path)}, clear=False):
             _get_or_create_vapid_keys()
-        key_file = tmp_path / "jji" / ".vapid_keys.json"
+        key_file = tmp_path / "rootcoz" / ".vapid_keys.json"
         mode = key_file.stat().st_mode & 0o777
         assert mode == 0o600
 
     def test_tightens_loose_permissions(self, tmp_path):
         """If the file was created with loose permissions, they get tightened."""
-        jji_dir = tmp_path / "jji"
-        jji_dir.mkdir()
-        key_file = jji_dir / ".vapid_keys.json"
+        rootcoz_dir = tmp_path / "rootcoz"
+        rootcoz_dir.mkdir()
+        key_file = rootcoz_dir / ".vapid_keys.json"
         keys = _generate_vapid_keys()
         key_file.write_text(json.dumps(keys))
         key_file.chmod(0o644)
@@ -72,9 +72,9 @@ class TestGetOrCreateVapidKeys:
 
     def test_handles_corrupt_file(self, tmp_path):
         """Corrupt file triggers regeneration."""
-        jji_dir = tmp_path / "jji"
-        jji_dir.mkdir()
-        key_file = jji_dir / ".vapid_keys.json"
+        rootcoz_dir = tmp_path / "rootcoz"
+        rootcoz_dir.mkdir()
+        key_file = rootcoz_dir / ".vapid_keys.json"
         key_file.write_text("not valid json")
         key_file.chmod(0o600)
         with patch.dict(os.environ, {"XDG_DATA_HOME": str(tmp_path)}, clear=False):
@@ -84,9 +84,9 @@ class TestGetOrCreateVapidKeys:
 
     def test_handles_race_condition(self, tmp_path, monkeypatch):
         """When another process wins the O_EXCL race, falls back to reading their file."""
-        jji_dir = tmp_path / "jji"
-        jji_dir.mkdir()
-        key_file = jji_dir / ".vapid_keys.json"
+        rootcoz_dir = tmp_path / "rootcoz"
+        rootcoz_dir.mkdir()
+        key_file = rootcoz_dir / ".vapid_keys.json"
         existing_keys = _generate_vapid_keys()
         key_file.write_text(json.dumps(existing_keys))
         key_file.chmod(0o600)
@@ -129,11 +129,11 @@ class TestGetVapidConfig:
             "XDG_DATA_HOME": str(tmp_path),
         }
         # Create a key file with different values
-        jji_dir = tmp_path / "jji"
-        jji_dir.mkdir()
+        rootcoz_dir = tmp_path / "rootcoz"
+        rootcoz_dir.mkdir()
         _priv = "file-priv"  # pragma: allowlist secret  # gitleaks:allow
         key_data = {"public_key": "file-pub", "private_key": _priv}
-        (jji_dir / ".vapid_keys.json").write_text(json.dumps(key_data))
+        (rootcoz_dir / ".vapid_keys.json").write_text(json.dumps(key_data))
         with patch.dict(os.environ, env, clear=False):
             cfg = get_vapid_config()
         assert cfg["public_key"] == "env-pub"
@@ -169,7 +169,7 @@ class TestGetVapidConfig:
         """Returns {} when key generation fails."""
         with (
             patch(
-                "jenkins_job_insight.vapid._get_or_create_vapid_keys",
+                "rootcoz.vapid._get_or_create_vapid_keys",
                 side_effect=RuntimeError("boom"),
             ),
             patch.dict(

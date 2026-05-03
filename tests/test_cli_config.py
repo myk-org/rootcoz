@@ -1,4 +1,4 @@
-"""Tests for jji CLI config module and config-driven server resolution."""
+"""Tests for rootcoz CLI config module and config-driven server resolution."""
 
 import os
 from contextlib import contextmanager
@@ -8,7 +8,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 from typer.testing import CliRunner
 
-from jenkins_job_insight.cli.config import (
+from rootcoz.cli.config import (
     ServerConfig,
     _server_config_from_dict,
     get_default_server_name,
@@ -16,7 +16,7 @@ from jenkins_job_insight.cli.config import (
     list_servers,
     load_config,
 )
-from jenkins_job_insight.cli.main import app
+from rootcoz.cli.main import app
 
 runner = CliRunner()
 
@@ -53,12 +53,12 @@ max_wait_minutes = 45
 force = true
 
 [servers.prod]
-url = "https://jji.example.com"
+url = "https://rootcoz.example.com"
 username = "prod-user"
 no_verify_ssl = false
 
 [servers.staging]
-url = "https://staging-jji.example.com"
+url = "https://staging-rootcoz.example.com"
 username = "admin"
 """
 
@@ -80,7 +80,7 @@ username = "dev-user"
 jenkins_ssl_verify = false
 
 [servers.prod]
-url = "https://jji.example.com"
+url = "https://rootcoz.example.com"
 username = "prod-user"
 ai_provider = "cursor"
 ai_model = "gpt-5"
@@ -208,7 +208,7 @@ class TestGetServerConfig:
         config = load_config(config_file)
         cfg = get_server_config("prod", config)
         assert cfg is not None
-        assert cfg.url == "https://jji.example.com"
+        assert cfg.url == "https://rootcoz.example.com"
         assert cfg.username == "prod-user"
         assert cfg.no_verify_ssl is False
 
@@ -297,7 +297,7 @@ class TestListServers:
     def test_server_fields(self, config_file: Path):
         config = load_config(config_file)
         staging = list_servers(config)["staging"]
-        assert staging.url == "https://staging-jji.example.com"
+        assert staging.url == "https://staging-rootcoz.example.com"
         assert staging.username == "admin"
         assert staging.no_verify_ssl is False
 
@@ -325,13 +325,13 @@ class TestServerNameResolution:
 
     def test_server_name_resolves_from_config(self, config_file: Path):
         with (
-            patch("jenkins_job_insight.cli.main.get_server_config") as mock_get,
-            patch("jenkins_job_insight.cli.main.list_servers") as mock_list,
-            patch("jenkins_job_insight.cli.main._get_client") as mock_client_fn,
+            patch("rootcoz.cli.main.get_server_config") as mock_get,
+            patch("rootcoz.cli.main.list_servers") as mock_list,
+            patch("rootcoz.cli.main._get_client") as mock_client_fn,
             patch.dict(os.environ, {}, clear=True),
         ):
             mock_get.return_value = ServerConfig(
-                url="https://jji.example.com",
+                url="https://rootcoz.example.com",
                 username="prod-user",
                 no_verify_ssl=False,
             )
@@ -345,9 +345,9 @@ class TestServerNameResolution:
 
     def test_unknown_server_name_errors(self):
         with (
-            patch("jenkins_job_insight.cli.main.get_server_config", return_value=None),
+            patch("rootcoz.cli.main.get_server_config", return_value=None),
             patch(
-                "jenkins_job_insight.cli.main.list_servers",
+                "rootcoz.cli.main.list_servers",
                 return_value={"dev": ServerConfig(url="http://x")},
             ),
             patch.dict(os.environ, {}, clear=True),
@@ -369,12 +369,12 @@ class TestDefaultServerFromConfig:
         assert resolved is not None
 
         with (
-            patch("jenkins_job_insight.cli.config.load_config", return_value=config),
+            patch("rootcoz.cli.config.load_config", return_value=config),
             patch(
-                "jenkins_job_insight.cli.main.get_server_config",
+                "rootcoz.cli.main.get_server_config",
                 wraps=get_server_config,
             ) as mock_get,
-            patch("jenkins_job_insight.cli.main._get_client") as mock_client_fn,
+            patch("rootcoz.cli.main._get_client") as mock_client_fn,
             patch.dict(os.environ, {}, clear=True),
         ):
             _mock_healthy_client(mock_client_fn)
@@ -391,7 +391,7 @@ class TestDefaultServerFromConfig:
 
     def test_no_server_no_config_errors(self):
         with (
-            patch("jenkins_job_insight.cli.main.get_server_config", return_value=None),
+            patch("rootcoz.cli.main.get_server_config", return_value=None),
             patch.dict(os.environ, {}, clear=True),
         ):
             result = runner.invoke(app, ["health"])
@@ -405,9 +405,9 @@ class TestCLIOverridesConfig:
 
     def test_cli_user_overrides_config(self):
         with (
-            patch("jenkins_job_insight.cli.main.get_server_config") as mock_get,
-            patch("jenkins_job_insight.cli.main._get_client") as mock_client_fn,
-            patch("jenkins_job_insight.cli.main._state", {}) as mock_state,
+            patch("rootcoz.cli.main.get_server_config") as mock_get,
+            patch("rootcoz.cli.main._get_client") as mock_client_fn,
+            patch("rootcoz.cli.main._state", {}) as mock_state,
             patch.dict(os.environ, {}, clear=True),
         ):
             mock_get.return_value = ServerConfig(
@@ -428,9 +428,9 @@ class TestCLIOverridesConfig:
 
     def test_cli_no_verify_ssl_overrides_config(self):
         with (
-            patch("jenkins_job_insight.cli.main.get_server_config") as mock_get,
-            patch("jenkins_job_insight.cli.main._get_client") as mock_client_fn,
-            patch("jenkins_job_insight.cli.main._state", {}) as mock_state,
+            patch("rootcoz.cli.main.get_server_config") as mock_get,
+            patch("rootcoz.cli.main._get_client") as mock_client_fn,
+            patch("rootcoz.cli.main._state", {}) as mock_state,
             patch.dict(os.environ, {}, clear=True),
         ):
             mock_get.return_value = ServerConfig(
@@ -452,9 +452,9 @@ class TestCLIOverridesConfig:
     def test_url_does_not_inherit_config_profile(self):
         """When --server is a concrete URL, config profile is NOT loaded."""
         with (
-            patch("jenkins_job_insight.cli.main.get_server_config") as mock_get,
-            patch("jenkins_job_insight.cli.main._get_client") as mock_client_fn,
-            patch("jenkins_job_insight.cli.main._state", {}) as mock_state,
+            patch("rootcoz.cli.main.get_server_config") as mock_get,
+            patch("rootcoz.cli.main._get_client") as mock_client_fn,
+            patch("rootcoz.cli.main._state", {}) as mock_state,
             patch.dict(os.environ, {}, clear=True),
         ):
             mock_get.return_value = ServerConfig(
@@ -480,7 +480,7 @@ class TestCLIOverridesConfig:
 
 class TestConfigShow:
     def test_show_no_config(self):
-        with patch("jenkins_job_insight.cli.main.load_config", return_value={}):
+        with patch("rootcoz.cli.main.load_config", return_value={}):
             result = runner.invoke(app, ["config", "show"])
             assert result.exit_code == 0
             assert "No config file" in result.output
@@ -488,13 +488,13 @@ class TestConfigShow:
     def test_show_with_config(self, config_file: Path):
         config = load_config(config_file)
         with (
-            patch("jenkins_job_insight.cli.main.load_config", return_value=config),
+            patch("rootcoz.cli.main.load_config", return_value=config),
             patch(
-                "jenkins_job_insight.cli.main.get_default_server_name",
+                "rootcoz.cli.main.get_default_server_name",
                 return_value="dev",
             ),
             patch(
-                "jenkins_job_insight.cli.main.list_servers",
+                "rootcoz.cli.main.list_servers",
                 return_value={
                     "dev": ServerConfig(
                         url="http://localhost:8000",
@@ -502,7 +502,7 @@ class TestConfigShow:
                         no_verify_ssl=True,
                     ),
                     "prod": ServerConfig(
-                        url="https://jji.example.com",
+                        url="https://rootcoz.example.com",
                         username="prod-user",
                         no_verify_ssl=False,
                     ),
@@ -520,13 +520,13 @@ class TestConfigServers:
     def test_servers_table(self, config_file: Path):
         config = load_config(config_file)
         with (
-            patch("jenkins_job_insight.cli.main.load_config", return_value=config),
+            patch("rootcoz.cli.main.load_config", return_value=config),
             patch(
-                "jenkins_job_insight.cli.main.get_default_server_name",
+                "rootcoz.cli.main.get_default_server_name",
                 return_value="dev",
             ),
             patch(
-                "jenkins_job_insight.cli.main.list_servers",
+                "rootcoz.cli.main.list_servers",
                 return_value={
                     "dev": ServerConfig(
                         url="http://localhost:8000",
@@ -543,12 +543,12 @@ class TestConfigServers:
 
     def test_servers_empty(self):
         with (
-            patch("jenkins_job_insight.cli.main.load_config", return_value={}),
+            patch("rootcoz.cli.main.load_config", return_value={}),
             patch(
-                "jenkins_job_insight.cli.main.get_default_server_name",
+                "rootcoz.cli.main.get_default_server_name",
                 return_value="",
             ),
-            patch("jenkins_job_insight.cli.main.list_servers", return_value={}),
+            patch("rootcoz.cli.main.list_servers", return_value={}),
         ):
             result = runner.invoke(app, ["config", "servers"])
             assert result.exit_code == 0
@@ -559,13 +559,13 @@ class TestConfigServers:
 
         config = load_config(config_file)
         with (
-            patch("jenkins_job_insight.cli.main.load_config", return_value=config),
+            patch("rootcoz.cli.main.load_config", return_value=config),
             patch(
-                "jenkins_job_insight.cli.main.get_default_server_name",
+                "rootcoz.cli.main.get_default_server_name",
                 return_value="dev",
             ),
             patch(
-                "jenkins_job_insight.cli.main.list_servers",
+                "rootcoz.cli.main.list_servers",
                 return_value={
                     "dev": ServerConfig(
                         url="http://localhost:8000",
@@ -588,10 +588,10 @@ class TestConfigServers:
 
 @contextmanager
 def _reload_config_under_env(env_patch: dict[str, str], *, clear: bool = False):
-    """Reload ``jenkins_job_insight.cli.config`` under *env_patch*, restoring afterwards."""
+    """Reload ``rootcoz.cli.config`` under *env_patch*, restoring afterwards."""
     import importlib
 
-    import jenkins_job_insight.cli.config as cfg_mod
+    import rootcoz.cli.config as cfg_mod
 
     try:
         with patch.dict(os.environ, env_patch, clear=clear):
@@ -608,16 +608,17 @@ class TestXDGConfigHome:
         """When XDG_CONFIG_HOME is unset, falls back to ~/.config."""
         env = {k: v for k, v in os.environ.items() if k != "XDG_CONFIG_HOME"}
         with _reload_config_under_env(env, clear=True) as cfg_mod:
-            assert cfg_mod.CONFIG_DIR == Path.home() / ".config" / "jji"
+            assert cfg_mod.CONFIG_DIR == Path.home() / ".config" / "rootcoz"
             assert (
-                cfg_mod.CONFIG_FILE == Path.home() / ".config" / "jji" / "config.toml"
+                cfg_mod.CONFIG_FILE
+                == Path.home() / ".config" / "rootcoz" / "config.toml"
             )
 
     def test_xdg_config_home_override(self, tmp_path: Path):
         """When XDG_CONFIG_HOME is set, CONFIG_DIR uses it."""
         with _reload_config_under_env({"XDG_CONFIG_HOME": str(tmp_path)}) as cfg_mod:
-            assert cfg_mod.CONFIG_DIR == tmp_path / "jji"
-            assert cfg_mod.CONFIG_FILE == tmp_path / "jji" / "config.toml"
+            assert cfg_mod.CONFIG_DIR == tmp_path / "rootcoz"
+            assert cfg_mod.CONFIG_FILE == tmp_path / "rootcoz" / "config.toml"
 
 
 # -- Global defaults merging --------------------------------------------------
@@ -656,7 +657,7 @@ class TestGlobalDefaults:
         assert cfg.jenkins_user == "shared-user"
         assert cfg.tests_repo_url == "https://github.com/org/tests"
         # From [servers.prod]
-        assert cfg.url == "https://jji.example.com"
+        assert cfg.url == "https://rootcoz.example.com"
         assert cfg.username == "prod-user"
 
     def test_list_servers_merges_defaults(self, defaults_config_file: Path):

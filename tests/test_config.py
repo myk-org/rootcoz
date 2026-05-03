@@ -5,7 +5,7 @@ from unittest.mock import patch
 
 import pytest
 
-from jenkins_job_insight.config import (
+from rootcoz.config import (
     Settings,
     _resolve_jira_auth,
     get_settings,
