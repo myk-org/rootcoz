@@ -8,6 +8,7 @@
 # Symlink cursor config dir to PVC mount so agent login writes persist
 if [ -d /cursor-credentials ]; then
     _cursor_cfg="${XDG_CONFIG_HOME:-/home/appuser/.config}/cursor"
+    mkdir -p "$(dirname "$_cursor_cfg")"
     rm -rf "$_cursor_cfg"
     ln -sfn /cursor-credentials "$_cursor_cfg"
 fi
