@@ -5,10 +5,11 @@
 # ~/.config non-writable. XDG_CONFIG_HOME redirects config writes
 # to a writable location.
 
-# Copy cursor credentials from PVC staging mount
+# Symlink cursor config dir to PVC mount so agent login writes persist
 if [ -d /cursor-credentials ]; then
-    mkdir -p "${XDG_CONFIG_HOME:-/home/appuser/.config}/cursor"
-    cp -a /cursor-credentials/. "${XDG_CONFIG_HOME:-/home/appuser/.config}/cursor/"
+    _cursor_cfg="${XDG_CONFIG_HOME:-/home/appuser/.config}/cursor"
+    rm -rf "$_cursor_cfg"
+    ln -sfn /cursor-credentials "$_cursor_cfg"
 fi
 
 # Resolve PORT with a default so the exec-form CMD (which cannot expand
