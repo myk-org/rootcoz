@@ -1,0 +1,533 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="light">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Automating Common Tasks with the CLI - rootcoz</title>
+    <meta name="description" content="Turn failing Jenkins builds and JUnit XML into actionable root-cause reports your team can review, discuss, and track.">
+    <link rel="stylesheet" href="assets/style.css">
+    <script>try{var t=localStorage.getItem('theme');if(t==='dark')document.documentElement.setAttribute('data-theme','dark')}catch(e){}</script>
+    <link rel="alternate" type="text/plain" title="LLM Documentation Index" href="llms.txt">
+    <link rel="alternate" type="text/plain" title="LLM Full Documentation" href="llms-full.txt">
+</head>
+<body>
+    <aside class="sidebar" id="sidebar">
+        <div class="sidebar-header">
+            <a href="index.html" class="sidebar-logo">rootcoz</a>
+            <p class="sidebar-tagline">Turn failing Jenkins builds and JUnit XML into actionable root-cause reports your team can review, discuss, and track.</p>
+        </div>
+
+        <div class="sidebar-search">
+            <input type="text" id="search-input" placeholder="Search... (⌘K)" autocomplete="off" readonly>
+            <div id="search-results" class="search-results"></div>
+        </div>
+
+        <nav class="sidebar-nav">
+            
+            <div class="nav-group">
+                <h3 class="nav-group-title">Getting Started</h3>
+                <ul class="nav-group-pages">
+                    
+                    <li>
+                        <a href="run-your-first-analysis.html"
+                           class="nav-link">
+                            Run Your First Analysis
+                        </a>
+                    </li>
+                    
+                </ul>
+            </div>
+            
+            <div class="nav-group">
+                <h3 class="nav-group-title">User Guides</h3>
+                <ul class="nav-group-pages">
+                    
+                    <li>
+                        <a href="finding-runs-on-the-dashboard.html"
+                           class="nav-link">
+                            Finding Runs on the Dashboard
+                        </a>
+                    </li>
+                    
+                    <li>
+                        <a href="submitting-jenkins-builds-and-junit-xml.html"
+                           class="nav-link">
+                            Submitting Jenkins Builds and JUnit XML
+                        </a>
+                    </li>
+                    
+                    <li>
+                        <a href="tracking-analysis-progress.html"
+                           class="nav-link">
+                            Tracking Analysis Progress
+                        </a>
+                    </li>
+                    
+                    <li>
+                        <a href="reviewing-and-classifying-failures.html"
+                           class="nav-link">
+                            Reviewing and Classifying Failures
+                        </a>
+                    </li>
+                    
+                    <li>
+                        <a href="commenting-and-mentioning-teammates.html"
+                           class="nav-link">
+                            Commenting and Mentioning Teammates
+                        </a>
+                    </li>
+                    
+                    <li>
+                        <a href="creating-github-and-jira-issues.html"
+                           class="nav-link">
+                            Creating GitHub and Jira Issues
+                        </a>
+                    </li>
+                    
+                    <li>
+                        <a href="exploring-failure-history-and-test-trends.html"
+                           class="nav-link">
+                            Exploring Failure History and Test Trends
+                        </a>
+                    </li>
+                    
+                    <li>
+                        <a href="updating-your-profile-and-notifications.html"
+                           class="nav-link">
+                            Updating Your Profile and Notifications
+                        </a>
+                    </li>
+                    
+                    <li>
+                        <a href="managing-users-and-api-keys.html"
+                           class="nav-link">
+                            Managing Users and API Keys
+                        </a>
+                    </li>
+                    
+                </ul>
+            </div>
+            
+            <div class="nav-group">
+                <h3 class="nav-group-title">Recipes</h3>
+                <ul class="nav-group-pages">
+                    
+                    <li>
+                        <a href="automating-common-tasks-with-the-cli.html"
+                           class="nav-link active" aria-current="page">
+                            Automating Common Tasks with the CLI
+                        </a>
+                    </li>
+                    
+                    <li>
+                        <a href="connecting-github-jira-and-report-portal.html"
+                           class="nav-link">
+                            Connecting GitHub, Jira, and Report Portal
+                        </a>
+                    </li>
+                    
+                </ul>
+            </div>
+            
+            <div class="nav-group">
+                <h3 class="nav-group-title">Reference</h3>
+                <ul class="nav-group-pages">
+                    
+                    <li>
+                        <a href="cli-command-reference.html"
+                           class="nav-link">
+                            CLI Command Reference
+                        </a>
+                    </li>
+                    
+                    <li>
+                        <a href="api-endpoint-reference.html"
+                           class="nav-link">
+                            API Endpoint Reference
+                        </a>
+                    </li>
+                    
+                    <li>
+                        <a href="configuration-reference.html"
+                           class="nav-link">
+                            Configuration Reference
+                        </a>
+                    </li>
+                    
+                </ul>
+            </div>
+            
+        </nav>
+    </aside>
+
+    <div class="main-wrapper">
+        <header class="top-bar">
+            <div class="top-bar-left">
+                <button class="sidebar-toggle" id="sidebar-toggle" aria-label="Toggle sidebar" aria-expanded="false">
+                    <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
+                        <path d="M3 5h14M3 10h14M3 15h14" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+                    </svg>
+                </button>
+                <a href="index.html" class="top-bar-title">rootcoz</a>
+            </div>
+            <div class="top-bar-spacer"></div>
+            <div class="top-bar-right">
+                <button class="top-bar-search-btn" id="search-trigger" aria-label="Search">
+                    <kbd>&#8984;K</kbd> Search
+                </button>
+                <a href="https://github.com/myk-org/docsfy" target="_blank" rel="noopener" class="docsfy-badge" title="Generated with docsfy">
+                    ⚡ docs<span class="brand-accent">fy</span>
+                </a>
+                
+                <a href="https://github.com/myk-org/rootcoz.git" target="_blank" rel="noopener noreferrer" class="top-bar-github" id="github-link" data-repo-url="https://github.com/myk-org/rootcoz.git">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><path d="M12 0c-6.626 0-12 5.373-12 12 0 5.302 3.438 9.8 8.207 11.387.599.111.793-.261.793-.577v-2.234c-3.338.726-4.033-1.416-4.033-1.416-.546-1.387-1.333-1.756-1.333-1.756-1.089-.745.083-.729.083-.729 1.205.084 1.839 1.237 1.839 1.237 1.07 1.834 2.807 1.304 3.492.997.107-.775.418-1.305.762-1.604-2.665-.305-5.467-1.334-5.467-5.931 0-1.311.469-2.381 1.236-3.221-.124-.303-.535-1.524.117-3.176 0 0 1.008-.322 3.301 1.23.957-.266 1.983-.399 3.003-.404 1.02.005 2.047.138 3.006.404 2.291-1.552 3.297-1.23 3.297-1.23.653 1.653.242 2.874.118 3.176.77.84 1.235 1.911 1.235 3.221 0 4.609-2.807 5.624-5.479 5.921.43.372.823 1.102.823 2.222v3.293c0 .319.192.694.801.576 4.765-1.589 8.199-6.086 8.199-11.386 0-6.627-5.373-12-12-12z"/></svg>
+                    <span class="github-stars" id="github-stars" title="GitHub stars"></span>
+                </a>
+                
+                <button class="theme-toggle" id="theme-toggle" aria-label="Toggle theme">
+                    <svg class="icon-sun" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+                        <circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/>
+                    </svg>
+                    <svg class="icon-moon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+                        <path d="M21 12.79A9 9 0 1111.21 3 7 7 0 0021 12.79z"/>
+                    </svg>
+                </button>
+            </div>
+        </header>
+
+        <main class="content">
+            
+            <article class="article">
+                <div class="article-body">
+                    <!-- SECURITY: |safe is intentional. Content is AI-generated markdown
+                         converted to HTML server-side by the markdown library, not
+                         user-supplied input. XSS risk is minimal and accepted since
+                         the AI generates the content, not end users. -->
+                    <h1 id="automating-common-tasks-with-the-cli">Automating Common Tasks with the CLI</h1>
+<p>Copy these patterns as-is, then swap the concrete server, user, job, and test values for your environment. See <a href="cli-command-reference.html">CLI Command Reference</a> for every flag, <a href="api-endpoint-reference.html">API Endpoint Reference</a> for raw <code>--json</code> payloads, and <a href="creating-github-and-jira-issues.html">Creating GitHub and Jira Issues</a> for tracker-specific automation.</p>
+<blockquote>
+<p><strong>Note:</strong> If you already use named server profiles in <code>~/.config/rootcoz/config.toml</code>, skip the <code>ROOTCOZ_SERVER</code> export and add <code>--server dev</code> after <code>rootcoz</code> instead.</p>
+</blockquote>
+<h2 id="fail-fast-on-server-health">Fail Fast on Server Health</h2>
+<p>Use this before cron jobs or CI wrappers so you do not enqueue work against an unhealthy RootCoz server.</p>
+<div class="highlight"><pre><span></span><code><span class="nb">set</span><span class="w"> </span>-euo<span class="w"> </span>pipefail
+
+<span class="nb">export</span><span class="w"> </span><span class="nv">ROOTCOZ_SERVER</span><span class="o">=</span><span class="s2">&quot;https://rootcoz.ci.example.com&quot;</span>
+
+python3<span class="w"> </span>-<span class="w"> </span><span class="s">&lt;&lt;&#39;PY&#39;</span>
+<span class="s">import json</span>
+<span class="s">import subprocess</span>
+<span class="s">import sys</span>
+
+<span class="s">health = json.loads(subprocess.check_output([&quot;rootcoz&quot;, &quot;--json&quot;, &quot;health&quot;], text=True))</span>
+<span class="s">print(f&quot;rootcoz status: {health[&#39;status&#39;]}&quot;)</span>
+
+<span class="s">for name, check in sorted(health.get(&quot;checks&quot;, {}).items()):</span>
+<span class="s">    detail = check.get(&quot;detail&quot;, &quot;&quot;)</span>
+<span class="s">    suffix = f&quot; ({detail})&quot; if detail else &quot;&quot;</span>
+<span class="s">    print(f&quot;{name}: {check.get(&#39;status&#39;, &#39;unknown&#39;)}{suffix}&quot;)</span>
+
+<span class="s">sys.exit(1 if health[&quot;status&quot;] == &quot;unhealthy&quot; else 0)</span>
+<span class="s">PY</span>
+</code></pre></div>
+
+<p><code>rootcoz health</code> uses the detailed <code>/api/health</code> endpoint when available and falls back to the lightweight legacy check when it is not. In automation, inspect the JSON <code>status</code> field yourself because RootCoz can still return structured health output when the server reports an unhealthy 503.</p>
+<ul>
+<li><code>rootcoz --json capabilities</code> reports optional automation flags such as GitHub, Jira, and Report Portal support.</li>
+<li>Add <code>export ROOTCOZ_NO_VERIFY_SSL=true</code> when you are testing against a server with a self-signed certificate.</li>
+</ul>
+<h2 id="queue-an-analysis-and-wait-for-the-result">Queue an Analysis and Wait for the Result</h2>
+<p>Use this when you want a single shell block that submits a Jenkins build, waits for RootCoz to finish, and leaves you with the final JSON payload.</p>
+<div class="highlight"><pre><span></span><code><span class="nb">set</span><span class="w"> </span>-euo<span class="w"> </span>pipefail
+
+<span class="nb">export</span><span class="w"> </span><span class="nv">ROOTCOZ_SERVER</span><span class="o">=</span><span class="s2">&quot;https://rootcoz.ci.example.com&quot;</span>
+<span class="nb">export</span><span class="w"> </span><span class="nv">ROOTCOZ_USERNAME</span><span class="o">=</span><span class="s2">&quot;alice&quot;</span>
+
+<span class="nv">job_id</span><span class="o">=</span><span class="s2">&quot;</span><span class="k">$(</span>
+<span class="w">  </span>rootcoz<span class="w"> </span>--json<span class="w"> </span>analyze<span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--job-name<span class="w"> </span><span class="s2">&quot;ocp-e2e-aws-ovn-upgrade&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--build-number<span class="w"> </span><span class="m">41892</span><span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--provider<span class="w"> </span><span class="s2">&quot;cursor&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--model<span class="w"> </span><span class="s2">&quot;gpt-5.4-xhigh&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span><span class="p">|</span><span class="w"> </span>python3<span class="w"> </span>-c<span class="w"> </span><span class="s1">&#39;import json, sys; print(json.load(sys.stdin)[&quot;job_id&quot;])&#39;</span>
+<span class="k">)</span><span class="s2">&quot;</span>
+
+<span class="k">while</span><span class="w"> </span>:<span class="p">;</span><span class="w"> </span><span class="k">do</span>
+<span class="w">  </span><span class="nv">status</span><span class="o">=</span><span class="s2">&quot;</span><span class="k">$(</span>
+<span class="w">    </span>rootcoz<span class="w"> </span>--json<span class="w"> </span>status<span class="w"> </span><span class="s2">&quot;</span><span class="nv">$job_id</span><span class="s2">&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">    </span><span class="p">|</span><span class="w"> </span>python3<span class="w"> </span>-c<span class="w"> </span><span class="s1">&#39;import json, sys; print(json.load(sys.stdin)[&quot;status&quot;])&#39;</span>
+<span class="w">  </span><span class="k">)</span><span class="s2">&quot;</span>
+<span class="w">  </span><span class="nb">echo</span><span class="w"> </span><span class="s2">&quot;</span><span class="k">$(</span>date<span class="w"> </span>-u<span class="w"> </span>+%H:%M:%S<span class="k">)</span><span class="s2"> </span><span class="nv">$job_id</span><span class="s2"> -&gt; </span><span class="nv">$status</span><span class="s2">&quot;</span>
+
+<span class="w">  </span><span class="k">case</span><span class="w"> </span><span class="s2">&quot;</span><span class="nv">$status</span><span class="s2">&quot;</span><span class="w"> </span><span class="k">in</span>
+<span class="w">    </span>completed<span class="p">|</span>failed<span class="o">)</span><span class="w"> </span><span class="k">break</span><span class="w"> </span><span class="p">;;</span>
+<span class="w">    </span>pending<span class="p">|</span>waiting<span class="p">|</span>running<span class="o">)</span><span class="w"> </span>sleep<span class="w"> </span><span class="m">15</span><span class="w"> </span><span class="p">;;</span>
+<span class="w">    </span>*<span class="o">)</span><span class="w"> </span><span class="nb">echo</span><span class="w"> </span><span class="s2">&quot;Unexpected status: </span><span class="nv">$status</span><span class="s2">&quot;</span><span class="w"> </span>&gt;<span class="p">&amp;</span><span class="m">2</span><span class="p">;</span><span class="w"> </span><span class="nb">exit</span><span class="w"> </span><span class="m">1</span><span class="w"> </span><span class="p">;;</span>
+<span class="w">  </span><span class="k">esac</span>
+<span class="k">done</span>
+
+rootcoz<span class="w"> </span>--json<span class="w"> </span>status<span class="w"> </span><span class="s2">&quot;</span><span class="nv">$job_id</span><span class="s2">&quot;</span>
+</code></pre></div>
+
+<p>The first command queues analysis and captures the returned <code>job_id</code>, and the loop keeps polling stored job status until the run becomes <code>completed</code> or <code>failed</code>. The final <code>status --json</code> call gives the next step a full machine-readable result document instead of just a short table.</p>
+<ul>
+<li>Add <code>--wait --poll-interval 2 --max-wait 30</code> if the Jenkins build might still be running when you submit the analysis.</li>
+<li><code>rootcoz ai-models --provider cursor</code> lists valid model IDs, and <code>rootcoz ai-configs</code> shows provider/model pairs that already completed successfully on this server.</li>
+<li>Use <code>--peers "cursor:gpt-5.4-xhigh,gemini:gemini-2.5-pro"</code> or <code>--additional-repos "infra:https://github.com/acme/infra"</code> when the AI needs extra debate or repository context.</li>
+</ul>
+<h2 id="re-run-a-previous-analysis">Re-run a Previous Analysis</h2>
+<p>Use this when you want a fresh run from the same saved settings instead of rebuilding the original request by hand.</p>
+<div class="highlight"><pre><span></span><code><span class="nb">set</span><span class="w"> </span>-euo<span class="w"> </span>pipefail
+
+<span class="nb">export</span><span class="w"> </span><span class="nv">ROOTCOZ_SERVER</span><span class="o">=</span><span class="s2">&quot;https://rootcoz.ci.example.com&quot;</span>
+<span class="nb">export</span><span class="w"> </span><span class="nv">ROOTCOZ_USERNAME</span><span class="o">=</span><span class="s2">&quot;alice&quot;</span>
+
+<span class="nv">source_job_id</span><span class="o">=</span><span class="s2">&quot;</span><span class="k">$(</span>
+<span class="w">  </span>rootcoz<span class="w"> </span>--json<span class="w"> </span>results<span class="w"> </span>list<span class="w"> </span>--limit<span class="w"> </span><span class="m">1</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span><span class="p">|</span><span class="w"> </span>python3<span class="w"> </span>-c<span class="w"> </span><span class="s1">&#39;import json, sys; print(json.load(sys.stdin)[0][&quot;job_id&quot;])&#39;</span>
+<span class="k">)</span><span class="s2">&quot;</span>
+<span class="nv">new_job_id</span><span class="o">=</span><span class="s2">&quot;</span><span class="k">$(</span>
+<span class="w">  </span>rootcoz<span class="w"> </span>--json<span class="w"> </span>re-analyze<span class="w"> </span><span class="s2">&quot;</span><span class="nv">$source_job_id</span><span class="s2">&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span><span class="p">|</span><span class="w"> </span>python3<span class="w"> </span>-c<span class="w"> </span><span class="s1">&#39;import json, sys; print(json.load(sys.stdin)[&quot;job_id&quot;])&#39;</span>
+<span class="k">)</span><span class="s2">&quot;</span>
+
+<span class="nb">echo</span><span class="w"> </span><span class="s2">&quot;Re-analysis queued: </span><span class="nv">$source_job_id</span><span class="s2"> -&gt; </span><span class="nv">$new_job_id</span><span class="s2">&quot;</span>
+</code></pre></div>
+
+<p>The first command grabs the newest stored job ID, and the second queues a re-analysis that reuses the original request parameters. Replace the <code>results list</code> step with a specific job ID when you want to replay a particular historical run instead of the latest one.</p>
+<h2 id="review-a-failing-test-from-the-shell">Review a Failing Test from the Shell</h2>
+<p>Use this when you already know the run and test you want to comment on and mark reviewed.</p>
+<div class="highlight"><pre><span></span><code><span class="nb">set</span><span class="w"> </span>-euo<span class="w"> </span>pipefail
+
+<span class="nb">export</span><span class="w"> </span><span class="nv">ROOTCOZ_SERVER</span><span class="o">=</span><span class="s2">&quot;https://rootcoz.ci.example.com&quot;</span>
+<span class="nb">export</span><span class="w"> </span><span class="nv">ROOTCOZ_USERNAME</span><span class="o">=</span><span class="s2">&quot;alice&quot;</span>
+
+<span class="nv">job_id</span><span class="o">=</span><span class="s2">&quot;9a5ac7e2-1b61-4e67-a2a8-0dbb3c7ef5b1&quot;</span>
+<span class="nv">test_name</span><span class="o">=</span><span class="s2">&quot;tests.network.TestIngress.test_route_flaps&quot;</span>
+
+rootcoz<span class="w"> </span>results<span class="w"> </span>review-status<span class="w"> </span><span class="s2">&quot;</span><span class="nv">$job_id</span><span class="s2">&quot;</span>
+
+rootcoz<span class="w"> </span>comments<span class="w"> </span>add<span class="w"> </span><span class="s2">&quot;</span><span class="nv">$job_id</span><span class="s2">&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--test<span class="w"> </span><span class="s2">&quot;</span><span class="nv">$test_name</span><span class="s2">&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--message<span class="w"> </span><span class="s2">&quot;@bob reproduced this during the 2026-04-18 router rollout; tracking in NET-4281&quot;</span>
+
+rootcoz<span class="w"> </span>results<span class="w"> </span>set-reviewed<span class="w"> </span><span class="s2">&quot;</span><span class="nv">$job_id</span><span class="s2">&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--test<span class="w"> </span><span class="s2">&quot;</span><span class="nv">$test_name</span><span class="s2">&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--reviewed
+</code></pre></div>
+
+<p>This checks the run's review counts, adds a comment to one failing test, and then marks that failure as reviewed under your username. It is the fastest CLI workflow when you already know the <code>job_id</code> and fully qualified test name you want to close out.</p>
+<ul>
+<li><code>rootcoz mentionable-users</code> lists usernames you can safely <code>@mention</code>.</li>
+<li><code>rootcoz classify "$test_name" --type INFRASTRUCTURE --job-id "$job_id" --reason "router rollout"</code> stores a classification alongside the review.</li>
+<li>Add <code>--child-job</code> and <code>--child-build</code> to both commands when the failure came from a pipeline child job.</li>
+</ul>
+<h2 id="check-one-tests-failure-history">Check One Test's Failure History</h2>
+<p>Use this when you want the recent context for a single failing test before you classify or review it.</p>
+<div class="highlight"><pre><span></span><code><span class="nb">export</span><span class="w"> </span><span class="nv">ROOTCOZ_SERVER</span><span class="o">=</span><span class="s2">&quot;https://rootcoz.ci.example.com&quot;</span>
+<span class="nb">export</span><span class="w"> </span><span class="nv">ROOTCOZ_USERNAME</span><span class="o">=</span><span class="s2">&quot;alice&quot;</span>
+
+rootcoz<span class="w"> </span><span class="nb">history</span><span class="w"> </span><span class="nb">test</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span><span class="s2">&quot;tests.network.TestIngress.test_route_flaps&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--job-name<span class="w"> </span><span class="s2">&quot;ocp-e2e-aws-ovn-upgrade&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--limit<span class="w"> </span><span class="m">10</span>
+</code></pre></div>
+
+<p>This prints the failure count, failure rate, last classification, recent runs, and related comments for one fully qualified test name. Use it when you need quick context on whether a failure is new, noisy, or already well understood.</p>
+<ul>
+<li>Add <code>--exclude-job-id "9a5ac7e2-1b61-4e67-a2a8-0dbb3c7ef5b1"</code> to compare against earlier history without the run you are currently triaging.</li>
+</ul>
+<h2 id="build-a-filtered-failure-queue">Build a Filtered Failure Queue</h2>
+<p>Use this when you need a small, scripted batch of historical failures filtered by job, classification, and search text.</p>
+<div class="highlight"><pre><span></span><code><span class="nb">set</span><span class="w"> </span>-euo<span class="w"> </span>pipefail
+
+<span class="nb">export</span><span class="w"> </span><span class="nv">ROOTCOZ_SERVER</span><span class="o">=</span><span class="s2">&quot;https://rootcoz.ci.example.com&quot;</span>
+<span class="nb">export</span><span class="w"> </span><span class="nv">ROOTCOZ_USERNAME</span><span class="o">=</span><span class="s2">&quot;alice&quot;</span>
+
+rootcoz<span class="w"> </span>--json<span class="w"> </span><span class="nb">history</span><span class="w"> </span>failures<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--job-name<span class="w"> </span><span class="s2">&quot;ocp-e2e-aws-ovn-upgrade&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--classification<span class="w"> </span><span class="s2">&quot;PRODUCT BUG&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--search<span class="w"> </span><span class="s2">&quot;route&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--limit<span class="w"> </span><span class="m">20</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--offset<span class="w"> </span><span class="m">0</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>&gt;<span class="w"> </span>product-bug-queue.json
+
+<span class="nb">echo</span><span class="w"> </span><span class="s2">&quot;Saved product-bug-queue.json&quot;</span>
+</code></pre></div>
+
+<p>This builds a paginated slice of historical failures filtered by job, stored classification, and search text. It works well for ad hoc review queues and for exporting small batches into other tools.</p>
+<ul>
+<li>Drop <code>--json</code> if you want the built-in table instead of a file.</li>
+<li>If you already have a specific error signature hash, use <code>rootcoz history search --signature "4e6f3e8c1e6c4540833d6f2d3f89ce9a83c5a7d54b4f6e5b19f9d4f642b9a4c1"</code>.</li>
+</ul>
+<h2 id="work-through-unread-mentions">Work Through Unread Mentions</h2>
+<p>Use this when you want an inbox-like CLI loop for comments that mentioned your username.</p>
+<div class="highlight"><pre><span></span><code><span class="nb">export</span><span class="w"> </span><span class="nv">ROOTCOZ_SERVER</span><span class="o">=</span><span class="s2">&quot;https://rootcoz.ci.example.com&quot;</span>
+<span class="nb">export</span><span class="w"> </span><span class="nv">ROOTCOZ_USERNAME</span><span class="o">=</span><span class="s2">&quot;alice&quot;</span>
+
+rootcoz<span class="w"> </span>mentions<span class="w"> </span>--unread
+rootcoz<span class="w"> </span>mentions-mark-read<span class="w"> </span>--ids<span class="w"> </span><span class="s2">&quot;812,815&quot;</span>
+</code></pre></div>
+
+<p><code>mentions --unread</code> limits the list to new notifications for the current user, and <code>mentions-mark-read</code> accepts a comma-separated list of comment IDs. This gives you a quick follow-up flow without opening the web UI.</p>
+<ul>
+<li>Use <code>rootcoz mentions-mark-all-read</code> to clear everything in one step.</li>
+<li>Add <code>--offset 50</code> to page through older mentions.</li>
+</ul>
+<h2 id="confirm-admin-access-before-changes">Confirm Admin Access Before Changes</h2>
+<p>Use this before creating users, changing roles, or rotating keys so you know exactly which admin identity the CLI is using.</p>
+<div class="highlight"><pre><span></span><code><span class="nb">export</span><span class="w"> </span><span class="nv">ROOTCOZ_SERVER</span><span class="o">=</span><span class="s2">&quot;https://rootcoz.ci.example.com&quot;</span>
+<span class="nb">read</span><span class="w"> </span>-rsp<span class="w"> </span><span class="s2">&quot;Admin API key: &quot;</span><span class="w"> </span>ROOTCOZ_API_KEY
+<span class="nb">export</span><span class="w"> </span>ROOTCOZ_API_KEY
+<span class="nb">echo</span>
+
+rootcoz<span class="w"> </span>auth<span class="w"> </span>whoami
+rootcoz<span class="w"> </span>admin<span class="w"> </span>users<span class="w"> </span>list
+</code></pre></div>
+
+<p>Admin commands authenticate with <code>--api-key</code> or <code>ROOTCOZ_API_KEY</code>, so this pattern keeps the key out of shell history while still making the rest of the shell session usable. <code>auth whoami</code> confirms the effective identity before you create, delete, or change users.</p>
+<blockquote>
+<p><strong>Warning:</strong> <code>admin users create</code>, <code>admin users change-role ... admin</code>, and <code>admin users rotate-key</code> show the new API key once and it cannot be retrieved later.</p>
+</blockquote>
+<ul>
+<li><code>rootcoz admin users create "release-bot"</code> creates a delegated admin and prints its first API key.</li>
+<li><code>rootcoz admin users rotate-key "release-bot"</code> rotates an existing key.</li>
+<li><code>rootcoz auth login --username "platform-admin" --api-key "$ROOTCOZ_API_KEY"</code> validates credentials without changing config, but it does not persist a session.</li>
+</ul>
+<h2 id="export-weekly-token-usage">Export Weekly Token Usage</h2>
+<p>Use this when you need a quick weekly usage file for chargeback, provider comparisons, or admin reporting.</p>
+<div class="highlight"><pre><span></span><code><span class="nb">export</span><span class="w"> </span><span class="nv">ROOTCOZ_SERVER</span><span class="o">=</span><span class="s2">&quot;https://rootcoz.ci.example.com&quot;</span>
+<span class="nb">read</span><span class="w"> </span>-rsp<span class="w"> </span><span class="s2">&quot;Admin API key: &quot;</span><span class="w"> </span>ROOTCOZ_API_KEY
+<span class="nb">export</span><span class="w"> </span>ROOTCOZ_API_KEY
+<span class="nb">echo</span>
+
+rootcoz<span class="w"> </span>admin<span class="w"> </span>token-usage<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--period<span class="w"> </span>week<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--group-by<span class="w"> </span>provider<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--format<span class="w"> </span>csv<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>&gt;<span class="w"> </span>rootcoz-token-usage-weekly.csv
+
+<span class="nb">echo</span><span class="w"> </span><span class="s2">&quot;Saved rootcoz-token-usage-weekly.csv&quot;</span>
+</code></pre></div>
+
+<p>With no filters, <code>admin token-usage</code> prints a summary dashboard; adding <code>--period</code> or <code>--group-by</code> switches it into filtered reporting mode. CSV output is convenient when you want a file you can hand off to finance, ops, or another script.</p>
+<ul>
+<li><code>rootcoz admin token-usage --job-id "9a5ac7e2-1b61-4e67-a2a8-0dbb3c7ef5b1"</code> shows token and cost details for one analysis.</li>
+<li><code>rootcoz --json admin token-usage --provider cursor --group-by model</code> gives machine-readable per-model usage for one provider.</li>
+</ul>
+<h2 id="related-pages">Related Pages</h2>
+<ul>
+<li><a href="cli-command-reference.html">CLI Command Reference</a></li>
+<li><a href="api-endpoint-reference.html">API Endpoint Reference</a></li>
+<li><a href="configuration-reference.html">Configuration Reference</a></li>
+<li><a href="submitting-jenkins-builds-and-junit-xml.html">Submitting Jenkins Builds and JUnit XML</a></li>
+<li><a href="creating-github-and-jira-issues.html">Creating GitHub and Jira Issues</a></li>
+</ul>
+                </div>
+            </article>
+            <nav class="page-nav">
+                
+                <a href="managing-users-and-api-keys.html" class="page-nav-link page-nav-prev">
+                    <span class="page-nav-label">Previous</span>
+                    <span class="page-nav-title">Managing Users and API Keys</span>
+                </a>
+                
+                
+                <a href="connecting-github-jira-and-report-portal.html" class="page-nav-link page-nav-next">
+                    <span class="page-nav-label">Next</span>
+                    <span class="page-nav-title">Connecting GitHub, Jira, and Report Portal</span>
+                </a>
+                
+            </nav>
+            
+            <aside class="toc-sidebar">
+                <div class="toc-container">
+                    <h3>On this page</h3>
+                    <div class="toc">
+<ul>
+<li><a href="#fail-fast-on-server-health">Fail Fast on Server Health</a></li>
+<li><a href="#queue-an-analysis-and-wait-for-the-result">Queue an Analysis and Wait for the Result</a></li>
+<li><a href="#re-run-a-previous-analysis">Re-run a Previous Analysis</a></li>
+<li><a href="#review-a-failing-test-from-the-shell">Review a Failing Test from the Shell</a></li>
+<li><a href="#check-one-tests-failure-history">Check One Test's Failure History</a></li>
+<li><a href="#build-a-filtered-failure-queue">Build a Filtered Failure Queue</a></li>
+<li><a href="#work-through-unread-mentions">Work Through Unread Mentions</a></li>
+<li><a href="#confirm-admin-access-before-changes">Confirm Admin Access Before Changes</a></li>
+<li><a href="#export-weekly-token-usage">Export Weekly Token Usage</a></li>
+<li><a href="#related-pages">Related Pages</a></li>
+</ul>
+</div>
+
+                </div>
+            </aside>
+            
+
+        </main>
+
+        <footer class="page-footer">
+            
+            <span class="footer-version">Generated from version 4.0.0</span>
+            <span class="footer-sep">&middot;</span>
+            
+            Generated with <a href="https://github.com/myk-org/docsfy" target="_blank" rel="noopener">docs<span class="brand-accent">fy</span></a>
+            <span class="footer-sep">&middot;</span>
+            <span class="footer-llm">LLM-friendly: <a href="llms.txt">llms.txt</a> &middot; <a href="llms-full.txt">llms-full.txt</a></span>
+        </footer>
+    </div>
+
+    <div class="sidebar-overlay" id="sidebar-overlay"></div>
+
+    <script src="assets/theme.js"></script>
+    <script src="assets/search.js"></script>
+    <script src="assets/copy.js"></script>
+    <script src="assets/callouts.js"></script>
+    <script src="assets/scrollspy.js"></script>
+    <script src="assets/codelabels.js"></script>
+    <script src="assets/github.js"></script>
+    <script>
+(function() {
+    var toggle = document.getElementById('sidebar-toggle');
+    var sidebar = document.getElementById('sidebar');
+    var overlay = document.getElementById('sidebar-overlay');
+    if (toggle && sidebar) {
+        toggle.addEventListener('click', function() {
+            sidebar.classList.toggle('open');
+            if (overlay) overlay.classList.toggle('open');
+            var expanded = sidebar.classList.contains('open');
+            toggle.setAttribute('aria-expanded', expanded ? 'true' : 'false');
+        });
+    }
+    if (overlay) {
+        overlay.addEventListener('click', function() {
+            sidebar.classList.remove('open');
+            overlay.classList.remove('open');
+            if (toggle) toggle.setAttribute('aria-expanded', 'false');
+        });
+    }
+})();
+</script>
+<script>
+(function() {
+    var sidebar = document.querySelector('.sidebar-nav') || document.querySelector('.sidebar');
+    if (!sidebar) return;
+
+    // Restore scroll position
+    var saved = sessionStorage.getItem('sidebar-scroll');
+    if (saved) sidebar.scrollTop = parseInt(saved, 10);
+
+    // Save scroll position before navigating
+    sidebar.addEventListener('scroll', function() {
+        sessionStorage.setItem('sidebar-scroll', sidebar.scrollTop.toString());
+    });
+
+    // Also scroll active link into view if no saved position
+    if (!saved) {
+        var active = sidebar.querySelector('.nav-link.active');
+        if (active) {
+            active.scrollIntoView({ block: 'center', behavior: 'instant' });
+        }
+    }
+})();
+</script>
+</body>
+</html>
