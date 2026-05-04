@@ -27,12 +27,7 @@ import { TokenUsageBadge } from './report/TokenUsageBadge'
 import { reviewKey } from './report/ReportContext'
 import type { ChildJobAnalysis } from '@/types'
 
-/** Interval in milliseconds between comment poll requests.
- *  Override at build time via VITE_COMMENT_POLL_MS (e.g. 60000 for 1 minute).
- *  Clamped to [5 000, 300 000] ms to avoid accidental runaway polling. */
-const COMMENT_POLL_MS = Math.max(5_000, Math.min(300_000,
-  Number(import.meta.env.VITE_COMMENT_POLL_MS) || 30_000,
-))
+
 
 export function ReportPage() {
   const { jobId } = useParams<{ jobId: string }>()
@@ -205,20 +200,37 @@ function ReportContent() {
     return () => { cancelled = true }
   }, [jobId, navigate, dispatch, refreshEnrichments, fetchComments])
 
-  // Poll for new comments every 30 seconds (single-flight via fetchComments).
-  // Pauses while user is typing in any comment textarea to avoid overwriting draft state.
+  // Ref to track draft count without re-running SSE effect
+  const commentDraftCountRef = useRef(state.commentDraftCount)
+  const pendingCommentRefreshRef = useRef(false)
   useEffect(() => {
-    if (!jobId || state.error || !state.result) return
-
-    const interval = setInterval(() => {
-      if (state.commentDraftCount > 0) return
+    commentDraftCountRef.current = state.commentDraftCount
+    if (state.commentDraftCount === 0 && pendingCommentRefreshRef.current && jobId) {
+      pendingCommentRefreshRef.current = false
       fetchComments(jobId)
-    }, COMMENT_POLL_MS)
+    }
+  }, [state.commentDraftCount, jobId, fetchComments])
+
+  // SSE stream for real-time comment updates
+  useEffect(() => {
+    if (!jobId) return
+
+    const eventSource = new EventSource(`/api/results/${jobId}/comments/stream`)
+    eventSource.addEventListener('comments-changed', () => {
+      if (commentDraftCountRef.current === 0) {
+        fetchComments(jobId)
+      } else {
+        pendingCommentRefreshRef.current = true
+      }
+    })
+    eventSource.onerror = () => {
+      console.debug('Comments SSE error')
+    }
 
     return () => {
-      clearInterval(interval)
+      eventSource.close()
     }
-  }, [jobId, fetchComments, state.commentDraftCount, state.error, state.result])
+  }, [jobId, fetchComments])
 
   // Preserve scroll position across F5 refreshes
   const scrollKey = `rootcoz-scroll-${jobId}`

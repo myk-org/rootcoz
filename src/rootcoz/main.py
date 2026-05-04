@@ -163,6 +163,117 @@ def notify_mentions_changed(username: str) -> None:
             event.set()
 
 
+# Dashboard job list change notifications
+_dashboard_listeners: set[asyncio.Event] = set()
+
+# Per-job status change notifications
+_job_status_listeners: dict[str, set[asyncio.Event]] = {}
+
+# Per-job comment change notifications
+_comment_listeners: dict[str, set[asyncio.Event]] = {}
+
+# Token usage change notifications
+_token_usage_listeners: set[asyncio.Event] = set()
+
+
+def notify_dashboard_changed() -> None:
+    """Signal all dashboard SSE listeners that the job list changed."""
+    for event in _dashboard_listeners:
+        event.set()
+
+
+def notify_job_status_changed(job_id: str) -> None:
+    """Signal SSE listeners for a specific job that its status changed."""
+    listeners = _job_status_listeners.get(job_id)
+    if listeners:
+        for event in listeners:
+            event.set()
+
+
+def notify_comments_changed(job_id: str) -> None:
+    """Signal SSE listeners for a specific job that comments changed."""
+    listeners = _comment_listeners.get(job_id)
+    if listeners:
+        for event in listeners:
+            event.set()
+
+
+def notify_token_usage_changed() -> None:
+    """Signal all token usage SSE listeners."""
+    for event in _token_usage_listeners:
+        event.set()
+
+
+def _make_sse_stream(
+    request: Request,
+    listeners: set[asyncio.Event],
+    event_name: str,
+    per_key_listeners: dict[str, set[asyncio.Event]] | None = None,
+    listener_key: str = "",
+) -> StreamingResponse:
+    """Create a generic SSE stream that sends a named event when signaled.
+
+    Args:
+        request: The incoming HTTP request (for disconnect detection).
+        listeners: Global listener set (used when per_key_listeners is None).
+        event_name: SSE event name to send (e.g. 'dashboard-changed').
+        per_key_listeners: Optional per-key listener dict (e.g. per job_id).
+        listener_key: Key into per_key_listeners (e.g. the job_id).
+    """
+
+    async def event_generator():
+        my_event = asyncio.Event()
+
+        # Register
+        if per_key_listeners is not None:
+            per_key_listeners.setdefault(listener_key, set()).add(my_event)
+        else:
+            listeners.add(my_event)
+
+        try:
+            while True:
+                my_event.clear()
+                try:
+                    done, pending = await asyncio.wait(
+                        [asyncio.create_task(my_event.wait())],
+                        timeout=30,
+                        return_when=asyncio.FIRST_COMPLETED,
+                    )
+                    for task in pending:
+                        task.cancel()
+                except asyncio.CancelledError:
+                    break
+
+                if not done:
+                    yield ": keepalive\n\n"
+                    continue
+
+                if await request.is_disconnected():
+                    break
+
+                if my_event.is_set():
+                    yield f"event: {event_name}\ndata: refresh\n\n"
+        finally:
+            if per_key_listeners is not None:
+                bucket = per_key_listeners.get(listener_key)
+                if bucket is not None:
+                    bucket.discard(my_event)
+                    if not bucket:
+                        per_key_listeners.pop(listener_key, None)
+            else:
+                listeners.discard(my_event)
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
 # Semaphore to limit concurrent track_user tasks
 _track_user_semaphore = asyncio.Semaphore(10)
 
@@ -509,6 +620,8 @@ async def _fail_resumed_waiting_job(job_id: str, result_data: dict, error: str) 
         fail_data["request_params"] = result_data["request_params"]
     await storage.update_status(job_id, "failed", fail_data)
     notify_active_count_changed()
+    notify_dashboard_changed()
+    notify_job_status_changed(job_id)
 
 
 async def _resume_waiting_jobs(waiting_jobs: list[dict]) -> None:
@@ -645,6 +758,7 @@ async def lifespan(app: FastAPI):
 
         waiting_jobs = await storage.mark_stale_results_failed()
         notify_active_count_changed()
+        notify_dashboard_changed()
         if waiting_jobs:
             # Schedule resumption as a background task so it runs after the
             # app is fully started and ready to serve internal API requests.
@@ -1484,7 +1598,10 @@ async def process_analysis_with_id(
         if settings.wait_for_completion and settings.jenkins_url:
             await update_status(job_id, "waiting")
             notify_active_count_changed()
+            notify_dashboard_changed()
+            notify_job_status_changed(job_id)
             await _safe_update_progress_phase("waiting_for_jenkins")
+            notify_job_status_changed(job_id)
 
             completed, wait_error = await _wait_for_jenkins_completion(
                 jenkins_url=settings.jenkins_url,
@@ -1511,6 +1628,8 @@ async def process_analysis_with_id(
                     fail_data,
                 )
                 notify_active_count_changed()
+                notify_dashboard_changed()
+                notify_job_status_changed(job_id)
                 return
 
         logger.debug(
@@ -1518,7 +1637,10 @@ async def process_analysis_with_id(
         )
         await update_status(job_id, "running")
         notify_active_count_changed()
+        notify_dashboard_changed()
+        notify_job_status_changed(job_id)
         await _safe_update_progress_phase("analyzing")
+        notify_job_status_changed(job_id)
 
         logger.debug(
             f"process_analysis_with_id: ai_provider={ai_provider}, ai_model={ai_model}"
@@ -1545,6 +1667,7 @@ async def process_analysis_with_id(
         # Enrich PRODUCT BUG failures with Jira matches
         if _resolve_enable_jira(body, settings):
             await _safe_update_progress_phase("enriching_jira")
+            notify_job_status_changed(job_id)
             logger.debug(
                 f"process_analysis_with_id: enriching with Jira matches, job_id={job_id}"
             )
@@ -1560,6 +1683,7 @@ async def process_analysis_with_id(
         request_tests_repo_url = str(body.tests_repo_url or "")
         if settings.tests_repo_url or request_tests_repo_url:
             await _safe_update_progress_phase("enriching_tests_repo")
+            notify_job_status_changed(job_id)
             logger.debug(
                 f"process_analysis_with_id: enriching with tests repo matches, job_id={job_id}"
             )
@@ -1573,6 +1697,7 @@ async def process_analysis_with_id(
             )
 
         await _safe_update_progress_phase("saving")
+        notify_job_status_changed(job_id)
         logger.debug(
             f"process_analysis_with_id: saving completed result, job_id={job_id}"
         )
@@ -1587,6 +1712,9 @@ async def process_analysis_with_id(
         # injection from being stored.
         await update_status(job_id, result.status, result_data)
         notify_active_count_changed()
+        notify_dashboard_changed()
+        notify_job_status_changed(job_id)
+        notify_token_usage_changed()
         logger.info(
             f"Analysis completed for {body.job_name} #{body.build_number} "
             f"(job_id: {job_id})"
@@ -1633,6 +1761,9 @@ async def process_analysis_with_id(
 
         await update_status(job_id, "failed", error_data)
         notify_active_count_changed()
+        notify_dashboard_changed()
+        notify_job_status_changed(job_id)
+        notify_token_usage_changed()
 
 
 def _build_base_request_params(
@@ -1799,6 +1930,7 @@ async def _enqueue_analysis_job(
         initial_result,
     )
     notify_active_count_changed()
+    notify_dashboard_changed()
     background_tasks.add_task(process_analysis_with_id, job_id, body, merged)
     response: dict = {
         "status": "queued",
@@ -1878,6 +2010,7 @@ async def analyze_failures(
             result_data = analysis_result.model_dump(mode="json")
             await save_result(job_id, "", "completed", result_data)
             notify_active_count_changed()
+            notify_dashboard_changed()
             return JSONResponse(
                 content=_attach_result_links(result_data, base_url, job_id)
             )
@@ -1922,6 +2055,7 @@ async def analyze_failures(
     }
     await save_result(job_id, "", "pending", initial_result)
     notify_active_count_changed()
+    notify_dashboard_changed()
 
     # Group failures by error signature for deduplication
     groups: dict[str, list] = defaultdict(list)
@@ -1940,6 +2074,8 @@ async def analyze_failures(
     try:
         await update_status(job_id, "running")
         notify_active_count_changed()
+        notify_dashboard_changed()
+        notify_job_status_changed(job_id)
 
         repo_path = repo_manager.create_workspace()
 
@@ -2059,6 +2195,9 @@ async def analyze_failures(
 
         await update_status(job_id, "completed", result_data)
         notify_active_count_changed()
+        notify_dashboard_changed()
+        notify_job_status_changed(job_id)
+        notify_token_usage_changed()
 
         # Populate failure history
         try:
@@ -2093,6 +2232,9 @@ async def analyze_failures(
 
         await update_status(job_id, "failed", fail_data)
         notify_active_count_changed()
+        notify_dashboard_changed()
+        notify_job_status_changed(job_id)
+        notify_token_usage_changed()
         return JSONResponse(content=_attach_result_links(fail_data, base_url, job_id))
 
     finally:
@@ -2414,6 +2556,8 @@ async def add_comment(
     for mentioned_user in mentioned:
         notify_mentions_changed(mentioned_user)
 
+    notify_comments_changed(job_id)
+
     return {"id": comment_id}
 
 
@@ -2451,6 +2595,7 @@ async def delete_comment_endpoint(
     deleted = await storage.delete_comment(comment_id, delete_username, job_id=job_id)
     if deleted:
         notify_mentions_changed(request.state.username)
+        notify_comments_changed(job_id)
         if comment_text:
             for mentioned_user in detect_mentions(comment_text):
                 notify_mentions_changed(mentioned_user)
@@ -2492,6 +2637,7 @@ async def set_reviewed(
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    notify_comments_changed(job_id)
     return {
         "status": "ok",
         "reviewed_by": username if body.reviewed else "",
@@ -3101,6 +3247,7 @@ async def _add_tracker_comment(
         )
         for mentioned_user in detect_mentions(comment_text):
             notify_mentions_changed(mentioned_user)
+        notify_comments_changed(job_id)
     except Exception:
         logger.warning(
             f"Failed to add comment after {tracker_label} creation "
@@ -3873,6 +4020,7 @@ async def bulk_delete_jobs_endpoint(body: BulkDeleteRequest, request: Request) -
 
     result = await storage.delete_jobs_bulk(body.job_ids)
     notify_active_count_changed()
+    notify_dashboard_changed()
 
     # Audit log each deletion individually
     for job_id in result["deleted"]:
@@ -3894,6 +4042,7 @@ async def delete_job_endpoint(
 
     await storage.delete_job(job_id)
     notify_active_count_changed()
+    notify_dashboard_changed()
     logger.info(f"[AUDIT] Admin '{request.state.username}' deleted job {job_id}")
     return {"status": "deleted", "job_id": job_id}
 
@@ -4016,6 +4165,46 @@ async def stream_navbar_counts(request: Request) -> StreamingResponse:
             "X-Accel-Buffering": "no",
         },
     )
+
+
+@app.get("/api/dashboard/stream")
+async def stream_dashboard(request: Request) -> StreamingResponse:
+    """SSE stream that notifies when the dashboard job list changes."""
+    _check_allow_list(request)
+    return _make_sse_stream(request, _dashboard_listeners, "dashboard-changed")
+
+
+@app.get("/api/results/{job_id}/stream")
+async def stream_job_status(job_id: str, request: Request) -> StreamingResponse:
+    """SSE stream that notifies when a specific job's status changes."""
+    _check_allow_list(request)
+    return _make_sse_stream(
+        request,
+        set(),
+        "status-changed",
+        per_key_listeners=_job_status_listeners,
+        listener_key=job_id,
+    )
+
+
+@app.get("/api/results/{job_id}/comments/stream")
+async def stream_comments(job_id: str, request: Request) -> StreamingResponse:
+    """SSE stream that notifies when comments change for a specific job."""
+    _check_allow_list(request)
+    return _make_sse_stream(
+        request,
+        set(),
+        "comments-changed",
+        per_key_listeners=_comment_listeners,
+        listener_key=job_id,
+    )
+
+
+@app.get("/api/admin/token-usage/stream")
+async def stream_token_usage(request: Request) -> StreamingResponse:
+    """SSE stream that notifies when token usage data changes."""
+    _check_allow_list(request)
+    return _make_sse_stream(request, _token_usage_listeners, "usage-changed")
 
 
 @app.get("/api/dashboard")
@@ -4340,6 +4529,8 @@ async def classify_test(request: Request, body: ClassifyTestRequest) -> dict:
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if classify_job_id:
+        notify_comments_changed(classify_job_id)
     return {"id": classification_id}
 
 

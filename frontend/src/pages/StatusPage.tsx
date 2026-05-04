@@ -10,8 +10,6 @@ import { Clock, ExternalLink, Loader2, RotateCw } from 'lucide-react'
 import { StatusChip } from '@/components/shared/StatusChip'
 import { ReAnalyzeDialog } from './report/ReAnalyzeDialog'
 
-const POLL_MS = 10_000
-
 const phaseLabels: Record<string, string> = {
   waiting_for_jenkins: 'Waiting for Jenkins build to complete...',
   analyzing: 'Analyzing test failures with AI...',
@@ -81,7 +79,6 @@ export function StatusPage() {
   const [error, setError] = useState('')
   const [terminalErrorKind, setTerminalErrorKind] = useState<'not_found' | 'unauthorized' | 'failed' | null>(null)
   const [reAnalyzeOpen, setReAnalyzeOpen] = useState(false)
-  const intervalRef = useRef<ReturnType<typeof setInterval>>(null)
   const prevLogLenRef = useRef(0)
   const logEndRef = useRef<HTMLDivElement>(null)
   const logContainerRef = useRef<HTMLDivElement>(null)
@@ -91,21 +88,20 @@ export function StatusPage() {
 
     let cancelled = false
     let inFlight = false
-    const stopPolling = () => {
-      if (intervalRef.current) {
-        clearInterval(intervalRef.current)
-        intervalRef.current = null
-      }
-    }
+    let pendingRefresh = false
     setData(null)
     setError('')
     setTerminalErrorKind(null)
     setReAnalyzeOpen(false)
     prevLogLenRef.current = 0
 
-    async function poll() {
-      if (inFlight || cancelled) return
+    async function fetchStatus() {
+      if (inFlight || cancelled) {
+        pendingRefresh = true
+        return 'continue'
+      }
       inFlight = true
+      pendingRefresh = false
       try {
         const res = await api.get<ResultResponse>(`/results/${jobId}`)
         if (cancelled) return
@@ -113,18 +109,16 @@ export function StatusPage() {
         setData(res)
 
         if (res.status === 'completed') {
-          stopPolling()
           navigate(`/results/${jobId}`, { replace: true })
+          return 'terminal'
         } else if (res.status === 'failed') {
-          stopPolling()
           setTerminalErrorKind('failed')
           setError(res.result?.error ?? 'Analysis failed')
+          return 'terminal'
         }
       } catch (err) {
         if (!cancelled) {
           if (err instanceof ApiError && (err.status === 404 || err.status === 403)) {
-            // Permanent error — stop polling
-            stopPolling()
             setTerminalErrorKind(err.status === 404 ? 'not_found' : 'unauthorized')
             setError(
               err.status === 404
@@ -132,22 +126,41 @@ export function StatusPage() {
                 : 'Access denied. You are not authorized to view this job.'
             )
             setData(null)
+            return 'terminal'
           } else {
-            // Transient transport error — keep polling, don't clear data
             setTerminalErrorKind(null)
             setError('Failed to reach the server. Retrying...')
           }
         }
       } finally {
         inFlight = false
+        if (pendingRefresh && !cancelled) {
+          pendingRefresh = false
+          fetchStatus()
+        }
       }
+      return 'continue'
     }
 
-    poll()
-    intervalRef.current = setInterval(poll, POLL_MS)
+    // Initial fetch
+    fetchStatus()
+
+    // SSE stream for real-time updates
+    const eventSource = new EventSource(`/api/results/${jobId}/stream`)
+    eventSource.addEventListener('status-changed', () => {
+      fetchStatus().then(result => {
+        if (result === 'terminal') {
+          eventSource.close()
+        }
+      })
+    })
+    eventSource.onerror = () => {
+      console.debug('Status SSE error')
+    }
+
     return () => {
       cancelled = true
-      stopPolling()
+      eventSource.close()
     }
   }, [jobId, navigate])
 

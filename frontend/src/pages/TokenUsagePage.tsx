@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useLatestRef } from '@/lib/useLatestRef'
 import { api } from '@/lib/api'
 import { formatCompactNumber, formatCost } from '@/lib/format'
 import { Input } from '@/components/ui/input'
@@ -166,12 +167,6 @@ export function TokenUsagePage() {
       .finally(() => setSummaryLoading(false))
   }, [])
 
-  useEffect(() => {
-    fetchSummary()
-    const interval = setInterval(fetchSummary, 30000)
-    return () => clearInterval(interval)
-  }, [fetchSummary])
-
   // Fetch breakdown table
   const fetchBreakdown = useCallback(() => {
     const requestId = ++latestRequestIdRef.current
@@ -211,11 +206,28 @@ export function TokenUsagePage() {
       })
   }, [groupBy, dateFrom, dateTo, debouncedProvider])
 
+  const fetchSummaryRef = useLatestRef(fetchSummary)
+  const fetchBreakdownRef = useLatestRef(fetchBreakdown)
+
+  // Fetch on mount and when deps change
+  useEffect(() => { fetchSummary() }, [fetchSummary])
+  useEffect(() => { fetchBreakdown() }, [fetchBreakdown])
+
+  // SSE connection (stable — doesn't depend on fetch callbacks)
   useEffect(() => {
-    fetchBreakdown()
-    const interval = setInterval(fetchBreakdown, 30000)
-    return () => clearInterval(interval)
-  }, [fetchBreakdown])
+    const eventSource = new EventSource('/api/admin/token-usage/stream')
+    eventSource.addEventListener('usage-changed', () => {
+      fetchSummaryRef.current()
+      fetchBreakdownRef.current()
+    })
+    eventSource.onerror = () => {
+      console.debug('Token usage SSE error')
+    }
+
+    return () => {
+      eventSource.close()
+    }
+  }, [])
 
   const sorted = useMemo(() => {
     const copy = [...breakdown]
