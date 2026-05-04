@@ -1,0 +1,30 @@
+# rootcoz
+
+> Turn failing Jenkins builds and JUnit XML into actionable root-cause reports your team can review, discuss, and track.
+
+## Getting Started
+
+- [Run Your First Analysis](run-your-first-analysis.md): Install RootCoz, set the minimum Jenkins and AI settings, create your profile, and open a first report in minutes.
+
+## User Guides
+
+- [Finding Runs on the Dashboard](finding-runs-on-the-dashboard.md): Filter the dashboard by status, metadata, and date so you can jump straight to the right active or completed run.
+- [Submitting Jenkins Builds and JUnit XML](submitting-jenkins-builds-and-junit-xml.md): Submit a Jenkins build or JUnit XML file with the right AI, repository, peer-analysis, and Jira settings for the job.
+- [Tracking Analysis Progress](tracking-analysis-progress.md): Follow a run from queued to complete, understand wait and timeout behavior, and re-run a job when results need refreshing.
+- [Reviewing and Classifying Failures](reviewing-and-classifying-failures.md): Interpret grouped failures, peer-analysis output, child jobs, and review controls so you can mark the right tests done.
+- [Commenting and Mentioning Teammates](commenting-and-mentioning-teammates.md): Discuss failures in context, @mention teammates, and use the Mentions inbox and browser notifications to follow up quickly.
+- [Creating GitHub and Jira Issues](creating-github-and-jira-issues.md): Preview and create issues from a failure once your personal tokens and server capabilities are ready.
+- [Exploring Failure History and Test Trends](exploring-failure-history-and-test-trends.md): Search past runs, inspect one test over time, and compare classifications so you can spot repeat problems and flaky behavior.
+- [Updating Your Profile and Notifications](updating-your-profile-and-notifications.md): Update your username, saved GitHub and Jira tokens, admin session, and browser notification settings without losing access.
+- [Managing Users and API Keys](managing-users-and-api-keys.md): Create admins, rotate delegated API keys, change roles, and understand who can submit or modify data on the server.
+
+## Recipes
+
+- [Automating Common Tasks with the CLI](automating-common-tasks-with-the-cli.md): Copy and adapt common `rootcoz` command patterns for health checks, analysis, reviews, history queries, mentions, and admin work.
+- [Connecting GitHub, Jira, and Report Portal](connecting-github-jira-and-report-portal.md): Use short setup patterns to validate tokens, enable issue creation, and push classifications into the systems your team already uses.
+
+## Reference
+
+- [CLI Command Reference](cli-command-reference.md): Look up every `rootcoz` command, subcommand, flag, and output mode when you need exact CLI syntax.
+- [API Endpoint Reference](api-endpoint-reference.md): Find request and response details for analysis, results, comments, history, auth, admin, metadata, notifications, and feedback endpoints.
+- [Configuration Reference](configuration-reference.md): Look up server environment variables, CLI `config.toml` fields, auth modes, and per-request overrides for analysis behavior.

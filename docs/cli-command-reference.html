@@ -1,0 +1,3052 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="light">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CLI Command Reference - rootcoz</title>
+    <meta name="description" content="Turn failing Jenkins builds and JUnit XML into actionable root-cause reports your team can review, discuss, and track.">
+    <link rel="stylesheet" href="assets/style.css">
+    <script>try{var t=localStorage.getItem('theme');if(t==='dark')document.documentElement.setAttribute('data-theme','dark')}catch(e){}</script>
+    <link rel="alternate" type="text/plain" title="LLM Documentation Index" href="llms.txt">
+    <link rel="alternate" type="text/plain" title="LLM Full Documentation" href="llms-full.txt">
+</head>
+<body>
+    <aside class="sidebar" id="sidebar">
+        <div class="sidebar-header">
+            <a href="index.html" class="sidebar-logo">rootcoz</a>
+            <p class="sidebar-tagline">Turn failing Jenkins builds and JUnit XML into actionable root-cause reports your team can review, discuss, and track.</p>
+        </div>
+
+        <div class="sidebar-search">
+            <input type="text" id="search-input" placeholder="Search... (⌘K)" autocomplete="off" readonly>
+            <div id="search-results" class="search-results"></div>
+        </div>
+
+        <nav class="sidebar-nav">
+            
+            <div class="nav-group">
+                <h3 class="nav-group-title">Getting Started</h3>
+                <ul class="nav-group-pages">
+                    
+                    <li>
+                        <a href="run-your-first-analysis.html"
+                           class="nav-link">
+                            Run Your First Analysis
+                        </a>
+                    </li>
+                    
+                </ul>
+            </div>
+            
+            <div class="nav-group">
+                <h3 class="nav-group-title">User Guides</h3>
+                <ul class="nav-group-pages">
+                    
+                    <li>
+                        <a href="finding-runs-on-the-dashboard.html"
+                           class="nav-link">
+                            Finding Runs on the Dashboard
+                        </a>
+                    </li>
+                    
+                    <li>
+                        <a href="submitting-jenkins-builds-and-junit-xml.html"
+                           class="nav-link">
+                            Submitting Jenkins Builds and JUnit XML
+                        </a>
+                    </li>
+                    
+                    <li>
+                        <a href="tracking-analysis-progress.html"
+                           class="nav-link">
+                            Tracking Analysis Progress
+                        </a>
+                    </li>
+                    
+                    <li>
+                        <a href="reviewing-and-classifying-failures.html"
+                           class="nav-link">
+                            Reviewing and Classifying Failures
+                        </a>
+                    </li>
+                    
+                    <li>
+                        <a href="commenting-and-mentioning-teammates.html"
+                           class="nav-link">
+                            Commenting and Mentioning Teammates
+                        </a>
+                    </li>
+                    
+                    <li>
+                        <a href="creating-github-and-jira-issues.html"
+                           class="nav-link">
+                            Creating GitHub and Jira Issues
+                        </a>
+                    </li>
+                    
+                    <li>
+                        <a href="exploring-failure-history-and-test-trends.html"
+                           class="nav-link">
+                            Exploring Failure History and Test Trends
+                        </a>
+                    </li>
+                    
+                    <li>
+                        <a href="updating-your-profile-and-notifications.html"
+                           class="nav-link">
+                            Updating Your Profile and Notifications
+                        </a>
+                    </li>
+                    
+                    <li>
+                        <a href="managing-users-and-api-keys.html"
+                           class="nav-link">
+                            Managing Users and API Keys
+                        </a>
+                    </li>
+                    
+                </ul>
+            </div>
+            
+            <div class="nav-group">
+                <h3 class="nav-group-title">Recipes</h3>
+                <ul class="nav-group-pages">
+                    
+                    <li>
+                        <a href="automating-common-tasks-with-the-cli.html"
+                           class="nav-link">
+                            Automating Common Tasks with the CLI
+                        </a>
+                    </li>
+                    
+                    <li>
+                        <a href="connecting-github-jira-and-report-portal.html"
+                           class="nav-link">
+                            Connecting GitHub, Jira, and Report Portal
+                        </a>
+                    </li>
+                    
+                </ul>
+            </div>
+            
+            <div class="nav-group">
+                <h3 class="nav-group-title">Reference</h3>
+                <ul class="nav-group-pages">
+                    
+                    <li>
+                        <a href="cli-command-reference.html"
+                           class="nav-link active" aria-current="page">
+                            CLI Command Reference
+                        </a>
+                    </li>
+                    
+                    <li>
+                        <a href="api-endpoint-reference.html"
+                           class="nav-link">
+                            API Endpoint Reference
+                        </a>
+                    </li>
+                    
+                    <li>
+                        <a href="configuration-reference.html"
+                           class="nav-link">
+                            Configuration Reference
+                        </a>
+                    </li>
+                    
+                </ul>
+            </div>
+            
+        </nav>
+    </aside>
+
+    <div class="main-wrapper">
+        <header class="top-bar">
+            <div class="top-bar-left">
+                <button class="sidebar-toggle" id="sidebar-toggle" aria-label="Toggle sidebar" aria-expanded="false">
+                    <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
+                        <path d="M3 5h14M3 10h14M3 15h14" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+                    </svg>
+                </button>
+                <a href="index.html" class="top-bar-title">rootcoz</a>
+            </div>
+            <div class="top-bar-spacer"></div>
+            <div class="top-bar-right">
+                <button class="top-bar-search-btn" id="search-trigger" aria-label="Search">
+                    <kbd>&#8984;K</kbd> Search
+                </button>
+                <a href="https://github.com/myk-org/docsfy" target="_blank" rel="noopener" class="docsfy-badge" title="Generated with docsfy">
+                    ⚡ docs<span class="brand-accent">fy</span>
+                </a>
+                
+                <a href="https://github.com/myk-org/rootcoz.git" target="_blank" rel="noopener noreferrer" class="top-bar-github" id="github-link" data-repo-url="https://github.com/myk-org/rootcoz.git">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><path d="M12 0c-6.626 0-12 5.373-12 12 0 5.302 3.438 9.8 8.207 11.387.599.111.793-.261.793-.577v-2.234c-3.338.726-4.033-1.416-4.033-1.416-.546-1.387-1.333-1.756-1.333-1.756-1.089-.745.083-.729.083-.729 1.205.084 1.839 1.237 1.839 1.237 1.07 1.834 2.807 1.304 3.492.997.107-.775.418-1.305.762-1.604-2.665-.305-5.467-1.334-5.467-5.931 0-1.311.469-2.381 1.236-3.221-.124-.303-.535-1.524.117-3.176 0 0 1.008-.322 3.301 1.23.957-.266 1.983-.399 3.003-.404 1.02.005 2.047.138 3.006.404 2.291-1.552 3.297-1.23 3.297-1.23.653 1.653.242 2.874.118 3.176.77.84 1.235 1.911 1.235 3.221 0 4.609-2.807 5.624-5.479 5.921.43.372.823 1.102.823 2.222v3.293c0 .319.192.694.801.576 4.765-1.589 8.199-6.086 8.199-11.386 0-6.627-5.373-12-12-12z"/></svg>
+                    <span class="github-stars" id="github-stars" title="GitHub stars"></span>
+                </a>
+                
+                <button class="theme-toggle" id="theme-toggle" aria-label="Toggle theme">
+                    <svg class="icon-sun" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+                        <circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/>
+                    </svg>
+                    <svg class="icon-moon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+                        <path d="M21 12.79A9 9 0 1111.21 3 7 7 0 0021 12.79z"/>
+                    </svg>
+                </button>
+            </div>
+        </header>
+
+        <main class="content">
+            
+            <article class="article">
+                <div class="article-body">
+                    <!-- SECURITY: |safe is intentional. Content is AI-generated markdown
+                         converted to HTML server-side by the markdown library, not
+                         user-supplied input. XSS risk is minimal and accepted since
+                         the AI generates the content, not end users. -->
+                    <h1 id="cli-command-reference">CLI Command Reference</h1>
+<p><code>rootcoz [GLOBAL OPTIONS] COMMAND [ARGS]...</code></p>
+<blockquote>
+<p><strong>Note:</strong> For profile fields, config file layout, and environment-backed defaults, see <a href="configuration-reference.html">Configuration Reference</a>.</p>
+<p><strong>Tip:</strong> For task-focused command patterns, see <a href="automating-common-tasks-with-the-cli.html">Automating Common Tasks with the CLI</a>.</p>
+<p><strong>Note:</strong> For HTTP request and response schemas, see <a href="api-endpoint-reference.html">API Endpoint Reference</a>.</p>
+</blockquote>
+<h2 id="global-options">Global Options</h2>
+<p>These options are accepted before the command name.</p>
+<table>
+<thead>
+<tr>
+<th>Name</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>--server</code>, <code>-s</code></td>
+<td>string</td>
+<td>default profile if configured</td>
+<td>Server profile name or full base URL. Reads <code>ROOTCOZ_SERVER</code>.</td>
+</tr>
+<tr>
+<td><code>--json</code></td>
+<td>boolean</td>
+<td><code>false</code></td>
+<td>Print JSON instead of text output for commands that support JSON output.</td>
+</tr>
+<tr>
+<td><code>--user</code></td>
+<td>string</td>
+<td>profile value or empty</td>
+<td>Username used for comments and review actions. Reads <code>ROOTCOZ_USERNAME</code>.</td>
+</tr>
+<tr>
+<td><code>--api-key</code></td>
+<td>string</td>
+<td>profile value or empty</td>
+<td>Bearer token used for admin-authenticated requests. Reads <code>ROOTCOZ_API_KEY</code>.</td>
+</tr>
+<tr>
+<td><code>--no-verify-ssl</code></td>
+<td>boolean</td>
+<td>profile value or <code>false</code></td>
+<td>Disable HTTPS certificate verification. Reads <code>ROOTCOZ_NO_VERIFY_SSL</code>.</td>
+</tr>
+<tr>
+<td><code>--verify-ssl</code></td>
+<td>boolean</td>
+<td>unset</td>
+<td>Force HTTPS certificate verification on, even when the selected profile disables it.</td>
+</tr>
+<tr>
+<td><code>--insecure</code></td>
+<td>boolean</td>
+<td><code>false</code></td>
+<td>Alias for <code>--no-verify-ssl</code>.</td>
+</tr>
+<tr>
+<td><code>--show-completion</code></td>
+<td><code>bash</code> | <code>zsh</code></td>
+<td>unset</td>
+<td>Print the shell completion script for the selected shell.</td>
+</tr>
+<tr>
+<td><code>--help</code></td>
+<td>boolean</td>
+<td><code>false</code></td>
+<td>Show help for the current command.</td>
+</tr>
+</tbody>
+</table>
+<blockquote>
+<p><strong>Warning:</strong> <code>--verify-ssl</code> and <code>--insecure</code> cannot be used together.</p>
+<p><strong>Note:</strong> When <code>--server</code> is a full URL, profile values do not cascade into the command. When <code>--server</code> is omitted, <code>rootcoz</code> uses the default profile from <code>$XDG_CONFIG_HOME/rootcoz/config.toml</code> or <code>~/.config/rootcoz/config.toml</code>.</p>
+</blockquote>
+<p>Example:</p>
+<div class="highlight"><pre><span></span><code>rootcoz<span class="w"> </span>--server<span class="w"> </span>dev<span class="w"> </span>--json<span class="w"> </span>results<span class="w"> </span>list
+</code></pre></div>
+
+<h2 id="output-modes">Output Modes</h2>
+<table>
+<thead>
+<tr>
+<th>Mode</th>
+<th>Syntax</th>
+<th>Effect</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Text</td>
+<td>default</td>
+<td>Prints aligned tables, short status lines, or command-specific plain text. Table output preserves full values.</td>
+</tr>
+<tr>
+<td>JSON</td>
+<td><code>rootcoz --json ...</code> or <code>rootcoz &lt;leaf-command&gt; --json</code></td>
+<td>Prints pretty-printed JSON with 2-space indentation for commands that support JSON output.</td>
+</tr>
+<tr>
+<td>Full result JSON</td>
+<td><code>rootcoz results show JOB_ID --full</code></td>
+<td>Prints the complete stored result document.</td>
+</tr>
+<tr>
+<td>Token usage CSV</td>
+<td><code>rootcoz admin token-usage --format csv</code></td>
+<td>Prints CSV instead of text.</td>
+</tr>
+</tbody>
+</table>
+<blockquote>
+<p><strong>Note:</strong> Command tables below list command-specific parameters only. Apply the global options above to any leaf command unless the command section says otherwise.</p>
+</blockquote>
+<p>Example:</p>
+<div class="highlight"><pre><span></span><code>rootcoz<span class="w"> </span>--json<span class="w"> </span>health
+rootcoz<span class="w"> </span>results<span class="w"> </span>list<span class="w"> </span>--json
+rootcoz<span class="w"> </span>results<span class="w"> </span>show<span class="w"> </span>job-123<span class="w"> </span>--full
+rootcoz<span class="w"> </span>admin<span class="w"> </span>token-usage<span class="w"> </span>--group-by<span class="w"> </span>provider<span class="w"> </span>--format<span class="w"> </span>csv
+</code></pre></div>
+
+<h2 id="analysis-and-results">Analysis and Results</h2>
+<blockquote>
+<p><strong>Tip:</strong> See <a href="submitting-jenkins-builds-and-junit-xml.html">Submitting Jenkins Builds and JUnit XML</a>, <a href="tracking-analysis-progress.html">Tracking Analysis Progress</a>, and <a href="finding-runs-on-the-dashboard.html">Finding Runs on the Dashboard</a> for workflow guidance.</p>
+</blockquote>
+<h3 id="health"><code>health</code></h3>
+<p>Checks server availability.</p>
+<table>
+<thead>
+<tr>
+<th>Name</th>
+<th>Kind</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>none</td>
+<td>—</td>
+<td>—</td>
+<td>—</td>
+<td>No command-specific parameters.</td>
+</tr>
+</tbody>
+</table>
+<p>Example:</p>
+<div class="highlight"><pre><span></span><code>rootcoz<span class="w"> </span>health
+</code></pre></div>
+
+<p>Return value/effect: Prints the current service status and any named health checks.</p>
+<h3 id="analyze"><code>analyze</code></h3>
+<p>Queues a Jenkins build for analysis.</p>
+<blockquote>
+<p><strong>Note:</strong> Unset options can fall back to the selected server profile. Env-backed flags read the environment variable named in the description before profile fallback.</p>
+<p><strong>Warning:</strong> <code>--build-number</code>, <code>--ai-cli-timeout</code>, <code>--jenkins-timeout</code>, <code>--jenkins-artifacts-max-size-mb</code>, <code>--jira-max-results</code>, and <code>--poll-interval</code> must be greater than <code>0</code> when set. <code>--max-wait</code> and <code>--max-concurrent</code> must be non-negative. <code>--peer-analysis-max-rounds</code> must be between <code>1</code> and <code>10</code>.</p>
+</blockquote>
+<p>Core options</p>
+<table>
+<thead>
+<tr>
+<th>Name</th>
+<th>Kind</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>--job-name</code>, <code>-j</code></td>
+<td>option</td>
+<td>string</td>
+<td>required</td>
+<td>Jenkins job name.</td>
+</tr>
+<tr>
+<td><code>--build-number</code>, <code>-b</code></td>
+<td>option</td>
+<td>integer</td>
+<td>required</td>
+<td>Jenkins build number to analyze.</td>
+</tr>
+<tr>
+<td><code>--provider</code></td>
+<td>option</td>
+<td>string</td>
+<td>unset</td>
+<td>AI provider. Profile fallback applies.</td>
+</tr>
+<tr>
+<td><code>--model</code></td>
+<td>option</td>
+<td>string</td>
+<td>unset</td>
+<td>AI model. Profile fallback applies.</td>
+</tr>
+<tr>
+<td><code>--jira</code> / <code>--no-jira</code></td>
+<td>option</td>
+<td>boolean</td>
+<td>unset</td>
+<td>Enable or disable Jira integration for this request.</td>
+</tr>
+<tr>
+<td><code>--raw-prompt</code></td>
+<td>option</td>
+<td>string</td>
+<td>empty</td>
+<td>Extra AI instructions appended to the request.</td>
+</tr>
+</tbody>
+</table>
+<p>Jenkins and repository options</p>
+<table>
+<thead>
+<tr>
+<th>Name</th>
+<th>Kind</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>--jenkins-url</code></td>
+<td>option</td>
+<td>string</td>
+<td>unset</td>
+<td>Jenkins base URL. Reads <code>JENKINS_URL</code>.</td>
+</tr>
+<tr>
+<td><code>--jenkins-user</code></td>
+<td>option</td>
+<td>string</td>
+<td>unset</td>
+<td>Jenkins username. Reads <code>JENKINS_USER</code>.</td>
+</tr>
+<tr>
+<td><code>--jenkins-password</code></td>
+<td>option</td>
+<td>string</td>
+<td>unset</td>
+<td>Jenkins password or API token. Reads <code>JENKINS_PASSWORD</code>.</td>
+</tr>
+<tr>
+<td><code>--jenkins-ssl-verify</code> / <code>--no-jenkins-ssl-verify</code></td>
+<td>option</td>
+<td>boolean</td>
+<td>unset</td>
+<td>Override Jenkins HTTPS certificate verification.</td>
+</tr>
+<tr>
+<td><code>--jenkins-timeout</code></td>
+<td>option</td>
+<td>integer</td>
+<td>unset</td>
+<td>Jenkins API timeout in seconds.</td>
+</tr>
+<tr>
+<td><code>--jenkins-artifacts-max-size-mb</code></td>
+<td>option</td>
+<td>integer</td>
+<td>unset</td>
+<td>Maximum downloaded artifact size in MB.</td>
+</tr>
+<tr>
+<td><code>--get-job-artifacts</code> / <code>--no-get-job-artifacts</code></td>
+<td>option</td>
+<td>boolean</td>
+<td>unset</td>
+<td>Download all job artifacts for analysis context.</td>
+</tr>
+<tr>
+<td><code>--tests-repo-url</code></td>
+<td>option</td>
+<td>string</td>
+<td>unset</td>
+<td>Tests repository URL. Reads <code>TESTS_REPO_URL</code>.</td>
+</tr>
+<tr>
+<td><code>--tests-repo-token</code></td>
+<td>option</td>
+<td>string</td>
+<td>unset</td>
+<td>Token for cloning a private tests repository. Reads <code>TESTS_REPO_TOKEN</code>.</td>
+</tr>
+<tr>
+<td><code>--additional-repos</code></td>
+<td>option</td>
+<td>string</td>
+<td>unset</td>
+<td>Comma-separated repo specs in <code>name:url</code>, optionally with <code>:ref</code> and <code>@token</code>.</td>
+</tr>
+</tbody>
+</table>
+<p>Jira, GitHub, and peer-AI options</p>
+<table>
+<thead>
+<tr>
+<th>Name</th>
+<th>Kind</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>--jira-url</code></td>
+<td>option</td>
+<td>string</td>
+<td>unset</td>
+<td>Jira base URL. Reads <code>JIRA_URL</code>.</td>
+</tr>
+<tr>
+<td><code>--jira-email</code></td>
+<td>option</td>
+<td>string</td>
+<td>unset</td>
+<td>Jira Cloud email. Reads <code>JIRA_EMAIL</code>.</td>
+</tr>
+<tr>
+<td><code>--jira-api-token</code></td>
+<td>option</td>
+<td>string</td>
+<td>unset</td>
+<td>Jira Cloud API token. Reads <code>JIRA_API_TOKEN</code>.</td>
+</tr>
+<tr>
+<td><code>--jira-pat</code></td>
+<td>option</td>
+<td>string</td>
+<td>unset</td>
+<td>Jira Server/Data Center PAT. Reads <code>JIRA_PAT</code>.</td>
+</tr>
+<tr>
+<td><code>--jira-project-key</code></td>
+<td>option</td>
+<td>string</td>
+<td>unset</td>
+<td>Jira project key. Reads <code>JIRA_PROJECT_KEY</code>.</td>
+</tr>
+<tr>
+<td><code>--jira-ssl-verify</code> / <code>--no-jira-ssl-verify</code></td>
+<td>option</td>
+<td>boolean</td>
+<td>unset</td>
+<td>Override Jira HTTPS certificate verification.</td>
+</tr>
+<tr>
+<td><code>--jira-max-results</code></td>
+<td>option</td>
+<td>integer</td>
+<td>unset</td>
+<td>Maximum number of Jira search matches.</td>
+</tr>
+<tr>
+<td><code>--github-token</code></td>
+<td>option</td>
+<td>string</td>
+<td>unset</td>
+<td>GitHub token. Reads <code>GITHUB_TOKEN</code>.</td>
+</tr>
+<tr>
+<td><code>--ai-cli-timeout</code></td>
+<td>option</td>
+<td>integer</td>
+<td>unset</td>
+<td>AI CLI timeout in minutes.</td>
+</tr>
+<tr>
+<td><code>--peers</code></td>
+<td>option</td>
+<td>string</td>
+<td>unset</td>
+<td>Comma-separated <code>provider:model</code> peer-analysis list.</td>
+</tr>
+<tr>
+<td><code>--peer-analysis-max-rounds</code></td>
+<td>option</td>
+<td>integer</td>
+<td>unset</td>
+<td>Maximum peer-analysis rounds.</td>
+</tr>
+</tbody>
+</table>
+<p>Queue and concurrency options</p>
+<table>
+<thead>
+<tr>
+<th>Name</th>
+<th>Kind</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>--wait</code> / <code>--no-wait</code></td>
+<td>option</td>
+<td>boolean</td>
+<td>unset</td>
+<td>Wait or do not wait for the Jenkins build to finish before analysis.</td>
+</tr>
+<tr>
+<td><code>--poll-interval</code></td>
+<td>option</td>
+<td>integer</td>
+<td>unset</td>
+<td>Minutes between Jenkins polls.</td>
+</tr>
+<tr>
+<td><code>--max-wait</code></td>
+<td>option</td>
+<td>integer</td>
+<td>unset</td>
+<td>Maximum minutes to wait for completion. <code>0</code> means no time limit when the server accepts it.</td>
+</tr>
+<tr>
+<td><code>--force</code> / <code>--no-force</code></td>
+<td>option</td>
+<td>boolean</td>
+<td>unset</td>
+<td>Analyze even when the build succeeded, or explicitly disable that behavior.</td>
+</tr>
+<tr>
+<td><code>--max-concurrent</code></td>
+<td>option</td>
+<td>integer</td>
+<td><code>0</code></td>
+<td>Maximum concurrent AI CLI calls. <code>0</code> means no CLI-side override.</td>
+</tr>
+</tbody>
+</table>
+<p>Example:</p>
+<div class="highlight"><pre><span></span><code>rootcoz<span class="w"> </span>analyze<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--job-name<span class="w"> </span>ocp-e2e-aws<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--build-number<span class="w"> </span><span class="m">1542</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--provider<span class="w"> </span>claude<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--model<span class="w"> </span>claude-sonnet-4<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--wait
+</code></pre></div>
+
+<p>Return value/effect: Queues the analysis and prints the new <code>job_id</code>, queue <code>status</code>, and result polling URL.</p>
+<h3 id="re-analyze"><code>re-analyze</code></h3>
+<p>Queues a new analysis using the saved settings from an earlier job.</p>
+<table>
+<thead>
+<tr>
+<th>Name</th>
+<th>Kind</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>JOB_ID</code></td>
+<td>arg</td>
+<td>string</td>
+<td>required</td>
+<td>Existing analysis job ID to re-run.</td>
+</tr>
+</tbody>
+</table>
+<p>Example:</p>
+<div class="highlight"><pre><span></span><code>rootcoz<span class="w"> </span>re-analyze<span class="w"> </span>job-123
+</code></pre></div>
+
+<p>Return value/effect: Queues a new analysis and prints the new <code>job_id</code>, <code>status</code>, and result URL.</p>
+<h3 id="status"><code>status</code></h3>
+<p>Shows the current state of one analysis job.</p>
+<table>
+<thead>
+<tr>
+<th>Name</th>
+<th>Kind</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>JOB_ID</code></td>
+<td>arg</td>
+<td>string</td>
+<td>required</td>
+<td>Analysis job ID to query.</td>
+</tr>
+</tbody>
+</table>
+<p>Example:</p>
+<div class="highlight"><pre><span></span><code>rootcoz<span class="w"> </span>status<span class="w"> </span>job-123
+</code></pre></div>
+
+<p>Return value/effect: Default output is a two-column table with <code>job_id</code> and <code>status</code>. JSON mode returns the full stored result payload.</p>
+<h3 id="results-list"><code>results list</code></h3>
+<p>Lists recent analysis jobs.</p>
+<table>
+<thead>
+<tr>
+<th>Name</th>
+<th>Kind</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>--limit</code>, <code>-l</code></td>
+<td>option</td>
+<td>integer</td>
+<td><code>50</code></td>
+<td>Maximum number of jobs to return.</td>
+</tr>
+</tbody>
+</table>
+<p>Example:</p>
+<div class="highlight"><pre><span></span><code>rootcoz<span class="w"> </span>results<span class="w"> </span>list<span class="w"> </span>--limit<span class="w"> </span><span class="m">10</span>
+</code></pre></div>
+
+<p>Return value/effect: Prints a table with <code>job_id</code>, <code>status</code>, <code>jenkins_url</code>, and <code>created_at</code>.</p>
+<h3 id="results-dashboard"><code>results dashboard</code></h3>
+<p>Lists analysis jobs with dashboard metadata.</p>
+<table>
+<thead>
+<tr>
+<th>Name</th>
+<th>Kind</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>none</td>
+<td>—</td>
+<td>—</td>
+<td>—</td>
+<td>No command-specific parameters.</td>
+</tr>
+</tbody>
+</table>
+<p>Example:</p>
+<div class="highlight"><pre><span></span><code>rootcoz<span class="w"> </span>results<span class="w"> </span>dashboard
+</code></pre></div>
+
+<p>Return value/effect: Prints a table with <code>job_id</code>, <code>job_name</code>, <code>build_number</code>, <code>status</code>, <code>failure_count</code>, <code>reviewed_count</code>, <code>comment_count</code>, and <code>created_at</code>.</p>
+<h3 id="results-show"><code>results show</code></h3>
+<p>Shows one stored analysis result.</p>
+<table>
+<thead>
+<tr>
+<th>Name</th>
+<th>Kind</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>JOB_ID</code></td>
+<td>arg</td>
+<td>string</td>
+<td>required</td>
+<td>Analysis job ID to display.</td>
+</tr>
+<tr>
+<td><code>--full</code>, <code>-f</code></td>
+<td>option</td>
+<td>boolean</td>
+<td><code>false</code></td>
+<td>Print the complete result document as JSON.</td>
+</tr>
+</tbody>
+</table>
+<p>Example:</p>
+<div class="highlight"><pre><span></span><code>rootcoz<span class="w"> </span>results<span class="w"> </span>show<span class="w"> </span>job-123
+</code></pre></div>
+
+<p>Return value/effect: Default output is a summary table with <code>job_id</code>, <code>status</code>, <code>summary</code>, <code>failures</code>, <code>children</code>, <code>ai_provider</code>, and <code>created_at</code>. <code>--full</code> prints the full result JSON.</p>
+<h3 id="results-delete"><code>results delete</code></h3>
+<p>Deletes one or more stored analysis jobs.</p>
+<blockquote>
+<p><strong>Warning:</strong> <code>--all</code> requires <code>--confirm</code> and cannot be combined with explicit job IDs.</p>
+</blockquote>
+<table>
+<thead>
+<tr>
+<th>Name</th>
+<th>Kind</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>JOB_ID ...</code></td>
+<td>arg</td>
+<td>string[]</td>
+<td>required unless <code>--all</code></td>
+<td>One or more analysis job IDs to delete.</td>
+</tr>
+<tr>
+<td><code>--all</code></td>
+<td>option</td>
+<td>boolean</td>
+<td><code>false</code></td>
+<td>Delete every job returned by the dashboard listing.</td>
+</tr>
+<tr>
+<td><code>--confirm</code></td>
+<td>option</td>
+<td>boolean</td>
+<td><code>false</code></td>
+<td>Required safety flag for <code>--all</code>.</td>
+</tr>
+</tbody>
+</table>
+<p>Example:</p>
+<div class="highlight"><pre><span></span><code>rootcoz<span class="w"> </span>results<span class="w"> </span>delete<span class="w"> </span>job-123<span class="w"> </span>job-124
+</code></pre></div>
+
+<p>Return value/effect: Deletes the requested job IDs. Single-job runs print one confirmation line; multi-job runs print a success summary and any failures.</p>
+<h3 id="results-review-status"><code>results review-status</code></h3>
+<p>Shows review progress for one result set.</p>
+<table>
+<thead>
+<tr>
+<th>Name</th>
+<th>Kind</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>JOB_ID</code></td>
+<td>arg</td>
+<td>string</td>
+<td>required</td>
+<td>Analysis job ID.</td>
+</tr>
+</tbody>
+</table>
+<p>Example:</p>
+<div class="highlight"><pre><span></span><code>rootcoz<span class="w"> </span>results<span class="w"> </span>review-status<span class="w"> </span>job-123
+</code></pre></div>
+
+<p>Return value/effect: Prints a table with <code>total_failures</code>, <code>reviewed_count</code>, and <code>comment_count</code>.</p>
+<h3 id="results-set-reviewed"><code>results set-reviewed</code></h3>
+<p>Sets or clears the reviewed state for one failure.</p>
+<blockquote>
+<p><strong>Warning:</strong> <code>--child-build</code> must be non-negative. Values greater than <code>0</code> require <code>--child-job</code>.</p>
+</blockquote>
+<table>
+<thead>
+<tr>
+<th>Name</th>
+<th>Kind</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>JOB_ID</code></td>
+<td>arg</td>
+<td>string</td>
+<td>required</td>
+<td>Analysis job ID.</td>
+</tr>
+<tr>
+<td><code>--test</code>, <code>-t</code></td>
+<td>option</td>
+<td>string</td>
+<td>required</td>
+<td>Test name to update.</td>
+</tr>
+<tr>
+<td><code>--reviewed</code> / <code>--not-reviewed</code></td>
+<td>option</td>
+<td>boolean</td>
+<td>required</td>
+<td>Mark the failure reviewed or not reviewed.</td>
+</tr>
+<tr>
+<td><code>--child-job</code></td>
+<td>option</td>
+<td>string</td>
+<td>empty</td>
+<td>Child job name for pipeline child failures.</td>
+</tr>
+<tr>
+<td><code>--child-build</code></td>
+<td>option</td>
+<td>integer</td>
+<td><code>0</code></td>
+<td>Child build number for pipeline child failures.</td>
+</tr>
+</tbody>
+</table>
+<p>Example:</p>
+<div class="highlight"><pre><span></span><code>rootcoz<span class="w"> </span>results<span class="w"> </span>set-reviewed<span class="w"> </span>job-123<span class="w"> </span>--test<span class="w"> </span>tests.TestA.test_one<span class="w"> </span>--reviewed
+</code></pre></div>
+
+<p>Return value/effect: Prints a short confirmation line, including the reviewer name when the server returns it.</p>
+<h3 id="results-enrich-comments"><code>results enrich-comments</code></h3>
+<p>Refreshes stored comment links with live tracker state.</p>
+<table>
+<thead>
+<tr>
+<th>Name</th>
+<th>Kind</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>JOB_ID</code></td>
+<td>arg</td>
+<td>string</td>
+<td>required</td>
+<td>Analysis job ID.</td>
+</tr>
+</tbody>
+</table>
+<p>Example:</p>
+<div class="highlight"><pre><span></span><code>rootcoz<span class="w"> </span>results<span class="w"> </span>enrich-comments<span class="w"> </span>job-123
+</code></pre></div>
+
+<p>Return value/effect: Refreshes linked PR and ticket state for the job's comments and prints a completion line.</p>
+<h3 id="ai-configs"><code>ai-configs</code></h3>
+<p>Lists AI provider/model pairs found in completed analyses.</p>
+<table>
+<thead>
+<tr>
+<th>Name</th>
+<th>Kind</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>none</td>
+<td>—</td>
+<td>—</td>
+<td>—</td>
+<td>No command-specific parameters.</td>
+</tr>
+</tbody>
+</table>
+<p>Example:</p>
+<div class="highlight"><pre><span></span><code>rootcoz<span class="w"> </span>ai-configs
+</code></pre></div>
+
+<p>Return value/effect: Prints a table with <code>ai_provider</code> and <code>ai_model</code>. If no completed analyses contributed configurations, it prints an empty-state message.</p>
+<h3 id="ai-models"><code>ai-models</code></h3>
+<p>Lists currently available models by AI provider.</p>
+<table>
+<thead>
+<tr>
+<th>Name</th>
+<th>Kind</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>--provider</code>, <code>-p</code></td>
+<td>option</td>
+<td>string</td>
+<td>empty</td>
+<td>Limit output to one provider.</td>
+</tr>
+</tbody>
+</table>
+<p>Example:</p>
+<div class="highlight"><pre><span></span><code>rootcoz<span class="w"> </span>ai-models<span class="w"> </span>--provider<span class="w"> </span>claude
+</code></pre></div>
+
+<p>Return value/effect: With <code>--provider</code>, prints the models for that provider. Without it, prints one section per provider with a model count and <code>id</code>/<code>name</code> rows.</p>
+<h2 id="history-and-classification">History and Classification</h2>
+<blockquote>
+<p><strong>Tip:</strong> See <a href="exploring-failure-history-and-test-trends.html">Exploring Failure History and Test Trends</a> and <a href="reviewing-and-classifying-failures.html">Reviewing and Classifying Failures</a> for workflow guidance.</p>
+</blockquote>
+<h3 id="history-test"><code>history test</code></h3>
+<p>Shows failure history for one fully qualified test name.</p>
+<table>
+<thead>
+<tr>
+<th>Name</th>
+<th>Kind</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>TEST_NAME</code></td>
+<td>arg</td>
+<td>string</td>
+<td>required</td>
+<td>Fully qualified test name.</td>
+</tr>
+<tr>
+<td><code>--limit</code>, <code>-l</code></td>
+<td>option</td>
+<td>integer</td>
+<td><code>20</code></td>
+<td>Maximum number of recent runs to return.</td>
+</tr>
+<tr>
+<td><code>--job-name</code>, <code>-j</code></td>
+<td>option</td>
+<td>string</td>
+<td>empty</td>
+<td>Limit history to one Jenkins job name.</td>
+</tr>
+<tr>
+<td><code>--exclude-job-id</code></td>
+<td>option</td>
+<td>string</td>
+<td>empty</td>
+<td>Exclude results from one analysis job ID.</td>
+</tr>
+</tbody>
+</table>
+<p>Example:</p>
+<div class="highlight"><pre><span></span><code>rootcoz<span class="w"> </span><span class="nb">history</span><span class="w"> </span><span class="nb">test</span><span class="w"> </span>tests.TestA.test_one<span class="w"> </span>--limit<span class="w"> </span><span class="m">10</span>
+</code></pre></div>
+
+<p>Return value/effect: Prints summary lines for the test, then a <code>Recent runs</code> table and a <code>Comments</code> table when those sections are present.</p>
+<h3 id="history-search"><code>history search</code></h3>
+<p>Finds tests that share one error signature.</p>
+<table>
+<thead>
+<tr>
+<th>Name</th>
+<th>Kind</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>--signature</code>, <code>-s</code></td>
+<td>option</td>
+<td>string</td>
+<td>required</td>
+<td>Error signature hash to search for.</td>
+</tr>
+<tr>
+<td><code>--exclude-job-id</code></td>
+<td>option</td>
+<td>string</td>
+<td>empty</td>
+<td>Exclude results from one analysis job ID.</td>
+</tr>
+</tbody>
+</table>
+<p>Example:</p>
+<div class="highlight"><pre><span></span><code>rootcoz<span class="w"> </span><span class="nb">history</span><span class="w"> </span>search<span class="w"> </span>--signature<span class="w"> </span>2f0c8d0c...
+</code></pre></div>
+
+<p>Return value/effect: Prints the signature, total occurrence count, unique test count, and a table of matching tests.</p>
+<h3 id="history-stats"><code>history stats</code></h3>
+<p>Shows aggregate history statistics for one Jenkins job.</p>
+<table>
+<thead>
+<tr>
+<th>Name</th>
+<th>Kind</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>JOB_NAME</code></td>
+<td>arg</td>
+<td>string</td>
+<td>required</td>
+<td>Jenkins job name.</td>
+</tr>
+<tr>
+<td><code>--exclude-job-id</code></td>
+<td>option</td>
+<td>string</td>
+<td>empty</td>
+<td>Exclude results from one analysis job ID.</td>
+</tr>
+</tbody>
+</table>
+<p>Example:</p>
+<div class="highlight"><pre><span></span><code>rootcoz<span class="w"> </span><span class="nb">history</span><span class="w"> </span>stats<span class="w"> </span>ocp-e2e-aws
+</code></pre></div>
+
+<p>Return value/effect: Prints job-level totals and, when available, a <code>Most common failures</code> table.</p>
+<h3 id="history-failures"><code>history failures</code></h3>
+<p>Lists paginated failure history across jobs.</p>
+<table>
+<thead>
+<tr>
+<th>Name</th>
+<th>Kind</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>--limit</code>, <code>-l</code></td>
+<td>option</td>
+<td>integer</td>
+<td><code>50</code></td>
+<td>Maximum rows to return.</td>
+</tr>
+<tr>
+<td><code>--offset</code>, <code>-o</code></td>
+<td>option</td>
+<td>integer</td>
+<td><code>0</code></td>
+<td>Pagination offset.</td>
+</tr>
+<tr>
+<td><code>--search</code>, <code>-s</code></td>
+<td>option</td>
+<td>string</td>
+<td>empty</td>
+<td>Test-name search string.</td>
+</tr>
+<tr>
+<td><code>--classification</code>, <code>-c</code></td>
+<td>option</td>
+<td>string</td>
+<td>empty</td>
+<td>Classification filter.</td>
+</tr>
+<tr>
+<td><code>--job-name</code>, <code>-j</code></td>
+<td>option</td>
+<td>string</td>
+<td>empty</td>
+<td>Jenkins job-name filter.</td>
+</tr>
+</tbody>
+</table>
+<p>Example:</p>
+<div class="highlight"><pre><span></span><code>rootcoz<span class="w"> </span><span class="nb">history</span><span class="w"> </span>failures<span class="w"> </span>--classification<span class="w"> </span><span class="s2">&quot;PRODUCT BUG&quot;</span><span class="w"> </span>--limit<span class="w"> </span><span class="m">25</span>
+</code></pre></div>
+
+<p>Return value/effect: Prints a total-count line followed by a table with <code>test_name</code>, <code>job_name</code>, <code>classification</code>, and <code>analyzed_at</code>.</p>
+<h3 id="classify"><code>classify</code></h3>
+<p>Creates a classification for one failure.</p>
+<table>
+<thead>
+<tr>
+<th>Name</th>
+<th>Kind</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>TEST_NAME</code></td>
+<td>arg</td>
+<td>string</td>
+<td>required</td>
+<td>Fully qualified test name.</td>
+</tr>
+<tr>
+<td><code>--type</code>, <code>-t</code></td>
+<td>option</td>
+<td>string</td>
+<td>required</td>
+<td>Classification type: <code>FLAKY</code>, <code>REGRESSION</code>, <code>INFRASTRUCTURE</code>, <code>KNOWN_BUG</code>, or <code>INTERMITTENT</code>.</td>
+</tr>
+<tr>
+<td><code>--job-id</code></td>
+<td>option</td>
+<td>string</td>
+<td>required</td>
+<td>Analysis job ID this classification belongs to.</td>
+</tr>
+<tr>
+<td><code>--reason</code>, <code>-r</code></td>
+<td>option</td>
+<td>string</td>
+<td>empty</td>
+<td>Free-text reason.</td>
+</tr>
+<tr>
+<td><code>--job-name</code>, <code>-j</code></td>
+<td>option</td>
+<td>string</td>
+<td>empty</td>
+<td>Jenkins job name for the failure.</td>
+</tr>
+<tr>
+<td><code>--references</code></td>
+<td>option</td>
+<td>string</td>
+<td>empty</td>
+<td>Bug URLs or ticket keys.</td>
+</tr>
+<tr>
+<td><code>--child-job</code></td>
+<td>option</td>
+<td>string</td>
+<td>empty</td>
+<td>Child job name for pipeline child failures.</td>
+</tr>
+<tr>
+<td><code>--child-build</code></td>
+<td>option</td>
+<td>integer</td>
+<td><code>0</code></td>
+<td>Child build number for pipeline child failures.</td>
+</tr>
+</tbody>
+</table>
+<p>Example:</p>
+<div class="highlight"><pre><span></span><code>rootcoz<span class="w"> </span>classify<span class="w"> </span>tests.TestA.test_one<span class="w"> </span>--type<span class="w"> </span>FLAKY<span class="w"> </span>--job-id<span class="w"> </span>job-123<span class="w"> </span>--reason<span class="w"> </span><span class="s2">&quot;Intermittent DNS lookup&quot;</span>
+</code></pre></div>
+
+<p>Return value/effect: Creates a classification record and prints its server-generated ID.</p>
+<h3 id="classifications-list"><code>classifications list</code></h3>
+<p>Lists stored classifications.</p>
+<table>
+<thead>
+<tr>
+<th>Name</th>
+<th>Kind</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>--job-id</code></td>
+<td>option</td>
+<td>string</td>
+<td>empty</td>
+<td>Filter by analysis job ID.</td>
+</tr>
+<tr>
+<td><code>--test-name</code>, <code>-t</code></td>
+<td>option</td>
+<td>string</td>
+<td>empty</td>
+<td>Filter by test name.</td>
+</tr>
+<tr>
+<td><code>--type</code>, <code>-c</code></td>
+<td>option</td>
+<td>string</td>
+<td>empty</td>
+<td>Filter by classification type.</td>
+</tr>
+<tr>
+<td><code>--job-name</code>, <code>-j</code></td>
+<td>option</td>
+<td>string</td>
+<td>empty</td>
+<td>Filter by job name.</td>
+</tr>
+<tr>
+<td><code>--parent-job-name</code></td>
+<td>option</td>
+<td>string</td>
+<td>empty</td>
+<td>Filter by parent job name.</td>
+</tr>
+</tbody>
+</table>
+<p>Example:</p>
+<div class="highlight"><pre><span></span><code>rootcoz<span class="w"> </span>classifications<span class="w"> </span>list<span class="w"> </span>--type<span class="w"> </span>FLAKY<span class="w"> </span>--job-name<span class="w"> </span>ocp-e2e-aws
+</code></pre></div>
+
+<p>Return value/effect: Prints a table with <code>test_name</code>, <code>classification</code>, <code>reason</code>, <code>created_by</code>, and <code>created_at</code>. If nothing matches, it prints an empty-state message.</p>
+<h3 id="override-classification"><code>override-classification</code></h3>
+<p>Overrides one failure's top-level classification.</p>
+<table>
+<thead>
+<tr>
+<th>Name</th>
+<th>Kind</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>JOB_ID</code></td>
+<td>arg</td>
+<td>string</td>
+<td>required</td>
+<td>Analysis job ID.</td>
+</tr>
+<tr>
+<td><code>--test</code>, <code>-t</code></td>
+<td>option</td>
+<td>string</td>
+<td>required</td>
+<td>Test name to override.</td>
+</tr>
+<tr>
+<td><code>--classification</code>, <code>-c</code></td>
+<td>option</td>
+<td>string</td>
+<td>required</td>
+<td>Override value, such as <code>CODE ISSUE</code>, <code>PRODUCT BUG</code>, or <code>INFRASTRUCTURE</code>.</td>
+</tr>
+<tr>
+<td><code>--child-job</code></td>
+<td>option</td>
+<td>string</td>
+<td>empty</td>
+<td>Child job name for pipeline child failures.</td>
+</tr>
+<tr>
+<td><code>--child-build</code></td>
+<td>option</td>
+<td>integer</td>
+<td><code>0</code></td>
+<td>Child build number for pipeline child failures.</td>
+</tr>
+</tbody>
+</table>
+<p>Example:</p>
+<div class="highlight"><pre><span></span><code>rootcoz<span class="w"> </span>override-classification<span class="w"> </span>job-123<span class="w"> </span>--test<span class="w"> </span>tests.TestA.test_one<span class="w"> </span>--classification<span class="w"> </span><span class="s2">&quot;PRODUCT BUG&quot;</span>
+</code></pre></div>
+
+<p>Return value/effect: Updates the stored classification and prints the final value returned by the server.</p>
+<h2 id="comments-and-mentions">Comments and Mentions</h2>
+<blockquote>
+<p><strong>Tip:</strong> See <a href="commenting-and-mentioning-teammates.html">Commenting and Mentioning Teammates</a> for workflow guidance.</p>
+</blockquote>
+<h3 id="comments-list"><code>comments list</code></h3>
+<p>Lists comments for one analysis job.</p>
+<table>
+<thead>
+<tr>
+<th>Name</th>
+<th>Kind</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>JOB_ID</code></td>
+<td>arg</td>
+<td>string</td>
+<td>required</td>
+<td>Analysis job ID.</td>
+</tr>
+</tbody>
+</table>
+<p>Example:</p>
+<div class="highlight"><pre><span></span><code>rootcoz<span class="w"> </span>comments<span class="w"> </span>list<span class="w"> </span>job-123
+</code></pre></div>
+
+<p>Return value/effect: Prints a table with <code>id</code>, <code>test_name</code>, <code>comment</code>, <code>username</code>, and <code>created_at</code>. If the job has no comments, it prints an empty-state message.</p>
+<h3 id="comments-add"><code>comments add</code></h3>
+<p>Adds a comment to one failure.</p>
+<table>
+<thead>
+<tr>
+<th>Name</th>
+<th>Kind</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>JOB_ID</code></td>
+<td>arg</td>
+<td>string</td>
+<td>required</td>
+<td>Analysis job ID.</td>
+</tr>
+<tr>
+<td><code>--test</code>, <code>-t</code></td>
+<td>option</td>
+<td>string</td>
+<td>required</td>
+<td>Test name to comment on.</td>
+</tr>
+<tr>
+<td><code>--message</code>, <code>-m</code></td>
+<td>option</td>
+<td>string</td>
+<td>required</td>
+<td>Comment text.</td>
+</tr>
+<tr>
+<td><code>--child-job</code></td>
+<td>option</td>
+<td>string</td>
+<td>empty</td>
+<td>Child job name for pipeline child failures.</td>
+</tr>
+<tr>
+<td><code>--child-build</code></td>
+<td>option</td>
+<td>integer</td>
+<td><code>0</code></td>
+<td>Child build number for pipeline child failures.</td>
+</tr>
+</tbody>
+</table>
+<p>Example:</p>
+<div class="highlight"><pre><span></span><code>rootcoz<span class="w"> </span>comments<span class="w"> </span>add<span class="w"> </span>job-123<span class="w"> </span>--test<span class="w"> </span>tests.TestA.test_one<span class="w"> </span>--message<span class="w"> </span><span class="s2">&quot;Opened PROJ-456&quot;</span>
+</code></pre></div>
+
+<p>Return value/effect: Creates the comment and prints the new comment ID.</p>
+<h3 id="comments-delete"><code>comments delete</code></h3>
+<p>Deletes one comment.</p>
+<table>
+<thead>
+<tr>
+<th>Name</th>
+<th>Kind</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>JOB_ID</code></td>
+<td>arg</td>
+<td>string</td>
+<td>required</td>
+<td>Analysis job ID.</td>
+</tr>
+<tr>
+<td><code>COMMENT_ID</code></td>
+<td>arg</td>
+<td>integer</td>
+<td>required</td>
+<td>Comment ID to remove.</td>
+</tr>
+</tbody>
+</table>
+<p>Example:</p>
+<div class="highlight"><pre><span></span><code>rootcoz<span class="w"> </span>comments<span class="w"> </span>delete<span class="w"> </span>job-123<span class="w"> </span><span class="m">42</span>
+</code></pre></div>
+
+<p>Return value/effect: Deletes the comment and prints a confirmation line.</p>
+<h3 id="mentionable-users"><code>mentionable-users</code></h3>
+<p>Lists usernames that can be mentioned in comments.</p>
+<table>
+<thead>
+<tr>
+<th>Name</th>
+<th>Kind</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>none</td>
+<td>—</td>
+<td>—</td>
+<td>—</td>
+<td>No command-specific parameters.</td>
+</tr>
+</tbody>
+</table>
+<p>Example:</p>
+<div class="highlight"><pre><span></span><code>rootcoz<span class="w"> </span>mentionable-users
+</code></pre></div>
+
+<p>Return value/effect: Prints one username per line. If no users are available, it prints an empty-state message.</p>
+<h3 id="mentions"><code>mentions</code></h3>
+<p>Lists the current user's mentions.</p>
+<table>
+<thead>
+<tr>
+<th>Name</th>
+<th>Kind</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>--limit</code>, <code>-l</code></td>
+<td>option</td>
+<td>integer</td>
+<td><code>50</code></td>
+<td>Maximum mentions to return.</td>
+</tr>
+<tr>
+<td><code>--offset</code>, <code>-o</code></td>
+<td>option</td>
+<td>integer</td>
+<td><code>0</code></td>
+<td>Pagination offset.</td>
+</tr>
+<tr>
+<td><code>--unread</code></td>
+<td>option</td>
+<td>boolean</td>
+<td><code>false</code></td>
+<td>Limit results to unread mentions.</td>
+</tr>
+</tbody>
+</table>
+<p>Example:</p>
+<div class="highlight"><pre><span></span><code>rootcoz<span class="w"> </span>mentions<span class="w"> </span>--unread
+</code></pre></div>
+
+<p>Return value/effect: Prints the total and unread counts, then a table with <code>id</code>, <code>job_id</code>, <code>test_name</code>, <code>comment</code>, <code>username</code>, <code>is_read</code>, and <code>created_at</code>.</p>
+<h3 id="mentions-mark-read"><code>mentions-mark-read</code></h3>
+<p>Marks selected mentions as read.</p>
+<table>
+<thead>
+<tr>
+<th>Name</th>
+<th>Kind</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>--ids</code></td>
+<td>option</td>
+<td><code>csv&lt;int&gt;</code></td>
+<td>required</td>
+<td>Comma-separated positive comment IDs.</td>
+</tr>
+</tbody>
+</table>
+<p>Example:</p>
+<div class="highlight"><pre><span></span><code>rootcoz<span class="w"> </span>mentions-mark-read<span class="w"> </span>--ids<span class="w"> </span><span class="m">10</span>,11,12
+</code></pre></div>
+
+<p>Return value/effect: Marks the listed mentions as read and exits successfully when the server accepts the request.</p>
+<h3 id="mentions-mark-all-read"><code>mentions-mark-all-read</code></h3>
+<p>Marks every mention for the current user as read.</p>
+<table>
+<thead>
+<tr>
+<th>Name</th>
+<th>Kind</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>none</td>
+<td>—</td>
+<td>—</td>
+<td>—</td>
+<td>No command-specific parameters.</td>
+</tr>
+</tbody>
+</table>
+<p>Example:</p>
+<div class="highlight"><pre><span></span><code>rootcoz<span class="w"> </span>mentions-mark-all-read
+</code></pre></div>
+
+<p>Return value/effect: Marks all mentions as read and exits successfully when the server accepts the request.</p>
+<h3 id="analyze-comment-intent"><code>analyze-comment-intent</code></h3>
+<p>Runs AI intent detection on one comment string.</p>
+<table>
+<thead>
+<tr>
+<th>Name</th>
+<th>Kind</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>COMMENT</code></td>
+<td>arg</td>
+<td>string</td>
+<td>required</td>
+<td>Comment text to analyze.</td>
+</tr>
+<tr>
+<td><code>--job-id</code></td>
+<td>option</td>
+<td>string</td>
+<td>empty</td>
+<td>Job ID used to resolve AI settings from an analyzed job.</td>
+</tr>
+<tr>
+<td><code>--ai-provider</code></td>
+<td>option</td>
+<td>string</td>
+<td>empty</td>
+<td>Override AI provider.</td>
+</tr>
+<tr>
+<td><code>--ai-model</code></td>
+<td>option</td>
+<td>string</td>
+<td>empty</td>
+<td>Override AI model.</td>
+</tr>
+</tbody>
+</table>
+<p>Example:</p>
+<div class="highlight"><pre><span></span><code>rootcoz<span class="w"> </span>analyze-comment-intent<span class="w"> </span><span class="s2">&quot;Fixed in PR #42&quot;</span>
+</code></pre></div>
+
+<p>Return value/effect: Prints whether the comment suggests the failure is reviewed and, when present, the returned reason string.</p>
+<h2 id="issue-and-integration-commands">Issue and Integration Commands</h2>
+<blockquote>
+<p><strong>Tip:</strong> See <a href="creating-github-and-jira-issues.html">Creating GitHub and Jira Issues</a> for issue workflows and <a href="connecting-github-jira-and-report-portal.html">Connecting GitHub, Jira, and Report Portal</a> for setup details.</p>
+</blockquote>
+<h3 id="capabilities"><code>capabilities</code></h3>
+<p>Shows server-side automation feature flags.</p>
+<table>
+<thead>
+<tr>
+<th>Name</th>
+<th>Kind</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>none</td>
+<td>—</td>
+<td>—</td>
+<td>—</td>
+<td>No command-specific parameters.</td>
+</tr>
+</tbody>
+</table>
+<p>Example:</p>
+<div class="highlight"><pre><span></span><code>rootcoz<span class="w"> </span>capabilities
+</code></pre></div>
+
+<p>Return value/effect: Prints a JSON object that reports whether GitHub issue creation and Jira bug creation are enabled on the server.</p>
+<h3 id="jira-projects"><code>jira-projects</code></h3>
+<p>Lists Jira projects available to the current credentials.</p>
+<table>
+<thead>
+<tr>
+<th>Name</th>
+<th>Kind</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>--query</code></td>
+<td>option</td>
+<td>string</td>
+<td>empty</td>
+<td>Search filter applied to Jira projects.</td>
+</tr>
+<tr>
+<td><code>--jira-token</code></td>
+<td>option</td>
+<td>string</td>
+<td>unset</td>
+<td>Jira token override. If omitted, the selected profile may supply it.</td>
+</tr>
+<tr>
+<td><code>--jira-email</code></td>
+<td>option</td>
+<td>string</td>
+<td>unset</td>
+<td>Jira email override. If omitted, the selected profile may supply it.</td>
+</tr>
+</tbody>
+</table>
+<p>Example:</p>
+<div class="highlight"><pre><span></span><code>rootcoz<span class="w"> </span>jira-projects<span class="w"> </span>--query<span class="w"> </span>platform
+</code></pre></div>
+
+<p>Return value/effect: Prints a table with project <code>key</code> and <code>name</code>. If no projects match, it prints an empty-state message.</p>
+<h3 id="jira-security-levels"><code>jira-security-levels</code></h3>
+<p>Lists Jira security levels for one project.</p>
+<table>
+<thead>
+<tr>
+<th>Name</th>
+<th>Kind</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>PROJECT_KEY</code></td>
+<td>arg</td>
+<td>string</td>
+<td>required</td>
+<td>Jira project key.</td>
+</tr>
+<tr>
+<td><code>--jira-token</code></td>
+<td>option</td>
+<td>string</td>
+<td>unset</td>
+<td>Jira token override. If omitted, the selected profile may supply it.</td>
+</tr>
+<tr>
+<td><code>--jira-email</code></td>
+<td>option</td>
+<td>string</td>
+<td>unset</td>
+<td>Jira email override. If omitted, the selected profile may supply it.</td>
+</tr>
+</tbody>
+</table>
+<p>Example:</p>
+<div class="highlight"><pre><span></span><code>rootcoz<span class="w"> </span>jira-security-levels<span class="w"> </span>PROJ
+</code></pre></div>
+
+<p>Return value/effect: Prints a table with security level <code>name</code> and <code>description</code>. If the project exposes none, it prints an empty-state message.</p>
+<h3 id="preview-issue"><code>preview-issue</code></h3>
+<p>Generates issue content for GitHub or Jira without creating the issue.</p>
+<blockquote>
+<p><strong>Warning:</strong> <code>--type</code> accepts only <code>github</code> or <code>jira</code>.</p>
+<p><strong>Note:</strong> GitHub-only overrides are used only when <code>--type github</code> is selected. Jira-only overrides are used only when <code>--type jira</code> is selected.</p>
+</blockquote>
+<p>Core options</p>
+<table>
+<thead>
+<tr>
+<th>Name</th>
+<th>Kind</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>JOB_ID</code></td>
+<td>arg</td>
+<td>string</td>
+<td>required</td>
+<td>Analysis job ID.</td>
+</tr>
+<tr>
+<td><code>--test</code>, <code>-t</code></td>
+<td>option</td>
+<td>string</td>
+<td>required</td>
+<td>Test name to preview.</td>
+</tr>
+<tr>
+<td><code>--type</code></td>
+<td>option</td>
+<td>string</td>
+<td>required</td>
+<td>Issue target: <code>github</code> or <code>jira</code>.</td>
+</tr>
+<tr>
+<td><code>--child-job</code></td>
+<td>option</td>
+<td>string</td>
+<td>empty</td>
+<td>Child job name for pipeline child failures.</td>
+</tr>
+<tr>
+<td><code>--child-build</code></td>
+<td>option</td>
+<td>integer</td>
+<td><code>0</code></td>
+<td>Child build number for pipeline child failures.</td>
+</tr>
+<tr>
+<td><code>--include-links</code></td>
+<td>option</td>
+<td>boolean</td>
+<td><code>false</code></td>
+<td>Include full URLs in the generated text.</td>
+</tr>
+<tr>
+<td><code>--ai-provider</code></td>
+<td>option</td>
+<td>string</td>
+<td>empty</td>
+<td>Override AI provider for issue generation.</td>
+</tr>
+<tr>
+<td><code>--ai-model</code></td>
+<td>option</td>
+<td>string</td>
+<td>empty</td>
+<td>Override AI model for issue generation.</td>
+</tr>
+<tr>
+<td><code>--issue-prompt</code></td>
+<td>option</td>
+<td>string</td>
+<td>empty</td>
+<td>Extra AI instructions for issue generation.</td>
+</tr>
+</tbody>
+</table>
+<p>Tracker override options</p>
+<table>
+<thead>
+<tr>
+<th>Name</th>
+<th>Kind</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>--github-token</code></td>
+<td>option</td>
+<td>string</td>
+<td>unset</td>
+<td>GitHub token override.</td>
+</tr>
+<tr>
+<td><code>--github-repo-url</code></td>
+<td>option</td>
+<td>string</td>
+<td>unset</td>
+<td>GitHub repository URL override.</td>
+</tr>
+<tr>
+<td><code>--jira-token</code></td>
+<td>option</td>
+<td>string</td>
+<td>unset</td>
+<td>Jira token override.</td>
+</tr>
+<tr>
+<td><code>--jira-email</code></td>
+<td>option</td>
+<td>string</td>
+<td>unset</td>
+<td>Jira email override.</td>
+</tr>
+<tr>
+<td><code>--jira-project-key</code></td>
+<td>option</td>
+<td>string</td>
+<td>unset</td>
+<td>Jira project key override.</td>
+</tr>
+<tr>
+<td><code>--jira-security-level</code></td>
+<td>option</td>
+<td>string</td>
+<td>unset</td>
+<td>Jira security level name override.</td>
+</tr>
+</tbody>
+</table>
+<p>Example:</p>
+<div class="highlight"><pre><span></span><code>rootcoz<span class="w"> </span>preview-issue<span class="w"> </span>job-123<span class="w"> </span>--test<span class="w"> </span>tests.TestA.test_one<span class="w"> </span>--type<span class="w"> </span>github<span class="w"> </span>--include-links
+</code></pre></div>
+
+<p>Return value/effect: Prints the generated issue title and body. When the server returns related matches, it also prints a <code>Similar issues</code> section.</p>
+<h3 id="get-issue-prompt"><code>get-issue-prompt</code></h3>
+<p>Shows the issue-generation prompt associated with one analysis job.</p>
+<table>
+<thead>
+<tr>
+<th>Name</th>
+<th>Kind</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>JOB_ID</code></td>
+<td>arg</td>
+<td>string</td>
+<td>required</td>
+<td>Analysis job ID.</td>
+</tr>
+</tbody>
+</table>
+<p>Example:</p>
+<div class="highlight"><pre><span></span><code>rootcoz<span class="w"> </span>get-issue-prompt<span class="w"> </span>job-123
+</code></pre></div>
+
+<p>Return value/effect: Prints the stored prompt text. If the job has no issue prompt, it prints an empty-state message.</p>
+<h3 id="create-issue"><code>create-issue</code></h3>
+<p>Creates a GitHub issue or Jira issue from an analyzed failure.</p>
+<blockquote>
+<p><strong>Warning:</strong> <code>--type</code> accepts only <code>github</code> or <code>jira</code>.</p>
+</blockquote>
+<p>Core options</p>
+<table>
+<thead>
+<tr>
+<th>Name</th>
+<th>Kind</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>JOB_ID</code></td>
+<td>arg</td>
+<td>string</td>
+<td>required</td>
+<td>Analysis job ID.</td>
+</tr>
+<tr>
+<td><code>--test</code>, <code>-t</code></td>
+<td>option</td>
+<td>string</td>
+<td>required</td>
+<td>Test name to create the issue from.</td>
+</tr>
+<tr>
+<td><code>--type</code></td>
+<td>option</td>
+<td>string</td>
+<td>required</td>
+<td>Issue target: <code>github</code> or <code>jira</code>.</td>
+</tr>
+<tr>
+<td><code>--title</code></td>
+<td>option</td>
+<td>string</td>
+<td>required</td>
+<td>Final issue title.</td>
+</tr>
+<tr>
+<td><code>--body</code></td>
+<td>option</td>
+<td>string</td>
+<td>required</td>
+<td>Final issue body.</td>
+</tr>
+<tr>
+<td><code>--child-job</code></td>
+<td>option</td>
+<td>string</td>
+<td>empty</td>
+<td>Child job name for pipeline child failures.</td>
+</tr>
+<tr>
+<td><code>--child-build</code></td>
+<td>option</td>
+<td>integer</td>
+<td><code>0</code></td>
+<td>Child build number for pipeline child failures.</td>
+</tr>
+</tbody>
+</table>
+<p>Tracker override options</p>
+<table>
+<thead>
+<tr>
+<th>Name</th>
+<th>Kind</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>--github-token</code></td>
+<td>option</td>
+<td>string</td>
+<td>unset</td>
+<td>GitHub token override.</td>
+</tr>
+<tr>
+<td><code>--github-repo-url</code></td>
+<td>option</td>
+<td>string</td>
+<td>unset</td>
+<td>GitHub repository URL override.</td>
+</tr>
+<tr>
+<td><code>--jira-token</code></td>
+<td>option</td>
+<td>string</td>
+<td>unset</td>
+<td>Jira token override.</td>
+</tr>
+<tr>
+<td><code>--jira-email</code></td>
+<td>option</td>
+<td>string</td>
+<td>unset</td>
+<td>Jira email override.</td>
+</tr>
+<tr>
+<td><code>--jira-project-key</code></td>
+<td>option</td>
+<td>string</td>
+<td>unset</td>
+<td>Jira project key override.</td>
+</tr>
+<tr>
+<td><code>--jira-security-level</code></td>
+<td>option</td>
+<td>string</td>
+<td>unset</td>
+<td>Jira security level name override.</td>
+</tr>
+<tr>
+<td><code>--jira-issue-type</code></td>
+<td>option</td>
+<td>string</td>
+<td><code>Bug</code></td>
+<td>Jira issue type name, such as <code>Bug</code>, <code>Story</code>, or <code>Task</code>.</td>
+</tr>
+</tbody>
+</table>
+<p>Example:</p>
+<div class="highlight"><pre><span></span><code>rootcoz<span class="w"> </span>create-issue<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>job-123<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--test<span class="w"> </span>tests.TestA.test_one<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--type<span class="w"> </span>jira<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--title<span class="w"> </span><span class="s2">&quot;DNS timeout in tests.TestA.test_one&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--body<span class="w"> </span><span class="s2">&quot;Observed in build 1542.&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--jira-issue-type<span class="w"> </span>Bug
+</code></pre></div>
+
+<p>Return value/effect: Creates the issue, then prints the created key or number, the issue URL, and an added comment ID when the server returns one.</p>
+<h3 id="validate-token"><code>validate-token</code></h3>
+<p>Validates a GitHub or Jira token.</p>
+<blockquote>
+<p><strong>Warning:</strong> Invalid tokens exit with status code <code>1</code>, including JSON mode.</p>
+</blockquote>
+<table>
+<thead>
+<tr>
+<th>Name</th>
+<th>Kind</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>TOKEN_TYPE</code></td>
+<td>arg</td>
+<td>string</td>
+<td>required</td>
+<td>Token target: <code>github</code> or <code>jira</code>.</td>
+</tr>
+<tr>
+<td><code>--token</code></td>
+<td>option</td>
+<td>string</td>
+<td>prompted</td>
+<td>Token value to validate. Input is hidden when prompted.</td>
+</tr>
+<tr>
+<td><code>--email</code></td>
+<td>option</td>
+<td>string</td>
+<td>empty</td>
+<td>Jira Cloud email to send with Jira token validation.</td>
+</tr>
+</tbody>
+</table>
+<p>Example:</p>
+<div class="highlight"><pre><span></span><code>rootcoz<span class="w"> </span>validate-token<span class="w"> </span>github<span class="w"> </span>--token<span class="w"> </span><span class="s2">&quot;</span><span class="nv">$GITHUB_TOKEN</span><span class="s2">&quot;</span>
+</code></pre></div>
+
+<p>Return value/effect: Prints a valid or invalid status line. In JSON mode, it prints the validation response object.</p>
+<h3 id="push-reportportal"><code>push-reportportal</code></h3>
+<p>Pushes stored classifications into Report Portal.</p>
+<blockquote>
+<p><strong>Note:</strong> Alias: <code>push-rp</code>.</p>
+</blockquote>
+<table>
+<thead>
+<tr>
+<th>Name</th>
+<th>Kind</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>JOB_ID</code></td>
+<td>arg</td>
+<td>string</td>
+<td>required</td>
+<td>Analysis job ID to push.</td>
+</tr>
+<tr>
+<td><code>--child-job-name</code></td>
+<td>option</td>
+<td>string</td>
+<td>unset</td>
+<td>Child job name for pipeline child pushes.</td>
+</tr>
+<tr>
+<td><code>--child-build-number</code></td>
+<td>option</td>
+<td>integer</td>
+<td>unset</td>
+<td>Child build number for pipeline child pushes.</td>
+</tr>
+</tbody>
+</table>
+<p>Example:</p>
+<div class="highlight"><pre><span></span><code>rootcoz<span class="w"> </span>push-reportportal<span class="w"> </span>job-123<span class="w"> </span>--child-job-name<span class="w"> </span>my-child<span class="w"> </span>--child-build-number<span class="w"> </span><span class="m">42</span>
+</code></pre></div>
+
+<p>Return value/effect: Prints the number of pushed classifications, the launch ID when returned, any unmatched tests, and any error count/details.</p>
+<h2 id="authentication-and-admin-commands">Authentication and Admin Commands</h2>
+<blockquote>
+<p><strong>Tip:</strong> See <a href="managing-users-and-api-keys.html">Managing Users and API Keys</a> and <a href="updating-your-profile-and-notifications.html">Updating Your Profile and Notifications</a> for workflow guidance.</p>
+</blockquote>
+<h3 id="auth-login"><code>auth login</code></h3>
+<p>Validates admin credentials.</p>
+<blockquote>
+<p><strong>Note:</strong> This command does not persist a login session across later CLI invocations. Persistent admin access is normally provided by the global <code>--api-key</code>, <code>ROOTCOZ_API_KEY</code>, or a profile <code>api_key</code>.</p>
+</blockquote>
+<table>
+<thead>
+<tr>
+<th>Name</th>
+<th>Kind</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>--username</code>, <code>-u</code></td>
+<td>option</td>
+<td>string</td>
+<td>required</td>
+<td>Admin username to validate.</td>
+</tr>
+<tr>
+<td><code>--api-key</code>, <code>-k</code></td>
+<td>option</td>
+<td>string</td>
+<td>required</td>
+<td>Admin API key to validate.</td>
+</tr>
+</tbody>
+</table>
+<p>Example:</p>
+<div class="highlight"><pre><span></span><code>rootcoz<span class="w"> </span>auth<span class="w"> </span>login<span class="w"> </span>--username<span class="w"> </span>admin<span class="w"> </span>--api-key<span class="w"> </span><span class="s2">&quot;</span><span class="nv">$ROOTCOZ_ADMIN_KEY</span><span class="s2">&quot;</span>
+</code></pre></div>
+
+<p>Return value/effect: Prints the returned username, role, and admin flag.</p>
+<h3 id="auth-logout"><code>auth logout</code></h3>
+<p>Sends the logout request.</p>
+<table>
+<thead>
+<tr>
+<th>Name</th>
+<th>Kind</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>none</td>
+<td>—</td>
+<td>—</td>
+<td>—</td>
+<td>No command-specific parameters.</td>
+</tr>
+</tbody>
+</table>
+<p>Example:</p>
+<div class="highlight"><pre><span></span><code>rootcoz<span class="w"> </span>auth<span class="w"> </span><span class="nb">logout</span>
+</code></pre></div>
+
+<p>Return value/effect: Sends the logout request and exits successfully when the server accepts it.</p>
+<h3 id="auth-whoami"><code>auth whoami</code></h3>
+<p>Shows the current authenticated user record.</p>
+<table>
+<thead>
+<tr>
+<th>Name</th>
+<th>Kind</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>none</td>
+<td>—</td>
+<td>—</td>
+<td>—</td>
+<td>No command-specific parameters.</td>
+</tr>
+</tbody>
+</table>
+<p>Example:</p>
+<div class="highlight"><pre><span></span><code>rootcoz<span class="w"> </span>auth<span class="w"> </span>whoami
+</code></pre></div>
+
+<p>Return value/effect: Prints a table with <code>username</code>, <code>role</code>, and <code>is_admin</code>.</p>
+<h3 id="admin-users-list"><code>admin users list</code></h3>
+<p>Lists known users.</p>
+<table>
+<thead>
+<tr>
+<th>Name</th>
+<th>Kind</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>none</td>
+<td>—</td>
+<td>—</td>
+<td>—</td>
+<td>No command-specific parameters.</td>
+</tr>
+</tbody>
+</table>
+<p>Example:</p>
+<div class="highlight"><pre><span></span><code>rootcoz<span class="w"> </span>admin<span class="w"> </span>users<span class="w"> </span>list
+</code></pre></div>
+
+<p>Return value/effect: Prints a table with <code>username</code>, <code>role</code>, <code>created_at</code>, and <code>last_seen</code>.</p>
+<h3 id="admin-users-create"><code>admin users create</code></h3>
+<p>Creates a new admin account.</p>
+<blockquote>
+<p><strong>Warning:</strong> The generated API key is shown once. Save it before the command ends.</p>
+</blockquote>
+<table>
+<thead>
+<tr>
+<th>Name</th>
+<th>Kind</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>USERNAME</code></td>
+<td>arg</td>
+<td>string</td>
+<td>required</td>
+<td>Username for the new admin account.</td>
+</tr>
+</tbody>
+</table>
+<p>Example:</p>
+<div class="highlight"><pre><span></span><code>rootcoz<span class="w"> </span>admin<span class="w"> </span>users<span class="w"> </span>create<span class="w"> </span>release-admin
+</code></pre></div>
+
+<p>Return value/effect: Creates the account and prints the returned API key.</p>
+<h3 id="admin-users-delete"><code>admin users delete</code></h3>
+<p>Removes an admin account by username.</p>
+<table>
+<thead>
+<tr>
+<th>Name</th>
+<th>Kind</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>USERNAME</code></td>
+<td>arg</td>
+<td>string</td>
+<td>required</td>
+<td>Admin username to remove.</td>
+</tr>
+<tr>
+<td><code>--force</code>, <code>-f</code></td>
+<td>option</td>
+<td>boolean</td>
+<td><code>false</code></td>
+<td>Skip the confirmation prompt.</td>
+</tr>
+</tbody>
+</table>
+<p>Example:</p>
+<div class="highlight"><pre><span></span><code>rootcoz<span class="w"> </span>admin<span class="w"> </span>users<span class="w"> </span>delete<span class="w"> </span>release-admin<span class="w"> </span>--force
+</code></pre></div>
+
+<p>Return value/effect: Deletes the named account. Without <code>--force</code>, the CLI asks for confirmation first.</p>
+<h3 id="admin-users-rotate-key"><code>admin users rotate-key</code></h3>
+<p>Rotates an admin user's API key.</p>
+<blockquote>
+<p><strong>Warning:</strong> The new API key is shown once. Save it before the command ends.</p>
+</blockquote>
+<table>
+<thead>
+<tr>
+<th>Name</th>
+<th>Kind</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>USERNAME</code></td>
+<td>arg</td>
+<td>string</td>
+<td>required</td>
+<td>Admin username whose key should be rotated.</td>
+</tr>
+</tbody>
+</table>
+<p>Example:</p>
+<div class="highlight"><pre><span></span><code>rootcoz<span class="w"> </span>admin<span class="w"> </span>users<span class="w"> </span>rotate-key<span class="w"> </span>release-admin
+</code></pre></div>
+
+<p>Return value/effect: Rotates the key and prints the newly issued API key.</p>
+<h3 id="admin-users-change-role"><code>admin users change-role</code></h3>
+<p>Changes a user's role.</p>
+<blockquote>
+<p><strong>Warning:</strong> Promoting a user to <code>admin</code> can return a new API key. Save it before the command ends.</p>
+</blockquote>
+<table>
+<thead>
+<tr>
+<th>Name</th>
+<th>Kind</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>USERNAME</code></td>
+<td>arg</td>
+<td>string</td>
+<td>required</td>
+<td>Username whose role should change.</td>
+</tr>
+<tr>
+<td><code>ROLE</code></td>
+<td>arg</td>
+<td>string</td>
+<td>required</td>
+<td>New role: <code>admin</code> or <code>user</code>.</td>
+</tr>
+</tbody>
+</table>
+<p>Example:</p>
+<div class="highlight"><pre><span></span><code>rootcoz<span class="w"> </span>admin<span class="w"> </span>users<span class="w"> </span>change-role<span class="w"> </span>alice<span class="w"> </span>admin
+</code></pre></div>
+
+<p>Return value/effect: Updates the user's role and prints the returned role. When the server returns a new admin key, the CLI prints it.</p>
+<h3 id="admin-token-usage"><code>admin token-usage</code></h3>
+<p>Shows AI token usage and cost data.</p>
+<p>Mode selection</p>
+<table>
+<thead>
+<tr>
+<th>Trigger</th>
+<th>Effect</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>no filters and no <code>--job-id</code></td>
+<td>Summary dashboard for <code>today</code>, <code>this_week</code>, and <code>this_month</code>, plus top models</td>
+</tr>
+<tr>
+<td><code>--job-id</code></td>
+<td>Per-call records for one analysis job</td>
+</tr>
+<tr>
+<td>any <code>--period</code>, <code>--start-date</code>, <code>--end-date</code>, <code>--provider</code>, <code>--model</code>, <code>--call-type</code>, or <code>--group-by</code></td>
+<td>Aggregated totals, plus a breakdown when grouping is present</td>
+</tr>
+</tbody>
+</table>
+<blockquote>
+<p><strong>Note:</strong> <code>--json</code> overrides <code>--format</code>.</p>
+</blockquote>
+<table>
+<thead>
+<tr>
+<th>Name</th>
+<th>Kind</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>--period</code></td>
+<td>option</td>
+<td>string</td>
+<td>unset</td>
+<td>Preset date range: <code>today</code>, <code>week</code>, <code>month</code>, or <code>all</code>.</td>
+</tr>
+<tr>
+<td><code>--start-date</code></td>
+<td>option</td>
+<td>string</td>
+<td>unset</td>
+<td>Start date in <code>YYYY-MM-DD</code> format.</td>
+</tr>
+<tr>
+<td><code>--end-date</code></td>
+<td>option</td>
+<td>string</td>
+<td>unset</td>
+<td>End date in <code>YYYY-MM-DD</code> format.</td>
+</tr>
+<tr>
+<td><code>--provider</code></td>
+<td>option</td>
+<td>string</td>
+<td>unset</td>
+<td>Filter by AI provider.</td>
+</tr>
+<tr>
+<td><code>--model</code></td>
+<td>option</td>
+<td>string</td>
+<td>unset</td>
+<td>Filter by AI model.</td>
+</tr>
+<tr>
+<td><code>--call-type</code></td>
+<td>option</td>
+<td>string</td>
+<td>unset</td>
+<td>Filter by call type.</td>
+</tr>
+<tr>
+<td><code>--group-by</code></td>
+<td>option</td>
+<td>string</td>
+<td>unset</td>
+<td>Group by <code>provider</code>, <code>model</code>, <code>call_type</code>, <code>day</code>, <code>week</code>, <code>month</code>, or <code>job</code>.</td>
+</tr>
+<tr>
+<td><code>--job-id</code></td>
+<td>option</td>
+<td>string</td>
+<td>unset</td>
+<td>Show per-call usage for one analysis job ID.</td>
+</tr>
+<tr>
+<td><code>--format</code></td>
+<td>option</td>
+<td>string</td>
+<td><code>table</code></td>
+<td>Output format: <code>table</code>, <code>json</code>, or <code>csv</code>.</td>
+</tr>
+</tbody>
+</table>
+<p>Example:</p>
+<div class="highlight"><pre><span></span><code>rootcoz<span class="w"> </span>admin<span class="w"> </span>token-usage<span class="w"> </span>--group-by<span class="w"> </span>provider<span class="w"> </span>--format<span class="w"> </span>csv
+</code></pre></div>
+
+<p>Return value/effect: In text mode, prints either a dashboard summary, aggregated totals, or per-job call records. CSV mode prints CSV rows. JSON mode prints the raw response object.</p>
+<h2 id="metadata-commands">Metadata Commands</h2>
+<h3 id="metadata-list"><code>metadata list</code></h3>
+<p>Lists stored job metadata.</p>
+<table>
+<thead>
+<tr>
+<th>Name</th>
+<th>Kind</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>--team</code></td>
+<td>option</td>
+<td>string</td>
+<td>empty</td>
+<td>Filter by team.</td>
+</tr>
+<tr>
+<td><code>--tier</code></td>
+<td>option</td>
+<td>string</td>
+<td>empty</td>
+<td>Filter by tier.</td>
+</tr>
+<tr>
+<td><code>--version</code></td>
+<td>option</td>
+<td>string</td>
+<td>empty</td>
+<td>Filter by version.</td>
+</tr>
+<tr>
+<td><code>--label</code>, <code>-l</code></td>
+<td>option</td>
+<td>string[]</td>
+<td>empty</td>
+<td>Repeatable label filter.</td>
+</tr>
+</tbody>
+</table>
+<p>Example:</p>
+<div class="highlight"><pre><span></span><code>rootcoz<span class="w"> </span>metadata<span class="w"> </span>list<span class="w"> </span>--team<span class="w"> </span>platform<span class="w"> </span>--label<span class="w"> </span>nightly
+</code></pre></div>
+
+<p>Return value/effect: Prints a table with <code>job_name</code>, <code>team</code>, <code>tier</code>, <code>version</code>, and <code>labels</code>.</p>
+<h3 id="metadata-get"><code>metadata get</code></h3>
+<p>Shows metadata for one job.</p>
+<table>
+<thead>
+<tr>
+<th>Name</th>
+<th>Kind</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>JOB_NAME</code></td>
+<td>arg</td>
+<td>string</td>
+<td>required</td>
+<td>Job name to fetch.</td>
+</tr>
+</tbody>
+</table>
+<p>Example:</p>
+<div class="highlight"><pre><span></span><code>rootcoz<span class="w"> </span>metadata<span class="w"> </span>get<span class="w"> </span>ocp-e2e-aws
+</code></pre></div>
+
+<p>Return value/effect: Prints one row with <code>job_name</code>, <code>team</code>, <code>tier</code>, <code>version</code>, and <code>labels</code>.</p>
+<h3 id="metadata-set"><code>metadata set</code></h3>
+<p>Creates or updates metadata for one job.</p>
+<table>
+<thead>
+<tr>
+<th>Name</th>
+<th>Kind</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>JOB_NAME</code></td>
+<td>arg</td>
+<td>string</td>
+<td>required</td>
+<td>Job name to update.</td>
+</tr>
+<tr>
+<td><code>--team</code></td>
+<td>option</td>
+<td>string</td>
+<td>empty</td>
+<td>Team value to store.</td>
+</tr>
+<tr>
+<td><code>--tier</code></td>
+<td>option</td>
+<td>string</td>
+<td>empty</td>
+<td>Tier value to store.</td>
+</tr>
+<tr>
+<td><code>--version</code></td>
+<td>option</td>
+<td>string</td>
+<td>empty</td>
+<td>Version value to store.</td>
+</tr>
+<tr>
+<td><code>--label</code>, <code>-l</code></td>
+<td>option</td>
+<td>string[]</td>
+<td>empty</td>
+<td>Repeatable labels to store.</td>
+</tr>
+</tbody>
+</table>
+<p>Example:</p>
+<div class="highlight"><pre><span></span><code>rootcoz<span class="w"> </span>metadata<span class="w"> </span><span class="nb">set</span><span class="w"> </span>ocp-e2e-aws<span class="w"> </span>--team<span class="w"> </span>platform<span class="w"> </span>--tier<span class="w"> </span>critical<span class="w"> </span>--label<span class="w"> </span>nightly
+</code></pre></div>
+
+<p>Return value/effect: Updates the job metadata and prints a confirmation line naming the job.</p>
+<h3 id="metadata-delete"><code>metadata delete</code></h3>
+<p>Deletes metadata for one job.</p>
+<table>
+<thead>
+<tr>
+<th>Name</th>
+<th>Kind</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>JOB_NAME</code></td>
+<td>arg</td>
+<td>string</td>
+<td>required</td>
+<td>Job name whose metadata should be deleted.</td>
+</tr>
+</tbody>
+</table>
+<p>Example:</p>
+<div class="highlight"><pre><span></span><code>rootcoz<span class="w"> </span>metadata<span class="w"> </span>delete<span class="w"> </span>ocp-e2e-aws
+</code></pre></div>
+
+<p>Return value/effect: Deletes the metadata record and prints a confirmation line naming the job.</p>
+<h3 id="metadata-import"><code>metadata import</code></h3>
+<p>Bulk imports job metadata from a local file.</p>
+<blockquote>
+<p><strong>Warning:</strong> <code>.yaml</code> and <code>.yml</code> files are parsed as YAML. Any other extension is parsed as JSON. The file must contain an array of metadata objects.</p>
+</blockquote>
+<table>
+<thead>
+<tr>
+<th>Name</th>
+<th>Kind</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>FILE_PATH</code></td>
+<td>arg</td>
+<td>string</td>
+<td>required</td>
+<td>Path to a JSON or YAML file containing metadata items.</td>
+</tr>
+</tbody>
+</table>
+<p>Example:</p>
+<div class="highlight"><pre><span></span><code>rootcoz<span class="w"> </span>metadata<span class="w"> </span>import<span class="w"> </span>./metadata.yaml
+</code></pre></div>
+
+<p>Return value/effect: Reads the local file, uploads the parsed items, and prints the number of updated metadata entries.</p>
+<h3 id="metadata-rules"><code>metadata rules</code></h3>
+<p>Lists configured metadata auto-assignment rules.</p>
+<table>
+<thead>
+<tr>
+<th>Name</th>
+<th>Kind</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>none</td>
+<td>—</td>
+<td>—</td>
+<td>—</td>
+<td>No command-specific parameters.</td>
+</tr>
+</tbody>
+</table>
+<p>Example:</p>
+<div class="highlight"><pre><span></span><code>rootcoz<span class="w"> </span>metadata<span class="w"> </span>rules
+</code></pre></div>
+
+<p>Return value/effect: Prints the rules file path when present, then each rule's pattern and assigned fields. If no rules are configured, it prints an empty-state message.</p>
+<h3 id="metadata-preview"><code>metadata preview</code></h3>
+<p>Shows what metadata rules would assign to one job name.</p>
+<table>
+<thead>
+<tr>
+<th>Name</th>
+<th>Kind</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>JOB_NAME</code></td>
+<td>arg</td>
+<td>string</td>
+<td>required</td>
+<td>Job name to test against the configured rules.</td>
+</tr>
+</tbody>
+</table>
+<p>Example:</p>
+<div class="highlight"><pre><span></span><code>rootcoz<span class="w"> </span>metadata<span class="w"> </span>preview<span class="w"> </span>test-smoke
+</code></pre></div>
+
+<p>Return value/effect: Prints the matched metadata fields for that job name, or an empty-state message when no rule matches.</p>
+<h2 id="configuration-commands">Configuration Commands</h2>
+<blockquote>
+<p><strong>Note:</strong> <code>rootcoz config</code> runs <code>rootcoz config show</code> when no subcommand is given.
+</p>
+<p><strong>Note:</strong> Configuration commands do not require a server connection.
+</p>
+<p><strong>Tip:</strong> See <a href="configuration-reference.html">Configuration Reference</a> for field-by-field config details.</p>
+</blockquote>
+<h3 id="config-show"><code>config show</code></h3>
+<p>Shows the current config file summary.</p>
+<table>
+<thead>
+<tr>
+<th>Name</th>
+<th>Kind</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>none</td>
+<td>—</td>
+<td>—</td>
+<td>—</td>
+<td>No command-specific parameters.</td>
+</tr>
+</tbody>
+</table>
+<p>Example:</p>
+<div class="highlight"><pre><span></span><code>rootcoz<span class="w"> </span>config<span class="w"> </span>show
+</code></pre></div>
+
+<p>Return value/effect: Prints the config file path, default server name, and configured servers. If no config file exists, it prints the expected path and a starter file snippet.</p>
+<h3 id="config-completion"><code>config completion</code></h3>
+<p>Prints shell-completion setup instructions.</p>
+<table>
+<thead>
+<tr>
+<th>Name</th>
+<th>Kind</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>SHELL</code></td>
+<td>arg</td>
+<td><code>bash</code> | <code>zsh</code></td>
+<td><code>zsh</code></td>
+<td>Target shell.</td>
+</tr>
+</tbody>
+</table>
+<p>Example:</p>
+<div class="highlight"><pre><span></span><code>rootcoz<span class="w"> </span>config<span class="w"> </span>completion<span class="w"> </span>bash
+</code></pre></div>
+
+<p>Return value/effect: Prints the shell RC snippet that calls <code>rootcoz --show-completion SHELL</code>. Unsupported shell names exit with an error.</p>
+<h3 id="config-servers"><code>config servers</code></h3>
+<p>Lists configured server profiles.</p>
+<table>
+<thead>
+<tr>
+<th>Name</th>
+<th>Kind</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>none</td>
+<td>—</td>
+<td>—</td>
+<td>—</td>
+<td>No command-specific parameters.</td>
+</tr>
+</tbody>
+</table>
+<p>Example:</p>
+<div class="highlight"><pre><span></span><code>rootcoz<span class="w"> </span>config<span class="w"> </span>servers
+</code></pre></div>
+
+<p>Return value/effect: Prints a table with <code>name</code>, <code>url</code>, <code>username</code>, <code>no_verify_ssl</code>, and a default-server marker. JSON mode returns an object keyed by server name.</p>
+<h2 id="related-pages">Related Pages</h2>
+<ul>
+<li><a href="automating-common-tasks-with-the-cli.html">Automating Common Tasks with the CLI</a></li>
+<li><a href="configuration-reference.html">Configuration Reference</a></li>
+<li><a href="api-endpoint-reference.html">API Endpoint Reference</a></li>
+<li><a href="submitting-jenkins-builds-and-junit-xml.html">Submitting Jenkins Builds and JUnit XML</a></li>
+<li><a href="reviewing-and-classifying-failures.html">Reviewing and Classifying Failures</a></li>
+</ul>
+                </div>
+            </article>
+            <nav class="page-nav">
+                
+                <a href="connecting-github-jira-and-report-portal.html" class="page-nav-link page-nav-prev">
+                    <span class="page-nav-label">Previous</span>
+                    <span class="page-nav-title">Connecting GitHub, Jira, and Report Portal</span>
+                </a>
+                
+                
+                <a href="api-endpoint-reference.html" class="page-nav-link page-nav-next">
+                    <span class="page-nav-label">Next</span>
+                    <span class="page-nav-title">API Endpoint Reference</span>
+                </a>
+                
+            </nav>
+            
+            <aside class="toc-sidebar">
+                <div class="toc-container">
+                    <h3>On this page</h3>
+                    <div class="toc">
+<ul>
+<li><a href="#global-options">Global Options</a></li>
+<li><a href="#output-modes">Output Modes</a></li>
+<li><a href="#analysis-and-results">Analysis and Results</a><ul>
+<li><a href="#health">health</a></li>
+<li><a href="#analyze">analyze</a></li>
+<li><a href="#re-analyze">re-analyze</a></li>
+<li><a href="#status">status</a></li>
+<li><a href="#results-list">results list</a></li>
+<li><a href="#results-dashboard">results dashboard</a></li>
+<li><a href="#results-show">results show</a></li>
+<li><a href="#results-delete">results delete</a></li>
+<li><a href="#results-review-status">results review-status</a></li>
+<li><a href="#results-set-reviewed">results set-reviewed</a></li>
+<li><a href="#results-enrich-comments">results enrich-comments</a></li>
+<li><a href="#ai-configs">ai-configs</a></li>
+<li><a href="#ai-models">ai-models</a></li>
+</ul>
+</li>
+<li><a href="#history-and-classification">History and Classification</a><ul>
+<li><a href="#history-test">history test</a></li>
+<li><a href="#history-search">history search</a></li>
+<li><a href="#history-stats">history stats</a></li>
+<li><a href="#history-failures">history failures</a></li>
+<li><a href="#classify">classify</a></li>
+<li><a href="#classifications-list">classifications list</a></li>
+<li><a href="#override-classification">override-classification</a></li>
+</ul>
+</li>
+<li><a href="#comments-and-mentions">Comments and Mentions</a><ul>
+<li><a href="#comments-list">comments list</a></li>
+<li><a href="#comments-add">comments add</a></li>
+<li><a href="#comments-delete">comments delete</a></li>
+<li><a href="#mentionable-users">mentionable-users</a></li>
+<li><a href="#mentions">mentions</a></li>
+<li><a href="#mentions-mark-read">mentions-mark-read</a></li>
+<li><a href="#mentions-mark-all-read">mentions-mark-all-read</a></li>
+<li><a href="#analyze-comment-intent">analyze-comment-intent</a></li>
+</ul>
+</li>
+<li><a href="#issue-and-integration-commands">Issue and Integration Commands</a><ul>
+<li><a href="#capabilities">capabilities</a></li>
+<li><a href="#jira-projects">jira-projects</a></li>
+<li><a href="#jira-security-levels">jira-security-levels</a></li>
+<li><a href="#preview-issue">preview-issue</a></li>
+<li><a href="#get-issue-prompt">get-issue-prompt</a></li>
+<li><a href="#create-issue">create-issue</a></li>
+<li><a href="#validate-token">validate-token</a></li>
+<li><a href="#push-reportportal">push-reportportal</a></li>
+</ul>
+</li>
+<li><a href="#authentication-and-admin-commands">Authentication and Admin Commands</a><ul>
+<li><a href="#auth-login">auth login</a></li>
+<li><a href="#auth-logout">auth logout</a></li>
+<li><a href="#auth-whoami">auth whoami</a></li>
+<li><a href="#admin-users-list">admin users list</a></li>
+<li><a href="#admin-users-create">admin users create</a></li>
+<li><a href="#admin-users-delete">admin users delete</a></li>
+<li><a href="#admin-users-rotate-key">admin users rotate-key</a></li>
+<li><a href="#admin-users-change-role">admin users change-role</a></li>
+<li><a href="#admin-token-usage">admin token-usage</a></li>
+</ul>
+</li>
+<li><a href="#metadata-commands">Metadata Commands</a><ul>
+<li><a href="#metadata-list">metadata list</a></li>
+<li><a href="#metadata-get">metadata get</a></li>
+<li><a href="#metadata-set">metadata set</a></li>
+<li><a href="#metadata-delete">metadata delete</a></li>
+<li><a href="#metadata-import">metadata import</a></li>
+<li><a href="#metadata-rules">metadata rules</a></li>
+<li><a href="#metadata-preview">metadata preview</a></li>
+</ul>
+</li>
+<li><a href="#configuration-commands">Configuration Commands</a><ul>
+<li><a href="#config-show">config show</a></li>
+<li><a href="#config-completion">config completion</a></li>
+<li><a href="#config-servers">config servers</a></li>
+</ul>
+</li>
+<li><a href="#related-pages">Related Pages</a></li>
+</ul>
+</div>
+
+                </div>
+            </aside>
+            
+
+        </main>
+
+        <footer class="page-footer">
+            
+            <span class="footer-version">Generated from version 4.0.0</span>
+            <span class="footer-sep">&middot;</span>
+            
+            Generated with <a href="https://github.com/myk-org/docsfy" target="_blank" rel="noopener">docs<span class="brand-accent">fy</span></a>
+            <span class="footer-sep">&middot;</span>
+            <span class="footer-llm">LLM-friendly: <a href="llms.txt">llms.txt</a> &middot; <a href="llms-full.txt">llms-full.txt</a></span>
+        </footer>
+    </div>
+
+    <div class="sidebar-overlay" id="sidebar-overlay"></div>
+
+    <script src="assets/theme.js"></script>
+    <script src="assets/search.js"></script>
+    <script src="assets/copy.js"></script>
+    <script src="assets/callouts.js"></script>
+    <script src="assets/scrollspy.js"></script>
+    <script src="assets/codelabels.js"></script>
+    <script src="assets/github.js"></script>
+    <script>
+(function() {
+    var toggle = document.getElementById('sidebar-toggle');
+    var sidebar = document.getElementById('sidebar');
+    var overlay = document.getElementById('sidebar-overlay');
+    if (toggle && sidebar) {
+        toggle.addEventListener('click', function() {
+            sidebar.classList.toggle('open');
+            if (overlay) overlay.classList.toggle('open');
+            var expanded = sidebar.classList.contains('open');
+            toggle.setAttribute('aria-expanded', expanded ? 'true' : 'false');
+        });
+    }
+    if (overlay) {
+        overlay.addEventListener('click', function() {
+            sidebar.classList.remove('open');
+            overlay.classList.remove('open');
+            if (toggle) toggle.setAttribute('aria-expanded', 'false');
+        });
+    }
+})();
+</script>
+<script>
+(function() {
+    var sidebar = document.querySelector('.sidebar-nav') || document.querySelector('.sidebar');
+    if (!sidebar) return;
+
+    // Restore scroll position
+    var saved = sessionStorage.getItem('sidebar-scroll');
+    if (saved) sidebar.scrollTop = parseInt(saved, 10);
+
+    // Save scroll position before navigating
+    sidebar.addEventListener('scroll', function() {
+        sessionStorage.setItem('sidebar-scroll', sidebar.scrollTop.toString());
+    });
+
+    // Also scroll active link into view if no saved position
+    if (!saved) {
+        var active = sidebar.querySelector('.nav-link.active');
+        if (active) {
+            active.scrollIntoView({ block: 'center', behavior: 'instant' });
+        }
+    }
+})();
+</script>
+</body>
+</html>
