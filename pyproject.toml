@@ -4,7 +4,7 @@ version = "4.0.0"
 description = "AI-powered root cause analysis for CI/CD test failures"
 requires-python = ">=3.12"
 dependencies = [
-  "ai-cli-runner>=0.1.1",
+  "ai-cli-runner>=0.3.0",
   "aiosqlite",
   "cryptography>=46.0.5",
   "defusedxml>=0.7.1",
