@@ -126,7 +126,6 @@ export function MentionsPage() {
       // Refresh the current page to reflect the changes
       setMentions((prev) => prev.map((m) => ({ ...m, is_read: true })))
       setUnreadCount(0)
-      window.dispatchEvent(new Event('mentions-updated'))
     } catch {
       // best-effort
     } finally {
@@ -143,7 +142,6 @@ export function MentionsPage() {
         prev.map((m) => (m.id === id ? { ...m, is_read: true } : m)),
       )
       setUnreadCount((prev) => Math.max(0, prev - 1))
-      window.dispatchEvent(new Event('mentions-updated'))
     } catch {
       // best-effort
     }

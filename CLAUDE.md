@@ -80,6 +80,7 @@ uvx --with tox-uv tox -e frontend   # Frontend only
 - **State**: Page-scoped `useReducer` (e.g., `ReportContext` for the report page) — each page owns its own context; do NOT introduce global state (Redux, Zustand, etc.)
 - **API**: Centralized `api.get/post/put/delete` wrapper in `lib/api.ts` — do NOT use raw `fetch` calls
 - **User identification**: Cookie-based (`rootcoz_username`), display-only — NOT an authentication/authorization boundary
+- **Real-time badges**: NavBar badge counts (active analyses, unread mentions) use a Server-Sent Events stream at `/api/navbar/stream` — no polling. Backend broadcasts via per-connection `asyncio.Event` objects. SSE endpoints are an exception to CLI parity (streaming doesn't apply to one-shot CLI). The existing `/api/dashboard/active-count` GET endpoint remains for CLI consumers.
 
 ### Auto-Generated Documentation
 
@@ -105,6 +106,9 @@ Every new API endpoint MUST also be supported via the `rootcoz` CLI tool. When a
 1. Add the client method to `src/rootcoz/cli/client.py`
 2. Add the CLI command to `src/rootcoz/cli/main.py`
 3. Add tests for both in `tests/test_cli_client.py` and `tests/test_cli_main.py`
+
+**Exceptions (no CLI equivalent needed):**
+- SSE streaming endpoints (e.g., `/api/navbar/stream`) — CLI is a one-shot tool, not a long-lived stream consumer. Equivalent GET endpoints remain available for CLI use.
 
 ### Failure Deduplication
 
