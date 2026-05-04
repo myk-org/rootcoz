@@ -9,7 +9,8 @@ import secrets
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from collections.abc import Callable
+from collections.abc import AsyncIterator, Callable
+from contextlib import asynccontextmanager
 from typing import get_args
 
 import aiosqlite
@@ -28,6 +29,17 @@ from rootcoz.models import (
 logger = get_logger(name=__name__, level=os.environ.get("LOG_LEVEL", "INFO"))
 
 DB_PATH = Path(os.getenv("DB_PATH", "/data/results.db"))
+
+
+@asynccontextmanager
+async def _connect_db() -> AsyncIterator[aiosqlite.Connection]:
+    """Open a database connection with WAL mode and busy_timeout."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("PRAGMA journal_mode=WAL")
+        await db.execute("PRAGMA busy_timeout=5000")
+        db.row_factory = aiosqlite.Row
+        yield db
+
 
 # Primary (override) classifications — derived from the OverrideClassificationLiteral
 # type so the SQL filter stays in sync with the model definition.
@@ -139,7 +151,7 @@ async def init_db() -> None:
     """
     logger.info(f"Initializing database at {DB_PATH}")
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _connect_db() as db:
         await db.execute("""
             CREATE TABLE IF NOT EXISTS results (
                 job_id TEXT PRIMARY KEY,
@@ -503,7 +515,7 @@ async def add_comment(
         f"add_comment: job_id={job_id}, test_name={test_name}, comment_len={len(comment)}"
     )
     _validate_child_identifier_pairing(child_job_name, child_build_number)
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _connect_db() as db:
         cursor = await db.execute(
             "INSERT INTO comments (job_id, test_name, child_job_name, child_build_number, comment, error_signature, username) VALUES (?, ?, ?, ?, ?, ?, ?)",
             (
@@ -530,7 +542,7 @@ async def delete_comment(comment_id: int, username: str, job_id: str = "") -> bo
     Returns True if deleted, False if not found.
     """
     logger.debug(f"delete_comment: comment_id={comment_id}, job_id={job_id}")
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _connect_db() as db:
         # Build query with optional scoping filters
         query = "DELETE FROM comments WHERE id = ?"
         params: list = [comment_id]
@@ -554,8 +566,7 @@ async def delete_comment(comment_id: int, username: str, job_id: str = "") -> bo
 async def get_comments_for_job(job_id: str) -> list[dict]:
     """Get all comments for a specific job."""
     logger.debug(f"get_comments_for_job: job_id={job_id}")
-    async with aiosqlite.connect(DB_PATH) as db:
-        db.row_factory = aiosqlite.Row
+    async with _connect_db() as db:
         cursor = await db.execute(
             "SELECT id, job_id, test_name, child_job_name, child_build_number, comment, error_signature, username, created_at "
             "FROM comments WHERE job_id = ? ORDER BY created_at ASC",
@@ -580,7 +591,7 @@ async def set_reviewed(
         f"set_reviewed: job_id={job_id}, test_name={test_name}, reviewed={reviewed}"
     )
     _validate_child_identifier_pairing(child_job_name, child_build_number)
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _connect_db() as db:
         await db.execute(
             "INSERT OR REPLACE INTO failure_reviews (job_id, test_name, child_job_name, child_build_number, reviewed, username, updated_at) "
             "VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)",
@@ -592,8 +603,7 @@ async def set_reviewed(
 async def get_reviews_for_job(job_id: str) -> dict[str, dict]:
     """Get all review states for a specific job."""
     logger.debug(f"get_reviews_for_job: job_id={job_id}")
-    async with aiosqlite.connect(DB_PATH) as db:
-        db.row_factory = aiosqlite.Row
+    async with _connect_db() as db:
         cursor = await db.execute(
             "SELECT test_name, child_job_name, child_build_number, reviewed, username, updated_at "
             "FROM failure_reviews WHERE job_id = ?",
@@ -618,7 +628,7 @@ async def get_reviews_for_job(job_id: str) -> dict[str, dict]:
 async def get_review_status(job_id: str) -> dict:
     """Get review summary for a job (used by dashboard)."""
     logger.debug(f"get_review_status: job_id={job_id}")
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _connect_db() as db:
         cursor = await db.execute(
             "SELECT result_json FROM results WHERE job_id = ?", (job_id,)
         )
@@ -684,8 +694,7 @@ async def get_historical_comments(
         where = f"({where}) AND job_id != ?"
         params.append(exclude_job_id)
 
-    async with aiosqlite.connect(DB_PATH) as db:
-        db.row_factory = aiosqlite.Row
+    async with _connect_db() as db:
         cursor = await db.execute(
             f"SELECT id, job_id, test_name, child_job_name, child_build_number, comment, error_signature, username, created_at "
             f"FROM comments WHERE {where} ORDER BY created_at DESC",
@@ -747,7 +756,7 @@ async def save_result(
     """
     logger.debug(f"Saving result for job_id: {job_id} (status: {status})")
     result_json = json.dumps(result) if result is not None else None
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _connect_db() as db:
         # Insert the row if it doesn't exist yet (preserves created_at / analysis_started_at).
         await db.execute(
             """
@@ -782,7 +791,7 @@ async def update_status(
         result: Optional result data to store. When None, result_json is not modified.
     """
     logger.debug(f"Updating status for job_id: {job_id} (status: {status})")
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _connect_db() as db:
         result_json = json.dumps(result) if result is not None else None
         set_parts, params = _build_status_update_clause(status, result_json)
         params.append(job_id)
@@ -854,7 +863,7 @@ async def patch_result_json(
 
     If the row does not exist or ``result_json`` is empty, this is a no-op.
     """
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _connect_db() as db:
         await db.execute("BEGIN IMMEDIATE")
         try:
             cursor = await db.execute(
@@ -893,8 +902,7 @@ async def get_result(job_id: str, *, strip_sensitive: bool = True) -> dict | Non
         Result dictionary if found, None otherwise.
     """
     logger.debug(f"get_result: job_id={job_id}")
-    async with aiosqlite.connect(DB_PATH) as db:
-        db.row_factory = aiosqlite.Row
+    async with _connect_db() as db:
         cursor = await db.execute(
             "SELECT * FROM results WHERE job_id = ?",
             (job_id,),
@@ -933,8 +941,7 @@ async def list_results(limit: int = 50) -> list[dict]:
     Returns:
         List of result summary dictionaries.
     """
-    async with aiosqlite.connect(DB_PATH) as db:
-        db.row_factory = aiosqlite.Row
+    async with _connect_db() as db:
         cursor = await db.execute(
             """
             SELECT job_id, jenkins_url, status, created_at
@@ -1132,7 +1139,7 @@ async def populate_failure_history(
         )
         return
 
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _connect_db() as db:
         # Delete existing rows for this job_id (supports re-analysis)
         await db.execute(
             "DELETE FROM failure_history WHERE job_id = ?",
@@ -1174,7 +1181,7 @@ async def backfill_failure_history() -> None:
     the results table has completed rows. Uses the same extraction
     logic as populate_failure_history().
     """
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _connect_db() as db:
         # Find completed results that are NOT yet in failure_history.
         # This makes the backfill resumable: if it crashes mid-way,
         # remaining jobs are picked up on next startup.
@@ -1334,9 +1341,7 @@ async def get_test_history(
     logger.debug(
         f"get_test_history: test_name={test_name}, limit={limit}, job_name={job_name}"
     )
-    async with aiosqlite.connect(DB_PATH) as db:
-        db.row_factory = aiosqlite.Row
-
+    async with _connect_db() as db:
         # Build optional job_name filter
         job_filter = ""
         params: list = [test_name]
@@ -1468,9 +1473,7 @@ async def search_by_signature(signature: str, exclude_job_id: str = "") -> dict:
     logger.debug(
         f"search_by_signature: signature={signature}, exclude_job_id={exclude_job_id}"
     )
-    async with aiosqlite.connect(DB_PATH) as db:
-        db.row_factory = aiosqlite.Row
-
+    async with _connect_db() as db:
         # Build optional exclude filter
         exclude_filter = ""
         base_params: list = [signature]
@@ -1550,9 +1553,7 @@ async def get_job_stats(job_name: str, exclude_job_id: str = "") -> dict:
         overall_failure_rate, most_common_failures, and recent_trend.
     """
     logger.debug(f"get_job_stats: job_name={job_name}, exclude_job_id={exclude_job_id}")
-    async with aiosqlite.connect(DB_PATH) as db:
-        db.row_factory = aiosqlite.Row
-
+    async with _connect_db() as db:
         # Build optional exclude filter
         exclude_filter = ""
         exclude_params: list = []
@@ -1655,7 +1656,7 @@ async def count_active_analyses() -> int:
     Uses a lightweight COUNT query — no result_json is fetched.
     """
     placeholders = ",".join("?" for _ in ACTIVE_STATUSES)
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _connect_db() as db:
         cursor = await db.execute(
             f"SELECT COUNT(*) FROM results WHERE status IN ({placeholders})",
             ACTIVE_STATUSES,
@@ -1682,8 +1683,7 @@ async def list_results_for_dashboard(
     if limit < 0:
         raise ValueError("limit must be >= 0")
 
-    async with aiosqlite.connect(DB_PATH) as db:
-        db.row_factory = aiosqlite.Row
+    async with _connect_db() as db:
         sql = """
             SELECT r.job_id, r.jenkins_url, r.status, r.result_json,
                 r.created_at, r.completed_at, r.analysis_started_at,
@@ -1741,7 +1741,7 @@ async def get_parent_job_name_for_test(test_name: str, job_id: str = "") -> str:
         job_id: When provided, scopes the lookup to a specific analysis job
                 to avoid cross-job leakage.
     """
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _connect_db() as db:
         if job_id:
             query = (
                 "SELECT job_name FROM failure_history "
@@ -1827,7 +1827,7 @@ async def set_test_classification(
         f"set_test_classification: test_name={test_name}, classification={classification}, "
         f"parent_job_name={parent_job_name}, job_id={job_id}, visible={visible}"
     )
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _connect_db() as db:
         cursor = await db.execute(
             "INSERT INTO test_classifications (test_name, job_name, parent_job_name, classification, reason, references_info, created_by, job_id, child_build_number, visible) "
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
@@ -1917,8 +1917,7 @@ async def get_test_classifications(
 
     where = " AND ".join(conditions)
 
-    async with aiosqlite.connect(DB_PATH) as db:
-        db.row_factory = aiosqlite.Row
+    async with _connect_db() as db:
         cursor = await db.execute(
             f"SELECT tc.id, tc.test_name, tc.job_name, tc.parent_job_name, tc.classification, "
             f"tc.reason, tc.references_info, tc.created_by, tc.job_id, tc.child_build_number, tc.created_at "
@@ -1940,8 +1939,7 @@ async def make_classifications_visible(job_id: str) -> None:
     from set_test_classification (which creates rows with visible=0 during
     analysis) to here so that failure_history doesn't leak hidden AI labels.
     """
-    async with aiosqlite.connect(DB_PATH) as db:
-        db.row_factory = aiosqlite.Row
+    async with _connect_db() as db:
         # Fetch hidden classifications before flipping so we can mirror them.
         # ORDER BY created_at DESC ensures latest-wins when deduplicating
         # by (test_name, job_name, child_build_number) below.
@@ -2026,7 +2024,7 @@ async def get_all_failures(
 
     where = " AND ".join(conditions) if conditions else "1=1"
 
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _connect_db() as db:
         # Get total count
         cursor = await db.execute(
             f"SELECT COUNT(*) FROM failure_history WHERE {where}",
@@ -2035,7 +2033,6 @@ async def get_all_failures(
         total = (await cursor.fetchone())[0]
 
         # Get paginated results
-        db.row_factory = aiosqlite.Row
         cursor = await db.execute(
             f"SELECT id, job_id, job_name, build_number, test_name, error_message, "
             f"error_signature, classification, child_job_name, child_build_number, analyzed_at "
@@ -2068,7 +2065,7 @@ async def _delete_job_rows(db: aiosqlite.Connection, job_id: str) -> bool:
 
 async def delete_job(job_id: str) -> bool:
     """Delete an analyzed job and all its related data."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _connect_db() as db:
         job_existed = await _delete_job_rows(db, job_id)
         await db.commit()
         return job_existed
@@ -2084,7 +2081,7 @@ async def delete_jobs_bulk(job_ids: list[str]) -> dict:
     failed = []
     # Preserve order while dropping duplicates
     unique_ids = list(dict.fromkeys(job_ids))
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _connect_db() as db:
         await db.execute("BEGIN IMMEDIATE")
         try:
             for idx, job_id in enumerate(unique_ids):
@@ -2145,7 +2142,7 @@ async def override_classification(
         raise ValueError(
             "override_classification requires child_build_number when child_job_name is set"
         )
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _connect_db() as db:
         # Look up the error_signature for this test so we can update
         # ALL tests in the same group (same signature, same job).
         # Scope by child context when provided so that identically-named
@@ -2292,7 +2289,7 @@ async def get_history_classification(
     _child_job_name = child_job_name or ""
     _child_build_number = child_build_number or 0
 
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _connect_db() as db:
         # 1. Prefer visible entry from test_classifications
         override_row = await (
             await db.execute(
@@ -2352,7 +2349,7 @@ async def get_effective_classification(
     _child_job_name = child_job_name or ""
     _child_build_number = child_build_number or 0
 
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _connect_db() as db:
         # 1. Prefer visible override from test_classifications
         override_row = await (
             await db.execute(
@@ -2397,9 +2394,7 @@ async def mark_stale_results_failed() -> list[dict]:
         List of dicts with ``job_id`` and ``result_data`` for each waiting job.
     """
     waiting_jobs: list[dict] = []
-    async with aiosqlite.connect(DB_PATH) as db:
-        db.row_factory = aiosqlite.Row
-
+    async with _connect_db() as db:
         # Mark pending/running as failed (background task is gone)
         cursor = await db.execute(
             "UPDATE results SET status = 'failed' "
@@ -2473,7 +2468,7 @@ async def get_ai_configs() -> list[dict]:
     Returns:
         List of dicts with 'ai_provider' and 'ai_model' keys.
     """
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _connect_db() as db:
         cursor = await db.execute(
             """
             SELECT DISTINCT
@@ -2506,7 +2501,7 @@ async def create_admin_user(username: str) -> tuple[str, str]:
         raise ValueError(msg)
     raw_key = generate_api_key()
     key_hash = hash_api_key(raw_key)
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _connect_db() as db:
         await db.execute(
             "INSERT INTO users (username, api_key_hash, role) VALUES (?, ?, 'admin')",
             (username, key_hash),
@@ -2518,8 +2513,7 @@ async def create_admin_user(username: str) -> tuple[str, str]:
 async def get_user_by_key(api_key: str) -> dict | None:
     """Look up a user by their raw API key."""
     key_hash = hash_api_key(api_key)
-    async with aiosqlite.connect(DB_PATH) as db:
-        db.row_factory = aiosqlite.Row
+    async with _connect_db() as db:
         cursor = await db.execute(
             "SELECT id, username, role, created_at, last_seen FROM users WHERE api_key_hash = ?",
             (key_hash,),
@@ -2530,8 +2524,7 @@ async def get_user_by_key(api_key: str) -> dict | None:
 
 async def get_user_by_username(username: str) -> dict | None:
     """Look up a user by username."""
-    async with aiosqlite.connect(DB_PATH) as db:
-        db.row_factory = aiosqlite.Row
+    async with _connect_db() as db:
         cursor = await db.execute(
             "SELECT id, username, role, created_at, last_seen FROM users WHERE username = ?",
             (username,),
@@ -2545,7 +2538,7 @@ async def delete_admin_user(username: str) -> bool:
 
     Raises ValueError if this would delete the last admin user.
     """
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _connect_db() as db:
         await db.execute("BEGIN IMMEDIATE")
         try:
             cursor = await db.execute("SELECT COUNT(*) FROM users WHERE role = 'admin'")
@@ -2595,8 +2588,7 @@ async def change_user_role(username: str, new_role: str) -> tuple[str, str]:
     if username.lower() == "admin":
         msg = "Cannot change role of reserved 'admin' user"
         raise ValueError(msg)
-    async with aiosqlite.connect(DB_PATH) as db:
-        db.row_factory = aiosqlite.Row
+    async with _connect_db() as db:
         cursor = await db.execute(
             "SELECT username, role FROM users WHERE username = ?", (username,)
         )
@@ -2659,8 +2651,7 @@ async def change_user_role(username: str, new_role: str) -> tuple[str, str]:
 
 async def list_users() -> list[dict]:
     """List all users (without key hashes)."""
-    async with aiosqlite.connect(DB_PATH) as db:
-        db.row_factory = aiosqlite.Row
+    async with _connect_db() as db:
         cursor = await db.execute(
             "SELECT id, username, role, created_at, last_seen FROM users ORDER BY created_at DESC"
         )
@@ -2674,7 +2665,7 @@ async def track_user(username: str) -> None:
     """
     if username.lower() == "admin":
         return
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _connect_db() as db:
         await db.execute(
             "INSERT INTO users (username, role) VALUES (?, 'user') "
             "ON CONFLICT(username) DO UPDATE SET last_seen = CURRENT_TIMESTAMP",
@@ -2691,7 +2682,7 @@ async def create_session(
     token_hash = _hash_session_token(token)
     expires_at = datetime.now(timezone.utc) + timedelta(hours=ttl_hours)
     expires_str = expires_at.strftime("%Y-%m-%d %H:%M:%S")
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _connect_db() as db:
         await db.execute(
             "INSERT INTO sessions (token, username, is_admin, expires_at) VALUES (?, ?, ?, ?)",
             (token_hash, username, 1 if is_admin else 0, expires_str),
@@ -2703,8 +2694,7 @@ async def create_session(
 async def get_session(token: str) -> dict | None:
     """Look up a session. Returns None if expired or not found."""
     token_hash = _hash_session_token(token)
-    async with aiosqlite.connect(DB_PATH) as db:
-        db.row_factory = aiosqlite.Row
+    async with _connect_db() as db:
         cursor = await db.execute(
             "SELECT username, is_admin, created_at, expires_at FROM sessions WHERE token = ? AND expires_at > datetime('now')",
             (token_hash,),
@@ -2723,7 +2713,7 @@ async def renew_session(token: str) -> bool:
     token_hash = _hash_session_token(token)
     new_expires = datetime.now(timezone.utc) + timedelta(hours=SESSION_TTL_HOURS)
     expires_str = new_expires.strftime("%Y-%m-%d %H:%M:%S")
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _connect_db() as db:
         cursor = await db.execute(
             "UPDATE sessions SET expires_at = ? "
             "WHERE token = ? AND expires_at > datetime('now')",
@@ -2736,7 +2726,7 @@ async def renew_session(token: str) -> bool:
 async def delete_session(token: str) -> None:
     """Delete a session (logout)."""
     token_hash = _hash_session_token(token)
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _connect_db() as db:
         await db.execute("DELETE FROM sessions WHERE token = ?", (token_hash,))
         await db.commit()
 
@@ -2749,7 +2739,7 @@ async def rotate_admin_key(username: str, custom_key: str | None = None) -> str:
     else:
         raw_key = generate_api_key()
     key_hash = hash_api_key(raw_key)
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _connect_db() as db:
         cursor = await db.execute(
             "UPDATE users SET api_key_hash = ? WHERE username = ? AND role = 'admin'",
             (key_hash, username),
@@ -2765,7 +2755,7 @@ async def rotate_admin_key(username: str, custom_key: str | None = None) -> str:
 
 async def cleanup_expired_sessions() -> None:
     """Remove expired sessions."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _connect_db() as db:
         await db.execute("DELETE FROM sessions WHERE expires_at <= datetime('now')")
         await db.commit()
 
@@ -2799,7 +2789,7 @@ async def save_user_tokens(
         return
 
     params.append(username)
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _connect_db() as db:
         await db.execute(
             f"UPDATE users SET {', '.join(updates)} WHERE username = ?",  # noqa: S608 — columns are hardcoded literals
             params,
@@ -2811,7 +2801,7 @@ async def get_user_tokens(username: str) -> dict[str, str]:
     """Get decrypted user tokens. Returns dict with github_token, jira_email, jira_token."""
     from rootcoz.encryption import decrypt_value
 
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _connect_db() as db:
         cursor = await db.execute(
             "SELECT github_token_enc, jira_email_enc, jira_token_enc FROM users WHERE username = ?",
             (username,),
@@ -2838,8 +2828,7 @@ async def get_job_metadata(job_name: str) -> dict | None:
     Returns:
         Metadata dict if found, None otherwise.
     """
-    async with aiosqlite.connect(DB_PATH) as db:
-        db.row_factory = aiosqlite.Row
+    async with _connect_db() as db:
         cursor = await db.execute(
             "SELECT job_name, team, tier, version, labels FROM job_metadata WHERE job_name = ?",
             (job_name,),
@@ -2900,7 +2889,7 @@ async def set_job_metadata(
     Returns:
         The stored metadata dict.
     """
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _connect_db() as db:
         await _upsert_job_metadata_row(
             db,
             {
@@ -2927,7 +2916,7 @@ async def delete_job_metadata(job_name: str) -> bool:
     Returns:
         True if deleted, False if not found.
     """
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _connect_db() as db:
         cursor = await db.execute(
             "DELETE FROM job_metadata WHERE job_name = ?",
             (job_name,),
@@ -2971,8 +2960,7 @@ async def list_jobs_with_metadata(
 
     where = " AND ".join(conditions) if conditions else "1=1"
 
-    async with aiosqlite.connect(DB_PATH) as db:
-        db.row_factory = aiosqlite.Row
+    async with _connect_db() as db:
         cursor = await db.execute(
             f"SELECT job_name, team, tier, version, labels FROM job_metadata WHERE {where} ORDER BY job_name",  # noqa: S608
             params,
@@ -3004,7 +2992,7 @@ async def bulk_set_metadata(items: list[dict]) -> dict:
             raise ValueError(
                 f"bulk_set_metadata: item at index {idx} is missing 'job_name'"
             )
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _connect_db() as db:
         for item in items:
             await _upsert_job_metadata_row(db, item)
         await db.commit()
@@ -3077,7 +3065,7 @@ async def record_token_usage(
     """Record a single AI CLI call's token usage. Returns the record ID."""
     record_id = str(uuid.uuid4())
     total_tokens = input_tokens + output_tokens
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _connect_db() as db:
         await db.execute(
             "INSERT INTO ai_token_usage "
             "(id, job_id, ai_provider, ai_model, call_type, input_tokens, output_tokens, "
@@ -3107,8 +3095,7 @@ async def record_token_usage(
 
 async def get_token_usage_for_job(job_id: str) -> list[dict]:
     """Get all token usage records for a specific job."""
-    async with aiosqlite.connect(DB_PATH) as db:
-        db.row_factory = aiosqlite.Row
+    async with _connect_db() as db:
         cursor = await db.execute(
             "SELECT * FROM ai_token_usage WHERE job_id = ? ORDER BY created_at ASC",
             (job_id,),
@@ -3152,9 +3139,7 @@ async def get_token_usage_summary(
 
     where_clause = f" WHERE {' AND '.join(conditions)}" if conditions else ""
 
-    async with aiosqlite.connect(DB_PATH) as db:
-        db.row_factory = aiosqlite.Row
-
+    async with _connect_db() as db:
         # Totals
         totals_query = (
             "SELECT "
@@ -3214,9 +3199,7 @@ async def get_token_usage_dashboard_summary() -> dict:
     - ``this_week``: last 7 rolling days (not calendar week)
     - ``this_month``: last 30 rolling days (not calendar month)
     """
-    async with aiosqlite.connect(DB_PATH) as db:
-        db.row_factory = aiosqlite.Row
-
+    async with _connect_db() as db:
         periods = {
             "today": "date(created_at) = date('now')",
             "this_week": "created_at >= datetime('now', '-7 days')",
@@ -3271,7 +3254,7 @@ async def save_push_subscription(
     Upserts by endpoint — a user can have multiple subscriptions (multiple browsers/devices).
     """
     logger.debug(f"save_push_subscription: username={username}")
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _connect_db() as db:
         await db.execute("BEGIN IMMEDIATE")
         try:
             await db.execute(
@@ -3302,7 +3285,7 @@ async def delete_push_subscription(endpoint: str, username: str) -> bool:
     Returns True if deleted, False if not found or not owned by username.
     """
     logger.debug(f"delete_push_subscription: username={username}")
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _connect_db() as db:
         cursor = await db.execute(
             "DELETE FROM push_subscriptions WHERE endpoint = ? AND username = ?",
             (endpoint, username),
@@ -3321,8 +3304,7 @@ async def get_push_subscriptions_for_users(usernames: list[str]) -> list[dict]:
     if not usernames:
         return []
     logger.debug(f"get_push_subscriptions_for_users: usernames_count={len(usernames)}")
-    async with aiosqlite.connect(DB_PATH) as db:
-        db.row_factory = aiosqlite.Row
+    async with _connect_db() as db:
         placeholders = ",".join("?" for _ in usernames)
         cursor = await db.execute(
             f"SELECT username, endpoint, p256dh_key, auth_key "  # noqa: S608
@@ -3340,7 +3322,7 @@ async def delete_stale_push_subscriptions(endpoints: list[str]) -> None:
     if not endpoints:
         return
     logger.debug(f"delete_stale_push_subscriptions: endpoints_count={len(endpoints)}")
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _connect_db() as db:
         placeholders = ",".join("?" for _ in endpoints)
         await db.execute(
             f"DELETE FROM push_subscriptions WHERE endpoint IN ({placeholders})",  # noqa: S608
@@ -3374,9 +3356,7 @@ async def _fetch_mention_candidates(
     if unread_only:
         base_where += " AND mr.id IS NULL"
 
-    async with aiosqlite.connect(DB_PATH) as db:
-        db.row_factory = aiosqlite.Row
-
+    async with _connect_db() as db:
         cursor = await db.execute(
             f"SELECT c.id, c.job_id, c.test_name, c.child_job_name, "
             f"c.child_build_number, c.comment, c.username, c.created_at, "
@@ -3453,7 +3433,7 @@ async def mark_mentions_read(username: str, comment_ids: list[int]) -> None:
     logger.debug(
         f"mark_mentions_read: username={username}, comment_ids_count={len(comment_ids)}"
     )
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _connect_db() as db:
         await db.executemany(
             "INSERT OR IGNORE INTO mention_reads (username, comment_id) VALUES (?, ?)",
             [(username, cid) for cid in comment_ids],
@@ -3481,7 +3461,7 @@ async def mark_all_mentions_read(username: str) -> int:
         return 0
 
     comment_ids = [c["id"] for c in candidates]
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _connect_db() as db:
         await db.executemany(
             "INSERT OR IGNORE INTO mention_reads (username, comment_id) VALUES (?, ?)",
             [(username, cid) for cid in comment_ids],
