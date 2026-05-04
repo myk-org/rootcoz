@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useEffect, useState } from 'react'
 import { Link, useLocation } from 'react-router-dom'
 import { BookOpen, MessageSquarePlus, Plus, type LucideIcon } from 'lucide-react'
 import { UserBadge } from './UserBadge'
@@ -24,8 +24,6 @@ const BASE_NAV_LINKS = [
   { to: '/history', label: 'History' },
 ]
 
-const UNREAD_POLL_INTERVAL = 30_000
-
 export function NavBar() {
   const location = useLocation()
   const { isAdmin, username } = useAuth()
@@ -33,68 +31,34 @@ export function NavBar() {
   const [activeCount, setActiveCount] = useState(0)
   const [feedbackOpen, setFeedbackOpen] = useState(false)
   const [feedbackEnabled, setFeedbackEnabled] = useState(false)
-  const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
-  const activeIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
-
-  const fetchUnread = useCallback(async () => {
-    try {
-      const res = await api.get<{ count: number }>('/api/users/mentions/unread-count')
-      setUnreadCount(res.count)
-    } catch {
-      // best-effort
-    }
-  }, [])
-
-  const fetchActiveCount = useCallback(async (ignore?: { current: boolean }) => {
-    try {
-      const res = await api.get<{ count: number }>('/api/dashboard/active-count')
-      if (ignore?.current) return
-      setActiveCount(res.count)
-    } catch {
-      // best-effort
-    }
-  }, [])
-
+  // Unified SSE stream for navbar badges — server pushes both counts in real-time
   useEffect(() => {
     if (!username) return
-    fetchUnread()
-    intervalRef.current = setInterval(fetchUnread, UNREAD_POLL_INTERVAL)
-    return () => {
-      if (intervalRef.current) clearInterval(intervalRef.current)
-    }
-  }, [username, fetchUnread])
 
-  useEffect(() => {
-    if (!username) return
-    const ignore = { current: false }
-    fetchActiveCount(ignore)
-    activeIntervalRef.current = setInterval(() => fetchActiveCount(ignore), UNREAD_POLL_INTERVAL)
-    return () => {
-      ignore.current = true
-      if (activeIntervalRef.current) clearInterval(activeIntervalRef.current)
-    }
-  }, [username, fetchActiveCount])
+    const eventSource = new EventSource('/api/navbar/stream')
 
-  useEffect(() => {
-    if (!username) return
-    function handleMentionsUpdated() {
-      fetchUnread()
-    }
-    window.addEventListener('mentions-updated', handleMentionsUpdated)
-    return () => window.removeEventListener('mentions-updated', handleMentionsUpdated)
-  }, [username, fetchUnread])
-
-  useEffect(() => {
-    if (!username) return
-    function handleVisibility() {
-      if (document.visibilityState === 'visible') {
-        fetchUnread()
-        fetchActiveCount()
+    eventSource.addEventListener('active-count', (event) => {
+      const count = parseInt(event.data, 10)
+      if (!isNaN(count)) {
+        setActiveCount(count)
       }
+    })
+
+    eventSource.addEventListener('unread-count', (event) => {
+      const count = parseInt(event.data, 10)
+      if (!isNaN(count)) {
+        setUnreadCount(count)
+      }
+    })
+
+    eventSource.onerror = () => {
+      // EventSource auto-reconnects on error
     }
-    document.addEventListener('visibilitychange', handleVisibility)
-    return () => document.removeEventListener('visibilitychange', handleVisibility)
-  }, [username, fetchUnread, fetchActiveCount])
+
+    return () => {
+      eventSource.close()
+    }
+  }, [username])
 
   // Clear stale counts when user is logged out
   useEffect(() => {

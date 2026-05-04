@@ -19,7 +19,13 @@ import httpx
 from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Query, Request
 from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
+from fastapi.responses import (
+    HTMLResponse,
+    JSONResponse,
+    RedirectResponse,
+    Response,
+    StreamingResponse,
+)
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.base import BaseHTTPMiddleware
 from pydantic import BaseModel, Field, SecretStr, ValidationError
@@ -134,6 +140,25 @@ from rootcoz.storage import (
 )
 
 # Inline favicon
+
+
+# --- SSE broadcast for navbar badges ---
+_active_count_listeners: set[asyncio.Event] = set()
+_mention_listeners: dict[str, set[asyncio.Event]] = {}
+
+
+def notify_active_count_changed() -> None:
+    """Signal all SSE listeners that the active analysis count has changed."""
+    for event in _active_count_listeners:
+        event.set()
+
+
+def notify_mentions_changed(username: str) -> None:
+    """Signal SSE listeners for a specific user that their mention count changed."""
+    listeners = _mention_listeners.get(username)
+    if listeners:
+        for event in listeners:
+            event.set()
 
 
 # Semaphore to limit concurrent track_user tasks
@@ -481,6 +506,7 @@ async def _fail_resumed_waiting_job(job_id: str, result_data: dict, error: str) 
     if "request_params" in result_data:
         fail_data["request_params"] = result_data["request_params"]
     await storage.update_status(job_id, "failed", fail_data)
+    notify_active_count_changed()
 
 
 async def _resume_waiting_jobs(waiting_jobs: list[dict]) -> None:
@@ -618,6 +644,7 @@ async def lifespan(app: FastAPI):
         task.add_done_callback(_background_tasks.discard)
 
         waiting_jobs = await storage.mark_stale_results_failed()
+        notify_active_count_changed()
         if waiting_jobs:
             # Schedule resumption as a background task so it runs after the
             # app is fully started and ready to serve internal API requests.
@@ -1456,6 +1483,7 @@ async def process_analysis_with_id(
 
         if settings.wait_for_completion and settings.jenkins_url:
             await update_status(job_id, "waiting")
+            notify_active_count_changed()
             await _safe_update_progress_phase("waiting_for_jenkins")
 
             completed, wait_error = await _wait_for_jenkins_completion(
@@ -1482,12 +1510,14 @@ async def process_analysis_with_id(
                     "failed",
                     fail_data,
                 )
+                notify_active_count_changed()
                 return
 
         logger.debug(
             f"process_analysis_with_id: updating status to running, job_id={job_id}"
         )
         await update_status(job_id, "running")
+        notify_active_count_changed()
         await _safe_update_progress_phase("analyzing")
 
         logger.debug(
@@ -1556,6 +1586,7 @@ async def process_analysis_with_id(
         # request-derived and re-generated on every GET to avoid host-header
         # injection from being stored.
         await update_status(job_id, result.status, result_data)
+        notify_active_count_changed()
         logger.info(
             f"Analysis completed for {body.job_name} #{body.build_number} "
             f"(job_id: {job_id})"
@@ -1601,6 +1632,7 @@ async def process_analysis_with_id(
         await _attach_token_usage(job_id, error_data)
 
         await update_status(job_id, "failed", error_data)
+        notify_active_count_changed()
 
 
 def _build_base_request_params(
@@ -1766,6 +1798,7 @@ async def _enqueue_analysis_job(
         "waiting" if can_resume_wait else "pending",
         initial_result,
     )
+    notify_active_count_changed()
     background_tasks.add_task(process_analysis_with_id, job_id, body, merged)
     response: dict = {
         "status": "queued",
@@ -1844,6 +1877,7 @@ async def analyze_failures(
             )
             result_data = analysis_result.model_dump(mode="json")
             await save_result(job_id, "", "completed", result_data)
+            notify_active_count_changed()
             return JSONResponse(
                 content=_attach_result_links(result_data, base_url, job_id)
             )
@@ -1887,6 +1921,7 @@ async def analyze_failures(
         ),
     }
     await save_result(job_id, "", "pending", initial_result)
+    notify_active_count_changed()
 
     # Group failures by error signature for deduplication
     groups: dict[str, list] = defaultdict(list)
@@ -1904,6 +1939,7 @@ async def analyze_failures(
     cloned_repos: dict[str, Path] = {}
     try:
         await update_status(job_id, "running")
+        notify_active_count_changed()
 
         repo_path = repo_manager.create_workspace()
 
@@ -2022,6 +2058,7 @@ async def analyze_failures(
         await _attach_token_usage(job_id, result_data)
 
         await update_status(job_id, "completed", result_data)
+        notify_active_count_changed()
 
         # Populate failure history
         try:
@@ -2055,6 +2092,7 @@ async def analyze_failures(
         await _attach_token_usage(job_id, fail_data)
 
         await update_status(job_id, "failed", fail_data)
+        notify_active_count_changed()
         return JSONResponse(content=_attach_result_links(fail_data, base_url, job_id))
 
     finally:
@@ -2350,10 +2388,11 @@ async def add_comment(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    # Detect @mentions and send notifications (best-effort, fire-and-forget)
+    # Detect @mentions once and reuse for both web-push and SSE notifications
+    mentioned = detect_mentions(body.comment)
+
     settings = get_settings()
     if settings.web_push_enabled and username:
-        mentioned = detect_mentions(body.comment)
         if mentioned:
             vapid_cfg = get_vapid_config()
             if vapid_cfg and "private_key" in vapid_cfg and "claim_email" in vapid_cfg:
@@ -2370,6 +2409,10 @@ async def add_comment(
                 )
                 _background_tasks.add(task)
                 task.add_done_callback(_background_tasks.discard)
+
+    # Notify mentioned users for SSE badge updates
+    for mentioned_user in mentioned:
+        notify_mentions_changed(mentioned_user)
 
     return {"id": comment_id}
 
@@ -2391,7 +2434,26 @@ async def delete_comment_endpoint(
 
     # Admins can delete any comment; regular users only their own
     delete_username = "" if request.state.is_admin else username
+
+    # Fetch comment text before deletion to notify mentioned users
+    comment_text = ""
+    try:
+        comments = await storage.get_comments_for_job(job_id)
+        for c in comments:
+            if c.get("id") == comment_id:
+                comment_text = c.get("comment", "")
+                break
+    except Exception:
+        logger.debug(
+            "Failed to fetch comment text for mention notification", exc_info=True
+        )
+
     deleted = await storage.delete_comment(comment_id, delete_username, job_id=job_id)
+    if deleted:
+        notify_mentions_changed(request.state.username)
+        if comment_text:
+            for mentioned_user in detect_mentions(comment_text):
+                notify_mentions_changed(mentioned_user)
     if not deleted:
         detail = (
             "Comment not found"
@@ -3037,6 +3099,8 @@ async def _add_tracker_comment(
             error_signature=error_signature,
             username=username,
         )
+        for mentioned_user in detect_mentions(comment_text):
+            notify_mentions_changed(mentioned_user)
     except Exception:
         logger.warning(
             f"Failed to add comment after {tracker_label} creation "
@@ -3808,6 +3872,7 @@ async def bulk_delete_jobs_endpoint(body: BulkDeleteRequest, request: Request) -
     _require_admin(request)
 
     result = await storage.delete_jobs_bulk(body.job_ids)
+    notify_active_count_changed()
 
     # Audit log each deletion individually
     for job_id in result["deleted"]:
@@ -3828,6 +3893,7 @@ async def delete_job_endpoint(
         raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
 
     await storage.delete_job(job_id)
+    notify_active_count_changed()
     logger.info(f"[AUDIT] Admin '{request.state.username}' deleted job {job_id}")
     return {"status": "deleted", "job_id": job_id}
 
@@ -3845,6 +3911,111 @@ async def get_active_analysis_count() -> dict:
             detail="Failed to get active analysis count",
         ) from exc
     return {"count": count}
+
+
+@app.get("/api/navbar/stream")
+async def stream_navbar_counts(request: Request) -> StreamingResponse:
+    """SSE stream that pushes active analysis count and unread mention count."""
+    username = request.state.username
+    _check_allow_list(request)
+
+    async def event_generator():
+        # Per-connection events
+        active_event = asyncio.Event()
+        mention_event = asyncio.Event() if username else None
+
+        # Register
+        _active_count_listeners.add(active_event)
+        if username and mention_event is not None:
+            _mention_listeners.setdefault(username, set()).add(mention_event)
+
+        try:
+            # Send both counts immediately on connect
+            try:
+                active = await storage.count_active_analyses()
+                last_active = active
+                yield f"event: active-count\ndata: {active}\n\n"
+            except Exception:
+                last_active = 0
+                yield "event: active-count\ndata: 0\n\n"
+
+            last_unread = -1
+            if username:
+                try:
+                    unread = await storage.get_unread_mention_count(username)
+                    last_unread = unread
+                    yield f"event: unread-count\ndata: {unread}\n\n"
+                except Exception:
+                    last_unread = 0
+                    yield "event: unread-count\ndata: 0\n\n"
+
+            while True:
+                # Wait for either event or timeout
+                wait_tasks = [asyncio.create_task(active_event.wait())]
+                if mention_event is not None:
+                    wait_tasks.append(asyncio.create_task(mention_event.wait()))
+
+                try:
+                    done, pending = await asyncio.wait(
+                        wait_tasks, timeout=30, return_when=asyncio.FIRST_COMPLETED
+                    )
+                    for task in pending:
+                        task.cancel()
+                except asyncio.CancelledError:
+                    for task in wait_tasks:
+                        task.cancel()
+                    break
+
+                if not done:
+                    yield ": keepalive\n\n"
+                    continue
+
+                if await request.is_disconnected():
+                    break
+
+                # Re-fetch and send only if changed
+                if active_event.is_set():
+                    active_event.clear()
+                    try:
+                        active = await storage.count_active_analyses()
+                        if active != last_active:
+                            yield f"event: active-count\ndata: {active}\n\n"
+                            last_active = active
+                    except Exception:
+                        logger.debug(
+                            "Failed to fetch active count for SSE", exc_info=True
+                        )
+
+                if mention_event is not None and mention_event.is_set():
+                    mention_event.clear()
+                    try:
+                        unread = await storage.get_unread_mention_count(username)
+                        if unread != last_unread:
+                            yield f"event: unread-count\ndata: {unread}\n\n"
+                            last_unread = unread
+                    except Exception:
+                        logger.debug(
+                            "Failed to fetch unread count for SSE", exc_info=True
+                        )
+        finally:
+            # Cleanup: remove per-connection events
+            _active_count_listeners.discard(active_event)
+            if username and mention_event is not None:
+                listeners = _mention_listeners.get(username)
+                if listeners is not None:
+                    listeners.discard(mention_event)
+                    if not listeners:
+                        _mention_listeners.pop(username, None)
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 @app.get("/api/dashboard")
@@ -5007,6 +5178,7 @@ async def mark_all_mentions_read_endpoint(request: Request):
         raise HTTPException(status_code=401, detail="Username required")
     _check_allow_list(request)
     count = await storage.mark_all_mentions_read(username)
+    notify_mentions_changed(username)
     return {"marked_read": count}
 
 
@@ -5031,6 +5203,7 @@ async def mark_mentions_as_read(request: Request):
             detail="comment_ids must be a non-empty list of integers",
         )
     await storage.mark_mentions_read(username, comment_ids)
+    notify_mentions_changed(username)
     return {"ok": True}
 
 
