@@ -137,6 +137,10 @@ class BaseAnalysisRequest(BaseModel):
         default=None,
         description="Raw prompt to append as additional AI instructions (overrides repo-level JOB_INSIGHT_PROMPT.md)",
     )
+    issue_prompt: str | None = Field(
+        default=None,
+        description="Custom issue generation prompt. Overrides JOB_INSIGHT_ISSUE_PROMPT.md from the test repo.",
+    )
     github_token: str | None = Field(
         default=None,
         description="GitHub API token for private repo PR status in comments (overrides GITHUB_TOKEN env var)",

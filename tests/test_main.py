@@ -4545,3 +4545,83 @@ class TestMergeSettingsForce:
         settings = Settings()
         merged = _merge_settings(body, settings)
         assert merged.force_analysis is False
+
+
+@pytest.mark.asyncio
+class TestGetIssuePromptStoredPriority:
+    """Tests for GET /results/{job_id}/issue-prompt stored prompt priority."""
+
+    async def test_returns_stored_issue_prompt_from_request_params(
+        self, test_client, temp_db_path: Path
+    ) -> None:
+        """Stored issue_prompt in request_params is returned directly."""
+        with patch.object(storage, "DB_PATH", temp_db_path):
+            await storage.init_db()
+            await storage.save_result(
+                job_id="job-prompt-test",
+                jenkins_url="https://jenkins.example.com/job/test/1/",
+                status="completed",
+                result={
+                    "job_name": "test-job",
+                    "build_number": 1,
+                    "request_params": {
+                        "issue_prompt": "My custom issue prompt",
+                        "tests_repo_url": "https://github.com/org/repo",
+                    },
+                },
+            )
+
+            with patch("rootcoz.main.httpx.AsyncClient") as mock_http:
+                resp = test_client.get("/results/job-prompt-test/issue-prompt")
+                assert resp.status_code == 200
+                assert resp.json()["prompt"] == "My custom issue prompt"
+                mock_http.assert_not_called()  # GitHub API should not be called
+
+    async def test_falls_through_when_issue_prompt_empty(
+        self, test_client, temp_db_path: Path
+    ) -> None:
+        """Empty issue_prompt falls through to repo fetch."""
+        with patch.object(storage, "DB_PATH", temp_db_path):
+            await storage.init_db()
+            await storage.save_result(
+                job_id="job-empty-prompt",
+                jenkins_url="https://jenkins.example.com/job/test/1/",
+                status="completed",
+                result={
+                    "job_name": "test-job",
+                    "build_number": 1,
+                    "request_params": {
+                        "issue_prompt": "",
+                        "tests_repo_url": "",
+                    },
+                },
+            )
+
+            resp = test_client.get("/results/job-empty-prompt/issue-prompt")
+            assert resp.status_code == 200
+            # Falls through — no repo configured either, returns empty
+            assert resp.json()["prompt"] == ""
+
+    async def test_falls_through_when_issue_prompt_whitespace(
+        self, test_client, temp_db_path: Path
+    ) -> None:
+        """Whitespace-only issue_prompt is stripped and falls through."""
+        with patch.object(storage, "DB_PATH", temp_db_path):
+            await storage.init_db()
+            await storage.save_result(
+                job_id="job-ws-prompt",
+                jenkins_url="https://jenkins.example.com/job/test/1/",
+                status="completed",
+                result={
+                    "job_name": "test-job",
+                    "build_number": 1,
+                    "request_params": {
+                        "issue_prompt": "   \n  ",
+                        "tests_repo_url": "",
+                    },
+                },
+            )
+
+            resp = test_client.get("/results/job-ws-prompt/issue-prompt")
+            assert resp.status_code == 200
+            assert resp.json()["prompt"] == ""
