@@ -4,12 +4,13 @@ requires-python = ">=3.12"
 
 [[package]]
 name = "ai-cli-runner"
-version = "0.2.0"
+version = "0.3.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
+    { name = "httpx" },
     { name = "python-simple-logger" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/dd/db/b818b38345194a66975c42e339e2e65b8cc43792b35bdcade4004f644690/ai_cli_runner-0.2.0.tar.gz", hash = "sha256:087f5596629ff0cb6a25f4663dfac7134aeb763b1b943fedb5dab87c5a10a5ef", size = 29959, upload-time = "2026-04-24T05:47:20.098Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/04/a2/a03bd995c8278ea985423ad0401c328195480ff74b7e1d846b87faad5721/ai_cli_runner-0.3.0.tar.gz", hash = "sha256:bbb0cdf1ecb80203aa3d659e631ed13123dbb2ee1ac0b78a2c76a8e5ed45bd90", size = 45632, upload-time = "2026-05-04T16:05:43.296Z" }
 
 [[package]]
 name = "aiohappyeyeballs"
@@ -1177,7 +1178,7 @@ tests = [
 
 [package.metadata]
 requires-dist = [
-    { name = "ai-cli-runner", specifier = ">=0.1.1" },
+    { name = "ai-cli-runner", specifier = ">=0.3.0" },
     { name = "aiosqlite" },
     { name = "cryptography", specifier = ">=46.0.5" },
     { name = "defusedxml", specifier = ">=0.7.1" },

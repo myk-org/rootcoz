@@ -32,10 +32,12 @@ from pydantic import BaseModel, Field, SecretStr, ValidationError
 from simple_logger.logger import get_logger
 
 from rootcoz.logging_context import JobIdFilter, job_id_var
-from rootcoz.ai_models import model_cache
-from rootcoz.llm_pricing import pricing_cache
-
-from ai_cli_runner import VALID_AI_PROVIDERS, run_parallel_with_limit
+from ai_cli_runner import (
+    VALID_AI_PROVIDERS,
+    model_cache,
+    pricing_cache,
+    run_parallel_with_limit,
+)
 from rootcoz.analyzer import (
     JOB_INSIGHT_ISSUE_PROMPT_FILENAME,
     clone_additional_repos,
@@ -634,10 +636,8 @@ async def lifespan(app: FastAPI):
     _warmup.add_done_callback(_background_tasks.discard)
 
     try:
-        pricing_cache.start_background_refresh()
+        await pricing_cache.start_background_refresh()
 
-        # Wire AI model cache to pricing data and pre-populate cursor models
-        model_cache.set_pricing_cache(pricing_cache)
         # Pre-populate cursor models in background (don't block startup)
         task = asyncio.create_task(_safe_preload_cursor_models())
         _background_tasks.add(task)
@@ -654,7 +654,7 @@ async def lifespan(app: FastAPI):
 
         yield
     finally:
-        pricing_cache.stop_background_refresh()
+        await pricing_cache.stop_background_refresh()
 
 
 app = FastAPI(

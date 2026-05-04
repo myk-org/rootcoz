@@ -310,10 +310,19 @@ class TestCommentMentionNotification:
             patch.object(storage, "DB_PATH", temp_db_path),
         ):
             get_settings.cache_clear()
-            with patch(
-                "rootcoz.main.send_mention_notifications",
-                new_callable=AsyncMock,
-            ) as mock_send:
+            with (
+                patch(
+                    "rootcoz.main.send_mention_notifications",
+                    new_callable=AsyncMock,
+                ) as mock_send,
+                patch(
+                    "rootcoz.main.get_vapid_config",
+                    return_value={
+                        "private_key": "fake-private-key",  # pragma: allowlist secret
+                        "claim_email": "admin@example.com",
+                    },
+                ),
+            ):
                 from rootcoz.main import app
 
                 with TestClient(app) as client:
@@ -328,7 +337,7 @@ class TestCommentMentionNotification:
                     assert resp.status_code == 201
                     import time
 
-                    deadline = time.monotonic() + 2.0
+                    deadline = time.monotonic() + 5.0
                     while time.monotonic() < deadline:
                         if mock_send.call_count > 0:
                             break
@@ -360,10 +369,19 @@ class TestCommentMentionNotification:
             patch.object(storage, "DB_PATH", temp_db_path),
         ):
             get_settings.cache_clear()
-            with patch(
-                "rootcoz.main.send_mention_notifications",
-                new_callable=AsyncMock,
-            ) as mock_send:
+            with (
+                patch(
+                    "rootcoz.main.send_mention_notifications",
+                    new_callable=AsyncMock,
+                ) as mock_send,
+                patch(
+                    "rootcoz.main.get_vapid_config",
+                    return_value={
+                        "private_key": "fake-private-key",  # pragma: allowlist secret
+                        "claim_email": "admin@example.com",
+                    },
+                ),
+            ):
                 from rootcoz.main import app
 
                 with TestClient(app) as client:

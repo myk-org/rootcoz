@@ -6,11 +6,10 @@ and build token usage summaries for analysis results.
 
 import os
 
-from ai_cli_runner import AIResult
+from ai_cli_runner import AIResult, pricing_cache
 from simple_logger.logger import get_logger
 
 from rootcoz import storage
-from rootcoz.llm_pricing import pricing_cache
 from rootcoz.models import TokenUsageEntry, TokenUsageSummary
 
 logger = get_logger(name=__name__, level=os.environ.get("LOG_LEVEL", "INFO"))
