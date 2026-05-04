@@ -6,9 +6,12 @@ import type { ResultResponse } from '@/types'
 import { Card, CardContent } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
-import { Clock, ExternalLink, Loader2, RotateCw } from 'lucide-react'
+import { Clock, ExternalLink, Loader2, RotateCw, XCircle } from 'lucide-react'
 import { StatusChip } from '@/components/shared/StatusChip'
+import { ConfirmDialog } from '@/components/shared/ConfirmDialog'
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
 import { ReAnalyzeDialog } from './report/ReAnalyzeDialog'
+import { useAuth } from '@/lib/auth'
 
 const phaseLabels: Record<string, string> = {
   waiting_for_jenkins: 'Waiting for Jenkins build to complete...',
@@ -57,6 +60,10 @@ const statusMessages: Record<string, { title: string; subtitle: string }> = {
     title: 'Analysis complete',
     subtitle: 'Analysis finished.',
   },
+  aborted: {
+    title: 'Analysis aborted',
+    subtitle: 'This analysis was cancelled by a user.',
+  },
 }
 
 /** Title text for terminal error states rendered via the error branch. */
@@ -64,6 +71,7 @@ const terminalErrorTitles: Record<string, string> = {
   not_found: 'Job not found',
   unauthorized: 'Access denied',
   failed: 'Analysis failed',
+  aborted: 'Analysis aborted',
 }
 
 interface StepLogEntry {
@@ -77,8 +85,10 @@ export function StatusPage() {
   const navigate = useNavigate()
   const [data, setData] = useState<ResultResponse | null>(null)
   const [error, setError] = useState('')
-  const [terminalErrorKind, setTerminalErrorKind] = useState<'not_found' | 'unauthorized' | 'failed' | null>(null)
+  const [terminalErrorKind, setTerminalErrorKind] = useState<'not_found' | 'unauthorized' | 'failed' | 'aborted' | null>(null)
   const [reAnalyzeOpen, setReAnalyzeOpen] = useState(false)
+  const [isAborting, setIsAborting] = useState(false)
+  const [abortConfirmOpen, setAbortConfirmOpen] = useState(false)
   const prevLogLenRef = useRef(0)
   const logEndRef = useRef<HTMLDivElement>(null)
   const logContainerRef = useRef<HTMLDivElement>(null)
@@ -114,6 +124,10 @@ export function StatusPage() {
         } else if (res.status === 'failed') {
           setTerminalErrorKind('failed')
           setError(res.result?.error ?? 'Analysis failed')
+          return 'terminal'
+        } else if (res.status === 'aborted') {
+          setTerminalErrorKind('aborted')
+          setError(res.result?.error ?? 'Analysis was aborted')
           return 'terminal'
         }
       } catch (err) {
@@ -164,6 +178,48 @@ export function StatusPage() {
     }
   }, [jobId, navigate])
 
+  const fetchStatus = async () => {
+    if (!jobId) return
+    try {
+      const res = await api.get<ResultResponse>(`/results/${jobId}`)
+      setData(res)
+      setError('')
+      if (res.status === 'completed') {
+        navigate(`/results/${jobId}`, { replace: true })
+      } else if (res.status === 'failed') {
+        if (intervalRef.current) {
+          clearInterval(intervalRef.current)
+          intervalRef.current = null
+        }
+        setTerminalErrorKind('failed')
+        setError(res.result?.error ?? 'Analysis failed')
+      } else if (res.status === 'aborted') {
+        if (intervalRef.current) {
+          clearInterval(intervalRef.current)
+          intervalRef.current = null
+        }
+        setTerminalErrorKind('aborted')
+        setError(res.result?.error ?? 'Analysis was aborted')
+      }
+    } catch {
+      // best-effort
+    }
+  }
+
+  async function handleAbort() {
+    setIsAborting(true)
+    try {
+      await api.post(`/results/${jobId}/abort`)
+      await fetchStatus()
+    } catch (err) {
+      console.error('Failed to abort analysis:', err)
+      setError('Failed to abort analysis. Please try again.')
+    } finally {
+      setIsAborting(false)
+      setAbortConfirmOpen(false)
+    }
+  }
+
   // Derive stepLog from server-persisted progress_log (survives F5 refresh)
   const rawProgressLog = data?.result?.progress_log
   const progressLog = Array.isArray(rawProgressLog) ? rawProgressLog : []
@@ -206,13 +262,18 @@ export function StatusPage() {
   const isRunning = displayStatus === 'running'
   const isWaiting = displayStatus === 'waiting'
   const isActive = isRunning || isWaiting
+  const isAbortable = !!data && ['running', 'waiting', 'pending'].includes(data.status)
   const msg = statusMessages[displayStatus] ?? statusMessages.running
   const statusBadgeLabel = displayStatus.replace(/_/g, ' ').toUpperCase()
+
+  const { isAdmin, username } = useAuth()
+  const submitter = data?.result?.request_params?.submitted_by ?? ''
+  const canAbort = isAdmin || (!!username && username === submitter)
 
   return (
     <>
       {/* Sticky header for failed jobs — matches report page layout */}
-      {terminalErrorKind === 'failed' && data?.result && (
+      {(terminalErrorKind === 'failed' || terminalErrorKind === 'aborted') && data?.result && (
         <div className="sticky top-14 z-40 w-full bg-surface-page/95 backdrop-blur-sm border-b border-border-muted">
           <div className="mx-auto max-w-[1400px] px-4 py-3 sm:px-6 lg:px-8">
             <div className="flex flex-wrap items-center gap-3">
@@ -295,7 +356,7 @@ export function StatusPage() {
                   strokeWidth="2"
                   strokeLinecap="round"
                   strokeDasharray={isActive ? '80 184' : '264 0'}
-                  className={`text-signal-blue ${isActive ? 'animate-spin-slow' : 'animate-pulse-ring'}`}
+                  className={`text-signal-blue ${isActive ? 'animate-spin-slow' : ''}`}
                   style={{ transformOrigin: 'center' }}
                 />
               </svg>
@@ -305,8 +366,12 @@ export function StatusPage() {
                 <Clock className="h-6 w-6 text-signal-blue animate-pulse-ring" />
               ) : isRunning ? (
                 <Loader2 className="h-6 w-6 text-signal-blue animate-spin" />
+              ) : terminalErrorKind === 'aborted' ? (
+                <XCircle className="h-6 w-6 text-signal-orange" />
+              ) : terminalErrorKind ? (
+                <div className="h-3 w-3 rounded-full bg-signal-red" />
               ) : (
-                <div className="h-3 w-3 rounded-full bg-signal-blue animate-pulse-ring" />
+                <div className="h-3 w-3 rounded-full bg-signal-blue" />
               )}
 
               {/* Ambient glow */}
@@ -328,6 +393,15 @@ export function StatusPage() {
                       The AI analysis timed out. You can re-analyze with a longer timeout.
                     </p>
                   </>
+                ) : terminalErrorKind === 'aborted' ? (
+                  <>
+                    <h2 className="font-display text-lg font-semibold text-signal-orange">
+                      {terminalErrorTitles.aborted}
+                    </h2>
+                    <p className="mt-2 text-sm text-signal-orange/80 bg-signal-orange/10 rounded-md px-3 py-2">
+                      This analysis was cancelled by a user. You can re-analyze if needed.
+                    </p>
+                  </>
                 ) : (
                   <>
                     <h2 className="font-display text-lg font-semibold text-signal-red">
@@ -336,7 +410,6 @@ export function StatusPage() {
                     <p className="mt-2 text-sm text-signal-red/80 bg-signal-red/10 rounded-md px-3 py-2">
                       Analysis failed. You can re-analyze or check server logs for details.
                     </p>
-
                   </>
                 )
               ) : (
@@ -406,6 +479,30 @@ export function StatusPage() {
               )}
             </div>
 
+            {isAbortable && (
+              <TooltipProvider>
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <span>
+                      <Button
+                        variant="destructive"
+                        size="sm"
+                        className="gap-1.5"
+                        disabled={isAborting || !canAbort}
+                        onClick={() => setAbortConfirmOpen(true)}
+                      >
+                        <XCircle className="h-3.5 w-3.5" />
+                        {isAborting ? 'Aborting\u2026' : 'Abort'}
+                      </Button>
+                    </span>
+                  </TooltipTrigger>
+                  {!canAbort && (
+                    <TooltipContent>Only the submitter or an admin can abort this analysis</TooltipContent>
+                  )}
+                </Tooltip>
+              </TooltipProvider>
+            )}
+
             {stepLog.length > 0 && (
               <div className="w-full rounded-md border border-border-muted bg-surface-elevated/30 overflow-hidden">
                 <div className="px-3 py-1.5 border-b border-border-muted">
@@ -455,7 +552,18 @@ export function StatusPage() {
 
       </div>
 
-      {jobId && terminalErrorKind === 'failed' && data?.result?.request_params && (
+      <ConfirmDialog
+        open={abortConfirmOpen}
+        onOpenChange={setAbortConfirmOpen}
+        title="Abort analysis"
+        description="Are you sure you want to abort this analysis? This cannot be undone."
+        confirmLabel="Abort"
+        variant="destructive"
+        onConfirm={handleAbort}
+        loading={isAborting}
+      />
+
+      {jobId && (terminalErrorKind === 'failed' || terminalErrorKind === 'aborted') && data?.result?.request_params && (
         <ReAnalyzeDialog
           open={reAnalyzeOpen}
           onOpenChange={setReAnalyzeOpen}

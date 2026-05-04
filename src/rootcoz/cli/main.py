@@ -907,6 +907,26 @@ def re_analyze_cmd(
         typer.echo(f"Poll: {data.get('result_url', '')}")
 
 
+# -- Abort --------------------------------------------------------------------
+
+
+@app.command()
+def abort(
+    job_id: str = typer.Argument(help="Job ID to abort."),
+    json_output: bool = _JSON_OPTION,
+):
+    """Abort a running or waiting analysis."""
+    data = _run_client_command(
+        json_output,
+        lambda c: c.abort_job(job_id=job_id),
+        emit_output=False,
+    )
+    if not _state.get("json", False):
+        typer.echo(f"Job {job_id}: {data.get('status', 'unknown')}")
+        if data.get("message"):
+            typer.echo(f"  {data['message']}")
+
+
 # -- Status -------------------------------------------------------------------
 
 

@@ -989,6 +989,90 @@ class TestResultsEndpoints:
         assert data["job_id"] == "json-job-456"
 
 
+class TestAbortEndpoint:
+    """Tests for POST /results/{job_id}/abort."""
+
+    @pytest.mark.asyncio
+    async def test_abort_running_job(self, test_client, temp_db_path):
+        """Aborting a running job returns status aborted."""
+        with patch.object(storage, "DB_PATH", temp_db_path):
+            await storage.init_db()
+            await storage.save_result(
+                job_id="job-abort-test",
+                jenkins_url="http://jenkins",
+                status="running",
+                result={
+                    "job_name": "test",
+                    "build_number": 1,
+                    "request_params": {"submitted_by": "testuser"},
+                },
+            )
+            resp = test_client.post(
+                "/results/job-abort-test/abort",
+                cookies={"rootcoz_username": "testuser"},
+            )
+            assert resp.status_code == 200
+            data = resp.json()
+            assert data["status"] == "aborted"
+
+            # Verify persisted status
+            stored = await storage.get_result("job-abort-test")
+            assert stored["status"] == "aborted"
+
+    @pytest.mark.asyncio
+    async def test_abort_completed_job_is_noop(self, test_client, temp_db_path):
+        """Aborting a completed job returns its current status."""
+        with patch.object(storage, "DB_PATH", temp_db_path):
+            await storage.init_db()
+            await storage.save_result(
+                job_id="job-completed",
+                jenkins_url="http://jenkins",
+                status="completed",
+                result={
+                    "job_name": "test",
+                    "build_number": 1,
+                    "request_params": {"submitted_by": "testuser"},
+                },
+            )
+            resp = test_client.post(
+                "/results/job-completed/abort",
+                cookies={"rootcoz_username": "testuser"},
+            )
+            assert resp.status_code == 200
+            assert resp.json()["status"] == "completed"
+            assert "already" in resp.json().get("message", "").lower()
+
+            # Verify persisted status is unchanged
+            stored = await storage.get_result("job-completed")
+            assert stored["status"] == "completed"
+
+    async def test_abort_nonexistent_job(self, test_client, temp_db_path):
+        """Aborting a non-existent job returns 404."""
+        resp = test_client.post("/results/nonexistent-job/abort")
+        assert resp.status_code == 404
+
+    @pytest.mark.asyncio
+    async def test_abort_forbidden_for_non_owner(self, test_client, temp_db_path):
+        """Non-owner non-admin gets 403 when trying to abort."""
+        with patch.object(storage, "DB_PATH", temp_db_path):
+            await storage.init_db()
+            await storage.save_result(
+                job_id="job-other-user",
+                jenkins_url="http://jenkins",
+                status="running",
+                result={
+                    "job_name": "test",
+                    "build_number": 1,
+                    "request_params": {"submitted_by": "alice"},
+                },
+            )
+            resp = test_client.post(
+                "/results/job-other-user/abort",
+                cookies={"rootcoz_username": "bob"},
+            )
+            assert resp.status_code == 403
+
+
 class TestAppLifespan:
     """Tests for application lifespan events."""
 
@@ -3142,10 +3226,17 @@ class TestResumeWaitingJobs:
                 },
             }
         ]
-        with patch(
-            "rootcoz.main.process_analysis_with_id",
-            new_callable=AsyncMock,
-        ) as mock_process:
+        with (
+            patch(
+                "rootcoz.main.process_analysis_with_id",
+                new_callable=AsyncMock,
+            ) as mock_process,
+            patch(
+                "rootcoz.main.storage.get_result",
+                new_callable=AsyncMock,
+                return_value={"status": "waiting"},
+            ),
+        ):
             await _resume_waiting_jobs(waiting_jobs)
             # asyncio.create_task wraps the coroutine; give it a tick to start
             import asyncio

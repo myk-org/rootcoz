@@ -9,14 +9,14 @@ import time as _time
 import urllib.parse
 import uuid
 from collections import defaultdict
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Annotated, Any, Coroutine, Literal
 from xml.etree.ElementTree import ParseError
 
 import httpx
-from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Query, Request
+from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import (
@@ -584,6 +584,26 @@ def _reconstruct_from_params(
 
 _background_tasks: set[asyncio.Task] = set()
 
+# Track analysis background tasks by job_id for abort support
+_job_tasks: dict[str, asyncio.Task] = {}
+
+
+def _remove_job_task(job_id: str) -> Callable[[asyncio.Task[object]], None]:
+    """Create a done-callback that removes a job from the task tracker."""
+
+    def _callback(task: asyncio.Task[object]) -> None:
+        _job_tasks.pop(job_id, None)
+
+    return _callback
+
+
+def _register_job_task(job_id: str, task: asyncio.Task) -> None:
+    """Register an analysis task for tracking and abort support."""
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
+    task.add_done_callback(_remove_job_task(job_id))
+    _job_tasks[job_id] = task
+
 
 async def _preserve_request_params(job_id: str, result_data: dict) -> None:
     """Copy ``request_params`` from the stored result into *result_data*.
@@ -698,11 +718,18 @@ async def _resume_waiting_jobs(waiting_jobs: list[dict]) -> None:
             merged_data["max_wait_minutes"] = max(1, math.ceil(remaining))
             merged = Settings.model_validate(merged_data)
 
+        # Re-check status in case job was aborted during startup
+        current = await storage.get_result(job["job_id"])
+        if current and current.get("status") in ("aborted", "completed", "failed"):
+            logger.info(
+                f"Skipping resumed job {job['job_id']} — status is {current['status']}"
+            )
+            continue
+
         task = asyncio.create_task(
             process_analysis_with_id(job["job_id"], body, merged)
         )
-        _background_tasks.add(task)
-        task.add_done_callback(_background_tasks.discard)
+        _register_job_task(job["job_id"], task)
         logger.info(
             f"Resumed waiting job {job['job_id']} "
             f"({result_data.get('job_name')} #{result_data.get('build_number')})"
@@ -1747,6 +1774,10 @@ async def process_analysis_with_id(
         # Reveal classifications created during analysis
         await storage.make_classifications_visible(job_id)
 
+    except asyncio.CancelledError:
+        logger.info(f"Analysis task cancelled for job_id={job_id}")
+        return
+
     except Exception as e:
         logger.exception(f"Analysis failed for job {job_id}")
         error_detail = format_exception_with_type(e)
@@ -1898,10 +1929,10 @@ async def _enqueue_analysis_job(
     body: AnalyzeRequest,
     merged: Settings,
     resolved_peers: list | None,
-    background_tasks: BackgroundTasks,
     base_url: str,
     *,
     message_prefix: str = "Analysis",
+    username: str = "",
 ) -> dict:
     """Create, save, and enqueue a new analysis job.
 
@@ -1924,6 +1955,7 @@ async def _enqueue_analysis_job(
             peer_ai_configs_resolved=resolved_peers,
         ),
     }
+    initial_result["request_params"]["submitted_by"] = username
     can_resume_wait = merged.wait_for_completion and bool(merged.jenkins_url)
     await save_result(
         job_id,
@@ -1933,7 +1965,8 @@ async def _enqueue_analysis_job(
     )
     notify_active_count_changed()
     notify_dashboard_changed()
-    background_tasks.add_task(process_analysis_with_id, job_id, body, merged)
+    task = asyncio.create_task(process_analysis_with_id(job_id, body, merged))
+    _register_job_task(job_id, task)
     response: dict = {
         "status": "queued",
         "job_id": job_id,
@@ -1946,7 +1979,6 @@ async def _enqueue_analysis_job(
 async def analyze(
     request: Request,
     body: AnalyzeRequest,
-    background_tasks: BackgroundTasks,
     *,
     settings: Settings = Depends(get_settings),
 ) -> dict:
@@ -1969,8 +2001,8 @@ async def analyze(
         body,
         merged,
         resolved_peers,
-        background_tasks,
         base_url,
+        username=request.state.username,
     )
 
 
@@ -2056,6 +2088,7 @@ async def analyze_failures(
     initial_result: dict = {
         "request_params": encrypt_sensitive_fields(base_params),
     }
+    initial_result["request_params"]["submitted_by"] = request.state.username
     await save_result(job_id, "", "pending", initial_result)
     notify_active_count_changed()
     notify_dashboard_changed()
@@ -2249,7 +2282,6 @@ async def re_analyze(
     job_id: str,
     request: Request,
     body: BaseAnalysisRequest,
-    background_tasks: BackgroundTasks,
     _: None = Depends(_bind_job_id),
 ) -> dict:
     """Re-analyze a previously analyzed job with the same (or overridden) settings.
@@ -2298,9 +2330,9 @@ async def re_analyze(
         original_body,
         merged,
         resolved_peers,
-        background_tasks,
         base_url,
         message_prefix="Re-analysis",
+        username=request.state.username,
     )
 
 
@@ -4061,6 +4093,91 @@ async def delete_job_endpoint(
     notify_dashboard_changed()
     logger.info(f"[AUDIT] Admin '{request.state.username}' deleted job {job_id}")
     return {"status": "deleted", "job_id": job_id}
+
+
+@app.post("/results/{job_id}/abort")
+async def abort_analysis(
+    job_id: str,
+    request: Request,
+    _: None = Depends(_bind_job_id),
+) -> dict:
+    """Abort a running or waiting analysis."""
+    _check_allow_list(request)
+
+    result = await storage.get_result(job_id)
+    if not result:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    # Enforce ownership: only submitter or admin can abort
+    username = request.state.username
+    is_admin_user = getattr(request.state, "is_admin", False)
+    result_data = result.get("result") or {}
+    request_params = result_data.get("request_params") or {}
+    submitter = request_params.get("submitted_by", "")
+
+    if not is_admin_user and (not username or username != submitter):
+        raise HTTPException(
+            status_code=403,
+            detail="Only the submitter or an admin can abort this job",
+        )
+
+    status = result.get("status", "")
+    if status in ("completed", "failed", "aborted"):
+        return {"status": status, "message": f"Job already {status}"}
+
+    # Cancel the background task if it exists
+    task = _job_tasks.get(job_id)
+    if task and not task.done():
+        task.cancel()
+        try:
+            await asyncio.wait_for(asyncio.shield(task), timeout=2.0)
+        except asyncio.CancelledError:
+            pass  # Expected — task was cancelled
+        except asyncio.TimeoutError:
+            logger.debug(f"Timed out waiting for task cancellation for job_id={job_id}")
+        except Exception:  # noqa: BLE001
+            logger.warning(
+                f"Unexpected error while waiting for task cancellation for job_id={job_id}",
+                exc_info=True,
+            )
+        if task.done():
+            _job_tasks.pop(job_id, None)
+            logger.info(f"Cancelled background task for job_id={job_id}")
+        else:
+            logger.warning(
+                f"Task for job_id={job_id} still running after cancel timeout, keeping tracked"
+            )
+    else:
+        _job_tasks.pop(job_id, None)
+        logger.warning(
+            f"No active background task found for job_id={job_id}, updating status only"
+        )
+
+    # Update status to aborted
+    abort_data: dict = {
+        "error": "Analysis was aborted by user",
+    }
+    # Preserve existing result data
+    existing = await storage.get_result(job_id, strip_sensitive=False)
+    if existing and existing.get("result"):
+        abort_data = {**existing["result"], "error": "Analysis was aborted by user"}
+
+    # Re-check status — task may have completed between cancel and here
+    current = await storage.get_result(job_id)
+    if current and current.get("status") in ("completed", "failed"):
+        logger.info(f"Job {job_id} completed/failed during abort — not overwriting")
+        return {
+            "status": current["status"],
+            "message": f"Job finished as {current['status']} during abort",
+        }
+
+    await update_status(job_id, "aborted", abort_data)
+    notify_active_count_changed()
+    notify_dashboard_changed()
+    notify_job_status_changed(job_id)
+
+    logger.info(f"[AUDIT] User '{request.state.username}' aborted job {job_id}")
+    return {"status": "aborted", "job_id": job_id}
 
 
 @app.get("/api/dashboard/active-count")

@@ -193,6 +193,10 @@ class RootCozClient:
         """Delete a job and all related data. DELETE /results/{job_id}"""
         return self._request("DELETE", f"/results/{job_id}")
 
+    def abort_job(self, job_id: str) -> dict:
+        """Abort a running or waiting analysis. POST /results/{job_id}/abort"""
+        return self._request("POST", f"/results/{job_id}/abort")
+
     def delete_jobs_bulk(self, job_ids: list[str]) -> dict:
         """Delete multiple jobs. DELETE /api/results/bulk"""
         return self._request("DELETE", "/api/results/bulk", json={"job_ids": job_ids})

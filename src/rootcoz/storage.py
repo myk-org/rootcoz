@@ -55,8 +55,21 @@ _HISTORY_CLASSIFICATIONS_SQL = (
     "(" + ", ".join(f"'{c}'" for c in HISTORY_CLASSIFICATIONS) + ")"
 )
 
+
 # --- Auth constants and helpers ---
-SESSION_TTL_HOURS = 8
+def _parse_session_ttl() -> int:
+    """Parse SESSION_TTL_HOURS from env, defaulting to 30 days."""
+    raw = os.environ.get("SESSION_TTL_HOURS", "")
+    if not raw:
+        return 24 * 30
+    try:
+        value = int(raw)
+        return max(1, value)
+    except ValueError:
+        return 24 * 30
+
+
+SESSION_TTL_HOURS = _parse_session_ttl()
 SESSION_TTL_SECONDS = SESSION_TTL_HOURS * 3600
 MIN_KEY_LENGTH = 16
 

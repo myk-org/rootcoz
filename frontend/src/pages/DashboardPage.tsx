@@ -44,7 +44,7 @@ import { NotificationPrompt } from '@/components/shared/NotificationPrompt'
 import { WhatsNewDialog } from '@/components/shared/WhatsNewDialog'
 
 const STATUS_FILTER_ALL = 'ALL'
-const STATUS_FILTER_OPTIONS = [STATUS_FILTER_ALL, 'completed', 'running', 'waiting', 'pending', 'failed', 'timeout'] as const
+const STATUS_FILTER_OPTIONS = [STATUS_FILTER_ALL, 'completed', 'running', 'waiting', 'pending', 'failed', 'timeout', 'aborted'] as const
 const BULK_DELETE_LIMIT = 500
 
 const BULK_SELECT_CHECKBOX_CLASS =
@@ -86,6 +86,7 @@ const STATUS_BORDER: Record<string, string> = {
   pending: 'border-l-border-default',
   failed: 'border-l-signal-red',
   timeout: 'border-l-signal-orange',
+  aborted: 'border-l-signal-orange',
 }
 
 function relativeTime(iso: string): string {
@@ -396,7 +397,7 @@ export function DashboardPage() {
   }
 
   function getJobRoute(job: DashboardJob): string {
-    return ['waiting', 'pending', 'running', 'failed'].includes(job.status)
+    return ['waiting', 'pending', 'running', 'failed', 'aborted'].includes(job.status)
       ? `/status/${job.job_id}`
       : `/results/${job.job_id}`
   }
