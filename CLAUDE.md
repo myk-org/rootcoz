@@ -80,7 +80,12 @@ uvx --with tox-uv tox -e frontend   # Frontend only
 - **State**: Page-scoped `useReducer` (e.g., `ReportContext` for the report page) — each page owns its own context; do NOT introduce global state (Redux, Zustand, etc.)
 - **API**: Centralized `api.get/post/put/delete` wrapper in `lib/api.ts` — do NOT use raw `fetch` calls
 - **User identification**: Cookie-based (`rootcoz_username`), display-only — NOT an authentication/authorization boundary
-- **Real-time badges**: NavBar badge counts (active analyses, unread mentions) use a Server-Sent Events stream at `/api/navbar/stream` — no polling. Backend broadcasts via per-connection `asyncio.Event` objects. SSE endpoints are an exception to CLI parity (streaming doesn't apply to one-shot CLI). The existing `/api/dashboard/active-count` GET endpoint remains for CLI consumers.
+- **Real-time updates**: Server-Sent Events (SSE) push real-time updates to the frontend — no polling. Backend broadcasts via per-connection `asyncio.Event` objects. Available SSE streams:
+  - `/api/navbar/stream` — navbar badge counts (active analyses, unread mentions)
+  - `/api/dashboard/stream` — dashboard job list changes
+  - `/api/results/{job_id}/stream` — per-job status changes
+  - `/api/results/{job_id}/comments/stream` — per-job comment changes
+  - `/api/admin/token-usage/stream` — token usage data changes
 
 ### Auto-Generated Documentation
 
@@ -108,7 +113,7 @@ Every new API endpoint MUST also be supported via the `rootcoz` CLI tool. When a
 3. Add tests for both in `tests/test_cli_client.py` and `tests/test_cli_main.py`
 
 **Exceptions (no CLI equivalent needed):**
-- SSE streaming endpoints (e.g., `/api/navbar/stream`) — CLI is a one-shot tool, not a long-lived stream consumer. Equivalent GET endpoints remain available for CLI use.
+- SSE streaming endpoints (`/api/navbar/stream`, `/api/dashboard/stream`, `/api/results/*/stream`, `/api/admin/token-usage/stream`) — CLI is a one-shot tool, not a long-lived stream consumer. Equivalent GET endpoints remain available for CLI use.
 
 ### Failure Deduplication
 

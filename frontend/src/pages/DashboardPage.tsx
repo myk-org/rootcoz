@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import { useLatestRef } from '@/lib/useLatestRef'
 import { Link, useNavigate, useSearchParams } from 'react-router-dom'
 import { api } from '@/lib/api'
 import { GITHUB_REPO_URL } from '@/lib/constants'
@@ -224,11 +225,27 @@ export function DashboardPage() {
     }
   }, [metaTeam, metaTier, metaVersion, metaLabels])
 
+  const fetchJobsRef = useLatestRef(fetchJobs)
+
+  // Fetch on mount and when filters change
   useEffect(() => {
     fetchJobs()
-    const interval = setInterval(fetchJobs, 10_000)
-    return () => clearInterval(interval)
   }, [fetchJobs])
+
+  // SSE connection (stable — doesn't depend on fetchJobs)
+  useEffect(() => {
+    const eventSource = new EventSource('/api/dashboard/stream')
+    eventSource.addEventListener('dashboard-changed', () => {
+      fetchJobsRef.current()
+    })
+    eventSource.onerror = () => {
+      console.debug('Dashboard SSE error')
+    }
+
+    return () => {
+      eventSource.close()
+    }
+  }, [])
   useEffect(() => { setPage(1) }, [search, statusFilter, perPage, dateFrom, dateTo, metaTeam, metaTier, metaVersion, metaLabels])
 
   const filtered = useMemo(() => {
