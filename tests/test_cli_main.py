@@ -878,6 +878,12 @@ class TestAnalyzeAllOptions:
                 _FAKE_GITHUB_CLI_TOKEN,
             ),
             ("--raw-prompt", "extra instructions", "raw_prompt", "extra instructions"),
+            (
+                "--issue-prompt",
+                "custom issue prompt",
+                "issue_prompt",
+                "custom issue prompt",
+            ),
         ],
     )
     def test_string_options(

@@ -500,6 +500,7 @@ def _reconstruct_from_params(
         max_wait_minutes=params.get("max_wait_minutes", 0),
         enable_jira=params.get("enable_jira"),
         raw_prompt=params.get("raw_prompt") or None,
+        issue_prompt=params.get("issue_prompt") or None,
         tests_repo_url=_recompose_repo_spec(
             params.get("tests_repo_url", ""), params.get("tests_repo_ref", "")
         )
@@ -1884,6 +1885,7 @@ def _build_request_params(
             "jenkins_artifacts_max_size_mb": merged.jenkins_artifacts_max_size_mb,
             "get_job_artifacts": merged.get_job_artifacts,
             "raw_prompt": body.raw_prompt or "",
+            "issue_prompt": body.issue_prompt or "",
             "peer_analysis_max_rounds": merged.peer_analysis_max_rounds,
             "force": merged.force_analysis,
             "wait_started_at": _time.time(),
@@ -2040,18 +2042,19 @@ async def analyze_failures(
 
     # Save initial pending state with request_params so GET /results/{job_id}
     # works immediately and _preserve_request_params can find them later.
+    base_params = _build_base_request_params(
+        ai_provider,
+        ai_model,
+        peer_ai_configs,
+        tests_repo_url=tests_repo_url,
+        tests_repo_token=resolved_tests_repo_token,
+        tests_repo_ref=tests_repo_ref,
+        additional_repos=additional_repos_list or None,
+    )
+    base_params["raw_prompt"] = body.raw_prompt or ""
+    base_params["issue_prompt"] = body.issue_prompt or ""
     initial_result: dict = {
-        "request_params": encrypt_sensitive_fields(
-            _build_base_request_params(
-                ai_provider,
-                ai_model,
-                peer_ai_configs,
-                tests_repo_url=tests_repo_url,
-                tests_repo_token=resolved_tests_repo_token,
-                tests_repo_ref=tests_repo_ref,
-                additional_repos=additional_repos_list or None,
-            )
-        ),
+        "request_params": encrypt_sensitive_fields(base_params),
     }
     await save_result(job_id, "", "pending", initial_result)
     notify_active_count_changed()
@@ -2875,11 +2878,13 @@ async def get_issue_prompt(
     settings: Settings = Depends(get_settings),
     _: None = Depends(_bind_job_id),
 ) -> dict:
-    """Fetch JOB_INSIGHT_ISSUE_PROMPT.md from the test repo via the GitHub Contents API.
+    """Return the issue generation prompt for a job.
 
-    Makes a single HTTP call instead of cloning the repo.  Returns
-    ``{"prompt": ""}`` when no repo is configured, the file does not exist,
-    or any error occurs.
+    Resolution order:
+    1. Stored ``issue_prompt`` from analysis request params (if provided at submission time)
+    2. ``JOB_INSIGHT_ISSUE_PROMPT.md`` fetched from the test repo via GitHub Contents API
+
+    Returns ``{"prompt": ""}`` when no prompt is available.
     """
     _check_allow_list(request)
 
@@ -2888,6 +2893,17 @@ async def get_issue_prompt(
         return {"prompt": ""}
 
     result_data = stored["result"]
+
+    # Check for stored issue_prompt from analysis request first
+    request_params = result_data.get("request_params") or {}
+    stored_issue_prompt = (request_params.get("issue_prompt") or "").strip()
+    if stored_issue_prompt:
+        logger.debug(
+            "Using stored issue_prompt (%d chars) for job %s",
+            len(stored_issue_prompt),
+            job_id,
+        )
+        return {"prompt": stored_issue_prompt}
 
     tests_repo_url, tests_repo_ref, tests_repo_token = _resolve_analyzed_repo(
         settings, result_data

@@ -651,6 +651,11 @@ def analyze(
     raw_prompt: str = typer.Option(
         "", "--raw-prompt", help="Raw prompt to append as additional AI instructions."
     ),
+    issue_prompt: str = typer.Option(
+        "",
+        "--issue-prompt",
+        help="Custom issue generation prompt (overrides JOB_INSIGHT_ISSUE_PROMPT.md from test repo)",
+    ),
     peers: str = typer.Option(
         "",
         "--peers",
@@ -801,6 +806,7 @@ def analyze(
         "jira_project_key": jira_project_key,
         "github_token": github_token,
         "raw_prompt": raw_prompt,
+        "issue_prompt": issue_prompt,
     }
     for key, value in _str_fields.items():
         if value:
