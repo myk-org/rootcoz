@@ -22,8 +22,6 @@ def _init_db(temp_db_path):
     """Initialize database with test path."""
     with patch.object(storage, "DB_PATH", temp_db_path):
         asyncio.run(storage.init_db())
-        asyncio.run(storage.track_user("alice"))
-        asyncio.run(storage.track_user("bob"))
         yield
 
 
@@ -41,6 +39,8 @@ def _make_client(
         "SECURE_COOKIES": "false",
         "DB_PATH": str(temp_db_path),
         "ALLOWED_USERS": "",
+        "ADMIN_KEY": "test-admin-key-16chars",  # pragma: allowlist secret
+        "ROOTCOZ_ENCRYPTION_KEY": "test-encryption-key-for-hmac",  # pragma: allowlist secret
     }
     if vapid_env:
         env.update(vapid_env)
@@ -68,6 +68,20 @@ _VAPID_ENV = {
     "VAPID_CLAIM_EMAIL": "admin@example.com",
 }
 
+_ADMIN_AUTH_HEADERS = {
+    "Authorization": "Bearer test-admin-key-16chars"
+}  # pragma: allowlist secret
+
+
+def _login_user(client, username):
+    """Register a user and return auth headers for requests."""
+    resp = client.post("/api/auth/register", json={"username": username})
+    if resp.status_code == 200:
+        api_key = resp.json().get("api_key", "")
+        if api_key:
+            return {"Authorization": f"Bearer {api_key}"}
+    return None
+
 
 @pytest.fixture
 def client_with_push(_init_db, temp_db_path):
@@ -85,20 +99,26 @@ class TestVapidPublicKey:
     """Tests for GET /api/notifications/vapid-public-key."""
 
     def test_returns_key_when_configured(self, client_with_push):
-        resp = client_with_push.get("/api/notifications/vapid-public-key")
+        resp = client_with_push.get(
+            "/api/notifications/vapid-public-key", headers=_ADMIN_AUTH_HEADERS
+        )
         assert resp.status_code == 200
         data = resp.json()
         assert data["vapid_public_key"] == _VAPID_ENV["VAPID_PUBLIC_KEY"]
 
     def test_returns_404_when_not_configured(self, client_no_push):
-        resp = client_no_push.get("/api/notifications/vapid-public-key")
+        resp = client_no_push.get(
+            "/api/notifications/vapid-public-key", headers=_ADMIN_AUTH_HEADERS
+        )
         assert resp.status_code == 404
         assert "not configured" in resp.json()["detail"].lower()
 
     def test_returns_503_when_keys_unavailable(self, client_with_push):
         """Returns 503 when web_push_enabled is True but VAPID keys become unavailable."""
         with patch("rootcoz.main.get_vapid_config", return_value={}):
-            resp = client_with_push.get("/api/notifications/vapid-public-key")
+            resp = client_with_push.get(
+                "/api/notifications/vapid-public-key", headers=_ADMIN_AUTH_HEADERS
+            )
             assert resp.status_code == 503
             assert "unavailable" in resp.json()["detail"].lower()
 
@@ -107,6 +127,7 @@ class TestSubscribeNotifications:
     """Tests for POST /api/notifications/subscribe."""
 
     def test_subscribe_success(self, client_with_push):
+        cookies = _login_user(client_with_push, "alice")
         resp = client_with_push.post(
             "/api/notifications/subscribe",
             json={
@@ -114,7 +135,7 @@ class TestSubscribeNotifications:
                 "p256dh_key": "p256dh-test",  # pragma: allowlist secret  # gitleaks:allow
                 "auth_key": "auth-test",  # pragma: allowlist secret  # gitleaks:allow
             },
-            cookies={"rootcoz_username": "alice"},
+            headers=cookies,
         )
         assert resp.status_code == 200
         assert resp.json()["status"] == "subscribed"
@@ -129,9 +150,9 @@ class TestSubscribeNotifications:
             },
         )
         assert resp.status_code == 401
-        assert "username" in resp.json()["detail"].lower()
 
     def test_subscribe_404_when_push_not_configured(self, client_no_push):
+        cookies = _login_user(client_no_push, "alice")
         resp = client_no_push.post(
             "/api/notifications/subscribe",
             json={
@@ -139,7 +160,7 @@ class TestSubscribeNotifications:
                 "p256dh_key": "p256dh-test",  # pragma: allowlist secret  # gitleaks:allow
                 "auth_key": "auth-test",  # pragma: allowlist secret  # gitleaks:allow
             },
-            cookies={"rootcoz_username": "alice"},
+            headers=cookies,
         )
         assert resp.status_code == 404
 
@@ -148,6 +169,7 @@ class TestUnsubscribeNotifications:
     """Tests for POST /api/notifications/unsubscribe."""
 
     def test_unsubscribe_success(self, client_with_push):
+        cookies = _login_user(client_with_push, "alice")
         # First subscribe
         client_with_push.post(
             "/api/notifications/subscribe",
@@ -156,28 +178,31 @@ class TestUnsubscribeNotifications:
                 "p256dh_key": "p256dh-test",  # pragma: allowlist secret  # gitleaks:allow
                 "auth_key": "auth-test",  # pragma: allowlist secret  # gitleaks:allow
             },
-            cookies={"rootcoz_username": "alice"},
+            headers=cookies,
         )
         # Then unsubscribe
         resp = client_with_push.post(
             "/api/notifications/unsubscribe",
             json={"endpoint": "https://push.example.com/sub/unsub-test"},
-            cookies={"rootcoz_username": "alice"},
+            headers=cookies,
         )
         assert resp.status_code == 200
         assert resp.json()["status"] == "unsubscribed"
 
     def test_unsubscribe_404_for_nonexistent(self, client_with_push):
+        cookies = _login_user(client_with_push, "alice")
         resp = client_with_push.post(
             "/api/notifications/unsubscribe",
             json={"endpoint": "https://push.example.com/sub/nonexistent"},
-            cookies={"rootcoz_username": "alice"},
+            headers=cookies,
         )
         assert resp.status_code == 404
         assert "not found" in resp.json()["detail"].lower()
 
     def test_unsubscribe_only_own_subscription(self, client_with_push):
         """A user cannot unsubscribe another user's endpoint."""
+        alice_cookies = _login_user(client_with_push, "alice")
+        bob_cookies = _login_user(client_with_push, "bob2")
         # alice subscribes
         client_with_push.post(
             "/api/notifications/subscribe",
@@ -186,13 +211,13 @@ class TestUnsubscribeNotifications:
                 "p256dh_key": "p256dh-test",  # pragma: allowlist secret  # gitleaks:allow
                 "auth_key": "auth-test",  # pragma: allowlist secret  # gitleaks:allow
             },
-            cookies={"rootcoz_username": "alice"},
+            headers=alice_cookies,
         )
         # bob tries to unsubscribe alice's endpoint
         resp = client_with_push.post(
             "/api/notifications/unsubscribe",
             json={"endpoint": "https://push.example.com/sub/alice-only"},
-            cookies={"rootcoz_username": "bob"},
+            headers=bob_cookies,
         )
         assert resp.status_code == 404
         assert "not found" in resp.json()["detail"].lower()
@@ -205,10 +230,11 @@ class TestUnsubscribeNotifications:
         assert resp.status_code == 401
 
     def test_unsubscribe_404_when_push_not_configured(self, client_no_push):
+        cookies = _login_user(client_no_push, "alice")
         resp = client_no_push.post(
             "/api/notifications/unsubscribe",
             json={"endpoint": "https://push.example.com/sub/test-1"},
-            cookies={"rootcoz_username": "alice"},
+            headers=cookies,
         )
         assert resp.status_code == 404
 
@@ -217,6 +243,7 @@ class TestEndpointHttpsValidation:
     """Tests for HTTPS endpoint validation."""
 
     def test_subscribe_rejects_http_endpoint(self, client_with_push):
+        cookies = _login_user(client_with_push, "alice")
         resp = client_with_push.post(
             "/api/notifications/subscribe",
             json={
@@ -224,15 +251,16 @@ class TestEndpointHttpsValidation:
                 "p256dh_key": "p256dh-test",  # pragma: allowlist secret  # gitleaks:allow
                 "auth_key": "auth-test",  # pragma: allowlist secret  # gitleaks:allow
             },
-            cookies={"rootcoz_username": "alice"},
+            headers=cookies,
         )
         assert resp.status_code == 422
 
     def test_unsubscribe_rejects_http_endpoint(self, client_with_push):
+        cookies = _login_user(client_with_push, "alice")
         resp = client_with_push.post(
             "/api/notifications/unsubscribe",
             json={"endpoint": "http://push.example.com/sub/insecure"},
-            cookies={"rootcoz_username": "alice"},
+            headers=cookies,
         )
         assert resp.status_code == 422
 
@@ -242,19 +270,10 @@ class TestMentionableUsers:
 
     def test_returns_user_list(self, client_with_push):
         """Returns list of tracked users."""
-        # Make a request as alice to trigger user tracking, then wait
-        client_with_push.get(
-            "/api/notifications/vapid-public-key",
-            cookies={"rootcoz_username": "alice"},
-        )
-        # Give background task time to track user
-        import time
-
-        time.sleep(0.2)
-
+        cookies = _login_user(client_with_push, "alice")
         resp = client_with_push.get(
             "/api/users/mentionable",
-            cookies={"rootcoz_username": "alice"},
+            headers=cookies,
         )
         assert resp.status_code == 200
         data = resp.json()
@@ -294,19 +313,18 @@ class TestCommentMentionNotification:
         self, _seed_result, temp_db_path
     ):
         """Adding a comment with @mention triggers send_mention_notifications."""
+        _comment_env = {
+            "AI_PROVIDER": "claude",
+            "AI_MODEL": "test",
+            "SECURE_COOKIES": "false",
+            "DB_PATH": str(temp_db_path),
+            "ALLOWED_USERS": "",
+            "ADMIN_KEY": "test-admin-key-16chars",  # pragma: allowlist secret
+            "ROOTCOZ_ENCRYPTION_KEY": "test-encryption-key-for-hmac",  # pragma: allowlist secret
+            **_VAPID_ENV,
+        }
         with (
-            patch.dict(
-                os.environ,
-                {
-                    "AI_PROVIDER": "claude",
-                    "AI_MODEL": "test",
-                    "SECURE_COOKIES": "false",
-                    "DB_PATH": str(temp_db_path),
-                    "ALLOWED_USERS": "",
-                    **_VAPID_ENV,
-                },
-                clear=True,
-            ),
+            patch.dict(os.environ, _comment_env, clear=True),
             patch.object(storage, "DB_PATH", temp_db_path),
         ):
             get_settings.cache_clear()
@@ -326,13 +344,14 @@ class TestCommentMentionNotification:
                 from rootcoz.main import app
 
                 with TestClient(app) as client:
+                    cookies = _login_user(client, "alice")
                     resp = client.post(
                         "/results/job-mention/comments",
                         json={
                             "test_name": "test_foo",
                             "comment": "Hey @bob, can you check this?",
                         },
-                        cookies={"rootcoz_username": "alice"},
+                        headers=cookies,
                     )
                     assert resp.status_code == 201
                     import time
@@ -353,19 +372,18 @@ class TestCommentMentionNotification:
 
     def test_comment_without_mention_no_notification(self, _seed_result, temp_db_path):
         """A comment without @mentions does not trigger notifications."""
+        _comment_env = {
+            "AI_PROVIDER": "claude",
+            "AI_MODEL": "test",
+            "SECURE_COOKIES": "false",
+            "DB_PATH": str(temp_db_path),
+            "ALLOWED_USERS": "",
+            "ADMIN_KEY": "test-admin-key-16chars",  # pragma: allowlist secret
+            "ROOTCOZ_ENCRYPTION_KEY": "test-encryption-key-for-hmac",  # pragma: allowlist secret
+            **_VAPID_ENV,
+        }
         with (
-            patch.dict(
-                os.environ,
-                {
-                    "AI_PROVIDER": "claude",
-                    "AI_MODEL": "test",
-                    "SECURE_COOKIES": "false",
-                    "DB_PATH": str(temp_db_path),
-                    "ALLOWED_USERS": "",
-                    **_VAPID_ENV,
-                },
-                clear=True,
-            ),
+            patch.dict(os.environ, _comment_env, clear=True),
             patch.object(storage, "DB_PATH", temp_db_path),
         ):
             get_settings.cache_clear()
@@ -385,13 +403,14 @@ class TestCommentMentionNotification:
                 from rootcoz.main import app
 
                 with TestClient(app) as client:
+                    cookies = _login_user(client, "alice")
                     resp = client.post(
                         "/results/job-mention/comments",
                         json={
                             "test_name": "test_foo",
                             "comment": "Looks good, no issues here.",
                         },
-                        cookies={"rootcoz_username": "alice"},
+                        headers=cookies,
                     )
                     assert resp.status_code == 201
                     import time

@@ -311,7 +311,15 @@ def _make_mock_settings(**overrides):
     mock = MagicMock()
     mock.metadata_rules = overrides.get("metadata_rules", [])
     mock.metadata_rules_file = overrides.get("metadata_rules_file", "")
+    mock.admin_key = "test-admin-key-16chars"  # pragma: allowlist secret
+    mock.trust_proxy_headers = False
+    mock.secure_cookies = False
     return mock
+
+
+_RULES_AUTH_HEADERS = {
+    "Authorization": "Bearer test-admin-key-16chars"
+}  # pragma: allowlist secret
 
 
 class TestMetadataRulesAPI:
@@ -329,6 +337,7 @@ class TestMetadataRulesAPI:
             async with httpx.AsyncClient(
                 transport=httpx.ASGITransport(app=fastapi_app),
                 base_url="http://test",
+                headers=_RULES_AUTH_HEADERS,
             ) as client:
                 resp = await client.get("/api/jobs/metadata/rules")
                 assert resp.status_code == 200
@@ -348,6 +357,7 @@ class TestMetadataRulesAPI:
             async with httpx.AsyncClient(
                 transport=httpx.ASGITransport(app=fastapi_app),
                 base_url="http://test",
+                headers=_RULES_AUTH_HEADERS,
             ) as client:
                 resp = await client.post(
                     "/api/jobs/metadata/rules/preview",
@@ -369,6 +379,7 @@ class TestMetadataRulesAPI:
             async with httpx.AsyncClient(
                 transport=httpx.ASGITransport(app=fastapi_app),
                 base_url="http://test",
+                headers=_RULES_AUTH_HEADERS,
             ) as client:
                 resp = await client.post(
                     "/api/jobs/metadata/rules/preview",
@@ -388,6 +399,7 @@ class TestMetadataRulesAPI:
             async with httpx.AsyncClient(
                 transport=httpx.ASGITransport(app=fastapi_app),
                 base_url="http://test",
+                headers=_RULES_AUTH_HEADERS,
             ) as client:
                 resp = await client.post(
                     "/api/jobs/metadata/rules/preview",
@@ -404,6 +416,7 @@ class TestMetadataRulesAPI:
             async with httpx.AsyncClient(
                 transport=httpx.ASGITransport(app=fastapi_app),
                 base_url="http://test",
+                headers=_RULES_AUTH_HEADERS,
             ) as client:
                 resp = await client.post(
                     "/api/jobs/metadata/rules/preview",
@@ -420,6 +433,7 @@ class TestMetadataRulesAPI:
             async with httpx.AsyncClient(
                 transport=httpx.ASGITransport(app=fastapi_app),
                 base_url="http://test",
+                headers=_RULES_AUTH_HEADERS,
             ) as client:
                 resp = await client.post(
                     "/api/jobs/metadata/rules/preview",

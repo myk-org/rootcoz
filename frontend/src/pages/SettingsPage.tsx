@@ -21,6 +21,7 @@ export function SettingsPage() {
       <ProfileForm
         onSaved={async () => { await refreshAuth(); navigate('/') }}
         onAdminLogin={async (u, k) => { await login(u, k) }}
+        readOnlyUsername
       />
       <p className="mt-4 text-center text-xs text-text-tertiary">
         Tokens are stored locally and synced to the server (encrypted at rest) for cross-browser access.

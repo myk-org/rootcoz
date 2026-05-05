@@ -169,6 +169,9 @@ class TestMaskSensitiveFields:
 # ---------------------------------------------------------------------------
 
 
+_TEST_ADMIN_KEY = "test-admin-key-16chars"  # pragma: allowlist secret
+
+
 @pytest.fixture
 def _mock_settings(temp_db_path):
     """Provide minimal env for Settings, matching test_main.py pattern."""
@@ -179,6 +182,8 @@ def _mock_settings(temp_db_path):
         "AI_PROVIDER": "claude",
         "AI_MODEL": "test-model",
         "DB_PATH": str(temp_db_path),
+        "ADMIN_KEY": _TEST_ADMIN_KEY,  # pragma: allowlist secret
+        "ROOTCOZ_ENCRYPTION_KEY": "test-encryption-key-for-hmac",  # pragma: allowlist secret
     }
     with patch.dict(os.environ, env, clear=True):
         from rootcoz.config import get_settings
@@ -199,7 +204,9 @@ def test_client(_mock_settings, temp_db_path: Path):
     from rootcoz.main import app
 
     with patch.object(storage, "DB_PATH", temp_db_path):
-        with TestClient(app) as client:
+        with TestClient(
+            app, headers={"Authorization": f"Bearer {_TEST_ADMIN_KEY}"}
+        ) as client:
             yield client
 
 
@@ -268,7 +275,6 @@ def test_validation_error_logged_at_debug(test_client, caplog):
             resp = test_client.post(
                 "/analyze",
                 json=payload,
-                cookies={"rootcoz_username": "testuser"},
             )
 
         assert resp.status_code == 422

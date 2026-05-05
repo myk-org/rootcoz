@@ -293,6 +293,35 @@ def main_callback(
         _state["api_key"] = ""
 
 
+# -- Register -----------------------------------------------------------------
+
+
+@app.command()
+def register(
+    username: str = typer.Argument(help="Username to register."),
+    json_output: bool = _JSON_OPTION,
+):
+    """Register a new user and get an API key."""
+    _set_json(json_output)
+    client = _get_client()
+    try:
+        result = client.register(username=username)
+    except RootCozError as err:
+        _handle_error(err)
+    if _state.get("json", False):
+        print_output(result, columns=[], as_json=True)
+    else:
+        typer.echo(f"Registered: {result.get('username', username)}")
+        api_key = result.get("api_key", "")
+        if not api_key:
+            typer.echo(
+                "Error: Registration succeeded but no API key was returned.", err=True
+            )
+            raise typer.Exit(1)
+        typer.echo("\n\u26a0\ufe0f  Save this API key \u2014 you won't see it again!")
+        typer.echo(f"API Key: {api_key}")
+
+
 # -- Health -------------------------------------------------------------------
 
 

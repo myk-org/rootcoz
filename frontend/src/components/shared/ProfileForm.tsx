@@ -26,6 +26,8 @@ import { SectionDivider } from '@/components/shared/SectionDivider'
 interface ProfileFormProps {
   onSaved: () => void | Promise<void>
   onAdminLogin?: (username: string, apiKey: string) => Promise<void>
+  /** When true, the username field is read-only (settings page — user is already authenticated) */
+  readOnlyUsername?: boolean
 }
 
 interface TokenValidationResult {
@@ -177,7 +179,7 @@ function NotificationToggle() {
   )
 }
 
-export function ProfileForm({ onSaved, onAdminLogin }: ProfileFormProps) {
+export function ProfileForm({ onSaved, onAdminLogin, readOnlyUsername }: ProfileFormProps) {
   const { isAdmin } = useAuth()
   const [initialUsername] = useState(getUsername)
   const [username, setUsernameValue] = useState(initialUsername)
@@ -247,7 +249,7 @@ export function ProfileForm({ onSaved, onAdminLogin }: ProfileFormProps) {
   async function handleSubmit(e: FormEvent) {
     e.preventDefault()
     const trimmed = username.trim()
-    if (!trimmed) return
+    if (!readOnlyUsername && !trimmed) return
 
     if (trimmed.toLowerCase() === 'admin' && !apiKey.trim()) {
       setUsernameError("The username 'admin' is reserved")
@@ -353,20 +355,26 @@ export function ProfileForm({ onSaved, onAdminLogin }: ProfileFormProps) {
           {/* Username field */}
           <div className="space-y-1.5">
             <label
-              htmlFor="username"
+              htmlFor={readOnlyUsername ? undefined : 'username'}
               className="block font-display text-xs font-medium uppercase tracking-widest text-text-secondary"
             >
               Username
             </label>
-            <Input
-              id="username"
-              value={username}
-              onChange={(e) => { setUsernameValue(e.target.value); setUsernameError(null) }}
-              placeholder="e.g. jdoe"
-              autoFocus
-              autoComplete="username"
-              className="h-10 font-mono"
-            />
+            {readOnlyUsername ? (
+              <div className="flex h-10 items-center rounded-md border border-border-default bg-surface-elevated px-3">
+                <span className="font-mono text-sm text-text-primary">{username}</span>
+              </div>
+            ) : (
+              <Input
+                id="username"
+                value={username}
+                onChange={(e) => { setUsernameValue(e.target.value); setUsernameError(null) }}
+                placeholder="e.g. jdoe"
+                autoFocus
+                autoComplete="username"
+                className="h-10 font-mono"
+              />
+            )}
             {usernameError && (
               <p className="text-xs text-signal-red">{usernameError}</p>
             )}
@@ -462,7 +470,7 @@ export function ProfileForm({ onSaved, onAdminLogin }: ProfileFormProps) {
             helpContent={<>Jira Cloud: API token from{' '}<a href="https://id.atlassian.com/manage-profile/security/api-tokens" target="_blank" rel="noopener noreferrer" className="text-text-link hover:underline">Atlassian account →</a>{' '}· Jira Server/DC: Personal Access Token</>}
           />
 
-          <Button type="submit" className="w-full" disabled={!username.trim() || saving || validatingGithub || validatingJira || !tokensLoaded}>
+          <Button type="submit" className="w-full" disabled={(!readOnlyUsername && !username.trim()) || saving || validatingGithub || validatingJira || !tokensLoaded}>
             {saving ? 'Saving...' : 'Save'}
           </Button>
           </fieldset>

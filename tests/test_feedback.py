@@ -716,6 +716,10 @@ class TestFeedbackEndpoint:
         }
         env["SECURE_COOKIES"] = "false"
         env["DB_PATH"] = str(temp_db_path)
+        env["ADMIN_KEY"] = "test-admin-key-16chars"  # pragma: allowlist secret
+        env["ROOTCOZ_ENCRYPTION_KEY"] = (
+            "test-encryption-key-for-hmac"  # pragma: allowlist secret
+        )
         if github_token:
             env["GITHUB_TOKEN"] = github_token
         if enable_github_issues:
@@ -735,7 +739,9 @@ class TestFeedbackEndpoint:
             ):
                 from rootcoz.main import app
 
-                with TestClient(app) as c:
+                with TestClient(
+                    app, headers={"Authorization": "Bearer test-admin-key-16chars"}
+                ) as c:
                     yield c
             get_settings.cache_clear()
 

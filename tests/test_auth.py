@@ -121,20 +121,28 @@ class TestAuthMe:
         assert data["is_admin"] is True
         assert data["role"] == "admin"
 
-    def test_me_as_regular_user(self, client):
-        resp = client.get("/api/auth/me", cookies={"rootcoz_username": "testuser"})
+    def test_me_as_regular_user_with_session(self, client):
+        """Regular user with a valid session can access /api/auth/me."""
+        # Register user to get a session
+        resp = client.post("/api/auth/register", json={"username": "testuser"})
+        assert resp.status_code == 200
+        session_cookie = resp.cookies.get("rootcoz_session")
+        assert session_cookie
+        resp = client.get("/api/auth/me", cookies={"rootcoz_session": session_cookie})
         assert resp.status_code == 200
         data = resp.json()
         assert data["username"] == "testuser"
         assert data["is_admin"] is False
         assert data["role"] == "user"
 
+    def test_me_cookie_only_returns_401(self, client):
+        """Cookie-only user (no session) gets 401."""
+        resp = client.get("/api/auth/me", cookies={"rootcoz_username": "testuser"})
+        assert resp.status_code == 401
+
     def test_me_no_auth(self, client):
         resp = client.get("/api/auth/me")
-        assert resp.status_code == 200
-        data = resp.json()
-        assert data["username"] == ""
-        assert data["is_admin"] is False
+        assert resp.status_code == 401
 
 
 class TestAuthLogout:
@@ -142,10 +150,9 @@ class TestAuthLogout:
         cookies = _admin_login(client)
         resp = client.post("/api/auth/logout", cookies=cookies)
         assert resp.status_code == 200
-        # Session should be invalidated
+        # Session should be invalidated — now returns 401
         resp2 = client.get("/api/auth/me", cookies=cookies)
-        data = resp2.json()
-        assert data["is_admin"] is False
+        assert resp2.status_code == 401
 
 
 class TestAdminUsers:
@@ -165,12 +172,13 @@ class TestAdminUsers:
         assert resp.status_code == 403
 
     def test_create_admin_regular_user_forbidden(self, client):
+        """Cookie-only user cannot access admin endpoints (gets 401 before 403)."""
         resp = client.post(
             "/api/admin/users",
             json={"username": "newadmin"},
             cookies={"rootcoz_username": "regular"},
         )
-        assert resp.status_code == 403
+        assert resp.status_code in (401, 403)
 
     def test_list_users(self, client):
         cookies = _admin_login(client)
@@ -179,8 +187,9 @@ class TestAdminUsers:
         assert "users" in resp.json()
 
     def test_list_users_requires_admin(self, client):
+        """Cookie-only user cannot list admin users (gets 401 before 403)."""
         resp = client.get("/api/admin/users", cookies={"rootcoz_username": "regular"})
-        assert resp.status_code == 403
+        assert resp.status_code in (401, 403)
 
     def test_delete_admin_user(self, client):
         cookies = _admin_login(client)
@@ -217,16 +226,16 @@ class TestAdminUsers:
 
 class TestDeleteJobAdminOnly:
     def test_delete_job_requires_admin(self, client):
-        """Regular users cannot delete jobs."""
+        """Cookie-only users cannot delete jobs (gets 401 before 403)."""
         resp = client.delete(
             "/results/fake-job-id", cookies={"rootcoz_username": "regular"}
         )
-        assert resp.status_code == 403
+        assert resp.status_code in (401, 403)
 
     def test_delete_job_no_auth(self, client):
         """Unauthenticated users cannot delete jobs."""
         resp = client.delete("/results/fake-job-id")
-        assert resp.status_code == 403
+        assert resp.status_code in (401, 403)
 
     def test_delete_job_as_admin(self, client):
         """Admin can delete jobs."""
@@ -238,14 +247,14 @@ class TestDeleteJobAdminOnly:
 
 class TestBulkDeleteAdminOnly:
     def test_bulk_delete_requires_admin(self, client):
-        """Regular users cannot bulk delete jobs."""
+        """Cookie-only users cannot bulk delete jobs (gets 401 before 403)."""
         resp = client.request(
             "DELETE",
             "/api/results/bulk",
             json={"job_ids": ["a", "b"]},
             cookies={"rootcoz_username": "regular"},
         )
-        assert resp.status_code == 403
+        assert resp.status_code in (401, 403)
 
     def test_bulk_delete_no_auth(self, client):
         """Unauthenticated users cannot bulk delete jobs."""
@@ -254,7 +263,7 @@ class TestBulkDeleteAdminOnly:
             "/api/results/bulk",
             json={"job_ids": ["a", "b"]},
         )
-        assert resp.status_code == 403
+        assert resp.status_code in (401, 403)
 
     def test_bulk_delete_as_admin(self, client):
         """Admin can bulk delete jobs."""
@@ -360,13 +369,11 @@ class TestBearerTokenAuth:
         assert data["role"] == "admin"
 
     def test_bearer_invalid_key(self, client):
-        """Bearer token with invalid key returns non-admin."""
+        """Bearer token with invalid key returns 401."""
         resp = client.get(
             "/api/auth/me", headers={"Authorization": "Bearer invalid-key"}
         )
-        assert resp.status_code == 200
-        data = resp.json()
-        assert data["is_admin"] is False
+        assert resp.status_code == 401
 
 
 class TestChangeUserRole:
@@ -428,12 +435,13 @@ class TestChangeUserRole:
         client.delete("/api/admin/users/onlyadmin", cookies=cookies)
 
     def test_change_role_requires_admin(self, client):
+        """Cookie-only user cannot change roles (gets 401 before 403)."""
         resp = client.put(
             "/api/admin/users/someone/role",
             json={"role": "admin"},
             cookies={"rootcoz_username": "regular"},
         )
-        assert resp.status_code == 403
+        assert resp.status_code in (401, 403)
 
     def test_change_role_cannot_change_self(self, client):
         cookies = _admin_login(client)
@@ -475,12 +483,19 @@ class TestChangeUserRole:
         assert resp.status_code == 404
 
 
+def _register_user(client, username):
+    """Register a user and return session cookies."""
+    resp = client.post("/api/auth/register", json={"username": username})
+    assert resp.status_code == 200
+    session = resp.cookies.get("rootcoz_session", "")
+    assert session, "Registration should set rootcoz_session cookie"
+    return {"rootcoz_session": session}
+
+
 class TestUserTokens:
     def test_save_and_get_tokens(self, client):
         """Tokens round-trip through encrypt/decrypt."""
-        # Track a user first
-        client.get("/api/dashboard", cookies={"rootcoz_username": "tokenuser"})
-        _wait_for_user_tracked(client, "tokenuser")
+        cookies = _register_user(client, "tokenuser")
         # Save tokens
         resp = client.put(
             "/api/user/tokens",
@@ -489,11 +504,11 @@ class TestUserTokens:
                 "jira_email": "a@b.com",
                 "jira_token": "jira_tok",
             },
-            cookies={"rootcoz_username": "tokenuser"},
+            cookies=cookies,
         )
         assert resp.status_code == 200
         # Get tokens back
-        resp = client.get("/api/user/tokens", cookies={"rootcoz_username": "tokenuser"})
+        resp = client.get("/api/user/tokens", cookies=cookies)
         assert resp.status_code == 200
         data = resp.json()
         assert data["github_token"] == "ghp_test123"  # noqa: S105
@@ -508,12 +523,10 @@ class TestUserTokens:
         resp = client.put("/api/user/tokens", json={"github_token": "x"})
         assert resp.status_code == 401
 
-    def test_get_tokens_nonexistent_user(self, client):
-        """Non-tracked user gets empty tokens."""
+    def test_get_tokens_nonexistent_user_cookie_only(self, client):
+        """Cookie-only user (no session) gets 401."""
         resp = client.get("/api/user/tokens", cookies={"rootcoz_username": "ghost"})
-        assert resp.status_code == 200
-        data = resp.json()
-        assert data["github_token"] == ""
+        assert resp.status_code == 401
 
     def test_save_tokens_no_username(self, client):
         """Saving tokens without a username should return 401."""
@@ -525,8 +538,7 @@ class TestUserTokens:
 
     def test_save_partial_tokens(self, client):
         """Saving one token should NOT wipe others."""
-        client.get("/api/dashboard", cookies={"rootcoz_username": "partial"})
-        _wait_for_user_tracked(client, "partial")
+        cookies = _register_user(client, "partial")
 
         # Save all three tokens
         client.put(
@@ -536,18 +548,18 @@ class TestUserTokens:
                 "jira_email": "orig@test.com",
                 "jira_token": "jira_orig",
             },
-            cookies={"rootcoz_username": "partial"},
+            cookies=cookies,
         )
 
         # Now update ONLY github_token
         client.put(
             "/api/user/tokens",
             json={"github_token": "ghp_updated"},
-            cookies={"rootcoz_username": "partial"},
+            cookies=cookies,
         )
 
         # Verify jira tokens were NOT wiped
-        resp = client.get("/api/user/tokens", cookies={"rootcoz_username": "partial"})
+        resp = client.get("/api/user/tokens", cookies=cookies)
         data = resp.json()
         assert data["github_token"] == "ghp_updated"  # noqa: S105
         assert data["jira_email"] == "orig@test.com"  # NOT wiped
@@ -559,12 +571,11 @@ class TestUserTokens:
 
         import aiosqlite
 
-        client.get("/api/dashboard", cookies={"rootcoz_username": "enctest"})
-        _wait_for_user_tracked(client, "enctest")
+        cookies = _register_user(client, "enctest")
         client.put(
             "/api/user/tokens",
             json={"github_token": "ghp_secret_value"},
-            cookies={"rootcoz_username": "enctest"},
+            cookies=cookies,
         )
 
         # Read raw DB value
@@ -656,19 +667,22 @@ class TestAdminDeleteComment:
             )
         )
 
-        # "bob" tries to delete alice's comment — should fail
+        # "bob" with a session tries to delete alice's comment — should fail
+        bob_cookies = _register_user(client, "bob")
         resp = client.delete(
             f"/results/test-job-2/comments/{comment_id}",
-            cookies={"rootcoz_username": "bob"},
+            cookies=bob_cookies,
         )
         assert resp.status_code == 404  # Not found (not owned by bob)
 
 
 class TestUserTracking:
     def test_regular_user_tracked(self, client):
-        """Regular user activity is tracked in the users table."""
-        # Make a request as a regular user
-        client.get("/api/dashboard", cookies={"rootcoz_username": "trackeduser"})
+        """Regular user activity is tracked in the users table via registration."""
+        # Register user (creates user + session)
+        cookies = _register_user(client, "trackeduser")
+        # Make a request with session to trigger tracking
+        client.get("/api/auth/me", cookies=cookies)
         # Poll until the fire-and-forget task completes
         _wait_for_user_tracked(client, "trackeduser")
 
@@ -903,11 +917,9 @@ class TestSessionRenewalMiddleware:
 
         asyncio.run(expire_session())
 
-        # Make a request with the expired session — should NOT be admin
+        # Make a request with the expired session — should get 401 now
         resp = client.get("/api/auth/me", cookies={"rootcoz_session": session_cookie})
-        assert resp.status_code == 200
-        data = resp.json()
-        assert data["is_admin"] is False
+        assert resp.status_code == 401
 
         # The response should NOT have a refreshed rootcoz_session cookie
         assert "rootcoz_session" not in resp.cookies
@@ -956,11 +968,8 @@ class TestProxyHeaders:
             "/api/auth/me",
             headers={"X-Forwarded-User": "sso-user"},
         )
-        assert resp.status_code == 200
-        data = resp.json()
-        # Without cookie or session, username should be empty
-        assert data["username"] == ""
-        assert data["is_admin"] is False
+        # Without cookie or session, gets 401 now
+        assert resp.status_code == 401
 
     def test_header_sets_username_when_enabled(self, proxy_client):
         """X-Forwarded-User sets username when TRUST_PROXY_HEADERS is true."""
@@ -983,28 +992,21 @@ class TestProxyHeaders:
         assert resp.status_code == 200
         assert resp.cookies.get("rootcoz_username") == "sso-user"
 
-    def test_cookie_flow_works_without_header(self, proxy_client):
-        """Existing cookie-based flow still works when header is absent."""
+    def test_cookie_only_returns_401_without_header(self, proxy_client):
+        """Cookie-only user (no session) gets 401 even with proxy enabled."""
         resp = proxy_client.get(
             "/api/auth/me",
             cookies={"rootcoz_username": "cookie-user"},
         )
-        assert resp.status_code == 200
-        data = resp.json()
-        assert data["username"] == "cookie-user"
-        # No proxy cookie should be set when using regular cookie flow
-        assert "rootcoz_username" not in resp.cookies
+        assert resp.status_code == 401
 
     def test_header_admin_reserved(self, proxy_client):
-        """X-Forwarded-User with 'admin' is rejected (reserved username)."""
+        """X-Forwarded-User with 'admin' is rejected (reserved username) — gets 401."""
         resp = proxy_client.get(
             "/api/auth/me",
             headers={"X-Forwarded-User": "admin"},
         )
-        assert resp.status_code == 200
-        data = resp.json()
-        assert data["username"] == ""
-        assert data["is_admin"] is False
+        assert resp.status_code == 401
 
     def test_register_redirects_for_sso_user(self, proxy_client):
         """SSO user hitting /register is redirected to dashboard."""
@@ -1065,12 +1067,9 @@ class TestProxyHeaders:
         assert resp.cookies.get("rootcoz_username") != "header_user"
 
     def test_empty_header_ignored(self, proxy_client):
-        """Empty X-Forwarded-User header is treated as absent."""
+        """Empty X-Forwarded-User header is treated as absent — gets 401."""
         resp = proxy_client.get(
             "/api/auth/me",
             headers={"X-Forwarded-User": "  "},
         )
-        assert resp.status_code == 200
-        data = resp.json()
-        assert data["username"] == ""
-        assert "rootcoz_username" not in resp.cookies
+        assert resp.status_code == 401

@@ -1,5 +1,4 @@
 import { Navigate } from 'react-router-dom'
-import { isLoggedIn } from '@/lib/cookies'
 import { useAuth } from '@/lib/auth'
 
 interface Props {
@@ -8,13 +7,12 @@ interface Props {
 }
 
 export function ProtectedRoute({ children, adminOnly }: Props) {
-  const { isAdmin, loading, username } = useAuth()
+  const { isAdmin, loading, authenticated } = useAuth()
 
   // Wait for auth to resolve before any redirect
   if (loading) return null
 
-  // Use auth context username (resolves from session OR cookie)
-  if (!username && !isLoggedIn()) {
+  if (!authenticated) {
     return <Navigate to="/register" replace />
   }
 

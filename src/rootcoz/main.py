@@ -891,13 +891,22 @@ def _set_username_cookie(response: Response, username: str, *, secure: bool) -> 
 
 
 class AuthMiddleware(BaseHTTPMiddleware):
-    """Authenticate requests: admin via session/Bearer, regular users via cookie."""
+    """Authenticate all requests via session cookie, Bearer token, or trusted SSO header.
+
+    All users (admin and regular) must authenticate. The rootcoz_username
+    cookie is for display/tracking only — it does not grant API access.
+    SSO deployments (trust_proxy_headers) use X-Forwarded-User as an
+    alternative to API key authentication.
+    """
 
     _PUBLIC_PATHS = frozenset(
         {
             "/register",
             "/health",
             "/api/health",
+            "/api/auth/register",
+            "/api/auth/login",
+            "/api/auth/needs-key",
             "/metrics",
             "/favicon.ico",
             "/sw.js",
@@ -947,8 +956,9 @@ class AuthMiddleware(BaseHTTPMiddleware):
         is_admin = False
         username = ""
         authenticated_admin = False
+        has_valid_session = False
 
-        # 1. Check session cookie (rootcoz_session) — admin session
+        # 1. Check session cookie (rootcoz_session) — user or admin session
         session_token = _read_cookie(request, "rootcoz_session")
         if session_token:
             session = await storage.get_session(session_token)
@@ -956,6 +966,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
                 is_admin = bool(session["is_admin"])
                 username = str(session["username"])
                 authenticated_admin = is_admin
+                has_valid_session = True
 
                 # Renew session (sliding window) — only when <50% TTL remains
                 expires_at_str = session.get("expires_at", "")
@@ -990,10 +1001,12 @@ class AuthMiddleware(BaseHTTPMiddleware):
                     is_admin = True
                     username = "admin"
                     authenticated_admin = True
+                    has_valid_session = True
                 else:
                     user = await storage.get_user_by_key(token)
                     if user:
                         username = str(user["username"])
+                        has_valid_session = True
                         if user.get("role") == "admin":
                             is_admin = True
                             authenticated_admin = True
@@ -1002,6 +1015,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
         if not username and proxy_username:
             if proxy_username.lower() != "admin":
                 username = proxy_username
+                has_valid_session = True
                 # Flag that we need to set the rootcoz_username cookie on the response
                 request.state.set_proxy_cookie = proxy_username
 
@@ -1030,11 +1044,17 @@ class AuthMiddleware(BaseHTTPMiddleware):
                     status_code=403, content={"detail": "Admin access required"}
                 )
 
-        # Redirect to /register if no username for browser HTML requests (keep existing behavior)
-        if not username and not path.startswith("/api/"):
+        # Require authentication for all non-public, non-optional paths
+        if not has_valid_session and path not in self._PUBLIC_PATHS:
             accept = request.headers.get("accept", "")
-            if "text/html" in accept:
+            if "text/html" in accept and not path.startswith("/api/"):
                 return RedirectResponse(url="/register", status_code=303)
+            return JSONResponse(
+                status_code=401,
+                content={
+                    "detail": "Authentication required. Please log in with your API key."
+                },
+            )
 
         response = await call_next(request)
 
@@ -4977,6 +4997,100 @@ async def auth_me(request: Request) -> JSONResponse:
     )
 
 
+@app.post("/api/auth/register")
+async def register_user(request: Request) -> JSONResponse:
+    """Register a new user or generate API key for existing user without one.
+
+    Returns the generated API key (shown once).
+    """
+    body = await _read_json_object(request)
+    username = (body.get("username") or "").strip()
+    if not username:
+        raise HTTPException(status_code=400, detail="Username is required")
+
+    settings = get_settings()
+    if settings.allowed_users:
+        allowed = [u.strip() for u in settings.allowed_users.split(",") if u.strip()]
+        if allowed and username not in allowed:
+            raise HTTPException(
+                status_code=403, detail="Registration is restricted. Contact an admin."
+            )
+
+    try:
+        _, raw_key = await storage.create_user(username)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    # Create a session for the user
+    session_token = await storage.create_session(username, is_admin=False)
+
+    response = JSONResponse(
+        content={
+            "username": username,
+            "api_key": raw_key,
+            "role": "user",
+            "is_admin": False,
+            "message": "Save this API key \u2014 you won't see it again.",
+        },
+        headers={
+            "Cache-Control": "no-store, no-cache, must-revalidate",
+            "Pragma": "no-cache",
+        },
+    )
+    response.set_cookie(
+        "rootcoz_session",
+        session_token,
+        httponly=True,
+        samesite="strict",
+        secure=settings.secure_cookies,
+        max_age=storage.SESSION_TTL_SECONDS,
+    )
+    response.set_cookie(
+        "rootcoz_username",
+        username,
+        samesite="lax",
+        secure=settings.secure_cookies,
+        max_age=365 * 24 * 60 * 60,
+    )
+
+    logger.info(f"[AUDIT] User registered: {username}")
+    return response
+
+
+@app.get("/api/auth/needs-key")
+async def check_needs_key(request: Request) -> JSONResponse:
+    """Check if the current user needs to generate an API key.
+
+    Uses session or cookie username to determine if the user needs registration.
+    This is a public endpoint — does not require authentication.
+    """
+    # Try session first (authenticated identity)
+    session_token = _read_cookie(request, "rootcoz_session")
+    if session_token:
+        session = await storage.get_session(session_token)
+        if session:
+            return JSONResponse(
+                content={"needs_key": False, "username": str(session["username"])}
+            )
+
+    # Check trusted proxy header (SSO)
+    settings = get_settings()
+    if settings.trust_proxy_headers:
+        proxy_user = request.headers.get("x-forwarded-user", "").strip()
+        if proxy_user and proxy_user.lower() != "admin":
+            return JSONResponse(content={"needs_key": False, "username": proxy_user})
+
+    # Fall back to cookie username (for migration — user may need a key)
+    cookie_username = _read_cookie(request, "rootcoz_username")
+    if cookie_username and cookie_username.lower() != "admin":
+        has_key = await storage.user_has_key(cookie_username)
+        return JSONResponse(
+            content={"needs_key": not has_key, "username": cookie_username}
+        )
+
+    return JSONResponse(content={"needs_key": True, "username": ""})
+
+
 # --- User token endpoints ---
 
 
@@ -5179,7 +5293,7 @@ async def list_users_endpoint(request: Request) -> dict:
 
 @app.post("/api/admin/users/{username}/rotate-key")
 async def rotate_key_endpoint(request: Request, username: str) -> JSONResponse:
-    """Rotate an admin user's API key."""
+    """Rotate a user's API key. Works for both admin and regular users."""
     _require_admin(request)
     try:
         body_bytes = await request.body()
@@ -5199,19 +5313,30 @@ async def rotate_key_endpoint(request: Request, username: str) -> JSONResponse:
             status_code=400, detail=f"Invalid JSON body: {exc}"
         ) from exc
 
+    # Try admin key rotation first (supports custom keys)
     try:
         new_key = await storage.rotate_admin_key(username, custom_key=custom_key)
     except ValueError as exc:
         detail = str(exc)
-        status = 404 if "not found" in detail.lower() else 400
-        raise HTTPException(status_code=status, detail=detail) from exc
+        # If the user is not an admin, try rotating as regular user
+        if "not found" in detail.lower() and not custom_key:
+            try:
+                new_key = await storage.rotate_user_key(username)
+            except ValueError as user_exc:
+                raise HTTPException(status_code=404, detail=str(user_exc)) from user_exc
+        else:
+            status = 404 if "not found" in detail.lower() else 400
+            raise HTTPException(status_code=status, detail=detail) from exc
 
     logger.info(
         f"[AUDIT] Admin '{request.state.username}' rotated key for '{username}'"
     )
     return JSONResponse(
         content={"username": username, "new_api_key": new_key},
-        headers={"Cache-Control": "no-store"},
+        headers={
+            "Cache-Control": "no-store, no-cache, must-revalidate",
+            "Pragma": "no-cache",
+        },
     )
 
 

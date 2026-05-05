@@ -2380,23 +2380,36 @@ class TestAnalyzeFailuresWorkspacePattern:
             fake_to_thread,
         )
 
-        test_client = TestClient(app)
-        response = test_client.post(
-            "/analyze-failures",
-            json={
-                "failures": [
-                    {
-                        "test_name": "test_foo",
-                        "error_message": "assert False",
-                        "stack_trace": "line 10",
-                    }
-                ],
-                "ai_provider": "claude",
-                "ai_model": "test-model",
-                "tests_repo_url": "https://github.com/org/my-tests",
-            },
-        )
-        assert response.status_code == 200
+        _admin_key = "test-admin-key-16chars"  # pragma: allowlist secret
+        monkeypatch.setenv("ADMIN_KEY", _admin_key)
+        monkeypatch.setenv(
+            "ROOTCOZ_ENCRYPTION_KEY", "test-encryption-key-for-hmac"
+        )  # pragma: allowlist secret
+        from rootcoz.config import get_settings
+
+        get_settings.cache_clear()
+        try:
+            test_client = TestClient(
+                app, headers={"Authorization": f"Bearer {_admin_key}"}
+            )
+            response = test_client.post(
+                "/analyze-failures",
+                json={
+                    "failures": [
+                        {
+                            "test_name": "test_foo",
+                            "error_message": "assert False",
+                            "stack_trace": "line 10",
+                        }
+                    ],
+                    "ai_provider": "claude",
+                    "ai_model": "test-model",
+                    "tests_repo_url": "https://github.com/org/my-tests",
+                },
+            )
+            assert response.status_code == 200
+        finally:
+            get_settings.cache_clear()
 
         # Verify workspace was created
         mock_repo_manager.create_workspace.assert_called_once()
@@ -2575,22 +2588,35 @@ class TestWorkspaceAlwaysCreated:
             fake_to_thread,
         )
 
-        test_client = TestClient(app)
-        response = test_client.post(
-            "/analyze-failures",
-            json={
-                "failures": [
-                    {
-                        "test_name": "test_foo",
-                        "error_message": "assert False",
-                        "stack_trace": "line 10",
-                    }
-                ],
-                "ai_provider": "claude",
-                "ai_model": "test-model",
-            },
-        )
-        assert response.status_code == 200
+        _admin_key = "test-admin-key-16chars"  # pragma: allowlist secret
+        monkeypatch.setenv("ADMIN_KEY", _admin_key)
+        monkeypatch.setenv(
+            "ROOTCOZ_ENCRYPTION_KEY", "test-encryption-key-for-hmac"
+        )  # pragma: allowlist secret
+        from rootcoz.config import get_settings
+
+        get_settings.cache_clear()
+        try:
+            test_client = TestClient(
+                app, headers={"Authorization": f"Bearer {_admin_key}"}
+            )
+            response = test_client.post(
+                "/analyze-failures",
+                json={
+                    "failures": [
+                        {
+                            "test_name": "test_foo",
+                            "error_message": "assert False",
+                            "stack_trace": "line 10",
+                        }
+                    ],
+                    "ai_provider": "claude",
+                    "ai_model": "test-model",
+                },
+            )
+            assert response.status_code == 200
+        finally:
+            get_settings.cache_clear()
 
         # Workspace must be created even without any repos
         mock_repo_manager.create_workspace.assert_called_once()

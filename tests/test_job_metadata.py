@@ -197,6 +197,7 @@ def mock_settings(temp_db_path):
         "JENKINS_PASSWORD": "testpassword",  # pragma: allowlist secret
         "GEMINI_API_KEY": "test-key",  # pragma: allowlist secret
         "ADMIN_KEY": _ADMIN_KEY,
+        "ROOTCOZ_ENCRYPTION_KEY": "test-encryption-key-for-hmac",  # pragma: allowlist secret
         "DB_PATH": str(temp_db_path),
     }
     with patch.dict(os.environ, env, clear=True):
@@ -215,25 +216,9 @@ def api_client(mock_settings, temp_db_path: Path):
         from starlette.testclient import TestClient
         from rootcoz.main import app
 
-        with TestClient(app) as client:
-            # Inject admin auth header for mutation endpoints
-            _original_put = client.put
-            _original_delete = client.delete
-
-            def _put_with_auth(*args, **kwargs):
-                kwargs.setdefault("headers", {})["Authorization"] = (
-                    f"Bearer {_ADMIN_KEY}"
-                )
-                return _original_put(*args, **kwargs)
-
-            def _delete_with_auth(*args, **kwargs):
-                kwargs.setdefault("headers", {})["Authorization"] = (
-                    f"Bearer {_ADMIN_KEY}"
-                )
-                return _original_delete(*args, **kwargs)
-
-            client.put = _put_with_auth
-            client.delete = _delete_with_auth
+        with TestClient(
+            app, headers={"Authorization": f"Bearer {_ADMIN_KEY}"}
+        ) as client:
             yield client
 
 
@@ -407,27 +392,27 @@ def noauth_client(mock_settings, temp_db_path: Path):
 
 
 class TestJobMetadataNoAdmin:
-    """Mutation endpoints must return 403 without admin auth."""
+    """Mutation endpoints must return 401 without admin auth."""
 
     def test_put_metadata_forbidden(self, noauth_client) -> None:
         resp = noauth_client.put("/api/jobs/my-job/metadata", json={"team": "alpha"})
-        assert resp.status_code == 403
+        assert resp.status_code == 401
 
     def test_delete_metadata_forbidden(self, noauth_client) -> None:
         resp = noauth_client.delete("/api/jobs/my-job/metadata")
-        assert resp.status_code == 403
+        assert resp.status_code == 401
 
     def test_bulk_put_metadata_forbidden(self, noauth_client) -> None:
         resp = noauth_client.put(
             "/api/jobs/metadata/bulk",
             json={"items": [{"job_name": "j", "team": "t"}]},
         )
-        assert resp.status_code == 403
+        assert resp.status_code == 401
 
-    def test_get_metadata_allowed(self, noauth_client) -> None:
-        """Read endpoints should work without admin auth."""
+    def test_get_metadata_unauthenticated(self, noauth_client) -> None:
+        """Unauthenticated read endpoints now return 401."""
         resp = noauth_client.get("/api/jobs/metadata")
-        assert resp.status_code == 200
+        assert resp.status_code == 401
 
 
 # --- CLI client tests ---

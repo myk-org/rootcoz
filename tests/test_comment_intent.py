@@ -39,7 +39,9 @@ def client(_mock_settings, temp_db_path: Path):
 
         from rootcoz.main import app
 
-        with TestClient(app) as c:
+        with TestClient(
+            app, headers={"Authorization": "Bearer test-admin-key-16chars"}
+        ) as c:
             yield c
 
 
@@ -202,7 +204,9 @@ class TestAnalyzeCommentIntentJobFallback:
 
             from rootcoz.main import app
 
-            with TestClient(app) as c:
+            with TestClient(
+                app, headers={"Authorization": "Bearer test-admin-key-16chars"}
+            ) as c:
                 yield c
 
     @staticmethod
@@ -320,7 +324,9 @@ class TestAnalyzeCommentIntentJobFallback:
 
             from rootcoz.main import app
 
-            with TestClient(app) as client_env:
+            with TestClient(
+                app, headers={"Authorization": "Bearer test-admin-key-16chars"}
+            ) as client_env:
                 with patch(
                     "ai_cli_runner.call_ai_cli", return_value=ai_response
                 ) as mock_ai:
