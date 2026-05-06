@@ -104,6 +104,13 @@ def _echo_api_key_warning(api_key: str) -> None:
     typer.echo(f"API Key: {api_key}")
 
 
+def _require_api_key(key: str, action: str = "Operation") -> None:
+    """Exit with error if API key is missing from response."""
+    if not key:
+        typer.echo(f"Error: {action} succeeded but no API key was returned.", err=True)
+        raise typer.Exit(1)
+
+
 def _run_client_command(
     json_output: bool,
     request_fn,
@@ -314,11 +321,7 @@ def register(
         emit_output=False,
     )
     api_key = result.get("api_key", "")
-    if not api_key:
-        typer.echo(
-            "Error: Registration succeeded but no API key was returned.", err=True
-        )
-        raise typer.Exit(1)
+    _require_api_key(api_key, "Registration")
     if not _state.get("json", False):
         typer.echo(f"Registered: {result.get('username', username)}")
         _echo_api_key_warning(api_key)
@@ -2028,9 +2031,7 @@ def auth_rotate_key(
         emit_output=False,
     )
     new_key = result.get("new_api_key", "")
-    if not new_key:
-        typer.echo("Error: Key rotation succeeded but no key was returned.", err=True)
-        raise typer.Exit(1)
+    _require_api_key(new_key, "Key rotation")
     if not _state.get("json", False):
         typer.echo(f"Key rotated for: {result.get('username', '')}")
         _echo_api_key_warning(new_key)
@@ -2094,9 +2095,7 @@ def admin_users_create(
         emit_output=False,
     )
     api_key = data.get("api_key", "")
-    if not api_key:
-        typer.echo("Error: User created but no API key was returned.", err=True)
-        raise typer.Exit(1)
+    _require_api_key(api_key, "User creation")
     if not _state.get("json", False):
         typer.echo(f"Created admin user: {data.get('username', username)}")
         _echo_api_key_warning(api_key)
@@ -2138,9 +2137,7 @@ def admin_users_rotate_key(
         emit_output=False,
     )
     new_key = data.get("new_api_key", "")
-    if not new_key:
-        typer.echo("Error: Key rotation succeeded but no key was returned.", err=True)
-        raise typer.Exit(1)
+    _require_api_key(new_key, "Key rotation")
     if not _state.get("json", False):
         typer.echo(f"Rotated API key for: {data.get('username', username)}")
         _echo_api_key_warning(new_key)

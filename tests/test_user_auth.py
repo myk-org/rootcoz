@@ -124,10 +124,6 @@ class TestUserRegistration:
 
     def test_register_legacy_user_migration(self, client, temp_db_path):
         """Pre-tracked user (cookie-only, no key) can register to get an API key."""
-        import asyncio
-        from unittest.mock import patch
-        from rootcoz import storage
-
         # Simulate a legacy user created by track_user (no api_key_hash)
         with patch.object(storage, "DB_PATH", temp_db_path):
             asyncio.run(storage.track_user("legacyuser"))
