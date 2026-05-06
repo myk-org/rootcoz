@@ -116,7 +116,8 @@ class TestUserRegistration:
 
     def test_register_duplicate_user_with_key(self, client):
         """Second registration for same user (who already has a key) fails."""
-        client.post("/api/auth/register", json={"username": "dupuser"})
+        first = client.post("/api/auth/register", json={"username": "dupuser"})
+        assert first.status_code == 200
         resp = client.post("/api/auth/register", json={"username": "dupuser"})
         assert resp.status_code == 400
         assert "already has" in resp.json()["detail"].lower()

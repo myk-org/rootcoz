@@ -2027,13 +2027,11 @@ def auth_rotate_key(
         lambda c: c.rotate_key(),
         emit_output=False,
     )
+    new_key = result.get("new_api_key", "")
+    if not new_key:
+        typer.echo("Error: Key rotation succeeded but no key was returned.", err=True)
+        raise typer.Exit(1)
     if not _state.get("json", False):
-        new_key = result.get("new_api_key", "")
-        if not new_key:
-            typer.echo(
-                "Error: Key rotation succeeded but no key was returned.", err=True
-            )
-            raise typer.Exit(1)
         typer.echo(f"Key rotated for: {result.get('username', '')}")
         _echo_api_key_warning(new_key)
 
@@ -2095,9 +2093,13 @@ def admin_users_create(
         lambda c: c.admin_create_user(username),
         emit_output=False,
     )
+    api_key = data.get("api_key", "")
+    if not api_key:
+        typer.echo("Error: User created but no API key was returned.", err=True)
+        raise typer.Exit(1)
     if not _state.get("json", False):
         typer.echo(f"Created admin user: {data.get('username', username)}")
-        _echo_api_key_warning(data.get("api_key", ""))
+        _echo_api_key_warning(api_key)
 
 
 @admin_users_app.command("delete")
@@ -2135,9 +2137,13 @@ def admin_users_rotate_key(
         lambda c: c.admin_rotate_key(username),
         emit_output=False,
     )
+    new_key = data.get("new_api_key", "")
+    if not new_key:
+        typer.echo("Error: Key rotation succeeded but no key was returned.", err=True)
+        raise typer.Exit(1)
     if not _state.get("json", False):
         typer.echo(f"Rotated API key for: {data.get('username', username)}")
-        _echo_api_key_warning(data.get("new_api_key", ""))
+        _echo_api_key_warning(new_key)
 
 
 @admin_users_app.command("change-role")
