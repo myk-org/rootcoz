@@ -2,13 +2,14 @@ import { useState, useEffect, type FormEvent } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useAuth } from '@/lib/auth'
 import { api, ApiError } from '@/lib/api'
-import { SectionDivider } from '@/components/shared/SectionDivider'
 import { persistTokensToServer } from '@/lib/tokens'
 import { setGithubToken, setJiraEmail, setJiraToken } from '@/lib/cookies'
 import { Card, CardContent } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
 import { Button } from '@/components/ui/button'
-import { Eye, EyeOff } from 'lucide-react'
+import { TokenField } from '@/components/shared/TokenField'
+import { TrackerTokensFields } from '@/components/shared/TrackerTokensFields'
+import { NotificationToggle } from '@/components/shared/NotificationToggle'
 
 type Mode = 'login' | 'register' | 'key-reveal'
 
@@ -44,45 +45,13 @@ function ApiKeyReveal({ apiKey, onAcknowledge }: { apiKey: string; onAcknowledge
   )
 }
 
-function PasswordInput({ id, value, onChange, placeholder, autoFocus }: {
-  id: string
-  value: string
-  onChange: (v: string) => void
-  placeholder: string
-  autoFocus?: boolean
-}) {
-  const [visible, setVisible] = useState(false)
-
-  return (
-    <div className="relative">
-      <Input
-        id={id}
-        type={visible ? 'text' : 'password'}
-        value={value}
-        onChange={(e) => onChange(e.target.value)}
-        placeholder={placeholder}
-        autoComplete="off"
-        autoFocus={autoFocus}
-        className="h-10 pr-10 font-mono"
-      />
-      <button
-        type="button"
-        onClick={() => setVisible(!visible)}
-        className="absolute right-2 top-1/2 -translate-y-1/2 p-1 text-text-tertiary hover:text-text-secondary transition-colors"
-        aria-label={visible ? 'Hide' : 'Show'}
-      >
-        {visible ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
-      </button>
-    </div>
-  )
-}
-
 export function RegisterPage() {
   const navigate = useNavigate()
   const { login, refreshAuth, authenticated, loading: authLoading } = useAuth()
   const [mode, setMode] = useState<Mode>('login')
   const [username, setUsername] = useState('')
   const [apiKey, setApiKey] = useState('')
+  const [showApiKey, setShowApiKey] = useState(false)
   const [newApiKey, setNewApiKey] = useState('')
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(false)
@@ -230,59 +199,17 @@ export function RegisterPage() {
                       <p className="text-xs text-text-tertiary">Choose a username to create your account. You'll receive an API key for future logins.</p>
                     </div>
 
-                    <details className="group">
-                      <summary className="cursor-pointer">
-                        <SectionDivider title="Tracker Tokens (optional)" />
-                      </summary>
-                      <div className="space-y-3 pt-2">
-                        <p className="text-xs text-text-tertiary">
-                          Set up your personal tokens to create issues and bugs directly under your name.
-                          You can also configure these later in Settings.
-                        </p>
+                    <TrackerTokensFields
+                      githubToken={githubToken}
+                      onGithubTokenChange={setGithubTokenValue}
+                      jiraEmail={jiraEmail}
+                      onJiraEmailChange={setJiraEmailValue}
+                      jiraToken={jiraToken}
+                      onJiraTokenChange={setJiraTokenValue}
+                      idPrefix="reg"
+                    />
 
-                        <div className="space-y-1.5">
-                          <label htmlFor="reg-github-token" className="block font-display text-xs font-medium uppercase tracking-widest text-text-secondary">
-                            GitHub Token <span className="text-text-tertiary font-normal normal-case tracking-normal">(optional)</span>
-                          </label>
-                          <PasswordInput
-                            id="reg-github-token"
-                            value={githubToken}
-                            onChange={setGithubTokenValue}
-                            placeholder="ghp_..."
-                          />
-                          <p className="text-xs text-text-tertiary">
-                            Personal Access Token with <code className="text-text-secondary">repo</code> scope.
-                          </p>
-                        </div>
-
-                        <div className="space-y-1.5">
-                          <label htmlFor="reg-jira-email" className="block font-display text-xs font-medium uppercase tracking-widest text-text-secondary">
-                            Jira Email <span className="text-text-tertiary font-normal normal-case tracking-normal">(optional)</span>
-                          </label>
-                          <Input
-                            id="reg-jira-email"
-                            type="email"
-                            value={jiraEmail}
-                            onChange={(e) => setJiraEmailValue(e.target.value)}
-                            placeholder="e.g. jdoe@company.com"
-                            autoComplete="email"
-                            className="h-10 font-mono"
-                          />
-                        </div>
-
-                        <div className="space-y-1.5">
-                          <label htmlFor="reg-jira-token" className="block font-display text-xs font-medium uppercase tracking-widest text-text-secondary">
-                            Jira Token <span className="text-text-tertiary font-normal normal-case tracking-normal">(optional)</span>
-                          </label>
-                          <PasswordInput
-                            id="reg-jira-token"
-                            value={jiraToken}
-                            onChange={setJiraTokenValue}
-                            placeholder="Token..."
-                          />
-                        </div>
-                      </div>
-                    </details>
+                    <NotificationToggle />
 
                     <Button type="submit" className="w-full" disabled={!username.trim() || loading}>
                       {loading ? 'Registering...' : 'Register'}
@@ -321,18 +248,17 @@ export function RegisterPage() {
                       />
                     </div>
 
-                    <div className="space-y-1.5">
-                      <label htmlFor="login-apikey" className="block font-display text-xs font-medium uppercase tracking-widest text-text-secondary">
-                        API Key
-                      </label>
-                      <PasswordInput
-                        id="login-apikey"
-                        value={apiKey}
-                        onChange={(v) => { setApiKey(v); setError('') }}
-                        placeholder="Enter your API key..."
-                        autoFocus={!!username}
-                      />
-                    </div>
+                    <TokenField
+                      id="login-apikey"
+                      label="API Key"
+                      value={apiKey}
+                      onChange={(v) => { setApiKey(v); setError('') }}
+                      show={showApiKey}
+                      onToggleShow={() => setShowApiKey(!showApiKey)}
+                      placeholder="Enter your API key..."
+                      optionalLabel={false}
+                      helpContent={<></>}
+                    />
 
                     <Button type="submit" className="w-full" disabled={!username.trim() || !apiKey.trim() || loading}>
                       {loading ? 'Logging in...' : 'Log in'}

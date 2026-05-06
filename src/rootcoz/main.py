@@ -223,6 +223,7 @@ def _make_sse_stream(
 
     async def event_generator():
         my_event = asyncio.Event()
+        wait_task: asyncio.Task | None = None
 
         # Register
         if per_key_listeners is not None:
@@ -234,13 +235,15 @@ def _make_sse_stream(
             while True:
                 my_event.clear()
                 try:
+                    wait_task = asyncio.create_task(my_event.wait())
                     done, pending = await asyncio.wait(
-                        [asyncio.create_task(my_event.wait())],
+                        [wait_task],
                         timeout=30,
                         return_when=asyncio.FIRST_COMPLETED,
                     )
                     for task in pending:
                         task.cancel()
+                    wait_task = None
                 except asyncio.CancelledError:
                     break
 
@@ -254,6 +257,8 @@ def _make_sse_stream(
                 if my_event.is_set():
                     yield f"event: {event_name}\ndata: refresh\n\n"
         finally:
+            if wait_task is not None:
+                wait_task.cancel()
             if per_key_listeners is not None:
                 bucket = per_key_listeners.get(listener_key)
                 if bucket is not None:
@@ -4251,21 +4256,26 @@ async def stream_navbar_counts(request: Request) -> StreamingResponse:
                     last_unread = 0
                     yield "event: unread-count\ndata: 0\n\n"
 
+            active_wait_tasks: list[asyncio.Task] = []
             while True:
                 # Wait for either event or timeout
-                wait_tasks = [asyncio.create_task(active_event.wait())]
+                active_wait_tasks = [asyncio.create_task(active_event.wait())]
                 if mention_event is not None:
-                    wait_tasks.append(asyncio.create_task(mention_event.wait()))
+                    active_wait_tasks.append(asyncio.create_task(mention_event.wait()))
 
                 try:
                     done, pending = await asyncio.wait(
-                        wait_tasks, timeout=30, return_when=asyncio.FIRST_COMPLETED
+                        active_wait_tasks,
+                        timeout=30,
+                        return_when=asyncio.FIRST_COMPLETED,
                     )
                     for task in pending:
                         task.cancel()
+                    active_wait_tasks = []
                 except asyncio.CancelledError:
-                    for task in wait_tasks:
+                    for task in active_wait_tasks:
                         task.cancel()
+                    active_wait_tasks = []
                     break
 
                 if not done:
@@ -4300,6 +4310,9 @@ async def stream_navbar_counts(request: Request) -> StreamingResponse:
                             "Failed to fetch unread count for SSE", exc_info=True
                         )
         finally:
+            # Cancel any pending wait tasks on disconnect
+            for task in active_wait_tasks:
+                task.cancel()
             # Cleanup: remove per-connection events
             _active_count_listeners.discard(active_event)
             if username and mention_event is not None:
