@@ -26,7 +26,7 @@ from rootcoz.models import (
     FailureAnalysis,
     PeerDebate,
     PeerRound,
-    TestFailure,
+    FailedTest,
 )
 from rootcoz.storage import update_progress_phase
 from rootcoz.token_tracking import record_ai_usage
@@ -289,7 +289,7 @@ classification if you believe the peers are wrong — justify your reasoning.
 
 
 def _build_failure_summary(
-    failures: list[TestFailure],
+    failures: list[FailedTest],
     error_signature: str,
 ) -> str:
     """Build a concise failure summary for peer prompts.
@@ -315,7 +315,7 @@ def _build_failure_summary(
 
 
 async def analyze_failure_group_with_peers(
-    failures: list[TestFailure],
+    failures: list[FailedTest],
     console_context: str,
     repo_path: Path | None,
     main_ai_provider: str,

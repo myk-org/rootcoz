@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback, useRef, type FormEvent, type ReactNode } from 'react'
 import { api, ApiError, isExpectedTokenSyncError } from '@/lib/api'
+import { persistTokensToServer } from '@/lib/tokens'
 import {
   setUsername,
   setGithubToken,
@@ -69,24 +70,6 @@ function TokenField({ id, label, value, onChange, show, onToggleShow, validation
       <p className="text-xs text-text-tertiary">{helpContent}</p>
     </div>
   )
-}
-
-async function persistTokensToServer(gh: string, je: string, jt: string) {
-  // Don't overwrite server tokens with empty values
-  if (!gh && !je && !jt) return
-  try {
-    await api.put('/api/user/tokens', {
-      github_token: gh,
-      jira_email: je,
-      jira_token: jt,
-    })
-  } catch (err) {
-    // May fail with 404 on first registration (user not yet in DB)
-    // or 401 if cookie not set yet — both are expected, not errors
-    if (!isExpectedTokenSyncError(err)) {
-      console.error('Failed to sync tokens to server:', err)
-    }
-  }
 }
 
 type PushState = Awaited<ReturnType<typeof getPushSubscriptionState>> | 'loading'

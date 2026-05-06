@@ -6,7 +6,7 @@ from xml.etree import ElementTree as ET
 from xml.etree.ElementTree import Element
 
 if TYPE_CHECKING:
-    from rootcoz.models import TestFailure
+    from rootcoz.models import FailedTest
 
 import httpx
 from defusedxml.ElementTree import fromstring as safe_fromstring
@@ -75,26 +75,26 @@ def extract_failures_from_xml(raw_xml: str) -> list[dict[str, str]]:
     return failures
 
 
-def extract_test_failures(raw_xml: str) -> list[TestFailure]:
-    """Extract test failures from JUnit XML and return as TestFailure objects.
+def extract_test_failures(raw_xml: str) -> list[FailedTest]:
+    """Extract test failures from JUnit XML and return as FailedTest objects.
 
     Parses the XML, extracts failure/error elements, and converts them
-    to TestFailure model objects ready for analysis.
+    to FailedTest model objects ready for analysis.
 
     Args:
         raw_xml: JUnit XML content as a string.
 
     Returns:
-        List of TestFailure objects. Empty list if no failures found.
+        List of FailedTest objects. Empty list if no failures found.
 
     Raises:
         xml.etree.ElementTree.ParseError: If the XML is malformed.
     """
-    from rootcoz.models import TestFailure
+    from rootcoz.models import FailedTest
 
     raw_failures = extract_failures_from_xml(raw_xml)
     return [
-        TestFailure(
+        FailedTest(
             test_name=f["test_name"],
             error_message=f.get("error_message", ""),
             stack_trace=f.get("stack_trace", ""),

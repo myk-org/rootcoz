@@ -183,7 +183,7 @@ class TestRunSingleAiAnalysis:
     ) -> None:
         """Successful AI call returns parsed AnalysisDetail and error signature."""
         from rootcoz.analyzer import _run_single_ai_analysis
-        from rootcoz.models import TestFailure
+        from rootcoz.models import FailedTest
         import json
 
         ai_response = json.dumps(
@@ -196,7 +196,7 @@ class TestRunSingleAiAnalysis:
         mock_cli = AsyncMock(return_value=AIResult(success=True, text=ai_response))
         monkeypatch.setattr("rootcoz.analyzer._call_ai_cli_with_retry", mock_cli)
 
-        failure = TestFailure(
+        failure = FailedTest(
             test_name="test_foo", error_message="AssertionError", stack_trace="line 42"
         )
         parsed, sig = await _run_single_ai_analysis(
@@ -221,12 +221,12 @@ class TestRunSingleAiAnalysis:
     ) -> None:
         """Failed AI call returns AnalysisDetail with raw output in details."""
         from rootcoz.analyzer import _run_single_ai_analysis
-        from rootcoz.models import TestFailure
+        from rootcoz.models import FailedTest
 
         mock_cli = AsyncMock(return_value=AIResult(success=False, text="CLI timeout"))
         monkeypatch.setattr("rootcoz.analyzer._call_ai_cli_with_retry", mock_cli)
 
-        failure = TestFailure(
+        failure = FailedTest(
             test_name="test_bar", error_message="err", stack_trace="st"
         )
         parsed, sig = await _run_single_ai_analysis(
@@ -254,7 +254,7 @@ class TestRunSingleAiAnalysis:
         from rootcoz.models import (
             AiConfigEntry,
             AnalysisDetail,
-            TestFailure,
+            FailedTest,
         )
 
         # Mock _run_single_ai_analysis to track that it was called
@@ -280,7 +280,7 @@ class TestRunSingleAiAnalysis:
         mock_cli = AsyncMock(return_value=AIResult(success=True, text=peer_response))
         monkeypatch.setattr("rootcoz.peer_analysis._call_ai_cli_with_retry", mock_cli)
 
-        failure = TestFailure(
+        failure = FailedTest(
             test_name="test_foo", error_message="err", stack_trace="st"
         )
         peers = [AiConfigEntry(ai_provider="gemini", ai_model="pro")]
@@ -310,7 +310,7 @@ class TestAnalyzeFailureGroupPeerDelegation:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """When peer_ai_configs is provided, delegates to peer analysis module."""
-        from rootcoz.analyzer import TestFailure, analyze_failure_group
+        from rootcoz.analyzer import FailedTest, analyze_failure_group
         from rootcoz.models import (
             AiConfigEntry,
             AnalysisDetail,
@@ -333,7 +333,7 @@ class TestAnalyzeFailureGroupPeerDelegation:
             mock_peer,
         )
 
-        failure = TestFailure(
+        failure = FailedTest(
             test_name="test_foo", error_message="err", stack_trace="st"
         )
         peers = [
@@ -363,7 +363,7 @@ class TestAnalyzeFailureGroupPeerDelegation:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """peer_analysis_max_rounds is forwarded as max_rounds."""
-        from rootcoz.analyzer import TestFailure, analyze_failure_group
+        from rootcoz.analyzer import FailedTest, analyze_failure_group
         from rootcoz.models import (
             AiConfigEntry,
             AnalysisDetail,
@@ -385,7 +385,7 @@ class TestAnalyzeFailureGroupPeerDelegation:
             mock_peer,
         )
 
-        failure = TestFailure(
+        failure = FailedTest(
             test_name="test_bar", error_message="err", stack_trace="st"
         )
         peers = [AiConfigEntry(ai_provider="gemini", ai_model="pro")]
@@ -406,7 +406,7 @@ class TestAnalyzeFailureGroupPeerDelegation:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """When no peer_ai_configs, uses single-AI path."""
-        from rootcoz.analyzer import TestFailure, analyze_failure_group
+        from rootcoz.analyzer import FailedTest, analyze_failure_group
 
         mock_cli = AsyncMock(
             return_value=AIResult(
@@ -416,7 +416,7 @@ class TestAnalyzeFailureGroupPeerDelegation:
         )
         monkeypatch.setattr("rootcoz.analyzer._call_ai_cli_with_retry", mock_cli)
 
-        failure = TestFailure(
+        failure = FailedTest(
             test_name="test_foo", error_message="err", stack_trace="st"
         )
 
@@ -431,7 +431,7 @@ class TestAnalyzeFailureGroupPeerDelegation:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """Dict-form peer configs are converted to AiConfigEntry objects."""
-        from rootcoz.analyzer import TestFailure, analyze_failure_group
+        from rootcoz.analyzer import FailedTest, analyze_failure_group
         from rootcoz.models import (
             AiConfigEntry,
             AnalysisDetail,
@@ -453,7 +453,7 @@ class TestAnalyzeFailureGroupPeerDelegation:
             mock_peer,
         )
 
-        failure = TestFailure(
+        failure = FailedTest(
             test_name="test_baz", error_message="err", stack_trace="st"
         )
         # Pass dicts instead of AiConfigEntry objects
@@ -476,7 +476,7 @@ class TestAnalyzeFailureGroupPeerDelegation:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """group_label is forwarded from analyze_failure_group to analyze_failure_group_with_peers."""
-        from rootcoz.analyzer import TestFailure, analyze_failure_group
+        from rootcoz.analyzer import FailedTest, analyze_failure_group
         from rootcoz.models import (
             AiConfigEntry,
             AnalysisDetail,
@@ -498,7 +498,7 @@ class TestAnalyzeFailureGroupPeerDelegation:
             mock_peer,
         )
 
-        failure = TestFailure(
+        failure = FailedTest(
             test_name="test_foo", error_message="err", stack_trace="st"
         )
         peers = [AiConfigEntry(ai_provider="gemini", ai_model="pro")]
@@ -519,7 +519,7 @@ class TestAnalyzeFailureGroupPeerDelegation:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """group_label defaults to empty string when not provided."""
-        from rootcoz.analyzer import TestFailure, analyze_failure_group
+        from rootcoz.analyzer import FailedTest, analyze_failure_group
         from rootcoz.models import (
             AiConfigEntry,
             AnalysisDetail,
@@ -541,7 +541,7 @@ class TestAnalyzeFailureGroupPeerDelegation:
             mock_peer,
         )
 
-        failure = TestFailure(
+        failure = FailedTest(
             test_name="test_foo", error_message="err", stack_trace="st"
         )
         peers = [AiConfigEntry(ai_provider="gemini", ai_model="pro")]
@@ -561,7 +561,7 @@ class TestAnalyzeFailureGroupPeerDelegation:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """max_concurrent_ai_calls is forwarded from analyze_failure_group to analyze_failure_group_with_peers."""
-        from rootcoz.analyzer import TestFailure, analyze_failure_group
+        from rootcoz.analyzer import FailedTest, analyze_failure_group
         from rootcoz.models import (
             AiConfigEntry,
             AnalysisDetail,
@@ -583,7 +583,7 @@ class TestAnalyzeFailureGroupPeerDelegation:
             mock_peer,
         )
 
-        failure = TestFailure(
+        failure = FailedTest(
             test_name="test_foo", error_message="err", stack_trace="st"
         )
         peers = [AiConfigEntry(ai_provider="gemini", ai_model="pro")]

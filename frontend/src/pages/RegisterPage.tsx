@@ -2,6 +2,9 @@ import { useState, useEffect, type FormEvent } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useAuth } from '@/lib/auth'
 import { api, ApiError } from '@/lib/api'
+import { SectionDivider } from '@/components/shared/SectionDivider'
+import { persistTokensToServer } from '@/lib/tokens'
+import { setGithubToken, setJiraEmail, setJiraToken } from '@/lib/cookies'
 import { Card, CardContent } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
 import { Button } from '@/components/ui/button'
@@ -83,6 +86,9 @@ export function RegisterPage() {
   const [newApiKey, setNewApiKey] = useState('')
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(false)
+  const [githubToken, setGithubTokenValue] = useState('')
+  const [jiraEmail, setJiraEmailValue] = useState('')
+  const [jiraToken, setJiraTokenValue] = useState('')
 
   useEffect(() => {
     if (!authLoading && authenticated) {
@@ -100,6 +106,16 @@ export function RegisterPage() {
     try {
       const result = await api.post<{ username: string; api_key: string }>('/api/auth/register', { username: trimmed })
       setNewApiKey(result.api_key)
+
+      // Persist tracker tokens if provided
+      const gh = githubToken.trim()
+      const je = jiraEmail.trim()
+      const jt = jiraToken.trim()
+      if (gh) setGithubToken(gh)
+      if (je) setJiraEmail(je)
+      if (jt) setJiraToken(jt)
+      await persistTokensToServer(gh, je, jt)
+
       setMode('key-reveal')
     } catch (err) {
       if (err instanceof ApiError && err.status === 400) {
@@ -213,6 +229,60 @@ export function RegisterPage() {
                       />
                       <p className="text-xs text-text-tertiary">Choose a username to create your account. You'll receive an API key for future logins.</p>
                     </div>
+
+                    <details className="group">
+                      <summary className="cursor-pointer">
+                        <SectionDivider title="Tracker Tokens (optional)" />
+                      </summary>
+                      <div className="space-y-3 pt-2">
+                        <p className="text-xs text-text-tertiary">
+                          Set up your personal tokens to create issues and bugs directly under your name.
+                          You can also configure these later in Settings.
+                        </p>
+
+                        <div className="space-y-1.5">
+                          <label htmlFor="reg-github-token" className="block font-display text-xs font-medium uppercase tracking-widest text-text-secondary">
+                            GitHub Token <span className="text-text-tertiary font-normal normal-case tracking-normal">(optional)</span>
+                          </label>
+                          <PasswordInput
+                            id="reg-github-token"
+                            value={githubToken}
+                            onChange={setGithubTokenValue}
+                            placeholder="ghp_..."
+                          />
+                          <p className="text-xs text-text-tertiary">
+                            Personal Access Token with <code className="text-text-secondary">repo</code> scope.
+                          </p>
+                        </div>
+
+                        <div className="space-y-1.5">
+                          <label htmlFor="reg-jira-email" className="block font-display text-xs font-medium uppercase tracking-widest text-text-secondary">
+                            Jira Email <span className="text-text-tertiary font-normal normal-case tracking-normal">(optional)</span>
+                          </label>
+                          <Input
+                            id="reg-jira-email"
+                            type="email"
+                            value={jiraEmail}
+                            onChange={(e) => setJiraEmailValue(e.target.value)}
+                            placeholder="e.g. jdoe@company.com"
+                            autoComplete="email"
+                            className="h-10 font-mono"
+                          />
+                        </div>
+
+                        <div className="space-y-1.5">
+                          <label htmlFor="reg-jira-token" className="block font-display text-xs font-medium uppercase tracking-widest text-text-secondary">
+                            Jira Token <span className="text-text-tertiary font-normal normal-case tracking-normal">(optional)</span>
+                          </label>
+                          <PasswordInput
+                            id="reg-jira-token"
+                            value={jiraToken}
+                            onChange={setJiraTokenValue}
+                            placeholder="Token..."
+                          />
+                        </div>
+                      </div>
+                    </details>
 
                     <Button type="submit" className="w-full" disabled={!username.trim() || loading}>
                       {loading ? 'Registering...' : 'Register'}

@@ -39,7 +39,7 @@ from rootcoz.models import (
     CodeFix,
     FailureAnalysis,
     ProductBugReport,
-    TestFailure,
+    FailedTest,
 )
 from rootcoz.repository import (
     RepositoryManager,
@@ -345,7 +345,7 @@ IMPORTANT INSTRUCTIONS FOR ARTIFACT ANALYSIS:
 4. Do NOT classify based solely on the test error message — check the artifact logs for the real root cause"""
 
 
-def get_failure_signature(failure: TestFailure) -> str:
+def get_failure_signature(failure: FailedTest) -> str:
     """Create a signature for grouping identical failures.
 
     Uses error message and first few lines of stack trace to identify
@@ -897,7 +897,7 @@ def _derive_error_details(error_details: str, stack_trace: str) -> str:
     return stripped
 
 
-def extract_failures_from_test_report(test_report: dict) -> list[TestFailure]:
+def extract_failures_from_test_report(test_report: dict) -> list[FailedTest]:
     """Extract failed test cases from Jenkins test report.
 
     Parses the structured test report from Jenkins /testReport/api/json endpoint
@@ -907,9 +907,9 @@ def extract_failures_from_test_report(test_report: dict) -> list[TestFailure]:
         test_report: Jenkins test report dictionary from the API.
 
     Returns:
-        List of TestFailure objects containing test details.
+        List of FailedTest objects containing test details.
     """
-    failures: list[TestFailure] = []
+    failures: list[FailedTest] = []
 
     # Handle both top-level suites and nested childReports structure
     suites = test_report.get("suites", [])
@@ -935,7 +935,7 @@ def extract_failures_from_test_report(test_report: dict) -> list[TestFailure]:
                 stack_trace = case.get("errorStackTrace", "") or ""
 
                 failures.append(
-                    TestFailure(
+                    FailedTest(
                         test_name=full_name,
                         error_message=error_details,
                         stack_trace=stack_trace,
@@ -1086,7 +1086,7 @@ def _build_resources_section(
 
 async def _run_single_ai_analysis(
     *,
-    failures: list[TestFailure],
+    failures: list[FailedTest],
     console_context: str,
     repo_path: Path | None,
     ai_provider: str,
@@ -1194,7 +1194,7 @@ Note: Multiple tests failed with the same error. Provide ONE analysis that appli
 
 
 async def analyze_failure_group(
-    failures: list[TestFailure],
+    failures: list[FailedTest],
     console_context: str,
     repo_path: Path | None,
     ai_provider: str = "",
@@ -1465,7 +1465,7 @@ async def analyze_child_job(
     # If we have test failures, group by signature and analyze unique groups
     if test_failures:
         # Group failures by signature to avoid analyzing identical errors multiple times
-        failure_groups: dict[str, list[TestFailure]] = defaultdict(list)
+        failure_groups: dict[str, list[FailedTest]] = defaultdict(list)
         for tf in test_failures:
             sig = get_failure_signature(tf)
             failure_groups[sig].append(tf)
@@ -1885,7 +1885,7 @@ async def analyze_job(
             if test_failures:
                 await _safe_update_progress(progress_job_id, "analyzing_failures")
                 # Group failures by signature to avoid analyzing identical errors multiple times
-                failure_groups: dict[str, list[TestFailure]] = defaultdict(list)
+                failure_groups: dict[str, list[FailedTest]] = defaultdict(list)
                 for tf in test_failures:
                     sig = get_failure_signature(tf)
                     failure_groups[sig].append(tf)

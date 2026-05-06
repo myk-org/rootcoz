@@ -246,7 +246,7 @@ class AnalyzeRequest(BaseAnalysisRequest):
     )
 
 
-class TestFailure(BaseModel):
+class FailedTest(BaseModel):
     """A single test failure extracted from Jenkins test report."""
 
     test_name: str = Field(
@@ -511,7 +511,7 @@ class JobStatus(BaseModel):
 class AnalyzeFailuresRequest(BaseAnalysisRequest):
     """Request payload for direct failure analysis (no Jenkins)."""
 
-    failures: list[TestFailure] | None = Field(
+    failures: list[FailedTest] | None = Field(
         default=None, description="Raw test failures to analyze"
     )
     raw_xml: Annotated[str, Field(max_length=50_000_000)] | None = Field(
