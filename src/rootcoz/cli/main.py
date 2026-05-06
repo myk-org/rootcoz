@@ -236,7 +236,7 @@ def main_callback(
         "",
         "--api-key",
         envvar="ROOTCOZ_API_KEY",
-        help="Admin API key for Bearer token authentication.",
+        help="API key for Bearer token authentication (user or admin).",
     ),
     no_verify_ssl: bool | None = typer.Option(
         None,
@@ -1993,11 +1993,11 @@ def analyze_comment_intent_cmd(
 
 @auth_app.command("login")
 def auth_login(
-    username: str = typer.Option(..., "--username", "-u", help="Admin username."),
-    api_key: str = typer.Option(..., "--api-key", "-k", help="Admin API key."),
+    username: str = typer.Option(..., "--username", "-u", help="Username."),
+    api_key: str = typer.Option(..., "--api-key", "-k", help="API key."),
     json_output: bool = _JSON_OPTION,
 ):
-    """Validate admin credentials. This does not persist a session.
+    """Validate credentials. This does not persist a session.
 
     For persistent auth, set api_key in ~/.config/rootcoz/config.toml or use
     --api-key / ROOTCOZ_API_KEY on each command.

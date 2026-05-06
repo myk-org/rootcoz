@@ -119,7 +119,7 @@ class RootCozClient:
         )
 
     def login(self, username: str, api_key: str) -> dict:
-        """Login as admin. POST /api/auth/login"""
+        """Login with username and API key. POST /api/auth/login"""
         return self._request(
             "POST",
             "/api/auth/login",
