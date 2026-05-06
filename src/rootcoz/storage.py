@@ -2560,7 +2560,7 @@ async def delete_admin_user(username: str) -> bool:
     async with _connect_db() as db:
         await db.execute("DELETE FROM sessions WHERE username = ?", (username,))
         cursor = await db.execute(
-            "DELETE FROM users WHERE username = ?",
+            "DELETE FROM users WHERE username = ? AND role = 'admin'",
             (username,),
         )
         await db.commit()
@@ -2787,11 +2787,11 @@ async def rotate_user_key(username: str) -> str:
     key_hash = hash_api_key(raw_key)
     async with _connect_db() as db:
         cursor = await db.execute(
-            "UPDATE users SET api_key_hash = ? WHERE username = ?",
+            "UPDATE users SET api_key_hash = ? WHERE username = ? AND role = 'user'",
             (key_hash, username),
         )
         if cursor.rowcount == 0:
-            msg = f"User '{username}' not found"
+            msg = f"User '{username}' not found or is not a regular user"
             raise ValueError(msg)
         # Invalidate all existing sessions for this user
         await db.execute("DELETE FROM sessions WHERE username = ?", (username,))

@@ -1031,8 +1031,8 @@ class AuthMiddleware(BaseHTTPMiddleware):
         request.state.is_admin = is_admin
         request.state.role = "admin" if is_admin else "user"
 
-        # Track user activity (update last_seen for all users)
-        if username:
+        # Track user activity only for authenticated identities
+        if has_valid_session and username:
             task = asyncio.create_task(_safe_track_user(username))
             _background_tasks.add(task)
             task.add_done_callback(_background_tasks.discard)
@@ -5009,12 +5009,11 @@ async def register_user(request: Request) -> JSONResponse:
         raise HTTPException(status_code=400, detail="Username is required")
 
     settings = get_settings()
-    if settings.allowed_users:
-        allowed = [u.strip() for u in settings.allowed_users.split(",") if u.strip()]
-        if allowed and username not in allowed:
-            raise HTTPException(
-                status_code=403, detail="Registration is restricted. Contact an admin."
-            )
+    allowed = settings.allowed_users_set
+    if allowed and username.lower() not in allowed:
+        raise HTTPException(
+            status_code=403, detail="Registration is restricted. Contact an admin."
+        )
 
     try:
         _, raw_key = await storage.create_user(username)

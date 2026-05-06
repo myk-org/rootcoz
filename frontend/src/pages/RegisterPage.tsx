@@ -24,8 +24,11 @@ function ApiKeyReveal({ apiKey, onAcknowledge }: { apiKey: string; onAcknowledge
           variant="outline"
           size="sm"
           onClick={async () => {
-            try { await navigator.clipboard.writeText(apiKey); setCopied(true) }
-            catch { /* clipboard not available */ }
+            try {
+              await navigator.clipboard.writeText(apiKey)
+              setCopied(true)
+              setTimeout(() => setCopied(false), 2000)
+            } catch { /* clipboard not available */ }
           }}
         >
           {copied ? 'Copied!' : 'Copy'}
@@ -240,7 +243,7 @@ export function RegisterPage() {
                       <Input
                         id="login-username"
                         value={username}
-                        onChange={(e) => setUsername(e.target.value)}
+                        onChange={(e) => { setUsername(e.target.value); setError('') }}
                         placeholder="e.g. jdoe"
                         autoComplete="username"
                         className="h-10 font-mono"
