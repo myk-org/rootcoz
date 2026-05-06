@@ -2777,6 +2777,38 @@ class TestReAnalyzeCommand:
         assert "404" in result.output or "not found" in result.output.lower()
 
 
+class TestAbortCommand:
+    def test_abort(self, mock_client):
+        mock_client.abort_job.return_value = {"status": "aborted", "job_id": "job-123"}
+        result = runner.invoke(app, ["abort", "job-123"])
+        assert result.exit_code == 0
+        assert "aborted" in result.output
+        mock_client.abort_job.assert_called_once_with(job_id="job-123")
+
+    def test_abort_already_completed(self, mock_client):
+        mock_client.abort_job.return_value = {
+            "status": "completed",
+            "message": "Job already completed",
+        }
+        result = runner.invoke(app, ["abort", "job-123"])
+        assert result.exit_code == 0
+        assert "completed" in result.output
+
+    def test_abort_error(self, mock_client):
+        mock_client.abort_job.side_effect = RootCozError(
+            status_code=404, detail="Job not found"
+        )
+        result = runner.invoke(app, ["abort", "job-123"])
+        assert result.exit_code == 1
+
+    def test_abort_json(self, mock_client):
+        mock_client.abort_job.return_value = {"status": "aborted", "job_id": "job-123"}
+        result = runner.invoke(app, ["--json", "abort", "job-123"])
+        assert result.exit_code == 0
+        parsed = json.loads(result.output)
+        assert parsed["status"] == "aborted"
+
+
 class TestPushRpCommand:
     def test_push_rp(self, mock_client):
         mock_client.push_reportportal.return_value = {

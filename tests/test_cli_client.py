@@ -1671,6 +1671,56 @@ class TestRootCozClientAiModels:
         assert result["models"] == []
 
 
+class TestRootCozClientAbort:
+    def test_abort_job(self):
+        """Test abort_job sends POST to /results/{job_id}/abort."""
+
+        def handler(request):
+            assert request.method == "POST"
+            assert "/results/job-123/abort" in str(request.url)
+            return httpx.Response(200, json={"status": "aborted", "job_id": "job-123"})
+
+        client = _make_client(handler)
+        result = client.abort_job(job_id="job-123")
+        assert result["status"] == "aborted"
+
+    def test_abort_job_already_completed(self):
+        """Test abort_job for already completed job."""
+
+        def handler(request):
+            assert request.method == "POST"
+            assert "/results/job-123/abort" in str(request.url)
+            return httpx.Response(
+                200,
+                json={"status": "completed", "message": "Job already completed"},
+            )
+
+        client = _make_client(handler)
+        result = client.abort_job(job_id="job-123")
+        assert result["status"] == "completed"
+
+    def test_abort_job_not_found(self):
+        """Test abort_job for non-existent job."""
+        client = _make_client(
+            lambda request: httpx.Response(404, json={"detail": "Job not found"})
+        )
+        with pytest.raises(RootCozError) as exc_info:
+            client.abort_job(job_id="job-123")
+        assert exc_info.value.status_code == 404
+
+    def test_abort_job_forbidden(self):
+        """Test abort_job returns error for non-owner non-admin."""
+        client = _make_client(
+            lambda request: httpx.Response(
+                403,
+                json={"detail": "Only the submitter or an admin can abort this job"},
+            )
+        )
+        with pytest.raises(RootCozError) as exc_info:
+            client.abort_job(job_id="job-123")
+        assert exc_info.value.status_code == 403
+
+
 class TestRootCozClientApiKeyHeader:
     def test_api_key_sent_as_bearer_header(self):
         def check_header(request):
