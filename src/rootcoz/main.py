@@ -5016,6 +5016,7 @@ async def rotate_own_key_endpoint(request: Request) -> JSONResponse:
 
     The old key and all sessions are invalidated immediately.
     """
+    _check_allow_list(request)
     username = request.state.username
     if not username:
         raise HTTPException(status_code=401, detail="Authentication required")

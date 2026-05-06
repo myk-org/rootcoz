@@ -81,6 +81,9 @@ class TestUserRegistration:
         assert data["api_key"].startswith("rootcoz_")
         assert "message" in data
         assert "rootcoz_session" in resp.cookies
+        assert (
+            resp.headers.get("cache-control") == "no-store, no-cache, must-revalidate"
+        )
 
     def test_register_returns_session_cookie(self, client):
         resp = client.post("/api/auth/register", json={"username": "sessionuser"})
@@ -117,6 +120,30 @@ class TestUserRegistration:
         resp = client.post("/api/auth/register", json={"username": "dupuser"})
         assert resp.status_code == 400
         assert "already has" in resp.json()["detail"].lower()
+
+    def test_register_legacy_user_migration(self, client, temp_db_path):
+        """Pre-tracked user (cookie-only, no key) can register to get an API key."""
+        import asyncio
+        from unittest.mock import patch
+        from rootcoz import storage
+
+        # Simulate a legacy user created by track_user (no api_key_hash)
+        with patch.object(storage, "DB_PATH", temp_db_path):
+            asyncio.run(storage.track_user("legacyuser"))
+
+        resp = client.post("/api/auth/register", json={"username": "legacyuser"})
+        assert resp.status_code == 200
+        data = resp.json()
+        assert "api_key" in data
+        assert data["api_key"].startswith("rootcoz_")
+        assert "rootcoz_session" in resp.cookies
+
+        # Can now login with the new key
+        login_resp = client.post(
+            "/api/auth/login",
+            json={"username": "legacyuser", "api_key": data["api_key"]},
+        )
+        assert login_resp.status_code == 200
 
     def test_register_public_no_auth_needed(self, client):
         """Registration endpoint is accessible without any authentication."""
@@ -366,6 +393,10 @@ class TestSelfServiceKeyRotation:
         assert data["username"] == "rotateself"
         # Should get a new session cookie
         assert "rootcoz_session" in rotate_resp.cookies
+        assert (
+            rotate_resp.headers.get("cache-control")
+            == "no-store, no-cache, must-revalidate"
+        )
 
     def test_rotate_key_unauthenticated(self, client):
         """Unauthenticated request gets 401."""

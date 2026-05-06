@@ -98,6 +98,12 @@ def _handle_error(err: RootCozError) -> None:
     raise typer.Exit(code=1)
 
 
+def _echo_api_key_warning(api_key: str) -> None:
+    """Print the one-time API key save warning."""
+    typer.echo("\n\u26a0\ufe0f  Save this API key \u2014 you won't see it again!")
+    typer.echo(f"API Key: {api_key}")
+
+
 def _run_client_command(
     json_output: bool,
     request_fn,
@@ -315,8 +321,7 @@ def register(
         raise typer.Exit(1)
     if not _state.get("json", False):
         typer.echo(f"Registered: {result.get('username', username)}")
-        typer.echo("\n\u26a0\ufe0f  Save this API key \u2014 you won't see it again!")
-        typer.echo(f"API Key: {api_key}")
+        _echo_api_key_warning(api_key)
 
 
 # -- Health -------------------------------------------------------------------
@@ -2030,8 +2035,7 @@ def auth_rotate_key(
             )
             raise typer.Exit(1)
         typer.echo(f"Key rotated for: {result.get('username', '')}")
-        typer.echo("\n\u26a0\ufe0f  Save this API key \u2014 you won't see it again!")
-        typer.echo(f"API Key: {new_key}")
+        _echo_api_key_warning(new_key)
 
 
 @auth_app.command("logout")
@@ -2093,11 +2097,7 @@ def admin_users_create(
     )
     if not _state.get("json", False):
         typer.echo(f"Created admin user: {data.get('username', username)}")
-        typer.echo(f"API Key: {data.get('api_key', '(not returned)')}")
-        typer.echo("")
-        typer.echo(
-            "\u26a0\ufe0f  Save this API key now \u2014 it cannot be retrieved later."
-        )
+        _echo_api_key_warning(data.get("api_key", ""))
 
 
 @admin_users_app.command("delete")
@@ -2137,11 +2137,7 @@ def admin_users_rotate_key(
     )
     if not _state.get("json", False):
         typer.echo(f"Rotated API key for: {data.get('username', username)}")
-        typer.echo(f"New API Key: {data.get('new_api_key', '(not returned)')}")
-        typer.echo("")
-        typer.echo(
-            "\u26a0\ufe0f  Save this API key now \u2014 it cannot be retrieved later."
-        )
+        _echo_api_key_warning(data.get("new_api_key", ""))
 
 
 @admin_users_app.command("change-role")
@@ -2160,11 +2156,7 @@ def admin_users_change_role(
         typer.echo(f"Changed role of '{data.get('username', username)}' to '{role}'")
         api_key = data.get("api_key")
         if api_key:
-            typer.echo(f"API Key: {api_key}")
-            typer.echo("")
-            typer.echo(
-                "\u26a0\ufe0f  Save this API key now \u2014 it cannot be retrieved later."
-            )
+            _echo_api_key_warning(api_key)
 
 
 # -- Token Usage (Admin) ------------------------------------------------------

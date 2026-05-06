@@ -2520,11 +2520,17 @@ async def create_admin_user(username: str) -> tuple[str, str]:
     raw_key = generate_api_key()
     key_hash = hash_api_key(raw_key)
     async with _connect_db() as db:
-        await db.execute(
-            "INSERT INTO users (username, api_key_hash, role) VALUES (?, ?, 'admin')",
-            (username, key_hash),
-        )
-        await db.commit()
+        try:
+            await db.execute(
+                "INSERT INTO users (username, api_key_hash, role) VALUES (?, ?, 'admin')",
+                (username, key_hash),
+            )
+            await db.commit()
+        except Exception as exc:
+            if "UNIQUE constraint" in str(exc):
+                msg = f"User '{username}' already exists"
+                raise ValueError(msg) from exc
+            raise
     return username, raw_key
 
 
