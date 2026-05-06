@@ -1079,9 +1079,15 @@ class TestAbortEndpoint:
                     "request_params": {"submitted_by": "alice"},
                 },
             )
+            # Register bob and get a session cookie (non-admin user)
+            reg_resp = test_client.post("/api/auth/register", json={"username": "bob"})
+            assert reg_resp.status_code == 200
+            bob_session = reg_resp.cookies.get("rootcoz_session")
+            # Override Authorization to remove admin Bearer token
             resp = test_client.post(
                 "/results/job-other-user/abort",
-                cookies={"rootcoz_username": "bob"},
+                headers={"Authorization": ""},
+                cookies={"rootcoz_session": bob_session},
             )
             assert resp.status_code == 403
 
