@@ -5226,7 +5226,7 @@ async def create_admin_user_endpoint(request: Request) -> JSONResponse:
 
 @app.delete("/api/admin/users/{username}")
 async def delete_admin_user_endpoint(request: Request, username: str) -> dict:
-    """Delete an admin user."""
+    """Delete a user. Bootstrap admin (ADMIN_KEY) is always available as fallback."""
     _require_admin(request)
     if username == request.state.username:
         raise HTTPException(status_code=400, detail="Cannot delete your own account")
@@ -5236,13 +5236,9 @@ async def delete_admin_user_endpoint(request: Request, username: str) -> dict:
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     if not deleted:
-        raise HTTPException(
-            status_code=404, detail=f"Admin user '{username}' not found"
-        )
+        raise HTTPException(status_code=404, detail=f"User '{username}' not found")
 
-    logger.info(
-        f"[AUDIT] Admin '{request.state.username}' deleted admin user '{username}'"
-    )
+    logger.info(f"[AUDIT] Admin '{request.state.username}' deleted user '{username}'")
     return {"deleted": username}
 
 

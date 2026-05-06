@@ -193,14 +193,11 @@ class TestAdminUsers:
 
     def test_delete_admin_user(self, client):
         cookies = _admin_login(client)
-        # Create two admins so we can safely delete one (last-admin guard)
-        client.post("/api/admin/users", json={"username": "keeper"}, cookies=cookies)
+        # Bootstrap admin (ADMIN_KEY) is always available — safe to delete DB admins
         client.post("/api/admin/users", json={"username": "todelete"}, cookies=cookies)
         resp = client.delete("/api/admin/users/todelete", cookies=cookies)
         assert resp.status_code == 200
         assert resp.json()["deleted"] == "todelete"
-        # Clean up
-        client.delete("/api/admin/users/keeper", cookies=cookies)
 
     def test_delete_self_forbidden(self, client):
         cookies = _admin_login(client)
@@ -420,17 +417,18 @@ class TestChangeUserRole:
         # Clean up
         client.delete("/api/admin/users/keeper2", cookies=cookies)
 
-    def test_demote_last_admin_blocked(self, client):
+    def test_demote_last_db_admin_allowed(self, client):
+        """Demoting the last DB admin is allowed — bootstrap admin (ADMIN_KEY) is always available."""
         cookies = _admin_login(client)
-        # Create a single admin — demoting should be blocked
+        # Create a single admin — demoting should succeed
         client.post("/api/admin/users", json={"username": "onlyadmin"}, cookies=cookies)
         resp = client.put(
             "/api/admin/users/onlyadmin/role",
             json={"role": "user"},
             cookies=cookies,
         )
-        assert resp.status_code == 400
-        assert "last admin" in resp.json()["detail"].lower()
+        assert resp.status_code == 200
+        assert resp.json()["role"] == "user"
         # Clean up
         client.delete("/api/admin/users/onlyadmin", cookies=cookies)
 

@@ -2554,34 +2554,17 @@ async def get_user_by_username(username: str) -> dict | None:
 async def delete_admin_user(username: str) -> bool:
     """Delete an admin user. Returns True if deleted.
 
-    Raises ValueError if this would delete the last admin user.
+    The bootstrap 'admin' user (via ADMIN_KEY env var) is never stored
+    in the users table, so there is always a fallback admin.
     """
     async with _connect_db() as db:
-        await db.execute("BEGIN IMMEDIATE")
-        try:
-            cursor = await db.execute("SELECT COUNT(*) FROM users WHERE role = 'admin'")
-            admin_count = (await cursor.fetchone())[0]
-            if admin_count <= 1:
-                cursor = await db.execute(
-                    "SELECT role FROM users WHERE username = ?", (username,)
-                )
-                row = await cursor.fetchone()
-                if row and row[0] == "admin":
-                    await db.execute("ROLLBACK")
-                    raise ValueError("Cannot delete the last admin user")
-
-            await db.execute("DELETE FROM sessions WHERE username = ?", (username,))
-            cursor = await db.execute(
-                "DELETE FROM users WHERE username = ? AND role = 'admin'",
-                (username,),
-            )
-            await db.commit()
-            return cursor.rowcount > 0
-        except ValueError:
-            raise
-        except Exception:
-            await db.execute("ROLLBACK")
-            raise
+        await db.execute("DELETE FROM sessions WHERE username = ?", (username,))
+        cursor = await db.execute(
+            "DELETE FROM users WHERE username = ?",
+            (username,),
+        )
+        await db.commit()
+        return cursor.rowcount > 0
 
 
 async def change_user_role(username: str, new_role: str) -> tuple[str, str]:
@@ -2649,28 +2632,14 @@ async def change_user_role(username: str, new_role: str) -> tuple[str, str]:
                 await db.execute("ROLLBACK")
                 raise
         else:
-            # Demoting to user — use transaction for atomic last-admin check
-            await db.execute("BEGIN IMMEDIATE")
-            try:
-                cursor = await db.execute(
-                    "SELECT COUNT(*) FROM users WHERE role = 'admin' AND username != ?",
-                    (username,),
-                )
-                other_admins = (await cursor.fetchone())[0]
-                if other_admins == 0:
-                    await db.execute("ROLLBACK")
-                    raise ValueError("Cannot demote the last admin user")
-                await db.execute(
-                    "UPDATE users SET role = 'user', api_key_hash = NULL WHERE username = ?",
-                    (username,),
-                )
-                await db.execute("DELETE FROM sessions WHERE username = ?", (username,))
-                await db.commit()
-            except ValueError:
-                raise
-            except Exception:
-                await db.execute("ROLLBACK")
-                raise
+            # Demoting to user — bootstrap admin (ADMIN_KEY) is always
+            # available as fallback, so no last-admin guard needed.
+            await db.execute(
+                "UPDATE users SET role = 'user', api_key_hash = NULL WHERE username = ?",
+                (username,),
+            )
+            await db.execute("DELETE FROM sessions WHERE username = ?", (username,))
+            await db.commit()
 
             return username, raw_key
 
