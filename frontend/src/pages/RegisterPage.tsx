@@ -5,8 +5,7 @@ import { api, ApiError } from '@/lib/api'
 import { Card, CardContent } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
 import { Button } from '@/components/ui/button'
-import { Eye, EyeOff, ShieldCheck } from 'lucide-react'
-import { SectionDivider } from '@/components/shared/SectionDivider'
+import { Eye, EyeOff } from 'lucide-react'
 
 type Mode = 'login' | 'register' | 'key-reveal'
 
@@ -74,17 +73,13 @@ function PasswordInput({ id, value, onChange, placeholder, autoFocus }: {
 
 export function RegisterPage() {
   const navigate = useNavigate()
-  const { login, refreshAuth, isAdmin: alreadyAdmin, authenticated, loading: authLoading } = useAuth()
+  const { login, refreshAuth, authenticated, loading: authLoading } = useAuth()
   const [mode, setMode] = useState<Mode>('login')
   const [username, setUsername] = useState('')
   const [apiKey, setApiKey] = useState('')
   const [newApiKey, setNewApiKey] = useState('')
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(false)
-
-  // Admin login state
-  const [adminApiKey, setAdminApiKey] = useState('')
-  const [adminError, setAdminError] = useState<string | null>(null)
 
   useEffect(() => {
     if (!authLoading && authenticated) {
@@ -152,31 +147,9 @@ export function RegisterPage() {
     navigate('/', { replace: true })
   }
 
-  async function handleAdminLogin(e: FormEvent) {
-    e.preventDefault()
-    const trimmed = username.trim()
-    if (!trimmed || !adminApiKey.trim()) return
-
-    setLoading(true)
-    setAdminError(null)
-    try {
-      await login(trimmed, adminApiKey.trim())
-      navigate('/', { replace: true })
-    } catch (err) {
-      if (err instanceof ApiError && err.status === 401) {
-        setAdminError('Invalid username or API key')
-      } else {
-        setAdminError('Login failed — please try again')
-      }
-    } finally {
-      setLoading(false)
-    }
-  }
-
   function switchMode(next: 'login' | 'register') {
     setMode(next)
     setError('')
-    setAdminError(null)
   }
 
   const subtitle = mode === 'key-reveal'
@@ -297,35 +270,6 @@ export function RegisterPage() {
                         Register
                       </button>
                     </p>
-
-                    {/* Admin section */}
-                    <SectionDivider title="Admin" />
-
-                    <div className="space-y-1.5">
-                      <label htmlFor="admin-api-key" className="block font-display text-xs font-medium uppercase tracking-widest text-text-secondary">
-                        Admin API Key <span className="text-text-tertiary font-normal normal-case tracking-normal">(optional)</span>
-                      </label>
-                      <PasswordInput
-                        id="admin-api-key"
-                        value={adminApiKey}
-                        onChange={(v) => { setAdminApiKey(v); setAdminError(null) }}
-                        placeholder={alreadyAdmin ? 'Authenticated ✓' : 'Enter admin API key...'}
-                      />
-                      {adminError && (
-                        <p className="text-xs text-signal-red">{adminError}</p>
-                      )}
-                      {alreadyAdmin && !adminApiKey.trim() && (
-                        <p className="text-xs">
-                          <span className="inline-flex items-center gap-1 text-signal-green"><ShieldCheck className="h-3 w-3" />Authenticated as admin</span>
-                        </p>
-                      )}
-                    </div>
-
-                    {adminApiKey.trim() && (
-                      <Button type="button" className="w-full" disabled={!username.trim() || loading} onClick={handleAdminLogin}>
-                        {loading ? 'Logging in...' : 'Log in as Admin'}
-                      </Button>
-                    )}
                   </fieldset>
                 </form>
               )}
