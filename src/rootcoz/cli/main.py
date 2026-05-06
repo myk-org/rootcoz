@@ -302,15 +302,12 @@ def register(
     json_output: bool = _JSON_OPTION,
 ):
     """Register a new user and get an API key."""
-    _set_json(json_output)
-    client = _get_client()
-    try:
-        result = client.register(username=username)
-    except RootCozError as err:
-        _handle_error(err)
-    if _state.get("json", False):
-        print_output(result, columns=[], as_json=True)
-    else:
+    result = _run_client_command(
+        json_output,
+        lambda c: c.register(username=username),
+        emit_output=False,
+    )
+    if not _state.get("json", False):
         typer.echo(f"Registered: {result.get('username', username)}")
         api_key = result.get("api_key", "")
         if not api_key:

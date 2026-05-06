@@ -5004,7 +5004,10 @@ async def register_user(request: Request) -> JSONResponse:
     Returns the generated API key (shown once).
     """
     body = await _read_json_object(request)
-    username = (body.get("username") or "").strip()
+    raw_username = body.get("username", "")
+    if not isinstance(raw_username, str):
+        raise HTTPException(status_code=400, detail="Username must be a string")
+    username = raw_username.strip()
     if not username:
         raise HTTPException(status_code=400, detail="Username is required")
 
@@ -5044,6 +5047,13 @@ async def register_user(request: Request) -> JSONResponse:
         secure=settings.secure_cookies,
         max_age=storage.SESSION_TTL_SECONDS,
     )
+    # Clear legacy session cookie after migration
+    response.delete_cookie(
+        "jji_session",
+        httponly=True,
+        samesite="strict",
+        secure=settings.secure_cookies,
+    )
     response.set_cookie(
         "rootcoz_username",
         username,
@@ -5051,6 +5061,7 @@ async def register_user(request: Request) -> JSONResponse:
         secure=settings.secure_cookies,
         max_age=365 * 24 * 60 * 60,
     )
+    response.delete_cookie("jji_username", path="/")
 
     logger.info(f"[AUDIT] User registered: {username}")
     return response

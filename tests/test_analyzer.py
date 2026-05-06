@@ -2617,12 +2617,10 @@ class TestWorkspaceAlwaysCreated:
             assert response.status_code == 200
         finally:
             get_settings.cache_clear()
+            app.dependency_overrides.pop(get_settings, None)
 
         # Workspace must be created even without any repos
         mock_repo_manager.create_workspace.assert_called_once()
-
-        # Clean up dependency override
-        app.dependency_overrides.pop(get_settings, None)
 
     @pytest.mark.asyncio
     async def test_clone_additional_repos_requires_path(self, tmp_path) -> None:

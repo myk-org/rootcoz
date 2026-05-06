@@ -100,7 +100,16 @@ class TestRegisterCommand:
         result = runner.invoke(app, ["register", "testuser"])
         assert result.exit_code == 0
         assert "rootcoz_abc123" in result.output
+        assert "Save this API key" in result.output
         mock_client.register.assert_called_once_with(username="testuser")
+
+    def test_register_command_missing_api_key(self, mock_client):
+        mock_client.register.return_value = {
+            "username": "testuser",
+        }
+        result = runner.invoke(app, ["register", "testuser"])
+        assert result.exit_code == 1
+        assert "failed" in result.output.lower() or "error" in result.output.lower()
 
     def test_register_command_json(self, mock_client):
         mock_client.register.return_value = {
