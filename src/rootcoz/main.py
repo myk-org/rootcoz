@@ -5010,6 +5010,51 @@ async def auth_me(request: Request) -> JSONResponse:
     )
 
 
+@app.post("/api/auth/rotate-key")
+async def rotate_own_key_endpoint(request: Request) -> JSONResponse:
+    """Rotate the current user's API key. Returns the new key (shown once).
+
+    The old key and all sessions are invalidated immediately.
+    """
+    username = request.state.username
+    if not username:
+        raise HTTPException(status_code=401, detail="Authentication required")
+    if username == "admin":
+        raise HTTPException(
+            status_code=400,
+            detail="Bootstrap admin cannot rotate key via this endpoint. Use ADMIN_KEY env var.",
+        )
+
+    try:
+        new_key = await storage.rotate_own_key(username)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    # Create a new session for the user so they stay logged in
+    is_admin = request.state.is_admin
+    session_token = await storage.create_session(username, is_admin=is_admin)
+    settings = get_settings()
+
+    response = JSONResponse(
+        content={"username": username, "new_api_key": new_key},
+        headers={
+            "Cache-Control": "no-store, no-cache, must-revalidate",
+            "Pragma": "no-cache",
+        },
+    )
+    response.set_cookie(
+        "rootcoz_session",
+        session_token,
+        httponly=True,
+        samesite="strict",
+        secure=settings.secure_cookies,
+        max_age=storage.SESSION_TTL_SECONDS,
+    )
+
+    logger.info(f"[AUDIT] User '{username}' rotated their own API key")
+    return response
+
+
 @app.post("/api/auth/register")
 async def register_user(request: Request) -> JSONResponse:
     """Register a new user or generate API key for existing user without one.

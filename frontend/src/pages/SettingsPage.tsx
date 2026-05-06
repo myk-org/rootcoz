@@ -5,7 +5,7 @@ import { Shield } from 'lucide-react'
 
 export function SettingsPage() {
   const navigate = useNavigate()
-  const { isAdmin, role, login, refreshAuth } = useAuth()
+  const { isAdmin, role, refreshAuth } = useAuth()
 
   return (
     <div className="mx-auto max-w-md">
@@ -20,7 +20,6 @@ export function SettingsPage() {
       </div>
       <ProfileForm
         onSaved={async () => { await refreshAuth(); navigate('/') }}
-        onAdminLogin={async (u, k) => { await login(u, k) }}
         readOnlyUsername
       />
       <p className="mt-4 text-center text-xs text-text-tertiary">

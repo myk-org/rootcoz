@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef, type FormEvent } from 'react'
-import { api, ApiError, isExpectedTokenSyncError } from '@/lib/api'
+import { api, isExpectedTokenSyncError } from '@/lib/api'
 import { persistTokensToServer } from '@/lib/tokens'
 import {
   setUsername,
@@ -14,27 +14,24 @@ import {
 import { Card, CardContent } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
 import { Button } from '@/components/ui/button'
-import { ShieldCheck } from 'lucide-react'
-import { useAuth } from '@/lib/auth'
 import { SectionDivider } from '@/components/shared/SectionDivider'
-import { TokenField, type TokenValidationResult } from '@/components/shared/TokenField'
+import { type TokenValidationResult } from '@/components/shared/TokenField'
 import { TrackerTokensFields } from '@/components/shared/TrackerTokensFields'
 import { NotificationToggle } from '@/components/shared/NotificationToggle'
 
 interface ProfileFormProps {
   onSaved: () => void | Promise<void>
-  onAdminLogin?: (username: string, apiKey: string) => Promise<void>
   /** When true, the username field is read-only (settings page — user is already authenticated) */
   readOnlyUsername?: boolean
 }
 
-export function ProfileForm({ onSaved, onAdminLogin, readOnlyUsername }: ProfileFormProps) {
-  const { isAdmin } = useAuth()
+export function ProfileForm({ onSaved, readOnlyUsername }: ProfileFormProps) {
   const [initialUsername] = useState(getUsername)
   const [username, setUsernameValue] = useState(initialUsername)
-  const [apiKey, setApiKey] = useState('')
-  const [showApiKey, setShowApiKey] = useState(false)
-  const [apiKeyError, setApiKeyError] = useState<string | null>(null)
+  const [rotating, setRotating] = useState(false)
+  const [rotateError, setRotateError] = useState<string | null>(null)
+  const [newApiKey, setNewApiKey] = useState('')
+  const [keyCopied, setKeyCopied] = useState(false)
   const [githubToken, setGithubTokenValue] = useState(getGithubToken())
   const [jiraEmail, setJiraEmailValue] = useState(getJiraEmail())
   const [jiraToken, setJiraTokenValue] = useState(getJiraToken())
@@ -93,19 +90,27 @@ export function ProfileForm({ onSaved, onAdminLogin, readOnlyUsername }: Profile
     await hydrateTokensFromServer({ gh: githubToken, je: jiraEmail, jt: jiraToken })
   }
 
+  async function handleRotateKey() {
+    setRotating(true)
+    setRotateError(null)
+    setNewApiKey('')
+    try {
+      const result = await api.post<{ new_api_key: string }>('/api/auth/rotate-key')
+      setNewApiKey(result.new_api_key)
+    } catch (err) {
+      setRotateError(err instanceof Error ? err.message : 'Failed to rotate key')
+    } finally {
+      setRotating(false)
+    }
+  }
+
   async function handleSubmit(e: FormEvent) {
     e.preventDefault()
     const trimmed = username.trim()
     if (!readOnlyUsername && !trimmed) return
 
-    if (trimmed.toLowerCase() === 'admin' && !apiKey.trim()) {
-      setUsernameError("The username 'admin' is reserved")
-      return
-    }
     setUsernameError(null)
-
     setSaving(true)
-    setApiKeyError(null)
 
     async function commitProfile(trimmedUsername: string) {
       setUsername(trimmedUsername)
@@ -117,28 +122,6 @@ export function ProfileForm({ onSaved, onAdminLogin, readOnlyUsername }: Profile
       setJiraEmail(je)
       setJiraToken(jt)
       await persistTokensToServer(gh, je, jt)
-    }
-
-    // Try admin login if API key is provided
-    if (apiKey.trim() && onAdminLogin) {
-      try {
-        await onAdminLogin(trimmed, apiKey.trim())
-        // Admin login succeeded — also save the username cookie
-        await commitProfile(trimmed)
-        // Re-fetch tokens from server before navigating away (onSaved unmounts the component)
-        await refreshTokensFromServer()
-        setSaving(false)
-        await onSaved()
-        return
-      } catch (err) {
-        setSaving(false)
-        if (err instanceof ApiError && err.status === 401) {
-          setApiKeyError('Invalid username or API key')
-        } else {
-          setApiKeyError('Login failed — please try again')
-        }
-        return
-      }
     }
 
     const needsGithubValidation = githubToken.trim() && (!githubValidation || !githubValidation.valid)
@@ -227,31 +210,46 @@ export function ProfileForm({ onSaved, onAdminLogin, readOnlyUsername }: Profile
             )}
           </div>
 
-          {onAdminLogin && (
+          {readOnlyUsername && (
             <>
-              {/* Admin Authentication Divider */}
-              <SectionDivider title="Admin Authentication" />
-              <p className="text-xs text-text-tertiary">
-                Provide your API key for admin access. Leave empty for regular user access.
-              </p>
-
-              {/* API Key field */}
-              <TokenField
-                id="api-key"
-                label="API Key"
-                value={apiKey}
-                onChange={(v) => { setApiKey(v); setApiKeyError(null) }}
-                show={showApiKey}
-                onToggleShow={() => setShowApiKey(!showApiKey)}
-                validation={null}
-                error={apiKeyError}
-                placeholder={isAdmin ? 'Authenticated ✓' : 'Enter API key...'}
-                helpContent={
-                  isAdmin && !apiKey.trim()
-                    ? <span className="inline-flex items-center gap-1 text-signal-green"><ShieldCheck className="h-3 w-3" />Authenticated as admin</span>
-                    : <>Admin API key provided by your server administrator.</>
-                }
-              />
+              <SectionDivider title="API Key" />
+              {newApiKey ? (
+                <div className="space-y-3">
+                  <div className="rounded-lg border border-signal-orange/30 bg-signal-orange/10 p-4">
+                    <p className="text-sm font-medium text-signal-orange">⚠️ Save this API key — you won't see it again!</p>
+                    <p className="mt-1 text-xs text-text-tertiary">Your old key has been invalidated. Use this new key to log in.</p>
+                  </div>
+                  <div className="flex items-center gap-2 rounded-md bg-surface-elevated p-3">
+                    <code className="flex-1 font-mono text-sm text-text-primary break-all select-all">{newApiKey}</code>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      onClick={async () => {
+                        try {
+                          await navigator.clipboard.writeText(newApiKey)
+                          setKeyCopied(true)
+                          setTimeout(() => setKeyCopied(false), 2000)
+                        } catch { /* clipboard not available */ }
+                      }}
+                    >
+                      {keyCopied ? 'Copied!' : 'Copy'}
+                    </Button>
+                  </div>
+                </div>
+              ) : (
+                <div className="space-y-2">
+                  <p className="text-xs text-text-tertiary">
+                    Generate a new API key. Your current key and all sessions will be invalidated.
+                  </p>
+                  <Button type="button" variant="outline" className="w-full" disabled={rotating} onClick={handleRotateKey}>
+                    {rotating ? 'Rotating...' : 'Rotate API Key'}
+                  </Button>
+                  {rotateError && (
+                    <p className="text-xs text-signal-red">{rotateError}</p>
+                  )}
+                </div>
+              )}
             </>
           )}
 

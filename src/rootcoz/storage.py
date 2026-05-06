@@ -2806,6 +2806,28 @@ async def rotate_user_key(username: str) -> str:
     return raw_key
 
 
+async def rotate_own_key(username: str) -> str:
+    """Rotate the API key for any user (self-service). Returns the raw key.
+
+    Works for both regular users and admin users.
+    Raises ValueError if user not found.
+    """
+    raw_key = generate_api_key()
+    key_hash = hash_api_key(raw_key)
+    async with _connect_db() as db:
+        cursor = await db.execute(
+            "UPDATE users SET api_key_hash = ? WHERE username = ?",
+            (key_hash, username),
+        )
+        if cursor.rowcount == 0:
+            msg = f"User '{username}' not found"
+            raise ValueError(msg)
+        # Invalidate all existing sessions for this user
+        await db.execute("DELETE FROM sessions WHERE username = ?", (username,))
+        await db.commit()
+    return raw_key
+
+
 async def user_has_key(username: str) -> bool:
     """Check if a user has an API key set."""
     async with _connect_db() as db:

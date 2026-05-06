@@ -131,6 +131,36 @@ class TestRegisterCommand:
         assert "400" in result.output or "reserved" in result.output
 
 
+class TestRotateKeyCommand:
+    def test_rotate_key_command(self, mock_client):
+        mock_client.rotate_key.return_value = {
+            "username": "testuser",
+            "new_api_key": "rootcoz_newkey123",  # pragma: allowlist secret
+        }
+        result = runner.invoke(app, ["auth", "rotate-key"])
+        assert result.exit_code == 0
+        assert "rootcoz_newkey123" in result.output
+        assert "Save this API key" in result.output
+        mock_client.rotate_key.assert_called_once()
+
+    def test_rotate_key_command_json(self, mock_client):
+        mock_client.rotate_key.return_value = {
+            "username": "testuser",
+            "new_api_key": "rootcoz_newkey123",  # pragma: allowlist secret
+        }
+        result = runner.invoke(app, ["--json", "auth", "rotate-key"])
+        assert result.exit_code == 0
+        parsed = json.loads(result.output)
+        assert parsed["new_api_key"] == "rootcoz_newkey123"  # pragma: allowlist secret
+
+    def test_rotate_key_missing_key_in_response(self, mock_client):
+        mock_client.rotate_key.return_value = {
+            "username": "testuser",
+        }
+        result = runner.invoke(app, ["auth", "rotate-key"])
+        assert result.exit_code == 1
+
+
 class TestHealthCommand:
     def test_health(self, mock_client):
         mock_client.health.return_value = {"status": "healthy"}

@@ -344,6 +344,88 @@ class TestKeyRotation:
         assert resp.status_code == 401
 
 
+class TestSelfServiceKeyRotation:
+    """Tests for POST /api/auth/rotate-key."""
+
+    def test_rotate_own_key(self, client):
+        """Authenticated user can rotate their own key."""
+        resp = client.post("/api/auth/register", json={"username": "rotateself"})
+        assert resp.status_code == 200
+        old_key = resp.json()["api_key"]
+        session = resp.cookies.get("rootcoz_session")
+
+        # Rotate using session
+        rotate_resp = client.post(
+            "/api/auth/rotate-key",
+            cookies={"rootcoz_session": session},
+        )
+        assert rotate_resp.status_code == 200
+        data = rotate_resp.json()
+        assert "new_api_key" in data
+        assert data["new_api_key"] != old_key
+        assert data["username"] == "rotateself"
+        # Should get a new session cookie
+        assert "rootcoz_session" in rotate_resp.cookies
+
+    def test_rotate_key_unauthenticated(self, client):
+        """Unauthenticated request gets 401."""
+        resp = client.post(
+            "/api/auth/rotate-key",
+            headers={"Authorization": ""},
+        )
+        assert resp.status_code == 401
+
+    def test_rotate_key_old_session_invalid(self, client):
+        """After rotation, old session is invalidated."""
+        resp = client.post("/api/auth/register", json={"username": "rotatesession"})
+        assert resp.status_code == 200
+        old_session = resp.cookies.get("rootcoz_session")
+
+        # Rotate
+        rotate_resp = client.post(
+            "/api/auth/rotate-key",
+            cookies={"rootcoz_session": old_session},
+        )
+        assert rotate_resp.status_code == 200
+
+        # Old session should be invalid
+        me_resp = client.get(
+            "/api/auth/me",
+            headers={"Authorization": ""},
+            cookies={"rootcoz_session": old_session},
+        )
+        assert me_resp.status_code == 401
+
+    def test_rotate_key_old_key_invalid(self, client):
+        """After rotation, old API key no longer works for login."""
+        resp = client.post("/api/auth/register", json={"username": "rotatekeycheck"})
+        assert resp.status_code == 200
+        old_key = resp.json()["api_key"]
+        session = resp.cookies.get("rootcoz_session")
+
+        # Rotate
+        client.post(
+            "/api/auth/rotate-key",
+            cookies={"rootcoz_session": session},
+        )
+
+        # Old key should not work
+        login_resp = client.post(
+            "/api/auth/login",
+            json={"username": "rotatekeycheck", "api_key": old_key},
+        )
+        assert login_resp.status_code == 401
+
+    def test_rotate_key_bootstrap_admin_blocked(self, client):
+        """Bootstrap admin user cannot rotate via self-service."""
+        resp = client.post(
+            "/api/auth/rotate-key",
+            headers={"Authorization": "Bearer test-admin-key-16chars"},
+        )
+        assert resp.status_code == 400
+        assert "admin" in resp.json()["detail"].lower()
+
+
 class TestSSOWithAuth:
     """Tests that SSO (proxy headers) users are properly authenticated."""
 

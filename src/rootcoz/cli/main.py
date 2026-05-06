@@ -2012,6 +2012,28 @@ def auth_login(
         )
 
 
+@auth_app.command("rotate-key")
+def auth_rotate_key(
+    json_output: bool = _JSON_OPTION,
+):
+    """Rotate your own API key. The new key is shown once \u2014 save it."""
+    result = _run_client_command(
+        json_output,
+        lambda c: c.rotate_key(),
+        emit_output=False,
+    )
+    if not _state.get("json", False):
+        new_key = result.get("new_api_key", "")
+        if not new_key:
+            typer.echo(
+                "Error: Key rotation succeeded but no key was returned.", err=True
+            )
+            raise typer.Exit(1)
+        typer.echo(f"Key rotated for: {result.get('username', '')}")
+        typer.echo("\n\u26a0\ufe0f  Save this API key \u2014 you won't see it again!")
+        typer.echo(f"API Key: {new_key}")
+
+
 @auth_app.command("logout")
 def auth_logout(
     json_output: bool = _JSON_OPTION,
