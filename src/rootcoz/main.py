@@ -5063,13 +5063,19 @@ async def check_needs_key(request: Request) -> JSONResponse:
     Uses session or cookie username to determine if the user needs registration.
     This is a public endpoint — does not require authentication.
     """
+    cache_headers = {
+        "Cache-Control": "no-store, no-cache, must-revalidate",
+        "Pragma": "no-cache",
+    }
+
     # Try session first (authenticated identity)
     session_token = _read_cookie(request, "rootcoz_session")
     if session_token:
         session = await storage.get_session(session_token)
         if session:
             return JSONResponse(
-                content={"needs_key": False, "username": str(session["username"])}
+                content={"needs_key": False, "username": str(session["username"])},
+                headers=cache_headers,
             )
 
     # Check trusted proxy header (SSO)
@@ -5077,17 +5083,24 @@ async def check_needs_key(request: Request) -> JSONResponse:
     if settings.trust_proxy_headers:
         proxy_user = request.headers.get("x-forwarded-user", "").strip()
         if proxy_user and proxy_user.lower() != "admin":
-            return JSONResponse(content={"needs_key": False, "username": proxy_user})
+            return JSONResponse(
+                content={"needs_key": False, "username": proxy_user},
+                headers=cache_headers,
+            )
 
     # Fall back to cookie username (for migration — user may need a key)
     cookie_username = _read_cookie(request, "rootcoz_username")
     if cookie_username and cookie_username.lower() != "admin":
         has_key = await storage.user_has_key(cookie_username)
         return JSONResponse(
-            content={"needs_key": not has_key, "username": cookie_username}
+            content={"needs_key": not has_key, "username": cookie_username},
+            headers=cache_headers,
         )
 
-    return JSONResponse(content={"needs_key": True, "username": ""})
+    return JSONResponse(
+        content={"needs_key": True, "username": ""},
+        headers=cache_headers,
+    )
 
 
 # --- User token endpoints ---

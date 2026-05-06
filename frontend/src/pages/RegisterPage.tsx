@@ -106,7 +106,7 @@ export function RegisterPage() {
         const bodyMsg = typeof err.body === 'object' && err.body !== null && 'detail' in err.body
           ? String((err.body as { detail: string }).detail)
           : err.message
-        if (bodyMsg.toLowerCase().includes('already has') || bodyMsg.toLowerCase().includes('already registered')) {
+        if (/already.*(registered|key|exists|has)/i.test(bodyMsg)) {
           setMode('login')
           setError('You already have an API key. Please log in.')
         } else {
@@ -246,6 +246,7 @@ export function RegisterPage() {
                         onChange={(e) => { setUsername(e.target.value); setError('') }}
                         placeholder="e.g. jdoe"
                         autoComplete="username"
+                        autoFocus={!username}
                         className="h-10 font-mono"
                       />
                     </div>
@@ -259,7 +260,7 @@ export function RegisterPage() {
                         value={apiKey}
                         onChange={(v) => { setApiKey(v); setError('') }}
                         placeholder="Enter your API key..."
-                        autoFocus
+                        autoFocus={!!username}
                       />
                     </div>
 

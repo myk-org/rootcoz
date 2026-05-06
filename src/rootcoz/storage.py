@@ -2558,11 +2558,12 @@ async def delete_admin_user(username: str) -> bool:
     in the users table, so there is always a fallback admin.
     """
     async with _connect_db() as db:
-        await db.execute("DELETE FROM sessions WHERE username = ?", (username,))
         cursor = await db.execute(
             "DELETE FROM users WHERE username = ? AND role = 'admin'",
             (username,),
         )
+        if cursor.rowcount > 0:
+            await db.execute("DELETE FROM sessions WHERE username = ?", (username,))
         await db.commit()
         return cursor.rowcount > 0
 
@@ -2746,20 +2747,26 @@ async def create_user(username: str) -> tuple[str, str]:
         await db.execute("BEGIN IMMEDIATE")
         try:
             cursor = await db.execute(
-                "SELECT id, api_key_hash FROM users WHERE username = ?",
+                "SELECT id, role, api_key_hash FROM users WHERE username = ?",
                 (username,),
             )
             existing = await cursor.fetchone()
 
             if existing:
+                if existing["role"] != "user":
+                    msg = f"User '{username}' is not eligible for self-registration"
+                    raise ValueError(msg)
                 if existing["api_key_hash"]:
                     msg = f"User '{username}' already has an API key. Please log in."
                     raise ValueError(msg)
                 # Existing user without key — generate one
-                await db.execute(
-                    "UPDATE users SET api_key_hash = ? WHERE username = ?",
+                update_cursor = await db.execute(
+                    "UPDATE users SET api_key_hash = ? WHERE username = ? AND role = 'user'",
                     (key_hash, username),
                 )
+                if update_cursor.rowcount == 0:
+                    msg = f"User '{username}' not found or is not a regular user"
+                    raise ValueError(msg)
             else:
                 await db.execute(
                     "INSERT INTO users (username, api_key_hash, role) VALUES (?, ?, 'user')",
@@ -2779,9 +2786,9 @@ async def create_user(username: str) -> tuple[str, str]:
 
 
 async def rotate_user_key(username: str) -> str:
-    """Generate a new API key for a user. Returns the raw key.
+    """Generate a new API key for a regular user. Returns the raw key.
 
-    Raises ValueError if user not found.
+    Raises ValueError if user not found or is not a regular user.
     """
     raw_key = generate_api_key()
     key_hash = hash_api_key(raw_key)
