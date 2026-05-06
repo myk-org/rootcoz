@@ -2587,7 +2587,8 @@ async def delete_admin_user(username: str) -> bool:
 async def change_user_role(username: str, new_role: str) -> tuple[str, str]:
     """Change a user's role. Returns (username, raw_api_key).
 
-    When promoting to admin, generates a new API key.
+    When promoting to admin, generates a new API key only if the user
+    doesn't already have one.
     When demoting to user, removes the API key and invalidates sessions.
 
     Args:
@@ -2595,7 +2596,8 @@ async def change_user_role(username: str, new_role: str) -> tuple[str, str]:
         new_role: The new role ('admin' or 'user').
 
     Returns:
-        Tuple of (username, raw_api_key). raw_api_key is empty when demoting.
+        Tuple of (username, raw_api_key). raw_api_key is empty when
+        demoting or when the user already has a key.
 
     Raises:
         ValueError: If username not found, role is invalid, or already has the role.
@@ -2608,7 +2610,8 @@ async def change_user_role(username: str, new_role: str) -> tuple[str, str]:
         raise ValueError(msg)
     async with _connect_db() as db:
         cursor = await db.execute(
-            "SELECT username, role FROM users WHERE username = ?", (username,)
+            "SELECT username, role, api_key_hash FROM users WHERE username = ?",
+            (username,),
         )
         user = await cursor.fetchone()
         if not user:
@@ -2620,15 +2623,22 @@ async def change_user_role(username: str, new_role: str) -> tuple[str, str]:
 
         raw_key = ""
         if new_role == "admin":
-            # Promoting to admin — use transaction for atomicity
-            raw_key = generate_api_key()
-            key_hash = hash_api_key(raw_key)
+            # Promoting to admin — only generate a key if user doesn't have one
+            if not user["api_key_hash"]:
+                raw_key = generate_api_key()
+                key_hash = hash_api_key(raw_key)
             await db.execute("BEGIN IMMEDIATE")
             try:
-                cursor = await db.execute(
-                    "UPDATE users SET role = 'admin', api_key_hash = ? WHERE username = ?",
-                    (key_hash, username),
-                )
+                if raw_key:
+                    cursor = await db.execute(
+                        "UPDATE users SET role = 'admin', api_key_hash = ? WHERE username = ?",
+                        (key_hash, username),
+                    )
+                else:
+                    cursor = await db.execute(
+                        "UPDATE users SET role = 'admin' WHERE username = ?",
+                        (username,),
+                    )
                 if cursor.rowcount == 0:
                     await db.execute("ROLLBACK")
                     raise ValueError(f"User '{username}' not found")

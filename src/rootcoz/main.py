@@ -5250,7 +5250,8 @@ async def delete_admin_user_endpoint(request: Request, username: str) -> dict:
 async def change_user_role_endpoint(request: Request, username: str) -> JSONResponse:
     """Change a user's role (promote to admin or demote to user).
 
-    When promoting to admin, an API key is generated and returned.
+    When promoting to admin, an API key is generated and returned only if
+    the user doesn't already have one.
     When demoting to user, the API key is removed and sessions invalidated.
     """
     _require_admin(request)
