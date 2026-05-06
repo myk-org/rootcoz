@@ -1,5 +1,4 @@
 import { useState } from 'react'
-import { Input } from '@/components/ui/input'
 import { SectionDivider } from '@/components/shared/SectionDivider'
 import { TokenField, type TokenValidationResult } from '@/components/shared/TokenField'
 
@@ -56,30 +55,15 @@ export function TrackerTokensFields({
       />
 
       {/* Jira Email field */}
-      <div className="space-y-1.5">
-        <label
-          htmlFor={`${prefix}jira-email`}
-          className="block font-display text-xs font-medium uppercase tracking-widest text-text-secondary"
-        >
-          Jira Email{' '}
-          <span className="text-text-tertiary font-normal normal-case tracking-normal">
-            (optional)
-          </span>
-        </label>
-        <Input
-          id={`${prefix}jira-email`}
-          type="email"
-          value={jiraEmail}
-          onChange={(e) => onJiraEmailChange(e.target.value)}
-          placeholder="e.g. jdoe@company.com"
-          autoComplete="email"
-          className="h-10 font-mono"
-        />
-        <p className="text-xs text-text-tertiary">
-          Required for Jira Cloud authentication. Use the same email as
-          your Atlassian account.
-        </p>
-      </div>
+      <TokenField
+        id={`${prefix}jira-email`}
+        label="Jira Email"
+        inputType="email"
+        value={jiraEmail}
+        onChange={onJiraEmailChange}
+        placeholder="e.g. jdoe@company.com"
+        helpContent="Required for Jira Cloud authentication. Use the same email as your Atlassian account."
+      />
 
       {/* Jira Token field */}
       <TokenField

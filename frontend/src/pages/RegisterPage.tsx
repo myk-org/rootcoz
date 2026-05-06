@@ -257,7 +257,7 @@ export function RegisterPage() {
                       onToggleShow={() => setShowApiKey(!showApiKey)}
                       placeholder="Enter your API key..."
                       optionalLabel={false}
-                      helpContent={<></>}
+                      autoFocus={!!username}
                     />
 
                     <Button type="submit" className="w-full" disabled={!username.trim() || !apiKey.trim() || loading}>

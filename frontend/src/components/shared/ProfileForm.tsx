@@ -18,6 +18,7 @@ import { SectionDivider } from '@/components/shared/SectionDivider'
 import { type TokenValidationResult } from '@/components/shared/TokenField'
 import { TrackerTokensFields } from '@/components/shared/TrackerTokensFields'
 import { NotificationToggle } from '@/components/shared/NotificationToggle'
+import { useAuth } from '@/lib/auth'
 
 interface ProfileFormProps {
   onSaved: () => void | Promise<void>
@@ -26,7 +27,8 @@ interface ProfileFormProps {
 }
 
 export function ProfileForm({ onSaved, readOnlyUsername }: ProfileFormProps) {
-  const [initialUsername] = useState(getUsername)
+  const { username: authUsername } = useAuth()
+  const [initialUsername] = useState(() => readOnlyUsername && authUsername ? authUsername : getUsername())
   const [username, setUsernameValue] = useState(initialUsername)
   const [rotating, setRotating] = useState(false)
   const [rotateError, setRotateError] = useState<string | null>(null)
@@ -138,11 +140,14 @@ export function ProfileForm({ onSaved, readOnlyUsername }: ProfileFormProps) {
       if (needsJiraValidation && results[1] === false) { setSaving(false); return }
     }
 
-    await commitProfile(trimmed)
-    // Re-fetch tokens from server before navigating away (onSaved unmounts the component)
-    await refreshTokensFromServer()
-    setSaving(false)
-    await onSaved()
+    try {
+      await commitProfile(trimmed)
+      // Re-fetch tokens from server before navigating away (onSaved unmounts the component)
+      await refreshTokensFromServer()
+      await onSaved()
+    } finally {
+      setSaving(false)
+    }
   }
 
   async function validateToken(

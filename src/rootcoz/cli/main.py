@@ -307,14 +307,14 @@ def register(
         lambda c: c.register(username=username),
         emit_output=False,
     )
+    api_key = result.get("api_key", "")
+    if not api_key:
+        typer.echo(
+            "Error: Registration succeeded but no API key was returned.", err=True
+        )
+        raise typer.Exit(1)
     if not _state.get("json", False):
         typer.echo(f"Registered: {result.get('username', username)}")
-        api_key = result.get("api_key", "")
-        if not api_key:
-            typer.echo(
-                "Error: Registration succeeded but no API key was returned.", err=True
-            )
-            raise typer.Exit(1)
         typer.echo("\n\u26a0\ufe0f  Save this API key \u2014 you won't see it again!")
         typer.echo(f"API Key: {api_key}")
 

@@ -37,7 +37,6 @@ async def _run_peer_analysis(
     """Helper to run analyze_failure_group_with_peers with mocked CLI."""
     from unittest.mock import AsyncMock
 
-    from rootcoz.models import AiConfigEntry, FailedTest
     from rootcoz.peer_analysis import analyze_failure_group_with_peers
 
     monkeypatch.setattr(
