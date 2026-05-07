@@ -68,6 +68,10 @@ export function NewAnalysisPage() {
   const [jiraUrl, setJiraUrl] = useState('')
   const [jiraProjectKey, setJiraProjectKey] = useState('')
 
+  // Tags
+  const [tags, setTags] = useState<string[]>([])
+  const [tagInput, setTagInput] = useState('')
+
   // Advanced
   const [force, setForce] = useState(false)
   const [getArtifacts, setGetArtifacts] = useState(true)
@@ -148,6 +152,7 @@ export function NewAnalysisPage() {
           job_name: jobName.trim(),
           build_number: buildNumber,
           force,
+          ...(tags.length > 0 && { tags }),
           wait_for_completion: waitForCompletion,
           poll_interval_minutes: pollInterval,
           max_wait_minutes: maxWait,
@@ -163,6 +168,7 @@ export function NewAnalysisPage() {
         const body: Record<string, unknown> = {
           ...commonFields,
           raw_xml: rawXml,
+          ...(tags.length > 0 && { tags }),
         }
         const data = await api.post<{ job_id: string }>('/analyze-failures', body)
         navigate(`/results/${data.job_id}`)
@@ -181,6 +187,7 @@ export function NewAnalysisPage() {
     buildNumber,
     aiProvider,
     aiModel,
+    tags,
     force,
     waitForCompletion,
     pollInterval,
@@ -641,6 +648,51 @@ export function NewAnalysisPage() {
                 </div>
               </div>
             )}
+          </Section>
+
+          <hr className="border-border-muted" />
+
+          {/* Tags */}
+          <Section title="Tags" dotColor="bg-signal-blue">
+            <div className="space-y-2">
+              <label className="block font-display text-xs font-medium uppercase tracking-widest text-text-secondary">
+                Tags <span className="text-text-tertiary font-normal normal-case tracking-normal">(optional)</span>
+              </label>
+              <div className="flex gap-2">
+                <Input
+                  value={tagInput}
+                  onChange={(e) => setTagInput(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' && tagInput.trim()) {
+                      e.preventDefault()
+                      const newTag = tagInput.trim().toLowerCase()
+                      if (!tags.includes(newTag)) setTags([...tags, newTag])
+                      setTagInput('')
+                    }
+                  }}
+                  placeholder="Add tag and press Enter..."
+                  className="h-10 font-mono flex-1"
+                />
+              </div>
+              {tags.length > 0 && (
+                <div className="flex flex-wrap gap-1.5">
+                  {tags.map((tag) => (
+                    <span key={tag} className="inline-flex items-center gap-1 rounded-full bg-signal-blue/10 px-2.5 py-0.5 text-xs font-medium text-signal-blue">
+                      {tag}
+                      <button
+                        type="button"
+                        onClick={() => setTags(tags.filter((t) => t !== tag))}
+                        className="ml-0.5 hover:text-signal-red transition-colors"
+                        aria-label={`Remove tag ${tag}`}
+                      >
+                        ×
+                      </button>
+                    </span>
+                  ))}
+                </div>
+              )}
+              <p className="text-xs text-text-tertiary">Categorize this analysis (e.g. regression, flaky, nightly).</p>
+            </div>
           </Section>
 
           {inputMode === 'jenkins' && (

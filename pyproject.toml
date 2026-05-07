@@ -58,3 +58,8 @@ filterwarnings = [
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/rootcoz"]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.2",
+]

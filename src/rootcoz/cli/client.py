@@ -219,6 +219,8 @@ class RootCozClient:
         self,
         job_name: str,
         build_number: int,
+        *,
+        tags: list[str] | None = None,
         **kwargs,
     ) -> dict:
         """Submit a Jenkins job for analysis. POST /analyze
@@ -226,12 +228,15 @@ class RootCozClient:
         Args:
             job_name: Jenkins job name.
             build_number: Build number to analyze.
+            tags: Optional list of tags for categorization.
             **kwargs: Additional fields for the AnalyzeRequest body.
 
         Returns:
             Queued status with job_id for polling.
         """
         body = {"job_name": job_name, "build_number": build_number, **kwargs}
+        if tags:
+            body["tags"] = tags
         return self._request(
             "POST",
             "/analyze",

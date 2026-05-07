@@ -215,6 +215,10 @@ class AnalyzeRequest(BaseAnalysisRequest):
         default=0,
         description="Maximum minutes to wait for job completion (0 = no limit)",
     )
+    tags: list[str] = Field(
+        default_factory=list,
+        description="User tags for categorization (e.g. 'regression', 'flaky')",
+    )
     jenkins_url: str | None = Field(
         default=None,
         description="Jenkins server URL (overrides JENKINS_URL env var)",

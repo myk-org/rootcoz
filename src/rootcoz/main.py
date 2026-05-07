@@ -1982,6 +1982,8 @@ async def _enqueue_analysis_job(
         ),
     }
     initial_result["request_params"]["submitted_by"] = username
+    if body.tags:
+        initial_result["tags"] = body.tags
     can_resume_wait = merged.wait_for_completion and bool(merged.jenkins_url)
     await save_result(
         job_id,
@@ -2344,6 +2346,12 @@ async def re_analyze(
     # For each non-None field in the override body, set it on original_body
     for field_name in body.model_fields_set:
         setattr(original_body, field_name, getattr(body, field_name))
+
+    # Auto-add re-analyze system tag
+    existing_tags = list(original_body.tags) if original_body.tags else []
+    if "re-analyze" not in existing_tags:
+        existing_tags.append("re-analyze")
+    original_body.tags = existing_tags
 
     # Re-merge settings with overrides applied
     merged = _merge_settings(original_body, original_settings)
@@ -4011,6 +4019,37 @@ def _patch_children(
             child_job_name,
             child_build_number,
         )
+
+
+@app.put("/results/{job_id}/tags")
+async def update_tags(
+    job_id: str,
+    request: Request,
+    _: None = Depends(_bind_job_id),
+) -> dict:
+    """Update tags on an existing result. System tags (re-analyze) cannot be removed."""
+    _check_allow_list(request)
+    body = await _read_json_object(request)
+    tags = body.get("tags")
+    if not isinstance(tags, list) or not all(isinstance(t, str) for t in tags):
+        raise HTTPException(status_code=400, detail="tags must be a list of strings")
+
+    stored = await get_result(job_id)
+    if not stored or not stored.get("result"):
+        raise HTTPException(status_code=404, detail=f"Result {job_id} not found")
+
+    result_data = stored["result"]
+    old_tags = result_data.get("tags", [])
+
+    # Preserve system tags that user tried to remove
+    system_tags = [t for t in old_tags if t == "re-analyze"]
+    for st in system_tags:
+        if st not in tags:
+            tags.append(st)
+
+    await patch_result_json(job_id, lambda d: d.update({"tags": tags}))
+    notify_dashboard_changed()
+    return {"job_id": job_id, "tags": tags}
 
 
 @app.put("/results/{job_id}/override-classification")

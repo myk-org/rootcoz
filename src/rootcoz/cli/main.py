@@ -726,6 +726,11 @@ def analyze(
         "--max-concurrent",
         help="Max concurrent AI CLI calls (0 = no CLI override; config or server default will be used).",
     ),
+    tags: list[str] = typer.Option(
+        [],
+        "--tag",
+        help="Tag for categorization (repeatable, e.g. --tag regression --tag flaky).",
+    ),
     json_output: bool = _JSON_OPTION,
 ):
     """Submit a Jenkins job for analysis."""
@@ -909,6 +914,9 @@ def analyze(
         except ValueError as exc:
             typer.echo(f"Error: {exc}", err=True)
             raise typer.Exit(code=1) from None
+
+    if tags:
+        extras["tags"] = tags
 
     try:
         client = _get_client()

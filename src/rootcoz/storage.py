@@ -1752,6 +1752,8 @@ async def list_results_for_dashboard(
                     entry["summary"] = result_data["summary"]
                 if result_data.get("error"):
                     entry["error"] = result_data["error"]
+                if result_data.get("tags"):
+                    entry["tags"] = result_data["tags"]
             results.append(entry)
         return results
 

@@ -164,6 +164,7 @@ export interface DashboardJob {
   child_job_count?: number
   summary?: string
   error?: string
+  tags?: string[]
 }
 
 // -- Comments & Reviews ---------------------------------------------
