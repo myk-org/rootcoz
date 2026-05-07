@@ -3005,6 +3005,62 @@ class TestParseJsonResponseCodeFields:
         assert result.code_fix.suggested_code is None
 
 
+class TestRecoverFromDetails:
+    """Tests for _recover_from_details including markdown and INFRASTRUCTURE recovery."""
+
+    def test_recover_infrastructure_classification(self):
+        """INFRASTRUCTURE classification is recovered from JSON in details."""
+        from rootcoz.analyzer import _recover_from_details
+        from rootcoz.models import AnalysisDetail
+
+        raw = '{"classification": "INFRASTRUCTURE", "affected_tests": ["test_node_ready"], "details": "Node went NotReady during test execution", "artifacts_evidence": "[cluster.log]: ERROR node-1 NotReady"}'
+        result = _recover_from_details(AnalysisDetail(classification="", details=raw))
+        assert result.classification == "INFRASTRUCTURE"
+        assert "test_node_ready" in result.affected_tests
+        assert "NotReady" in result.details
+
+    def test_recover_markdown_classification(self):
+        """Classification is recovered from markdown format when JSON key is absent."""
+        from rootcoz.analyzer import _recover_from_details
+        from rootcoz.models import AnalysisDetail
+
+        raw = "**Classification: INFRASTRUCTURE**\n\nAll 11 failing tests share a single root cause: the OCP authentication operator degraded mid-run."
+        result = _recover_from_details(AnalysisDetail(classification="", details=raw))
+        assert result.classification == "INFRASTRUCTURE"
+        assert "OCP authentication" in result.details
+        assert "**Classification:" not in result.details
+
+    def test_recover_markdown_product_bug(self):
+        """Markdown recovery works for PRODUCT BUG too."""
+        from rootcoz.analyzer import _recover_from_details
+        from rootcoz.models import AnalysisDetail
+
+        raw = "**Classification: PRODUCT BUG**\n\nThe API returns 500 on valid input."
+        result = _recover_from_details(AnalysisDetail(classification="", details=raw))
+        assert result.classification == "PRODUCT BUG"
+
+    def test_no_recovery_when_classification_present(self):
+        """No recovery attempted when classification is already set."""
+        from rootcoz.analyzer import _recover_from_details
+        from rootcoz.models import AnalysisDetail
+
+        result = _recover_from_details(
+            AnalysisDetail(
+                classification="CODE ISSUE",
+                details="**Classification: INFRASTRUCTURE**",
+            )
+        )
+        assert result.classification == "CODE ISSUE"
+
+    def test_no_recovery_from_empty_details(self):
+        """No recovery when details is empty."""
+        from rootcoz.analyzer import _recover_from_details
+        from rootcoz.models import AnalysisDetail
+
+        result = _recover_from_details(AnalysisDetail(classification="", details=""))
+        assert result.classification == ""
+
+
 class TestRecoverFromDetailsCodeFields:
     """Tests that _recover_from_details extracts original_code and suggested_code."""
 
