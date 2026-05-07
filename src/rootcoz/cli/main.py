@@ -54,6 +54,7 @@ _state: dict = {}
 # Shared option definition reused across leaf commands so --json works
 # both globally (before the subcommand) and per-command (after it).
 _JSON_OPTION = typer.Option(False, "--json", help="Output as JSON instead of table.")
+_TAG_OPTION = typer.Option([], "--tag", help="Tag for categorization (repeatable).")
 _JOB_IDS_ARGUMENT = typer.Argument(default=None, help="Job ID(s) to delete.")
 _BULK_DELETE_BATCH_SIZE = 500
 
@@ -726,11 +727,7 @@ def analyze(
         "--max-concurrent",
         help="Max concurrent AI CLI calls (0 = no CLI override; config or server default will be used).",
     ),
-    tags: list[str] = typer.Option(
-        [],
-        "--tag",
-        help="Tag for categorization (repeatable, e.g. --tag regression --tag flaky).",
-    ),
+    tags: list[str] = _TAG_OPTION,
     json_output: bool = _JSON_OPTION,
 ):
     """Submit a Jenkins job for analysis."""

@@ -2347,10 +2347,15 @@ async def re_analyze(
     for field_name in body.model_fields_set:
         setattr(original_body, field_name, getattr(body, field_name))
 
-    # Auto-add re-analyze system tag
-    existing_tags = list(original_body.tags) if original_body.tags else []
+    # Carry forward tags from the original result + auto-add re-analyze
+    existing_tags = list(result_data.get("tags", []))
     if "re-analyze" not in existing_tags:
         existing_tags.append("re-analyze")
+    # Merge with any user-supplied tags from the override body
+    if "tags" in body.model_fields_set:
+        for t in original_body.tags:
+            if t not in existing_tags:
+                existing_tags.append(t)
     original_body.tags = existing_tags
 
     # Re-merge settings with overrides applied
@@ -4030,9 +4035,18 @@ async def update_tags(
     """Update tags on an existing result. System tags (re-analyze) cannot be removed."""
     _check_allow_list(request)
     body = await _read_json_object(request)
-    tags = body.get("tags")
-    if not isinstance(tags, list) or not all(isinstance(t, str) for t in tags):
+    raw_tags = body.get("tags")
+    if not isinstance(raw_tags, list) or not all(isinstance(t, str) for t in raw_tags):
         raise HTTPException(status_code=400, detail="tags must be a list of strings")
+
+    # Normalize: strip, lowercase, deduplicate, remove blanks
+    seen: set[str] = set()
+    tags: list[str] = []
+    for t in raw_tags:
+        normalized = t.strip().lower()
+        if normalized and normalized not in seen:
+            seen.add(normalized)
+            tags.append(normalized)
 
     stored = await get_result(job_id)
     if not stored or not stored.get("result"):
@@ -4042,9 +4056,8 @@ async def update_tags(
     old_tags = result_data.get("tags", [])
 
     # Preserve system tags that user tried to remove
-    system_tags = [t for t in old_tags if t == "re-analyze"]
-    for st in system_tags:
-        if st not in tags:
+    for st in old_tags:
+        if st == "re-analyze" and st not in tags:
             tags.append(st)
 
     await patch_result_json(job_id, lambda d: d.update({"tags": tags}))
