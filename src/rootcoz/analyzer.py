@@ -317,7 +317,15 @@ jira_search_keywords rules:
 - Combine component name with the specific failure (e.g. "VM start failure migration", "API timeout authentication")
 - AVOID generic/broad terms alone like "timeout", "failure", "error"
 - Each keyword should be specific enough to narrow Jira search results to relevant bugs
-- Think: "what would someone title a Jira bug for this exact issue?\""""
+- Think: "what would someone title a Jira bug for this exact issue?\"
+
+If INFRASTRUCTURE:
+{
+  "classification": "INFRASTRUCTURE",
+  "affected_tests": ["test_name_1", "test_name_2"],
+  "details": "Your detailed analysis of the infrastructure/environment issue. Use paragraph breaks (double newlines) to separate sections: root cause identification, evidence from logs, and impact assessment. Do NOT write one continuous paragraph.",
+  "artifacts_evidence": "VERBATIM lines from files under build-artifacts/ that prove the infrastructure failure. Format each line as [file-path]: content. Example: [build-artifacts/logs/cluster.log]: 2026-03-16 ERROR Node not ready. Include the specific log lines showing the infrastructure problem. Separate distinct artifact entries with paragraph breaks (double newlines)."
+}"""
 
 
 def _format_timeout_log(timeout_value: int | None) -> str:
@@ -470,8 +478,28 @@ def _recover_from_details(result: AnalysisDetail) -> AnalysisDetail:
         return result
 
     details = result.details
-    if not details or '"classification"' not in details:
+    if not details:
         return result
+
+    # Try markdown classification recovery (e.g. "**Classification: INFRASTRUCTURE**")
+    if '"classification"' not in details:
+        md_match = re.search(r"\*\*Classification:\s*([A-Z][A-Z _]+?)\*\*", details)
+        if not md_match:
+            return result
+        # Found markdown classification — extract what we can
+        classification = md_match.group(1).strip()
+        logger.warning(
+            "Recovered classification '%s' from markdown-formatted AI response",
+            classification,
+        )
+        return AnalysisDetail(
+            classification=classification,
+            affected_tests=result.affected_tests,
+            details=details,
+            artifacts_evidence=result.artifacts_evidence,
+            code_fix=result.code_fix,
+            product_bug_report=result.product_bug_report,
+        )
 
     # Extract classification
     class_match = re.search(r'"classification"\s*:\s*"([^"]+)"', details)
