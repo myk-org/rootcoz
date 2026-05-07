@@ -430,12 +430,14 @@ export function UsersPage() {
             </DialogTitle>
             <DialogDescription>
               {roleChangeResult
-                ? (roleChangeResult.api_key
-                    ? `${roleChangeResult.username} is now an admin. Save the API key below.`
+                ? (roleChangeResult.role === 'admin'
+                    ? (roleChangeResult.api_key
+                        ? `${roleChangeResult.username} is now an admin. Save the API key below.`
+                        : `${roleChangeResult.username} is now an admin.`)
                     : `${roleChangeResult.username} has been demoted to regular user.`)
                 : (roleChangeTarget?.newRole === 'admin'
-                    ? `Promote "${roleChangeTarget?.username}" to admin? An API key will be generated.`
-                    : `Demote "${roleChangeTarget?.username}" to regular user? Their API key will be revoked and admin sessions invalidated.`)
+                    ? `Promote "${roleChangeTarget?.username}" to admin?`
+                    : `Demote "${roleChangeTarget?.username}" to regular user?`)
               }
             </DialogDescription>
           </DialogHeader>

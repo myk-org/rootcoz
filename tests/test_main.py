@@ -114,6 +114,10 @@ def _build_wait_settings(**overrides) -> Settings:
     return Settings.model_validate(settings_dict)
 
 
+_TEST_ADMIN_KEY = "test-admin-key-16chars"  # pragma: allowlist secret
+_TEST_ENCRYPTION_KEY = "test-encryption-key-for-hmac"  # pragma: allowlist secret
+
+
 @pytest.fixture
 def mock_settings(temp_db_path: Path):
     """Mock settings for tests."""
@@ -123,6 +127,8 @@ def mock_settings(temp_db_path: Path):
         "JENKINS_PASSWORD": "testpassword",  # pragma: allowlist secret
         "GEMINI_API_KEY": "test-key",  # pragma: allowlist secret
         "DB_PATH": str(temp_db_path),
+        "ADMIN_KEY": _TEST_ADMIN_KEY,  # pragma: allowlist secret
+        "ROOTCOZ_ENCRYPTION_KEY": _TEST_ENCRYPTION_KEY,  # pragma: allowlist secret
     }
     with patch.dict(os.environ, env, clear=True):
         # Clear the lru_cache to use fresh settings
@@ -135,14 +141,21 @@ def mock_settings(temp_db_path: Path):
             get_settings.cache_clear()
 
 
+_ADMIN_AUTH_HEADERS = {"Authorization": f"Bearer {_TEST_ADMIN_KEY}"}
+
+
 @pytest.fixture
 def test_client(mock_settings, temp_db_path: Path):
-    """Create a test client with mocked dependencies."""
+    """Create a test client with mocked dependencies.
+
+    Includes admin Bearer auth headers so endpoints that require
+    authentication (all non-public paths) work out of the box.
+    """
     with patch.object(storage, "DB_PATH", temp_db_path):
         from starlette.testclient import TestClient
         from rootcoz.main import app
 
-        with TestClient(app) as client:
+        with TestClient(app, headers=_ADMIN_AUTH_HEADERS) as client:
             yield client
 
 
@@ -286,7 +299,7 @@ class TestBaseUrlDetection:
                 from rootcoz.main import app
 
                 with (
-                    TestClient(app) as client,
+                    TestClient(app, headers=_ADMIN_AUTH_HEADERS) as client,
                     patch("rootcoz.main.process_analysis_with_id"),
                 ):
                     response = client.post(
@@ -321,7 +334,7 @@ class TestBaseUrlDetection:
                 from rootcoz.main import app
 
                 with (
-                    TestClient(app) as client,
+                    TestClient(app, headers=_ADMIN_AUTH_HEADERS) as client,
                     patch("rootcoz.main.process_analysis_with_id"),
                 ):
                     response = client.post(
@@ -1066,9 +1079,15 @@ class TestAbortEndpoint:
                     "request_params": {"submitted_by": "alice"},
                 },
             )
+            # Register bob and get a session cookie (non-admin user)
+            reg_resp = test_client.post("/api/auth/register", json={"username": "bob"})
+            assert reg_resp.status_code == 200
+            bob_session = reg_resp.cookies.get("rootcoz_session")
+            # Override Authorization to remove admin Bearer token
             resp = test_client.post(
                 "/results/job-other-user/abort",
-                cookies={"rootcoz_username": "bob"},
+                headers={"Authorization": ""},
+                cookies={"rootcoz_session": bob_session},
             )
             assert resp.status_code == 403
 
@@ -1132,7 +1151,7 @@ class TestApiDashboardEndpoint:
 
     def test_api_dashboard_returns_empty_list(self, test_client) -> None:
         """Test that GET /api/dashboard returns an empty list when no jobs exist."""
-        response = test_client.get("/api/dashboard")
+        response = test_client.get("/api/dashboard", headers=_ADMIN_AUTH_HEADERS)
         assert response.status_code == 200
         data = response.json()
         assert isinstance(data, list)
@@ -1152,7 +1171,7 @@ class TestApiDashboardEndpoint:
                     status="completed",
                 )
 
-            response = test_client.get("/api/dashboard")
+            response = test_client.get("/api/dashboard", headers=_ADMIN_AUTH_HEADERS)
             assert response.status_code == 200
             data = response.json()
             assert isinstance(data, list)
@@ -1165,7 +1184,7 @@ class TestApiDashboardEndpoint:
             new_callable=AsyncMock,
         ) as mock_list:
             mock_list.return_value = []
-            response = test_client.get("/api/dashboard")
+            response = test_client.get("/api/dashboard", headers=_ADMIN_AUTH_HEADERS)
             assert response.status_code == 200
             mock_list.assert_called_once_with()
 
@@ -1192,7 +1211,7 @@ class TestApiDashboardEndpoint:
                 },
             )
 
-            response = test_client.get("/api/dashboard")
+            response = test_client.get("/api/dashboard", headers=_ADMIN_AUTH_HEADERS)
             assert response.status_code == 200
             data = response.json()
             assert len(data) == 1
@@ -1331,11 +1350,14 @@ class TestReviewedEndpoint:
         await storage.save_result(
             "job-rev-1", "http://jenkins", "completed", result_data
         )
+        # Create a dedicated reviewer user and authenticate via Bearer token
+        # so the middleware picks up their identity.
         reviewer_name = "test-reviewer"
-        test_client.cookies.set("rootcoz_username", reviewer_name)
+        _, reviewer_key = await storage.create_user(reviewer_name)
         response = test_client.put(
             "/results/job-rev-1/reviewed",
             json={"test_name": "test_foo", "reviewed": True},
+            headers={"Authorization": f"Bearer {reviewer_key}"},
         )
         assert response.status_code == 200
         put_data = response.json()
@@ -1346,7 +1368,6 @@ class TestReviewedEndpoint:
         assert "test_foo" in data["reviews"]
         assert data["reviews"]["test_foo"]["reviewed"] is True
         assert data["reviews"]["test_foo"]["username"] == reviewer_name
-        test_client.cookies.clear()
 
     @pytest.mark.asyncio
     async def test_set_reviewed_nonexistent_job(self, test_client):
@@ -1926,7 +1947,7 @@ class TestCreateGithubIssue:
                 "number": 99,
             }
             with _with_github_issue_config():
-                test_client.cookies.set("rootcoz_username", "testuser")
+                _, user_key = await storage.create_user("testuser")
                 response = test_client.post(
                     "/results/job-create-gh/create-github-issue",
                     json={
@@ -1934,8 +1955,8 @@ class TestCreateGithubIssue:
                         "title": "Bug: login fails",
                         "body": "## Details\nLogin returns 500",
                     },
+                    headers={"Authorization": f"Bearer {user_key}"},
                 )
-                test_client.cookies.clear()
         assert response.status_code == 201
         data = response.json()
         assert "https://github.com" in data["url"]
@@ -2018,7 +2039,7 @@ class TestCreateJiraBug:
             }
             # Mock settings to have jira_enabled=True
             with _enable_feature("jira_enabled"):
-                test_client.cookies.set("rootcoz_username", "testuser")
+                _, user_key = await storage.create_user("testuser-jira")
                 response = test_client.post(
                     "/results/job-create-jira/create-jira-bug",
                     json={
@@ -2026,8 +2047,8 @@ class TestCreateJiraBug:
                         "title": "DNS timeout",
                         "body": "DNS resolution fails",
                     },
+                    headers={"Authorization": f"Bearer {user_key}"},
                 )
-                test_client.cookies.clear()
         assert response.status_code == 201
         data = response.json()
         assert data["key"] == "PROJ-456"
@@ -2037,7 +2058,7 @@ class TestCreateJiraBug:
         tracker_comment = next(c for c in all_comments if c["id"] == data["comment_id"])
         assert "PROJ-456" in tracker_comment["comment"]
         assert "DNS timeout" in tracker_comment["comment"]
-        assert tracker_comment["username"] == "testuser"
+        assert tracker_comment["username"] == "testuser-jira"
 
     @pytest.mark.asyncio
     async def test_create_jira_disabled_returns_403(self, test_client):
@@ -4433,6 +4454,7 @@ class TestValidateToken:
             response = test_client.post(
                 "/api/validate-token",
                 json={"token_type": "github", "token": "ghp_valid"},
+                headers=_ADMIN_AUTH_HEADERS,
             )
         assert response.status_code == 200
         data = response.json()
@@ -4457,6 +4479,7 @@ class TestValidateToken:
             response = test_client.post(
                 "/api/validate-token",
                 json={"token_type": "github", "token": "ghp_invalid"},
+                headers=_ADMIN_AUTH_HEADERS,
             )
         assert response.status_code == 200
         data = response.json()
@@ -4468,6 +4491,7 @@ class TestValidateToken:
         response = test_client.post(
             "/api/validate-token",
             json={"token_type": "bitbucket", "token": "some-token"},
+            headers=_ADMIN_AUTH_HEADERS,
         )
         assert response.status_code == 422
 
@@ -4476,6 +4500,7 @@ class TestValidateToken:
         response = test_client.post(
             "/api/validate-token",
             json={"token_type": "jira", "token": "jira-token"},
+            headers=_ADMIN_AUTH_HEADERS,
         )
         assert response.status_code == 200
         data = response.json()
@@ -4488,7 +4513,9 @@ class TestJiraProjectsEndpoint:
 
     def test_no_jira_url_returns_empty(self, test_client):
         """No JIRA_URL configured returns empty list."""
-        response = test_client.post("/api/jira-projects", json={})
+        response = test_client.post(
+            "/api/jira-projects", json={}, headers=_ADMIN_AUTH_HEADERS
+        )
         assert response.status_code == 200
         assert response.json() == []
 
@@ -4510,6 +4537,7 @@ class TestJiraProjectsEndpoint:
                 response = test_client.post(
                     "/api/jira-projects",
                     json={"jira_token": "tok", "jira_email": "u@e.com"},  # noqa: S106
+                    headers=_ADMIN_AUTH_HEADERS,
                 )
             assert response.status_code == 200
             data = response.json()
@@ -4524,7 +4552,9 @@ class TestJiraSecurityLevelsEndpoint:
     def test_no_jira_url_returns_empty(self, test_client):
         """No JIRA_URL configured returns empty list."""
         response = test_client.post(
-            "/api/jira-security-levels", json={"project_key": "PROJ"}
+            "/api/jira-security-levels",
+            json={"project_key": "PROJ"},
+            headers=_ADMIN_AUTH_HEADERS,
         )
         assert response.status_code == 200
         assert response.json() == []
@@ -4537,7 +4567,9 @@ class TestJiraSecurityLevelsEndpoint:
         app.dependency_overrides[get_settings] = lambda: jira_settings
         try:
             response = test_client.post(
-                "/api/jira-security-levels", json={"project_key": "PROJ"}
+                "/api/jira-security-levels",
+                json={"project_key": "PROJ"},
+                headers=_ADMIN_AUTH_HEADERS,
             )
             assert response.status_code == 200
             assert response.json() == []
@@ -4566,6 +4598,7 @@ class TestJiraSecurityLevelsEndpoint:
                         "jira_token": "tok",
                         "jira_email": "u@e.com",
                     },  # noqa: S106
+                    headers=_ADMIN_AUTH_HEADERS,
                 )
             assert response.status_code == 200
             data = response.json()

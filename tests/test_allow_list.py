@@ -4,11 +4,36 @@ import asyncio
 import os
 from unittest.mock import patch
 
+import aiosqlite
 import pytest
 from fastapi.testclient import TestClient
 
 from rootcoz import storage
 from rootcoz.config import Settings, get_settings
+from rootcoz.storage import generate_api_key, hash_api_key
+
+
+def _create_user_sync(temp_db_path, username: str) -> dict:
+    """Create a user with an API key and return Bearer auth headers."""
+    raw_key = generate_api_key()
+    key_hash = hash_api_key(raw_key)
+
+    async def _insert():
+        async with aiosqlite.connect(temp_db_path) as db:
+            await db.execute(
+                "UPDATE users SET api_key_hash = ? WHERE username = ?",
+                (key_hash, username),
+            )
+            rows = (await (await db.execute("SELECT changes()")).fetchone())[0]
+            if rows == 0:
+                await db.execute(
+                    "INSERT INTO users (username, api_key_hash, role) VALUES (?, ?, 'user')",
+                    (username, key_hash),
+                )
+            await db.commit()
+
+    asyncio.run(_insert())
+    return {"Authorization": f"Bearer {raw_key}"}
 
 
 @pytest.fixture
@@ -39,8 +64,12 @@ def _seed_result(_init_db, temp_db_path):
         )
 
 
+_ALLOW_LIST_ADMIN_KEY = "test-admin-key-16chars"  # pragma: allowlist secret
+
+
 def _make_client(temp_db_path, allowed_users: str = "", admin_key: str = ""):
     """Create a test client with allow list configured."""
+    effective_admin_key = admin_key or _ALLOW_LIST_ADMIN_KEY
     env = {
         k: v
         for k, v in os.environ.items()
@@ -48,11 +77,10 @@ def _make_client(temp_db_path, allowed_users: str = "", admin_key: str = ""):
     }
     env["SECURE_COOKIES"] = "false"
     env["DB_PATH"] = str(temp_db_path)
+    env["ADMIN_KEY"] = effective_admin_key
+    env["ROOTCOZ_ENCRYPTION_KEY"] = "test-key-for-hmac"  # pragma: allowlist secret
     if allowed_users:
         env["ALLOWED_USERS"] = allowed_users
-    if admin_key:
-        env["ADMIN_KEY"] = admin_key
-        env["ROOTCOZ_ENCRYPTION_KEY"] = "test-key-for-hmac"  # pragma: allowlist secret
     with patch.dict(os.environ, env, clear=True):
         get_settings.cache_clear()
         with patch.object(storage, "DB_PATH", temp_db_path):
@@ -75,7 +103,6 @@ def client_restricted(_seed_result, temp_db_path):
     yield from _make_client(
         temp_db_path,
         allowed_users="alice,bob",
-        admin_key="test-admin-key-16chars",  # pragma: allowlist secret
     )
 
 
@@ -117,7 +144,7 @@ class TestAllowListConfig:
 class TestOpenAccess:
     """When ALLOWED_USERS is empty, all users can write."""
 
-    def test_comment_allowed_without_allow_list(self, client_open):
+    def test_comment_allowed_without_allow_list(self, client_open, temp_db_path):
         """Any user can add a comment when allow list is empty."""
         # Create a result first
         result_data = {
@@ -134,10 +161,11 @@ class TestOpenAccess:
         asyncio.run(
             storage.save_result("job-open", "http://j/1", "completed", result_data)
         )
+        auth = _create_user_sync(temp_db_path, "anyone")
         resp = client_open.post(
             "/results/job-open/comments",
             json={"test_name": "test_foo", "comment": "looks good"},
-            cookies={"rootcoz_username": "anyone"},
+            headers=auth,
         )
         assert resp.status_code == 201
 
@@ -145,39 +173,42 @@ class TestOpenAccess:
 class TestRestrictedAccess:
     """When ALLOWED_USERS is set, only listed users can write."""
 
-    def test_allowed_user_can_comment(self, client_restricted):
+    def test_allowed_user_can_comment(self, client_restricted, temp_db_path):
+        auth = _create_user_sync(temp_db_path, "alice")
         resp = client_restricted.post(
             "/results/job-1/comments",
             json={"test_name": "test_foo", "comment": "fix coming"},
-            cookies={"rootcoz_username": "alice"},
+            headers=auth,
         )
         assert resp.status_code == 201
 
-    def test_allowed_user_case_insensitive(self, client_restricted):
+    def test_allowed_user_case_insensitive(self, client_restricted, temp_db_path):
         """Allow list matching is case-insensitive."""
+        auth = _create_user_sync(temp_db_path, "Alice")
         resp = client_restricted.post(
             "/results/job-1/comments",
             json={"test_name": "test_foo", "comment": "fix coming"},
-            cookies={"rootcoz_username": "Alice"},
+            headers=auth,
         )
         assert resp.status_code == 201
 
-    def test_blocked_user_gets_403(self, client_restricted):
+    def test_blocked_user_gets_403(self, client_restricted, temp_db_path):
+        auth = _create_user_sync(temp_db_path, "charlie")
         resp = client_restricted.post(
             "/results/job-1/comments",
             json={"test_name": "test_foo", "comment": "not allowed"},
-            cookies={"rootcoz_username": "charlie"},
+            headers=auth,
         )
         assert resp.status_code == 403
         assert "allow list" in resp.json()["detail"].lower()
 
-    def test_no_username_gets_403(self, client_restricted):
-        """Requests without a username are blocked."""
+    def test_no_username_gets_401(self, client_restricted):
+        """Requests without authentication are blocked."""
         resp = client_restricted.post(
             "/results/job-1/comments",
             json={"test_name": "test_foo", "comment": "anon"},
         )
-        assert resp.status_code == 403
+        assert resp.status_code == 401
 
     def test_admin_bypasses_allow_list(self, client_restricted):
         """Admin users always bypass the allow list."""
@@ -185,44 +216,49 @@ class TestRestrictedAccess:
             "/results/job-1/comments",
             json={"test_name": "test_foo", "comment": "admin override"},
             headers={
-                "Authorization": "Bearer test-admin-key-16chars"  # pragma: allowlist secret
+                "Authorization": f"Bearer {_ALLOW_LIST_ADMIN_KEY}"  # pragma: allowlist secret
             },
         )
         assert resp.status_code == 201
 
-    def test_reviewed_blocked(self, client_restricted):
+    def test_reviewed_blocked(self, client_restricted, temp_db_path):
+        auth = _create_user_sync(temp_db_path, "charlie-rev")
         resp = client_restricted.put(
             "/results/job-1/reviewed",
             json={"test_name": "test_foo", "reviewed": True},
-            cookies={"rootcoz_username": "charlie"},
+            headers=auth,
         )
         assert resp.status_code == 403
 
-    def test_reviewed_allowed(self, client_restricted):
+    def test_reviewed_allowed(self, client_restricted, temp_db_path):
+        auth = _create_user_sync(temp_db_path, "bob")
         resp = client_restricted.put(
             "/results/job-1/reviewed",
             json={"test_name": "test_foo", "reviewed": True},
-            cookies={"rootcoz_username": "bob"},
+            headers=auth,
         )
         assert resp.status_code == 200
 
-    def test_override_classification_blocked(self, client_restricted):
+    def test_override_classification_blocked(self, client_restricted, temp_db_path):
+        auth = _create_user_sync(temp_db_path, "charlie")
         resp = client_restricted.put(
             "/results/job-1/override-classification",
             json={"test_name": "test_foo", "classification": "PRODUCT BUG"},
-            cookies={"rootcoz_username": "charlie"},
+            headers=auth,
         )
         assert resp.status_code == 403
 
-    def test_override_classification_allowed(self, client_restricted):
+    def test_override_classification_allowed(self, client_restricted, temp_db_path):
+        auth = _create_user_sync(temp_db_path, "alice")
         resp = client_restricted.put(
             "/results/job-1/override-classification",
             json={"test_name": "test_foo", "classification": "PRODUCT BUG"},
-            cookies={"rootcoz_username": "alice"},
+            headers=auth,
         )
         assert resp.status_code == 200
 
-    def test_classify_blocked(self, client_restricted):
+    def test_classify_blocked(self, client_restricted, temp_db_path):
+        auth = _create_user_sync(temp_db_path, "charlie")
         resp = client_restricted.post(
             "/history/classify",
             json={
@@ -230,11 +266,12 @@ class TestRestrictedAccess:
                 "classification": "FLAKY",
                 "job_id": "job-1",
             },
-            cookies={"rootcoz_username": "charlie"},
+            headers=auth,
         )
         assert resp.status_code == 403
 
-    def test_classify_allowed(self, client_restricted):
+    def test_classify_allowed(self, client_restricted, temp_db_path):
+        auth = _create_user_sync(temp_db_path, "bob")
         resp = client_restricted.post(
             "/history/classify",
             json={
@@ -242,25 +279,26 @@ class TestRestrictedAccess:
                 "classification": "FLAKY",
                 "job_id": "job-1",
             },
-            cookies={"rootcoz_username": "bob"},
+            headers=auth,
         )
         assert resp.status_code == 201
 
-    def test_read_endpoints_not_affected(self, client_restricted):
+    def test_read_endpoints_not_affected(self, client_restricted, temp_db_path):
         """GET endpoints are not restricted by allow list."""
+        auth = _create_user_sync(temp_db_path, "charlie")
         resp = client_restricted.get(
             "/results/job-1",
-            cookies={"rootcoz_username": "charlie"},
-            headers={"Accept": "application/json"},
+            headers={**auth, "Accept": "application/json"},
         )
         # Should be 200 (found), NOT 403
         assert resp.status_code == 200
 
-    def test_get_comments_not_affected(self, client_restricted):
+    def test_get_comments_not_affected(self, client_restricted, temp_db_path):
         """GET comments endpoint is not restricted."""
+        auth = _create_user_sync(temp_db_path, "charlie")
         resp = client_restricted.get(
             "/results/job-1/comments",
-            cookies={"rootcoz_username": "charlie"},
+            headers=auth,
         )
         assert resp.status_code == 200
 

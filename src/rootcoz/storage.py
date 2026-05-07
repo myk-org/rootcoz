@@ -102,6 +102,16 @@ def generate_api_key() -> str:
     return f"rootcoz_{secrets.token_urlsafe(32)}"
 
 
+def _validate_username(username: str) -> None:
+    """Validate username format and reserved names."""
+    if username.lower() == "admin":
+        msg = "Username 'admin' is reserved"
+        raise ValueError(msg)
+    if not re.match(r"^[a-zA-Z0-9][a-zA-Z0-9._-]{1,49}$", username):
+        msg = f"Invalid username: '{username}'. Must be 2-50 alphanumeric characters, dots, hyphens, underscores."
+        raise ValueError(msg)
+
+
 def _hash_session_token(token: str) -> str:
     """Hash a session token for storage."""
     return hashlib.sha256(token.encode()).hexdigest()
@@ -2506,20 +2516,21 @@ async def get_ai_configs() -> list[dict]:
 async def create_admin_user(username: str) -> tuple[str, str]:
     """Create an admin user and return (username, raw_api_key).
     Raises ValueError if username is invalid or taken."""
-    if username.lower() == "admin":
-        msg = "Username 'admin' is reserved"
-        raise ValueError(msg)
-    if not re.match(r"^[a-zA-Z0-9][a-zA-Z0-9._-]{1,49}$", username):
-        msg = f"Invalid username: '{username}'. Must be 2-50 alphanumeric characters, dots, hyphens, underscores."
-        raise ValueError(msg)
+    _validate_username(username)
     raw_key = generate_api_key()
     key_hash = hash_api_key(raw_key)
     async with _connect_db() as db:
-        await db.execute(
-            "INSERT INTO users (username, api_key_hash, role) VALUES (?, ?, 'admin')",
-            (username, key_hash),
-        )
-        await db.commit()
+        try:
+            await db.execute(
+                "INSERT INTO users (username, api_key_hash, role) VALUES (?, ?, 'admin')",
+                (username, key_hash),
+            )
+            await db.commit()
+        except Exception as exc:
+            if "UNIQUE constraint" in str(exc):
+                msg = f"User '{username}' already exists"
+                raise ValueError(msg) from exc
+            raise
     return username, raw_key
 
 
@@ -2549,48 +2560,34 @@ async def get_user_by_username(username: str) -> dict | None:
 async def delete_admin_user(username: str) -> bool:
     """Delete an admin user. Returns True if deleted.
 
-    Raises ValueError if this would delete the last admin user.
+    The bootstrap 'admin' user (via ADMIN_KEY env var) is never stored
+    in the users table, so there is always a fallback admin.
     """
     async with _connect_db() as db:
-        await db.execute("BEGIN IMMEDIATE")
-        try:
-            cursor = await db.execute("SELECT COUNT(*) FROM users WHERE role = 'admin'")
-            admin_count = (await cursor.fetchone())[0]
-            if admin_count <= 1:
-                cursor = await db.execute(
-                    "SELECT role FROM users WHERE username = ?", (username,)
-                )
-                row = await cursor.fetchone()
-                if row and row[0] == "admin":
-                    await db.execute("ROLLBACK")
-                    raise ValueError("Cannot delete the last admin user")
-
+        cursor = await db.execute(
+            "DELETE FROM users WHERE username = ? AND role = 'admin'",
+            (username,),
+        )
+        if cursor.rowcount > 0:
             await db.execute("DELETE FROM sessions WHERE username = ?", (username,))
-            cursor = await db.execute(
-                "DELETE FROM users WHERE username = ? AND role = 'admin'",
-                (username,),
-            )
-            await db.commit()
-            return cursor.rowcount > 0
-        except ValueError:
-            raise
-        except Exception:
-            await db.execute("ROLLBACK")
-            raise
+        await db.commit()
+        return cursor.rowcount > 0
 
 
 async def change_user_role(username: str, new_role: str) -> tuple[str, str]:
     """Change a user's role. Returns (username, raw_api_key).
 
-    When promoting to admin, generates a new API key.
-    When demoting to user, removes the API key and invalidates sessions.
+    When promoting to admin, generates a new API key only if the user
+    doesn't already have one.
+    When demoting to user, preserves the existing API key.
 
     Args:
         username: The user to change.
         new_role: The new role ('admin' or 'user').
 
     Returns:
-        Tuple of (username, raw_api_key). raw_api_key is empty when demoting.
+        Tuple of (username, raw_api_key). raw_api_key is empty when
+        demoting or when the user already has a key.
 
     Raises:
         ValueError: If username not found, role is invalid, or already has the role.
@@ -2603,7 +2600,8 @@ async def change_user_role(username: str, new_role: str) -> tuple[str, str]:
         raise ValueError(msg)
     async with _connect_db() as db:
         cursor = await db.execute(
-            "SELECT username, role FROM users WHERE username = ?", (username,)
+            "SELECT username, role, api_key_hash FROM users WHERE username = ?",
+            (username,),
         )
         user = await cursor.fetchone()
         if not user:
@@ -2615,15 +2613,22 @@ async def change_user_role(username: str, new_role: str) -> tuple[str, str]:
 
         raw_key = ""
         if new_role == "admin":
-            # Promoting to admin — use transaction for atomicity
-            raw_key = generate_api_key()
-            key_hash = hash_api_key(raw_key)
+            # Promoting to admin — only generate a key if user doesn't have one
+            if not user["api_key_hash"]:
+                raw_key = generate_api_key()
+                key_hash = hash_api_key(raw_key)
             await db.execute("BEGIN IMMEDIATE")
             try:
-                cursor = await db.execute(
-                    "UPDATE users SET role = 'admin', api_key_hash = ? WHERE username = ?",
-                    (key_hash, username),
-                )
+                if raw_key:
+                    cursor = await db.execute(
+                        "UPDATE users SET role = 'admin', api_key_hash = ? WHERE username = ?",
+                        (key_hash, username),
+                    )
+                else:
+                    cursor = await db.execute(
+                        "UPDATE users SET role = 'admin' WHERE username = ?",
+                        (username,),
+                    )
                 if cursor.rowcount == 0:
                     await db.execute("ROLLBACK")
                     raise ValueError(f"User '{username}' not found")
@@ -2634,28 +2639,14 @@ async def change_user_role(username: str, new_role: str) -> tuple[str, str]:
                 await db.execute("ROLLBACK")
                 raise
         else:
-            # Demoting to user — use transaction for atomic last-admin check
-            await db.execute("BEGIN IMMEDIATE")
-            try:
-                cursor = await db.execute(
-                    "SELECT COUNT(*) FROM users WHERE role = 'admin' AND username != ?",
-                    (username,),
-                )
-                other_admins = (await cursor.fetchone())[0]
-                if other_admins == 0:
-                    await db.execute("ROLLBACK")
-                    raise ValueError("Cannot demote the last admin user")
-                await db.execute(
-                    "UPDATE users SET role = 'user', api_key_hash = NULL WHERE username = ?",
-                    (username,),
-                )
-                await db.execute("DELETE FROM sessions WHERE username = ?", (username,))
-                await db.commit()
-            except ValueError:
-                raise
-            except Exception:
-                await db.execute("ROLLBACK")
-                raise
+            # Demoting to user — preserve existing API key so the user
+            # can keep logging in. Bootstrap admin (ADMIN_KEY) is always
+            # available as fallback, so no last-admin guard needed.
+            await db.execute(
+                "UPDATE users SET role = 'user' WHERE username = ?",
+                (username,),
+            )
+            await db.commit()
 
             return username, raw_key
 
@@ -2742,6 +2733,116 @@ async def delete_session(token: str) -> None:
     async with _connect_db() as db:
         await db.execute("DELETE FROM sessions WHERE token = ?", (token_hash,))
         await db.commit()
+
+
+async def create_user(username: str) -> tuple[str, str]:
+    """Create a new user or generate an API key for an existing user without one.
+
+    Returns (username, raw_api_key).
+    Raises ValueError if username is invalid, reserved, or user already has a key.
+
+    Uses BEGIN IMMEDIATE to prevent TOCTOU races between the
+    existence check and the INSERT.
+    """
+    _validate_username(username)
+
+    raw_key = generate_api_key()
+    key_hash = hash_api_key(raw_key)
+
+    async with _connect_db() as db:
+        await db.execute("BEGIN IMMEDIATE")
+        try:
+            cursor = await db.execute(
+                "SELECT id, role, api_key_hash FROM users WHERE username = ?",
+                (username,),
+            )
+            existing = await cursor.fetchone()
+
+            if existing:
+                if existing["role"] != "user":
+                    msg = f"User '{username}' is not eligible for self-registration"
+                    raise ValueError(msg)
+                if existing["api_key_hash"]:
+                    msg = f"User '{username}' already has an API key. Please log in."
+                    raise ValueError(msg)
+                # Existing user without key — generate one
+                update_cursor = await db.execute(
+                    "UPDATE users SET api_key_hash = ? WHERE username = ? AND role = 'user'",
+                    (key_hash, username),
+                )
+                if update_cursor.rowcount == 0:
+                    msg = f"User '{username}' not found or is not a regular user"
+                    raise ValueError(msg)
+            else:
+                await db.execute(
+                    "INSERT INTO users (username, api_key_hash, role) VALUES (?, ?, 'user')",
+                    (username, key_hash),
+                )
+            await db.commit()
+        except ValueError:
+            await db.execute("ROLLBACK")
+            raise
+        except Exception as exc:
+            await db.execute("ROLLBACK")
+            if "UNIQUE constraint" in str(exc):
+                msg = f"User '{username}' already has an API key"
+                raise ValueError(msg) from exc
+            raise
+    return username, raw_key
+
+
+async def rotate_user_key(username: str) -> str:
+    """Generate a new API key for a regular user. Returns the raw key.
+
+    Raises ValueError if user not found or is not a regular user.
+    """
+    raw_key = generate_api_key()
+    key_hash = hash_api_key(raw_key)
+    async with _connect_db() as db:
+        cursor = await db.execute(
+            "UPDATE users SET api_key_hash = ? WHERE username = ? AND role = 'user'",
+            (key_hash, username),
+        )
+        if cursor.rowcount == 0:
+            msg = f"User '{username}' not found or is not a regular user"
+            raise ValueError(msg)
+        # Invalidate all existing sessions for this user
+        await db.execute("DELETE FROM sessions WHERE username = ?", (username,))
+        await db.commit()
+    return raw_key
+
+
+async def rotate_own_key(username: str) -> str:
+    """Rotate the API key for any user (self-service). Returns the raw key.
+
+    Works for both regular users and admin users.
+    Raises ValueError if user not found.
+    """
+    raw_key = generate_api_key()
+    key_hash = hash_api_key(raw_key)
+    async with _connect_db() as db:
+        cursor = await db.execute(
+            "UPDATE users SET api_key_hash = ? WHERE username = ?",
+            (key_hash, username),
+        )
+        if cursor.rowcount == 0:
+            msg = f"User '{username}' not found"
+            raise ValueError(msg)
+        # Invalidate all existing sessions for this user
+        await db.execute("DELETE FROM sessions WHERE username = ?", (username,))
+        await db.commit()
+    return raw_key
+
+
+async def user_has_key(username: str) -> bool:
+    """Check if a user has an API key set."""
+    async with _connect_db() as db:
+        cursor = await db.execute(
+            "SELECT api_key_hash FROM users WHERE username = ?",
+            (username,),
+        )
+        row = await cursor.fetchone()
+        return bool(row and row["api_key_hash"])
 
 
 async def rotate_admin_key(username: str, custom_key: str | None = None) -> str:

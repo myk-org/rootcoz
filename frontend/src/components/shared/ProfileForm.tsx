@@ -1,5 +1,6 @@
-import { useState, useEffect, useCallback, useRef, type FormEvent, type ReactNode } from 'react'
-import { api, ApiError, isExpectedTokenSyncError } from '@/lib/api'
+import { useState, useEffect, useCallback, useRef, type FormEvent } from 'react'
+import { api, isExpectedTokenSyncError } from '@/lib/api'
+import { persistTokensToServer } from '@/lib/tokens'
 import {
   setUsername,
   setGithubToken,
@@ -10,185 +11,32 @@ import {
   getJiraToken,
   getJiraEmail,
 } from '@/lib/cookies'
-import {
-  getPushSubscriptionState,
-  hasActivePushSubscription,
-  subscribeToPush,
-  unsubscribeFromPush,
-} from '@/lib/notifications'
 import { Card, CardContent } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
 import { Button } from '@/components/ui/button'
-import { Eye, EyeOff, Bell, BellOff, ShieldCheck } from 'lucide-react'
-import { useAuth } from '@/lib/auth'
 import { SectionDivider } from '@/components/shared/SectionDivider'
+import { type TokenValidationResult } from '@/components/shared/TokenField'
+import { TrackerTokensFields } from '@/components/shared/TrackerTokensFields'
+import { NotificationToggle } from '@/components/shared/NotificationToggle'
+import { useAuth } from '@/lib/auth'
 
 interface ProfileFormProps {
   onSaved: () => void | Promise<void>
-  onAdminLogin?: (username: string, apiKey: string) => Promise<void>
+  /** When true, the username field is read-only (settings page — user is already authenticated) */
+  readOnlyUsername?: boolean
 }
 
-interface TokenValidationResult {
-  valid: boolean
-  username: string
-  message: string
-}
-
-function TokenField({ id, label, value, onChange, show, onToggleShow, validation, error, placeholder, helpContent, optionalLabel = true }: {
-  id: string
-  label: string
-  value: string
-  onChange: (value: string) => void
-  show: boolean
-  onToggleShow: () => void
-  validation: TokenValidationResult | null
-  error?: string | null
-  placeholder: string
-  helpContent: ReactNode
-  optionalLabel?: boolean
-}) {
-  return (
-    <div className="space-y-1.5">
-      <label htmlFor={id} className="block font-display text-xs font-medium uppercase tracking-widest text-text-secondary">
-        {label} {optionalLabel && <span className="text-text-tertiary font-normal normal-case tracking-normal">(optional)</span>}
-      </label>
-      <div className="relative">
-        <Input id={id} type={show ? 'text' : 'password'} value={value} onChange={(e) => onChange(e.target.value)} placeholder={placeholder} autoComplete="off" className="h-10 pr-10 font-mono" />
-        <button type="button" onClick={onToggleShow} className="absolute right-2 top-1/2 -translate-y-1/2 p-1 text-text-tertiary hover:text-text-secondary transition-colors" aria-label={show ? 'Hide token' : 'Show token'}>
-          {show ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
-        </button>
-      </div>
-      {validation && (
-        <p className={`text-xs ${validation.valid ? 'text-signal-green' : 'text-signal-red'}`}>{validation.message}</p>
-      )}
-      {error && (
-        <p className="text-xs text-signal-red">{error}</p>
-      )}
-      <p className="text-xs text-text-tertiary">{helpContent}</p>
-    </div>
-  )
-}
-
-async function persistTokensToServer(gh: string, je: string, jt: string) {
-  // Don't overwrite server tokens with empty values
-  if (!gh && !je && !jt) return
-  try {
-    await api.put('/api/user/tokens', {
-      github_token: gh,
-      jira_email: je,
-      jira_token: jt,
-    })
-  } catch (err) {
-    // May fail with 404 on first registration (user not yet in DB)
-    // or 401 if cookie not set yet — both are expected, not errors
-    if (!isExpectedTokenSyncError(err)) {
-      console.error('Failed to sync tokens to server:', err)
-    }
-  }
-}
-
-type PushState = Awaited<ReturnType<typeof getPushSubscriptionState>> | 'loading'
-
-function NotificationToggle() {
-  const [pushState, setPushState] = useState<PushState>('loading')
-  const [hasSubscription, setHasSubscription] = useState(false)
-  const [toggling, setToggling] = useState(false)
-  const [toggleError, setToggleError] = useState<string | null>(null)
-
-  const refreshState = useCallback(async () => {
-    try {
-      const state = await getPushSubscriptionState()
-      setPushState(state)
-      setHasSubscription(await hasActivePushSubscription())
-    } catch (err) {
-      setToggleError(err instanceof Error ? err.message : 'Unable to read notification state')
-      setPushState((prev) => (prev === 'loading' ? 'default' : prev))
-    }
-  }, [])
-
-  useEffect(() => {
-    void refreshState()
-  }, [refreshState])
-
-  async function handleToggle() {
-    setToggling(true)
-    setToggleError(null)
-    try {
-      if (hasSubscription) {
-        const ok = await unsubscribeFromPush()
-        if (ok) setHasSubscription(false)
-        else setToggleError('Failed to disable notifications')
-      } else {
-        const result = await subscribeToPush()
-        if (result.ok) {
-          setHasSubscription(true)
-        } else {
-          setToggleError(result.error || 'Failed to enable notifications')
-        }
-      }
-      await refreshState()
-    } catch (err) {
-      setToggleError(err instanceof Error ? err.message : 'Unexpected error')
-    } finally {
-      setToggling(false)
-    }
-  }
-
-  if (pushState === 'loading') return null
-
-  if (pushState === 'unsupported') {
-    return (
-      <div className="space-y-1.5 pt-2">
-        <SectionDivider title="Push Notifications" />
-        <p className="text-xs text-text-tertiary">Push notifications are not supported in this browser.</p>
-      </div>
-    )
-  }
-
-  if (pushState === 'denied') {
-    return (
-      <div className="space-y-1.5 pt-2">
-        <SectionDivider title="Push Notifications" />
-        <div className="flex items-center gap-2 text-xs text-signal-amber">
-          <BellOff className="h-4 w-4 shrink-0" />
-          <span>Notifications blocked. To re-enable, update this site&apos;s notification permission in your browser settings.</span>
-        </div>
-      </div>
-    )
-  }
-
-  return (
-    <div className="space-y-1.5 pt-2">
-      <SectionDivider title="Push Notifications" />
-      <div className="flex items-center justify-between">
-        <div className="flex items-center gap-2 text-xs text-text-secondary">
-          {hasSubscription ? <Bell className="h-4 w-4 text-signal-green" /> : <BellOff className="h-4 w-4" />}
-          <span>{hasSubscription ? 'Notifications enabled' : 'Notifications disabled'}</span>
-        </div>
-        <Button type="button" variant={hasSubscription ? 'outline' : 'default'} size="sm" disabled={toggling} onClick={handleToggle}>
-          {toggling ? 'Updating...' : hasSubscription ? 'Disable' : 'Enable'}
-        </Button>
-      </div>
-      {toggleError && (
-        <p className="text-xs text-signal-red">{toggleError}</p>
-      )}
-      <p className="text-xs text-text-tertiary">Receive browser notifications when someone mentions you in a comment.</p>
-    </div>
-  )
-}
-
-export function ProfileForm({ onSaved, onAdminLogin }: ProfileFormProps) {
-  const { isAdmin } = useAuth()
-  const [initialUsername] = useState(getUsername)
+export function ProfileForm({ onSaved, readOnlyUsername }: ProfileFormProps) {
+  const { username: authUsername } = useAuth()
+  const [initialUsername] = useState(() => readOnlyUsername && authUsername ? authUsername : getUsername())
   const [username, setUsernameValue] = useState(initialUsername)
-  const [apiKey, setApiKey] = useState('')
-  const [showApiKey, setShowApiKey] = useState(false)
-  const [apiKeyError, setApiKeyError] = useState<string | null>(null)
+  const [rotating, setRotating] = useState(false)
+  const [rotateError, setRotateError] = useState<string | null>(null)
+  const [newApiKey, setNewApiKey] = useState('')
+  const [keyCopied, setKeyCopied] = useState(false)
   const [githubToken, setGithubTokenValue] = useState(getGithubToken())
   const [jiraEmail, setJiraEmailValue] = useState(getJiraEmail())
   const [jiraToken, setJiraTokenValue] = useState(getJiraToken())
-  const [showGithubToken, setShowGithubToken] = useState(false)
-  const [showJiraToken, setShowJiraToken] = useState(false)
   const [validatingGithub, setValidatingGithub] = useState(false)
   const [validatingJira, setValidatingJira] = useState(false)
   const [githubValidation, setGithubValidation] = useState<TokenValidationResult | null>(null)
@@ -244,19 +92,27 @@ export function ProfileForm({ onSaved, onAdminLogin }: ProfileFormProps) {
     await hydrateTokensFromServer({ gh: githubToken, je: jiraEmail, jt: jiraToken })
   }
 
+  async function handleRotateKey() {
+    setRotating(true)
+    setRotateError(null)
+    setNewApiKey('')
+    try {
+      const result = await api.post<{ new_api_key: string }>('/api/auth/rotate-key')
+      setNewApiKey(result.new_api_key)
+    } catch (err) {
+      setRotateError(err instanceof Error ? err.message : 'Failed to rotate key')
+    } finally {
+      setRotating(false)
+    }
+  }
+
   async function handleSubmit(e: FormEvent) {
     e.preventDefault()
     const trimmed = username.trim()
-    if (!trimmed) return
+    if (!readOnlyUsername && !trimmed) return
 
-    if (trimmed.toLowerCase() === 'admin' && !apiKey.trim()) {
-      setUsernameError("The username 'admin' is reserved")
-      return
-    }
     setUsernameError(null)
-
     setSaving(true)
-    setApiKeyError(null)
 
     async function commitProfile(trimmedUsername: string) {
       setUsername(trimmedUsername)
@@ -268,28 +124,6 @@ export function ProfileForm({ onSaved, onAdminLogin }: ProfileFormProps) {
       setJiraEmail(je)
       setJiraToken(jt)
       await persistTokensToServer(gh, je, jt)
-    }
-
-    // Try admin login if API key is provided
-    if (apiKey.trim() && onAdminLogin) {
-      try {
-        await onAdminLogin(trimmed, apiKey.trim())
-        // Admin login succeeded — also save the username cookie
-        await commitProfile(trimmed)
-        // Re-fetch tokens from server before navigating away (onSaved unmounts the component)
-        await refreshTokensFromServer()
-        setSaving(false)
-        await onSaved()
-        return
-      } catch (err) {
-        setSaving(false)
-        if (err instanceof ApiError && err.status === 401) {
-          setApiKeyError('Invalid username or API key')
-        } else {
-          setApiKeyError('Login failed — please try again')
-        }
-        return
-      }
     }
 
     const needsGithubValidation = githubToken.trim() && (!githubValidation || !githubValidation.valid)
@@ -306,11 +140,14 @@ export function ProfileForm({ onSaved, onAdminLogin }: ProfileFormProps) {
       if (needsJiraValidation && results[1] === false) { setSaving(false); return }
     }
 
-    await commitProfile(trimmed)
-    // Re-fetch tokens from server before navigating away (onSaved unmounts the component)
-    await refreshTokensFromServer()
-    setSaving(false)
-    await onSaved()
+    try {
+      await commitProfile(trimmed)
+      // Re-fetch tokens from server before navigating away (onSaved unmounts the component)
+      await refreshTokensFromServer()
+      await onSaved()
+    } finally {
+      setSaving(false)
+    }
   }
 
   async function validateToken(
@@ -353,116 +190,86 @@ export function ProfileForm({ onSaved, onAdminLogin }: ProfileFormProps) {
           {/* Username field */}
           <div className="space-y-1.5">
             <label
-              htmlFor="username"
+              htmlFor={readOnlyUsername ? undefined : 'username'}
               className="block font-display text-xs font-medium uppercase tracking-widest text-text-secondary"
             >
               Username
             </label>
-            <Input
-              id="username"
-              value={username}
-              onChange={(e) => { setUsernameValue(e.target.value); setUsernameError(null) }}
-              placeholder="e.g. jdoe"
-              autoFocus
-              autoComplete="username"
-              className="h-10 font-mono"
-            />
+            {readOnlyUsername ? (
+              <div className="flex h-10 items-center rounded-md border border-border-default bg-surface-elevated px-3">
+                <span className="font-mono text-sm text-text-primary">{username}</span>
+              </div>
+            ) : (
+              <Input
+                id="username"
+                value={username}
+                onChange={(e) => { setUsernameValue(e.target.value); setUsernameError(null) }}
+                placeholder="e.g. jdoe"
+                autoFocus
+                autoComplete="username"
+                className="h-10 font-mono"
+              />
+            )}
             {usernameError && (
               <p className="text-xs text-signal-red">{usernameError}</p>
             )}
           </div>
 
-          {onAdminLogin && (
+          {readOnlyUsername && (
             <>
-              {/* Admin Authentication Divider */}
-              <SectionDivider title="Admin Authentication" />
-              <p className="text-xs text-text-tertiary">
-                Provide your API key for admin access. Leave empty for regular user access.
-              </p>
-
-              {/* API Key field */}
-              <TokenField
-                id="api-key"
-                label="API Key"
-                value={apiKey}
-                onChange={(v) => { setApiKey(v); setApiKeyError(null) }}
-                show={showApiKey}
-                onToggleShow={() => setShowApiKey(!showApiKey)}
-                validation={null}
-                error={apiKeyError}
-                placeholder={isAdmin ? 'Authenticated ✓' : 'Enter API key...'}
-                helpContent={
-                  isAdmin && !apiKey.trim()
-                    ? <span className="inline-flex items-center gap-1 text-signal-green"><ShieldCheck className="h-3 w-3" />Authenticated as admin</span>
-                    : <>Admin API key provided by your server administrator.</>
-                }
-              />
+              <SectionDivider title="API Key" />
+              {newApiKey ? (
+                <div className="space-y-3">
+                  <div className="rounded-lg border border-signal-orange/30 bg-signal-orange/10 p-4">
+                    <p className="text-sm font-medium text-signal-orange">⚠️ Save this API key — you won't see it again!</p>
+                    <p className="mt-1 text-xs text-text-tertiary">Your old key has been invalidated. Use this new key to log in.</p>
+                  </div>
+                  <div className="flex items-center gap-2 rounded-md bg-surface-elevated p-3">
+                    <code className="flex-1 font-mono text-sm text-text-primary break-all select-all">{newApiKey}</code>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      onClick={async () => {
+                        try {
+                          await navigator.clipboard.writeText(newApiKey)
+                          setKeyCopied(true)
+                          setTimeout(() => setKeyCopied(false), 2000)
+                        } catch { /* clipboard not available */ }
+                      }}
+                    >
+                      {keyCopied ? 'Copied!' : 'Copy'}
+                    </Button>
+                  </div>
+                </div>
+              ) : (
+                <div className="space-y-2">
+                  <p className="text-xs text-text-tertiary">
+                    Generate a new API key. Your current key and all sessions will be invalidated.
+                  </p>
+                  <Button type="button" variant="outline" className="w-full" disabled={rotating} onClick={handleRotateKey}>
+                    {rotating ? 'Rotating...' : 'Rotate API Key'}
+                  </Button>
+                  {rotateError && (
+                    <p className="text-xs text-signal-red">{rotateError}</p>
+                  )}
+                </div>
+              )}
             </>
           )}
 
-          {/* Tracker Tokens Divider */}
-          <SectionDivider title="Tracker Tokens" />
-          <p className="text-xs text-text-tertiary">
-            Provide your personal tokens to create issues and bugs directly
-            under your name. Without tokens, you can still preview generated
-            content but cannot submit.
-          </p>
-
-          {/* GitHub Token field */}
-          <TokenField
-            id="github-token"
-            label="GitHub Token"
-            value={githubToken}
-            onChange={(v) => { setGithubTokenValue(v); setGithubValidation(null) }}
-            show={showGithubToken}
-            onToggleShow={() => setShowGithubToken(!showGithubToken)}
-            validation={githubValidation}
-            placeholder="ghp_..."
-            helpContent={<>Personal Access Token with{' '}<code className="text-text-secondary">repo</code> scope.{' '}<a href="https://github.com/settings/tokens" target="_blank" rel="noopener noreferrer" className="text-text-link hover:underline">Generate token →</a></>}
+          <TrackerTokensFields
+            githubToken={githubToken}
+            onGithubTokenChange={(v) => { setGithubTokenValue(v); setGithubValidation(null) }}
+            jiraEmail={jiraEmail}
+            onJiraEmailChange={(v) => { setJiraEmailValue(v); setJiraValidation(null) }}
+            jiraToken={jiraToken}
+            onJiraTokenChange={(v) => { setJiraTokenValue(v); setJiraValidation(null) }}
+            githubValidation={githubValidation}
+            jiraValidation={jiraValidation}
           />
 
-          {/* Jira Email + Token fields */}
-          <div className="space-y-1.5">
-            <label
-              htmlFor="jira-email"
-              className="block font-display text-xs font-medium uppercase tracking-widest text-text-secondary"
-            >
-              Jira Email{' '}
-              <span className="text-text-tertiary font-normal normal-case tracking-normal">
-                (optional)
-              </span>
-            </label>
-            <Input
-              id="jira-email"
-              type="email"
-              value={jiraEmail}
-              onChange={(e) => {
-                setJiraEmailValue(e.target.value)
-                setJiraValidation(null)
-              }}
-              placeholder="e.g. jdoe@company.com"
-              autoComplete="email"
-              className="h-10 font-mono"
-            />
-            <p className="text-xs text-text-tertiary">
-              Required for Jira Cloud authentication. Use the same email as
-              your Atlassian account.
-            </p>
-          </div>
-
-          <TokenField
-            id="jira-token"
-            label="Jira Token"
-            value={jiraToken}
-            onChange={(v) => { setJiraTokenValue(v); setJiraValidation(null) }}
-            show={showJiraToken}
-            onToggleShow={() => setShowJiraToken(!showJiraToken)}
-            validation={jiraValidation}
-            placeholder="Token..."
-            helpContent={<>Jira Cloud: API token from{' '}<a href="https://id.atlassian.com/manage-profile/security/api-tokens" target="_blank" rel="noopener noreferrer" className="text-text-link hover:underline">Atlassian account →</a>{' '}· Jira Server/DC: Personal Access Token</>}
-          />
-
-          <Button type="submit" className="w-full" disabled={!username.trim() || saving || validatingGithub || validatingJira || !tokensLoaded}>
+          <Button type="submit" className="w-full" disabled={(!readOnlyUsername && !username.trim()) || saving || validatingGithub || validatingJira || !tokensLoaded}>
             {saving ? 'Saving...' : 'Save'}
           </Button>
           </fieldset>

@@ -91,6 +91,76 @@ def mock_client():
         yield client
 
 
+class TestRegisterCommand:
+    def test_register_command(self, mock_client):
+        mock_client.register.return_value = {
+            "username": "testuser",
+            "api_key": "rootcoz_abc123",  # pragma: allowlist secret
+        }
+        result = runner.invoke(app, ["register", "testuser"])
+        assert result.exit_code == 0
+        assert "rootcoz_abc123" in result.output
+        assert "Save this API key" in result.output
+        mock_client.register.assert_called_once_with(username="testuser")
+
+    def test_register_command_missing_api_key(self, mock_client):
+        mock_client.register.return_value = {
+            "username": "testuser",
+        }
+        result = runner.invoke(app, ["register", "testuser"])
+        assert result.exit_code == 1
+        assert "failed" in result.output.lower() or "error" in result.output.lower()
+
+    def test_register_command_json(self, mock_client):
+        mock_client.register.return_value = {
+            "username": "testuser",
+            "api_key": "rootcoz_abc123",  # pragma: allowlist secret
+        }
+        result = runner.invoke(app, ["--json", "register", "testuser"])
+        assert result.exit_code == 0
+        parsed = json.loads(result.output)
+        assert parsed["username"] == "testuser"
+        assert parsed["api_key"] == "rootcoz_abc123"  # pragma: allowlist secret
+
+    def test_register_command_error(self, mock_client):
+        mock_client.register.side_effect = RootCozError(
+            status_code=400, detail="Username 'admin' is reserved"
+        )
+        result = runner.invoke(app, ["register", "admin"])
+        assert result.exit_code == 1
+        assert "400" in result.output or "reserved" in result.output
+
+
+class TestRotateKeyCommand:
+    def test_rotate_key_command(self, mock_client):
+        mock_client.rotate_key.return_value = {
+            "username": "testuser",
+            "new_api_key": "rootcoz_newkey123",  # pragma: allowlist secret
+        }
+        result = runner.invoke(app, ["auth", "rotate-key"])
+        assert result.exit_code == 0
+        assert "rootcoz_newkey123" in result.output
+        assert "Save this API key" in result.output
+        mock_client.rotate_key.assert_called_once()
+
+    def test_rotate_key_command_json(self, mock_client):
+        mock_client.rotate_key.return_value = {
+            "username": "testuser",
+            "new_api_key": "rootcoz_newkey123",  # pragma: allowlist secret
+        }
+        result = runner.invoke(app, ["--json", "auth", "rotate-key"])
+        assert result.exit_code == 0
+        parsed = json.loads(result.output)
+        assert parsed["new_api_key"] == "rootcoz_newkey123"  # pragma: allowlist secret
+
+    def test_rotate_key_missing_key_in_response(self, mock_client):
+        mock_client.rotate_key.return_value = {
+            "username": "testuser",
+        }
+        result = runner.invoke(app, ["auth", "rotate-key"])
+        assert result.exit_code == 1
+
+
 class TestHealthCommand:
     def test_health(self, mock_client):
         mock_client.health.return_value = {"status": "healthy"}

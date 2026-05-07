@@ -223,6 +223,7 @@ def _make_sse_stream(
 
     async def event_generator():
         my_event = asyncio.Event()
+        wait_task: asyncio.Task | None = None
 
         # Register
         if per_key_listeners is not None:
@@ -234,13 +235,15 @@ def _make_sse_stream(
             while True:
                 my_event.clear()
                 try:
+                    wait_task = asyncio.create_task(my_event.wait())
                     done, pending = await asyncio.wait(
-                        [asyncio.create_task(my_event.wait())],
+                        [wait_task],
                         timeout=30,
                         return_when=asyncio.FIRST_COMPLETED,
                     )
                     for task in pending:
                         task.cancel()
+                    wait_task = None
                 except asyncio.CancelledError:
                     break
 
@@ -254,6 +257,8 @@ def _make_sse_stream(
                 if my_event.is_set():
                     yield f"event: {event_name}\ndata: refresh\n\n"
         finally:
+            if wait_task is not None:
+                wait_task.cancel()
             if per_key_listeners is not None:
                 bucket = per_key_listeners.get(listener_key)
                 if bucket is not None:
@@ -891,13 +896,22 @@ def _set_username_cookie(response: Response, username: str, *, secure: bool) -> 
 
 
 class AuthMiddleware(BaseHTTPMiddleware):
-    """Authenticate requests: admin via session/Bearer, regular users via cookie."""
+    """Authenticate all requests via session cookie, Bearer token, or trusted SSO header.
+
+    All users (admin and regular) must authenticate. The rootcoz_username
+    cookie is for display/tracking only — it does not grant API access.
+    SSO deployments (trust_proxy_headers) use X-Forwarded-User as an
+    alternative to API key authentication.
+    """
 
     _PUBLIC_PATHS = frozenset(
         {
             "/register",
             "/health",
             "/api/health",
+            "/api/auth/register",
+            "/api/auth/login",
+            "/api/auth/needs-key",
             "/metrics",
             "/favicon.ico",
             "/sw.js",
@@ -947,8 +961,9 @@ class AuthMiddleware(BaseHTTPMiddleware):
         is_admin = False
         username = ""
         authenticated_admin = False
+        has_valid_session = False
 
-        # 1. Check session cookie (rootcoz_session) — admin session
+        # 1. Check session cookie (rootcoz_session) — user or admin session
         session_token = _read_cookie(request, "rootcoz_session")
         if session_token:
             session = await storage.get_session(session_token)
@@ -956,6 +971,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
                 is_admin = bool(session["is_admin"])
                 username = str(session["username"])
                 authenticated_admin = is_admin
+                has_valid_session = True
 
                 # Renew session (sliding window) — only when <50% TTL remains
                 expires_at_str = session.get("expires_at", "")
@@ -990,10 +1006,12 @@ class AuthMiddleware(BaseHTTPMiddleware):
                     is_admin = True
                     username = "admin"
                     authenticated_admin = True
+                    has_valid_session = True
                 else:
                     user = await storage.get_user_by_key(token)
                     if user:
                         username = str(user["username"])
+                        has_valid_session = True
                         if user.get("role") == "admin":
                             is_admin = True
                             authenticated_admin = True
@@ -1002,6 +1020,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
         if not username and proxy_username:
             if proxy_username.lower() != "admin":
                 username = proxy_username
+                has_valid_session = True
                 # Flag that we need to set the rootcoz_username cookie on the response
                 request.state.set_proxy_cookie = proxy_username
 
@@ -1017,8 +1036,8 @@ class AuthMiddleware(BaseHTTPMiddleware):
         request.state.is_admin = is_admin
         request.state.role = "admin" if is_admin else "user"
 
-        # Track user activity (update last_seen for all users)
-        if username:
+        # Track user activity only for authenticated identities
+        if has_valid_session and username:
             task = asyncio.create_task(_safe_track_user(username))
             _background_tasks.add(task)
             task.add_done_callback(_background_tasks.discard)
@@ -1030,11 +1049,17 @@ class AuthMiddleware(BaseHTTPMiddleware):
                     status_code=403, content={"detail": "Admin access required"}
                 )
 
-        # Redirect to /register if no username for browser HTML requests (keep existing behavior)
-        if not username and not path.startswith("/api/"):
+        # Require authentication for all non-public, non-optional paths
+        if not has_valid_session and path not in self._PUBLIC_PATHS:
             accept = request.headers.get("accept", "")
-            if "text/html" in accept:
+            if "text/html" in accept and not path.startswith("/api/"):
                 return RedirectResponse(url="/register", status_code=303)
+            return JSONResponse(
+                status_code=401,
+                content={
+                    "detail": "Authentication required. Please log in with your API key."
+                },
+            )
 
         response = await call_next(request)
 
@@ -4231,21 +4256,26 @@ async def stream_navbar_counts(request: Request) -> StreamingResponse:
                     last_unread = 0
                     yield "event: unread-count\ndata: 0\n\n"
 
+            active_wait_tasks: list[asyncio.Task] = []
             while True:
                 # Wait for either event or timeout
-                wait_tasks = [asyncio.create_task(active_event.wait())]
+                active_wait_tasks = [asyncio.create_task(active_event.wait())]
                 if mention_event is not None:
-                    wait_tasks.append(asyncio.create_task(mention_event.wait()))
+                    active_wait_tasks.append(asyncio.create_task(mention_event.wait()))
 
                 try:
                     done, pending = await asyncio.wait(
-                        wait_tasks, timeout=30, return_when=asyncio.FIRST_COMPLETED
+                        active_wait_tasks,
+                        timeout=30,
+                        return_when=asyncio.FIRST_COMPLETED,
                     )
                     for task in pending:
                         task.cancel()
+                    active_wait_tasks = []
                 except asyncio.CancelledError:
-                    for task in wait_tasks:
+                    for task in active_wait_tasks:
                         task.cancel()
+                    active_wait_tasks = []
                     break
 
                 if not done:
@@ -4280,6 +4310,9 @@ async def stream_navbar_counts(request: Request) -> StreamingResponse:
                             "Failed to fetch unread count for SSE", exc_info=True
                         )
         finally:
+            # Cancel any pending wait tasks on disconnect
+            for task in active_wait_tasks:
+                task.cancel()
             # Cleanup: remove per-connection events
             _active_count_listeners.discard(active_event)
             if username and mention_event is not None:
@@ -4977,6 +5010,169 @@ async def auth_me(request: Request) -> JSONResponse:
     )
 
 
+@app.post("/api/auth/rotate-key")
+async def rotate_own_key_endpoint(request: Request) -> JSONResponse:
+    """Rotate the current user's API key. Returns the new key (shown once).
+
+    The old key and all sessions are invalidated immediately.
+    """
+    _check_allow_list(request)
+    username = request.state.username
+    if not username:
+        raise HTTPException(status_code=401, detail="Authentication required")
+    if username == "admin":
+        raise HTTPException(
+            status_code=400,
+            detail="Bootstrap admin cannot rotate key via this endpoint. Use ADMIN_KEY env var.",
+        )
+
+    try:
+        new_key = await storage.rotate_own_key(username)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    # Create a new session for the user so they stay logged in
+    is_admin = request.state.is_admin
+    session_token = await storage.create_session(username, is_admin=is_admin)
+    settings = get_settings()
+
+    response = JSONResponse(
+        content={"username": username, "new_api_key": new_key},
+        headers={
+            "Cache-Control": "no-store, no-cache, must-revalidate",
+            "Pragma": "no-cache",
+        },
+    )
+    response.set_cookie(
+        "rootcoz_session",
+        session_token,
+        httponly=True,
+        samesite="strict",
+        secure=settings.secure_cookies,
+        max_age=storage.SESSION_TTL_SECONDS,
+    )
+
+    logger.info(f"[AUDIT] User '{username}' rotated their own API key")
+    return response
+
+
+@app.post("/api/auth/register")
+async def register_user(request: Request) -> JSONResponse:
+    """Register a new user or generate API key for existing user without one.
+
+    Returns the generated API key (shown once).
+    """
+    body = await _read_json_object(request)
+    raw_username = body.get("username", "")
+    if not isinstance(raw_username, str):
+        raise HTTPException(status_code=400, detail="Username must be a string")
+    username = raw_username.strip()
+    if not username:
+        raise HTTPException(status_code=400, detail="Username is required")
+
+    settings = get_settings()
+    allowed = settings.allowed_users_set
+    if allowed and username.lower() not in allowed:
+        raise HTTPException(
+            status_code=403, detail="Registration is restricted. Contact an admin."
+        )
+
+    try:
+        _, raw_key = await storage.create_user(username)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    # Create a session for the user
+    session_token = await storage.create_session(username, is_admin=False)
+
+    response = JSONResponse(
+        content={
+            "username": username,
+            "api_key": raw_key,
+            "role": "user",
+            "is_admin": False,
+            "message": "Save this API key \u2014 you won't see it again.",
+        },
+        headers={
+            "Cache-Control": "no-store, no-cache, must-revalidate",
+            "Pragma": "no-cache",
+        },
+    )
+    response.set_cookie(
+        "rootcoz_session",
+        session_token,
+        httponly=True,
+        samesite="strict",
+        secure=settings.secure_cookies,
+        max_age=storage.SESSION_TTL_SECONDS,
+    )
+    # Clear legacy session cookie after migration
+    response.delete_cookie(
+        "jji_session",
+        httponly=True,
+        samesite="strict",
+        secure=settings.secure_cookies,
+    )
+    response.set_cookie(
+        "rootcoz_username",
+        username,
+        samesite="lax",
+        secure=settings.secure_cookies,
+        max_age=365 * 24 * 60 * 60,
+    )
+    response.delete_cookie("jji_username", path="/")
+
+    logger.info(f"[AUDIT] User registered: {username}")
+    return response
+
+
+@app.get("/api/auth/needs-key")
+async def check_needs_key(request: Request) -> JSONResponse:
+    """Check if the current user needs to generate an API key.
+
+    Uses session or cookie username to determine if the user needs registration.
+    This is a public endpoint — does not require authentication.
+    """
+    cache_headers = {
+        "Cache-Control": "no-store, no-cache, must-revalidate",
+        "Pragma": "no-cache",
+    }
+
+    # Try session first (authenticated identity)
+    session_token = _read_cookie(request, "rootcoz_session")
+    if session_token:
+        session = await storage.get_session(session_token)
+        if session:
+            return JSONResponse(
+                content={"needs_key": False, "username": str(session["username"])},
+                headers=cache_headers,
+            )
+
+    # Check trusted proxy header (SSO)
+    settings = get_settings()
+    if settings.trust_proxy_headers:
+        proxy_user = request.headers.get("x-forwarded-user", "").strip()
+        if proxy_user and proxy_user.lower() != "admin":
+            return JSONResponse(
+                content={"needs_key": False, "username": proxy_user},
+                headers=cache_headers,
+            )
+
+    # Fall back to cookie username (for migration — user may need a key)
+    cookie_username = _read_cookie(request, "rootcoz_username")
+    if cookie_username and cookie_username.lower() != "admin":
+        has_key = await storage.user_has_key(cookie_username)
+        return JSONResponse(
+            content={"needs_key": not has_key, "username": cookie_username},
+            headers=cache_headers,
+        )
+
+    return JSONResponse(
+        content={"needs_key": True, "username": ""},
+        headers=cache_headers,
+    )
+
+
 # --- User token endpoints ---
 
 
@@ -5112,7 +5308,7 @@ async def create_admin_user_endpoint(request: Request) -> JSONResponse:
 
 @app.delete("/api/admin/users/{username}")
 async def delete_admin_user_endpoint(request: Request, username: str) -> dict:
-    """Delete an admin user."""
+    """Delete a user. Bootstrap admin (ADMIN_KEY) is always available as fallback."""
     _require_admin(request)
     if username == request.state.username:
         raise HTTPException(status_code=400, detail="Cannot delete your own account")
@@ -5122,13 +5318,9 @@ async def delete_admin_user_endpoint(request: Request, username: str) -> dict:
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     if not deleted:
-        raise HTTPException(
-            status_code=404, detail=f"Admin user '{username}' not found"
-        )
+        raise HTTPException(status_code=404, detail=f"User '{username}' not found")
 
-    logger.info(
-        f"[AUDIT] Admin '{request.state.username}' deleted admin user '{username}'"
-    )
+    logger.info(f"[AUDIT] Admin '{request.state.username}' deleted user '{username}'")
     return {"deleted": username}
 
 
@@ -5136,8 +5328,9 @@ async def delete_admin_user_endpoint(request: Request, username: str) -> dict:
 async def change_user_role_endpoint(request: Request, username: str) -> JSONResponse:
     """Change a user's role (promote to admin or demote to user).
 
-    When promoting to admin, an API key is generated and returned.
-    When demoting to user, the API key is removed and sessions invalidated.
+    When promoting to admin, an API key is generated and returned only if
+    the user doesn't already have one.
+    When demoting to user, the existing API key is preserved.
     """
     _require_admin(request)
     if username == request.state.username:
@@ -5179,7 +5372,7 @@ async def list_users_endpoint(request: Request) -> dict:
 
 @app.post("/api/admin/users/{username}/rotate-key")
 async def rotate_key_endpoint(request: Request, username: str) -> JSONResponse:
-    """Rotate an admin user's API key."""
+    """Rotate a user's API key. Works for both admin and regular users."""
     _require_admin(request)
     try:
         body_bytes = await request.body()
@@ -5199,19 +5392,30 @@ async def rotate_key_endpoint(request: Request, username: str) -> JSONResponse:
             status_code=400, detail=f"Invalid JSON body: {exc}"
         ) from exc
 
+    # Try admin key rotation first (supports custom keys)
     try:
         new_key = await storage.rotate_admin_key(username, custom_key=custom_key)
     except ValueError as exc:
         detail = str(exc)
-        status = 404 if "not found" in detail.lower() else 400
-        raise HTTPException(status_code=status, detail=detail) from exc
+        # If the user is not an admin, try rotating as regular user
+        if "not found" in detail.lower() and not custom_key:
+            try:
+                new_key = await storage.rotate_user_key(username)
+            except ValueError as user_exc:
+                raise HTTPException(status_code=404, detail=str(user_exc)) from user_exc
+        else:
+            status = 404 if "not found" in detail.lower() else 400
+            raise HTTPException(status_code=status, detail=detail) from exc
 
     logger.info(
         f"[AUDIT] Admin '{request.state.username}' rotated key for '{username}'"
     )
     return JSONResponse(
         content={"username": username, "new_api_key": new_key},
-        headers={"Cache-Control": "no-store"},
+        headers={
+            "Cache-Control": "no-store, no-cache, must-revalidate",
+            "Pragma": "no-cache",
+        },
     )
 
 

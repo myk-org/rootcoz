@@ -6,7 +6,7 @@ from unittest.mock import patch
 import pytest
 
 from ai_cli_runner import AIResult
-from rootcoz.models import AiConfigEntry, TestFailure
+from rootcoz.models import AiConfigEntry, FailedTest
 
 
 # ---------------------------------------------------------------------------
@@ -18,8 +18,8 @@ def _make_failure(
     test_name: str = "com.example.TestClass.testMethod",
     error_message: str = "AssertionError: expected true",
     stack_trace: str = "at com.example.TestClass.testMethod(TestClass.java:42)",
-) -> TestFailure:
-    return TestFailure(
+) -> FailedTest:
+    return FailedTest(
         test_name=test_name,
         error_message=error_message,
         stack_trace=stack_trace,
@@ -37,7 +37,6 @@ async def _run_peer_analysis(
     """Helper to run analyze_failure_group_with_peers with mocked CLI."""
     from unittest.mock import AsyncMock
 
-    from rootcoz.models import AiConfigEntry, TestFailure
     from rootcoz.peer_analysis import analyze_failure_group_with_peers
 
     monkeypatch.setattr(
@@ -51,7 +50,7 @@ async def _run_peer_analysis(
 
     return await analyze_failure_group_with_peers(
         failures=[
-            TestFailure(test_name="test_foo", error_message="err", stack_trace="trace")
+            FailedTest(test_name="test_foo", error_message="err", stack_trace="trace")
         ],
         console_context="console output",
         repo_path=None,

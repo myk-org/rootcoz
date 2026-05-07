@@ -34,6 +34,8 @@ def mock_settings(temp_db_path: Path):
         "JENKINS_USER": "testuser",
         "JENKINS_PASSWORD": "testpassword",  # pragma: allowlist secret
         "DB_PATH": str(temp_db_path),
+        "ADMIN_KEY": "test-admin-key-16chars",  # pragma: allowlist secret
+        "ROOTCOZ_ENCRYPTION_KEY": "test-encryption-key-for-hmac",  # pragma: allowlist secret
     }
     with patch.dict(os.environ, env, clear=True):
         from rootcoz.config import get_settings
@@ -54,6 +56,12 @@ def test_client(mock_settings, temp_db_path: Path):
         from rootcoz.main import app
 
         with TestClient(app) as client:
+            # Pre-register testuser so tests can use sessions
+            resp = client.post("/api/auth/register", json={"username": "testuser"})
+            assert resp.status_code == 200
+            # Store session for use by tests but don't set on client
+            # (tests that need auth will set cookies themselves)
+            client._test_session = resp.cookies.get("rootcoz_session")
             yield client
 
 
@@ -238,7 +246,7 @@ class TestGetMentionsEndpoint:
             await storage.init_db()
             await _add_comment(temp_db_path, "Hey @testuser look", username="bob")
 
-        test_client.cookies.set("rootcoz_username", "testuser")
+        test_client.cookies.set("rootcoz_session", test_client._test_session)
         response = test_client.get("/api/users/mentions")
         assert response.status_code == 200
         data = response.json()
@@ -258,7 +266,7 @@ class TestGetMentionsEndpoint:
         """unread_only query flag is forwarded to storage as True."""
         with patch.object(storage, "DB_PATH", temp_db_path):
             await storage.init_db()
-        test_client.cookies.set("rootcoz_username", "testuser")
+        test_client.cookies.set("rootcoz_session", test_client._test_session)
         with patch.object(
             storage,
             "get_mentions_for_user",
@@ -280,7 +288,7 @@ class TestMarkReadEndpoint:
             await storage.init_db()
             cid = await _add_comment(temp_db_path, "Hey @testuser", username="bob")
 
-        test_client.cookies.set("rootcoz_username", "testuser")
+        test_client.cookies.set("rootcoz_session", test_client._test_session)
         response = test_client.post(
             "/api/users/mentions/read",
             json={"comment_ids": [cid]},
@@ -291,7 +299,7 @@ class TestMarkReadEndpoint:
 
     async def test_mark_read_rejects_empty_list(self, test_client) -> None:
         """POST with empty comment_ids returns 400."""
-        test_client.cookies.set("rootcoz_username", "testuser")
+        test_client.cookies.set("rootcoz_session", test_client._test_session)
         response = test_client.post(
             "/api/users/mentions/read",
             json={"comment_ids": []},
@@ -301,7 +309,7 @@ class TestMarkReadEndpoint:
 
     async def test_mark_read_rejects_non_int(self, test_client) -> None:
         """POST with non-integer comment_ids returns 400."""
-        test_client.cookies.set("rootcoz_username", "testuser")
+        test_client.cookies.set("rootcoz_session", test_client._test_session)
         response = test_client.post(
             "/api/users/mentions/read",
             json={"comment_ids": ["abc"]},
@@ -313,7 +321,7 @@ class TestMarkReadEndpoint:
         """POST with boolean comment_ids returns 400."""
         with patch.object(storage, "DB_PATH", temp_db_path):
             await storage.init_db()
-        test_client.cookies.set("rootcoz_username", "testuser")
+        test_client.cookies.set("rootcoz_session", test_client._test_session)
         response = test_client.post(
             "/api/users/mentions/read",
             json={"comment_ids": [True, 2]},
@@ -338,7 +346,7 @@ class TestMarkReadEndpoint:
             # Comment mentions @other, NOT @testuser
             cid = await _add_comment(temp_db_path, "Hey @other look", username="bob")
 
-        test_client.cookies.set("rootcoz_username", "testuser")
+        test_client.cookies.set("rootcoz_session", test_client._test_session)
         # Marking succeeds (INSERT OR IGNORE) but creates a junk row
         response = test_client.post(
             "/api/users/mentions/read",
@@ -416,7 +424,7 @@ class TestMarkAllReadEndpoint:
             await _add_comment(temp_db_path, "Hey @testuser one", username="bob")
             await _add_comment(temp_db_path, "Hey @testuser two", username="charlie")
 
-        test_client.cookies.set("rootcoz_username", "testuser")
+        test_client.cookies.set("rootcoz_session", test_client._test_session)
         response = test_client.post("/api/users/mentions/read-all")
         assert response.status_code == 200
         data = response.json()
@@ -434,14 +442,14 @@ class TestGetMentionsEndpointValidation:
 
     async def test_invalid_offset(self, test_client) -> None:
         """Non-numeric offset returns 400."""
-        test_client.cookies.set("rootcoz_username", "testuser")
+        test_client.cookies.set("rootcoz_session", test_client._test_session)
         response = test_client.get("/api/users/mentions?offset=abc")
         assert response.status_code == 400
         test_client.cookies.clear()
 
     async def test_invalid_limit(self, test_client) -> None:
         """Non-numeric limit returns 400."""
-        test_client.cookies.set("rootcoz_username", "testuser")
+        test_client.cookies.set("rootcoz_session", test_client._test_session)
         response = test_client.get("/api/users/mentions?limit=xyz")
         assert response.status_code == 400
         test_client.cookies.clear()
@@ -452,7 +460,7 @@ class TestGetMentionsEndpointValidation:
         """Negative offset is clamped to 0."""
         with patch.object(storage, "DB_PATH", temp_db_path):
             await storage.init_db()
-        test_client.cookies.set("rootcoz_username", "testuser")
+        test_client.cookies.set("rootcoz_session", test_client._test_session)
         with patch.object(
             storage,
             "get_mentions_for_user",
@@ -469,7 +477,7 @@ class TestGetMentionsEndpointValidation:
         """Limit > 200 is clamped to 200."""
         with patch.object(storage, "DB_PATH", temp_db_path):
             await storage.init_db()
-        test_client.cookies.set("rootcoz_username", "testuser")
+        test_client.cookies.set("rootcoz_session", test_client._test_session)
         with patch.object(
             storage,
             "get_mentions_for_user",
@@ -510,7 +518,7 @@ class TestUnreadCountEndpoint:
             await storage.init_db()
             await _add_comment(temp_db_path, "Hey @testuser", username="bob")
 
-        test_client.cookies.set("rootcoz_username", "testuser")
+        test_client.cookies.set("rootcoz_session", test_client._test_session)
         response = test_client.get("/api/users/mentions/unread-count")
         assert response.status_code == 200
         assert response.json()["count"] == 1

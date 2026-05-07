@@ -7,6 +7,7 @@ interface AuthState {
   isAdmin: boolean
   role: string
   loading: boolean
+  authenticated: boolean
   login: (username: string, apiKey: string) => Promise<void>
   logout: () => Promise<void>
   refreshAuth: () => Promise<void>
@@ -31,6 +32,15 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [isAdmin, setIsAdminState] = useState(getIsAdmin())
   const [role, setRoleState] = useState('user')
   const [loading, setLoading] = useState(true)
+  const [authenticated, setAuthenticated] = useState(false)
+
+  function clearPrivileges() {
+    setIsAdminState(false)
+    setRoleState('user')
+    setIsAdmin(false)
+    setRole('user')
+    setAuthenticated(false)
+  }
 
   const refreshAuth = useCallback(async () => {
     try {
@@ -43,16 +53,22 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       if (me.username) {
         setUsername(me.username)
       }
+      setAuthenticated(true)
       await syncTokensFromServer(me.username)
-    } catch {
-      // Any error means no valid admin session — fall back to cookie identity
-      const cookieUsername = getUsername()
-      setUsernameState(cookieUsername)
-      setIsAdminState(false)
-      setRoleState('user')
-      setIsAdmin(false)
-      setRole('user')
-      await syncTokensFromServer(cookieUsername)
+    } catch (err) {
+      // 401 means not authenticated — clear identity and require login
+      if (err instanceof ApiError && err.status === 401) {
+        clearPrivileges()
+        setUsernameState('')
+        clearTokens()
+        clearUsername()
+      } else {
+        // Network/server errors — fall back to cookie identity for display only
+        clearPrivileges()
+        const cookieUsername = getUsername()
+        setUsernameState(cookieUsername)
+        await syncTokensFromServer(cookieUsername)
+      }
     } finally {
       setLoading(false)
     }
@@ -73,6 +89,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setUsername(result.username)
     setIsAdmin(result.is_admin)
     setRole(result.role)
+    setAuthenticated(true)
+    await syncTokensFromServer(result.username)
   }, [])
 
   const logout = useCallback(async () => {
@@ -81,10 +99,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     } catch {
       // ignore
     }
-    setIsAdminState(false)
-    setRoleState('user')
-    setIsAdmin(false)
-    setRole('user')
+    clearPrivileges()
     clearTokens()
     clearUsername()
     // Reset username state to empty
@@ -92,7 +107,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, [])
 
   return (
-    <AuthContext.Provider value={{ username, isAdmin, role, loading, login, logout, refreshAuth }}>
+    <AuthContext.Provider value={{ username, isAdmin, role, loading, authenticated, login, logout, refreshAuth }}>
       {children}
     </AuthContext.Provider>
   )

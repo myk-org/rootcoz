@@ -16,6 +16,8 @@ def _rp_disabled_env():
         "JENKINS_PASSWORD": "testpassword",  # pragma: allowlist secret
         "AI_PROVIDER": "claude",
         "AI_MODEL": "test-model",
+        "ADMIN_KEY": "test-admin-key-16chars",  # pragma: allowlist secret
+        "ROOTCOZ_ENCRYPTION_KEY": "test-encryption-key-for-hmac",  # pragma: allowlist secret
     }
     with patch.dict(os.environ, env, clear=True):
         from rootcoz.config import get_settings
@@ -38,6 +40,8 @@ def _rp_enabled_env():
         "REPORTPORTAL_API_TOKEN": "rp-token",  # pragma: allowlist secret
         "REPORTPORTAL_PROJECT": "my-project",
         "PUBLIC_BASE_URL": "https://rootcoz.example.com",
+        "ADMIN_KEY": "test-admin-key-16chars",  # pragma: allowlist secret
+        "ROOTCOZ_ENCRYPTION_KEY": "test-encryption-key-for-hmac",  # pragma: allowlist secret
     }
     with patch.dict(os.environ, env, clear=True):
         from rootcoz.config import get_settings
@@ -53,7 +57,11 @@ class TestPushReportPortalEndpoint:
     def test_returns_400_when_rp_disabled(self, _rp_disabled_env):
         from rootcoz.main import app
 
-        client = TestClient(app, raise_server_exceptions=False)
+        client = TestClient(
+            app,
+            raise_server_exceptions=False,
+            headers={"Authorization": "Bearer test-admin-key-16chars"},
+        )
         response = client.post("/results/some-job-id/push-reportportal")
         assert response.status_code == 400
         detail = response.json()["detail"].lower()
@@ -64,7 +72,11 @@ class TestPushReportPortalEndpoint:
         mock_get_result.return_value = None
         from rootcoz.main import app
 
-        client = TestClient(app, raise_server_exceptions=False)
+        client = TestClient(
+            app,
+            raise_server_exceptions=False,
+            headers={"Authorization": "Bearer test-admin-key-16chars"},
+        )
         response = client.post("/results/nonexistent-id/push-reportportal")
         assert response.status_code == 404
 
@@ -91,7 +103,11 @@ class TestPushReportPortalEndpoint:
 
         from rootcoz.main import app
 
-        client = TestClient(app, raise_server_exceptions=False)
+        client = TestClient(
+            app,
+            raise_server_exceptions=False,
+            headers={"Authorization": "Bearer test-admin-key-16chars"},
+        )
         response = client.post("/results/corrupt-job/push-reportportal")
         assert response.status_code == 422
         assert "validation error" in response.json()["detail"].lower()
@@ -143,7 +159,11 @@ class TestPushReportPortalEndpoint:
 
         from rootcoz.main import app
 
-        client = TestClient(app, raise_server_exceptions=False)
+        client = TestClient(
+            app,
+            raise_server_exceptions=False,
+            headers={"Authorization": "Bearer test-admin-key-16chars"},
+        )
         response = client.post("/results/some-job-id/push-reportportal")
         assert response.status_code == 200, f"Response: {response.text}"
         data = response.json()
@@ -199,7 +219,11 @@ class TestPushReportPortalEndpoint:
 
         from rootcoz.main import app
 
-        client = TestClient(app, raise_server_exceptions=False)
+        client = TestClient(
+            app,
+            raise_server_exceptions=False,
+            headers={"Authorization": "Bearer test-admin-key-16chars"},
+        )
         response = client.post("/results/some-job-id/push-reportportal")
         assert response.status_code == 200, f"Response: {response.text}"
         # Verify push_classifications was called with INFRASTRUCTURE in history_classifications
@@ -248,7 +272,11 @@ class TestPushReportPortalEndpoint:
 
         from rootcoz.main import app
 
-        client = TestClient(app, raise_server_exceptions=False)
+        client = TestClient(
+            app,
+            raise_server_exceptions=False,
+            headers={"Authorization": "Bearer test-admin-key-16chars"},
+        )
         response = client.post("/results/some-job-id/push-reportportal")
         assert response.status_code == 200
         data = response.json()
@@ -299,7 +327,11 @@ class TestPushReportPortalEndpoint:
 
             from rootcoz.main import app
 
-            client = TestClient(app, raise_server_exceptions=False)
+            client = TestClient(
+                app,
+                raise_server_exceptions=False,
+                headers={"Authorization": "Bearer test-admin-key-16chars"},
+            )
             client.post("/results/some-job/push-reportportal")
 
             # Verify verify_ssl=False was passed
@@ -365,7 +397,11 @@ class TestPushReportPortalEndpoint:
 
         from rootcoz.main import app
 
-        client = TestClient(app, raise_server_exceptions=False)
+        client = TestClient(
+            app,
+            raise_server_exceptions=False,
+            headers={"Authorization": "Bearer test-admin-key-16chars"},
+        )
         response = client.post(
             "/results/some-job-id/push-reportportal",
             params={"child_job_name": "child-job", "child_build_number": 42},
@@ -394,7 +430,11 @@ class TestPushReportPortalEndpoint:
 
         from rootcoz.main import app
 
-        client = TestClient(app, raise_server_exceptions=False)
+        client = TestClient(
+            app,
+            raise_server_exceptions=False,
+            headers={"Authorization": "Bearer test-admin-key-16chars"},
+        )
         response = client.post(
             "/results/some-job-id/push-reportportal",
             params={"child_job_name": "nonexistent", "child_build_number": 99},
@@ -459,7 +499,11 @@ class TestPushReportPortalEndpoint:
 
         from rootcoz.main import app
 
-        client = TestClient(app, raise_server_exceptions=False)
+        client = TestClient(
+            app,
+            raise_server_exceptions=False,
+            headers={"Authorization": "Bearer test-admin-key-16chars"},
+        )
         response = client.post(
             "/results/some-job-id/push-reportportal",
             params={"child_job_name": "child-job", "child_build_number": 10},
@@ -535,7 +579,11 @@ class TestPushReportPortalEndpoint:
 
         from rootcoz.main import app
 
-        client = TestClient(app, raise_server_exceptions=False)
+        client = TestClient(
+            app,
+            raise_server_exceptions=False,
+            headers={"Authorization": "Bearer test-admin-key-16chars"},
+        )
         response = client.post(
             "/results/some-job-id/push-reportportal",
             params={"child_job_name": "nested-child", "child_build_number": 5},
@@ -587,7 +635,11 @@ class TestRPPushHTTPErrors:
 
         from rootcoz.main import app
 
-        client = TestClient(app, raise_server_exceptions=False)
+        client = TestClient(
+            app,
+            raise_server_exceptions=False,
+            headers={"Authorization": "Bearer test-admin-key-16chars"},
+        )
         response = client.post("/results/job1/push-reportportal")
         assert response.status_code == 200
         body = response.json()
@@ -623,7 +675,11 @@ class TestRPPushHTTPErrors:
 
         from rootcoz.main import app
 
-        client = TestClient(app, raise_server_exceptions=False)
+        client = TestClient(
+            app,
+            raise_server_exceptions=False,
+            headers={"Authorization": "Bearer test-admin-key-16chars"},
+        )
         response = client.post("/results/job2/push-reportportal")
         assert response.status_code == 200
         body = response.json()
@@ -668,7 +724,11 @@ class TestRPPushHTTPErrors:
 
         from rootcoz.main import app
 
-        client = TestClient(app, raise_server_exceptions=False)
+        client = TestClient(
+            app,
+            raise_server_exceptions=False,
+            headers={"Authorization": "Bearer test-admin-key-16chars"},
+        )
         response = client.post("/results/job1/push-reportportal")
         assert response.status_code == 200
         body = response.json()
@@ -708,7 +768,11 @@ class TestRPPushHTTPErrors:
 
         from rootcoz.main import app
 
-        client = TestClient(app, raise_server_exceptions=False)
+        client = TestClient(
+            app,
+            raise_server_exceptions=False,
+            headers={"Authorization": "Bearer test-admin-key-16chars"},
+        )
         response = client.post("/results/job2/push-reportportal")
         assert response.status_code == 200
         body = response.json()
@@ -756,7 +820,11 @@ class TestRPPushHTTPErrors:
 
         from rootcoz.main import app
 
-        client = TestClient(app, raise_server_exceptions=False)
+        client = TestClient(
+            app,
+            raise_server_exceptions=False,
+            headers={"Authorization": "Bearer test-admin-key-16chars"},
+        )
         response = client.post("/results/job1/push-reportportal")
         assert response.status_code == 200
 
@@ -801,7 +869,11 @@ class TestRPPushHTTPErrors:
 
         from rootcoz.main import app
 
-        client = TestClient(app, raise_server_exceptions=False)
+        client = TestClient(
+            app,
+            raise_server_exceptions=False,
+            headers={"Authorization": "Bearer test-admin-key-16chars"},
+        )
         response = client.post("/results/job2/push-reportportal")
         assert response.status_code == 200
 
@@ -855,7 +927,11 @@ class TestRPPushHTTPErrors:
 
         from rootcoz.main import app
 
-        client = TestClient(app, raise_server_exceptions=False)
+        client = TestClient(
+            app,
+            raise_server_exceptions=False,
+            headers={"Authorization": "Bearer test-admin-key-16chars"},
+        )
         response = client.post("/results/job3/push-reportportal")
         assert response.status_code == 200
 
@@ -903,7 +979,11 @@ class TestRPPushHTTPErrors:
 
         from rootcoz.main import app
 
-        client = TestClient(app, raise_server_exceptions=False)
+        client = TestClient(
+            app,
+            raise_server_exceptions=False,
+            headers={"Authorization": "Bearer test-admin-key-16chars"},
+        )
         response = client.post("/results/job1/push-reportportal")
         assert response.status_code == 200
         body = response.json()
@@ -948,7 +1028,11 @@ class TestRPPushHTTPErrors:
 
         from rootcoz.main import app
 
-        client = TestClient(app, raise_server_exceptions=False)
+        client = TestClient(
+            app,
+            raise_server_exceptions=False,
+            headers={"Authorization": "Bearer test-admin-key-16chars"},
+        )
         response = client.post("/results/job3/push-reportportal")
         assert response.status_code == 200
         body = response.json()
@@ -989,7 +1073,11 @@ class TestRPPushEarlyGuard:
 
         from rootcoz.main import app
 
-        client = TestClient(app, raise_server_exceptions=False)
+        client = TestClient(
+            app,
+            raise_server_exceptions=False,
+            headers={"Authorization": "Bearer test-admin-key-16chars"},
+        )
         response = client.post("/results/job1/push-reportportal")
         assert response.status_code == 200
         body = response.json()
@@ -1013,7 +1101,11 @@ class TestRPPushEarlyGuard:
 
         from rootcoz.main import app
 
-        client = TestClient(app, raise_server_exceptions=False)
+        client = TestClient(
+            app,
+            raise_server_exceptions=False,
+            headers={"Authorization": "Bearer test-admin-key-16chars"},
+        )
         response = client.post("/results/job1/push-reportportal")
         assert response.status_code == 200
         body = response.json()
@@ -1058,7 +1150,11 @@ class TestRPPushEarlyGuard:
 
         from rootcoz.main import app
 
-        client = TestClient(app, raise_server_exceptions=False)
+        client = TestClient(
+            app,
+            raise_server_exceptions=False,
+            headers={"Authorization": "Bearer test-admin-key-16chars"},
+        )
         response = client.post(
             "/results/some-job-id/push-reportportal",
             params={"child_job_name": "child-job", "child_build_number": 42},
@@ -1102,7 +1198,11 @@ class TestRPPushDebugLogging:
 
         from rootcoz.main import app
 
-        client = TestClient(app, raise_server_exceptions=False)
+        client = TestClient(
+            app,
+            raise_server_exceptions=False,
+            headers={"Authorization": "Bearer test-admin-key-16chars"},
+        )
         response = client.post("/results/job1/push-reportportal")
         assert response.status_code == 200
         assert response.json()["pushed"] == 0
@@ -1138,7 +1238,11 @@ class TestRPPushDebugLogging:
 
         from rootcoz.main import app
 
-        client = TestClient(app, raise_server_exceptions=False)
+        client = TestClient(
+            app,
+            raise_server_exceptions=False,
+            headers={"Authorization": "Bearer test-admin-key-16chars"},
+        )
         response = client.post("/results/job2/push-reportportal")
         assert response.status_code == 200
         assert response.json()["pushed"] == 0
@@ -1156,7 +1260,11 @@ class TestCapabilitiesEndpoint:
     def test_capabilities_includes_rp_disabled(self, _rp_disabled_env):
         from rootcoz.main import app
 
-        client = TestClient(app, raise_server_exceptions=False)
+        client = TestClient(
+            app,
+            raise_server_exceptions=False,
+            headers={"Authorization": "Bearer test-admin-key-16chars"},
+        )
         response = client.get("/api/capabilities")
         assert response.status_code == 200
         data = response.json()
@@ -1167,7 +1275,11 @@ class TestCapabilitiesEndpoint:
     def test_capabilities_includes_rp_enabled(self, _rp_enabled_env):
         from rootcoz.main import app
 
-        client = TestClient(app, raise_server_exceptions=False)
+        client = TestClient(
+            app,
+            raise_server_exceptions=False,
+            headers={"Authorization": "Bearer test-admin-key-16chars"},
+        )
         response = client.get("/api/capabilities")
         assert response.status_code == 200
         data = response.json()
@@ -1318,7 +1430,11 @@ class TestRpPushErrorResult:
 
         from rootcoz.main import app
 
-        client = TestClient(app, raise_server_exceptions=False)
+        client = TestClient(
+            app,
+            raise_server_exceptions=False,
+            headers={"Authorization": "Bearer test-admin-key-16chars"},
+        )
         response = client.post("/results/job1/push-reportportal")
         assert response.status_code == 200
         body = response.json()
@@ -1354,7 +1470,11 @@ class TestRpPushErrorResult:
 
         from rootcoz.main import app
 
-        client = TestClient(app, raise_server_exceptions=False)
+        client = TestClient(
+            app,
+            raise_server_exceptions=False,
+            headers={"Authorization": "Bearer test-admin-key-16chars"},
+        )
         response = client.post("/results/job1/push-reportportal")
         body = response.json()
         assert "searching RP launches" in body["errors"][0]
@@ -1388,7 +1508,11 @@ class TestRpPushErrorResult:
 
         from rootcoz.main import app
 
-        client = TestClient(app, raise_server_exceptions=False)
+        client = TestClient(
+            app,
+            raise_server_exceptions=False,
+            headers={"Authorization": "Bearer test-admin-key-16chars"},
+        )
         response = client.post("/results/job1/push-reportportal")
         body = response.json()
         assert "No Report Portal launch found." in body["errors"][0]
@@ -1427,7 +1551,11 @@ class TestRpPushErrorResult:
 
         from rootcoz.main import app
 
-        client = TestClient(app, raise_server_exceptions=False)
+        client = TestClient(
+            app,
+            raise_server_exceptions=False,
+            headers={"Authorization": "Bearer test-admin-key-16chars"},
+        )
         response = client.post("/results/job1/push-reportportal")
         body = response.json()
         assert "fetching failed items" in body["errors"][0]
@@ -1463,7 +1591,11 @@ class TestRpPushErrorResult:
 
         from rootcoz.main import app
 
-        client = TestClient(app, raise_server_exceptions=False)
+        client = TestClient(
+            app,
+            raise_server_exceptions=False,
+            headers={"Authorization": "Bearer test-admin-key-16chars"},
+        )
         response = client.post("/results/job1/push-reportportal")
         body = response.json()
         assert "matching RP items" in body["errors"][0]
@@ -1501,7 +1633,11 @@ class TestRpPushErrorResult:
 
         from rootcoz.main import app
 
-        client = TestClient(app, raise_server_exceptions=False)
+        client = TestClient(
+            app,
+            raise_server_exceptions=False,
+            headers={"Authorization": "Bearer test-admin-key-16chars"},
+        )
         response = client.post("/results/job1/push-reportportal")
         body = response.json()
         assert "No overlap" in body["errors"][0]
@@ -1546,7 +1682,11 @@ class TestRpPushErrorResult:
 
         from rootcoz.main import app
 
-        client = TestClient(app, raise_server_exceptions=False)
+        client = TestClient(
+            app,
+            raise_server_exceptions=False,
+            headers={"Authorization": "Bearer test-admin-key-16chars"},
+        )
         response = client.post("/results/job1/push-reportportal")
         body = response.json()
         assert "pushing classifications" in body["errors"][0]
@@ -1576,7 +1716,11 @@ class TestRpPushErrorResult:
 
         from rootcoz.main import app
 
-        client = TestClient(app, raise_server_exceptions=False)
+        client = TestClient(
+            app,
+            raise_server_exceptions=False,
+            headers={"Authorization": "Bearer test-admin-key-16chars"},
+        )
         response = client.post("/results/job1/push-reportportal")
         body = response.json()
         assert "connecting to Report Portal" in body["errors"][0]

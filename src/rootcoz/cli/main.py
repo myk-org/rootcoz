@@ -98,6 +98,19 @@ def _handle_error(err: RootCozError) -> None:
     raise typer.Exit(code=1)
 
 
+def _echo_api_key_warning(api_key: str) -> None:
+    """Print the one-time API key save warning."""
+    typer.echo("\n\u26a0\ufe0f  Save this API key \u2014 you won't see it again!")
+    typer.echo(f"API Key: {api_key}")
+
+
+def _require_api_key(key: str, action: str = "Operation") -> None:
+    """Exit with error if API key is missing from response."""
+    if not key:
+        typer.echo(f"Error: {action} succeeded but no API key was returned.", err=True)
+        raise typer.Exit(1)
+
+
 def _run_client_command(
     json_output: bool,
     request_fn,
@@ -236,7 +249,7 @@ def main_callback(
         "",
         "--api-key",
         envvar="ROOTCOZ_API_KEY",
-        help="Admin API key for Bearer token authentication.",
+        help="API key for Bearer token authentication (user or admin).",
     ),
     no_verify_ssl: bool | None = typer.Option(
         None,
@@ -291,6 +304,27 @@ def main_callback(
         _state["api_key"] = cfg.api_key
     else:
         _state["api_key"] = ""
+
+
+# -- Register -----------------------------------------------------------------
+
+
+@app.command()
+def register(
+    username: str = typer.Argument(help="Username to register."),
+    json_output: bool = _JSON_OPTION,
+):
+    """Register a new user and get an API key."""
+    result = _run_client_command(
+        json_output,
+        lambda c: c.register(username=username),
+        emit_output=False,
+    )
+    api_key = result.get("api_key", "")
+    _require_api_key(api_key, "Registration")
+    if not _state.get("json", False):
+        typer.echo(f"Registered: {result.get('username', username)}")
+        _echo_api_key_warning(api_key)
 
 
 # -- Health -------------------------------------------------------------------
@@ -1964,11 +1998,11 @@ def analyze_comment_intent_cmd(
 
 @auth_app.command("login")
 def auth_login(
-    username: str = typer.Option(..., "--username", "-u", help="Admin username."),
-    api_key: str = typer.Option(..., "--api-key", "-k", help="Admin API key."),
+    username: str = typer.Option(..., "--username", "-u", help="Username."),
+    api_key: str = typer.Option(..., "--api-key", "-k", help="API key."),
     json_output: bool = _JSON_OPTION,
 ):
-    """Validate admin credentials. This does not persist a session.
+    """Validate credentials. This does not persist a session.
 
     For persistent auth, set api_key in ~/.config/rootcoz/config.toml or use
     --api-key / ROOTCOZ_API_KEY on each command.
@@ -1984,6 +2018,23 @@ def auth_login(
         typer.echo(
             f"Logged in as {data.get('username', username)} (role: {role}, admin: {is_admin})"
         )
+
+
+@auth_app.command("rotate-key")
+def auth_rotate_key(
+    json_output: bool = _JSON_OPTION,
+):
+    """Rotate your own API key. The new key is shown once \u2014 save it."""
+    result = _run_client_command(
+        json_output,
+        lambda c: c.rotate_key(),
+        emit_output=False,
+    )
+    new_key = result.get("new_api_key", "")
+    _require_api_key(new_key, "Key rotation")
+    if not _state.get("json", False):
+        typer.echo(f"Key rotated for: {result.get('username', '')}")
+        _echo_api_key_warning(new_key)
 
 
 @auth_app.command("logout")
@@ -2043,13 +2094,11 @@ def admin_users_create(
         lambda c: c.admin_create_user(username),
         emit_output=False,
     )
+    api_key = data.get("api_key", "")
+    _require_api_key(api_key, "User creation")
     if not _state.get("json", False):
         typer.echo(f"Created admin user: {data.get('username', username)}")
-        typer.echo(f"API Key: {data.get('api_key', '(not returned)')}")
-        typer.echo("")
-        typer.echo(
-            "\u26a0\ufe0f  Save this API key now \u2014 it cannot be retrieved later."
-        )
+        _echo_api_key_warning(api_key)
 
 
 @admin_users_app.command("delete")
@@ -2087,13 +2136,11 @@ def admin_users_rotate_key(
         lambda c: c.admin_rotate_key(username),
         emit_output=False,
     )
+    new_key = data.get("new_api_key", "")
+    _require_api_key(new_key, "Key rotation")
     if not _state.get("json", False):
         typer.echo(f"Rotated API key for: {data.get('username', username)}")
-        typer.echo(f"New API Key: {data.get('new_api_key', '(not returned)')}")
-        typer.echo("")
-        typer.echo(
-            "\u26a0\ufe0f  Save this API key now \u2014 it cannot be retrieved later."
-        )
+        _echo_api_key_warning(new_key)
 
 
 @admin_users_app.command("change-role")
@@ -2112,11 +2159,7 @@ def admin_users_change_role(
         typer.echo(f"Changed role of '{data.get('username', username)}' to '{role}'")
         api_key = data.get("api_key")
         if api_key:
-            typer.echo(f"API Key: {api_key}")
-            typer.echo("")
-            typer.echo(
-                "\u26a0\ufe0f  Save this API key now \u2014 it cannot be retrieved later."
-            )
+            _echo_api_key_warning(api_key)
 
 
 # -- Token Usage (Admin) ------------------------------------------------------

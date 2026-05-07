@@ -11,6 +11,10 @@ from ai_cli_runner import AIResult
 from rootcoz import storage
 from tests.conftest import build_test_env
 
+_ADMIN_AUTH_HEADERS = {
+    "Authorization": "Bearer test-admin-key-16chars"
+}  # pragma: allowlist secret
+
 
 @pytest.fixture
 def _mock_settings(temp_db_path: Path):
@@ -39,7 +43,7 @@ def client(_mock_settings, temp_db_path: Path):
 
         from rootcoz.main import app
 
-        with TestClient(app) as c:
+        with TestClient(app, headers=_ADMIN_AUTH_HEADERS) as c:
             yield c
 
 
@@ -202,7 +206,7 @@ class TestAnalyzeCommentIntentJobFallback:
 
             from rootcoz.main import app
 
-            with TestClient(app) as c:
+            with TestClient(app, headers=_ADMIN_AUTH_HEADERS) as c:
                 yield c
 
     @staticmethod
@@ -320,7 +324,7 @@ class TestAnalyzeCommentIntentJobFallback:
 
             from rootcoz.main import app
 
-            with TestClient(app) as client_env:
+            with TestClient(app, headers=_ADMIN_AUTH_HEADERS) as client_env:
                 with patch(
                     "ai_cli_runner.call_ai_cli", return_value=ai_response
                 ) as mock_ai:

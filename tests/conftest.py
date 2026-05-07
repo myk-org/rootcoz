@@ -34,6 +34,8 @@ def build_test_env(**overrides: str) -> dict[str, str]:
         "JENKINS_URL": "https://jenkins.example.com",
         "JENKINS_USER": "testuser",
         "JENKINS_PASSWORD": "testpassword",  # pragma: allowlist secret
+        "ADMIN_KEY": "test-admin-key-16chars",  # pragma: allowlist secret
+        "ROOTCOZ_ENCRYPTION_KEY": "test-encryption-key-for-hmac",  # pragma: allowlist secret
     }
     base.update(overrides)
     return base

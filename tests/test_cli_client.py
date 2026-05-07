@@ -1321,6 +1321,37 @@ class TestRootCozClientPushReportPortal:
         assert exc_info.value.status_code == 400
 
 
+class TestRootCozClientRegister:
+    def test_register(self):
+        def handler(request):
+            assert request.method == "POST"
+            assert request.url.path == "/api/auth/register"
+            body = json.loads(request.content)
+            assert body["username"] == "testuser"
+            return httpx.Response(
+                200,
+                json={
+                    "username": "testuser",
+                    "api_key": "rootcoz_test123",  # pragma: allowlist secret
+                },
+            )
+
+        client = _make_client(handler)
+        result = client.register(username="testuser")
+        assert result["username"] == "testuser"
+        assert result["api_key"] == "rootcoz_test123"  # pragma: allowlist secret
+
+    def test_register_error(self):
+        client = _make_client(
+            lambda request: httpx.Response(
+                400, json={"detail": "Username 'admin' is reserved"}
+            )
+        )
+        with pytest.raises(RootCozError) as exc_info:
+            client.register(username="admin")
+        assert exc_info.value.status_code == 400
+
+
 class TestRootCozClientAuth:
     def test_login(self):
         def handler(request):

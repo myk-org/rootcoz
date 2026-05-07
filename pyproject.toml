@@ -42,6 +42,19 @@ build-backend = "hatchling.build"
 asyncio_mode = "auto"
 testpaths = ["tests"]
 pythonpath = ["src"]
+filterwarnings = [
+    # aiosqlite worker threads race with event loop teardown — not fixable in user code
+    "ignore:Exception in thread.*_connection_worker_thread:pytest.PytestUnhandledThreadExceptionWarning",
+    # AsyncMock coroutines collected by GC during teardown — pytest-asyncio/unittest.mock interaction
+    "ignore:coroutine.*AsyncMockMixin.*was never awaited:RuntimeWarning",
+    # Starlette per-request cookies= deprecation — API still works, migrate when removed
+    "ignore:Setting per-request cookies=:DeprecationWarning",
+    # PytestCollectionWarning suppressed by renaming TestFailure → FailedTest; keep filter
+    # in case other Pydantic models accidentally use Test* prefix in the future
+    "ignore::pytest.PytestCollectionWarning",
+    # Async transport cleanup during parallel test teardown
+    "ignore:unclosed transport:ResourceWarning",
+]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/rootcoz"]

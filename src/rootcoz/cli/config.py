@@ -61,8 +61,8 @@ class ServerConfig:
     max_wait_minutes: int = 0  # 0 means use server default
     # Force analysis on successful builds
     force: bool | None = None
-    # Admin authentication
-    api_key: str = ""  # Admin API key for authentication
+    # Authentication
+    api_key: str = ""  # API key for authentication (user or admin)
 
 
 def _validate_section_server_field(

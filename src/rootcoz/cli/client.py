@@ -110,13 +110,25 @@ class RootCozClient:
 
     # -- Auth -----------------------------------------------------------------
 
+    def register(self, username: str) -> dict:
+        """Register a new user and get an API key. POST /api/auth/register"""
+        return self._request(
+            "POST",
+            "/api/auth/register",
+            json={"username": username},
+        )
+
     def login(self, username: str, api_key: str) -> dict:
-        """Login as admin. POST /api/auth/login"""
+        """Login with username and API key. POST /api/auth/login"""
         return self._request(
             "POST",
             "/api/auth/login",
             json={"username": username, "api_key": api_key},
         )
+
+    def rotate_key(self) -> dict:
+        """Rotate the current user's API key. POST /api/auth/rotate-key"""
+        return self._request("POST", "/api/auth/rotate-key")
 
     def logout(self) -> dict:
         """Logout (clear session). POST /api/auth/logout"""
