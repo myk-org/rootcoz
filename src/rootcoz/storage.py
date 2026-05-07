@@ -2669,6 +2669,9 @@ async def track_user(username: str) -> None:
     """
     if username.lower() == "admin":
         return
+    # Skip invalid usernames (e.g. from malformed cookies)
+    if not re.match(r"^[a-zA-Z0-9][a-zA-Z0-9._-]{1,49}$", username):
+        return
     async with _connect_db() as db:
         await db.execute(
             "INSERT INTO users (username, role) VALUES (?, 'user') "
