@@ -244,7 +244,7 @@ export function BugCreationDialog({
 
   return (
     <Dialog open={open} onOpenChange={handleClose}>
-      <DialogContent hideCloseButton={isBusy} className="max-w-2xl max-h-[85vh] overflow-y-auto">
+      <DialogContent hideCloseButton={isBusy} className="max-w-4xl max-h-[90vh] overflow-y-auto">
         <DialogHeader>
           <DialogTitle>{phase === 'success' ? `${label} Created` : `Create ${label}`}</DialogTitle>
           {phase === 'preview' && <DialogDescription>Review and edit before creating.</DialogDescription>}
@@ -268,7 +268,7 @@ export function BugCreationDialog({
                 id="bug-issue-prompt"
                 value={issuePrompt}
                 onChange={(e) => setIssuePrompt(e.target.value)}
-                rows={6}
+                rows={20}
                 placeholder="Enter a prompt to guide issue generation..."
                 className="font-mono text-xs"
               />
@@ -448,7 +448,7 @@ export function BugCreationDialog({
             </div>
             <div className="space-y-2">
               <label htmlFor="bug-body" className="text-xs font-display uppercase tracking-widest text-text-tertiary">Body</label>
-              <Textarea id="bug-body" value={body} onChange={(e) => setBody(e.target.value)} rows={12} className="font-mono text-xs" />
+              <Textarea id="bug-body" value={body} onChange={(e) => setBody(e.target.value)} rows={20} className="font-mono text-xs" />
             </div>
           </div>
         )}
@@ -484,7 +484,7 @@ export function BugCreationDialog({
           <div className="flex flex-col items-center gap-4 py-8">
             <p className="text-sm text-signal-red">{errorMsg}</p>
             {errorMsg.toLowerCase().includes('token') && errorMsg.toLowerCase().includes('invalid') && (
-              <p className="text-xs text-text-tertiary">You can update your tokens in <a href="/settings" className="text-text-link hover:underline">settings</a>.</p>
+              <p className="text-xs text-text-tertiary">You can update your tokens in <a href="/settings" target="_blank" rel="noopener noreferrer" className="text-text-link hover:underline">settings</a>.</p>
             )}
           </div>
         )}
@@ -493,7 +493,7 @@ export function BugCreationDialog({
           {phase === 'preview' && (
             <>
               {!hasToken && (
-                <p className="text-xs text-text-tertiary">Add a {target === 'github' ? 'GitHub' : 'Jira'} token in <a href="/settings" className="text-text-link hover:underline">settings</a> to create directly.</p>
+                <p className="text-xs text-text-tertiary">Add a {target === 'github' ? 'GitHub' : 'Jira'} token in <a href="/settings" target="_blank" rel="noopener noreferrer" className="text-text-link hover:underline">settings</a> to create directly.</p>
               )}
               <div className="flex gap-2 sm:ml-auto">
                 <Button variant="outline" onClick={() => handleCancel()}>Cancel</Button>

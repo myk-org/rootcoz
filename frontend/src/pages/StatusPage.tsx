@@ -187,17 +187,9 @@ export function StatusPage() {
       if (res.status === 'completed') {
         navigate(`/results/${jobId}`, { replace: true })
       } else if (res.status === 'failed') {
-        if (intervalRef.current) {
-          clearInterval(intervalRef.current)
-          intervalRef.current = null
-        }
         setTerminalErrorKind('failed')
         setError(res.result?.error ?? 'Analysis failed')
       } else if (res.status === 'aborted') {
-        if (intervalRef.current) {
-          clearInterval(intervalRef.current)
-          intervalRef.current = null
-        }
         setTerminalErrorKind('aborted')
         setError(res.result?.error ?? 'Analysis was aborted')
       }
@@ -408,7 +400,7 @@ export function StatusPage() {
                       {terminalErrorTitles[terminalErrorKind] ?? terminalErrorTitles.failed}
                     </h2>
                     <p className="mt-2 text-sm text-signal-red/80 bg-signal-red/10 rounded-md px-3 py-2">
-                      Analysis failed. You can re-analyze or check server logs for details.
+                      {error}
                     </p>
                   </>
                 )
