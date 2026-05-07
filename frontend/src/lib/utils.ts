@@ -74,6 +74,7 @@ export function formatRelativeTime(ts: string | null | undefined): string {
   const now = Date.now()
   const diff = now - parsed.getTime()
   const seconds = Math.floor(diff / 1000)
+  if (seconds < 0) return 'just now'
   if (seconds < 60) return 'just now'
   const minutes = Math.floor(seconds / 60)
   if (minutes < 60) return `${minutes}m ago`
