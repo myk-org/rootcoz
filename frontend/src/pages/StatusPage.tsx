@@ -187,17 +187,9 @@ export function StatusPage() {
       if (res.status === 'completed') {
         navigate(`/results/${jobId}`, { replace: true })
       } else if (res.status === 'failed') {
-        if (intervalRef.current) {
-          clearInterval(intervalRef.current)
-          intervalRef.current = null
-        }
         setTerminalErrorKind('failed')
         setError(res.result?.error ?? 'Analysis failed')
       } else if (res.status === 'aborted') {
-        if (intervalRef.current) {
-          clearInterval(intervalRef.current)
-          intervalRef.current = null
-        }
         setTerminalErrorKind('aborted')
         setError(res.result?.error ?? 'Analysis was aborted')
       }
