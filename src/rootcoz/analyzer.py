@@ -317,7 +317,7 @@ jira_search_keywords rules:
 - Combine component name with the specific failure (e.g. "VM start failure migration", "API timeout authentication")
 - AVOID generic/broad terms alone like "timeout", "failure", "error"
 - Each keyword should be specific enough to narrow Jira search results to relevant bugs
-- Think: "what would someone title a Jira bug for this exact issue?\"
+- Think: "what would someone title a Jira bug for this exact issue?"
 
 If INFRASTRUCTURE:
 {
