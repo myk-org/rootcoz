@@ -23,7 +23,7 @@ import { ConfirmDialog } from '@/components/shared/ConfirmDialog'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Copy, Check, RefreshCw, Trash2, UserPlus, Shield } from 'lucide-react'
 import { Select, SelectTrigger, SelectValue, SelectContent, SelectItem } from '@/components/ui/select'
-import { formatTimestamp } from '@/lib/utils'
+import { formatTimestamp, formatRelativeTime } from '@/lib/utils'
 import type { AdminUser, CreateUserResponse, RotateKeyResponse, ChangeRoleResponse } from '@/types'
 
 function CopyableKey({ label, value }: { label: string; value: string }) {
@@ -58,6 +58,7 @@ export function UsersPage() {
   // Create dialog
   const [createOpen, setCreateOpen] = useState(false)
   const [newUsername, setNewUsername] = useState('')
+  const [newUserRole, setNewUserRole] = useState<'user' | 'admin'>('user')
   const [creating, setCreating] = useState(false)
   const [createError, setCreateError] = useState<string | null>(null)
   const [createdUser, setCreatedUser] = useState<CreateUserResponse | null>(null)
@@ -99,7 +100,9 @@ export function UsersPage() {
     setCreating(true)
     setCreateError(null)
     try {
-      const result = await api.post<CreateUserResponse>('/api/admin/users', { username: trimmed })
+      const result = newUserRole === 'admin'
+        ? await api.post<CreateUserResponse>('/api/admin/users', { username: trimmed })
+        : await api.post<CreateUserResponse>('/api/auth/register', { username: trimmed })
       setCreatedUser(result)
       fetchUsers()
     } catch (err) {
@@ -156,6 +159,7 @@ export function UsersPage() {
   function closeCreateDialog() {
     setCreateOpen(false)
     setNewUsername('')
+    setNewUserRole('user')
     setCreateError(null)
     setCreatedUser(null)
   }
@@ -208,7 +212,7 @@ export function UsersPage() {
         </div>
         <Button onClick={() => setCreateOpen(true)} className="gap-1.5">
           <UserPlus className="h-4 w-4" />
-          Create Admin
+          Add User
         </Button>
       </div>
 
@@ -273,7 +277,7 @@ export function UsersPage() {
                   {formatTimestamp(user.created_at)}
                 </TableCell>
                 <TableCell className="font-mono text-xs text-text-tertiary">
-                  {user.last_seen ? formatTimestamp(user.last_seen) : '—'}
+                  {user.last_seen ? formatRelativeTime(user.last_seen) : '—'}
                 </TableCell>
                 <TableCell className="text-right">
                   {user.username === 'admin' ? (
@@ -335,17 +339,20 @@ export function UsersPage() {
       <Dialog open={createOpen} onOpenChange={(open) => { if (!open) closeCreateDialog() }}>
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>Create Admin User</DialogTitle>
+            <DialogTitle>Add User</DialogTitle>
             <DialogDescription>
-              Create a new admin user. An API key will be generated automatically.
+              Create a new user. Admin users will receive an API key automatically.
             </DialogDescription>
           </DialogHeader>
           {createdUser ? (
             <div className="space-y-4 py-2">
               <p className="text-sm text-text-secondary">
-                Admin user <span className="font-mono font-medium text-text-primary">{createdUser.username}</span> created successfully.
+                {newUserRole === 'admin' ? 'Admin user' : 'User'}{' '}
+                <span className="font-mono font-medium text-text-primary">{createdUser.username}</span> created successfully.
               </p>
-              <CopyableKey label="API Key" value={createdUser.api_key} />
+              {createdUser.api_key && (
+                <CopyableKey label="API Key" value={createdUser.api_key} />
+              )}
             </div>
           ) : (
             <div className="space-y-4 py-2">
@@ -364,6 +371,18 @@ export function UsersPage() {
                 {createError && (
                   <p className="text-xs text-signal-red">{createError}</p>
                 )}
+              </div>
+              <div className="space-y-1.5">
+                <label className="block text-xs font-medium text-text-secondary">Role</label>
+                <Select value={newUserRole} onValueChange={(v) => setNewUserRole(v as 'user' | 'admin')}>
+                  <SelectTrigger className="h-10">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="user">User</SelectItem>
+                    <SelectItem value="admin">Admin</SelectItem>
+                  </SelectContent>
+                </Select>
               </div>
             </div>
           )}
