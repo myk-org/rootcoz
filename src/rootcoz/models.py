@@ -215,6 +215,25 @@ class AnalyzeRequest(BaseAnalysisRequest):
         default=0,
         description="Maximum minutes to wait for job completion (0 = no limit)",
     )
+    tags: list[str] = Field(
+        default_factory=list,
+        description="User tags for categorization (e.g. 'regression', 'flaky')",
+    )
+
+    @field_validator("tags", mode="before")
+    @classmethod
+    def _normalize_tags(cls, v: list) -> list[str]:
+        """Strip, lowercase, deduplicate, remove blanks and reserved system tags."""
+        _SYSTEM_TAGS = {"re-analyze"}
+        seen: set[str] = set()
+        result: list[str] = []
+        for tag in v:
+            t = str(tag).strip().lower()
+            if t and t not in seen and t not in _SYSTEM_TAGS:
+                seen.add(t)
+                result.append(t)
+        return result
+
     jenkins_url: str | None = Field(
         default=None,
         description="Jenkins server URL (overrides JENKINS_URL env var)",
