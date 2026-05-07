@@ -2579,7 +2579,7 @@ async def change_user_role(username: str, new_role: str) -> tuple[str, str]:
 
     When promoting to admin, generates a new API key only if the user
     doesn't already have one.
-    When demoting to user, removes the API key and invalidates sessions.
+    When demoting to user, preserves the existing API key.
 
     Args:
         username: The user to change.
@@ -2639,13 +2639,13 @@ async def change_user_role(username: str, new_role: str) -> tuple[str, str]:
                 await db.execute("ROLLBACK")
                 raise
         else:
-            # Demoting to user — bootstrap admin (ADMIN_KEY) is always
+            # Demoting to user — preserve existing API key so the user
+            # can keep logging in. Bootstrap admin (ADMIN_KEY) is always
             # available as fallback, so no last-admin guard needed.
             await db.execute(
-                "UPDATE users SET role = 'user', api_key_hash = NULL WHERE username = ?",
+                "UPDATE users SET role = 'user' WHERE username = ?",
                 (username,),
             )
-            await db.execute("DELETE FROM sessions WHERE username = ?", (username,))
             await db.commit()
 
             return username, raw_key

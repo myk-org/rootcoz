@@ -5330,7 +5330,7 @@ async def change_user_role_endpoint(request: Request, username: str) -> JSONResp
 
     When promoting to admin, an API key is generated and returned only if
     the user doesn't already have one.
-    When demoting to user, the API key is removed and sessions invalidated.
+    When demoting to user, the existing API key is preserved.
     """
     _require_admin(request)
     if username == request.state.username:

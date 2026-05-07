@@ -376,18 +376,11 @@ class TestBearerTokenAuth:
 class TestChangeUserRole:
     def test_promote_user_to_admin(self, client):
         cookies = _admin_login(client)
-        # Create two admins so we can safely demote one (last-admin guard)
-        client.post(
-            "/api/admin/users", json={"username": "promoteuser"}, cookies=cookies
-        )
-        client.post("/api/admin/users", json={"username": "keeper"}, cookies=cookies)
-        client.put(
-            "/api/admin/users/promoteuser/role",
-            json={"role": "user"},
-            cookies=cookies,
-        )
-        client.delete("/api/admin/users/keeper", cookies=cookies)
-        # Now promote from user to admin
+        # Register a regular user (has API key)
+        reg_resp = client.post("/api/auth/register", json={"username": "promoteuser"})
+        assert reg_resp.status_code == 200
+        old_key = reg_resp.json()["api_key"]
+        # Promote to admin — existing key is preserved, no new key returned
         resp = client.put(
             "/api/admin/users/promoteuser/role",
             json={"role": "admin"},
@@ -397,14 +390,23 @@ class TestChangeUserRole:
         data = resp.json()
         assert data["username"] == "promoteuser"
         assert data["role"] == "admin"
-        assert "api_key" in data  # API key generated on promotion
+        assert "api_key" not in data  # Existing key preserved, no new key
+        # Can still login with the original key (now as admin)
+        login_resp = client.post(
+            "/api/auth/login",
+            json={"username": "promoteuser", "api_key": old_key},
+        )
+        assert login_resp.status_code == 200
+        assert login_resp.json()["is_admin"] is True
 
     def test_demote_admin_to_user(self, client):
         cookies = _admin_login(client)
-        # Create two admins so we can safely demote one (last-admin guard)
-        client.post("/api/admin/users", json={"username": "demoteme"}, cookies=cookies)
-        client.post("/api/admin/users", json={"username": "keeper2"}, cookies=cookies)
-        # Demote to user
+        # Create admin and save their key
+        create_resp = client.post(
+            "/api/admin/users", json={"username": "demoteme"}, cookies=cookies
+        )
+        old_key = create_resp.json()["api_key"]
+        # Demote to user — key should be preserved
         resp = client.put(
             "/api/admin/users/demoteme/role",
             json={"role": "user"},
@@ -413,9 +415,13 @@ class TestChangeUserRole:
         assert resp.status_code == 200
         data = resp.json()
         assert data["role"] == "user"
-        assert "api_key" not in data  # No key for regular users
-        # Clean up
-        client.delete("/api/admin/users/keeper2", cookies=cookies)
+        # Demoted user can still login with their existing key
+        login_resp = client.post(
+            "/api/auth/login",
+            json={"username": "demoteme", "api_key": old_key},
+        )
+        assert login_resp.status_code == 200
+        assert login_resp.json()["is_admin"] is False
 
     def test_demote_last_db_admin_allowed(self, client):
         """Demoting the last DB admin is allowed — bootstrap admin (ADMIN_KEY) is always available."""
