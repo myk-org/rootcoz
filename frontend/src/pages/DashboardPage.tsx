@@ -40,7 +40,6 @@ import { Trash2, MessageSquare, CheckCircle2, GitFork, AlertTriangle, Github } f
 import { useAuth } from '@/lib/auth'
 import { useMetadataOptions, MetadataDropdowns, MetadataLabelChips, MetadataClearButton } from '@/components/shared/MetadataFilterBar'
 import { MetadataBadges } from '@/components/shared/MetadataBadges'
-import { NotificationPrompt } from '@/components/shared/NotificationPrompt'
 import { WhatsNewDialog } from '@/components/shared/WhatsNewDialog'
 
 const STATUS_FILTER_ALL = 'ALL'
@@ -743,7 +742,6 @@ export function DashboardPage() {
           loading={bulkDeleting}
         />
 
-        <NotificationPrompt />
 
         <WhatsNewDialog />
       </div>

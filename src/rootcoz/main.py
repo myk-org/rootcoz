@@ -912,6 +912,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
             "/api/auth/register",
             "/api/auth/login",
             "/api/auth/needs-key",
+            "/api/releases/latest",
             "/metrics",
             "/favicon.ico",
             "/sw.js",
@@ -4828,6 +4829,58 @@ async def prometheus_metrics() -> Response:
         ),
         media_type="text/plain; version=0.0.4; charset=utf-8",
     )
+
+
+# Module-level cache for GitHub release data
+_release_cache: dict = {}
+_RELEASE_CACHE_TTL = 3600  # 1 hour
+
+
+@app.get("/api/releases/latest")
+async def get_latest_release() -> JSONResponse:
+    """Return the latest GitHub release info (cached for 1 hour).
+
+    Used by the What's New dialog. Falls back gracefully if GitHub is unreachable.
+    """
+    now = _time.monotonic()
+    if (
+        _release_cache
+        and now - _release_cache.get("fetched_at", 0) < _RELEASE_CACHE_TTL
+    ):
+        return JSONResponse(content=_release_cache["data"])
+
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.get(
+                "https://api.github.com/repos/myk-org/rootcoz/releases/latest",
+                headers={"Accept": "application/vnd.github.v3+json"},
+            )
+            resp.raise_for_status()
+            release = resp.json()
+            data = {
+                "version": release.get("tag_name", "").lstrip("v"),
+                "name": release.get("name", ""),
+                "body": release.get("body", ""),
+                "published_at": release.get("published_at", ""),
+                "html_url": release.get("html_url", ""),
+            }
+            _release_cache["data"] = data
+            _release_cache["fetched_at"] = now
+            return JSONResponse(content=data)
+    except Exception:  # noqa: BLE001
+        logger.debug("Failed to fetch latest GitHub release", exc_info=True)
+        # Return cached data if available, otherwise empty
+        if _release_cache.get("data"):
+            return JSONResponse(content=_release_cache["data"])
+        return JSONResponse(
+            content={
+                "version": "",
+                "name": "",
+                "body": "",
+                "published_at": "",
+                "html_url": "",
+            },
+        )
 
 
 @app.get("/favicon.ico", include_in_schema=False)

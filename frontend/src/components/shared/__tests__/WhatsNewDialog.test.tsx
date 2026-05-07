@@ -1,53 +1,88 @@
-import { describe, it, expect, beforeEach } from 'vitest'
-import { render, screen } from '@testing-library/react'
+import { describe, it, expect, beforeEach, vi } from 'vitest'
+import { render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { WhatsNewDialog } from '../WhatsNewDialog'
-import changelog from '@/changelog.json'
 
 const LS_KEY = 'rootcoz_last_seen_changelog_version'
 
+const mockRelease = {
+  version: '4.0.1',
+  name: 'v4.0.1',
+  body: '### Bug Fixes\n- **SQLite concurrent access** — Enable WAL mode (#12)\n- **Dark theme scrollbars** — Add global scrollbar CSS (#13)',
+  published_at: '2026-05-04T19:57:51Z',
+  html_url: 'https://github.com/myk-org/rootcoz/releases/tag/v4.0.1',
+}
+
+vi.mock('@/lib/api', () => ({
+  api: {
+    get: vi.fn(),
+  },
+}))
+
 describe('WhatsNewDialog', () => {
-  beforeEach(() => {
+  beforeEach(async () => {
     localStorage.clear()
+    vi.clearAllMocks()
+    const { api } = vi.mocked(await import('@/lib/api'))
+    api.get.mockResolvedValue(mockRelease)
   })
 
-  it('shows the dialog when no version has been seen', () => {
+  it('shows the dialog when version has not been seen', async () => {
     render(<WhatsNewDialog />)
-    expect(screen.getByText("What's New")).toBeInTheDocument()
+    await waitFor(() => {
+      expect(screen.getByText("What's New")).toBeInTheDocument()
+    })
   })
 
-  it('lists all entries from the latest changelog version', () => {
+  it('parses and displays release entries', async () => {
     render(<WhatsNewDialog />)
-    for (const entry of changelog[0].entries) {
-      expect(screen.getByText(entry.title)).toBeInTheDocument()
-    }
+    await waitFor(() => {
+      expect(screen.getByText('SQLite concurrent access')).toBeInTheDocument()
+      expect(screen.getByText('Dark theme scrollbars')).toBeInTheDocument()
+    })
   })
 
-  it('does not show the dialog when the latest version has already been seen', () => {
-    localStorage.setItem(LS_KEY, changelog[0].version)
+  it('does not show when version was already seen', async () => {
+    localStorage.setItem(LS_KEY, '4.0.1')
     render(<WhatsNewDialog />)
+    // Wait a tick for the async effect to run
+    await new Promise(r => setTimeout(r, 50))
     expect(screen.queryByText("What's New")).not.toBeInTheDocument()
   })
 
-  it('shows again for a new version even if a previous version was dismissed', () => {
-    localStorage.setItem(LS_KEY, '0.0.1')
+  it('shows for a new version even if a previous version was dismissed', async () => {
+    localStorage.setItem(LS_KEY, '3.2.0')
     render(<WhatsNewDialog />)
-    expect(screen.getByText("What's New")).toBeInTheDocument()
+    await waitFor(() => {
+      expect(screen.getByText("What's New")).toBeInTheDocument()
+    })
   })
 
-  it('dismisses without saving version when "Got it" is clicked without checkbox', async () => {
+  it('saves version when "Don\'t show again" is checked', async () => {
     const user = userEvent.setup()
     render(<WhatsNewDialog />)
+    await waitFor(() => {
+      expect(screen.getByText("What's New")).toBeInTheDocument()
+    })
+    await user.click(screen.getByRole('checkbox'))
     await user.click(screen.getByRole('button', { name: /got it/i }))
-    expect(screen.queryByText("What's New")).not.toBeInTheDocument()
+    expect(localStorage.getItem(LS_KEY)).toBe('4.0.1')
+  })
+
+  it('does not save version when dismissed without checkbox', async () => {
+    const user = userEvent.setup()
+    render(<WhatsNewDialog />)
+    await waitFor(() => {
+      expect(screen.getByText("What's New")).toBeInTheDocument()
+    })
+    await user.click(screen.getByRole('button', { name: /got it/i }))
     expect(localStorage.getItem(LS_KEY)).toBeNull()
   })
 
-  it('saves the version to localStorage when "Don\'t show again" is checked before dismissing', async () => {
-    const user = userEvent.setup()
+  it('shows link to full release notes', async () => {
     render(<WhatsNewDialog />)
-    await user.click(screen.getByRole('checkbox'))
-    await user.click(screen.getByRole('button', { name: /got it/i }))
-    expect(localStorage.getItem(LS_KEY)).toBe(changelog[0].version)
+    await waitFor(() => {
+      expect(screen.getByText('View full release notes →')).toHaveAttribute('href', mockRelease.html_url)
+    })
   })
 })
