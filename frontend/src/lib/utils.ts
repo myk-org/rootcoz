@@ -68,7 +68,7 @@ export function formatTimestamp(ts: string | null | undefined): string {
 }
 
 export function formatRelativeTime(ts: string | null | undefined): string {
-  if (!ts) return '—'
+  if (!ts) return INVALID_DATE_FALLBACK
   const parsed = parseApiTimestamp(ts)
   if (Number.isNaN(parsed.getTime())) return INVALID_DATE_FALLBACK
   const now = Date.now()

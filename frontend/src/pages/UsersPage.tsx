@@ -347,9 +347,12 @@ export function UsersPage() {
           {createdUser ? (
             <div className="space-y-4 py-2">
               <p className="text-sm text-text-secondary">
-                Admin user <span className="font-mono font-medium text-text-primary">{createdUser.username}</span> created successfully.
+                {newUserRole === 'admin' ? 'Admin user' : 'User'}{' '}
+                <span className="font-mono font-medium text-text-primary">{createdUser.username}</span> created successfully.
               </p>
-              <CopyableKey label="API Key" value={createdUser.api_key} />
+              {createdUser.api_key && (
+                <CopyableKey label="API Key" value={createdUser.api_key} />
+              )}
             </div>
           ) : (
             <div className="space-y-4 py-2">
