@@ -29,6 +29,13 @@ function parseReleaseEntries(body: string): { title: string; description: string
     const match = line.match(/^-\s+\*\*(.+?)\*\*\s*[—\-–]\s*(.+)/)
     if (match) {
       entries.push({ title: match[1].trim(), description: match[2].trim() })
+      continue
+    }
+
+    // Fallback: any markdown bullet line
+    const bullet = line.match(/^-\s+(.+)/)
+    if (bullet) {
+      entries.push({ title: bullet[1].trim(), description: '' })
     }
   }
   return entries

@@ -45,9 +45,9 @@ describe('WhatsNewDialog', () => {
   it('does not show when version was already seen', async () => {
     localStorage.setItem(LS_KEY, '4.0.1')
     render(<WhatsNewDialog />)
-    // Wait a tick for the async effect to run
-    await new Promise(r => setTimeout(r, 50))
-    expect(screen.queryByText("What's New")).not.toBeInTheDocument()
+    await waitFor(() => {
+      expect(screen.queryByText("What's New")).not.toBeInTheDocument()
+    })
   })
 
   it('shows for a new version even if a previous version was dismissed', async () => {
