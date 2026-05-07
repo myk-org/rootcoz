@@ -492,10 +492,14 @@ def _recover_from_details(result: AnalysisDetail) -> AnalysisDetail:
             "Recovered classification '%s' from markdown-formatted AI response",
             classification,
         )
+        # Strip the markdown classification header from details
+        clean_details = re.sub(
+            r"\*\*Classification:\s*[A-Z][A-Z _]+?\*\*\s*", "", details
+        ).strip()
         return AnalysisDetail(
             classification=classification,
             affected_tests=result.affected_tests,
-            details=details,
+            details=clean_details or details,
             artifacts_evidence=result.artifacts_evidence,
             code_fix=result.code_fix,
             product_bug_report=result.product_bug_report,

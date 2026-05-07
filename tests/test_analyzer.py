@@ -3028,6 +3028,7 @@ class TestRecoverFromDetails:
         result = _recover_from_details(AnalysisDetail(classification="", details=raw))
         assert result.classification == "INFRASTRUCTURE"
         assert "OCP authentication" in result.details
+        assert "**Classification:" not in result.details
 
     def test_recover_markdown_product_bug(self):
         """Markdown recovery works for PRODUCT BUG too."""
