@@ -12,8 +12,8 @@ from rootcoz.encryption import SENSITIVE_KEYS
 
 #: Combined tuple of exception types that indicate a transient Jenkins
 #: connectivity problem (network outage, DNS failure, timeout, etc.).
-#: Used by both the polling loop in *main.py* and the pre-flight check
-#: in *analyzer.py*.
+#: Used by the pre-flight check and analysis logic in
+#: *sources/jenkins_source.py*.
 #:
 #: Note: ``jenkins.JenkinsException`` is intentionally excluded — it is
 #: the base class for many non-transient errors (auth failures, 5xx,

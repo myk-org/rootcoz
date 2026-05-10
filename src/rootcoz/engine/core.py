@@ -128,8 +128,6 @@ def format_exception_with_type(exc: Exception) -> str:
     return f"{type(exc).__name__}: {exc}"
 
 
-FALLBACK_TAIL_LINES = 200
-
 # Path to FAILURE_HISTORY_ANALYSIS.md — the AI reads it at runtime instead of injecting content into the prompt
 QUERY_MD_PATH = (
     Path(__file__).parent.parent / "ai-prompts" / "FAILURE_HISTORY_ANALYSIS.md"
@@ -768,11 +766,7 @@ def extract_relevant_console_lines(console_output: str) -> str:
         return "\n".join(relevant_lines)
 
     # Fallback: if nothing found, return last N lines (likely has the failure info)
-    return (
-        "\n".join(lines[-FALLBACK_TAIL_LINES:])
-        if len(lines) > FALLBACK_TAIL_LINES
-        else console_output
-    )
+    return console_output
 
 
 def derive_error_details(error_details: str, stack_trace: str) -> str:

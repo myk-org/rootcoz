@@ -17,12 +17,17 @@ from rootcoz.repository import RESERVED_REPO_NAMES
 _SYSTEM_TAGS: set[str] = {"re-analyze"}
 
 
-def _normalize_tags_list(tags: list) -> list[str]:
+def _normalize_tags_list(tags: object) -> list[str]:
     """Strip, lowercase, deduplicate, remove blanks and reserved system tags."""
+    if not isinstance(tags, (list, tuple, set)):
+        raise ValueError("tags must be a list")
+
     seen: set[str] = set()
     result: list[str] = []
     for tag in tags:
-        t = str(tag).strip().lower()
+        if not isinstance(tag, str):
+            continue
+        t = tag.strip().lower()
         if t and t not in seen and t not in _SYSTEM_TAGS:
             seen.add(t)
             result.append(t)

@@ -19,6 +19,7 @@ from rootcoz.models import (
     AnalysisResult,
     FailureAnalysis,
 )
+from rootcoz.sources.jenkins_source import JenkinsError
 
 # Fake credentials for tests — annotated once to suppress Ruff S105/S106 globally.
 FAKE_JENKINS_PASSWORD = "not-a-real-password"  # noqa: S105  # pragma: allowlist secret
@@ -393,33 +394,47 @@ class TestBaseUrlDetection:
             assert data["result_url"].startswith("/results/")
 
 
+def _post_analyze_queued(test_client, payload: dict) -> tuple[dict, AsyncMock]:
+    """Post to /analyze, assert 202/queued, and return (response_data, mock).
+
+    Patches ``_process_file_raw_analysis`` with an ``AsyncMock``, sends the
+    *payload* to ``POST /analyze``, asserts the response is 202 with
+    ``status == "queued"``, and returns the parsed JSON **and** the mock so
+    callers can inspect call args when needed.
+    """
+    with patch(
+        "rootcoz.main._process_file_raw_analysis", new_callable=AsyncMock
+    ) as mock_process:
+        response = test_client.post("/analyze", json=payload)
+        assert response.status_code == 202
+        data = response.json()
+        assert data["status"] == "queued"
+        return data, mock_process
+
+
 class TestAnalyzeFailuresEndpoint:
     """Tests for the unified POST /analyze endpoint with type=raw."""
 
     def test_analyze_failures_success(self, test_client) -> None:
         """Test that valid raw failures return 202 (async queued)."""
-        with patch("rootcoz.main._process_file_raw_analysis", new_callable=AsyncMock):
-            response = test_client.post(
-                "/analyze",
-                json={
-                    "type": "raw",
-                    "failures": [
-                        {
-                            "test_name": "test_foo",
-                            "error_message": "assert False",
-                            "stack_trace": "File test.py, line 10",
-                        }
-                    ],
-                    "ai_provider": "claude",
-                    "ai_model": "test-model",
-                },
-            )
-            assert response.status_code == 202
-            data = response.json()
-            assert data["status"] == "queued"
-            assert "job_id" in data
-            assert data["base_url"] == ""
-            assert data["result_url"].startswith("/results/")
+        data, _mock = _post_analyze_queued(
+            test_client,
+            {
+                "type": "raw",
+                "failures": [
+                    {
+                        "test_name": "test_foo",
+                        "error_message": "assert False",
+                        "stack_trace": "File test.py, line 10",
+                    }
+                ],
+                "ai_provider": "claude",
+                "ai_model": "test-model",
+            },
+        )
+        assert "job_id" in data
+        assert data["base_url"] == ""
+        assert data["result_url"].startswith("/results/")
 
     def test_analyze_failures_empty_failures(self, test_client) -> None:
         """Test that empty failures list returns 422."""
@@ -485,9 +500,9 @@ class TestAnalyzeFailuresEndpoint:
             new_callable=AsyncMock,
         ) as mock_process:
             mock_process.side_effect = RuntimeError("boom")
-            response = test_client.post(
-                "/analyze",
-                json={
+            data, _ = _post_analyze_queued(
+                test_client,
+                {
                     "type": "raw",
                     "failures": [
                         {
@@ -499,69 +514,59 @@ class TestAnalyzeFailuresEndpoint:
                     "ai_model": "test-model",
                 },
             )
-            assert response.status_code == 202
-            data = response.json()
-            assert data["status"] == "queued"
+            assert "job_id" in data
 
     def test_analyze_failures_partial_failure(self, test_client) -> None:
         """Test that raw analysis is accepted and queued."""
-        with patch("rootcoz.main._process_file_raw_analysis", new_callable=AsyncMock):
-            response = test_client.post(
-                "/analyze",
-                json={
-                    "type": "raw",
-                    "failures": [
-                        {
-                            "test_name": "test_a",
-                            "error_message": "err",
-                            "stack_trace": "File a.py, line 1",
-                        },
-                        {
-                            "test_name": "test_b",
-                            "error_message": "different err",
-                            "stack_trace": "File b.py, line 2",
-                        },
-                    ],
-                    "ai_provider": "claude",
-                    "ai_model": "test-model",
-                },
-            )
-            assert response.status_code == 202
-            data = response.json()
-            assert data["status"] == "queued"
-            assert "job_id" in data
+        data, _mock = _post_analyze_queued(
+            test_client,
+            {
+                "type": "raw",
+                "failures": [
+                    {
+                        "test_name": "test_a",
+                        "error_message": "err",
+                        "stack_trace": "File a.py, line 1",
+                    },
+                    {
+                        "test_name": "test_b",
+                        "error_message": "different err",
+                        "stack_trace": "File b.py, line 2",
+                    },
+                ],
+                "ai_provider": "claude",
+                "ai_model": "test-model",
+            },
+        )
+        assert "job_id" in data
 
     def test_analyze_failures_deduplication(self, test_client) -> None:
         """Test that raw analysis request with multiple failures is accepted."""
-        with patch("rootcoz.main._process_file_raw_analysis", new_callable=AsyncMock):
-            response = test_client.post(
-                "/analyze",
-                json={
-                    "type": "raw",
-                    "failures": [
-                        {
-                            "test_name": "test_foo",
-                            "error_message": "assert False",
-                            "stack_trace": "File test.py, line 10",
-                        },
-                        {
-                            "test_name": "test_baz",
-                            "error_message": "assert False",
-                            "stack_trace": "File test.py, line 10",
-                        },
-                        {
-                            "test_name": "test_bar",
-                            "error_message": "KeyError: x",
-                            "stack_trace": "File test.py, line 20",
-                        },
-                    ],
-                    "ai_provider": "claude",
-                    "ai_model": "test-model",
-                },
-            )
-            assert response.status_code == 202
-            data = response.json()
-            assert data["status"] == "queued"
+        _post_analyze_queued(
+            test_client,
+            {
+                "type": "raw",
+                "failures": [
+                    {
+                        "test_name": "test_foo",
+                        "error_message": "assert False",
+                        "stack_trace": "File test.py, line 10",
+                    },
+                    {
+                        "test_name": "test_baz",
+                        "error_message": "assert False",
+                        "stack_trace": "File test.py, line 10",
+                    },
+                    {
+                        "test_name": "test_bar",
+                        "error_message": "KeyError: x",
+                        "stack_trace": "File test.py, line 20",
+                    },
+                ],
+                "ai_provider": "claude",
+                "ai_model": "test-model",
+            },
+        )
 
 
 class TestAnalyzeFailuresRawXml:
@@ -584,51 +589,41 @@ class TestAnalyzeFailuresRawXml:
 
     def test_raw_xml_success(self, test_client) -> None:
         """Test that raw_xml with failures returns 202 (queued)."""
-        with patch("rootcoz.main._process_file_raw_analysis", new_callable=AsyncMock):
-            response = test_client.post(
-                "/analyze",
-                json={
-                    "type": "file",
-                    "raw_xml": self.SAMPLE_XML,
-                    "ai_provider": "claude",
-                    "ai_model": "test-model",
-                },
-            )
-            assert response.status_code == 202
-            data = response.json()
-            assert data["status"] == "queued"
-            assert "job_id" in data
+        data, _mock = _post_analyze_queued(
+            test_client,
+            {
+                "type": "file",
+                "raw_xml": self.SAMPLE_XML,
+                "ai_provider": "claude",
+                "ai_model": "test-model",
+            },
+        )
+        assert "job_id" in data
 
     def test_raw_xml_no_failures(self, test_client) -> None:
         """Test that raw_xml with no failures is still accepted (queued)."""
-        with patch("rootcoz.main._process_file_raw_analysis", new_callable=AsyncMock):
-            response = test_client.post(
-                "/analyze",
-                json={
-                    "type": "file",
-                    "raw_xml": self.SAMPLE_XML_NO_FAILURES,
-                    "ai_provider": "claude",
-                    "ai_model": "test-model",
-                },
-            )
-            assert response.status_code == 202
-            data = response.json()
-            assert data["status"] == "queued"
+        _post_analyze_queued(
+            test_client,
+            {
+                "type": "file",
+                "raw_xml": self.SAMPLE_XML_NO_FAILURES,
+                "ai_provider": "claude",
+                "ai_model": "test-model",
+            },
+        )
 
     def test_raw_xml_invalid_xml(self, test_client) -> None:
         """Test that invalid XML is still accepted for async processing (validation happens in background)."""
-        with patch("rootcoz.main._process_file_raw_analysis", new_callable=AsyncMock):
-            response = test_client.post(
-                "/analyze",
-                json={
-                    "type": "file",
-                    "raw_xml": "this is not valid xml <<<<",
-                    "ai_provider": "claude",
-                    "ai_model": "test-model",
-                },
-            )
-            # Invalid XML is now detected in background task, not at request time
-            assert response.status_code == 202
+        # Invalid XML is now detected in background task, not at request time
+        _post_analyze_queued(
+            test_client,
+            {
+                "type": "file",
+                "raw_xml": "this is not valid xml <<<<",
+                "ai_provider": "claude",
+                "ai_model": "test-model",
+            },
+        )
 
     def test_raw_xml_and_failures_mutual_exclusion(self, test_client) -> None:
         """Test that providing both raw_xml and failures for type=file returns 422."""
@@ -663,41 +658,33 @@ class TestAnalyzeFailuresRawXml:
 
     def test_failures_mode_still_works(self, test_client) -> None:
         """Test that type=raw with failures is accepted."""
-        with patch("rootcoz.main._process_file_raw_analysis", new_callable=AsyncMock):
-            response = test_client.post(
-                "/analyze",
-                json={
-                    "type": "raw",
-                    "failures": [
-                        {
-                            "test_name": "test_foo",
-                            "error_message": "assert False",
-                            "stack_trace": "File test.py, line 10",
-                        }
-                    ],
-                    "ai_provider": "claude",
-                    "ai_model": "test-model",
-                },
-            )
-            assert response.status_code == 202
-            data = response.json()
-            assert data["status"] == "queued"
+        _post_analyze_queued(
+            test_client,
+            {
+                "type": "raw",
+                "failures": [
+                    {
+                        "test_name": "test_foo",
+                        "error_message": "assert False",
+                        "stack_trace": "File test.py, line 10",
+                    }
+                ],
+                "ai_provider": "claude",
+                "ai_model": "test-model",
+            },
+        )
 
     def test_raw_xml_enriched_xml_contains_analysis(self, test_client) -> None:
         """Test that type=file request is accepted for async processing."""
-        with patch("rootcoz.main._process_file_raw_analysis", new_callable=AsyncMock):
-            response = test_client.post(
-                "/analyze",
-                json={
-                    "type": "file",
-                    "raw_xml": self.SAMPLE_XML,
-                    "ai_provider": "claude",
-                    "ai_model": "test-model",
-                },
-            )
-            assert response.status_code == 202
-            data = response.json()
-            assert data["status"] == "queued"
+        _post_analyze_queued(
+            test_client,
+            {
+                "type": "file",
+                "raw_xml": self.SAMPLE_XML,
+                "ai_provider": "claude",
+                "ai_model": "test-model",
+            },
+        )
 
 
 class TestResultsEndpoints:
@@ -2554,7 +2541,9 @@ class TestWaitForJenkinsCompletion:
         """Non-transient errors (e.g. bad credentials) stop polling immediately."""
         with patch("rootcoz.sources.jenkins_source.JenkinsClient") as mock_cls:
             mock_client = mock_cls.return_value
-            mock_client.get_build_info_safe.side_effect = ValueError("bad credentials")
+            mock_client.get_build_info_safe.side_effect = JenkinsError(
+                "bad credentials", status_code=502
+            )
 
             from rootcoz.sources.jenkins_source import wait_for_jenkins_completion
 
@@ -3455,30 +3444,38 @@ class TestPeerAnalysisParams:
         assert merged_out.peer_analysis_max_rounds == 5
 
     def test_analyze_failures_with_peer_ai_configs(self, test_client) -> None:
-        """POST /analyze with type=raw and peer_ai_configs returns 202."""
-        with patch("rootcoz.main._process_file_raw_analysis", new_callable=AsyncMock):
-            response = test_client.post(
-                "/analyze",
-                json={
-                    "type": "raw",
-                    "failures": [
-                        {
-                            "test_name": "test_foo",
-                            "error_message": "assert False",
-                            "stack_trace": "File test.py, line 10",
-                        }
-                    ],
-                    "ai_provider": "claude",
-                    "ai_model": "test-model",
-                    "peer_ai_configs": [
-                        {"ai_provider": "gemini", "ai_model": "pro"},
-                    ],
-                    "peer_analysis_max_rounds": 7,
-                },
-            )
-            assert response.status_code == 202
-            data = response.json()
-            assert data["status"] == "queued"
+        """POST /analyze with type=raw and peer_ai_configs returns 202 and forwards peer settings."""
+        data, mock_process = _post_analyze_queued(
+            test_client,
+            {
+                "type": "raw",
+                "failures": [
+                    {
+                        "test_name": "test_foo",
+                        "error_message": "assert False",
+                        "stack_trace": "File test.py, line 10",
+                    }
+                ],
+                "ai_provider": "claude",
+                "ai_model": "test-model",
+                "peer_ai_configs": [
+                    {"ai_provider": "gemini", "ai_model": "pro"},
+                ],
+                "peer_analysis_max_rounds": 7,
+            },
+        )
+        assert "job_id" in data
+
+        # Verify peer-analysis settings survive the queuing
+        mock_process.assert_called_once()
+        call_kwargs = mock_process.call_args.kwargs
+        peer_configs = call_kwargs["peer_ai_configs"]
+        assert peer_configs is not None
+        assert len(peer_configs) == 1
+        assert peer_configs[0].ai_provider == "gemini"
+        assert peer_configs[0].ai_model == "pro"
+        merged = call_kwargs["merged"]
+        assert merged.peer_analysis_max_rounds == 7
 
     def test_build_request_params_stores_resolved_peer_configs(
         self, mock_settings

@@ -934,6 +934,10 @@ class AuthMiddleware(BaseHTTPMiddleware):
     alternative to API key authentication.
     """
 
+    # Public paths that bypass authentication.
+    # /api/releases/latest is intentionally public — it only proxies the
+    # latest GitHub release metadata (version, changelog) with no
+    # sensitive data, similar to /health.
     _PUBLIC_PATHS = frozenset(
         {
             "/register",
@@ -1555,7 +1559,6 @@ async def process_analysis_with_id(
     """
     job_id_var.set(job_id)
 
-    auth_header = await _create_ai_auth_header(username)
     logger.info(
         f"Analysis request received for {body.job_name} #{body.build_number} "
         f"(job_id: {job_id})"
@@ -1608,6 +1611,8 @@ async def process_analysis_with_id(
                 notify_dashboard_changed()
                 notify_job_status_changed(job_id)
                 return
+
+        auth_header = await _create_ai_auth_header(username)
 
         logger.debug(
             f"process_analysis_with_id: updating status to running, job_id={job_id}"
@@ -2410,9 +2415,6 @@ async def analyze(
     # Validate AI config early
     _resolve_ai_config(body)
 
-    merged = _merge_settings(body, settings)
-    resolved_peers = _validate_peer_configs(body, merged)
-
     # Resolve display name
     display_name: str = body.name or ""
     if not display_name:
@@ -2444,6 +2446,8 @@ async def analyze(
         if body.name:
             jenkins_fields["name"] = body.name
         jenkins_body = AnalyzeRequest(**jenkins_fields)
+        merged = _merge_settings(jenkins_body, settings)
+        resolved_peers = _validate_peer_configs(jenkins_body, merged)
         return await _enqueue_analysis_job(
             jenkins_body,
             merged,
@@ -2453,6 +2457,8 @@ async def analyze(
         )
 
     # File or Raw — enqueue as async background task
+    merged = _merge_settings(body, settings)
+    resolved_peers = _validate_peer_configs(body, merged)
     return await _enqueue_file_raw_analysis(
         body=body,
         merged=merged,

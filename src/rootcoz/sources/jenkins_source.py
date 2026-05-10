@@ -406,13 +406,19 @@ class JenkinsSource(CISource):
         # ------------------------------------------------------------------
         # 5. Get test report and extract failures
         # ------------------------------------------------------------------
+        test_report = None
         try:
             test_report = await asyncio.to_thread(
                 self.client.get_test_report, self.job_name, self.build_number
             )
+        except jenkins.NotFoundException:
+            logger.info(
+                "No test report for %s #%s; falling back to console-only analysis",
+                self.job_name,
+                self.build_number,
+            )
         except Exception as exc:
-            logger.warning(f"Failed to fetch test report: {exc}")
-            test_report = None
+            handle_jenkins_exception(exc, self.job_name, self.build_number)
         test_failures = (
             extract_failures_from_test_report(test_report) if test_report else []
         )
@@ -523,15 +529,67 @@ async def analyze_child_job(
     try:
         source_result = await source.fetch()
     except Exception as e:
+        source.cleanup()
         return ChildJobAnalysis(
             job_name=job_name,
             build_number=build_number,
             jenkins_url=jenkins_url,
             note=f"Failed to get build info: {e}",
         )
+
+    try:
+        return await _analyze_child_job_inner(
+            source=source,
+            source_result=source_result,
+            job_name=job_name,
+            build_number=build_number,
+            jenkins_url=jenkins_url,
+            settings=settings,
+            depth=depth,
+            max_depth=max_depth,
+            repo_path=repo_path,
+            ai_provider=ai_provider,
+            ai_model=ai_model,
+            ai_cli_timeout=ai_cli_timeout,
+            custom_prompt=custom_prompt,
+            artifacts_context=artifacts_context,
+            server_url=server_url,
+            job_id=job_id,
+            peer_ai_configs=peer_ai_configs,
+            peer_analysis_max_rounds=peer_analysis_max_rounds,
+            additional_repos=additional_repos,
+            max_concurrent_ai_calls=max_concurrent_ai_calls,
+            auth_header=auth_header,
+        )
     finally:
         source.cleanup()
 
+
+async def _analyze_child_job_inner(
+    *,
+    source: JenkinsSource,
+    source_result: CISourceResult,
+    job_name: str,
+    build_number: int,
+    jenkins_url: str,
+    settings: Settings,
+    depth: int,
+    max_depth: int,
+    repo_path: Path | None,
+    ai_provider: str,
+    ai_model: str,
+    ai_cli_timeout: int | None,
+    custom_prompt: str,
+    artifacts_context: str,
+    server_url: str,
+    job_id: str,
+    peer_ai_configs: list | None,
+    peer_analysis_max_rounds: int,
+    additional_repos: dict[str, Path] | None,
+    max_concurrent_ai_calls: int,
+    auth_header: str,
+) -> ChildJobAnalysis:
+    """Inner logic for analyze_child_job, separated to allow cleanup after completion."""
     child_artifacts_context = source_result.artifacts_context or artifacts_context
     failed_children = source_result.child_job_infos
 
@@ -842,7 +900,7 @@ async def analyze_job(
                     logger.info(
                         f"Successfully cloned test repository into {repo_name}/"
                     )
-                    repo_context = f"\nTest repository cloned from: {clean_tests_url} (at {repo_name}/)"
+                    repo_context = f"\nTest repository cloned from: {redact_url(clean_tests_url)} (at {repo_name}/)"
                 except Exception as e:  # non-fatal tests repo clone failure
                     logger.warning(
                         "Failed to clone repository (%s)",

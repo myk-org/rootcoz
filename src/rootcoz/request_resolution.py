@@ -1,6 +1,6 @@
 """Shared request-parameter resolution helpers.
 
-Extracted to avoid circular imports between main.py and analyzer.py.
+Extracted to avoid circular imports between main.py and the source modules.
 """
 
 from __future__ import annotations

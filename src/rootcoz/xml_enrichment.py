@@ -238,11 +238,16 @@ def enrich_junit_xml_via_server(
     if session_cookie:
         cookies["rootcoz_session"] = session_cookie
 
-    start = time.monotonic()
-    with httpx.Client(timeout=min(timeout, 60)) as client:
+    deadline = time.monotonic() + timeout
+    with httpx.Client() as client:
         # Submit the analysis
+        submit_timeout = min(60, max(0.0, deadline - time.monotonic()))
         response = client.post(
-            f"{base}/analyze", json=payload, headers=headers, cookies=cookies
+            f"{base}/analyze",
+            json=payload,
+            headers=headers,
+            cookies=cookies,
+            timeout=submit_timeout,
         )
         response.raise_for_status()
         submit_data = response.json()
@@ -255,14 +260,17 @@ def enrich_junit_xml_via_server(
         # Poll for completion
         poll_interval = 5  # seconds
         while True:
-            elapsed = time.monotonic() - start
-            if elapsed >= timeout:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
                 raise TimeoutError(
                     f"Analysis did not complete within {timeout}s (job_id: {job_id})"
                 )
 
             result_response = client.get(
-                f"{base}/results/{job_id}", headers=headers, cookies=cookies
+                f"{base}/results/{job_id}",
+                headers=headers,
+                cookies=cookies,
+                timeout=min(60, remaining),
             )
             result_response.raise_for_status()
             result_data = result_response.json()
@@ -273,7 +281,7 @@ def enrich_junit_xml_via_server(
             elif status in ("failed", "aborted"):
                 return result_data.get("result", result_data)
 
-            time.sleep(poll_interval)
+            time.sleep(min(poll_interval, max(0.0, deadline - time.monotonic())))
 
 
 def _inject_analysis(testcase: Element, analysis: dict[str, Any]) -> None:
