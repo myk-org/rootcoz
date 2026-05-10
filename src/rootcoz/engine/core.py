@@ -18,6 +18,7 @@ from ai_cli_runner import AIResult, call_ai_cli
 from simple_logger.logger import get_logger
 
 from rootcoz.config import Settings, parse_additional_repos
+from rootcoz.logging_context import get_log_file
 from rootcoz.models import (
     AdditionalRepo,
     AiConfigEntry,
@@ -32,12 +33,7 @@ from rootcoz.repository import RepositoryManager
 from rootcoz.storage import update_progress_phase
 from rootcoz.token_tracking import record_ai_usage
 
-_LOG_DIR = Path(os.getenv("DB_PATH", "/data/results.db")).parent / "logs"
-try:
-    _LOG_DIR.mkdir(parents=True, exist_ok=True)
-    _log_file: str | None = str(_LOG_DIR / "rootcoz.log")
-except OSError:
-    _log_file = None
+_log_file = get_log_file()
 
 logger = get_logger(
     name=__name__,
@@ -389,12 +385,8 @@ def get_failure_signature(failure: FailedTest) -> str:
     Returns:
         SHA-256 hash string representing the failure signature.
     """
-    # Use error message and first 5 lines of stack trace for deduplication.
-    # Intentionally limited to 5 lines: different stack depths for the same
-    # root cause (e.g., varying call-site depth) should still collapse into
-    # one group so the AI analyzes each unique error only once.
-    stack_lines = failure.stack_trace.split("\n")[:5]
-    signature_text = f"{failure.error_message}|{'|'.join(stack_lines)}"
+    # Use error message and full stack trace for deduplication.
+    signature_text = f"{failure.error_message}|{failure.stack_trace}"
     return hashlib.sha256(signature_text.encode()).hexdigest()
 
 
@@ -877,8 +869,8 @@ These instructions complement (do not replace) the main instructions above.
         auth_instruction = ""
         if auth_header:
             auth_instruction = (
-                f"\nFor ALL curl commands, include this authentication"
-                f' header: -H "Authorization: {auth_header}"'
+                "\nFor ALL curl commands, include this authentication"
+                ' header: -H "Authorization: <AUTH_TOKEN>"'
             )
 
         query_section = f"""

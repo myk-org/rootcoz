@@ -197,6 +197,8 @@ def enrich_junit_xml_via_server(
     ai_provider: str,
     ai_model: str,
     timeout: int = 600,
+    api_key: str = "",
+    session_cookie: str = "",
 ) -> dict[str, Any]:
     """Send raw JUnit XML to a rootcoz server for AI analysis and enrichment.
 
@@ -210,6 +212,8 @@ def enrich_junit_xml_via_server(
         ai_provider: AI provider to use (claude, gemini, or cursor).
         ai_model: AI model name.
         timeout: Total timeout in seconds for submission + polling (default: 600).
+        api_key: Optional Bearer token for authenticated endpoints.
+        session_cookie: Optional session cookie value for authenticated endpoints.
 
     Returns:
         Server response dict with enriched_xml, report_url, status, failures.
@@ -227,10 +231,19 @@ def enrich_junit_xml_via_server(
         "ai_model": ai_model,
     }
 
+    headers: dict[str, str] = {}
+    cookies: dict[str, str] = {}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+    if session_cookie:
+        cookies["rootcoz_session"] = session_cookie
+
     start = time.monotonic()
     with httpx.Client(timeout=min(timeout, 60)) as client:
         # Submit the analysis
-        response = client.post(f"{base}/analyze", json=payload)
+        response = client.post(
+            f"{base}/analyze", json=payload, headers=headers, cookies=cookies
+        )
         response.raise_for_status()
         submit_data = response.json()
 
@@ -248,7 +261,9 @@ def enrich_junit_xml_via_server(
                     f"Analysis did not complete within {timeout}s (job_id: {job_id})"
                 )
 
-            result_response = client.get(f"{base}/results/{job_id}")
+            result_response = client.get(
+                f"{base}/results/{job_id}", headers=headers, cookies=cookies
+            )
             result_response.raise_for_status()
             result_data = result_response.json()
 

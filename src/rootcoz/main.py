@@ -78,6 +78,7 @@ from rootcoz.engine.core import (
     format_exception_with_type,
     get_failure_signature,
     resolve_additional_repos,
+    safe_update_progress,
 )
 from rootcoz.feedback import (
     create_feedback_from_preview,
@@ -85,7 +86,7 @@ from rootcoz.feedback import (
 )
 from rootcoz.github_issues import enrich_with_tests_repo_matches
 from rootcoz.jira import JiraClient, enrich_with_jira_matches
-from rootcoz.logging_context import JobIdFilter, job_id_var
+from rootcoz.logging_context import JobIdFilter, get_log_file, job_id_var
 from rootcoz.metadata_rules import match_job_metadata
 from rootcoz.models import (
     AddCommentRequest,
@@ -141,7 +142,6 @@ from rootcoz.storage import (
     patch_result_json,
     populate_failure_history,
     save_result,
-    update_progress_phase,
     update_status,
 )
 from rootcoz.token_tracking import build_token_usage_summary, record_ai_usage
@@ -313,12 +313,7 @@ FAVICON_SVG = (
     b'<text y="0.9em" font-size="90">\xf0\x9f\x94\x8d</text></svg>'
 )
 
-_LOG_DIR = Path(os.getenv("DB_PATH", "/data/results.db")).parent / "logs"
-try:
-    _LOG_DIR.mkdir(parents=True, exist_ok=True)
-    _LOG_FILE: str | None = str(_LOG_DIR / "rootcoz.log")
-except OSError:
-    _LOG_FILE = None
+_LOG_FILE = get_log_file()
 
 logger = get_logger(
     name=__name__,
@@ -471,7 +466,7 @@ def _build_report_context(
         report_url = f"{base_url}/results/{job_id}"
     else:
         report_url = f"/results/{job_id}"
-        job_name = result_data.get("job_name", "")
+        job_name = result_data.get("display_name") or result_data.get("job_name", "")
         build_number = result_data.get("build_number", 0)
         jenkins_url = f"{job_name} #{build_number}" if job_name else ""
 
@@ -669,6 +664,8 @@ async def _fail_resumed_waiting_job(job_id: str, result_data: dict, error: str) 
     """
     fail_data = {
         "job_name": result_data.get("job_name", ""),
+        "display_name": result_data.get("display_name")
+        or result_data.get("job_name", ""),
         "build_number": result_data.get("build_number", 0),
         "error": error,
     }
@@ -744,7 +741,7 @@ async def _resume_waiting_jobs(waiting_jobs: list[dict]) -> None:
                     result_data,
                     (
                         f"Timed out waiting for Jenkins job "
-                        f"{result_data.get('job_name')} #{result_data.get('build_number')} "
+                        f"{result_data.get('display_name') or result_data.get('job_name')} #{result_data.get('build_number')} "
                         f"after {merged.max_wait_minutes} minutes (deadline passed during restart)"
                     ),
                 )
@@ -770,7 +767,7 @@ async def _resume_waiting_jobs(waiting_jobs: list[dict]) -> None:
         _register_job_task(job["job_id"], task)
         logger.info(
             f"Resumed waiting job {job['job_id']} "
-            f"({result_data.get('job_name')} #{result_data.get('build_number')})"
+            f"({result_data.get('display_name') or result_data.get('job_name')} #{result_data.get('build_number')})"
         )
 
 
@@ -1530,6 +1527,21 @@ async def _enrich_result_with_tests_repo_matches(
     )
 
 
+async def _create_ai_auth_header(username: str) -> str:
+    """Create a short-lived session token for AI CLI internal API calls.
+
+    Returns a Bearer auth header string, or empty string on failure/no user.
+    """
+    if not username:
+        return ""
+    try:
+        session_token = await storage.create_session(username, ttl_hours=1)
+        return f"Bearer {session_token}"
+    except Exception:
+        logger.warning("Failed to create AI session for history access", exc_info=True)
+        return ""
+
+
 async def process_analysis_with_id(
     job_id: str, body: AnalyzeRequest, settings: Settings, username: str = ""
 ) -> None:
@@ -1543,29 +1555,11 @@ async def process_analysis_with_id(
     """
     job_id_var.set(job_id)
 
-    # Create a short-lived session for AI CLI internal API calls
-    auth_header = ""
-    if username:
-        try:
-            session_token = await storage.create_session(username, ttl_hours=1)
-            auth_header = f"Bearer {session_token}"
-        except Exception:
-            logger.warning(
-                "Failed to create AI session for history access", exc_info=True
-            )
+    auth_header = await _create_ai_auth_header(username)
     logger.info(
         f"Analysis request received for {body.job_name} #{body.build_number} "
         f"(job_id: {job_id})"
     )
-
-    async def _safe_update_progress_phase(phase: str) -> None:
-        try:
-            await update_progress_phase(job_id, phase)
-        except Exception:
-            logger.debug(
-                f"Failed to update progress phase for job_id={job_id}, phase={phase}",
-                exc_info=True,
-            )
 
     try:
         # Validate AI config early -- before potentially waiting hours for Jenkins.
@@ -1583,7 +1577,7 @@ async def process_analysis_with_id(
             notify_active_count_changed()
             notify_dashboard_changed()
             notify_job_status_changed(job_id)
-            await _safe_update_progress_phase("waiting_for_jenkins")
+            await safe_update_progress(job_id, "waiting_for_jenkins")
             notify_job_status_changed(job_id)
 
             completed, wait_error = await wait_for_jenkins_completion(
@@ -1622,7 +1616,7 @@ async def process_analysis_with_id(
         notify_active_count_changed()
         notify_dashboard_changed()
         notify_job_status_changed(job_id)
-        await _safe_update_progress_phase("analyzing")
+        await safe_update_progress(job_id, "analyzing")
         notify_job_status_changed(job_id)
 
         logger.debug(
@@ -1650,7 +1644,7 @@ async def process_analysis_with_id(
 
         # Enrich PRODUCT BUG failures with Jira matches
         if _resolve_enable_jira(body, settings):
-            await _safe_update_progress_phase("enriching_jira")
+            await safe_update_progress(job_id, "enriching_jira")
             notify_job_status_changed(job_id)
             logger.debug(
                 f"process_analysis_with_id: enriching with Jira matches, job_id={job_id}"
@@ -1666,7 +1660,7 @@ async def process_analysis_with_id(
         # Enrich CODE ISSUE failures with tests repo issue matches
         request_tests_repo_url = str(body.tests_repo_url or "")
         if settings.tests_repo_url or request_tests_repo_url:
-            await _safe_update_progress_phase("enriching_tests_repo")
+            await safe_update_progress(job_id, "enriching_tests_repo")
             notify_job_status_changed(job_id)
             logger.debug(
                 f"process_analysis_with_id: enriching with tests repo matches, job_id={job_id}"
@@ -1680,7 +1674,7 @@ async def process_analysis_with_id(
                 tests_repo_url=request_tests_repo_url,
             )
 
-        await _safe_update_progress_phase("saving")
+        await safe_update_progress(job_id, "saving")
         notify_job_status_changed(job_id)
         logger.debug(
             f"process_analysis_with_id: saving completed result, job_id={job_id}"
@@ -1802,6 +1796,149 @@ def _build_base_request_params(
     }
 
 
+def _apply_base_analysis_overrides(
+    params: dict,
+    body: "BaseAnalysisRequest",
+    merged: "Settings",
+) -> None:
+    """Apply BaseAnalysisRequest overrides to a base params dict.
+
+    Centralises the serialisation of per-request overrides that both the
+    unified ``/analyze`` endpoint and the file/raw re-analyze path need.
+    Mutates *params* in place.
+    """
+    if body.enable_jira is not None:
+        params["enable_jira"] = body.enable_jira
+    if body.jira_url:
+        params["jira_url"] = body.jira_url
+    if body.jira_email:
+        params["jira_email"] = body.jira_email
+    if body.jira_api_token:
+        params["jira_api_token"] = body.jira_api_token
+    if body.jira_pat:
+        params["jira_pat"] = body.jira_pat
+    if body.jira_project_key:
+        params["jira_project_key"] = body.jira_project_key
+    if body.jira_ssl_verify is not None:
+        params["jira_ssl_verify"] = body.jira_ssl_verify
+    if body.jira_max_results is not None:
+        params["jira_max_results"] = body.jira_max_results
+    if body.github_token:
+        params["github_token"] = body.github_token
+    if body.ai_cli_timeout is not None:
+        params["ai_cli_timeout"] = body.ai_cli_timeout
+    if body.max_concurrent_ai_calls is not None:
+        params["max_concurrent_ai_calls"] = body.max_concurrent_ai_calls
+    # Always persist peer_analysis_max_rounds so non-default values survive
+    # re-analyze round-trips.
+    params["peer_analysis_max_rounds"] = merged.peer_analysis_max_rounds
+
+
+async def _enqueue_file_raw_analysis(
+    body: "UnifiedAnalyzeRequest",
+    merged: "Settings",
+    resolved_peers: list | None,
+    display_name: str,
+    analysis_type: str,
+    base_url: str,
+    username: str,
+    *,
+    tags: list[str] | None = None,
+    message_prefix: str = "Analysis",
+) -> dict:
+    """Build params, persist initial state, spawn task, and return response.
+
+    Shared by the ``/analyze`` file/raw path and the ``/re-analyze`` file/raw
+    path.  Callers handle request-specific reconstruction/validation before
+    calling this helper with a ready-to-go *body*.
+
+    Args:
+        body: The analysis request (``UnifiedAnalyzeRequest`` or similar).
+        merged: Merged settings.
+        resolved_peers: Validated peer AI configs.
+        display_name: Human-readable job name.
+        analysis_type: ``"file"`` or ``"raw"``.
+        base_url: Server base URL for result links.
+        username: Authenticated user who submitted the request.
+        tags: Optional pre-built tags list. When ``None``, uses ``body.tags``.
+        message_prefix: Prefix for the queued-message ("Analysis" or
+            "Re-analysis").
+
+    Returns:
+        JSON-serialisable response dict with ``status``, ``job_id``, links.
+    """
+    ai_provider, ai_model = _resolve_ai_config_values(body.ai_provider, body.ai_model)
+
+    # Resolve repos
+    tests_repo_url_raw = str(body.tests_repo_url or merged.tests_repo_url or "")
+    tests_repo_url, tests_repo_ref = parse_repo_ref(tests_repo_url_raw)
+    resolved_tests_repo_token = resolve_tests_repo_token(body, merged)
+    additional_repos_list = resolve_additional_repos(body, merged)
+
+    job_id = str(uuid.uuid4())
+    job_id_var.set(job_id)
+
+    # Build and persist initial state
+    base_params = _build_base_request_params(
+        ai_provider,
+        ai_model,
+        resolved_peers,
+        tests_repo_url=tests_repo_url,
+        tests_repo_token=resolved_tests_repo_token,
+        tests_repo_ref=tests_repo_ref,
+        additional_repos=additional_repos_list or None,
+    )
+    base_params["raw_prompt"] = body.raw_prompt or ""
+    base_params["issue_prompt"] = body.issue_prompt or ""
+    base_params["analysis_type"] = analysis_type
+    _apply_base_analysis_overrides(base_params, body, merged)
+
+    if analysis_type == "file":
+        base_params["raw_xml"] = body.raw_xml
+    elif analysis_type == "raw":
+        assert body.failures is not None
+        base_params["failures"] = [f.model_dump() for f in body.failures]
+
+    initial_result: dict = {
+        "job_name": display_name,
+        "request_params": encrypt_sensitive_fields(base_params),
+    }
+    initial_result["request_params"]["submitted_by"] = username
+    effective_tags = tags if tags is not None else (body.tags or None)
+    if effective_tags:
+        initial_result["tags"] = effective_tags
+    await save_result(job_id, "", "pending", initial_result)
+    notify_active_count_changed()
+    notify_dashboard_changed()
+
+    # Spawn background task
+    task = asyncio.create_task(
+        _process_file_raw_analysis(
+            job_id=job_id,
+            body=body,
+            merged=merged,
+            display_name=display_name,
+            ai_provider=ai_provider,
+            ai_model=ai_model,
+            peer_ai_configs=resolved_peers,
+            tests_repo_url=tests_repo_url,
+            tests_repo_ref=tests_repo_ref,
+            resolved_tests_repo_token=resolved_tests_repo_token,
+            additional_repos_list=additional_repos_list,
+            base_url=base_url,
+            username=username,
+        )
+    )
+    _register_job_task(job_id, task)
+
+    response: dict = {
+        "status": "queued",
+        "job_id": job_id,
+        "message": f"{message_prefix} job queued. Poll /results/{job_id} for status.",
+    }
+    return _attach_result_links(response, base_url, job_id)
+
+
 def _build_request_params(
     body: AnalyzeRequest,
     merged: Settings,
@@ -1900,8 +2037,10 @@ async def _enqueue_analysis_job(
     jenkins_url = build_jenkins_url(
         merged.jenkins_url, body.job_name, body.build_number
     )
+    display_name = getattr(body, "name", None) or body.job_name
     initial_result: dict = {
-        "job_name": getattr(body, "name", None) or body.job_name,
+        "job_name": body.job_name,
+        "display_name": display_name,
         "build_number": body.build_number,
         "request_params": _build_request_params(
             body,
@@ -1955,16 +2094,7 @@ async def _process_file_raw_analysis(
     """Background task for file/raw analysis."""
     job_id_var.set(job_id)
 
-    # Create a short-lived session for AI CLI internal API calls
-    auth_header = ""
-    if username:
-        try:
-            session_token = await storage.create_session(username, ttl_hours=1)
-            auth_header = f"Bearer {session_token}"
-        except Exception:
-            logger.warning(
-                "Failed to create AI session for history access", exc_info=True
-            )
+    auth_header = await _create_ai_auth_header(username)
 
     logger.info(
         f"Starting file/raw analysis for job_id={job_id}, type={body.type}, display_name={display_name}"
@@ -2118,8 +2248,10 @@ async def _process_file_raw_analysis(
         )
 
         all_analyses = []
+        failed_group_count = 0
         for result in results:
             if isinstance(result, Exception):
+                failed_group_count += 1
                 logger.error(
                     f"Failed to analyze failure group: {result}", exc_info=result
                 )
@@ -2127,6 +2259,34 @@ async def _process_file_raw_analysis(
                 all_analyses.extend(result)
 
         unique_errors = len(groups)
+
+        # If every group failed, treat the entire job as failed rather than
+        # saving a misleading "completed" result with zero findings.
+        if not all_analyses and failed_group_count == len(results):
+            error_msg = (
+                f"All {failed_group_count} failure group(s) failed during analysis "
+                f"({len(test_failures)} test failures, {unique_errors} unique errors)"
+            )
+            logger.error(
+                f"File/raw analysis fully failed for job_id={job_id}: {error_msg}"
+            )
+            fail_result = FailureAnalysisResult(
+                job_id=job_id,
+                status="failed",
+                summary=f"Analysis failed: {error_msg}",
+                ai_provider=ai_provider,
+                ai_model=ai_model,
+            )
+            fail_data = fail_result.model_dump(mode="json")
+            fail_data["job_name"] = display_name
+            await _preserve_request_params(job_id, fail_data)
+            await _attach_token_usage(job_id, fail_data)
+            await update_status(job_id, "failed", fail_data)
+            notify_active_count_changed()
+            notify_dashboard_changed()
+            notify_job_status_changed(job_id)
+            return
+
         summary = (
             f"Analyzed {len(test_failures)} test failures "
             f"({unique_errors} unique errors). "
@@ -2293,95 +2453,16 @@ async def analyze(
         )
 
     # File or Raw — enqueue as async background task
-    ai_provider, ai_model = _resolve_ai_config_values(body.ai_provider, body.ai_model)
-
-    # Resolve repos
-    tests_repo_url_raw = str(body.tests_repo_url or merged.tests_repo_url or "")
-    tests_repo_url, tests_repo_ref = parse_repo_ref(tests_repo_url_raw)
-    resolved_tests_repo_token = resolve_tests_repo_token(body, merged)
-    additional_repos_list = resolve_additional_repos(body, merged)
-
-    job_id = str(uuid.uuid4())
-    job_id_var.set(job_id)
-
-    # Save initial state
-    base_params = _build_base_request_params(
-        ai_provider,
-        ai_model,
-        resolved_peers,
-        tests_repo_url=tests_repo_url,
-        tests_repo_token=resolved_tests_repo_token,
-        tests_repo_ref=tests_repo_ref,
-        additional_repos=additional_repos_list or None,
+    return await _enqueue_file_raw_analysis(
+        body=body,
+        merged=merged,
+        resolved_peers=resolved_peers,
+        display_name=display_name,
+        analysis_type=body.type,
+        base_url=base_url,
+        username=request.state.username,
+        message_prefix="Analysis",
     )
-    base_params["raw_prompt"] = body.raw_prompt or ""
-    base_params["issue_prompt"] = body.issue_prompt or ""
-    base_params["analysis_type"] = body.type
-    # Persist all BaseAnalysisRequest fields for re-analyze fidelity
-    if body.enable_jira is not None:
-        base_params["enable_jira"] = body.enable_jira
-    if body.jira_url:
-        base_params["jira_url"] = body.jira_url
-    if body.jira_email:
-        base_params["jira_email"] = body.jira_email
-    if body.jira_api_token:
-        base_params["jira_api_token"] = body.jira_api_token
-    if body.jira_pat:
-        base_params["jira_pat"] = body.jira_pat
-    if body.jira_project_key:
-        base_params["jira_project_key"] = body.jira_project_key
-    if body.jira_ssl_verify is not None:
-        base_params["jira_ssl_verify"] = body.jira_ssl_verify
-    if body.jira_max_results is not None:
-        base_params["jira_max_results"] = body.jira_max_results
-    if body.github_token:
-        base_params["github_token"] = body.github_token
-    if body.ai_cli_timeout is not None:
-        base_params["ai_cli_timeout"] = body.ai_cli_timeout
-    if body.max_concurrent_ai_calls is not None:
-        base_params["max_concurrent_ai_calls"] = body.max_concurrent_ai_calls
-    if body.type == "file":
-        base_params["raw_xml"] = body.raw_xml
-    elif body.type == "raw":
-        assert body.failures is not None
-        base_params["failures"] = [f.model_dump() for f in body.failures]
-    initial_result: dict = {
-        "job_name": display_name,
-        "request_params": encrypt_sensitive_fields(base_params),
-    }
-    initial_result["request_params"]["submitted_by"] = request.state.username
-    if body.tags:
-        initial_result["tags"] = body.tags
-    await save_result(job_id, "", "pending", initial_result)
-    notify_active_count_changed()
-    notify_dashboard_changed()
-
-    # Spawn background task
-    task = asyncio.create_task(
-        _process_file_raw_analysis(
-            job_id=job_id,
-            body=body,
-            merged=merged,
-            display_name=display_name,
-            ai_provider=ai_provider,
-            ai_model=ai_model,
-            peer_ai_configs=resolved_peers,
-            tests_repo_url=tests_repo_url,
-            tests_repo_ref=tests_repo_ref,
-            resolved_tests_repo_token=resolved_tests_repo_token,
-            additional_repos_list=additional_repos_list,
-            base_url=base_url,
-            username=request.state.username,
-        )
-    )
-    _register_job_task(job_id, task)
-
-    response: dict = {
-        "status": "queued",
-        "job_id": job_id,
-        "message": f"Analysis job queued. Poll /results/{job_id} for status.",
-    }
-    return _attach_result_links(response, base_url, job_id)
 
 
 @app.post("/re-analyze/{job_id}", status_code=202, response_model=None)
@@ -2431,7 +2512,8 @@ async def re_analyze(
         # Build unified request from stored params
         unified_fields: dict = {
             "type": analysis_type,
-            "name": result_data.get("job_name", f"{analysis_type}-analysis"),
+            "name": result_data.get("display_name")
+            or result_data.get("job_name", f"{analysis_type}-analysis"),
         }
         # Restore source data
         if analysis_type == "file":
@@ -2512,104 +2594,17 @@ async def re_analyze(
         # Resolve display name
         display_name = unified_body.name or f"{analysis_type}-re-analysis"
 
-        ai_provider, ai_model = _resolve_ai_config_values(
-            unified_body.ai_provider, unified_body.ai_model
+        return await _enqueue_file_raw_analysis(
+            body=unified_body,
+            merged=merged,
+            resolved_peers=resolved_peers,
+            display_name=display_name,
+            analysis_type=analysis_type,
+            base_url=base_url,
+            username=request.state.username,
+            tags=unified_body.tags,
+            message_prefix="Re-analysis",
         )
-
-        # Resolve repos
-        tests_repo_url_raw = str(
-            unified_body.tests_repo_url or merged.tests_repo_url or ""
-        )
-        tests_repo_url, tests_repo_ref = parse_repo_ref(tests_repo_url_raw)
-        resolved_tests_repo_token = resolve_tests_repo_token(unified_body, merged)
-        additional_repos_list = resolve_additional_repos(unified_body, merged)
-
-        job_id_new = str(uuid.uuid4())
-        job_id_var.set(job_id_new)
-
-        # Save initial state
-        base_params_new = _build_base_request_params(
-            ai_provider,
-            ai_model,
-            resolved_peers,
-            tests_repo_url=tests_repo_url,
-            tests_repo_token=resolved_tests_repo_token,
-            tests_repo_ref=tests_repo_ref,
-            additional_repos=additional_repos_list or None,
-        )
-        base_params_new["raw_prompt"] = unified_body.raw_prompt or ""
-        base_params_new["issue_prompt"] = unified_body.issue_prompt or ""
-        base_params_new["analysis_type"] = analysis_type
-
-        # Persist all BaseAnalysisRequest overrides for re-analyze fidelity
-        if unified_body.enable_jira is not None:
-            base_params_new["enable_jira"] = unified_body.enable_jira
-        if unified_body.jira_url:
-            base_params_new["jira_url"] = unified_body.jira_url
-        if unified_body.jira_email:
-            base_params_new["jira_email"] = unified_body.jira_email
-        if unified_body.jira_api_token:
-            base_params_new["jira_api_token"] = unified_body.jira_api_token
-        if unified_body.jira_pat:
-            base_params_new["jira_pat"] = unified_body.jira_pat
-        if unified_body.jira_project_key:
-            base_params_new["jira_project_key"] = unified_body.jira_project_key
-        if unified_body.jira_ssl_verify is not None:
-            base_params_new["jira_ssl_verify"] = unified_body.jira_ssl_verify
-        if unified_body.jira_max_results is not None:
-            base_params_new["jira_max_results"] = unified_body.jira_max_results
-        if unified_body.github_token:
-            base_params_new["github_token"] = unified_body.github_token
-        if unified_body.ai_cli_timeout is not None:
-            base_params_new["ai_cli_timeout"] = unified_body.ai_cli_timeout
-        if unified_body.max_concurrent_ai_calls is not None:
-            base_params_new["max_concurrent_ai_calls"] = (
-                unified_body.max_concurrent_ai_calls
-            )
-
-        if analysis_type == "file":
-            base_params_new["raw_xml"] = unified_body.raw_xml
-        else:
-            assert unified_body.failures is not None
-            base_params_new["failures"] = [
-                f.model_dump() for f in unified_body.failures
-            ]
-
-        initial_result_new: dict = {
-            "job_name": display_name,
-            "request_params": encrypt_sensitive_fields(base_params_new),
-        }
-        initial_result_new["request_params"]["submitted_by"] = request.state.username
-        initial_result_new["tags"] = unified_body.tags
-        await save_result(job_id_new, "", "pending", initial_result_new)
-        notify_active_count_changed()
-        notify_dashboard_changed()
-
-        task = asyncio.create_task(
-            _process_file_raw_analysis(
-                job_id=job_id_new,
-                body=unified_body,
-                merged=merged,
-                display_name=display_name,
-                ai_provider=ai_provider,
-                ai_model=ai_model,
-                peer_ai_configs=resolved_peers,
-                tests_repo_url=tests_repo_url,
-                tests_repo_ref=tests_repo_ref,
-                resolved_tests_repo_token=resolved_tests_repo_token,
-                additional_repos_list=additional_repos_list,
-                base_url=base_url,
-                username=request.state.username,
-            )
-        )
-        _register_job_task(job_id_new, task)
-
-        response_data: dict = {
-            "status": "queued",
-            "job_id": job_id_new,
-            "message": f"Re-analysis job queued. Poll /results/{job_id_new} for status.",
-        }
-        return _attach_result_links(response_data, base_url, job_id_new)
 
     # Jenkins path (existing code)
     # Reconstruct the original AnalyzeRequest + Settings

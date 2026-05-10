@@ -40,7 +40,7 @@ from rootcoz.sources.jenkins_source import (
     handle_jenkins_exception,
 )
 
-_FAKE_JENKINS_PASSWORD = "test-pass"  # pragma: allowlist secret
+_FAKE_JENKINS_PASSWORD = "test-pass"  # noqa: S105  # pragma: allowlist secret
 
 
 class TestHandleJenkinsException:
@@ -301,6 +301,7 @@ class TestRunSingleAiAnalysis:
             main_ai_model="opus",
             peer_ai_configs=peers,
             max_rounds=1,
+            auth_header="Bearer test-token",
         )
 
         # run_single_ai_analysis must have been called for the orchestrator
@@ -308,6 +309,7 @@ class TestRunSingleAiAnalysis:
         call_kwargs = mock_run.call_args.kwargs
         assert call_kwargs["ai_provider"] == "claude"
         assert call_kwargs["ai_model"] == "opus"
+        assert call_kwargs["auth_header"] == "Bearer test-token"
 
 
 class TestAnalyzeFailureGroupPeerDelegation:
@@ -613,7 +615,7 @@ class TestConsoleOnlyPeerWarning:
         settings_data = settings.model_dump(mode="python")
         settings_data["jenkins_url"] = "https://jenkins.example.com"
         settings_data["jenkins_user"] = "user"
-        settings_data["jenkins_password"] = "pass"  # pragma: allowlist secret
+        settings_data["jenkins_password"] = _FAKE_JENKINS_PASSWORD
         child_settings = Settings.model_validate(settings_data)
 
         peers = [AiConfigEntry(ai_provider="gemini", ai_model="pro")]
@@ -669,7 +671,7 @@ class TestConsoleOnlyPeerWarning:
         settings_data = settings.model_dump(mode="python")
         settings_data["jenkins_url"] = "https://jenkins.example.com"
         settings_data["jenkins_user"] = "user"
-        settings_data["jenkins_password"] = "pass"  # pragma: allowlist secret
+        settings_data["jenkins_password"] = _FAKE_JENKINS_PASSWORD
         child_settings = Settings.model_validate(settings_data)
 
         with patch("rootcoz.sources.jenkins_source.logger") as mock_logger:

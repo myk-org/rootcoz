@@ -14,6 +14,20 @@ from pydantic import (
 
 from rootcoz.repository import RESERVED_REPO_NAMES
 
+_SYSTEM_TAGS: set[str] = {"re-analyze"}
+
+
+def _normalize_tags_list(tags: list) -> list[str]:
+    """Strip, lowercase, deduplicate, remove blanks and reserved system tags."""
+    seen: set[str] = set()
+    result: list[str] = []
+    for tag in tags:
+        t = str(tag).strip().lower()
+        if t and t not in seen and t not in _SYSTEM_TAGS:
+            seen.add(t)
+            result.append(t)
+    return result
+
 
 class AiConfigEntry(BaseModel):
     """Single AI provider/model configuration for peer analysis."""
@@ -223,16 +237,7 @@ class AnalyzeRequest(BaseAnalysisRequest):
     @field_validator("tags", mode="before")
     @classmethod
     def _normalize_tags(cls, v: list) -> list[str]:
-        """Strip, lowercase, deduplicate, remove blanks and reserved system tags."""
-        _SYSTEM_TAGS = {"re-analyze"}
-        seen: set[str] = set()
-        result: list[str] = []
-        for tag in v:
-            t = str(tag).strip().lower()
-            if t and t not in seen and t not in _SYSTEM_TAGS:
-                seen.add(t)
-                result.append(t)
-        return result
+        return _normalize_tags_list(v)
 
     jenkins_url: str | None = Field(
         default=None,
@@ -527,26 +532,6 @@ class JobStatus(BaseModel):
     created_at: datetime = Field(description="Timestamp when the job was created")
 
 
-class AnalyzeFailuresRequest(BaseAnalysisRequest):
-    """Request payload for direct failure analysis (no Jenkins)."""
-
-    failures: list[FailedTest] | None = Field(
-        default=None, description="Raw test failures to analyze"
-    )
-    raw_xml: Annotated[str, Field(max_length=50_000_000)] | None = Field(
-        default=None,
-        description="Raw JUnit XML content to extract failures from and enrich with analysis results",
-    )
-
-    @model_validator(mode="after")
-    def check_input_source(self) -> "AnalyzeFailuresRequest":
-        if self.failures and self.raw_xml:
-            raise ValueError("Provide either 'failures' or 'raw_xml', not both")
-        if not self.failures and not self.raw_xml:
-            raise ValueError("Either 'failures' or 'raw_xml' must be provided")
-        return self
-
-
 class UnifiedAnalyzeRequest(BaseAnalysisRequest):
     """Unified request payload for all analysis types."""
 
@@ -634,16 +619,7 @@ class UnifiedAnalyzeRequest(BaseAnalysisRequest):
     @field_validator("tags", mode="before")
     @classmethod
     def _normalize_tags(cls, v: list) -> list[str]:
-        """Strip, lowercase, deduplicate, remove blanks and reserved system tags."""
-        _SYSTEM_TAGS = {"re-analyze"}
-        seen: set[str] = set()
-        result: list[str] = []
-        for tag in v:
-            t = str(tag).strip().lower()
-            if t and t not in seen and t not in _SYSTEM_TAGS:
-                seen.add(t)
-                result.append(t)
-        return result
+        return _normalize_tags_list(v)
 
     @model_validator(mode="after")
     def _validate_by_type(self) -> "UnifiedAnalyzeRequest":
@@ -656,14 +632,14 @@ class UnifiedAnalyzeRequest(BaseAnalysisRequest):
         elif self.type == "file":
             if not self.raw_xml:
                 raise ValueError("raw_xml is required for type=file")
-            if self.failures:
+            if self.failures is not None:
                 raise ValueError(
                     "failures cannot be provided for type=file (use type=raw)"
                 )
         elif self.type == "raw":
             if not self.failures:
                 raise ValueError("failures is required for type=raw")
-            if self.raw_xml:
+            if self.raw_xml is not None:
                 raise ValueError(
                     "raw_xml cannot be provided for type=raw (use type=file)"
                 )

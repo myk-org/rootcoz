@@ -236,12 +236,10 @@ class RootCozClient:
         Returns:
             Queued status with job_id for polling.
         """
-        body: dict = {
-            "type": "jenkins",
-            "job_name": job_name,
-            "build_number": build_number,
-            **kwargs,
-        }
+        body: dict = {**kwargs}
+        body["type"] = "jenkins"
+        body["job_name"] = job_name
+        body["build_number"] = build_number
         if name:
             body["name"] = name
         if tags:
@@ -272,7 +270,9 @@ class RootCozClient:
         Returns:
             Queued status with job_id for polling.
         """
-        body: dict = {"type": "file", "raw_xml": raw_xml, **kwargs}
+        body: dict = {**kwargs}
+        body["type"] = "file"
+        body["raw_xml"] = raw_xml
         if name:
             body["name"] = name
         if tags:

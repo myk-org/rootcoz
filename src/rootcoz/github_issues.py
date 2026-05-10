@@ -200,7 +200,7 @@ async def enrich_with_tests_repo_matches(
         search_results = await asyncio.gather(*tasks)
 
         # AI relevance filtering for each keyword set
-        for kw_tuple, candidates in zip(keyword_to_pairs, search_results, strict=False):
+        for kw_tuple, candidates in zip(keyword_to_pairs, search_results, strict=True):
             if not candidates:
                 continue
 

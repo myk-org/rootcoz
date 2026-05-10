@@ -9,7 +9,7 @@ import os
 import re
 from collections.abc import Coroutine
 from pathlib import Path
-from typing import Any, Literal, TypedDict, cast
+from typing import Any, Literal, TypedDict, cast, get_args
 
 from ai_cli_runner import AIResult, run_parallel_with_limit
 from simple_logger.logger import get_logger
@@ -21,15 +21,16 @@ from rootcoz.engine.core import (
     call_ai_cli_with_retry,
     parse_json_response,
     run_single_ai_analysis,
+    safe_update_progress,
 )
 from rootcoz.models import (
     AiConfigEntry,
     FailedTest,
     FailureAnalysis,
+    OverrideClassificationLiteral,
     PeerDebate,
     PeerRound,
 )
-from rootcoz.storage import update_progress_phase
 from rootcoz.token_tracking import record_ai_usage
 
 logger = get_logger(name=__name__, level=os.environ.get("LOG_LEVEL", "INFO"))
@@ -42,15 +43,11 @@ class PeerResponseSummary(TypedDict):
     reasoning: str
 
 
-async def safe_update_progress(job_id: str | None, phase: str) -> None:
-    """Best-effort progress update; failures are swallowed and logged."""
-    if not job_id:
-        return
-    try:
-        await update_progress_phase(job_id, phase)
-    except Exception:
-        logger.debug("Failed to update progress phase", exc_info=True)
-
+# Derive valid classifications from the canonical type so peer analysis
+# stays in sync with the model definition (includes INFRASTRUCTURE).
+_VALID_CLASSIFICATIONS: frozenset[str] = frozenset(
+    get_args(OverrideClassificationLiteral)
+)
 
 _PEER_RESPONSE_SCHEMA = (
     "CRITICAL: Your response must be ONLY a valid JSON object."
@@ -58,15 +55,15 @@ _PEER_RESPONSE_SCHEMA = (
     " No explanation.\n"
     "{\n"
     '  "agrees": true or false,\n'
-    '  "classification": "CODE ISSUE" or "PRODUCT BUG",\n'
+    '  "classification": '
+    + " or ".join(f'"{c}"' for c in get_args(OverrideClassificationLiteral))
+    + ",\n"
     '  "reasoning": "your detailed reasoning for agreeing'
     ' or disagreeing",\n'
     '  "suggested_changes": "specific changes you\'d suggest'
     ' to the analysis (empty string if you agree)"\n'
     "}"
 )
-
-_VALID_CLASSIFICATIONS = frozenset({"CODE ISSUE", "PRODUCT BUG"})
 _PEER_RESPONSE_KEYS = frozenset({"agrees", "classification", "reasoning"})
 
 

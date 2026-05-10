@@ -787,7 +787,7 @@ def analyze(
             typer.echo("Error: --file is required when --source file.", err=True)
             raise typer.Exit(1)
         xml_path = Path(xml_file)
-        if not xml_path.exists():
+        if not xml_path.exists() or not xml_path.is_file():
             typer.echo(f"Error: file not found: {xml_file}", err=True)
             raise typer.Exit(1)
 
@@ -977,12 +977,32 @@ def analyze(
     if source == "jenkins" and tags:
         extras["tags"] = tags
 
+    if source == "file":
+        for key in (
+            "jenkins_url",
+            "jenkins_user",
+            "jenkins_password",
+            "jenkins_ssl_verify",
+            "jenkins_timeout",
+            "jenkins_artifacts_max_size_mb",
+            "get_job_artifacts",
+            "wait_for_completion",
+            "poll_interval_minutes",
+            "max_wait_minutes",
+            "force",
+        ):
+            extras.pop(key, None)
+
     try:
         client = _get_client()
         if source == "jenkins":
             data = client.analyze(job_name, build_number, name=name, **extras)
         else:
-            raw_xml = Path(xml_file).read_text()
+            try:
+                raw_xml = Path(xml_file).read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError) as exc:
+                typer.echo(f"Error: cannot read XML file '{xml_file}': {exc}", err=True)
+                raise typer.Exit(1) from None
             data = client.analyze_file(raw_xml, name=name, tags=tags or None, **extras)
     except RootCozError as err:
         _handle_error(err)

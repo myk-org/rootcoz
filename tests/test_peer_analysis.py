@@ -40,7 +40,7 @@ async def _run_peer_analysis(
 
     monkeypatch.setattr("rootcoz.peer_analysis.call_ai_cli_with_retry", cli_side_effect)
     monkeypatch.setattr("rootcoz.engine.core.call_ai_cli_with_retry", cli_side_effect)
-    monkeypatch.setattr("rootcoz.peer_analysis.update_progress_phase", AsyncMock())
+    monkeypatch.setattr("rootcoz.engine.core.update_progress_phase", AsyncMock())
 
     if peer_configs is None:
         peer_configs = [AiConfigEntry(ai_provider="gemini", ai_model="pro")]
@@ -1510,7 +1510,7 @@ class TestAnalyzeWithPeers:
                 side_effect=mock_peer_and_revision_call,
             ),
             patch(
-                "rootcoz.peer_analysis.update_progress_phase",
+                "rootcoz.engine.core.update_progress_phase",
                 side_effect=capture_phase,
             ),
         ):
@@ -1589,7 +1589,7 @@ class TestAnalyzeWithPeers:
                 side_effect=mock_peer_and_revision_call,
             ),
             patch(
-                "rootcoz.peer_analysis.update_progress_phase",
+                "rootcoz.engine.core.update_progress_phase",
                 side_effect=capture_phase,
             ),
         ):
@@ -1653,7 +1653,7 @@ class TestAnalyzeWithPeers:
                 side_effect=mock_peer_call,
             ),
             patch(
-                "rootcoz.peer_analysis.update_progress_phase",
+                "rootcoz.engine.core.update_progress_phase",
                 side_effect=capture_phase,
             ),
         ):
@@ -1866,7 +1866,7 @@ class TestAnalyzeWithPeers:
                 side_effect=mock_peer_call,
             ),
             patch(
-                "rootcoz.peer_analysis.update_progress_phase",
+                "rootcoz.engine.core.update_progress_phase",
                 new_callable=AsyncMock,
             ) as mock_update,
         ):

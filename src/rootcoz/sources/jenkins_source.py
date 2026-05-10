@@ -144,6 +144,7 @@ def extract_failed_child_jobs(build_info: dict) -> list[tuple[str, int]]:
         List of (job_name, build_number) tuples for failed child jobs.
     """
     failed_jobs: list[tuple[str, int]] = []
+    seen: set[tuple[str, int]] = set()
 
     # Check for subBuilds in pipeline (Blue Ocean / Pipeline plugin)
     sub_builds = build_info.get("subBuilds", [])
@@ -151,8 +152,9 @@ def extract_failed_child_jobs(build_info: dict) -> list[tuple[str, int]]:
         if sub.get("result") in ("FAILURE", "UNSTABLE"):
             job_name = sub.get("jobName", "")
             build_num = sub.get("buildNumber", 0)
-            if job_name and build_num:
+            if job_name and build_num and (job_name, build_num) not in seen:
                 failed_jobs.append((job_name, build_num))
+                seen.add((job_name, build_num))
 
     # Also check actions for triggered builds (older Jenkins plugins)
     for action in build_info.get("actions", []):
@@ -176,8 +178,9 @@ def extract_failed_child_jobs(build_info: dict) -> list[tuple[str, int]]:
                             except ValueError:
                                 continue
                     build_num = triggered.get("number", triggered.get("buildNumber", 0))
-                    if job_name and build_num:
+                    if job_name and build_num and (job_name, build_num) not in seen:
                         failed_jobs.append((job_name, build_num))
+                        seen.add((job_name, build_num))
 
     return failed_jobs
 
@@ -403,9 +406,13 @@ class JenkinsSource(CISource):
         # ------------------------------------------------------------------
         # 5. Get test report and extract failures
         # ------------------------------------------------------------------
-        test_report = await asyncio.to_thread(
-            self.client.get_test_report, self.job_name, self.build_number
-        )
+        try:
+            test_report = await asyncio.to_thread(
+                self.client.get_test_report, self.job_name, self.build_number
+            )
+        except Exception as exc:
+            logger.warning(f"Failed to fetch test report: {exc}")
+            test_report = None
         test_failures = (
             extract_failures_from_test_report(test_report) if test_report else []
         )
@@ -525,6 +532,7 @@ async def analyze_child_job(
     finally:
         source.cleanup()
 
+    child_artifacts_context = source_result.artifacts_context or artifacts_context
     failed_children = source_result.child_job_infos
 
     if failed_children:
@@ -541,7 +549,7 @@ async def analyze_child_job(
                 ai_model,
                 ai_cli_timeout,
                 custom_prompt,
-                artifacts_context="",
+                artifacts_context=child_artifacts_context,
                 server_url=server_url,
                 job_id=job_id,
                 peer_ai_configs=peer_ai_configs,
@@ -617,7 +625,7 @@ async def analyze_child_job(
                     ai_model=ai_model,
                     ai_cli_timeout=ai_cli_timeout,
                     custom_prompt=custom_prompt,
-                    artifacts_context=artifacts_context,
+                    artifacts_context=child_artifacts_context,
                     server_url=server_url,
                     job_id=job_id,
                     peer_ai_configs=peer_ai_configs,
@@ -684,7 +692,7 @@ async def analyze_child_job(
     custom_prompt_section, artifacts_section, resources_section, query_section = (
         build_prompt_sections(
             custom_prompt,
-            artifacts_context,
+            child_artifacts_context,
             repo_path,
             server_url,
             job_id,
@@ -898,7 +906,7 @@ async def analyze_job(
                         ai_model=ai_model,
                         ai_cli_timeout=settings.ai_cli_timeout,
                         custom_prompt=custom_prompt,
-                        artifacts_context="",
+                        artifacts_context=artifacts_context,
                         server_url=server_url,
                         job_id=job_id,
                         peer_ai_configs=peer_ai_configs,
@@ -1172,13 +1180,25 @@ async def wait_for_jenkins_completion(
     try:
         await asyncio.to_thread(client.get_whoami)
     except Exception as e:
-        if not is_jenkins_connectivity_error(e):
-            raise
-        logger.error("Cannot reach Jenkins at %s: %s", jenkins_url, e, exc_info=True)
-        return False, (
-            "Jenkins reachability check failed; please verify the Jenkins URL, "
-            "credentials, and network connectivity"
-        )
+        if is_jenkins_connectivity_error(e):
+            logger.error(
+                "Cannot reach Jenkins at %s: %s", jenkins_url, e, exc_info=True
+            )
+            return False, (
+                "Jenkins connectivity error: unable to reach Jenkins; "
+                "please verify the Jenkins URL and network connectivity"
+            )
+        else:
+            logger.error(
+                "Jenkins auth/permission failure at %s: %s",
+                jenkins_url,
+                e,
+                exc_info=True,
+            )
+            return False, (
+                "Jenkins authentication/permission error: please verify "
+                "your credentials and access permissions"
+            )
 
     if max_wait_minutes > 0:
         deadline: float | None = _time.monotonic() + max_wait_minutes * 60

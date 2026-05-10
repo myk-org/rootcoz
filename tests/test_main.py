@@ -21,8 +21,8 @@ from rootcoz.models import (
 )
 
 # Fake credentials for tests — annotated once to suppress Ruff S105/S106 globally.
-FAKE_JENKINS_PASSWORD = "not-a-real-password"  # pragma: allowlist secret
-FAKE_GITHUB_TOKEN = "not-a-real-token"  # pragma: allowlist secret
+FAKE_JENKINS_PASSWORD = "not-a-real-password"  # noqa: S105  # pragma: allowlist secret
+FAKE_GITHUB_TOKEN = "not-a-real-token"  # noqa: S105
 
 
 @contextmanager
@@ -480,7 +480,11 @@ class TestAnalyzeFailuresEndpoint:
 
     def test_analyze_failures_handles_analysis_exception(self, test_client) -> None:
         """Test that when background task raises, job is still queued (202)."""
-        with patch("rootcoz.main._process_file_raw_analysis", new_callable=AsyncMock):
+        with patch(
+            "rootcoz.main._process_file_raw_analysis",
+            new_callable=AsyncMock,
+        ) as mock_process:
+            mock_process.side_effect = RuntimeError("boom")
             response = test_client.post(
                 "/analyze",
                 json={
@@ -2672,7 +2676,7 @@ class TestProcessAnalysisWaiting:
             ) as mock_wait,
             patch("rootcoz.main.update_status", side_effect=capture_status),
             patch(
-                "rootcoz.main.update_progress_phase",
+                "rootcoz.main.safe_update_progress",
                 new_callable=AsyncMock,
             ),
             patch("rootcoz.main.analyze_job", new_callable=AsyncMock) as mock_analyze,
@@ -2730,7 +2734,7 @@ class TestProcessAnalysisWaiting:
             ) as mock_wait,
             patch("rootcoz.main.update_status", side_effect=capture_status),
             patch(
-                "rootcoz.main.update_progress_phase",
+                "rootcoz.main.safe_update_progress",
                 new_callable=AsyncMock,
             ),
             patch("rootcoz.main.analyze_job", new_callable=AsyncMock) as mock_analyze,
@@ -2797,7 +2801,7 @@ class TestProcessAnalysisWaiting:
             ),
             patch("rootcoz.main.update_status", side_effect=capture_status),
             patch(
-                "rootcoz.main.update_progress_phase",
+                "rootcoz.main.safe_update_progress",
                 new_callable=AsyncMock,
             ),
             patch("rootcoz.main.analyze_job", new_callable=AsyncMock) as mock_analyze,
@@ -2852,7 +2856,7 @@ class TestProcessAnalysisWaiting:
             ) as mock_wait,
             patch("rootcoz.main.update_status", side_effect=capture_status),
             patch(
-                "rootcoz.main.update_progress_phase",
+                "rootcoz.main.safe_update_progress",
                 new_callable=AsyncMock,
             ),
             patch("rootcoz.main.analyze_job", new_callable=AsyncMock) as mock_analyze,
@@ -3636,7 +3640,7 @@ class TestProgressPhaseTracking:
             ),
             patch("rootcoz.main.update_status", new_callable=AsyncMock),
             patch(
-                "rootcoz.main.update_progress_phase",
+                "rootcoz.main.safe_update_progress",
                 side_effect=capture_phase,
             ),
             patch("rootcoz.main.analyze_job", new_callable=AsyncMock) as mock_analyze,
@@ -3693,7 +3697,7 @@ class TestProgressPhaseTracking:
         with (
             patch("rootcoz.main.update_status", new_callable=AsyncMock),
             patch(
-                "rootcoz.main.update_progress_phase",
+                "rootcoz.main.safe_update_progress",
                 side_effect=capture_phase,
             ),
             patch("rootcoz.main.analyze_job", new_callable=AsyncMock) as mock_analyze,
@@ -3748,7 +3752,7 @@ class TestProgressPhaseTracking:
         with (
             patch("rootcoz.main.update_status", new_callable=AsyncMock),
             patch(
-                "rootcoz.main.update_progress_phase",
+                "rootcoz.main.safe_update_progress",
                 side_effect=capture_phase,
             ),
             patch("rootcoz.main.analyze_job", new_callable=AsyncMock) as mock_analyze,
@@ -3802,7 +3806,7 @@ class TestProgressPhaseTracking:
         with (
             patch("rootcoz.main.update_status", new_callable=AsyncMock) as mock_status,
             patch(
-                "rootcoz.main.update_progress_phase",
+                "rootcoz.engine.core.update_progress_phase",
                 side_effect=RuntimeError("DB connection lost"),
             ),
             patch("rootcoz.main.analyze_job", new_callable=AsyncMock) as mock_analyze,

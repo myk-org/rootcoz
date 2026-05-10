@@ -77,7 +77,7 @@ uvx --with tox-uv tox -e frontend   # Frontend only
 
 ### Backend Module Layout
 
-```
+```text
 src/rootcoz/
   engine/                   # CI-agnostic analysis core
     core.py                 # Failure grouping, AI CLI orchestration, prompt building,
