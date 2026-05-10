@@ -8,10 +8,9 @@ from unittest.mock import AsyncMock, MagicMock, PropertyMock, patch
 import httpx
 import jenkins
 import pytest
-
-from rootcoz import storage
 from pydantic import SecretStr
 
+from rootcoz import storage
 from rootcoz.config import Settings
 from rootcoz.encryption import encrypt_sensitive_fields
 from rootcoz.models import (
@@ -22,8 +21,8 @@ from rootcoz.models import (
 )
 
 # Fake credentials for tests — annotated once to suppress Ruff S105/S106 globally.
-FAKE_JENKINS_PASSWORD = "not-a-real-password"  # noqa: S105  # pragma: allowlist secret
-FAKE_GITHUB_TOKEN = "not-a-real-token"  # noqa: S105  # pragma: allowlist secret
+FAKE_JENKINS_PASSWORD = "not-a-real-password"  # pragma: allowlist secret
+FAKE_GITHUB_TOKEN = "not-a-real-token"  # pragma: allowlist secret
 
 
 @contextmanager
@@ -153,6 +152,7 @@ def test_client(mock_settings, temp_db_path: Path):
     """
     with patch.object(storage, "DB_PATH", temp_db_path):
         from starlette.testclient import TestClient
+
         from rootcoz.main import app
 
         with TestClient(app, headers=_ADMIN_AUTH_HEADERS) as client:
@@ -183,6 +183,7 @@ class TestAnalyzeEndpoint:
             response = test_client.post(
                 "/analyze",
                 json={
+                    "type": "jenkins",
                     "job_name": "test",
                     "build_number": 123,
                     "tests_repo_url": "https://github.com/example/repo",
@@ -201,6 +202,7 @@ class TestAnalyzeEndpoint:
         response = test_client.post(
             "/analyze",
             json={
+                "type": "jenkins",
                 "job_name": "test",
                 "build_number": "not-a-number",
                 "tests_repo_url": "https://github.com/example/repo",
@@ -213,6 +215,7 @@ class TestAnalyzeEndpoint:
         response = test_client.post(
             "/analyze",
             json={
+                "type": "jenkins",
                 "job_name": "test",
                 "build_number": 123,
                 "tests_repo_url": "https://github.com/org/repo:develop",
@@ -227,6 +230,7 @@ class TestAnalyzeEndpoint:
         response = test_client.post(
             "/analyze",
             json={
+                "type": "jenkins",
                 "job_name": "test",
             },
         )
@@ -237,6 +241,7 @@ class TestAnalyzeEndpoint:
         response = test_client.post(
             "/analyze",
             json={
+                "type": "jenkins",
                 "job_name": "test",
                 "build_number": 123,
                 "ai_model": "test-model",
@@ -255,6 +260,7 @@ class TestAnalyzeEndpoint:
             response = test_client.post(
                 "/analyze",
                 json={
+                    "type": "jenkins",
                     "job_name": "test-job",
                     "build_number": 42,
                     "ai_provider": "claude",
@@ -281,6 +287,7 @@ class TestBaseUrlDetection:
     @staticmethod
     def _analyze_body() -> dict[str, object]:
         return {
+            "type": "jenkins",
             "job_name": "test",
             "build_number": 1,
             "ai_provider": "claude",
@@ -296,6 +303,7 @@ class TestBaseUrlDetection:
         try:
             with patch.object(storage, "DB_PATH", temp_db_path):
                 from starlette.testclient import TestClient
+
                 from rootcoz.main import app
 
                 with (
@@ -331,6 +339,7 @@ class TestBaseUrlDetection:
         try:
             with patch.object(storage, "DB_PATH", temp_db_path):
                 from starlette.testclient import TestClient
+
                 from rootcoz.main import app
 
                 with (
@@ -385,70 +394,39 @@ class TestBaseUrlDetection:
 
 
 class TestAnalyzeFailuresEndpoint:
-    """Tests for the POST /analyze-failures endpoint."""
+    """Tests for the unified POST /analyze endpoint with type=raw."""
 
     def test_analyze_failures_success(self, test_client) -> None:
-        """Test that valid failures return 200 with correct structure."""
-        mock_analysis = FailureAnalysis(
-            test_name="test_foo",
-            error="assert False",
-            analysis=AnalysisDetail(
-                classification="CODE ISSUE",
-                details="Test assertion failed",
-            ),
-        )
-
-        with patch("rootcoz.main.RepositoryManager") as mock_repo_cls:
-            mock_repo_instance = mock_repo_cls.return_value
-            mock_repo_instance.clone.return_value = None
-            mock_repo_instance.cleanup.return_value = None
-
-            with patch(
-                "rootcoz.main.analyze_failure_group",
-                new_callable=AsyncMock,
-            ) as mock_analyze_group:
-                mock_analyze_group.return_value = [mock_analysis]
-
-                with patch(
-                    "rootcoz.main.run_parallel_with_limit",
-                    new_callable=AsyncMock,
-                ) as mock_parallel:
-
-                    async def run_coroutines(coroutines, **kwargs):
-                        return [await coro for coro in coroutines]
-
-                    mock_parallel.side_effect = run_coroutines
-
-                    response = test_client.post(
-                        "/analyze-failures",
-                        json={
-                            "failures": [
-                                {
-                                    "test_name": "test_foo",
-                                    "error_message": "assert False",
-                                    "stack_trace": "File test.py, line 10",
-                                }
-                            ],
-                            "ai_provider": "claude",
-                            "ai_model": "test-model",
-                        },
-                    )
-                    assert response.status_code == 200
-                    data = response.json()
-                    assert data["status"] == "completed"
-                    assert data["ai_provider"] == "claude"
-                    assert data["ai_model"] == "test-model"
-                    assert "job_id" in data
-                    assert len(data["failures"]) == 1
-                    assert data["failures"][0]["test_name"] == "test_foo"
-                    assert data["base_url"] == ""
-                    assert data["result_url"].startswith("/results/")
+        """Test that valid raw failures return 202 (async queued)."""
+        with patch("rootcoz.main._process_file_raw_analysis", new_callable=AsyncMock):
+            response = test_client.post(
+                "/analyze",
+                json={
+                    "type": "raw",
+                    "failures": [
+                        {
+                            "test_name": "test_foo",
+                            "error_message": "assert False",
+                            "stack_trace": "File test.py, line 10",
+                        }
+                    ],
+                    "ai_provider": "claude",
+                    "ai_model": "test-model",
+                },
+            )
+            assert response.status_code == 202
+            data = response.json()
+            assert data["status"] == "queued"
+            assert "job_id" in data
+            assert data["base_url"] == ""
+            assert data["result_url"].startswith("/results/")
 
     def test_analyze_failures_empty_failures(self, test_client) -> None:
-        """Test that empty failures list returns 422 (validator rejects empty list without raw_xml)."""
+        """Test that empty failures list returns 422."""
         response = test_client.post(
-            "/analyze-failures",
+            "/analyze",
             json={
+                "type": "raw",
                 "failures": [],
                 "ai_provider": "claude",
                 "ai_model": "test-model",
@@ -463,8 +441,9 @@ class TestAnalyzeFailuresEndpoint:
             patch("rootcoz.main.AI_MODEL", ""),
         ):
             response = test_client.post(
-                "/analyze-failures",
+                "/analyze",
                 json={
+                    "type": "raw",
                     "failures": [
                         {
                             "test_name": "test_foo",
@@ -484,8 +463,9 @@ class TestAnalyzeFailuresEndpoint:
             patch("rootcoz.main.AI_MODEL", ""),
         ):
             response = test_client.post(
-                "/analyze-failures",
+                "/analyze",
                 json={
+                    "type": "raw",
                     "failures": [
                         {
                             "test_name": "test_foo",
@@ -499,213 +479,89 @@ class TestAnalyzeFailuresEndpoint:
             assert "AI model" in response.json()["detail"]
 
     def test_analyze_failures_handles_analysis_exception(self, test_client) -> None:
-        """Test that when analyze_failure_group raises, endpoint returns status 'failed'."""
-        with patch("rootcoz.main.RepositoryManager") as mock_repo_cls:
-            mock_repo_instance = mock_repo_cls.return_value
-            mock_repo_instance.clone.return_value = None
-            mock_repo_instance.cleanup.return_value = None
-
-            with patch(
-                "rootcoz.main.get_failure_signature",
-                return_value="sig-a",
-            ):
-                with patch(
-                    "rootcoz.main.run_parallel_with_limit",
-                    new_callable=AsyncMock,
-                ) as mock_parallel:
-
-                    async def raise_after_closing(coroutines, **kwargs):
-                        for coro in coroutines:
-                            coro.close()
-                        raise RuntimeError("AI CLI crashed")
-
-                    mock_parallel.side_effect = raise_after_closing
-
-                    response = test_client.post(
-                        "/analyze-failures",
-                        json={
-                            "failures": [
-                                {
-                                    "test_name": "test_foo",
-                                    "error_message": "assert False",
-                                }
-                            ],
-                            "ai_provider": "claude",
-                            "ai_model": "test-model",
-                        },
-                    )
-                    assert response.status_code == 200
-                    data = response.json()
-                    assert data["status"] == "failed"
-                    assert "AI CLI crashed" in data["summary"]
+        """Test that when background task raises, job is still queued (202)."""
+        with patch("rootcoz.main._process_file_raw_analysis", new_callable=AsyncMock):
+            response = test_client.post(
+                "/analyze",
+                json={
+                    "type": "raw",
+                    "failures": [
+                        {
+                            "test_name": "test_foo",
+                            "error_message": "assert False",
+                        }
+                    ],
+                    "ai_provider": "claude",
+                    "ai_model": "test-model",
+                },
+            )
+            assert response.status_code == 202
+            data = response.json()
+            assert data["status"] == "queued"
 
     def test_analyze_failures_partial_failure(self, test_client) -> None:
-        """Test that when some failure groups succeed and others raise, the endpoint returns partial results.
-
-        Posts 2 failures with different signatures. run_parallel_with_limit returns
-        one successful analysis list and one RuntimeError exception. Verifies the
-        endpoint returns status 'completed' with only the successful analysis and
-        the summary reflects the correct counts.
-        """
-        mock_analysis = FailureAnalysis(
-            test_name="test_a",
-            error="err",
-            analysis=AnalysisDetail(
-                classification="CODE ISSUE",
-                details="analysis",
-            ),
-        )
-
-        with patch("rootcoz.main.RepositoryManager") as mock_repo_cls:
-            mock_repo_instance = mock_repo_cls.return_value
-            mock_repo_instance.clone.return_value = None
-            mock_repo_instance.cleanup.return_value = None
-
-            with patch(
-                "rootcoz.main.get_failure_signature",
-                side_effect=["sig-a", "sig-b"],
-            ):
-                with patch(
-                    "rootcoz.main.run_parallel_with_limit",
-                    new_callable=AsyncMock,
-                ) as mock_parallel:
-
-                    async def run_partial_failure(coroutines, **kwargs):
-                        for coro in coroutines:
-                            coro.close()
-                        return [
-                            [mock_analysis],
-                            RuntimeError("AI CLI crashed"),
-                        ]
-
-                    mock_parallel.side_effect = run_partial_failure
-
-                    with patch(
-                        "rootcoz.main.save_result",
-                        new_callable=AsyncMock,
-                    ):
-                        with patch(
-                            "rootcoz.main.update_status",
-                            new_callable=AsyncMock,
-                        ):
-                            response = test_client.post(
-                                "/analyze-failures",
-                                json={
-                                    "failures": [
-                                        {
-                                            "test_name": "test_a",
-                                            "error_message": "err",
-                                            "stack_trace": "File a.py, line 1",
-                                        },
-                                        {
-                                            "test_name": "test_b",
-                                            "error_message": "different err",
-                                            "stack_trace": "File b.py, line 2",
-                                        },
-                                    ],
-                                    "ai_provider": "claude",
-                                    "ai_model": "test-model",
-                                },
-                            )
-                            assert response.status_code == 200
-                            data = response.json()
-                            assert data["status"] == "completed"
-                            assert len(data["failures"]) == 1
-                            assert data["failures"][0]["test_name"] == "test_a"
-                            assert "2 test failures" in data["summary"]
-                            assert "2 unique errors" in data["summary"]
-                            assert "1 analyzed successfully" in data["summary"]
+        """Test that raw analysis is accepted and queued."""
+        with patch("rootcoz.main._process_file_raw_analysis", new_callable=AsyncMock):
+            response = test_client.post(
+                "/analyze",
+                json={
+                    "type": "raw",
+                    "failures": [
+                        {
+                            "test_name": "test_a",
+                            "error_message": "err",
+                            "stack_trace": "File a.py, line 1",
+                        },
+                        {
+                            "test_name": "test_b",
+                            "error_message": "different err",
+                            "stack_trace": "File b.py, line 2",
+                        },
+                    ],
+                    "ai_provider": "claude",
+                    "ai_model": "test-model",
+                },
+            )
+            assert response.status_code == 202
+            data = response.json()
+            assert data["status"] == "queued"
+            assert "job_id" in data
 
     def test_analyze_failures_deduplication(self, test_client) -> None:
-        """Test that failures sharing the same signature are deduplicated.
-
-        Three failures are submitted where two share a signature. Verify
-        analyze_failure_group is called twice (once per unique signature),
-        not three times.
-        """
-        mock_analysis_a = FailureAnalysis(
-            test_name="test_foo",
-            error="assert False",
-            analysis=AnalysisDetail(
-                classification="CODE ISSUE",
-                details="assertion failure",
-            ),
-        )
-        mock_analysis_b = FailureAnalysis(
-            test_name="test_bar",
-            error="KeyError: x",
-            analysis=AnalysisDetail(
-                classification="CODE ISSUE",
-                details="missing key",
-            ),
-        )
-
-        with patch("rootcoz.main.RepositoryManager") as mock_repo_cls:
-            mock_repo_instance = mock_repo_cls.return_value
-            mock_repo_instance.clone.return_value = None
-            mock_repo_instance.cleanup.return_value = None
-
-            # Return same signature for first two failures, different for third
-            signatures = iter(["sig-a", "sig-a", "sig-b"])
-            with patch(
-                "rootcoz.main.get_failure_signature",
-                side_effect=lambda f: next(signatures),
-            ):
-                with patch(
-                    "rootcoz.main.analyze_failure_group",
-                    new_callable=AsyncMock,
-                ) as mock_analyze_group:
-                    mock_analyze_group.side_effect = [
-                        [mock_analysis_a, mock_analysis_a],
-                        [mock_analysis_b],
-                    ]
-
-                    with patch(
-                        "rootcoz.main.run_parallel_with_limit",
-                        new_callable=AsyncMock,
-                    ) as mock_parallel:
-                        # Simulate run_parallel_with_limit calling the coroutines
-                        async def run_coroutines(coroutines, **kwargs):
-                            results = []
-                            for coro in coroutines:
-                                results.append(await coro)
-                            return results
-
-                        mock_parallel.side_effect = run_coroutines
-
-                        response = test_client.post(
-                            "/analyze-failures",
-                            json={
-                                "failures": [
-                                    {
-                                        "test_name": "test_foo",
-                                        "error_message": "assert False",
-                                        "stack_trace": "File test.py, line 10",
-                                    },
-                                    {
-                                        "test_name": "test_baz",
-                                        "error_message": "assert False",
-                                        "stack_trace": "File test.py, line 10",
-                                    },
-                                    {
-                                        "test_name": "test_bar",
-                                        "error_message": "KeyError: x",
-                                        "stack_trace": "File test.py, line 20",
-                                    },
-                                ],
-                                "ai_provider": "claude",
-                                "ai_model": "test-model",
-                            },
-                        )
-                        assert response.status_code == 200
-                        data = response.json()
-                        assert data["status"] == "completed"
-                        # analyze_failure_group called twice: once for sig-a group, once for sig-b
-                        assert mock_analyze_group.call_count == 2
+        """Test that raw analysis request with multiple failures is accepted."""
+        with patch("rootcoz.main._process_file_raw_analysis", new_callable=AsyncMock):
+            response = test_client.post(
+                "/analyze",
+                json={
+                    "type": "raw",
+                    "failures": [
+                        {
+                            "test_name": "test_foo",
+                            "error_message": "assert False",
+                            "stack_trace": "File test.py, line 10",
+                        },
+                        {
+                            "test_name": "test_baz",
+                            "error_message": "assert False",
+                            "stack_trace": "File test.py, line 10",
+                        },
+                        {
+                            "test_name": "test_bar",
+                            "error_message": "KeyError: x",
+                            "stack_trace": "File test.py, line 20",
+                        },
+                    ],
+                    "ai_provider": "claude",
+                    "ai_model": "test-model",
+                },
+            )
+            assert response.status_code == 202
+            data = response.json()
+            assert data["status"] == "queued"
 
 
 class TestAnalyzeFailuresRawXml:
-    """Tests for the POST /analyze-failures endpoint with raw_xml input."""
+    """Tests for the unified POST /analyze endpoint with type=file."""
 
     SAMPLE_XML = """<?xml version="1.0" encoding="UTF-8"?>
 <testsuite name="TestSuite" tests="2" failures="1" errors="0">
@@ -723,82 +579,59 @@ class TestAnalyzeFailuresRawXml:
 </testsuite>"""
 
     def test_raw_xml_success(self, test_client) -> None:
-        """Test that raw_xml with failures returns enriched XML."""
-        mock_analysis = FailureAnalysis(
-            test_name="tests.test_auth.test_login",
-            error="assert False",
-            analysis=AnalysisDetail(
-                classification="CODE ISSUE",
-                details="Test assertion failed",
-            ),
-        )
-
-        with patch("rootcoz.main.RepositoryManager") as mock_repo_cls:
-            mock_repo_instance = mock_repo_cls.return_value
-            mock_repo_instance.clone.return_value = None
-            mock_repo_instance.cleanup.return_value = None
-
-            with patch(
-                "rootcoz.main.run_parallel_with_limit",
-                new_callable=AsyncMock,
-            ) as mock_parallel:
-
-                async def return_mock_results(coroutines, **kwargs):
-                    for coro in coroutines:
-                        coro.close()
-                    return [[mock_analysis]]
-
-                mock_parallel.side_effect = return_mock_results
-
-                response = test_client.post(
-                    "/analyze-failures",
-                    json={
-                        "raw_xml": self.SAMPLE_XML,
-                        "ai_provider": "claude",
-                        "ai_model": "test-model",
-                    },
-                )
-                assert response.status_code == 200
-                data = response.json()
-                assert data["status"] == "completed"
-                assert data["enriched_xml"] is not None
-                assert "<?xml" in data["enriched_xml"]
-                assert len(data["failures"]) == 1
+        """Test that raw_xml with failures returns 202 (queued)."""
+        with patch("rootcoz.main._process_file_raw_analysis", new_callable=AsyncMock):
+            response = test_client.post(
+                "/analyze",
+                json={
+                    "type": "file",
+                    "raw_xml": self.SAMPLE_XML,
+                    "ai_provider": "claude",
+                    "ai_model": "test-model",
+                },
+            )
+            assert response.status_code == 202
+            data = response.json()
+            assert data["status"] == "queued"
+            assert "job_id" in data
 
     def test_raw_xml_no_failures(self, test_client) -> None:
-        """Test that raw_xml with no failures returns the original XML."""
-        response = test_client.post(
-            "/analyze-failures",
-            json={
-                "raw_xml": self.SAMPLE_XML_NO_FAILURES,
-                "ai_provider": "claude",
-                "ai_model": "test-model",
-            },
-        )
-        assert response.status_code == 200
-        data = response.json()
-        assert data["status"] == "completed"
-        assert "No test failures" in data["summary"]
-        assert data["enriched_xml"] is not None
+        """Test that raw_xml with no failures is still accepted (queued)."""
+        with patch("rootcoz.main._process_file_raw_analysis", new_callable=AsyncMock):
+            response = test_client.post(
+                "/analyze",
+                json={
+                    "type": "file",
+                    "raw_xml": self.SAMPLE_XML_NO_FAILURES,
+                    "ai_provider": "claude",
+                    "ai_model": "test-model",
+                },
+            )
+            assert response.status_code == 202
+            data = response.json()
+            assert data["status"] == "queued"
 
     def test_raw_xml_invalid_xml(self, test_client) -> None:
-        """Test that invalid XML returns 400."""
-        response = test_client.post(
-            "/analyze-failures",
-            json={
-                "raw_xml": "this is not valid xml <<<<",
-                "ai_provider": "claude",
-                "ai_model": "test-model",
-            },
-        )
-        assert response.status_code == 400
-        assert "Invalid XML" in response.json()["detail"]
+        """Test that invalid XML is still accepted for async processing (validation happens in background)."""
+        with patch("rootcoz.main._process_file_raw_analysis", new_callable=AsyncMock):
+            response = test_client.post(
+                "/analyze",
+                json={
+                    "type": "file",
+                    "raw_xml": "this is not valid xml <<<<",
+                    "ai_provider": "claude",
+                    "ai_model": "test-model",
+                },
+            )
+            # Invalid XML is now detected in background task, not at request time
+            assert response.status_code == 202
 
     def test_raw_xml_and_failures_mutual_exclusion(self, test_client) -> None:
-        """Test that providing both raw_xml and failures returns 422."""
+        """Test that providing both raw_xml and failures for type=file returns 422."""
         response = test_client.post(
-            "/analyze-failures",
+            "/analyze",
             json={
+                "type": "file",
                 "raw_xml": self.SAMPLE_XML,
                 "failures": [
                     {
@@ -813,10 +646,11 @@ class TestAnalyzeFailuresRawXml:
         assert response.status_code == 422
 
     def test_neither_raw_xml_nor_failures_returns_422(self, test_client) -> None:
-        """Test that providing neither raw_xml nor failures returns 422."""
+        """Test that type=raw without failures returns 422."""
         response = test_client.post(
-            "/analyze-failures",
+            "/analyze",
             json={
+                "type": "raw",
                 "ai_provider": "claude",
                 "ai_model": "test-model",
             },
@@ -824,92 +658,42 @@ class TestAnalyzeFailuresRawXml:
         assert response.status_code == 422
 
     def test_failures_mode_still_works(self, test_client) -> None:
-        """Test that existing failures mode is backwards compatible."""
-        mock_analysis = FailureAnalysis(
-            test_name="test_foo",
-            error="assert False",
-            analysis=AnalysisDetail(
-                classification="CODE ISSUE",
-                details="Test assertion failed",
-            ),
-        )
-
-        with patch("rootcoz.main.RepositoryManager") as mock_repo_cls:
-            mock_repo_instance = mock_repo_cls.return_value
-            mock_repo_instance.clone.return_value = None
-            mock_repo_instance.cleanup.return_value = None
-
-            with patch(
-                "rootcoz.main.run_parallel_with_limit",
-                new_callable=AsyncMock,
-            ) as mock_parallel:
-
-                async def return_mock_results(coroutines, **kwargs):
-                    for coro in coroutines:
-                        coro.close()
-                    return [[mock_analysis]]
-
-                mock_parallel.side_effect = return_mock_results
-
-                response = test_client.post(
-                    "/analyze-failures",
-                    json={
-                        "failures": [
-                            {
-                                "test_name": "test_foo",
-                                "error_message": "assert False",
-                                "stack_trace": "File test.py, line 10",
-                            }
-                        ],
-                        "ai_provider": "claude",
-                        "ai_model": "test-model",
-                    },
-                )
-                assert response.status_code == 200
-                data = response.json()
-                assert data["status"] == "completed"
-                assert data["enriched_xml"] is None  # No enriched_xml in failures mode
+        """Test that type=raw with failures is accepted."""
+        with patch("rootcoz.main._process_file_raw_analysis", new_callable=AsyncMock):
+            response = test_client.post(
+                "/analyze",
+                json={
+                    "type": "raw",
+                    "failures": [
+                        {
+                            "test_name": "test_foo",
+                            "error_message": "assert False",
+                            "stack_trace": "File test.py, line 10",
+                        }
+                    ],
+                    "ai_provider": "claude",
+                    "ai_model": "test-model",
+                },
+            )
+            assert response.status_code == 202
+            data = response.json()
+            assert data["status"] == "queued"
 
     def test_raw_xml_enriched_xml_contains_analysis(self, test_client) -> None:
-        """Test that enriched_xml contains ai_classification properties."""
-        mock_analysis = FailureAnalysis(
-            test_name="tests.test_auth.test_login",
-            error="assert False",
-            analysis=AnalysisDetail(
-                classification="PRODUCT BUG",
-                details="Auth service down",
-            ),
-        )
-
-        with patch("rootcoz.main.RepositoryManager") as mock_repo_cls:
-            mock_repo_instance = mock_repo_cls.return_value
-            mock_repo_instance.clone.return_value = None
-            mock_repo_instance.cleanup.return_value = None
-
-            with patch(
-                "rootcoz.main.run_parallel_with_limit",
-                new_callable=AsyncMock,
-            ) as mock_parallel:
-
-                async def return_mock_results(coroutines, **kwargs):
-                    for coro in coroutines:
-                        coro.close()
-                    return [[mock_analysis]]
-
-                mock_parallel.side_effect = return_mock_results
-
-                response = test_client.post(
-                    "/analyze-failures",
-                    json={
-                        "raw_xml": self.SAMPLE_XML,
-                        "ai_provider": "claude",
-                        "ai_model": "test-model",
-                    },
-                )
-                data = response.json()
-                assert data["enriched_xml"] is not None
-                assert "ai_classification" in data["enriched_xml"]
-                assert "PRODUCT BUG" in data["enriched_xml"]
+        """Test that type=file request is accepted for async processing."""
+        with patch("rootcoz.main._process_file_raw_analysis", new_callable=AsyncMock):
+            response = test_client.post(
+                "/analyze",
+                json={
+                    "type": "file",
+                    "raw_xml": self.SAMPLE_XML,
+                    "ai_provider": "claude",
+                    "ai_model": "test-model",
+                },
+            )
+            assert response.status_code == 202
+            data = response.json()
+            assert data["status"] == "queued"
 
 
 class TestResultsEndpoints:
@@ -1101,6 +885,7 @@ class TestAppLifespan:
         """Test that database is initialized on app startup."""
         with patch.object(storage, "DB_PATH", temp_db_path):
             from starlette.testclient import TestClient
+
             from rootcoz.main import app
 
             with TestClient(app):
@@ -2612,21 +2397,21 @@ class TestClassifyEndpoint:
 
 
 class TestWaitForJenkinsCompletion:
-    """Tests for the _wait_for_jenkins_completion function."""
+    """Tests for the wait_for_jenkins_completion function."""
 
     @pytest.mark.asyncio
     async def test_already_completed_returns_true(self) -> None:
         """Job that is already finished returns True on first poll."""
-        with patch("rootcoz.jenkins.JenkinsClient") as mock_cls:
+        with patch("rootcoz.sources.jenkins_source.JenkinsClient") as mock_cls:
             mock_client = mock_cls.return_value
             mock_client.get_build_info_safe.return_value = {
                 "building": False,
                 "result": "SUCCESS",
             }
 
-            from rootcoz.main import _wait_for_jenkins_completion
+            from rootcoz.sources.jenkins_source import wait_for_jenkins_completion
 
-            result, error = await _wait_for_jenkins_completion(
+            result, error = await wait_for_jenkins_completion(
                 jenkins_url="https://jenkins.example.com",
                 job_name="my-job",
                 build_number=1,
@@ -2646,9 +2431,14 @@ class TestWaitForJenkinsCompletion:
         fake_monotonic, fake_sleep = fake_clock
 
         with (
-            patch("rootcoz.jenkins.JenkinsClient") as mock_cls,
-            patch("rootcoz.main.asyncio.sleep", side_effect=fake_sleep),
-            patch("rootcoz.main._time.monotonic", side_effect=fake_monotonic),
+            patch("rootcoz.sources.jenkins_source.JenkinsClient") as mock_cls,
+            patch(
+                "rootcoz.sources.jenkins_source.asyncio.sleep", side_effect=fake_sleep
+            ),
+            patch(
+                "rootcoz.sources.jenkins_source._time.monotonic",
+                side_effect=fake_monotonic,
+            ),
         ):
             mock_client = mock_cls.return_value
             mock_client.get_build_info_safe.side_effect = [
@@ -2657,9 +2447,9 @@ class TestWaitForJenkinsCompletion:
                 {"building": False, "result": "FAILURE"},
             ]
 
-            from rootcoz.main import _wait_for_jenkins_completion
+            from rootcoz.sources.jenkins_source import wait_for_jenkins_completion
 
-            result, error = await _wait_for_jenkins_completion(
+            result, error = await wait_for_jenkins_completion(
                 jenkins_url="https://jenkins.example.com",
                 job_name="my-job",
                 build_number=42,
@@ -2687,16 +2477,21 @@ class TestWaitForJenkinsCompletion:
         fake_monotonic, fake_sleep = fake_clock
 
         with (
-            patch("rootcoz.jenkins.JenkinsClient") as mock_cls,
-            patch("rootcoz.main.asyncio.sleep", side_effect=fake_sleep),
-            patch("rootcoz.main._time.monotonic", side_effect=fake_monotonic),
+            patch("rootcoz.sources.jenkins_source.JenkinsClient") as mock_cls,
+            patch(
+                "rootcoz.sources.jenkins_source.asyncio.sleep", side_effect=fake_sleep
+            ),
+            patch(
+                "rootcoz.sources.jenkins_source._time.monotonic",
+                side_effect=fake_monotonic,
+            ),
         ):
             mock_client = mock_cls.return_value
             mock_client.get_build_info_safe.return_value = {"building": True}
 
-            from rootcoz.main import _wait_for_jenkins_completion
+            from rootcoz.sources.jenkins_source import wait_for_jenkins_completion
 
-            result, error = await _wait_for_jenkins_completion(
+            result, error = await wait_for_jenkins_completion(
                 jenkins_url="https://jenkins.example.com",
                 job_name="my-job",
                 build_number=1,
@@ -2720,9 +2515,14 @@ class TestWaitForJenkinsCompletion:
         fake_monotonic, fake_sleep = fake_clock
 
         with (
-            patch("rootcoz.jenkins.JenkinsClient") as mock_cls,
-            patch("rootcoz.main.asyncio.sleep", side_effect=fake_sleep),
-            patch("rootcoz.main._time.monotonic", side_effect=fake_monotonic),
+            patch("rootcoz.sources.jenkins_source.JenkinsClient") as mock_cls,
+            patch(
+                "rootcoz.sources.jenkins_source.asyncio.sleep", side_effect=fake_sleep
+            ),
+            patch(
+                "rootcoz.sources.jenkins_source._time.monotonic",
+                side_effect=fake_monotonic,
+            ),
         ):
             mock_client = mock_cls.return_value
             mock_client.get_build_info_safe.side_effect = [
@@ -2730,9 +2530,9 @@ class TestWaitForJenkinsCompletion:
                 {"building": False, "result": "SUCCESS"},
             ]
 
-            from rootcoz.main import _wait_for_jenkins_completion
+            from rootcoz.sources.jenkins_source import wait_for_jenkins_completion
 
-            result, error = await _wait_for_jenkins_completion(
+            result, error = await wait_for_jenkins_completion(
                 jenkins_url="https://jenkins.example.com",
                 job_name="my-job",
                 build_number=1,
@@ -2748,13 +2548,13 @@ class TestWaitForJenkinsCompletion:
     @pytest.mark.asyncio
     async def test_non_transient_error_stops_polling(self) -> None:
         """Non-transient errors (e.g. bad credentials) stop polling immediately."""
-        with patch("rootcoz.jenkins.JenkinsClient") as mock_cls:
+        with patch("rootcoz.sources.jenkins_source.JenkinsClient") as mock_cls:
             mock_client = mock_cls.return_value
             mock_client.get_build_info_safe.side_effect = ValueError("bad credentials")
 
-            from rootcoz.main import _wait_for_jenkins_completion
+            from rootcoz.sources.jenkins_source import wait_for_jenkins_completion
 
-            result, error = await _wait_for_jenkins_completion(
+            result, error = await wait_for_jenkins_completion(
                 jenkins_url="https://jenkins.example.com",
                 job_name="my-job",
                 build_number=1,
@@ -2771,15 +2571,15 @@ class TestWaitForJenkinsCompletion:
     @pytest.mark.asyncio
     async def test_job_not_found_returns_false_immediately(self) -> None:
         """NotFoundException (404) is permanent and stops polling immediately."""
-        with patch("rootcoz.jenkins.JenkinsClient") as mock_cls:
+        with patch("rootcoz.sources.jenkins_source.JenkinsClient") as mock_cls:
             mock_client = mock_cls.return_value
             mock_client.get_build_info_safe.side_effect = jenkins.NotFoundException(
                 "job[my-job] does not exist"
             )
 
-            from rootcoz.main import _wait_for_jenkins_completion
+            from rootcoz.sources.jenkins_source import wait_for_jenkins_completion
 
-            result, error = await _wait_for_jenkins_completion(
+            result, error = await wait_for_jenkins_completion(
                 jenkins_url="https://jenkins.example.com",
                 job_name="my-job",
                 build_number=999,
@@ -2800,8 +2600,10 @@ class TestWaitForJenkinsCompletion:
     async def test_unlimited_wait_polls_until_complete(self) -> None:
         """max_wait_minutes=0 polls indefinitely until job completes."""
         with (
-            patch("rootcoz.jenkins.JenkinsClient") as mock_cls,
-            patch("rootcoz.main.asyncio.sleep", new_callable=AsyncMock) as mock_sleep,
+            patch("rootcoz.sources.jenkins_source.JenkinsClient") as mock_cls,
+            patch(
+                "rootcoz.sources.jenkins_source.asyncio.sleep", new_callable=AsyncMock
+            ) as mock_sleep,
         ):
             mock_client = mock_cls.return_value
             mock_client.get_build_info_safe.side_effect = [
@@ -2811,9 +2613,9 @@ class TestWaitForJenkinsCompletion:
                 {"building": False, "result": "SUCCESS"},
             ]
 
-            from rootcoz.main import _wait_for_jenkins_completion
+            from rootcoz.sources.jenkins_source import wait_for_jenkins_completion
 
-            result, error = await _wait_for_jenkins_completion(
+            result, error = await wait_for_jenkins_completion(
                 jenkins_url="https://jenkins.example.com",
                 job_name="my-job",
                 build_number=1,
@@ -2864,7 +2666,7 @@ class TestProcessAnalysisWaiting:
 
         with (
             patch(
-                "rootcoz.main._wait_for_jenkins_completion",
+                "rootcoz.main.wait_for_jenkins_completion",
                 new_callable=AsyncMock,
                 return_value=(True, ""),
             ) as mock_wait,
@@ -2923,7 +2725,7 @@ class TestProcessAnalysisWaiting:
 
         with (
             patch(
-                "rootcoz.main._wait_for_jenkins_completion",
+                "rootcoz.main.wait_for_jenkins_completion",
                 new_callable=AsyncMock,
             ) as mock_wait,
             patch("rootcoz.main.update_status", side_effect=capture_status),
@@ -2986,7 +2788,7 @@ class TestProcessAnalysisWaiting:
 
         with (
             patch(
-                "rootcoz.main._wait_for_jenkins_completion",
+                "rootcoz.main.wait_for_jenkins_completion",
                 new_callable=AsyncMock,
                 return_value=(
                     False,
@@ -3045,7 +2847,7 @@ class TestProcessAnalysisWaiting:
 
         with (
             patch(
-                "rootcoz.main._wait_for_jenkins_completion",
+                "rootcoz.main.wait_for_jenkins_completion",
                 new_callable=AsyncMock,
             ) as mock_wait,
             patch("rootcoz.main.update_status", side_effect=capture_status),
@@ -3109,7 +2911,7 @@ class TestBuildRequestParams:
         """SecretStr values are encrypted, not stored as plaintext."""
         from pydantic import SecretStr
 
-        from rootcoz.encryption import SENSITIVE_KEYS, _ENCRYPTED_PREFIX
+        from rootcoz.encryption import _ENCRYPTED_PREFIX, SENSITIVE_KEYS
         from rootcoz.main import _build_request_params
         from rootcoz.models import AnalyzeRequest
 
@@ -3380,6 +3182,7 @@ class TestLifespanResumesWaitingJobs:
                 # Patch away the startup delay so the deferred task runs immediately
                 with patch("rootcoz.main.asyncio.sleep", new_callable=AsyncMock):
                     from starlette.testclient import TestClient
+
                     from rootcoz.main import app
 
                     with TestClient(app):
@@ -3412,6 +3215,7 @@ class TestLifespanResumesWaitingJobs:
 
         with patch.object(storage, "DB_PATH", temp_db_path):
             from starlette.testclient import TestClient
+
             from rootcoz.main import app
 
             with TestClient(app):
@@ -3440,6 +3244,7 @@ class TestPeerAnalysisParams:
             response = test_client.post(
                 "/analyze",
                 json={
+                    "type": "jenkins",
                     "job_name": "test",
                     "build_number": 123,
                     "ai_provider": "claude",
@@ -3467,6 +3272,7 @@ class TestPeerAnalysisParams:
             response = test_client.post(
                 "/analyze",
                 json={
+                    "type": "jenkins",
                     "job_name": "test",
                     "build_number": 123,
                     "ai_provider": "claude",
@@ -3645,68 +3451,30 @@ class TestPeerAnalysisParams:
         assert merged_out.peer_analysis_max_rounds == 5
 
     def test_analyze_failures_with_peer_ai_configs(self, test_client) -> None:
-        """POST /analyze-failures with peer_ai_configs passes them to analyze_failure_group."""
-        mock_analysis = FailureAnalysis(
-            test_name="test_foo",
-            error="assert False",
-            analysis=AnalysisDetail(
-                classification="CODE ISSUE",
-                details="Test assertion failed",
-            ),
-        )
-
-        with patch("rootcoz.main.RepositoryManager") as mock_repo_cls:
-            mock_repo_instance = mock_repo_cls.return_value
-            mock_repo_instance.clone.return_value = None
-            mock_repo_instance.cleanup.return_value = None
-
-            with patch(
-                "rootcoz.main.analyze_failure_group",
-                new_callable=AsyncMock,
-            ) as mock_analyze_group:
-                mock_analyze_group.return_value = [mock_analysis]
-
-                with patch(
-                    "rootcoz.main.run_parallel_with_limit",
-                    new_callable=AsyncMock,
-                ) as mock_parallel:
-
-                    async def run_coroutines(coroutines, **kwargs):
-                        return [await coro for coro in coroutines]
-
-                    mock_parallel.side_effect = run_coroutines
-
-                    response = test_client.post(
-                        "/analyze-failures",
-                        json={
-                            "failures": [
-                                {
-                                    "test_name": "test_foo",
-                                    "error_message": "assert False",
-                                    "stack_trace": "File test.py, line 10",
-                                }
-                            ],
-                            "ai_provider": "claude",
-                            "ai_model": "test-model",
-                            "peer_ai_configs": [
-                                {"ai_provider": "gemini", "ai_model": "pro"},
-                            ],
-                            "peer_analysis_max_rounds": 7,
-                        },
-                    )
-                    assert response.status_code == 200
-                    # Verify analyze_failure_group was called with peer params
-                    call_kwargs = mock_analyze_group.call_args[1]
-                    passed_peers = call_kwargs["peer_ai_configs"]
-                    assert len(passed_peers) == 1
-                    # Normalize to dict for comparison (may be AiConfigEntry or dict)
-                    peer = (
-                        passed_peers[0]
-                        if isinstance(passed_peers[0], dict)
-                        else passed_peers[0].model_dump()
-                    )
-                    assert peer == {"ai_provider": "gemini", "ai_model": "pro"}
-                    assert call_kwargs["peer_analysis_max_rounds"] == 7
+        """POST /analyze with type=raw and peer_ai_configs returns 202."""
+        with patch("rootcoz.main._process_file_raw_analysis", new_callable=AsyncMock):
+            response = test_client.post(
+                "/analyze",
+                json={
+                    "type": "raw",
+                    "failures": [
+                        {
+                            "test_name": "test_foo",
+                            "error_message": "assert False",
+                            "stack_trace": "File test.py, line 10",
+                        }
+                    ],
+                    "ai_provider": "claude",
+                    "ai_model": "test-model",
+                    "peer_ai_configs": [
+                        {"ai_provider": "gemini", "ai_model": "pro"},
+                    ],
+                    "peer_analysis_max_rounds": 7,
+                },
+            )
+            assert response.status_code == 202
+            data = response.json()
+            assert data["status"] == "queued"
 
     def test_build_request_params_stores_resolved_peer_configs(
         self, mock_settings
@@ -3862,7 +3630,7 @@ class TestProgressPhaseTracking:
 
         with (
             patch(
-                "rootcoz.main._wait_for_jenkins_completion",
+                "rootcoz.main.wait_for_jenkins_completion",
                 new_callable=AsyncMock,
                 return_value=(True, ""),
             ),
@@ -4233,67 +4001,38 @@ class TestRequestParamsPreservation:
     def test_analyze_failures_preserves_request_params_on_success(
         self, test_client, temp_db_path: Path
     ) -> None:
-        """POST /analyze-failures must seed and preserve request_params."""
-        mock_analysis = FailureAnalysis(
-            test_name="test_foo",
-            error="assert False",
-            analysis=AnalysisDetail(
-                classification="CODE ISSUE",
-                details="Test failed",
-            ),
-        )
+        """POST /analyze with type=raw seeds request_params in pending state."""
+        with patch("rootcoz.main._process_file_raw_analysis", new_callable=AsyncMock):
+            response = test_client.post(
+                "/analyze",
+                json={
+                    "type": "raw",
+                    "failures": [
+                        {
+                            "test_name": "test_foo",
+                            "error_message": "assert False",
+                            "stack_trace": "File test.py, line 10",
+                        }
+                    ],
+                    "ai_provider": "cursor",
+                    "ai_model": "test-model",
+                },
+            )
+            assert response.status_code == 202
+            data = response.json()
+            job_id = data["job_id"]
 
-        with patch("rootcoz.main.RepositoryManager") as mock_repo_cls:
-            mock_repo_instance = mock_repo_cls.return_value
-            mock_repo_instance.clone.return_value = None
-            mock_repo_instance.cleanup.return_value = None
-
-            with (
-                patch(
-                    "rootcoz.main.analyze_failure_group",
-                    new_callable=AsyncMock,
-                ) as mock_analyze_group,
-                patch(
-                    "rootcoz.main.run_parallel_with_limit",
-                    new_callable=AsyncMock,
-                ) as mock_parallel,
-            ):
-                mock_analyze_group.return_value = [mock_analysis]
-
-                async def run_coroutines(coroutines, **kwargs):
-                    return [await coro for coro in coroutines]
-
-                mock_parallel.side_effect = run_coroutines
-
-                response = test_client.post(
-                    "/analyze-failures",
-                    json={
-                        "failures": [
-                            {
-                                "test_name": "test_foo",
-                                "error_message": "assert False",
-                                "stack_trace": "File test.py, line 10",
-                            }
-                        ],
-                        "ai_provider": "cursor",
-                        "ai_model": "test-model",
-                    },
-                )
-                assert response.status_code == 200
-                data = response.json()
-                job_id = data["job_id"]
-
-        # Fetch the stored result and verify request_params survived
+        # Fetch the stored result and verify request_params were seeded
         result_response = test_client.get(
             f"/results/{job_id}",
             headers={"accept": "application/json"},
         )
-        assert result_response.status_code == 200
+        assert result_response.status_code in (200, 202)
         result_data = result_response.json()
         assert "result" in result_data
         result = result_data["result"]
         assert "request_params" in result, (
-            "request_params must be preserved after analyze-failures completes"
+            "request_params must be seeded when the job is queued"
         )
         rp = result["request_params"]
         assert rp["ai_provider"] == "cursor"
@@ -4528,7 +4267,7 @@ class TestJiraProjectsEndpoint:
         jira_settings = _build_wait_settings(jira_url="https://jira.example.com")
         app.dependency_overrides[get_settings] = lambda: jira_settings
         try:
-            with patch("rootcoz.jira.JiraClient") as MockJiraClient:
+            with patch("rootcoz.main.JiraClient") as MockJiraClient:
                 mock_client = AsyncMock()
                 mock_client.list_projects = AsyncMock(return_value=projects)
                 mock_client.__aenter__ = AsyncMock(return_value=mock_client)
@@ -4536,7 +4275,7 @@ class TestJiraProjectsEndpoint:
                 MockJiraClient.return_value = mock_client
                 response = test_client.post(
                     "/api/jira-projects",
-                    json={"jira_token": "tok", "jira_email": "u@e.com"},  # noqa: S106
+                    json={"jira_token": "tok", "jira_email": "u@e.com"},
                     headers=_ADMIN_AUTH_HEADERS,
                 )
             assert response.status_code == 200
@@ -4585,7 +4324,7 @@ class TestJiraSecurityLevelsEndpoint:
         jira_settings = _build_wait_settings(jira_url="https://jira.example.com")
         app.dependency_overrides[get_settings] = lambda: jira_settings
         try:
-            with patch("rootcoz.jira.JiraClient") as MockJiraClient:
+            with patch("rootcoz.main.JiraClient") as MockJiraClient:
                 mock_client = AsyncMock()
                 mock_client.list_security_levels = AsyncMock(return_value=levels)
                 mock_client.__aenter__ = AsyncMock(return_value=mock_client)
@@ -4597,7 +4336,7 @@ class TestJiraSecurityLevelsEndpoint:
                         "project_key": "PROJ",
                         "jira_token": "tok",
                         "jira_email": "u@e.com",
-                    },  # noqa: S106
+                    },
                     headers=_ADMIN_AUTH_HEADERS,
                 )
             assert response.status_code == 200

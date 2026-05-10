@@ -4,10 +4,9 @@ import json
 from unittest.mock import patch
 
 import pytest
-
 from ai_cli_runner import AIResult
-from rootcoz.models import AiConfigEntry, FailedTest
 
+from rootcoz.models import AiConfigEntry, FailedTest
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -39,10 +38,8 @@ async def _run_peer_analysis(
 
     from rootcoz.peer_analysis import analyze_failure_group_with_peers
 
-    monkeypatch.setattr(
-        "rootcoz.peer_analysis._call_ai_cli_with_retry", cli_side_effect
-    )
-    monkeypatch.setattr("rootcoz.analyzer._call_ai_cli_with_retry", cli_side_effect)
+    monkeypatch.setattr("rootcoz.peer_analysis.call_ai_cli_with_retry", cli_side_effect)
+    monkeypatch.setattr("rootcoz.engine.core.call_ai_cli_with_retry", cli_side_effect)
     monkeypatch.setattr("rootcoz.peer_analysis.update_progress_phase", AsyncMock())
 
     if peer_configs is None:
@@ -112,8 +109,8 @@ def _make_peer_json_response(
 class TestCheckConsensus:
     def test_check_consensus_all_agree(self) -> None:
         """All non-failed peers agree with orchestrator -> True."""
-        from rootcoz.peer_analysis import _check_consensus
         from rootcoz.models import PeerRound
+        from rootcoz.peer_analysis import _check_consensus
 
         rounds = [
             PeerRound(
@@ -139,8 +136,8 @@ class TestCheckConsensus:
 
     def test_check_consensus_disagreement(self) -> None:
         """At least one peer disagrees -> False."""
-        from rootcoz.peer_analysis import _check_consensus
         from rootcoz.models import PeerRound
+        from rootcoz.peer_analysis import _check_consensus
 
         rounds = [
             PeerRound(
@@ -166,8 +163,8 @@ class TestCheckConsensus:
 
     def test_check_consensus_no_valid_peers(self) -> None:
         """All peers failed (agrees=None) -> False."""
-        from rootcoz.peer_analysis import _check_consensus
         from rootcoz.models import PeerRound
+        from rootcoz.peer_analysis import _check_consensus
 
         rounds = [
             PeerRound(
@@ -193,8 +190,8 @@ class TestCheckConsensus:
 
     def test_check_consensus_failed_peer_excluded(self) -> None:
         """One peer failed (None), remaining peer agrees -> True."""
-        from rootcoz.peer_analysis import _check_consensus
         from rootcoz.models import PeerRound
+        from rootcoz.peer_analysis import _check_consensus
 
         rounds = [
             PeerRound(
@@ -224,8 +221,8 @@ class TestCheckConsensus:
         A peer that self-reports agrees=True but has a different classification
         should NOT count as consensus.
         """
-        from rootcoz.peer_analysis import _check_consensus
         from rootcoz.models import PeerRound
+        from rootcoz.peer_analysis import _check_consensus
 
         # Peer says agrees=True but classification differs from orchestrator
         rounds = [
@@ -244,8 +241,8 @@ class TestCheckConsensus:
 
     def test_check_consensus_classification_match_overrides_disagrees(self) -> None:
         """Peer that says disagrees but has matching classification -> consensus True."""
-        from rootcoz.peer_analysis import _check_consensus
         from rootcoz.models import PeerRound
+        from rootcoz.peer_analysis import _check_consensus
 
         rounds = [
             PeerRound(
@@ -262,8 +259,8 @@ class TestCheckConsensus:
 
     def test_check_consensus_case_insensitive(self) -> None:
         """Classification comparison is case-insensitive."""
-        from rootcoz.peer_analysis import _check_consensus
         from rootcoz.models import PeerRound
+        from rootcoz.peer_analysis import _check_consensus
 
         rounds = [
             PeerRound(
@@ -280,8 +277,8 @@ class TestCheckConsensus:
 
     def test_check_consensus_whitespace_tolerance(self) -> None:
         """Classification comparison tolerates leading/trailing whitespace."""
-        from rootcoz.peer_analysis import _check_consensus
         from rootcoz.models import PeerRound
+        from rootcoz.peer_analysis import _check_consensus
 
         rounds = [
             PeerRound(
@@ -669,11 +666,11 @@ class TestAnalyzeWithPeers:
 
         with (
             patch(
-                "rootcoz.peer_analysis._run_single_ai_analysis",
+                "rootcoz.peer_analysis.run_single_ai_analysis",
                 mock_orchestrator,
             ),
             patch(
-                "rootcoz.peer_analysis._call_ai_cli_with_retry",
+                "rootcoz.peer_analysis.call_ai_cli_with_retry",
                 side_effect=mock_peer_call,
             ),
         ):
@@ -749,11 +746,11 @@ class TestAnalyzeWithPeers:
 
         with (
             patch(
-                "rootcoz.peer_analysis._run_single_ai_analysis",
+                "rootcoz.peer_analysis.run_single_ai_analysis",
                 mock_orchestrator,
             ),
             patch(
-                "rootcoz.peer_analysis._call_ai_cli_with_retry",
+                "rootcoz.peer_analysis.call_ai_cli_with_retry",
                 side_effect=mock_peer_and_revision_call,
             ),
         ):
@@ -825,11 +822,11 @@ class TestAnalyzeWithPeers:
 
         with (
             patch(
-                "rootcoz.peer_analysis._run_single_ai_analysis",
+                "rootcoz.peer_analysis.run_single_ai_analysis",
                 mock_orchestrator,
             ),
             patch(
-                "rootcoz.peer_analysis._call_ai_cli_with_retry",
+                "rootcoz.peer_analysis.call_ai_cli_with_retry",
                 side_effect=mock_peer_and_revision_call,
             ),
         ):
@@ -903,11 +900,11 @@ class TestAnalyzeWithPeers:
 
         with (
             patch(
-                "rootcoz.peer_analysis._run_single_ai_analysis",
+                "rootcoz.peer_analysis.run_single_ai_analysis",
                 mock_orchestrator,
             ),
             patch(
-                "rootcoz.peer_analysis._call_ai_cli_with_retry",
+                "rootcoz.peer_analysis.call_ai_cli_with_retry",
                 side_effect=mock_peer_and_revision_call,
             ),
         ):
@@ -1003,11 +1000,11 @@ class TestAnalyzeWithPeers:
 
         with (
             patch(
-                "rootcoz.peer_analysis._run_single_ai_analysis",
+                "rootcoz.peer_analysis.run_single_ai_analysis",
                 mock_orchestrator,
             ),
             patch(
-                "rootcoz.peer_analysis._call_ai_cli_with_retry",
+                "rootcoz.peer_analysis.call_ai_cli_with_retry",
                 side_effect=mock_peer_and_revision_call,
             ),
         ):
@@ -1103,11 +1100,11 @@ class TestAnalyzeWithPeers:
 
         with (
             patch(
-                "rootcoz.peer_analysis._run_single_ai_analysis",
+                "rootcoz.peer_analysis.run_single_ai_analysis",
                 mock_orchestrator,
             ),
             patch(
-                "rootcoz.peer_analysis._call_ai_cli_with_retry",
+                "rootcoz.peer_analysis.call_ai_cli_with_retry",
                 side_effect=mock_peer_and_revision_call,
             ),
         ):
@@ -1200,11 +1197,11 @@ class TestAnalyzeWithPeers:
 
         with (
             patch(
-                "rootcoz.peer_analysis._run_single_ai_analysis",
+                "rootcoz.peer_analysis.run_single_ai_analysis",
                 mock_orchestrator,
             ),
             patch(
-                "rootcoz.peer_analysis._call_ai_cli_with_retry",
+                "rootcoz.peer_analysis.call_ai_cli_with_retry",
                 side_effect=mock_peer_and_revision_call,
             ),
         ):
@@ -1271,11 +1268,11 @@ class TestAnalyzeWithPeers:
 
         with (
             patch(
-                "rootcoz.peer_analysis._run_single_ai_analysis",
+                "rootcoz.peer_analysis.run_single_ai_analysis",
                 mock_orchestrator,
             ),
             patch(
-                "rootcoz.peer_analysis._call_ai_cli_with_retry",
+                "rootcoz.peer_analysis.call_ai_cli_with_retry",
                 side_effect=mock_peer_and_revision_call,
             ),
         ):
@@ -1357,11 +1354,11 @@ class TestAnalyzeWithPeers:
 
         with (
             patch(
-                "rootcoz.peer_analysis._run_single_ai_analysis",
+                "rootcoz.peer_analysis.run_single_ai_analysis",
                 mock_orchestrator,
             ),
             patch(
-                "rootcoz.peer_analysis._call_ai_cli_with_retry",
+                "rootcoz.peer_analysis.call_ai_cli_with_retry",
                 side_effect=mock_peer_call,
             ),
         ):
@@ -1423,11 +1420,11 @@ class TestAnalyzeWithPeers:
 
         with (
             patch(
-                "rootcoz.peer_analysis._run_single_ai_analysis",
+                "rootcoz.peer_analysis.run_single_ai_analysis",
                 mock_orchestrator,
             ),
             patch(
-                "rootcoz.peer_analysis._call_ai_cli_with_retry",
+                "rootcoz.peer_analysis.call_ai_cli_with_retry",
                 side_effect=mock_peer_call,
             ),
         ):
@@ -1505,11 +1502,11 @@ class TestAnalyzeWithPeers:
 
         with (
             patch(
-                "rootcoz.peer_analysis._run_single_ai_analysis",
+                "rootcoz.peer_analysis.run_single_ai_analysis",
                 mock_orchestrator,
             ),
             patch(
-                "rootcoz.peer_analysis._call_ai_cli_with_retry",
+                "rootcoz.peer_analysis.call_ai_cli_with_retry",
                 side_effect=mock_peer_and_revision_call,
             ),
             patch(
@@ -1584,11 +1581,11 @@ class TestAnalyzeWithPeers:
 
         with (
             patch(
-                "rootcoz.peer_analysis._run_single_ai_analysis",
+                "rootcoz.peer_analysis.run_single_ai_analysis",
                 mock_orchestrator,
             ),
             patch(
-                "rootcoz.peer_analysis._call_ai_cli_with_retry",
+                "rootcoz.peer_analysis.call_ai_cli_with_retry",
                 side_effect=mock_peer_and_revision_call,
             ),
             patch(
@@ -1648,11 +1645,11 @@ class TestAnalyzeWithPeers:
 
         with (
             patch(
-                "rootcoz.peer_analysis._run_single_ai_analysis",
+                "rootcoz.peer_analysis.run_single_ai_analysis",
                 mock_orchestrator,
             ),
             patch(
-                "rootcoz.peer_analysis._call_ai_cli_with_retry",
+                "rootcoz.peer_analysis.call_ai_cli_with_retry",
                 side_effect=mock_peer_call,
             ),
             patch(
@@ -1726,11 +1723,11 @@ class TestAnalyzeWithPeers:
 
         with (
             patch(
-                "rootcoz.peer_analysis._run_single_ai_analysis",
+                "rootcoz.peer_analysis.run_single_ai_analysis",
                 mock_orchestrator,
             ),
             patch(
-                "rootcoz.peer_analysis._call_ai_cli_with_retry",
+                "rootcoz.peer_analysis.call_ai_cli_with_retry",
                 side_effect=mock_peer_call,
             ),
         ):
@@ -1861,11 +1858,11 @@ class TestAnalyzeWithPeers:
 
         with (
             patch(
-                "rootcoz.peer_analysis._run_single_ai_analysis",
+                "rootcoz.peer_analysis.run_single_ai_analysis",
                 mock_orchestrator,
             ),
             patch(
-                "rootcoz.peer_analysis._call_ai_cli_with_retry",
+                "rootcoz.peer_analysis.call_ai_cli_with_retry",
                 side_effect=mock_peer_call,
             ),
             patch(
@@ -1986,9 +1983,7 @@ class TestAnalyzeWithPeers:
 
     def test_build_peer_review_prompt_includes_other_peers(self) -> None:
         """When other_peer_responses is provided, prompt includes their responses."""
-        from rootcoz.peer_analysis import _build_peer_review_prompt
-
-        from rootcoz.peer_analysis import PeerResponseSummary
+        from rootcoz.peer_analysis import PeerResponseSummary, _build_peer_review_prompt
 
         other_responses: list[PeerResponseSummary] = [
             PeerResponseSummary(
@@ -2098,11 +2093,11 @@ class TestAnalyzeWithPeers:
 
         with (
             patch(
-                "rootcoz.peer_analysis._run_single_ai_analysis",
+                "rootcoz.peer_analysis.run_single_ai_analysis",
                 mock_orchestrator,
             ),
             patch(
-                "rootcoz.peer_analysis._call_ai_cli_with_retry",
+                "rootcoz.peer_analysis.call_ai_cli_with_retry",
                 side_effect=mock_calls,
             ),
         ):
@@ -2186,11 +2181,11 @@ class TestAnalyzeWithPeers:
 
         with (
             patch(
-                "rootcoz.peer_analysis._run_single_ai_analysis",
+                "rootcoz.peer_analysis.run_single_ai_analysis",
                 mock_orchestrator,
             ),
             patch(
-                "rootcoz.peer_analysis._call_ai_cli_with_retry",
+                "rootcoz.peer_analysis.call_ai_cli_with_retry",
                 side_effect=mock_calls,
             ),
         ):
@@ -2281,11 +2276,11 @@ class TestAnalyzeWithPeers:
 
         with (
             patch(
-                "rootcoz.peer_analysis._run_single_ai_analysis",
+                "rootcoz.peer_analysis.run_single_ai_analysis",
                 mock_orchestrator,
             ),
             patch(
-                "rootcoz.peer_analysis._call_ai_cli_with_retry",
+                "rootcoz.peer_analysis.call_ai_cli_with_retry",
                 side_effect=mock_calls,
             ),
         ):
@@ -2372,11 +2367,11 @@ class TestAnalyzeWithPeers:
 
         with (
             patch(
-                "rootcoz.peer_analysis._run_single_ai_analysis",
+                "rootcoz.peer_analysis.run_single_ai_analysis",
                 mock_orchestrator,
             ),
             patch(
-                "rootcoz.peer_analysis._call_ai_cli_with_retry",
+                "rootcoz.peer_analysis.call_ai_cli_with_retry",
                 side_effect=mock_calls,
             ),
         ):
@@ -2438,11 +2433,11 @@ class TestAnalyzeWithPeers:
 
         with (
             patch(
-                "rootcoz.peer_analysis._run_single_ai_analysis",
+                "rootcoz.peer_analysis.run_single_ai_analysis",
                 mock_orchestrator,
             ),
             patch(
-                "rootcoz.peer_analysis._call_ai_cli_with_retry",
+                "rootcoz.peer_analysis.call_ai_cli_with_retry",
                 side_effect=mock_peer_call,
             ),
         ):
@@ -2545,11 +2540,11 @@ class TestAnalyzeWithPeers:
 
         with (
             patch(
-                "rootcoz.peer_analysis._run_single_ai_analysis",
+                "rootcoz.peer_analysis.run_single_ai_analysis",
                 mock_orchestrator,
             ),
             patch(
-                "rootcoz.peer_analysis._call_ai_cli_with_retry",
+                "rootcoz.peer_analysis.call_ai_cli_with_retry",
                 side_effect=mock_calls,
             ),
         ):
@@ -2661,11 +2656,11 @@ class TestAnalyzeWithPeers:
 
         with (
             patch(
-                "rootcoz.peer_analysis._run_single_ai_analysis",
+                "rootcoz.peer_analysis.run_single_ai_analysis",
                 mock_orchestrator,
             ),
             patch(
-                "rootcoz.peer_analysis._call_ai_cli_with_retry",
+                "rootcoz.peer_analysis.call_ai_cli_with_retry",
                 side_effect=mock_calls,
             ),
         ):

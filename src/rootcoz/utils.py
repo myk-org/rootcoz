@@ -10,7 +10,6 @@ import requests.exceptions
 
 from rootcoz.encryption import SENSITIVE_KEYS
 
-
 #: Combined tuple of exception types that indicate a transient Jenkins
 #: connectivity problem (network outage, DNS failure, timeout, etc.).
 #: Used by both the polling loop in *main.py* and the pre-flight check
@@ -54,7 +53,7 @@ def mask_sensitive_fields(data: Any) -> Any:
     if isinstance(data, dict):
         masked: dict[str, Any] = {}
         for k, v in data.items():
-            if isinstance(k, str) and _is_sensitive_key(k) and v:
+            if isinstance(k, str) and is_sensitive_key(k) and v:
                 masked[k] = _MASK
             else:
                 masked[k] = mask_sensitive_fields(v)
@@ -64,6 +63,6 @@ def mask_sensitive_fields(data: Any) -> Any:
     return data
 
 
-def _is_sensitive_key(key: str) -> bool:
+def is_sensitive_key(key: str) -> bool:
     """Return True if *key* names a sensitive field."""
     return key in SENSITIVE_KEYS or bool(_GENERIC_SENSITIVE_RE.search(key))

@@ -28,7 +28,7 @@ from rootcoz.models import (
     PageState,
 )
 
-_TEST_GITHUB_TOKEN = "test-token-placeholder"  # noqa: S105
+_TEST_GITHUB_TOKEN = "test-token-placeholder"
 
 _GITHUB_FOOTER_MARKER = (
     "Generated using AI with [rootcoz](https://github.com/myk-org/rootcoz)"

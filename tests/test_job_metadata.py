@@ -214,6 +214,7 @@ def mock_settings(temp_db_path):
 def api_client(mock_settings, temp_db_path: Path):
     with patch.object(storage, "DB_PATH", temp_db_path):
         from starlette.testclient import TestClient
+
         from rootcoz.main import app
 
         with TestClient(
@@ -385,6 +386,7 @@ def noauth_client(mock_settings, temp_db_path: Path):
     """Test client with NO admin credentials."""
     with patch.object(storage, "DB_PATH", temp_db_path):
         from starlette.testclient import TestClient
+
         from rootcoz.main import app
 
         with TestClient(app) as client:

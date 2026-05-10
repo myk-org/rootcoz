@@ -22,7 +22,6 @@ from rootcoz.monitoring import (
     validate_startup_config,
 )
 
-
 # ---------------------------------------------------------------------------
 # Rolling counter
 # ---------------------------------------------------------------------------
@@ -517,6 +516,7 @@ class TestHealthEndpointIntegration:
                     ),
                 ):
                     from starlette.testclient import TestClient
+
                     from rootcoz.main import app
 
                     with TestClient(app) as client:

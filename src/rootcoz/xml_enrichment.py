@@ -1,15 +1,15 @@
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING, Any
+import time
+from typing import Any
 from xml.etree import ElementTree as ET
 from xml.etree.ElementTree import Element
 
-if TYPE_CHECKING:
-    from rootcoz.models import FailedTest
-
 import httpx
 from defusedxml.ElementTree import fromstring as safe_fromstring
+
+from rootcoz.models import FailedTest
 
 logger = logging.getLogger(__name__)
 
@@ -90,8 +90,6 @@ def extract_test_failures(raw_xml: str) -> list[FailedTest]:
     Raises:
         xml.etree.ElementTree.ParseError: If the XML is malformed.
     """
-    from rootcoz.models import FailedTest
-
     raw_failures = extract_failures_from_xml(raw_xml)
     return [
         FailedTest(
@@ -202,16 +200,16 @@ def enrich_junit_xml_via_server(
 ) -> dict[str, Any]:
     """Send raw JUnit XML to a rootcoz server for AI analysis and enrichment.
 
-    Posts the XML content to the /analyze-failures endpoint. The server
-    extracts failures, runs AI analysis, and returns the enriched XML
-    with analysis results injected back into it.
+    Posts the XML content to the /analyze endpoint with type=file. The server
+    queues the analysis and returns a job_id. This function polls until the
+    analysis completes or the timeout is reached.
 
     Args:
         server_url: Base URL of the rootcoz server (e.g., "http://localhost:8000").
         raw_xml: JUnit XML content as a string.
         ai_provider: AI provider to use (claude, gemini, or cursor).
         ai_model: AI model name.
-        timeout: Request timeout in seconds (default: 600).
+        timeout: Total timeout in seconds for submission + polling (default: 600).
 
     Returns:
         Server response dict with enriched_xml, report_url, status, failures.
@@ -219,20 +217,48 @@ def enrich_junit_xml_via_server(
     Raises:
         httpx.HTTPStatusError: If the server returns an error status.
         httpx.RequestError: If the HTTP request fails.
+        TimeoutError: If the analysis does not complete within the timeout.
     """
+    base = server_url.rstrip("/")
     payload: dict[str, Any] = {
+        "type": "file",
         "raw_xml": raw_xml,
         "ai_provider": ai_provider,
         "ai_model": ai_model,
     }
 
-    response = httpx.post(
-        f"{server_url.rstrip('/')}/analyze-failures",
-        json=payload,
-        timeout=timeout,
-    )
-    response.raise_for_status()
-    return response.json()
+    start = time.monotonic()
+    with httpx.Client(timeout=min(timeout, 60)) as client:
+        # Submit the analysis
+        response = client.post(f"{base}/analyze", json=payload)
+        response.raise_for_status()
+        submit_data = response.json()
+
+        job_id = submit_data.get("job_id")
+        if not job_id:
+            # Unexpected response format
+            return submit_data
+
+        # Poll for completion
+        poll_interval = 5  # seconds
+        while True:
+            elapsed = time.monotonic() - start
+            if elapsed >= timeout:
+                raise TimeoutError(
+                    f"Analysis did not complete within {timeout}s (job_id: {job_id})"
+                )
+
+            result_response = client.get(f"{base}/results/{job_id}")
+            result_response.raise_for_status()
+            result_data = result_response.json()
+
+            status = result_data.get("status")
+            if status == "completed":
+                return result_data.get("result", result_data)
+            elif status in ("failed", "aborted"):
+                return result_data.get("result", result_data)
+
+            time.sleep(poll_interval)
 
 
 def _inject_analysis(testcase: Element, analysis: dict[str, Any]) -> None:

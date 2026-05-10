@@ -220,6 +220,7 @@ class RootCozClient:
         job_name: str,
         build_number: int,
         *,
+        name: str = "",
         tags: list[str] | None = None,
         **kwargs,
     ) -> dict:
@@ -228,13 +229,52 @@ class RootCozClient:
         Args:
             job_name: Jenkins job name.
             build_number: Build number to analyze.
+            name: Display name for this analysis on the dashboard.
             tags: Optional list of tags for categorization.
             **kwargs: Additional fields for the AnalyzeRequest body.
 
         Returns:
             Queued status with job_id for polling.
         """
-        body = {"job_name": job_name, "build_number": build_number, **kwargs}
+        body: dict = {
+            "type": "jenkins",
+            "job_name": job_name,
+            "build_number": build_number,
+            **kwargs,
+        }
+        if name:
+            body["name"] = name
+        if tags:
+            body["tags"] = tags
+        return self._request(
+            "POST",
+            "/analyze",
+            json=body,
+            accept_statuses=(202,),
+        )
+
+    def analyze_file(
+        self,
+        raw_xml: str,
+        *,
+        name: str = "",
+        tags: list[str] | None = None,
+        **kwargs,
+    ) -> dict:
+        """Submit JUnit XML for analysis. POST /analyze with type=file
+
+        Args:
+            raw_xml: JUnit XML content as a string.
+            name: Display name for this analysis on the dashboard.
+            tags: Optional list of tags for categorization.
+            **kwargs: Additional fields for the UnifiedAnalyzeRequest body.
+
+        Returns:
+            Queued status with job_id for polling.
+        """
+        body: dict = {"type": "file", "raw_xml": raw_xml, **kwargs}
+        if name:
+            body["name"] = name
         if tags:
             body["tags"] = tags
         return self._request(

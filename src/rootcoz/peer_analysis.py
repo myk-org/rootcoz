@@ -7,26 +7,27 @@ Loop until all agree or max rounds hit. No one has veto power — it's a convers
 import json
 import os
 import re
+from collections.abc import Coroutine
 from pathlib import Path
-from typing import Any, Coroutine, TypedDict
+from typing import Any, Literal, TypedDict, cast
 
 from ai_cli_runner import AIResult, run_parallel_with_limit
 from simple_logger.logger import get_logger
 
-from rootcoz.analyzer import (
+from rootcoz.engine.core import (
+    JSON_RESPONSE_SCHEMA,
     PROVIDER_CLI_FLAGS,
-    _build_prompt_sections,
-    _call_ai_cli_with_retry,
-    _parse_json_response,
-    _run_single_ai_analysis,
-    _JSON_RESPONSE_SCHEMA,
+    build_prompt_sections,
+    call_ai_cli_with_retry,
+    parse_json_response,
+    run_single_ai_analysis,
 )
 from rootcoz.models import (
     AiConfigEntry,
+    FailedTest,
     FailureAnalysis,
     PeerDebate,
     PeerRound,
-    FailedTest,
 )
 from rootcoz.storage import update_progress_phase
 from rootcoz.token_tracking import record_ai_usage
@@ -41,7 +42,7 @@ class PeerResponseSummary(TypedDict):
     reasoning: str
 
 
-async def _safe_update_progress(job_id: str | None, phase: str) -> None:
+async def safe_update_progress(job_id: str | None, phase: str) -> None:
     """Best-effort progress update; failures are swallowed and logged."""
     if not job_id:
         return
@@ -51,13 +52,19 @@ async def _safe_update_progress(job_id: str | None, phase: str) -> None:
         logger.debug("Failed to update progress phase", exc_info=True)
 
 
-_PEER_RESPONSE_SCHEMA = """CRITICAL: Your response must be ONLY a valid JSON object. No text before or after. No markdown code blocks. No explanation.
-{
-  "agrees": true or false,
-  "classification": "CODE ISSUE" or "PRODUCT BUG",
-  "reasoning": "your detailed reasoning for agreeing or disagreeing",
-  "suggested_changes": "specific changes you'd suggest to the analysis (empty string if you agree)"
-}"""
+_PEER_RESPONSE_SCHEMA = (
+    "CRITICAL: Your response must be ONLY a valid JSON object."
+    " No text before or after. No markdown code blocks."
+    " No explanation.\n"
+    "{\n"
+    '  "agrees": true or false,\n'
+    '  "classification": "CODE ISSUE" or "PRODUCT BUG",\n'
+    '  "reasoning": "your detailed reasoning for agreeing'
+    ' or disagreeing",\n'
+    '  "suggested_changes": "specific changes you\'d suggest'
+    ' to the analysis (empty string if you agree)"\n'
+    "}"
+)
 
 _VALID_CLASSIFICATIONS = frozenset({"CODE ISSUE", "PRODUCT BUG"})
 _PEER_RESPONSE_KEYS = frozenset({"agrees", "classification", "reasoning"})
@@ -284,7 +291,7 @@ PEER FEEDBACK:
 Revise your analysis considering the peer feedback above. You may keep your original \
 classification if you believe the peers are wrong — justify your reasoning.
 {custom_section}{resources_section}
-{_JSON_RESPONSE_SCHEMA}
+{JSON_RESPONSE_SCHEMA}
 """
 
 
@@ -330,6 +337,7 @@ async def analyze_failure_group_with_peers(
     group_label: str = "",
     additional_repos: dict[str, Path] | None = None,
     max_concurrent_ai_calls: int = 3,
+    auth_header: str = "",
 ) -> list[FailureAnalysis]:
     """Analyze a failure group using multi-AI peer consensus.
 
@@ -368,7 +376,7 @@ async def analyze_failure_group_with_peers(
         f"Peer analysis: calling main AI ({main_ai_provider}/{main_ai_model}) "
         f"for failure group ({len(failures)} tests)"
     )
-    parsed_analysis, error_signature = await _run_single_ai_analysis(
+    parsed_analysis, error_signature = await run_single_ai_analysis(
         failures=failures,
         console_context=console_context,
         repo_path=repo_path,
@@ -380,6 +388,7 @@ async def analyze_failure_group_with_peers(
         server_url=server_url,
         job_id=job_id,
         additional_repos=additional_repos,
+        auth_header=auth_header,
     )
 
     # Validate orchestrator classification before feeding into consensus
@@ -396,13 +405,14 @@ async def analyze_failure_group_with_peers(
 
     # Build failure summary and resources section for peer prompts
     failure_summary = _build_failure_summary(failures, error_signature)
-    _, _, resources_section, _ = _build_prompt_sections(
+    _, _, resources_section, _ = build_prompt_sections(
         custom_prompt,
         artifacts_context,
         repo_path,
         server_url,
         job_id,
         additional_repos=additional_repos,
+        auth_header=auth_header,
     )
     all_rounds: list[PeerRound] = []
     consensus_reached = False
@@ -414,7 +424,7 @@ async def analyze_failure_group_with_peers(
         rounds_used = round_num
         logger.info(f"Peer analysis: starting debate round {round_num}/{max_rounds}")
 
-        await _safe_update_progress(
+        await safe_update_progress(
             job_id, f"peer_review_round_{round_num}{group_suffix}"
         )
 
@@ -473,9 +483,10 @@ async def analyze_failure_group_with_peers(
         async def _call_peer(
             idx: int,
             config: AiConfigEntry,
+            _peer_prompts: dict[int, str] = peer_prompts,
         ) -> tuple[AiConfigEntry, AIResult]:
-            prompt = peer_prompts[idx]
-            ai_result = await _call_ai_cli_with_retry(
+            prompt = _peer_prompts[idx]
+            ai_result = await call_ai_cli_with_retry(
                 prompt,
                 cwd=repo_path,
                 ai_provider=config.ai_provider,
@@ -621,7 +632,7 @@ async def analyze_failure_group_with_peers(
         if round_num < max_rounds:
             logger.info(f"No consensus in round {round_num}; main AI revising analysis")
 
-            await _safe_update_progress(
+            await safe_update_progress(
                 job_id, f"orchestrator_revising_round_{round_num}{group_suffix}"
             )
             # Collect peer feedback
@@ -646,7 +657,7 @@ async def analyze_failure_group_with_peers(
 
             previous_analysis = parsed_analysis
             try:
-                rev_result = await _call_ai_cli_with_retry(
+                rev_result = await call_ai_cli_with_retry(
                     revision_prompt,
                     cwd=repo_path,
                     ai_provider=main_ai_provider,
@@ -670,7 +681,7 @@ async def analyze_failure_group_with_peers(
                 continue
 
             if rev_result.success:
-                revised = _parse_json_response(rev_result.text)
+                revised = parse_json_response(rev_result.text)
                 normalized_revised = _coerce_supported_classification(
                     revised.classification
                 )
@@ -725,7 +736,9 @@ async def analyze_failure_group_with_peers(
         max_rounds=max_rounds,
         ai_configs=[
             AiConfigEntry(
-                ai_provider=main_ai_provider,  # type: ignore[arg-type]
+                ai_provider=cast(
+                    Literal["claude", "gemini", "cursor"], main_ai_provider
+                ),
                 ai_model=main_ai_model,
             ),
             *peer_ai_configs,

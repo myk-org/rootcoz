@@ -6,9 +6,9 @@ from unittest.mock import patch
 import pytest
 
 from rootcoz.encryption import (
+    _ENCRYPTED_PREFIX,
     RESPONSE_REDACTED_KEYS,
     SENSITIVE_KEYS,
-    _ENCRYPTED_PREFIX,
     _get_or_create_key_file,
     decrypt_sensitive_fields,
     encrypt_sensitive_fields,
@@ -102,8 +102,8 @@ class TestLegacyPlaintext:
 
     def test_plaintext_values_returned_as_is(self) -> None:
         params = {
-            "jenkins_password": "legacy-plain",  # noqa: S105  # pragma: allowlist secret
-            "github_token": "ghp_old",  # noqa: S105  # pragma: allowlist secret
+            "jenkins_password": "legacy-plain",  # pragma: allowlist secret
+            "github_token": "ghp_old",  # pragma: allowlist secret
         }
         decrypted = decrypt_sensitive_fields(params)
         assert decrypted["jenkins_password"] == params["jenkins_password"]
@@ -298,7 +298,8 @@ class TestAdditionalReposTokenEncryption:
         encrypted = encrypt_sensitive_fields(params)
         decrypted = decrypt_sensitive_fields(encrypted)
         assert (
-            decrypted["additional_repos"][0]["token"] == "tok"  # noqa: S105  # pragma: allowlist secret
+            decrypted["additional_repos"][0]["token"]
+            == "tok"  # pragma: allowlist secret
         )
 
     def test_round_trip_additional_repos_tokens(self) -> None:
@@ -321,11 +322,13 @@ class TestAdditionalReposTokenEncryption:
         encrypted = encrypt_sensitive_fields(params)
         decrypted = decrypt_sensitive_fields(encrypted)
         assert (
-            decrypted["additional_repos"][0]["token"] == "tok1"  # noqa: S105  # pragma: allowlist secret
+            decrypted["additional_repos"][0]["token"]
+            == "tok1"  # pragma: allowlist secret
         )
         assert "token" not in decrypted["additional_repos"][1]
         assert (
-            decrypted["additional_repos"][2]["token"] == "tok3"  # noqa: S105  # pragma: allowlist secret
+            decrypted["additional_repos"][2]["token"]
+            == "tok3"  # pragma: allowlist secret
         )
 
     def test_strip_additional_repos_tokens(self) -> None:

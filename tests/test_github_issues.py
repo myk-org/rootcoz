@@ -11,8 +11,8 @@ from rootcoz.config import Settings
 from rootcoz.github_issues import (
     _CODE_ISSUE_CLASSIFICATIONS,
     _collect_code_fix_reports,
-    _parse_github_repo_url,
     enrich_with_tests_repo_matches,
+    parse_github_repo_url,
     search_github_issues,
 )
 from rootcoz.models import (
@@ -21,8 +21,7 @@ from rootcoz.models import (
     FailureAnalysis,
 )
 
-
-_TEST_GITHUB_TOKEN = "ghp_test_token_123"  # noqa: S105  # pragma: allowlist secret
+_TEST_GITHUB_TOKEN = "ghp_test_token_123"  # pragma: allowlist secret
 
 _BASE_ENV = {
     "JENKINS_URL": "https://jenkins.example.com",
@@ -105,30 +104,30 @@ def product_bug_failure() -> FailureAnalysis:
 
 
 class TestParseGitHubRepoUrl:
-    """Tests for _parse_github_repo_url."""
+    """Tests for parse_github_repo_url."""
 
     def test_parses_https_url(self) -> None:
-        owner, repo = _parse_github_repo_url("https://github.com/org/my-repo")
+        owner, repo = parse_github_repo_url("https://github.com/org/my-repo")
         assert owner == "org"
         assert repo == "my-repo"
 
     def test_parses_git_url(self) -> None:
-        owner, repo = _parse_github_repo_url("https://github.com/org/my-repo.git")
+        owner, repo = parse_github_repo_url("https://github.com/org/my-repo.git")
         assert owner == "org"
         assert repo == "my-repo"
 
     def test_parses_trailing_slash(self) -> None:
-        owner, repo = _parse_github_repo_url("https://github.com/org/my-repo/")
+        owner, repo = parse_github_repo_url("https://github.com/org/my-repo/")
         assert owner == "org"
         assert repo == "my-repo"
 
     def test_raises_on_invalid_url(self) -> None:
         with pytest.raises(ValueError, match="Cannot parse"):
-            _parse_github_repo_url("https://gitlab.com/org/repo")
+            parse_github_repo_url("https://gitlab.com/org/repo")
 
     def test_raises_on_non_github_url(self) -> None:
         with pytest.raises(ValueError, match="Cannot parse"):
-            _parse_github_repo_url("not-a-url")
+            parse_github_repo_url("not-a-url")
 
 
 class TestSearchGitHubIssues:

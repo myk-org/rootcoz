@@ -9,7 +9,6 @@ from rootcoz.xml_enrichment import (
     extract_failures_from_xml,
 )
 
-
 JUNIT_XML_WITH_FAILURES = """<?xml version="1.0" encoding="UTF-8"?>
 <testsuite name="TestSuite" tests="3" failures="2" errors="0">
     <testcase classname="com.example.Tests" name="test_pass" time="0.1"/>

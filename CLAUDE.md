@@ -70,10 +70,35 @@ uvx --with tox-uv tox -e frontend   # Frontend only
 
 ### Tech Stack
 
-- **Backend**: Python + FastAPI + TinyDB
+- **Backend**: Python + FastAPI + SQLite (aiosqlite)
 - **Frontend**: Vite + React 19 + TypeScript + Tailwind CSS + shadcn/ui (in `/frontend/`)
 - **AI Integration**: CLI-based (Claude CLI, Gemini CLI, Cursor Agent CLI) — no SDK dependencies, provider-agnostic, `AI_PROVIDER` env var selects provider
 - **CLI**: `rootcoz` CLI tool for querying the API — run `rootcoz --help` for available commands
+
+### Backend Module Layout
+
+```
+src/rootcoz/
+  engine/                   # CI-agnostic analysis core
+    core.py                 # Failure grouping, AI CLI orchestration, prompt building,
+                            # JSON response parsing, deduplication. Has ZERO knowledge
+                            # of any specific CI system.
+  sources/                  # CI source plugins (data fetching)
+    base.py                 # CISource ABC + CISourceResult dataclass
+    jenkins_source.py       # Jenkins plugin: JenkinsSource, analyze_job, analyze_child_job,
+                            # wait_for_jenkins_completion, Jenkins helpers (handle_jenkins_exception, extract_*, etc.)
+    file_source.py          # JUnit XML plugin: FileSource
+    raw_source.py           # Raw failure list plugin: RawSource
+  main.py                   # FastAPI app, unified POST /analyze endpoint, background tasks
+  models.py                 # Pydantic request/response models
+  config.py                 # Settings (env vars)
+  storage.py                # SQLite persistence
+  cli/                      # CLI client (rootcoz command)
+  peer_analysis.py          # Multi-AI peer debate loop
+  ...                       # Other modules (jira, github_issues, monitoring, etc.)
+```
+
+**Dependency direction:** `main` → `sources/` + `engine/`. `sources/` → `engine/`. `engine/` does NOT import `sources/`. `engine/core.py` has a lazy import of `peer_analysis` (only when `peer_ai_configs` is set). Adding a new CI plugin means adding a file under `sources/` and a dispatch branch in `main.py` — `engine/core.py` stays untouched.
 
 ### Frontend Patterns
 

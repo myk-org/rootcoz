@@ -1,10 +1,9 @@
 """Tests for notification and mention API endpoints."""
 
 import asyncio
+import contextlib
 import os
 from unittest.mock import AsyncMock, patch
-
-import contextlib
 
 import pytest
 from fastapi.testclient import TestClient
@@ -48,7 +47,7 @@ def _make_client(
         get_settings.cache_clear()
         with patch.object(storage, "DB_PATH", temp_db_path):
             ctx = (
-                patch("rootcoz.vapid.get_vapid_config", return_value={})
+                patch("rootcoz.config.get_vapid_config", return_value={})
                 if disable_vapid_auto
                 else _nullcontext()
             )

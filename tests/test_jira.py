@@ -21,7 +21,6 @@ from rootcoz.models import (
     ProductBugReport,
 )
 
-
 _BASE_JIRA_ENV = {
     "JENKINS_URL": "https://jenkins.example.com",
     "JENKINS_USER": "testuser",

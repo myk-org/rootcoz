@@ -238,7 +238,7 @@ class TestGetServerConfig:
         assert cfg is not None
         assert cfg.jenkins_url == "https://jenkins.dev.local"
         assert cfg.jenkins_user == "jenkins-dev"
-        assert cfg.jenkins_password == "dev-token"  # noqa: S105  # pragma: allowlist secret
+        assert cfg.jenkins_password == "dev-token"  # pragma: allowlist secret
         assert cfg.jenkins_ssl_verify is False
         assert cfg.tests_repo_url == "https://github.com/org/tests"
         assert cfg.ai_provider == "claude"
@@ -247,14 +247,14 @@ class TestGetServerConfig:
         assert cfg.max_concurrent_ai_calls == 7
         assert cfg.jira_url == "https://jira.dev.local"
         assert cfg.jira_email == "dev@example.com"
-        assert cfg.jira_api_token == "jira-tok-dev"  # noqa: S105
-        assert cfg.jira_pat == "jira-pat-dev"  # noqa: S105
-        assert cfg.jira_token == "jira-token-dev"  # noqa: S105
+        assert cfg.jira_api_token == "jira-tok-dev"
+        assert cfg.jira_pat == "jira-pat-dev"
+        assert cfg.jira_token == "jira-token-dev"
         assert cfg.jira_project_key == "DEV"
         assert cfg.jira_ssl_verify is False
         assert cfg.jira_max_results == 30
         assert cfg.enable_jira is True
-        assert cfg.github_token == "ghp_dev123"  # noqa: S105
+        assert cfg.github_token == "ghp_dev123"
         assert cfg.wait_for_completion is True
         assert cfg.poll_interval_minutes == 2
         assert cfg.max_wait_minutes == 45
@@ -635,7 +635,7 @@ class TestGlobalDefaults:
         # Inherited from [defaults]
         assert cfg.jenkins_url == "https://jenkins.shared.local"
         assert cfg.jenkins_user == "shared-user"
-        assert cfg.jenkins_password == "shared-token"  # noqa: S105  # pragma: allowlist secret
+        assert cfg.jenkins_password == "shared-token"  # pragma: allowlist secret
         assert cfg.ai_provider == "claude"
         assert cfg.ai_model == "opus-4"
         assert cfg.tests_repo_url == "https://github.com/org/tests"

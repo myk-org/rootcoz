@@ -2,14 +2,13 @@
 
 import os
 import tempfile
+from collections.abc import Awaitable, Callable, Generator
 from pathlib import Path
-from collections.abc import Awaitable, Callable
-from typing import Generator
 from unittest.mock import MagicMock, patch
 
 import httpx
-from ai_cli_runner import AIResult
 import pytest
+from ai_cli_runner import AIResult
 
 from rootcoz.cli.client import RootCozClient
 from rootcoz.config import Settings
@@ -193,9 +192,14 @@ def mock_jenkins_client() -> MagicMock:
 @pytest.fixture
 def mock_ai_cli() -> Generator[MagicMock, None, None]:
     """Mock the call_ai_cli function."""
-    with patch("rootcoz.analyzer.call_ai_cli") as mock:
+    with patch("rootcoz.engine.core.call_ai_cli") as mock:
         mock.return_value = AIResult(
             success=True,
-            text='{"classification": "CODE ISSUE", "affected_tests": ["test_example"], "details": "The test failed due to a missing configuration.", "code_fix": {"file": "tests/test_example.py", "line": "42", "change": "Add the missing import statement"}}',
+            text=(
+                '{"classification": "CODE ISSUE", "affected_tests": ["test_example"],'
+                ' "details": "The test failed due to a missing configuration.",'
+                ' "code_fix": {"file": "tests/test_example.py", "line": "42",'
+                ' "change": "Add the missing import statement"}}'
+            ),
         )
         yield mock

@@ -8,7 +8,6 @@ import requests as _requests
 import rootcoz.reportportal as rp_module
 from rootcoz.reportportal import ReportPortalClient
 
-
 # -- Classification mapping tests -------------------------------------------
 
 

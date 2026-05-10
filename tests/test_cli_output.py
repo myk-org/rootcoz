@@ -4,7 +4,7 @@ import json
 from io import StringIO
 from unittest.mock import patch
 
-from rootcoz.cli.output import format_table, format_json, print_output
+from rootcoz.cli.output import format_json, format_table, print_output
 
 
 class TestFormatTable:

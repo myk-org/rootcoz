@@ -61,7 +61,7 @@ async def _send_one(
             sub["username"],
             exc,
         )
-    except Exception as exc:  # noqa: BLE001 — best-effort delivery; log and continue
+    except Exception as exc:  # best-effort delivery; log and continue
         logger.warning(
             "send_mention_notifications: unexpected error sending to %s: %s",
             sub["username"],
@@ -122,7 +122,7 @@ async def send_mention_notifications(
         if stale_endpoints:
             await delete_stale_push_subscriptions(stale_endpoints)
 
-    except Exception:  # noqa: BLE001 — best-effort dispatch; never propagate
+    except Exception:  # best-effort dispatch; never propagate
         logger.warning(
             "send_mention_notifications: unexpected error in notification dispatch",
             exc_info=True,

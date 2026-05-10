@@ -12,7 +12,7 @@ from collections.abc import Sequence
 import httpx
 from simple_logger.logger import get_logger
 
-from rootcoz.config import Settings, _resolve_jira_auth
+from rootcoz.config import Settings, resolve_jira_auth
 from rootcoz.issue_matching import filter_issue_matches_with_ai
 from rootcoz.models import (
     AnalysisDetail,
@@ -59,18 +59,18 @@ class JiraClient:
         self._project_key = settings.jira_project_key
         self._max_results = settings.jira_max_results
 
-        is_cloud, token_value = _resolve_jira_auth(settings)
+        is_cloud, token_value = resolve_jira_auth(settings)
 
         # Configure Cloud vs Server/DC auth
         self._auth: tuple[str, str] | None
         if is_cloud and settings.jira_email:
-            # Cloud: _resolve_jira_auth() selected email + token (api_token or pat).
+            # Cloud: resolve_jira_auth() selected email + token (api_token or pat).
             self._auth = (settings.jira_email, token_value)
             self._search_path = "/rest/api/3/search/jql"
             self._api_path = "/rest/api/3"
             self._headers: dict[str, str] = {}
         elif token_value:
-            # Server/DC: _resolve_jira_auth() already selected the credential.
+            # Server/DC: resolve_jira_auth() already selected the credential.
             self._auth = None
             self._search_path = "/rest/api/2/search"
             self._api_path = "/rest/api/2"
@@ -452,7 +452,9 @@ async def enrich_with_jira_matches(
             search_results = await asyncio.gather(*tasks)
 
             # AI relevance filtering for each keyword set
-            for kw_tuple, candidates in zip(keyword_to_reports, search_results):
+            for kw_tuple, candidates in zip(
+                keyword_to_reports, search_results, strict=False
+            ):
                 if not candidates:
                     continue
 

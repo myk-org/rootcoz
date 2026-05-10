@@ -9,12 +9,12 @@ import json
 import os
 import re
 
+from ai_cli_runner import call_ai_cli
 from simple_logger.logger import get_logger
 
-from ai_cli_runner import call_ai_cli
-from rootcoz.analyzer import PROVIDER_CLI_FLAGS
 from rootcoz.bug_creation import GITHUB_AI_FOOTER, create_github_issue
 from rootcoz.config import Settings
+from rootcoz.engine.core import PROVIDER_CLI_FLAGS
 from rootcoz.models import (
     FeedbackPreviewResponse,
     FeedbackRequest,
@@ -175,7 +175,7 @@ Do NOT include any sensitive data (tokens, passwords, etc.) in the output."""
             cli_flags=PROVIDER_CLI_FLAGS.get(ai_provider, []),
             output_format="json",
         )
-    except Exception as exc:  # noqa: BLE001 - feedback formatting should fall back
+    except Exception as exc:  # feedback formatting should fall back
         logger.warning("AI CLI call failed for feedback formatting: %s", exc)
         title, body = _build_fallback_feedback(request)
         return title, body, _derive_fallback_labels(request)

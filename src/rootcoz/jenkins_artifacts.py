@@ -390,7 +390,8 @@ def build_artifacts_context(extract_path: Path) -> str:
 
     sections.append(f"--- Full artifacts available at: {extract_path} ---")
     sections.append(
-        "Explore the build-artifacts/ directory (or current working directory) for complete evidence before classifying."
+        "Explore the build-artifacts/ directory (or current working"
+        " directory) for complete evidence before classifying."
     )
 
     context = "\n".join(sections)

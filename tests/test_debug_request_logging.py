@@ -9,7 +9,6 @@ import pytest
 
 from rootcoz.utils import mask_sensitive_fields
 
-
 # ---------------------------------------------------------------------------
 # Unit tests for mask_sensitive_fields
 # ---------------------------------------------------------------------------
@@ -30,13 +29,13 @@ class TestMaskSensitiveFields:
             "job_name": "my-job",
         }
         result = mask_sensitive_fields(data)
-        assert result["jenkins_password"] == "***"  # noqa: S105
-        assert result["jenkins_user"] == "***"  # noqa: S105
-        assert result["jira_api_token"] == "***"  # noqa: S105
-        assert result["jira_pat"] == "***"  # noqa: S105
-        assert result["jira_email"] == "***"  # noqa: S105
-        assert result["github_token"] == "***"  # noqa: S105
-        assert result["reportportal_api_token"] == "***"  # noqa: S105
+        assert result["jenkins_password"] == "***"
+        assert result["jenkins_user"] == "***"
+        assert result["jira_api_token"] == "***"
+        assert result["jira_pat"] == "***"
+        assert result["jira_email"] == "***"
+        assert result["github_token"] == "***"
+        assert result["reportportal_api_token"] == "***"
         # Non-sensitive field preserved
         assert result["job_name"] == "my-job"
 
@@ -49,10 +48,10 @@ class TestMaskSensitiveFields:
             "safe_field": "visible",
         }
         result = mask_sensitive_fields(data)
-        assert result["custom_password"] == "***"  # noqa: S105
-        assert result["my_token"] == "***"  # noqa: S105
-        assert result["api_secret"] == "***"  # noqa: S105
-        assert result["encryption_key"] == "***"  # noqa: S105
+        assert result["custom_password"] == "***"
+        assert result["my_token"] == "***"
+        assert result["api_secret"] == "***"
+        assert result["encryption_key"] == "***"
         assert result["safe_field"] == "visible"
 
     def test_handles_nested_dicts(self):
@@ -65,7 +64,7 @@ class TestMaskSensitiveFields:
         }
         result = mask_sensitive_fields(data)
         assert result["outer"] == "ok"
-        assert result["nested"]["jenkins_password"] == "***"  # noqa: S105
+        assert result["nested"]["jenkins_password"] == "***"
         assert result["nested"]["name"] == "visible"
 
     def test_handles_lists(self):
@@ -85,8 +84,8 @@ class TestMaskSensitiveFields:
         }
         result = mask_sensitive_fields(data)
         assert result["additional_repos"][0]["name"] == "repo1"
-        assert result["additional_repos"][0]["token"] == "***"  # noqa: S105
-        assert result["additional_repos"][1]["token"] == "***"  # noqa: S105
+        assert result["additional_repos"][0]["token"] == "***"
+        assert result["additional_repos"][1]["token"] == "***"
 
     def test_handles_deeply_nested_structures(self):
         data = {
@@ -102,7 +101,7 @@ class TestMaskSensitiveFields:
             }
         }
         result = mask_sensitive_fields(data)
-        assert result["level1"]["level2"][0]["level3"]["secret_key"] == "***"  # noqa: S105
+        assert result["level1"]["level2"][0]["level3"]["secret_key"] == "***"
         assert result["level1"]["level2"][0]["level3"]["name"] == "ok"
 
     def test_preserves_empty_and_falsy_values(self):
@@ -130,7 +129,7 @@ class TestMaskSensitiveFields:
             "name": "test",
         }
         _ = mask_sensitive_fields(original)
-        assert original["jenkins_password"] == "secret"  # noqa: S105  # pragma: allowlist secret
+        assert original["jenkins_password"] == "secret"  # pragma: allowlist secret
 
     def test_empty_dict(self):
         assert mask_sensitive_fields({}) == {}
@@ -159,7 +158,7 @@ class TestMaskSensitiveFields:
 
         masked = [_mask_pydantic_error(e) for e in pydantic_errors]
         # Sensitive field input should be masked
-        assert masked[0]["input"] == "***"  # noqa: S105
+        assert masked[0]["input"] == "***"
         # Non-sensitive field input should be preserved
         assert masked[1]["input"] is None
 
@@ -235,6 +234,7 @@ def test_middleware_logs_masked_body(test_client, caplog):
     main_logger, orig_level = _capture_debug_logs(caplog)
     try:
         payload = {
+            "type": "jenkins",
             "job_name": "my-job",
             "build_number": 42,
             "jenkins_password": "super-secret",  # pragma: allowlist secret
@@ -269,6 +269,7 @@ def test_validation_error_logged_at_debug(test_client, caplog):
     try:
         # Send a payload missing required fields to trigger RequestValidationError
         payload = {
+            "type": "jenkins",
             "jenkins_password": "oops-secret",  # pragma: allowlist secret
         }
         with caplog.at_level(logging.DEBUG):

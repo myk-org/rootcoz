@@ -1,8 +1,9 @@
 """Tests for comment enrichment."""
 
+from unittest.mock import AsyncMock, MagicMock, patch
+
 import httpx
 import pytest
-from unittest.mock import AsyncMock, MagicMock, patch
 
 from rootcoz.comment_enrichment import (
     detect_github_issues,

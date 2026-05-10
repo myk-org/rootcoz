@@ -10,6 +10,7 @@ import tempfile
 import uuid
 from pathlib import Path
 from typing import TYPE_CHECKING, Self
+from urllib.parse import quote, urlparse, urlunparse
 
 from git import Repo
 from git.exc import GitCommandError
@@ -31,10 +32,8 @@ def _is_commit_sha(ref: str) -> bool:
     return bool(_SHA_PATTERN.match(ref))
 
 
-def _redact_url(url: str) -> str:
+def redact_url(url: str) -> str:
     """Remove userinfo (credentials) from a URL for safe logging."""
-    from urllib.parse import urlparse, urlunparse
-
     parsed = urlparse(url)
     if parsed.username or parsed.password:
         redacted = parsed._replace(
@@ -117,7 +116,7 @@ def _scrub_credentials(target_dir: Path, repo_url: str | HttpUrl) -> None:
         return
     git_executable = shutil.which("git")
     if git_executable:
-        subprocess.run(  # noqa: S603
+        subprocess.run(
             [git_executable, "remote", "set-url", "origin", str(repo_url)],
             cwd=target_dir,
             check=False,
@@ -140,8 +139,6 @@ def _inject_token_into_url(url: str, token: str) -> str:
     For HTTPS URLs, embeds the token as ``x-token-auth:<token>@host``.
     Non-HTTPS URLs are returned unchanged (token is ignored).
     """
-    from urllib.parse import quote, urlparse, urlunparse
-
     parsed = urlparse(url)
     if parsed.scheme != "https" or not token:
         return url
@@ -177,7 +174,7 @@ def _clone_with_ssl_retry(
             or "server verification failed" in stderr
         ):
             logger.warning(
-                f"SSL certificate verification failed for {_redact_url(str(repo_url))}, "
+                f"SSL certificate verification failed for {redact_url(str(repo_url))}, "
                 "retrying with SSL verification disabled (GIT_SSL_NO_VERIFY=1)"
             )
             # Clean up partial clone before retry

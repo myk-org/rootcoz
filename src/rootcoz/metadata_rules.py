@@ -11,6 +11,7 @@ import os
 import re
 from pathlib import Path
 
+import yaml
 from simple_logger.logger import get_logger
 
 logger = get_logger(name=__name__, level=os.environ.get("LOG_LEVEL", "INFO"))
@@ -43,13 +44,6 @@ def load_metadata_rules(path: str) -> list[dict]:
     raw: object
 
     if p.suffix.lower() in (".yaml", ".yml"):
-        try:
-            import yaml
-        except ImportError as exc:
-            raise ImportError(
-                "PyYAML is required to load YAML rules files. "
-                "Install with: pip install pyyaml"
-            ) from exc
         raw = yaml.safe_load(content)
     else:
         raw = json.loads(content)

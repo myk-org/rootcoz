@@ -547,6 +547,129 @@ class AnalyzeFailuresRequest(BaseAnalysisRequest):
         return self
 
 
+class UnifiedAnalyzeRequest(BaseAnalysisRequest):
+    """Unified request payload for all analysis types."""
+
+    type: Literal["jenkins", "file", "raw"] = Field(
+        description="Analysis type: jenkins (CI job), file (JUnit XML), or raw (failure list)"
+    )
+
+    # Jenkins-specific fields (required when type="jenkins")
+    job_name: str | None = Field(
+        default=None,
+        description="Jenkins job name (required for type=jenkins)",
+    )
+    build_number: int | None = Field(
+        default=None,
+        description="Build number to analyze (required for type=jenkins)",
+    )
+    force: bool = Field(
+        default=False,
+        description="Force analysis even if the build succeeded (type=jenkins only)",
+    )
+    wait_for_completion: bool = Field(
+        default=True,
+        description="Wait for Jenkins job to complete before analyzing (type=jenkins only)",
+    )
+    poll_interval_minutes: Annotated[int, Field(gt=0)] = Field(
+        default=2,
+        description="Minutes between Jenkins status polls when waiting (type=jenkins only)",
+    )
+    max_wait_minutes: Annotated[int, Field(ge=0)] = Field(
+        default=0,
+        description="Maximum minutes to wait for job completion, 0=no limit (type=jenkins only)",
+    )
+    jenkins_url: str | None = Field(
+        default=None,
+        description="Jenkins server URL (overrides JENKINS_URL env var)",
+    )
+    jenkins_user: str | None = Field(
+        default=None,
+        description="Jenkins username (overrides JENKINS_USER env var)",
+    )
+    jenkins_password: str | None = Field(
+        default=None,
+        description="Jenkins password or API token (overrides JENKINS_PASSWORD env var)",
+        json_schema_extra={"format": "password"},
+    )
+    jenkins_ssl_verify: bool | None = Field(
+        default=None,
+        description="Jenkins SSL verification (overrides JENKINS_SSL_VERIFY env var)",
+    )
+    jenkins_timeout: Annotated[int, Field(gt=0)] | None = Field(
+        default=None,
+        description="Jenkins API request timeout in seconds",
+    )
+    jenkins_artifacts_max_size_mb: Annotated[int, Field(gt=0)] | None = Field(
+        default=None,
+        description="Maximum Jenkins artifacts size in MB",
+    )
+    get_job_artifacts: bool | None = Field(
+        default=None,
+        description="Download all build artifacts for AI context (type=jenkins only)",
+    )
+
+    # File-specific fields (required when type="file")
+    raw_xml: Annotated[str, Field(max_length=50_000_000)] | None = Field(
+        default=None,
+        description="Raw JUnit XML content (required for type=file)",
+    )
+
+    # Raw-specific fields (required when type="raw")
+    failures: list[FailedTest] | None = Field(
+        default=None,
+        description="Raw test failures to analyze (required for type=raw)",
+    )
+
+    # Common optional fields
+    name: str | None = Field(
+        default=None,
+        description="Custom display name for this analysis job (overrides auto-generated name)",
+    )
+    tags: list[str] = Field(
+        default_factory=list,
+        description="User tags for categorization",
+    )
+
+    @field_validator("tags", mode="before")
+    @classmethod
+    def _normalize_tags(cls, v: list) -> list[str]:
+        """Strip, lowercase, deduplicate, remove blanks and reserved system tags."""
+        _SYSTEM_TAGS = {"re-analyze"}
+        seen: set[str] = set()
+        result: list[str] = []
+        for tag in v:
+            t = str(tag).strip().lower()
+            if t and t not in seen and t not in _SYSTEM_TAGS:
+                seen.add(t)
+                result.append(t)
+        return result
+
+    @model_validator(mode="after")
+    def _validate_by_type(self) -> "UnifiedAnalyzeRequest":
+        """Validate required fields based on analysis type."""
+        if self.type == "jenkins":
+            if not self.job_name:
+                raise ValueError("job_name is required for type=jenkins")
+            if self.build_number is None:
+                raise ValueError("build_number is required for type=jenkins")
+        elif self.type == "file":
+            if not self.raw_xml:
+                raise ValueError("raw_xml is required for type=file")
+            if self.failures:
+                raise ValueError(
+                    "failures cannot be provided for type=file (use type=raw)"
+                )
+        elif self.type == "raw":
+            if not self.failures:
+                raise ValueError("failures is required for type=raw")
+            if self.raw_xml:
+                raise ValueError(
+                    "raw_xml cannot be provided for type=raw (use type=file)"
+                )
+        return self
+
+
 class FailureAnalysisResult(BaseModel):
     """Analysis result for direct failure analysis (no Jenkins context)."""
 

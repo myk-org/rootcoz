@@ -445,7 +445,9 @@ class TestGetTestHistory:
             for i in range(3):
                 await db.execute(
                     """INSERT INTO failure_history
-                       (job_id, job_name, build_number, test_name, error_message, error_signature, classification, analyzed_at)
+                       (job_id, job_name, build_number, test_name,
+                        error_message, error_signature,
+                        classification, analyzed_at)
                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
                     (
                         f"job-{i}",
@@ -461,7 +463,9 @@ class TestGetTestHistory:
 
             # Insert a comment for the test
             await db.execute(
-                "INSERT INTO comments (job_id, test_name, comment, error_signature, username, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+                "INSERT INTO comments"
+                " (job_id, test_name, comment, error_signature, username, created_at)"
+                " VALUES (?, ?, ?, ?, ?, ?)",
                 (
                     "job-0",
                     "tests.network.TestDNS.test_lookup",

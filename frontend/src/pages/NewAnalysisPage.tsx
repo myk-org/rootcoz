@@ -149,6 +149,7 @@ export function NewAnalysisPage() {
       if (inputMode === 'jenkins') {
         const body: Record<string, unknown> = {
           ...commonFields,
+          type: 'jenkins',
           job_name: jobName.trim(),
           build_number: buildNumber,
           force,
@@ -167,10 +168,11 @@ export function NewAnalysisPage() {
       } else {
         const body: Record<string, unknown> = {
           ...commonFields,
+          type: 'file',
           raw_xml: rawXml,
           ...(tags.length > 0 && { tags }),
         }
-        const data = await api.post<{ job_id: string }>('/analyze-failures', body)
+        const data = await api.post<{ job_id: string }>('/analyze', body)
         navigate(`/results/${data.job_id}`)
       }
     } catch (err) {

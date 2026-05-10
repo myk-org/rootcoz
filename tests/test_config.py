@@ -7,11 +7,11 @@ import pytest
 
 from rootcoz.config import (
     Settings,
-    _resolve_jira_auth,
     get_settings,
     parse_additional_repos,
     parse_peer_configs,
     parse_repo_ref,
+    resolve_jira_auth,
 )
 from tests.conftest import build_test_env as _build_env
 
@@ -97,7 +97,7 @@ class TestJiraSettings:
             _build_env(
                 JIRA_URL="https://jira.example.com",
                 JIRA_EMAIL="user@example.com",
-                JIRA_API_TOKEN="token-123",  # noqa: S106  # pragma: allowlist secret
+                JIRA_API_TOKEN="token-123",  # pragma: allowlist secret
                 JIRA_PROJECT_KEY="TEST",
             ),
             clear=True,
@@ -125,7 +125,7 @@ class TestJiraSettings:
             os.environ,
             _build_env(
                 JIRA_EMAIL="user@example.com",
-                JIRA_API_TOKEN="token-123",  # noqa: S106  # pragma: allowlist secret
+                JIRA_API_TOKEN="token-123",  # pragma: allowlist secret
                 JIRA_PROJECT_KEY="TEST",
             ),
             clear=True,
@@ -189,7 +189,7 @@ class TestJiraSettings:
             _build_env(
                 JIRA_URL="https://jira.example.com",
                 JIRA_EMAIL="user@example.com",
-                JIRA_API_TOKEN="token",  # noqa: S106  # pragma: allowlist secret
+                JIRA_API_TOKEN="token",  # pragma: allowlist secret
                 JIRA_PROJECT_KEY="MYPROJ",
                 JIRA_SSL_VERIFY="false",
                 JIRA_MAX_RESULTS="10",
@@ -203,7 +203,7 @@ class TestJiraSettings:
 
 
 class TestResolveJiraAuth:
-    """Tests for _resolve_jira_auth helper."""
+    """Tests for resolve_jira_auth helper."""
 
     def test_email_plus_pat_is_cloud(self) -> None:
         """JIRA_EMAIL + JIRA_PAT resolves to Cloud mode.
@@ -218,7 +218,7 @@ class TestResolveJiraAuth:
         )
         with patch.dict(os.environ, env, clear=True):
             settings = Settings(_env_file=None)
-            is_cloud, token = _resolve_jira_auth(settings)
+            is_cloud, token = resolve_jira_auth(settings)
             assert is_cloud, "email present must activate Cloud mode"
             assert token == env["JIRA_PAT"]
 
@@ -235,7 +235,7 @@ class TestGitHubIssuesSettings:
     def test_github_issues_enabled_with_token_and_repo(self) -> None:
         """GitHub issues enabled when both GITHUB_TOKEN and TESTS_REPO_URL are set."""
         env = _build_env(
-            GITHUB_TOKEN="ghp_test123",  # noqa: S106  # pragma: allowlist secret
+            GITHUB_TOKEN="ghp_test123",  # pragma: allowlist secret
             TESTS_REPO_URL="https://github.com/org/repo",
         )
         with patch.dict(os.environ, env, clear=True):
@@ -252,7 +252,7 @@ class TestGitHubIssuesSettings:
     def test_github_issues_disabled_without_repo_url(self) -> None:
         """GitHub issues disabled when TESTS_REPO_URL is missing."""
         env = _build_env(
-            GITHUB_TOKEN="ghp_test123",  # noqa: S106  # pragma: allowlist secret
+            GITHUB_TOKEN="ghp_test123",  # pragma: allowlist secret
         )
         with patch.dict(os.environ, env, clear=True):
             settings = Settings(_env_file=None)
@@ -261,7 +261,7 @@ class TestGitHubIssuesSettings:
     def test_github_issues_explicit_false_disables(self) -> None:
         """GitHub issues disabled when ENABLE_GITHUB_ISSUES is explicitly False."""
         env = _build_env(
-            GITHUB_TOKEN="ghp_test123",  # noqa: S106  # pragma: allowlist secret
+            GITHUB_TOKEN="ghp_test123",  # pragma: allowlist secret
             TESTS_REPO_URL="https://github.com/org/repo",
             ENABLE_GITHUB_ISSUES="false",
         )
@@ -408,7 +408,7 @@ class TestParseAdditionalRepos:
                 "name": "infra",
                 "url": "https://github.com/org/infra",
                 "ref": "",
-                "token": "ghp_secret123",  # noqa: S105  # pragma: allowlist secret
+                "token": "ghp_secret123",  # pragma: allowlist secret
             }
         ]
 
@@ -422,7 +422,7 @@ class TestParseAdditionalRepos:
                 "name": "infra",
                 "url": "https://github.com/org/infra",
                 "ref": "develop",
-                "token": "ghp_secret123",  # noqa: S105  # pragma: allowlist secret
+                "token": "ghp_secret123",  # pragma: allowlist secret
             }
         ]
 
@@ -438,7 +438,7 @@ class TestParseAdditionalRepos:
             "product:https://github.com/org/product"
         )
         assert len(result) == 2
-        assert result[0]["token"] == "tok1"  # noqa: S105  # pragma: allowlist secret
+        assert result[0]["token"] == "tok1"  # pragma: allowlist secret
         assert "token" not in result[1]
 
     def test_settings_loads_additional_repos(self) -> None:
