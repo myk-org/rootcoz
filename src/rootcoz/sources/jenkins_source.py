@@ -547,7 +547,7 @@ async def analyze_child_job(
             settings=settings,
             depth=depth,
             max_depth=max_depth,
-            repo_path=repo_path,
+            repo_path=source_result.extract_path or repo_path,
             ai_provider=ai_provider,
             ai_model=ai_model,
             ai_cli_timeout=ai_cli_timeout,
@@ -784,6 +784,14 @@ You have access to the repository if one was cloned. Explore to understand the f
         ai_cli_timeout=ai_cli_timeout,
         cli_flags=PROVIDER_CLI_FLAGS.get(ai_provider, []),
     )
+
+    if not result.success:
+        return ChildJobAnalysis(
+            job_name=job_name,
+            build_number=build_number,
+            jenkins_url=jenkins_url,
+            note=f"Analysis failed: {result.text}",
+        )
 
     if parsed_analysis is None:
         parsed_analysis = AnalysisDetail(details=result.text)
@@ -1083,6 +1091,23 @@ async def analyze_job(
                             )
                     else:
                         failures.extend(result)
+
+                # If every group analysis errored out, return failed status
+                if group_results and all(
+                    isinstance(r, Exception) for r in group_results
+                ):
+                    return AnalysisResult(
+                        job_id=job_id,
+                        job_name=request.job_name,
+                        build_number=request.build_number,
+                        jenkins_url=HttpUrl(jenkins_build_url),
+                        status="failed",
+                        summary=f"All {len(group_results)} analysis group(s) failed",
+                        ai_provider=ai_provider,
+                        ai_model=ai_model,
+                        failures=failures,
+                        child_job_analyses=child_job_analyses,
+                    )
             else:
                 # No structured test failures - fall back to single Claude CLI analysis
                 if peer_ai_configs:

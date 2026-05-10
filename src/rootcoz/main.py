@@ -1596,8 +1596,10 @@ async def process_analysis_with_id(
             )
 
             if not completed:
+                display_name = getattr(body, "name", None) or body.job_name
                 fail_data = {
                     "job_name": body.job_name,
+                    "display_name": display_name,
                     "build_number": body.build_number,
                     "error": wait_error,
                 }
@@ -1736,8 +1738,10 @@ async def process_analysis_with_id(
     except Exception as e:
         logger.exception(f"Analysis failed for job {job_id}")
         error_detail = format_exception_with_type(e)
+        display_name = getattr(body, "name", None) or body.job_name
         error_data: dict = {
             "job_name": body.job_name,
+            "display_name": display_name,
             "build_number": body.build_number,
             "error": error_detail,
         }
@@ -1812,28 +1816,55 @@ def _apply_base_analysis_overrides(
     unified ``/analyze`` endpoint and the file/raw re-analyze path need.
     Mutates *params* in place.
     """
-    if body.enable_jira is not None:
-        params["enable_jira"] = body.enable_jira
-    if body.jira_url:
-        params["jira_url"] = body.jira_url
-    if body.jira_email:
-        params["jira_email"] = body.jira_email
-    if body.jira_api_token:
-        params["jira_api_token"] = body.jira_api_token
-    if body.jira_pat:
-        params["jira_pat"] = body.jira_pat
-    if body.jira_project_key:
-        params["jira_project_key"] = body.jira_project_key
-    if body.jira_ssl_verify is not None:
-        params["jira_ssl_verify"] = body.jira_ssl_verify
-    if body.jira_max_results is not None:
-        params["jira_max_results"] = body.jira_max_results
-    if body.github_token:
-        params["github_token"] = body.github_token
-    if body.ai_cli_timeout is not None:
-        params["ai_cli_timeout"] = body.ai_cli_timeout
-    if body.max_concurrent_ai_calls is not None:
-        params["max_concurrent_ai_calls"] = body.max_concurrent_ai_calls
+    params["enable_jira"] = (
+        body.enable_jira if body.enable_jira is not None else merged.enable_jira
+    )
+    params["jira_url"] = (
+        body.jira_url if body.jira_url is not None else (merged.jira_url or "")
+    )
+    params["jira_email"] = (
+        body.jira_email if body.jira_email is not None else (merged.jira_email or "")
+    )
+    params["jira_api_token"] = (
+        body.jira_api_token
+        if body.jira_api_token is not None
+        else (merged.jira_api_token.get_secret_value() if merged.jira_api_token else "")
+    )
+    params["jira_pat"] = (
+        body.jira_pat
+        if body.jira_pat is not None
+        else (merged.jira_pat.get_secret_value() if merged.jira_pat else "")
+    )
+    params["jira_project_key"] = (
+        body.jira_project_key
+        if body.jira_project_key is not None
+        else (merged.jira_project_key or "")
+    )
+    params["jira_ssl_verify"] = (
+        body.jira_ssl_verify
+        if body.jira_ssl_verify is not None
+        else merged.jira_ssl_verify
+    )
+    params["jira_max_results"] = (
+        body.jira_max_results
+        if body.jira_max_results is not None
+        else merged.jira_max_results
+    )
+    params["github_token"] = (
+        body.github_token
+        if body.github_token is not None
+        else (merged.github_token.get_secret_value() if merged.github_token else "")
+    )
+    params["ai_cli_timeout"] = (
+        body.ai_cli_timeout
+        if body.ai_cli_timeout is not None
+        else merged.ai_cli_timeout
+    )
+    params["max_concurrent_ai_calls"] = (
+        body.max_concurrent_ai_calls
+        if body.max_concurrent_ai_calls is not None
+        else merged.max_concurrent_ai_calls
+    )
     # Always persist peer_analysis_max_rounds so non-default values survive
     # re-analyze round-trips.
     params["peer_analysis_max_rounds"] = merged.peer_analysis_max_rounds
@@ -1984,6 +2015,10 @@ def _build_request_params(
         tests_repo_ref=tests_repo_ref,
         additional_repos=resolved_additional,
     )
+    # Apply shared BaseAnalysisRequest fields (Jira, GitHub, AI settings).
+    # _apply_base_analysis_overrides is the single source of truth for these.
+    _apply_base_analysis_overrides(params, body, merged)
+    # Jenkins-specific fields on top.
     params.update(
         {
             "jenkins_url": merged.jenkins_url,
@@ -1994,28 +2029,10 @@ def _build_request_params(
             "wait_for_completion": merged.wait_for_completion,
             "poll_interval_minutes": merged.poll_interval_minutes,
             "max_wait_minutes": merged.max_wait_minutes,
-            "enable_jira": body.enable_jira
-            if body.enable_jira is not None
-            else merged.enable_jira,
-            "jira_url": merged.jira_url or "",
-            "jira_email": merged.jira_email or "",
-            "jira_api_token": merged.jira_api_token.get_secret_value()
-            if merged.jira_api_token
-            else "",
-            "jira_pat": merged.jira_pat.get_secret_value() if merged.jira_pat else "",
-            "jira_project_key": merged.jira_project_key or "",
-            "jira_ssl_verify": merged.jira_ssl_verify,
-            "jira_max_results": merged.jira_max_results,
-            "github_token": merged.github_token.get_secret_value()
-            if merged.github_token
-            else "",
-            "ai_cli_timeout": merged.ai_cli_timeout,
-            "max_concurrent_ai_calls": merged.max_concurrent_ai_calls,
             "jenkins_artifacts_max_size_mb": merged.jenkins_artifacts_max_size_mb,
             "get_job_artifacts": merged.get_job_artifacts,
             "raw_prompt": body.raw_prompt or "",
             "issue_prompt": body.issue_prompt or "",
-            "peer_analysis_max_rounds": merged.peer_analysis_max_rounds,
             "force": merged.force_analysis,
             "wait_started_at": _time.time(),
         }
@@ -2290,6 +2307,7 @@ async def _process_file_raw_analysis(
             notify_active_count_changed()
             notify_dashboard_changed()
             notify_job_status_changed(job_id)
+            notify_token_usage_changed()
             return
 
         summary = (

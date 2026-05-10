@@ -864,7 +864,7 @@ These instructions complement (do not replace) the main instructions above.
         if auth_header:
             auth_instruction = (
                 "\nFor ALL curl commands, include this authentication"
-                ' header: -H "Authorization: <AUTH_TOKEN>"'
+                f' header: -H "Authorization: {auth_header}"'
             )
 
         query_section = f"""
