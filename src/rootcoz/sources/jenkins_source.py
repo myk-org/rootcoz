@@ -149,6 +149,8 @@ def extract_failed_child_jobs(build_info: dict) -> list[tuple[str, int]]:
     # Check for subBuilds in pipeline (Blue Ocean / Pipeline plugin)
     sub_builds = build_info.get("subBuilds", [])
     for sub in sub_builds:
+        if sub is None:
+            continue
         if sub.get("result") in ("FAILURE", "UNSTABLE"):
             job_name = sub.get("jobName", "")
             build_num = sub.get("buildNumber", 0)
@@ -835,7 +837,7 @@ async def _analyze_child_job_inner(
 
     # If we have test failures, group by signature and analyze unique groups
     if test_failures:
-        failures, unique_errors, _failed_groups = await _analyze_grouped_failures(
+        failures, unique_errors, failed_groups = await _analyze_grouped_failures(
             test_failures,
             console_context=console_context,
             repo_path=repo_path,
@@ -853,6 +855,16 @@ async def _analyze_child_job_inner(
             max_concurrent_ai_calls=max_concurrent_ai_calls,
             auth_header=auth_header,
         )
+
+        # Propagate all-failed-groups note
+        if unique_errors > 0 and failed_groups == unique_errors:
+            return ChildJobAnalysis(
+                job_name=job_name,
+                build_number=build_number,
+                jenkins_url=jenkins_url,
+                note=f"All {unique_errors} analysis group(s) failed",
+                failures=failures,
+            )
 
         # Generate summary from parallel results
         total_failures = len(failures)

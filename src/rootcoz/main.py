@@ -678,6 +678,8 @@ async def _fail_resumed_waiting_job(job_id: str, result_data: dict, error: str) 
     }
     if "request_params" in result_data:
         fail_data["request_params"] = result_data["request_params"]
+    if "tags" in result_data:
+        fail_data["tags"] = result_data["tags"]
     await storage.update_status(job_id, "failed", fail_data)
     notify_active_count_changed()
     notify_dashboard_changed()
@@ -1854,9 +1856,7 @@ def _apply_base_analysis_overrides(
     unified ``/analyze`` endpoint and the file/raw re-analyze path need.
     Mutates *params* in place.
     """
-    params["enable_jira"] = (
-        body.enable_jira if body.enable_jira is not None else merged.enable_jira
-    )
+    params["enable_jira"] = _resolve_enable_jira(body, merged)
     params["jira_url"] = (
         body.jira_url if body.jira_url is not None else (merged.jira_url or "")
     )
@@ -2572,6 +2572,21 @@ async def re_analyze(
                 status_code=400,
                 detail=f"Failed to decrypt stored params: {exc}",
             ) from exc
+
+        # Fail fast if any sensitive field is still encrypted (key changed / corrupt)
+        for key in SENSITIVE_KEYS:
+            value = decrypted_params.get(key)
+            if _is_encrypted_value(value):
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Cannot re-analyze: stored {key} could not be decrypted",
+                )
+        for repo in decrypted_params.get("additional_repos") or []:
+            if isinstance(repo, dict) and _is_encrypted_value(repo.get("token")):
+                raise HTTPException(
+                    status_code=400,
+                    detail="Cannot re-analyze: stored additional_repos token could not be decrypted",
+                )
 
         # Build unified request from stored params
         unified_fields: dict = {
