@@ -2084,7 +2084,9 @@ def _build_request_params(
         else ""
     )
     resolved_tests_repo, tests_repo_ref = parse_repo_ref(resolved_tests_repo)
-    resolved_tests_repo_token = resolve_tests_repo_token(body, merged)
+    resolved_tests_repo_token = (
+        resolve_tests_repo_token(body, merged) if resolved_tests_repo else ""
+    )
     resolved_additional = resolve_additional_repos(body, merged)
     params = _build_base_request_params(
         ai_provider,
