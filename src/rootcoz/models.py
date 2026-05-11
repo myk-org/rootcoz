@@ -234,6 +234,10 @@ class AnalyzeRequest(BaseAnalysisRequest):
         default=0,
         description="Maximum minutes to wait for job completion (0 = no limit)",
     )
+    name: str | None = Field(
+        default=None,
+        description="Custom display name for this analysis job (overrides auto-generated name)",
+    )
     tags: list[str] = Field(
         default_factory=list,
         description="User tags for categorization (e.g. 'regression', 'flaky')",

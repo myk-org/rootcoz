@@ -411,6 +411,9 @@ def parse_json_response(raw_text: str) -> AnalysisDetail:
     text = raw_text.strip()
 
     # Strategy 1: Try parsing the entire text as JSON directly
+    # TODO: This only handles JSON objects; top-level JSON arrays are not
+    # supported.  Current callers always expect an object schema so this is
+    # fine, but revisit if array responses become possible.
     if text.startswith("{"):
         try:
             data = json.loads(text)
@@ -456,6 +459,10 @@ def _extract_string_array_field(details: str, field_name: str) -> list[str]:
     Returns:
         Deduplicated list of non-empty strings, or ``[]`` on failure.
     """
+    # TODO: This regex is fragile for values containing escaped quotes or
+    # nested brackets.  It works for the current use case (3-5 short
+    # keywords) but should be replaced with a proper JSON parser if the
+    # expected payloads grow more complex.
     match = re.search(rf'"{re.escape(field_name)}"\s*:\s*\[([^\]]*)\]', details)
     if not match:
         return []

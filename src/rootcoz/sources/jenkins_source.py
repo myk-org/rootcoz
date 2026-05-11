@@ -201,6 +201,7 @@ def extract_failed_child_jobs_from_console(
         List of (job_name, build_number) tuples for failed child jobs.
     """
     failed_jobs: list[tuple[str, int]] = []
+    seen: set[tuple[str, int]] = set()
 
     # Pattern: Build [job path] #[number] completed: FAILURE/UNSTABLE
     pattern = r"Build\s+(.+?)\s+#(\d+)\s+completed:\s*(FAILURE|UNSTABLE)"
@@ -213,7 +214,9 @@ def extract_failed_child_jobs_from_console(
         # Example: "mtv-base » mtv-deploy-dynamic" -> "mtv-base/mtv-deploy-dynamic"
         # The URL construction will handle adding /job/ segments for display
         job_name = job_path.replace(" » ", "/")
-        failed_jobs.append((job_name, build_num))
+        if (job_name, build_num) not in seen:
+            failed_jobs.append((job_name, build_num))
+            seen.add((job_name, build_num))
 
     return failed_jobs
 
@@ -565,6 +568,100 @@ async def analyze_child_job(
         source.cleanup()
 
 
+async def _analyze_grouped_failures(
+    test_failures: list[FailedTest],
+    *,
+    console_context: str,
+    repo_path: Path | None,
+    artifacts_context: str,
+    group_label_prefix: str = "",
+    additional_repos: dict[str, Path] | None = None,
+    ai_provider: str = "",
+    ai_model: str = "",
+    ai_cli_timeout: int | None = None,
+    custom_prompt: str = "",
+    server_url: str = "",
+    job_id: str = "",
+    peer_ai_configs: list | None = None,
+    peer_analysis_max_rounds: int = 3,
+    max_concurrent_ai_calls: int = 3,
+    auth_header: str = "",
+) -> tuple[list[FailureAnalysis], int, int]:
+    """Group failures by signature, fan out analyze_failure_group, flatten + map exceptions.
+
+    Returns:
+        A tuple of (failures, unique_errors_count, failed_groups_count).
+    """
+    failure_groups: dict[str, list[FailedTest]] = defaultdict(list)
+    for tf in test_failures:
+        sig = get_failure_signature(tf)
+        failure_groups[sig].append(tf)
+
+    unique_errors = len(failure_groups)
+    logger.info(
+        f"Grouped {len(test_failures)} failures into {unique_errors} unique error types"
+    )
+
+    # Build tasks for each unique failure group
+    total_groups = len(failure_groups)
+    tasks: list[Coroutine[Any, Any, Any]] = []
+    for group_idx, (_sig, group) in enumerate(failure_groups.items(), 1):
+        if group_label_prefix:
+            group_label = (
+                f"{group_label_prefix}:{group_idx}/{total_groups}"
+                if total_groups > 1
+                else ""
+            )
+        else:
+            group_label = f"{group_idx}/{total_groups}" if total_groups > 1 else ""
+        tasks.append(
+            analyze_failure_group(
+                failures=group,
+                console_context=console_context,
+                repo_path=repo_path,
+                ai_provider=ai_provider,
+                ai_model=ai_model,
+                ai_cli_timeout=ai_cli_timeout,
+                custom_prompt=custom_prompt,
+                artifacts_context=artifacts_context,
+                server_url=server_url,
+                job_id=job_id,
+                peer_ai_configs=peer_ai_configs,
+                peer_analysis_max_rounds=peer_analysis_max_rounds,
+                group_label=group_label,
+                additional_repos=additional_repos,
+                max_concurrent_ai_calls=max_concurrent_ai_calls,
+                auth_header=auth_header,
+            )
+        )
+    group_results = await run_parallel_with_limit(
+        tasks, max_concurrency=max_concurrent_ai_calls
+    )
+
+    # Flatten results and handle exceptions
+    failures: list[FailureAnalysis] = []
+    failed_groups = 0
+    group_list = list(failure_groups.values())
+    for i, result in enumerate(group_results):
+        if isinstance(result, Exception):
+            failed_groups += 1
+            for tf in group_list[i]:
+                failures.append(
+                    FailureAnalysis(
+                        test_name=tf.test_name,
+                        error=tf.error_message,
+                        error_signature=get_failure_signature(tf),
+                        analysis=AnalysisDetail(
+                            details=f"Analysis failed: {format_exception_with_type(result)}"
+                        ),
+                    )
+                )
+        else:
+            failures.extend(result)
+
+    return failures, unique_errors, failed_groups
+
+
 async def _analyze_child_job_inner(
     *,
     source: JenkinsSource,
@@ -660,69 +757,27 @@ async def _analyze_child_job_inner(
 
     # If we have test failures, group by signature and analyze unique groups
     if test_failures:
-        # Group failures by signature to avoid analyzing identical errors multiple times
-        failure_groups: dict[str, list[FailedTest]] = defaultdict(list)
-        for tf in test_failures:
-            sig = get_failure_signature(tf)
-            failure_groups[sig].append(tf)
-
-        logger.info(
-            f"Grouped {len(test_failures)} failures into {len(failure_groups)} unique error types"
+        failures, unique_errors, _failed_groups = await _analyze_grouped_failures(
+            test_failures,
+            console_context=console_context,
+            repo_path=repo_path,
+            artifacts_context=child_artifacts_context,
+            group_label_prefix=job_name,
+            additional_repos=additional_repos,
+            ai_provider=ai_provider,
+            ai_model=ai_model,
+            ai_cli_timeout=ai_cli_timeout,
+            custom_prompt=custom_prompt,
+            server_url=server_url,
+            job_id=job_id,
+            peer_ai_configs=peer_ai_configs,
+            peer_analysis_max_rounds=peer_analysis_max_rounds,
+            max_concurrent_ai_calls=max_concurrent_ai_calls,
+            auth_header=auth_header,
         )
-
-        # Analyze each unique failure group in parallel
-        total_groups = len(failure_groups)
-        tasks: list[Coroutine[Any, Any, Any]] = []
-        for group_idx, (_sig, group) in enumerate(failure_groups.items(), 1):
-            tasks.append(
-                analyze_failure_group(
-                    failures=group,
-                    console_context=console_context,
-                    repo_path=repo_path,
-                    ai_provider=ai_provider,
-                    ai_model=ai_model,
-                    ai_cli_timeout=ai_cli_timeout,
-                    custom_prompt=custom_prompt,
-                    artifacts_context=child_artifacts_context,
-                    server_url=server_url,
-                    job_id=job_id,
-                    peer_ai_configs=peer_ai_configs,
-                    peer_analysis_max_rounds=peer_analysis_max_rounds,
-                    group_label=f"{job_name}:{group_idx}/{total_groups}"
-                    if total_groups > 1
-                    else "",
-                    additional_repos=additional_repos,
-                    max_concurrent_ai_calls=max_concurrent_ai_calls,
-                    auth_header=auth_header,
-                )
-            )
-        group_results = await run_parallel_with_limit(
-            tasks, max_concurrency=max_concurrent_ai_calls
-        )
-
-        # Flatten results and handle exceptions
-        failures = []
-        group_list = list(failure_groups.values())
-        for i, result in enumerate(group_results):
-            if isinstance(result, Exception):
-                # Create error entries for all failures in this group
-                for tf in group_list[i]:
-                    failures.append(
-                        FailureAnalysis(
-                            test_name=tf.test_name,
-                            error=tf.error_message,
-                            analysis=AnalysisDetail(
-                                details=f"Analysis failed: {format_exception_with_type(result)}"
-                            ),
-                            error_signature=get_failure_signature(tf),
-                        )
-                    )
-            else:
-                failures.extend(result)
 
         # Generate summary from parallel results
         total_failures = len(failures)
-        unique_errors = len(failure_groups)
 
         # Include deduplication info in summary if applicable
         if unique_errors < total_failures:
@@ -1031,78 +1086,37 @@ async def analyze_job(
             unique_errors = 0
             if test_failures:
                 await safe_update_progress(progress_job_id, "analyzing_failures")
-                # Group failures by signature to avoid analyzing identical errors multiple times
-                failure_groups: dict[str, list[FailedTest]] = defaultdict(list)
-                for tf in test_failures:
-                    sig = get_failure_signature(tf)
-                    failure_groups[sig].append(tf)
-
-                unique_errors = len(failure_groups)
-                logger.info(
-                    f"Grouped {len(test_failures)} failures into {unique_errors} unique error types"
+                (
+                    failures,
+                    unique_errors,
+                    failed_groups,
+                ) = await _analyze_grouped_failures(
+                    test_failures,
+                    console_context=console_context,
+                    repo_path=repo_path,
+                    artifacts_context=artifacts_context,
+                    additional_repos=cloned_repos or None,
+                    ai_provider=ai_provider,
+                    ai_model=ai_model,
+                    ai_cli_timeout=settings.ai_cli_timeout,
+                    custom_prompt=custom_prompt,
+                    server_url=server_url,
+                    job_id=job_id,
+                    peer_ai_configs=peer_ai_configs,
+                    peer_analysis_max_rounds=peer_analysis_max_rounds,
+                    max_concurrent_ai_calls=settings.max_concurrent_ai_calls,
+                    auth_header=auth_header,
                 )
-
-                # Analyze each unique failure group in parallel
-                total_groups = len(failure_groups)
-                failure_tasks: list[Coroutine[Any, Any, Any]] = []
-                for group_idx, (_sig, group) in enumerate(failure_groups.items(), 1):
-                    failure_tasks.append(
-                        analyze_failure_group(
-                            failures=group,
-                            console_context=console_context,
-                            repo_path=repo_path,
-                            ai_provider=ai_provider,
-                            ai_model=ai_model,
-                            ai_cli_timeout=settings.ai_cli_timeout,
-                            custom_prompt=custom_prompt,
-                            artifacts_context=artifacts_context,
-                            server_url=server_url,
-                            job_id=job_id,
-                            peer_ai_configs=peer_ai_configs,
-                            peer_analysis_max_rounds=peer_analysis_max_rounds,
-                            group_label=f"{group_idx}/{total_groups}"
-                            if total_groups > 1
-                            else "",
-                            additional_repos=cloned_repos or None,
-                            max_concurrent_ai_calls=settings.max_concurrent_ai_calls,
-                            auth_header=auth_header,
-                        )
-                    )
-                group_results = await run_parallel_with_limit(
-                    failure_tasks, max_concurrency=settings.max_concurrent_ai_calls
-                )
-
-                # Flatten results and handle exceptions
-                failures = []
-                group_list = list(failure_groups.values())
-                for i, result in enumerate(group_results):
-                    if isinstance(result, Exception):
-                        # Create error entries for all failures in this group
-                        for tf in group_list[i]:
-                            failures.append(
-                                FailureAnalysis(
-                                    test_name=tf.test_name,
-                                    error=tf.error_message,
-                                    error_signature=get_failure_signature(tf),
-                                    analysis=AnalysisDetail(
-                                        details=f"Analysis failed: {format_exception_with_type(result)}"
-                                    ),
-                                )
-                            )
-                    else:
-                        failures.extend(result)
 
                 # If every group analysis errored out, return failed status
-                if group_results and all(
-                    isinstance(r, Exception) for r in group_results
-                ):
+                if failures and failed_groups == unique_errors:
                     return AnalysisResult(
                         job_id=job_id,
                         job_name=request.job_name,
                         build_number=request.build_number,
                         jenkins_url=HttpUrl(jenkins_build_url),
                         status="failed",
-                        summary=f"All {len(group_results)} analysis group(s) failed",
+                        summary=f"All {unique_errors} analysis group(s) failed",
                         ai_provider=ai_provider,
                         ai_model=ai_model,
                         failures=failures,
@@ -1295,16 +1309,27 @@ async def wait_for_jenkins_completion(
             build_info = await asyncio.to_thread(
                 client.get_build_info_safe, job_name, build_number
             )
-            consecutive_failures = 0
 
-            if build_info and not build_info.get("building", True):
+            if not build_info or "building" not in build_info:
+                consecutive_failures += 1
+                logger.warning(
+                    "Empty/incomplete build_info for %s #%s (%d/%d)",
+                    job_name,
+                    build_number,
+                    consecutive_failures,
+                    max_consecutive_failures,
+                )
+                if consecutive_failures >= max_consecutive_failures:
+                    return False, unreachable_error
+            elif not build_info["building"]:
                 logger.info(
                     f"Jenkins job {job_name} #{build_number} completed "
                     f"with result: {build_info.get('result')}"
                 )
                 return True, ""
-
-            logger.info(f"Jenkins job {job_name} #{build_number} still running")
+            else:
+                consecutive_failures = 0
+                logger.info(f"Jenkins job {job_name} #{build_number} still running")
 
         except jenkins.NotFoundException:
             logger.error(

@@ -523,6 +523,7 @@ def _reconstruct_from_params(
     body = AnalyzeRequest(
         job_name=result_data["job_name"],
         build_number=result_data["build_number"],
+        name=params.get("name") or None,
         ai_provider=params.get("ai_provider", ""),
         ai_model=params.get("ai_model", ""),
         wait_for_completion=params.get("wait_for_completion", True),
@@ -1531,6 +1532,14 @@ async def _enrich_result_with_tests_repo_matches(
     )
 
 
+_AI_SESSION_TTL_HOURS = 8  # Short-lived for AI CLI internal API calls
+
+
+def _get_display_name(body: AnalyzeRequest | UnifiedAnalyzeRequest) -> str:
+    """Get display name from request, falling back to job_name."""
+    return body.name or body.job_name or ""
+
+
 async def _create_ai_auth_header(username: str) -> str:
     """Create a short-lived session token for AI CLI internal API calls.
 
@@ -1539,7 +1548,10 @@ async def _create_ai_auth_header(username: str) -> str:
     if not username:
         return ""
     try:
-        session_token = await storage.create_session(username, ttl_hours=1)
+        session_token = await storage.create_session(
+            username,
+            ttl_hours=_AI_SESSION_TTL_HOURS,
+        )
         return f"Bearer {session_token}"
     except Exception:
         logger.warning("Failed to create AI session for history access", exc_info=True)
@@ -1596,7 +1608,7 @@ async def process_analysis_with_id(
             )
 
             if not completed:
-                display_name = getattr(body, "name", None) or body.job_name
+                display_name = _get_display_name(body)
                 fail_data = {
                     "job_name": body.job_name,
                     "display_name": display_name,
@@ -1738,7 +1750,7 @@ async def process_analysis_with_id(
     except Exception as e:
         logger.exception(f"Analysis failed for job {job_id}")
         error_detail = format_exception_with_type(e)
-        display_name = getattr(body, "name", None) or body.job_name
+        display_name = _get_display_name(body)
         error_data: dict = {
             "job_name": body.job_name,
             "display_name": display_name,
@@ -2035,6 +2047,7 @@ def _build_request_params(
             "issue_prompt": body.issue_prompt or "",
             "force": merged.force_analysis,
             "wait_started_at": _time.time(),
+            "name": getattr(body, "name", None) or "",
         }
     )
     return encrypt_sensitive_fields(params)
@@ -2059,7 +2072,7 @@ async def _enqueue_analysis_job(
     jenkins_url = build_jenkins_url(
         merged.jenkins_url, body.job_name, body.build_number
     )
-    display_name = getattr(body, "name", None) or body.job_name
+    display_name = _get_display_name(body)
     initial_result: dict = {
         "job_name": body.job_name,
         "display_name": display_name,
