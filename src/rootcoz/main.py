@@ -1222,6 +1222,9 @@ async def _validation_error_handler(
     if request.url.path in _BODY_LOGGING_SKIP_PATHS:
         raw_errors = jsonable_encoder(exc.errors())
         masked_errors = [_mask_pydantic_error(e) for e in raw_errors]
+        for error in masked_errors:
+            if "input" in error:
+                error["input"] = "<redacted>"
         return JSONResponse(
             status_code=422,
             content={"detail": masked_errors},
