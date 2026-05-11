@@ -1996,6 +1996,7 @@ async def _enqueue_file_raw_analysis(
     base_params["raw_prompt"] = body.raw_prompt or ""
     base_params["issue_prompt"] = body.issue_prompt or ""
     base_params["analysis_type"] = analysis_type
+    base_params["original_name"] = body.name or ""
     _apply_base_analysis_overrides(base_params, body, merged)
 
     if analysis_type == "file":
@@ -2638,9 +2639,13 @@ async def re_analyze(
                 )
 
         # Build unified request from stored params
+        # Prefer the original user-supplied name (before UUID suffix was added)
+        # over the resolved display_name / job_name.
+        stored_original_name = decrypted_params.get("original_name", "")
         unified_fields: dict = {
             "type": analysis_type,
-            "name": result_data.get("display_name")
+            "name": stored_original_name
+            or result_data.get("display_name")
             or result_data.get("job_name", f"{analysis_type}-analysis"),
         }
         # Restore source data

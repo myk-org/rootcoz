@@ -43,6 +43,44 @@ from rootcoz.sources.jenkins_source import (
 _FAKE_JENKINS_PASSWORD = "test-pass"  # noqa: S105  # pragma: allowlist secret
 
 
+def _make_jenkins_settings(**overrides: object) -> Settings:
+    """Build a ``Settings`` instance pre-filled with dummy Jenkins credentials.
+
+    Any extra *overrides* (e.g. ``force_analysis=True``) are merged into the
+    settings dict before validation.
+    """
+    data = Settings().model_dump(mode="python")
+    data["jenkins_url"] = "https://jenkins.example.com"
+    data["jenkins_user"] = "user"
+    data["jenkins_password"] = _FAKE_JENKINS_PASSWORD
+    data.update(overrides)
+    return Settings.model_validate(data)
+
+
+def _patch_jenkins_client(
+    monkeypatch: pytest.MonkeyPatch,
+    mock_client: MagicMock,
+) -> None:
+    """Monkeypatch ``JenkinsClient`` construction and ``asyncio.to_thread``.
+
+    After calling this helper, the jenkins source module will:
+    * return *mock_client* from ``JenkinsClient(**…)``
+    * execute ``asyncio.to_thread`` calls synchronously
+    """
+
+    async def fake_to_thread(func, *args, **kwargs):
+        return func(*args, **kwargs)
+
+    monkeypatch.setattr(
+        "rootcoz.sources.jenkins_source.asyncio.to_thread",
+        fake_to_thread,
+    )
+    monkeypatch.setattr(
+        "rootcoz.sources.jenkins_source.JenkinsClient",
+        lambda **_kwargs: mock_client,
+    )
+
+
 class TestHandleJenkinsException:
     """Tests for the handle_jenkins_exception function."""
 
@@ -590,17 +628,7 @@ class TestConsoleOnlyPeerWarning:
         mock_client.get_build_console.return_value = "Build failed with error"
         mock_client.get_test_report.return_value = None
 
-        async def fake_to_thread(func, *args, **kwargs):
-            return func(*args, **kwargs)
-
-        monkeypatch.setattr(
-            "rootcoz.sources.jenkins_source.asyncio.to_thread",
-            fake_to_thread,
-        )
-        monkeypatch.setattr(
-            "rootcoz.sources.jenkins_source.JenkinsClient",
-            lambda **_kwargs: mock_client,
-        )
+        _patch_jenkins_client(monkeypatch, mock_client)
         monkeypatch.setattr(
             "rootcoz.engine.core.call_ai_cli_with_retry",
             AsyncMock(
@@ -611,13 +639,7 @@ class TestConsoleOnlyPeerWarning:
             ),
         )
 
-        settings = Settings()
-        settings_data = settings.model_dump(mode="python")
-        settings_data["jenkins_url"] = "https://jenkins.example.com"
-        settings_data["jenkins_user"] = "user"
-        settings_data["jenkins_password"] = _FAKE_JENKINS_PASSWORD
-        child_settings = Settings.model_validate(settings_data)
-
+        child_settings = _make_jenkins_settings()
         peers = [AiConfigEntry(ai_provider="gemini", ai_model="pro")]
 
         with patch("rootcoz.sources.jenkins_source.logger") as mock_logger:
@@ -646,17 +668,7 @@ class TestConsoleOnlyPeerWarning:
         mock_client.get_build_console.return_value = "Build failed with error"
         mock_client.get_test_report.return_value = None
 
-        async def fake_to_thread(func, *args, **kwargs):
-            return func(*args, **kwargs)
-
-        monkeypatch.setattr(
-            "rootcoz.sources.jenkins_source.asyncio.to_thread",
-            fake_to_thread,
-        )
-        monkeypatch.setattr(
-            "rootcoz.sources.jenkins_source.JenkinsClient",
-            lambda **_kwargs: mock_client,
-        )
+        _patch_jenkins_client(monkeypatch, mock_client)
         monkeypatch.setattr(
             "rootcoz.engine.core.call_ai_cli_with_retry",
             AsyncMock(
@@ -667,12 +679,7 @@ class TestConsoleOnlyPeerWarning:
             ),
         )
 
-        settings = Settings()
-        settings_data = settings.model_dump(mode="python")
-        settings_data["jenkins_url"] = "https://jenkins.example.com"
-        settings_data["jenkins_user"] = "user"
-        settings_data["jenkins_password"] = _FAKE_JENKINS_PASSWORD
-        child_settings = Settings.model_validate(settings_data)
+        child_settings = _make_jenkins_settings()
 
         with patch("rootcoz.sources.jenkins_source.logger") as mock_logger:
             await analyze_child_job(
@@ -696,12 +703,7 @@ class TestConsoleOnlyPeerWarning:
             job_name="my-job",
             build_number=123,
         )
-        settings = Settings()
-        settings_data = settings.model_dump(mode="python")
-        settings_data["jenkins_url"] = "https://jenkins.example.com"
-        settings_data["jenkins_user"] = "user"
-        settings_data["jenkins_password"] = _FAKE_JENKINS_PASSWORD
-        merged = Settings.model_validate(settings_data)
+        merged = _make_jenkins_settings()
 
         mock_client = MagicMock()
         mock_client.get_build_info_safe.return_value = {
@@ -712,18 +714,7 @@ class TestConsoleOnlyPeerWarning:
         mock_client.get_test_report.return_value = None
         mock_client.session = MagicMock()
 
-        monkeypatch.setattr(
-            "rootcoz.sources.jenkins_source.JenkinsClient",
-            lambda **_kwargs: mock_client,
-        )
-
-        async def fake_to_thread(func, *args, **kwargs):
-            return func(*args, **kwargs)
-
-        monkeypatch.setattr(
-            "rootcoz.sources.jenkins_source.asyncio.to_thread",
-            fake_to_thread,
-        )
+        _patch_jenkins_client(monkeypatch, mock_client)
         monkeypatch.setattr(
             "rootcoz.sources.jenkins_source.check_ai_cli_available",
             AsyncMock(return_value=AIResult(success=True, text="")),
@@ -772,12 +763,7 @@ class TestAnalyzeJobProgressPhases:
             job_name="pipeline-job",
             build_number=42,
         )
-        settings = Settings()
-        settings_data = settings.model_dump(mode="python")
-        settings_data["jenkins_url"] = "https://jenkins.example.com"
-        settings_data["jenkins_user"] = "user"
-        settings_data["jenkins_password"] = _FAKE_JENKINS_PASSWORD
-        merged = Settings.model_validate(settings_data)
+        merged = _make_jenkins_settings()
 
         phases: list[str] = []
 
@@ -795,18 +781,7 @@ class TestAnalyzeJobProgressPhases:
         mock_client.get_build_console.return_value = "Build failed"
         mock_client.get_test_report.return_value = None
 
-        monkeypatch.setattr(
-            "rootcoz.sources.jenkins_source.JenkinsClient",
-            lambda **_kwargs: mock_client,
-        )
-
-        async def fake_to_thread(func, *args, **kwargs):
-            return func(*args, **kwargs)
-
-        monkeypatch.setattr(
-            "rootcoz.sources.jenkins_source.asyncio.to_thread",
-            fake_to_thread,
-        )
+        _patch_jenkins_client(monkeypatch, mock_client)
         monkeypatch.setattr(
             "rootcoz.sources.jenkins_source.check_ai_cli_available",
             AsyncMock(return_value=AIResult(success=True, text="")),
@@ -853,12 +828,7 @@ class TestAnalyzeJobProgressPhases:
             job_name="my-job",
             build_number=123,
         )
-        settings = Settings()
-        settings_data = settings.model_dump(mode="python")
-        settings_data["jenkins_url"] = "https://jenkins.example.com"
-        settings_data["jenkins_user"] = "user"
-        settings_data["jenkins_password"] = _FAKE_JENKINS_PASSWORD
-        merged = Settings.model_validate(settings_data)
+        merged = _make_jenkins_settings()
 
         phases: list[str] = []
 
@@ -890,18 +860,7 @@ class TestAnalyzeJobProgressPhases:
         }
         mock_client.session = MagicMock()
 
-        monkeypatch.setattr(
-            "rootcoz.sources.jenkins_source.JenkinsClient",
-            lambda **_kwargs: mock_client,
-        )
-
-        async def fake_to_thread(func, *args, **kwargs):
-            return func(*args, **kwargs)
-
-        monkeypatch.setattr(
-            "rootcoz.sources.jenkins_source.asyncio.to_thread",
-            fake_to_thread,
-        )
+        _patch_jenkins_client(monkeypatch, mock_client)
         monkeypatch.setattr(
             "rootcoz.sources.jenkins_source.check_ai_cli_available",
             AsyncMock(return_value=AIResult(success=True, text="")),
@@ -948,12 +907,7 @@ class TestAnalyzeJobProgressPhases:
             job_name="my-job",
             build_number=123,
         )
-        settings = Settings()
-        settings_data = settings.model_dump(mode="python")
-        settings_data["jenkins_url"] = "https://jenkins.example.com"
-        settings_data["jenkins_user"] = "user"
-        settings_data["jenkins_password"] = _FAKE_JENKINS_PASSWORD
-        merged = Settings.model_validate(settings_data)
+        merged = _make_jenkins_settings()
 
         mock_client = MagicMock()
         mock_client.get_build_info_safe.return_value = {
@@ -961,18 +915,7 @@ class TestAnalyzeJobProgressPhases:
             "building": False,
         }
 
-        monkeypatch.setattr(
-            "rootcoz.sources.jenkins_source.JenkinsClient",
-            lambda **_kwargs: mock_client,
-        )
-
-        async def fake_to_thread(func, *args, **kwargs):
-            return func(*args, **kwargs)
-
-        monkeypatch.setattr(
-            "rootcoz.sources.jenkins_source.asyncio.to_thread",
-            fake_to_thread,
-        )
+        _patch_jenkins_client(monkeypatch, mock_client)
 
         mock_update = AsyncMock()
         monkeypatch.setattr(
@@ -1005,12 +948,7 @@ class TestAnalyzeJobProgressPhases:
             job_name="my-job",
             build_number=123,
         )
-        settings = Settings()
-        settings_data = settings.model_dump(mode="python")
-        settings_data["jenkins_url"] = "https://jenkins.example.com"
-        settings_data["jenkins_user"] = "user"
-        settings_data["jenkins_password"] = _FAKE_JENKINS_PASSWORD
-        merged = Settings.model_validate(settings_data)
+        merged = _make_jenkins_settings()
 
         mock_client = MagicMock()
         mock_client.get_build_info_safe.return_value = {
@@ -1037,18 +975,7 @@ class TestAnalyzeJobProgressPhases:
         }
         mock_client.session = MagicMock()
 
-        monkeypatch.setattr(
-            "rootcoz.sources.jenkins_source.JenkinsClient",
-            lambda **_kwargs: mock_client,
-        )
-
-        async def fake_to_thread(func, *args, **kwargs):
-            return func(*args, **kwargs)
-
-        monkeypatch.setattr(
-            "rootcoz.sources.jenkins_source.asyncio.to_thread",
-            fake_to_thread,
-        )
+        _patch_jenkins_client(monkeypatch, mock_client)
         monkeypatch.setattr(
             "rootcoz.sources.jenkins_source.check_ai_cli_available",
             AsyncMock(return_value=AIResult(success=True, text="")),
@@ -1103,12 +1030,7 @@ class TestForceAnalysisSuccessfulBuild:
             build_number=123,
             force=False,
         )
-        settings = Settings()
-        settings_data = settings.model_dump(mode="python")
-        settings_data["jenkins_url"] = "https://jenkins.example.com"
-        settings_data["jenkins_user"] = "user"
-        settings_data["jenkins_password"] = _FAKE_JENKINS_PASSWORD
-        merged = Settings.model_validate(settings_data)
+        merged = _make_jenkins_settings()
 
         mock_client = MagicMock()
         mock_client.get_build_info_safe.return_value = {
@@ -1116,18 +1038,7 @@ class TestForceAnalysisSuccessfulBuild:
             "building": False,
         }
 
-        monkeypatch.setattr(
-            "rootcoz.sources.jenkins_source.JenkinsClient",
-            lambda **_kwargs: mock_client,
-        )
-
-        async def fake_to_thread(func, *args, **kwargs):
-            return func(*args, **kwargs)
-
-        monkeypatch.setattr(
-            "rootcoz.sources.jenkins_source.asyncio.to_thread",
-            fake_to_thread,
-        )
+        _patch_jenkins_client(monkeypatch, mock_client)
 
         result = await analyze_job(
             body,
@@ -1152,12 +1063,7 @@ class TestForceAnalysisSuccessfulBuild:
             build_number=123,
             force=True,
         )
-        settings = Settings()
-        settings_data = settings.model_dump(mode="python")
-        settings_data["jenkins_url"] = "https://jenkins.example.com"
-        settings_data["jenkins_user"] = "user"
-        settings_data["jenkins_password"] = _FAKE_JENKINS_PASSWORD
-        merged = Settings.model_validate(settings_data)
+        merged = _make_jenkins_settings()
 
         mock_client = MagicMock()
         mock_client.get_build_info_safe.return_value = {
@@ -1168,18 +1074,7 @@ class TestForceAnalysisSuccessfulBuild:
         mock_client.get_build_console.return_value = "Build finished successfully"
         mock_client.get_test_report.return_value = None
 
-        monkeypatch.setattr(
-            "rootcoz.sources.jenkins_source.JenkinsClient",
-            lambda **_kwargs: mock_client,
-        )
-
-        async def fake_to_thread(func, *args, **kwargs):
-            return func(*args, **kwargs)
-
-        monkeypatch.setattr(
-            "rootcoz.sources.jenkins_source.asyncio.to_thread",
-            fake_to_thread,
-        )
+        _patch_jenkins_client(monkeypatch, mock_client)
         monkeypatch.setattr(
             "rootcoz.sources.jenkins_source.check_ai_cli_available",
             AsyncMock(return_value=AIResult(success=True, text="")),
@@ -1219,13 +1114,7 @@ class TestForceAnalysisSuccessfulBuild:
             build_number=123,
             # force intentionally omitted — settings.force_analysis should drive behavior
         )
-        settings = Settings()
-        settings_data = settings.model_dump(mode="python")
-        settings_data["jenkins_url"] = "https://jenkins.example.com"
-        settings_data["jenkins_user"] = "user"
-        settings_data["jenkins_password"] = _FAKE_JENKINS_PASSWORD
-        settings_data["force_analysis"] = True  # env-level force is on
-        merged = Settings.model_validate(settings_data)
+        merged = _make_jenkins_settings(force_analysis=True)  # env-level force is on
 
         mock_client = MagicMock()
         mock_client.get_build_info_safe.return_value = {
@@ -1236,18 +1125,7 @@ class TestForceAnalysisSuccessfulBuild:
         mock_client.get_build_console.return_value = "Build finished successfully"
         mock_client.get_test_report.return_value = None
 
-        monkeypatch.setattr(
-            "rootcoz.sources.jenkins_source.JenkinsClient",
-            lambda **_kwargs: mock_client,
-        )
-
-        async def fake_to_thread(func, *args, **kwargs):
-            return func(*args, **kwargs)
-
-        monkeypatch.setattr(
-            "rootcoz.sources.jenkins_source.asyncio.to_thread",
-            fake_to_thread,
-        )
+        _patch_jenkins_client(monkeypatch, mock_client)
         monkeypatch.setattr(
             "rootcoz.sources.jenkins_source.check_ai_cli_available",
             AsyncMock(return_value=AIResult(success=True, text="")),
