@@ -1154,7 +1154,9 @@ app.add_middleware(AuthMiddleware)
 app.add_middleware(ErrorTrackingMiddleware)
 
 
-_BODY_LOGGING_SKIP_PATHS = frozenset({"/api/feedback/preview", "/api/feedback/create"})
+_BODY_LOGGING_SKIP_PATHS = frozenset(
+    {"/api/feedback/preview", "/api/feedback/create", "/api/analyze"}
+)
 
 
 class RequestBodyLoggingMiddleware(BaseHTTPMiddleware):
@@ -1968,7 +1970,7 @@ async def _enqueue_file_raw_analysis(
         tests_repo_url=tests_repo_url,
         tests_repo_token=resolved_tests_repo_token,
         tests_repo_ref=tests_repo_ref,
-        additional_repos=additional_repos_list or None,
+        additional_repos=additional_repos_list,
     )
     base_params["raw_prompt"] = body.raw_prompt or ""
     base_params["issue_prompt"] = body.issue_prompt or ""
