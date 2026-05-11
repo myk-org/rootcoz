@@ -466,6 +466,11 @@ def _build_report_context(
         report_url = f"{base_url}/results/{job_id}"
     else:
         report_url = f"/results/{job_id}"
+
+    # Always fall back to display_name/job_name when there is no real
+    # Jenkins URL so that file/raw analyses retain a human-readable label
+    # in GitHub/Jira previews.
+    if not jenkins_url:
         job_name = result_data.get("display_name") or result_data.get("job_name", "")
         build_number = result_data.get("build_number")
         if job_name and build_number:
