@@ -214,6 +214,15 @@ class BaseAnalysisRequest(BaseModel):
 class _JenkinsParamsMixin(BaseModel):
     """Shared Jenkins connection and polling fields."""
 
+    @field_validator("job_name", mode="before", check_fields=False)
+    @classmethod
+    def _strip_job_name(cls, v: str | None) -> str | None:
+        if v is not None:
+            v = v.strip()
+            if not v:
+                raise ValueError("job_name cannot be blank")
+        return v
+
     force: bool = Field(
         default=False,
         description="Force analysis even if the build succeeded (bypass SUCCESS early-return)",

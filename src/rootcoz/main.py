@@ -2152,101 +2152,108 @@ async def _process_file_raw_analysis(
     """Background task for file/raw analysis."""
     job_id_var.set(job_id)
 
-    auth_header = await _create_ai_auth_header(username)
+    auth_header = ""
+    repo_manager: RepositoryManager | None = None
 
-    logger.info(
-        f"Starting file/raw analysis for job_id={job_id}, type={body.type}, display_name={display_name}"
-    )
-
-    # Create source plugin
-    source: CISource
-    if body.type == "file":
-        assert body.raw_xml is not None
-        source = FileSource(raw_xml=body.raw_xml)
-    else:
-        assert body.failures is not None
-        source = RawSource(failures=body.failures)
-
-    # Fetch failures from source
-    source_result = await source.fetch()
-    logger.debug(
-        f"Source fetch complete: {len(source_result.failures)} failures, build_passed={source_result.build_passed}"
-    )
-
-    if source_result.build_passed:
-        # No failures found (XML with no failures)
-        analysis_result = FailureAnalysisResult(
-            job_id=job_id,
-            status="completed",
-            summary="No test failures found in the provided input.",
-            enriched_xml=body.raw_xml if body.type == "file" else None,
-        )
-        result_data = analysis_result.model_dump(mode="json")
-        result_data["job_name"] = display_name
-        await _preserve_request_params(job_id, result_data)
-        logger.info(f"No failures found for job_id={job_id}, completing early")
-        await update_status(job_id, "completed", result_data)
-        notify_active_count_changed()
-        notify_dashboard_changed()
-        notify_job_status_changed(job_id)
-        return
-
-    test_failures = source_result.failures
-
-    await update_status(job_id, "running")
-    notify_active_count_changed()
-    notify_dashboard_changed()
-    notify_job_status_changed(job_id)
-
-    # Pre-flight: verify AI CLI is reachable before spawning parallel tasks
-    preflight_result = await check_ai_cli_available(
-        ai_provider, ai_model, cli_flags=PROVIDER_CLI_FLAGS.get(ai_provider, [])
-    )
-    if not preflight_result.success:
-        logger.error(
-            "AI CLI sanity check failed for job %s (%s/%s)",
-            job_id,
-            ai_provider,
-            ai_model,
-        )
-        fail_result = FailureAnalysisResult(
-            job_id=job_id,
-            status="failed",
-            summary=preflight_result.text,
-            ai_provider=ai_provider,
-            ai_model=ai_model,
-        )
-        fail_data = fail_result.model_dump(mode="json")
-        fail_data["job_name"] = display_name
-        await _preserve_request_params(job_id, fail_data)
-        await update_status(job_id, "failed", fail_data)
-        notify_active_count_changed()
-        notify_dashboard_changed()
-        notify_job_status_changed(job_id)
-        return
-
-    # Group failures by error signature
-    groups: dict[str, list] = defaultdict(list)
-    for failure in test_failures:
-        sig = get_failure_signature(failure)
-        groups[sig].append(failure)
-
-    logger.info(
-        f"Grouped {len(test_failures)} failures into {len(groups)} unique error signatures (job_id: {job_id})"
-    )
-    logger.debug(
-        f"Failure grouping complete: {len(groups)} unique signatures from {len(test_failures)} failures"
-    )
-
-    # Clone repos
-    repo_manager = RepositoryManager()
-    cloned_repos: dict[str, Path] = {}
     try:
+        logger.info(
+            f"Starting file/raw analysis for job_id={job_id}, type={body.type}, display_name={display_name}"
+        )
+
+        # Create source plugin
+        source: CISource
+        if body.type == "file":
+            assert body.raw_xml is not None
+            source = FileSource(raw_xml=body.raw_xml)
+        else:
+            assert body.failures is not None
+            source = RawSource(failures=body.failures)
+
+        # Fetch failures from source
+        source_result = await source.fetch()
+        logger.debug(
+            f"Source fetch complete: {len(source_result.failures)} failures, build_passed={source_result.build_passed}"
+        )
+
+        if source_result.build_passed:
+            # No failures found (XML with no failures)
+            analysis_result = FailureAnalysisResult(
+                job_id=job_id,
+                status="completed",
+                summary="No test failures found in the provided input.",
+                enriched_xml=body.raw_xml if body.type == "file" else None,
+            )
+            result_data = analysis_result.model_dump(mode="json")
+            result_data["job_name"] = display_name
+            await _preserve_request_params(job_id, result_data)
+            logger.info(f"No failures found for job_id={job_id}, completing early")
+            await update_status(job_id, "completed", result_data)
+            notify_active_count_changed()
+            notify_dashboard_changed()
+            notify_job_status_changed(job_id)
+            return
+
+        test_failures = source_result.failures
+
+        await update_status(job_id, "running")
+        notify_active_count_changed()
+        notify_dashboard_changed()
+        notify_job_status_changed(job_id)
+
+        # Pre-flight: verify AI CLI is reachable before spawning parallel tasks
+        preflight_result = await check_ai_cli_available(
+            ai_provider, ai_model, cli_flags=PROVIDER_CLI_FLAGS.get(ai_provider, [])
+        )
+        if not preflight_result.success:
+            logger.error(
+                "AI CLI sanity check failed for job %s (%s/%s)",
+                job_id,
+                ai_provider,
+                ai_model,
+            )
+            fail_result = FailureAnalysisResult(
+                job_id=job_id,
+                status="failed",
+                summary=preflight_result.text,
+                ai_provider=ai_provider,
+                ai_model=ai_model,
+            )
+            fail_data = fail_result.model_dump(mode="json")
+            fail_data["job_name"] = display_name
+            await _preserve_request_params(job_id, fail_data)
+            await update_status(job_id, "failed", fail_data)
+            notify_active_count_changed()
+            notify_dashboard_changed()
+            notify_job_status_changed(job_id)
+            return
+
+        auth_header = await _create_ai_auth_header(username)
+
+        # Group failures by error signature
+        groups: dict[str, list] = defaultdict(list)
+        for failure in test_failures:
+            sig = get_failure_signature(failure)
+            groups[sig].append(failure)
+
+        logger.info(
+            f"Grouped {len(test_failures)} failures into {len(groups)} unique error signatures (job_id: {job_id})"
+        )
+        logger.debug(
+            f"Failure grouping complete: {len(groups)} unique signatures from {len(test_failures)} failures"
+        )
+
+        # Clone repos
+        repo_manager = RepositoryManager()
+        cloned_repos: dict[str, Path] = {}
         repo_path = repo_manager.create_workspace()
         logger.debug(f"Workspace created at {repo_path}")
 
         if tests_repo_url:
-            logger.debug(f"Cloning test repo: {tests_repo_url} (ref={tests_repo_ref})")
+            logger.debug(
+                "Cloning test repo: %s (ref=%s)",
+                redact_url(str(tests_repo_url)),
+                tests_repo_ref,
+            )
             try:
                 repo_name = derive_test_repo_name(
                     str(tests_repo_url), additional_repos_list
@@ -2448,7 +2455,8 @@ async def _process_file_raw_analysis(
 
     finally:
         logger.debug(f"Cleaning up workspace for job_id={job_id}")
-        repo_manager.cleanup()
+        if repo_manager is not None:
+            repo_manager.cleanup()
         await _cleanup_ai_session(auth_header)
 
 
@@ -2634,7 +2642,7 @@ async def re_analyze(
         if "re-analyze" not in existing_tags:
             existing_tags.append("re-analyze")
         if "tags" in body.model_fields_set:
-            for t in getattr(body, "tags", []):
+            for t in getattr(body, "tags", None) or []:
                 if t not in existing_tags:
                     existing_tags.append(t)
         unified_body.tags = existing_tags
@@ -2680,7 +2688,7 @@ async def re_analyze(
         existing_tags.append("re-analyze")
     # Merge with any user-supplied tags from the override body
     if "tags" in body.model_fields_set:
-        for t in original_body.tags:
+        for t in original_body.tags or []:
             if t not in existing_tags:
                 existing_tags.append(t)
     original_body.tags = existing_tags

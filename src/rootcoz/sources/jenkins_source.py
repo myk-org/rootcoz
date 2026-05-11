@@ -770,7 +770,7 @@ async def _analyze_child_job_inner(
     auth_header: str,
 ) -> ChildJobAnalysis:
     """Inner logic for analyze_child_job, separated to allow cleanup after completion."""
-    child_artifacts_context = source_result.artifacts_context or artifacts_context
+    child_artifacts_context = source_result.artifacts_context
     failed_children = source_result.child_job_infos
 
     if failed_children:
@@ -1112,11 +1112,7 @@ async def analyze_job(
             if child_job_analyses and not test_failures:
                 # Check if any child actually produced real findings
                 analyzed_children = [
-                    c
-                    for c in child_job_analyses
-                    if c.failures
-                    or c.failed_children
-                    or not (c.note or "").startswith("Analysis failed")
+                    c for c in child_job_analyses if c.failures or c.failed_children
                 ]
                 if not analyzed_children:
                     return AnalysisResult(
