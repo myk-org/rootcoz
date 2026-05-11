@@ -1973,6 +1973,16 @@ async def _enqueue_file_raw_analysis(
     job_id = str(uuid.uuid4())
     job_id_var.set(job_id)
 
+    # Append short job_id suffix to generic fallback names for uniqueness
+    _GENERIC_FALLBACK_NAMES = {
+        "file-analysis",
+        "raw-analysis",
+        "file-re-analysis",
+        "raw-re-analysis",
+    }
+    if display_name in _GENERIC_FALLBACK_NAMES:
+        display_name = f"{display_name}-{job_id[:8]}"
+
     # Build and persist initial state
     base_params = _build_base_request_params(
         ai_provider,

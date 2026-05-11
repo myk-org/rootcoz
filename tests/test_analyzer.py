@@ -2278,7 +2278,7 @@ class TestAnalyzeFailuresWorkspacePattern:
         mock_process.assert_called_once()
         call_kwargs = mock_process.call_args.kwargs
         assert call_kwargs["tests_repo_url"] == "https://github.com/org/my-tests"
-        assert call_kwargs["display_name"] == "raw-analysis"
+        assert call_kwargs["display_name"].startswith("raw-analysis-")
         assert call_kwargs["ai_provider"] == "claude"
         assert call_kwargs["ai_model"] == "test-model"
 
