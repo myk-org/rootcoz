@@ -640,22 +640,25 @@ def _register_job_task(job_id: str, task: asyncio.Task) -> None:
 
 
 async def _preserve_request_params(job_id: str, result_data: dict) -> None:
-    """Copy ``request_params`` from the stored result into *result_data*.
+    """Copy persisted enqueue-time fields from the stored result into result_data.
 
-    The initial ``save_result`` persists ``request_params`` (ai_provider,
-    ai_model, peer_ai_configs, etc.) but the ``AnalysisResult`` model dump
-    produced when analysis finishes does not include that key.  Without this
-    merge the params would be silently lost when ``update_status`` overwrites
+    The initial ``save_result`` persists ``request_params``, ``tags``, and
+    ``display_name`` but the ``AnalysisResult`` model dump produced when
+    analysis finishes does not include those keys.  Without this merge the
+    fields would be silently lost when ``update_status`` overwrites
     ``result_json``.
 
     Args:
         job_id: The analysis job identifier.
         result_data: Mutable dict that will be written to ``result_json``.
-            Modified in place to add ``request_params`` when available.
+            Modified in place to add preserved fields when available.
     """
     stored = await get_result(job_id, strip_sensitive=False)
-    if stored and stored.get("result") and "request_params" in stored["result"]:
-        result_data["request_params"] = stored["result"]["request_params"]
+    if stored and stored.get("result"):
+        stored_result = stored["result"]
+        for key in ("request_params", "tags", "display_name"):
+            if key in stored_result and key not in result_data:
+                result_data[key] = stored_result[key]
 
 
 async def _fail_resumed_waiting_job(job_id: str, result_data: dict, error: str) -> None:

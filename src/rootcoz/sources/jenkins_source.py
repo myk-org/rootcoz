@@ -476,7 +476,6 @@ async def analyze_child_job(
     ai_model: str = "",
     ai_cli_timeout: int | None = None,
     custom_prompt: str = "",
-    artifacts_context: str = "",
     server_url: str = "",
     job_id: str = "",
     peer_ai_configs: list | None = None,
@@ -500,7 +499,6 @@ async def analyze_child_job(
         ai_model: AI model to use.
         ai_cli_timeout: Timeout in minutes (overrides AI_CLI_TIMEOUT env var).
         custom_prompt: Additional instructions from request payload (raw_prompt).
-        artifacts_context: Jenkins artifacts context for AI analysis (optional).
         server_url: Base URL of this server for AI history API access.
         job_id: Current job ID to exclude from history queries.
         peer_ai_configs: Peer AI configurations for multi-AI consensus analysis.
@@ -555,7 +553,6 @@ async def analyze_child_job(
             ai_model=ai_model,
             ai_cli_timeout=ai_cli_timeout,
             custom_prompt=custom_prompt,
-            artifacts_context=artifacts_context,
             server_url=server_url,
             job_id=job_id,
             peer_ai_configs=peer_ai_configs,
@@ -760,7 +757,6 @@ async def _analyze_child_job_inner(
     ai_model: str,
     ai_cli_timeout: int | None,
     custom_prompt: str,
-    artifacts_context: str,
     server_url: str,
     job_id: str,
     peer_ai_configs: list | None,
@@ -787,7 +783,6 @@ async def _analyze_child_job_inner(
                 ai_model,
                 ai_cli_timeout,
                 custom_prompt,
-                artifacts_context=child_artifacts_context,
                 server_url=server_url,
                 job_id=job_id,
                 peer_ai_configs=peer_ai_configs,
@@ -937,7 +932,7 @@ async def analyze_job(
     build_number = request.build_number
     logger.info(f"Starting analysis for job {job_name} #{build_number}")
 
-    force = getattr(request, "force", False) or settings.force_analysis
+    force = request.force or settings.force_analysis
 
     # Use JenkinsSource to fetch all build data (steps 1-8)
     source = JenkinsSource(
@@ -1077,7 +1072,6 @@ async def analyze_job(
                         ai_model=ai_model,
                         ai_cli_timeout=settings.ai_cli_timeout,
                         custom_prompt=custom_prompt,
-                        artifacts_context=artifacts_context,
                         server_url=server_url,
                         job_id=job_id,
                         peer_ai_configs=peer_ai_configs,
@@ -1111,6 +1105,9 @@ async def analyze_job(
             # Skip Claude CLI analysis - just return the child analyses
             if child_job_analyses and not test_failures:
                 # Check if any child actually produced real findings
+                # Note: for multi-level pipelines, this check is shallow —
+                # a child with failed_children but no leaf findings still counts as analyzed.
+                # A recursive check could improve accuracy for deeply nested pipelines.
                 analyzed_children = [
                     c for c in child_job_analyses if c.failures or c.failed_children
                 ]
@@ -1177,7 +1174,7 @@ async def analyze_job(
                 )
 
                 # If every group analysis errored out, return failed status
-                if failures and failed_groups == unique_errors:
+                if unique_errors > 0 and failed_groups == unique_errors:
                     return AnalysisResult(
                         job_id=job_id,
                         job_name=request.job_name,
