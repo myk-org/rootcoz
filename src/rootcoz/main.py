@@ -2208,6 +2208,19 @@ async def _process_file_raw_analysis(
             notify_active_count_changed()
             notify_dashboard_changed()
             notify_job_status_changed(job_id)
+
+            # Auto-assign job metadata from name pattern rules
+            try:
+                await storage.auto_assign_job_metadata(
+                    display_name, merged.metadata_rules
+                )
+            except Exception:  # metadata auto-assignment is best-effort
+                logger.warning(
+                    "Failed to auto-assign metadata for job '%s'",
+                    display_name,
+                    exc_info=True,
+                )
+
             return
 
         test_failures = source_result.failures
@@ -2437,6 +2450,16 @@ async def _process_file_raw_analysis(
             logger.warning(
                 "Failed to populate failure_history for job_id=%s",
                 job_id,
+                exc_info=True,
+            )
+
+        # Auto-assign job metadata from name pattern rules
+        try:
+            await storage.auto_assign_job_metadata(display_name, merged.metadata_rules)
+        except Exception:  # metadata auto-assignment is best-effort
+            logger.warning(
+                "Failed to auto-assign metadata for job '%s'",
+                display_name,
                 exc_info=True,
             )
 
