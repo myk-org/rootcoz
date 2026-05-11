@@ -1155,7 +1155,7 @@ app.add_middleware(ErrorTrackingMiddleware)
 
 
 _BODY_LOGGING_SKIP_PATHS = frozenset(
-    {"/api/feedback/preview", "/api/feedback/create", "/api/analyze"}
+    {"/api/feedback/preview", "/api/feedback/create", "/analyze"}
 )
 
 
@@ -1509,7 +1509,7 @@ async def _enrich_result_with_tests_repo_matches(
     ai_provider: str = "",
     ai_model: str = "",
     job_id: str = "",
-    tests_repo_url: str = "",
+    tests_repo_url: str | None = None,
 ) -> None:
     """Enrich CODE ISSUE failures with tests repo issue matches.
 
@@ -1524,11 +1524,15 @@ async def _enrich_result_with_tests_repo_matches(
         ai_model: AI model for relevance filtering.
         job_id: Job identifier for token usage tracking.
         tests_repo_url: Per-request tests repo URL override.  When
-            non-empty and ``settings.tests_repo_url`` is unset, a
+            not None and ``settings.tests_repo_url`` is unset, a
             temporary settings copy is created so that
             ``enrich_with_tests_repo_matches`` sees the URL.
     """
-    effective_url = tests_repo_url or str(settings.tests_repo_url or "")
+    effective_url = (
+        tests_repo_url
+        if tests_repo_url is not None
+        else str(settings.tests_repo_url or "")
+    )
     effective_url, _ = parse_repo_ref(effective_url)
     if not effective_url:
         return
