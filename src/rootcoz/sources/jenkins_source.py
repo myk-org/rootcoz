@@ -63,6 +63,31 @@ logger = get_logger(name=__name__, level=os.environ.get("LOG_LEVEL", "INFO"))
 # ---------------------------------------------------------------------------
 
 
+def _normalize_child_results(
+    failed_children: list[tuple[str, int]],
+    child_results: list,
+) -> list[ChildJobAnalysis]:
+    """Convert parallel child-analysis results into ChildJobAnalysis objects.
+
+    Exceptions are turned into stub analyses with a descriptive ``note``.
+    """
+    analyses: list[ChildJobAnalysis] = []
+    for i, result in enumerate(child_results):
+        if isinstance(result, Exception):
+            child_name, child_num = failed_children[i]
+            analyses.append(
+                ChildJobAnalysis(
+                    job_name=child_name,
+                    build_number=child_num,
+                    jenkins_url="",
+                    note=f"Analysis failed: {format_exception_with_type(result)}",
+                )
+            )
+        else:
+            analyses.append(result)
+    return analyses
+
+
 class JenkinsError(Exception):
     """Domain exception for Jenkins interaction failures."""
 
@@ -163,11 +188,13 @@ def extract_failed_child_jobs(build_info: dict) -> list[tuple[str, int]]:
         if action is None:
             continue
         action_class = action.get("_class", "")
-        triggered_builds = action.get("triggeredBuilds", [])
+        triggered_builds = action.get("triggeredBuilds") or []
 
         # Check for BuildAction or similar action types
         if triggered_builds or "BuildAction" in action_class:
             for triggered in triggered_builds:
+                if triggered is None:
+                    continue
                 if triggered.get("result") in ("FAILURE", "UNSTABLE"):
                     # Try to get job name from different possible fields
                     job_name = triggered.get("jobName", "")
@@ -800,20 +827,7 @@ async def _analyze_child_job_inner(
         )
 
         # Handle exceptions in results
-        child_analyses = []
-        for i, result in enumerate(child_results):
-            if isinstance(result, Exception):
-                child_name, child_num = failed_children[i]
-                child_analyses.append(
-                    ChildJobAnalysis(
-                        job_name=child_name,
-                        build_number=child_num,
-                        jenkins_url="",
-                        note=f"Analysis failed: {format_exception_with_type(result)}",
-                    )
-                )
-            else:
-                child_analyses.append(result)
+        child_analyses = _normalize_child_results(failed_children, child_results)
 
         # This job failed because children failed - skip Claude CLI analysis
         # Count failures from child analyses
@@ -1099,19 +1113,9 @@ async def analyze_job(
                 )
 
                 # Handle exceptions in results
-                for i, result in enumerate(child_results):
-                    if isinstance(result, Exception):
-                        child_name, child_num = failed_child_jobs[i]
-                        child_job_analyses.append(
-                            ChildJobAnalysis(
-                                job_name=child_name,
-                                build_number=child_num,
-                                jenkins_url="",
-                                note=f"Analysis failed: {format_exception_with_type(result)}",
-                            )
-                        )
-                    else:
-                        child_job_analyses.append(result)
+                child_job_analyses.extend(
+                    _normalize_child_results(failed_child_jobs, child_results)
+                )
 
             # If this job has failed children AND no test failures, it's a pipeline/orchestrator
             # Skip Claude CLI analysis - just return the child analyses
@@ -1121,7 +1125,9 @@ async def analyze_job(
                 # a child with failed_children but no leaf findings still counts as analyzed.
                 # A recursive check could improve accuracy for deeply nested pipelines.
                 analyzed_children = [
-                    c for c in child_job_analyses if c.failures or c.failed_children
+                    c
+                    for c in child_job_analyses
+                    if (c.failures or c.failed_children) and not c.note
                 ]
                 if not analyzed_children:
                     return AnalysisResult(

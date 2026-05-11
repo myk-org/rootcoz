@@ -1944,7 +1944,11 @@ async def _enqueue_file_raw_analysis(
     ai_provider, ai_model = _resolve_ai_config_values(body.ai_provider, body.ai_model)
 
     # Resolve repos
-    tests_repo_url_raw = str(body.tests_repo_url or merged.tests_repo_url or "")
+    tests_repo_url_raw = (
+        str(body.tests_repo_url)
+        if body.tests_repo_url is not None
+        else str(merged.tests_repo_url or "")
+    )
     tests_repo_url, tests_repo_ref = parse_repo_ref(tests_repo_url_raw)
     resolved_tests_repo_token = resolve_tests_repo_token(body, merged)
     additional_repos_list = resolve_additional_repos(body, merged)
@@ -2551,6 +2555,17 @@ async def re_analyze(
         raise HTTPException(status_code=404, detail=f"Result {job_id} not found")
 
     result_data = stored["result"]
+
+    # Authorization: only the original submitter or an admin may re-analyze
+    original_submitter = result_data.get("request_params", {}).get("submitted_by", "")
+    requesting_user = getattr(request.state, "username", "")
+    is_admin = getattr(request.state, "is_admin", False)
+    if not is_admin and requesting_user != original_submitter:
+        raise HTTPException(
+            status_code=403,
+            detail="Only the original submitter or an admin can re-analyze this job",
+        )
+
     if "request_params" not in result_data:
         raise HTTPException(
             status_code=400,
