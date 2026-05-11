@@ -1558,6 +1558,22 @@ def _get_display_name(body: AnalyzeRequest | UnifiedAnalyzeRequest) -> str:
     return body.name or body.job_name or ""
 
 
+async def _auto_assign_metadata(
+    display_name: str, metadata_rules: list[dict] | None
+) -> None:
+    """Best-effort metadata auto-assignment."""
+    if not metadata_rules:
+        return
+    try:
+        await storage.auto_assign_job_metadata(display_name, metadata_rules)
+    except Exception:
+        logger.warning(
+            "Failed to auto-assign metadata for job '%s'",
+            display_name,
+            exc_info=True,
+        )
+
+
 async def _create_ai_auth_header(username: str) -> str:
     """Create a short-lived session token for AI CLI internal API calls.
 
@@ -1764,16 +1780,7 @@ async def process_analysis_with_id(
                 )
 
         # Auto-assign job metadata from name pattern rules
-        try:
-            await storage.auto_assign_job_metadata(
-                body.job_name, settings.metadata_rules
-            )
-        except Exception:  # metadata auto-assignment is best-effort
-            logger.warning(
-                "Failed to auto-assign metadata for job '%s'",
-                body.job_name,
-                exc_info=True,
-            )
+        await _auto_assign_metadata(body.job_name, settings.metadata_rules)
 
         # Reveal classifications created during analysis
         await storage.make_classifications_visible(job_id)
@@ -2210,16 +2217,7 @@ async def _process_file_raw_analysis(
             notify_job_status_changed(job_id)
 
             # Auto-assign job metadata from name pattern rules
-            try:
-                await storage.auto_assign_job_metadata(
-                    display_name, merged.metadata_rules
-                )
-            except Exception:  # metadata auto-assignment is best-effort
-                logger.warning(
-                    "Failed to auto-assign metadata for job '%s'",
-                    display_name,
-                    exc_info=True,
-                )
+            await _auto_assign_metadata(display_name, merged.metadata_rules)
 
             return
 
@@ -2400,7 +2398,7 @@ async def _process_file_raw_analysis(
 
         # Enrich with tests repo matches
         logger.debug(
-            f"Enriching with tests repo matches (tests_repo_url={tests_repo_url})"
+            f"Enriching with tests repo matches (tests_repo_url={redact_url(str(tests_repo_url or ''))})"
         )
         if merged.tests_repo_url or tests_repo_url:
             await _enrich_result_with_tests_repo_matches(
@@ -2454,14 +2452,7 @@ async def _process_file_raw_analysis(
             )
 
         # Auto-assign job metadata from name pattern rules
-        try:
-            await storage.auto_assign_job_metadata(display_name, merged.metadata_rules)
-        except Exception:  # metadata auto-assignment is best-effort
-            logger.warning(
-                "Failed to auto-assign metadata for job '%s'",
-                display_name,
-                exc_info=True,
-            )
+        await _auto_assign_metadata(display_name, merged.metadata_rules)
 
         # Reveal classifications created during analysis
         await storage.make_classifications_visible(job_id)
