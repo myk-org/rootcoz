@@ -1702,7 +1702,11 @@ async def process_analysis_with_id(
             )
 
         # Enrich CODE ISSUE failures with tests repo issue matches
-        request_tests_repo_url = str(body.tests_repo_url or "")
+        request_tests_repo_url = (
+            str(body.tests_repo_url)
+            if body.tests_repo_url is not None
+            else str(settings.tests_repo_url or "")
+        )
         if settings.tests_repo_url or request_tests_repo_url:
             await safe_update_progress(job_id, "enriching_tests_repo")
             notify_job_status_changed(job_id)
