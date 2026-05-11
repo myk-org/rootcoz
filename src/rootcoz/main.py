@@ -1975,7 +1975,9 @@ async def _enqueue_file_raw_analysis(
         else str(merged.tests_repo_url or "")
     )
     tests_repo_url, tests_repo_ref = parse_repo_ref(tests_repo_url_raw)
-    resolved_tests_repo_token = resolve_tests_repo_token(body, merged)
+    resolved_tests_repo_token = (
+        resolve_tests_repo_token(body, merged) if tests_repo_url else ""
+    )
     additional_repos_list = resolve_additional_repos(body, merged)
 
     job_id = str(uuid.uuid4())
@@ -1988,7 +1990,7 @@ async def _enqueue_file_raw_analysis(
         "file-re-analysis",
         "raw-re-analysis",
     }
-    if display_name in _GENERIC_FALLBACK_NAMES:
+    if display_name in _GENERIC_FALLBACK_NAMES and not body.name:
         display_name = f"{display_name}-{job_id[:8]}"
 
     # Build and persist initial state
