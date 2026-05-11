@@ -662,6 +662,89 @@ async def _analyze_grouped_failures(
     return failures, unique_errors, failed_groups
 
 
+async def _run_console_only_analysis(
+    *,
+    job_name: str,
+    build_number: int,
+    console_context: str,
+    artifacts_context: str,
+    repo_path: Path | None,
+    ai_provider: str,
+    ai_model: str,
+    ai_cli_timeout: int | None,
+    custom_prompt: str,
+    server_url: str,
+    job_id: str,
+    additional_repos: dict[str, Path] | None,
+    auth_header: str,
+    call_type: str,
+    extra_context: str = "",
+    peer_ai_configs: list | None = None,
+) -> tuple[bool, list[FailureAnalysis], str]:
+    """Run console-only AI analysis when no structured test failures exist.
+
+    Returns:
+        A tuple of (success, failures_list, error_text).  On failure
+        ``success`` is ``False`` and ``error_text`` contains the error message.
+    """
+    if peer_ai_configs:
+        logger.warning(
+            "Peer analysis not supported for console-only failures (no test report)"
+        )
+
+    custom_prompt_section, artifacts_section, resources_section, query_section = (
+        build_prompt_sections(
+            custom_prompt,
+            artifacts_context,
+            repo_path,
+            server_url,
+            job_id,
+            additional_repos=additional_repos,
+            auth_header=auth_header,
+        )
+    )
+
+    prompt = f"""{query_section}
+Analyze this failed Jenkins job:
+
+Job: {job_name} #{build_number}
+
+CONSOLE OUTPUT (errors/failures/warnings extracted):
+{console_context}
+{extra_context}
+{artifacts_section}
+
+You have access to the repository if one was cloned. Explore to understand the failure.
+{custom_prompt_section}{resources_section}
+{JSON_RESPONSE_SCHEMA}
+"""
+    logger.debug(f"AI prompt length: {len(prompt)} chars")
+    logger.info(f"Calling AI CLI with {format_timeout_log(ai_cli_timeout)}")
+    result, parsed_analysis = await call_ai_and_record(
+        prompt,
+        job_id=job_id,
+        call_type=call_type,
+        cwd=repo_path,
+        ai_provider=ai_provider,
+        ai_model=ai_model,
+        ai_cli_timeout=ai_cli_timeout,
+        cli_flags=PROVIDER_CLI_FLAGS.get(ai_provider, []),
+    )
+
+    if not result.success:
+        return False, [], result.text
+
+    analysis = parsed_analysis or AnalysisDetail(details=result.text)
+    failures = [
+        FailureAnalysis(
+            test_name=f"{job_name}#{build_number}",
+            error="Console-only analysis",
+            analysis=analysis,
+        )
+    ]
+    return True, failures, ""
+
+
 async def _analyze_child_job_inner(
     *,
     source: JenkinsSource,
@@ -796,73 +879,39 @@ async def _analyze_child_job_inner(
             failures=failures,
         )
 
-    # No structured test failures - fall back to single Claude CLI analysis of console output
-    if peer_ai_configs:
-        logger.warning(
-            "Peer analysis not supported for console-only failures (no test report)"
-        )
-
-    custom_prompt_section, artifacts_section, resources_section, query_section = (
-        build_prompt_sections(
-            custom_prompt,
-            child_artifacts_context,
-            repo_path,
-            server_url,
-            job_id,
-            additional_repos=additional_repos,
-            auth_header=auth_header,
-        )
-    )
-
-    prompt = f"""{query_section}
-Analyze this failed Jenkins job:
-
-Job: {job_name} #{build_number}
-
-CONSOLE OUTPUT (errors/failures/warnings extracted):
-{console_context}
-{artifacts_section}
-
-You have access to the repository if one was cloned. Explore to understand the failure.
-{custom_prompt_section}{resources_section}
-{JSON_RESPONSE_SCHEMA}
-"""
-    logger.debug(f"AI prompt length: {len(prompt)} chars")
-    logger.info(f"Calling AI CLI with {format_timeout_log(ai_cli_timeout)}")
-    result, parsed_analysis = await call_ai_and_record(
-        prompt,
-        job_id=job_id,
-        call_type="child_console",
-        cwd=repo_path,
+    # No structured test failures - fall back to single AI CLI analysis of console output
+    success, failures, error_text = await _run_console_only_analysis(
+        job_name=job_name,
+        build_number=build_number,
+        console_context=console_context,
+        artifacts_context=child_artifacts_context,
+        repo_path=repo_path,
         ai_provider=ai_provider,
         ai_model=ai_model,
         ai_cli_timeout=ai_cli_timeout,
-        cli_flags=PROVIDER_CLI_FLAGS.get(ai_provider, []),
+        custom_prompt=custom_prompt,
+        server_url=server_url,
+        job_id=job_id,
+        additional_repos=additional_repos,
+        auth_header=auth_header,
+        call_type="child_console",
+        peer_ai_configs=peer_ai_configs,
     )
 
-    if not result.success:
+    if not success:
         return ChildJobAnalysis(
             job_name=job_name,
             build_number=build_number,
             jenkins_url=jenkins_url,
-            note=f"Analysis failed: {result.text}",
+            note=f"Analysis failed: {error_text}",
         )
-
-    if parsed_analysis is None:
-        parsed_analysis = AnalysisDetail(details=result.text)
 
     return ChildJobAnalysis(
         job_name=job_name,
         build_number=build_number,
         jenkins_url=jenkins_url,
         summary="Analysis complete",
-        failures=[
-            FailureAnalysis(
-                test_name=f"{job_name}#{build_number}",
-                error="Console-only analysis",
-                analysis=parsed_analysis,
-            )
-        ],
+        failures=failures,
     )
 
 
@@ -981,6 +1030,7 @@ async def analyze_job(
                     logger.info(f"Linked artifacts into workspace: {artifacts_link}")
                 except OSError as exc:
                     logger.warning(f"Could not link artifacts into workspace: {exc}")
+                    artifacts_context = ""
 
             # Clone additional repositories for AI context
             if additional_repos_list:
@@ -1060,6 +1110,28 @@ async def analyze_job(
             # If this job has failed children AND no test failures, it's a pipeline/orchestrator
             # Skip Claude CLI analysis - just return the child analyses
             if child_job_analyses and not test_failures:
+                # Check if any child actually produced real findings
+                analyzed_children = [
+                    c
+                    for c in child_job_analyses
+                    if c.failures
+                    or c.failed_children
+                    or not (c.note or "").startswith("Analysis failed")
+                ]
+                if not analyzed_children:
+                    return AnalysisResult(
+                        job_id=job_id,
+                        job_name=request.job_name,
+                        build_number=request.build_number,
+                        jenkins_url=HttpUrl(jenkins_build_url),
+                        status="failed",
+                        summary=f"All {len(child_job_analyses)} child job analyses failed",
+                        ai_provider=ai_provider,
+                        ai_model=ai_model,
+                        failures=[],
+                        child_job_analyses=child_job_analyses,
+                    )
+
                 total_failures = sum(
                     len(child.failures) for child in child_job_analyses
                 )
@@ -1123,77 +1195,39 @@ async def analyze_job(
                         child_job_analyses=child_job_analyses,
                     )
             else:
-                # No structured test failures - fall back to single Claude CLI analysis
-                if peer_ai_configs:
-                    logger.warning(
-                        "Peer analysis not supported for console-only failures (no test report)"
-                    )
-
-                (
-                    custom_prompt_section,
-                    artifacts_section,
-                    resources_section,
-                    query_section,
-                ) = build_prompt_sections(
-                    custom_prompt,
-                    artifacts_context,
-                    repo_path,
-                    server_url,
-                    job_id,
-                    additional_repos=cloned_repos or None,
-                    auth_header=auth_header,
-                )
-
-                prompt = f"""{query_section}
-Analyze this failed Jenkins job:
-
-Job: {job_name} #{build_number}
-
-CONSOLE OUTPUT (errors/failures/warnings extracted):
-{console_context}
-{repo_context}
-{artifacts_section}
-
-You have access to the repository if one was cloned. Explore to understand the failure.
-{custom_prompt_section}{resources_section}
-{JSON_RESPONSE_SCHEMA}
-"""
-                logger.debug(f"AI prompt length: {len(prompt)} chars")
-                logger.info(
-                    f"Calling AI CLI with {format_timeout_log(settings.ai_cli_timeout)}"
-                )
-                result, parsed_console = await call_ai_and_record(
-                    prompt,
-                    job_id=job_id,
-                    call_type="main_console",
-                    cwd=repo_path,
+                # No structured test failures - fall back to single AI CLI analysis
+                success, failures, error_text = await _run_console_only_analysis(
+                    job_name=job_name,
+                    build_number=build_number,
+                    console_context=console_context,
+                    artifacts_context=artifacts_context,
+                    repo_path=repo_path,
                     ai_provider=ai_provider,
                     ai_model=ai_model,
                     ai_cli_timeout=settings.ai_cli_timeout,
-                    cli_flags=PROVIDER_CLI_FLAGS.get(ai_provider, []),
+                    custom_prompt=custom_prompt,
+                    server_url=server_url,
+                    job_id=job_id,
+                    additional_repos=cloned_repos or None,
+                    auth_header=auth_header,
+                    call_type="main_console",
+                    extra_context=repo_context,
+                    peer_ai_configs=peer_ai_configs,
                 )
 
-                if not result.success:
+                if not success:
                     return AnalysisResult(
                         job_id=job_id,
                         job_name=request.job_name,
                         build_number=request.build_number,
                         jenkins_url=HttpUrl(jenkins_build_url),
                         status="failed",
-                        summary=result.text,
+                        summary=error_text,
                         ai_provider=ai_provider,
                         ai_model=ai_model,
                         failures=[],
                         child_job_analyses=child_job_analyses,
                     )
-
-                failures = [
-                    FailureAnalysis(
-                        test_name=f"{job_name}#{build_number}",
-                        error="Console-only analysis",
-                        analysis=parsed_console or AnalysisDetail(details=result.text),
-                    )
-                ]
 
             # Build summary from parallel results
             total_failures = len(failures)
@@ -1287,15 +1321,21 @@ async def wait_for_jenkins_completion(
             )
         else:
             logger.error(
-                "Jenkins auth/permission failure at %s: %s",
+                "Jenkins preflight failed at %s (%s): %s",
                 jenkins_url,
+                type(e).__name__,
                 e,
                 exc_info=True,
             )
-            return False, (
-                "Jenkins authentication/permission error: please verify "
-                "your credentials and access permissions"
-            )
+            err_str = str(e).lower()
+            if isinstance(e, jenkins.JenkinsException) and any(
+                m in err_str for m in ("unauthorized", "401", "forbidden", "403")
+            ):
+                return False, (
+                    "Jenkins authentication/permission error: please verify "
+                    "your credentials and access permissions"
+                )
+            return False, f"Jenkins preflight failed ({type(e).__name__}): {e}"
 
     if max_wait_minutes > 0:
         deadline: float | None = _time.monotonic() + max_wait_minutes * 60

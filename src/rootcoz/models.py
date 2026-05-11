@@ -211,13 +211,9 @@ class BaseAnalysisRequest(BaseModel):
         return v
 
 
-class AnalyzeRequest(BaseAnalysisRequest):
-    """Request payload for analysis endpoint."""
+class _JenkinsParamsMixin(BaseModel):
+    """Shared Jenkins connection and polling fields."""
 
-    job_name: str = Field(
-        description="Jenkins job name (can include folders like 'folder/job-name')"
-    )
-    build_number: int = Field(description="Build number to analyze")
     force: bool = Field(
         default=False,
         description="Force analysis even if the build succeeded (bypass SUCCESS early-return)",
@@ -234,20 +230,6 @@ class AnalyzeRequest(BaseAnalysisRequest):
         default=0,
         description="Maximum minutes to wait for job completion (0 = no limit)",
     )
-    name: str | None = Field(
-        default=None,
-        description="Custom display name for this analysis job (overrides auto-generated name)",
-    )
-    tags: list[str] = Field(
-        default_factory=list,
-        description="User tags for categorization (e.g. 'regression', 'flaky')",
-    )
-
-    @field_validator("tags", mode="before")
-    @classmethod
-    def _normalize_tags(cls, v: list) -> list[str]:
-        return _normalize_tags_list(v)
-
     jenkins_url: str | None = Field(
         default=None,
         description="Jenkins server URL (overrides JENKINS_URL env var)",
@@ -267,7 +249,7 @@ class AnalyzeRequest(BaseAnalysisRequest):
     )
     jenkins_timeout: Annotated[int, Field(gt=0)] | None = Field(
         default=None,
-        description="Jenkins API request timeout in seconds (overrides JENKINS_TIMEOUT env var).",
+        description="Jenkins API request timeout in seconds (overrides JENKINS_TIMEOUT env var)",
     )
     jenkins_artifacts_max_size_mb: Annotated[int, Field(gt=0)] | None = Field(
         default=None,
@@ -277,6 +259,34 @@ class AnalyzeRequest(BaseAnalysisRequest):
         default=None,
         description="Download all build artifacts for AI context (default: true, overrides GET_JOB_ARTIFACTS env var)",
     )
+
+
+class _NameTagsMixin(BaseModel):
+    """Shared name and tags fields with tag normalization."""
+
+    name: str | None = Field(
+        default=None,
+        max_length=500,
+        description="Custom display name for this analysis job (overrides auto-generated name)",
+    )
+    tags: list[str] = Field(
+        default_factory=list,
+        description="User tags for categorization (e.g. 'regression', 'flaky')",
+    )
+
+    @field_validator("tags", mode="before")
+    @classmethod
+    def _normalize_tags(cls, v: list) -> list[str]:
+        return _normalize_tags_list(v)
+
+
+class AnalyzeRequest(_JenkinsParamsMixin, _NameTagsMixin, BaseAnalysisRequest):
+    """Request payload for analysis endpoint."""
+
+    job_name: str = Field(
+        description="Jenkins job name (can include folders like 'folder/job-name')"
+    )
+    build_number: int = Field(description="Build number to analyze")
 
 
 class FailedTest(BaseModel):
@@ -541,14 +551,14 @@ class JobStatus(BaseModel):
     created_at: datetime = Field(description="Timestamp when the job was created")
 
 
-class UnifiedAnalyzeRequest(BaseAnalysisRequest):
+class UnifiedAnalyzeRequest(_JenkinsParamsMixin, _NameTagsMixin, BaseAnalysisRequest):
     """Unified request payload for all analysis types."""
 
     type: Literal["jenkins", "file", "raw"] = Field(
         description="Analysis type: jenkins (CI job), file (JUnit XML), or raw (failure list)"
     )
 
-    # Jenkins-specific fields (required when type="jenkins")
+    # Jenkins-specific fields (required when type="jenkins", optional otherwise)
     job_name: str | None = Field(
         default=None,
         description="Jenkins job name (required for type=jenkins)",
@@ -556,51 +566,6 @@ class UnifiedAnalyzeRequest(BaseAnalysisRequest):
     build_number: int | None = Field(
         default=None,
         description="Build number to analyze (required for type=jenkins)",
-    )
-    force: bool = Field(
-        default=False,
-        description="Force analysis even if the build succeeded (type=jenkins only)",
-    )
-    wait_for_completion: bool = Field(
-        default=True,
-        description="Wait for Jenkins job to complete before analyzing (type=jenkins only)",
-    )
-    poll_interval_minutes: Annotated[int, Field(gt=0)] = Field(
-        default=2,
-        description="Minutes between Jenkins status polls when waiting (type=jenkins only)",
-    )
-    max_wait_minutes: Annotated[int, Field(ge=0)] = Field(
-        default=0,
-        description="Maximum minutes to wait for job completion, 0=no limit (type=jenkins only)",
-    )
-    jenkins_url: str | None = Field(
-        default=None,
-        description="Jenkins server URL (overrides JENKINS_URL env var)",
-    )
-    jenkins_user: str | None = Field(
-        default=None,
-        description="Jenkins username (overrides JENKINS_USER env var)",
-    )
-    jenkins_password: str | None = Field(
-        default=None,
-        description="Jenkins password or API token (overrides JENKINS_PASSWORD env var)",
-        json_schema_extra={"format": "password"},
-    )
-    jenkins_ssl_verify: bool | None = Field(
-        default=None,
-        description="Jenkins SSL verification (overrides JENKINS_SSL_VERIFY env var)",
-    )
-    jenkins_timeout: Annotated[int, Field(gt=0)] | None = Field(
-        default=None,
-        description="Jenkins API request timeout in seconds",
-    )
-    jenkins_artifacts_max_size_mb: Annotated[int, Field(gt=0)] | None = Field(
-        default=None,
-        description="Maximum Jenkins artifacts size in MB",
-    )
-    get_job_artifacts: bool | None = Field(
-        default=None,
-        description="Download all build artifacts for AI context (type=jenkins only)",
     )
 
     # File-specific fields (required when type="file")
@@ -614,21 +579,6 @@ class UnifiedAnalyzeRequest(BaseAnalysisRequest):
         default=None,
         description="Raw test failures to analyze (required for type=raw)",
     )
-
-    # Common optional fields
-    name: str | None = Field(
-        default=None,
-        description="Custom display name for this analysis job (overrides auto-generated name)",
-    )
-    tags: list[str] = Field(
-        default_factory=list,
-        description="User tags for categorization",
-    )
-
-    @field_validator("tags", mode="before")
-    @classmethod
-    def _normalize_tags(cls, v: list) -> list[str]:
-        return _normalize_tags_list(v)
 
     @model_validator(mode="after")
     def _validate_by_type(self) -> "UnifiedAnalyzeRequest":

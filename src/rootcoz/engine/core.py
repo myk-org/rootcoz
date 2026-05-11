@@ -200,8 +200,6 @@ async def call_ai_and_record(
     parsed: AnalysisDetail | None = None
     if result.success:
         parsed = parse_json_response(result.text)
-        if parsed is None:
-            parsed = AnalysisDetail(details=result.text)
 
     return result, parsed
 
@@ -374,8 +372,8 @@ def build_artifacts_section(artifacts_context: str) -> str:
 def get_failure_signature(failure: FailedTest) -> str:
     """Create a signature for grouping identical failures.
 
-    Uses error message and first few lines of stack trace to identify
-    failures that are essentially the same issue.
+    Uses the full error message and stack trace to identify failures that
+    are essentially the same issue.
 
     Args:
         failure: The test failure to create a signature for.
@@ -772,7 +770,8 @@ def extract_relevant_console_lines(console_output: str) -> str:
     if relevant_lines:
         return "\n".join(relevant_lines)
 
-    # Fallback: if nothing found, return last N lines (likely has the failure info)
+    # Fallback: nothing matched the error pattern; return full console output
+    # so downstream consumers (AI prompt, etc.) can decide their own limits.
     return console_output
 
 

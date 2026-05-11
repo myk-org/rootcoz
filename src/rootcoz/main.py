@@ -467,8 +467,11 @@ def _build_report_context(
     else:
         report_url = f"/results/{job_id}"
         job_name = result_data.get("display_name") or result_data.get("job_name", "")
-        build_number = result_data.get("build_number", 0)
-        jenkins_url = f"{job_name} #{build_number}" if job_name else ""
+        build_number = result_data.get("build_number")
+        if job_name and build_number:
+            jenkins_url = f"{job_name} #{build_number}"
+        else:
+            jenkins_url = job_name or ""
 
     return report_url, jenkins_url
 
@@ -1205,9 +1208,11 @@ async def _validation_error_handler(
 ) -> JSONResponse:
     """Log 422 validation error details at DEBUG level, then return standard response."""
     if request.url.path in _BODY_LOGGING_SKIP_PATHS:
+        raw_errors = jsonable_encoder(exc.errors())
+        masked_errors = [_mask_pydantic_error(e) for e in raw_errors]
         return JSONResponse(
             status_code=422,
-            content={"detail": jsonable_encoder(exc.errors())},
+            content={"detail": masked_errors},
         )
     if logger.isEnabledFor(logging.DEBUG):
         masked_body = None
@@ -1235,10 +1240,12 @@ async def _validation_error_handler(
             masked_errors,
             masked_body,
         )
-    # Response body uses raw (unmasked) errors — only the DEBUG log path is masked.
+    # Mask sensitive values in the response body as well.
+    response_errors = jsonable_encoder(exc.errors())
+    masked_response = [_mask_pydantic_error(e) for e in response_errors]
     return JSONResponse(
         status_code=422,
-        content={"detail": jsonable_encoder(exc.errors())},
+        content={"detail": masked_response},
     )
 
 
@@ -1558,6 +1565,18 @@ async def _create_ai_auth_header(username: str) -> str:
         return ""
 
 
+async def _cleanup_ai_session(auth_header: str) -> None:
+    """Revoke the short-lived AI session token created for an analysis run."""
+    if not auth_header:
+        return
+    try:
+        token = auth_header.removeprefix("Bearer ").strip()
+        if token:
+            await storage.delete_session(token)
+    except Exception:
+        logger.warning("Failed to delete AI session token", exc_info=True)
+
+
 async def process_analysis_with_id(
     job_id: str, body: AnalyzeRequest, settings: Settings, username: str = ""
 ) -> None:
@@ -1576,6 +1595,7 @@ async def process_analysis_with_id(
         f"(job_id: {job_id})"
     )
 
+    auth_header = ""
     try:
         # Validate AI config early -- before potentially waiting hours for Jenkins.
         # This ensures invalid provider/model fails fast instead of after a long wait.
@@ -1767,6 +1787,9 @@ async def process_analysis_with_id(
         notify_dashboard_changed()
         notify_job_status_changed(job_id)
         notify_token_usage_changed()
+
+    finally:
+        await _cleanup_ai_session(auth_header)
 
 
 def _build_base_request_params(
@@ -2426,6 +2449,7 @@ async def _process_file_raw_analysis(
     finally:
         logger.debug(f"Cleaning up workspace for job_id={job_id}")
         repo_manager.cleanup()
+        await _cleanup_ai_session(auth_header)
 
 
 @app.post("/analyze", status_code=202, response_model=None)
@@ -2460,15 +2484,7 @@ async def analyze(
         # Build a legacy AnalyzeRequest for the existing Jenkins flow
         jenkins_fields: dict = {}
         for field_name in AnalyzeRequest.model_fields:
-            if field_name in body.model_fields_set or field_name in (
-                "job_name",
-                "build_number",
-                "force",
-                "wait_for_completion",
-                "poll_interval_minutes",
-                "max_wait_minutes",
-                "tags",
-            ):
+            if field_name in body.model_fields_set:
                 val = getattr(body, field_name, None)
                 if val is not None:
                     jenkins_fields[field_name] = val
