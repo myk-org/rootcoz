@@ -2641,13 +2641,14 @@ async def re_analyze(
         # Build unified request from stored params
         # Prefer the original user-supplied name (before UUID suffix was added)
         # over the resolved display_name / job_name.
-        stored_original_name = decrypted_params.get("original_name", "")
         unified_fields: dict = {
             "type": analysis_type,
-            "name": stored_original_name
-            or result_data.get("display_name")
-            or result_data.get("job_name", f"{analysis_type}-analysis"),
         }
+        # Only restore name if user explicitly provided one;
+        # leave unset so _enqueue_file_raw_analysis generates a fresh fallback.
+        stored_name = decrypted_params.get("original_name", "")
+        if stored_name:
+            unified_fields["name"] = stored_name
         # Restore source data
         if analysis_type == "file":
             stored_xml = decrypted_params.get("raw_xml")
