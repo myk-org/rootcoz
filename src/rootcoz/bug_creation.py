@@ -613,6 +613,8 @@ async def search_jira_duplicates(
             return [
                 {
                     "key": c["key"],
+                    # "title" for backward compat with existing consumers,
+                    # "summary" for AI filtering (issue_matching.py expects "summary")
                     "title": c["summary"],
                     "summary": c["summary"],
                     "description": c.get("description", ""),

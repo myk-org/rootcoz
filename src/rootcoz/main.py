@@ -988,7 +988,21 @@ class AuthMiddleware(BaseHTTPMiddleware):
             request.state.username = ""
             request.state.is_admin = False
             request.state.role = "user"
-            return await call_next(request)
+            origin = request.headers.get("origin", "*")
+            return Response(
+                status_code=200,
+                headers={
+                    "Access-Control-Allow-Origin": origin,
+                    "Access-Control-Allow-Methods": request.headers.get(
+                        "access-control-request-method",
+                        "GET, POST, PUT, DELETE, OPTIONS",
+                    ),
+                    "Access-Control-Allow-Headers": request.headers.get(
+                        "access-control-request-headers", "authorization, content-type"
+                    ),
+                    "Access-Control-Max-Age": "86400",
+                },
+            )
 
         path = request.url.path
 
@@ -3629,6 +3643,9 @@ async def preview_jira_bug(
                 settings=effective_jira_settings,
             )
             # AI relevance filtering — only if AI is configured and candidates exist
+            request_params = result_data.get("request_params") or {}
+            ai_provider = ai_provider or request_params.get("ai_provider", "")
+            ai_model = ai_model or request_params.get("ai_model", "")
             if candidates and ai_provider and ai_model:
                 try:
                     matches = await filter_matches_with_ai(
