@@ -446,6 +446,7 @@ def _build_report_context(
     result_data: dict,
     child_job_name: str = "",
     child_build_number: int = 0,
+    matched_child: dict | None = None,
 ) -> tuple[str, str]:
     """Build report URL and Jenkins URL for bug preview endpoints.
 
@@ -464,6 +465,7 @@ def _build_report_context(
         result_data: Raw result dict from storage (contains jenkins_url, job_name, etc.).
         child_job_name: Optional child job name to scope the Jenkins URL.
         child_build_number: Optional child build number (0 = match by name only).
+        matched_child: Pre-resolved child dict to avoid a redundant lookup.
 
     Returns:
         A ``(report_url, jenkins_url)`` tuple.
@@ -471,18 +473,18 @@ def _build_report_context(
     jenkins_url = result_data.get("jenkins_url", "")
 
     # Scope to child job when specified
-    child: dict | None = None
-    if child_job_name:
+    child: dict | None = matched_child
+    if child_job_name and child is None:
         child = _find_child_job_in_result(
             result_data, child_job_name, child_build_number
         )
-        if child:
-            jenkins_url = child.get("jenkins_url") or ""
-        else:
-            logger.debug(
-                "Child job '%s' not found in result; falling back to parent URL",
-                child_job_name,
-            )
+    if child_job_name and child:
+        jenkins_url = child.get("jenkins_url") or ""
+    elif child_job_name:
+        logger.debug(
+            "Child job '%s' not found in result; falling back to parent URL",
+            child_job_name,
+        )
 
     if include_links and base_url:
         report_url = f"{base_url}/results/{job_id}"
@@ -2968,9 +2970,7 @@ def _find_test_in_children(
 ) -> bool:
     """Recursively search child job analyses for a test."""
     for child in children:
-        if child.get("job_name") == child_job_name and (
-            child_build_number == 0 or child.get("build_number") == child_build_number
-        ):
+        if _child_matches(child, child_job_name, child_build_number):
             for f in child.get("failures", []):
                 if f.get("test_name") == test_name:
                     return True
@@ -3517,11 +3517,11 @@ async def _load_effective_failure(
     test_name: str,
     child_job_name: str,
     child_build_number: int,
-) -> tuple[FailureAnalysis, dict]:
+) -> tuple[FailureAnalysis, dict, dict | None]:
     """Shared lookup for preview/create endpoints: validate, load, and resolve a failure.
 
     Returns:
-        Tuple of (resolved FailureAnalysis, result_data dict).
+        Tuple of (resolved FailureAnalysis, result_data dict, matched child dict or None).
 
     Raises:
         HTTPException: 404 if the job is not found, 400 if the test is not found.
@@ -3541,11 +3541,16 @@ async def _load_effective_failure(
             status_code=400,
             detail=f"Test '{test_name}' not found in job {job_id}",
         )
+    matched_child: dict | None = None
+    if child_job_name:
+        matched_child = _find_child_job_in_result(
+            result_data, child_job_name, child_build_number
+        )
     failure = FailureAnalysis.model_validate(failure_dict)
     failure = await _resolve_effective_failure(
         job_id, failure, child_job_name, child_build_number
     )
-    return failure, result_data
+    return failure, result_data, matched_child
 
 
 @app.get("/results/{job_id}/issue-prompt")
@@ -3670,7 +3675,7 @@ async def preview_github_issue(
             status_code=403,
             detail="GitHub issue creation is disabled on this server",
         )
-    failure, result_data = await _load_effective_failure(
+    failure, result_data, matched_child = await _load_effective_failure(
         job_id, body.test_name, body.child_job_name, body.child_build_number
     )
 
@@ -3686,6 +3691,7 @@ async def preview_github_issue(
         result_data=result_data,
         child_job_name=body.child_job_name,
         child_build_number=body.child_build_number,
+        matched_child=matched_child,
     )
 
     issue_prompt = (body.issue_prompt or "").strip()
@@ -3748,7 +3754,7 @@ async def preview_jira_bug(
             status_code=400,
             detail="Jira URL is not configured on the server",
         )
-    failure, result_data = await _load_effective_failure(
+    failure, result_data, matched_child = await _load_effective_failure(
         job_id, body.test_name, body.child_job_name, body.child_build_number
     )
 
@@ -3764,6 +3770,7 @@ async def preview_jira_bug(
         result_data=result_data,
         child_job_name=body.child_job_name,
         child_build_number=body.child_build_number,
+        matched_child=matched_child,
     )
 
     issue_prompt = (body.issue_prompt or "").strip()
@@ -4015,7 +4022,7 @@ async def create_github_issue_endpoint(
             ),
         )
 
-    _failure, _result_data = await _load_effective_failure(
+    _failure, _result_data, _matched_child = await _load_effective_failure(
         job_id, body.test_name, body.child_job_name, body.child_build_number
     )
 
@@ -4102,7 +4109,7 @@ async def create_jira_bug_endpoint(
             detail="Jira URL is not configured on the server",
         )
 
-    _failure, _result_data = await _load_effective_failure(
+    _failure, _result_data, _matched_child = await _load_effective_failure(
         job_id, body.test_name, body.child_job_name, body.child_build_number
     )
 
@@ -4600,10 +4607,7 @@ def _apply_classification_override(
     if child_job_name:
         # Override in child job failures
         for child in result_data.get("child_job_analyses", []):
-            if child.get("job_name") == child_job_name and (
-                child_build_number == 0
-                or child.get("build_number") == child_build_number
-            ):
+            if _child_matches(child, child_job_name, child_build_number):
                 _patch_failure_classification(
                     child.get("failures", []), test_name, classification
                 )
@@ -4631,9 +4635,7 @@ def _patch_children(
 ) -> None:
     """Recursively patch classification in nested children."""
     for child in children:
-        if child.get("job_name") == child_job_name and (
-            child_build_number == 0 or child.get("build_number") == child_build_number
-        ):
+        if _child_matches(child, child_job_name, child_build_number):
             _patch_failure_classification(
                 child.get("failures", []), test_name, classification
             )

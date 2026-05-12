@@ -1730,49 +1730,52 @@ class TestRpPushErrorResult:
 class TestRPPushChildValidation:
     """Validate child_job_name / child_build_number parameter combinations."""
 
-    _PARENT_RESULT = {
-        "status": "completed",
-        "result": {
-            "job_name": "parent-pipeline",
-            "build_number": 1,
-            "jenkins_url": "https://jenkins.example.com/job/parent/1/",
-            "failures": [
-                {
-                    "test_name": "test_parent",
-                    "error": "err",
-                    "analysis": {
-                        "classification": "PRODUCT BUG",
-                        "details": "d",
-                    },
-                }
-            ],
-            "child_job_analyses": [
-                {
-                    "job_name": "child-job",
-                    "build_number": 42,
-                    "jenkins_url": "https://jenkins.example.com/job/child-job/42/",
-                    "failures": [
-                        {
-                            "test_name": "test_child",
-                            "error": "err",
-                            "analysis": {
-                                "classification": "CODE ISSUE",
-                                "details": "d",
-                            },
-                        }
-                    ],
-                    "failed_children": [],
-                }
-            ],
-        },
-    }
+    @staticmethod
+    def _make_parent_result() -> dict:
+        """Return a fresh parent result dict for each test."""
+        return {
+            "status": "completed",
+            "result": {
+                "job_name": "parent-pipeline",
+                "build_number": 1,
+                "jenkins_url": "https://jenkins.example.com/job/parent/1/",
+                "failures": [
+                    {
+                        "test_name": "test_parent",
+                        "error": "err",
+                        "analysis": {
+                            "classification": "PRODUCT BUG",
+                            "details": "d",
+                        },
+                    }
+                ],
+                "child_job_analyses": [
+                    {
+                        "job_name": "child-job",
+                        "build_number": 42,
+                        "jenkins_url": "https://jenkins.example.com/job/child-job/42/",
+                        "failures": [
+                            {
+                                "test_name": "test_child",
+                                "error": "err",
+                                "analysis": {
+                                    "classification": "CODE ISSUE",
+                                    "details": "d",
+                                },
+                            }
+                        ],
+                        "failed_children": [],
+                    }
+                ],
+            },
+        }
 
     @patch("rootcoz.main.get_result")
     def test_child_job_name_without_build_number_returns_400(
         self, mock_get_result, _rp_enabled_env
     ):
         """child_job_name without child_build_number should fail."""
-        mock_get_result.return_value = self._PARENT_RESULT
+        mock_get_result.return_value = self._make_parent_result()
 
         from rootcoz.main import app
 
@@ -1793,7 +1796,7 @@ class TestRPPushChildValidation:
         self, mock_get_result, _rp_enabled_env
     ):
         """child_build_number=0 with child_job_name should fail."""
-        mock_get_result.return_value = self._PARENT_RESULT
+        mock_get_result.return_value = self._make_parent_result()
 
         from rootcoz.main import app
 
@@ -1814,7 +1817,7 @@ class TestRPPushChildValidation:
         self, mock_get_result, _rp_enabled_env
     ):
         """child_build_number without child_job_name should fail."""
-        mock_get_result.return_value = self._PARENT_RESULT
+        mock_get_result.return_value = self._make_parent_result()
 
         from rootcoz.main import app
 

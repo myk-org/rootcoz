@@ -213,18 +213,22 @@ class TestAnalyzeEndpoint:
 
     def test_analyze_accepts_tests_repo_url_with_ref(self, test_client) -> None:
         """Test that tests_repo_url with ':ref' suffix is accepted (no URL validation)."""
-        response = test_client.post(
-            "/analyze",
-            json={
-                "type": "jenkins",
-                "job_name": "test",
-                "build_number": 123,
-                "tests_repo_url": "https://github.com/org/repo:develop",
-            },
-        )
-        # 400 from missing AI config, not 422 from URL validation
-        assert response.status_code == 400
-        assert "AI provider" in response.json()["detail"]
+        with (
+            patch("rootcoz.main.AI_PROVIDER", ""),
+            patch("rootcoz.main.AI_MODEL", ""),
+        ):
+            response = test_client.post(
+                "/analyze",
+                json={
+                    "type": "jenkins",
+                    "job_name": "test",
+                    "build_number": 123,
+                    "tests_repo_url": "https://github.com/org/repo:develop",
+                },
+            )
+            # 400 from missing AI config, not 422 from URL validation
+            assert response.status_code == 400
+            assert "AI provider" in response.json()["detail"]
 
     def test_analyze_missing_required_field(self, test_client) -> None:
         """Test that missing required field returns 422."""
@@ -239,17 +243,21 @@ class TestAnalyzeEndpoint:
 
     def test_analyze_missing_ai_provider_returns_400(self, test_client) -> None:
         """Test that missing AI provider returns 400 before queuing."""
-        response = test_client.post(
-            "/analyze",
-            json={
-                "type": "jenkins",
-                "job_name": "test",
-                "build_number": 123,
-                "ai_model": "test-model",
-            },
-        )
-        assert response.status_code == 400
-        assert "AI provider" in response.json()["detail"]
+        with (
+            patch("rootcoz.main.AI_PROVIDER", ""),
+            patch("rootcoz.main.AI_MODEL", ""),
+        ):
+            response = test_client.post(
+                "/analyze",
+                json={
+                    "type": "jenkins",
+                    "job_name": "test",
+                    "build_number": 123,
+                    "ai_model": "test-model",
+                },
+            )
+            assert response.status_code == 400
+            assert "AI provider" in response.json()["detail"]
 
     def test_analyze_always_saves_request_params(self, test_client) -> None:
         """request_params is persisted even when wait_for_completion is False.
@@ -1440,6 +1448,61 @@ class TestGetIssuePrompt:
         assert "/private-org/private-repo/" in call_args.args[0]
 
 
+def _make_child_preview_result(
+    *,
+    child_a_error: str = "AssertionError",
+    child_a_classification: str = "CODE ISSUE",
+    child_a_details: str = "Child A failure details",
+    child_a_evidence: str = "child-A artifact log line",
+    child_b_evidence: str = "child-B artifact log line",
+    child_b_details: str = "Child B failure details",
+) -> dict:
+    """Build a result_data dict with two sibling child jobs.
+
+    This helper eliminates duplication across GitHub and Jira preview tests.
+    """
+    return {
+        "status": "completed",
+        "summary": "Pipeline failed",
+        "jenkins_url": "http://jenkins/parent/1/",
+        "failures": [],
+        "child_job_analyses": [
+            {
+                "job_name": "child-A",
+                "build_number": 10,
+                "jenkins_url": "http://jenkins/child-A/10/",
+                "failures": [
+                    {
+                        "test_name": "test_alpha",
+                        "error": child_a_error,
+                        "analysis": {
+                            "classification": child_a_classification,
+                            "details": child_a_details,
+                            "artifacts_evidence": child_a_evidence,
+                        },
+                    }
+                ],
+            },
+            {
+                "job_name": "child-B",
+                "build_number": 20,
+                "jenkins_url": "http://jenkins/child-B/20/",
+                "failures": [
+                    {
+                        "test_name": "test_beta",
+                        "error": "RuntimeError",
+                        "analysis": {
+                            "classification": "PRODUCT BUG",
+                            "details": child_b_details,
+                            "artifacts_evidence": child_b_evidence,
+                        },
+                    }
+                ],
+            },
+        ],
+    }
+
+
 class TestPreviewGithubIssue:
     """Tests for POST /results/{job_id}/preview-github-issue."""
 
@@ -1592,46 +1655,7 @@ class TestPreviewGithubIssue:
     @pytest.mark.asyncio
     async def test_preview_child_job_uses_child_jenkins_url(self, test_client):
         """Preview for a child job failure uses the child's jenkins_url, not the parent's."""
-        result_data = {
-            "status": "completed",
-            "summary": "Pipeline failed",
-            "jenkins_url": "http://jenkins/parent/1/",
-            "failures": [],
-            "child_job_analyses": [
-                {
-                    "job_name": "child-A",
-                    "build_number": 10,
-                    "jenkins_url": "http://jenkins/child-A/10/",
-                    "failures": [
-                        {
-                            "test_name": "test_alpha",
-                            "error": "AssertionError",
-                            "analysis": {
-                                "classification": "CODE ISSUE",
-                                "details": "Child A failure details",
-                                "artifacts_evidence": "child-A artifact log line",
-                            },
-                        }
-                    ],
-                },
-                {
-                    "job_name": "child-B",
-                    "build_number": 20,
-                    "jenkins_url": "http://jenkins/child-B/20/",
-                    "failures": [
-                        {
-                            "test_name": "test_beta",
-                            "error": "RuntimeError",
-                            "analysis": {
-                                "classification": "PRODUCT BUG",
-                                "details": "Child B failure details",
-                                "artifacts_evidence": "child-B artifact log line",
-                            },
-                        }
-                    ],
-                },
-            ],
-        }
+        result_data = _make_child_preview_result()
         await storage.save_result(
             "job-child-preview-gh", "http://jenkins/parent/1/", "completed", result_data
         )
@@ -1661,46 +1685,12 @@ class TestPreviewGithubIssue:
     @pytest.mark.asyncio
     async def test_preview_child_job_sibling_artifacts_not_leaked(self, test_client):
         """Sibling child job artifacts must not appear in the preview for a specific child."""
-        result_data = {
-            "status": "completed",
-            "summary": "Pipeline failed",
-            "jenkins_url": "http://jenkins/parent/1/",
-            "failures": [],
-            "child_job_analyses": [
-                {
-                    "job_name": "child-A",
-                    "build_number": 10,
-                    "jenkins_url": "http://jenkins/child-A/10/",
-                    "failures": [
-                        {
-                            "test_name": "test_alpha",
-                            "error": "AssertionError",
-                            "analysis": {
-                                "classification": "CODE ISSUE",
-                                "details": "Child A failure",
-                                "artifacts_evidence": "child-A evidence only",
-                            },
-                        }
-                    ],
-                },
-                {
-                    "job_name": "child-B",
-                    "build_number": 20,
-                    "jenkins_url": "http://jenkins/child-B/20/",
-                    "failures": [
-                        {
-                            "test_name": "test_beta",
-                            "error": "RuntimeError",
-                            "analysis": {
-                                "classification": "PRODUCT BUG",
-                                "details": "Child B failure",
-                                "artifacts_evidence": "child-B evidence only",
-                            },
-                        }
-                    ],
-                },
-            ],
-        }
+        result_data = _make_child_preview_result(
+            child_a_details="Child A failure",
+            child_a_evidence="child-A evidence only",
+            child_b_details="Child B failure",
+            child_b_evidence="child-B evidence only",
+        )
         await storage.save_result(
             "job-sibling-gh", "http://jenkins/parent/1/", "completed", result_data
         )
@@ -1926,46 +1916,10 @@ class TestPreviewJiraBug:
     @pytest.mark.asyncio
     async def test_preview_child_job_uses_child_jenkins_url(self, test_client):
         """Preview for a child job failure uses the child's jenkins_url, not the parent's."""
-        result_data = {
-            "status": "completed",
-            "summary": "Pipeline failed",
-            "jenkins_url": "http://jenkins/parent/1/",
-            "failures": [],
-            "child_job_analyses": [
-                {
-                    "job_name": "child-A",
-                    "build_number": 10,
-                    "jenkins_url": "http://jenkins/child-A/10/",
-                    "failures": [
-                        {
-                            "test_name": "test_alpha",
-                            "error": "TimeoutError",
-                            "analysis": {
-                                "classification": "PRODUCT BUG",
-                                "details": "Child A failure details",
-                                "artifacts_evidence": "child-A artifact log line",
-                            },
-                        }
-                    ],
-                },
-                {
-                    "job_name": "child-B",
-                    "build_number": 20,
-                    "jenkins_url": "http://jenkins/child-B/20/",
-                    "failures": [
-                        {
-                            "test_name": "test_beta",
-                            "error": "RuntimeError",
-                            "analysis": {
-                                "classification": "PRODUCT BUG",
-                                "details": "Child B failure details",
-                                "artifacts_evidence": "child-B artifact log line",
-                            },
-                        }
-                    ],
-                },
-            ],
-        }
+        result_data = _make_child_preview_result(
+            child_a_error="TimeoutError",
+            child_a_classification="PRODUCT BUG",
+        )
         await storage.save_result(
             "job-child-preview-jira",
             "http://jenkins/parent/1/",
@@ -1998,46 +1952,12 @@ class TestPreviewJiraBug:
     @pytest.mark.asyncio
     async def test_preview_child_job_sibling_artifacts_not_leaked(self, test_client):
         """Sibling child job artifacts must not appear in the Jira preview."""
-        result_data = {
-            "status": "completed",
-            "summary": "Pipeline failed",
-            "jenkins_url": "http://jenkins/parent/1/",
-            "failures": [],
-            "child_job_analyses": [
-                {
-                    "job_name": "child-A",
-                    "build_number": 10,
-                    "jenkins_url": "http://jenkins/child-A/10/",
-                    "failures": [
-                        {
-                            "test_name": "test_alpha",
-                            "error": "AssertionError",
-                            "analysis": {
-                                "classification": "CODE ISSUE",
-                                "details": "Child A failure",
-                                "artifacts_evidence": "child-A evidence only",
-                            },
-                        }
-                    ],
-                },
-                {
-                    "job_name": "child-B",
-                    "build_number": 20,
-                    "jenkins_url": "http://jenkins/child-B/20/",
-                    "failures": [
-                        {
-                            "test_name": "test_beta",
-                            "error": "RuntimeError",
-                            "analysis": {
-                                "classification": "PRODUCT BUG",
-                                "details": "Child B failure",
-                                "artifacts_evidence": "child-B evidence only",
-                            },
-                        }
-                    ],
-                },
-            ],
-        }
+        result_data = _make_child_preview_result(
+            child_a_details="Child A failure",
+            child_a_evidence="child-A evidence only",
+            child_b_details="Child B failure",
+            child_b_evidence="child-B evidence only",
+        )
         await storage.save_result(
             "job-sibling-jira", "http://jenkins/parent/1/", "completed", result_data
         )
@@ -2063,6 +1983,7 @@ class TestPreviewJiraBug:
         # Verify the jenkins_url is child-A's
         assert kwargs["jenkins_url"] == "http://jenkins/child-A/10/"
         assert "parent" not in kwargs["jenkins_url"]
+
 
 class TestCreateGithubIssue:
     """Tests for POST /results/{job_id}/create-github-issue."""
