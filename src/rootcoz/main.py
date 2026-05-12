@@ -85,7 +85,7 @@ from rootcoz.feedback import (
     generate_feedback_preview,
 )
 from rootcoz.github_issues import enrich_with_tests_repo_matches
-from rootcoz.jira import JiraClient, _filter_matches_with_ai, enrich_with_jira_matches
+from rootcoz.jira import JiraClient, filter_matches_with_ai, enrich_with_jira_matches
 from rootcoz.logging_context import JobIdFilter, get_log_file, job_id_var
 from rootcoz.metadata_rules import match_job_metadata
 from rootcoz.models import (
@@ -3631,7 +3631,7 @@ async def preview_jira_bug(
             # AI relevance filtering — only if AI is configured and candidates exist
             if candidates and ai_provider and ai_model:
                 try:
-                    matches = await _filter_matches_with_ai(
+                    matches = await filter_matches_with_ai(
                         bug_title=content["title"],
                         bug_description=content["body"],
                         candidates=candidates,
@@ -3639,7 +3639,20 @@ async def preview_jira_bug(
                         ai_model=ai_model,
                         job_id=job_id,
                     )
-                    similar = [m.model_dump() for m in matches]
+                    # Normalize AI-filtered results to same schema as unfiltered path
+                    similar = [
+                        {
+                            "key": m.key,
+                            "title": m.summary,
+                            "summary": m.summary,
+                            "description": "",
+                            "url": m.url,
+                            "status": m.status,
+                            "priority": m.priority,
+                            "score": m.score,
+                        }
+                        for m in matches
+                    ]
                 except Exception:
                     logger.warning(
                         "AI relevance filtering failed for job_id=%s, "

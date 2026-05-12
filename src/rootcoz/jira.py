@@ -309,7 +309,7 @@ def _extract_text_from_adf(adf: dict) -> str:
     return " ".join(parts)
 
 
-async def _filter_matches_with_ai(
+async def filter_matches_with_ai(
     bug_title: str,
     bug_description: str,
     candidates: list[dict],
@@ -462,7 +462,7 @@ async def enrich_with_jira_matches(
                 representative = keyword_to_reports[kw_tuple][0]
 
                 if ai_provider and ai_model:
-                    matches = await _filter_matches_with_ai(
+                    matches = await filter_matches_with_ai(
                         bug_title=representative.title,
                         bug_description=representative.description,
                         candidates=candidates,

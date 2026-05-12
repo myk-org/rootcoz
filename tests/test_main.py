@@ -1696,6 +1696,94 @@ class TestPreviewJiraBug:
         _, kwargs = mock_gen.call_args
         assert kwargs["issue_prompt"] == "Include OCP version"
 
+    @pytest.mark.asyncio
+    async def test_preview_with_ai_filter_returns_normalized_schema(self, test_client):
+        """AI-filtered similar issues use the same schema as unfiltered ones."""
+        from rootcoz.models import JiraMatch
+
+        result_data = {
+            "status": "completed",
+            "summary": "",
+            "failures": [
+                {
+                    "test_name": "test_network",
+                    "error": "ConnectionError",
+                    "analysis": {
+                        "classification": "PRODUCT BUG",
+                        "details": "Connection refused",
+                    },
+                }
+            ],
+        }
+        await storage.save_result(
+            "job-ai-filter", "http://jenkins", "completed", result_data
+        )
+
+        unfiltered_candidates = [
+            {
+                "key": "TEST-100",
+                "title": "Connection refused in prod",
+                "summary": "Connection refused in prod",
+                "description": "Detailed description",
+                "url": "https://jira.example.com/browse/TEST-100",
+                "status": "Open",
+            },
+            {
+                "key": "TEST-200",
+                "title": "Unrelated issue",
+                "summary": "Unrelated issue",
+                "description": "Not relevant",
+                "url": "https://jira.example.com/browse/TEST-200",
+                "status": "Closed",
+            },
+        ]
+
+        ai_filtered = [
+            JiraMatch(
+                key="TEST-100",
+                summary="Connection refused in prod",
+                status="Open",
+                priority="High",
+                url="https://jira.example.com/browse/TEST-100",
+                score=0.85,
+            ),
+        ]
+
+        with _enable_feature("jira_enabled"):
+            with patch("rootcoz.main.generate_jira_bug_content") as mock_gen:
+                mock_gen.return_value = {
+                    "title": "Connection refused",
+                    "body": "h2. Summary\n\nConnection fails",
+                }
+                with patch("rootcoz.main.search_jira_duplicates") as mock_dup:
+                    mock_dup.return_value = unfiltered_candidates
+                    with patch(
+                        "rootcoz.main.filter_matches_with_ai",
+                        new_callable=AsyncMock,
+                        return_value=ai_filtered,
+                    ):
+                        response = test_client.post(
+                            "/results/job-ai-filter/preview-jira-bug",
+                            json={
+                                "test_name": "test_network",
+                                "ai_provider": "claude",
+                                "ai_model": "opus",
+                            },
+                        )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert len(data["similar_issues"]) == 1
+        match = data["similar_issues"][0]
+        # Verify normalized schema: both 'title' and 'summary' present
+        assert match["key"] == "TEST-100"
+        assert match["title"] == "Connection refused in prod"
+        assert match["summary"] == "Connection refused in prod"
+        assert match["url"] == "https://jira.example.com/browse/TEST-100"
+        assert match["status"] == "Open"
+        assert match["score"] == 0.85
+        assert "description" in match
+
 
 class TestCreateGithubIssue:
     """Tests for POST /results/{job_id}/create-github-issue."""

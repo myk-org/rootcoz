@@ -619,7 +619,7 @@ async def search_jira_duplicates(
                     "url": c["url"],
                     "status": c.get("status", ""),
                 }
-                for c in candidates[:5]
+                for c in candidates
             ]
     except Exception:
         logger.debug("Jira duplicate search failed", exc_info=True)
