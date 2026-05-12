@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo, type ReactNode } from 'react'
+import { useState, useEffect, useMemo, useRef, type ReactNode } from 'react'
 import { useLocation } from 'react-router-dom'
 import { useClipboard } from '@/lib/useClipboard'
 import type { GroupedFailure } from '@/types'
@@ -90,15 +90,30 @@ interface FailureCardProps {
   childJobName?: string
   childBuildNumber?: number
   index: number
+  /** Hash fragment (without #) from the URL, used for auto-expand & scroll-to on load. */
+  activeHash?: string
 }
 
-export function FailureCard({ group, jobId, childJobName, childBuildNumber, index }: FailureCardProps) {
+export function FailureCard({ group, jobId, childJobName, childBuildNumber, index, activeHash }: FailureCardProps) {
   const scopedChildJobName = childJobName ?? ''
   const scopedChildBuildNumber = childBuildNumber ?? 0
   const { githubIssuesEnabled, jiraIssuesEnabled, serverJiraProjectKey, comments, reviews, aiConfigs, result, classifications } = useReportState()
   const dispatch = useReportDispatch()
   const expandKey = `rootcoz-expand-${jobId}-${scopedChildJobName}-${scopedChildBuildNumber}-${group.id}`
   const [expanded, setExpanded] = useSessionState<boolean>(expandKey, false)
+  const cardRef = useRef<HTMLDivElement>(null)
+
+  // Auto-expand and scroll when URL hash targets this failure group
+  useEffect(() => {
+    if (activeHash && activeHash === group.id) {
+      if (!expanded) {
+        setExpanded(true)
+      }
+      requestAnimationFrame(() => {
+        cardRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+      })
+    }
+  }, [activeHash, group.id, expanded, setExpanded])
   const [bugTarget, setBugTarget] = useState<'github' | 'jira' | null>(null)
   const [reviewingAll, setReviewingAll] = useState(false)
   const [reviewAllError, setReviewAllError] = useState<string | null>(null)
@@ -222,7 +237,9 @@ export function FailureCard({ group, jobId, childJobName, childBuildNumber, inde
   return (
     <>
       <Card
-        className={`border-l-4 ${borderColor} animate-slide-up`}
+        ref={cardRef}
+        id={group.id}
+        className={`border-l-4 ${borderColor} animate-slide-up scroll-mt-24${activeHash === group.id ? ' ring-2 ring-accent-blue/50' : ''}`}
         style={{ animationDelay: `${index * 50}ms`, animationFillMode: 'backwards' }}
       >
         {/* Header */}

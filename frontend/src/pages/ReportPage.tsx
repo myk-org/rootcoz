@@ -547,7 +547,7 @@ function ReportContent() {
           </div>
           <div className="space-y-3" key={failureRemountKey}>
             {groups.map((g, i) => (
-              <FailureCard key={g.id} group={g} jobId={result.job_id} index={i} />
+              <FailureCard key={g.id} group={g} jobId={result.job_id} index={i} activeHash={activeHash} />
             ))}
           </div>
         </section>

@@ -148,6 +148,7 @@ export function ChildJobSection({ child, jobId, depth = 0, activeHash, parentHas
                 childJobName={child.job_name}
                 childBuildNumber={child.build_number}
                 index={i}
+                activeHash={activeHash}
               />
             ))}
           </div>
