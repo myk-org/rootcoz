@@ -492,16 +492,24 @@ def _attach_result_links(payload: dict, base_url: str, job_id: str) -> dict:
 async def _attach_origin_job_info(result: dict) -> None:
     """Attach origin job reference when the result is a re-analysis.
 
-    If ``request_params.reanalyzed_from_job_id`` exists, resolves the
-    original job's display name and adds ``reanalyzed_from_job_id`` and
-    ``origin_job_name`` to the top-level response.
+    If ``request_params.reanalyzed_from_job_id`` exists, adds
+    ``reanalyzed_from_job_id`` and ``origin_job_name`` to the top-level
+    response.  Prefers the denormalized ``reanalyzed_from_job_name``
+    stored at creation time; falls back to a DB lookup for legacy data.
     """
     params = (result.get("result") or {}).get("request_params", {})
     origin_id = params.get("reanalyzed_from_job_id", "")
     if not origin_id:
         return
     result["reanalyzed_from_job_id"] = origin_id
-    # Resolve origin display name
+
+    # Fast path: use denormalized name stored at re-analysis creation time
+    stored_name = params.get("reanalyzed_from_job_name", "")
+    if stored_name:
+        result["origin_job_name"] = stored_name
+        return
+
+    # Fallback for legacy data: resolve via DB lookup
     try:
         origin = await storage.get_result(origin_id)
     except Exception:
@@ -1988,6 +1996,7 @@ async def _enqueue_file_raw_analysis(
     tags: list[str] | None = None,
     message_prefix: str = "Analysis",
     reanalyzed_from_job_id: str = "",
+    reanalyzed_from_job_name: str = "",
 ) -> dict:
     """Build params, persist initial state, spawn task, and return response.
 
@@ -2069,6 +2078,10 @@ async def _enqueue_file_raw_analysis(
         initial_result["request_params"]["reanalyzed_from_job_id"] = (
             reanalyzed_from_job_id
         )
+        if reanalyzed_from_job_name:
+            initial_result["request_params"]["reanalyzed_from_job_name"] = (
+                reanalyzed_from_job_name
+            )
     effective_tags = tags if tags is not None else (body.tags or None)
     if effective_tags:
         initial_result["tags"] = effective_tags
@@ -2181,6 +2194,7 @@ async def _enqueue_analysis_job(
     message_prefix: str = "Analysis",
     username: str = "",
     reanalyzed_from_job_id: str = "",
+    reanalyzed_from_job_name: str = "",
 ) -> dict:
     """Create, save, and enqueue a new analysis job.
 
@@ -2211,6 +2225,10 @@ async def _enqueue_analysis_job(
         initial_result["request_params"]["reanalyzed_from_job_id"] = (
             reanalyzed_from_job_id
         )
+        if reanalyzed_from_job_name:
+            initial_result["request_params"]["reanalyzed_from_job_name"] = (
+                reanalyzed_from_job_name
+            )
     if body.tags:
         initial_result["tags"] = body.tags
     can_resume_wait = merged.wait_for_completion and bool(merged.jenkins_url)
@@ -2657,6 +2675,11 @@ async def re_analyze(
 
     result_data = stored["result"]
 
+    # Resolve origin display name now so it can be denormalized into request_params
+    origin_job_display_name = (
+        result_data.get("display_name") or result_data.get("job_name") or job_id
+    )
+
     # Authorization: only the original submitter or an admin may re-analyze
     original_submitter = result_data.get("request_params", {}).get("submitted_by", "")
     requesting_user = getattr(request.state, "username", "")
@@ -2805,6 +2828,7 @@ async def re_analyze(
             tags=unified_body.tags,
             message_prefix="Re-analysis",
             reanalyzed_from_job_id=job_id,
+            reanalyzed_from_job_name=origin_job_display_name,
         )
 
     # Jenkins path (existing code)
@@ -2848,6 +2872,7 @@ async def re_analyze(
         message_prefix="Re-analysis",
         username=request.state.username,
         reanalyzed_from_job_id=job_id,
+        reanalyzed_from_job_name=origin_job_display_name,
     )
 
 
