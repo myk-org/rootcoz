@@ -2017,6 +2017,7 @@ async def _enqueue_file_raw_analysis(
 
     initial_result: dict = {
         "job_name": display_name,
+        "display_name": display_name,
         "request_params": encrypt_sensitive_fields(base_params),
     }
     initial_result["request_params"]["submitted_by"] = username
@@ -2672,7 +2673,7 @@ async def re_analyze(
             unified_fields["raw_xml"] = stored_xml
         else:
             stored_failures = decrypted_params.get("failures")
-            if not stored_failures:
+            if stored_failures is None:
                 raise HTTPException(
                     status_code=400,
                     detail="Original raw analysis has no stored failures; cannot re-analyze",
