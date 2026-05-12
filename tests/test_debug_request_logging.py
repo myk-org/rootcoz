@@ -29,13 +29,13 @@ class TestMaskSensitiveFields:
             "job_name": "my-job",
         }
         result = mask_sensitive_fields(data)
-        assert result["jenkins_password"] == "***"
+        assert result["jenkins_password"] == "***"  # noqa: S105
         assert result["jenkins_user"] == "***"
-        assert result["jira_api_token"] == "***"
+        assert result["jira_api_token"] == "***"  # noqa: S105
         assert result["jira_pat"] == "***"
         assert result["jira_email"] == "***"
-        assert result["github_token"] == "***"
-        assert result["reportportal_api_token"] == "***"
+        assert result["github_token"] == "***"  # noqa: S105
+        assert result["reportportal_api_token"] == "***"  # noqa: S105
         # Non-sensitive field preserved
         assert result["job_name"] == "my-job"
 
@@ -48,9 +48,9 @@ class TestMaskSensitiveFields:
             "safe_field": "visible",
         }
         result = mask_sensitive_fields(data)
-        assert result["custom_password"] == "***"
-        assert result["my_token"] == "***"
-        assert result["api_secret"] == "***"
+        assert result["custom_password"] == "***"  # noqa: S105
+        assert result["my_token"] == "***"  # noqa: S105
+        assert result["api_secret"] == "***"  # noqa: S105
         assert result["encryption_key"] == "***"
         assert result["safe_field"] == "visible"
 
@@ -64,7 +64,7 @@ class TestMaskSensitiveFields:
         }
         result = mask_sensitive_fields(data)
         assert result["outer"] == "ok"
-        assert result["nested"]["jenkins_password"] == "***"
+        assert result["nested"]["jenkins_password"] == "***"  # noqa: S105
         assert result["nested"]["name"] == "visible"
 
     def test_handles_lists(self):
@@ -84,8 +84,8 @@ class TestMaskSensitiveFields:
         }
         result = mask_sensitive_fields(data)
         assert result["additional_repos"][0]["name"] == "repo1"
-        assert result["additional_repos"][0]["token"] == "***"
-        assert result["additional_repos"][1]["token"] == "***"
+        assert result["additional_repos"][0]["token"] == "***"  # noqa: S105
+        assert result["additional_repos"][1]["token"] == "***"  # noqa: S105
 
     def test_handles_deeply_nested_structures(self):
         data = {
@@ -101,7 +101,7 @@ class TestMaskSensitiveFields:
             }
         }
         result = mask_sensitive_fields(data)
-        assert result["level1"]["level2"][0]["level3"]["secret_key"] == "***"
+        assert result["level1"]["level2"][0]["level3"]["secret_key"] == "***"  # noqa: S105
         assert result["level1"]["level2"][0]["level3"]["name"] == "ok"
 
     def test_preserves_empty_and_falsy_values(self):
@@ -129,7 +129,7 @@ class TestMaskSensitiveFields:
             "name": "test",
         }
         _ = mask_sensitive_fields(original)
-        assert original["jenkins_password"] == "secret"  # pragma: allowlist secret
+        assert original["jenkins_password"] == "secret"  # noqa: S105  # pragma: allowlist secret
 
     def test_empty_dict(self):
         assert mask_sensitive_fields({}) == {}
