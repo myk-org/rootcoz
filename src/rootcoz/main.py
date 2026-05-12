@@ -1984,6 +1984,18 @@ def _apply_base_analysis_overrides(
     params["peer_analysis_max_rounds"] = merged.peer_analysis_max_rounds
 
 
+def _stamp_reanalysis_metadata(
+    request_params: dict,
+    reanalyzed_from_job_id: str,
+    reanalyzed_from_job_name: str,
+) -> None:
+    """Write re-analysis origin fields into *request_params* when present."""
+    if reanalyzed_from_job_id:
+        request_params["reanalyzed_from_job_id"] = reanalyzed_from_job_id
+        if reanalyzed_from_job_name:
+            request_params["reanalyzed_from_job_name"] = reanalyzed_from_job_name
+
+
 async def _enqueue_file_raw_analysis(
     body: "UnifiedAnalyzeRequest",
     merged: "Settings",
@@ -2074,14 +2086,11 @@ async def _enqueue_file_raw_analysis(
         "request_params": encrypt_sensitive_fields(base_params),
     }
     initial_result["request_params"]["submitted_by"] = username
-    if reanalyzed_from_job_id:
-        initial_result["request_params"]["reanalyzed_from_job_id"] = (
-            reanalyzed_from_job_id
-        )
-        if reanalyzed_from_job_name:
-            initial_result["request_params"]["reanalyzed_from_job_name"] = (
-                reanalyzed_from_job_name
-            )
+    _stamp_reanalysis_metadata(
+        initial_result["request_params"],
+        reanalyzed_from_job_id,
+        reanalyzed_from_job_name,
+    )
     effective_tags = tags if tags is not None else (body.tags or None)
     if effective_tags:
         initial_result["tags"] = effective_tags
@@ -2221,14 +2230,11 @@ async def _enqueue_analysis_job(
     }
     initial_result["request_params"]["submitted_by"] = username
     initial_result["request_params"]["analysis_type"] = "jenkins"
-    if reanalyzed_from_job_id:
-        initial_result["request_params"]["reanalyzed_from_job_id"] = (
-            reanalyzed_from_job_id
-        )
-        if reanalyzed_from_job_name:
-            initial_result["request_params"]["reanalyzed_from_job_name"] = (
-                reanalyzed_from_job_name
-            )
+    _stamp_reanalysis_metadata(
+        initial_result["request_params"],
+        reanalyzed_from_job_id,
+        reanalyzed_from_job_name,
+    )
     if body.tags:
         initial_result["tags"] = body.tags
     can_resume_wait = merged.wait_for_completion and bool(merged.jenkins_url)

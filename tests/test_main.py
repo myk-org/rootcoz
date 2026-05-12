@@ -4144,6 +4144,40 @@ class TestReAnalyzeEndpoint:
         assert params.get("reanalyzed_from_job_name") == "My Job"
 
     @pytest.mark.asyncio
+    async def test_re_analyze_file_stores_reanalyzed_metadata(
+        self, test_client
+    ) -> None:
+        """Re-analyze a file/raw job stores reanalyzed_from_job_id and _job_name."""
+        result_data = {
+            "summary": "file failure",
+            "job_name": "file-job",
+            "display_name": "File Job",
+            "request_params": encrypt_sensitive_fields(
+                {
+                    "analysis_type": "file",
+                    "raw_xml": "<testsuite><testcase name='t1'><failure>err</failure></testcase></testsuite>",
+                    "ai_provider": "claude",
+                    "ai_model": "opus",
+                }
+            ),
+        }
+        await storage.save_result(
+            "file-origin",
+            "",
+            "completed",
+            result_data,
+        )
+        with patch("rootcoz.main._process_file_raw_analysis"):
+            response = test_client.post("/re-analyze/file-origin", json={})
+        assert response.status_code == 202
+        new_job_id = response.json()["job_id"]
+        stored = await storage.get_result(new_job_id)
+        assert stored is not None
+        params = stored["result"]["request_params"]
+        assert params["reanalyzed_from_job_id"] == "file-origin"
+        assert params["reanalyzed_from_job_name"] == "File Job"
+
+    @pytest.mark.asyncio
     async def test_results_endpoint_returns_origin_info(self, test_client) -> None:
         """GET /results/{job_id} includes origin job info for re-analyzed jobs."""
         # Create original job
