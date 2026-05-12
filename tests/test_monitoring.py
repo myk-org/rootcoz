@@ -226,8 +226,10 @@ class TestHealthChecks:
         settings.reportportal_api_token.get_secret_value.return_value = "tok"
 
         mock_resp = httpx.Response(200)
+        captured_urls: list[str] = []
 
         async def mock_get(url, **kwargs):
+            captured_urls.append(url)
             return mock_resp
 
         with patch("rootcoz.monitoring.httpx.AsyncClient") as mock_client_cls:
@@ -238,6 +240,10 @@ class TestHealthChecks:
             mock_client_cls.return_value = mock_client
             result = await check_reportportal(settings)
         assert result["status"] == "ok"
+        assert len(captured_urls) == 1
+        called_url = captured_urls[0]
+        assert "/api/v1/my_project/launch" in called_url
+        assert "page.size=1" in called_url
 
     async def test_build_health_response_healthy(self, temp_db_path):
         import aiosqlite
