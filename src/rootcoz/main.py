@@ -773,6 +773,12 @@ async def _resume_waiting_jobs(waiting_jobs: list[dict]) -> None:
             continue
 
         resumed_username = result_data.get("request_params", {}).get("submitted_by", "")
+        if not resumed_username:
+            logger.warning(
+                "Resumed job %s has no submitted_by in stored params "
+                "(pre-migration job); history-aware classification will be disabled",
+                job["job_id"],
+            )
         task = asyncio.create_task(
             process_analysis_with_id(
                 job["job_id"], body, merged, username=resumed_username
@@ -3282,7 +3288,9 @@ def _resolve_analyzed_repo(
     if not ref:
         ref = parsed_ref
 
-    # Token: decrypt stored value, fall back to server token
+    # Token: decrypt stored value, fall back to server token only when
+    # the resolved URL matches the server-configured repo to prevent a
+    # user-specified repo from borrowing the deployment token.
     token = ""
     if request_params:
         decrypted = decrypt_sensitive_fields(request_params)
@@ -3290,7 +3298,16 @@ def _resolve_analyzed_repo(
         if not _is_encrypted_value(stored_token):
             token = stored_token
     if not token and settings.tests_repo_token:
-        token = settings.tests_repo_token.get_secret_value()
+        server_url_normalized, _ = parse_repo_ref(str(settings.tests_repo_url or ""))
+        if url == server_url_normalized:
+            token = settings.tests_repo_token.get_secret_value()
+        else:
+            logger.debug(
+                "Skipping server tests_repo_token: resolved URL %s differs from "
+                "server-configured %s",
+                redact_url(url),
+                redact_url(server_url_normalized),
+            )
 
     return url, ref, token
 
