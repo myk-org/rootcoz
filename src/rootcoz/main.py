@@ -3029,6 +3029,9 @@ async def re_analyze_failure(
     test_failure = FailedTest(
         test_name=failure_dict.get("test_name", ""),
         error_message=failure_dict.get("error", ""),
+        stack_trace=failure_dict.get("stack_trace", ""),
+        duration=failure_dict.get("duration") or 0.0,
+        status=failure_dict.get("status") or "FAILED",
     )
 
     # Build unified request from stored params

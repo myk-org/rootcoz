@@ -4,6 +4,7 @@ import type { FailureAnalysis } from '@/types'
 
 function makeFailure(testName: string, errorSig: string): FailureAnalysis {
   return {
+    id: `test-uuid-${testName}`,
     test_name: testName,
     error: 'some error',
     analysis: {
@@ -58,6 +59,6 @@ describe('groupFailures', () => {
   it('applies prefix to group IDs', () => {
     const failures = [makeFailure('test1', 'sig-a')]
     const groups = groupFailures(failures, 'child')
-    expect(groups[0].id).toBe('child-sig-a')
+    expect(groups[0].id).toBe('child-test-uuid-test1')
   })
 })

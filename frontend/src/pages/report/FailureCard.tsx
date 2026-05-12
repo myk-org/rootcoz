@@ -102,18 +102,19 @@ export function FailureCard({ group, jobId, childJobName, childBuildNumber, inde
   const expandKey = `rootcoz-expand-${jobId}-${scopedChildJobName}-${scopedChildBuildNumber}-${group.id}`
   const [expanded, setExpanded] = useSessionState<boolean>(expandKey, false)
   const cardRef = useRef<HTMLDivElement>(null)
+  const expandedByHashRef = useRef(false)
 
   // Auto-expand and scroll when URL hash targets this failure group
   useEffect(() => {
-    if (activeHash && activeHash === group.id) {
-      if (!expanded) {
-        setExpanded(true)
-      }
-      requestAnimationFrame(() => {
-        cardRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })
-      })
+    if (activeHash === group.id && !expandedByHashRef.current) {
+      setExpanded(true)
+      expandedByHashRef.current = true
+      cardRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })
     }
-  }, [activeHash, group.id, expanded, setExpanded])
+    if (activeHash !== group.id) {
+      expandedByHashRef.current = false
+    }
+  }, [activeHash, group.id])
   const [bugTarget, setBugTarget] = useState<'github' | 'jira' | null>(null)
   const [reviewingAll, setReviewingAll] = useState(false)
   const [reviewAllError, setReviewAllError] = useState<string | null>(null)
