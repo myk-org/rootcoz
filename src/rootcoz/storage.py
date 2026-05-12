@@ -938,6 +938,74 @@ async def patch_result_json(
             raise
 
 
+def _backfill_child_uuids(child: dict) -> bool:
+    """Recursively assign UUIDs to a child job analysis and its failures.
+
+    Walks ``failures`` and ``failed_children`` (nested children).
+
+    Returns:
+        ``True`` if any UUIDs were added.
+    """
+    changed = False
+    if "id" not in child:
+        child["id"] = str(uuid.uuid4())
+        changed = True
+    for f in child.get("failures", []):
+        if not isinstance(f, dict):
+            continue
+        if "id" not in f:
+            f["id"] = str(uuid.uuid4())
+            changed = True
+    for nested in child.get("failed_children", []):
+        if not isinstance(nested, dict):
+            continue
+        if _backfill_child_uuids(nested):
+            changed = True
+    return changed
+
+
+async def _backfill_failure_uuids(job_id: str, result_data: dict) -> bool:
+    """Assign stable UUIDs to failures and child analyses that lack them.
+
+    Legacy ``result_json`` rows pre-date the ``id`` field on
+    :class:`~rootcoz.models.FailureAnalysis` and
+    :class:`~rootcoz.models.ChildJobAnalysis`.  When such data is loaded,
+    Pydantic's ``default_factory`` generates a *transient* UUID that is never
+    persisted — so the ID changes on every read.
+
+    This helper detects missing ``id`` fields, assigns UUIDs, and persists them
+    back so subsequent reads return stable identifiers.
+
+    Args:
+        job_id: The analysis job identifier (used for the DB update).
+        result_data: Parsed result dict (mutated in place).
+
+    Returns:
+        ``True`` if any UUIDs were added (and the DB was updated).
+    """
+    changed = False
+    for f in result_data.get("failures", []):
+        if not isinstance(f, dict):
+            continue
+        if "id" not in f:
+            f["id"] = str(uuid.uuid4())
+            changed = True
+    for child in result_data.get("child_job_analyses", []):
+        if not isinstance(child, dict):
+            continue
+        if _backfill_child_uuids(child):
+            changed = True
+    if changed:
+        async with _connect_db() as db:
+            await db.execute(
+                "UPDATE results SET result_json = ? WHERE job_id = ?",
+                (json.dumps(result_data), job_id),
+            )
+            await db.commit()
+        logger.info(f"Backfilled missing failure UUIDs for job_id={job_id}")
+    return changed
+
+
 async def get_result(job_id: str, *, strip_sensitive: bool = True) -> dict | None:
     """Retrieve an analysis result by job ID.
 
@@ -963,6 +1031,8 @@ async def get_result(job_id: str, *, strip_sensitive: bool = True) -> dict | Non
                 f"get_result: job_id={job_id}, found=True, status={row['status']}"
             )
             parsed = parse_result_json(row["result_json"], job_id=job_id)
+            if parsed:
+                await _backfill_failure_uuids(job_id, parsed)
             if parsed and strip_sensitive:
                 parsed = strip_sensitive_from_response(parsed)
             return {
@@ -987,6 +1057,8 @@ def _find_failure_by_uuid_in_failures(
 ) -> dict | None:
     """Search a flat list of failure dicts for a matching UUID."""
     for f in failures:
+        if not isinstance(f, dict):
+            continue
         if f.get("id") == failure_uuid:
             return f
     return None
@@ -1001,6 +1073,8 @@ def _find_failure_by_uuid_in_children(
         (failure_dict, child_job_name, child_build_number) or (None, "", 0).
     """
     for child in children:
+        if not isinstance(child, dict):
+            continue
         # Check direct failures of this child
         found = _find_failure_by_uuid_in_failures(
             child.get("failures", []), failure_uuid

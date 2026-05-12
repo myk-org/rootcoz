@@ -3026,13 +3026,17 @@ async def re_analyze_failure(
     _check_reanalyze_authorization(request, params)
 
     # Build a raw analysis request with just this one failure
-    test_failure = FailedTest(
-        test_name=failure_dict.get("test_name", ""),
-        error_message=failure_dict.get("error", ""),
-        stack_trace=failure_dict.get("stack_trace", ""),
-        duration=failure_dict.get("duration") or 0.0,
-        status=failure_dict.get("status") or "FAILED",
-    )
+    _ft_kwargs: dict = {
+        "test_name": failure_dict.get("test_name", ""),
+        "error_message": failure_dict.get("error", ""),
+    }
+    if "stack_trace" in failure_dict:
+        _ft_kwargs["stack_trace"] = failure_dict["stack_trace"]
+    if "duration" in failure_dict:
+        _ft_kwargs["duration"] = failure_dict["duration"]
+    if "status" in failure_dict:
+        _ft_kwargs["status"] = failure_dict["status"]
+    test_failure = FailedTest(**_ft_kwargs)
 
     # Build unified request from stored params
     try:

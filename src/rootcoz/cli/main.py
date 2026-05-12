@@ -1019,6 +1019,13 @@ def analyze(
         typer.echo(f"Poll: {data.get('result_url', '')}")
 
 
+def _echo_queued_job(data: dict, prefix: str = "Job") -> None:
+    """Print queued-job confirmation lines (shared by re-analyze commands)."""
+    typer.echo(f"{prefix} queued: {data.get('job_id', '')}")
+    typer.echo(f"Status: {data.get('status', '')}")
+    typer.echo(f"Poll: {data.get('result_url', '')}")
+
+
 @app.command("re-analyze")
 def re_analyze_cmd(
     job_id: str = typer.Argument(help="Job ID of the analysis to re-run."),
@@ -1031,9 +1038,7 @@ def re_analyze_cmd(
         emit_output=False,
     )
     if not _state.get("json", False):
-        typer.echo(f"Re-analysis queued: {data.get('job_id', '')}")
-        typer.echo(f"Status: {data.get('status', '')}")
-        typer.echo(f"Poll: {data.get('result_url', '')}")
+        _echo_queued_job(data, prefix="Re-analysis")
 
 
 # -- Failure ------------------------------------------------------------------
@@ -1074,9 +1079,7 @@ def failure_re_analyze_cmd(
         emit_output=False,
     )
     if not _state.get("json", False):
-        typer.echo(f"Re-analysis queued: {data.get('job_id', '')}")
-        typer.echo(f"Status: {data.get('status', '')}")
-        typer.echo(f"Poll: {data.get('result_url', '')}")
+        _echo_queued_job(data, prefix="Re-analysis")
 
 
 # -- Abort --------------------------------------------------------------------

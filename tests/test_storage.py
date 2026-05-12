@@ -166,8 +166,143 @@ class TestGetResult:
 
             result = await storage.get_result("job-json")
             assert result is not None
-            assert result["result"] == complex_result
             assert len(result["result"]["failures"]) == 2
+            # Failures without 'id' get backfilled UUIDs on read
+            for f in result["result"]["failures"]:
+                assert "id" in f
+            assert result["result"]["failures"][0]["test_name"] == "test_1"
+            assert result["result"]["failures"][1]["test_name"] == "test_2"
+
+
+class TestBackfillFailureUuids:
+    """Tests for UUID backward compatibility with legacy data."""
+
+    async def test_legacy_failures_without_ids_get_stable_uuids(
+        self, setup_test_db: Path
+    ) -> None:
+        """Legacy result_json without 'id' fields gets stable UUIDs on read."""
+        with patch.object(storage, "DB_PATH", setup_test_db):
+            legacy_result = {
+                "summary": "Legacy analysis",
+                "failures": [
+                    {"test_name": "test_a", "error": "Error A"},
+                    {"test_name": "test_b", "error": "Error B"},
+                ],
+            }
+            await storage.save_result(
+                job_id="legacy-job",
+                jenkins_url="https://jenkins.example.com/job/test/1/",
+                status="completed",
+                result=legacy_result,
+            )
+
+            # First read: backfills and persists UUIDs
+            result1 = await storage.get_result("legacy-job")
+            assert result1 is not None
+            ids_first = [f["id"] for f in result1["result"]["failures"]]
+            assert len(ids_first) == 2
+            assert all(ids_first)  # non-empty
+            assert ids_first[0] != ids_first[1]  # unique
+
+            # Second read: UUIDs are stable (same values)
+            result2 = await storage.get_result("legacy-job")
+            ids_second = [f["id"] for f in result2["result"]["failures"]]
+            assert ids_first == ids_second
+
+    async def test_legacy_child_job_analyses_get_stable_uuids(
+        self, setup_test_db: Path
+    ) -> None:
+        """Legacy child_job_analyses and their failures get backfilled UUIDs."""
+        with patch.object(storage, "DB_PATH", setup_test_db):
+            legacy_result = {
+                "summary": "Pipeline analysis",
+                "failures": [],
+                "child_job_analyses": [
+                    {
+                        "job_name": "child-1",
+                        "build_number": 10,
+                        "failures": [
+                            {"test_name": "child_test_1", "error": "Err"},
+                        ],
+                        "failed_children": [
+                            {
+                                "job_name": "grandchild-1",
+                                "build_number": 5,
+                                "failures": [
+                                    {"test_name": "gc_test_1", "error": "GC Err"},
+                                ],
+                                "failed_children": [],
+                            }
+                        ],
+                    }
+                ],
+            }
+            await storage.save_result(
+                job_id="legacy-pipeline",
+                jenkins_url="https://jenkins.example.com/job/pipe/1/",
+                status="completed",
+                result=legacy_result,
+            )
+
+            result = await storage.get_result("legacy-pipeline")
+            assert result is not None
+            children = result["result"]["child_job_analyses"]
+            # Child itself gets an id
+            assert "id" in children[0]
+            # Child failure gets an id
+            assert "id" in children[0]["failures"][0]
+            # Grandchild gets an id
+            grandchild = children[0]["failed_children"][0]
+            assert "id" in grandchild
+            # Grandchild failure gets an id
+            assert "id" in grandchild["failures"][0]
+
+            # Verify stability on second read
+            result2 = await storage.get_result("legacy-pipeline")
+            children2 = result2["result"]["child_job_analyses"]
+            assert children[0]["id"] == children2[0]["id"]
+            assert children[0]["failures"][0]["id"] == children2[0]["failures"][0]["id"]
+
+    async def test_results_with_existing_ids_not_modified(
+        self, setup_test_db: Path
+    ) -> None:
+        """Results that already have 'id' fields are not re-written."""
+        with patch.object(storage, "DB_PATH", setup_test_db):
+            existing_id = "existing-uuid-1234"
+            result_data = {
+                "summary": "Modern analysis",
+                "failures": [
+                    {
+                        "id": existing_id,
+                        "test_name": "test_x",
+                        "error": "Error X",
+                    },
+                ],
+            }
+            await storage.save_result(
+                job_id="modern-job",
+                jenkins_url="https://jenkins.example.com/job/test/2/",
+                status="completed",
+                result=result_data,
+            )
+
+            result = await storage.get_result("modern-job")
+            assert result is not None
+            assert result["result"]["failures"][0]["id"] == existing_id
+
+    async def test_backfill_no_failures_is_noop(self, setup_test_db: Path) -> None:
+        """Result with no failures list triggers no backfill."""
+        with patch.object(storage, "DB_PATH", setup_test_db):
+            await storage.save_result(
+                job_id="no-failures",
+                jenkins_url="https://jenkins.example.com/job/test/3/",
+                status="completed",
+                result={"summary": "All passed"},
+            )
+
+            result = await storage.get_result("no-failures")
+            assert result is not None
+            assert "failures" not in result["result"]
 
 
 class TestListResults:
