@@ -3295,19 +3295,18 @@ def _resolve_analyzed_repo(
     return url, ref, token
 
 
-def _resolve_github_repo_url(settings: Settings, result_data: dict) -> str:
-    """Resolve GitHub repo URL from server config / analyzed result only.
+def _resolve_github_repo_url(settings: Settings) -> str:
+    """Resolve GitHub repo URL from server config only.
 
-    The repo URL is resolved via ``_resolve_analyzed_repo`` which consults
-    the deployment-level ``TESTS_REPO_URL`` setting and stored analysis
-    parameters.  Request-body overrides are intentionally **not** accepted
+    Only the deployment-level ``TESTS_REPO_URL`` setting is used.
+    Stored analysis ``request_params`` are intentionally **not** consulted
     so that callers cannot retarget issue creation or duplicate search away
     from the deployment-configured repository while using server credentials.
 
     Returns:
         The resolved repo URL, or an empty string when unavailable.
     """
-    url, _ref, _token = _resolve_analyzed_repo(settings, result_data)
+    url, _ref = parse_repo_ref(str(settings.tests_repo_url or ""))
     return url
 
 
@@ -3498,7 +3497,7 @@ async def preview_github_issue(
     )
 
     # Duplicate detection (best-effort: failures must not break preview)
-    tests_repo_url = _resolve_github_repo_url(settings, result_data)
+    tests_repo_url = _resolve_github_repo_url(settings)
     github_token = (body.github_token or "").strip() or (
         settings.github_token.get_secret_value() if settings.github_token else ""
     )
@@ -3786,7 +3785,7 @@ async def create_github_issue_endpoint(
     if username:
         issue_body += f"\n\n---\n_Reported by: {username} via rootcoz_"
 
-    tests_repo_url = _resolve_github_repo_url(settings, _result_data)
+    tests_repo_url = _resolve_github_repo_url(settings)
     if not tests_repo_url:
         raise HTTPException(
             status_code=400,
