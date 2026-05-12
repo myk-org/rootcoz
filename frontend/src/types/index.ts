@@ -283,6 +283,8 @@ export interface ResultResponse {
   analysis_started_at?: string | null
   base_url: string | null
   result_url: string | null
+  reanalyzed_from_job_id?: string
+  origin_job_name?: string
   capabilities?: {
     github_issues_enabled: boolean
     jira_issues_enabled: boolean
