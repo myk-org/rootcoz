@@ -511,7 +511,7 @@ async def _attach_origin_job_info(result: dict) -> None:
 
     # Fallback for legacy data: resolve via DB lookup
     try:
-        origin = await storage.get_result(origin_id)
+        origin = await get_result(origin_id)
     except Exception:
         logger.warning("Failed to resolve origin job %s", origin_id, exc_info=True)
         origin = None

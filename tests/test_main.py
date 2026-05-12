@@ -4141,6 +4141,7 @@ class TestReAnalyzeEndpoint:
         assert stored is not None
         params = stored["result"]["request_params"]
         assert params["reanalyzed_from_job_id"] == "job-origin"
+        assert params.get("reanalyzed_from_job_name") == "My Job"
 
     @pytest.mark.asyncio
     async def test_results_endpoint_returns_origin_info(self, test_client) -> None:
