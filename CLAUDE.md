@@ -108,6 +108,7 @@ src/rootcoz/
 - **Auth roles & permissions**:
   - Two roles: `user` and `admin`. A bootstrap `admin` superuser (via `ADMIN_KEY` env var) always exists outside the DB.
   - All API endpoints require authentication except public paths (`/register`, `/health`, `/api/health`, `/api/auth/register`, `/api/auth/login`, `/api/auth/needs-key`, `/api/releases/latest`, `/metrics`). `/api/releases/latest` is intentionally public — it only proxies GitHub release metadata (version, changelog) with no sensitive data.
+  - CORS preflight (OPTIONS) requests bypass authentication on all endpoints.
   - **Users** can: register, login, rotate their own API key (`POST /api/auth/rotate-key`), manage their own tracker tokens, submit analyses.
   - **Admins** can: everything users can, plus rotate any user's key (`POST /api/admin/users/{username}/rotate-key`), create/delete/promote/demote users, access admin-only endpoints (`/api/admin/*`).
 - **Real-time updates**: Server-Sent Events (SSE) push real-time updates to the frontend — no polling. Backend broadcasts via per-connection `asyncio.Event` objects. Available SSE streams:

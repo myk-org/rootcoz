@@ -85,8 +85,7 @@ from rootcoz.feedback import (
     generate_feedback_preview,
 )
 from rootcoz.github_issues import enrich_with_tests_repo_matches
-from rootcoz.issue_matching import filter_issue_matches_with_ai
-from rootcoz.jira import JiraClient, enrich_with_jira_matches
+from rootcoz.jira import JiraClient, _filter_matches_with_ai, enrich_with_jira_matches
 from rootcoz.logging_context import JobIdFilter, get_log_file, job_id_var
 from rootcoz.metadata_rules import match_job_metadata
 from rootcoz.models import (
@@ -986,6 +985,9 @@ class AuthMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
         # CORS preflight requests must pass through without authentication
         if request.method == "OPTIONS":
+            request.state.username = ""
+            request.state.is_admin = False
+            request.state.role = "user"
             return await call_next(request)
 
         path = request.url.path
@@ -3629,17 +3631,15 @@ async def preview_jira_bug(
             # AI relevance filtering — only if AI is configured and candidates exist
             if candidates and ai_provider and ai_model:
                 try:
-                    evaluations = await filter_issue_matches_with_ai(
+                    matches = await _filter_matches_with_ai(
                         bug_title=content["title"],
                         bug_description=content["body"],
                         candidates=candidates,
                         ai_provider=ai_provider,
                         ai_model=ai_model,
                         job_id=job_id,
-                        call_type="jira_preview_filter",
                     )
-                    relevant_keys = {ev["key"] for ev in evaluations}
-                    similar = [c for c in candidates if c["key"] in relevant_keys]
+                    similar = [m.model_dump() for m in matches]
                 except Exception:
                     logger.warning(
                         "AI relevance filtering failed for job_id=%s, "

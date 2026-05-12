@@ -80,13 +80,16 @@ class TestOptionsPreflightBypassesAuth:
     def test_options_on_protected_api_returns_ok(self, client):
         """OPTIONS on a protected endpoint should not return 401."""
         resp = client.options("/api/results")
-        assert resp.status_code != 401
+        # FastAPI returns 405 for routes without explicit OPTIONS handler.
+        # The key assertion is that auth middleware doesn't block it (no 401/403).
+        assert resp.status_code in (200, 204, 405)
 
     def test_options_on_admin_endpoint_returns_ok(self, client):
         """OPTIONS on an admin endpoint should not return 403."""
         resp = client.options("/api/admin/users")
-        assert resp.status_code != 401
-        assert resp.status_code != 403
+        # FastAPI returns 405 for routes without explicit OPTIONS handler.
+        # The key assertion is that auth middleware doesn't block it (no 401/403).
+        assert resp.status_code in (200, 204, 405)
 
 
 class TestAuthLogin:
