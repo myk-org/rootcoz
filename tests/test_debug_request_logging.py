@@ -229,6 +229,14 @@ def _restore_logger(main_logger, original_level, caplog):
     main_logger.setLevel(original_level)
 
 
+def _get_debug_messages(caplog, *, containing: str = "") -> list[str]:
+    """Extract DEBUG-level messages from caplog, optionally filtered by substring."""
+    messages = [r.message for r in caplog.records if r.levelno == logging.DEBUG]
+    if containing:
+        messages = [m for m in messages if containing in m]
+    return messages
+
+
 def test_middleware_logs_masked_body(test_client, caplog):
     """POST request body is logged at DEBUG with sensitive fields masked.
 
@@ -249,12 +257,9 @@ def test_middleware_logs_masked_body(test_client, caplog):
                 cookies={"rootcoz_username": "testuser"},
             )
 
-        debug_messages = [
-            r.message for r in caplog.records if r.levelno == logging.DEBUG
-        ]
-        body_log = [
-            m for m in debug_messages if "Incoming POST /api/validate-token body:" in m
-        ]
+        body_log = _get_debug_messages(
+            caplog, containing="Incoming POST /api/validate-token body:"
+        )
         assert body_log, "Expected a DEBUG log for the incoming request body"
         log_entry = body_log[0]
         # Sensitive values must be masked
@@ -282,10 +287,9 @@ def test_skip_path_body_not_logged(test_client, caplog):
                 cookies={"rootcoz_username": "testuser"},
             )
 
-        debug_messages = [
-            r.message for r in caplog.records if r.levelno == logging.DEBUG
-        ]
-        body_log = [m for m in debug_messages if "Incoming POST /analyze body:" in m]
+        body_log = _get_debug_messages(
+            caplog, containing="Incoming POST /analyze body:"
+        )
         assert not body_log, "/analyze is in skip-paths; body should NOT be logged"
     finally:
         _restore_logger(main_logger, orig_level, caplog)
@@ -313,10 +317,9 @@ def test_validation_error_logged_at_debug(test_client, caplog):
 
         assert resp.status_code == 422
 
-        debug_messages = [
-            r.message for r in caplog.records if r.levelno == logging.DEBUG
-        ]
-        validation_logs = [m for m in debug_messages if "RequestValidationError" in m]
+        validation_logs = _get_debug_messages(
+            caplog, containing="RequestValidationError"
+        )
         assert validation_logs, "Expected a DEBUG log for the validation error"
         log_entry = validation_logs[0]
         # Sensitive values must be masked
@@ -343,10 +346,9 @@ def test_validation_error_skip_path_no_debug_body(test_client, caplog):
 
         assert resp.status_code == 422
 
-        debug_messages = [
-            r.message for r in caplog.records if r.levelno == logging.DEBUG
-        ]
-        validation_logs = [m for m in debug_messages if "RequestValidationError" in m]
+        validation_logs = _get_debug_messages(
+            caplog, containing="RequestValidationError"
+        )
         assert not validation_logs, (
             "/analyze is in skip-paths; validation error body should NOT be DEBUG-logged"
         )
@@ -364,10 +366,8 @@ def test_get_requests_not_logged(test_client, caplog):
                 cookies={"rootcoz_username": "testuser"},
             )
 
-        debug_messages = [
-            r.message for r in caplog.records if r.levelno == logging.DEBUG
-        ]
-        body_logs = [m for m in debug_messages if "Incoming GET" in m and "body:" in m]
+        body_logs = _get_debug_messages(caplog, containing="Incoming GET")
+        body_logs = [m for m in body_logs if "body:" in m]
         assert not body_logs, "GET requests should not log a request body"
     finally:
         _restore_logger(main_logger, orig_level, caplog)
