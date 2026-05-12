@@ -99,6 +99,7 @@ from rootcoz.models import (
     ChildJobAnalysis,
     ClassifyTestRequest,
     CreateIssueRequest,
+    FailedTest,
     FailureAnalysis,
     FailureAnalysisResult,
     FeedbackCreateRequest,
@@ -567,6 +568,77 @@ def _recompose_repo_spec(url: str, ref: str) -> str:
 def _is_encrypted_value(value: Any) -> bool:
     """Return True if *value* looks like an undecrypted encrypted field."""
     return isinstance(value, str) and value.startswith("enc:")
+
+
+def _check_reanalyze_authorization(request: Request, params: dict) -> None:
+    """Check that requester is original submitter or admin."""
+    original_submitter = params.get("submitted_by", "")
+    requesting_user = getattr(request.state, "username", "")
+    is_admin = getattr(request.state, "is_admin", False)
+    if not is_admin and requesting_user != original_submitter:
+        raise HTTPException(
+            status_code=403,
+            detail="Only the original submitter or an admin can re-analyze this job",
+        )
+
+
+def _validate_decrypted_sensitive_fields(decrypted_params: dict) -> None:
+    """Fail fast if any sensitive field is still encrypted (key changed / corrupt)."""
+    for key in SENSITIVE_KEYS:
+        value = decrypted_params.get(key)
+        if _is_encrypted_value(value):
+            raise HTTPException(
+                status_code=400,
+                detail=f"Cannot re-analyze: stored {key} could not be decrypted",
+            )
+    for repo in decrypted_params.get("additional_repos") or []:
+        if isinstance(repo, dict) and _is_encrypted_value(repo.get("token")):
+            raise HTTPException(
+                status_code=400,
+                detail="Cannot re-analyze: stored additional_repos token could not be decrypted",
+            )
+
+
+_ANALYSIS_SETTINGS_FIELDS = (
+    "ai_provider",
+    "ai_model",
+    "raw_prompt",
+    "issue_prompt",
+    "tests_repo_url",
+    "tests_repo_token",
+    "peer_analysis_max_rounds",
+    "enable_jira",
+    "jira_url",
+    "jira_email",
+    "jira_api_token",
+    "jira_pat",
+    "jira_project_key",
+    "jira_ssl_verify",
+    "jira_max_results",
+    "github_token",
+    "ai_cli_timeout",
+    "max_concurrent_ai_calls",
+)
+
+
+def _copy_analysis_settings(decrypted_params: dict, unified_fields: dict) -> None:
+    """Copy analysis settings from stored params to unified request fields."""
+    for field in _ANALYSIS_SETTINGS_FIELDS:
+        if field in decrypted_params and decrypted_params[field] is not None:
+            if field == "tests_repo_url":
+                ref = decrypted_params.get("tests_repo_ref", "")
+                url = decrypted_params[field]
+                unified_fields[field] = f"{url}:{ref}" if ref else url
+            else:
+                unified_fields[field] = decrypted_params[field]
+
+    if "peer_ai_configs" in decrypted_params:
+        unified_fields["peer_ai_configs"] = decrypted_params["peer_ai_configs"]
+    if (
+        "additional_repos" in decrypted_params
+        and decrypted_params["additional_repos"] is not None
+    ):
+        unified_fields["additional_repos"] = decrypted_params["additional_repos"]
 
 
 def _reconstruct_from_params(
@@ -2741,14 +2813,7 @@ async def re_analyze(
     )
 
     # Authorization: only the original submitter or an admin may re-analyze
-    original_submitter = result_data.get("request_params", {}).get("submitted_by", "")
-    requesting_user = getattr(request.state, "username", "")
-    is_admin = getattr(request.state, "is_admin", False)
-    if not is_admin and requesting_user != original_submitter:
-        raise HTTPException(
-            status_code=403,
-            detail="Only the original submitter or an admin can re-analyze this job",
-        )
+    _check_reanalyze_authorization(request, result_data.get("request_params", {}))
 
     if "request_params" not in result_data:
         raise HTTPException(
@@ -2772,20 +2837,7 @@ async def re_analyze(
                 detail=f"Failed to decrypt stored params: {exc}",
             ) from exc
 
-        # Fail fast if any sensitive field is still encrypted (key changed / corrupt)
-        for key in SENSITIVE_KEYS:
-            value = decrypted_params.get(key)
-            if _is_encrypted_value(value):
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"Cannot re-analyze: stored {key} could not be decrypted",
-                )
-        for repo in decrypted_params.get("additional_repos") or []:
-            if isinstance(repo, dict) and _is_encrypted_value(repo.get("token")):
-                raise HTTPException(
-                    status_code=400,
-                    detail="Cannot re-analyze: stored additional_repos token could not be decrypted",
-                )
+        _validate_decrypted_sensitive_fields(decrypted_params)
 
         # Build unified request from stored params
         # Prefer the original user-supplied name (before UUID suffix was added)
@@ -2816,42 +2868,7 @@ async def re_analyze(
                 )
             unified_fields["failures"] = stored_failures
 
-        # Copy over shared analysis settings
-        for field in (
-            "ai_provider",
-            "ai_model",
-            "raw_prompt",
-            "issue_prompt",
-            "tests_repo_url",
-            "tests_repo_token",
-            "peer_analysis_max_rounds",
-            "enable_jira",
-            "jira_url",
-            "jira_email",
-            "jira_api_token",
-            "jira_pat",
-            "jira_project_key",
-            "jira_ssl_verify",
-            "jira_max_results",
-            "github_token",
-            "ai_cli_timeout",
-            "max_concurrent_ai_calls",
-        ):
-            if field in decrypted_params and decrypted_params[field] is not None:
-                if field == "tests_repo_url":
-                    ref = decrypted_params.get("tests_repo_ref", "")
-                    url = decrypted_params[field]
-                    unified_fields[field] = f"{url}:{ref}" if ref else url
-                else:
-                    unified_fields[field] = decrypted_params[field]
-
-        if "peer_ai_configs" in decrypted_params:
-            unified_fields["peer_ai_configs"] = decrypted_params["peer_ai_configs"]
-        if (
-            "additional_repos" in decrypted_params
-            and decrypted_params["additional_repos"] is not None
-        ):
-            unified_fields["additional_repos"] = decrypted_params["additional_repos"]
+        _copy_analysis_settings(decrypted_params, unified_fields)
 
         # Apply overrides from request body
         for field_name in body.model_fields_set:
@@ -2960,6 +2977,101 @@ async def get_job_result(
     if result.get("status") in IN_PROGRESS_STATUSES:
         response.status_code = 202
     return result
+
+
+@app.get("/api/failures/{failure_uuid}")
+async def get_failure_by_uuid(failure_uuid: str) -> dict:
+    """Look up a single failure analysis by its UUID.
+
+    Searches across all stored jobs for a failure with the given UUID.
+    Returns the failure details plus the parent job_id.
+    """
+    result = await storage.find_failure_by_uuid(failure_uuid)
+    if not result:
+        raise HTTPException(status_code=404, detail=f"Failure {failure_uuid} not found")
+    return result
+
+
+@app.post("/api/failures/{failure_uuid}/re-analyze", status_code=202)
+async def re_analyze_failure(
+    failure_uuid: str,
+    request: Request,
+) -> dict:
+    """Re-analyze a single failure identified by its UUID.
+
+    Finds the parent job and specific failure, then creates a new raw
+    analysis job containing only that test.
+    """
+    _check_allow_list(request)
+
+    # Find the failure across all stored results
+    match = await storage.find_failure_by_uuid(failure_uuid)
+    if not match:
+        raise HTTPException(status_code=404, detail=f"Failure {failure_uuid} not found")
+
+    parent_job_id = match["job_id"]
+    failure_dict = match["failure"]
+
+    # Load the parent job to get AI config
+    stored = await get_result(parent_job_id, strip_sensitive=False)
+    if not stored or not stored.get("result"):
+        raise HTTPException(
+            status_code=404, detail=f"Parent job {parent_job_id} not found"
+        )
+
+    result_data = stored["result"]
+    params = result_data.get("request_params", {})
+
+    # Authorization: only the original submitter or an admin may re-analyze
+    _check_reanalyze_authorization(request, params)
+
+    # Build a raw analysis request with just this one failure
+    test_failure = FailedTest(
+        test_name=failure_dict.get("test_name", ""),
+        error_message=failure_dict.get("error", ""),
+    )
+
+    # Build unified request from stored params
+    try:
+        decrypted_params = decrypt_sensitive_fields(dict(params))
+    except Exception as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Failed to decrypt stored params: {exc}",
+        ) from exc
+
+    _validate_decrypted_sensitive_fields(decrypted_params)
+
+    unified_fields: dict = {
+        "type": "raw",
+        "failures": [test_failure],
+        "name": f"re-analyze: {failure_dict.get('test_name', 'unknown')}",
+    }
+
+    _copy_analysis_settings(decrypted_params, unified_fields)
+
+    unified_body = UnifiedAnalyzeRequest(**unified_fields)
+    unified_body.tags = ["re-analyze"]
+
+    # Validate and merge settings
+    _resolve_ai_config(unified_body)
+    merged = _merge_settings(unified_body, get_settings())
+    resolved_peers = _validate_peer_configs(unified_body, merged)
+
+    base_url = _extract_base_url()
+    display_name = unified_body.name or "failure-re-analysis"
+
+    return await _enqueue_file_raw_analysis(
+        body=unified_body,
+        merged=merged,
+        resolved_peers=resolved_peers,
+        display_name=display_name,
+        analysis_type="raw",
+        base_url=base_url,
+        username=request.state.username,
+        tags=unified_body.tags,
+        message_prefix="Failure re-analysis",
+    )
 
 
 def _find_test_in_children(

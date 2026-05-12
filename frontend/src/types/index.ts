@@ -102,6 +102,7 @@ export interface PeerDebate {
 }
 
 export interface FailureAnalysis {
+  id: string
   test_name: string
   error: string
   analysis: AnalysisDetail
@@ -110,6 +111,7 @@ export interface FailureAnalysis {
 }
 
 export interface ChildJobAnalysis {
+  id: string
   job_name: string
   build_number: number
   jenkins_url: string | null

@@ -4542,6 +4542,109 @@ class TestReAnalyzeEndpoint:
         assert "origin_job_name" not in data
 
 
+class TestGetFailureByUUID:
+    """Tests for GET /api/failures/{failure_uuid}."""
+
+    @pytest.mark.asyncio
+    async def test_get_failure_by_uuid_found(self, test_client) -> None:
+        """Returns the failure and parent job_id when found."""
+        from rootcoz import storage
+
+        fa = FailureAnalysis(
+            test_name="tests.TestFoo.test_bar",
+            error="AssertionError",
+            analysis=AnalysisDetail(classification="CODE ISSUE"),
+        )
+        result_data = {
+            "summary": "1 failure",
+            "failures": [fa.model_dump(mode="json")],
+        }
+        await storage.save_result("job-uuid-1", "", "completed", result_data)
+
+        response = test_client.get(f"/api/failures/{fa.id}")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["job_id"] == "job-uuid-1"
+        assert data["failure"]["test_name"] == "tests.TestFoo.test_bar"
+        assert data["failure"]["id"] == fa.id
+
+    def test_get_failure_by_uuid_not_found(self, test_client) -> None:
+        """Returns 404 for unknown UUID."""
+        response = test_client.get("/api/failures/nonexistent-uuid")
+        assert response.status_code == 404
+
+    @pytest.mark.asyncio
+    async def test_get_failure_by_uuid_in_child_job(self, test_client) -> None:
+        """Finds failure inside a child job analysis."""
+        from rootcoz import storage
+        from rootcoz.models import ChildJobAnalysis
+
+        fa = FailureAnalysis(
+            test_name="tests.TestChild.test_nested",
+            error="RuntimeError",
+            analysis=AnalysisDetail(classification="PRODUCT BUG"),
+        )
+        cja = ChildJobAnalysis(
+            job_name="child-runner",
+            build_number=5,
+            failures=[fa],
+        )
+        result_data = {
+            "summary": "nested failure",
+            "failures": [],
+            "child_job_analyses": [cja.model_dump(mode="json")],
+        }
+        await storage.save_result("job-uuid-child", "", "completed", result_data)
+
+        response = test_client.get(f"/api/failures/{fa.id}")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["job_id"] == "job-uuid-child"
+        assert data["child_job_name"] == "child-runner"
+        assert data["child_build_number"] == 5
+
+
+class TestReAnalyzeFailure:
+    """Tests for POST /api/failures/{failure_uuid}/re-analyze."""
+
+    def test_re_analyze_failure_not_found(self, test_client) -> None:
+        """Returns 404 for unknown failure UUID."""
+        response = test_client.post("/api/failures/nonexistent-uuid/re-analyze")
+        assert response.status_code == 404
+
+    @pytest.mark.asyncio
+    async def test_re_analyze_failure_success(self, test_client) -> None:
+        """Creates a new raw analysis job for the specific failure."""
+        from rootcoz import storage
+
+        fa = FailureAnalysis(
+            test_name="tests.TestReAnalyze.test_one",
+            error="ValueError",
+            analysis=AnalysisDetail(classification="CODE ISSUE"),
+        )
+        result_data = {
+            "summary": "1 failure",
+            "failures": [fa.model_dump(mode="json")],
+            "request_params": encrypt_sensitive_fields(
+                {
+                    "ai_provider": "claude",
+                    "ai_model": "opus",
+                    "submitted_by": "admin",
+                }
+            ),
+        }
+        result_data["request_params"]["submitted_by"] = "admin"
+        await storage.save_result("job-reanalyze-f", "", "completed", result_data)
+
+        with patch("rootcoz.main._process_file_raw_analysis"):
+            response = test_client.post(f"/api/failures/{fa.id}/re-analyze")
+        assert response.status_code == 202
+        data = response.json()
+        assert data["status"] == "queued"
+        assert "job_id" in data
+        assert data["job_id"] != "job-reanalyze-f"
+
+
 class TestBuildEffectiveJiraSettings:
     """Tests for _build_effective_jira_settings helper."""
 

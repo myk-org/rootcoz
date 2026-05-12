@@ -27,7 +27,13 @@ export function groupingKey(failure: FailureAnalysis): string {
   return failure.error_signature || `unique-${failure.test_name}`
 }
 
-/** Group failures by error signature, preserving order. */
+/** Group failures by error signature, preserving order.
+ *
+ *  The group ``id`` uses the first failure's UUID (``failure.id``) when
+ *  available so that URL anchors and sessionStorage keys remain stable
+ *  across re-analyses.  Falls back to the signature-based id for
+ *  legacy data without UUIDs.
+ */
 export function groupFailures(
   failures: FailureAnalysis[],
   prefix = '',
@@ -45,11 +51,15 @@ export function groupFailures(
 
   const groups: GroupedFailure[] = []
   for (const [signature, tests] of groupMap) {
+    // Prefer the first failure's stable UUID for the group id
+    const stableId = tests[0]?.id
+      ? `${idPrefix}-${tests[0].id}`
+      : `${idPrefix}-${encodeURIComponent(signature)}`
     groups.push({
       signature,
       tests,
       count: tests.length,
-      id: `${idPrefix}-${encodeURIComponent(signature)}`,
+      id: stableId,
     })
   }
   return groups

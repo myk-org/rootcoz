@@ -2,6 +2,7 @@
 
 from datetime import datetime
 from typing import Annotated, Literal
+from uuid import uuid4
 
 from pydantic import (
     BaseModel,
@@ -444,6 +445,10 @@ class PeerDebate(BaseModel):
 class FailureAnalysis(BaseModel):
     """Analysis result for a single test failure."""
 
+    id: str = Field(
+        default_factory=lambda: str(uuid4()),
+        description="Stable UUID for referencing this failure",
+    )
     test_name: str = Field(description="Name of the failed test")
     error: str = Field(description="Error message or exception")
     analysis: AnalysisDetail = Field(description="Structured AI analysis output")
@@ -473,6 +478,10 @@ class FailureAnalysis(BaseModel):
 class ChildJobAnalysis(BaseModel):
     """Analysis result for a failed child job in a pipeline."""
 
+    id: str = Field(
+        default_factory=lambda: str(uuid4()),
+        description="Stable UUID for referencing this child job analysis",
+    )
     job_name: str = Field(description="Name of the child job")
     build_number: int = Field(description="Build number of the child job")
     jenkins_url: str | None = Field(

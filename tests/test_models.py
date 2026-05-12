@@ -11,6 +11,7 @@ from rootcoz.models import (
     AnalysisDetail,
     AnalysisResult,
     AnalyzeRequest,
+    ChildJobAnalysis,
     CodeFix,
     CreateIssueRequest,
     CreateIssueResponse,
@@ -1110,3 +1111,58 @@ class TestAnalyzeRequestForce:
         """force does not appear in model_fields_set when omitted."""
         req = AnalyzeRequest(job_name="j", build_number=1)
         assert "force" not in req.model_fields_set
+
+
+class TestFailureAnalysisUUID:
+    """Tests for the UUID field on FailureAnalysis."""
+
+    def test_failure_has_uuid(self) -> None:
+        """FailureAnalysis should have an auto-generated UUID."""
+        fa = FailureAnalysis(
+            test_name="test_x",
+            error="err",
+            analysis=AnalysisDetail(classification="CODE ISSUE"),
+        )
+        assert fa.id
+        assert len(fa.id) == 36  # UUID format
+
+    def test_failure_uuid_unique(self) -> None:
+        """Two FailureAnalysis instances should have different UUIDs."""
+        fa1 = FailureAnalysis(
+            test_name="test_a",
+            error="err",
+            analysis=AnalysisDetail(),
+        )
+        fa2 = FailureAnalysis(
+            test_name="test_b",
+            error="err",
+            analysis=AnalysisDetail(),
+        )
+        assert fa1.id != fa2.id
+
+    def test_failure_uuid_preserved_from_json(self) -> None:
+        """UUID should survive JSON round-trip."""
+        fa = FailureAnalysis(
+            test_name="test_x",
+            error="err",
+            analysis=AnalysisDetail(),
+        )
+        data = fa.model_dump(mode="json")
+        fa2 = FailureAnalysis.model_validate(data)
+        assert fa2.id == fa.id
+
+
+class TestChildJobAnalysisUUID:
+    """Tests for the UUID field on ChildJobAnalysis."""
+
+    def test_child_has_uuid(self) -> None:
+        """ChildJobAnalysis should have an auto-generated UUID."""
+        cja = ChildJobAnalysis(job_name="child-1", build_number=1)
+        assert cja.id
+        assert len(cja.id) == 36
+
+    def test_child_uuid_unique(self) -> None:
+        """Two ChildJobAnalysis instances should have different UUIDs."""
+        c1 = ChildJobAnalysis(job_name="a", build_number=1)
+        c2 = ChildJobAnalysis(job_name="b", build_number=2)
+        assert c1.id != c2.id

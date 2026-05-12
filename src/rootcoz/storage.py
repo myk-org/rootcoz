@@ -982,6 +982,87 @@ async def get_result(job_id: str, *, strip_sensitive: bool = True) -> dict | Non
         return None
 
 
+def _find_failure_by_uuid_in_failures(
+    failures: list[dict], failure_uuid: str
+) -> dict | None:
+    """Search a flat list of failure dicts for a matching UUID."""
+    for f in failures:
+        if f.get("id") == failure_uuid:
+            return f
+    return None
+
+
+def _find_failure_by_uuid_in_children(
+    children: list[dict], failure_uuid: str
+) -> tuple[dict | None, str, int]:
+    """Recursively search child job analyses for a failure with matching UUID.
+
+    Returns:
+        (failure_dict, child_job_name, child_build_number) or (None, "", 0).
+    """
+    for child in children:
+        # Check direct failures of this child
+        found = _find_failure_by_uuid_in_failures(
+            child.get("failures", []), failure_uuid
+        )
+        if found is not None:
+            return found, child.get("job_name", ""), child.get("build_number", 0)
+        # Recurse into nested children
+        found, cjn, cbn = _find_failure_by_uuid_in_children(
+            child.get("failed_children", []), failure_uuid
+        )
+        if found is not None:
+            return found, cjn, cbn
+    return None, "", 0
+
+
+async def find_failure_by_uuid(
+    failure_uuid: str,
+) -> dict | None:
+    """Search all stored results for a failure with the given UUID.
+
+    Uses SQLite ``INSTR`` to pre-filter rows that *might* contain the UUID,
+    then verifies in Python.
+
+    Returns:
+        Dict with ``job_id``, ``failure``, ``child_job_name``,
+        ``child_build_number``, or ``None`` if not found.
+    """
+    async with _connect_db() as db:
+        cursor = await db.execute(
+            "SELECT job_id, result_json FROM results "
+            "WHERE result_json IS NOT NULL AND INSTR(result_json, ?) > 0",
+            (failure_uuid,),
+        )
+        async for row in cursor:
+            result_data = parse_result_json(row["result_json"], job_id=row["job_id"])
+            if not result_data:
+                continue
+            # Search top-level failures
+            found = _find_failure_by_uuid_in_failures(
+                result_data.get("failures", []), failure_uuid
+            )
+            if found is not None:
+                return {
+                    "job_id": row["job_id"],
+                    "failure": found,
+                    "child_job_name": "",
+                    "child_build_number": 0,
+                }
+            # Search child job analyses
+            found, cjn, cbn = _find_failure_by_uuid_in_children(
+                result_data.get("child_job_analyses", []), failure_uuid
+            )
+            if found is not None:
+                return {
+                    "job_id": row["job_id"],
+                    "failure": found,
+                    "child_job_name": cjn,
+                    "child_build_number": cbn,
+                }
+    return None
+
+
 async def list_results(limit: int = 50) -> list[dict]:
     """List recent analysis results.
 

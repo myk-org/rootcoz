@@ -43,12 +43,16 @@ admin_app = typer.Typer(help="Admin management commands.", no_args_is_help=True)
 admin_users_app = typer.Typer(help="Manage admin users.", no_args_is_help=True)
 
 metadata_app = typer.Typer(help="Manage job metadata.", no_args_is_help=True)
+failure_app = typer.Typer(
+    help="Look up and re-analyze individual failures.", no_args_is_help=True
+)
 
 app.add_typer(results_app, name="results")
 app.add_typer(history_app, name="history")
 app.add_typer(comments_app, name="comments")
 app.add_typer(classifications_app, name="classifications")
 app.add_typer(metadata_app, name="metadata")
+app.add_typer(failure_app, name="failure")
 app.add_typer(config_app, name="config")
 app.add_typer(auth_app, name="auth")
 app.add_typer(admin_app, name="admin")
@@ -1024,6 +1028,49 @@ def re_analyze_cmd(
     data = _run_client_command(
         json_output,
         lambda c: c.re_analyze(job_id),
+        emit_output=False,
+    )
+    if not _state.get("json", False):
+        typer.echo(f"Re-analysis queued: {data.get('job_id', '')}")
+        typer.echo(f"Status: {data.get('status', '')}")
+        typer.echo(f"Poll: {data.get('result_url', '')}")
+
+
+# -- Failure ------------------------------------------------------------------
+
+
+@failure_app.command("show")
+def failure_show(
+    failure_uuid: str = typer.Argument(help="UUID of the failure to look up."),
+    json_output: bool = _JSON_OPTION,
+):
+    """Show a failure analysis by its UUID."""
+    data = _run_client_command(
+        json_output,
+        lambda c: c.get_failure(failure_uuid),
+        emit_output=False,
+    )
+    if not _state.get("json", False):
+        failure = data.get("failure", {})
+        typer.echo(f"Job ID: {data.get('job_id', '')}")
+        typer.echo(f"Test: {failure.get('test_name', '')}")
+        typer.echo(f"Error: {failure.get('error', '')}")
+        analysis = failure.get("analysis", {})
+        if analysis.get("classification"):
+            typer.echo(f"Classification: {analysis['classification']}")
+        if analysis.get("details"):
+            typer.echo(f"\nDetails:\n{analysis['details']}")
+
+
+@failure_app.command("re-analyze")
+def failure_re_analyze_cmd(
+    failure_uuid: str = typer.Argument(help="UUID of the failure to re-analyze."),
+    json_output: bool = _JSON_OPTION,
+):
+    """Re-analyze a single failure by its UUID."""
+    data = _run_client_command(
+        json_output,
+        lambda c: c.re_analyze_failure(failure_uuid),
         emit_output=False,
     )
     if not _state.get("json", False):

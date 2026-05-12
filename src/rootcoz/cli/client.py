@@ -904,6 +904,23 @@ class RootCozClient:
             "POST", "/api/jobs/metadata/rules/preview", json={"job_name": job_name}
         )
 
+    # -- Failures ------------------------------------------------------------
+
+    def get_failure(self, failure_uuid: str) -> dict:
+        """Look up a failure by UUID. GET /api/failures/{failure_uuid}"""
+        return self._request("GET", f"/api/failures/{failure_uuid}")
+
+    def re_analyze_failure(self, failure_uuid: str) -> dict:
+        """Re-analyze a single failure by UUID. POST /api/failures/{failure_uuid}/re-analyze"""
+        return self._request(
+            "POST",
+            f"/api/failures/{failure_uuid}/re-analyze",
+            json={},
+            accept_statuses=(202,),
+        )
+
+    # -- Comment Intent -------------------------------------------------------
+
     def analyze_comment_intent(
         self,
         comment: str,

@@ -1016,3 +1016,76 @@ class TestGetHistoryClassification:
                 child_build_number=6,
             )
             assert cls2 == "REGRESSION"
+
+
+class TestFindFailureByUuid:
+    """Tests for find_failure_by_uuid."""
+
+    async def test_find_in_flat_failures(self, setup_test_db: Path) -> None:
+        """Test finding a failure by UUID in a flat failures list."""
+        with patch.object(storage, "DB_PATH", setup_test_db):
+            await storage.save_result(
+                job_id="job-flat",
+                jenkins_url="http://jenkins/flat",
+                status="completed",
+                result={
+                    "failures": [
+                        {"id": "uuid-aaa", "test_name": "test_one", "error": "boom"},
+                        {"id": "uuid-bbb", "test_name": "test_two", "error": "crash"},
+                    ],
+                },
+            )
+            result = await storage.find_failure_by_uuid("uuid-bbb")
+            assert result is not None
+            assert result["job_id"] == "job-flat"
+            assert result["failure"]["test_name"] == "test_two"
+            assert result["child_job_name"] == ""
+            assert result["child_build_number"] == 0
+
+    async def test_find_in_nested_children(self, setup_test_db: Path) -> None:
+        """Test finding a failure in nested child job analyses."""
+        with patch.object(storage, "DB_PATH", setup_test_db):
+            await storage.save_result(
+                job_id="job-parent",
+                jenkins_url="http://jenkins/parent",
+                status="completed",
+                result={
+                    "failures": [],
+                    "child_job_analyses": [
+                        {
+                            "job_name": "child-1",
+                            "build_number": 10,
+                            "failures": [
+                                {
+                                    "id": "uuid-child-1",
+                                    "test_name": "test_child",
+                                    "error": "err",
+                                },
+                            ],
+                            "failed_children": [],
+                        },
+                    ],
+                },
+            )
+            result = await storage.find_failure_by_uuid("uuid-child-1")
+            assert result is not None
+            assert result["job_id"] == "job-parent"
+            assert result["failure"]["test_name"] == "test_child"
+            assert result["child_job_name"] == "child-1"
+            assert result["child_build_number"] == 10
+
+    async def test_returns_none_for_unknown_uuid(self, setup_test_db: Path) -> None:
+        """Test returning None for unknown UUID."""
+        with patch.object(storage, "DB_PATH", setup_test_db):
+            await storage.save_result(
+                job_id="job-exists",
+                jenkins_url="http://jenkins/exists",
+                status="completed",
+                result={
+                    "failures": [
+                        {"id": "uuid-known", "test_name": "test_known", "error": "ok"},
+                    ],
+                },
+            )
+            result = await storage.find_failure_by_uuid("uuid-does-not-exist")
+            assert result is None
