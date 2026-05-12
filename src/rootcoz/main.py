@@ -3029,6 +3029,16 @@ async def _validate_test_name_in_result(
         )
 
 
+def _child_matches(child: dict, job_name: str, build_number: int = 0) -> bool:
+    """Return True if *child* matches the given job name and optional build number.
+
+    When ``build_number`` is 0 the match is by name only (wildcard).
+    """
+    return child.get("job_name") == job_name and (
+        build_number == 0 or child.get("build_number") == build_number
+    )
+
+
 def _find_failure_in_children(
     children: list[dict],
     test_name: str,
@@ -3037,9 +3047,7 @@ def _find_failure_in_children(
 ) -> dict | None:
     """Recursively find a failure dict in child job analyses."""
     for child in children:
-        if child.get("job_name") == child_job_name and (
-            child_build_number == 0 or child.get("build_number") == child_build_number
-        ):
+        if _child_matches(child, child_job_name, child_build_number):
             for f in child.get("failures", []):
                 if f.get("test_name") == test_name:
                     return f
@@ -3085,9 +3093,7 @@ def _find_child_job_in_children(
     ``child_build_number == 0`` matches by name only.
     """
     for child in children:
-        if child.get("job_name") == child_job_name and (
-            child_build_number == 0 or child.get("build_number") == child_build_number
-        ):
+        if _child_matches(child, child_job_name, child_build_number):
             return child
         found = _find_child_job_in_children(
             child.get("failed_children", []),
@@ -4361,6 +4367,8 @@ async def _execute_rp_push(
             f"child-{urllib.parse.quote(child_job_name, safe='')}-{child_build_number}"
         )
         report_url = f"{report_url}#{anchor}"
+    elif child_build_number is not None:
+        raise ValueError("child_build_number requires child_job_name to be set")
 
     failures_data = result_data.get("failures", [])
     if not failures_data:
