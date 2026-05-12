@@ -588,20 +588,28 @@ def _reconstruct_from_params(
     if "force" in params:
         overrides["force_analysis"] = params["force"]
 
-    # Tests repo URL
-    recomposed = _recompose_repo_spec(
-        params.get("tests_repo_url", ""), params.get("tests_repo_ref", "")
-    )
-    if recomposed:
+    # Tests repo URL — use `is not None` so an explicit empty string
+    # (clearing the field) is preserved instead of silently dropped.
+    stored_tests_repo_url = params.get("tests_repo_url")
+    if stored_tests_repo_url is not None:
+        recomposed = _recompose_repo_spec(
+            stored_tests_repo_url, params.get("tests_repo_ref", "")
+        )
         overrides["tests_repo_url"] = recomposed
 
-    # SecretStr fields
-    if params.get("jira_api_token"):
-        overrides["jira_api_token"] = SecretStr(params["jira_api_token"])
-    if params.get("jira_pat"):
-        overrides["jira_pat"] = SecretStr(params["jira_pat"])
-    if params.get("github_token"):
-        overrides["github_token"] = SecretStr(params["github_token"])
+    # SecretStr fields — use `is not None` to preserve explicit clears.
+    if params.get("jira_api_token") is not None:
+        overrides["jira_api_token"] = (
+            SecretStr(params["jira_api_token"]) if params["jira_api_token"] else None
+        )
+    if params.get("jira_pat") is not None:
+        overrides["jira_pat"] = (
+            SecretStr(params["jira_pat"]) if params["jira_pat"] else None
+        )
+    if params.get("github_token") is not None:
+        overrides["github_token"] = (
+            SecretStr(params["github_token"]) if params["github_token"] else None
+        )
     if "tests_repo_token" in params:
         token_value = params["tests_repo_token"]
         overrides["tests_repo_token"] = (
@@ -3293,7 +3301,15 @@ def _resolve_analyzed_repo(
     # user-specified repo from borrowing the deployment token.
     token = ""
     if request_params:
-        decrypted = decrypt_sensitive_fields(request_params)
+        try:
+            decrypted = decrypt_sensitive_fields(request_params)
+        except Exception:
+            logger.warning(
+                "Failed to decrypt stored request_params; "
+                "falling back to server token only",
+                exc_info=True,
+            )
+            decrypted = {}
         stored_token = decrypted.get("tests_repo_token", "")
         if not _is_encrypted_value(stored_token):
             token = stored_token
