@@ -3295,26 +3295,18 @@ def _resolve_analyzed_repo(
     return url, ref, token
 
 
-def _resolve_github_repo_url(
-    body_repo_url: str, settings: Settings, result_data: dict
-) -> str:
-    """Validate and resolve GitHub repo URL from request body or fallback.
+def _resolve_github_repo_url(settings: Settings, result_data: dict) -> str:
+    """Resolve GitHub repo URL from server config / analyzed result only.
 
-    If *body_repo_url* is provided it is validated via ``parse_github_repo_url``
-    (which raises ``ValueError`` on bad input).  Otherwise falls back to
-    ``_resolve_analyzed_repo``.
+    The repo URL is resolved via ``_resolve_analyzed_repo`` which consults
+    the deployment-level ``TESTS_REPO_URL`` setting and stored analysis
+    parameters.  Request-body overrides are intentionally **not** accepted
+    so that callers cannot retarget issue creation or duplicate search away
+    from the deployment-configured repository while using server credentials.
 
-    Raises:
-        HTTPException: 400 when *body_repo_url* is invalid.
+    Returns:
+        The resolved repo URL, or an empty string when unavailable.
     """
-    if body_repo_url:
-        try:
-            parse_github_repo_url(body_repo_url)
-        except ValueError as exc:
-            raise HTTPException(
-                status_code=400, detail=f"Invalid github_repo_url: {exc}"
-            ) from exc
-        return body_repo_url
     url, _ref, _token = _resolve_analyzed_repo(settings, result_data)
     return url
 
@@ -3506,9 +3498,7 @@ async def preview_github_issue(
     )
 
     # Duplicate detection (best-effort: failures must not break preview)
-    tests_repo_url = _resolve_github_repo_url(
-        body.github_repo_url, settings, result_data
-    )
+    tests_repo_url = _resolve_github_repo_url(settings, result_data)
     github_token = (body.github_token or "").strip() or (
         settings.github_token.get_secret_value() if settings.github_token else ""
     )
@@ -3796,9 +3786,7 @@ async def create_github_issue_endpoint(
     if username:
         issue_body += f"\n\n---\n_Reported by: {username} via rootcoz_"
 
-    tests_repo_url = _resolve_github_repo_url(
-        body.github_repo_url, settings, _result_data
-    )
+    tests_repo_url = _resolve_github_repo_url(settings, _result_data)
     if not tests_repo_url:
         raise HTTPException(
             status_code=400,

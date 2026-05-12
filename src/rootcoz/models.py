@@ -721,11 +721,8 @@ class _TrackerCredentialsMixin(BaseModel):
     jira_security_level: str = Field(
         default="", description="Jira security level name for restricted issues"
     )
-    github_repo_url: str = Field(
-        default="", description="Override GitHub repo URL for issue creation"
-    )
 
-    @field_validator("jira_project_key", "jira_security_level", "github_repo_url")
+    @field_validator("jira_project_key", "jira_security_level")
     @classmethod
     def _strip_tracker_overrides(cls, v: str) -> str:
         return v.strip() if isinstance(v, str) else v
