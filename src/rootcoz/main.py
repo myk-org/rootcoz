@@ -1001,6 +1001,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
                         "access-control-request-headers", "authorization, content-type"
                     ),
                     "Access-Control-Max-Age": "86400",
+                    "Vary": "Origin, Access-Control-Request-Method, Access-Control-Request-Headers",
                 },
             )
 
@@ -3644,8 +3645,10 @@ async def preview_jira_bug(
             )
             # AI relevance filtering — only if AI is configured and candidates exist
             request_params = result_data.get("request_params") or {}
-            ai_provider = ai_provider or request_params.get("ai_provider", "")
-            ai_model = ai_model or request_params.get("ai_model", "")
+            ai_provider = (
+                body.ai_provider or request_params.get("ai_provider", "") or AI_PROVIDER
+            )
+            ai_model = body.ai_model or request_params.get("ai_model", "") or AI_MODEL
             if candidates and ai_provider and ai_model:
                 try:
                     matches = await filter_matches_with_ai(
