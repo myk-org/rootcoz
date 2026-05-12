@@ -230,15 +230,50 @@ def _restore_logger(main_logger, original_level, caplog):
 
 
 def test_middleware_logs_masked_body(test_client, caplog):
-    """POST request body is logged at DEBUG with sensitive fields masked."""
+    """POST request body is logged at DEBUG with sensitive fields masked.
+
+    Uses /api/validate-token (not in _BODY_LOGGING_SKIP_PATHS) to verify
+    that body logging + masking works correctly.
+    """
+    main_logger, orig_level = _capture_debug_logs(caplog)
+    try:
+        payload = {
+            "token_type": "github",
+            "token": "super-secret-token-value",  # pragma: allowlist secret
+            "email": "user@example.com",
+        }
+        with caplog.at_level(logging.DEBUG):
+            test_client.post(
+                "/api/validate-token",
+                json=payload,
+                cookies={"rootcoz_username": "testuser"},
+            )
+
+        debug_messages = [
+            r.message for r in caplog.records if r.levelno == logging.DEBUG
+        ]
+        body_log = [
+            m for m in debug_messages if "Incoming POST /api/validate-token body:" in m
+        ]
+        assert body_log, "Expected a DEBUG log for the incoming request body"
+        log_entry = body_log[0]
+        # Sensitive values must be masked
+        assert "super-secret-token-value" not in log_entry
+        assert "***" in log_entry
+        # Non-sensitive values should be present
+        assert "user@example.com" in log_entry
+    finally:
+        _restore_logger(main_logger, orig_level, caplog)
+
+
+def test_skip_path_body_not_logged(test_client, caplog):
+    """POST to a _BODY_LOGGING_SKIP_PATHS endpoint must NOT log the body."""
     main_logger, orig_level = _capture_debug_logs(caplog)
     try:
         payload = {
             "type": "jenkins",
             "job_name": "my-job",
             "build_number": 42,
-            "jenkins_password": "super-secret",  # pragma: allowlist secret
-            "github_token": "test-github-value",  # pragma: allowlist secret
         }
         with caplog.at_level(logging.DEBUG):
             test_client.post(
@@ -251,23 +286,51 @@ def test_middleware_logs_masked_body(test_client, caplog):
             r.message for r in caplog.records if r.levelno == logging.DEBUG
         ]
         body_log = [m for m in debug_messages if "Incoming POST /analyze body:" in m]
-        assert body_log, "Expected a DEBUG log for the incoming request body"
-        log_entry = body_log[0]
-        # Sensitive values must be masked
-        assert "super-secret" not in log_entry
-        assert "test-github-value" not in log_entry
-        assert "***" in log_entry
-        # Non-sensitive values should be present
-        assert "my-job" in log_entry
+        assert not body_log, "/analyze is in skip-paths; body should NOT be logged"
     finally:
         _restore_logger(main_logger, orig_level, caplog)
 
 
 def test_validation_error_logged_at_debug(test_client, caplog):
-    """422 validation errors are logged at DEBUG with masked body."""
+    """422 validation errors are logged at DEBUG with masked body.
+
+    Uses /api/validate-token (not in _BODY_LOGGING_SKIP_PATHS) with an
+    invalid payload to trigger RequestValidationError and verify the
+    debug log contains masked sensitive values.
+    """
     main_logger, orig_level = _capture_debug_logs(caplog)
     try:
-        # Send a payload missing required fields to trigger RequestValidationError
+        # Send a payload missing the required 'token' field
+        payload = {
+            "token_type": "invalid-type",
+            "token": "oops-secret",  # pragma: allowlist secret
+        }
+        with caplog.at_level(logging.DEBUG):
+            resp = test_client.post(
+                "/api/validate-token",
+                json=payload,
+            )
+
+        assert resp.status_code == 422
+
+        debug_messages = [
+            r.message for r in caplog.records if r.levelno == logging.DEBUG
+        ]
+        validation_logs = [m for m in debug_messages if "RequestValidationError" in m]
+        assert validation_logs, "Expected a DEBUG log for the validation error"
+        log_entry = validation_logs[0]
+        # Sensitive values must be masked
+        assert "oops-secret" not in log_entry
+        assert "***" in log_entry
+    finally:
+        _restore_logger(main_logger, orig_level, caplog)
+
+
+def test_validation_error_skip_path_no_debug_body(test_client, caplog):
+    """422 on a skip-path endpoint must NOT log body at DEBUG."""
+    main_logger, orig_level = _capture_debug_logs(caplog)
+    try:
+        # Missing required fields triggers 422 on /analyze
         payload = {
             "type": "jenkins",
             "jenkins_password": "oops-secret",  # pragma: allowlist secret
@@ -284,11 +347,9 @@ def test_validation_error_logged_at_debug(test_client, caplog):
             r.message for r in caplog.records if r.levelno == logging.DEBUG
         ]
         validation_logs = [m for m in debug_messages if "RequestValidationError" in m]
-        assert validation_logs, "Expected a DEBUG log for the validation error"
-        log_entry = validation_logs[0]
-        # Sensitive values must be masked
-        assert "oops-secret" not in log_entry
-        assert "***" in log_entry
+        assert not validation_logs, (
+            "/analyze is in skip-paths; validation error body should NOT be DEBUG-logged"
+        )
     finally:
         _restore_logger(main_logger, orig_level, caplog)
 
