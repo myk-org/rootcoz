@@ -131,7 +131,10 @@ class ErrorRateTracker:
     def window_seconds(self) -> float:
         return self._short.window_seconds
 
-    def record_request(self, status_code: int) -> None:
+    def record_request(self, status_code: int, *, method: str = "") -> None:
+        # Skip CORS preflight OPTIONS from error rate tracking
+        if method == "OPTIONS":
+            return
         now = time.monotonic()
         self._short.record_request(status_code, now)
         self._long.record_request(status_code, now)
@@ -238,7 +241,12 @@ async def check_ai_provider() -> dict[str, str]:
 
 
 async def check_reportportal(settings: Any) -> dict[str, str]:
-    """Check Report Portal configuration."""
+    """Check Report Portal reachability, token validity, and project access.
+
+    Uses the launch listing endpoint (``/api/v1/{project}/launch?page.size=1``)
+    instead of the deprecated ``/api/v1/user`` so the health check also
+    verifies that the configured project is accessible.
+    """
     if not settings.reportportal_enabled:
         return {"status": "not_configured"}
     token = (
@@ -246,8 +254,11 @@ async def check_reportportal(settings: Any) -> dict[str, str]:
         if settings.reportportal_api_token
         else ""
     )
+    project = settings.reportportal_project or ""
+    if not project:
+        return {"status": "error", "detail": "REPORTPORTAL_PROJECT is not set"}
     return await _check_http_service(
-        f"{settings.reportportal_url.rstrip('/')}/api/v1/user",
+        f"{settings.reportportal_url.rstrip('/')}/api/v1/{project}/launch?page.size=1",
         verify_ssl=settings.reportportal_verify_ssl,
         headers={"Authorization": f"Bearer {token}"},
         ok_below=400,

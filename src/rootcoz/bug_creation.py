@@ -614,6 +614,8 @@ async def search_jira_duplicates(
                 {
                     "key": c["key"],
                     "title": c["summary"],
+                    "summary": c["summary"],
+                    "description": c.get("description", ""),
                     "url": c["url"],
                     "status": c.get("status", ""),
                 }

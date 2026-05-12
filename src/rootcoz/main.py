@@ -85,6 +85,7 @@ from rootcoz.feedback import (
     generate_feedback_preview,
 )
 from rootcoz.github_issues import enrich_with_tests_repo_matches
+from rootcoz.issue_matching import filter_issue_matches_with_ai
 from rootcoz.jira import JiraClient, enrich_with_jira_matches
 from rootcoz.logging_context import JobIdFilter, get_log_file, job_id_var
 from rootcoz.metadata_rules import match_job_metadata
@@ -908,13 +909,14 @@ class ErrorTrackingMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
         if request.url.path in self._SKIP_PATHS:
             return await call_next(request)
+        method = request.method
         try:
             response = await call_next(request)
         except Exception:
-            error_tracker.record_request(500)
+            error_tracker.record_request(500, method=method)
             self._schedule_high_error_rate_alert()
             raise
-        error_tracker.record_request(response.status_code)
+        error_tracker.record_request(response.status_code, method=method)
         if response.status_code >= 500:
             self._schedule_high_error_rate_alert()
         return response
@@ -982,6 +984,10 @@ class AuthMiddleware(BaseHTTPMiddleware):
     )
 
     async def dispatch(self, request: Request, call_next):
+        # CORS preflight requests must pass through without authentication
+        if request.method == "OPTIONS":
+            return await call_next(request)
+
         path = request.url.path
 
         # Set defaults
@@ -3616,10 +3622,34 @@ async def preview_jira_bug(
         and effective_jira_settings.jira_project_key
     ):
         try:
-            similar = await search_jira_duplicates(
+            candidates = await search_jira_duplicates(
                 title=content["title"],
                 settings=effective_jira_settings,
             )
+            # AI relevance filtering — only if AI is configured and candidates exist
+            if candidates and ai_provider and ai_model:
+                try:
+                    evaluations = await filter_issue_matches_with_ai(
+                        bug_title=content["title"],
+                        bug_description=content["body"],
+                        candidates=candidates,
+                        ai_provider=ai_provider,
+                        ai_model=ai_model,
+                        job_id=job_id,
+                        call_type="jira_preview_filter",
+                    )
+                    relevant_keys = {ev["key"] for ev in evaluations}
+                    similar = [c for c in candidates if c["key"] in relevant_keys]
+                except Exception:
+                    logger.warning(
+                        "AI relevance filtering failed for job_id=%s, "
+                        "returning unfiltered candidates",
+                        job_id,
+                        exc_info=True,
+                    )
+                    similar = candidates
+            else:
+                similar = candidates
         except Exception:
             logger.warning(
                 "Jira duplicate search failed for job_id=%s",
