@@ -3659,19 +3659,12 @@ async def preview_jira_bug(
                         ai_model=ai_model,
                         job_id=job_id,
                     )
-                    # Normalize AI-filtered results to same schema as unfiltered path
+                    # Merge AI score into original candidate data to preserve all fields
+                    candidate_by_key = {c["key"]: c for c in candidates}
                     similar = [
-                        {
-                            "key": m.key,
-                            "title": m.summary,
-                            "summary": m.summary,
-                            "description": "",
-                            "url": m.url,
-                            "status": m.status,
-                            "priority": m.priority,
-                            "score": m.score,
-                        }
+                        {**candidate_by_key[m.key], "score": m.score}
                         for m in matches
+                        if m.key in candidate_by_key
                     ]
                 except Exception:
                     logger.warning(
