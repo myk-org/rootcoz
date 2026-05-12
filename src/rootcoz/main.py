@@ -3022,6 +3022,12 @@ async def re_analyze_failure(
     result_data = stored["result"]
     params = result_data.get("request_params", {})
 
+    if not params:
+        raise HTTPException(
+            status_code=400,
+            detail="Original analysis has no stored request_params; cannot re-analyze",
+        )
+
     # Authorization: only the original submitter or an admin may re-analyze
     _check_reanalyze_authorization(request, params)
 
@@ -3058,7 +3064,10 @@ async def re_analyze_failure(
     _copy_analysis_settings(decrypted_params, unified_fields)
 
     unified_body = UnifiedAnalyzeRequest(**unified_fields)
-    unified_body.tags = ["re-analyze"]
+    existing_tags = list(result_data.get("tags", []))
+    if "re-analyze" not in existing_tags:
+        existing_tags.append("re-analyze")
+    unified_body.tags = existing_tags
 
     # Validate and merge settings
     _resolve_ai_config(unified_body)
