@@ -4043,6 +4043,17 @@ class TestRequestParamsPreservation:
 class TestReAnalyzeEndpoint:
     """Tests for POST /re-analyze/{job_id}."""
 
+    @staticmethod
+    async def _create_origin_job(
+        job_id: str,
+        jenkins_url: str,
+        result_data: dict,
+    ) -> None:
+        """Save a completed origin job into storage for re-analysis tests."""
+        from rootcoz import storage
+
+        await storage.save_result(job_id, jenkins_url, "completed", result_data)
+
     def test_re_analyze_not_found(self, test_client) -> None:
         """Re-analyze returns 404 when job_id does not exist."""
         response = test_client.post("/re-analyze/nonexistent", json={})
@@ -4126,10 +4137,9 @@ class TestReAnalyzeEndpoint:
                 }
             ),
         }
-        await storage.save_result(
+        await self._create_origin_job(
             "job-origin",
             "http://jenkins/job/my-job/42/",
-            "completed",
             result_data,
         )
         with patch("rootcoz.main.process_analysis_with_id"):
@@ -4141,7 +4151,7 @@ class TestReAnalyzeEndpoint:
         assert stored is not None
         params = stored["result"]["request_params"]
         assert params["reanalyzed_from_job_id"] == "job-origin"
-        assert params.get("reanalyzed_from_job_name") == "My Job"
+        assert params["reanalyzed_from_job_name"] == "My Job"
 
     @pytest.mark.asyncio
     async def test_re_analyze_file_stores_reanalyzed_metadata(
@@ -4161,10 +4171,9 @@ class TestReAnalyzeEndpoint:
                 }
             ),
         }
-        await storage.save_result(
+        await self._create_origin_job(
             "file-origin",
             "",
-            "completed",
             result_data,
         )
         with patch("rootcoz.main._process_file_raw_analysis"):
