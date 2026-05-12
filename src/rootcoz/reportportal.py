@@ -9,7 +9,7 @@ from __future__ import annotations
 import os
 import threading
 import warnings
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 import requests as _requests
 import urllib3
@@ -40,7 +40,7 @@ if not hasattr(RPClient, _PREFETCH_ATTR):
     )
 
 
-def _noop_prefetch(self: RPClient) -> None:  # type: ignore[no-untyped-def]
+def _noop_prefetch(self: Any) -> None:
     """No-op replacement: skip the background thread, mark event done."""
     self._api_info_prefetched.set()
 

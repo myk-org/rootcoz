@@ -2,7 +2,7 @@
 
 import json
 import os
-from types import MappingProxyType
+from typing import ClassVar
 from unittest.mock import MagicMock, patch
 
 import click
@@ -24,7 +24,8 @@ def _extract_envvar_names(command_name: str) -> tuple[str, ...]:
     in sync with the analyze command definition automatically.
     """
     # Resolve the underlying Click command via the typer-created Click Group
-    click_group: click.Group = typer.main.get_command(app)  # type: ignore[attr-defined]
+    click_group = typer.main.get_command(app)
+    assert isinstance(click_group, click.Group)
     cmd = click_group.commands.get(command_name)
     if not cmd:
         raise AssertionError(
@@ -60,6 +61,8 @@ _FAKE_JIRA_PAT = "cfg-jira-pat"  # noqa: S105
 _FAKE_GITHUB_TOKEN = "ghp_cfg_token"  # noqa: S105
 _FAKE_GITHUB_CLI_TOKEN = "ghp_tok"  # noqa: S105
 _FAKE_GITHUB_CLI_OVERRIDE = "ghp_cli_override"  # noqa: S105  # pragma: allowlist secret
+_FAKE_JIRA_CLI_TOKEN = "jira-tok"  # noqa: S105
+_FAKE_GITHUB_TEST_TOKEN = "ghp_test"  # noqa: S105
 
 
 @pytest.fixture
@@ -902,7 +905,7 @@ class TestClassificationsParentJobName:
 class TestAnalyzeAllOptions:
     """Verify that all AnalyzeRequest fields are forwarded via CLI options."""
 
-    _ANALYZE_RESPONSE = MappingProxyType({"status": "queued", "job_id": "j1"})
+    _ANALYZE_RESPONSE: ClassVar[dict] = {"status": "queued", "job_id": "j1"}
 
     @pytest.mark.parametrize(
         "cli_flag,cli_value,body_key,expected_value",
@@ -1482,16 +1485,16 @@ class TestPreviewIssueCommand:
                 "--type",
                 "github",
                 "--github-token",
-                "ghp_tok",  # noqa: S106
+                _FAKE_GITHUB_CLI_TOKEN,
                 "--jira-token",
-                "jira-tok",  # noqa: S106
+                _FAKE_JIRA_CLI_TOKEN,
                 "--jira-email",
                 "user@example.com",
             ],
         )
         assert result.exit_code == 0
         kwargs = mock_client.preview_github_issue.call_args[1]
-        assert kwargs["github_token"] == "ghp_tok"  # noqa: S105
+        assert kwargs["github_token"] == _FAKE_GITHUB_CLI_TOKEN
         assert "jira_token" not in kwargs
         assert "jira_email" not in kwargs
 
@@ -1511,9 +1514,9 @@ class TestPreviewIssueCommand:
                 "--type",
                 "jira",
                 "--github-token",
-                "ghp_tok",  # noqa: S106
+                _FAKE_GITHUB_CLI_TOKEN,
                 "--jira-token",
-                "jira-tok",  # noqa: S106
+                _FAKE_JIRA_CLI_TOKEN,
                 "--jira-email",
                 "user@example.com",
             ],
@@ -1521,7 +1524,7 @@ class TestPreviewIssueCommand:
         assert result.exit_code == 0
         kwargs = mock_client.preview_jira_bug.call_args[1]
         assert "github_token" not in kwargs
-        assert kwargs["jira_token"] == "jira-tok"  # noqa: S105
+        assert kwargs["jira_token"] == _FAKE_JIRA_CLI_TOKEN
         assert kwargs["jira_email"] == "user@example.com"
 
     def test_preview_with_issue_prompt(self, mock_client):
@@ -1688,16 +1691,16 @@ class TestCreateIssueCommand:
                 "--body",
                 "Details...",
                 "--github-token",
-                "ghp_tok",  # noqa: S106
+                _FAKE_GITHUB_CLI_TOKEN,
                 "--jira-token",
-                "jira-tok",  # noqa: S106
+                _FAKE_JIRA_CLI_TOKEN,
                 "--jira-email",
                 "user@example.com",
             ],
         )
         assert result.exit_code == 0
         kwargs = mock_client.create_github_issue.call_args[1]
-        assert kwargs["github_token"] == "ghp_tok"  # noqa: S105
+        assert kwargs["github_token"] == _FAKE_GITHUB_CLI_TOKEN
         assert "jira_token" not in kwargs
         assert "jira_email" not in kwargs
 
@@ -1722,9 +1725,9 @@ class TestCreateIssueCommand:
                 "--body",
                 "Description...",
                 "--github-token",
-                "ghp_tok",  # noqa: S106
+                _FAKE_GITHUB_CLI_TOKEN,
                 "--jira-token",
-                "jira-tok",  # noqa: S106
+                _FAKE_JIRA_CLI_TOKEN,
                 "--jira-email",
                 "user@example.com",
             ],
@@ -1732,7 +1735,7 @@ class TestCreateIssueCommand:
         assert result.exit_code == 0
         kwargs = mock_client.create_jira_bug.call_args[1]
         assert "github_token" not in kwargs
-        assert kwargs["jira_token"] == "jira-tok"  # noqa: S105
+        assert kwargs["jira_token"] == _FAKE_JIRA_CLI_TOKEN
         assert kwargs["jira_email"] == "user@example.com"
 
 
@@ -1930,7 +1933,7 @@ class TestJsonPerCommand:
 class TestAnalyzeConfigDefaults:
     """Config file values are used as defaults when CLI flags are not provided."""
 
-    _ANALYZE_RESPONSE = MappingProxyType({"status": "queued", "job_id": "j1"})
+    _ANALYZE_RESPONSE: ClassVar[dict] = {"status": "queued", "job_id": "j1"}
 
     _FULL_CONFIG = ServerConfig(
         url="http://localhost:8000",
@@ -2140,7 +2143,7 @@ class TestAnalyzeConfigDefaults:
 class TestAnalyzePeerFlags:
     """Tests for --peers and --peer-analysis-max-rounds CLI flags."""
 
-    _ANALYZE_RESPONSE = MappingProxyType({"status": "queued", "job_id": "j1"})
+    _ANALYZE_RESPONSE: ClassVar[dict] = {"status": "queued", "job_id": "j1"}
 
     def test_peers_flag_parsed_and_sent(self, mock_client):
         """--peers should parse and send peer_ai_configs list in request body."""
@@ -2448,10 +2451,110 @@ class TestAnalyzePeerFlags:
             assert "must be between 1 and 10" in result.output
 
 
+class TestAnalyzeSourceFlag:
+    """Tests for the unified analyze command with --source flag."""
+
+    _ANALYZE_RESPONSE: ClassVar[dict] = {"status": "queued", "job_id": "j1"}
+
+    def test_analyze_source_jenkins_works(self, mock_client):
+        mock_client.analyze.return_value = self._ANALYZE_RESPONSE
+        result = runner.invoke(
+            app,
+            [
+                "analyze",
+                "--source",
+                "jenkins",
+                "--job-name",
+                "my-job",
+                "--build-number",
+                "1",
+            ],
+        )
+        assert result.exit_code == 0
+        assert "j1" in result.output
+        mock_client.analyze.assert_called_once()
+
+    def test_analyze_source_file_works(self, mock_client, tmp_path):
+        xml_file = tmp_path / "results.xml"
+        xml_file.write_text("<testsuites/>")
+        mock_client.analyze_file.return_value = self._ANALYZE_RESPONSE
+        result = runner.invoke(
+            app,
+            ["analyze", "--source", "file", "--file", str(xml_file)],
+        )
+        assert result.exit_code == 0
+        assert "j1" in result.output
+        mock_client.analyze_file.assert_called_once()
+        kwargs = mock_client.analyze_file.call_args
+        assert kwargs[0][0] == "<testsuites/>"
+
+    def test_analyze_source_file_without_file_errors(self, mock_client):
+        result = runner.invoke(
+            app,
+            ["analyze", "--source", "file"],
+        )
+        assert result.exit_code == 1
+        assert "--file" in result.output
+
+    def test_analyze_source_jenkins_without_job_name_errors(self, mock_client):
+        result = runner.invoke(
+            app,
+            ["analyze", "--source", "jenkins", "--build-number", "1"],
+        )
+        assert result.exit_code == 1
+        assert "--job-name" in result.output
+
+    def test_analyze_source_jenkins_without_build_number_errors(self, mock_client):
+        result = runner.invoke(
+            app,
+            ["analyze", "--source", "jenkins", "--job-name", "my-job"],
+        )
+        assert result.exit_code == 1
+        assert "--build-number" in result.output
+
+    def test_analyze_source_file_missing_file_errors(self, mock_client):
+        result = runner.invoke(
+            app,
+            ["analyze", "--source", "file", "--file", "/nonexistent.xml"],
+        )
+        assert result.exit_code == 1
+        assert "not found" in result.output.lower()
+
+    def test_analyze_invalid_source_errors(self, mock_client):
+        result = runner.invoke(
+            app,
+            ["analyze", "--source", "invalid"],
+        )
+        assert result.exit_code == 1
+        assert "--source" in result.output
+
+    def test_analyze_source_file_json_output(self, mock_client, tmp_path):
+        xml_file = tmp_path / "results.xml"
+        xml_file.write_text("<testsuites/>")
+        mock_client.analyze_file.return_value = self._ANALYZE_RESPONSE
+        result = runner.invoke(
+            app,
+            ["--json", "analyze", "--source", "file", "--file", str(xml_file)],
+        )
+        assert result.exit_code == 0
+        parsed = json.loads(result.output)
+        assert parsed["job_id"] == "j1"
+
+    def test_analyze_default_source_is_jenkins(self, mock_client):
+        """When --source is omitted, it defaults to jenkins."""
+        mock_client.analyze.return_value = self._ANALYZE_RESPONSE
+        result = runner.invoke(
+            app,
+            ["analyze", "--job-name", "my-job", "--build-number", "1"],
+        )
+        assert result.exit_code == 0
+        mock_client.analyze.assert_called_once()
+
+
 class TestAnalyzeAdditionalReposFlags:
     """Tests for --additional-repos CLI flag."""
 
-    _ANALYZE_RESPONSE = MappingProxyType({"status": "queued", "job_id": "j1"})
+    _ANALYZE_RESPONSE: ClassVar[dict] = {"status": "queued", "job_id": "j1"}
 
     def test_additional_repos_flag_parsed_and_sent(self, mock_client):
         """--additional-repos should parse and send additional_repos list."""
@@ -2705,12 +2808,14 @@ class TestValidateTokenCommand:
             "username": "testuser",
             "message": "Authenticated as testuser",
         }
-        result = runner.invoke(app, ["validate-token", "github", "--token", "ghp_test"])  # noqa: S106
+        result = runner.invoke(
+            app, ["validate-token", "github", "--token", _FAKE_GITHUB_TEST_TOKEN]
+        )
         assert result.exit_code == 0
         assert "Valid" in result.output
         mock_client.validate_token.assert_called_once_with(
             token_type="github",  # noqa: S106
-            token="ghp_test",  # noqa: S105, S106
+            token=_FAKE_GITHUB_TEST_TOKEN,  # noqa: S106
             email="",
         )
 
@@ -2720,7 +2825,7 @@ class TestValidateTokenCommand:
             "username": "",
             "message": "Invalid token (HTTP 401)",
         }
-        result = runner.invoke(app, ["validate-token", "github", "--token", "bad"])  # noqa: S106
+        result = runner.invoke(app, ["validate-token", "github", "--token", "bad"])
         assert result.exit_code == 1
         assert "Invalid" in result.output
 
@@ -2732,7 +2837,7 @@ class TestValidateTokenCommand:
         }
         result = runner.invoke(
             app,
-            ["--json", "validate-token", "github", "--token", "ghp_test"],  # noqa: S106
+            ["--json", "validate-token", "github", "--token", _FAKE_GITHUB_TEST_TOKEN],
         )
         assert result.exit_code == 0
         parsed = json.loads(result.output)
@@ -2750,7 +2855,7 @@ class TestValidateTokenCommand:
                 "validate-token",
                 "jira",
                 "--token",
-                "jira-tok",  # noqa: S106
+                _FAKE_JIRA_CLI_TOKEN,
                 "--email",
                 "user@example.com",
             ],
@@ -2758,7 +2863,7 @@ class TestValidateTokenCommand:
         assert result.exit_code == 0
         kwargs = mock_client.validate_token.call_args[1]
         assert kwargs["token_type"] == "jira"  # noqa: S105
-        assert kwargs["token"] == "jira-tok"  # noqa: S105
+        assert kwargs["token"] == _FAKE_JIRA_CLI_TOKEN  # noqa: S105
         assert kwargs["email"] == "user@example.com"
 
 
@@ -2966,7 +3071,7 @@ class TestAuthLoginCommand:
         }
         result = runner.invoke(
             app,
-            ["auth", "login", "--username", "admin", "--api-key", "test-key"],  # noqa: S106
+            ["auth", "login", "--username", "admin", "--api-key", "test-key"],
         )
         assert result.exit_code == 0
         assert "Logged in as admin" in result.output
@@ -2981,7 +3086,7 @@ class TestAuthLoginCommand:
         }
         result = runner.invoke(
             app,
-            ["--json", "auth", "login", "--username", "admin", "--api-key", "key"],  # noqa: S106
+            ["--json", "auth", "login", "--username", "admin", "--api-key", "key"],
         )
         assert result.exit_code == 0
         parsed = json.loads(result.output)
@@ -2991,7 +3096,7 @@ class TestAuthLoginCommand:
         mock_client.login.side_effect = RootCozError(status_code=401, detail="Invalid")
         result = runner.invoke(
             app,
-            ["auth", "login", "--username", "admin", "--api-key", "bad"],  # noqa: S106
+            ["auth", "login", "--username", "admin", "--api-key", "bad"],
         )
         assert result.exit_code == 1
         assert "Error" in result.output
@@ -3458,7 +3563,7 @@ class TestApiKeyOption:
             mock_cls.return_value = mock_instance
             result = runner.invoke(
                 app,
-                ["--api-key", "my-secret-key", "health"],  # noqa: S106
+                ["--api-key", "my-secret-key", "health"],
             )
             assert result.exit_code == 0
             mock_cls.assert_called_once_with(
@@ -3513,7 +3618,7 @@ class TestApiKeyOption:
             mock_cls.return_value = mock_instance
             result = runner.invoke(
                 app,
-                ["--api-key", "cli-key", "health"],  # noqa: S106
+                ["--api-key", "cli-key", "health"],
             )
             assert result.exit_code == 0
             mock_cls.assert_called_once_with(

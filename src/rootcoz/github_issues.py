@@ -10,12 +10,12 @@ Mirrors the Jira integration pattern in ``jira.py``.
 
 import asyncio
 import os
-import re
 from collections.abc import Sequence
 
 import httpx
 from simple_logger.logger import get_logger
 
+from rootcoz.bug_creation import parse_github_repo_url
 from rootcoz.config import Settings
 from rootcoz.issue_matching import filter_issue_matches_with_ai
 from rootcoz.models import (
@@ -29,22 +29,6 @@ logger = get_logger(name=__name__, level=os.environ.get("LOG_LEVEL", "INFO"))
 
 # Classifications considered "code issues" for tests repo search
 _CODE_ISSUE_CLASSIFICATIONS = frozenset({"CODE ISSUE"})
-
-
-def _parse_github_repo_url(repo_url: str) -> tuple[str, str]:
-    """Extract owner and repo from a GitHub repository URL.
-
-    Reuses the same regex as ``bug_creation._parse_github_repo_url``
-    but is defined here to avoid circular imports.
-
-    Returns (owner, repo) tuple.
-
-    Raises ValueError if the URL cannot be parsed.
-    """
-    match = re.match(r"https?://github\.com/([^/]+)/([^/]+?)(?:\.git)?/?$", repo_url)
-    if not match:
-        raise ValueError(f"Cannot parse GitHub repo URL: {repo_url}")
-    return match.group(1), match.group(2)
 
 
 async def search_github_issues(
@@ -69,7 +53,7 @@ async def search_github_issues(
         return []
 
     try:
-        owner, repo = _parse_github_repo_url(repo_url)
+        owner, repo = parse_github_repo_url(repo_url)
     except ValueError:
         logger.warning("Could not parse GitHub repo URL for issue search: %s", repo_url)
         return []
@@ -216,7 +200,7 @@ async def enrich_with_tests_repo_matches(
         search_results = await asyncio.gather(*tasks)
 
         # AI relevance filtering for each keyword set
-        for kw_tuple, candidates in zip(keyword_to_pairs, search_results):
+        for kw_tuple, candidates in zip(keyword_to_pairs, search_results, strict=True):
             if not candidates:
                 continue
 

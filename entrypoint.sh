@@ -46,7 +46,7 @@ if [ "$has_uvicorn" = true ] && [ "$has_port" = false ]; then
     extra_args="$extra_args --port $PORT"
 fi
 if [ "$has_uvicorn" = true ] && [ "${DEV_MODE:-}" = "true" ]; then
-    extra_args="$extra_args --reload --reload-dir /app/src"
+    extra_args="$extra_args --reload --reload-dir /app/src --timeout-graceful-shutdown 3"
 fi
 
 if [ -n "$extra_args" ]; then

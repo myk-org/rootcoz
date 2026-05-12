@@ -16,13 +16,13 @@ class TestJenkinsClientInit:
         JenkinsClient(
             url="http://jenkins.example.com",
             username="user",
-            password="pass",  # noqa: S106  # pragma: allowlist secret
+            password="pass",  # pragma: allowlist secret
             timeout=60,
         )
         mock_init.assert_called_once_with(
             url="http://jenkins.example.com",
             username="user",
-            password="pass",  # noqa: S106  # pragma: allowlist secret
+            password="pass",  # pragma: allowlist secret
             timeout=60,
         )
 
@@ -32,12 +32,12 @@ class TestJenkinsClientInit:
         JenkinsClient(
             url="http://jenkins.example.com",
             username="user",
-            password="pass",  # noqa: S106  # pragma: allowlist secret
+            password="pass",  # pragma: allowlist secret
         )
         mock_init.assert_called_once_with(
             url="http://jenkins.example.com",
             username="user",
-            password="pass",  # noqa: S106  # pragma: allowlist secret
+            password="pass",  # pragma: allowlist secret
             timeout=30,
         )
 

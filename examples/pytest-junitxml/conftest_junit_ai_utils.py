@@ -7,6 +7,7 @@ They are not tied to pytest and can be used independently.
 
 import logging
 import os
+import time
 from pathlib import Path
 
 import requests
@@ -62,7 +63,7 @@ def enrich_junit_xml(session) -> None:
     """Read JUnit XML, send to server for analysis, write enriched XML back.
 
     Reads the JUnit XML that pytest generated, POSTs the raw content to the
-    RootCoz server's /analyze-failures endpoint, and writes the enriched XML
+    RootCoz server's /analyze endpoint, and writes the enriched XML
     (with analysis results) back to the same file.
 
     Args:
@@ -102,16 +103,47 @@ def enrich_junit_xml(session) -> None:
 
     try:
         response = requests.post(
-            f"{server_url.rstrip('/')}/analyze-failures",
+            f"{server_url.rstrip('/')}/analyze",
             json={
+                "type": "file",
                 "raw_xml": raw_xml,
                 "ai_provider": ai_provider,
                 "ai_model": ai_model,
             },
-            timeout=timeout_value,
+            timeout=60,
         )
         response.raise_for_status()
-        result = response.json()
+        submit_data = response.json()
+
+        job_id = submit_data.get("job_id")
+        if not job_id:
+            logger.warning("No job_id in analyze response; skipping enrichment")
+            return
+
+        # Poll for completion
+        poll_interval = 5
+        start = time.monotonic()
+        result = None
+        while time.monotonic() - start < timeout_value:
+            time.sleep(poll_interval)
+            poll_response = requests.get(
+                f"{server_url.rstrip('/')}/results/{job_id}",
+                timeout=30,
+            )
+            if poll_response.status_code == 200:
+                poll_data = poll_response.json()
+                status = poll_data.get("status")
+                if status == "completed":
+                    result = poll_data.get("result", poll_data)
+                    break
+                elif status in ("failed", "aborted"):
+                    logger.warning("Analysis %s for %s", status, xml_path)
+                    result = poll_data.get("result", poll_data)
+                    break
+
+        if result is None:
+            logger.warning("Analysis timed out for %s", xml_path)
+            return
     except Exception as ex:
         logger.exception(f"Failed to enrich JUnit XML, original preserved. {ex}")
         return

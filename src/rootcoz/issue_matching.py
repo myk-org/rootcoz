@@ -7,10 +7,10 @@ issues from any tracker match a given bug/failure description.
 import json
 import os
 
+from ai_cli_runner import call_ai_cli
 from simple_logger.logger import get_logger
 
-from ai_cli_runner import call_ai_cli
-from rootcoz.analyzer import PROVIDER_CLI_FLAGS
+from rootcoz.engine.core import PROVIDER_CLI_FLAGS
 from rootcoz.token_tracking import record_ai_usage
 
 logger = get_logger(name=__name__, level=os.environ.get("LOG_LEVEL", "INFO"))

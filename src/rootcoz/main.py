@@ -1,5 +1,4 @@
 import asyncio
-from datetime import datetime, timedelta, timezone
 import hmac
 import json
 import logging
@@ -9,13 +8,23 @@ import time as _time
 import urllib.parse
 import uuid
 from collections import defaultdict
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Coroutine, Sequence
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Annotated, Any, Coroutine, Literal
-from xml.etree.ElementTree import ParseError
+from typing import Annotated, Any, Literal
 
+import aiosqlite
 import httpx
+import uvicorn
+from ai_cli_runner import (
+    VALID_AI_PROVIDERS,
+    call_ai_cli,
+    check_ai_cli_available,
+    model_cache,
+    pricing_cache,
+    run_parallel_with_limit,
+)
 from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
@@ -27,25 +36,28 @@ from fastapi.responses import (
     StreamingResponse,
 )
 from fastapi.staticfiles import StaticFiles
-from starlette.middleware.base import BaseHTTPMiddleware
 from pydantic import BaseModel, Field, SecretStr, ValidationError
 from simple_logger.logger import get_logger
+from starlette.middleware.base import BaseHTTPMiddleware
 
-from rootcoz.logging_context import JobIdFilter, job_id_var
-from ai_cli_runner import (
-    VALID_AI_PROVIDERS,
-    model_cache,
-    pricing_cache,
-    run_parallel_with_limit,
+from rootcoz import storage
+from rootcoz.bug_creation import (
+    create_github_issue,
+    create_jira_bug,
+    generate_github_issue_content,
+    generate_jira_bug_content,
+    parse_github_repo_url,
+    search_github_duplicates,
+    search_jira_duplicates,
 )
-from rootcoz.analyzer import (
-    JOB_INSIGHT_ISSUE_PROMPT_FILENAME,
-    clone_additional_repos,
-    resolve_additional_repos,
-    analyze_failure_group,
-    analyze_job,
-    format_exception_with_type,
-    get_failure_signature,
+from rootcoz.comment_enrichment import (
+    detect_github_issues,
+    detect_github_prs,
+    detect_jira_keys,
+    detect_mentions,
+    fetch_github_issue_status,
+    fetch_github_pr_status,
+    fetch_jira_ticket_status,
 )
 from rootcoz.config import (
     Settings,
@@ -58,38 +70,28 @@ from rootcoz.encryption import (
     decrypt_sensitive_fields,
     encrypt_sensitive_fields,
 )
-from rootcoz.github_issues import enrich_with_tests_repo_matches
-from rootcoz.jira import enrich_with_jira_matches
-from rootcoz.token_tracking import build_token_usage_summary
-from rootcoz.monitoring import (
-    build_health_response,
-    dispatch_alert,
-    error_tracker,
-    render_prometheus_metrics,
-    validate_startup_config,
-)
-from rootcoz.reportportal import AmbiguousLaunchError, ReportPortalClient
-from rootcoz.bug_creation import (
-    _parse_github_repo_url,
-    create_github_issue,
-    create_jira_bug,
-    generate_github_issue_content,
-    generate_jira_bug_content,
-    search_github_duplicates,
-    search_jira_duplicates,
+from rootcoz.engine.core import (
+    JOB_INSIGHT_ISSUE_PROMPT_FILENAME,
+    PROVIDER_CLI_FLAGS,
+    analyze_failure_group,
+    clone_additional_repos,
+    format_exception_with_type,
+    get_failure_signature,
+    resolve_additional_repos,
+    safe_update_progress,
 )
 from rootcoz.feedback import (
     create_feedback_from_preview,
     generate_feedback_preview,
 )
-from rootcoz.comment_enrichment import detect_mentions
-from rootcoz.notifications import send_mention_notifications
-from rootcoz.vapid import get_vapid_config
+from rootcoz.github_issues import enrich_with_tests_repo_matches
+from rootcoz.jira import JiraClient, enrich_with_jira_matches
+from rootcoz.logging_context import JobIdFilter, get_log_file, job_id_var
+from rootcoz.metadata_rules import match_job_metadata
 from rootcoz.models import (
     AddCommentRequest,
     AnalyzeCommentRequest,
     AnalyzeCommentResponse,
-    AnalyzeFailuresRequest,
     AnalyzeRequest,
     BaseAnalysisRequest,
     BulkDeleteRequest,
@@ -109,23 +111,26 @@ from rootcoz.models import (
     PushSubscriptionRequest,
     ReportPortalPushResult,
     SetReviewedRequest,
+    UnifiedAnalyzeRequest,
     UnsubscribeRequest,
 )
-from rootcoz.utils import (
-    _is_sensitive_key,
-    mask_sensitive_fields,
+from rootcoz.monitoring import (
+    build_health_response,
+    dispatch_alert,
+    error_tracker,
+    render_prometheus_metrics,
+    validate_startup_config,
 )
-from rootcoz.xml_enrichment import (
-    build_enriched_xml,
-    extract_test_failures,
-)
+from rootcoz.notifications import send_mention_notifications
+from rootcoz.reportportal import AmbiguousLaunchError, ReportPortalClient
 from rootcoz.repository import (
     RepositoryManager,
-    _redact_url,
     derive_test_repo_name,
+    redact_url,
 )
 from rootcoz.request_resolution import resolve_tests_repo_token
-from rootcoz import storage
+from rootcoz.sources import CISource, FileSource, RawSource
+from rootcoz.sources.jenkins_source import analyze_job, wait_for_jenkins_completion
 from rootcoz.storage import (
     get_ai_configs,
     get_effective_classification,
@@ -137,9 +142,20 @@ from rootcoz.storage import (
     patch_result_json,
     populate_failure_history,
     save_result,
-    update_progress_phase,
     update_status,
 )
+from rootcoz.token_tracking import build_token_usage_summary, record_ai_usage
+from rootcoz.utils import (
+    is_sensitive_key,
+    mask_sensitive_fields,
+)
+from rootcoz.vapid import get_vapid_config
+from rootcoz.xml_enrichment import (
+    build_enriched_xml,
+)
+
+# Module-level Depends singletons (B008: avoid function calls in defaults)
+_SETTINGS_DEP = Depends(get_settings)
 
 # Inline favicon
 
@@ -292,9 +308,18 @@ async def _safe_track_user(username: str) -> None:
         logger.debug("Failed to track user activity for %s", username, exc_info=True)
 
 
-FAVICON_SVG = b'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><text y="0.9em" font-size="90">\xf0\x9f\x94\x8d</text></svg>'
+FAVICON_SVG = (
+    b'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">'
+    b'<text y="0.9em" font-size="90">\xf0\x9f\x94\x8d</text></svg>'
+)
 
-logger = get_logger(name=__name__, level=os.environ.get("LOG_LEVEL", "INFO"))
+_LOG_FILE = get_log_file()
+
+logger = get_logger(
+    name=__name__,
+    level=os.environ.get("LOG_LEVEL", "INFO"),
+    **({"filename": _LOG_FILE} if _LOG_FILE else {}),
+)
 
 # Install job_id filter on ALL logger handlers so module loggers
 # (which use propagate=False via python-simple-logger) get the prefix.
@@ -319,7 +344,7 @@ async def _attach_token_usage(job_id: str, result_data: dict) -> None:
         token_summary = await build_token_usage_summary(job_id)
         if token_summary:
             result_data["token_usage"] = token_summary.model_dump(mode="json")
-    except Exception:  # noqa: BLE001 — best-effort token tracking must never fail the job
+    except Exception:  # best-effort token tracking must never fail the job
         logger.debug("Failed to attach token usage for job %s", job_id, exc_info=True)
 
 
@@ -441,9 +466,17 @@ def _build_report_context(
         report_url = f"{base_url}/results/{job_id}"
     else:
         report_url = f"/results/{job_id}"
-        job_name = result_data.get("job_name", "")
-        build_number = result_data.get("build_number", 0)
-        jenkins_url = f"{job_name} #{build_number}" if job_name else ""
+
+    # Always fall back to display_name/job_name when there is no real
+    # Jenkins URL so that file/raw analyses retain a human-readable label
+    # in GitHub/Jira previews.
+    if not jenkins_url:
+        job_name = result_data.get("display_name") or result_data.get("job_name", "")
+        build_number = result_data.get("build_number")
+        if job_name and build_number:
+            jenkins_url = f"{job_name} #{build_number}"
+        else:
+            jenkins_url = job_name or ""
 
     return report_url, jenkins_url
 
@@ -498,6 +531,7 @@ def _reconstruct_from_params(
     body = AnalyzeRequest(
         job_name=result_data["job_name"],
         build_number=result_data["build_number"],
+        name=params.get("name") or None,
         ai_provider=params.get("ai_provider", ""),
         ai_model=params.get("ai_model", ""),
         wait_for_completion=params.get("wait_for_completion", True),
@@ -554,20 +588,28 @@ def _reconstruct_from_params(
     if "force" in params:
         overrides["force_analysis"] = params["force"]
 
-    # Tests repo URL
-    recomposed = _recompose_repo_spec(
-        params.get("tests_repo_url", ""), params.get("tests_repo_ref", "")
-    )
-    if recomposed:
+    # Tests repo URL — use `is not None` so an explicit empty string
+    # (clearing the field) is preserved instead of silently dropped.
+    stored_tests_repo_url = params.get("tests_repo_url")
+    if stored_tests_repo_url is not None:
+        recomposed = _recompose_repo_spec(
+            stored_tests_repo_url, params.get("tests_repo_ref", "")
+        )
         overrides["tests_repo_url"] = recomposed
 
-    # SecretStr fields
-    if params.get("jira_api_token"):
-        overrides["jira_api_token"] = SecretStr(params["jira_api_token"])
-    if params.get("jira_pat"):
-        overrides["jira_pat"] = SecretStr(params["jira_pat"])
-    if params.get("github_token"):
-        overrides["github_token"] = SecretStr(params["github_token"])
+    # SecretStr fields — use `is not None` to preserve explicit clears.
+    if params.get("jira_api_token") is not None:
+        overrides["jira_api_token"] = (
+            SecretStr(params["jira_api_token"]) if params["jira_api_token"] else None
+        )
+    if params.get("jira_pat") is not None:
+        overrides["jira_pat"] = (
+            SecretStr(params["jira_pat"]) if params["jira_pat"] else None
+        )
+    if params.get("github_token") is not None:
+        overrides["github_token"] = (
+            SecretStr(params["github_token"]) if params["github_token"] else None
+        )
     if "tests_repo_token" in params:
         token_value = params["tests_repo_token"]
         overrides["tests_repo_token"] = (
@@ -596,7 +638,7 @@ _job_tasks: dict[str, asyncio.Task] = {}
 def _remove_job_task(job_id: str) -> Callable[[asyncio.Task[object]], None]:
     """Create a done-callback that removes a job from the task tracker."""
 
-    def _callback(task: asyncio.Task[object]) -> None:
+    def _callback(_task: asyncio.Task[object]) -> None:
         _job_tasks.pop(job_id, None)
 
     return _callback
@@ -611,22 +653,25 @@ def _register_job_task(job_id: str, task: asyncio.Task) -> None:
 
 
 async def _preserve_request_params(job_id: str, result_data: dict) -> None:
-    """Copy ``request_params`` from the stored result into *result_data*.
+    """Copy persisted enqueue-time fields from the stored result into result_data.
 
-    The initial ``save_result`` persists ``request_params`` (ai_provider,
-    ai_model, peer_ai_configs, etc.) but the ``AnalysisResult`` model dump
-    produced when analysis finishes does not include that key.  Without this
-    merge the params would be silently lost when ``update_status`` overwrites
+    The initial ``save_result`` persists ``request_params``, ``tags``, and
+    ``display_name`` but the ``AnalysisResult`` model dump produced when
+    analysis finishes does not include those keys.  Without this merge the
+    fields would be silently lost when ``update_status`` overwrites
     ``result_json``.
 
     Args:
         job_id: The analysis job identifier.
         result_data: Mutable dict that will be written to ``result_json``.
-            Modified in place to add ``request_params`` when available.
+            Modified in place to add preserved fields when available.
     """
     stored = await get_result(job_id, strip_sensitive=False)
-    if stored and stored.get("result") and "request_params" in stored["result"]:
-        result_data["request_params"] = stored["result"]["request_params"]
+    if stored and stored.get("result"):
+        stored_result = stored["result"]
+        for key in ("request_params", "tags", "display_name"):
+            if key in stored_result and key not in result_data:
+                result_data[key] = stored_result[key]
 
 
 async def _fail_resumed_waiting_job(job_id: str, result_data: dict, error: str) -> None:
@@ -639,11 +684,15 @@ async def _fail_resumed_waiting_job(job_id: str, result_data: dict, error: str) 
     """
     fail_data = {
         "job_name": result_data.get("job_name", ""),
+        "display_name": result_data.get("display_name")
+        or result_data.get("job_name", ""),
         "build_number": result_data.get("build_number", 0),
         "error": error,
     }
     if "request_params" in result_data:
         fail_data["request_params"] = result_data["request_params"]
+    if "tags" in result_data:
+        fail_data["tags"] = result_data["tags"]
     await storage.update_status(job_id, "failed", fail_data)
     notify_active_count_changed()
     notify_dashboard_changed()
@@ -714,7 +763,7 @@ async def _resume_waiting_jobs(waiting_jobs: list[dict]) -> None:
                     result_data,
                     (
                         f"Timed out waiting for Jenkins job "
-                        f"{result_data.get('job_name')} #{result_data.get('build_number')} "
+                        f"{result_data.get('display_name') or result_data.get('job_name')} #{result_data.get('build_number')} "
                         f"after {merged.max_wait_minutes} minutes (deadline passed during restart)"
                     ),
                 )
@@ -731,13 +780,22 @@ async def _resume_waiting_jobs(waiting_jobs: list[dict]) -> None:
             )
             continue
 
+        resumed_username = result_data.get("request_params", {}).get("submitted_by", "")
+        if not resumed_username:
+            logger.warning(
+                "Resumed job %s has no submitted_by in stored params "
+                "(pre-migration job); history-aware classification will be disabled",
+                job["job_id"],
+            )
         task = asyncio.create_task(
-            process_analysis_with_id(job["job_id"], body, merged)
+            process_analysis_with_id(
+                job["job_id"], body, merged, username=resumed_username
+            )
         )
         _register_job_task(job["job_id"], task)
         logger.info(
             f"Resumed waiting job {job['job_id']} "
-            f"({result_data.get('job_name')} #{result_data.get('build_number')})"
+            f"({result_data.get('display_name') or result_data.get('job_name')} #{result_data.get('build_number')})"
         )
 
 
@@ -761,7 +819,7 @@ async def _deferred_resume_waiting_jobs(waiting_jobs: list[dict]) -> None:
 
 
 @asynccontextmanager
-async def lifespan(app: FastAPI):
+async def lifespan(_app: FastAPI):
     _install_job_id_filter()
 
     # Startup config validation
@@ -844,7 +902,7 @@ class ErrorTrackingMiddleware(BaseHTTPMiddleware):
                 )
                 _background_tasks.add(task)
                 task.add_done_callback(_background_tasks.discard)
-        except Exception:  # noqa: BLE001 — alert scheduling must never break request handling
+        except Exception:  # alert scheduling must never break request handling
             logger.debug("Failed to schedule high-error-rate alert", exc_info=True)
 
     async def dispatch(self, request: Request, call_next):
@@ -904,6 +962,10 @@ class AuthMiddleware(BaseHTTPMiddleware):
     alternative to API key authentication.
     """
 
+    # Public paths that bypass authentication.
+    # /api/releases/latest is intentionally public — it only proxies the
+    # latest GitHub release metadata (version, changelog) with no
+    # sensitive data, similar to /health.
     _PUBLIC_PATHS = frozenset(
         {
             "/register",
@@ -980,8 +1042,8 @@ class AuthMiddleware(BaseHTTPMiddleware):
                     try:
                         expires_at = datetime.strptime(
                             str(expires_at_str), "%Y-%m-%d %H:%M:%S"
-                        ).replace(tzinfo=timezone.utc)
-                        remaining = expires_at - datetime.now(timezone.utc)
+                        ).replace(tzinfo=UTC)
+                        remaining = expires_at - datetime.now(UTC)
                         if remaining < timedelta(hours=storage.SESSION_TTL_HOURS / 2):
                             # Await renewal so cookie refresh is only set after confirmed DB update
                             try:
@@ -1016,6 +1078,15 @@ class AuthMiddleware(BaseHTTPMiddleware):
                         if user.get("role") == "admin":
                             is_admin = True
                             authenticated_admin = True
+                    else:
+                        # Fall back to session token via Bearer header
+                        # (used by AI CLI for internal API calls)
+                        session = await storage.get_session(token)
+                        if session:
+                            is_admin = bool(session["is_admin"])
+                            username = str(session["username"])
+                            authenticated_admin = is_admin
+                            has_valid_session = True
 
         # 3. Check X-Forwarded-User header (SSO via trusted proxy)
         if not username and proxy_username:
@@ -1102,7 +1173,9 @@ app.add_middleware(AuthMiddleware)
 app.add_middleware(ErrorTrackingMiddleware)
 
 
-_BODY_LOGGING_SKIP_PATHS = frozenset({"/api/feedback/preview", "/api/feedback/create"})
+_BODY_LOGGING_SKIP_PATHS = frozenset(
+    {"/api/feedback/preview", "/api/feedback/create", "/analyze"}
+)
 
 
 class RequestBodyLoggingMiddleware(BaseHTTPMiddleware):
@@ -1148,7 +1221,7 @@ def _mask_pydantic_error(error: dict) -> dict:
     result = dict(error)
     loc = error.get("loc") or ()
     field = loc[-1] if loc else ""
-    if isinstance(field, str) and _is_sensitive_key(field) and "input" in result:
+    if isinstance(field, str) and is_sensitive_key(field) and "input" in result:
         result["input"] = "***"
     elif "input" in result:
         result["input"] = mask_sensitive_fields(result["input"])
@@ -1161,9 +1234,14 @@ async def _validation_error_handler(
 ) -> JSONResponse:
     """Log 422 validation error details at DEBUG level, then return standard response."""
     if request.url.path in _BODY_LOGGING_SKIP_PATHS:
+        raw_errors = jsonable_encoder(exc.errors())
+        masked_errors = [_mask_pydantic_error(e) for e in raw_errors]
+        for error in masked_errors:
+            if "input" in error:
+                error["input"] = "<redacted>"
         return JSONResponse(
             status_code=422,
-            content={"detail": jsonable_encoder(exc.errors())},
+            content={"detail": masked_errors},
         )
     if logger.isEnabledFor(logging.DEBUG):
         masked_body = None
@@ -1180,7 +1258,7 @@ async def _validation_error_handler(
                     masked_body = f"<non-JSON, {size} bytes>"
                 else:
                     masked_body = f"<non-JSON body: {type(exc.body).__name__}>"
-            except Exception:  # noqa: BLE001 — masking must never break the 422 response
+            except Exception:  # masking must never break the 422 response
                 masked_body = "<unable to mask>"
         raw_errors = jsonable_encoder(exc.errors())
         masked_errors = [_mask_pydantic_error(e) for e in raw_errors]
@@ -1191,10 +1269,12 @@ async def _validation_error_handler(
             masked_errors,
             masked_body,
         )
-    # Response body uses raw (unmasked) errors — only the DEBUG log path is masked.
+    # Mask sensitive values in the response body as well.
+    response_errors = jsonable_encoder(exc.errors())
+    masked_response = [_mask_pydantic_error(e) for e in response_errors]
     return JSONResponse(
         status_code=422,
-        content={"detail": jsonable_encoder(exc.errors())},
+        content={"detail": masked_response},
     )
 
 
@@ -1224,7 +1304,11 @@ def _resolve_ai_config_values(
     if not provider:
         raise HTTPException(
             status_code=400,
-            detail=f"No AI provider configured. Set AI_PROVIDER env var or pass ai_provider in request body. Valid providers: {', '.join(sorted(VALID_AI_PROVIDERS))}",
+            detail=(
+                f"No AI provider configured. Set AI_PROVIDER env var or"
+                f" pass ai_provider in request body."
+                f" Valid providers: {', '.join(sorted(VALID_AI_PROVIDERS))}"
+            ),
         )
     if provider not in VALID_AI_PROVIDERS:
         raise HTTPException(
@@ -1242,7 +1326,7 @@ def _resolve_ai_config_values(
     return provider, model
 
 
-def _resolve_ai_config(body: AnalyzeRequest) -> tuple[str, str]:
+def _resolve_ai_config(body: BaseAnalysisRequest) -> tuple[str, str]:
     """Resolve AI config from an AnalyzeRequest."""
     return _resolve_ai_config_values(body.ai_provider, body.ai_model)
 
@@ -1286,7 +1370,7 @@ def _resolve_enable_jira(body: BaseAnalysisRequest, settings: Settings) -> bool:
     2. settings.jira_enabled property (env var + auto-detect fallback)
 
     Args:
-        body: The analysis request (AnalyzeRequest or AnalyzeFailuresRequest).
+        body: The analysis request.
         settings: Application settings (should be merged settings).
 
     Returns:
@@ -1447,7 +1531,7 @@ async def _enrich_result_with_tests_repo_matches(
     ai_provider: str = "",
     ai_model: str = "",
     job_id: str = "",
-    tests_repo_url: str = "",
+    tests_repo_url: str | None = None,
 ) -> None:
     """Enrich CODE ISSUE failures with tests repo issue matches.
 
@@ -1462,11 +1546,15 @@ async def _enrich_result_with_tests_repo_matches(
         ai_model: AI model for relevance filtering.
         job_id: Job identifier for token usage tracking.
         tests_repo_url: Per-request tests repo URL override.  When
-            non-empty and ``settings.tests_repo_url`` is unset, a
+            not None and ``settings.tests_repo_url`` is unset, a
             temporary settings copy is created so that
             ``enrich_with_tests_repo_matches`` sees the URL.
     """
-    effective_url = tests_repo_url or str(settings.tests_repo_url or "")
+    effective_url = (
+        tests_repo_url
+        if tests_repo_url is not None
+        else str(settings.tests_repo_url or "")
+    )
     effective_url, _ = parse_repo_ref(effective_url)
     if not effective_url:
         return
@@ -1484,137 +1572,62 @@ async def _enrich_result_with_tests_repo_matches(
     )
 
 
-async def _wait_for_jenkins_completion(
-    jenkins_url: str,
-    job_name: str,
-    build_number: int,
-    jenkins_user: str,
-    jenkins_password: str,
-    jenkins_ssl_verify: bool,
-    poll_interval_minutes: int,
-    max_wait_minutes: int,
-    jenkins_timeout: int = 30,
-    max_consecutive_failures: int = 5,
-) -> tuple[bool, str]:
-    """Poll Jenkins until the build finishes.
+_AI_SESSION_TTL_HOURS = 8  # Short-lived for AI CLI internal API calls
 
-    Args:
-        jenkins_url: Jenkins server base URL.
-        job_name: Name of the Jenkins job.
-        build_number: Build number to monitor.
-        jenkins_user: Jenkins username for authentication.
-        jenkins_password: Jenkins password or API token.
-        jenkins_ssl_verify: Whether to verify SSL certificates.
-        poll_interval_minutes: Minutes between polls.
-        max_wait_minutes: Maximum minutes to wait before timing out.
-            0 means no limit (poll forever until job finishes).
-        jenkins_timeout: Jenkins API request timeout in seconds.
-        max_consecutive_failures: Number of consecutive transient errors
-            allowed before giving up. Defaults to 5.
 
-    Returns:
-        A tuple of (success, error_message). success is True if the build
-        completed, False otherwise. error_message is empty on success.
-    """
-    import jenkins
+def _get_display_name(body: AnalyzeRequest | UnifiedAnalyzeRequest) -> str:
+    """Get display name from request, falling back to job_name."""
+    return body.name or body.job_name or ""
 
-    from rootcoz.jenkins import JenkinsClient
-    from rootcoz.utils import is_jenkins_connectivity_error
 
-    client = JenkinsClient(
-        url=jenkins_url,
-        username=jenkins_user,
-        password=jenkins_password,
-        ssl_verify=jenkins_ssl_verify,
-        timeout=jenkins_timeout,
-    )
-
-    unreachable_error = (
-        "Cannot reach Jenkins; please verify the Jenkins URL, credentials, "
-        "and network connectivity"
-    )
-
+async def _auto_assign_metadata(
+    display_name: str, metadata_rules: list[dict] | None
+) -> None:
+    """Best-effort metadata auto-assignment."""
+    if not metadata_rules:
+        return
     try:
-        await asyncio.to_thread(client.get_whoami)
-    except Exception as e:
-        if not is_jenkins_connectivity_error(e):
-            raise
-        logger.error("Cannot reach Jenkins at %s: %s", jenkins_url, e, exc_info=True)
-        return False, (
-            "Jenkins reachability check failed; please verify the Jenkins URL, "
-            "credentials, and network connectivity"
+        await storage.auto_assign_job_metadata(display_name, metadata_rules)
+    except Exception:
+        logger.warning(
+            "Failed to auto-assign metadata for job '%s'",
+            display_name,
+            exc_info=True,
         )
 
-    if max_wait_minutes > 0:
-        deadline: float | None = _time.monotonic() + max_wait_minutes * 60
-    else:
-        deadline = None  # No limit
 
-    consecutive_failures = 0
+async def _create_ai_auth_header(username: str) -> str:
+    """Create a short-lived session token for AI CLI internal API calls.
 
-    while True:
-        try:
-            build_info = await asyncio.to_thread(
-                client.get_build_info_safe, job_name, build_number
-            )
-            consecutive_failures = 0
+    Returns a Bearer auth header string, or empty string on failure/no user.
+    """
+    if not username:
+        return ""
+    try:
+        session_token = await storage.create_session(
+            username,
+            ttl_hours=_AI_SESSION_TTL_HOURS,
+        )
+        return f"Bearer {session_token}"
+    except Exception:
+        logger.warning("Failed to create AI session for history access", exc_info=True)
+        return ""
 
-            if build_info and not build_info.get("building", True):
-                logger.info(
-                    f"Jenkins job {job_name} #{build_number} completed "
-                    f"with result: {build_info.get('result')}"
-                )
-                return True, ""
 
-            logger.info(f"Jenkins job {job_name} #{build_number} still running")
-
-        except jenkins.NotFoundException:
-            logger.error(
-                f"Jenkins job {job_name} #{build_number} not found (404). "
-                "Stopping poll."
-            )
-            return False, f"Jenkins job {job_name} #{build_number} not found (404)"
-
-        except Exception as e:
-            if not is_jenkins_connectivity_error(e):
-                logger.error(
-                    "Non-transient error checking Jenkins status", exc_info=True
-                )
-                return False, "Jenkins poll failed; check server logs for details"
-            consecutive_failures += 1
-            logger.warning(
-                "Transient error checking Jenkins status (%d/%d): %s",
-                consecutive_failures,
-                max_consecutive_failures,
-                e,
-            )
-            if consecutive_failures >= max_consecutive_failures:
-                logger.error(
-                    "Cannot reach Jenkins at %s after %d consecutive failures",
-                    jenkins_url,
-                    consecutive_failures,
-                    exc_info=True,
-                )
-                return False, unreachable_error
-
-        if deadline is not None:
-            remaining = deadline - _time.monotonic()
-            if remaining <= 0:
-                break
-            await asyncio.sleep(min(poll_interval_minutes * 60, remaining))
-        else:
-            await asyncio.sleep(poll_interval_minutes * 60)
-
-    error_msg = (
-        f"Timed out waiting for Jenkins job {job_name} #{build_number} "
-        f"after {max_wait_minutes} minutes"
-    )
-    logger.warning(error_msg)
-    return False, error_msg
+async def _cleanup_ai_session(auth_header: str) -> None:
+    """Revoke the short-lived AI session token created for an analysis run."""
+    if not auth_header:
+        return
+    try:
+        token = auth_header.removeprefix("Bearer ").strip()
+        if token:
+            await storage.delete_session(token)
+    except Exception:
+        logger.warning("Failed to delete AI session token", exc_info=True)
 
 
 async def process_analysis_with_id(
-    job_id: str, body: AnalyzeRequest, settings: Settings
+    job_id: str, body: AnalyzeRequest, settings: Settings, username: str = ""
 ) -> None:
     """Background task to process analysis with a pre-generated job_id.
 
@@ -1622,22 +1635,16 @@ async def process_analysis_with_id(
         job_id: Pre-generated job ID for tracking.
         body: The analysis request.
         settings: Application settings.
+        username: Submitting user for session-based AI auth.
     """
     job_id_var.set(job_id)
+
     logger.info(
         f"Analysis request received for {body.job_name} #{body.build_number} "
         f"(job_id: {job_id})"
     )
 
-    async def _safe_update_progress_phase(phase: str) -> None:
-        try:
-            await update_progress_phase(job_id, phase)
-        except Exception:
-            logger.debug(
-                f"Failed to update progress phase for job_id={job_id}, phase={phase}",
-                exc_info=True,
-            )
-
+    auth_header = ""
     try:
         # Validate AI config early -- before potentially waiting hours for Jenkins.
         # This ensures invalid provider/model fails fast instead of after a long wait.
@@ -1654,10 +1661,10 @@ async def process_analysis_with_id(
             notify_active_count_changed()
             notify_dashboard_changed()
             notify_job_status_changed(job_id)
-            await _safe_update_progress_phase("waiting_for_jenkins")
+            await safe_update_progress(job_id, "waiting_for_jenkins")
             notify_job_status_changed(job_id)
 
-            completed, wait_error = await _wait_for_jenkins_completion(
+            completed, wait_error = await wait_for_jenkins_completion(
                 jenkins_url=settings.jenkins_url,
                 job_name=body.job_name,
                 build_number=body.build_number,
@@ -1670,8 +1677,10 @@ async def process_analysis_with_id(
             )
 
             if not completed:
+                display_name = _get_display_name(body)
                 fail_data = {
                     "job_name": body.job_name,
+                    "display_name": display_name,
                     "build_number": body.build_number,
                     "error": wait_error,
                 }
@@ -1686,6 +1695,8 @@ async def process_analysis_with_id(
                 notify_job_status_changed(job_id)
                 return
 
+        auth_header = await _create_ai_auth_header(username)
+
         logger.debug(
             f"process_analysis_with_id: updating status to running, job_id={job_id}"
         )
@@ -1693,7 +1704,7 @@ async def process_analysis_with_id(
         notify_active_count_changed()
         notify_dashboard_changed()
         notify_job_status_changed(job_id)
-        await _safe_update_progress_phase("analyzing")
+        await safe_update_progress(job_id, "analyzing")
         notify_job_status_changed(job_id)
 
         logger.debug(
@@ -1716,11 +1727,12 @@ async def process_analysis_with_id(
             server_url=server_url,
             peer_ai_configs=peer_ai_configs,
             peer_analysis_max_rounds=settings.peer_analysis_max_rounds,
+            auth_header=auth_header,
         )
 
         # Enrich PRODUCT BUG failures with Jira matches
         if _resolve_enable_jira(body, settings):
-            await _safe_update_progress_phase("enriching_jira")
+            await safe_update_progress(job_id, "enriching_jira")
             notify_job_status_changed(job_id)
             logger.debug(
                 f"process_analysis_with_id: enriching with Jira matches, job_id={job_id}"
@@ -1734,9 +1746,13 @@ async def process_analysis_with_id(
             )
 
         # Enrich CODE ISSUE failures with tests repo issue matches
-        request_tests_repo_url = str(body.tests_repo_url or "")
+        request_tests_repo_url = (
+            str(body.tests_repo_url)
+            if body.tests_repo_url is not None
+            else str(settings.tests_repo_url or "")
+        )
         if settings.tests_repo_url or request_tests_repo_url:
-            await _safe_update_progress_phase("enriching_tests_repo")
+            await safe_update_progress(job_id, "enriching_tests_repo")
             notify_job_status_changed(job_id)
             logger.debug(
                 f"process_analysis_with_id: enriching with tests repo matches, job_id={job_id}"
@@ -1750,7 +1766,7 @@ async def process_analysis_with_id(
                 tests_repo_url=request_tests_repo_url,
             )
 
-        await _safe_update_progress_phase("saving")
+        await safe_update_progress(job_id, "saving")
         notify_job_status_changed(job_id)
         logger.debug(
             f"process_analysis_with_id: saving completed result, job_id={job_id}"
@@ -1786,16 +1802,7 @@ async def process_analysis_with_id(
                 )
 
         # Auto-assign job metadata from name pattern rules
-        try:
-            await storage.auto_assign_job_metadata(
-                body.job_name, settings.metadata_rules
-            )
-        except Exception:  # noqa: BLE001 — metadata auto-assignment is best-effort
-            logger.warning(
-                "Failed to auto-assign metadata for job '%s'",
-                body.job_name,
-                exc_info=True,
-            )
+        await _auto_assign_metadata(body.job_name, settings.metadata_rules)
 
         # Reveal classifications created during analysis
         await storage.make_classifications_visible(job_id)
@@ -1807,8 +1814,10 @@ async def process_analysis_with_id(
     except Exception as e:
         logger.exception(f"Analysis failed for job {job_id}")
         error_detail = format_exception_with_type(e)
+        display_name = _get_display_name(body)
         error_data: dict = {
             "job_name": body.job_name,
+            "display_name": display_name,
             "build_number": body.build_number,
             "error": error_detail,
         }
@@ -1822,6 +1831,9 @@ async def process_analysis_with_id(
         notify_dashboard_changed()
         notify_job_status_changed(job_id)
         notify_token_usage_changed()
+
+    finally:
+        await _cleanup_ai_session(auth_header)
 
 
 def _build_base_request_params(
@@ -1872,6 +1884,192 @@ def _build_base_request_params(
     }
 
 
+def _apply_base_analysis_overrides(
+    params: dict,
+    body: "BaseAnalysisRequest",
+    merged: "Settings",
+) -> None:
+    """Apply BaseAnalysisRequest overrides to a base params dict.
+
+    Centralises the serialisation of per-request overrides that both the
+    unified ``/analyze`` endpoint and the file/raw re-analyze path need.
+    Mutates *params* in place.
+    """
+    params["enable_jira"] = _resolve_enable_jira(body, merged)
+    params["jira_url"] = (
+        body.jira_url if body.jira_url is not None else (merged.jira_url or "")
+    )
+    params["jira_email"] = (
+        body.jira_email if body.jira_email is not None else (merged.jira_email or "")
+    )
+    params["jira_api_token"] = (
+        body.jira_api_token
+        if body.jira_api_token is not None
+        else (merged.jira_api_token.get_secret_value() if merged.jira_api_token else "")
+    )
+    params["jira_pat"] = (
+        body.jira_pat
+        if body.jira_pat is not None
+        else (merged.jira_pat.get_secret_value() if merged.jira_pat else "")
+    )
+    params["jira_project_key"] = (
+        body.jira_project_key
+        if body.jira_project_key is not None
+        else (merged.jira_project_key or "")
+    )
+    params["jira_ssl_verify"] = (
+        body.jira_ssl_verify
+        if body.jira_ssl_verify is not None
+        else merged.jira_ssl_verify
+    )
+    params["jira_max_results"] = (
+        body.jira_max_results
+        if body.jira_max_results is not None
+        else merged.jira_max_results
+    )
+    params["github_token"] = (
+        body.github_token
+        if body.github_token is not None
+        else (merged.github_token.get_secret_value() if merged.github_token else "")
+    )
+    params["ai_cli_timeout"] = (
+        body.ai_cli_timeout
+        if body.ai_cli_timeout is not None
+        else merged.ai_cli_timeout
+    )
+    params["max_concurrent_ai_calls"] = (
+        body.max_concurrent_ai_calls
+        if body.max_concurrent_ai_calls is not None
+        else merged.max_concurrent_ai_calls
+    )
+    # Always persist peer_analysis_max_rounds so non-default values survive
+    # re-analyze round-trips.
+    params["peer_analysis_max_rounds"] = merged.peer_analysis_max_rounds
+
+
+async def _enqueue_file_raw_analysis(
+    body: "UnifiedAnalyzeRequest",
+    merged: "Settings",
+    resolved_peers: list | None,
+    display_name: str,
+    analysis_type: str,
+    base_url: str,
+    username: str,
+    *,
+    tags: list[str] | None = None,
+    message_prefix: str = "Analysis",
+) -> dict:
+    """Build params, persist initial state, spawn task, and return response.
+
+    Shared by the ``/analyze`` file/raw path and the ``/re-analyze`` file/raw
+    path.  Callers handle request-specific reconstruction/validation before
+    calling this helper with a ready-to-go *body*.
+
+    Args:
+        body: The analysis request (``UnifiedAnalyzeRequest`` or similar).
+        merged: Merged settings.
+        resolved_peers: Validated peer AI configs.
+        display_name: Human-readable job name.
+        analysis_type: ``"file"`` or ``"raw"``.
+        base_url: Server base URL for result links.
+        username: Authenticated user who submitted the request.
+        tags: Optional pre-built tags list. When ``None``, uses ``body.tags``.
+        message_prefix: Prefix for the queued-message ("Analysis" or
+            "Re-analysis").
+
+    Returns:
+        JSON-serialisable response dict with ``status``, ``job_id``, links.
+    """
+    ai_provider, ai_model = _resolve_ai_config_values(body.ai_provider, body.ai_model)
+
+    # Resolve repos
+    tests_repo_url_raw = (
+        str(body.tests_repo_url)
+        if body.tests_repo_url is not None
+        else str(merged.tests_repo_url or "")
+    )
+    tests_repo_url, tests_repo_ref = parse_repo_ref(tests_repo_url_raw)
+    resolved_tests_repo_token = (
+        resolve_tests_repo_token(body, merged) if tests_repo_url else ""
+    )
+    additional_repos_list = resolve_additional_repos(body, merged)
+
+    job_id = str(uuid.uuid4())
+    job_id_var.set(job_id)
+
+    # Append short job_id suffix to generic fallback names for uniqueness
+    _GENERIC_FALLBACK_NAMES = {
+        "file-analysis",
+        "raw-analysis",
+        "file-re-analysis",
+        "raw-re-analysis",
+    }
+    if display_name in _GENERIC_FALLBACK_NAMES and not body.name:
+        display_name = f"{display_name}-{job_id[:8]}"
+
+    # Build and persist initial state
+    base_params = _build_base_request_params(
+        ai_provider,
+        ai_model,
+        resolved_peers,
+        tests_repo_url=tests_repo_url,
+        tests_repo_token=resolved_tests_repo_token,
+        tests_repo_ref=tests_repo_ref,
+        additional_repos=additional_repos_list,
+    )
+    base_params["raw_prompt"] = body.raw_prompt or ""
+    base_params["issue_prompt"] = body.issue_prompt or ""
+    base_params["analysis_type"] = analysis_type
+    base_params["original_name"] = body.name or ""
+    _apply_base_analysis_overrides(base_params, body, merged)
+
+    if analysis_type == "file":
+        base_params["raw_xml"] = body.raw_xml
+    elif analysis_type == "raw":
+        assert body.failures is not None
+        base_params["failures"] = [f.model_dump() for f in body.failures]
+
+    initial_result: dict = {
+        "job_name": display_name,
+        "display_name": display_name,
+        "request_params": encrypt_sensitive_fields(base_params),
+    }
+    initial_result["request_params"]["submitted_by"] = username
+    effective_tags = tags if tags is not None else (body.tags or None)
+    if effective_tags:
+        initial_result["tags"] = effective_tags
+    await save_result(job_id, "", "pending", initial_result)
+    notify_active_count_changed()
+    notify_dashboard_changed()
+
+    # Spawn background task
+    task = asyncio.create_task(
+        _process_file_raw_analysis(
+            job_id=job_id,
+            body=body,
+            merged=merged,
+            display_name=display_name,
+            ai_provider=ai_provider,
+            ai_model=ai_model,
+            peer_ai_configs=resolved_peers,
+            tests_repo_url=tests_repo_url,
+            tests_repo_ref=tests_repo_ref,
+            resolved_tests_repo_token=resolved_tests_repo_token,
+            additional_repos_list=additional_repos_list,
+            base_url=base_url,
+            username=username,
+        )
+    )
+    _register_job_task(job_id, task)
+
+    response: dict = {
+        "status": "queued",
+        "job_id": job_id,
+        "message": f"{message_prefix} job queued. Poll /results/{job_id} for status.",
+    }
+    return _attach_result_links(response, base_url, job_id)
+
+
 def _build_request_params(
     body: AnalyzeRequest,
     merged: Settings,
@@ -1901,7 +2099,9 @@ def _build_request_params(
         else ""
     )
     resolved_tests_repo, tests_repo_ref = parse_repo_ref(resolved_tests_repo)
-    resolved_tests_repo_token = resolve_tests_repo_token(body, merged)
+    resolved_tests_repo_token = (
+        resolve_tests_repo_token(body, merged) if resolved_tests_repo else ""
+    )
     resolved_additional = resolve_additional_repos(body, merged)
     params = _build_base_request_params(
         ai_provider,
@@ -1912,6 +2112,10 @@ def _build_request_params(
         tests_repo_ref=tests_repo_ref,
         additional_repos=resolved_additional,
     )
+    # Apply shared BaseAnalysisRequest fields (Jira, GitHub, AI settings).
+    # _apply_base_analysis_overrides is the single source of truth for these.
+    _apply_base_analysis_overrides(params, body, merged)
+    # Jenkins-specific fields on top.
     params.update(
         {
             "jenkins_url": merged.jenkins_url,
@@ -1922,30 +2126,13 @@ def _build_request_params(
             "wait_for_completion": merged.wait_for_completion,
             "poll_interval_minutes": merged.poll_interval_minutes,
             "max_wait_minutes": merged.max_wait_minutes,
-            "enable_jira": body.enable_jira
-            if body.enable_jira is not None
-            else merged.enable_jira,
-            "jira_url": merged.jira_url or "",
-            "jira_email": merged.jira_email or "",
-            "jira_api_token": merged.jira_api_token.get_secret_value()
-            if merged.jira_api_token
-            else "",
-            "jira_pat": merged.jira_pat.get_secret_value() if merged.jira_pat else "",
-            "jira_project_key": merged.jira_project_key or "",
-            "jira_ssl_verify": merged.jira_ssl_verify,
-            "jira_max_results": merged.jira_max_results,
-            "github_token": merged.github_token.get_secret_value()
-            if merged.github_token
-            else "",
-            "ai_cli_timeout": merged.ai_cli_timeout,
-            "max_concurrent_ai_calls": merged.max_concurrent_ai_calls,
             "jenkins_artifacts_max_size_mb": merged.jenkins_artifacts_max_size_mb,
             "get_job_artifacts": merged.get_job_artifacts,
             "raw_prompt": body.raw_prompt or "",
             "issue_prompt": body.issue_prompt or "",
-            "peer_analysis_max_rounds": merged.peer_analysis_max_rounds,
             "force": merged.force_analysis,
             "wait_started_at": _time.time(),
+            "name": getattr(body, "name", None) or "",
         }
     )
     return encrypt_sensitive_fields(params)
@@ -1970,8 +2157,10 @@ async def _enqueue_analysis_job(
     jenkins_url = build_jenkins_url(
         merged.jenkins_url, body.job_name, body.build_number
     )
+    display_name = _get_display_name(body)
     initial_result: dict = {
         "job_name": body.job_name,
+        "display_name": display_name,
         "build_number": body.build_number,
         "request_params": _build_request_params(
             body,
@@ -1982,6 +2171,7 @@ async def _enqueue_analysis_job(
         ),
     }
     initial_result["request_params"]["submitted_by"] = username
+    initial_result["request_params"]["analysis_type"] = "jenkins"
     if body.tags:
         initial_result["tags"] = body.tags
     can_resume_wait = merged.wait_for_completion and bool(merged.jenkins_url)
@@ -1993,7 +2183,9 @@ async def _enqueue_analysis_job(
     )
     notify_active_count_changed()
     notify_dashboard_changed()
-    task = asyncio.create_task(process_analysis_with_id(job_id, body, merged))
+    task = asyncio.create_task(
+        process_analysis_with_id(job_id, body, merged, username=username)
+    )
     _register_job_task(job_id, task)
     response: dict = {
         "status": "queued",
@@ -2003,156 +2195,135 @@ async def _enqueue_analysis_job(
     return _attach_result_links(response, base_url, job_id)
 
 
-@app.post("/analyze", status_code=202, response_model=None)
-async def analyze(
-    request: Request,
-    body: AnalyzeRequest,
+async def _process_file_raw_analysis(
     *,
-    settings: Settings = Depends(get_settings),
-) -> dict:
-    """Submit a Jenkins job for analysis.
+    job_id: str,
+    body: UnifiedAnalyzeRequest,
+    merged: Settings,
+    display_name: str,
+    ai_provider: str,
+    ai_model: str,
+    peer_ai_configs: list | None,
+    tests_repo_url: str,
+    tests_repo_ref: str,
+    resolved_tests_repo_token: str,
+    additional_repos_list: list,
+    base_url: str,
+    username: str = "",
+) -> None:
+    """Background task for file/raw analysis."""
+    job_id_var.set(job_id)
 
-    Returns immediately with a job_id. Poll /results/{job_id} for status.
-    """
-    _check_allow_list(request)
-    logger.debug(f"Starting analysis for {body.job_name} #{body.build_number}")
-    base_url = _extract_base_url()
+    auth_header = ""
+    repo_manager: RepositoryManager | None = None
 
-    # Validate AI config early -- fail fast before queuing invalid jobs.
-    _resolve_ai_config(body)
+    try:
+        logger.info(
+            f"Starting file/raw analysis for job_id={job_id}, type={body.type}, display_name={display_name}"
+        )
 
-    merged = _merge_settings(body, settings)
+        # Create source plugin
+        source: CISource
+        if body.type == "file":
+            assert body.raw_xml is not None
+            source = FileSource(raw_xml=body.raw_xml)
+        else:
+            assert body.failures is not None
+            source = RawSource(failures=body.failures)
 
-    # Validate peer configs early -- fail fast before returning 202.
-    resolved_peers = _validate_peer_configs(body, merged)
-    return await _enqueue_analysis_job(
-        body,
-        merged,
-        resolved_peers,
-        base_url,
-        username=request.state.username,
-    )
+        # Fetch failures from source
+        source_result = await source.fetch()
+        logger.debug(
+            f"Source fetch complete: {len(source_result.failures)} failures, build_passed={source_result.build_passed}"
+        )
 
-
-@app.post("/analyze-failures", response_model=None)
-async def analyze_failures(
-    request: Request,
-    body: AnalyzeFailuresRequest,
-    settings: Settings = Depends(get_settings),
-) -> JSONResponse:
-    """Analyze raw test failures directly without Jenkins.
-
-    Accepts test failure data (or raw JUnit XML) and returns AI analysis.
-    Sync only. Reuses the same deduplication and analysis logic as Jenkins-based analysis.
-
-    When raw_xml is provided, failures are extracted from the XML and the enriched
-    XML with analysis results is included in the response.
-    """
-    _check_allow_list(request)
-    logger.debug(
-        f"POST /analyze-failures: failures_count={len(body.failures) if body.failures else 0}, has_raw_xml={body.raw_xml is not None}"
-    )
-    base_url = _extract_base_url()
-
-    if raw_xml := body.raw_xml:
-        try:
-            test_failures = extract_test_failures(raw_xml)
-        except ParseError as e:
-            raise HTTPException(status_code=400, detail=f"Invalid XML: {e}") from e
-
-        if not test_failures:
-            job_id = str(uuid.uuid4())
-            job_id_var.set(job_id)
+        if source_result.build_passed:
+            # No failures found (XML with no failures)
             analysis_result = FailureAnalysisResult(
                 job_id=job_id,
                 status="completed",
-                summary="No test failures found in the provided XML.",
-                enriched_xml=raw_xml,
+                summary="No test failures found in the provided input.",
+                enriched_xml=body.raw_xml if body.type == "file" else None,
             )
             result_data = analysis_result.model_dump(mode="json")
-            await save_result(job_id, "", "completed", result_data)
+            result_data["job_name"] = display_name
+            await _preserve_request_params(job_id, result_data)
+            logger.info(f"No failures found for job_id={job_id}, completing early")
+            await update_status(job_id, "completed", result_data)
             notify_active_count_changed()
             notify_dashboard_changed()
-            return JSONResponse(
-                content=_attach_result_links(result_data, base_url, job_id)
-            )
-    else:
-        if not body.failures:
-            raise HTTPException(status_code=400, detail="No failures provided")
-        test_failures = body.failures
+            notify_job_status_changed(job_id)
 
-    merged = _merge_settings(body, settings)
-    ai_provider, ai_model = _resolve_ai_config_values(body.ai_provider, body.ai_model)
+            # Auto-assign job metadata from name pattern rules
+            await _auto_assign_metadata(display_name, merged.metadata_rules)
 
-    # Validate/resolve peer configs early -- fail fast before saving result.
-    peer_ai_configs = _validate_peer_configs(body, merged)
+            return
 
-    # Resolve repos early so _build_base_request_params captures effective values
-    # (including env-var / config-file defaults, not just request-body values).
-    tests_repo_url_raw = str(body.tests_repo_url or merged.tests_repo_url or "")
-    tests_repo_url, tests_repo_ref = parse_repo_ref(tests_repo_url_raw)
-    resolved_tests_repo_token = resolve_tests_repo_token(body, merged)
-    additional_repos_list = resolve_additional_repos(body, merged)
+        test_failures = source_result.failures
 
-    job_id = str(uuid.uuid4())
-    job_id_var.set(job_id)
-    logger.info(
-        f"Direct failure analysis request received with {len(test_failures)} failures (job_id: {job_id})"
-    )
-
-    # Save initial pending state with request_params so GET /results/{job_id}
-    # works immediately and _preserve_request_params can find them later.
-    base_params = _build_base_request_params(
-        ai_provider,
-        ai_model,
-        peer_ai_configs,
-        tests_repo_url=tests_repo_url,
-        tests_repo_token=resolved_tests_repo_token,
-        tests_repo_ref=tests_repo_ref,
-        additional_repos=additional_repos_list or None,
-    )
-    base_params["raw_prompt"] = body.raw_prompt or ""
-    base_params["issue_prompt"] = body.issue_prompt or ""
-    initial_result: dict = {
-        "request_params": encrypt_sensitive_fields(base_params),
-    }
-    initial_result["request_params"]["submitted_by"] = request.state.username
-    await save_result(job_id, "", "pending", initial_result)
-    notify_active_count_changed()
-    notify_dashboard_changed()
-
-    # Group failures by error signature for deduplication
-    groups: dict[str, list] = defaultdict(list)
-    for failure in test_failures:
-        sig = get_failure_signature(failure)
-        groups[sig].append(failure)
-
-    logger.info(
-        f"Grouped {len(test_failures)} failures into {len(groups)} unique error signatures"
-    )
-
-    # Always create a workspace for AI to work in
-    repo_manager = RepositoryManager()
-    custom_prompt = ""
-    cloned_repos: dict[str, Path] = {}
-    try:
         await update_status(job_id, "running")
         notify_active_count_changed()
         notify_dashboard_changed()
         notify_job_status_changed(job_id)
 
+        # Pre-flight: verify AI CLI is reachable before spawning parallel tasks
+        preflight_result = await check_ai_cli_available(
+            ai_provider, ai_model, cli_flags=PROVIDER_CLI_FLAGS.get(ai_provider, [])
+        )
+        if not preflight_result.success:
+            logger.error(
+                "AI CLI sanity check failed for job %s (%s/%s)",
+                job_id,
+                ai_provider,
+                ai_model,
+            )
+            fail_result = FailureAnalysisResult(
+                job_id=job_id,
+                status="failed",
+                summary=preflight_result.text,
+                ai_provider=ai_provider,
+                ai_model=ai_model,
+            )
+            fail_data = fail_result.model_dump(mode="json")
+            fail_data["job_name"] = display_name
+            await _preserve_request_params(job_id, fail_data)
+            await update_status(job_id, "failed", fail_data)
+            notify_active_count_changed()
+            notify_dashboard_changed()
+            notify_job_status_changed(job_id)
+            return
+
+        auth_header = await _create_ai_auth_header(username)
+
+        # Group failures by error signature
+        groups: dict[str, list] = defaultdict(list)
+        for failure in test_failures:
+            sig = get_failure_signature(failure)
+            groups[sig].append(failure)
+
+        logger.info(
+            f"Grouped {len(test_failures)} failures into {len(groups)} unique error signatures (job_id: {job_id})"
+        )
+        logger.debug(
+            f"Failure grouping complete: {len(groups)} unique signatures from {len(test_failures)} failures"
+        )
+
+        # Clone repos
+        repo_manager = RepositoryManager()
+        cloned_repos: dict[str, Path] = {}
         repo_path = repo_manager.create_workspace()
+        logger.debug(f"Workspace created at {repo_path}")
 
         if tests_repo_url:
+            logger.debug(
+                "Cloning test repo: %s (ref=%s)",
+                redact_url(str(tests_repo_url)),
+                tests_repo_ref,
+            )
             try:
                 repo_name = derive_test_repo_name(
                     str(tests_repo_url), additional_repos_list
                 )
-                logger.info(
-                    f"Cloning test repository: {_redact_url(str(tests_repo_url))}"
-                    + (f" (ref={tests_repo_ref})" if tests_repo_ref else "")
-                )
-
                 await asyncio.to_thread(
                     repo_manager.clone_into,
                     str(tests_repo_url),
@@ -2162,14 +2333,10 @@ async def analyze_failures(
                     token=resolved_tests_repo_token or None,
                 )
                 cloned_repos[repo_name] = repo_path / repo_name
-                logger.info(f"Successfully cloned test repository into {repo_name}/")
-            except Exception as e:  # noqa: BLE001 — non-fatal tests repo clone failure
-                logger.warning(
-                    "Failed to clone test repository (%s)",
-                    type(e).__name__,
-                )
+                logger.debug(f"Test repo cloned successfully into {repo_name}/")
+            except Exception:
+                logger.warning("Failed to clone test repository", exc_info=True)
 
-        # Clone additional repositories for AI context
         if additional_repos_list:
             additional_repos_cloned, repo_path = await clone_additional_repos(
                 repo_manager, additional_repos_list, repo_path
@@ -2177,10 +2344,13 @@ async def analyze_failures(
             cloned_repos.update(additional_repos_cloned)
 
         custom_prompt = (body.raw_prompt or "").strip()
-
         server_url = _build_internal_server_url()
 
-        # Analyze each unique failure group in parallel
+        logger.info(
+            f"Starting AI analysis for {len(groups)} failure groups (provider={ai_provider}, model={ai_model})"
+        )
+
+        # Analyze each group in parallel
         coroutines: list[Coroutine[Any, Any, Any]] = [
             analyze_failure_group(
                 failures=group_failures,
@@ -2196,6 +2366,7 @@ async def analyze_failures(
                 peer_analysis_max_rounds=merged.peer_analysis_max_rounds,
                 additional_repos=cloned_repos or None,
                 max_concurrent_ai_calls=merged.max_concurrent_ai_calls,
+                auth_header=auth_header,
             )
             for group_failures in groups.values()
         ]
@@ -2203,11 +2374,15 @@ async def analyze_failures(
         results = await run_parallel_with_limit(
             coroutines, max_concurrency=merged.max_concurrent_ai_calls
         )
+        logger.debug(
+            f"AI analysis complete: {len(results)} results from {len(groups)} groups"
+        )
 
-        # Flatten results and filter out exceptions
         all_analyses = []
+        failed_group_count = 0
         for result in results:
             if isinstance(result, Exception):
+                failed_group_count += 1
                 logger.error(
                     f"Failed to analyze failure group: {result}", exc_info=result
                 )
@@ -2215,15 +2390,54 @@ async def analyze_failures(
                 all_analyses.extend(result)
 
         unique_errors = len(groups)
-        summary = f"Analyzed {len(test_failures)} test failures ({unique_errors} unique errors). {len(all_analyses)} analyzed successfully."
 
-        # Enrich PRODUCT BUG failures with Jira matches
+        # If every group failed, treat the entire job as failed rather than
+        # saving a misleading "completed" result with zero findings.
+        if not all_analyses and failed_group_count == len(results):
+            error_msg = (
+                f"All {failed_group_count} failure group(s) failed during analysis "
+                f"({len(test_failures)} test failures, {unique_errors} unique errors)"
+            )
+            logger.error(
+                f"File/raw analysis fully failed for job_id={job_id}: {error_msg}"
+            )
+            fail_result = FailureAnalysisResult(
+                job_id=job_id,
+                status="failed",
+                summary=f"Analysis failed: {error_msg}",
+                ai_provider=ai_provider,
+                ai_model=ai_model,
+            )
+            fail_data = fail_result.model_dump(mode="json")
+            fail_data["job_name"] = display_name
+            await _preserve_request_params(job_id, fail_data)
+            await _attach_token_usage(job_id, fail_data)
+            await update_status(job_id, "failed", fail_data)
+            notify_active_count_changed()
+            notify_dashboard_changed()
+            notify_job_status_changed(job_id)
+            notify_token_usage_changed()
+            return
+
+        summary = (
+            f"Analyzed {len(test_failures)} test failures "
+            f"({unique_errors} unique errors). "
+            f"{len(all_analyses)} analyzed successfully."
+        )
+
+        # Enrich with Jira matches
+        logger.debug(
+            f"Enriching with Jira matches (enable_jira={_resolve_enable_jira(body, merged)})"
+        )
         if _resolve_enable_jira(body, merged):
             await enrich_with_jira_matches(
                 all_analyses, merged, ai_provider, ai_model, job_id=job_id
             )
 
-        # Enrich CODE ISSUE failures with tests repo issue matches
+        # Enrich with tests repo matches
+        logger.debug(
+            f"Enriching with tests repo matches (tests_repo_url={redact_url(str(tests_repo_url or ''))})"
+        )
         if merged.tests_repo_url or tests_repo_url:
             await _enrich_result_with_tests_repo_matches(
                 all_analyses,
@@ -2234,11 +2448,11 @@ async def analyze_failures(
                 tests_repo_url=tests_repo_url,
             )
 
-        # If raw_xml was provided, produce enriched XML
+        # Build enriched XML if applicable
         enriched_xml = None
-        if raw_xml is not None:
+        if body.type == "file" and body.raw_xml is not None:
             enriched_xml = build_enriched_xml(
-                raw_xml, all_analyses, f"{base_url}/results/{job_id}"
+                body.raw_xml, all_analyses, f"{base_url}/results/{job_id}"
             )
 
         analysis_result = FailureAnalysisResult(
@@ -2252,6 +2466,8 @@ async def analyze_failures(
         )
 
         result_data = analysis_result.model_dump(mode="json")
+        result_data["job_name"] = display_name
+        logger.info(f"File/raw analysis completed for job_id={job_id}: {summary}")
         await _preserve_request_params(job_id, result_data)
 
         # Attach token usage summary before persisting
@@ -2273,25 +2489,31 @@ async def analyze_failures(
                 exc_info=True,
             )
 
+        # Auto-assign job metadata from name pattern rules
+        await _auto_assign_metadata(display_name, merged.metadata_rules)
+
         # Reveal classifications created during analysis
         await storage.make_classifications_visible(job_id)
 
-        return JSONResponse(content=_attach_result_links(result_data, base_url, job_id))
+    except asyncio.CancelledError:
+        logger.info(f"File/raw analysis task cancelled for job_id={job_id}")
+        return
 
     except Exception as e:
-        logger.exception(f"Direct failure analysis failed for job {job_id}")
+        logger.exception(f"File/raw analysis failed for job {job_id}")
         error_detail = format_exception_with_type(e)
-        analysis_result = FailureAnalysisResult(
+        fail_result = FailureAnalysisResult(
             job_id=job_id,
             status="failed",
             summary=f"Analysis failed: {error_detail}",
             ai_provider=ai_provider,
             ai_model=ai_model,
         )
-        fail_data = analysis_result.model_dump(mode="json")
+        fail_data = fail_result.model_dump(mode="json")
+        fail_data["job_name"] = display_name
         await _preserve_request_params(job_id, fail_data)
 
-        # Attach token usage even on failure — partial AI calls may have been recorded
+        # Attach token usage even on failure
         await _attach_token_usage(job_id, fail_data)
 
         await update_status(job_id, "failed", fail_data)
@@ -2299,10 +2521,78 @@ async def analyze_failures(
         notify_dashboard_changed()
         notify_job_status_changed(job_id)
         notify_token_usage_changed()
-        return JSONResponse(content=_attach_result_links(fail_data, base_url, job_id))
 
     finally:
-        repo_manager.cleanup()
+        logger.debug(f"Cleaning up workspace for job_id={job_id}")
+        if repo_manager is not None:
+            repo_manager.cleanup()
+        await _cleanup_ai_session(auth_header)
+
+
+@app.post("/analyze", status_code=202, response_model=None)
+async def analyze(
+    request: Request,
+    body: UnifiedAnalyzeRequest,
+    *,
+    settings: Settings = _SETTINGS_DEP,
+) -> dict:
+    """Submit an analysis job.
+
+    Dispatches to the appropriate CI source plugin based on the ``type`` field.
+    All types return 202 with a job_id for async polling.
+    """
+    _check_allow_list(request)
+    base_url = _extract_base_url()
+
+    # Validate AI config early
+    _resolve_ai_config(body)
+
+    # Resolve display name
+    display_name: str = body.name or ""
+    if not display_name:
+        if body.type == "jenkins":
+            display_name = body.job_name or "jenkins-analysis"
+        elif body.type == "file":
+            display_name = "file-analysis"
+        else:
+            display_name = "raw-analysis"
+
+    if body.type == "jenkins":
+        # Build a legacy AnalyzeRequest for the existing Jenkins flow
+        jenkins_fields: dict = {}
+        for field_name in AnalyzeRequest.model_fields:
+            if field_name in body.model_fields_set:
+                val = getattr(body, field_name, None)
+                if val is not None:
+                    jenkins_fields[field_name] = val
+        jenkins_fields["job_name"] = body.job_name
+        jenkins_fields["build_number"] = body.build_number
+        if body.name:
+            jenkins_fields["name"] = body.name
+        jenkins_body = AnalyzeRequest(**jenkins_fields)
+        merged = _merge_settings(jenkins_body, settings)
+        resolved_peers = _validate_peer_configs(jenkins_body, merged)
+        return await _enqueue_analysis_job(
+            jenkins_body,
+            merged,
+            resolved_peers,
+            base_url,
+            username=request.state.username,
+        )
+
+    # File or Raw — enqueue as async background task
+    merged = _merge_settings(body, settings)
+    resolved_peers = _validate_peer_configs(body, merged)
+    return await _enqueue_file_raw_analysis(
+        body=body,
+        merged=merged,
+        resolved_peers=resolved_peers,
+        display_name=display_name,
+        analysis_type=body.type,
+        base_url=base_url,
+        username=request.state.username,
+        message_prefix="Analysis",
+    )
 
 
 @app.post("/re-analyze/{job_id}", status_code=202, response_model=None)
@@ -2327,12 +2617,157 @@ async def re_analyze(
         raise HTTPException(status_code=404, detail=f"Result {job_id} not found")
 
     result_data = stored["result"]
+
+    # Authorization: only the original submitter or an admin may re-analyze
+    original_submitter = result_data.get("request_params", {}).get("submitted_by", "")
+    requesting_user = getattr(request.state, "username", "")
+    is_admin = getattr(request.state, "is_admin", False)
+    if not is_admin and requesting_user != original_submitter:
+        raise HTTPException(
+            status_code=403,
+            detail="Only the original submitter or an admin can re-analyze this job",
+        )
+
     if "request_params" not in result_data:
         raise HTTPException(
             status_code=400,
             detail="Original analysis has no stored request_params; cannot re-analyze",
         )
 
+    # Detect analysis type from stored params
+    params = result_data.get("request_params", {})
+    analysis_type = params.get(
+        "analysis_type", "jenkins"
+    )  # default to jenkins for backward compat
+
+    if analysis_type in ("file", "raw"):
+        # File/Raw re-analysis: rebuild a UnifiedAnalyzeRequest and re-submit
+        try:
+            decrypted_params = decrypt_sensitive_fields(dict(params))
+        except Exception as exc:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Failed to decrypt stored params: {exc}",
+            ) from exc
+
+        # Fail fast if any sensitive field is still encrypted (key changed / corrupt)
+        for key in SENSITIVE_KEYS:
+            value = decrypted_params.get(key)
+            if _is_encrypted_value(value):
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Cannot re-analyze: stored {key} could not be decrypted",
+                )
+        for repo in decrypted_params.get("additional_repos") or []:
+            if isinstance(repo, dict) and _is_encrypted_value(repo.get("token")):
+                raise HTTPException(
+                    status_code=400,
+                    detail="Cannot re-analyze: stored additional_repos token could not be decrypted",
+                )
+
+        # Build unified request from stored params
+        # Prefer the original user-supplied name (before UUID suffix was added)
+        # over the resolved display_name / job_name.
+        unified_fields: dict = {
+            "type": analysis_type,
+        }
+        # Only restore name if user explicitly provided one;
+        # leave unset so _enqueue_file_raw_analysis generates a fresh fallback.
+        stored_name = decrypted_params.get("original_name", "")
+        if stored_name:
+            unified_fields["name"] = stored_name
+        # Restore source data
+        if analysis_type == "file":
+            stored_xml = decrypted_params.get("raw_xml")
+            if not stored_xml:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Original file analysis has no stored raw_xml; cannot re-analyze",
+                )
+            unified_fields["raw_xml"] = stored_xml
+        else:
+            stored_failures = decrypted_params.get("failures")
+            if stored_failures is None:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Original raw analysis has no stored failures; cannot re-analyze",
+                )
+            unified_fields["failures"] = stored_failures
+
+        # Copy over shared analysis settings
+        for field in (
+            "ai_provider",
+            "ai_model",
+            "raw_prompt",
+            "issue_prompt",
+            "tests_repo_url",
+            "tests_repo_token",
+            "peer_analysis_max_rounds",
+            "enable_jira",
+            "jira_url",
+            "jira_email",
+            "jira_api_token",
+            "jira_pat",
+            "jira_project_key",
+            "jira_ssl_verify",
+            "jira_max_results",
+            "github_token",
+            "ai_cli_timeout",
+            "max_concurrent_ai_calls",
+        ):
+            if field in decrypted_params and decrypted_params[field] is not None:
+                if field == "tests_repo_url":
+                    ref = decrypted_params.get("tests_repo_ref", "")
+                    url = decrypted_params[field]
+                    unified_fields[field] = f"{url}:{ref}" if ref else url
+                else:
+                    unified_fields[field] = decrypted_params[field]
+
+        if "peer_ai_configs" in decrypted_params:
+            unified_fields["peer_ai_configs"] = decrypted_params["peer_ai_configs"]
+        if (
+            "additional_repos" in decrypted_params
+            and decrypted_params["additional_repos"] is not None
+        ):
+            unified_fields["additional_repos"] = decrypted_params["additional_repos"]
+
+        # Apply overrides from request body
+        for field_name in body.model_fields_set:
+            unified_fields[field_name] = getattr(body, field_name)
+
+        unified_body = UnifiedAnalyzeRequest(**unified_fields)
+
+        # Tags: carry forward + auto-add re-analyze
+        existing_tags = list(result_data.get("tags", []))
+        if "re-analyze" not in existing_tags:
+            existing_tags.append("re-analyze")
+        if "tags" in body.model_fields_set:
+            for t in getattr(body, "tags", None) or []:
+                if t not in existing_tags:
+                    existing_tags.append(t)
+        unified_body.tags = existing_tags
+
+        # Validate and merge settings
+        _resolve_ai_config(unified_body)
+        merged = _merge_settings(unified_body, get_settings())
+        resolved_peers = _validate_peer_configs(unified_body, merged)
+
+        # Resolve display name
+        display_name = unified_body.name or f"{analysis_type}-re-analysis"
+
+        return await _enqueue_file_raw_analysis(
+            body=unified_body,
+            merged=merged,
+            resolved_peers=resolved_peers,
+            display_name=display_name,
+            analysis_type=analysis_type,
+            base_url=base_url,
+            username=request.state.username,
+            tags=unified_body.tags,
+            message_prefix="Re-analysis",
+        )
+
+    # Jenkins path (existing code)
     # Reconstruct the original AnalyzeRequest + Settings
     try:
         original_body, original_settings = _reconstruct_from_params(result_data)
@@ -2353,7 +2788,7 @@ async def re_analyze(
         existing_tags.append("re-analyze")
     # Merge with any user-supplied tags from the override body
     if "tags" in body.model_fields_set:
-        for t in original_body.tags:
+        for t in original_body.tags or []:
             if t not in existing_tags:
                 existing_tags.append(t)
     original_body.tags = existing_tags
@@ -2722,20 +3157,12 @@ async def set_reviewed(
 async def enrich_comments(
     job_id: str,
     request: Request,
-    settings: Settings = Depends(get_settings),
+    settings: Settings = _SETTINGS_DEP,
     _: None = Depends(_bind_job_id),
 ) -> dict:
     """Fetch live statuses for GitHub PRs and Jira tickets found in comments."""
     _check_allow_list(request)
     logger.debug(f"POST /results/{job_id}/enrich-comments")
-    from rootcoz.comment_enrichment import (
-        detect_github_issues,
-        detect_github_prs,
-        detect_jira_keys,
-        fetch_github_issue_status,
-        fetch_github_pr_status,
-        fetch_jira_ticket_status,
-    )
 
     comments = await storage.get_comments_for_job(job_id)
     logger.debug(f"enrich_comments: job_id={job_id}, comments_count={len(comments)}")
@@ -2869,40 +3296,50 @@ def _resolve_analyzed_repo(
     if not ref:
         ref = parsed_ref
 
-    # Token: decrypt stored value, fall back to server token
+    # Token: decrypt stored value, fall back to server token only when
+    # the resolved URL matches the server-configured repo to prevent a
+    # user-specified repo from borrowing the deployment token.
     token = ""
     if request_params:
-        decrypted = decrypt_sensitive_fields(request_params)
+        try:
+            decrypted = decrypt_sensitive_fields(request_params)
+        except Exception:
+            logger.warning(
+                "Failed to decrypt stored request_params; "
+                "falling back to server token only",
+                exc_info=True,
+            )
+            decrypted = {}
         stored_token = decrypted.get("tests_repo_token", "")
         if not _is_encrypted_value(stored_token):
             token = stored_token
     if not token and settings.tests_repo_token:
-        token = settings.tests_repo_token.get_secret_value()
+        server_url_normalized, _ = parse_repo_ref(str(settings.tests_repo_url or ""))
+        if url == server_url_normalized:
+            token = settings.tests_repo_token.get_secret_value()
+        else:
+            logger.debug(
+                "Skipping server tests_repo_token: resolved URL %s differs from "
+                "server-configured %s",
+                redact_url(url),
+                redact_url(server_url_normalized),
+            )
 
     return url, ref, token
 
 
-def _resolve_github_repo_url(
-    body_repo_url: str, settings: Settings, result_data: dict
-) -> str:
-    """Validate and resolve GitHub repo URL from request body or fallback.
+def _resolve_github_repo_url(settings: Settings) -> str:
+    """Resolve GitHub repo URL from server config only.
 
-    If *body_repo_url* is provided it is validated via ``_parse_github_repo_url``
-    (which raises ``ValueError`` on bad input).  Otherwise falls back to
-    ``_resolve_analyzed_repo``.
+    Only the deployment-level ``TESTS_REPO_URL`` setting is used.
+    Stored analysis ``request_params`` are intentionally **not** consulted
+    so that callers cannot retarget issue creation or duplicate search away
+    from the deployment-configured repository while using server credentials.
 
-    Raises:
-        HTTPException: 400 when *body_repo_url* is invalid.
+    Returns:
+        The resolved repo URL, or an empty string when unavailable.
     """
-    if body_repo_url:
-        try:
-            _parse_github_repo_url(body_repo_url)
-        except ValueError as exc:
-            raise HTTPException(
-                status_code=400, detail=f"Invalid github_repo_url: {exc}"
-            ) from exc
-        return body_repo_url
-    url, _ref, _token = _resolve_analyzed_repo(settings, result_data)
+    url, _ref = parse_repo_ref(str(settings.tests_repo_url or ""))
     return url
 
 
@@ -2946,7 +3383,7 @@ async def _load_effective_failure(
 async def get_issue_prompt(
     job_id: str,
     request: Request,
-    settings: Settings = Depends(get_settings),
+    settings: Settings = _SETTINGS_DEP,
     _: None = Depends(_bind_job_id),
 ) -> dict:
     """Return the issue generation prompt for a job.
@@ -2983,11 +3420,11 @@ async def get_issue_prompt(
         return {"prompt": ""}
 
     try:
-        owner, repo = _parse_github_repo_url(tests_repo_url)
+        owner, repo = parse_github_repo_url(tests_repo_url)
     except ValueError:
         logger.warning(
             "Cannot parse GitHub repo URL for issue prompt: %s",
-            _redact_url(tests_repo_url),
+            redact_url(tests_repo_url),
         )
         return {"prompt": ""}
 
@@ -3032,7 +3469,7 @@ async def get_issue_prompt(
     except httpx.TimeoutException:
         logger.warning("Timeout fetching issue prompt from %s/%s", owner, repo)
         return {"prompt": ""}
-    except Exception:  # noqa: BLE001 — never crash; empty prompt is safe
+    except Exception:  # never crash; empty prompt is safe
         logger.warning(
             "Failed to fetch issue prompt from %s/%s",
             owner,
@@ -3051,7 +3488,7 @@ async def preview_github_issue(
     job_id: str,
     body: PreviewIssueRequest,
     request: Request,
-    settings: Settings = Depends(get_settings),
+    settings: Settings = _SETTINGS_DEP,
     _: None = Depends(_bind_job_id),
 ) -> dict:
     """Generate preview content for a GitHub issue from a failure analysis."""
@@ -3093,9 +3530,7 @@ async def preview_github_issue(
     )
 
     # Duplicate detection (best-effort: failures must not break preview)
-    tests_repo_url = _resolve_github_repo_url(
-        body.github_repo_url, settings, result_data
-    )
+    tests_repo_url = _resolve_github_repo_url(settings)
     github_token = (body.github_token or "").strip() or (
         settings.github_token.get_secret_value() if settings.github_token else ""
     )
@@ -3126,7 +3561,7 @@ async def preview_jira_bug(
     job_id: str,
     body: PreviewIssueRequest,
     request: Request,
-    settings: Settings = Depends(get_settings),
+    settings: Settings = _SETTINGS_DEP,
     _: None = Depends(_bind_job_id),
 ) -> dict:
     """Generate preview content for a Jira bug from a failure analysis."""
@@ -3250,7 +3685,7 @@ def _build_effective_jira_settings(
     Uses ``model_copy()`` to follow the same pattern as ``_merge_settings()``.
     The user token is set as ``jira_api_token`` and ``jira_pat`` is cleared so
     the user token takes precedence in all auth resolution paths
-    (``_resolve_jira_auth`` prefers PAT over API token, so leaving server PAT
+    (``resolve_jira_auth`` prefers PAT over API token, so leaving server PAT
     intact would bypass the user override).
 
     When the user provides a token but no email, ``jira_email`` is also cleared
@@ -3349,7 +3784,7 @@ async def create_github_issue_endpoint(
     job_id: str,
     body: CreateIssueRequest,
     request: Request,
-    settings: Settings = Depends(get_settings),
+    settings: Settings = _SETTINGS_DEP,
     _: None = Depends(_bind_job_id),
 ) -> dict:
     """Create a GitHub issue from a failure analysis."""
@@ -3368,7 +3803,10 @@ async def create_github_issue_endpoint(
     if not github_token:
         raise HTTPException(
             status_code=400,
-            detail="GitHub token is required. Provide a token in your profile settings or configure GITHUB_TOKEN on the server.",
+            detail=(
+                "GitHub token is required. Provide a token in your"
+                " profile settings or configure GITHUB_TOKEN on the server."
+            ),
         )
 
     _failure, _result_data = await _load_effective_failure(
@@ -3380,9 +3818,7 @@ async def create_github_issue_endpoint(
     if username:
         issue_body += f"\n\n---\n_Reported by: {username} via rootcoz_"
 
-    tests_repo_url = _resolve_github_repo_url(
-        body.github_repo_url, settings, _result_data
-    )
+    tests_repo_url = _resolve_github_repo_url(settings)
     if not tests_repo_url:
         raise HTTPException(
             status_code=400,
@@ -3442,7 +3878,7 @@ async def create_jira_bug_endpoint(
     job_id: str,
     body: CreateIssueRequest,
     request: Request,
-    settings: Settings = Depends(get_settings),
+    settings: Settings = _SETTINGS_DEP,
     _: None = Depends(_bind_job_id),
 ) -> dict:
     """Create a Jira bug from a failure analysis."""
@@ -3476,12 +3912,19 @@ async def create_jira_bug_endpoint(
         if not effective_jira_settings.jira_project_key:
             raise HTTPException(
                 status_code=400,
-                detail="Jira project key is required. Provide it in the request or configure JIRA_PROJECT_KEY on the server.",
+                detail=(
+                    "Jira project key is required. Provide it in the"
+                    " request or configure JIRA_PROJECT_KEY on the server."
+                ),
             )
         if not _has_jira_credentials(effective_jira_settings):
             raise HTTPException(
                 status_code=400,
-                detail="Jira token is required. Provide a token in your profile settings or configure Jira credentials on the server.",
+                detail=(
+                    "Jira token is required. Provide a token in your"
+                    " profile settings or configure Jira credentials"
+                    " on the server."
+                ),
             )
         result = await create_jira_bug(
             title=body.title,
@@ -3534,7 +3977,7 @@ async def push_to_reportportal(
     child_build_number: int | None = Query(
         default=None, description="Child build number for pipeline child push"
     ),
-    settings: Settings = Depends(get_settings),
+    settings: Settings = _SETTINGS_DEP,
     _: None = Depends(_bind_job_id),
 ) -> dict:
     """Push rootcoz classifications into Report Portal test items.
@@ -4211,9 +4654,9 @@ async def abort_analysis(
             await asyncio.wait_for(asyncio.shield(task), timeout=2.0)
         except asyncio.CancelledError:
             pass  # Expected — task was cancelled
-        except asyncio.TimeoutError:
+        except TimeoutError:
             logger.debug(f"Timed out waiting for task cancellation for job_id={job_id}")
-        except Exception:  # noqa: BLE001
+        except Exception:
             logger.warning(
                 f"Unexpected error while waiting for task cancellation for job_id={job_id}",
                 exc_info=True,
@@ -4433,7 +4876,7 @@ async def api_dashboard() -> list[dict]:
 
 
 @app.get("/api/capabilities")
-async def get_capabilities(settings: Settings = Depends(get_settings)) -> dict:
+async def get_capabilities(settings: Settings = _SETTINGS_DEP) -> dict:
     """Report server-level feature toggles and credential availability.
 
     Feature toggles (ENABLE_GITHUB_ISSUES, ENABLE_JIRA_ISSUES) control
@@ -4470,7 +4913,7 @@ def _jira_client_from_body(
 @app.post("/api/jira-projects")
 async def list_jira_projects(
     body: JiraProjectsRequest,
-    settings: Settings = Depends(get_settings),
+    settings: Settings = _SETTINGS_DEP,
 ) -> list[dict]:
     """List Jira projects accessible to the user.
 
@@ -4490,8 +4933,6 @@ async def list_jira_projects(
         return []
 
     effective_settings, _ = result
-
-    from rootcoz.jira import JiraClient
 
     projects: list[dict] = []
     try:
@@ -4518,7 +4959,7 @@ class JiraSecurityLevelsRequest(BaseModel):
 @app.post("/api/jira-security-levels")
 async def list_jira_security_levels(
     body: JiraSecurityLevelsRequest,
-    settings: Settings = Depends(get_settings),
+    settings: Settings = _SETTINGS_DEP,
 ) -> list[dict]:
     """List available security levels for a Jira project."""
     if not settings.jira_url or not body.project_key:
@@ -4529,8 +4970,6 @@ async def list_jira_security_levels(
         return []
 
     effective_settings, _ = result
-
-    from rootcoz.jira import JiraClient
 
     try:
         async with JiraClient(effective_settings) as client:
@@ -4551,7 +4990,7 @@ class ValidateTokenRequest(BaseModel):
 @app.post("/api/validate-token")
 async def validate_token(
     body: ValidateTokenRequest,
-    settings: Settings = Depends(get_settings),
+    settings: Settings = _SETTINGS_DEP,
 ) -> dict:
     """Validate a GitHub or Jira token by making a lightweight API call.
 
@@ -4642,7 +5081,9 @@ async def get_all_failures_endpoint(
 ) -> dict:
     """Get paginated failure history."""
     logger.debug(
-        f"GET /history/failures: search={search!r}, job_name={job_name!r}, classification={classification!r}, limit={limit}, offset={offset}"
+        f"GET /history/failures: search={search!r}, "
+        f"job_name={job_name!r}, classification={classification!r}, "
+        f"limit={limit}, offset={offset}"
     )
     return await storage.get_all_failures(
         search=search,
@@ -4857,22 +5298,20 @@ async def prometheus_metrics() -> Response:
     try:
         health = await build_health_response(settings, db_path)
         health_up = 0 if health["status"] == "unhealthy" else 1
-    except Exception:  # noqa: BLE001
+    except Exception:
         logger.debug("Failed to compute health status for metrics", exc_info=True)
         health_up = 0
 
     # Count active analyses
     active_analyses: int | None = None
     try:
-        import aiosqlite
-
         async with aiosqlite.connect(db_path) as db:
             cursor = await db.execute(
                 "SELECT COUNT(*) FROM results WHERE status IN ('pending', 'running', 'waiting')"
             )
             row = await cursor.fetchone()
             active_analyses = row[0] if row else 0
-    except Exception:  # noqa: BLE001
+    except Exception:
         logger.debug("Failed to compute active analyses for metrics", exc_info=True)
 
     return Response(
@@ -4929,7 +5368,7 @@ async def get_latest_release() -> JSONResponse:
                 _release_cache["data"] = data
                 _release_cache["fetched_at"] = now
                 return JSONResponse(content=data)
-        except Exception:  # noqa: BLE001
+        except Exception:
             logger.debug("Failed to fetch latest GitHub release", exc_info=True)
             if _release_cache.get("data"):
                 return JSONResponse(content=_release_cache["data"])
@@ -5672,8 +6111,6 @@ async def preview_metadata_rules(body: dict) -> dict:
         raise HTTPException(status_code=422, detail="job_name is required")
     job_name = job_name.strip()
 
-    from rootcoz.metadata_rules import match_job_metadata
-
     settings = get_settings()
     rules = settings.metadata_rules
     matched = match_job_metadata(job_name, rules)
@@ -5890,10 +6327,6 @@ async def analyze_comment_intent(
                 ai_model = params.get("ai_model", "")
     ai_provider, ai_model = _resolve_ai_config_values(ai_provider, ai_model)
 
-    from ai_cli_runner import call_ai_cli
-
-    from rootcoz.analyzer import PROVIDER_CLI_FLAGS
-
     prompt = """You are analyzing a comment left on a test failure report.
 Does this comment imply the failure has been reviewed or resolved?
 
@@ -5925,8 +6358,6 @@ Respond with ONLY a JSON object:
         cli_flags=PROVIDER_CLI_FLAGS.get(ai_provider, []),
         output_format="json",
     )
-
-    from rootcoz.token_tracking import record_ai_usage
 
     await record_ai_usage(
         job_id="comment-intent",
@@ -5985,7 +6416,7 @@ async def preview_feedback(request: Request, body: FeedbackRequest):
         return await generate_feedback_preview(
             body, settings, ai_provider=ai_provider, ai_model=ai_model
         )
-    except Exception as exc:  # noqa: BLE001 — non-fatal feedback preview
+    except Exception as exc:  # non-fatal feedback preview
         logger.exception("Failed to generate feedback preview")
         raise HTTPException(
             status_code=500,
@@ -6028,7 +6459,7 @@ async def create_feedback(request: Request, body: FeedbackCreateRequest):
             status_code=502,
             detail=f"GitHub API unreachable: {exc}",
         ) from exc
-    except Exception as exc:  # noqa: BLE001 — non-fatal feedback submission
+    except Exception as exc:  # non-fatal feedback submission
         logger.exception("Failed to create feedback issue")
         raise HTTPException(
             status_code=500,
@@ -6056,7 +6487,5 @@ async def serve_frontend_catchall(request: Request, path: str) -> HTMLResponse:
 
 def run() -> None:
     """Entry point for the CLI."""
-    import uvicorn
-
     reload = os.getenv("DEBUG", "").lower() == "true"
     uvicorn.run("rootcoz.main:app", host="0.0.0.0", port=APP_PORT, reload=reload)

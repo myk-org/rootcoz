@@ -1,24 +1,84 @@
 """Tests for analyzer module."""
 
+import inspect
+import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import jenkins
 import pytest
+import requests
 from ai_cli_runner import AIResult
-from fastapi import HTTPException
 
-from rootcoz.analyzer import (
-    _JSON_RESPONSE_SCHEMA,
-    _build_resources_section,
-    _call_ai_cli_with_retry,
-    _parse_json_response,
-    _recover_from_details,
+from rootcoz.config import Settings, get_settings
+from rootcoz.engine.core import (
+    JSON_RESPONSE_SCHEMA,
+    analyze_failure_group,
+    build_resources_section,
+    call_ai_cli_with_retry,
+    clone_additional_repos,
+    parse_json_response,
+    recover_from_details,
+    resolve_additional_repos,
+    run_single_ai_analysis,
+)
+from rootcoz.models import (
+    AdditionalRepo,
+    AiConfigEntry,
+    AnalysisDetail,
+    AnalyzeRequest,
+    ChildJobAnalysis,
+    FailedTest,
+    FailureAnalysis,
+)
+from rootcoz.peer_analysis import analyze_failure_group_with_peers
+from rootcoz.repository import RepositoryManager
+from rootcoz.sources.jenkins_source import (
+    JenkinsError,
+    analyze_child_job,
+    analyze_job,
     extract_failures_from_test_report,
     handle_jenkins_exception,
 )
-from rootcoz.config import Settings
 
 _FAKE_JENKINS_PASSWORD = "test-pass"  # noqa: S105  # pragma: allowlist secret
+
+
+def _make_jenkins_settings(**overrides: object) -> Settings:
+    """Build a ``Settings`` instance pre-filled with dummy Jenkins credentials.
+
+    Any extra *overrides* (e.g. ``force_analysis=True``) are merged into the
+    settings dict before validation.
+    """
+    data = Settings().model_dump(mode="python")
+    data["jenkins_url"] = "https://jenkins.example.com"
+    data["jenkins_user"] = "user"
+    data["jenkins_password"] = _FAKE_JENKINS_PASSWORD
+    data.update(overrides)
+    return Settings.model_validate(data)
+
+
+def _patch_jenkins_client(
+    monkeypatch: pytest.MonkeyPatch,
+    mock_client: MagicMock,
+) -> None:
+    """Monkeypatch ``JenkinsClient`` construction and ``asyncio.to_thread``.
+
+    After calling this helper, the jenkins source module will:
+    * return *mock_client* from ``JenkinsClient(**…)``
+    * execute ``asyncio.to_thread`` calls synchronously
+    """
+
+    async def fake_to_thread(func, *args, **kwargs):
+        return func(*args, **kwargs)
+
+    monkeypatch.setattr(
+        "rootcoz.sources.jenkins_source.asyncio.to_thread",
+        fake_to_thread,
+    )
+    monkeypatch.setattr(
+        "rootcoz.sources.jenkins_source.JenkinsClient",
+        lambda **_kwargs: mock_client,
+    )
 
 
 class TestHandleJenkinsException:
@@ -27,99 +87,97 @@ class TestHandleJenkinsException:
     def test_handle_not_found_exception(self) -> None:
         """Test that NotFoundException returns 404."""
         exc = jenkins.NotFoundException("Job not found")
-        with pytest.raises(HTTPException) as exc_info:
+        with pytest.raises(JenkinsError) as exc_info:
             handle_jenkins_exception(exc, "my-job", 123)
         assert exc_info.value.status_code == 404
-        assert "my-job" in exc_info.value.detail
-        assert "123" in exc_info.value.detail
+        assert "my-job" in str(exc_info.value)
+        assert "123" in str(exc_info.value)
 
     def test_handle_jenkins_exception_with_not_found_message(self) -> None:
         """Test that JenkinsException with 'not found' message returns 404."""
         exc = jenkins.JenkinsException("Job does not exist")
-        with pytest.raises(HTTPException) as exc_info:
+        with pytest.raises(JenkinsError) as exc_info:
             handle_jenkins_exception(exc, "my-job", 456)
         assert exc_info.value.status_code == 404
 
     def test_handle_jenkins_exception_with_404_message(self) -> None:
         """Test that JenkinsException with '404' in message returns 404."""
         exc = jenkins.JenkinsException("Error 404: Resource not available")
-        with pytest.raises(HTTPException) as exc_info:
+        with pytest.raises(JenkinsError) as exc_info:
             handle_jenkins_exception(exc, "my-job", 789)
         assert exc_info.value.status_code == 404
 
     def test_handle_jenkins_exception_unauthorized(self) -> None:
         """Test that unauthorized error returns 502 with auth message."""
         exc = jenkins.JenkinsException("401 Unauthorized")
-        with pytest.raises(HTTPException) as exc_info:
+        with pytest.raises(JenkinsError) as exc_info:
             handle_jenkins_exception(exc, "my-job", 123)
         assert exc_info.value.status_code == 502
-        assert "authentication failed" in exc_info.value.detail.lower()
+        assert "authentication failed" in str(exc_info.value).lower()
 
     def test_handle_jenkins_exception_forbidden(self) -> None:
         """Test that forbidden error returns 502 with permission message."""
         exc = jenkins.JenkinsException("403 Forbidden")
-        with pytest.raises(HTTPException) as exc_info:
+        with pytest.raises(JenkinsError) as exc_info:
             handle_jenkins_exception(exc, "my-job", 123)
         assert exc_info.value.status_code == 502
-        assert "access denied" in exc_info.value.detail.lower()
-        assert "my-job" in exc_info.value.detail
+        assert "access denied" in str(exc_info.value).lower()
+        assert "my-job" in str(exc_info.value)
 
     def test_handle_jenkins_exception_generic(self) -> None:
         """Test that generic JenkinsException returns 502 with error details."""
         exc = jenkins.JenkinsException("Connection timeout")
-        with pytest.raises(HTTPException) as exc_info:
+        with pytest.raises(JenkinsError) as exc_info:
             handle_jenkins_exception(exc, "my-job", 123)
         assert exc_info.value.status_code == 502
-        assert "Jenkins error" in exc_info.value.detail
+        assert "Jenkins error" in str(exc_info.value)
 
     def test_handle_non_jenkins_exception(self) -> None:
         """Test that non-Jenkins exceptions return 502 with connection error."""
         exc = ValueError("Some other error")
-        with pytest.raises(HTTPException) as exc_info:
+        with pytest.raises(JenkinsError) as exc_info:
             handle_jenkins_exception(exc, "my-job", 123)
         assert exc_info.value.status_code == 502
-        assert "Failed to connect to Jenkins" in exc_info.value.detail
+        assert "Failed to connect to Jenkins" in str(exc_info.value)
 
     def test_handle_timeout_exception(self) -> None:
         """Test that timeout returns 504 with generic message."""
-        import requests
 
         exc = requests.exceptions.Timeout("Connection timed out")
-        with pytest.raises(HTTPException) as exc_info:
+        with pytest.raises(JenkinsError) as exc_info:
             handle_jenkins_exception(exc, "my-job", 123)
         assert exc_info.value.status_code == 504
         assert (
-            exc_info.value.detail
+            str(exc_info.value)
             == "Jenkins is unreachable or timed out. Check server connectivity."
         )
         # Raw exception message must not leak into the HTTP response
-        assert "Connection timed out" not in exc_info.value.detail
+        assert "Connection timed out" not in str(exc_info.value)
 
     def test_handle_connection_error_exception(self) -> None:
         """Test that connection error returns 504 with generic message."""
-        import requests
 
         exc = requests.exceptions.ConnectionError("Connection refused")
-        with pytest.raises(HTTPException) as exc_info:
+        with pytest.raises(JenkinsError) as exc_info:
             handle_jenkins_exception(exc, "my-job", 123)
         assert exc_info.value.status_code == 504
         assert (
-            exc_info.value.detail
+            str(exc_info.value)
             == "Jenkins is unreachable or timed out. Check server connectivity."
         )
         # Raw exception message must not leak into the HTTP response
-        assert "Connection refused" not in exc_info.value.detail
+        assert "Connection refused" not in str(exc_info.value)
 
 
 class TestCallAiCliWithRetry:
-    """Tests for the _call_ai_cli_with_retry function."""
+    """Tests for the call_ai_cli_with_retry function."""
 
     @pytest.mark.asyncio
     async def test_success_no_retry(self) -> None:
         """Test that a successful first call does not retry."""
-        with patch("rootcoz.analyzer.call_ai_cli", new_callable=AsyncMock) as mock:
+        with patch("rootcoz.engine.core.call_ai_cli", new_callable=AsyncMock) as mock:
             mock.return_value = AIResult(success=True, text="result")
-            result = await _call_ai_cli_with_retry("prompt", ai_provider="test")
+            result = await call_ai_cli_with_retry("prompt", ai_provider="test")
             assert result.success is True
             assert result.text == "result"
             assert mock.call_count == 1
@@ -128,8 +186,8 @@ class TestCallAiCliWithRetry:
     async def test_retryable_error_retries(self) -> None:
         """Test that a retryable error triggers a retry and succeeds."""
         with (
-            patch("rootcoz.analyzer.call_ai_cli", new_callable=AsyncMock) as mock,
-            patch("rootcoz.analyzer.asyncio.sleep", new_callable=AsyncMock),
+            patch("rootcoz.engine.core.call_ai_cli", new_callable=AsyncMock) as mock,
+            patch("rootcoz.engine.core.asyncio.sleep", new_callable=AsyncMock),
         ):
             mock.side_effect = [
                 AIResult(
@@ -138,7 +196,7 @@ class TestCallAiCliWithRetry:
                 ),
                 AIResult(success=True, text="success after retry"),
             ]
-            result = await _call_ai_cli_with_retry(
+            result = await call_ai_cli_with_retry(
                 "prompt", ai_provider="test", max_retries=1
             )
             assert result.success is True
@@ -148,9 +206,9 @@ class TestCallAiCliWithRetry:
     @pytest.mark.asyncio
     async def test_non_retryable_error_no_retry(self) -> None:
         """Test that a non-retryable error does not trigger a retry."""
-        with patch("rootcoz.analyzer.call_ai_cli", new_callable=AsyncMock) as mock:
+        with patch("rootcoz.engine.core.call_ai_cli", new_callable=AsyncMock) as mock:
             mock.return_value = AIResult(success=False, text="some other error")
-            result = await _call_ai_cli_with_retry(
+            result = await call_ai_cli_with_retry(
                 "prompt", ai_provider="test", max_retries=3
             )
             assert result.success is False
@@ -161,13 +219,13 @@ class TestCallAiCliWithRetry:
     async def test_max_retries_exhausted(self) -> None:
         """Test that retries stop after max_retries is exhausted."""
         with (
-            patch("rootcoz.analyzer.call_ai_cli", new_callable=AsyncMock) as mock,
-            patch("rootcoz.analyzer.asyncio.sleep", new_callable=AsyncMock),
+            patch("rootcoz.engine.core.call_ai_cli", new_callable=AsyncMock) as mock,
+            patch("rootcoz.engine.core.asyncio.sleep", new_callable=AsyncMock),
         ):
             mock.return_value = AIResult(
                 success=False, text="ENOENT: no such file or directory"
             )
-            result = await _call_ai_cli_with_retry(
+            result = await call_ai_cli_with_retry(
                 "prompt", ai_provider="test", max_retries=2
             )
             assert result.success is False
@@ -175,16 +233,13 @@ class TestCallAiCliWithRetry:
 
 
 class TestRunSingleAiAnalysis:
-    """Tests for the _run_single_ai_analysis shared helper."""
+    """Tests for the run_single_ai_analysis shared helper."""
 
     @pytest.mark.asyncio
     async def test_returns_parsed_analysis_and_signature(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """Successful AI call returns parsed AnalysisDetail and error signature."""
-        from rootcoz.analyzer import _run_single_ai_analysis
-        from rootcoz.models import FailedTest
-        import json
 
         ai_response = json.dumps(
             {
@@ -194,12 +249,12 @@ class TestRunSingleAiAnalysis:
             }
         )
         mock_cli = AsyncMock(return_value=AIResult(success=True, text=ai_response))
-        monkeypatch.setattr("rootcoz.analyzer._call_ai_cli_with_retry", mock_cli)
+        monkeypatch.setattr("rootcoz.engine.core.call_ai_cli_with_retry", mock_cli)
 
         failure = FailedTest(
             test_name="test_foo", error_message="AssertionError", stack_trace="line 42"
         )
-        parsed, sig = await _run_single_ai_analysis(
+        parsed, sig = await run_single_ai_analysis(
             failures=[failure],
             console_context="console lines",
             repo_path=None,
@@ -220,16 +275,14 @@ class TestRunSingleAiAnalysis:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """Failed AI call returns AnalysisDetail with raw output in details."""
-        from rootcoz.analyzer import _run_single_ai_analysis
-        from rootcoz.models import FailedTest
 
         mock_cli = AsyncMock(return_value=AIResult(success=False, text="CLI timeout"))
-        monkeypatch.setattr("rootcoz.analyzer._call_ai_cli_with_retry", mock_cli)
+        monkeypatch.setattr("rootcoz.engine.core.call_ai_cli_with_retry", mock_cli)
 
         failure = FailedTest(
             test_name="test_bar", error_message="err", stack_trace="st"
         )
-        parsed, sig = await _run_single_ai_analysis(
+        parsed, sig = await run_single_ai_analysis(
             failures=[failure],
             console_context="",
             repo_path=None,
@@ -249,25 +302,18 @@ class TestRunSingleAiAnalysis:
     async def test_peer_analysis_uses_shared_helper(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Peer analysis module calls _run_single_ai_analysis for the orchestrator's initial analysis."""
-        from rootcoz.peer_analysis import analyze_failure_group_with_peers
-        from rootcoz.models import (
-            AiConfigEntry,
-            AnalysisDetail,
-            FailedTest,
-        )
+        """Peer analysis module calls run_single_ai_analysis for the orchestrator's initial analysis."""
 
-        # Mock _run_single_ai_analysis to track that it was called
+        # Mock run_single_ai_analysis to track that it was called
         mock_run = AsyncMock(
             return_value=(
                 AnalysisDetail(classification="CODE ISSUE", details="test"),
                 "abc123sig",
             )
         )
-        monkeypatch.setattr("rootcoz.peer_analysis._run_single_ai_analysis", mock_run)
+        monkeypatch.setattr("rootcoz.peer_analysis.run_single_ai_analysis", mock_run)
 
         # Mock peer calls to agree immediately
-        import json
 
         peer_response = json.dumps(
             {
@@ -278,7 +324,7 @@ class TestRunSingleAiAnalysis:
             }
         )
         mock_cli = AsyncMock(return_value=AIResult(success=True, text=peer_response))
-        monkeypatch.setattr("rootcoz.peer_analysis._call_ai_cli_with_retry", mock_cli)
+        monkeypatch.setattr("rootcoz.peer_analysis.call_ai_cli_with_retry", mock_cli)
 
         failure = FailedTest(
             test_name="test_foo", error_message="err", stack_trace="st"
@@ -293,13 +339,15 @@ class TestRunSingleAiAnalysis:
             main_ai_model="opus",
             peer_ai_configs=peers,
             max_rounds=1,
+            auth_header="Bearer test-token",
         )
 
-        # _run_single_ai_analysis must have been called for the orchestrator
+        # run_single_ai_analysis must have been called for the orchestrator
         assert mock_run.called
         call_kwargs = mock_run.call_args.kwargs
         assert call_kwargs["ai_provider"] == "claude"
         assert call_kwargs["ai_model"] == "opus"
+        assert call_kwargs["auth_header"] == "Bearer test-token"
 
 
 class TestAnalyzeFailureGroupPeerDelegation:
@@ -310,12 +358,6 @@ class TestAnalyzeFailureGroupPeerDelegation:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """When peer_ai_configs is provided, delegates to peer analysis module."""
-        from rootcoz.analyzer import FailedTest, analyze_failure_group
-        from rootcoz.models import (
-            AiConfigEntry,
-            AnalysisDetail,
-            FailureAnalysis,
-        )
 
         expected_result = [
             FailureAnalysis(
@@ -363,12 +405,6 @@ class TestAnalyzeFailureGroupPeerDelegation:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """peer_analysis_max_rounds is forwarded as max_rounds."""
-        from rootcoz.analyzer import FailedTest, analyze_failure_group
-        from rootcoz.models import (
-            AiConfigEntry,
-            AnalysisDetail,
-            FailureAnalysis,
-        )
 
         mock_peer = AsyncMock(
             return_value=[
@@ -406,7 +442,6 @@ class TestAnalyzeFailureGroupPeerDelegation:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """When no peer_ai_configs, uses single-AI path."""
-        from rootcoz.analyzer import FailedTest, analyze_failure_group
 
         mock_cli = AsyncMock(
             return_value=AIResult(
@@ -414,7 +449,7 @@ class TestAnalyzeFailureGroupPeerDelegation:
                 text='{"classification":"CODE ISSUE","affected_tests":["t"],"details":"d"}',
             )
         )
-        monkeypatch.setattr("rootcoz.analyzer._call_ai_cli_with_retry", mock_cli)
+        monkeypatch.setattr("rootcoz.engine.core.call_ai_cli_with_retry", mock_cli)
 
         failure = FailedTest(
             test_name="test_foo", error_message="err", stack_trace="st"
@@ -431,12 +466,6 @@ class TestAnalyzeFailureGroupPeerDelegation:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """Dict-form peer configs are converted to AiConfigEntry objects."""
-        from rootcoz.analyzer import FailedTest, analyze_failure_group
-        from rootcoz.models import (
-            AiConfigEntry,
-            AnalysisDetail,
-            FailureAnalysis,
-        )
 
         mock_peer = AsyncMock(
             return_value=[
@@ -476,12 +505,6 @@ class TestAnalyzeFailureGroupPeerDelegation:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """group_label is forwarded from analyze_failure_group to analyze_failure_group_with_peers."""
-        from rootcoz.analyzer import FailedTest, analyze_failure_group
-        from rootcoz.models import (
-            AiConfigEntry,
-            AnalysisDetail,
-            FailureAnalysis,
-        )
 
         mock_peer = AsyncMock(
             return_value=[
@@ -519,12 +542,6 @@ class TestAnalyzeFailureGroupPeerDelegation:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """group_label defaults to empty string when not provided."""
-        from rootcoz.analyzer import FailedTest, analyze_failure_group
-        from rootcoz.models import (
-            AiConfigEntry,
-            AnalysisDetail,
-            FailureAnalysis,
-        )
 
         mock_peer = AsyncMock(
             return_value=[
@@ -561,12 +578,6 @@ class TestAnalyzeFailureGroupPeerDelegation:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """max_concurrent_ai_calls is forwarded from analyze_failure_group to analyze_failure_group_with_peers."""
-        from rootcoz.analyzer import FailedTest, analyze_failure_group
-        from rootcoz.models import (
-            AiConfigEntry,
-            AnalysisDetail,
-            FailureAnalysis,
-        )
 
         mock_peer = AsyncMock(
             return_value=[
@@ -608,8 +619,6 @@ class TestConsoleOnlyPeerWarning:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """analyze_child_job console-only path logs warning when peer_ai_configs set."""
-        from rootcoz.analyzer import analyze_child_job
-        from rootcoz.models import AiConfigEntry
 
         mock_client = MagicMock()
         mock_client.get_build_info_safe.return_value = {
@@ -619,15 +628,9 @@ class TestConsoleOnlyPeerWarning:
         mock_client.get_build_console.return_value = "Build failed with error"
         mock_client.get_test_report.return_value = None
 
-        async def fake_to_thread(func, *args, **kwargs):
-            return func(*args, **kwargs)
-
+        _patch_jenkins_client(monkeypatch, mock_client)
         monkeypatch.setattr(
-            "rootcoz.analyzer.asyncio.to_thread",
-            fake_to_thread,
-        )
-        monkeypatch.setattr(
-            "rootcoz.analyzer._call_ai_cli_with_retry",
+            "rootcoz.engine.core.call_ai_cli_with_retry",
             AsyncMock(
                 return_value=AIResult(
                     success=True,
@@ -636,14 +639,14 @@ class TestConsoleOnlyPeerWarning:
             ),
         )
 
+        child_settings = _make_jenkins_settings()
         peers = [AiConfigEntry(ai_provider="gemini", ai_model="pro")]
 
-        with patch("rootcoz.analyzer.logger") as mock_logger:
+        with patch("rootcoz.sources.jenkins_source.logger") as mock_logger:
             await analyze_child_job(
                 job_name="child-job",
                 build_number=1,
-                jenkins_client=mock_client,
-                jenkins_base_url="https://jenkins.example.com",
+                settings=child_settings,
                 peer_ai_configs=peers,
             )
 
@@ -656,7 +659,6 @@ class TestConsoleOnlyPeerWarning:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """analyze_child_job console-only path does NOT warn when no peers."""
-        from rootcoz.analyzer import analyze_child_job
 
         mock_client = MagicMock()
         mock_client.get_build_info_safe.return_value = {
@@ -666,15 +668,9 @@ class TestConsoleOnlyPeerWarning:
         mock_client.get_build_console.return_value = "Build failed with error"
         mock_client.get_test_report.return_value = None
 
-        async def fake_to_thread(func, *args, **kwargs):
-            return func(*args, **kwargs)
-
+        _patch_jenkins_client(monkeypatch, mock_client)
         monkeypatch.setattr(
-            "rootcoz.analyzer.asyncio.to_thread",
-            fake_to_thread,
-        )
-        monkeypatch.setattr(
-            "rootcoz.analyzer._call_ai_cli_with_retry",
+            "rootcoz.engine.core.call_ai_cli_with_retry",
             AsyncMock(
                 return_value=AIResult(
                     success=True,
@@ -683,12 +679,13 @@ class TestConsoleOnlyPeerWarning:
             ),
         )
 
-        with patch("rootcoz.analyzer.logger") as mock_logger:
+        child_settings = _make_jenkins_settings()
+
+        with patch("rootcoz.sources.jenkins_source.logger") as mock_logger:
             await analyze_child_job(
                 job_name="child-job",
                 build_number=1,
-                jenkins_client=mock_client,
-                jenkins_base_url="https://jenkins.example.com",
+                settings=child_settings,
                 peer_ai_configs=None,
             )
 
@@ -701,19 +698,12 @@ class TestConsoleOnlyPeerWarning:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """analyze_job console-only path logs warning when peer_ai_configs set."""
-        from rootcoz.analyzer import analyze_job
-        from rootcoz.models import AiConfigEntry, AnalyzeRequest
 
         body = AnalyzeRequest(
             job_name="my-job",
             build_number=123,
         )
-        settings = Settings()
-        settings_data = settings.model_dump(mode="python")
-        settings_data["jenkins_url"] = "https://jenkins.example.com"
-        settings_data["jenkins_user"] = "user"
-        settings_data["jenkins_password"] = _FAKE_JENKINS_PASSWORD
-        merged = Settings.model_validate(settings_data)
+        merged = _make_jenkins_settings()
 
         mock_client = MagicMock()
         mock_client.get_build_info_safe.return_value = {
@@ -724,24 +714,13 @@ class TestConsoleOnlyPeerWarning:
         mock_client.get_test_report.return_value = None
         mock_client.session = MagicMock()
 
+        _patch_jenkins_client(monkeypatch, mock_client)
         monkeypatch.setattr(
-            "rootcoz.analyzer.JenkinsClient",
-            lambda **kwargs: mock_client,
-        )
-
-        async def fake_to_thread(func, *args, **kwargs):
-            return func(*args, **kwargs)
-
-        monkeypatch.setattr(
-            "rootcoz.analyzer.asyncio.to_thread",
-            fake_to_thread,
-        )
-        monkeypatch.setattr(
-            "rootcoz.analyzer.check_ai_cli_available",
+            "rootcoz.sources.jenkins_source.check_ai_cli_available",
             AsyncMock(return_value=AIResult(success=True, text="")),
         )
         monkeypatch.setattr(
-            "rootcoz.analyzer._call_ai_cli_with_retry",
+            "rootcoz.engine.core.call_ai_cli_with_retry",
             AsyncMock(
                 return_value=AIResult(
                     success=True,
@@ -750,13 +729,13 @@ class TestConsoleOnlyPeerWarning:
             ),
         )
         monkeypatch.setattr(
-            "rootcoz.analyzer.update_progress_phase",
+            "rootcoz.engine.core.update_progress_phase",
             AsyncMock(),
         )
 
         peers = [AiConfigEntry(ai_provider="gemini", ai_model="pro")]
 
-        with patch("rootcoz.analyzer.logger") as mock_logger:
+        with patch("rootcoz.sources.jenkins_source.logger") as mock_logger:
             await analyze_job(
                 body,
                 merged,
@@ -779,23 +758,16 @@ class TestAnalyzeJobProgressPhases:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """When there are failed child jobs, emits analyzing_child_jobs phase."""
-        from rootcoz.analyzer import analyze_job
-        from rootcoz.models import AnalyzeRequest, ChildJobAnalysis
 
         body = AnalyzeRequest(
             job_name="pipeline-job",
             build_number=42,
         )
-        settings = Settings()
-        settings_data = settings.model_dump(mode="python")
-        settings_data["jenkins_url"] = "https://jenkins.example.com"
-        settings_data["jenkins_user"] = "user"
-        settings_data["jenkins_password"] = _FAKE_JENKINS_PASSWORD
-        merged = Settings.model_validate(settings_data)
+        merged = _make_jenkins_settings()
 
         phases: list[str] = []
 
-        async def capture_phase(job_id, phase):
+        async def capture_phase(_job_id, phase):
             phases.append(phase)
 
         mock_client = MagicMock()
@@ -809,20 +781,9 @@ class TestAnalyzeJobProgressPhases:
         mock_client.get_build_console.return_value = "Build failed"
         mock_client.get_test_report.return_value = None
 
+        _patch_jenkins_client(monkeypatch, mock_client)
         monkeypatch.setattr(
-            "rootcoz.analyzer.JenkinsClient",
-            lambda **kwargs: mock_client,
-        )
-
-        async def fake_to_thread(func, *args, **kwargs):
-            return func(*args, **kwargs)
-
-        monkeypatch.setattr(
-            "rootcoz.analyzer.asyncio.to_thread",
-            fake_to_thread,
-        )
-        monkeypatch.setattr(
-            "rootcoz.analyzer.check_ai_cli_available",
+            "rootcoz.sources.jenkins_source.check_ai_cli_available",
             AsyncMock(return_value=AIResult(success=True, text="")),
         )
 
@@ -835,15 +796,15 @@ class TestAnalyzeJobProgressPhases:
             failures=[],
         )
         monkeypatch.setattr(
-            "rootcoz.analyzer.analyze_child_job",
+            "rootcoz.sources.jenkins_source.analyze_child_job",
             AsyncMock(return_value=child_result),
         )
         monkeypatch.setattr(
-            "rootcoz.analyzer.run_parallel_with_limit",
+            "rootcoz.sources.jenkins_source.run_parallel_with_limit",
             AsyncMock(return_value=[child_result]),
         )
         monkeypatch.setattr(
-            "rootcoz.analyzer.update_progress_phase",
+            "rootcoz.engine.core.update_progress_phase",
             AsyncMock(side_effect=capture_phase),
         )
 
@@ -862,27 +823,16 @@ class TestAnalyzeJobProgressPhases:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """When there are test failures, emits analyzing_failures phase."""
-        from rootcoz.analyzer import analyze_job
-        from rootcoz.models import (
-            AnalysisDetail,
-            AnalyzeRequest,
-            FailureAnalysis,
-        )
 
         body = AnalyzeRequest(
             job_name="my-job",
             build_number=123,
         )
-        settings = Settings()
-        settings_data = settings.model_dump(mode="python")
-        settings_data["jenkins_url"] = "https://jenkins.example.com"
-        settings_data["jenkins_user"] = "user"
-        settings_data["jenkins_password"] = _FAKE_JENKINS_PASSWORD
-        merged = Settings.model_validate(settings_data)
+        merged = _make_jenkins_settings()
 
         phases: list[str] = []
 
-        async def capture_phase(job_id, phase):
+        async def capture_phase(_job_id, phase):
             phases.append(phase)
 
         mock_client = MagicMock()
@@ -910,20 +860,9 @@ class TestAnalyzeJobProgressPhases:
         }
         mock_client.session = MagicMock()
 
+        _patch_jenkins_client(monkeypatch, mock_client)
         monkeypatch.setattr(
-            "rootcoz.analyzer.JenkinsClient",
-            lambda **kwargs: mock_client,
-        )
-
-        async def fake_to_thread(func, *args, **kwargs):
-            return func(*args, **kwargs)
-
-        monkeypatch.setattr(
-            "rootcoz.analyzer.asyncio.to_thread",
-            fake_to_thread,
-        )
-        monkeypatch.setattr(
-            "rootcoz.analyzer.check_ai_cli_available",
+            "rootcoz.sources.jenkins_source.check_ai_cli_available",
             AsyncMock(return_value=AIResult(success=True, text="")),
         )
 
@@ -936,15 +875,15 @@ class TestAnalyzeJobProgressPhases:
             error_signature="sig123",
         )
         monkeypatch.setattr(
-            "rootcoz.analyzer.analyze_failure_group",
+            "rootcoz.sources.jenkins_source.analyze_failure_group",
             AsyncMock(return_value=[mock_failure]),
         )
         monkeypatch.setattr(
-            "rootcoz.analyzer.run_parallel_with_limit",
+            "rootcoz.sources.jenkins_source.run_parallel_with_limit",
             AsyncMock(return_value=[[mock_failure]]),
         )
         monkeypatch.setattr(
-            "rootcoz.analyzer.update_progress_phase",
+            "rootcoz.engine.core.update_progress_phase",
             AsyncMock(side_effect=capture_phase),
         )
 
@@ -963,19 +902,12 @@ class TestAnalyzeJobProgressPhases:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """When job_id is None, update_progress_phase should not be called."""
-        from rootcoz.analyzer import analyze_job
-        from rootcoz.models import AnalyzeRequest
 
         body = AnalyzeRequest(
             job_name="my-job",
             build_number=123,
         )
-        settings = Settings()
-        settings_data = settings.model_dump(mode="python")
-        settings_data["jenkins_url"] = "https://jenkins.example.com"
-        settings_data["jenkins_user"] = "user"
-        settings_data["jenkins_password"] = _FAKE_JENKINS_PASSWORD
-        merged = Settings.model_validate(settings_data)
+        merged = _make_jenkins_settings()
 
         mock_client = MagicMock()
         mock_client.get_build_info_safe.return_value = {
@@ -983,22 +915,11 @@ class TestAnalyzeJobProgressPhases:
             "building": False,
         }
 
-        monkeypatch.setattr(
-            "rootcoz.analyzer.JenkinsClient",
-            lambda **kwargs: mock_client,
-        )
-
-        async def fake_to_thread(func, *args, **kwargs):
-            return func(*args, **kwargs)
-
-        monkeypatch.setattr(
-            "rootcoz.analyzer.asyncio.to_thread",
-            fake_to_thread,
-        )
+        _patch_jenkins_client(monkeypatch, mock_client)
 
         mock_update = AsyncMock()
         monkeypatch.setattr(
-            "rootcoz.analyzer.update_progress_phase",
+            "rootcoz.engine.core.update_progress_phase",
             mock_update,
         )
 
@@ -1022,23 +943,12 @@ class TestAnalyzeJobProgressPhases:
         This covers the case where a synthetic UUID is generated internally
         but progress writes are skipped because no persisted job exists.
         """
-        from rootcoz.analyzer import analyze_job
-        from rootcoz.models import (
-            AnalysisDetail,
-            AnalyzeRequest,
-            FailureAnalysis,
-        )
 
         body = AnalyzeRequest(
             job_name="my-job",
             build_number=123,
         )
-        settings = Settings()
-        settings_data = settings.model_dump(mode="python")
-        settings_data["jenkins_url"] = "https://jenkins.example.com"
-        settings_data["jenkins_user"] = "user"
-        settings_data["jenkins_password"] = _FAKE_JENKINS_PASSWORD
-        merged = Settings.model_validate(settings_data)
+        merged = _make_jenkins_settings()
 
         mock_client = MagicMock()
         mock_client.get_build_info_safe.return_value = {
@@ -1065,20 +975,9 @@ class TestAnalyzeJobProgressPhases:
         }
         mock_client.session = MagicMock()
 
+        _patch_jenkins_client(monkeypatch, mock_client)
         monkeypatch.setattr(
-            "rootcoz.analyzer.JenkinsClient",
-            lambda **kwargs: mock_client,
-        )
-
-        async def fake_to_thread(func, *args, **kwargs):
-            return func(*args, **kwargs)
-
-        monkeypatch.setattr(
-            "rootcoz.analyzer.asyncio.to_thread",
-            fake_to_thread,
-        )
-        monkeypatch.setattr(
-            "rootcoz.analyzer.check_ai_cli_available",
+            "rootcoz.sources.jenkins_source.check_ai_cli_available",
             AsyncMock(return_value=AIResult(success=True, text="")),
         )
 
@@ -1091,17 +990,17 @@ class TestAnalyzeJobProgressPhases:
             error_signature="sig123",
         )
         monkeypatch.setattr(
-            "rootcoz.analyzer.analyze_failure_group",
+            "rootcoz.sources.jenkins_source.analyze_failure_group",
             AsyncMock(return_value=[mock_failure]),
         )
         monkeypatch.setattr(
-            "rootcoz.analyzer.run_parallel_with_limit",
+            "rootcoz.sources.jenkins_source.run_parallel_with_limit",
             AsyncMock(return_value=[[mock_failure]]),
         )
 
         mock_update = AsyncMock()
         monkeypatch.setattr(
-            "rootcoz.analyzer.update_progress_phase",
+            "rootcoz.engine.core.update_progress_phase",
             mock_update,
         )
 
@@ -1125,20 +1024,13 @@ class TestForceAnalysisSuccessfulBuild:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """When build is SUCCESS and force is False, returns early with no-failures summary."""
-        from rootcoz.analyzer import analyze_job
-        from rootcoz.models import AnalyzeRequest
 
         body = AnalyzeRequest(
             job_name="my-job",
             build_number=123,
             force=False,
         )
-        settings = Settings()
-        settings_data = settings.model_dump(mode="python")
-        settings_data["jenkins_url"] = "https://jenkins.example.com"
-        settings_data["jenkins_user"] = "user"
-        settings_data["jenkins_password"] = _FAKE_JENKINS_PASSWORD
-        merged = Settings.model_validate(settings_data)
+        merged = _make_jenkins_settings()
 
         mock_client = MagicMock()
         mock_client.get_build_info_safe.return_value = {
@@ -1146,18 +1038,7 @@ class TestForceAnalysisSuccessfulBuild:
             "building": False,
         }
 
-        monkeypatch.setattr(
-            "rootcoz.analyzer.JenkinsClient",
-            lambda **kwargs: mock_client,
-        )
-
-        async def fake_to_thread(func, *args, **kwargs):
-            return func(*args, **kwargs)
-
-        monkeypatch.setattr(
-            "rootcoz.analyzer.asyncio.to_thread",
-            fake_to_thread,
-        )
+        _patch_jenkins_client(monkeypatch, mock_client)
 
         result = await analyze_job(
             body,
@@ -1176,20 +1057,13 @@ class TestForceAnalysisSuccessfulBuild:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """When build is SUCCESS and request.force is True, analysis continues past the early return."""
-        from rootcoz.analyzer import analyze_job
-        from rootcoz.models import AnalyzeRequest
 
         body = AnalyzeRequest(
             job_name="my-job",
             build_number=123,
             force=True,
         )
-        settings = Settings()
-        settings_data = settings.model_dump(mode="python")
-        settings_data["jenkins_url"] = "https://jenkins.example.com"
-        settings_data["jenkins_user"] = "user"
-        settings_data["jenkins_password"] = _FAKE_JENKINS_PASSWORD
-        merged = Settings.model_validate(settings_data)
+        merged = _make_jenkins_settings()
 
         mock_client = MagicMock()
         mock_client.get_build_info_safe.return_value = {
@@ -1200,24 +1074,13 @@ class TestForceAnalysisSuccessfulBuild:
         mock_client.get_build_console.return_value = "Build finished successfully"
         mock_client.get_test_report.return_value = None
 
+        _patch_jenkins_client(monkeypatch, mock_client)
         monkeypatch.setattr(
-            "rootcoz.analyzer.JenkinsClient",
-            lambda **kwargs: mock_client,
-        )
-
-        async def fake_to_thread(func, *args, **kwargs):
-            return func(*args, **kwargs)
-
-        monkeypatch.setattr(
-            "rootcoz.analyzer.asyncio.to_thread",
-            fake_to_thread,
-        )
-        monkeypatch.setattr(
-            "rootcoz.analyzer.check_ai_cli_available",
+            "rootcoz.sources.jenkins_source.check_ai_cli_available",
             AsyncMock(return_value=AIResult(success=True, text="")),
         )
         monkeypatch.setattr(
-            "rootcoz.analyzer._call_ai_cli_with_retry",
+            "rootcoz.engine.core.call_ai_cli_with_retry",
             AsyncMock(
                 return_value=AIResult(
                     success=True,
@@ -1245,21 +1108,13 @@ class TestForceAnalysisSuccessfulBuild:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """When build is SUCCESS and settings.force_analysis is True, analysis continues."""
-        from rootcoz.analyzer import analyze_job
-        from rootcoz.models import AnalyzeRequest
 
         body = AnalyzeRequest(
             job_name="my-job",
             build_number=123,
             # force intentionally omitted — settings.force_analysis should drive behavior
         )
-        settings = Settings()
-        settings_data = settings.model_dump(mode="python")
-        settings_data["jenkins_url"] = "https://jenkins.example.com"
-        settings_data["jenkins_user"] = "user"
-        settings_data["jenkins_password"] = _FAKE_JENKINS_PASSWORD
-        settings_data["force_analysis"] = True  # env-level force is on
-        merged = Settings.model_validate(settings_data)
+        merged = _make_jenkins_settings(force_analysis=True)  # env-level force is on
 
         mock_client = MagicMock()
         mock_client.get_build_info_safe.return_value = {
@@ -1270,24 +1125,13 @@ class TestForceAnalysisSuccessfulBuild:
         mock_client.get_build_console.return_value = "Build finished successfully"
         mock_client.get_test_report.return_value = None
 
+        _patch_jenkins_client(monkeypatch, mock_client)
         monkeypatch.setattr(
-            "rootcoz.analyzer.JenkinsClient",
-            lambda **kwargs: mock_client,
-        )
-
-        async def fake_to_thread(func, *args, **kwargs):
-            return func(*args, **kwargs)
-
-        monkeypatch.setattr(
-            "rootcoz.analyzer.asyncio.to_thread",
-            fake_to_thread,
-        )
-        monkeypatch.setattr(
-            "rootcoz.analyzer.check_ai_cli_available",
+            "rootcoz.sources.jenkins_source.check_ai_cli_available",
             AsyncMock(return_value=AIResult(success=True, text="")),
         )
         monkeypatch.setattr(
-            "rootcoz.analyzer._call_ai_cli_with_retry",
+            "rootcoz.engine.core.call_ai_cli_with_retry",
             AsyncMock(
                 return_value=AIResult(
                     success=True,
@@ -1313,8 +1157,6 @@ class TestResolveAdditionalRepos:
 
     def test_request_value_takes_priority(self) -> None:
         """Request additional_repos overrides settings."""
-        from rootcoz.models import AdditionalRepo, AnalyzeRequest
-        from rootcoz.analyzer import resolve_additional_repos
 
         request = AnalyzeRequest(
             job_name="test",
@@ -1333,8 +1175,6 @@ class TestResolveAdditionalRepos:
 
     def test_falls_back_to_settings(self) -> None:
         """Falls back to settings when request is None."""
-        from rootcoz.models import AnalyzeRequest
-        from rootcoz.analyzer import resolve_additional_repos
 
         request = AnalyzeRequest(job_name="test", build_number=1)
         settings = MagicMock()
@@ -1345,8 +1185,6 @@ class TestResolveAdditionalRepos:
 
     def test_empty_settings_returns_empty(self) -> None:
         """Returns empty list when both request and settings are empty."""
-        from rootcoz.models import AnalyzeRequest
-        from rootcoz.analyzer import resolve_additional_repos
 
         request = AnalyzeRequest(job_name="test", build_number=1)
         settings = MagicMock()
@@ -1356,8 +1194,6 @@ class TestResolveAdditionalRepos:
 
     def test_explicit_empty_list_overrides_settings(self) -> None:
         """Explicit [] in request disables additional repos."""
-        from rootcoz.models import AnalyzeRequest
-        from rootcoz.analyzer import resolve_additional_repos
 
         request = AnalyzeRequest(job_name="test", build_number=1, additional_repos=[])
         settings = MagicMock()
@@ -1372,9 +1208,6 @@ class TestCloneAdditionalRepos:
     @pytest.mark.asyncio
     async def test_clones_into_subdirs_when_repo_path_exists(self, tmp_path) -> None:
         """Additional repos are cloned as subdirectories of repo_path."""
-        from rootcoz.analyzer import clone_additional_repos
-        from rootcoz.models import AdditionalRepo
-        from rootcoz.repository import RepositoryManager
 
         repo_path = tmp_path / "main-repo"
         repo_path.mkdir()
@@ -1390,7 +1223,7 @@ class TestCloneAdditionalRepos:
 
         manager = MagicMock(spec=RepositoryManager)
 
-        def fake_clone_into(url, target, depth=1, branch="", token=None):
+        def fake_clone_into(_url, target, depth=1, branch="", token=None):
             target.mkdir(parents=True, exist_ok=True)
             return target
 
@@ -1400,7 +1233,7 @@ class TestCloneAdditionalRepos:
             return fn(*args, **kwargs)
 
         with patch(
-            "rootcoz.analyzer.asyncio.to_thread",
+            "rootcoz.engine.core.asyncio.to_thread",
             side_effect=fake_to_thread,
         ):
             cloned, result_path = await clone_additional_repos(
@@ -1417,9 +1250,6 @@ class TestCloneAdditionalRepos:
     @pytest.mark.asyncio
     async def test_clones_into_caller_provided_workspace(self, tmp_path) -> None:
         """Caller always provides workspace; repos are cloned as subdirectories."""
-        from rootcoz.analyzer import clone_additional_repos
-        from rootcoz.models import AdditionalRepo
-        from rootcoz.repository import RepositoryManager
 
         workspace_dir = tmp_path / "workspace"
         workspace_dir.mkdir()
@@ -1432,7 +1262,7 @@ class TestCloneAdditionalRepos:
 
         manager = MagicMock(spec=RepositoryManager)
 
-        def fake_clone_into(url, target, depth=1, branch="", token=None):
+        def fake_clone_into(_url, target, depth=1, branch="", token=None):
             target.mkdir(parents=True, exist_ok=True)
             return target
 
@@ -1442,7 +1272,7 @@ class TestCloneAdditionalRepos:
             return fn(*args, **kwargs)
 
         with patch(
-            "rootcoz.analyzer.asyncio.to_thread",
+            "rootcoz.engine.core.asyncio.to_thread",
             side_effect=fake_to_thread,
         ):
             cloned, result_path = await clone_additional_repos(
@@ -1456,9 +1286,6 @@ class TestCloneAdditionalRepos:
     @pytest.mark.asyncio
     async def test_all_repos_are_subdirs_of_workspace(self, tmp_path) -> None:
         """ALL repos are cloned as subdirectories of the provided workspace."""
-        from rootcoz.analyzer import clone_additional_repos
-        from rootcoz.models import AdditionalRepo
-        from rootcoz.repository import RepositoryManager
 
         workspace_dir = tmp_path / "workspace"
         workspace_dir.mkdir()
@@ -1474,7 +1301,7 @@ class TestCloneAdditionalRepos:
 
         manager = MagicMock(spec=RepositoryManager)
 
-        def fake_clone_into(url, target, depth=1, branch="", token=None):
+        def fake_clone_into(_url, target, depth=1, branch="", token=None):
             target.mkdir(parents=True, exist_ok=True)
             return target
 
@@ -1484,7 +1311,7 @@ class TestCloneAdditionalRepos:
             return fn(*args, **kwargs)
 
         with patch(
-            "rootcoz.analyzer.asyncio.to_thread",
+            "rootcoz.engine.core.asyncio.to_thread",
             side_effect=fake_to_thread,
         ):
             cloned, result_path = await clone_additional_repos(
@@ -1502,9 +1329,6 @@ class TestCloneAdditionalRepos:
     @pytest.mark.asyncio
     async def test_clone_failure_is_graceful(self, tmp_path) -> None:
         """Failed clones are logged but don't crash the process."""
-        from rootcoz.analyzer import clone_additional_repos
-        from rootcoz.models import AdditionalRepo
-        from rootcoz.repository import RepositoryManager
 
         repo_path = tmp_path / "main"
         repo_path.mkdir()
@@ -1531,7 +1355,7 @@ class TestCloneAdditionalRepos:
             return fn(*args, **kwargs)
 
         with patch(
-            "rootcoz.analyzer.asyncio.to_thread",
+            "rootcoz.engine.core.asyncio.to_thread",
             side_effect=fake_to_thread,
         ):
             cloned, result_path = await clone_additional_repos(
@@ -1545,9 +1369,6 @@ class TestCloneAdditionalRepos:
     @pytest.mark.asyncio
     async def test_cloning_uses_asyncio_gather(self, tmp_path) -> None:
         """Verify that parallel cloning uses asyncio.gather, not sequential loops."""
-        from rootcoz.analyzer import clone_additional_repos
-        from rootcoz.models import AdditionalRepo
-        from rootcoz.repository import RepositoryManager
 
         repo_path = tmp_path / "main-repo"
         repo_path.mkdir()
@@ -1566,7 +1387,7 @@ class TestCloneAdditionalRepos:
 
         manager = MagicMock(spec=RepositoryManager)
 
-        def fake_clone_into(url, target, depth=1, branch="", token=None):
+        def fake_clone_into(_url, target, depth=1, branch="", token=None):
             target.mkdir(parents=True, exist_ok=True)
             return target
 
@@ -1577,11 +1398,11 @@ class TestCloneAdditionalRepos:
 
         with (
             patch(
-                "rootcoz.analyzer.asyncio.to_thread",
+                "rootcoz.engine.core.asyncio.to_thread",
                 side_effect=fake_to_thread,
             ),
             patch(
-                "rootcoz.analyzer.asyncio.gather",
+                "rootcoz.engine.core.asyncio.gather",
                 wraps=__import__("asyncio").gather,
             ) as mock_gather,
         ):
@@ -1594,9 +1415,6 @@ class TestCloneAdditionalRepos:
     @pytest.mark.asyncio
     async def test_all_repos_use_asyncio_gather_with_workspace(self, tmp_path) -> None:
         """ALL repos are cloned in parallel via asyncio.gather in the provided workspace."""
-        from rootcoz.analyzer import clone_additional_repos
-        from rootcoz.models import AdditionalRepo
-        from rootcoz.repository import RepositoryManager
 
         workspace_dir = tmp_path / "workspace"
         workspace_dir.mkdir()
@@ -1615,7 +1433,7 @@ class TestCloneAdditionalRepos:
 
         manager = MagicMock(spec=RepositoryManager)
 
-        def fake_clone_into(url, target, depth=1, branch="", token=None):
+        def fake_clone_into(_url, target, depth=1, branch="", token=None):
             target.mkdir(parents=True, exist_ok=True)
             return target
 
@@ -1626,11 +1444,11 @@ class TestCloneAdditionalRepos:
 
         with (
             patch(
-                "rootcoz.analyzer.asyncio.to_thread",
+                "rootcoz.engine.core.asyncio.to_thread",
                 side_effect=fake_to_thread,
             ),
             patch(
-                "rootcoz.analyzer.asyncio.gather",
+                "rootcoz.engine.core.asyncio.gather",
                 wraps=__import__("asyncio").gather,
             ) as mock_gather,
         ):
@@ -1649,7 +1467,7 @@ class TestCloneAdditionalRepos:
 
 
 class TestBuildResourcesSectionAdditionalRepos:
-    """Tests for _build_resources_section with additional_repos."""
+    """Tests for build_resources_section with additional_repos."""
 
     def test_additional_repos_git_repos(self, tmp_path) -> None:
         """Test that additional git repos are advertised in resources section."""
@@ -1664,7 +1482,7 @@ class TestBuildResourcesSectionAdditionalRepos:
             path.mkdir()
             (path / ".git").mkdir()
 
-        result = _build_resources_section(workspace, additional_repos=additional)
+        result = build_resources_section(workspace, additional_repos=additional)
         assert "infra" in result
         assert "product" in result
         assert "Repository" in result
@@ -1677,7 +1495,7 @@ class TestBuildResourcesSectionAdditionalRepos:
         additional = {"data": tmp_path / "data"}
         additional["data"].mkdir()
 
-        result = _build_resources_section(workspace, additional_repos=additional)
+        result = build_resources_section(workspace, additional_repos=additional)
         assert "data" in result
         assert "Directory" in result
 
@@ -1686,7 +1504,7 @@ class TestBuildResourcesSectionAdditionalRepos:
         workspace = tmp_path / "workspace"
         workspace.mkdir()
 
-        result = _build_resources_section(workspace, additional_repos=None)
+        result = build_resources_section(workspace, additional_repos=None)
         assert "Repository" not in result
         assert "Directory" not in result
 
@@ -1695,7 +1513,7 @@ class TestBuildResourcesSectionAdditionalRepos:
         workspace = tmp_path / "workspace"
         workspace.mkdir()
 
-        result = _build_resources_section(workspace, additional_repos={})
+        result = build_resources_section(workspace, additional_repos={})
         assert "Repository" not in result
 
     def test_job_insight_prompt_in_repo(self, tmp_path) -> None:
@@ -1709,7 +1527,7 @@ class TestBuildResourcesSectionAdditionalRepos:
         (repo_path / "JOB_INSIGHT_PROMPT.md").write_text("custom instructions")
 
         additional = {"my-repo": repo_path}
-        result = _build_resources_section(workspace, additional_repos=additional)
+        result = build_resources_section(workspace, additional_repos=additional)
         assert "JOB_INSIGHT_PROMPT.md" in result
         assert "Project-specific analysis instructions" in result
 
@@ -1726,7 +1544,7 @@ class TestBuildResourcesSectionAdditionalRepos:
         )
 
         additional = {"my-repo": repo_path}
-        result = _build_resources_section(
+        result = build_resources_section(
             workspace, additional_repos=additional, history_enabled=True
         )
         assert "history analysis instructions" in result
@@ -1744,7 +1562,7 @@ class TestBuildResourcesSectionAdditionalRepos:
         )
 
         additional = {"my-repo": repo_path}
-        result = _build_resources_section(
+        result = build_resources_section(
             workspace, additional_repos=additional, history_enabled=False
         )
         assert "history analysis instructions" not in result
@@ -1758,8 +1576,6 @@ class TestAnalyzeJobWorkspacePattern:
         self, monkeypatch: pytest.MonkeyPatch, tmp_path
     ) -> None:
         """When tests_repo_url is set, test repo is cloned as subdirectory of workspace."""
-        from rootcoz.analyzer import analyze_job
-        from rootcoz.models import AnalyzeRequest
 
         body = AnalyzeRequest.model_validate(
             {
@@ -1788,23 +1604,23 @@ class TestAnalyzeJobWorkspacePattern:
         mock_client.session = MagicMock()
 
         monkeypatch.setattr(
-            "rootcoz.analyzer.JenkinsClient",
-            lambda **kwargs: mock_client,
+            "rootcoz.sources.jenkins_source.JenkinsClient",
+            lambda **_kwargs: mock_client,
         )
 
         async def fake_to_thread(func, *args, **kwargs):
             return func(*args, **kwargs)
 
         monkeypatch.setattr(
-            "rootcoz.analyzer.asyncio.to_thread",
+            "rootcoz.sources.jenkins_source.asyncio.to_thread",
             fake_to_thread,
         )
         monkeypatch.setattr(
-            "rootcoz.analyzer.check_ai_cli_available",
+            "rootcoz.sources.jenkins_source.check_ai_cli_available",
             AsyncMock(return_value=AIResult(success=True, text="")),
         )
         monkeypatch.setattr(
-            "rootcoz.analyzer._call_ai_cli_with_retry",
+            "rootcoz.engine.core.call_ai_cli_with_retry",
             AsyncMock(
                 return_value=AIResult(
                     success=True,
@@ -1813,7 +1629,7 @@ class TestAnalyzeJobWorkspacePattern:
             ),
         )
         monkeypatch.setattr(
-            "rootcoz.analyzer.update_progress_phase",
+            "rootcoz.engine.core.update_progress_phase",
             AsyncMock(),
         )
 
@@ -1833,7 +1649,7 @@ class TestAnalyzeJobWorkspacePattern:
         mock_repo_manager.clone_into = MagicMock(side_effect=fake_clone_into)
 
         monkeypatch.setattr(
-            "rootcoz.analyzer.RepositoryManager",
+            "rootcoz.sources.jenkins_source.RepositoryManager",
             lambda: mock_repo_manager,
         )
 
@@ -1860,8 +1676,6 @@ class TestAnalyzeJobWorkspacePattern:
         self, monkeypatch: pytest.MonkeyPatch, tmp_path
     ) -> None:
         """Repo name is extracted from URL, stripping .git suffix and trailing slashes."""
-        from rootcoz.analyzer import analyze_job
-        from rootcoz.models import AnalyzeRequest
 
         body = AnalyzeRequest.model_validate(
             {
@@ -1890,23 +1704,23 @@ class TestAnalyzeJobWorkspacePattern:
         mock_client.session = MagicMock()
 
         monkeypatch.setattr(
-            "rootcoz.analyzer.JenkinsClient",
-            lambda **kwargs: mock_client,
+            "rootcoz.sources.jenkins_source.JenkinsClient",
+            lambda **_kwargs: mock_client,
         )
 
         async def fake_to_thread(func, *args, **kwargs):
             return func(*args, **kwargs)
 
         monkeypatch.setattr(
-            "rootcoz.analyzer.asyncio.to_thread",
+            "rootcoz.sources.jenkins_source.asyncio.to_thread",
             fake_to_thread,
         )
         monkeypatch.setattr(
-            "rootcoz.analyzer.check_ai_cli_available",
+            "rootcoz.sources.jenkins_source.check_ai_cli_available",
             AsyncMock(return_value=AIResult(success=True, text="")),
         )
         monkeypatch.setattr(
-            "rootcoz.analyzer._call_ai_cli_with_retry",
+            "rootcoz.engine.core.call_ai_cli_with_retry",
             AsyncMock(
                 return_value=AIResult(
                     success=True,
@@ -1915,7 +1729,7 @@ class TestAnalyzeJobWorkspacePattern:
             ),
         )
         monkeypatch.setattr(
-            "rootcoz.analyzer.update_progress_phase",
+            "rootcoz.engine.core.update_progress_phase",
             AsyncMock(),
         )
 
@@ -1932,7 +1746,7 @@ class TestAnalyzeJobWorkspacePattern:
         mock_repo_manager.clone_into = MagicMock(side_effect=fake_clone_into)
 
         monkeypatch.setattr(
-            "rootcoz.analyzer.RepositoryManager",
+            "rootcoz.sources.jenkins_source.RepositoryManager",
             lambda: mock_repo_manager,
         )
 
@@ -1952,8 +1766,6 @@ class TestAnalyzeJobWorkspacePattern:
         self, monkeypatch: pytest.MonkeyPatch, tmp_path
     ) -> None:
         """When no test repo but additional repos exist, workspace is still created."""
-        from rootcoz.analyzer import analyze_job
-        from rootcoz.models import AnalyzeRequest
 
         body = AnalyzeRequest.model_validate(
             {
@@ -1984,23 +1796,23 @@ class TestAnalyzeJobWorkspacePattern:
         mock_client.session = MagicMock()
 
         monkeypatch.setattr(
-            "rootcoz.analyzer.JenkinsClient",
-            lambda **kwargs: mock_client,
+            "rootcoz.sources.jenkins_source.JenkinsClient",
+            lambda **_kwargs: mock_client,
         )
 
         async def fake_to_thread(func, *args, **kwargs):
             return func(*args, **kwargs)
 
         monkeypatch.setattr(
-            "rootcoz.analyzer.asyncio.to_thread",
+            "rootcoz.sources.jenkins_source.asyncio.to_thread",
             fake_to_thread,
         )
         monkeypatch.setattr(
-            "rootcoz.analyzer.check_ai_cli_available",
+            "rootcoz.sources.jenkins_source.check_ai_cli_available",
             AsyncMock(return_value=AIResult(success=True, text="")),
         )
         monkeypatch.setattr(
-            "rootcoz.analyzer._call_ai_cli_with_retry",
+            "rootcoz.engine.core.call_ai_cli_with_retry",
             AsyncMock(
                 return_value=AIResult(
                     success=True,
@@ -2009,14 +1821,14 @@ class TestAnalyzeJobWorkspacePattern:
             ),
         )
         monkeypatch.setattr(
-            "rootcoz.analyzer.update_progress_phase",
+            "rootcoz.engine.core.update_progress_phase",
             AsyncMock(),
         )
 
         mock_repo_manager = MagicMock()
         mock_repo_manager.create_workspace.return_value = workspace_dir
 
-        def fake_clone_into(url, target, depth=1, branch="", token=None):
+        def fake_clone_into(_url, target, depth=1, branch="", token=None):
             target.mkdir(parents=True, exist_ok=True)
             (target / ".git").mkdir(exist_ok=True)
             return target
@@ -2024,19 +1836,19 @@ class TestAnalyzeJobWorkspacePattern:
         mock_repo_manager.clone_into = MagicMock(side_effect=fake_clone_into)
 
         monkeypatch.setattr(
-            "rootcoz.analyzer.RepositoryManager",
+            "rootcoz.sources.jenkins_source.RepositoryManager",
             lambda: mock_repo_manager,
         )
 
         # Mock clone_additional_repos to track calls
         clone_additional_calls = []
 
-        async def mock_clone_additional(manager, repos, path):
+        async def mock_clone_additional(manager, _repos, path):
             clone_additional_calls.append({"manager": manager, "path": path})
             return {"infra": workspace_dir / "infra"}, path or workspace_dir
 
         monkeypatch.setattr(
-            "rootcoz.analyzer.clone_additional_repos",
+            "rootcoz.sources.jenkins_source.clone_additional_repos",
             mock_clone_additional,
         )
 
@@ -2056,8 +1868,6 @@ class TestAnalyzeJobWorkspacePattern:
         self, monkeypatch: pytest.MonkeyPatch, tmp_path
     ) -> None:
         """Test repo and additional repos are both in the same workspace."""
-        from rootcoz.analyzer import analyze_job
-        from rootcoz.models import AnalyzeRequest
 
         body = AnalyzeRequest.model_validate(
             {
@@ -2089,23 +1899,23 @@ class TestAnalyzeJobWorkspacePattern:
         mock_client.session = MagicMock()
 
         monkeypatch.setattr(
-            "rootcoz.analyzer.JenkinsClient",
-            lambda **kwargs: mock_client,
+            "rootcoz.sources.jenkins_source.JenkinsClient",
+            lambda **_kwargs: mock_client,
         )
 
         async def fake_to_thread(func, *args, **kwargs):
             return func(*args, **kwargs)
 
         monkeypatch.setattr(
-            "rootcoz.analyzer.asyncio.to_thread",
+            "rootcoz.sources.jenkins_source.asyncio.to_thread",
             fake_to_thread,
         )
         monkeypatch.setattr(
-            "rootcoz.analyzer.check_ai_cli_available",
+            "rootcoz.sources.jenkins_source.check_ai_cli_available",
             AsyncMock(return_value=AIResult(success=True, text="")),
         )
         monkeypatch.setattr(
-            "rootcoz.analyzer._call_ai_cli_with_retry",
+            "rootcoz.engine.core.call_ai_cli_with_retry",
             AsyncMock(
                 return_value=AIResult(
                     success=True,
@@ -2114,7 +1924,7 @@ class TestAnalyzeJobWorkspacePattern:
             ),
         )
         monkeypatch.setattr(
-            "rootcoz.analyzer.update_progress_phase",
+            "rootcoz.engine.core.update_progress_phase",
             AsyncMock(),
         )
 
@@ -2131,19 +1941,19 @@ class TestAnalyzeJobWorkspacePattern:
         mock_repo_manager.clone_into = MagicMock(side_effect=fake_clone_into)
 
         monkeypatch.setattr(
-            "rootcoz.analyzer.RepositoryManager",
+            "rootcoz.sources.jenkins_source.RepositoryManager",
             lambda: mock_repo_manager,
         )
 
         # Track what clone_additional_repos receives as repo_path
         clone_additional_repo_paths = []
 
-        async def mock_clone_additional(manager, repos, path):
+        async def mock_clone_additional(_manager, _repos, path):
             clone_additional_repo_paths.append(path)
             return {"infra": workspace_dir / "infra"}, path
 
         monkeypatch.setattr(
-            "rootcoz.analyzer.clone_additional_repos",
+            "rootcoz.sources.jenkins_source.clone_additional_repos",
             mock_clone_additional,
         )
 
@@ -2168,12 +1978,6 @@ class TestAnalyzeJobWorkspacePattern:
         self, monkeypatch: pytest.MonkeyPatch, tmp_path
     ) -> None:
         """Test repo is added to the cloned_repos dict passed to analysis functions."""
-        from rootcoz.analyzer import analyze_job
-        from rootcoz.models import (
-            AnalysisDetail,
-            AnalyzeRequest,
-            FailureAnalysis,
-        )
 
         body = AnalyzeRequest.model_validate(
             {
@@ -2216,30 +2020,30 @@ class TestAnalyzeJobWorkspacePattern:
         mock_client.session = MagicMock()
 
         monkeypatch.setattr(
-            "rootcoz.analyzer.JenkinsClient",
-            lambda **kwargs: mock_client,
+            "rootcoz.sources.jenkins_source.JenkinsClient",
+            lambda **_kwargs: mock_client,
         )
 
         async def fake_to_thread(func, *args, **kwargs):
             return func(*args, **kwargs)
 
         monkeypatch.setattr(
-            "rootcoz.analyzer.asyncio.to_thread",
+            "rootcoz.sources.jenkins_source.asyncio.to_thread",
             fake_to_thread,
         )
         monkeypatch.setattr(
-            "rootcoz.analyzer.check_ai_cli_available",
+            "rootcoz.sources.jenkins_source.check_ai_cli_available",
             AsyncMock(return_value=AIResult(success=True, text="")),
         )
         monkeypatch.setattr(
-            "rootcoz.analyzer.update_progress_phase",
+            "rootcoz.engine.core.update_progress_phase",
             AsyncMock(),
         )
 
         mock_repo_manager = MagicMock()
         mock_repo_manager.create_workspace.return_value = workspace_dir
 
-        def fake_clone_into(url, target, depth=1, branch="", token=None):
+        def fake_clone_into(_url, target, depth=1, branch="", token=None):
             target.mkdir(parents=True, exist_ok=True)
             (target / ".git").mkdir(exist_ok=True)
             return target
@@ -2247,7 +2051,7 @@ class TestAnalyzeJobWorkspacePattern:
         mock_repo_manager.clone_into = MagicMock(side_effect=fake_clone_into)
 
         monkeypatch.setattr(
-            "rootcoz.analyzer.RepositoryManager",
+            "rootcoz.sources.jenkins_source.RepositoryManager",
             lambda: mock_repo_manager,
         )
 
@@ -2263,20 +2067,20 @@ class TestAnalyzeJobWorkspacePattern:
             error_signature="sig123",
         )
 
-        async def mock_analyze_group(*args, **kwargs):
+        async def mock_analyze_group(*_args, **kwargs):
             captured_additional_repos.append(kwargs.get("additional_repos"))
             return [mock_failure]
 
         monkeypatch.setattr(
-            "rootcoz.analyzer.analyze_failure_group",
+            "rootcoz.sources.jenkins_source.analyze_failure_group",
             mock_analyze_group,
         )
 
-        async def run_coroutines(coroutines, **kwargs):
+        async def run_coroutines(coroutines, **_kwargs):
             return [await coro for coro in coroutines]
 
         monkeypatch.setattr(
-            "rootcoz.analyzer.run_parallel_with_limit",
+            "rootcoz.sources.jenkins_source.run_parallel_with_limit",
             AsyncMock(side_effect=run_coroutines),
         )
 
@@ -2301,100 +2105,37 @@ class TestAnalyzeFailuresWorkspacePattern:
 
     @pytest.mark.asyncio
     async def test_analyze_failures_workspace_via_http(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_path
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path,
     ) -> None:
-        """POST /analyze-failures with tests_repo_url creates workspace pattern."""
-        from rootcoz.models import (
-            AnalysisDetail,
-            FailureAnalysis,
-        )
-        from starlette.testclient import TestClient
-        from rootcoz.main import app
+        """POST /analyze with type=raw and tests_repo_url dispatches to background task."""
 
-        workspace_dir = tmp_path / "workspace"
-        workspace_dir.mkdir()
-
-        clone_into_calls = []
-        mock_repo_manager = MagicMock()
-        mock_repo_manager.create_workspace.return_value = workspace_dir
-        mock_repo_manager.cleanup.return_value = None
-
-        def fake_clone_into(url, target, depth=1, branch="", token=None):
-            clone_into_calls.append({"url": url, "target": target, "depth": depth})
-            target.mkdir(parents=True, exist_ok=True)
-            (target / ".git").mkdir(exist_ok=True)
-            return target
-
-        mock_repo_manager.clone_into = MagicMock(side_effect=fake_clone_into)
-
-        monkeypatch.setattr(
-            "rootcoz.main.RepositoryManager",
-            lambda: mock_repo_manager,
-        )
-
-        mock_failure = FailureAnalysis(
-            test_name="test_foo",
-            error="assert False",
-            analysis=AnalysisDetail(classification="CODE ISSUE", details="d"),
-            error_signature="sig",
-        )
-
-        monkeypatch.setattr(
-            "rootcoz.main.analyze_failure_group",
-            AsyncMock(return_value=[mock_failure]),
-        )
-
-        async def run_coroutines(coroutines, **kwargs):
-            return [await coro for coro in coroutines]
-
-        monkeypatch.setattr(
-            "rootcoz.main.run_parallel_with_limit",
-            AsyncMock(side_effect=run_coroutines),
-        )
-        monkeypatch.setattr(
-            "rootcoz.main.save_result",
-            AsyncMock(),
-        )
-        monkeypatch.setattr(
-            "rootcoz.main.update_status",
-            AsyncMock(),
-        )
-        monkeypatch.setattr(
-            "rootcoz.main.populate_failure_history",
-            AsyncMock(),
-        )
-        monkeypatch.setattr(
-            "rootcoz.main.storage.make_classifications_visible",
-            AsyncMock(),
-        )
-        monkeypatch.setattr(
-            "rootcoz.main._preserve_request_params",
-            AsyncMock(),
-        )
-
-        async def fake_to_thread(func, *args, **kwargs):
-            return func(*args, **kwargs)
-
-        monkeypatch.setattr(
-            "rootcoz.main.asyncio.to_thread",
-            fake_to_thread,
-        )
+        mock_process = AsyncMock()
+        monkeypatch.setattr("rootcoz.main._process_file_raw_analysis", mock_process)
+        monkeypatch.setattr("rootcoz.main.save_result", AsyncMock())
+        monkeypatch.setattr("rootcoz.main.notify_active_count_changed", MagicMock())
+        monkeypatch.setattr("rootcoz.main.notify_dashboard_changed", MagicMock())
 
         _admin_key = "test-admin-key-16chars"  # pragma: allowlist secret
         monkeypatch.setenv("ADMIN_KEY", _admin_key)
         monkeypatch.setenv(
             "ROOTCOZ_ENCRYPTION_KEY", "test-encryption-key-for-hmac"
         )  # pragma: allowlist secret
-        from rootcoz.config import get_settings
 
         get_settings.cache_clear()
         try:
+            from starlette.testclient import TestClient
+
+            from rootcoz.main import app
+
             test_client = TestClient(
                 app, headers={"Authorization": f"Bearer {_admin_key}"}
             )
             response = test_client.post(
-                "/analyze-failures",
+                "/analyze",
                 json={
+                    "type": "raw",
                     "failures": [
                         {
                             "test_name": "test_foo",
@@ -2407,19 +2148,17 @@ class TestAnalyzeFailuresWorkspacePattern:
                     "tests_repo_url": "https://github.com/org/my-tests",
                 },
             )
-            assert response.status_code == 200
+            assert response.status_code == 202
         finally:
             get_settings.cache_clear()
 
-        # Verify workspace was created
-        mock_repo_manager.create_workspace.assert_called_once()
-
-        # Verify test repo was cloned INTO workspace as subdirectory
-        assert len(clone_into_calls) == 1
-        call = clone_into_calls[0]
-        assert call["url"] == "https://github.com/org/my-tests"
-        assert call["target"] == workspace_dir / "my-tests"
-        assert call["depth"] == 50  # Test repo uses depth=50
+        # Verify background task was dispatched with correct args
+        mock_process.assert_called_once()
+        call_kwargs = mock_process.call_args.kwargs
+        assert call_kwargs["tests_repo_url"] == "https://github.com/org/my-tests"
+        assert call_kwargs["display_name"].startswith("raw-analysis-")
+        assert call_kwargs["ai_provider"] == "claude"
+        assert call_kwargs["ai_model"] == "test-model"
 
 
 class TestWorkspaceAlwaysCreated:
@@ -2430,8 +2169,6 @@ class TestWorkspaceAlwaysCreated:
         self, monkeypatch: pytest.MonkeyPatch, tmp_path
     ) -> None:
         """analyze_job creates a workspace even when no test repo or additional repos."""
-        from rootcoz.analyzer import analyze_job
-        from rootcoz.models import AnalyzeRequest
 
         body = AnalyzeRequest(
             job_name="my-job",
@@ -2459,23 +2196,23 @@ class TestWorkspaceAlwaysCreated:
         mock_client.session = MagicMock()
 
         monkeypatch.setattr(
-            "rootcoz.analyzer.JenkinsClient",
-            lambda **kwargs: mock_client,
+            "rootcoz.sources.jenkins_source.JenkinsClient",
+            lambda **_kwargs: mock_client,
         )
 
         async def fake_to_thread(func, *args, **kwargs):
             return func(*args, **kwargs)
 
         monkeypatch.setattr(
-            "rootcoz.analyzer.asyncio.to_thread",
+            "rootcoz.sources.jenkins_source.asyncio.to_thread",
             fake_to_thread,
         )
         monkeypatch.setattr(
-            "rootcoz.analyzer.check_ai_cli_available",
+            "rootcoz.sources.jenkins_source.check_ai_cli_available",
             AsyncMock(return_value=AIResult(success=True, text="")),
         )
         monkeypatch.setattr(
-            "rootcoz.analyzer._call_ai_cli_with_retry",
+            "rootcoz.engine.core.call_ai_cli_with_retry",
             AsyncMock(
                 return_value=AIResult(
                     success=True,
@@ -2484,7 +2221,7 @@ class TestWorkspaceAlwaysCreated:
             ),
         )
         monkeypatch.setattr(
-            "rootcoz.analyzer.update_progress_phase",
+            "rootcoz.engine.core.update_progress_phase",
             AsyncMock(),
         )
 
@@ -2492,7 +2229,7 @@ class TestWorkspaceAlwaysCreated:
         mock_repo_manager.create_workspace.return_value = workspace_dir
 
         monkeypatch.setattr(
-            "rootcoz.analyzer.RepositoryManager",
+            "rootcoz.sources.jenkins_source.RepositoryManager",
             lambda: mock_repo_manager,
         )
 
@@ -2509,100 +2246,37 @@ class TestWorkspaceAlwaysCreated:
 
     @pytest.mark.asyncio
     async def test_analyze_failures_creates_workspace_without_repos(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_path
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path,
     ) -> None:
-        """POST /analyze-failures creates workspace even without tests_repo_url."""
-        from rootcoz.models import (
-            AnalysisDetail,
-            FailureAnalysis,
-        )
-        from starlette.testclient import TestClient
-        from rootcoz.main import app
-        from rootcoz.config import get_settings
+        """POST /analyze with type=raw (no repos) dispatches background task."""
 
-        # Override settings to ensure no repos are configured
-        no_repo_settings = Settings()
-        settings_data = no_repo_settings.model_dump(mode="python")
-        settings_data["tests_repo_url"] = None
-        settings_data["additional_repos"] = ""
-        no_repo_settings = Settings.model_validate(settings_data)
-        app.dependency_overrides[get_settings] = lambda: no_repo_settings
-
-        workspace_dir = tmp_path / "workspace"
-        workspace_dir.mkdir()
-
-        mock_repo_manager = MagicMock()
-        mock_repo_manager.create_workspace.return_value = workspace_dir
-        mock_repo_manager.cleanup.return_value = None
-
-        monkeypatch.setattr(
-            "rootcoz.main.RepositoryManager",
-            lambda: mock_repo_manager,
-        )
-
-        mock_failure = FailureAnalysis(
-            test_name="test_foo",
-            error="assert False",
-            analysis=AnalysisDetail(classification="CODE ISSUE", details="d"),
-            error_signature="sig",
-        )
-
-        monkeypatch.setattr(
-            "rootcoz.main.analyze_failure_group",
-            AsyncMock(return_value=[mock_failure]),
-        )
-
-        async def run_coroutines(coroutines, **kwargs):
-            return [await coro for coro in coroutines]
-
-        monkeypatch.setattr(
-            "rootcoz.main.run_parallel_with_limit",
-            AsyncMock(side_effect=run_coroutines),
-        )
-        monkeypatch.setattr(
-            "rootcoz.main.save_result",
-            AsyncMock(),
-        )
-        monkeypatch.setattr(
-            "rootcoz.main.update_status",
-            AsyncMock(),
-        )
-        monkeypatch.setattr(
-            "rootcoz.main.populate_failure_history",
-            AsyncMock(),
-        )
-        monkeypatch.setattr(
-            "rootcoz.main.storage.make_classifications_visible",
-            AsyncMock(),
-        )
-        monkeypatch.setattr(
-            "rootcoz.main._preserve_request_params",
-            AsyncMock(),
-        )
-
-        async def fake_to_thread(func, *args, **kwargs):
-            return func(*args, **kwargs)
-
-        monkeypatch.setattr(
-            "rootcoz.main.asyncio.to_thread",
-            fake_to_thread,
-        )
+        mock_process = AsyncMock()
+        monkeypatch.setattr("rootcoz.main._process_file_raw_analysis", mock_process)
+        monkeypatch.setattr("rootcoz.main.save_result", AsyncMock())
+        monkeypatch.setattr("rootcoz.main.notify_active_count_changed", MagicMock())
+        monkeypatch.setattr("rootcoz.main.notify_dashboard_changed", MagicMock())
 
         _admin_key = "test-admin-key-16chars"  # pragma: allowlist secret
         monkeypatch.setenv("ADMIN_KEY", _admin_key)
         monkeypatch.setenv(
             "ROOTCOZ_ENCRYPTION_KEY", "test-encryption-key-for-hmac"
         )  # pragma: allowlist secret
-        from rootcoz.config import get_settings
 
         get_settings.cache_clear()
         try:
+            from starlette.testclient import TestClient
+
+            from rootcoz.main import app
+
             test_client = TestClient(
                 app, headers={"Authorization": f"Bearer {_admin_key}"}
             )
             response = test_client.post(
-                "/analyze-failures",
+                "/analyze",
                 json={
+                    "type": "raw",
                     "failures": [
                         {
                             "test_name": "test_foo",
@@ -2614,19 +2288,19 @@ class TestWorkspaceAlwaysCreated:
                     "ai_model": "test-model",
                 },
             )
-            assert response.status_code == 200
+            assert response.status_code == 202
         finally:
             get_settings.cache_clear()
-            app.dependency_overrides.pop(get_settings, None)
 
-        # Workspace must be created even without any repos
-        mock_repo_manager.create_workspace.assert_called_once()
+        # Verify background task was dispatched (workspace creation happens inside the task)
+        mock_process.assert_called_once()
+        call_kwargs = mock_process.call_args.kwargs
+        assert call_kwargs["tests_repo_url"] == ""
+        assert call_kwargs["ai_provider"] == "claude"
 
     @pytest.mark.asyncio
     async def test_clone_additional_repos_requires_path(self, tmp_path) -> None:
         """clone_additional_repos always receives a Path, never None."""
-        from rootcoz.analyzer import clone_additional_repos
-        import inspect
 
         sig = inspect.signature(clone_additional_repos)
         repo_path_param = sig.parameters["repo_path"]
@@ -2641,9 +2315,6 @@ class TestCloneAdditionalReposPassesRef:
     @pytest.mark.asyncio
     async def test_ref_passed_as_branch(self, tmp_path) -> None:
         """AdditionalRepo.ref is forwarded as branch parameter to clone_into."""
-        from rootcoz.analyzer import clone_additional_repos
-        from rootcoz.models import AdditionalRepo
-        from rootcoz.repository import RepositoryManager
 
         repo_path = tmp_path / "workspace"
         repo_path.mkdir()
@@ -2663,7 +2334,7 @@ class TestCloneAdditionalReposPassesRef:
 
         manager = MagicMock(spec=RepositoryManager)
 
-        def fake_clone_into(url, target, depth=1, branch="", token=None):
+        def fake_clone_into(_url, target, depth=1, branch="", token=None):
             target.mkdir(parents=True, exist_ok=True)
             return target
 
@@ -2673,7 +2344,7 @@ class TestCloneAdditionalReposPassesRef:
             return fn(*args, **kwargs)
 
         with patch(
-            "rootcoz.analyzer.asyncio.to_thread",
+            "rootcoz.engine.core.asyncio.to_thread",
             side_effect=fake_to_thread,
         ):
             cloned, _ = await clone_additional_repos(manager, repos, repo_path)
@@ -2710,8 +2381,6 @@ class TestAnalyzeJobParsesRepoRef:
         self, monkeypatch: pytest.MonkeyPatch, tmp_path
     ) -> None:
         """When tests_repo_url has ':ref', parse it and pass branch to clone_into."""
-        from rootcoz.analyzer import analyze_job
-        from rootcoz.models import AnalyzeRequest
 
         body = AnalyzeRequest.model_validate(
             {
@@ -2740,23 +2409,23 @@ class TestAnalyzeJobParsesRepoRef:
         mock_client.session = MagicMock()
 
         monkeypatch.setattr(
-            "rootcoz.analyzer.JenkinsClient",
-            lambda **kwargs: mock_client,
+            "rootcoz.sources.jenkins_source.JenkinsClient",
+            lambda **_kwargs: mock_client,
         )
 
         async def fake_to_thread(func, *args, **kwargs):
             return func(*args, **kwargs)
 
         monkeypatch.setattr(
-            "rootcoz.analyzer.asyncio.to_thread",
+            "rootcoz.sources.jenkins_source.asyncio.to_thread",
             fake_to_thread,
         )
         monkeypatch.setattr(
-            "rootcoz.analyzer.check_ai_cli_available",
+            "rootcoz.sources.jenkins_source.check_ai_cli_available",
             AsyncMock(return_value=AIResult(success=True, text="")),
         )
         monkeypatch.setattr(
-            "rootcoz.analyzer._call_ai_cli_with_retry",
+            "rootcoz.engine.core.call_ai_cli_with_retry",
             AsyncMock(
                 return_value=AIResult(
                     success=True,
@@ -2765,7 +2434,7 @@ class TestAnalyzeJobParsesRepoRef:
             ),
         )
         monkeypatch.setattr(
-            "rootcoz.analyzer.update_progress_phase",
+            "rootcoz.engine.core.update_progress_phase",
             AsyncMock(),
         )
 
@@ -2784,7 +2453,7 @@ class TestAnalyzeJobParsesRepoRef:
         mock_repo_manager.clone_into = MagicMock(side_effect=fake_clone_into)
 
         monkeypatch.setattr(
-            "rootcoz.analyzer.RepositoryManager",
+            "rootcoz.sources.jenkins_source.RepositoryManager",
             lambda: mock_repo_manager,
         )
 
@@ -2810,8 +2479,6 @@ class TestAnalyzeJobParsesRepoRef:
         self, monkeypatch: pytest.MonkeyPatch, tmp_path
     ) -> None:
         """When tests_repo_url has no ':ref', branch is empty string."""
-        from rootcoz.analyzer import analyze_job
-        from rootcoz.models import AnalyzeRequest
 
         body = AnalyzeRequest.model_validate(
             {
@@ -2840,23 +2507,23 @@ class TestAnalyzeJobParsesRepoRef:
         mock_client.session = MagicMock()
 
         monkeypatch.setattr(
-            "rootcoz.analyzer.JenkinsClient",
-            lambda **kwargs: mock_client,
+            "rootcoz.sources.jenkins_source.JenkinsClient",
+            lambda **_kwargs: mock_client,
         )
 
         async def fake_to_thread(func, *args, **kwargs):
             return func(*args, **kwargs)
 
         monkeypatch.setattr(
-            "rootcoz.analyzer.asyncio.to_thread",
+            "rootcoz.sources.jenkins_source.asyncio.to_thread",
             fake_to_thread,
         )
         monkeypatch.setattr(
-            "rootcoz.analyzer.check_ai_cli_available",
+            "rootcoz.sources.jenkins_source.check_ai_cli_available",
             AsyncMock(return_value=AIResult(success=True, text="")),
         )
         monkeypatch.setattr(
-            "rootcoz.analyzer._call_ai_cli_with_retry",
+            "rootcoz.engine.core.call_ai_cli_with_retry",
             AsyncMock(
                 return_value=AIResult(
                     success=True,
@@ -2865,7 +2532,7 @@ class TestAnalyzeJobParsesRepoRef:
             ),
         )
         monkeypatch.setattr(
-            "rootcoz.analyzer.update_progress_phase",
+            "rootcoz.engine.core.update_progress_phase",
             AsyncMock(),
         )
 
@@ -2884,7 +2551,7 @@ class TestAnalyzeJobParsesRepoRef:
         mock_repo_manager.clone_into = MagicMock(side_effect=fake_clone_into)
 
         monkeypatch.setattr(
-            "rootcoz.analyzer.RepositoryManager",
+            "rootcoz.sources.jenkins_source.RepositoryManager",
             lambda: mock_repo_manager,
         )
 
@@ -2903,68 +2570,67 @@ class TestAnalyzeJobParsesRepoRef:
 
 
 class TestJsonResponseSchemaParagraphBreaks:
-    """Tests that _JSON_RESPONSE_SCHEMA instructs the AI to use paragraph breaks."""
+    """Tests that JSON_RESPONSE_SCHEMA instructs the AI to use paragraph breaks."""
 
     def test_code_issue_details_has_paragraph_break_instruction(self) -> None:
         """CODE ISSUE details field instructs AI to use paragraph breaks."""
-        assert "paragraph breaks" in _JSON_RESPONSE_SCHEMA
-        assert "root cause identification" in _JSON_RESPONSE_SCHEMA
-        assert "Do NOT write one continuous paragraph" in _JSON_RESPONSE_SCHEMA
+        assert "paragraph breaks" in JSON_RESPONSE_SCHEMA
+        assert "root cause identification" in JSON_RESPONSE_SCHEMA
+        assert "Do NOT write one continuous paragraph" in JSON_RESPONSE_SCHEMA
 
     def test_product_bug_details_has_paragraph_break_instruction(self) -> None:
         """PRODUCT BUG details field instructs AI to use paragraph breaks."""
-        assert "If PRODUCT BUG:" in _JSON_RESPONSE_SCHEMA
-        assert "Do NOT write one continuous paragraph" in _JSON_RESPONSE_SCHEMA
+        assert "If PRODUCT BUG:" in JSON_RESPONSE_SCHEMA
+        assert "Do NOT write one continuous paragraph" in JSON_RESPONSE_SCHEMA
 
     def test_code_issue_artifacts_evidence_has_paragraph_break_instruction(
         self,
     ) -> None:
         """CODE ISSUE artifacts_evidence field instructs AI to separate entries with paragraph breaks."""
-        assert "artifacts_evidence" in _JSON_RESPONSE_SCHEMA
+        assert "artifacts_evidence" in JSON_RESPONSE_SCHEMA
         assert (
             "Separate distinct artifact entries with paragraph breaks"
-            in _JSON_RESPONSE_SCHEMA
+            in JSON_RESPONSE_SCHEMA
         )
 
     def test_product_bug_artifacts_evidence_has_paragraph_break_instruction(
         self,
     ) -> None:
         """PRODUCT BUG artifacts_evidence field instructs AI to separate entries with paragraph breaks."""
-        assert "artifacts_evidence" in _JSON_RESPONSE_SCHEMA
+        assert "artifacts_evidence" in JSON_RESPONSE_SCHEMA
         assert (
             "Separate distinct artifact entries with paragraph breaks"
-            in _JSON_RESPONSE_SCHEMA
+            in JSON_RESPONSE_SCHEMA
         )
 
     def test_product_bug_report_description_has_paragraph_break_instruction(
         self,
     ) -> None:
         """product_bug_report description field instructs AI to use paragraph breaks."""
-        assert "paragraph breaks between sections" in _JSON_RESPONSE_SCHEMA
+        assert "paragraph breaks between sections" in JSON_RESPONSE_SCHEMA
 
 
 class TestJsonResponseSchemaCodeFields:
-    """Tests that _JSON_RESPONSE_SCHEMA includes original_code and suggested_code."""
+    """Tests that JSON_RESPONSE_SCHEMA includes original_code and suggested_code."""
 
     def test_schema_includes_original_code(self) -> None:
         """Schema instructs AI to produce original_code field."""
-        assert "original_code" in _JSON_RESPONSE_SCHEMA
+        assert "original_code" in JSON_RESPONSE_SCHEMA
 
     def test_schema_includes_suggested_code(self) -> None:
         """Schema instructs AI to produce suggested_code field."""
-        assert "suggested_code" in _JSON_RESPONSE_SCHEMA
+        assert "suggested_code" in JSON_RESPONSE_SCHEMA
 
     def test_schema_specifies_no_markdown(self) -> None:
         """Schema instructs AI to produce raw code with no markdown."""
-        assert "NO markdown" in _JSON_RESPONSE_SCHEMA
+        assert "NO markdown" in JSON_RESPONSE_SCHEMA
 
 
 class TestParseJsonResponseCodeFields:
-    """Tests that _parse_json_response handles original_code and suggested_code."""
+    """Tests that parse_json_response handles original_code and suggested_code."""
 
     def test_parse_code_fix_with_code_fields(self) -> None:
         """JSON with original_code and suggested_code parses correctly."""
-        import json
 
         data = {
             "classification": "CODE ISSUE",
@@ -2979,14 +2645,13 @@ class TestParseJsonResponseCodeFields:
                 "suggested_code": "import sys\nimport os",
             },
         }
-        result = _parse_json_response(json.dumps(data))
+        result = parse_json_response(json.dumps(data))
         assert result.code_fix
         assert result.code_fix.original_code == "import sys"
         assert result.code_fix.suggested_code == "import sys\nimport os"
 
     def test_parse_code_fix_without_code_fields(self) -> None:
         """JSON without original_code/suggested_code still parses (backward compat)."""
-        import json
 
         data = {
             "classification": "CODE ISSUE",
@@ -2999,52 +2664,53 @@ class TestParseJsonResponseCodeFields:
                 "change": "Fix it",
             },
         }
-        result = _parse_json_response(json.dumps(data))
+        result = parse_json_response(json.dumps(data))
         assert result.code_fix
         assert result.code_fix.original_code is None
         assert result.code_fix.suggested_code is None
 
 
 class TestRecoverFromDetails:
-    """Tests for _recover_from_details including markdown and INFRASTRUCTURE recovery."""
+    """Tests for recover_from_details including markdown and INFRASTRUCTURE recovery."""
 
     def test_recover_infrastructure_classification(self):
         """INFRASTRUCTURE classification is recovered from JSON in details."""
-        from rootcoz.analyzer import _recover_from_details
-        from rootcoz.models import AnalysisDetail
 
-        raw = '{"classification": "INFRASTRUCTURE", "affected_tests": ["test_node_ready"], "details": "Node went NotReady during test execution", "artifacts_evidence": "[cluster.log]: ERROR node-1 NotReady"}'
-        result = _recover_from_details(AnalysisDetail(classification="", details=raw))
+        raw = (
+            '{"classification": "INFRASTRUCTURE", '
+            '"affected_tests": ["test_node_ready"], '
+            '"details": "Node went NotReady during test execution", '
+            '"artifacts_evidence": "[cluster.log]: ERROR node-1 NotReady"}'
+        )
+        result = recover_from_details(AnalysisDetail(classification="", details=raw))
         assert result.classification == "INFRASTRUCTURE"
         assert "test_node_ready" in result.affected_tests
         assert "NotReady" in result.details
 
     def test_recover_markdown_classification(self):
         """Classification is recovered from markdown format when JSON key is absent."""
-        from rootcoz.analyzer import _recover_from_details
-        from rootcoz.models import AnalysisDetail
 
-        raw = "**Classification: INFRASTRUCTURE**\n\nAll 11 failing tests share a single root cause: the OCP authentication operator degraded mid-run."
-        result = _recover_from_details(AnalysisDetail(classification="", details=raw))
+        raw = (
+            "**Classification: INFRASTRUCTURE**\n\n"
+            "All 11 failing tests share a single root cause: "
+            "the OCP authentication operator degraded mid-run."
+        )
+        result = recover_from_details(AnalysisDetail(classification="", details=raw))
         assert result.classification == "INFRASTRUCTURE"
         assert "OCP authentication" in result.details
         assert "**Classification:" not in result.details
 
     def test_recover_markdown_product_bug(self):
         """Markdown recovery works for PRODUCT BUG too."""
-        from rootcoz.analyzer import _recover_from_details
-        from rootcoz.models import AnalysisDetail
 
         raw = "**Classification: PRODUCT BUG**\n\nThe API returns 500 on valid input."
-        result = _recover_from_details(AnalysisDetail(classification="", details=raw))
+        result = recover_from_details(AnalysisDetail(classification="", details=raw))
         assert result.classification == "PRODUCT BUG"
 
     def test_no_recovery_when_classification_present(self):
         """No recovery attempted when classification is already set."""
-        from rootcoz.analyzer import _recover_from_details
-        from rootcoz.models import AnalysisDetail
 
-        result = _recover_from_details(
+        result = recover_from_details(
             AnalysisDetail(
                 classification="CODE ISSUE",
                 details="**Classification: INFRASTRUCTURE**",
@@ -3054,19 +2720,16 @@ class TestRecoverFromDetails:
 
     def test_no_recovery_from_empty_details(self):
         """No recovery when details is empty."""
-        from rootcoz.analyzer import _recover_from_details
-        from rootcoz.models import AnalysisDetail
 
-        result = _recover_from_details(AnalysisDetail(classification="", details=""))
+        result = recover_from_details(AnalysisDetail(classification="", details=""))
         assert result.classification == ""
 
 
 class TestRecoverFromDetailsCodeFields:
-    """Tests that _recover_from_details extracts original_code and suggested_code."""
+    """Tests that recover_from_details extracts original_code and suggested_code."""
 
     def test_recover_with_code_fields(self) -> None:
         """Regex recovery extracts original_code and suggested_code."""
-        from rootcoz.models import AnalysisDetail
 
         raw = (
             '{"classification": "CODE ISSUE", "affected_tests": ["test_x"], '
@@ -3074,7 +2737,7 @@ class TestRecoverFromDetailsCodeFields:
             '"change": "fix", "original_code": "old code", "suggested_code": "new code"}}'
         )
         fallback = AnalysisDetail(details=raw)
-        result = _recover_from_details(fallback)
+        result = recover_from_details(fallback)
         assert result.classification == "CODE ISSUE"
         assert result.code_fix
         assert result.code_fix.original_code == "old code"
@@ -3082,7 +2745,6 @@ class TestRecoverFromDetailsCodeFields:
 
     def test_recover_with_escaped_code_characters(self) -> None:
         """Regex recovery correctly decodes JSON-escaped characters in code fields."""
-        from rootcoz.models import AnalysisDetail
 
         raw = (
             '{"classification": "CODE ISSUE", "affected_tests": ["test_x"], '
@@ -3092,14 +2754,13 @@ class TestRecoverFromDetailsCodeFields:
             '"suggested_code": "print(\\"y\\")"}}'
         )
         fallback = AnalysisDetail(details=raw)
-        result = _recover_from_details(fallback)
+        result = recover_from_details(fallback)
         assert result.code_fix
         assert result.code_fix.original_code == 'print("x")'
         assert result.code_fix.suggested_code == 'print("y")'
 
     def test_recover_without_code_fields(self) -> None:
         """Regex recovery works without original_code/suggested_code."""
-        from rootcoz.models import AnalysisDetail
 
         raw = (
             '{"classification": "CODE ISSUE", "affected_tests": ["test_x"], '
@@ -3107,7 +2768,7 @@ class TestRecoverFromDetailsCodeFields:
             '"change": "fix"}}'
         )
         fallback = AnalysisDetail(details=raw)
-        result = _recover_from_details(fallback)
+        result = recover_from_details(fallback)
         assert result.classification == "CODE ISSUE"
         assert result.code_fix
         assert result.code_fix.original_code is None
@@ -3153,7 +2814,13 @@ class TestExtractFailuresFromTestReport:
                     "name": "TestVmState",
                     "status": "FAILED",
                     "errorDetails": None,
-                    "errorStackTrace": "tests/vm_state_test.go:201\nExpected\n    <v1.PersistentVolumeAccessMode>: ReadWriteMany\nto equal\n    <v1.PersistentVolumeAccessMode>: ReadWriteOnce\ntests/vm_state_test.go:167",
+                    "errorStackTrace": (
+                        "tests/vm_state_test.go:201\nExpected\n"
+                        "    <v1.PersistentVolumeAccessMode>: ReadWriteMany\n"
+                        "to equal\n"
+                        "    <v1.PersistentVolumeAccessMode>: ReadWriteOnce\n"
+                        "tests/vm_state_test.go:167"
+                    ),
                     "duration": 0.3,
                 }
             ]
@@ -3162,7 +2829,8 @@ class TestExtractFailuresFromTestReport:
         assert len(failures) == 1
         assert (
             failures[0].error_message
-            == "Expected <v1.PersistentVolumeAccessMode>: ReadWriteMany to equal <v1.PersistentVolumeAccessMode>: ReadWriteOnce"
+            == "Expected <v1.PersistentVolumeAccessMode>: ReadWriteMany"
+            " to equal <v1.PersistentVolumeAccessMode>: ReadWriteOnce"
         )
         assert "ReadWriteMany" in failures[0].stack_trace
         assert "ReadWriteOnce" in failures[0].stack_trace

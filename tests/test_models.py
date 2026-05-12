@@ -952,9 +952,9 @@ class TestAdditionalRepo:
         repo = AdditionalRepo(
             name="infra",
             url="https://github.com/org/infra",
-            token="tok",  # noqa: S106
+            token="tok",
         )
-        assert repo.token == "tok"  # noqa: S105
+        assert repo.token == "tok"
 
     def test_token_none_explicit(self) -> None:
         """Explicitly passing None for token is accepted."""

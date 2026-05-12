@@ -14,7 +14,7 @@ from rootcoz.models import (
     ProductBugReport,
 )
 
-_TEST_GITHUB_TOKEN = "ghp_test"  # noqa: S105
+_TEST_GITHUB_TOKEN = "ghp_test"
 
 # Expected footer substrings for assertion checks.
 _GITHUB_FOOTER_MARKER = (
@@ -35,7 +35,10 @@ def code_issue_failure() -> FailureAnalysis:
         analysis=AnalysisDetail(
             classification="CODE ISSUE",
             affected_tests=["tests.auth.test_login.TestLogin.test_valid_credentials"],
-            details="The test fails because the login endpoint handler does not catch ValueError from the password validator.",
+            details=(
+                "The test fails because the login endpoint handler"
+                " does not catch ValueError from the password validator."
+            ),
             code_fix=CodeFix(
                 file="src/auth/handlers.py",
                 line="42",
@@ -464,40 +467,40 @@ class TestCreateJiraBug:
 
 class TestParseGithubRepoUrl:
     def test_standard_url(self):
-        from rootcoz.bug_creation import _parse_github_repo_url
+        from rootcoz.bug_creation import parse_github_repo_url
 
-        owner, repo = _parse_github_repo_url("https://github.com/myorg/myrepo")
+        owner, repo = parse_github_repo_url("https://github.com/myorg/myrepo")
         assert owner == "myorg"
         assert repo == "myrepo"
 
     def test_url_with_git_suffix(self):
-        from rootcoz.bug_creation import _parse_github_repo_url
+        from rootcoz.bug_creation import parse_github_repo_url
 
-        owner, repo = _parse_github_repo_url("https://github.com/myorg/myrepo.git")
+        owner, repo = parse_github_repo_url("https://github.com/myorg/myrepo.git")
         assert owner == "myorg"
         assert repo == "myrepo"
 
     def test_url_with_dots_in_repo_name(self):
         """Finding 5: Repo names with dots should be parsed correctly."""
-        from rootcoz.bug_creation import _parse_github_repo_url
+        from rootcoz.bug_creation import parse_github_repo_url
 
-        owner, repo = _parse_github_repo_url("https://github.com/org/my.repo")
+        owner, repo = parse_github_repo_url("https://github.com/org/my.repo")
         assert owner == "org"
         assert repo == "my.repo"
 
     def test_url_with_dots_and_git_suffix(self):
         """Finding 5: Repo names with dots AND .git suffix."""
-        from rootcoz.bug_creation import _parse_github_repo_url
+        from rootcoz.bug_creation import parse_github_repo_url
 
-        owner, repo = _parse_github_repo_url("https://github.com/org/my.repo.git")
+        owner, repo = parse_github_repo_url("https://github.com/org/my.repo.git")
         assert owner == "org"
         assert repo == "my.repo"
 
     def test_invalid_url(self):
-        from rootcoz.bug_creation import _parse_github_repo_url
+        from rootcoz.bug_creation import parse_github_repo_url
 
         with pytest.raises(ValueError, match="Cannot parse"):
-            _parse_github_repo_url("not-a-url")
+            parse_github_repo_url("not-a-url")
 
 
 class TestBuildFailbackContent:

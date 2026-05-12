@@ -8,11 +8,12 @@ import os
 import re
 
 import httpx
+from ai_cli_runner import call_ai_cli
 from simple_logger.logger import get_logger
 
-from ai_cli_runner import call_ai_cli
-from rootcoz.analyzer import PROVIDER_CLI_FLAGS
 from rootcoz.config import Settings
+from rootcoz.engine.core import PROVIDER_CLI_FLAGS
+from rootcoz.jira import JiraClient
 from rootcoz.models import (
     AnalysisDetail,
     CodeFix,
@@ -517,7 +518,7 @@ Do not wrap in code blocks or JSON. Just the summary on the first line, then the
     return content
 
 
-def _parse_github_repo_url(repo_url: str) -> tuple[str, str]:
+def parse_github_repo_url(repo_url: str) -> tuple[str, str]:
     """Extract owner and repo from a GitHub repository URL.
 
     Supports https://github.com/owner/repo and
@@ -544,7 +545,7 @@ async def search_github_duplicates(
     Swallows all errors and returns [].
     """
     try:
-        owner, repo = _parse_github_repo_url(repo_url)
+        owner, repo = parse_github_repo_url(repo_url)
     except ValueError:
         logger.warning(
             "Could not parse GitHub repo URL for duplicate search: %s", repo_url
@@ -601,8 +602,6 @@ async def search_jira_duplicates(
         return []
 
     try:
-        from rootcoz.jira import JiraClient
-
         # Extract meaningful keywords from title
         query_words = title.split()
         keywords = [w for w in query_words if len(w) > 2]
@@ -638,7 +637,7 @@ async def create_github_issue(
 
     Raises httpx.HTTPStatusError on failure.
     """
-    owner, repo = _parse_github_repo_url(repo_url)
+    owner, repo = parse_github_repo_url(repo_url)
 
     # Append AI attribution footer if not already present.
     if GITHUB_AI_FOOTER.strip() not in body:

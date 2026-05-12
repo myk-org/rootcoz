@@ -9,6 +9,8 @@ import pytest
 from rootcoz.cli.client import RootCozClient, RootCozError
 from tests.conftest import (
     CLI_TEST_BASE_URL as BASE_URL,
+)
+from tests.conftest import (
     make_test_client as _make_client,
 )
 
@@ -595,7 +597,7 @@ class TestRootCozClientIssueTokens:
             assert request.method == "POST"
             assert "/results/job-1/preview-github-issue" in str(request.url)
             body = json.loads(request.content)
-            assert body["github_token"] == "ghp_test123"  # noqa: S105
+            assert body["github_token"] == "ghp_test123"
             assert "jira_token" not in body
             assert "jira_email" not in body
             return httpx.Response(
@@ -607,7 +609,7 @@ class TestRootCozClientIssueTokens:
         result = client.preview_github_issue(
             job_id="job-1",
             test_name="tests.TestA.test_one",
-            github_token="ghp_test123",  # noqa: S106
+            github_token="ghp_test123",
         )
         assert result["title"] == "Fix"
 
@@ -616,7 +618,7 @@ class TestRootCozClientIssueTokens:
             assert request.method == "POST"
             assert "/results/job-1/create-github-issue" in str(request.url)
             body = json.loads(request.content)
-            assert body["github_token"] == "ghp_test123"  # noqa: S105
+            assert body["github_token"] == "ghp_test123"
             assert "jira_token" not in body
             assert "jira_email" not in body
             return httpx.Response(
@@ -635,7 +637,7 @@ class TestRootCozClientIssueTokens:
             test_name="tests.TestA.test_one",
             title="Bug",
             body="Details",
-            github_token="ghp_test123",  # noqa: S106
+            github_token="ghp_test123",
         )
         assert result["url"] == "https://github.com/org/repo/issues/99"
 
@@ -645,7 +647,7 @@ class TestRootCozClientIssueTokens:
             assert "/results/job-1/preview-jira-bug" in str(request.url)
             body = json.loads(request.content)
             assert "github_token" not in body
-            assert body["jira_token"] == "jira-tok-test"  # noqa: S105
+            assert body["jira_token"] == "jira-tok-test"
             assert body["jira_email"] == "test@example.com"
             return httpx.Response(
                 200,
@@ -656,7 +658,7 @@ class TestRootCozClientIssueTokens:
         result = client.preview_jira_bug(
             job_id="job-1",
             test_name="tests.TestA.test_one",
-            jira_token="jira-tok-test",  # noqa: S106
+            jira_token="jira-tok-test",
             jira_email="test@example.com",
         )
         assert result["title"] == "Bug"
@@ -667,7 +669,7 @@ class TestRootCozClientIssueTokens:
             assert "/results/job-1/create-jira-bug" in str(request.url)
             body = json.loads(request.content)
             assert "github_token" not in body
-            assert body["jira_token"] == "jira-tok-test"  # noqa: S105
+            assert body["jira_token"] == "jira-tok-test"
             assert body["jira_email"] == "test@example.com"
             return httpx.Response(
                 201,
@@ -685,7 +687,7 @@ class TestRootCozClientIssueTokens:
             test_name="tests.TestA.test_one",
             title="Bug",
             body="Details",
-            jira_token="jira-tok-test",  # noqa: S106
+            jira_token="jira-tok-test",
             jira_email="test@example.com",
         )
         assert result["key"] == "PROJ-1"
@@ -773,7 +775,7 @@ class TestRootCozClientIssueTokens:
             test_name="tests.TestA.test_one",
             title="Bug",
             body="Details",
-            jira_token="jira-tok-test",  # noqa: S106
+            jira_token="jira-tok-test",
             jira_email="test@example.com",
             jira_security_level="Restricted",
         )
@@ -792,7 +794,7 @@ class TestRootCozClientCrossCredentialLeakage:
             assert "jira_email" not in body, (
                 "jira_email leaked into GitHub preview payload"
             )
-            assert body["github_token"] == "ghp_test"  # noqa: S105
+            assert body["github_token"] == "ghp_test"
             return httpx.Response(
                 200,
                 json={"title": "Fix", "body": "Body", "similar_issues": []},
@@ -802,7 +804,7 @@ class TestRootCozClientCrossCredentialLeakage:
         client.preview_github_issue(
             job_id="job-1",
             test_name="tests.TestA.test_one",
-            github_token="ghp_test",  # noqa: S106
+            github_token="ghp_test",
         )
 
     def test_create_github_issue_excludes_jira_credentials(self):
@@ -830,7 +832,7 @@ class TestRootCozClientCrossCredentialLeakage:
             test_name="tests.TestA.test_one",
             title="Bug",
             body="Details",
-            github_token="ghp_test",  # noqa: S106
+            github_token="ghp_test",
         )
 
     def test_preview_jira_bug_excludes_github_credentials(self):
@@ -839,7 +841,7 @@ class TestRootCozClientCrossCredentialLeakage:
             assert "github_token" not in body, (
                 "github_token leaked into Jira preview payload"
             )
-            assert body["jira_token"] == "jira-tok"  # noqa: S105
+            assert body["jira_token"] == "jira-tok"
             return httpx.Response(
                 200,
                 json={"title": "Bug", "body": "Desc", "similar_issues": []},
@@ -849,7 +851,7 @@ class TestRootCozClientCrossCredentialLeakage:
         client.preview_jira_bug(
             job_id="job-1",
             test_name="tests.TestA.test_one",
-            jira_token="jira-tok",  # noqa: S106
+            jira_token="jira-tok",
         )
 
     def test_create_jira_bug_excludes_github_credentials(self):
@@ -874,7 +876,7 @@ class TestRootCozClientCrossCredentialLeakage:
             test_name="tests.TestA.test_one",
             title="Bug",
             body="Details",
-            jira_token="jira-tok",  # noqa: S106
+            jira_token="jira-tok",
         )
 
 
@@ -1015,6 +1017,43 @@ def _parse_analyze_request(request):
     return json.loads(request.content)
 
 
+class TestRootCozClientAnalyzeFile:
+    def test_analyze_file_sends_correct_body(self):
+        def handler(request):
+            body = json.loads(request.content)
+            assert body["type"] == "file"
+            assert body["raw_xml"] == "<testsuites/>"
+            assert body["ai_provider"] == "claude"
+            return httpx.Response(202, json={"status": "queued", "job_id": "f1"})
+
+        client = _make_client(handler)
+        result = client.analyze_file("<testsuites/>", ai_provider="claude")
+        assert result["status"] == "queued"
+
+    def test_analyze_file_with_name_and_tags(self):
+        def handler(request):
+            body = json.loads(request.content)
+            assert body["type"] == "file"
+            assert body["name"] == "my-file-analysis"
+            assert body["tags"] == ["regression"]
+            return httpx.Response(202, json={"status": "queued", "job_id": "f2"})
+
+        client = _make_client(handler)
+        result = client.analyze_file(
+            "<testsuites/>", name="my-file-analysis", tags=["regression"]
+        )
+        assert result["status"] == "queued"
+
+    def test_analyze_file_minimal_body(self):
+        def handler(request):
+            body = json.loads(request.content)
+            assert body == {"type": "file", "raw_xml": "<testsuites/>"}
+            return httpx.Response(202, json={"status": "queued", "job_id": "f3"})
+
+        client = _make_client(handler)
+        client.analyze_file("<testsuites/>")
+
+
 class TestRootCozClientAnalyzeAdditionalRepos:
     def test_analyze_passes_additional_repos(self):
         """additional_repos is forwarded in the request body."""
@@ -1060,12 +1099,12 @@ class TestRootCozClientAnalyzeExtras:
             "tests_repo_url": "https://github.com/org/tests",
             "jira_url": "https://jira.example.com",
             "jira_email": "user@example.com",
-            "jira_api_token": "tok-123",  # noqa: S105
-            "jira_pat": "pat-abc",  # noqa: S105
+            "jira_api_token": "tok-123",
+            "jira_pat": "pat-abc",
             "jira_project_key": "PROJ",
             "jira_ssl_verify": True,
             "jira_max_results": 25,
-            "github_token": "ghp_abc123",  # noqa: S105
+            "github_token": "ghp_abc123",
             "ai_cli_timeout": 10,
             "enable_jira": True,
             "raw_prompt": "extra instructions",
@@ -1134,7 +1173,7 @@ class TestRootCozClientAnalyzeExtras:
 
         def handler(request):
             body = _parse_analyze_request(request)
-            assert body == {"job_name": "my-job", "build_number": 1}
+            assert body == {"type": "jenkins", "job_name": "my-job", "build_number": 1}
             return httpx.Response(202, json={"status": "queued", "job_id": "x"})
 
         client = _make_client(handler)
@@ -1148,8 +1187,8 @@ class TestRootCozClientValidateToken:
             assert request.method == "POST"
             assert "/api/validate-token" in str(request.url)
             body = json.loads(request.content)
-            assert body["token_type"] == "github"  # noqa: S105
-            assert body["token"] == "ghp_test"  # noqa: S105
+            assert body["token_type"] == "github"
+            assert body["token"] == "ghp_test"
             return httpx.Response(
                 200,
                 json={
@@ -1160,7 +1199,7 @@ class TestRootCozClientValidateToken:
             )
 
         client = _make_client(handler)
-        result = client.validate_token(token_type="github", token="ghp_test")  # noqa: S106
+        result = client.validate_token(token_type="github", token="ghp_test")
         assert result["valid"] is True
 
     def test_validate_jira_token_with_email(self):
@@ -1168,8 +1207,8 @@ class TestRootCozClientValidateToken:
             assert request.method == "POST"
             assert "/api/validate-token" in str(request.url)
             body = json.loads(request.content)
-            assert body["token_type"] == "jira"  # noqa: S105
-            assert body["token"] == "jira-tok"  # noqa: S105
+            assert body["token_type"] == "jira"
+            assert body["token"] == "jira-tok"
             assert body["email"] == "user@example.com"
             return httpx.Response(
                 200,
@@ -1182,8 +1221,8 @@ class TestRootCozClientValidateToken:
 
         client = _make_client(handler)
         result = client.validate_token(
-            token_type="jira",  # noqa: S106
-            token="jira-tok",  # noqa: S106
+            token_type="jira",
+            token="jira-tok",
             email="user@example.com",
         )
         assert result["valid"] is True
@@ -1194,14 +1233,14 @@ class TestRootCozClientValidateToken:
             assert "/api/validate-token" in str(request.url)
             body = json.loads(request.content)
             assert "email" not in body
-            assert body["token_type"] == "jira"  # noqa: S105
-            assert body["token"] == "jira-tok"  # noqa: S105
+            assert body["token_type"] == "jira"
+            assert body["token"] == "jira-tok"
             return httpx.Response(
                 200, json={"valid": True, "username": "u", "message": "ok"}
             )
 
         client = _make_client(handler)
-        client.validate_token(token_type="jira", token="jira-tok")  # noqa: S106
+        client.validate_token(token_type="jira", token="jira-tok")
 
 
 class TestRootCozClientJiraProjects:
@@ -1237,14 +1276,14 @@ class TestRootCozClientJiraSecurityLevels:
     def test_jira_security_levels_with_token(self):
         def handler(request):
             body = json.loads(request.content)
-            assert body["jira_token"] == "tok"  # noqa: S105
+            assert body["jira_token"] == "tok"
             assert body["jira_email"] == "u@e.com"
             return httpx.Response(200, json=[])
 
         client = _make_client(handler)
         result = client.jira_security_levels(
             "PROJ",
-            jira_token="tok",  # noqa: S106
+            jira_token="tok",
             jira_email="u@e.com",
         )
         assert result == []
@@ -1359,7 +1398,7 @@ class TestRootCozClientAuth:
             assert request.url.path == "/api/auth/login"
             body = json.loads(request.content)
             assert body["username"] == "admin"
-            assert body["api_key"] == "test-key"  # noqa: S105  # pragma: allowlist secret
+            assert body["api_key"] == "test-key"  # pragma: allowlist secret
             return httpx.Response(
                 200,
                 json={"username": "admin", "role": "admin", "is_admin": True},
@@ -1756,13 +1795,13 @@ class TestRootCozClientApiKeyHeader:
     def test_api_key_sent_as_bearer_header(self):
         def check_header(request):
             auth = request.headers.get("authorization", "")
-            assert auth == "Bearer test-api-key"  # noqa: S105
+            assert auth == "Bearer test-api-key"
             return httpx.Response(
                 200,
                 json={"username": "admin", "role": "admin", "is_admin": True},
             )
 
-        client = _make_client(check_header, api_key="test-api-key")  # noqa: S106
+        client = _make_client(check_header, api_key="test-api-key")
         client.auth_me()
 
     def test_no_api_key_no_auth_header(self):

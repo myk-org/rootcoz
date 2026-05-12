@@ -9,6 +9,9 @@ from pydantic import Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from simple_logger.logger import get_logger
 
+from rootcoz.metadata_rules import load_metadata_rules
+from rootcoz.vapid import get_vapid_config
+
 logger = get_logger(name=__name__, level=os.environ.get("LOG_LEVEL", "INFO"))
 
 
@@ -185,7 +188,10 @@ class Settings(BaseSettings):
     # Explicit GitHub issue creation toggle (optional)
     enable_github_issues: bool | None = Field(
         default=None,
-        description="Enable GitHub issue creation. When None, enabled if TESTS_REPO_URL and GITHUB_TOKEN are configured.",
+        description=(
+            "Enable GitHub issue creation."
+            " When None, enabled if TESTS_REPO_URL and GITHUB_TOKEN are configured."
+        ),
     )
 
     # Explicit Jira issue creation toggle (optional)
@@ -261,7 +267,11 @@ class Settings(BaseSettings):
     )
     enable_reportportal: bool | None = Field(
         default=None,
-        description="Enable Report Portal integration. When None, enabled if REPORTPORTAL_URL, REPORTPORTAL_API_TOKEN, and REPORTPORTAL_PROJECT are configured.",
+        description=(
+            "Enable Report Portal integration."
+            " When None, enabled if REPORTPORTAL_URL, REPORTPORTAL_API_TOKEN,"
+            " and REPORTPORTAL_PROJECT are configured."
+        ),
     )
 
     # Web Push (VAPID) configuration (optional, server-only)
@@ -335,7 +345,7 @@ class Settings(BaseSettings):
             if self.enable_jira is True:
                 logger.warning("enable_jira is True but JIRA_URL is not configured")
             return False
-        _, token_value = _resolve_jira_auth(self)
+        _, token_value = resolve_jira_auth(self)
         if not token_value:
             if self.enable_jira is True:
                 logger.warning(
@@ -401,8 +411,6 @@ class Settings(BaseSettings):
             object.__setattr__(self, "_vapid_config_cache", True)
             return True
 
-        from rootcoz.vapid import get_vapid_config
-
         result = bool(get_vapid_config())
         object.__setattr__(self, "_vapid_config_cache", result)
         return result
@@ -425,10 +433,8 @@ class Settings(BaseSettings):
             return []
 
         try:
-            from rootcoz.metadata_rules import load_metadata_rules
-
             rules = load_metadata_rules(path)
-        except Exception:  # noqa: BLE001 — never crash the app on bad rule config
+        except Exception:  # never crash the app on bad rule config
             logger.warning("Failed to load metadata rules from %s", path, exc_info=True)
             rules = []
 
@@ -464,7 +470,7 @@ class Settings(BaseSettings):
         return True
 
 
-def _resolve_jira_auth(settings: Settings) -> tuple[bool, str]:
+def resolve_jira_auth(settings: Settings) -> tuple[bool, str]:
     """Resolve Jira authentication mode and token value.
 
     Determines Cloud vs Server/DC deployment first, then selects the
@@ -490,9 +496,11 @@ def _resolve_jira_auth(settings: Settings) -> tuple[bool, str]:
     # email present = Cloud; use api_token first, fall back to pat
     if has_email:
         if has_api_token:
-            return True, settings.jira_api_token.get_secret_value()  # type: ignore[union-attr]
+            assert settings.jira_api_token is not None  # guarded by has_api_token
+            return True, settings.jira_api_token.get_secret_value()
         if has_pat:
-            return True, settings.jira_pat.get_secret_value()  # type: ignore[union-attr]
+            assert settings.jira_pat is not None  # guarded by has_pat
+            return True, settings.jira_pat.get_secret_value()
         return True, ""
 
     # No email = Server/DC; prefer PAT, fall back to API token

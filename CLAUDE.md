@@ -70,10 +70,35 @@ uvx --with tox-uv tox -e frontend   # Frontend only
 
 ### Tech Stack
 
-- **Backend**: Python + FastAPI + TinyDB
+- **Backend**: Python + FastAPI + SQLite (aiosqlite)
 - **Frontend**: Vite + React 19 + TypeScript + Tailwind CSS + shadcn/ui (in `/frontend/`)
 - **AI Integration**: CLI-based (Claude CLI, Gemini CLI, Cursor Agent CLI) — no SDK dependencies, provider-agnostic, `AI_PROVIDER` env var selects provider
 - **CLI**: `rootcoz` CLI tool for querying the API — run `rootcoz --help` for available commands
+
+### Backend Module Layout
+
+```text
+src/rootcoz/
+  engine/                   # CI-agnostic analysis core
+    core.py                 # Failure grouping, AI CLI orchestration, prompt building,
+                            # JSON response parsing, deduplication. Has ZERO knowledge
+                            # of any specific CI system.
+  sources/                  # CI source plugins (data fetching)
+    base.py                 # CISource ABC + CISourceResult dataclass
+    jenkins_source.py       # Jenkins plugin: JenkinsSource, analyze_job, analyze_child_job,
+                            # wait_for_jenkins_completion, Jenkins helpers (handle_jenkins_exception, extract_*, etc.)
+    file_source.py          # JUnit XML plugin: FileSource
+    raw_source.py           # Raw failure list plugin: RawSource
+  main.py                   # FastAPI app, unified POST /analyze endpoint, background tasks
+  models.py                 # Pydantic request/response models
+  config.py                 # Settings (env vars)
+  storage.py                # SQLite persistence
+  cli/                      # CLI client (rootcoz command)
+  peer_analysis.py          # Multi-AI peer debate loop
+  ...                       # Other modules (jira, github_issues, monitoring, etc.)
+```
+
+**Dependency direction:** `main` → `sources/` + `engine/`. `sources/` → `engine/`. `engine/` does NOT import `sources/`. `engine/core.py` has a lazy import of `peer_analysis` (only when `peer_ai_configs` is set). Adding a new CI plugin means adding a file under `sources/` and a dispatch branch in `main.py` — `engine/core.py` stays untouched.
 
 ### Frontend Patterns
 
@@ -82,7 +107,7 @@ uvx --with tox-uv tox -e frontend   # Frontend only
 - **User identification**: Session-based — all users must register (auto-generated API key) and log in (username + API key → session cookie). The `rootcoz_username` cookie is set for display, but authentication is enforced via `rootcoz_session` cookie or Bearer token. When `TRUST_PROXY_HEADERS` is enabled, trusted `X-Forwarded-User` satisfies authentication without registration.
 - **Auth roles & permissions**:
   - Two roles: `user` and `admin`. A bootstrap `admin` superuser (via `ADMIN_KEY` env var) always exists outside the DB.
-  - All API endpoints require authentication except public paths (`/register`, `/health`, `/api/health`, `/api/auth/register`, `/api/auth/login`, `/api/auth/needs-key`, `/metrics`).
+  - All API endpoints require authentication except public paths (`/register`, `/health`, `/api/health`, `/api/auth/register`, `/api/auth/login`, `/api/auth/needs-key`, `/api/releases/latest`, `/metrics`). `/api/releases/latest` is intentionally public — it only proxies GitHub release metadata (version, changelog) with no sensitive data.
   - **Users** can: register, login, rotate their own API key (`POST /api/auth/rotate-key`), manage their own tracker tokens, submit analyses.
   - **Admins** can: everything users can, plus rotate any user's key (`POST /api/admin/users/{username}/rotate-key`), create/delete/promote/demote users, access admin-only endpoints (`/api/admin/*`).
 - **Real-time updates**: Server-Sent Events (SSE) push real-time updates to the frontend — no polling. Backend broadcasts via per-connection `asyncio.Event` objects. Available SSE streams:

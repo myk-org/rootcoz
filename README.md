@@ -38,7 +38,7 @@ Example API override:
 ```bash
 curl -X POST http://localhost:8000/analyze \
   -H "Content-Type: application/json" \
-  -d '{"job_name": "my-job", "build_number": 42, "max_concurrent_ai_calls": 2}'
+  -d '{"type": "jenkins", "job_name": "my-job", "build_number": 42, "max_concurrent_ai_calls": 2}'
 ```
 
 ## Features

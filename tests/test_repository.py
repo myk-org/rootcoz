@@ -383,8 +383,8 @@ class TestDeriveTestRepoName:
 
     def test_collision_falls_back(self) -> None:
         """When derived name collides with an additional repo, returns 'tests-repo-1'."""
-        from rootcoz.repository import derive_test_repo_name
         from rootcoz.models import AdditionalRepo
+        from rootcoz.repository import derive_test_repo_name
 
         additional = [
             AdditionalRepo.model_validate(
@@ -396,8 +396,8 @@ class TestDeriveTestRepoName:
 
     def test_no_collision_different_name(self) -> None:
         """No collision when additional repo has a different name."""
-        from rootcoz.repository import derive_test_repo_name
         from rootcoz.models import AdditionalRepo
+        from rootcoz.repository import derive_test_repo_name
 
         additional = [
             AdditionalRepo.model_validate(
@@ -423,8 +423,8 @@ class TestDeriveTestRepoName:
 
     def test_fallback_also_avoids_collision(self) -> None:
         """Fallback name avoids collision with 'tests-repo-1' too."""
-        from rootcoz.repository import derive_test_repo_name
         from rootcoz.models import AdditionalRepo
+        from rootcoz.repository import derive_test_repo_name
 
         repos = [
             AdditionalRepo.model_validate(
@@ -457,8 +457,8 @@ class TestDeriveTestRepoName:
 
     def test_uuid_fallback_logs_warning(self) -> None:
         """When all 99 numeric candidates are taken, UUID fallback logs a warning."""
-        from rootcoz.repository import derive_test_repo_name
         from rootcoz.models import AdditionalRepo
+        from rootcoz.repository import derive_test_repo_name
 
         # Create additional repos that collide with the base name and all 99 numeric fallbacks
         repos = [
@@ -513,46 +513,46 @@ class TestCloneWithSslRetryCleanup:
 
 
 class TestRedactUrl:
-    """Tests for _redact_url credential stripping."""
+    """Tests for redact_url credential stripping."""
 
     def test_no_credentials(self) -> None:
         """URL without credentials is returned unchanged."""
-        from rootcoz.repository import _redact_url
+        from rootcoz.repository import redact_url
 
         assert (
-            _redact_url("https://github.com/org/repo") == "https://github.com/org/repo"
+            redact_url("https://github.com/org/repo") == "https://github.com/org/repo"
         )
 
     def test_username_and_password_redacted(self) -> None:
         """Username and password are replaced with ***."""
-        from rootcoz.repository import _redact_url
+        from rootcoz.repository import redact_url
 
-        result = _redact_url("https://user:pass@github.com/org/repo")
+        result = redact_url("https://user:pass@github.com/org/repo")
         assert "user" not in result
         assert "pass" not in result
         assert "***@github.com" in result
 
     def test_username_only_redacted(self) -> None:
         """Username-only auth is redacted."""
-        from rootcoz.repository import _redact_url
+        from rootcoz.repository import redact_url
 
-        result = _redact_url("https://token@github.com/org/repo")
+        result = redact_url("https://token@github.com/org/repo")
         assert "token" not in result
         assert "***@github.com" in result
 
     def test_preserves_port(self) -> None:
         """Port is preserved when credentials are redacted."""
-        from rootcoz.repository import _redact_url
+        from rootcoz.repository import redact_url
 
-        result = _redact_url("https://user:pass@github.com:8443/org/repo")
+        result = redact_url("https://user:pass@github.com:8443/org/repo")
         assert ":8443" in result
         assert "user" not in result
 
     def test_git_protocol(self) -> None:
         """git:// URLs without credentials are unchanged."""
-        from rootcoz.repository import _redact_url
+        from rootcoz.repository import redact_url
 
-        assert _redact_url("git://github.com/org/repo") == "git://github.com/org/repo"
+        assert redact_url("git://github.com/org/repo") == "git://github.com/org/repo"
 
 
 class TestCloneBranchParameter:
@@ -885,7 +885,7 @@ class TestCloneShaFlow:
                 target,
                 depth=1,
                 branch=sha,
-                token="tok123",  # noqa: S106  # pragma: allowlist secret
+                token="tok123",  # pragma: allowlist secret
             )
 
         # Token injected in clone URL
@@ -944,7 +944,7 @@ class TestCloneIntoWithToken:
             "https://github.com/org/repo",
             target,
             depth=1,
-            token="tok123",  # noqa: S106  # pragma: allowlist secret
+            token="tok123",  # pragma: allowlist secret
         )
         mock_repo.clone_from.assert_called_once_with(
             "https://x-token-auth:tok123@github.com/org/repo",  # pragma: allowlist secret

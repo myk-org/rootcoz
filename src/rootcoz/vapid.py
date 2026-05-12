@@ -165,6 +165,6 @@ def get_vapid_config() -> dict:
             "private_key": keys["private_key"],
             "claim_email": email or DEFAULT_CLAIM_EMAIL,
         }
-    except Exception:  # noqa: BLE001 — VAPID resolution must never raise; callers gate on truthy dict
+    except Exception:  # VAPID resolution must never raise; callers gate on truthy dict
         logger.warning("Failed to resolve VAPID keys", exc_info=True)
         return {}

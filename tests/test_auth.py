@@ -3,6 +3,7 @@
 import asyncio
 import os
 import time
+from datetime import UTC
 from unittest.mock import patch
 
 import pytest
@@ -515,9 +516,9 @@ class TestUserTokens:
         resp = client.get("/api/user/tokens", cookies=cookies)
         assert resp.status_code == 200
         data = resp.json()
-        assert data["github_token"] == "ghp_test123"  # noqa: S105
+        assert data["github_token"] == "ghp_test123"
         assert data["jira_email"] == "a@b.com"
-        assert data["jira_token"] == "jira_tok"  # noqa: S105
+        assert data["jira_token"] == "jira_tok"
 
     def test_get_tokens_no_user(self, client):
         resp = client.get("/api/user/tokens")
@@ -565,9 +566,9 @@ class TestUserTokens:
         # Verify jira tokens were NOT wiped
         resp = client.get("/api/user/tokens", cookies=cookies)
         data = resp.json()
-        assert data["github_token"] == "ghp_updated"  # noqa: S105
+        assert data["github_token"] == "ghp_updated"
         assert data["jira_email"] == "orig@test.com"  # NOT wiped
-        assert data["jira_token"] == "jira_orig"  # NOT wiped  # noqa: S105
+        assert data["jira_token"] == "jira_orig"  # NOT wiped
 
     def test_tokens_encrypted_at_rest(self, client, temp_db_path):
         """Verify tokens are not stored as plaintext in the DB."""
@@ -789,9 +790,9 @@ class TestSessionRenewalMiddleware:
         token_hash = storage._hash_session_token(session_cookie)
 
         async def shorten_expiry():
-            from datetime import datetime, timedelta, timezone
+            from datetime import datetime, timedelta
 
-            short_expires = datetime.now(timezone.utc) + timedelta(hours=1)
+            short_expires = datetime.now(UTC) + timedelta(hours=1)
             expires_str = short_expires.strftime("%Y-%m-%d %H:%M:%S")
             async with aiosqlite.connect(temp_db_path) as db:
                 await db.execute(
@@ -866,9 +867,9 @@ class TestSessionRenewalMiddleware:
 
         # Manually set expiry to 1 hour from now (shorter than SESSION_TTL_HOURS)
         async def shorten_expiry():
-            from datetime import datetime, timedelta, timezone
+            from datetime import datetime, timedelta
 
-            short_expires = datetime.now(timezone.utc) + timedelta(hours=1)
+            short_expires = datetime.now(UTC) + timedelta(hours=1)
             expires_str = short_expires.strftime("%Y-%m-%d %H:%M:%S")
             async with aiosqlite.connect(temp_db_path) as db:
                 await db.execute(

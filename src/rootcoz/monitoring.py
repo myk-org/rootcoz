@@ -10,14 +10,17 @@ Provides:
 
 import asyncio
 import os
+import pathlib
 import smtplib
 import threading
 import time
 from collections import deque
 from dataclasses import dataclass, field
 from email.message import EmailMessage
+from importlib.metadata import version as pkg_version
 from typing import Any
 
+import aiosqlite
 import httpx
 from simple_logger.logger import get_logger
 
@@ -29,10 +32,8 @@ _APP_STARTED_AT = time.monotonic()
 def _get_app_version() -> str:
     """Return the application version string."""
     try:
-        from importlib.metadata import version
-
-        return version("rootcoz")
-    except Exception:  # noqa: BLE001
+        return pkg_version("rootcoz")
+    except Exception:
         return "unknown"
 
 
@@ -158,8 +159,6 @@ error_tracker = ErrorRateTracker()
 
 async def check_db(db_path: str) -> dict[str, str]:
     """Check database connectivity and writability."""
-    import pathlib
-
     try:
         p = pathlib.Path(db_path)
         db_dir = p.parent
@@ -177,15 +176,13 @@ async def check_db(db_path: str) -> dict[str, str]:
                 "detail": f"Database file is not writable: {db_path}",
             }
 
-        import aiosqlite
-
         async with aiosqlite.connect(db_path) as db:
             # Use BEGIN IMMEDIATE to verify write-lock can be acquired,
             # then rollback to avoid any side effects.
             await db.execute("BEGIN IMMEDIATE")
             await db.execute("ROLLBACK")
         return {"status": "ok"}
-    except Exception as exc:  # noqa: BLE001 — health check must return status, not raise
+    except Exception as exc:  # health check must return status, not raise
         return {"status": "error", "detail": str(exc)}
 
 
@@ -213,7 +210,7 @@ async def _check_http_service(
             if resp.status_code < ok_below:
                 return {"status": "ok"}
             return {"status": "degraded", "detail": f"HTTP {resp.status_code}"}
-    except Exception as exc:  # noqa: BLE001 — health check must return status, not raise
+    except Exception as exc:  # health check must return status, not raise
         return {"status": "error", "detail": str(exc)}
 
 
@@ -530,7 +527,7 @@ async def send_slack_alert(message: str, webhook_url: str | None = None) -> bool
                 return True
             logger.warning("Slack webhook returned HTTP %d", resp.status_code)
             return False
-    except Exception:  # noqa: BLE001 — alerting failures must never propagate
+    except Exception:  # alerting failures must never propagate
         logger.debug("Failed to send Slack alert", exc_info=True)
         return False
 
@@ -583,7 +580,7 @@ def send_email_alert(
             smtp.send_message(msg)
         logger.debug("Email alert sent successfully")
         return True
-    except Exception:  # noqa: BLE001 — alerting failures must never propagate
+    except Exception:  # alerting failures must never propagate
         logger.debug("Failed to send email alert", exc_info=True)
         return False
 
@@ -599,7 +596,7 @@ async def send_email_alert_async(
         return await loop.run_in_executor(
             None, lambda: send_email_alert(subject, body, **kwargs)
         )
-    except Exception:  # noqa: BLE001 — alerting failures must never propagate
+    except Exception:  # alerting failures must never propagate
         logger.debug("Failed to send async email alert", exc_info=True)
         return False
 
@@ -634,7 +631,7 @@ async def dispatch_alert(
             send_email_alert_async(email_subject, message),
             return_exceptions=True,
         )
-    except Exception:  # noqa: BLE001 — alerting failures must never propagate
+    except Exception:  # alerting failures must never propagate
         logger.debug("Failed to dispatch alert", exc_info=True)
 
 

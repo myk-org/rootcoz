@@ -6,11 +6,12 @@ import json
 import os
 import re
 import secrets
+import time
 import uuid
-from datetime import datetime, timedelta, timezone
-from pathlib import Path
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import get_args
 
 import aiosqlite
@@ -18,9 +19,12 @@ from simple_logger.logger import get_logger
 
 from rootcoz.comment_enrichment import detect_mentions
 from rootcoz.encryption import (
+    decrypt_value,
+    encrypt_value,
     get_hmac_secret,
     strip_sensitive_from_response,
 )
+from rootcoz.metadata_rules import match_job_metadata
 from rootcoz.models import (
     HistoryClassificationLiteral,
     OverrideClassificationLiteral,
@@ -271,8 +275,14 @@ async def init_db() -> None:
                     )
                 """)
                 await db.execute("""
-                    INSERT INTO failure_reviews (job_id, test_name, child_job_name, child_build_number, reviewed, username, updated_at)
-                    SELECT job_id, test_name, child_job_name, child_build_number, reviewed, COALESCE(username, ''), updated_at
+                    INSERT INTO failure_reviews (
+                        job_id, test_name, child_job_name,
+                        child_build_number, reviewed, username,
+                        updated_at
+                    )
+                    SELECT job_id, test_name, child_job_name,
+                        child_build_number, reviewed,
+                        COALESCE(username, ''), updated_at
                     FROM failure_reviews_old
                 """)
                 await db.execute("DROP TABLE failure_reviews_old")
@@ -354,7 +364,9 @@ async def init_db() -> None:
             "CREATE INDEX IF NOT EXISTS idx_fh_job_test ON failure_history (job_name, test_name)"
         )
         await db.execute(
-            "CREATE INDEX IF NOT EXISTS idx_fh_job_context ON failure_history (job_id, test_name, child_job_name, child_build_number)"
+            "CREATE INDEX IF NOT EXISTS idx_fh_job_context"
+            " ON failure_history"
+            " (job_id, test_name, child_job_name, child_build_number)"
         )
         await db.execute(
             "CREATE INDEX IF NOT EXISTS idx_fh_classification ON failure_history (classification)"
@@ -540,7 +552,10 @@ async def add_comment(
     _validate_child_identifier_pairing(child_job_name, child_build_number)
     async with _connect_db() as db:
         cursor = await db.execute(
-            "INSERT INTO comments (job_id, test_name, child_job_name, child_build_number, comment, error_signature, username) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO comments"
+            " (job_id, test_name, child_job_name, child_build_number,"
+            " comment, error_signature, username)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?)",
             (
                 job_id,
                 test_name,
@@ -591,8 +606,10 @@ async def get_comments_for_job(job_id: str) -> list[dict]:
     logger.debug(f"get_comments_for_job: job_id={job_id}")
     async with _connect_db() as db:
         cursor = await db.execute(
-            "SELECT id, job_id, test_name, child_job_name, child_build_number, comment, error_signature, username, created_at "
-            "FROM comments WHERE job_id = ? ORDER BY created_at ASC",
+            "SELECT id, job_id, test_name, child_job_name,"
+            " child_build_number, comment, error_signature,"
+            " username, created_at"
+            " FROM comments WHERE job_id = ? ORDER BY created_at ASC",
             (job_id,),
         )
         rows = await cursor.fetchall()
@@ -616,8 +633,10 @@ async def set_reviewed(
     _validate_child_identifier_pairing(child_job_name, child_build_number)
     async with _connect_db() as db:
         await db.execute(
-            "INSERT OR REPLACE INTO failure_reviews (job_id, test_name, child_job_name, child_build_number, reviewed, username, updated_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)",
+            "INSERT OR REPLACE INTO failure_reviews"
+            " (job_id, test_name, child_job_name,"
+            " child_build_number, reviewed, username, updated_at)"
+            " VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)",
             (job_id, test_name, child_job_name, child_build_number, reviewed, username),
         )
         await db.commit()
@@ -674,7 +693,10 @@ async def get_review_status(job_id: str) -> dict:
         comment_count = (await cursor.fetchone())[0]
 
         logger.debug(
-            f"get_review_status: job_id={job_id}, total_failures={total_failures}, reviewed_count={reviewed_count}, comment_count={comment_count}"
+            f"get_review_status: job_id={job_id}, "
+            f"total_failures={total_failures}, "
+            f"reviewed_count={reviewed_count}, "
+            f"comment_count={comment_count}"
         )
         return {
             "total_failures": total_failures,
@@ -694,7 +716,11 @@ async def get_historical_comments(
     No arbitrary limit -- returns all matching comments.
     """
     logger.debug(
-        f"get_historical_comments: test_names_count={len(test_names) if test_names else 0}, signatures_count={len(error_signatures) if error_signatures else 0}, exclude_job_id={exclude_job_id}"
+        f"get_historical_comments: "
+        f"test_names_count={len(test_names) if test_names else 0}, "
+        f"signatures_count="
+        f"{len(error_signatures) if error_signatures else 0}, "
+        f"exclude_job_id={exclude_job_id}"
     )
     conditions: list[str] = []
     params: list[str] = []
@@ -719,7 +745,9 @@ async def get_historical_comments(
 
     async with _connect_db() as db:
         cursor = await db.execute(
-            f"SELECT id, job_id, test_name, child_job_name, child_build_number, comment, error_signature, username, created_at "
+            "SELECT id, job_id, test_name, child_job_name,"
+            " child_build_number, comment, error_signature,"
+            " username, created_at "
             f"FROM comments WHERE {where} ORDER BY created_at DESC",
             params,
         )
@@ -842,7 +870,6 @@ def _make_progress_phase_patcher(phase: str) -> Callable[[dict], None]:
     Returns:
         A callable that mutates a dict in place, suitable for ``patch_result_json``.
     """
-    import time
 
     def _patcher(d: dict) -> None:
         d["progress_phase"] = phase
@@ -1278,7 +1305,9 @@ async def _get_failure_stats(
 
     # Last classification (most recent failure)
     cursor = await db.execute(
-        f"SELECT classification FROM failure_history WHERE test_name = ?{job_filter} ORDER BY analyzed_at DESC, id DESC LIMIT 1",
+        f"SELECT classification FROM failure_history"
+        f" WHERE test_name = ?{job_filter}"
+        f" ORDER BY analyzed_at DESC, id DESC LIMIT 1",
         params,
     )
     last_classification = (await cursor.fetchone())[0] or ""
@@ -1552,7 +1581,9 @@ async def search_by_signature(signature: str, exclude_job_id: str = "") -> dict:
         comments = [dict(row) for row in await cursor.fetchall()]
 
     logger.debug(
-        f"search_by_signature: signature={signature}, total_occurrences={total_occurrences}, unique_tests={unique_tests}"
+        f"search_by_signature: signature={signature}, "
+        f"total_occurrences={total_occurrences}, "
+        f"unique_tests={unique_tests}"
     )
     return {
         "signature": signature,
@@ -1632,7 +1663,7 @@ async def get_job_stats(job_name: str, exclude_job_id: str = "") -> dict:
         most_common = [dict(row) for row in await cursor.fetchall()]
 
         # Recent trend: compare last 7 days vs previous 7 days
-        now = datetime.now(tz=timezone.utc)
+        now = datetime.now(tz=UTC)
         seven_days_ago = (now - timedelta(days=7)).strftime("%Y-%m-%d %H:%M:%S")
         fourteen_days_ago = (now - timedelta(days=14)).strftime("%Y-%m-%d %H:%M:%S")
 
@@ -1857,7 +1888,10 @@ async def set_test_classification(
     )
     async with _connect_db() as db:
         cursor = await db.execute(
-            "INSERT INTO test_classifications (test_name, job_name, parent_job_name, classification, reason, references_info, created_by, job_id, child_build_number, visible) "
+            "INSERT INTO test_classifications"
+            " (test_name, job_name, parent_job_name, classification,"
+            " reason, references_info, created_by, job_id,"
+            " child_build_number, visible) "
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 test_name,
@@ -2033,7 +2067,10 @@ async def get_all_failures(
         Dict with ``failures`` (list of row dicts) and ``total`` (int).
     """
     logger.debug(
-        f"get_all_failures: search={search!r}, job_name={job_name!r}, classification={classification!r}, limit={limit}, offset={offset}"
+        f"get_all_failures: search={search!r}, "
+        f"job_name={job_name!r}, "
+        f"classification={classification!r}, "
+        f"limit={limit}, offset={offset}"
     )
     conditions: list[str] = []
     params: list[str | int] = []
@@ -2692,7 +2729,7 @@ async def create_session(
     """Create an opaque session token. Returns raw token."""
     token = secrets.token_urlsafe(32)
     token_hash = _hash_session_token(token)
-    expires_at = datetime.now(timezone.utc) + timedelta(hours=ttl_hours)
+    expires_at = datetime.now(UTC) + timedelta(hours=ttl_hours)
     expires_str = expires_at.strftime("%Y-%m-%d %H:%M:%S")
     async with _connect_db() as db:
         await db.execute(
@@ -2708,7 +2745,9 @@ async def get_session(token: str) -> dict | None:
     token_hash = _hash_session_token(token)
     async with _connect_db() as db:
         cursor = await db.execute(
-            "SELECT username, is_admin, created_at, expires_at FROM sessions WHERE token = ? AND expires_at > datetime('now')",
+            "SELECT username, is_admin, created_at, expires_at"
+            " FROM sessions"
+            " WHERE token = ? AND expires_at > datetime('now')",
             (token_hash,),
         )
         row = await cursor.fetchone()
@@ -2723,7 +2762,7 @@ async def renew_session(token: str) -> bool:
     Returns True if the session was found and renewed, False otherwise.
     """
     token_hash = _hash_session_token(token)
-    new_expires = datetime.now(timezone.utc) + timedelta(hours=SESSION_TTL_HOURS)
+    new_expires = datetime.now(UTC) + timedelta(hours=SESSION_TTL_HOURS)
     expires_str = new_expires.strftime("%Y-%m-%d %H:%M:%S")
     async with _connect_db() as db:
         cursor = await db.execute(
@@ -2893,8 +2932,6 @@ async def save_user_tokens(
 
     Pass empty string to clear a field. Omit (None) to leave unchanged.
     """
-    from rootcoz.encryption import encrypt_value
-
     updates = []
     params: list[str] = []
     if github_token is not None:
@@ -2913,7 +2950,7 @@ async def save_user_tokens(
     params.append(username)
     async with _connect_db() as db:
         await db.execute(
-            f"UPDATE users SET {', '.join(updates)} WHERE username = ?",  # noqa: S608 — columns are hardcoded literals
+            f"UPDATE users SET {', '.join(updates)} WHERE username = ?",  # columns are hardcoded literals
             params,
         )
         await db.commit()
@@ -2921,8 +2958,6 @@ async def save_user_tokens(
 
 async def get_user_tokens(username: str) -> dict[str, str]:
     """Get decrypted user tokens. Returns dict with github_token, jira_email, jira_token."""
-    from rootcoz.encryption import decrypt_value
-
     async with _connect_db() as db:
         cursor = await db.execute(
             "SELECT github_token_enc, jira_email_enc, jira_token_enc FROM users WHERE username = ?",
@@ -3084,7 +3119,7 @@ async def list_jobs_with_metadata(
 
     async with _connect_db() as db:
         cursor = await db.execute(
-            f"SELECT job_name, team, tier, version, labels FROM job_metadata WHERE {where} ORDER BY job_name",  # noqa: S608
+            f"SELECT job_name, team, tier, version, labels FROM job_metadata WHERE {where} ORDER BY job_name",
             params,
         )
         rows = await cursor.fetchall()
@@ -3148,8 +3183,6 @@ async def auto_assign_job_metadata(
             f"auto_assign_job_metadata: job '{job_name}' already has metadata, skipping"
         )
         return None
-
-    from rootcoz.metadata_rules import match_job_metadata
 
     matched = match_job_metadata(job_name, rules)
     if matched is None:
@@ -3272,7 +3305,7 @@ async def get_token_usage_summary(
             "COALESCE(SUM(cost_usd), 0) as total_cost_usd, "
             "COUNT(*) as total_calls, "
             "COALESCE(SUM(duration_ms), 0) as total_duration_ms "
-            f"FROM ai_token_usage{where_clause}"  # noqa: S608
+            f"FROM ai_token_usage{where_clause}"
         )
         cursor = await db.execute(totals_query, params)
         totals = dict(await cursor.fetchone())
@@ -3299,8 +3332,11 @@ async def get_token_usage_summary(
                     "COALESCE(SUM(cache_write_tokens), 0) as cache_write_tokens, "
                     "COALESCE(SUM(cost_usd), 0) as cost_usd, "
                     "COUNT(*) as call_count, "
-                    "CASE WHEN COUNT(duration_ms) > 0 THEN COALESCE(SUM(duration_ms), 0) / COUNT(duration_ms) ELSE 0 END as avg_duration_ms "
-                    f"FROM ai_token_usage{where_clause} "  # noqa: S608
+                    "CASE WHEN COUNT(duration_ms) > 0"
+                    " THEN COALESCE(SUM(duration_ms), 0)"
+                    " / COUNT(duration_ms)"
+                    " ELSE 0 END as avg_duration_ms "
+                    f"FROM ai_token_usage{where_clause} "
                     f"GROUP BY {group_column} "
                     "ORDER BY COALESCE(SUM(cost_usd), 0) DESC"
                 )
@@ -3331,7 +3367,7 @@ async def get_token_usage_dashboard_summary() -> dict:
         result: dict = {}
         for period_name, condition in periods.items():
             cursor = await db.execute(
-                f"SELECT COUNT(*) as calls, "  # noqa: S608
+                f"SELECT COUNT(*) as calls, "
                 f"COALESCE(SUM(total_tokens), 0) as tokens, "
                 f"COALESCE(SUM(input_tokens), 0) as input_tokens, "
                 f"COALESCE(SUM(output_tokens), 0) as output_tokens, "
@@ -3429,8 +3465,8 @@ async def get_push_subscriptions_for_users(usernames: list[str]) -> list[dict]:
     async with _connect_db() as db:
         placeholders = ",".join("?" for _ in usernames)
         cursor = await db.execute(
-            f"SELECT username, endpoint, p256dh_key, auth_key "  # noqa: S608
-            f"FROM push_subscriptions WHERE username IN ({placeholders})",  # noqa: S608
+            f"SELECT username, endpoint, p256dh_key, auth_key "
+            f"FROM push_subscriptions WHERE username IN ({placeholders})",
             usernames,
         )
         rows = await cursor.fetchall()
@@ -3447,7 +3483,7 @@ async def delete_stale_push_subscriptions(endpoints: list[str]) -> None:
     async with _connect_db() as db:
         placeholders = ",".join("?" for _ in endpoints)
         await db.execute(
-            f"DELETE FROM push_subscriptions WHERE endpoint IN ({placeholders})",  # noqa: S608
+            f"DELETE FROM push_subscriptions WHERE endpoint IN ({placeholders})",
             endpoints,
         )
         await db.commit()

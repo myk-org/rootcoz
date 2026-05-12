@@ -3,6 +3,7 @@
 from unittest.mock import AsyncMock, patch
 
 from ai_cli_runner import AIResult
+
 from rootcoz.issue_matching import filter_issue_matches_with_ai
 
 

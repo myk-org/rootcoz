@@ -1,9 +1,15 @@
 """rootcoz -- CLI tool for the rootcoz REST API."""
 
+import csv
+import json as json_mod
+import sys
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
+
 import typer
+import yaml
 
 from rootcoz.cli.client import RootCozClient, RootCozError
-from rootcoz.config import parse_additional_repos, parse_peer_configs
 from rootcoz.cli.config import (
     CONFIG_FILE,
     ServerConfig,
@@ -13,6 +19,7 @@ from rootcoz.cli.config import (
     load_config,
 )
 from rootcoz.cli.output import print_output
+from rootcoz.config import parse_additional_repos, parse_peer_configs
 
 # -- App and sub-command groups -----------------------------------------------
 
@@ -55,6 +62,10 @@ _state: dict = {}
 # both globally (before the subcommand) and per-command (after it).
 _JSON_OPTION = typer.Option(False, "--json", help="Output as JSON instead of table.")
 _TAG_OPTION = typer.Option([], "--tag", help="Tag for categorization (repeatable).")
+_LABEL_FILTER_OPTION = typer.Option(
+    [], "--label", "-l", help="Filter by label (can repeat)."
+)
+_LABEL_SET_OPTION = typer.Option([], "--label", "-l", help="Label (can repeat).")
 _JOB_IDS_ARGUMENT = typer.Argument(default=None, help="Job ID(s) to delete.")
 _BULK_DELETE_BATCH_SIZE = 500
 
@@ -596,9 +607,34 @@ def enrich_comments_cmd(
 
 @app.command()
 def analyze(
-    job_name: str = typer.Option(..., "--job-name", "-j", help="Jenkins job name."),
+    source: str = typer.Option(
+        "jenkins",
+        "--source",
+        help="Analysis source: jenkins or file.",
+    ),
+    job_name: str = typer.Option(
+        "",
+        "--job-name",
+        "-j",
+        help="Jenkins job name (required when --source jenkins).",
+    ),
     build_number: int = typer.Option(
-        ..., "--build-number", "-b", help="Build number to analyze."
+        0,
+        "--build-number",
+        "-b",
+        help="Build number to analyze (required when --source jenkins).",
+    ),
+    xml_file: str = typer.Option(
+        "",
+        "--file",
+        "-f",
+        help="Path to JUnit XML file (required when --source file).",
+    ),
+    name: str = typer.Option(
+        "",
+        "--name",
+        "-n",
+        help="Display name for this analysis on the dashboard (defaults to job_name).",
     ),
     provider: str = typer.Option(
         "", "--provider", help="AI provider (e.g. claude, gemini, cursor)."
@@ -730,17 +766,43 @@ def analyze(
     tags: list[str] = _TAG_OPTION,
     json_output: bool = _JSON_OPTION,
 ):
-    """Submit a Jenkins job for analysis."""
+    """Submit an analysis job (Jenkins or JUnit XML file)."""
     _set_json(json_output)
 
-    _positive_int_fields = {
-        "--build-number": build_number,
-        "--poll-interval": poll_interval,
-        "--jira-max-results": jira_max_results,
-        "--ai-cli-timeout": ai_cli_timeout,
-        "--jenkins-artifacts-max-size-mb": jenkins_artifacts_max_size_mb,
-        "--jenkins-timeout": jenkins_timeout,
-    }
+    if source not in ("jenkins", "file"):
+        typer.echo("Error: --source must be 'jenkins' or 'file'.", err=True)
+        raise typer.Exit(1)
+
+    if source == "jenkins":
+        if not job_name:
+            typer.echo("Error: --job-name is required when --source jenkins.", err=True)
+            raise typer.Exit(1)
+        if build_number <= 0:
+            typer.echo(
+                "Error: --build-number is required when --source jenkins.", err=True
+            )
+            raise typer.Exit(1)
+    elif source == "file":
+        if not xml_file:
+            typer.echo("Error: --file is required when --source file.", err=True)
+            raise typer.Exit(1)
+        xml_path = Path(xml_file)
+        if not xml_path.exists() or not xml_path.is_file():
+            typer.echo(f"Error: file not found: {xml_file}", err=True)
+            raise typer.Exit(1)
+
+    _positive_int_fields: dict[str, int | None] = {}
+    if source == "jenkins":
+        _positive_int_fields["--build-number"] = build_number
+    _positive_int_fields.update(
+        {
+            "--poll-interval": poll_interval,
+            "--jira-max-results": jira_max_results,
+            "--ai-cli-timeout": ai_cli_timeout,
+            "--jenkins-artifacts-max-size-mb": jenkins_artifacts_max_size_mb,
+            "--jenkins-timeout": jenkins_timeout,
+        }
+    )
     for flag_name, flag_value in _positive_int_fields.items():
         if flag_value is not None and flag_value <= 0:
             typer.echo(f"Error: {flag_name} must be greater than 0.", err=True)
@@ -912,12 +974,36 @@ def analyze(
             typer.echo(f"Error: {exc}", err=True)
             raise typer.Exit(code=1) from None
 
-    if tags:
+    if source == "jenkins" and tags:
         extras["tags"] = tags
+
+    if source == "file":
+        for key in (
+            "jenkins_url",
+            "jenkins_user",
+            "jenkins_password",
+            "jenkins_ssl_verify",
+            "jenkins_timeout",
+            "jenkins_artifacts_max_size_mb",
+            "get_job_artifacts",
+            "wait_for_completion",
+            "poll_interval_minutes",
+            "max_wait_minutes",
+            "force",
+        ):
+            extras.pop(key, None)
 
     try:
         client = _get_client()
-        data = client.analyze(job_name, build_number, **extras)
+        if source == "jenkins":
+            data = client.analyze(job_name, build_number, name=name, **extras)
+        else:
+            try:
+                raw_xml = Path(xml_file).read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError) as exc:
+                typer.echo(f"Error: cannot read XML file '{xml_file}': {exc}", err=True)
+                raise typer.Exit(1) from None
+            data = client.analyze_file(raw_xml, name=name, tags=tags or None, **extras)
     except RootCozError as err:
         _handle_error(err)
 
@@ -2171,9 +2257,7 @@ def admin_users_change_role(
 
 
 def _date_offset(days: int = 0) -> str:
-    from datetime import datetime, timedelta, timezone
-
-    return (datetime.now(timezone.utc).date() - timedelta(days=days)).isoformat()
+    return (datetime.now(UTC).date() - timedelta(days=days)).isoformat()
 
 
 def _format_cost(value: float | None, precision: int = 2) -> str:
@@ -2244,9 +2328,6 @@ def _print_job_token_usage(data: dict) -> None:
 
 def _print_token_usage_csv(rows: list[dict]) -> None:
     """Print token usage as CSV."""
-    import csv
-    import sys
-
     if not rows:
         typer.echo("No data", err=True)
         return
@@ -2380,9 +2461,7 @@ def metadata_list(
     team: str = typer.Option("", "--team", help="Filter by team."),
     tier: str = typer.Option("", "--tier", help="Filter by tier."),
     version: str = typer.Option("", "--version", help="Filter by version."),
-    label: list[str] = typer.Option(  # noqa: B008
-        [], "--label", "-l", help="Filter by label (can repeat)."
-    ),
+    label: list[str] = _LABEL_FILTER_OPTION,
     json_output: bool = _JSON_OPTION,
 ):
     """List job metadata with optional filters."""
@@ -2415,9 +2494,7 @@ def metadata_set(
     team: str = typer.Option("", "--team", help="Team owning this job."),
     tier: str = typer.Option("", "--tier", help="Service tier."),
     version: str = typer.Option("", "--version", help="Version label."),
-    label: list[str] = typer.Option(  # noqa: B008
-        [], "--label", "-l", help="Label (can repeat)."
-    ),
+    label: list[str] = _LABEL_SET_OPTION,
     json_output: bool = _JSON_OPTION,
 ):
     """Set or update metadata for a job."""
@@ -2456,9 +2533,6 @@ def metadata_import(
 
     File format: a list of objects with job_name, team, tier, version, labels.
     """
-    import json as json_mod
-    from pathlib import Path
-
     _set_json(json_output)
     path = Path(file_path)
     if not path.exists():
@@ -2469,8 +2543,6 @@ def metadata_import(
     items: list[dict] = []
 
     if path.suffix.lower() in (".yaml", ".yml"):
-        import yaml
-
         try:
             items = yaml.safe_load(content)
         except yaml.YAMLError as exc:

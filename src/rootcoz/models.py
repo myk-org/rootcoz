@@ -14,6 +14,25 @@ from pydantic import (
 
 from rootcoz.repository import RESERVED_REPO_NAMES
 
+_SYSTEM_TAGS: set[str] = {"re-analyze"}
+
+
+def _normalize_tags_list(tags: object) -> list[str]:
+    """Strip, lowercase, deduplicate, remove blanks and reserved system tags."""
+    if not isinstance(tags, (list, tuple, set)):
+        raise ValueError("tags must be a list")
+
+    seen: set[str] = set()
+    result: list[str] = []
+    for tag in tags:
+        if not isinstance(tag, str):
+            continue
+        t = tag.strip().lower()
+        if t and t not in seen and t not in _SYSTEM_TAGS:
+            seen.add(t)
+            result.append(t)
+    return result
+
 
 class AiConfigEntry(BaseModel):
     """Single AI provider/model configuration for peer analysis."""
@@ -192,13 +211,18 @@ class BaseAnalysisRequest(BaseModel):
         return v
 
 
-class AnalyzeRequest(BaseAnalysisRequest):
-    """Request payload for analysis endpoint."""
+class _JenkinsParamsMixin(BaseModel):
+    """Shared Jenkins connection and polling fields."""
 
-    job_name: str = Field(
-        description="Jenkins job name (can include folders like 'folder/job-name')"
-    )
-    build_number: int = Field(description="Build number to analyze")
+    @field_validator("job_name", mode="before", check_fields=False)
+    @classmethod
+    def _strip_job_name(cls, v: str | None) -> str | None:
+        if v is not None:
+            v = v.strip()
+            if not v:
+                raise ValueError("job_name cannot be blank")
+        return v
+
     force: bool = Field(
         default=False,
         description="Force analysis even if the build succeeded (bypass SUCCESS early-return)",
@@ -215,25 +239,6 @@ class AnalyzeRequest(BaseAnalysisRequest):
         default=0,
         description="Maximum minutes to wait for job completion (0 = no limit)",
     )
-    tags: list[str] = Field(
-        default_factory=list,
-        description="User tags for categorization (e.g. 'regression', 'flaky')",
-    )
-
-    @field_validator("tags", mode="before")
-    @classmethod
-    def _normalize_tags(cls, v: list) -> list[str]:
-        """Strip, lowercase, deduplicate, remove blanks and reserved system tags."""
-        _SYSTEM_TAGS = {"re-analyze"}
-        seen: set[str] = set()
-        result: list[str] = []
-        for tag in v:
-            t = str(tag).strip().lower()
-            if t and t not in seen and t not in _SYSTEM_TAGS:
-                seen.add(t)
-                result.append(t)
-        return result
-
     jenkins_url: str | None = Field(
         default=None,
         description="Jenkins server URL (overrides JENKINS_URL env var)",
@@ -253,7 +258,7 @@ class AnalyzeRequest(BaseAnalysisRequest):
     )
     jenkins_timeout: Annotated[int, Field(gt=0)] | None = Field(
         default=None,
-        description="Jenkins API request timeout in seconds (overrides JENKINS_TIMEOUT env var).",
+        description="Jenkins API request timeout in seconds (overrides JENKINS_TIMEOUT env var)",
     )
     jenkins_artifacts_max_size_mb: Annotated[int, Field(gt=0)] | None = Field(
         default=None,
@@ -263,6 +268,34 @@ class AnalyzeRequest(BaseAnalysisRequest):
         default=None,
         description="Download all build artifacts for AI context (default: true, overrides GET_JOB_ARTIFACTS env var)",
     )
+
+
+class _NameTagsMixin(BaseModel):
+    """Shared name and tags fields with tag normalization."""
+
+    name: str | None = Field(
+        default=None,
+        max_length=500,
+        description="Custom display name for this analysis job (overrides auto-generated name)",
+    )
+    tags: list[str] = Field(
+        default_factory=list,
+        description="User tags for categorization (e.g. 'regression', 'flaky')",
+    )
+
+    @field_validator("tags", mode="before")
+    @classmethod
+    def _normalize_tags(cls, v: list) -> list[str]:
+        return _normalize_tags_list(v)
+
+
+class AnalyzeRequest(_JenkinsParamsMixin, _NameTagsMixin, BaseAnalysisRequest):
+    """Request payload for analysis endpoint."""
+
+    job_name: str = Field(
+        description="Jenkins job name (can include folders like 'folder/job-name')"
+    )
+    build_number: int = Field(description="Build number to analyze")
 
 
 class FailedTest(BaseModel):
@@ -527,23 +560,57 @@ class JobStatus(BaseModel):
     created_at: datetime = Field(description="Timestamp when the job was created")
 
 
-class AnalyzeFailuresRequest(BaseAnalysisRequest):
-    """Request payload for direct failure analysis (no Jenkins)."""
+class UnifiedAnalyzeRequest(_JenkinsParamsMixin, _NameTagsMixin, BaseAnalysisRequest):
+    """Unified request payload for all analysis types."""
 
-    failures: list[FailedTest] | None = Field(
-        default=None, description="Raw test failures to analyze"
+    type: Literal["jenkins", "file", "raw"] = Field(
+        description="Analysis type: jenkins (CI job), file (JUnit XML), or raw (failure list)"
     )
+
+    # Jenkins-specific fields (required when type="jenkins", optional otherwise)
+    job_name: str | None = Field(
+        default=None,
+        description="Jenkins job name (required for type=jenkins)",
+    )
+    build_number: int | None = Field(
+        default=None,
+        description="Build number to analyze (required for type=jenkins)",
+    )
+
+    # File-specific fields (required when type="file")
     raw_xml: Annotated[str, Field(max_length=50_000_000)] | None = Field(
         default=None,
-        description="Raw JUnit XML content to extract failures from and enrich with analysis results",
+        description="Raw JUnit XML content (required for type=file)",
+    )
+
+    # Raw-specific fields (required when type="raw")
+    failures: list[FailedTest] | None = Field(
+        default=None,
+        description="Raw test failures to analyze (required for type=raw)",
     )
 
     @model_validator(mode="after")
-    def check_input_source(self) -> "AnalyzeFailuresRequest":
-        if self.failures and self.raw_xml:
-            raise ValueError("Provide either 'failures' or 'raw_xml', not both")
-        if not self.failures and not self.raw_xml:
-            raise ValueError("Either 'failures' or 'raw_xml' must be provided")
+    def _validate_by_type(self) -> "UnifiedAnalyzeRequest":
+        """Validate required fields based on analysis type."""
+        if self.type == "jenkins":
+            if not self.job_name:
+                raise ValueError("job_name is required for type=jenkins")
+            if self.build_number is None:
+                raise ValueError("build_number is required for type=jenkins")
+        elif self.type == "file":
+            if not self.raw_xml:
+                raise ValueError("raw_xml is required for type=file")
+            if self.failures is not None:
+                raise ValueError(
+                    "failures cannot be provided for type=file (use type=raw)"
+                )
+        elif self.type == "raw":
+            if not self.failures:
+                raise ValueError("failures is required for type=raw")
+            if self.raw_xml is not None:
+                raise ValueError(
+                    "raw_xml cannot be provided for type=raw (use type=file)"
+                )
         return self
 
 
@@ -654,11 +721,8 @@ class _TrackerCredentialsMixin(BaseModel):
     jira_security_level: str = Field(
         default="", description="Jira security level name for restricted issues"
     )
-    github_repo_url: str = Field(
-        default="", description="Override GitHub repo URL for issue creation"
-    )
 
-    @field_validator("jira_project_key", "jira_security_level", "github_repo_url")
+    @field_validator("jira_project_key", "jira_security_level")
     @classmethod
     def _strip_tracker_overrides(cls, v: str) -> str:
         return v.strip() if isinstance(v, str) else v
