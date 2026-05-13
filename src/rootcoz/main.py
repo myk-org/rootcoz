@@ -7066,9 +7066,20 @@ async def send_chat_message(
 
     result_data = stored["result"]
 
-    # Resolve AI provider/model: request override > job's original > server default
-    ai_provider = body.ai_provider or result_data.get("ai_provider", "") or AI_PROVIDER
-    ai_model = body.ai_model or result_data.get("ai_model", "") or AI_MODEL
+    # Resolve AI provider/model: request override > job's original > request_params > server default
+    params = result_data.get("request_params", {})
+    ai_provider = (
+        body.ai_provider
+        or result_data.get("ai_provider", "")
+        or params.get("ai_provider", "")
+        or AI_PROVIDER
+    )
+    ai_model = (
+        body.ai_model
+        or result_data.get("ai_model", "")
+        or params.get("ai_model", "")
+        or AI_MODEL
+    )
 
     if not ai_provider:
         raise HTTPException(status_code=400, detail="No AI provider configured")
@@ -7207,6 +7218,11 @@ async def clear_chat_history(job_id: str, request: Request) -> dict:
                 status_code=403,
                 detail="Only the original submitter or an admin can clear chat history",
             )
+    elif not getattr(request.state, "is_admin", False):
+        raise HTTPException(
+            status_code=403,
+            detail="Cannot determine job ownership; only admins can clear chat for legacy jobs",
+        )
 
     count = await storage.delete_chat_messages(job_id)
     cleanup_chat_workspace(job_id)
