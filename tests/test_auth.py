@@ -74,6 +74,34 @@ def _wait_for_user_tracked(client, username, timeout=2.0):
     raise TimeoutError(f"User '{username}' not tracked within {timeout}s")
 
 
+class TestOptionsPreflightBypassesAuth:
+    """OPTIONS preflight requests must pass through without authentication."""
+
+    def test_options_on_protected_api_returns_ok(self, client):
+        """OPTIONS on a protected endpoint should not return 401."""
+        resp = client.options(
+            "/api/results",
+            headers={
+                "Origin": "https://example.com",
+                "Access-Control-Request-Method": "GET",
+            },
+        )
+        assert resp.status_code in (200, 204)
+        assert "access-control-allow-origin" in resp.headers
+
+    def test_options_on_admin_endpoint_returns_ok(self, client):
+        """OPTIONS on an admin endpoint should not return 403."""
+        resp = client.options(
+            "/api/admin/users",
+            headers={
+                "Origin": "https://example.com",
+                "Access-Control-Request-Method": "POST",
+            },
+        )
+        assert resp.status_code in (200, 204)
+        assert "access-control-allow-origin" in resp.headers
+
+
 class TestAuthLogin:
     def test_admin_login_success(self, client):
         resp = client.post(

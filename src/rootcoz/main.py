@@ -85,7 +85,7 @@ from rootcoz.feedback import (
     generate_feedback_preview,
 )
 from rootcoz.github_issues import enrich_with_tests_repo_matches
-from rootcoz.jira import JiraClient, enrich_with_jira_matches
+from rootcoz.jira import JiraClient, filter_matches_with_ai, enrich_with_jira_matches
 from rootcoz.logging_context import JobIdFilter, get_log_file, job_id_var
 from rootcoz.metadata_rules import match_job_metadata
 from rootcoz.models import (
@@ -945,13 +945,14 @@ class ErrorTrackingMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
         if request.url.path in self._SKIP_PATHS:
             return await call_next(request)
+        method = request.method
         try:
             response = await call_next(request)
         except Exception:
-            error_tracker.record_request(500)
+            error_tracker.record_request(500, method=method)
             self._schedule_high_error_rate_alert()
             raise
-        error_tracker.record_request(response.status_code)
+        error_tracker.record_request(response.status_code, method=method)
         if response.status_code >= 500:
             self._schedule_high_error_rate_alert()
         return response
@@ -1019,6 +1020,28 @@ class AuthMiddleware(BaseHTTPMiddleware):
     )
 
     async def dispatch(self, request: Request, call_next):
+        # CORS preflight requests must pass through without authentication
+        if request.method == "OPTIONS":
+            request.state.username = ""
+            request.state.is_admin = False
+            request.state.role = "user"
+            origin = request.headers.get("origin", "*")
+            return Response(
+                status_code=200,
+                headers={
+                    "Access-Control-Allow-Origin": origin,
+                    "Access-Control-Allow-Methods": request.headers.get(
+                        "access-control-request-method",
+                        "GET, POST, PUT, DELETE, OPTIONS",
+                    ),
+                    "Access-Control-Allow-Headers": request.headers.get(
+                        "access-control-request-headers", "authorization, content-type"
+                    ),
+                    "Access-Control-Max-Age": "86400",
+                    "Vary": "Origin, Access-Control-Request-Method, Access-Control-Request-Headers",
+                },
+            )
+
         path = request.url.path
 
         # Set defaults
@@ -3689,10 +3712,43 @@ async def preview_jira_bug(
         and effective_jira_settings.jira_project_key
     ):
         try:
-            similar = await search_jira_duplicates(
+            candidates = await search_jira_duplicates(
                 title=content["title"],
                 settings=effective_jira_settings,
             )
+            # AI relevance filtering — only if AI is configured and candidates exist
+            request_params = result_data.get("request_params") or {}
+            ai_provider = (
+                body.ai_provider or request_params.get("ai_provider", "") or AI_PROVIDER
+            )
+            ai_model = body.ai_model or request_params.get("ai_model", "") or AI_MODEL
+            if candidates and ai_provider and ai_model:
+                try:
+                    matches = await filter_matches_with_ai(
+                        bug_title=content["title"],
+                        bug_description=content["body"],
+                        candidates=candidates,
+                        ai_provider=ai_provider,
+                        ai_model=ai_model,
+                        job_id=job_id,
+                    )
+                    # Merge AI score into original candidate data to preserve all fields
+                    candidate_by_key = {c["key"]: c for c in candidates}
+                    similar = [
+                        {**candidate_by_key[m.key], "score": m.score}
+                        for m in matches
+                        if m.key in candidate_by_key
+                    ]
+                except Exception:
+                    logger.warning(
+                        "AI relevance filtering failed for job_id=%s, "
+                        "returning unfiltered candidates",
+                        job_id,
+                        exc_info=True,
+                    )
+                    similar = candidates
+            else:
+                similar = candidates
         except Exception:
             logger.warning(
                 "Jira duplicate search failed for job_id=%s",

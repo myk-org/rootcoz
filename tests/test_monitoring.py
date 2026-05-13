@@ -107,6 +107,22 @@ class TestErrorRateTracker:
         snap = tracker.snapshot()
         assert snap["window_seconds"] == 120.0
 
+    def test_options_excluded_from_tracking(self):
+        tracker = ErrorRateTracker(window_seconds=60.0)
+        tracker.record_request(200, method="OPTIONS")
+        tracker.record_request(404, method="OPTIONS")
+        snap = tracker.snapshot()
+        assert snap["total_requests"] == 0
+        assert snap["total_errors"] == 0
+
+    def test_non_options_still_tracked(self):
+        tracker = ErrorRateTracker(window_seconds=60.0)
+        tracker.record_request(200, method="GET")
+        tracker.record_request(500, method="POST")
+        snap = tracker.snapshot()
+        assert snap["total_requests"] == 2
+        assert snap["total_errors"] == 1
+
 
 # ---------------------------------------------------------------------------
 # Health checks
@@ -191,6 +207,43 @@ class TestHealthChecks:
         settings.reportportal_enabled = False
         result = await check_reportportal(settings)
         assert result["status"] == "not_configured"
+
+    async def test_check_reportportal_missing_project(self):
+        settings = MagicMock()
+        settings.reportportal_enabled = True
+        settings.reportportal_project = None
+        result = await check_reportportal(settings)
+        assert result["status"] == "error"
+        assert "REPORTPORTAL_PROJECT" in result["detail"]
+
+    async def test_check_reportportal_uses_project_launch_url(self):
+        settings = MagicMock()
+        settings.reportportal_enabled = True
+        settings.reportportal_url = "https://rp.example.com"
+        settings.reportportal_project = "my_project"
+        settings.reportportal_verify_ssl = False
+        settings.reportportal_api_token = MagicMock()
+        settings.reportportal_api_token.get_secret_value.return_value = "tok"
+
+        mock_resp = httpx.Response(200)
+        captured_urls: list[str] = []
+
+        async def mock_get(url, **kwargs):
+            captured_urls.append(url)
+            return mock_resp
+
+        with patch("rootcoz.monitoring.httpx.AsyncClient") as mock_client_cls:
+            mock_client = AsyncMock()
+            mock_client.get = mock_get
+            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_client.__aexit__ = AsyncMock(return_value=None)
+            mock_client_cls.return_value = mock_client
+            result = await check_reportportal(settings)
+        assert result["status"] == "ok"
+        assert len(captured_urls) == 1
+        called_url = captured_urls[0]
+        assert "/api/v1/my_project/launch" in called_url
+        assert "page.size=1" in called_url
 
     async def test_build_health_response_healthy(self, temp_db_path):
         import aiosqlite

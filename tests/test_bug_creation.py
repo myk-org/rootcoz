@@ -177,6 +177,53 @@ class TestGenerateJiraBugContent:
             assert _JIRA_FOOTER_MARKER in result["body"]
 
 
+class TestSearchJiraDuplicatesIncludesDescription:
+    """Verify search_jira_duplicates returns description for AI filtering."""
+
+    async def test_returns_description_field(self):
+        from rootcoz.bug_creation import search_jira_duplicates
+
+        mock_settings = MagicMock()
+        mock_settings.jira_enabled = True
+        mock_settings.jira_url = "https://jira.example.com"
+        mock_settings.jira_project_key = "PROJ"
+        mock_settings.jira_email = "test@example.com"
+        mock_settings.jira_api_token = MagicMock()
+        mock_settings.jira_api_token.get_secret_value.return_value = "token"
+        mock_settings.jira_pat = None
+        mock_settings.jira_ssl_verify = True
+        mock_settings.jira_max_results = 5
+
+        mock_client = AsyncMock()
+        mock_client.search.return_value = [
+            {
+                "key": "PROJ-1",
+                "summary": "Login broken",
+                "description": "Login fails with 500 error",
+                "status": "Open",
+                "priority": "High",
+                "url": "https://jira.example.com/browse/PROJ-1",
+            }
+        ]
+
+        with patch(
+            "rootcoz.bug_creation.JiraClient",
+        ) as MockJiraClient:
+            MockJiraClient.return_value.__aenter__ = AsyncMock(return_value=mock_client)
+            MockJiraClient.return_value.__aexit__ = AsyncMock(return_value=None)
+
+            results = await search_jira_duplicates(
+                title="Login broken after update",
+                settings=mock_settings,
+            )
+
+        assert len(results) == 1
+        assert results[0]["key"] == "PROJ-1"
+        assert results[0]["description"] == "Login fails with 500 error"
+        assert results[0]["summary"] == "Login broken"
+        assert results[0]["title"] == "Login broken"
+
+
 class TestSearchGithubDuplicates:
     async def test_finds_similar_issues(self):
         from rootcoz.bug_creation import search_github_duplicates

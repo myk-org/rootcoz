@@ -548,7 +548,7 @@ class TestEnrichWithJiraMatches:
             mock_client_cls.return_value = mock_instance
 
             with patch(
-                "rootcoz.jira._filter_matches_with_ai",
+                "rootcoz.jira.filter_matches_with_ai",
                 new_callable=AsyncMock,
                 return_value=mock_ai_matches,
             ):
