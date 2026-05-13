@@ -26,16 +26,12 @@ from simple_logger.logger import get_logger
 
 from rootcoz.config import Settings, parse_repo_ref
 from rootcoz.engine.core import (
-    JSON_RESPONSE_SCHEMA,
     PROVIDER_CLI_FLAGS,
     analyze_failure_group,
-    build_prompt_sections,
-    call_ai_and_record,
     clone_additional_repos,
     derive_error_details,
     extract_relevant_console_lines,
     format_exception_with_type,
-    format_timeout_log,
     get_failure_signature,
     resolve_additional_repos,
     safe_update_progress,
@@ -706,69 +702,54 @@ async def _run_console_only_analysis(
     call_type: str,
     extra_context: str = "",
     peer_ai_configs: list | None = None,
+    peer_analysis_max_rounds: int = 3,
+    max_concurrent_ai_calls: int = 3,
 ) -> tuple[bool, list[FailureAnalysis], str]:
     """Run console-only AI analysis when no structured test failures exist.
+
+    Creates a synthetic FailedTest and delegates to analyze_failure_group,
+    which handles both single-AI and peer analysis paths.
 
     Returns:
         A tuple of (success, failures_list, error_text).  On failure
         ``success`` is ``False`` and ``error_text`` contains the error message.
     """
-    if peer_ai_configs:
-        logger.warning(
-            "Peer analysis not supported for console-only failures (no test report)"
+    # Build a synthetic FailedTest so we can use the standard analysis path
+    # (including peer debate when configured)
+    full_context = console_context
+    if extra_context:
+        full_context = (
+            f"{console_context}\n{extra_context}" if console_context else extra_context
         )
 
-    custom_prompt_section, artifacts_section, resources_section, query_section = (
-        build_prompt_sections(
-            custom_prompt,
-            artifacts_context,
-            repo_path,
-            server_url,
-            job_id,
+    synthetic_failure = FailedTest(
+        test_name=f"{job_name}#{build_number}",
+        error_message=full_context or "Console-only analysis (no JUnit report)",
+    )
+
+    try:
+        results = await analyze_failure_group(
+            failures=[synthetic_failure],
+            console_context=console_context,
+            repo_path=repo_path,
+            ai_provider=ai_provider,
+            ai_model=ai_model,
+            ai_cli_timeout=ai_cli_timeout,
+            custom_prompt=custom_prompt,
+            artifacts_context=artifacts_context,
+            server_url=server_url,
+            job_id=job_id,
+            peer_ai_configs=peer_ai_configs,
+            peer_analysis_max_rounds=peer_analysis_max_rounds,
+            group_label=call_type,
             additional_repos=additional_repos,
+            max_concurrent_ai_calls=max_concurrent_ai_calls,
             auth_header=auth_header,
         )
-    )
-
-    prompt = f"""{query_section}
-Analyze this failed Jenkins job:
-
-Job: {job_name} #{build_number}
-
-CONSOLE OUTPUT (errors/failures/warnings extracted):
-{console_context}
-{extra_context}
-{artifacts_section}
-
-You have access to the repository if one was cloned. Explore to understand the failure.
-{custom_prompt_section}{resources_section}
-{JSON_RESPONSE_SCHEMA}
-"""
-    logger.debug(f"AI prompt length: {len(prompt)} chars")
-    logger.info(f"Calling AI CLI with {format_timeout_log(ai_cli_timeout)}")
-    result, parsed_analysis = await call_ai_and_record(
-        prompt,
-        job_id=job_id,
-        call_type=call_type,
-        cwd=repo_path,
-        ai_provider=ai_provider,
-        ai_model=ai_model,
-        ai_cli_timeout=ai_cli_timeout,
-        cli_flags=PROVIDER_CLI_FLAGS.get(ai_provider, []),
-    )
-
-    if not result.success:
-        return False, [], result.text
-
-    analysis = parsed_analysis or AnalysisDetail(details=result.text)
-    failures = [
-        FailureAnalysis(
-            test_name=f"{job_name}#{build_number}",
-            error="Console-only analysis",
-            analysis=analysis,
-        )
-    ]
-    return True, failures, ""
+        return True, results, ""
+    except Exception as exc:
+        logger.error("Console-only analysis failed: %s", exc, exc_info=True)
+        return False, [], str(exc)
 
 
 async def _analyze_child_job_inner(
@@ -917,6 +898,8 @@ async def _analyze_child_job_inner(
         auth_header=auth_header,
         call_type="child_console",
         peer_ai_configs=peer_ai_configs,
+        peer_analysis_max_rounds=peer_analysis_max_rounds,
+        max_concurrent_ai_calls=max_concurrent_ai_calls,
     )
 
     if not success:
@@ -1224,6 +1207,8 @@ async def analyze_job(
                     call_type="main_console",
                     extra_context=repo_context,
                     peer_ai_configs=peer_ai_configs,
+                    peer_analysis_max_rounds=peer_analysis_max_rounds,
+                    max_concurrent_ai_calls=settings.max_concurrent_ai_calls,
                 )
 
                 if not success:
