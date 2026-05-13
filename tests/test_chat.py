@@ -157,7 +157,7 @@ class TestBuildSystemPrompt:
         prompt = build_system_prompt(result_data, "j1", "http://srv:8000")
         assert "curl" in prompt
         assert "/api/results/j1" in prompt
-        assert "/api/failures/" in prompt
+        assert "/api/results/j1/comments" in prompt
 
     def test_nested_child_failures(self):
         result_data = {

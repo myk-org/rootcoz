@@ -2695,10 +2695,26 @@ def chat_history(
     json_output: bool = _JSON_OPTION,
 ) -> None:
     """Show chat history for an analyzed job."""
-    _run_client_command(
+    data = _run_client_command(
         json_output,
         lambda c: c.get_chat_history(job_id, limit=limit),
+        emit_output=False,
     )
+    if not _state.get("json", False):
+        messages = data.get("messages", [])
+        if not messages:
+            typer.echo("No chat messages.")
+            return
+        for msg in messages:
+            role = msg.get("role", "unknown").upper()
+            ts = msg.get("created_at", "")
+            content = msg.get("content", "")
+            header = f"[{role}]"
+            if ts:
+                header += f" {ts}"
+            typer.echo(header)
+            typer.echo(content)
+            typer.echo("")
 
 
 @chat_app.command("send")
@@ -2710,12 +2726,16 @@ def chat_send(
     json_output: bool = _JSON_OPTION,
 ) -> None:
     """Send a chat message and get AI response."""
-    _run_client_command(
+    data = _run_client_command(
         json_output,
         lambda c: c.send_chat_message(
             job_id, message, ai_provider=ai_provider, ai_model=ai_model
         ),
+        emit_output=False,
     )
+    if not _state.get("json", False):
+        assistant = data.get("assistant_message", {})
+        typer.echo(assistant.get("content", ""))
 
 
 @chat_app.command("clear")
@@ -2724,13 +2744,14 @@ def chat_clear(
     json_output: bool = _JSON_OPTION,
 ) -> None:
     """Clear chat history for an analyzed job."""
-    _run_client_command(
+    data = _run_client_command(
         json_output,
         lambda c: c.clear_chat(job_id),
         emit_output=False,
     )
     if not _state.get("json", False):
-        typer.echo(f"Chat history cleared for job {job_id}.")
+        deleted = data.get("deleted", 0)
+        typer.echo(f"Deleted {deleted} message(s) for job {job_id}.")
 
 
 # -- Config -------------------------------------------------------------------

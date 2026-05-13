@@ -3725,13 +3725,24 @@ class TestChatCommands:
     def test_chat_history(self, mock_client):
         mock_client.get_chat_history.return_value = {
             "messages": [
-                {"role": "user", "content": "Why did this fail?"},
-                {"role": "assistant", "content": "DNS timeout."},
+                {
+                    "role": "user",
+                    "content": "Why did this fail?",
+                    "created_at": "2025-01-01T00:00:00",
+                },
+                {
+                    "role": "assistant",
+                    "content": "DNS timeout.",
+                    "created_at": "2025-01-01T00:00:01",
+                },
             ],
             "total": 2,
         }
         result = runner.invoke(app, ["chat", "history", "job-1"])
         assert result.exit_code == 0
+        assert "[USER]" in result.output
+        assert "[ASSISTANT]" in result.output
+        assert "DNS timeout." in result.output
         mock_client.get_chat_history.assert_called_once_with("job-1", limit=200)
 
     def test_chat_history_with_limit(self, mock_client):
@@ -3741,6 +3752,7 @@ class TestChatCommands:
         }
         result = runner.invoke(app, ["chat", "history", "job-1", "--limit", "10"])
         assert result.exit_code == 0
+        assert "No chat messages" in result.output
         mock_client.get_chat_history.assert_called_once_with("job-1", limit=10)
 
     def test_chat_history_json(self, mock_client):
@@ -3757,21 +3769,34 @@ class TestChatCommands:
 
     def test_chat_send(self, mock_client):
         mock_client.send_chat_message.return_value = {
-            "role": "assistant",
-            "content": "The test failed due to a timeout.",
+            "user_message": {
+                "id": 1,
+                "role": "user",
+                "content": "Why did this test fail?",
+            },
+            "assistant_message": {
+                "id": 2,
+                "role": "assistant",
+                "content": "The test failed due to a timeout.",
+            },
         }
         result = runner.invoke(
             app, ["chat", "send", "job-1", "Why did this test fail?"]
         )
         assert result.exit_code == 0
+        assert "The test failed due to a timeout." in result.output
         mock_client.send_chat_message.assert_called_once_with(
             "job-1", "Why did this test fail?", ai_provider="", ai_model=""
         )
 
     def test_chat_send_with_ai_config(self, mock_client):
         mock_client.send_chat_message.return_value = {
-            "role": "assistant",
-            "content": "Explanation",
+            "user_message": {"id": 1, "role": "user", "content": "Explain the error"},
+            "assistant_message": {
+                "id": 2,
+                "role": "assistant",
+                "content": "Explanation",
+            },
         }
         result = runner.invoke(
             app,
@@ -3787,32 +3812,36 @@ class TestChatCommands:
             ],
         )
         assert result.exit_code == 0
+        assert "Explanation" in result.output
         mock_client.send_chat_message.assert_called_once_with(
             "job-1", "Explain the error", ai_provider="claude", ai_model="opus-4"
         )
 
     def test_chat_send_json(self, mock_client):
-        payload = {"role": "assistant", "content": "Answer"}
+        payload = {
+            "user_message": {"id": 1, "role": "user", "content": "question"},
+            "assistant_message": {"id": 2, "role": "assistant", "content": "Answer"},
+        }
         mock_client.send_chat_message.return_value = payload
         result = runner.invoke(app, ["--json", "chat", "send", "job-1", "question"])
         assert result.exit_code == 0
         parsed = json.loads(result.output)
-        assert parsed["role"] == "assistant"
-        assert parsed["content"] == "Answer"
+        assert parsed["assistant_message"]["role"] == "assistant"
+        assert parsed["assistant_message"]["content"] == "Answer"
 
     def test_chat_clear(self, mock_client):
-        mock_client.clear_chat.return_value = {"status": "cleared"}
+        mock_client.clear_chat.return_value = {"deleted": 5}
         result = runner.invoke(app, ["chat", "clear", "job-1"])
         assert result.exit_code == 0
-        assert "cleared" in result.output.lower()
+        assert "Deleted 5 message(s)" in result.output
         mock_client.clear_chat.assert_called_once_with("job-1")
 
     def test_chat_clear_json(self, mock_client):
-        mock_client.clear_chat.return_value = {"status": "cleared"}
+        mock_client.clear_chat.return_value = {"deleted": 3}
         result = runner.invoke(app, ["--json", "chat", "clear", "job-1"])
         assert result.exit_code == 0
         parsed = json.loads(result.output)
-        assert parsed["status"] == "cleared"
+        assert parsed["deleted"] == 3
 
     def test_chat_history_error(self, mock_client):
         mock_client.get_chat_history.side_effect = RootCozError(

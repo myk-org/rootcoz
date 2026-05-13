@@ -3825,10 +3825,10 @@ async def add_chat_message(
 async def get_chat_messages(
     job_id: str, limit: int = 200, offset: int = 0
 ) -> list[dict]:
-    """Get chat messages for a job, ordered by created_at ASC."""
+    """Get chat messages for a job, ordered by id ASC."""
     async with _connect_db() as db:
         cursor = await db.execute(
-            "SELECT id, job_id, role, content, username, ai_provider, ai_model, created_at FROM chat_messages WHERE job_id = ? ORDER BY created_at ASC LIMIT ? OFFSET ?",
+            "SELECT id, job_id, role, content, username, ai_provider, ai_model, created_at FROM chat_messages WHERE job_id = ? ORDER BY id ASC LIMIT ? OFFSET ?",
             (job_id, limit, offset),
         )
         rows = await cursor.fetchall()
@@ -3844,6 +3844,13 @@ async def count_chat_messages(job_id: str) -> int:
         )
         row = await cursor.fetchone()
         return row[0] if row else 0
+
+
+async def delete_chat_message_by_id(msg_id: int) -> None:
+    """Delete a single chat message by its id."""
+    async with _connect_db() as db:
+        await db.execute("DELETE FROM chat_messages WHERE id = ?", (msg_id,))
+        await db.commit()
 
 
 async def delete_chat_messages(job_id: str) -> int:

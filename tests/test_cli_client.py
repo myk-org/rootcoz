@@ -1886,8 +1886,11 @@ class TestRootCozClientChat:
 
     def test_send_chat_message(self):
         response_data = {
-            "role": "assistant",
-            "content": "The failure is caused by a DNS timeout.",
+            "user_message": {"role": "user", "content": "Why did this test fail?"},
+            "assistant_message": {
+                "role": "assistant",
+                "content": "The failure is caused by a DNS timeout.",
+            },
         }
 
         def handler(request):
@@ -1901,7 +1904,7 @@ class TestRootCozClientChat:
 
         client = _make_client(handler)
         result = client.send_chat_message("job-1", "Why did this test fail?")
-        assert result["role"] == "assistant"
+        assert result["assistant_message"]["role"] == "assistant"
 
     def test_send_chat_message_with_ai_config(self):
         def handler(request):
@@ -1910,24 +1913,31 @@ class TestRootCozClientChat:
             assert body["ai_provider"] == "claude"
             assert body["ai_model"] == "opus-4"
             return httpx.Response(
-                200, json={"role": "assistant", "content": "Explanation"}
+                200,
+                json={
+                    "user_message": {"role": "user", "content": "Explain the error"},
+                    "assistant_message": {
+                        "role": "assistant",
+                        "content": "Explanation",
+                    },
+                },
             )
 
         client = _make_client(handler)
         result = client.send_chat_message(
             "job-1", "Explain the error", ai_provider="claude", ai_model="opus-4"
         )
-        assert result["content"] == "Explanation"
+        assert result["assistant_message"]["content"] == "Explanation"
 
     def test_clear_chat(self):
         def handler(request):
             assert request.method == "DELETE"
             assert "/api/chat/job-1" in str(request.url)
-            return httpx.Response(200, json={"status": "cleared"})
+            return httpx.Response(200, json={"deleted": 1})
 
         client = _make_client(handler)
         result = client.clear_chat("job-1")
-        assert result["status"] == "cleared"
+        assert result["deleted"] == 1
 
     def test_get_chat_history_not_found(self):
         client = _make_client(

@@ -7071,23 +7071,6 @@ async def send_chat_message(
     # Strip sensitive data before passing to chat engine
     safe_result = strip_sensitive_from_response(dict(result_data))
 
-    # Also strip request_params which may contain encrypted credentials
-    if "request_params" in safe_result:
-        safe_params = dict(safe_result["request_params"])
-        for key in (
-            "jenkins_password",
-            "jenkins_user",
-            "jira_api_token",
-            "jira_pat",
-            "jira_email",
-            "github_token",
-            "tests_repo_token",
-            "reportportal_api_token",
-            "vapid_private_key",
-        ):
-            safe_params.pop(key, None)
-        safe_result["request_params"] = safe_params
-
     # Save user message
     user_msg_id = await storage.add_chat_message(
         job_id=job_id,
@@ -7103,27 +7086,25 @@ async def send_chat_message(
 
     # Call AI
     server_url = _build_internal_server_url()
-    success, response_text = await chat_with_ai(
-        job_id=job_id,
-        result_data=safe_result,
-        message=body.message,
-        history=history,
-        ai_provider=ai_provider,
-        ai_model=ai_model,
-        server_url=server_url,
-        ai_cli_timeout=get_settings().ai_cli_timeout,
-        username=request.state.username,
-    )
-
-    if not success:
-        # Save error as assistant message so user sees it
-        _error_msg_id = await storage.add_chat_message(
+    auth_header = await _create_ai_auth_header(request.state.username)
+    try:
+        success, response_text = await chat_with_ai(
             job_id=job_id,
-            role="assistant",
-            content=f"Error: {response_text}",
+            result_data=safe_result,
+            message=body.message,
+            history=history,
             ai_provider=ai_provider,
             ai_model=ai_model,
+            server_url=server_url,
+            ai_cli_timeout=get_settings().ai_cli_timeout,
+            auth_header=auth_header,
         )
+    finally:
+        await _cleanup_ai_session(auth_header)
+
+    if not success:
+        # Delete the user message we saved — don't persist failed turns
+        await storage.delete_chat_message_by_id(user_msg_id)
         raise HTTPException(status_code=502, detail=response_text)
 
     # Save assistant response

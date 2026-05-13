@@ -13,6 +13,7 @@ import { ModelCombobox } from '@/components/shared/ModelCombobox'
 import type { ModelOption } from '@/components/shared/ModelCombobox'
 import { Tooltip, TooltipTrigger, TooltipContent } from '@/components/ui/tooltip'
 import { TooltipProvider } from '@/components/ui/tooltip'
+import { Textarea } from '@/components/ui/textarea'
 import { Send, Trash2, ArrowLeft, Loader2, Bot, User } from 'lucide-react'
 
 interface ChatMessage {
@@ -65,8 +66,8 @@ export function ChatPage() {
       if (resultRes.result) {
         const r = resultRes.result
         setJobInfo({ job_name: r.job_name, build_number: r.build_number, summary: r.summary, ai_provider: r.ai_provider, ai_model: r.ai_model })
-        if (!aiProvider) setAiProvider(r.ai_provider || 'claude')
-        if (!aiModel) setAiModel(r.ai_model || '')
+        setAiProvider(r.ai_provider || 'claude')
+        setAiModel(r.ai_model || '')
       }
       setAiConfigs(configsRes)
     }).catch(err => {
@@ -299,13 +300,13 @@ export function ChatPage() {
         {/* Input area */}
         <div className="border-t border-border-muted px-6 py-3 shrink-0">
           <form onSubmit={handleSend} className="flex gap-2">
-            <textarea
+            <Textarea
               ref={inputRef}
               value={input}
               onChange={e => setInput(e.target.value)}
               onKeyDown={handleKeyDown}
               placeholder="Ask about this analysis... (Enter to send, Shift+Enter for newline)"
-              className="flex-1 resize-none rounded-lg border border-border-default bg-surface-card px-3 py-2 text-sm text-text-primary placeholder:text-text-tertiary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-border-accent min-h-[44px] max-h-[120px]"
+              className="flex-1 resize-none min-h-[44px] max-h-[120px]"
               rows={1}
               disabled={sending}
             />

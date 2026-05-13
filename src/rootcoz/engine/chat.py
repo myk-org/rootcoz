@@ -19,6 +19,7 @@ def build_system_prompt(
     result_data: dict,
     job_id: str,
     server_url: str,
+    auth_header: str = "",
 ) -> str:
     """Build a system prompt that scopes the AI to a specific analyzed job.
 
@@ -71,12 +72,12 @@ def build_system_prompt(
     # API endpoints the AI can use
     api_section = ""
     if server_url:
+        auth_flag = f" -H 'Authorization: {auth_header}'" if auth_header else ""
         api_section = f"""
 ## Available API Endpoints (read-only)
 You can use curl to query these endpoints for more details:
-- `curl {server_url}/api/results/{job_id}` — Full job result with all failure analyses
-- `curl {server_url}/api/failures/{{failure_uuid}}` — Get details for a specific failure by UUID
-- `curl {server_url}/api/results/{job_id}/comments` — Get comments on this job
+- `curl{auth_flag} {server_url}/api/results/{job_id}` — Full job result with all failure analyses
+- `curl{auth_flag} {server_url}/api/results/{job_id}/comments` — Get comments on this job
 """
 
     return f"""You are a read-only assistant helping a user understand a CI/CD failure analysis.
@@ -144,7 +145,7 @@ async def chat_with_ai(
     server_url: str = "",
     repo_path: Path | None = None,
     ai_cli_timeout: int | None = None,
-    username: str = "",
+    auth_header: str = "",
 ) -> tuple[bool, str]:
     """Send a chat message and get an AI response.
 
@@ -158,12 +159,14 @@ async def chat_with_ai(
         server_url: Internal server URL for AI to query APIs.
         repo_path: Path to cloned repos (if available).
         ai_cli_timeout: Timeout for AI CLI call.
-        username: Current user for auth header.
+        auth_header: Bearer auth header for AI to use when curling API.
 
     Returns:
         Tuple of (success, response_text).
     """
-    system_prompt = build_system_prompt(result_data, job_id, server_url)
+    system_prompt = build_system_prompt(
+        result_data, job_id, server_url, auth_header=auth_header
+    )
     full_prompt = build_chat_prompt(system_prompt, history, message)
 
     logger.info(
