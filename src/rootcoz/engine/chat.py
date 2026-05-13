@@ -26,7 +26,8 @@ def get_chat_workspace(job_id: str) -> Path:
     workspace = Path(f"/tmp/{_CHAT_WORKSPACE_PREFIX}{safe_id}")
     # Verify the resolved path is still under /tmp/
     resolved = workspace.resolve()
-    if not str(resolved).startswith("/tmp/"):
+    tmp_resolved = Path("/tmp").resolve()
+    if not str(resolved).startswith(str(tmp_resolved)):
         raise ValueError(f"Invalid job_id for workspace: {job_id}")
     return workspace
 

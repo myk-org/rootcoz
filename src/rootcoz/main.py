@@ -7076,18 +7076,9 @@ async def send_chat_message(
     # Strip sensitive data before passing to chat engine
     safe_result = strip_sensitive_from_response(dict(result_data))
 
-    # Save user message
-    user_msg_id = await storage.add_chat_message(
-        job_id=job_id,
-        role="user",
-        content=body.message,
-        username=request.state.username,
-    )
-
-    # Get conversation history
-    history = await storage.get_chat_messages(job_id)
-    # Exclude the message we just added (it's the new message)
-    history = [m for m in history if m["id"] != user_msg_id]
+    # Get conversation history (limit to last 50 messages to bound context size)
+    all_history = await storage.get_chat_messages(job_id)
+    history = all_history[-50:]
 
     # Find session_id from the last assistant message
     last_session_id = None
@@ -7126,6 +7117,14 @@ async def send_chat_message(
     # Find session: check DB first, then disk
     if not last_session_id:
         last_session_id = find_session_id_on_disk(job_id, ai_provider)
+
+    # Save user message AFTER workspace setup so the existing try/except covers rollback
+    user_msg_id = await storage.add_chat_message(
+        job_id=job_id,
+        role="user",
+        content=body.message,
+        username=request.state.username,
+    )
 
     # Call AI
     server_url = _build_internal_server_url()
