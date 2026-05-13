@@ -26,10 +26,14 @@ interface ReportState {
   /** Incremented on every optimistic local mutation (ADD_COMMENT, REMOVE_COMMENT, SET_REVIEW)
    *  so that in-flight poll responses can detect stale data and skip overwriting. */
   localMutationRev: number
+  /** Original job ID when this is a re-analysis. */
+  reanalyzedFromJobId: string
+  /** Display name of the original job. */
+  originJobName: string
 }
 
 type ReportAction =
-  | { type: 'SET_RESULT'; payload: { result: AnalysisResult; createdAt: string; completedAt: string; analysisStartedAt: string } }
+  | { type: 'SET_RESULT'; payload: { result: AnalysisResult; createdAt: string; completedAt: string; analysisStartedAt: string; reanalyzedFromJobId?: string; originJobName?: string } }
   | { type: 'SET_COMMENTS_AND_REVIEWS'; payload: CommentsAndReviews }
   | { type: 'ADD_COMMENT'; payload: Comment }
   | { type: 'REMOVE_COMMENT'; payload: number }
@@ -78,12 +82,14 @@ const initialState: ReportState = {
   commentDraftCount: 0,
   reAnalyzeOpen: false,
   localMutationRev: 0,
+  reanalyzedFromJobId: '',
+  originJobName: '',
 }
 
 function reportReducer(state: ReportState, action: ReportAction): ReportState {
   switch (action.type) {
     case 'SET_RESULT':
-      return { ...state, result: action.payload.result, createdAt: action.payload.createdAt, completedAt: action.payload.completedAt, analysisStartedAt: action.payload.analysisStartedAt, loading: false, error: '' }
+      return { ...state, result: action.payload.result, createdAt: action.payload.createdAt, completedAt: action.payload.completedAt, analysisStartedAt: action.payload.analysisStartedAt, reanalyzedFromJobId: action.payload.reanalyzedFromJobId ?? '', originJobName: action.payload.originJobName ?? '', loading: false, error: '' }
     case 'SET_COMMENTS_AND_REVIEWS':
       return { ...state, comments: action.payload.comments, reviews: action.payload.reviews }
     case 'ADD_COMMENT':

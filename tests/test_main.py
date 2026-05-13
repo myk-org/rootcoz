@@ -4043,6 +4043,17 @@ class TestRequestParamsPreservation:
 class TestReAnalyzeEndpoint:
     """Tests for POST /re-analyze/{job_id}."""
 
+    @staticmethod
+    async def _create_origin_job(
+        job_id: str,
+        jenkins_url: str,
+        result_data: dict,
+    ) -> None:
+        """Save a completed origin job into storage for re-analysis tests."""
+        from rootcoz import storage
+
+        await storage.save_result(job_id, jenkins_url, "completed", result_data)
+
     def test_re_analyze_not_found(self, test_client) -> None:
         """Re-analyze returns 404 when job_id does not exist."""
         response = test_client.post("/re-analyze/nonexistent", json={})
@@ -4104,6 +4115,143 @@ class TestReAnalyzeEndpoint:
         assert "result_url" in data
         mock_process.assert_called_once()
         assert data["result_url"].endswith(f"/results/{data['job_id']}")
+
+    @pytest.mark.asyncio
+    async def test_re_analyze_stores_reanalyzed_from_job_id(self, test_client) -> None:
+        """Re-analyze stores reanalyzed_from_job_id in the new job's request_params."""
+        result_data = {
+            "summary": "1 failure",
+            "job_name": "my-job",
+            "display_name": "My Job",
+            "build_number": 42,
+            "failures": [],
+            "request_params": encrypt_sensitive_fields(
+                {
+                    "job_name": "my-job",
+                    "build_number": 42,
+                    "ai_provider": "claude",
+                    "ai_model": "opus",
+                    "jenkins_url": "https://jenkins.example.com",
+                    "jenkins_user": "testuser",
+                    "jenkins_password": "testpw",  # pragma: allowlist secret
+                }
+            ),
+        }
+        await self._create_origin_job(
+            "job-origin",
+            "http://jenkins/job/my-job/42/",
+            result_data,
+        )
+        with patch("rootcoz.main.process_analysis_with_id"):
+            response = test_client.post("/re-analyze/job-origin", json={})
+        assert response.status_code == 202
+        new_job_id = response.json()["job_id"]
+        # Verify the new job has reanalyzed_from_job_id stored
+        stored = await storage.get_result(new_job_id)
+        assert stored is not None
+        params = stored["result"]["request_params"]
+        assert params["reanalyzed_from_job_id"] == "job-origin"
+        assert params["reanalyzed_from_job_name"] == "My Job"
+
+    @pytest.mark.asyncio
+    async def test_re_analyze_file_stores_reanalyzed_metadata(
+        self, test_client
+    ) -> None:
+        """Re-analyze a file/raw job stores reanalyzed_from_job_id and _job_name."""
+        result_data = {
+            "summary": "file failure",
+            "job_name": "file-job",
+            "display_name": "File Job",
+            "request_params": encrypt_sensitive_fields(
+                {
+                    "analysis_type": "file",
+                    "raw_xml": "<testsuite><testcase name='t1'><failure>err</failure></testcase></testsuite>",
+                    "ai_provider": "claude",
+                    "ai_model": "opus",
+                }
+            ),
+        }
+        await self._create_origin_job(
+            "file-origin",
+            "",
+            result_data,
+        )
+        with patch("rootcoz.main._process_file_raw_analysis"):
+            response = test_client.post("/re-analyze/file-origin", json={})
+        assert response.status_code == 202
+        new_job_id = response.json()["job_id"]
+        stored = await storage.get_result(new_job_id)
+        assert stored is not None
+        params = stored["result"]["request_params"]
+        assert params["reanalyzed_from_job_id"] == "file-origin"
+        assert params["reanalyzed_from_job_name"] == "File Job"
+
+    @pytest.mark.asyncio
+    async def test_results_endpoint_returns_origin_info(self, test_client) -> None:
+        """GET /results/{job_id} includes origin job info for re-analyzed jobs."""
+        # Create original job
+        await storage.save_result(
+            "origin-job",
+            "http://jenkins/job/orig/1/",
+            "completed",
+            {"summary": "original", "display_name": "Original Job", "job_name": "orig"},
+        )
+        # Create re-analyzed job with reanalyzed_from_job_id
+        await storage.save_result(
+            "reanalyzed-job",
+            "",
+            "completed",
+            {
+                "summary": "re-done",
+                "request_params": {"reanalyzed_from_job_id": "origin-job"},
+            },
+        )
+        response = test_client.get("/results/reanalyzed-job")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["reanalyzed_from_job_id"] == "origin-job"
+        assert data["origin_job_name"] == "Original Job"
+
+    @pytest.mark.asyncio
+    async def test_results_endpoint_returns_denormalized_origin_name(
+        self, test_client
+    ) -> None:
+        """GET /results/{job_id} uses denormalized name without DB lookup."""
+        # No origin job stored – the denormalized name should be used directly
+        await storage.save_result(
+            "reanalyzed-job-fast",
+            "",
+            "completed",
+            {
+                "summary": "re-done",
+                "request_params": {
+                    "reanalyzed_from_job_id": "missing-origin",
+                    "reanalyzed_from_job_name": "Denormalized Name",
+                },
+            },
+        )
+        response = test_client.get("/results/reanalyzed-job-fast")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["reanalyzed_from_job_id"] == "missing-origin"
+        assert data["origin_job_name"] == "Denormalized Name"
+
+    @pytest.mark.asyncio
+    async def test_results_endpoint_no_origin_for_normal_jobs(
+        self, test_client
+    ) -> None:
+        """GET /results/{job_id} does not include origin fields for normal jobs."""
+        await storage.save_result(
+            "normal-job",
+            "",
+            "completed",
+            {"summary": "normal", "request_params": {}},
+        )
+        response = test_client.get("/results/normal-job")
+        assert response.status_code == 200
+        data = response.json()
+        assert "reanalyzed_from_job_id" not in data
+        assert "origin_job_name" not in data
 
 
 class TestBuildEffectiveJiraSettings:

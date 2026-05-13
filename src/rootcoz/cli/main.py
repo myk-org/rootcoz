@@ -1075,6 +1075,15 @@ def status(
             columns=["job_id", "status"],
             as_json=False,
         )
+        origin_id = data.get("reanalyzed_from_job_id", "")
+        if origin_id:
+            origin_name = data.get("origin_job_name", "")
+            label = (
+                f"{origin_id} ({origin_name})"
+                if origin_name and origin_name != origin_id
+                else origin_id
+            )
+            typer.echo(f"Reanalyzed from: {label}")
 
 
 # -- History ------------------------------------------------------------------

@@ -24,6 +24,8 @@ import { ExternalLink, CheckCircle2, Clock, Calendar, Cpu, Timer, FolderGit2, Ro
 import { ReAnalyzeDialog } from './report/ReAnalyzeDialog'
 import { ReportPortalButton } from './report/ReportPortalButton'
 import { TokenUsageBadge } from './report/TokenUsageBadge'
+import { OriginJobBanner } from '@/components/shared/OriginJobBanner'
+import { originJobLabel } from '@/lib/originJobLabel'
 import { reviewKey } from './report/ReportContext'
 import type { ChildJobAnalysis } from '@/types'
 
@@ -149,7 +151,7 @@ function ReportContent() {
           return
         }
 
-        dispatch({ type: 'SET_RESULT', payload: { result: resultRes.result, createdAt: resultRes.created_at, completedAt: resultRes.completed_at ?? '', analysisStartedAt: resultRes.analysis_started_at ?? '' } })
+        dispatch({ type: 'SET_RESULT', payload: { result: resultRes.result, createdAt: resultRes.created_at, completedAt: resultRes.completed_at ?? '', analysisStartedAt: resultRes.analysis_started_at ?? '', reanalyzedFromJobId: resultRes.reanalyzed_from_job_id, originJobName: resultRes.origin_job_name } })
 
         // Use capabilities from the result response (job-scoped, avoids separate call)
         if (resultRes.capabilities) {
@@ -456,6 +458,11 @@ function ReportContent() {
           </div>
         </div>
       </div>
+
+      {/* ---- Origin job reference for re-analyses ---- */}
+      {state.reanalyzedFromJobId && (
+        <OriginJobBanner originJobId={state.reanalyzedFromJobId} originJobName={originJobLabel(state.originJobName, state.reanalyzedFromJobId)} />
+      )}
 
       {/* ---- Metadata detail row ---- */}
       <div className="flex flex-wrap items-center gap-x-5 gap-y-1 text-xs text-text-tertiary animate-slide-up">
