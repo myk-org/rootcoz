@@ -110,6 +110,7 @@ export interface FailureAnalysis {
   peer_debate?: PeerDebate | null
   previous_analysis?: AnalysisDetail | null
   reanalysis_status?: 'running' | 'failed' | null
+  reanalysis_error?: string | null
   reanalyzed_with?: { ai_provider: string; ai_model: string } | null
 }
 

@@ -91,6 +91,7 @@ from rootcoz.logging_context import JobIdFilter, get_log_file, job_id_var
 from rootcoz.metadata_rules import match_job_metadata
 from rootcoz.models import (
     AddCommentRequest,
+    AdditionalRepo,
     AnalyzeCommentRequest,
     AnalyzeCommentResponse,
     AnalyzeRequest,
@@ -3106,8 +3107,9 @@ async def _reanalyze_failure_background(
                 failure["peer_debate"] = new_data["peer_debate"]
             else:
                 failure.pop("peer_debate", None)
-            # Remove running status
+            # Remove running status and any previous error
             failure.pop("reanalysis_status", None)
+            failure.pop("reanalysis_error", None)
 
         await patch_result_json(job_id, _patch_success)
         logger.info(
@@ -3116,19 +3118,23 @@ async def _reanalyze_failure_background(
             job_id,
         )
 
-    except Exception:
+    except Exception as exc:
+        error_msg = "Re-analysis failed unexpectedly. Check server logs for details."
         logger.error(
-            "Failure %s re-analysis failed in job %s",
+            "Failure %s re-analysis failed in job %s: %s: %s",
             failure_uuid,
             job_id,
+            type(exc).__name__,
+            exc,
             exc_info=True,
         )
 
-        # Patch failure status to "failed"
+        # Patch failure status to "failed" with error message
         def _patch_error(result_data: dict) -> None:
             failure = _find_failure_by_uuid_in_result(result_data, failure_uuid)
             if failure:
                 failure["reanalysis_status"] = "failed"
+                failure["reanalysis_error"] = error_msg
 
         try:
             await patch_result_json(job_id, _patch_error)
@@ -3247,9 +3253,16 @@ async def re_analyze_failure(
     if overrides.tests_repo_url is not None:
         tests_repo_url, tests_repo_ref = parse_repo_ref(overrides.tests_repo_url)
 
-    additional_repos_list = decrypted_params.get("additional_repos") or []
+    additional_repos_list_raw = decrypted_params.get("additional_repos") or []
+    additional_repos_list: list[AdditionalRepo] = [
+        AdditionalRepo(**r) if isinstance(r, dict) else r
+        for r in additional_repos_list_raw
+    ]
     if overrides.additional_repos is not None:
-        additional_repos_list = overrides.additional_repos
+        additional_repos_list = [
+            AdditionalRepo(**r) if isinstance(r, dict) else r
+            for r in overrides.additional_repos
+        ]
 
     max_concurrent_ai_calls = decrypted_params.get("max_concurrent_ai_calls", 3)
 

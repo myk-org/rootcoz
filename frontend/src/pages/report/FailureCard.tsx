@@ -304,6 +304,16 @@ export function FailureCard({ group, jobId, childJobName, childBuildNumber, inde
                 </TooltipContent>
               </Tooltip>
             )}
+            {rep.reanalysis_status === 'failed' && (
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <span className="flex items-center gap-1 rounded-md bg-signal-red/15 px-2 py-1 text-[10px] font-mono text-signal-red">
+                    Re-analysis failed
+                  </span>
+                </TooltipTrigger>
+                <TooltipContent className="max-w-md break-all">{rep.reanalysis_error || 'Unknown error'}</TooltipContent>
+              </Tooltip>
+            )}
             <ClassificationBadge classification={classification} />
             {rep.reanalyzed_with && rep.reanalysis_status !== 'running' && (
               <Tooltip>
