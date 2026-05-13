@@ -320,9 +320,7 @@ export function UsersPage() {
                           </TooltipTrigger>
                           <TooltipContent>Rotate API key</TooltipContent>
                         </Tooltip>
-                      </TooltipProvider>
-                      {/* Delete */}
-                      <TooltipProvider delayDuration={200}>
+                        {/* Delete */}
                         <Tooltip>
                           <TooltipTrigger asChild>
                             <Button

@@ -141,9 +141,9 @@ export function NavBar() {
           </nav>
         </div>
         <div className="flex items-center gap-3">
-          {EXTERNAL_NAV_LINKS.map(({ href, label, title, icon: Icon }) => (
-            <TooltipProvider key={href} delayDuration={200}>
-              <Tooltip>
+          <TooltipProvider delayDuration={200}>
+            {EXTERNAL_NAV_LINKS.map(({ href, label, title, icon: Icon }) => (
+              <Tooltip key={href}>
                 <TooltipTrigger asChild>
                   <a
                     href={href}
@@ -157,10 +157,8 @@ export function NavBar() {
                 </TooltipTrigger>
                 <TooltipContent>{title}</TooltipContent>
               </Tooltip>
-            </TooltipProvider>
-          ))}
-          {feedbackEnabled && (
-            <TooltipProvider delayDuration={200}>
+            ))}
+            {feedbackEnabled && (
               <Tooltip>
                 <TooltipTrigger asChild>
                   <button
@@ -174,8 +172,8 @@ export function NavBar() {
                 </TooltipTrigger>
                 <TooltipContent>Send feedback</TooltipContent>
               </Tooltip>
-            </TooltipProvider>
-          )}
+            )}
+          </TooltipProvider>
           <UserBadge />
           {feedbackEnabled && (
             <FeedbackDialog open={feedbackOpen} onOpenChange={setFeedbackOpen} />

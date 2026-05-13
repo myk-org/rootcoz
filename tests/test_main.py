@@ -4622,9 +4622,14 @@ class TestReAnalyzeFailure:
             error="ValueError",
             analysis=AnalysisDetail(classification="CODE ISSUE"),
         )
+        fa_dict = fa.model_dump(mode="json")
+        # Add extra fields that should survive the in-place patch
+        fa_dict["stack_trace"] = "Traceback (most recent call last):\n  ValueError"
+        fa_dict["duration"] = 12.5
+        fa_dict["status"] = "FAILED"
         result_data = {
             "summary": "1 failure",
-            "failures": [fa.model_dump(mode="json")],
+            "failures": [fa_dict],
             "request_params": encrypt_sensitive_fields(
                 {
                     "ai_provider": "claude",
@@ -4658,10 +4663,16 @@ class TestReAnalyzeFailure:
             ),
         ):
             response = test_client.post(f"/api/failures/{fa.id}/re-analyze")
-            # Give the background task a moment to complete
+            # Wait for background task to complete
             import asyncio
 
-            await asyncio.sleep(0.3)
+            for _ in range(50):
+                await asyncio.sleep(0.1)
+                _stored = await storage.get_result("job-reanalyze-f")
+                if _stored:
+                    _failures = _stored.get("result", {}).get("failures", [])
+                    if _failures and _failures[0].get("reanalysis_status") is None:
+                        break
         assert response.status_code == 202
         data = response.json()
         assert data["status"] == "accepted"
@@ -4680,6 +4691,12 @@ class TestReAnalyzeFailure:
             "ai_provider": "claude",
             "ai_model": "opus",
         }
+        # Verify metadata fields survived the in-place patch
+        assert (
+            failure["stack_trace"] == "Traceback (most recent call last):\n  ValueError"
+        )
+        assert failure["duration"] == 12.5
+        assert failure["status"] == "FAILED"
 
 
 class TestBuildEffectiveJiraSettings:

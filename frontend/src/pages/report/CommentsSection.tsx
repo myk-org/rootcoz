@@ -10,7 +10,7 @@ import { LinkedText } from '@/components/shared/LinkedText'
 import { ConfirmDialog } from '@/components/shared/ConfirmDialog'
 import { MentionTextarea } from './MentionTextarea'
 import { useReviewSuggestion } from './useReviewSuggestion'
-import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
 import { Trash2, MessageSquare } from 'lucide-react'
 import type { Comment } from '@/types'
 
@@ -227,6 +227,7 @@ export function CommentsSection({ jobId, testNames, childJobName, childBuildNumb
                   </p>
                 </div>
                 {username && c.username === username && (
+                  <TooltipProvider delayDuration={200}>
                   <Tooltip>
                     <TooltipTrigger asChild>
                       <button
@@ -241,6 +242,7 @@ export function CommentsSection({ jobId, testNames, childJobName, childBuildNumb
                     </TooltipTrigger>
                     <TooltipContent>Delete comment</TooltipContent>
                   </Tooltip>
+                  </TooltipProvider>
                 )}
               </div>
             )

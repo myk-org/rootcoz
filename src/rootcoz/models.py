@@ -859,7 +859,11 @@ class ClassifyTestRequest(BaseModel):
 
 
 class ReAnalyzeFailureRequest(BaseModel):
-    """Optional overrides for per-failure re-analysis."""
+    """Optional overrides for per-failure re-analysis.
+
+    Fields mirror BaseAnalysisRequest but are all optional since
+    unset values fall back to the parent job's stored settings.
+    """
 
     ai_provider: str | None = None
     ai_model: str | None = None

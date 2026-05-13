@@ -164,6 +164,7 @@ export function MentionsPage() {
   }
 
   return (
+    <TooltipProvider delayDuration={200}>
     <div className="space-y-6">
       {/* Header */}
       <div className="flex items-center justify-between">
@@ -245,14 +246,12 @@ export function MentionsPage() {
                   {/* Unread dot */}
                   <div className="mt-1.5 shrink-0 w-2">
                     {!m.is_read && (
-                      <TooltipProvider delayDuration={200}>
-                        <Tooltip>
-                          <TooltipTrigger asChild>
-                            <span className="block h-2 w-2 rounded-full bg-signal-blue" />
-                          </TooltipTrigger>
-                          <TooltipContent>Unread</TooltipContent>
-                        </Tooltip>
-                      </TooltipProvider>
+                      <Tooltip>
+                        <TooltipTrigger asChild>
+                          <span className="block h-2 w-2 rounded-full bg-signal-blue" />
+                        </TooltipTrigger>
+                        <TooltipContent>Unread</TooltipContent>
+                      </Tooltip>
                     )}
                   </div>
 
@@ -293,16 +292,14 @@ export function MentionsPage() {
                         {m.job_id}
                       </span>
                       {m.test_name && (
-                        <TooltipProvider delayDuration={200}>
-                          <Tooltip>
-                            <TooltipTrigger asChild>
-                              <span className="font-mono truncate max-w-[400px]">
-                                {m.test_name}
-                              </span>
-                            </TooltipTrigger>
-                            <TooltipContent className="max-w-md break-all">{m.test_name}</TooltipContent>
-                          </Tooltip>
-                        </TooltipProvider>
+                        <Tooltip>
+                          <TooltipTrigger asChild>
+                            <span className="font-mono truncate max-w-[400px]">
+                              {m.test_name}
+                            </span>
+                          </TooltipTrigger>
+                          <TooltipContent className="max-w-md break-all">{m.test_name}</TooltipContent>
+                        </Tooltip>
                       )}
                     </div>
                   </div>
@@ -315,5 +312,6 @@ export function MentionsPage() {
 
       <Pagination page={page} totalPages={totalPages} onPageChange={setPage} />
     </div>
+    </TooltipProvider>
   )
 }

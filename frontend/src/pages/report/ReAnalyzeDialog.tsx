@@ -187,6 +187,7 @@ export function ReAnalyzeDialog({ open, onOpenChange, result, jobId, failureUuid
     jobId,
     onOpenChange,
     navigate,
+    failureUuid,
   ])
 
   return (

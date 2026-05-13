@@ -36,8 +36,6 @@ export function UserBadge() {
           </TooltipTrigger>
           <TooltipContent>Settings</TooltipContent>
         </Tooltip>
-      </TooltipProvider>
-      <TooltipProvider delayDuration={200}>
         <Tooltip>
           <TooltipTrigger asChild>
             <button type="button" aria-label="Logout" onClick={handleLogout}

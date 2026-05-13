@@ -2815,13 +2815,13 @@ async def re_analyze(
     )
 
     # Authorization: only the original submitter or an admin may re-analyze
-    _check_reanalyze_authorization(request, result_data.get("request_params", {}))
-
     if "request_params" not in result_data:
         raise HTTPException(
             status_code=400,
             detail="Original analysis has no stored request_params; cannot re-analyze",
         )
+
+    _check_reanalyze_authorization(request, result_data["request_params"])
 
     # Detect analysis type from stored params
     params = result_data.get("request_params", {})
@@ -3104,6 +3104,8 @@ async def _reanalyze_failure_background(
             failure["analysis"] = new_data.get("analysis")
             if new_data.get("peer_debate"):
                 failure["peer_debate"] = new_data["peer_debate"]
+            else:
+                failure.pop("peer_debate", None)
             # Remove running status
             failure.pop("reanalysis_status", None)
 
@@ -3162,10 +3164,18 @@ async def re_analyze_failure(
 
     # Parse optional body
     body_data: dict = {}
-    try:
-        body_data = await request.json()
-    except Exception:
-        pass  # No body is fine, all settings come from parent
+    content_length = request.headers.get("content-length", "0")
+    if content_length != "0":
+        try:
+            body_data = await request.json()
+        except Exception as exc:
+            raise HTTPException(
+                status_code=400, detail=f"Invalid JSON body: {exc}"
+            ) from exc
+        if not isinstance(body_data, dict):
+            raise HTTPException(
+                status_code=400, detail="Request body must be a JSON object"
+            )
     overrides = ReAnalyzeFailureRequest(**body_data)
 
     # Find the failure across all stored results
@@ -3244,9 +3254,15 @@ async def re_analyze_failure(
     max_concurrent_ai_calls = decrypted_params.get("max_concurrent_ai_calls", 3)
 
     # Immediately patch the failure as "running"
+    already_running = False
+
     def _patch_running(result_data: dict) -> None:
+        nonlocal already_running
         failure = _find_failure_by_uuid_in_result(result_data, failure_uuid)
         if failure:
+            if failure.get("reanalysis_status") == "running":
+                already_running = True
+                return
             failure["reanalysis_status"] = "running"
             failure["reanalyzed_with"] = {
                 "ai_provider": ai_provider,
@@ -3254,6 +3270,12 @@ async def re_analyze_failure(
             }
 
     await patch_result_json(parent_job_id, _patch_running)
+
+    if already_running:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Failure {failure_uuid} is already being re-analyzed",
+        )
     notify_job_status_changed(parent_job_id)
 
     # Start background task
