@@ -462,7 +462,7 @@ function ReportContent() {
               <ReportPortalButton jobId={result.job_id} jobName={result.job_name ?? result.job_id} buildNumber={result.build_number} hasFailures={(result.failures ?? []).length > 0} />
             )}
             <Link to={`/chat/${jobId}`}>
-              <Button variant="outline" size="sm" className="gap-1.5 text-xs">
+              <Button variant="ghost" size="sm" className="gap-1.5 text-xs">
                 <MessageCircle className="h-3.5 w-3.5" />
                 Chat
               </Button>
