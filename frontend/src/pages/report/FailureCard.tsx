@@ -21,6 +21,7 @@ import { ClassificationSelect } from './ClassificationSelect'
 import { BugCreationDialog } from './BugCreationDialog'
 import { useReviewSuggestion } from './useReviewSuggestion'
 import { ConfirmDialog } from '@/components/shared/ConfirmDialog'
+import { UuidCopyButton } from '@/components/shared/UuidCopyButton'
 import { ChevronDown, ChevronRight, Bug, MessageSquare, CheckCircle2, Copy, Check, RotateCw } from 'lucide-react'
 
 function IssueButton({ disabled, tooltip, label, onClick }: {
@@ -282,16 +283,7 @@ export function FailureCard({ group, jobId, childJobName, childBuildNumber, inde
             >
               {copiedSection === 'test-name' ? <Check className="h-3 w-3 text-signal-green" /> : <Copy className="h-3 w-3" />}
             </button>
-            <span className="font-mono text-[10px] text-text-tertiary">{rep.id.slice(0, 8)}</span>
-            <button
-              type="button"
-              className="text-text-tertiary hover:text-text-primary transition-colors"
-              onClick={(e) => { e.stopPropagation(); copyToClipboard(rep.id, 'uuid') }}
-              title={copiedSection === 'uuid' ? 'Copied UUID' : 'Copy UUID to clipboard'}
-              aria-label={copiedSection === 'uuid' ? 'Copied UUID' : 'Copy UUID to clipboard'}
-            >
-              {copiedSection === 'uuid' ? <Check className="h-3 w-3 text-signal-green" /> : <Copy className="h-3 w-3" />}
-            </button>
+            <UuidCopyButton uuid={rep.id} sectionKey="uuid" copiedSection={copiedSection} onCopy={copyToClipboard} />
           </div>
           <div className="flex items-center gap-2 shrink-0">
             <ClassificationBadge classification={classification} />
@@ -306,8 +298,22 @@ export function FailureCard({ group, jobId, childJobName, childBuildNumber, inde
                 <ClassificationBadge key={cls} classification={cls} />
               ))
             })()}
-            {group.count === 1 && (
+            {group.count === 1 ? (
               <ReviewToggle jobId={jobId} testName={rep.test_name} childJobName={scopedChildJobName} childBuildNumber={scopedChildBuildNumber} />
+            ) : (
+              <button
+                onClick={(e) => { e.stopPropagation(); handleReviewAll() }}
+                disabled={reviewingAll}
+                className={`flex items-center gap-1 rounded-md px-2 py-1 text-[10px] font-mono transition-colors ${
+                  allReviewed
+                    ? 'bg-signal-green/15 text-signal-green'
+                    : 'bg-surface-elevated text-text-tertiary hover:text-text-secondary'
+                }`}
+                title={allReviewed ? 'All reviewed' : `Review all ${group.count} tests`}
+              >
+                <CheckCircle2 className="h-3 w-3" />
+                {allReviewed ? 'Reviewed' : `Review ${reviewedCount}/${group.count}`}
+              </button>
             )}
             {commentCount > 0 && (
               <span className="flex items-center gap-1 rounded-md bg-surface-elevated px-2 py-1 text-[10px] font-mono text-text-tertiary">
@@ -349,16 +355,7 @@ export function FailureCard({ group, jobId, childJobName, childBuildNumber, inde
                     <div key={t.test_name} className="flex items-center justify-between gap-2">
                       <div className="flex items-center gap-1.5 min-w-0">
                         <p className="font-mono text-xs text-text-secondary truncate" title={t.test_name}>{t.test_name}</p>
-                        <span className="font-mono text-[10px] text-text-tertiary shrink-0">{t.id.slice(0, 8)}</span>
-                        <button
-                          type="button"
-                          className="text-text-tertiary hover:text-text-primary transition-colors shrink-0"
-                          onClick={() => copyToClipboard(t.id, `uuid-${t.id}`)}
-                          title={copiedSection === `uuid-${t.id}` ? 'Copied UUID' : 'Copy UUID to clipboard'}
-                          aria-label={copiedSection === `uuid-${t.id}` ? 'Copied UUID' : 'Copy UUID to clipboard'}
-                        >
-                          {copiedSection === `uuid-${t.id}` ? <Check className="h-3 w-3 text-signal-green" /> : <Copy className="h-3 w-3" />}
-                        </button>
+                        <UuidCopyButton uuid={t.id} sectionKey={`uuid-${t.id}`} copiedSection={copiedSection} onCopy={copyToClipboard} />
                       </div>
                       <ReviewToggle jobId={jobId} testName={t.test_name} childJobName={scopedChildJobName} childBuildNumber={scopedChildBuildNumber} disabled={reviewingAll} />
                     </div>
