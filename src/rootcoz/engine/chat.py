@@ -3,6 +3,8 @@
 Builds job-scoped system prompts and manages AI CLI conversations.
 """
 
+import asyncio
+import shutil
 from pathlib import Path
 
 from simple_logger.logger import get_logger
@@ -14,12 +16,169 @@ from rootcoz.engine.core import (
 
 logger = get_logger(name=__name__)
 
+_CHAT_WORKSPACE_PREFIX = "rootcoz-chat-"
+
+
+def get_chat_workspace(job_id: str) -> Path:
+    """Get the chat workspace path for a job."""
+    # Sanitize job_id to prevent path traversal
+    safe_id = job_id.replace("/", "_").replace("..", "_").replace("\\", "_")
+    workspace = Path(f"/tmp/{_CHAT_WORKSPACE_PREFIX}{safe_id}")
+    # Verify the resolved path is still under /tmp/
+    resolved = workspace.resolve()
+    if not str(resolved).startswith("/tmp/"):
+        raise ValueError(f"Invalid job_id for workspace: {job_id}")
+    return workspace
+
+
+def ensure_chat_workspace(job_id: str) -> Path:
+    """Create the chat workspace directory if it doesn't exist."""
+    workspace = get_chat_workspace(job_id)
+    workspace.mkdir(parents=True, exist_ok=True)
+    return workspace
+
+
+def find_session_id_on_disk(job_id: str, ai_provider: str) -> str | None:
+    """Check if a CLI session exists on disk for this job.
+
+    Different providers store sessions in different locations.
+    Returns the session_id if found, None otherwise.
+    """
+    workspace = get_chat_workspace(job_id)
+    if not workspace.exists():
+        return None
+
+    # Claude stores sessions in .claude/ directory
+    claude_sessions = workspace / ".claude" / "projects"
+    if ai_provider == "claude" and claude_sessions.exists():
+        # Claude session dirs contain conversation state
+        for session_dir in claude_sessions.iterdir():
+            if session_dir.is_dir():
+                return session_dir.name
+
+    # For other providers, we rely on the session_id stored in the DB
+    return None
+
+
+async def clone_chat_repos(
+    workspace: Path,
+    request_params: dict,
+) -> bool:
+    """Clone repos into the chat workspace.
+
+    Skips if repos are already cloned (marker file exists).
+    Returns True if repos are available.
+
+    Note:
+        Repo tokens may be embedded in git remote URLs within the workspace.
+        The workspace is in /tmp/ owned by the server process. Tokens are
+        cleaned up when repos are deleted via cleanup_chat_repos().
+    """
+    from rootcoz.config import parse_repo_ref
+    from rootcoz.repository import RepositoryManager, derive_test_repo_name
+    from rootcoz.models import AdditionalRepo
+
+    marker = workspace / ".repos_cloned"
+    if marker.exists():
+        return True
+
+    tests_repo_url = request_params.get("tests_repo_url", "")
+    additional_repos = request_params.get("additional_repos") or []
+
+    if not tests_repo_url and not additional_repos:
+        return False
+
+    repo_manager = RepositoryManager()
+    cloned_any = False
+
+    try:
+        if tests_repo_url:
+            try:
+                clean_url, ref = parse_repo_ref(str(tests_repo_url))
+                repo_name = derive_test_repo_name(clean_url, additional_repos)
+                token = request_params.get("tests_repo_token", "")
+                await asyncio.to_thread(
+                    repo_manager.clone_into,
+                    clean_url,
+                    workspace / repo_name,
+                    depth=50,
+                    branch=ref,
+                    token=token or None,
+                )
+                cloned_any = True
+            except Exception:
+                logger.warning("Failed to clone test repo for chat", exc_info=True)
+
+        if additional_repos:
+            repos = [
+                AdditionalRepo(**r) if isinstance(r, dict) else r
+                for r in additional_repos
+            ]
+            for repo in repos:
+                try:
+                    token = getattr(repo, "token", None) or ""
+                    await asyncio.to_thread(
+                        repo_manager.clone_into,
+                        str(repo.url),
+                        workspace / repo.name,
+                        depth=50,
+                        branch=getattr(repo, "ref", "") or "",
+                        token=token or None,
+                    )
+                    cloned_any = True
+                except Exception:
+                    logger.warning(
+                        f"Failed to clone repo {repo.name} for chat", exc_info=True
+                    )
+
+        if cloned_any:
+            marker.touch()
+    except Exception:
+        logger.warning("Chat repo cloning failed", exc_info=True)
+
+    return cloned_any
+
+
+def cleanup_chat_repos(job_id: str) -> None:
+    """Delete cloned repos from chat workspace but keep session files."""
+    workspace = get_chat_workspace(job_id)
+    if not workspace.exists():
+        return
+
+    marker = workspace / ".repos_cloned"
+    if marker.exists():
+        marker.unlink()
+
+    # Delete everything except hidden dirs (which contain session data)
+    for item in workspace.iterdir():
+        if item.name.startswith("."):
+            continue  # Keep .claude/, .cursor/ etc (session data)
+        if item.is_dir():
+            shutil.rmtree(item, ignore_errors=True)
+        else:
+            item.unlink(missing_ok=True)
+
+    logger.info(f"Cleaned up chat repos for job {job_id} (kept sessions)")
+
+
+def cleanup_chat_workspace(job_id: str) -> None:
+    """Delete the entire chat workspace including sessions."""
+    workspace = get_chat_workspace(job_id)
+    if workspace.exists():
+        shutil.rmtree(workspace, ignore_errors=True)
+        logger.info(f"Deleted chat workspace for job {job_id}")
+
 
 def build_system_prompt(
     result_data: dict,
     job_id: str,
     server_url: str,
     auth_header: str = "",
+    jira_configured: bool = False,
+    jira_url: str = "",
+    jira_project_key: str = "",
+    github_issues_enabled: bool = False,
+    repos_available: bool = False,
 ) -> str:
     """Build a system prompt that scopes the AI to a specific analyzed job.
 
@@ -80,6 +239,31 @@ You can use curl to query these endpoints for more details:
 - `curl{auth_flag} {server_url}/api/results/{job_id}/comments` — Get comments on this job
 """
 
+    # Build integrations section
+    integration_lines = []
+    if jira_configured:
+        integration_lines.append(
+            f"Jira: Configured (URL: {jira_url}, Project: {jira_project_key}). "
+            "Check failure's product_bug_report.jira_matches for existing tickets."
+        )
+    else:
+        integration_lines.append(
+            "Jira: Not configured. Tell user to configure Jira credentials in Settings."
+        )
+    if github_issues_enabled:
+        integration_lines.append("GitHub Issues: Enabled.")
+    else:
+        integration_lines.append(
+            "GitHub Issues: Not configured. Tell user to configure GitHub token in Settings."
+        )
+    if repos_available:
+        integration_lines.append(
+            "Source Repositories: Cloned in your working directory. Explore test/product code."
+        )
+    else:
+        integration_lines.append("Source Repositories: Not available.")
+    integrations_section = "\n".join(f"- {line}" for line in integration_lines)
+
     return f"""You are a read-only assistant helping a user understand a CI/CD failure analysis.
 
 ## Scope — STRICT RULES
@@ -101,6 +285,9 @@ You can use curl to query these endpoints for more details:
 
 When the user references a test, use the UUID to look up its details.
 {api_section}
+## Integrations
+{integrations_section}
+
 ## Instructions
 - Answer questions about the failures, their root causes, classifications, and suggested fixes
 - If the user asks about a specific test, use the UUID to reference it
@@ -149,6 +336,11 @@ async def chat_with_ai(
     ai_cli_timeout: int | None = None,
     auth_header: str = "",
     session_id: str | None = None,
+    jira_configured: bool = False,
+    jira_url: str = "",
+    jira_project_key: str = "",
+    github_issues_enabled: bool = False,
+    repos_available: bool = False,
 ) -> tuple[bool, str, str | None]:
     """Send a chat message and get an AI response.
 
@@ -175,7 +367,15 @@ async def chat_with_ai(
     else:
         # First message — build full system prompt
         system_prompt = build_system_prompt(
-            result_data, job_id, server_url, auth_header=auth_header
+            result_data,
+            job_id,
+            server_url,
+            auth_header=auth_header,
+            jira_configured=jira_configured,
+            jira_url=jira_url,
+            jira_project_key=jira_project_key,
+            github_issues_enabled=github_issues_enabled,
+            repos_available=repos_available,
         )
         prompt = build_chat_prompt(system_prompt, history, message)
 

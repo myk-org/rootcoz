@@ -14,7 +14,7 @@ import type { ModelOption } from '@/components/shared/ModelCombobox'
 import { Tooltip, TooltipTrigger, TooltipContent } from '@/components/ui/tooltip'
 import { TooltipProvider } from '@/components/ui/tooltip'
 import { Textarea } from '@/components/ui/textarea'
-import { Send, Trash2, ArrowLeft, Loader2, Bot, User } from 'lucide-react'
+import { Send, Trash2, ArrowLeft, Loader2, Bot, User, Copy, Check } from 'lucide-react'
 
 interface ChatMessage {
   id: number
@@ -48,6 +48,8 @@ export function ChatPage() {
   const [aiModel, setAiModel] = useState('')
   const [availableModels, setAvailableModels] = useState<ModelOption[]>([])
   const [aiConfigs, setAiConfigs] = useState<{ ai_provider: string; ai_model: string }[]>([])
+
+  const [copiedMsgId, setCopiedMsgId] = useState<number | null>(null)
 
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLTextAreaElement>(null)
@@ -152,6 +154,14 @@ export function ChatPage() {
       inputRef.current?.focus()
     }
   }, [input, sending, jobId, aiProvider, aiModel])
+
+  const copyMessage = useCallback(async (content: string, msgId: number) => {
+    try {
+      await navigator.clipboard.writeText(content)
+      setCopiedMsgId(msgId)
+      setTimeout(() => setCopiedMsgId(null), 2000)
+    } catch { /* clipboard not available */ }
+  }, [])
 
   const handleClear = useCallback(async () => {
     if (!jobId) return
@@ -258,12 +268,26 @@ export function ChatPage() {
                 }`}
               >
                 <div className="whitespace-pre-wrap break-words">{msg.content}</div>
-                <div className="flex items-center gap-2 mt-2 text-[10px] text-text-tertiary">
-                  {msg.role === 'user' && msg.username && <span>{msg.username}</span>}
-                  {msg.role === 'assistant' && msg.ai_provider && (
-                    <span>{msg.ai_provider}{msg.ai_model ? ` / ${msg.ai_model}` : ''}</span>
-                  )}
-                  <span>{new Date(msg.created_at).toLocaleTimeString()}</span>
+                <div className="flex items-center justify-between mt-2">
+                  <div className="flex items-center gap-2 text-[10px] text-text-tertiary">
+                    {msg.role === 'user' && msg.username && <span>{msg.username}</span>}
+                    {msg.role === 'assistant' && msg.ai_provider && (
+                      <span>{msg.ai_provider}{msg.ai_model ? ` / ${msg.ai_model}` : ''}</span>
+                    )}
+                    <span>{new Date(msg.created_at).toLocaleTimeString()}</span>
+                  </div>
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <button
+                        type="button"
+                        className="text-text-tertiary hover:text-text-primary transition-colors"
+                        onClick={() => copyMessage(msg.content, msg.id)}
+                      >
+                        {copiedMsgId === msg.id ? <Check className="h-3 w-3 text-signal-green" /> : <Copy className="h-3 w-3" />}
+                      </button>
+                    </TooltipTrigger>
+                    <TooltipContent>{copiedMsgId === msg.id ? 'Copied!' : 'Copy message'}</TooltipContent>
+                  </Tooltip>
                 </div>
               </div>
               {msg.role === 'user' && (
@@ -282,8 +306,12 @@ export function ChatPage() {
                   <Bot className="h-4 w-4 text-accent-blue" />
                 </div>
               </div>
-              <div className="bg-surface-elevated rounded-lg px-4 py-3">
+              <div className="flex items-center gap-2 bg-surface-elevated rounded-lg px-4 py-3">
                 <Loader2 className="h-4 w-4 animate-spin text-text-tertiary" />
+                <span className="text-xs text-text-tertiary">Thinking...</span>
+                <Button variant="ghost" size="sm" className="h-6 px-2 text-xs text-signal-red" onClick={() => setSending(false)}>
+                  Stop
+                </Button>
               </div>
             </div>
           )}

@@ -7091,6 +7091,37 @@ async def send_chat_message(
             last_session_id = msg["session_id"]
             break
 
+    # Set up chat workspace
+    from rootcoz.engine.chat import (
+        ensure_chat_workspace,
+        clone_chat_repos,
+        find_session_id_on_disk,
+    )
+
+    workspace = ensure_chat_workspace(job_id)
+
+    # Clone repos (skips if already cloned)
+    params = result_data.get("request_params", {})
+    decrypted_params = {}
+    try:
+        decrypted_params = decrypt_sensitive_fields(dict(params))
+    except Exception:
+        pass
+    repos_available = await clone_chat_repos(workspace, decrypted_params)
+
+    # Detect integration status
+    settings = get_settings()
+    jira_configured = bool(decrypted_params.get("jira_url") or settings.jira_url)
+    jira_url = decrypted_params.get("jira_url", "") or str(settings.jira_url or "")
+    jira_project_key = decrypted_params.get("jira_project_key", "") or str(
+        settings.jira_project_key or ""
+    )
+    github_issues_enabled = bool(settings.enable_github_issues)
+
+    # Find session: check DB first, then disk
+    if not last_session_id:
+        last_session_id = find_session_id_on_disk(job_id, ai_provider)
+
     # Call AI
     server_url = _build_internal_server_url()
     auth_header = await _create_ai_auth_header(request.state.username)
@@ -7103,9 +7134,15 @@ async def send_chat_message(
             ai_provider=ai_provider,
             ai_model=ai_model,
             server_url=server_url,
+            repo_path=workspace,
             ai_cli_timeout=get_settings().ai_cli_timeout,
             auth_header=auth_header,
             session_id=last_session_id,
+            jira_configured=jira_configured,
+            jira_url=jira_url,
+            jira_project_key=jira_project_key,
+            github_issues_enabled=github_issues_enabled,
+            repos_available=repos_available,
         )
     finally:
         await _cleanup_ai_session(auth_header)
@@ -7145,11 +7182,14 @@ async def send_chat_message(
 @app.delete("/api/chat/{job_id}")
 async def clear_chat_history(job_id: str) -> dict:
     """Clear all chat messages for a job."""
+    from rootcoz.engine.chat import cleanup_chat_workspace
+
     result = await get_result(job_id)
     if not result:
         raise HTTPException(status_code=404, detail="Job not found")
 
     count = await storage.delete_chat_messages(job_id)
+    cleanup_chat_workspace(job_id)
     return {"deleted": count}
 
 

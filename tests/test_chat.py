@@ -362,7 +362,7 @@ class TestChatEndpoints:
         with patch(
             "rootcoz.engine.chat.chat_with_ai", new_callable=AsyncMock
         ) as mock_chat:
-            mock_chat.return_value = (True, "AI response here")
+            mock_chat.return_value = (True, "AI response here", None)
             response = test_client.post(
                 "/api/chat/chat-send-job",
                 json={"message": "what failed?", "ai_provider": "claude"},
@@ -383,7 +383,7 @@ class TestChatEndpoints:
         with patch(
             "rootcoz.engine.chat.chat_with_ai", new_callable=AsyncMock
         ) as mock_chat:
-            mock_chat.return_value = (True, "first response")
+            mock_chat.return_value = (True, "first response", None)
             test_client.post(
                 "/api/chat/chat-hist-job",
                 json={"message": "hello", "ai_provider": "claude"},
@@ -403,7 +403,7 @@ class TestChatEndpoints:
         with patch(
             "rootcoz.engine.chat.chat_with_ai", new_callable=AsyncMock
         ) as mock_chat:
-            mock_chat.return_value = (True, "resp")
+            mock_chat.return_value = (True, "resp", None)
             test_client.post(
                 "/api/chat/chat-del-job",
                 json={"message": "hello", "ai_provider": "claude"},
@@ -444,7 +444,7 @@ class TestChatEndpoints:
         with patch(
             "rootcoz.engine.chat.chat_with_ai", new_callable=AsyncMock
         ) as mock_chat:
-            mock_chat.return_value = (False, "AI CLI timed out")
+            mock_chat.return_value = (False, "AI CLI timed out", None)
             response = test_client.post(
                 "/api/chat/chat-fail-job",
                 json={"message": "hello", "ai_provider": "claude"},
@@ -457,7 +457,7 @@ class TestChatEndpoints:
         with patch(
             "rootcoz.engine.chat.chat_with_ai", new_callable=AsyncMock
         ) as mock_chat:
-            mock_chat.return_value = (True, "resp")
+            mock_chat.return_value = (True, "resp", None)
             for i in range(3):
                 test_client.post(
                     "/api/chat/chat-page-job",
