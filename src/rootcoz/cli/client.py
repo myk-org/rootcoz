@@ -938,3 +938,24 @@ class RootCozClient:
         if ai_model:
             payload["ai_model"] = ai_model
         return self._request("POST", "/api/analyze-comment-intent", json=payload)
+
+    # -- Chat -----------------------------------------------------------------
+
+    def get_chat_history(self, job_id: str, limit: int = 200) -> dict:
+        """Get chat history for a job. GET /api/chat/{job_id}"""
+        return self._request("GET", f"/api/chat/{job_id}", params={"limit": str(limit)})
+
+    def send_chat_message(
+        self, job_id: str, message: str, ai_provider: str = "", ai_model: str = ""
+    ) -> dict:
+        """Send a chat message and get AI response. POST /api/chat/{job_id}"""
+        body: dict = {"message": message}
+        if ai_provider:
+            body["ai_provider"] = ai_provider
+        if ai_model:
+            body["ai_model"] = ai_model
+        return self._request("POST", f"/api/chat/{job_id}", json=body)
+
+    def clear_chat(self, job_id: str) -> dict:
+        """Clear chat history for a job. DELETE /api/chat/{job_id}"""
+        return self._request("DELETE", f"/api/chat/{job_id}")

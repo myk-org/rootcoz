@@ -3719,3 +3719,105 @@ class TestApiKeyOption:
                 verify_ssl=True,
                 api_key="cli-key",  # pragma: allowlist secret
             )
+
+
+class TestChatCommands:
+    def test_chat_history(self, mock_client):
+        mock_client.get_chat_history.return_value = {
+            "messages": [
+                {"role": "user", "content": "Why did this fail?"},
+                {"role": "assistant", "content": "DNS timeout."},
+            ],
+            "total": 2,
+        }
+        result = runner.invoke(app, ["chat", "history", "job-1"])
+        assert result.exit_code == 0
+        mock_client.get_chat_history.assert_called_once_with("job-1", limit=200)
+
+    def test_chat_history_with_limit(self, mock_client):
+        mock_client.get_chat_history.return_value = {
+            "messages": [],
+            "total": 0,
+        }
+        result = runner.invoke(app, ["chat", "history", "job-1", "--limit", "10"])
+        assert result.exit_code == 0
+        mock_client.get_chat_history.assert_called_once_with("job-1", limit=10)
+
+    def test_chat_history_json(self, mock_client):
+        payload = {
+            "messages": [{"role": "user", "content": "hello"}],
+            "total": 1,
+        }
+        mock_client.get_chat_history.return_value = payload
+        result = runner.invoke(app, ["--json", "chat", "history", "job-1"])
+        assert result.exit_code == 0
+        parsed = json.loads(result.output)
+        assert parsed["total"] == 1
+        assert parsed["messages"][0]["role"] == "user"
+
+    def test_chat_send(self, mock_client):
+        mock_client.send_chat_message.return_value = {
+            "role": "assistant",
+            "content": "The test failed due to a timeout.",
+        }
+        result = runner.invoke(
+            app, ["chat", "send", "job-1", "Why did this test fail?"]
+        )
+        assert result.exit_code == 0
+        mock_client.send_chat_message.assert_called_once_with(
+            "job-1", "Why did this test fail?", ai_provider="", ai_model=""
+        )
+
+    def test_chat_send_with_ai_config(self, mock_client):
+        mock_client.send_chat_message.return_value = {
+            "role": "assistant",
+            "content": "Explanation",
+        }
+        result = runner.invoke(
+            app,
+            [
+                "chat",
+                "send",
+                "job-1",
+                "Explain the error",
+                "--provider",
+                "claude",
+                "--model",
+                "opus-4",
+            ],
+        )
+        assert result.exit_code == 0
+        mock_client.send_chat_message.assert_called_once_with(
+            "job-1", "Explain the error", ai_provider="claude", ai_model="opus-4"
+        )
+
+    def test_chat_send_json(self, mock_client):
+        payload = {"role": "assistant", "content": "Answer"}
+        mock_client.send_chat_message.return_value = payload
+        result = runner.invoke(app, ["--json", "chat", "send", "job-1", "question"])
+        assert result.exit_code == 0
+        parsed = json.loads(result.output)
+        assert parsed["role"] == "assistant"
+        assert parsed["content"] == "Answer"
+
+    def test_chat_clear(self, mock_client):
+        mock_client.clear_chat.return_value = {"status": "cleared"}
+        result = runner.invoke(app, ["chat", "clear", "job-1"])
+        assert result.exit_code == 0
+        assert "cleared" in result.output.lower()
+        mock_client.clear_chat.assert_called_once_with("job-1")
+
+    def test_chat_clear_json(self, mock_client):
+        mock_client.clear_chat.return_value = {"status": "cleared"}
+        result = runner.invoke(app, ["--json", "chat", "clear", "job-1"])
+        assert result.exit_code == 0
+        parsed = json.loads(result.output)
+        assert parsed["status"] == "cleared"
+
+    def test_chat_history_error(self, mock_client):
+        mock_client.get_chat_history.side_effect = RootCozError(
+            status_code=404, detail="Job not found"
+        )
+        result = runner.invoke(app, ["chat", "history", "nonexistent"])
+        assert result.exit_code == 1
+        assert "404" in result.output or "not found" in result.output.lower()

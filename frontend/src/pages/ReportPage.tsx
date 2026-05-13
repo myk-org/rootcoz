@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { useParams, useNavigate, useLocation } from 'react-router-dom'
+import { useParams, useNavigate, useLocation, Link } from 'react-router-dom'
 import { api } from '@/lib/api'
 import { useClipboard } from '@/lib/useClipboard'
 import { parseApiTimestamp, isAnalysisTimeout, formatDuration, formatTimestamp } from '@/lib/utils'
@@ -20,7 +20,7 @@ import { Skeleton } from '@/components/ui/skeleton'
 import { StatusChip } from '@/components/shared/StatusChip'
 import { ExpandCollapseButtons } from '@/components/shared/ExpandCollapseButtons'
 import { Button } from '@/components/ui/button'
-import { ExternalLink, CheckCircle2, Clock, Calendar, Cpu, Timer, FolderGit2, RotateCw, Copy, Check } from 'lucide-react'
+import { ExternalLink, CheckCircle2, Clock, Calendar, Cpu, Timer, FolderGit2, RotateCw, Copy, Check, MessageCircle } from 'lucide-react'
 import { ReAnalyzeDialog } from './report/ReAnalyzeDialog'
 import { ReportPortalButton } from './report/ReportPortalButton'
 import { TokenUsageBadge } from './report/TokenUsageBadge'
@@ -461,6 +461,12 @@ function ReportContent() {
             {state.reportportalAvailable && (result.child_job_analyses ?? []).length === 0 && (
               <ReportPortalButton jobId={result.job_id} jobName={result.job_name ?? result.job_id} buildNumber={result.build_number} hasFailures={(result.failures ?? []).length > 0} />
             )}
+            <Link to={`/chat/${jobId}`}>
+              <Button variant="outline" size="sm" className="gap-1.5 text-xs">
+                <MessageCircle className="h-3.5 w-3.5" />
+                Chat
+              </Button>
+            </Link>
             {result.request_params && (
               <Button
                 variant="ghost"

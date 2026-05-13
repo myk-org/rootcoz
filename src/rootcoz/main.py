@@ -70,6 +70,7 @@ from rootcoz.encryption import (
     SENSITIVE_KEYS,
     decrypt_sensitive_fields,
     encrypt_sensitive_fields,
+    strip_sensitive_from_response,
 )
 from rootcoz.engine.core import (
     JOB_INSIGHT_ISSUE_PROMPT_FILENAME,
@@ -92,6 +93,7 @@ from rootcoz.metadata_rules import match_job_metadata
 from rootcoz.models import (
     AddCommentRequest,
     AdditionalRepo,
+    ChatMessageRequest,
     AnalyzeCommentRequest,
     AnalyzeCommentResponse,
     AnalyzeRequest,
@@ -7029,6 +7031,136 @@ async def create_feedback(request: Request, body: FeedbackCreateRequest):
             status_code=500,
             detail="Failed to create feedback issue",
         ) from exc
+
+
+# -- Chat endpoints --
+
+
+@app.get("/api/chat/{job_id}")
+async def get_chat_history(job_id: str, limit: int = 200, offset: int = 0) -> dict:
+    """Get chat message history for an analyzed job."""
+    result = await get_result(job_id)
+    if not result:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    messages = await storage.get_chat_messages(job_id, limit=limit, offset=offset)
+    total = await storage.count_chat_messages(job_id)
+    return {"messages": messages, "total": total}
+
+
+@app.post("/api/chat/{job_id}")
+async def send_chat_message(
+    job_id: str, body: ChatMessageRequest, request: Request
+) -> dict:
+    """Send a chat message and get an AI response."""
+    from rootcoz.engine.chat import chat_with_ai
+
+    stored = await get_result(job_id, strip_sensitive=False)
+    if not stored or not stored.get("result"):
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    result_data = stored["result"]
+
+    # Resolve AI provider/model: request override > job's original > server default
+    ai_provider = body.ai_provider or result_data.get("ai_provider", "") or AI_PROVIDER
+    ai_model = body.ai_model or result_data.get("ai_model", "") or AI_MODEL
+
+    if not ai_provider:
+        raise HTTPException(status_code=400, detail="No AI provider configured")
+
+    # Strip sensitive data before passing to chat engine
+    safe_result = strip_sensitive_from_response(dict(result_data))
+
+    # Also strip request_params which may contain encrypted credentials
+    if "request_params" in safe_result:
+        safe_params = dict(safe_result["request_params"])
+        for key in (
+            "jenkins_password",
+            "jenkins_user",
+            "jira_api_token",
+            "jira_pat",
+            "jira_email",
+            "github_token",
+            "tests_repo_token",
+            "reportportal_api_token",
+            "vapid_private_key",
+        ):
+            safe_params.pop(key, None)
+        safe_result["request_params"] = safe_params
+
+    # Save user message
+    user_msg_id = await storage.add_chat_message(
+        job_id=job_id,
+        role="user",
+        content=body.message,
+        username=request.state.username,
+    )
+
+    # Get conversation history
+    history = await storage.get_chat_messages(job_id)
+    # Exclude the message we just added (it's the new message)
+    history = [m for m in history if m["id"] != user_msg_id]
+
+    # Call AI
+    server_url = _build_internal_server_url()
+    success, response_text = await chat_with_ai(
+        job_id=job_id,
+        result_data=safe_result,
+        message=body.message,
+        history=history,
+        ai_provider=ai_provider,
+        ai_model=ai_model,
+        server_url=server_url,
+        ai_cli_timeout=get_settings().ai_cli_timeout,
+        username=request.state.username,
+    )
+
+    if not success:
+        # Save error as assistant message so user sees it
+        _error_msg_id = await storage.add_chat_message(
+            job_id=job_id,
+            role="assistant",
+            content=f"Error: {response_text}",
+            ai_provider=ai_provider,
+            ai_model=ai_model,
+        )
+        raise HTTPException(status_code=502, detail=response_text)
+
+    # Save assistant response
+    assistant_msg_id = await storage.add_chat_message(
+        job_id=job_id,
+        role="assistant",
+        content=response_text,
+        ai_provider=ai_provider,
+        ai_model=ai_model,
+    )
+
+    return {
+        "user_message": {
+            "id": user_msg_id,
+            "role": "user",
+            "content": body.message,
+            "username": request.state.username,
+        },
+        "assistant_message": {
+            "id": assistant_msg_id,
+            "role": "assistant",
+            "content": response_text,
+            "ai_provider": ai_provider,
+            "ai_model": ai_model,
+        },
+    }
+
+
+@app.delete("/api/chat/{job_id}")
+async def clear_chat_history(job_id: str) -> dict:
+    """Clear all chat messages for a job."""
+    result = await get_result(job_id)
+    if not result:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    count = await storage.delete_chat_messages(job_id)
+    return {"deleted": count}
 
 
 # SPA catch-all routes — must be AFTER all API routes

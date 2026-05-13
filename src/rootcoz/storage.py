@@ -498,6 +498,22 @@ async def init_db() -> None:
             "CREATE INDEX IF NOT EXISTS idx_mention_reads_username ON mention_reads (username)"
         )
 
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS chat_messages (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                job_id TEXT NOT NULL,
+                role TEXT NOT NULL,
+                content TEXT NOT NULL,
+                username TEXT NOT NULL DEFAULT '',
+                ai_provider TEXT NOT NULL DEFAULT '',
+                ai_model TEXT NOT NULL DEFAULT '',
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        await db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_chat_messages_job_id ON chat_messages (job_id)"
+        )
+
         await db.commit()
 
     # Backfill failure_history from existing results (runs once when table is empty).
@@ -2279,6 +2295,7 @@ async def _delete_job_rows(db: aiosqlite.Connection, job_id: str) -> bool:
     await db.execute("DELETE FROM failure_history WHERE job_id = ?", (job_id,))
     await db.execute("DELETE FROM test_classifications WHERE job_id = ?", (job_id,))
     await db.execute("DELETE FROM ai_token_usage WHERE job_id = ?", (job_id,))
+    await db.execute("DELETE FROM chat_messages WHERE job_id = ?", (job_id,))
     cursor = await db.execute("DELETE FROM results WHERE job_id = ?", (job_id,))
     return cursor.rowcount > 0
 
@@ -3785,3 +3802,56 @@ async def mark_all_mentions_read(username: str) -> int:
         f"mark_all_mentions_read: username={username}, marked={len(comment_ids)}"
     )
     return len(comment_ids)
+
+
+async def add_chat_message(
+    job_id: str,
+    role: str,
+    content: str,
+    username: str = "",
+    ai_provider: str = "",
+    ai_model: str = "",
+) -> int:
+    """Add a chat message and return its id."""
+    async with _connect_db() as db:
+        cursor = await db.execute(
+            "INSERT INTO chat_messages (job_id, role, content, username, ai_provider, ai_model) VALUES (?, ?, ?, ?, ?, ?)",
+            (job_id, role, content, username, ai_provider, ai_model),
+        )
+        await db.commit()
+        return cursor.lastrowid or 0
+
+
+async def get_chat_messages(
+    job_id: str, limit: int = 200, offset: int = 0
+) -> list[dict]:
+    """Get chat messages for a job, ordered by created_at ASC."""
+    async with _connect_db() as db:
+        cursor = await db.execute(
+            "SELECT id, job_id, role, content, username, ai_provider, ai_model, created_at FROM chat_messages WHERE job_id = ? ORDER BY created_at ASC LIMIT ? OFFSET ?",
+            (job_id, limit, offset),
+        )
+        rows = await cursor.fetchall()
+        return [dict(row) for row in rows]
+
+
+async def count_chat_messages(job_id: str) -> int:
+    """Count total chat messages for a job."""
+    async with _connect_db() as db:
+        cursor = await db.execute(
+            "SELECT COUNT(*) FROM chat_messages WHERE job_id = ?",
+            (job_id,),
+        )
+        row = await cursor.fetchone()
+        return row[0] if row else 0
+
+
+async def delete_chat_messages(job_id: str) -> int:
+    """Delete all chat messages for a job. Returns count deleted."""
+    async with _connect_db() as db:
+        cursor = await db.execute(
+            "DELETE FROM chat_messages WHERE job_id = ?",
+            (job_id,),
+        )
+        await db.commit()
+        return cursor.rowcount
