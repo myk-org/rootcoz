@@ -7113,7 +7113,9 @@ async def send_chat_message(
     try:
         decrypted_params = decrypt_sensitive_fields(dict(params))
     except Exception:
-        pass
+        logger.warning(
+            "Failed to decrypt request_params for chat context", exc_info=True
+        )
     repos_available = await clone_chat_repos(workspace, decrypted_params)
 
     # Detect integration status
@@ -7171,14 +7173,19 @@ async def send_chat_message(
         raise HTTPException(status_code=502, detail=response_text)
 
     # Save assistant response
-    assistant_msg_id = await storage.add_chat_message(
-        job_id=job_id,
-        role="assistant",
-        content=response_text,
-        ai_provider=ai_provider,
-        ai_model=ai_model,
-        session_id=new_session_id or "",
-    )
+    try:
+        assistant_msg_id = await storage.add_chat_message(
+            job_id=job_id,
+            role="assistant",
+            content=response_text,
+            ai_provider=ai_provider,
+            ai_model=ai_model,
+            session_id=new_session_id or "",
+        )
+    except Exception:
+        # Rollback user message if we can't save the response
+        await storage.delete_chat_message_by_id(user_msg_id)
+        raise
 
     return {
         "user_message": {
