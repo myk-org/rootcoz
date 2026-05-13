@@ -1,5 +1,5 @@
 import { useState, useEffect, useMemo, useRef, type ReactNode } from 'react'
-import { useLocation } from 'react-router-dom'
+import { useLocation, useNavigate } from 'react-router-dom'
 import { useClipboard } from '@/lib/useClipboard'
 import type { GroupedFailure } from '@/types'
 import { buildFileUrl, buildRepoUrls, isSafeHref, matchRepo, type RepoUrl } from '@/lib/autoLink'
@@ -21,7 +21,7 @@ import { ClassificationSelect } from './ClassificationSelect'
 import { BugCreationDialog } from './BugCreationDialog'
 import { useReviewSuggestion } from './useReviewSuggestion'
 import { ConfirmDialog } from '@/components/shared/ConfirmDialog'
-import { ChevronDown, ChevronRight, Bug, MessageSquare, CheckCircle2, Copy, Check } from 'lucide-react'
+import { ChevronDown, ChevronRight, Bug, MessageSquare, CheckCircle2, Copy, Check, RotateCw } from 'lucide-react'
 
 function IssueButton({ disabled, tooltip, label, onClick }: {
   disabled: boolean
@@ -121,7 +121,10 @@ export function FailureCard({ group, jobId, childJobName, childBuildNumber, inde
   const [selectedProvider, setSelectedProvider] = useState(result?.ai_provider ?? '')
   const [selectedModel, setSelectedModel] = useState(result?.ai_model ?? '')
   const [includeLinks, setIncludeLinks] = useState(false)
+  const [reAnalyzing, setReAnalyzing] = useState(false)
+  const [reAnalyzeError, setReAnalyzeError] = useState<string | null>(null)
   const { copiedKey: copiedSection, copy: copyToClipboard } = useClipboard()
+  const navigate = useNavigate()
 
   const rep = group.tests[0]
   const analysis = rep.analysis
@@ -235,6 +238,19 @@ export function FailureCard({ group, jobId, childJobName, childBuildNumber, inde
     }
   }
 
+  async function handleReAnalyzeFailure() {
+    setReAnalyzing(true)
+    setReAnalyzeError(null)
+    try {
+      const data = await api.post<{ job_id: string }>(`/failures/${rep.id}/re-analyze`, {})
+      navigate(`/results/${data.job_id}`)
+    } catch (err) {
+      setReAnalyzeError(err instanceof Error ? err.message : 'Failed to re-analyze failure')
+    } finally {
+      setReAnalyzing(false)
+    }
+  }
+
   return (
     <>
       <Card
@@ -256,15 +272,27 @@ export function FailureCard({ group, jobId, childJobName, childBuildNumber, inde
               {group.count > 1 && <span className="text-xs text-text-tertiary">+{group.count - 1} more with same error</span>}
             </div>
           </button>
-          <button
-            type="button"
-            className="text-text-tertiary hover:text-text-primary transition-colors shrink-0"
-            onClick={(e) => { e.stopPropagation(); copyToClipboard(rep.test_name, 'test-name') }}
-            title={copiedSection === 'test-name' ? 'Copied test name' : 'Copy test name to clipboard'}
-            aria-label={copiedSection === 'test-name' ? 'Copied test name' : 'Copy test name to clipboard'}
-          >
-            {copiedSection === 'test-name' ? <Check className="h-3 w-3 text-signal-green" /> : <Copy className="h-3 w-3" />}
-          </button>
+          <div className="flex items-center gap-1.5 shrink-0">
+            <button
+              type="button"
+              className="text-text-tertiary hover:text-text-primary transition-colors"
+              onClick={(e) => { e.stopPropagation(); copyToClipboard(rep.test_name, 'test-name') }}
+              title={copiedSection === 'test-name' ? 'Copied test name' : 'Copy test name to clipboard'}
+              aria-label={copiedSection === 'test-name' ? 'Copied test name' : 'Copy test name to clipboard'}
+            >
+              {copiedSection === 'test-name' ? <Check className="h-3 w-3 text-signal-green" /> : <Copy className="h-3 w-3" />}
+            </button>
+            <span className="font-mono text-[10px] text-text-tertiary">{rep.id.slice(0, 8)}</span>
+            <button
+              type="button"
+              className="text-text-tertiary hover:text-text-primary transition-colors"
+              onClick={(e) => { e.stopPropagation(); copyToClipboard(rep.id, 'uuid') }}
+              title={copiedSection === 'uuid' ? 'Copied UUID' : 'Copy UUID to clipboard'}
+              aria-label={copiedSection === 'uuid' ? 'Copied UUID' : 'Copy UUID to clipboard'}
+            >
+              {copiedSection === 'uuid' ? <Check className="h-3 w-3 text-signal-green" /> : <Copy className="h-3 w-3" />}
+            </button>
+          </div>
           <div className="flex items-center gap-2 shrink-0">
             <ClassificationBadge classification={classification} />
             {(() => {
@@ -319,7 +347,19 @@ export function FailureCard({ group, jobId, childJobName, childBuildNumber, inde
                 <div className="space-y-1">
                   {group.tests.map((t) => (
                     <div key={t.test_name} className="flex items-center justify-between gap-2">
-                      <p className="font-mono text-xs text-text-secondary truncate" title={t.test_name}>{t.test_name}</p>
+                      <div className="flex items-center gap-1.5 min-w-0">
+                        <p className="font-mono text-xs text-text-secondary truncate" title={t.test_name}>{t.test_name}</p>
+                        <span className="font-mono text-[10px] text-text-tertiary shrink-0">{t.id.slice(0, 8)}</span>
+                        <button
+                          type="button"
+                          className="text-text-tertiary hover:text-text-primary transition-colors shrink-0"
+                          onClick={() => copyToClipboard(t.id, `uuid-${t.id}`)}
+                          title={copiedSection === `uuid-${t.id}` ? 'Copied UUID' : 'Copy UUID to clipboard'}
+                          aria-label={copiedSection === `uuid-${t.id}` ? 'Copied UUID' : 'Copy UUID to clipboard'}
+                        >
+                          {copiedSection === `uuid-${t.id}` ? <Check className="h-3 w-3 text-signal-green" /> : <Copy className="h-3 w-3" />}
+                        </button>
+                      </div>
                       <ReviewToggle jobId={jobId} testName={t.test_name} childJobName={scopedChildJobName} childBuildNumber={scopedChildBuildNumber} disabled={reviewingAll} />
                     </div>
                   ))}
@@ -496,6 +536,11 @@ export function FailureCard({ group, jobId, childJobName, childBuildNumber, inde
                   Include links
                 </label>
               )}
+              <Button variant="outline" size="sm" onClick={handleReAnalyzeFailure} disabled={reAnalyzing}>
+                <RotateCw className={`h-3.5 w-3.5 mr-1${reAnalyzing ? ' animate-spin' : ''}`} />
+                Re-analyze
+              </Button>
+              {reAnalyzeError && <span className="text-signal-red text-xs" role="alert">{reAnalyzeError}</span>}
               <IssueButton
                 disabled={!githubIssuesEnabled}
                 tooltip={!githubIssuesEnabled ? 'GitHub issues are disabled on this server' : undefined}
