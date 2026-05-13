@@ -443,6 +443,28 @@ class TestStatusCommand:
         assert result.exit_code == 0
         assert "running" in result.output.lower()
 
+    def test_status_shows_reanalyzed_from(self, mock_client):
+        mock_client.get_result.return_value = {
+            "job_id": "new-job",
+            "status": "completed",
+            "reanalyzed_from_job_id": "old-job",
+            "origin_job_name": "Original Job",
+        }
+        result = runner.invoke(app, ["status", "new-job"])
+        assert result.exit_code == 0
+        assert "Reanalyzed from:" in result.output
+        assert "old-job" in result.output
+        assert "Original Job" in result.output
+
+    def test_status_no_reanalyzed_from_for_normal_jobs(self, mock_client):
+        mock_client.get_result.return_value = {
+            "job_id": "normal-job",
+            "status": "completed",
+        }
+        result = runner.invoke(app, ["status", "normal-job"])
+        assert result.exit_code == 0
+        assert "Reanalyzed from" not in result.output
+
 
 class TestHistoryCommands:
     def test_history_test(self, mock_client):

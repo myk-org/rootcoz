@@ -489,6 +489,43 @@ def _attach_result_links(payload: dict, base_url: str, job_id: str) -> dict:
     return payload
 
 
+async def _attach_origin_job_info(result: dict) -> None:
+    """Attach origin job reference when the result is a re-analysis.
+
+    If ``request_params.reanalyzed_from_job_id`` exists, adds
+    ``reanalyzed_from_job_id`` and ``origin_job_name`` to the top-level
+    response.  Prefers the denormalized ``reanalyzed_from_job_name``
+    stored at creation time; falls back to a DB lookup for legacy data.
+    """
+    params = (result.get("result") or {}).get("request_params", {})
+    origin_id = params.get("reanalyzed_from_job_id", "")
+    if not origin_id:
+        return
+    result["reanalyzed_from_job_id"] = origin_id
+
+    # Fast path: use denormalized name stored at re-analysis creation time
+    stored_name = params.get("reanalyzed_from_job_name", "")
+    if stored_name:
+        result["origin_job_name"] = stored_name
+        return
+
+    # Fallback for legacy data: resolve via DB lookup
+    try:
+        origin = await get_result(origin_id)
+    except Exception:
+        logger.warning("Failed to resolve origin job %s", origin_id, exc_info=True)
+        origin = None
+    if origin and origin.get("result"):
+        origin_result = origin["result"]
+        result["origin_job_name"] = (
+            origin_result.get("display_name")
+            or origin_result.get("job_name")
+            or origin_id
+        )
+    else:
+        result["origin_job_name"] = origin_id
+
+
 def _recompose_repo_spec(url: str, ref: str) -> str:
     """Recompose 'url:ref' from stored components. Returns url alone when ref is empty."""
     if not url:
@@ -1970,6 +2007,18 @@ def _apply_base_analysis_overrides(
     params["peer_analysis_max_rounds"] = merged.peer_analysis_max_rounds
 
 
+def _stamp_reanalysis_metadata(
+    request_params: dict,
+    reanalyzed_from_job_id: str,
+    reanalyzed_from_job_name: str,
+) -> None:
+    """Write re-analysis origin fields into *request_params* when present."""
+    if reanalyzed_from_job_id:
+        request_params["reanalyzed_from_job_id"] = reanalyzed_from_job_id
+        if reanalyzed_from_job_name:
+            request_params["reanalyzed_from_job_name"] = reanalyzed_from_job_name
+
+
 async def _enqueue_file_raw_analysis(
     body: "UnifiedAnalyzeRequest",
     merged: "Settings",
@@ -1981,6 +2030,8 @@ async def _enqueue_file_raw_analysis(
     *,
     tags: list[str] | None = None,
     message_prefix: str = "Analysis",
+    reanalyzed_from_job_id: str = "",
+    reanalyzed_from_job_name: str = "",
 ) -> dict:
     """Build params, persist initial state, spawn task, and return response.
 
@@ -2058,6 +2109,11 @@ async def _enqueue_file_raw_analysis(
         "request_params": encrypt_sensitive_fields(base_params),
     }
     initial_result["request_params"]["submitted_by"] = username
+    _stamp_reanalysis_metadata(
+        initial_result["request_params"],
+        reanalyzed_from_job_id,
+        reanalyzed_from_job_name,
+    )
     effective_tags = tags if tags is not None else (body.tags or None)
     if effective_tags:
         initial_result["tags"] = effective_tags
@@ -2169,6 +2225,8 @@ async def _enqueue_analysis_job(
     *,
     message_prefix: str = "Analysis",
     username: str = "",
+    reanalyzed_from_job_id: str = "",
+    reanalyzed_from_job_name: str = "",
 ) -> dict:
     """Create, save, and enqueue a new analysis job.
 
@@ -2195,6 +2253,11 @@ async def _enqueue_analysis_job(
     }
     initial_result["request_params"]["submitted_by"] = username
     initial_result["request_params"]["analysis_type"] = "jenkins"
+    _stamp_reanalysis_metadata(
+        initial_result["request_params"],
+        reanalyzed_from_job_id,
+        reanalyzed_from_job_name,
+    )
     if body.tags:
         initial_result["tags"] = body.tags
     can_resume_wait = merged.wait_for_completion and bool(merged.jenkins_url)
@@ -2641,6 +2704,11 @@ async def re_analyze(
 
     result_data = stored["result"]
 
+    # Resolve origin display name now so it can be denormalized into request_params
+    origin_job_display_name = (
+        result_data.get("display_name") or result_data.get("job_name") or job_id
+    )
+
     # Authorization: only the original submitter or an admin may re-analyze
     original_submitter = result_data.get("request_params", {}).get("submitted_by", "")
     requesting_user = getattr(request.state, "username", "")
@@ -2788,6 +2856,8 @@ async def re_analyze(
             username=request.state.username,
             tags=unified_body.tags,
             message_prefix="Re-analysis",
+            reanalyzed_from_job_id=job_id,
+            reanalyzed_from_job_name=origin_job_display_name,
         )
 
     # Jenkins path (existing code)
@@ -2830,6 +2900,8 @@ async def re_analyze(
         base_url,
         message_prefix="Re-analysis",
         username=request.state.username,
+        reanalyzed_from_job_id=job_id,
+        reanalyzed_from_job_name=origin_job_display_name,
     )
 
 
@@ -2851,6 +2923,7 @@ async def get_job_result(
     if not result:
         raise HTTPException(status_code=404, detail="Job not found")
     _attach_result_links(result, _extract_base_url(), job_id)
+    await _attach_origin_job_info(result)
     settings = get_settings()
     result["capabilities"] = _build_capabilities(settings)
     if result.get("status") in IN_PROGRESS_STATUSES:

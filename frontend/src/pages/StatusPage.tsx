@@ -11,6 +11,8 @@ import { StatusChip } from '@/components/shared/StatusChip'
 import { ConfirmDialog } from '@/components/shared/ConfirmDialog'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
 import { ReAnalyzeDialog } from './report/ReAnalyzeDialog'
+import { OriginJobBanner } from '@/components/shared/OriginJobBanner'
+import { originJobLabel } from '@/lib/originJobLabel'
 import { useAuth } from '@/lib/auth'
 
 const phaseLabels: Record<string, string> = {
@@ -470,6 +472,14 @@ export function StatusPage() {
                 />
               )}
             </div>
+
+            {/* Origin job reference for re-analyses */}
+            {data?.reanalyzed_from_job_id && (
+              <OriginJobBanner
+                originJobId={data.reanalyzed_from_job_id}
+                originJobName={originJobLabel(data.origin_job_name, data.reanalyzed_from_job_id)}
+              />
+            )}
 
             {isAbortable && (
               <TooltipProvider>
