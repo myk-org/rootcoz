@@ -213,18 +213,22 @@ class TestAnalyzeEndpoint:
 
     def test_analyze_accepts_tests_repo_url_with_ref(self, test_client) -> None:
         """Test that tests_repo_url with ':ref' suffix is accepted (no URL validation)."""
-        response = test_client.post(
-            "/analyze",
-            json={
-                "type": "jenkins",
-                "job_name": "test",
-                "build_number": 123,
-                "tests_repo_url": "https://github.com/org/repo:develop",
-            },
-        )
-        # 400 from missing AI config, not 422 from URL validation
-        assert response.status_code == 400
-        assert "AI provider" in response.json()["detail"]
+        with (
+            patch("rootcoz.main.AI_PROVIDER", ""),
+            patch("rootcoz.main.AI_MODEL", ""),
+        ):
+            response = test_client.post(
+                "/analyze",
+                json={
+                    "type": "jenkins",
+                    "job_name": "test",
+                    "build_number": 123,
+                    "tests_repo_url": "https://github.com/org/repo:develop",
+                },
+            )
+            # 400 from missing AI config, not 422 from URL validation
+            assert response.status_code == 400
+            assert "AI provider" in response.json()["detail"]
 
     def test_analyze_missing_required_field(self, test_client) -> None:
         """Test that missing required field returns 422."""
@@ -239,17 +243,21 @@ class TestAnalyzeEndpoint:
 
     def test_analyze_missing_ai_provider_returns_400(self, test_client) -> None:
         """Test that missing AI provider returns 400 before queuing."""
-        response = test_client.post(
-            "/analyze",
-            json={
-                "type": "jenkins",
-                "job_name": "test",
-                "build_number": 123,
-                "ai_model": "test-model",
-            },
-        )
-        assert response.status_code == 400
-        assert "AI provider" in response.json()["detail"]
+        with (
+            patch("rootcoz.main.AI_PROVIDER", ""),
+            patch("rootcoz.main.AI_MODEL", ""),
+        ):
+            response = test_client.post(
+                "/analyze",
+                json={
+                    "type": "jenkins",
+                    "job_name": "test",
+                    "build_number": 123,
+                    "ai_model": "test-model",
+                },
+            )
+            assert response.status_code == 400
+            assert "AI provider" in response.json()["detail"]
 
     def test_analyze_always_saves_request_params(self, test_client) -> None:
         """request_params is persisted even when wait_for_completion is False.
@@ -1440,6 +1448,61 @@ class TestGetIssuePrompt:
         assert "/private-org/private-repo/" in call_args.args[0]
 
 
+def _make_child_preview_result(
+    *,
+    child_a_error: str = "AssertionError",
+    child_a_classification: str = "CODE ISSUE",
+    child_a_details: str = "Child A failure details",
+    child_a_evidence: str = "child-A artifact log line",
+    child_b_evidence: str = "child-B artifact log line",
+    child_b_details: str = "Child B failure details",
+) -> dict:
+    """Build a result_data dict with two sibling child jobs.
+
+    This helper eliminates duplication across GitHub and Jira preview tests.
+    """
+    return {
+        "status": "completed",
+        "summary": "Pipeline failed",
+        "jenkins_url": "http://jenkins/parent/1/",
+        "failures": [],
+        "child_job_analyses": [
+            {
+                "job_name": "child-A",
+                "build_number": 10,
+                "jenkins_url": "http://jenkins/child-A/10/",
+                "failures": [
+                    {
+                        "test_name": "test_alpha",
+                        "error": child_a_error,
+                        "analysis": {
+                            "classification": child_a_classification,
+                            "details": child_a_details,
+                            "artifacts_evidence": child_a_evidence,
+                        },
+                    }
+                ],
+            },
+            {
+                "job_name": "child-B",
+                "build_number": 20,
+                "jenkins_url": "http://jenkins/child-B/20/",
+                "failures": [
+                    {
+                        "test_name": "test_beta",
+                        "error": "RuntimeError",
+                        "analysis": {
+                            "classification": "PRODUCT BUG",
+                            "details": child_b_details,
+                            "artifacts_evidence": child_b_evidence,
+                        },
+                    }
+                ],
+            },
+        ],
+    }
+
+
 class TestPreviewGithubIssue:
     """Tests for POST /results/{job_id}/preview-github-issue."""
 
@@ -1588,6 +1651,72 @@ class TestPreviewGithubIssue:
         assert response.status_code == 200
         _, kwargs = mock_gen.call_args
         assert kwargs["issue_prompt"] == "Include CNV version"
+
+    @pytest.mark.asyncio
+    async def test_preview_child_job_uses_child_jenkins_url(self, test_client):
+        """Preview for a child job failure uses the child's jenkins_url, not the parent's."""
+        result_data = _make_child_preview_result()
+        await storage.save_result(
+            "job-child-preview-gh", "http://jenkins/parent/1/", "completed", result_data
+        )
+        with _enable_feature("github_issues_enabled"):
+            with patch("rootcoz.main.generate_github_issue_content") as mock_gen:
+                mock_gen.return_value = {"title": "T", "body": "B"}
+                with patch("rootcoz.main.search_github_duplicates") as mock_dup:
+                    mock_dup.return_value = []
+                    response = test_client.post(
+                        "/results/job-child-preview-gh/preview-github-issue",
+                        json={
+                            "test_name": "test_alpha",
+                            "child_job_name": "child-A",
+                            "child_build_number": 10,
+                        },
+                    )
+        assert response.status_code == 200
+        _, kwargs = mock_gen.call_args
+        # The jenkins_url should be the child's URL, not the parent's
+        assert kwargs["jenkins_url"] == "http://jenkins/child-A/10/"
+        # The failure should be child-A's failure, not child-B's
+        assert kwargs["failure"].test_name == "test_alpha"
+        assert (
+            kwargs["failure"].analysis.artifacts_evidence == "child-A artifact log line"
+        )
+
+    @pytest.mark.asyncio
+    async def test_preview_child_job_sibling_artifacts_not_leaked(self, test_client):
+        """Sibling child job artifacts must not appear in the preview for a specific child."""
+        result_data = _make_child_preview_result(
+            child_a_details="Child A failure",
+            child_a_evidence="child-A evidence only",
+            child_b_details="Child B failure",
+            child_b_evidence="child-B evidence only",
+        )
+        await storage.save_result(
+            "job-sibling-gh", "http://jenkins/parent/1/", "completed", result_data
+        )
+        with _enable_feature("github_issues_enabled"):
+            with patch("rootcoz.main.generate_github_issue_content") as mock_gen:
+                mock_gen.return_value = {"title": "T", "body": "B"}
+                with patch("rootcoz.main.search_github_duplicates") as mock_dup:
+                    mock_dup.return_value = []
+                    response = test_client.post(
+                        "/results/job-sibling-gh/preview-github-issue",
+                        json={
+                            "test_name": "test_alpha",
+                            "child_job_name": "child-A",
+                            "child_build_number": 10,
+                        },
+                    )
+        assert response.status_code == 200
+        _, kwargs = mock_gen.call_args
+        failure = kwargs["failure"]
+        # Verify only child-A's evidence is present, NOT child-B's
+        assert failure.analysis.artifacts_evidence == "child-A evidence only"
+        assert "child-B" not in failure.analysis.artifacts_evidence
+        # Verify the jenkins_url is child-A's, not parent's or child-B's
+        assert kwargs["jenkins_url"] == "http://jenkins/child-A/10/"
+        assert "parent" not in kwargs["jenkins_url"]
+        assert "child-B" not in kwargs["jenkins_url"]
 
 
 class TestPreviewJiraBug:
@@ -1783,6 +1912,77 @@ class TestPreviewJiraBug:
         assert match["status"] == "Open"
         assert match["score"] == 0.85
         assert "description" in match
+
+    @pytest.mark.asyncio
+    async def test_preview_child_job_uses_child_jenkins_url(self, test_client):
+        """Preview for a child job failure uses the child's jenkins_url, not the parent's."""
+        result_data = _make_child_preview_result(
+            child_a_error="TimeoutError",
+            child_a_classification="PRODUCT BUG",
+        )
+        await storage.save_result(
+            "job-child-preview-jira",
+            "http://jenkins/parent/1/",
+            "completed",
+            result_data,
+        )
+        with _enable_feature("jira_enabled"):
+            with patch("rootcoz.main.generate_jira_bug_content") as mock_gen:
+                mock_gen.return_value = {"title": "T", "body": "B"}
+                with patch("rootcoz.main.search_jira_duplicates") as mock_dup:
+                    mock_dup.return_value = []
+                    response = test_client.post(
+                        "/results/job-child-preview-jira/preview-jira-bug",
+                        json={
+                            "test_name": "test_alpha",
+                            "child_job_name": "child-A",
+                            "child_build_number": 10,
+                        },
+                    )
+        assert response.status_code == 200
+        _, kwargs = mock_gen.call_args
+        # The jenkins_url should be the child's URL, not the parent's
+        assert kwargs["jenkins_url"] == "http://jenkins/child-A/10/"
+        # The failure should be child-A's failure, not child-B's
+        assert kwargs["failure"].test_name == "test_alpha"
+        assert (
+            kwargs["failure"].analysis.artifacts_evidence == "child-A artifact log line"
+        )
+
+    @pytest.mark.asyncio
+    async def test_preview_child_job_sibling_artifacts_not_leaked(self, test_client):
+        """Sibling child job artifacts must not appear in the Jira preview."""
+        result_data = _make_child_preview_result(
+            child_a_details="Child A failure",
+            child_a_evidence="child-A evidence only",
+            child_b_details="Child B failure",
+            child_b_evidence="child-B evidence only",
+        )
+        await storage.save_result(
+            "job-sibling-jira", "http://jenkins/parent/1/", "completed", result_data
+        )
+        with _enable_feature("jira_enabled"):
+            with patch("rootcoz.main.generate_jira_bug_content") as mock_gen:
+                mock_gen.return_value = {"title": "T", "body": "B"}
+                with patch("rootcoz.main.search_jira_duplicates") as mock_dup:
+                    mock_dup.return_value = []
+                    response = test_client.post(
+                        "/results/job-sibling-jira/preview-jira-bug",
+                        json={
+                            "test_name": "test_alpha",
+                            "child_job_name": "child-A",
+                            "child_build_number": 10,
+                        },
+                    )
+        assert response.status_code == 200
+        _, kwargs = mock_gen.call_args
+        failure = kwargs["failure"]
+        # Verify only child-A's evidence is present
+        assert failure.analysis.artifacts_evidence == "child-A evidence only"
+        assert "child-B" not in failure.analysis.artifacts_evidence
+        # Verify the jenkins_url is child-A's
+        assert kwargs["jenkins_url"] == "http://jenkins/child-A/10/"
+        assert "parent" not in kwargs["jenkins_url"]
 
 
 class TestCreateGithubIssue:
@@ -4725,3 +4925,165 @@ class TestGetIssuePromptStoredPriority:
             resp = test_client.get("/results/job-ws-prompt/issue-prompt")
             assert resp.status_code == 200
             assert resp.json()["prompt"] == ""
+
+
+class TestBuildReportContextChildScope:
+    """Tests for _build_report_context child job scoping."""
+
+    def test_parent_jenkins_url_used_without_child(self):
+        """Without child params, parent jenkins_url is returned."""
+        from rootcoz.main import _build_report_context
+
+        result_data = {
+            "jenkins_url": "http://jenkins/parent/1/",
+            "child_job_analyses": [
+                {
+                    "job_name": "child-A",
+                    "build_number": 10,
+                    "jenkins_url": "http://jenkins/child-A/10/",
+                    "failures": [],
+                },
+            ],
+        }
+        _, jenkins_url = _build_report_context(
+            include_links=False,
+            base_url="",
+            job_id="job-1",
+            result_data=result_data,
+        )
+        assert jenkins_url == "http://jenkins/parent/1/"
+
+    def test_child_jenkins_url_used_when_child_specified(self):
+        """With child params, child's jenkins_url is returned."""
+        from rootcoz.main import _build_report_context
+
+        result_data = {
+            "jenkins_url": "http://jenkins/parent/1/",
+            "child_job_analyses": [
+                {
+                    "job_name": "child-A",
+                    "build_number": 10,
+                    "jenkins_url": "http://jenkins/child-A/10/",
+                    "failures": [],
+                },
+                {
+                    "job_name": "child-B",
+                    "build_number": 20,
+                    "jenkins_url": "http://jenkins/child-B/20/",
+                    "failures": [],
+                },
+            ],
+        }
+        _, jenkins_url = _build_report_context(
+            include_links=False,
+            base_url="",
+            job_id="job-1",
+            result_data=result_data,
+            child_job_name="child-A",
+            child_build_number=10,
+        )
+        assert jenkins_url == "http://jenkins/child-A/10/"
+
+    def test_child_fallback_uses_child_job_name(self):
+        """When child has no jenkins_url, fallback uses child's job_name."""
+        from rootcoz.main import _build_report_context
+
+        result_data = {
+            "jenkins_url": "",
+            "job_name": "parent-pipeline",
+            "build_number": 1,
+            "child_job_analyses": [
+                {
+                    "job_name": "child-A",
+                    "build_number": 10,
+                    "jenkins_url": None,
+                    "failures": [],
+                },
+            ],
+        }
+        _, jenkins_url = _build_report_context(
+            include_links=False,
+            base_url="",
+            job_id="job-1",
+            result_data=result_data,
+            child_job_name="child-A",
+            child_build_number=10,
+        )
+        # Should use child's job_name, not parent's
+        assert jenkins_url == "child-A #10"
+
+    def test_child_not_found_falls_back_to_parent(self):
+        """When child is not found, falls back to parent jenkins_url."""
+        from rootcoz.main import _build_report_context
+
+        result_data = {
+            "jenkins_url": "http://jenkins/parent/1/",
+            "child_job_analyses": [],
+        }
+        _, jenkins_url = _build_report_context(
+            include_links=False,
+            base_url="",
+            job_id="job-1",
+            result_data=result_data,
+            child_job_name="nonexistent",
+            child_build_number=10,
+        )
+        assert jenkins_url == "http://jenkins/parent/1/"
+
+    def test_child_build_number_zero_matches_by_name(self):
+        """child_build_number=0 matches by job name only."""
+        from rootcoz.main import _build_report_context
+
+        result_data = {
+            "jenkins_url": "http://jenkins/parent/1/",
+            "child_job_analyses": [
+                {
+                    "job_name": "child-A",
+                    "build_number": 99,
+                    "jenkins_url": "http://jenkins/child-A/99/",
+                    "failures": [],
+                },
+            ],
+        }
+        _, jenkins_url = _build_report_context(
+            include_links=False,
+            base_url="",
+            job_id="job-1",
+            result_data=result_data,
+            child_job_name="child-A",
+            child_build_number=0,
+        )
+        assert jenkins_url == "http://jenkins/child-A/99/"
+
+    def test_nested_child_job_found(self):
+        """Child jobs nested in failed_children are found."""
+        from rootcoz.main import _build_report_context
+
+        result_data = {
+            "jenkins_url": "http://jenkins/parent/1/",
+            "child_job_analyses": [
+                {
+                    "job_name": "intermediate",
+                    "build_number": 5,
+                    "jenkins_url": "http://jenkins/intermediate/5/",
+                    "failures": [],
+                    "failed_children": [
+                        {
+                            "job_name": "leaf-child",
+                            "build_number": 42,
+                            "jenkins_url": "http://jenkins/leaf-child/42/",
+                            "failures": [],
+                        },
+                    ],
+                },
+            ],
+        }
+        _, jenkins_url = _build_report_context(
+            include_links=False,
+            base_url="",
+            job_id="job-1",
+            result_data=result_data,
+            child_job_name="leaf-child",
+            child_build_number=42,
+        )
+        assert jenkins_url == "http://jenkins/leaf-child/42/"
