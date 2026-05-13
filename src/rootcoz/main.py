@@ -7121,7 +7121,7 @@ async def send_chat_message(
     jira_project_key = decrypted_params.get("jira_project_key", "") or str(
         settings.jira_project_key or ""
     )
-    github_issues_enabled = bool(settings.enable_github_issues)
+    github_issues_enabled = settings.enable_github_issues is not False
 
     # Find session: check DB first, then disk
     if not last_session_id:
@@ -7149,6 +7149,9 @@ async def send_chat_message(
             github_issues_enabled=github_issues_enabled,
             repos_available=repos_available,
         )
+    except Exception:
+        await storage.delete_chat_message_by_id(user_msg_id)
+        raise
     finally:
         await _cleanup_ai_session(auth_header)
 
@@ -7190,9 +7193,21 @@ async def clear_chat_history(job_id: str, request: Request) -> dict:
     _check_allow_list(request)
     from rootcoz.engine.chat import cleanup_chat_workspace
 
-    result = await get_result(job_id)
-    if not result:
+    stored = await get_result(job_id, strip_sensitive=False)
+    if not stored or not stored.get("result"):
         raise HTTPException(status_code=404, detail="Job not found")
+
+    result_data = stored["result"]
+    params = result_data.get("request_params", {})
+    if params:
+        original_submitter = params.get("submitted_by", "")
+        requesting_user = getattr(request.state, "username", "")
+        is_admin = getattr(request.state, "is_admin", False)
+        if not is_admin and requesting_user != original_submitter:
+            raise HTTPException(
+                status_code=403,
+                detail="Only the original submitter or an admin can clear chat history",
+            )
 
     count = await storage.delete_chat_messages(job_id)
     cleanup_chat_workspace(job_id)

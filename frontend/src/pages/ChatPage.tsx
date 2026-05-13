@@ -53,6 +53,7 @@ export function ChatPage() {
 
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLTextAreaElement>(null)
+  const cancelledRef = useRef(false)
 
   // Load chat history + job info
   useEffect(() => {
@@ -79,11 +80,18 @@ export function ChatPage() {
 
   // Fetch models when provider changes
   useEffect(() => {
-    if (!aiProvider) { setAvailableModels([]); return }
+    if (!aiProvider) { setAvailableModels([]); setAiModel(''); return }
     let ignore = false
     api.get<{ models: ModelOption[] }>(`/api/ai-models?provider=${aiProvider}`)
-      .then(res => { if (!ignore) setAvailableModels(res.models ?? []) })
-      .catch(() => { if (!ignore) setAvailableModels([]) })
+      .then(res => {
+        if (ignore) return
+        const models = res.models ?? []
+        setAvailableModels(models)
+        if (aiModel && !models.some(m => m.id === aiModel)) {
+          setAiModel(models[0]?.id ?? '')
+        }
+      })
+      .catch(() => { if (!ignore) { setAvailableModels([]); setAiModel('') } })
     return () => { ignore = true }
   }, [aiProvider])
 
@@ -99,6 +107,7 @@ export function ChatPage() {
     const trimmed = input.trim()
     if (!trimmed || sending || !jobId) return
 
+    cancelledRef.current = false
     setSending(true)
     setError('')
     setInput('')
@@ -126,6 +135,8 @@ export function ChatPage() {
         ai_model: aiModel || undefined,
       })
 
+      if (cancelledRef.current) return  // User clicked Stop
+
       // Replace optimistic message + add assistant response
       setMessages(prev => {
         const withoutTemp = prev.filter(m => m.id !== tempUserMsg.id)
@@ -151,6 +162,7 @@ export function ChatPage() {
       setInput(trimmed) // Restore input
     } finally {
       setSending(false)
+      cancelledRef.current = false
       inputRef.current?.focus()
     }
   }, [input, sending, jobId, aiProvider, aiModel])
@@ -309,7 +321,7 @@ export function ChatPage() {
               <div className="flex items-center gap-2 bg-surface-elevated rounded-lg px-4 py-3">
                 <Loader2 className="h-4 w-4 animate-spin text-text-tertiary" />
                 <span className="text-xs text-text-tertiary">Thinking...</span>
-                <Button variant="ghost" size="sm" className="h-6 px-2 text-xs text-signal-red" onClick={() => setSending(false)}>
+                <Button variant="ghost" size="sm" className="h-6 px-2 text-xs text-signal-red" onClick={() => { cancelledRef.current = true; setSending(false) }}>
                   Stop
                 </Button>
               </div>

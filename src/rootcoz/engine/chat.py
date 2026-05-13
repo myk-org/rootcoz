@@ -35,6 +35,7 @@ def ensure_chat_workspace(job_id: str) -> Path:
     """Create the chat workspace directory if it doesn't exist."""
     workspace = get_chat_workspace(job_id)
     workspace.mkdir(parents=True, exist_ok=True)
+    workspace.chmod(0o700)
     return workspace
 
 
