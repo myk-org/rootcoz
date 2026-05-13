@@ -4614,7 +4614,7 @@ class TestReAnalyzeFailure:
 
     @pytest.mark.asyncio
     async def test_re_analyze_failure_success(self, test_client) -> None:
-        """Creates a new raw analysis job for the specific failure."""
+        """Patches the failure in-place in the parent job."""
         from rootcoz import storage
 
         fa = FailureAnalysis(
@@ -4636,13 +4636,50 @@ class TestReAnalyzeFailure:
         result_data["request_params"]["submitted_by"] = "admin"
         await storage.save_result("job-reanalyze-f", "", "completed", result_data)
 
-        with patch("rootcoz.main._process_file_raw_analysis"):
+        # Mock analyze_failure_group to return a new analysis
+        new_analysis = FailureAnalysis(
+            test_name="tests.TestReAnalyze.test_one",
+            error="ValueError",
+            analysis=AnalysisDetail(classification="PRODUCT ISSUE"),
+        )
+        with (
+            patch(
+                "rootcoz.main.analyze_failure_group",
+                new_callable=AsyncMock,
+                return_value=[new_analysis],
+            ),
+            patch(
+                "rootcoz.main._create_ai_auth_header",
+                new_callable=AsyncMock,
+                return_value="",
+            ),
+            patch(
+                "rootcoz.main.RepositoryManager",
+            ),
+        ):
             response = test_client.post(f"/api/failures/{fa.id}/re-analyze")
+            # Give the background task a moment to complete
+            import asyncio
+
+            await asyncio.sleep(0.3)
         assert response.status_code == 202
         data = response.json()
-        assert data["status"] == "queued"
-        assert "job_id" in data
-        assert data["job_id"] != "job-reanalyze-f"
+        assert data["status"] == "accepted"
+        assert data["job_id"] == "job-reanalyze-f"
+        assert data["failure_uuid"] == fa.id
+
+        # Verify the failure was patched in-place
+        stored = await storage.get_result("job-reanalyze-f")
+        result = stored["result"]
+        failure = result["failures"][0]
+        assert failure["analysis"]["classification"] == "PRODUCT ISSUE"
+        assert "previous_analysis" in failure
+        assert failure["previous_analysis"]["classification"] == "CODE ISSUE"
+        assert "reanalysis_status" not in failure
+        assert failure["reanalyzed_with"] == {
+            "ai_provider": "claude",
+            "ai_model": "opus",
+        }
 
 
 class TestBuildEffectiveJiraSettings:

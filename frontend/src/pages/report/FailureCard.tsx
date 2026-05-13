@@ -1,5 +1,5 @@
 import { useState, useEffect, useMemo, useRef, type ReactNode } from 'react'
-import { useLocation, useNavigate } from 'react-router-dom'
+import { useLocation } from 'react-router-dom'
 import { useClipboard } from '@/lib/useClipboard'
 import type { GroupedFailure } from '@/types'
 import { buildFileUrl, buildRepoUrls, isSafeHref, matchRepo, type RepoUrl } from '@/lib/autoLink'
@@ -19,6 +19,7 @@ import { ReviewToggle } from './ReviewToggle'
 import { CommentsSection } from './CommentsSection'
 import { ClassificationSelect } from './ClassificationSelect'
 import { BugCreationDialog } from './BugCreationDialog'
+import { ReAnalyzeDialog } from './ReAnalyzeDialog'
 import { useReviewSuggestion } from './useReviewSuggestion'
 import { ConfirmDialog } from '@/components/shared/ConfirmDialog'
 import { UuidCopyButton } from '@/components/shared/UuidCopyButton'
@@ -122,10 +123,8 @@ export function FailureCard({ group, jobId, childJobName, childBuildNumber, inde
   const [selectedProvider, setSelectedProvider] = useState(result?.ai_provider ?? '')
   const [selectedModel, setSelectedModel] = useState(result?.ai_model ?? '')
   const [includeLinks, setIncludeLinks] = useState(false)
-  const [reAnalyzing, setReAnalyzing] = useState(false)
-  const [reAnalyzeError, setReAnalyzeError] = useState<string | null>(null)
+  const [reAnalyzeOpen, setReAnalyzeOpen] = useState(false)
   const { copiedKey: copiedSection, copy: copyToClipboard } = useClipboard()
-  const navigate = useNavigate()
 
   const rep = group.tests[0]
   const analysis = rep.analysis
@@ -239,19 +238,6 @@ export function FailureCard({ group, jobId, childJobName, childBuildNumber, inde
     }
   }
 
-  async function handleReAnalyzeFailure() {
-    setReAnalyzing(true)
-    setReAnalyzeError(null)
-    try {
-      const data = await api.post<{ job_id: string }>(`/api/failures/${rep.id}/re-analyze`, {})
-      navigate(`/results/${data.job_id}`)
-    } catch (err) {
-      setReAnalyzeError(err instanceof Error ? err.message : 'Failed to re-analyze failure')
-    } finally {
-      setReAnalyzing(false)
-    }
-  }
-
   return (
     <>
       <Card
@@ -286,7 +272,21 @@ export function FailureCard({ group, jobId, childJobName, childBuildNumber, inde
             <UuidCopyButton uuid={rep.id} sectionKey="uuid" copiedSection={copiedSection} onCopy={copyToClipboard} />
           </div>
           <div className="flex items-center gap-2 shrink-0">
+            {rep.reanalysis_status === 'running' && (
+              <span
+                className="flex items-center gap-1 rounded-md bg-accent-blue/15 px-2 py-1 text-[10px] font-mono text-accent-blue animate-pulse"
+                title={`Re-analyzing using ${rep.reanalyzed_with?.ai_provider ?? ''}${rep.reanalyzed_with?.ai_model ? ' / ' + rep.reanalyzed_with.ai_model : ''}...`}
+              >
+                <RotateCw className="h-3 w-3 animate-spin" />
+                Re-analyzing
+              </span>
+            )}
             <ClassificationBadge classification={classification} />
+            {rep.reanalyzed_with && rep.reanalysis_status !== 'running' && (
+              <span className="rounded-md bg-surface-elevated px-2 py-1 text-[10px] font-mono text-text-tertiary" title="Re-analyzed with different AI">
+                {rep.reanalyzed_with.ai_provider}{rep.reanalyzed_with.ai_model ? ` / ${rep.reanalyzed_with.ai_model}` : ''}
+              </span>
+            )}
             {(() => {
               const secondaryBadges = new Set<string>()
               for (const t of group.tests) {
@@ -385,6 +385,19 @@ export function FailureCard({ group, jobId, childJobName, childBuildNumber, inde
                 />
                 <div className="rounded-md bg-glow-blue p-3 text-sm text-text-secondary whitespace-pre-wrap"><LinkedText text={analysis.details} repoUrls={repoUrls} /></div>
               </div>
+            )}
+
+            {/* Previous Analysis (from re-analysis) */}
+            {rep.previous_analysis && (
+              <details className="group">
+                <summary className="flex items-center gap-2 cursor-pointer text-xs font-display uppercase tracking-widest text-text-tertiary hover:text-text-secondary transition-colors">
+                  <ChevronRight className="h-3 w-3 group-open:rotate-90 transition-transform" />
+                  Previous Analysis
+                </summary>
+                <div className="mt-2 rounded-md bg-surface-elevated/50 border border-border-muted p-3 text-sm text-text-tertiary whitespace-pre-wrap opacity-75">
+                  <LinkedText text={rep.previous_analysis.details || ''} repoUrls={repoUrls} />
+                </div>
+              </details>
             )}
 
             {/* Artifacts evidence */}
@@ -533,11 +546,10 @@ export function FailureCard({ group, jobId, childJobName, childBuildNumber, inde
                   Include links
                 </label>
               )}
-              <Button variant="outline" size="sm" onClick={handleReAnalyzeFailure} disabled={reAnalyzing}>
-                <RotateCw className={`h-3.5 w-3.5 mr-1${reAnalyzing ? ' animate-spin' : ''}`} />
+              <Button variant="outline" size="sm" onClick={() => setReAnalyzeOpen(true)} disabled={rep.reanalysis_status === 'running'}>
+                <RotateCw className={`h-3.5 w-3.5 mr-1${rep.reanalysis_status === 'running' ? ' animate-spin' : ''}`} />
                 Re-analyze
               </Button>
-              {reAnalyzeError && <span className="text-signal-red text-xs" role="alert">{reAnalyzeError}</span>}
               <IssueButton
                 disabled={!githubIssuesEnabled}
                 tooltip={!githubIssuesEnabled ? 'GitHub issues are disabled on this server' : undefined}
@@ -593,6 +605,15 @@ export function FailureCard({ group, jobId, childJobName, childBuildNumber, inde
       />
       {bugReviewError && (
         <span className="text-sm text-destructive" role="alert">{bugReviewError}</span>
+      )}
+      {result && (
+        <ReAnalyzeDialog
+          open={reAnalyzeOpen}
+          onOpenChange={setReAnalyzeOpen}
+          result={result}
+          jobId={jobId}
+          failureUuid={rep.id}
+        />
       )}
     </>
   )

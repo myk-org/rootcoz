@@ -1,4 +1,5 @@
 import asyncio
+import copy
 import hmac
 import json
 import logging
@@ -110,6 +111,7 @@ from rootcoz.models import (
     OverrideClassificationRequest,
     PreviewIssueRequest,
     PushSubscriptionRequest,
+    ReAnalyzeFailureRequest,
     ReportPortalPushResult,
     SetReviewedRequest,
     UnifiedAnalyzeRequest,
@@ -2992,17 +2994,179 @@ async def get_failure_by_uuid(failure_uuid: str) -> dict:
     return result
 
 
+async def _reanalyze_failure_background(
+    job_id: str,
+    failure_uuid: str,
+    failure_dict: dict,
+    ai_provider: str,
+    ai_model: str,
+    ai_cli_timeout: int | None,
+    raw_prompt: str,
+    peer_ai_configs: list | None,
+    peer_analysis_max_rounds: int,
+    tests_repo_url: str,
+    tests_repo_ref: str,
+    tests_repo_token: str,
+    additional_repos_list: list,
+    username: str,
+    max_concurrent_ai_calls: int,
+) -> None:
+    """Background task: re-analyze a single failure in-place."""
+    job_id_var.set(job_id)
+    auth_header = ""
+    repo_manager: RepositoryManager | None = None
+
+    try:
+        auth_header = await _create_ai_auth_header(username)
+
+        # Clone repos if configured
+        repo_manager = RepositoryManager()
+        cloned_repos: dict[str, Path] = {}
+        repo_path = repo_manager.create_workspace()
+
+        if tests_repo_url:
+            try:
+                repo_name = derive_test_repo_name(
+                    str(tests_repo_url), additional_repos_list
+                )
+                await asyncio.to_thread(
+                    repo_manager.clone_into,
+                    str(tests_repo_url),
+                    repo_path / repo_name,
+                    depth=50,
+                    branch=tests_repo_ref,
+                    token=tests_repo_token or None,
+                )
+                cloned_repos[repo_name] = repo_path / repo_name
+            except Exception:
+                logger.warning(
+                    "Failed to clone test repository for failure re-analysis",
+                    exc_info=True,
+                )
+
+        if additional_repos_list:
+            additional_repos_cloned, repo_path = await clone_additional_repos(
+                repo_manager, additional_repos_list, repo_path
+            )
+            cloned_repos.update(additional_repos_cloned)
+
+        # Build a FailedTest from the failure dict
+        _ft_kwargs: dict = {
+            "test_name": failure_dict.get("test_name", ""),
+            "error_message": failure_dict.get("error", ""),
+        }
+        if "stack_trace" in failure_dict:
+            _ft_kwargs["stack_trace"] = failure_dict["stack_trace"]
+        if "duration" in failure_dict:
+            _ft_kwargs["duration"] = failure_dict["duration"]
+        if "status" in failure_dict:
+            _ft_kwargs["status"] = failure_dict["status"]
+        test_failure = FailedTest(**_ft_kwargs)
+
+        server_url = _build_internal_server_url()
+
+        # Analyze the single failure
+        analyses = await analyze_failure_group(
+            failures=[test_failure],
+            console_context="",
+            repo_path=repo_path,
+            ai_provider=ai_provider,
+            ai_model=ai_model,
+            ai_cli_timeout=ai_cli_timeout,
+            custom_prompt=raw_prompt,
+            server_url=server_url,
+            job_id=job_id,
+            peer_ai_configs=peer_ai_configs,
+            peer_analysis_max_rounds=peer_analysis_max_rounds,
+            additional_repos=cloned_repos or None,
+            max_concurrent_ai_calls=max_concurrent_ai_calls,
+            auth_header=auth_header,
+        )
+
+        if not analyses:
+            raise RuntimeError("analyze_failure_group returned no results")
+
+        new_analysis = analyses[0]
+
+        # Patch the failure in the parent job result on success
+        def _patch_success(result_data: dict) -> None:
+            failure = _find_failure_by_uuid_in_result(result_data, failure_uuid)
+            if not failure:
+                logger.error(
+                    "Failure %s not found in result during success patch", failure_uuid
+                )
+                return
+            # Save previous analysis
+            if "analysis" in failure:
+                failure["previous_analysis"] = copy.deepcopy(failure["analysis"])
+            # Replace with new analysis
+            new_data = new_analysis.model_dump(mode="json")
+            failure["analysis"] = new_data.get("analysis")
+            if new_data.get("peer_debate"):
+                failure["peer_debate"] = new_data["peer_debate"]
+            # Remove running status
+            failure.pop("reanalysis_status", None)
+
+        await patch_result_json(job_id, _patch_success)
+        logger.info(
+            "Failure %s re-analysis completed successfully in job %s",
+            failure_uuid,
+            job_id,
+        )
+
+    except Exception:
+        logger.error(
+            "Failure %s re-analysis failed in job %s",
+            failure_uuid,
+            job_id,
+            exc_info=True,
+        )
+
+        # Patch failure status to "failed"
+        def _patch_error(result_data: dict) -> None:
+            failure = _find_failure_by_uuid_in_result(result_data, failure_uuid)
+            if failure:
+                failure["reanalysis_status"] = "failed"
+
+        try:
+            await patch_result_json(job_id, _patch_error)
+        except Exception:
+            logger.error(
+                "Failed to patch error status for failure %s",
+                failure_uuid,
+                exc_info=True,
+            )
+
+    finally:
+        notify_job_status_changed(job_id)
+        await _cleanup_ai_session(auth_header)
+        if repo_manager:
+            try:
+                repo_manager.cleanup()
+            except Exception:
+                logger.warning("Failed to cleanup repos", exc_info=True)
+
+
 @app.post("/api/failures/{failure_uuid}/re-analyze", status_code=202)
 async def re_analyze_failure(
     failure_uuid: str,
     request: Request,
 ) -> dict:
-    """Re-analyze a single failure identified by its UUID.
+    """Re-analyze a single failure in-place within its parent job.
 
-    Finds the parent job and specific failure, then creates a new raw
-    analysis job containing only that test.
+    Patches the failure directly in the parent job's stored result instead
+    of creating a new job.  Accepts an optional JSON body with settings
+    overrides; defaults come from the parent job's request_params.
     """
     _check_allow_list(request)
+
+    # Parse optional body
+    body_data: dict = {}
+    try:
+        body_data = await request.json()
+    except Exception:
+        pass  # No body is fine, all settings come from parent
+    overrides = ReAnalyzeFailureRequest(**body_data)
 
     # Find the failure across all stored results
     match = await storage.find_failure_by_uuid(failure_uuid)
@@ -3031,20 +3195,7 @@ async def re_analyze_failure(
     # Authorization: only the original submitter or an admin may re-analyze
     _check_reanalyze_authorization(request, params)
 
-    # Build a raw analysis request with just this one failure
-    _ft_kwargs: dict = {
-        "test_name": failure_dict.get("test_name", ""),
-        "error_message": failure_dict.get("error", ""),
-    }
-    if "stack_trace" in failure_dict:
-        _ft_kwargs["stack_trace"] = failure_dict["stack_trace"]
-    if "duration" in failure_dict:
-        _ft_kwargs["duration"] = failure_dict["duration"]
-    if "status" in failure_dict:
-        _ft_kwargs["status"] = failure_dict["status"]
-    test_failure = FailedTest(**_ft_kwargs)
-
-    # Build unified request from stored params
+    # Decrypt parent settings
     try:
         decrypted_params = decrypt_sensitive_fields(dict(params))
     except Exception as exc:
@@ -3055,39 +3206,84 @@ async def re_analyze_failure(
 
     _validate_decrypted_sensitive_fields(decrypted_params)
 
-    unified_fields: dict = {
-        "type": "raw",
-        "failures": [test_failure],
-        "name": f"re-analyze: {failure_dict.get('test_name', 'unknown')}",
-    }
+    # Resolve settings: parent defaults + overrides from request body
+    ai_provider = decrypted_params.get("ai_provider", "")
+    ai_model = decrypted_params.get("ai_model", "")
+    if overrides.ai_provider is not None:
+        ai_provider = overrides.ai_provider
+    if overrides.ai_model is not None:
+        ai_model = overrides.ai_model
+    ai_provider, ai_model = _resolve_ai_config_values(ai_provider, ai_model)
 
-    _copy_analysis_settings(decrypted_params, unified_fields)
+    ai_cli_timeout = decrypted_params.get("ai_cli_timeout")
+    if overrides.ai_cli_timeout is not None:
+        ai_cli_timeout = overrides.ai_cli_timeout
 
-    unified_body = UnifiedAnalyzeRequest(**unified_fields)
-    existing_tags = list(result_data.get("tags", []))
-    if "re-analyze" not in existing_tags:
-        existing_tags.append("re-analyze")
-    unified_body.tags = existing_tags
+    raw_prompt = decrypted_params.get("raw_prompt", "")
+    if overrides.raw_prompt is not None:
+        raw_prompt = overrides.raw_prompt
 
-    # Validate and merge settings
-    _resolve_ai_config(unified_body)
-    merged = _merge_settings(unified_body, get_settings())
-    resolved_peers = _validate_peer_configs(unified_body, merged)
+    peer_ai_configs = decrypted_params.get("peer_ai_configs")
+    if overrides.peer_ai_configs is not None:
+        peer_ai_configs = overrides.peer_ai_configs
 
-    base_url = _extract_base_url()
-    display_name = unified_body.name or "failure-re-analysis"
+    peer_analysis_max_rounds = decrypted_params.get("peer_analysis_max_rounds", 3)
+    if overrides.peer_analysis_max_rounds is not None:
+        peer_analysis_max_rounds = overrides.peer_analysis_max_rounds
 
-    return await _enqueue_file_raw_analysis(
-        body=unified_body,
-        merged=merged,
-        resolved_peers=resolved_peers,
-        display_name=display_name,
-        analysis_type="raw",
-        base_url=base_url,
-        username=request.state.username,
-        tags=unified_body.tags,
-        message_prefix="Failure re-analysis",
+    tests_repo_url = decrypted_params.get("tests_repo_url", "")
+    tests_repo_ref = decrypted_params.get("tests_repo_ref", "")
+    tests_repo_token = decrypted_params.get("tests_repo_token", "")
+    if overrides.tests_repo_url is not None:
+        tests_repo_url, tests_repo_ref = parse_repo_ref(overrides.tests_repo_url)
+
+    additional_repos_list = decrypted_params.get("additional_repos") or []
+    if overrides.additional_repos is not None:
+        additional_repos_list = overrides.additional_repos
+
+    max_concurrent_ai_calls = decrypted_params.get("max_concurrent_ai_calls", 3)
+
+    # Immediately patch the failure as "running"
+    def _patch_running(result_data: dict) -> None:
+        failure = _find_failure_by_uuid_in_result(result_data, failure_uuid)
+        if failure:
+            failure["reanalysis_status"] = "running"
+            failure["reanalyzed_with"] = {
+                "ai_provider": ai_provider,
+                "ai_model": ai_model,
+            }
+
+    await patch_result_json(parent_job_id, _patch_running)
+    notify_job_status_changed(parent_job_id)
+
+    # Start background task
+    task = asyncio.create_task(
+        _reanalyze_failure_background(
+            job_id=parent_job_id,
+            failure_uuid=failure_uuid,
+            failure_dict=failure_dict,
+            ai_provider=ai_provider,
+            ai_model=ai_model,
+            ai_cli_timeout=ai_cli_timeout,
+            raw_prompt=raw_prompt,
+            peer_ai_configs=peer_ai_configs,
+            peer_analysis_max_rounds=peer_analysis_max_rounds,
+            tests_repo_url=tests_repo_url,
+            tests_repo_ref=tests_repo_ref,
+            tests_repo_token=tests_repo_token,
+            additional_repos_list=additional_repos_list,
+            username=request.state.username,
+            max_concurrent_ai_calls=max_concurrent_ai_calls,
+        )
     )
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
+
+    return {
+        "status": "accepted",
+        "job_id": parent_job_id,
+        "failure_uuid": failure_uuid,
+    }
 
 
 def _find_test_in_children(
@@ -3207,6 +3403,32 @@ def _find_failure_in_result(
     for f in result_data.get("failures", []):
         if f.get("test_name") == test_name:
             return f
+    return None
+
+
+def _find_failure_by_uuid_in_child(child: dict, failure_uuid: str) -> dict | None:
+    """Recursively search a child job dict for a failure by UUID."""
+    for f in child.get("failures", []):
+        if f.get("id") == failure_uuid:
+            return f
+    for nested in child.get("failed_children", []):
+        found = _find_failure_by_uuid_in_child(nested, failure_uuid)
+        if found:
+            return found
+    return None
+
+
+def _find_failure_by_uuid_in_result(
+    result_data: dict, failure_uuid: str
+) -> dict | None:
+    """Find a failure dict by UUID in the result data (top-level + children)."""
+    for f in result_data.get("failures", []):
+        if f.get("id") == failure_uuid:
+            return f
+    for child in result_data.get("child_job_analyses", []):
+        found = _find_failure_by_uuid_in_child(child, failure_uuid)
+        if found:
+            return found
     return None
 
 

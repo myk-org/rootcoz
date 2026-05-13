@@ -858,6 +858,22 @@ class ClassifyTestRequest(BaseModel):
         return v.upper() if isinstance(v, str) else v
 
 
+class ReAnalyzeFailureRequest(BaseModel):
+    """Optional overrides for per-failure re-analysis."""
+
+    ai_provider: str | None = None
+    ai_model: str | None = None
+    ai_cli_timeout: int | None = None
+    raw_prompt: str | None = None
+    peer_ai_configs: list[dict] | None = None
+    peer_analysis_max_rounds: int | None = None
+    tests_repo_url: str | None = None
+    enable_jira: bool | None = None
+    jira_url: str | None = None
+    jira_project_key: str | None = None
+    additional_repos: list[dict] | None = None
+
+
 class ReportPortalPushResult(BaseModel):
     """Result from pushing classifications to Report Portal."""
 

@@ -108,6 +108,9 @@ export interface FailureAnalysis {
   analysis: AnalysisDetail
   error_signature: string
   peer_debate?: PeerDebate | null
+  previous_analysis?: AnalysisDetail | null
+  reanalysis_status?: 'running' | 'failed' | null
+  reanalyzed_with?: { ai_provider: string; ai_model: string } | null
 }
 
 export interface ChildJobAnalysis {
