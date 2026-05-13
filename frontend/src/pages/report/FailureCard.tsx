@@ -242,7 +242,7 @@ export function FailureCard({ group, jobId, childJobName, childBuildNumber, inde
     setReAnalyzing(true)
     setReAnalyzeError(null)
     try {
-      const data = await api.post<{ job_id: string }>(`/failures/${rep.id}/re-analyze`, {})
+      const data = await api.post<{ job_id: string }>(`/api/failures/${rep.id}/re-analyze`, {})
       navigate(`/results/${data.job_id}`)
     } catch (err) {
       setReAnalyzeError(err instanceof Error ? err.message : 'Failed to re-analyze failure')
