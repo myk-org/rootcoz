@@ -198,7 +198,7 @@ def _extract_tar(
                     f"exceeds limit ({max_extracted_bytes / (1024 * 1024):.0f} MB)"
                 )
 
-        tar.extractall(path=extract_dir, members=safe_members)
+        tar.extractall(path=extract_dir, members=safe_members, filter="data")
 
 
 def _extract_zip(
