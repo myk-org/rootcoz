@@ -68,7 +68,7 @@ export function ChatPage() {
       if (resultRes.result) {
         const r = resultRes.result
         setJobInfo({ job_name: r.job_name, build_number: r.build_number, summary: r.summary, ai_provider: r.ai_provider, ai_model: r.ai_model })
-        setAiProvider(r.ai_provider || 'claude')
+        setAiProvider(r.ai_provider || configsRes[0]?.ai_provider || '')
         setAiModel(r.ai_model || '')
       }
       setAiConfigs(configsRes)

@@ -169,6 +169,29 @@ def cleanup_chat_workspace(job_id: str) -> None:
         logger.info(f"Deleted chat workspace for job {job_id}")
 
 
+def _get_classification(failure: dict) -> str:
+    """Safely extract classification from a failure dict."""
+    analysis = failure.get("analysis")
+    if isinstance(analysis, dict):
+        return analysis.get("classification", "?")
+    return "?"
+
+
+def _collect_child_failures(children: list[dict], lines: list[str]) -> None:
+    """Recursively collect failure lines from child job analyses."""
+    for child in children:
+        child_name = child.get("job_name", "?")
+        child_num = child.get("build_number", 0)
+        for f in child.get("failures", []):
+            fid = f.get("id", "?")
+            name = f.get("test_name", "unknown")
+            classification = _get_classification(f)
+            lines.append(
+                f"  - [{child_name}#{child_num}] {name} (UUID: {fid}) \u2014 {classification}"
+            )
+        _collect_child_failures(child.get("failed_children", []), lines)
+
+
 def build_system_prompt(
     result_data: dict,
     job_id: str,
@@ -200,31 +223,11 @@ def build_system_prompt(
     for i, f in enumerate(result_data.get("failures", []), 1):
         fid = f.get("id", "?")
         name = f.get("test_name", "unknown")
-        classification = f.get("analysis", {}).get("classification", "?")
+        classification = _get_classification(f)
         failure_lines.append(f"  {i}. {name} (UUID: {fid}) — {classification}")
 
-    # Include child job failures
-    for child in result_data.get("child_job_analyses", []):
-        child_name = child.get("job_name", "?")
-        child_num = child.get("build_number", 0)
-        for f in child.get("failures", []):
-            fid = f.get("id", "?")
-            name = f.get("test_name", "unknown")
-            classification = f.get("analysis", {}).get("classification", "?")
-            failure_lines.append(
-                f"  - [{child_name}#{child_num}] {name} (UUID: {fid}) — {classification}"
-            )
-        # Recurse one level into failed_children
-        for nested in child.get("failed_children", []):
-            nested_name = nested.get("job_name", "?")
-            nested_num = nested.get("build_number", 0)
-            for f in nested.get("failures", []):
-                fid = f.get("id", "?")
-                name = f.get("test_name", "unknown")
-                classification = f.get("analysis", {}).get("classification", "?")
-                failure_lines.append(
-                    f"  - [{nested_name}#{nested_num}] {name} (UUID: {fid}) — {classification}"
-                )
+    # Include child job failures (recursive)
+    _collect_child_failures(result_data.get("child_job_analyses", []), failure_lines)
 
     failures_section = "\n".join(failure_lines) if failure_lines else "  (no failures)"
 

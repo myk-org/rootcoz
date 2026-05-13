@@ -7037,7 +7037,11 @@ async def create_feedback(request: Request, body: FeedbackCreateRequest):
 
 
 @app.get("/api/chat/{job_id}")
-async def get_chat_history(job_id: str, limit: int = 200, offset: int = 0) -> dict:
+async def get_chat_history(
+    job_id: str,
+    limit: int = Query(default=200, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
+) -> dict:
     """Get chat message history for an analyzed job."""
     result = await get_result(job_id)
     if not result:
@@ -7053,6 +7057,7 @@ async def send_chat_message(
     job_id: str, body: ChatMessageRequest, request: Request
 ) -> dict:
     """Send a chat message and get an AI response."""
+    _check_allow_list(request)
     from rootcoz.engine.chat import chat_with_ai
 
     stored = await get_result(job_id, strip_sensitive=False)
@@ -7180,8 +7185,9 @@ async def send_chat_message(
 
 
 @app.delete("/api/chat/{job_id}")
-async def clear_chat_history(job_id: str) -> dict:
+async def clear_chat_history(job_id: str, request: Request) -> dict:
     """Clear all chat messages for a job."""
+    _check_allow_list(request)
     from rootcoz.engine.chat import cleanup_chat_workspace
 
     result = await get_result(job_id)

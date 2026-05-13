@@ -1064,6 +1064,14 @@ class ChatMessageRequest(BaseModel):
         min_length=1,
         max_length=50000,
     )
+
+    @field_validator("message")
+    @classmethod
+    def message_not_blank(cls, v: str) -> str:
+        if not v.strip():
+            raise ValueError("Message cannot be blank")
+        return v
+
     ai_provider: str | None = Field(
         default=None,
         description="AI provider to use for response (defaults to job's provider)",
