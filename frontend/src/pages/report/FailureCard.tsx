@@ -10,6 +10,7 @@ import { useSessionState } from '@/lib/useSessionState'
 import { unescapeCodeContent } from '@/lib/format'
 import { useReportState, useReportDispatch, reviewKey } from './ReportContext'
 import { Card, CardContent } from '@/components/ui/card'
+import { Tooltip, TooltipTrigger, TooltipContent } from '@/components/ui/tooltip'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { ClassificationBadge } from '@/components/shared/ClassificationBadge'
@@ -273,13 +274,17 @@ export function FailureCard({ group, jobId, childJobName, childBuildNumber, inde
           </div>
           <div className="flex items-center gap-2 shrink-0">
             {rep.reanalysis_status === 'running' && (
-              <span
-                className="flex items-center gap-1 rounded-md bg-accent-blue/15 px-2 py-1 text-[10px] font-mono text-accent-blue animate-pulse"
-                title={`Re-analyzing using ${rep.reanalyzed_with?.ai_provider ?? ''}${rep.reanalyzed_with?.ai_model ? ' / ' + rep.reanalyzed_with.ai_model : ''}...`}
-              >
-                <RotateCw className="h-3 w-3 animate-spin" />
-                Re-analyzing
-              </span>
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <span className="flex items-center gap-1 rounded-md bg-accent-blue/15 px-2 py-1 text-[10px] font-mono text-accent-blue animate-pulse">
+                    <RotateCw className="h-3 w-3 animate-spin" />
+                    Re-analyzing
+                  </span>
+                </TooltipTrigger>
+                <TooltipContent>
+                  Re-analyzing using {rep.reanalyzed_with?.ai_provider ?? 'unknown'}{rep.reanalyzed_with?.ai_model ? ` / ${rep.reanalyzed_with.ai_model}` : ''}...
+                </TooltipContent>
+              </Tooltip>
             )}
             <ClassificationBadge classification={classification} />
             {rep.reanalyzed_with && rep.reanalysis_status !== 'running' && (
