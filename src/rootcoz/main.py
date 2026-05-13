@@ -7084,11 +7084,18 @@ async def send_chat_message(
     # Exclude the message we just added (it's the new message)
     history = [m for m in history if m["id"] != user_msg_id]
 
+    # Find session_id from the last assistant message
+    last_session_id = None
+    for msg in reversed(history):
+        if msg.get("role") == "assistant" and msg.get("session_id"):
+            last_session_id = msg["session_id"]
+            break
+
     # Call AI
     server_url = _build_internal_server_url()
     auth_header = await _create_ai_auth_header(request.state.username)
     try:
-        success, response_text = await chat_with_ai(
+        success, response_text, new_session_id = await chat_with_ai(
             job_id=job_id,
             result_data=safe_result,
             message=body.message,
@@ -7098,6 +7105,7 @@ async def send_chat_message(
             server_url=server_url,
             ai_cli_timeout=get_settings().ai_cli_timeout,
             auth_header=auth_header,
+            session_id=last_session_id,
         )
     finally:
         await _cleanup_ai_session(auth_header)
@@ -7114,6 +7122,7 @@ async def send_chat_message(
         content=response_text,
         ai_provider=ai_provider,
         ai_model=ai_model,
+        session_id=new_session_id or "",
     )
 
     return {

@@ -507,11 +507,17 @@ async def init_db() -> None:
                 username TEXT NOT NULL DEFAULT '',
                 ai_provider TEXT NOT NULL DEFAULT '',
                 ai_model TEXT NOT NULL DEFAULT '',
+                session_id TEXT NOT NULL DEFAULT '',
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
         await db.execute(
             "CREATE INDEX IF NOT EXISTS idx_chat_messages_job_id ON chat_messages (job_id)"
+        )
+
+        # Migration: add session_id to chat_messages
+        await _migrate_add_column(
+            db, "chat_messages", "session_id", "TEXT NOT NULL DEFAULT ''"
         )
 
         await db.commit()
@@ -3811,12 +3817,13 @@ async def add_chat_message(
     username: str = "",
     ai_provider: str = "",
     ai_model: str = "",
+    session_id: str = "",
 ) -> int:
     """Add a chat message and return its id."""
     async with _connect_db() as db:
         cursor = await db.execute(
-            "INSERT INTO chat_messages (job_id, role, content, username, ai_provider, ai_model) VALUES (?, ?, ?, ?, ?, ?)",
-            (job_id, role, content, username, ai_provider, ai_model),
+            "INSERT INTO chat_messages (job_id, role, content, username, ai_provider, ai_model, session_id) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (job_id, role, content, username, ai_provider, ai_model, session_id),
         )
         await db.commit()
         return cursor.lastrowid or 0
@@ -3828,7 +3835,7 @@ async def get_chat_messages(
     """Get chat messages for a job, ordered by id ASC."""
     async with _connect_db() as db:
         cursor = await db.execute(
-            "SELECT id, job_id, role, content, username, ai_provider, ai_model, created_at FROM chat_messages WHERE job_id = ? ORDER BY id ASC LIMIT ? OFFSET ?",
+            "SELECT id, job_id, role, content, username, ai_provider, ai_model, session_id, created_at FROM chat_messages WHERE job_id = ? ORDER BY id ASC LIMIT ? OFFSET ?",
             (job_id, limit, offset),
         )
         rows = await cursor.fetchall()

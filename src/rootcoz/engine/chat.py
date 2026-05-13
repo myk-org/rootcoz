@@ -82,10 +82,12 @@ You can use curl to query these endpoints for more details:
 
     return f"""You are a read-only assistant helping a user understand a CI/CD failure analysis.
 
-## Scope
-You MUST only discuss this specific analyzed job. Do NOT answer general questions unrelated to this job.
-You MUST NOT modify any data, create issues, or perform any mutations.
-You are here to help the user understand the analysis results, explore failure details, and suggest next steps.
+## Scope — STRICT RULES
+- You MUST only discuss this specific analyzed job and its failures.
+- If the user asks something unrelated to this job (e.g., "what's the time?", general coding questions, anything not about this analysis), respond ONLY with: "I can only discuss the analysis results for this job. How can I help you understand the failures?"
+- Do NOT explore the filesystem, curl endpoints, or run any tools unless the user specifically asks about a failure or test in this job.
+- Do NOT modify any data, create issues, or perform any mutations.
+- Keep responses concise and focused. Do NOT dump entire analysis results unless explicitly asked.
 
 ## Job Context
 - **Job:** {job_name} #{build_number}
@@ -146,7 +148,8 @@ async def chat_with_ai(
     repo_path: Path | None = None,
     ai_cli_timeout: int | None = None,
     auth_header: str = "",
-) -> tuple[bool, str]:
+    session_id: str | None = None,
+) -> tuple[bool, str, str | None]:
     """Send a chat message and get an AI response.
 
     Args:
@@ -160,22 +163,29 @@ async def chat_with_ai(
         repo_path: Path to cloned repos (if available).
         ai_cli_timeout: Timeout for AI CLI call.
         auth_header: Bearer auth header for AI to use when curling API.
+        session_id: Session ID for conversation continuity.
 
     Returns:
-        Tuple of (success, response_text).
+        Tuple of (success, response_text, session_id).
+        session_id is returned from the AI CLI for session continuity.
     """
-    system_prompt = build_system_prompt(
-        result_data, job_id, server_url, auth_header=auth_header
-    )
-    full_prompt = build_chat_prompt(system_prompt, history, message)
+    if session_id:
+        # Continue existing session — just send the new message
+        prompt = message
+    else:
+        # First message — build full system prompt
+        system_prompt = build_system_prompt(
+            result_data, job_id, server_url, auth_header=auth_header
+        )
+        prompt = build_chat_prompt(system_prompt, history, message)
 
     logger.info(
         f"Chat message for job {job_id}: {len(message)} chars, "
-        f"history: {len(history)} messages, prompt: {len(full_prompt)} chars"
+        f"session_id={'yes' if session_id else 'new'}, prompt: {len(prompt)} chars"
     )
 
     result, _ = await call_ai_and_record(
-        full_prompt,
+        prompt,
         job_id=job_id,
         call_type="chat",
         cwd=repo_path,
@@ -183,10 +193,11 @@ async def chat_with_ai(
         ai_model=ai_model,
         ai_cli_timeout=ai_cli_timeout,
         cli_flags=PROVIDER_CLI_FLAGS.get(ai_provider, []),
+        session_id=session_id,
     )
 
     if not result.success:
         logger.error(f"Chat AI call failed for job {job_id}: {result.text}")
-        return False, result.text
+        return False, result.text, None
 
-    return True, result.text
+    return True, result.text, result.session_id

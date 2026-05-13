@@ -145,7 +145,7 @@ class TestBuildSystemPrompt:
             "failures": [],
         }
         prompt = build_system_prompt(result_data, "j1", "")
-        assert "curl" not in prompt
+        assert "Available API Endpoints" not in prompt
 
     def test_server_url_includes_api_endpoints(self):
         result_data = {
@@ -155,7 +155,7 @@ class TestBuildSystemPrompt:
             "failures": [],
         }
         prompt = build_system_prompt(result_data, "j1", "http://srv:8000")
-        assert "curl" in prompt
+        assert "Available API Endpoints" in prompt
         assert "/api/results/j1" in prompt
         assert "/api/results/j1/comments" in prompt
 
