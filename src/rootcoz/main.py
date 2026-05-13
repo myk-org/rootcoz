@@ -1350,7 +1350,9 @@ class RequestBodyLoggingMiddleware(BaseHTTPMiddleware):
     """Log incoming request bodies at DEBUG level with sensitive data masked."""
 
     async def dispatch(self, request: Request, call_next):
-        if request.url.path in _BODY_LOGGING_SKIP_PATHS:
+        if request.url.path in _BODY_LOGGING_SKIP_PATHS or request.url.path.startswith(
+            "/api/chat/"
+        ):
             return await call_next(request)
         if logger.isEnabledFor(logging.DEBUG) and request.method in (
             "POST",
@@ -7094,7 +7096,12 @@ async def send_chat_message(
     # Find session_id from the last assistant message
     last_session_id = None
     for msg in reversed(history):
-        if msg.get("role") == "assistant" and msg.get("session_id"):
+        if (
+            msg.get("role") == "assistant"
+            and msg.get("session_id")
+            and msg.get("ai_provider") == ai_provider
+            and msg.get("ai_model") == ai_model
+        ):
             last_session_id = msg["session_id"]
             break
 
