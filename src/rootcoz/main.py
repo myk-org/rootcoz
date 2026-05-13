@@ -3170,8 +3170,8 @@ async def re_analyze_failure(
 
     # Parse optional body
     body_data: dict = {}
-    content_length = request.headers.get("content-length", "0")
-    if content_length != "0":
+    raw_body = await request.body()
+    if raw_body:
         try:
             body_data = await request.json()
         except Exception as exc:

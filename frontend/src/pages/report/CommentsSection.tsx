@@ -186,6 +186,7 @@ export function CommentsSection({ jobId, testNames, childJobName, childBuildNumb
       </div>
 
       {testComments.length > 0 && (
+        <TooltipProvider delayDuration={200}>
         <div className="space-y-2">
           {testComments.map((c) => {
             const badges = enrichments[String(c.id)] ?? []
@@ -227,7 +228,6 @@ export function CommentsSection({ jobId, testNames, childJobName, childBuildNumb
                   </p>
                 </div>
                 {username && c.username === username && (
-                  <TooltipProvider delayDuration={200}>
                   <Tooltip>
                     <TooltipTrigger asChild>
                       <button
@@ -242,12 +242,12 @@ export function CommentsSection({ jobId, testNames, childJobName, childBuildNumb
                     </TooltipTrigger>
                     <TooltipContent>Delete comment</TooltipContent>
                   </Tooltip>
-                  </TooltipProvider>
                 )}
               </div>
             )
           })}
         </div>
+        </TooltipProvider>
       )}
 
       <div className="space-y-1">
