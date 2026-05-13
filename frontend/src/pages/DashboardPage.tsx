@@ -458,16 +458,20 @@ export function DashboardPage() {
           <p className="text-sm text-text-tertiary">
             {filtered.length} analysis {filtered.length === 1 ? 'run' : 'runs'}
           </p>
-          <a
-            href={`${GITHUB_REPO_URL}/issues`}
-            target="_blank"
-            rel="noopener noreferrer"
-            title="View GitHub issues"
-            className="flex items-center gap-1 rounded-md px-2 py-0.5 text-xs font-medium text-text-tertiary transition-colors duration-150 hover:bg-surface-hover hover:text-text-secondary"
-          >
-            <Github className="h-3 w-3" />
-            View Issues
-          </a>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <a
+                href={`${GITHUB_REPO_URL}/issues`}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="flex items-center gap-1 rounded-md px-2 py-0.5 text-xs font-medium text-text-tertiary transition-colors duration-150 hover:bg-surface-hover hover:text-text-secondary"
+              >
+                <Github className="h-3 w-3" />
+                View Issues
+              </a>
+            </TooltipTrigger>
+            <TooltipContent>View GitHub issues</TooltipContent>
+          </Tooltip>
         </div>
 
         {/* Bulk result message */}

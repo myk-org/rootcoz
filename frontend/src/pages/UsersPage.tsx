@@ -21,6 +21,7 @@ import {
 } from '@/components/ui/dialog'
 import { ConfirmDialog } from '@/components/shared/ConfirmDialog'
 import { Skeleton } from '@/components/ui/skeleton'
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
 import { Copy, Check, RefreshCw, Trash2, UserPlus, Shield } from 'lucide-react'
 import { Select, SelectTrigger, SelectValue, SelectContent, SelectItem } from '@/components/ui/select'
 import { formatTimestamp, formatRelativeTime } from '@/lib/utils'
@@ -302,30 +303,42 @@ export function UsersPage() {
                         </SelectContent>
                       </Select>
                       {/* Rotate key — only for admins (regular users have no API key) */}
-                      <Button
-                        type="button"
-                        variant="ghost"
-                        size="icon"
-                        aria-label={`Rotate key for ${user.username}`}
-                        className={`h-7 w-7${user.role !== 'admin' ? ' invisible' : ''}`}
-                        title="Rotate API key"
-                        disabled={user.role !== 'admin'}
-                        onClick={() => setRotateTarget(user.username)}
-                      >
-                        <RefreshCw className="h-3.5 w-3.5 text-text-tertiary hover:text-signal-blue" />
-                      </Button>
+                      <TooltipProvider delayDuration={200}>
+                        <Tooltip>
+                          <TooltipTrigger asChild>
+                            <Button
+                              type="button"
+                              variant="ghost"
+                              size="icon"
+                              aria-label={`Rotate key for ${user.username}`}
+                              className={`h-7 w-7${user.role !== 'admin' ? ' invisible' : ''}`}
+                              disabled={user.role !== 'admin'}
+                              onClick={() => setRotateTarget(user.username)}
+                            >
+                              <RefreshCw className="h-3.5 w-3.5 text-text-tertiary hover:text-signal-blue" />
+                            </Button>
+                          </TooltipTrigger>
+                          <TooltipContent>Rotate API key</TooltipContent>
+                        </Tooltip>
+                      </TooltipProvider>
                       {/* Delete */}
-                      <Button
-                        type="button"
-                        variant="ghost"
-                        size="icon"
-                        aria-label={`Delete ${user.username}`}
-                        className="h-7 w-7"
-                        title="Delete user"
-                        onClick={() => setDeleteTarget(user.username)}
-                      >
-                        <Trash2 className="h-3.5 w-3.5 text-text-tertiary hover:text-signal-red" />
-                      </Button>
+                      <TooltipProvider delayDuration={200}>
+                        <Tooltip>
+                          <TooltipTrigger asChild>
+                            <Button
+                              type="button"
+                              variant="ghost"
+                              size="icon"
+                              aria-label={`Delete ${user.username}`}
+                              className="h-7 w-7"
+                              onClick={() => setDeleteTarget(user.username)}
+                            >
+                              <Trash2 className="h-3.5 w-3.5 text-text-tertiary hover:text-signal-red" />
+                            </Button>
+                          </TooltipTrigger>
+                          <TooltipContent>Delete user</TooltipContent>
+                        </Tooltip>
+                      </TooltipProvider>
                     </div>
                   )}
                 </TableCell>

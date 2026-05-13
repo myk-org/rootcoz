@@ -5,6 +5,7 @@ import { cn } from '@/lib/utils'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Button } from '@/components/ui/button'
 import { Pagination } from '@/components/shared/Pagination'
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
 import { AtSign, CheckCheck } from 'lucide-react'
 
 /* ------------------------------------------------------------------ */
@@ -244,7 +245,14 @@ export function MentionsPage() {
                   {/* Unread dot */}
                   <div className="mt-1.5 shrink-0 w-2">
                     {!m.is_read && (
-                      <span className="block h-2 w-2 rounded-full bg-signal-blue" title="Unread" />
+                      <TooltipProvider delayDuration={200}>
+                        <Tooltip>
+                          <TooltipTrigger asChild>
+                            <span className="block h-2 w-2 rounded-full bg-signal-blue" />
+                          </TooltipTrigger>
+                          <TooltipContent>Unread</TooltipContent>
+                        </Tooltip>
+                      </TooltipProvider>
                     )}
                   </div>
 
@@ -285,9 +293,16 @@ export function MentionsPage() {
                         {m.job_id}
                       </span>
                       {m.test_name && (
-                        <span className="font-mono truncate max-w-[400px]" title={m.test_name}>
-                          {m.test_name}
-                        </span>
+                        <TooltipProvider delayDuration={200}>
+                          <Tooltip>
+                            <TooltipTrigger asChild>
+                              <span className="font-mono truncate max-w-[400px]">
+                                {m.test_name}
+                              </span>
+                            </TooltipTrigger>
+                            <TooltipContent className="max-w-md break-all">{m.test_name}</TooltipContent>
+                          </Tooltip>
+                        </TooltipProvider>
                       )}
                     </div>
                   </div>

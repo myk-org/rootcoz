@@ -12,6 +12,7 @@ import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Textarea } from '@/components/ui/textarea'
 import { Badge } from '@/components/ui/badge'
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { Select, SelectTrigger, SelectValue, SelectContent, SelectItem } from '@/components/ui/select'
 import { LoadingSpinner } from '@/components/shared/LoadingSpinner'
 import { CheckCircle2, ExternalLink, AlertTriangle } from 'lucide-react'
@@ -497,7 +498,18 @@ export function BugCreationDialog({
               )}
               <div className="flex gap-2 sm:ml-auto">
                 <Button variant="outline" onClick={() => handleCancel()}>Cancel</Button>
-                <Button onClick={handleCreate} disabled={!title.trim() || !hasToken || (target === 'jira' && jiraIssueType === '__custom__' && !customIssueType.trim())} title={!hasToken ? `Add a ${target === 'github' ? 'GitHub' : 'Jira'} token to create issues` : undefined}>Create {label}</Button>
+                {!hasToken ? (
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <span tabIndex={0}>
+                        <Button onClick={handleCreate} disabled={!title.trim() || !hasToken || (target === 'jira' && jiraIssueType === '__custom__' && !customIssueType.trim())}>Create {label}</Button>
+                      </span>
+                    </TooltipTrigger>
+                    <TooltipContent>Add a {target === 'github' ? 'GitHub' : 'Jira'} token to create issues</TooltipContent>
+                  </Tooltip>
+                ) : (
+                  <Button onClick={handleCreate} disabled={!title.trim() || (target === 'jira' && jiraIssueType === '__custom__' && !customIssueType.trim())}>Create {label}</Button>
+                )}
               </div>
             </>
           )}

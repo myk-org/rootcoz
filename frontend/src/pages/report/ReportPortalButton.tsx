@@ -32,13 +32,23 @@ function RPPushMetadata({ project, jobName, buildNumber, launchId, className }: 
       {project && (
         <>
           <dt className="font-medium">Project</dt>
-          <dd className="font-mono truncate" title={project}>{project}</dd>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <dd className="font-mono truncate">{project}</dd>
+            </TooltipTrigger>
+            <TooltipContent className="max-w-md break-all">{project}</TooltipContent>
+          </Tooltip>
         </>
       )}
       {jobName && (
         <>
           <dt className="font-medium">Job</dt>
-          <dd className="font-mono truncate" title={jobName}>{jobName}</dd>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <dd className="font-mono truncate">{jobName}</dd>
+            </TooltipTrigger>
+            <TooltipContent className="max-w-md break-all">{jobName}</TooltipContent>
+          </Tooltip>
         </>
       )}
       {buildNumber != null && (

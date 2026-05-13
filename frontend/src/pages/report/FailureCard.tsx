@@ -37,7 +37,12 @@ function IssueButton({ disabled, tooltip, label, onClick }: {
       <Bug className="h-3.5 w-3.5 mr-1" /> {label}
     </Button>
   )
-  return tooltip ? <span title={tooltip} className="inline-flex">{button}</span> : button
+  return tooltip ? (
+    <Tooltip>
+      <TooltipTrigger asChild><span className="inline-flex">{button}</span></TooltipTrigger>
+      <TooltipContent>{tooltip}</TooltipContent>
+    </Tooltip>
+  ) : button
 }
 
 function CopyableSectionHeader({ title, content, sectionId, copiedSection, onCopy, extra }: {
@@ -54,15 +59,19 @@ function CopyableSectionHeader({ title, content, sectionId, copiedSection, onCop
         <h4 className="text-xs font-display uppercase tracking-widest text-text-tertiary">{title}</h4>
         {extra}
       </div>
-      <button
-        type="button"
-        className="text-text-tertiary hover:text-text-primary transition-colors"
-        onClick={() => onCopy(content, sectionId)}
-        title={copiedSection === sectionId ? `Copied ${title}` : `Copy ${title} to clipboard`}
-        aria-label={copiedSection === sectionId ? `Copied ${title}` : `Copy ${title} to clipboard`}
-      >
-        {copiedSection === sectionId ? <Check className="h-3 w-3 text-signal-green" /> : <Copy className="h-3 w-3" />}
-      </button>
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <button
+            type="button"
+            className="text-text-tertiary hover:text-text-primary transition-colors"
+            onClick={() => onCopy(content, sectionId)}
+            aria-label={copiedSection === sectionId ? `Copied ${title}` : `Copy ${title} to clipboard`}
+          >
+            {copiedSection === sectionId ? <Check className="h-3 w-3 text-signal-green" /> : <Copy className="h-3 w-3" />}
+          </button>
+        </TooltipTrigger>
+        <TooltipContent>{copiedSection === sectionId ? `Copied ${title}` : `Copy ${title} to clipboard`}</TooltipContent>
+      </Tooltip>
     </div>
   )
 }
@@ -256,20 +265,29 @@ export function FailureCard({ group, jobId, childJobName, childBuildNumber, inde
           >
             {expanded ? <ChevronDown className="h-4 w-4 shrink-0 text-text-tertiary" /> : <ChevronRight className="h-4 w-4 shrink-0 text-text-tertiary" />}
             <div className="min-w-0 flex-1">
-              <p className="truncate font-display text-sm font-medium text-text-primary" title={rep.test_name}>{rep.test_name}</p>
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <p className="truncate font-display text-sm font-medium text-text-primary">{rep.test_name}</p>
+                </TooltipTrigger>
+                <TooltipContent className="max-w-md break-all">{rep.test_name}</TooltipContent>
+              </Tooltip>
               {group.count > 1 && <span className="text-xs text-text-tertiary">+{group.count - 1} more with same error</span>}
             </div>
           </button>
           <div className="flex items-center gap-1.5 shrink-0">
-            <button
-              type="button"
-              className="text-text-tertiary hover:text-text-primary transition-colors"
-              onClick={(e) => { e.stopPropagation(); copyToClipboard(rep.test_name, 'test-name') }}
-              title={copiedSection === 'test-name' ? 'Copied test name' : 'Copy test name to clipboard'}
-              aria-label={copiedSection === 'test-name' ? 'Copied test name' : 'Copy test name to clipboard'}
-            >
-              {copiedSection === 'test-name' ? <Check className="h-3 w-3 text-signal-green" /> : <Copy className="h-3 w-3" />}
-            </button>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <button
+                  type="button"
+                  className="text-text-tertiary hover:text-text-primary transition-colors"
+                  onClick={(e) => { e.stopPropagation(); copyToClipboard(rep.test_name, 'test-name') }}
+                  aria-label={copiedSection === 'test-name' ? 'Copied test name' : 'Copy test name to clipboard'}
+                >
+                  {copiedSection === 'test-name' ? <Check className="h-3 w-3 text-signal-green" /> : <Copy className="h-3 w-3" />}
+                </button>
+              </TooltipTrigger>
+              <TooltipContent>{copiedSection === 'test-name' ? 'Copied test name' : 'Copy test name to clipboard'}</TooltipContent>
+            </Tooltip>
             <UuidCopyButton uuid={rep.id} sectionKey="uuid" copiedSection={copiedSection} onCopy={copyToClipboard} />
           </div>
           <div className="flex items-center gap-2 shrink-0">
@@ -288,9 +306,14 @@ export function FailureCard({ group, jobId, childJobName, childBuildNumber, inde
             )}
             <ClassificationBadge classification={classification} />
             {rep.reanalyzed_with && rep.reanalysis_status !== 'running' && (
-              <span className="rounded-md bg-surface-elevated px-2 py-1 text-[10px] font-mono text-text-tertiary" title="Re-analyzed with different AI">
-                {rep.reanalyzed_with.ai_provider}{rep.reanalyzed_with.ai_model ? ` / ${rep.reanalyzed_with.ai_model}` : ''}
-              </span>
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <span className="rounded-md bg-surface-elevated px-2 py-1 text-[10px] font-mono text-text-tertiary cursor-default">
+                    {rep.reanalyzed_with.ai_provider}{rep.reanalyzed_with.ai_model ? ` / ${rep.reanalyzed_with.ai_model}` : ''}
+                  </span>
+                </TooltipTrigger>
+                <TooltipContent>Re-analyzed with different AI</TooltipContent>
+              </Tooltip>
             )}
             {(() => {
               const secondaryBadges = new Set<string>()
@@ -306,19 +329,23 @@ export function FailureCard({ group, jobId, childJobName, childBuildNumber, inde
             {group.count === 1 ? (
               <ReviewToggle jobId={jobId} testName={rep.test_name} childJobName={scopedChildJobName} childBuildNumber={scopedChildBuildNumber} />
             ) : (
-              <button
-                onClick={(e) => { e.stopPropagation(); handleReviewAll() }}
-                disabled={reviewingAll}
-                className={`flex items-center gap-1 rounded-md px-2 py-1 text-[10px] font-mono transition-colors ${
-                  allReviewed
-                    ? 'bg-signal-green/15 text-signal-green'
-                    : 'bg-surface-elevated text-text-tertiary hover:text-text-secondary'
-                }`}
-                title={allReviewed ? 'All reviewed' : `Review all ${group.count} tests`}
-              >
-                <CheckCircle2 className="h-3 w-3" />
-                {allReviewed ? 'Reviewed' : `Review ${reviewedCount}/${group.count}`}
-              </button>
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <button
+                    onClick={(e) => { e.stopPropagation(); handleReviewAll() }}
+                    disabled={reviewingAll}
+                    className={`flex items-center gap-1 rounded-md px-2 py-1 text-[10px] font-mono transition-colors ${
+                      allReviewed
+                        ? 'bg-signal-green/15 text-signal-green'
+                        : 'bg-surface-elevated text-text-tertiary hover:text-text-secondary'
+                    }`}
+                  >
+                    <CheckCircle2 className="h-3 w-3" />
+                    {allReviewed ? 'Reviewed' : `Review ${reviewedCount}/${group.count}`}
+                  </button>
+                </TooltipTrigger>
+                <TooltipContent>{allReviewed ? 'All reviewed' : `Review all ${group.count} tests`}</TooltipContent>
+              </Tooltip>
             )}
             {commentCount > 0 && (
               <span className="flex items-center gap-1 rounded-md bg-surface-elevated px-2 py-1 text-[10px] font-mono text-text-tertiary">
@@ -359,7 +386,12 @@ export function FailureCard({ group, jobId, childJobName, childBuildNumber, inde
                   {group.tests.map((t) => (
                     <div key={t.test_name} className="flex items-center justify-between gap-2">
                       <div className="flex items-center gap-1.5 min-w-0">
-                        <p className="font-mono text-xs text-text-secondary truncate" title={t.test_name}>{t.test_name}</p>
+                        <Tooltip>
+                          <TooltipTrigger asChild>
+                            <p className="font-mono text-xs text-text-secondary truncate">{t.test_name}</p>
+                          </TooltipTrigger>
+                          <TooltipContent className="max-w-md break-all">{t.test_name}</TooltipContent>
+                        </Tooltip>
                         <UuidCopyButton uuid={t.id} sectionKey={`uuid-${t.id}`} copiedSection={copiedSection} onCopy={copyToClipboard} />
                       </div>
                       <ReviewToggle jobId={jobId} testName={t.test_name} childJobName={scopedChildJobName} childBuildNumber={scopedChildBuildNumber} disabled={reviewingAll} />
