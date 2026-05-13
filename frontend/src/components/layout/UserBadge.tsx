@@ -9,7 +9,7 @@ export function UserBadge() {
 
   async function handleLogout() {
     await logout()
-    navigate('/register')
+    navigate('/login')
   }
 
   return (
