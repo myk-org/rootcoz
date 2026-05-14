@@ -341,9 +341,10 @@ Scripts in your working directory (under `bin/`) — use these to access data:
 
 **IMPORTANT:** Always use these scripts to get data. Start by running `./bin/rootcoz-chat-job summary` and `./bin/rootcoz-chat-job failures` to understand the job before answering.{repos_note}
 
-## Rules
-- Stay focused on this specific job and its failures
-- If the user asks something unrelated, redirect to the job analysis
+## Rules — STRICT
+- You MUST only discuss this specific job and its failures
+- If the user asks something unrelated to this job (e.g., "what's the time?", general coding questions, weather, anything not about this analysis), respond ONLY with: "I can only discuss the analysis results for this job. How can I help you understand the failures?"
+- Do NOT answer off-topic questions. Do NOT be helpful about non-job topics. Reject them immediately.
 - Do NOT modify any data — read-only access only
 - Do NOT run arbitrary curl commands — use the provided scripts
 """
@@ -373,6 +374,59 @@ def build_chat_prompt(
     parts.append("\n**Assistant:** ")
 
     return "\n".join(parts)
+
+
+async def init_chat_session(
+    *,
+    job_id: str,
+    job_name: str,
+    build_number: int,
+    ai_provider: str,
+    ai_model: str,
+    repo_path: Path | None = None,
+    available_scripts: list[str] | None = None,
+    repos_available: bool = False,
+) -> str | None:
+    """Initialize a chat session with a hidden AI call to obtain a session_id.
+
+    Sends the system prompt + a trivial message with output_format="json"
+    to get the session_id. The user never sees this exchange.
+
+    Returns the session_id, or None if the call failed.
+    """
+    system_prompt = build_system_prompt(
+        job_name=job_name,
+        build_number=build_number,
+        job_id=job_id,
+        available_scripts=available_scripts or [],
+        repos_available=repos_available,
+    )
+    # Build a minimal prompt with the system context
+    init_prompt = system_prompt + "\n\n**User:** hi\n\n**Assistant:** "
+
+    logger.info(
+        "Chat: initializing session for job %s (provider=%s)", job_id, ai_provider
+    )
+
+    result, _ = await call_ai_and_record(
+        init_prompt,
+        job_id=job_id,
+        call_type="chat_init",
+        cwd=repo_path,
+        ai_provider=ai_provider,
+        ai_model=ai_model,
+        cli_flags=PROVIDER_CLI_FLAGS.get(ai_provider, []),
+        output_format="json",  # Need JSON to extract session_id
+    )
+
+    if result.success and result.session_id:
+        logger.info(
+            "Chat: session initialized for job %s: %s", job_id, result.session_id
+        )
+        return result.session_id
+
+    logger.warning("Chat: failed to initialize session for job %s", job_id)
+    return None
 
 
 async def chat_with_ai(
@@ -447,6 +501,7 @@ async def chat_with_ai(
         ai_cli_timeout=ai_cli_timeout,
         cli_flags=PROVIDER_CLI_FLAGS.get(ai_provider, []),
         session_id=session_id,
+        output_format=None,  # Clean output, no chain-of-thought
     )
 
     if not result.success:

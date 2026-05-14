@@ -7065,17 +7065,21 @@ async def get_chat_history(
     messages = await storage.get_chat_messages(
         job_id, limit=limit, offset=offset, username=username
     )
+    # Filter out hidden init messages (empty content used for session_id storage)
+    messages = [m for m in messages if m.get("content")]
     total = await storage.count_chat_messages(job_id, username=username)
     return {"messages": messages, "total": total}
 
 
 @app.post("/api/chat/{job_id}/init")
 async def init_chat(job_id: str, request: Request) -> dict:
-    """Initialize chat workspace: create directory and clone repos."""
+    """Initialize chat workspace: create directory, clone repos, and start AI session."""
     _check_allow_list(request)
     from rootcoz.engine.chat import (
         ensure_chat_workspace,
         clone_chat_repos,
+        setup_chat_scripts,
+        init_chat_session,
     )
 
     stored = await get_result(job_id, strip_sensitive=False)
@@ -7084,9 +7088,9 @@ async def init_chat(job_id: str, request: Request) -> dict:
 
     result_data = stored["result"]
     params = result_data.get("request_params", {})
+    username = getattr(request.state, "username", "")
 
     # Create workspace
-    username = getattr(request.state, "username", "")
     workspace = ensure_chat_workspace(job_id, username=username)
 
     # Decrypt params for repo cloning
@@ -7096,14 +7100,105 @@ async def init_chat(job_id: str, request: Request) -> dict:
     except Exception:
         logger.warning("Failed to decrypt request_params for chat init", exc_info=True)
 
-    # Clone repos
+    # Resolve AI provider/model
+    ai_provider = (
+        result_data.get("ai_provider", "")
+        or params.get("ai_provider", "")
+        or AI_PROVIDER
+    )
+    ai_model = result_data.get("ai_model", "") or params.get("ai_model", "") or AI_MODEL
+
+    settings = get_settings()
+
+    # Get user tokens for Jira/GitHub access
+    user_tokens = await storage.get_user_tokens(username)
+
+    # Extract github repo
+    github_repo = ""
+    tests_repo_url = decrypted_params.get("tests_repo_url", "")
+    if tests_repo_url:
+        import re
+
+        match = re.search(
+            r"github\.com[/:]([^/]+/[^/]+?)(?:\.git)?$", str(tests_repo_url)
+        )
+        if match:
+            github_repo = match.group(1)
+
+    # Resolve Jira credentials
+    jira_url = decrypted_params.get("jira_url", "") or str(settings.jira_url or "")
+    jira_email = (
+        user_tokens.get("jira_email", "")
+        or decrypted_params.get("jira_email", "")
+        or str(settings.jira_email or "")
+    )
+    jira_token = (
+        user_tokens.get("jira_token", "")
+        or decrypted_params.get("jira_api_token", "")
+        or decrypted_params.get("jira_pat", "")
+    )
+    if not jira_token and settings.jira_api_token:
+        jira_token = settings.jira_api_token.get_secret_value()
+    if not jira_token and settings.jira_pat:
+        jira_token = settings.jira_pat.get_secret_value()
+
+    # Resolve GitHub token
+    github_token = user_tokens.get("github_token", "")
+    if not github_token and settings.github_token:
+        github_token = settings.github_token.get_secret_value()
+
+    # Clone repos and setup scripts
     repos_available = await clone_chat_repos(workspace, decrypted_params)
 
+    server_url = _build_internal_server_url()
+    auth_header = await _create_ai_auth_header(username)
+
+    available_scripts = setup_chat_scripts(
+        workspace,
+        server_url=server_url,
+        auth_token=auth_header.removeprefix("Bearer ").strip() if auth_header else "",
+        job_id=job_id,
+        jira_url=jira_url,
+        jira_email=jira_email,
+        jira_token=jira_token,
+        github_token=github_token,
+        github_repo=github_repo,
+    )
+
+    # Initialize AI session (needs workspace with scripts ready)
+    session_id = await init_chat_session(
+        job_id=job_id,
+        job_name=result_data.get("job_name", "unknown"),
+        build_number=result_data.get("build_number", 0),
+        ai_provider=ai_provider,
+        ai_model=ai_model,
+        repo_path=workspace,
+        available_scripts=available_scripts,
+        repos_available=repos_available,
+    )
+
+    # Store session_id for this user+job+provider+model
+    if session_id:
+        await storage.add_chat_message(
+            job_id=job_id,
+            role="assistant",
+            content="",  # Hidden init message
+            username=username,
+            ai_provider=ai_provider,
+            ai_model=ai_model,
+            session_id=session_id,
+            status="completed",
+        )
+
+    # Clean up the auth header created for script setup
+    await _cleanup_ai_session(auth_header)
+
     logger.info(
-        "Chat init for job %s: workspace=%s, repos=%s",
+        "Chat init for job %s: workspace=%s, repos=%s, session=%s",
         job_id,
         workspace,
         repos_available,
+        session_id,
     )
 
     # Collect repo names that were cloned
@@ -7115,11 +7210,11 @@ async def init_chat(job_id: str, request: Request) -> dict:
 
     return {
         "ready": True,
-        "workspace": str(workspace),
         "repos_cloned": repos_available,
         "repo_names": repo_names,
         "job_name": result_data.get("job_name", ""),
         "build_number": result_data.get("build_number", 0),
+        "session_id": session_id or "",
     }
 
 
@@ -7312,7 +7407,11 @@ async def _process_chat_message(
             # Get conversation history (limit to last 50 messages)
             all_history = await storage.get_chat_messages(job_id, username=username)
             # Filter to only completed messages for context
-            history = [m for m in all_history if m.get("status") != "pending"][-50:]
+            history = [
+                m
+                for m in all_history
+                if m.get("status") != "pending" and m.get("content")
+            ][-50:]
 
             # Find session_id from the last completed assistant message
             last_session_id = None
