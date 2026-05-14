@@ -49,7 +49,6 @@ export function ChatPage() {
   const [aiProvider, setAiProvider] = useState('')
   const [aiModel, setAiModel] = useState('')
   const [availableModels, setAvailableModels] = useState<ModelOption[]>([])
-  const [aiConfigs, setAiConfigs] = useState<{ ai_provider: string; ai_model: string }[]>([])
 
   const [copiedMsgId, setCopiedMsgId] = useState<number | null>(null)
 
@@ -94,16 +93,14 @@ export function ChatPage() {
     Promise.all([
       api.get<{ messages: ChatMessage[]; total: number }>(`/api/chat/${jobId}`),
       api.get<{ result: { job_name: string; build_number: number; summary: string; ai_provider: string; ai_model: string } }>(`/results/${jobId}`),
-      api.get<{ ai_provider: string; ai_model: string }[]>('/ai-configs'),
-    ]).then(([chatRes, resultRes, configsRes]) => {
+    ]).then(([chatRes, resultRes]) => {
       setMessages(chatRes.messages)
       if (resultRes.result) {
         const r = resultRes.result
         setJobInfo({ job_name: r.job_name, build_number: r.build_number, summary: r.summary, ai_provider: r.ai_provider, ai_model: r.ai_model })
-        setAiProvider(r.ai_provider || configsRes[0]?.ai_provider || '')
+        setAiProvider(r.ai_provider || 'claude')
         setAiModel(r.ai_model || '')
       }
-      setAiConfigs(configsRes)
     }).catch(err => {
       setError(err instanceof Error ? err.message : 'Failed to load chat')
     }).finally(() => setLoading(false))
@@ -131,7 +128,6 @@ export function ChatPage() {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
   }, [messages])
 
-  const providers = [...new Set(aiConfigs.map(c => c.ai_provider))]
 
   const handleSend = useCallback(async (e?: FormEvent) => {
     e?.preventDefault()
@@ -259,9 +255,9 @@ export function ChatPage() {
                 <SelectValue placeholder="Provider" />
               </SelectTrigger>
               <SelectContent>
-                {providers.map(p => (
-                  <SelectItem key={p} value={p}>{p}</SelectItem>
-                ))}
+                <SelectItem value="claude">Claude</SelectItem>
+                <SelectItem value="gemini">Gemini</SelectItem>
+                <SelectItem value="cursor">Cursor</SelectItem>
               </SelectContent>
             </Select>
             {/* Model selector */}
