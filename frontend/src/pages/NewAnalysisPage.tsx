@@ -55,6 +55,7 @@ export function NewAnalysisPage() {
   const [enablePeers, setEnablePeers] = useState(false)
   const [peerConfigs, setPeerConfigs] = useState<Array<AiConfig & { id: string }>>([])
   const [maxRounds, setMaxRounds] = useState(3)
+  const [peerModels, setPeerModels] = useState<Record<string, ModelOption[]>>({})
 
   // Source repositories
   const [testsRepoUrl, setTestsRepoUrl] = useState('')
@@ -89,6 +90,20 @@ export function NewAnalysisPage() {
       .catch(() => { if (!ignore) setAvailableModels([]) })
     return () => { ignore = true }
   }, [aiProvider])
+
+  // Fetch models for each peer provider
+  useEffect(() => {
+    if (!enablePeers) return
+    peerConfigs.forEach((peer) => {
+      if (!peer.ai_provider) {
+        setPeerModels(prev => ({ ...prev, [peer.id]: [] }))
+        return
+      }
+      api.get<{ models: ModelOption[] }>(`/api/ai-models?provider=${peer.ai_provider}`)
+        .then(res => setPeerModels(prev => ({ ...prev, [peer.id]: res.models ?? [] })))
+        .catch(() => setPeerModels(prev => ({ ...prev, [peer.id]: [] })))
+    })
+  }, [enablePeers, peerConfigs.map(p => p.ai_provider).join(',')])
 
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState('')
@@ -476,17 +491,17 @@ export function NewAnalysisPage() {
                           <SelectItem value="cursor">Cursor</SelectItem>
                         </SelectContent>
                       </Select>
-                      <Input
-                        className="flex-1"
-                        placeholder="Model"
+                      <ModelCombobox
                         value={peer.ai_model}
-                        onChange={(e) =>
+                        onChange={(val) =>
                           setPeerConfigs((prev) =>
                             prev.map((p) =>
-                              p.id === peer.id ? { ...p, ai_model: e.target.value } : p
+                              p.id === peer.id ? { ...p, ai_model: val } : p
                             )
                           )
                         }
+                        options={peerModels[peer.id] ?? []}
+                        placeholder="Model"
                       />
                       <button
                         type="button"
