@@ -1403,7 +1403,9 @@ async def _validation_error_handler(
     request: Request, exc: RequestValidationError
 ) -> JSONResponse:
     """Log 422 validation error details at DEBUG level, then return standard response."""
-    if request.url.path in _BODY_LOGGING_SKIP_PATHS:
+    if request.url.path in _BODY_LOGGING_SKIP_PATHS or request.url.path.startswith(
+        "/api/chat/"
+    ):
         raw_errors = jsonable_encoder(exc.errors())
         masked_errors = [_mask_pydantic_error(e) for e in raw_errors]
         for error in masked_errors:
@@ -7239,7 +7241,10 @@ async def clear_chat_history(job_id: str, request: Request) -> dict:
         )
 
     count = await storage.delete_chat_messages(job_id)
-    cleanup_chat_workspace(job_id)
+    try:
+        cleanup_chat_workspace(job_id)
+    except Exception:
+        logger.warning("Failed to cleanup chat workspace for %s", job_id, exc_info=True)
     return {"deleted": count}
 
 
