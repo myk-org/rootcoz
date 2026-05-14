@@ -7065,8 +7065,9 @@ async def get_chat_history(
     messages = await storage.get_chat_messages(
         job_id, limit=limit, offset=offset, username=username
     )
-    # Filter out hidden init messages (empty content used for session_id storage)
-    messages = [m for m in messages if m.get("content")]
+    # Filter out hidden init messages (empty content + completed status, used for session_id storage)
+    # Keep pending messages even if empty (they show "Thinking..." in the UI)
+    messages = [m for m in messages if m.get("content") or m.get("status") == "pending"]
     total = await storage.count_chat_messages(job_id, username=username)
     return {"messages": messages, "total": total}
 
@@ -7609,7 +7610,6 @@ async def _process_chat_message(
 async def clear_chat_history(job_id: str, request: Request) -> dict:
     """Clear chat messages for the current user on a job."""
     _check_allow_list(request)
-    from rootcoz.engine.chat import cleanup_chat_workspace
 
     stored = await get_result(job_id)
     if not stored:
@@ -7617,15 +7617,9 @@ async def clear_chat_history(job_id: str, request: Request) -> dict:
 
     username = request.state.username
     count = await storage.delete_chat_messages(job_id, username=username)
-    try:
-        cleanup_chat_workspace(job_id, username=username)
-    except Exception:
-        logger.warning(
-            "Failed to cleanup chat workspace for %s/%s",
-            job_id,
-            username,
-            exc_info=True,
-        )
+    logger.info(
+        "Chat: cleared %d messages for job %s, user %s", count, job_id, username
+    )
     return {"deleted": count}
 
 

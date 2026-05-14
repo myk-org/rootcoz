@@ -202,14 +202,10 @@ export function ChatPage() {
     setMessages([])
     setError('')
     try {
-      // Clear existing chat history
       await api.delete(`/api/chat/${jobId}`)
-      // Re-initialize workspace (clones repos, creates new AI session)
-      const res = await api.post<{ ready: boolean; repos_cloned: boolean; repo_names: string[] }>(`/api/chat/${jobId}/init`, {})
-      if (res.repos_cloned && res.repo_names.length > 0) {
-        setInitMessage(`Repos cloned: ${res.repo_names.join(', ')}`)
-      }
+      await api.post<{ ready: boolean; repos_cloned: boolean; repo_names: string[] }>(`/api/chat/${jobId}/init`, {})
       setChatReady(true)
+      setInitMessage('')
     } catch {
       setChatReady(true)
       setInitMessage('')

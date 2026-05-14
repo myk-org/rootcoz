@@ -339,7 +339,7 @@ def build_system_prompt(
 Scripts in your working directory (under `bin/`) — use these to access data:
 {tools_section}
 
-**IMPORTANT:** Always use these scripts to get data. Start by running `./bin/rootcoz-chat-job summary` and `./bin/rootcoz-chat-job failures` to understand the job before answering.{repos_note}
+**IMPORTANT:** Use these scripts to get data when the user asks a question. Do NOT run scripts proactively — only fetch data that's relevant to what the user is asking about.{repos_note}
 
 ## Rules — STRICT
 - You MUST only discuss this specific job and its failures
@@ -401,10 +401,14 @@ async def init_chat_session(
         available_scripts=available_scripts or [],
         repos_available=repos_available,
     )
-    # Build a minimal prompt with the system context
+    # Build init prompt — establish session with system context but NO tool execution
     init_prompt = (
         system_prompt
-        + "\n\n**User:** answer only with hi, do not think\n\n**Assistant:** "
+        + "\n\n**IMPORTANT OVERRIDE FOR THIS MESSAGE ONLY:** Do NOT run any scripts or tools right now. "
+        "Do NOT analyze the job yet. Do NOT fetch any data. Simply acknowledge that you understand "
+        "your role and are ready to help. Reply with only: "
+        '"I\'m ready to help you understand the analysis for this job. What would you like to know?"'
+        "\n\n**User:** hi\n\n**Assistant:** "
     )
 
     logger.info(
