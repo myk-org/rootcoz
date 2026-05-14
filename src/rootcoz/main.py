@@ -26,7 +26,7 @@ from ai_cli_runner import (
     pricing_cache,
     run_parallel_with_limit,
 )
-from fastapi import Depends, FastAPI, HTTPException, Query, Request
+from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Query, Request
 from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import (
@@ -197,6 +197,9 @@ _comment_listeners: dict[str, set[asyncio.Event]] = {}
 # Token usage change notifications
 _token_usage_listeners: set[asyncio.Event] = set()
 
+# Per-job chat change notifications
+_chat_listeners: dict[str, set[asyncio.Event]] = {}
+
 
 def notify_dashboard_changed() -> None:
     """Signal all dashboard SSE listeners that the job list changed."""
@@ -223,6 +226,12 @@ def notify_comments_changed(job_id: str) -> None:
 def notify_token_usage_changed() -> None:
     """Signal all token usage SSE listeners."""
     for event in _token_usage_listeners:
+        event.set()
+
+
+def notify_chat_changed(job_id: str) -> None:
+    """Signal SSE listeners for a specific job that chat messages changed."""
+    for event in _chat_listeners.get(job_id, set()).copy():
         event.set()
 
 
@@ -7120,153 +7129,80 @@ async def close_chat(job_id: str, request: Request) -> dict:
     return {"status": "ok"}
 
 
-@app.post("/api/chat/{job_id}")
+# Per-job chat processing locks — ensures sequential message processing
+_chat_locks: dict[str, asyncio.Lock] = {}
+
+
+def _get_chat_lock(job_id: str) -> asyncio.Lock:
+    """Get or create a per-job chat processing lock."""
+    if job_id not in _chat_locks:
+        _chat_locks[job_id] = asyncio.Lock()
+    return _chat_locks[job_id]
+
+
+@app.get("/api/chat/{job_id}/stream")
+async def chat_stream(job_id: str, request: Request) -> StreamingResponse:
+    """SSE stream for real-time chat message updates."""
+    return _make_sse_stream(
+        request,
+        set(),
+        "chat-changed",
+        per_key_listeners=_chat_listeners,
+        listener_key=job_id,
+    )
+
+
+@app.post("/api/chat/{job_id}", status_code=202)
 async def send_chat_message(
-    job_id: str, body: ChatMessageRequest, request: Request
+    job_id: str,
+    body: ChatMessageRequest,
+    request: Request,
+    background_tasks: BackgroundTasks,
 ) -> dict:
-    """Send a chat message and get an AI response."""
+    """Queue a chat message for AI processing.
+
+    Saves the user message immediately and kicks off background AI processing.
+    The response is delivered via SSE on /api/chat/{job_id}/stream.
+    """
     _check_allow_list(request)
-    from rootcoz.engine.chat import chat_with_ai
 
     stored = await get_result(job_id, strip_sensitive=False)
     if not stored or not stored.get("result"):
         raise HTTPException(status_code=404, detail="Job not found")
 
-    result_data = stored["result"]
-
-    # Resolve AI provider/model: request override > job's original > request_params > server default
-    params = result_data.get("request_params", {})
-    ai_provider = (
-        body.ai_provider
-        or result_data.get("ai_provider", "")
-        or params.get("ai_provider", "")
-        or AI_PROVIDER
-    )
-    ai_model = (
-        body.ai_model
-        or result_data.get("ai_model", "")
-        or params.get("ai_model", "")
-        or AI_MODEL
-    )
-
-    if not ai_provider:
-        raise HTTPException(status_code=400, detail="No AI provider configured")
-
-    if not ai_model:
-        logger.debug(
-            "Chat: no ai_model specified, using provider default for %s", ai_provider
-        )
-
-    # Strip sensitive data before passing to chat engine
-    safe_result = strip_sensitive_from_response(dict(result_data))
-
-    # Get conversation history (limit to last 50 messages to bound context size)
-    all_history = await storage.get_chat_messages(job_id)
-    history = all_history[-50:]
-
-    # Find session_id from the last assistant message
-    last_session_id = None
-    for msg in reversed(history):
-        if (
-            msg.get("role") == "assistant"
-            and msg.get("session_id")
-            and msg.get("ai_provider") == ai_provider
-            and msg.get("ai_model") == ai_model
-        ):
-            last_session_id = msg["session_id"]
-            logger.debug(
-                "Chat: found session %s from history (provider=%s, model=%s)",
-                last_session_id,
-                ai_provider,
-                ai_model,
-            )
-            break
-
-    # Set up chat workspace
-    from rootcoz.engine.chat import (
-        ensure_chat_workspace,
-        clone_chat_repos,
-    )
-
-    workspace = ensure_chat_workspace(job_id)
-
-    # Clone repos (skips if already cloned)
-    params = result_data.get("request_params", {})
-    decrypted_params = {}
-    try:
-        decrypted_params = decrypt_sensitive_fields(dict(params))
-    except Exception:
-        logger.warning(
-            "Failed to decrypt request_params for chat context", exc_info=True
-        )
-    repos_available = await clone_chat_repos(workspace, decrypted_params)
-
-    # Detect integration status
-    settings = get_settings()
-    jira_configured = bool(decrypted_params.get("jira_url") or settings.jira_url)
-    jira_url = decrypted_params.get("jira_url", "") or str(settings.jira_url or "")
-    jira_project_key = decrypted_params.get("jira_project_key", "") or str(
-        settings.jira_project_key or ""
-    )
-    github_issues_enabled = settings.enable_github_issues is not False
-
-    # Save user message AFTER workspace setup so the existing try/except covers rollback
+    # Save user message as completed immediately
     user_msg_id = await storage.add_chat_message(
         job_id=job_id,
         role="user",
         content=body.message,
         username=request.state.username,
+        status="completed",
+    )
+    logger.info("Chat: queued user message %d for job %s", user_msg_id, job_id)
+
+    # Save a pending assistant placeholder so the frontend knows a response is coming
+    assistant_msg_id = await storage.add_chat_message(
+        job_id=job_id,
+        role="assistant",
+        content="",
+        ai_provider=body.ai_provider or "",
+        ai_model=body.ai_model or "",
+        status="pending",
     )
 
-    # Call AI
-    server_url = _build_internal_server_url()
-    auth_header = await _create_ai_auth_header(request.state.username)
-    try:
-        success, response_text, new_session_id = await chat_with_ai(
-            job_id=job_id,
-            result_data=safe_result,
-            message=body.message,
-            history=history,
-            ai_provider=ai_provider,
-            ai_model=ai_model,
-            server_url=server_url,
-            repo_path=workspace,
-            ai_cli_timeout=get_settings().ai_cli_timeout,
-            auth_header=auth_header,
-            session_id=last_session_id,
-            jira_configured=jira_configured,
-            jira_url=jira_url,
-            jira_project_key=jira_project_key,
-            github_issues_enabled=github_issues_enabled,
-            repos_available=repos_available,
-        )
-    except Exception:
-        await storage.delete_chat_message_by_id(user_msg_id)
-        raise
-    finally:
-        await _cleanup_ai_session(auth_header)
+    notify_chat_changed(job_id)
 
-    logger.debug("Chat: AI returned session_id=%s", new_session_id)
-
-    if not success:
-        # Delete the user message we saved — don't persist failed turns
-        await storage.delete_chat_message_by_id(user_msg_id)
-        raise HTTPException(status_code=502, detail=response_text)
-
-    # Save assistant response
-    try:
-        assistant_msg_id = await storage.add_chat_message(
-            job_id=job_id,
-            role="assistant",
-            content=response_text,
-            ai_provider=ai_provider,
-            ai_model=ai_model,
-            session_id=new_session_id or "",
-        )
-    except Exception:
-        # Rollback user message if we can't save the response
-        await storage.delete_chat_message_by_id(user_msg_id)
-        raise
+    # Kick off background processing
+    background_tasks.add_task(
+        _process_chat_message,
+        job_id=job_id,
+        user_msg_id=user_msg_id,
+        assistant_msg_id=assistant_msg_id,
+        message=body.message,
+        ai_provider_override=body.ai_provider,
+        ai_model_override=body.ai_model,
+        username=request.state.username,
+    )
 
     return {
         "user_message": {
@@ -7274,15 +7210,184 @@ async def send_chat_message(
             "role": "user",
             "content": body.message,
             "username": request.state.username,
+            "status": "completed",
         },
         "assistant_message": {
             "id": assistant_msg_id,
             "role": "assistant",
-            "content": response_text,
-            "ai_provider": ai_provider,
-            "ai_model": ai_model,
+            "content": "",
+            "status": "pending",
         },
     }
+
+
+async def _process_chat_message(
+    *,
+    job_id: str,
+    user_msg_id: int,
+    assistant_msg_id: int,
+    message: str,
+    ai_provider_override: str | None,
+    ai_model_override: str | None,
+    username: str,
+) -> None:
+    """Background task: process a single chat message with AI."""
+    from rootcoz.engine.chat import (
+        chat_with_ai,
+        ensure_chat_workspace,
+        clone_chat_repos,
+    )
+
+    lock = _get_chat_lock(job_id)
+    auth_header = ""
+
+    async with lock:
+        try:
+            stored = await get_result(job_id, strip_sensitive=False)
+            if not stored or not stored.get("result"):
+                raise RuntimeError(f"Job {job_id} not found during chat processing")
+
+            result_data = stored["result"]
+            params = result_data.get("request_params", {})
+
+            ai_provider = (
+                ai_provider_override
+                or result_data.get("ai_provider", "")
+                or params.get("ai_provider", "")
+                or AI_PROVIDER
+            )
+            ai_model = (
+                ai_model_override
+                or result_data.get("ai_model", "")
+                or params.get("ai_model", "")
+                or AI_MODEL
+            )
+
+            if not ai_provider:
+                raise RuntimeError("No AI provider configured")
+
+            safe_result = strip_sensitive_from_response(dict(result_data))
+
+            # Get conversation history (limit to last 50 messages)
+            all_history = await storage.get_chat_messages(job_id)
+            # Filter to only completed messages for context
+            history = [m for m in all_history if m.get("status") != "pending"][-50:]
+
+            # Find session_id from the last completed assistant message
+            last_session_id = None
+            for msg in reversed(history):
+                if (
+                    msg.get("role") == "assistant"
+                    and msg.get("session_id")
+                    and msg.get("ai_provider") == ai_provider
+                    and msg.get("ai_model") == ai_model
+                ):
+                    last_session_id = msg["session_id"]
+                    logger.debug(
+                        "Chat: found session %s from history (provider=%s, model=%s)",
+                        last_session_id,
+                        ai_provider,
+                        ai_model,
+                    )
+                    break
+
+            workspace = ensure_chat_workspace(job_id)
+
+            decrypted_params = {}
+            try:
+                decrypted_params = decrypt_sensitive_fields(dict(params))
+            except Exception:
+                logger.warning(
+                    "Failed to decrypt request_params for chat context", exc_info=True
+                )
+            repos_available = await clone_chat_repos(workspace, decrypted_params)
+
+            settings = get_settings()
+            jira_configured = bool(
+                decrypted_params.get("jira_url") or settings.jira_url
+            )
+            jira_url = decrypted_params.get("jira_url", "") or str(
+                settings.jira_url or ""
+            )
+            jira_project_key = decrypted_params.get("jira_project_key", "") or str(
+                settings.jira_project_key or ""
+            )
+            github_issues_enabled = settings.enable_github_issues is not False
+
+            server_url = _build_internal_server_url()
+            auth_header = await _create_ai_auth_header(username)
+
+            success, response_text, new_session_id = await chat_with_ai(
+                job_id=job_id,
+                result_data=safe_result,
+                message=message,
+                history=history,
+                ai_provider=ai_provider,
+                ai_model=ai_model,
+                server_url=server_url,
+                repo_path=workspace,
+                ai_cli_timeout=settings.ai_cli_timeout,
+                auth_header=auth_header,
+                session_id=last_session_id,
+                jira_configured=jira_configured,
+                jira_url=jira_url,
+                jira_project_key=jira_project_key,
+                github_issues_enabled=github_issues_enabled,
+                repos_available=repos_available,
+            )
+
+            if not success:
+                logger.error(
+                    "Chat AI call failed for job %s: %s", job_id, response_text
+                )
+                # Update assistant message with error
+                await storage.update_chat_message_content(
+                    assistant_msg_id, f"Error: {response_text}"
+                )
+                await storage.update_chat_message_status(assistant_msg_id, "failed")
+                notify_chat_changed(job_id)
+                return
+
+            # Update the pending assistant message with the real response
+            await storage.update_chat_message_content(assistant_msg_id, response_text)
+            await storage.update_chat_message_status(assistant_msg_id, "completed")
+            # Update provider/model/session_id on the assistant message
+            await storage.update_chat_message_ai_fields(
+                assistant_msg_id,
+                ai_provider=ai_provider,
+                ai_model=ai_model,
+                session_id=new_session_id or "",
+            )
+            logger.info(
+                "Chat: message %d processed for job %s (session=%s)",
+                assistant_msg_id,
+                job_id,
+                new_session_id,
+            )
+            notify_chat_changed(job_id)
+
+        except Exception:
+            logger.error(
+                "Chat processing failed for job %s, msg %d",
+                job_id,
+                assistant_msg_id,
+                exc_info=True,
+            )
+            try:
+                await storage.update_chat_message_content(
+                    assistant_msg_id,
+                    "An error occurred while processing your message. Please try again.",
+                )
+                await storage.update_chat_message_status(assistant_msg_id, "failed")
+                notify_chat_changed(job_id)
+            except Exception:
+                logger.error(
+                    "Failed to update error status for chat msg %d",
+                    assistant_msg_id,
+                    exc_info=True,
+                )
+        finally:
+            await _cleanup_ai_session(auth_header)
 
 
 @app.delete("/api/chat/{job_id}")

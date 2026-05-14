@@ -2748,7 +2748,7 @@ def chat_send(
     ai_model: str = typer.Option("", "--model", "-m", help="AI model."),
     json_output: bool = _JSON_OPTION,
 ) -> None:
-    """Send a chat message and get AI response."""
+    """Send a chat message and queue AI processing."""
     data = _run_client_command(
         json_output,
         lambda c: c.send_chat_message(
@@ -2758,7 +2758,13 @@ def chat_send(
     )
     if not _state.get("json", False):
         assistant = data.get("assistant_message", {})
-        typer.echo(assistant.get("content", ""))
+        status = assistant.get("status", "completed")
+        if status == "pending":
+            typer.echo(
+                f"Message queued (id={assistant.get('id', '?')}). AI processing in background."
+            )
+        else:
+            typer.echo(assistant.get("content", ""))
 
 
 @chat_app.command("clear")

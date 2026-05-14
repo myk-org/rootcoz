@@ -18,6 +18,7 @@ interface ChatMessage {
   username: string
   ai_provider: string
   ai_model: string
+  status: string  // 'completed' | 'pending' | 'failed'
   created_at: string
 }
 
@@ -33,7 +34,6 @@ export function ChatPage() {
   const { jobId } = useParams<{ jobId: string }>()
   const [messages, setMessages] = useState<ChatMessage[]>([])
   const [input, setInput] = useState('')
-  const [sending, setSending] = useState(false)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
   const [chatReady, setChatReady] = useState(false)
@@ -48,7 +48,8 @@ export function ChatPage() {
 
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLTextAreaElement>(null)
-  const cancelledRef = useRef(false)
+
+  const hasPending = messages.some(m => m.status === 'pending')
 
   // Initialize chat workspace (clone repos)
   useEffect(() => {
@@ -100,76 +101,82 @@ export function ChatPage() {
     }).finally(() => setLoading(false))
   }, [jobId])
 
+  // SSE: listen for chat message updates (AI responses)
+  useEffect(() => {
+    if (!jobId) return
+
+    const evtSource = new EventSource(`/api/chat/${jobId}/stream`)
+
+    evtSource.addEventListener('chat-changed', () => {
+      // Re-fetch messages to get updated content/status
+      api.get<{ messages: ChatMessage[]; total: number }>(`/api/chat/${jobId}`)
+        .then(res => setMessages(res.messages))
+        .catch(() => {})  // Silently ignore fetch errors during SSE updates
+    })
+
+    evtSource.onerror = () => {
+      // EventSource auto-reconnects
+    }
+
+    return () => evtSource.close()
+  }, [jobId])
+
   // Auto-scroll
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
   }, [messages])
 
-
   const handleSend = useCallback(async (e?: FormEvent) => {
     e?.preventDefault()
     const trimmed = input.trim()
-    if (!trimmed || sending || !jobId) return
+    if (!trimmed || !jobId) return
 
-    cancelledRef.current = false
-    setSending(true)
     setError('')
     setInput('')
 
-    // Optimistic user message
-    const tempUserMsg: ChatMessage = {
-      id: Date.now(),
-      job_id: jobId,
-      role: 'user',
-      content: trimmed,
-      username: '',
-      ai_provider: '',
-      ai_model: '',
-      created_at: new Date().toISOString(),
-    }
-    setMessages(prev => [...prev, tempUserMsg])
-
     try {
       const res = await api.post<{
-        user_message: { id: number; role: string; content: string; username: string }
-        assistant_message: { id: number; role: string; content: string; ai_provider: string; ai_model: string }
+        user_message: { id: number; role: string; content: string; username: string; status: string }
+        assistant_message: { id: number; role: string; content: string; status: string }
       }>(`/api/chat/${jobId}`, {
         message: trimmed,
         ai_provider: aiProvider || undefined,
         ai_model: aiModel || undefined,
       })
 
-      if (cancelledRef.current) return  // User clicked Stop
-
-      // Replace optimistic message + add assistant response
-      setMessages(prev => {
-        const withoutTemp = prev.filter(m => m.id !== tempUserMsg.id)
-        return [
-          ...withoutTemp,
-          { ...tempUserMsg, id: res.user_message.id, username: res.user_message.username },
-          {
-            id: res.assistant_message.id,
-            job_id: jobId,
-            role: 'assistant' as const,
-            content: res.assistant_message.content,
-            username: '',
-            ai_provider: res.assistant_message.ai_provider,
-            ai_model: res.assistant_message.ai_model,
-            created_at: new Date().toISOString(),
-          },
-        ]
-      })
+      // Add user message + pending assistant message
+      setMessages(prev => [
+        ...prev,
+        {
+          id: res.user_message.id,
+          job_id: jobId,
+          role: 'user' as const,
+          content: trimmed,
+          username: res.user_message.username,
+          ai_provider: '',
+          ai_model: '',
+          status: 'completed',
+          created_at: new Date().toISOString(),
+        },
+        {
+          id: res.assistant_message.id,
+          job_id: jobId,
+          role: 'assistant' as const,
+          content: '',
+          username: '',
+          ai_provider: '',
+          ai_model: '',
+          status: 'pending',
+          created_at: new Date().toISOString(),
+        },
+      ])
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to send message')
-      // Remove optimistic message on error
-      setMessages(prev => prev.filter(m => m.id !== tempUserMsg.id))
-      setInput(trimmed) // Restore input
-    } finally {
-      setSending(false)
-      cancelledRef.current = false
-      inputRef.current?.focus()
+      setInput(trimmed)
     }
-  }, [input, sending, jobId, aiProvider, aiModel])
+
+    inputRef.current?.focus()
+  }, [input, jobId, aiProvider, aiModel])
 
   const copyMessage = useCallback(async (content: string, msgId: number) => {
     try {
@@ -236,7 +243,7 @@ export function ChatPage() {
             {/* Clear button */}
             <Tooltip>
               <TooltipTrigger asChild>
-                <Button variant="ghost" size="sm" onClick={handleClear} disabled={messages.length === 0}>
+                <Button variant="ghost" size="sm" onClick={handleClear} disabled={messages.length === 0 || hasPending}>
                   <Trash2 className="h-4 w-4" />
                 </Button>
               </TooltipTrigger>
@@ -270,30 +277,42 @@ export function ChatPage() {
                 className={`max-w-[75%] rounded-lg px-4 py-3 text-sm ${
                   msg.role === 'user'
                     ? 'bg-accent-blue/15 text-text-primary'
-                    : 'bg-surface-elevated text-text-secondary'
+                    : msg.status === 'failed'
+                      ? 'bg-signal-red/10 text-signal-red border border-signal-red/20'
+                      : 'bg-surface-elevated text-text-secondary'
                 }`}
               >
-                <div className="whitespace-pre-wrap break-words">{msg.content}</div>
+                {msg.status === 'pending' ? (
+                  <div className="flex items-center gap-2 text-text-tertiary">
+                    <Loader2 className="h-4 w-4 animate-spin" />
+                    <span className="text-sm">Thinking...</span>
+                  </div>
+                ) : (
+                  <div className="whitespace-pre-wrap break-words">{msg.content}</div>
+                )}
                 <div className="flex items-center justify-between mt-2">
                   <div className="flex items-center gap-2 text-[10px] text-text-tertiary">
                     {msg.role === 'user' && msg.username && <span>{msg.username}</span>}
                     {msg.role === 'assistant' && msg.ai_provider && (
                       <span>{msg.ai_provider}{msg.ai_model ? ` / ${msg.ai_model}` : ''}</span>
                     )}
+                    {msg.status === 'failed' && <span className="text-signal-red">Failed</span>}
                     <span>{new Date(msg.created_at).toLocaleTimeString()}</span>
                   </div>
-                  <Tooltip>
-                    <TooltipTrigger asChild>
-                      <button
-                        type="button"
-                        className="text-text-tertiary hover:text-text-primary transition-colors"
-                        onClick={() => copyMessage(msg.content, msg.id)}
-                      >
-                        {copiedMsgId === msg.id ? <Check className="h-3 w-3 text-signal-green" /> : <Copy className="h-3 w-3" />}
-                      </button>
-                    </TooltipTrigger>
-                    <TooltipContent>{copiedMsgId === msg.id ? 'Copied!' : 'Copy message'}</TooltipContent>
-                  </Tooltip>
+                  {msg.status !== 'pending' && (
+                    <Tooltip>
+                      <TooltipTrigger asChild>
+                        <button
+                          type="button"
+                          className="text-text-tertiary hover:text-text-primary transition-colors"
+                          onClick={() => copyMessage(msg.content, msg.id)}
+                        >
+                          {copiedMsgId === msg.id ? <Check className="h-3 w-3 text-signal-green" /> : <Copy className="h-3 w-3" />}
+                        </button>
+                      </TooltipTrigger>
+                      <TooltipContent>{copiedMsgId === msg.id ? 'Copied!' : 'Copy message'}</TooltipContent>
+                    </Tooltip>
+                  )}
                 </div>
               </div>
               {msg.role === 'user' && (
@@ -305,22 +324,6 @@ export function ChatPage() {
               )}
             </div>
           ))}
-          {sending && (
-            <div className="flex gap-3 justify-start">
-              <div className="shrink-0 mt-1">
-                <div className="h-7 w-7 rounded-full bg-accent-blue/15 flex items-center justify-center">
-                  <Bot className="h-4 w-4 text-accent-blue" />
-                </div>
-              </div>
-              <div className="flex items-center gap-2 bg-surface-elevated rounded-lg px-4 py-3">
-                <Loader2 className="h-4 w-4 animate-spin text-text-tertiary" />
-                <span className="text-xs text-text-tertiary">Thinking...</span>
-                <Button variant="ghost" size="sm" className="h-6 px-2 text-xs text-signal-red" onClick={() => { cancelledRef.current = true; setSending(false) }}>
-                  Stop
-                </Button>
-              </div>
-            </div>
-          )}
           <div ref={messagesEndRef} />
         </div>
 
@@ -342,9 +345,8 @@ export function ChatPage() {
               placeholder="Ask about this analysis... (Enter to send, Shift+Enter for newline)"
               className="flex-1 resize-none min-h-[44px] max-h-[120px]"
               rows={1}
-              disabled={sending}
             />
-            <Button type="submit" disabled={!input.trim() || sending || !chatReady} size="sm" className="self-end">
+            <Button type="submit" disabled={!input.trim() || !chatReady} size="sm" className="self-end">
               <Send className="h-4 w-4" />
             </Button>
           </form>

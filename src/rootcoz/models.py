@@ -1092,6 +1092,7 @@ class ChatMessageResponse(BaseModel):
     username: str = ""
     ai_provider: str = ""
     ai_model: str = ""
+    status: str = "completed"
     created_at: str
 
 

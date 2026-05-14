@@ -520,6 +520,11 @@ async def init_db() -> None:
             db, "chat_messages", "session_id", "TEXT NOT NULL DEFAULT ''"
         )
 
+        # Migration: add status to chat_messages (pending/completed/failed)
+        await _migrate_add_column(
+            db, "chat_messages", "status", "TEXT NOT NULL DEFAULT 'completed'"
+        )
+
         await db.commit()
 
     # Backfill failure_history from existing results (runs once when table is empty).
@@ -3818,12 +3823,22 @@ async def add_chat_message(
     ai_provider: str = "",
     ai_model: str = "",
     session_id: str = "",
+    status: str = "completed",
 ) -> int:
     """Add a chat message and return its id."""
     async with _connect_db() as db:
         cursor = await db.execute(
-            "INSERT INTO chat_messages (job_id, role, content, username, ai_provider, ai_model, session_id) VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (job_id, role, content, username, ai_provider, ai_model, session_id),
+            "INSERT INTO chat_messages (job_id, role, content, username, ai_provider, ai_model, session_id, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                job_id,
+                role,
+                content,
+                username,
+                ai_provider,
+                ai_model,
+                session_id,
+                status,
+            ),
         )
         await db.commit()
         return cursor.lastrowid or 0
@@ -3835,7 +3850,7 @@ async def get_chat_messages(
     """Get chat messages for a job, ordered by id ASC."""
     async with _connect_db() as db:
         cursor = await db.execute(
-            "SELECT id, job_id, role, content, username, ai_provider, ai_model, session_id, created_at FROM chat_messages WHERE job_id = ? ORDER BY id ASC LIMIT ? OFFSET ?",
+            "SELECT id, job_id, role, content, username, ai_provider, ai_model, session_id, status, created_at FROM chat_messages WHERE job_id = ? ORDER BY id ASC LIMIT ? OFFSET ?",
             (job_id, limit, offset),
         )
         rows = await cursor.fetchall()
@@ -3869,3 +3884,51 @@ async def delete_chat_messages(job_id: str) -> int:
         )
         await db.commit()
         return cursor.rowcount
+
+
+async def get_pending_chat_messages(job_id: str) -> list[dict]:
+    """Get pending (queued) chat messages for a job."""
+    async with _connect_db() as db:
+        cursor = await db.execute(
+            "SELECT id, job_id, role, content, username, ai_provider, ai_model, session_id, status, created_at "
+            "FROM chat_messages WHERE job_id = ? AND status = 'pending' ORDER BY id ASC",
+            (job_id,),
+        )
+        rows = await cursor.fetchall()
+        return [dict(r) for r in rows]
+
+
+async def update_chat_message_status(msg_id: int, status: str) -> None:
+    """Update the status of a chat message."""
+    async with _connect_db() as db:
+        await db.execute(
+            "UPDATE chat_messages SET status = ? WHERE id = ?",
+            (status, msg_id),
+        )
+        await db.commit()
+
+
+async def update_chat_message_content(msg_id: int, content: str) -> None:
+    """Update the content of a chat message."""
+    async with _connect_db() as db:
+        await db.execute(
+            "UPDATE chat_messages SET content = ? WHERE id = ?",
+            (content, msg_id),
+        )
+        await db.commit()
+
+
+async def update_chat_message_ai_fields(
+    msg_id: int,
+    *,
+    ai_provider: str = "",
+    ai_model: str = "",
+    session_id: str = "",
+) -> None:
+    """Update AI-related fields on a chat message."""
+    async with _connect_db() as db:
+        await db.execute(
+            "UPDATE chat_messages SET ai_provider = ?, ai_model = ?, session_id = ? WHERE id = ?",
+            (ai_provider, ai_model, session_id, msg_id),
+        )
+        await db.commit()

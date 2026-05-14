@@ -367,10 +367,17 @@ class TestChatEndpoints:
                 "/api/chat/chat-send-job",
                 json={"message": "what failed?", "ai_provider": "claude"},
             )
-        assert response.status_code == 200
+        assert response.status_code == 202
         data = response.json()
         assert data["user_message"]["content"] == "what failed?"
-        assert data["assistant_message"]["content"] == "AI response here"
+        assert data["user_message"]["status"] == "completed"
+        assert data["assistant_message"]["content"] == ""
+        assert data["assistant_message"]["status"] == "pending"
+        # Background task runs: verify the assistant message was completed
+        history = test_client.get("/api/chat/chat-send-job").json()
+        assistant_msgs = [m for m in history["messages"] if m["role"] == "assistant"]
+        assert assistant_msgs[0]["content"] == "AI response here"
+        assert assistant_msgs[0]["status"] == "completed"
 
     async def test_send_chat_message_saves_history(
         self, test_client, temp_db_path: Path
@@ -416,15 +423,20 @@ class TestChatEndpoints:
         response = test_client.delete("/api/chat/nonexistent-job")
         assert response.status_code == 404
 
-    async def test_send_message_no_provider_returns_400(
+    async def test_send_message_no_provider_queues_and_fails(
         self, test_client, temp_db_path: Path
     ):
+        """Without a provider, message is queued (202) but background processing fails."""
         await _save_job(temp_db_path, "chat-noprov-job")
         response = test_client.post(
             "/api/chat/chat-noprov-job",
             json={"message": "hello"},
         )
-        assert response.status_code == 400
+        assert response.status_code == 202
+        # Background task fails — assistant message should be marked failed
+        history = test_client.get("/api/chat/chat-noprov-job").json()
+        assistant_msgs = [m for m in history["messages"] if m["role"] == "assistant"]
+        assert assistant_msgs[0]["status"] == "failed"
 
     def test_send_message_404_for_missing_job(self, test_client):
         response = test_client.post(
@@ -433,9 +445,10 @@ class TestChatEndpoints:
         )
         assert response.status_code == 404
 
-    async def test_send_message_ai_failure_returns_502(
+    async def test_send_message_ai_failure_marks_failed(
         self, test_client, temp_db_path: Path
     ):
+        """AI failure is handled in background — message is queued (202), then marked failed."""
         await _save_job(
             temp_db_path,
             "chat-fail-job",
@@ -449,7 +462,12 @@ class TestChatEndpoints:
                 "/api/chat/chat-fail-job",
                 json={"message": "hello", "ai_provider": "claude"},
             )
-        assert response.status_code == 502
+        assert response.status_code == 202
+        # Background task processes failure — check history
+        history = test_client.get("/api/chat/chat-fail-job").json()
+        assistant_msgs = [m for m in history["messages"] if m["role"] == "assistant"]
+        assert assistant_msgs[0]["status"] == "failed"
+        assert "AI CLI timed out" in assistant_msgs[0]["content"]
 
     async def test_get_chat_with_pagination(self, test_client, temp_db_path: Path):
         await _save_job(temp_db_path, "chat-page-job")

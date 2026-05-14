@@ -1886,10 +1886,15 @@ class TestRootCozClientChat:
 
     def test_send_chat_message(self):
         response_data = {
-            "user_message": {"role": "user", "content": "Why did this test fail?"},
+            "user_message": {
+                "role": "user",
+                "content": "Why did this test fail?",
+                "status": "completed",
+            },
             "assistant_message": {
                 "role": "assistant",
-                "content": "The failure is caused by a DNS timeout.",
+                "content": "",
+                "status": "pending",
             },
         }
 
@@ -1900,11 +1905,12 @@ class TestRootCozClientChat:
             assert body["message"] == "Why did this test fail?"
             assert "ai_provider" not in body
             assert "ai_model" not in body
-            return httpx.Response(200, json=response_data)
+            return httpx.Response(202, json=response_data)
 
         client = _make_client(handler)
         result = client.send_chat_message("job-1", "Why did this test fail?")
         assert result["assistant_message"]["role"] == "assistant"
+        assert result["assistant_message"]["status"] == "pending"
 
     def test_send_chat_message_with_ai_config(self):
         def handler(request):
@@ -1913,12 +1919,17 @@ class TestRootCozClientChat:
             assert body["ai_provider"] == "claude"
             assert body["ai_model"] == "opus-4"
             return httpx.Response(
-                200,
+                202,
                 json={
-                    "user_message": {"role": "user", "content": "Explain the error"},
+                    "user_message": {
+                        "role": "user",
+                        "content": "Explain the error",
+                        "status": "completed",
+                    },
                     "assistant_message": {
                         "role": "assistant",
-                        "content": "Explanation",
+                        "content": "",
+                        "status": "pending",
                     },
                 },
             )
@@ -1927,7 +1938,7 @@ class TestRootCozClientChat:
         result = client.send_chat_message(
             "job-1", "Explain the error", ai_provider="claude", ai_model="opus-4"
         )
-        assert result["assistant_message"]["content"] == "Explanation"
+        assert result["assistant_message"]["status"] == "pending"
 
     def test_clear_chat(self):
         def handler(request):

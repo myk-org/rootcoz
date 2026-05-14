@@ -952,13 +952,15 @@ class RootCozClient:
     def send_chat_message(
         self, job_id: str, message: str, ai_provider: str = "", ai_model: str = ""
     ) -> dict:
-        """Send a chat message and get AI response. POST /api/chat/{job_id}"""
+        """Send a chat message and queue AI processing. POST /api/chat/{job_id}"""
         body: dict = {"message": message}
         if ai_provider:
             body["ai_provider"] = ai_provider
         if ai_model:
             body["ai_model"] = ai_model
-        return self._request("POST", f"/api/chat/{job_id}", json=body)
+        return self._request(
+            "POST", f"/api/chat/{job_id}", json=body, accept_statuses=(202,)
+        )
 
     def clear_chat(self, job_id: str) -> dict:
         """Clear chat history for a job. DELETE /api/chat/{job_id}"""

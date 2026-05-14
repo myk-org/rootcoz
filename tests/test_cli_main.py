@@ -3773,29 +3773,37 @@ class TestChatCommands:
                 "id": 1,
                 "role": "user",
                 "content": "Why did this test fail?",
+                "status": "completed",
             },
             "assistant_message": {
                 "id": 2,
                 "role": "assistant",
-                "content": "The test failed due to a timeout.",
+                "content": "",
+                "status": "pending",
             },
         }
         result = runner.invoke(
             app, ["chat", "send", "job-1", "Why did this test fail?"]
         )
         assert result.exit_code == 0
-        assert "The test failed due to a timeout." in result.output
+        assert "Message queued" in result.output
         mock_client.send_chat_message.assert_called_once_with(
             "job-1", "Why did this test fail?", ai_provider="", ai_model=""
         )
 
     def test_chat_send_with_ai_config(self, mock_client):
         mock_client.send_chat_message.return_value = {
-            "user_message": {"id": 1, "role": "user", "content": "Explain the error"},
+            "user_message": {
+                "id": 1,
+                "role": "user",
+                "content": "Explain the error",
+                "status": "completed",
+            },
             "assistant_message": {
                 "id": 2,
                 "role": "assistant",
-                "content": "Explanation",
+                "content": "",
+                "status": "pending",
             },
         }
         result = runner.invoke(
@@ -3812,22 +3820,32 @@ class TestChatCommands:
             ],
         )
         assert result.exit_code == 0
-        assert "Explanation" in result.output
+        assert "Message queued" in result.output
         mock_client.send_chat_message.assert_called_once_with(
             "job-1", "Explain the error", ai_provider="claude", ai_model="opus-4"
         )
 
     def test_chat_send_json(self, mock_client):
         payload = {
-            "user_message": {"id": 1, "role": "user", "content": "question"},
-            "assistant_message": {"id": 2, "role": "assistant", "content": "Answer"},
+            "user_message": {
+                "id": 1,
+                "role": "user",
+                "content": "question",
+                "status": "completed",
+            },
+            "assistant_message": {
+                "id": 2,
+                "role": "assistant",
+                "content": "",
+                "status": "pending",
+            },
         }
         mock_client.send_chat_message.return_value = payload
         result = runner.invoke(app, ["--json", "chat", "send", "job-1", "question"])
         assert result.exit_code == 0
         parsed = json.loads(result.output)
         assert parsed["assistant_message"]["role"] == "assistant"
-        assert parsed["assistant_message"]["content"] == "Answer"
+        assert parsed["assistant_message"]["status"] == "pending"
 
     def test_chat_clear(self, mock_client):
         mock_client.clear_chat.return_value = {"deleted": 5}
