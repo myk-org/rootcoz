@@ -7059,6 +7059,7 @@ async def get_chat_history(
 @app.post("/api/chat/{job_id}/init")
 async def init_chat(job_id: str, request: Request) -> dict:
     """Initialize chat workspace: create directory and clone repos."""
+    _check_allow_list(request)
     from rootcoz.engine.chat import (
         ensure_chat_workspace,
         clone_chat_repos,
@@ -7165,7 +7166,6 @@ async def send_chat_message(
     from rootcoz.engine.chat import (
         ensure_chat_workspace,
         clone_chat_repos,
-        find_session_id_on_disk,
     )
 
     workspace = ensure_chat_workspace(job_id)
@@ -7189,10 +7189,6 @@ async def send_chat_message(
         settings.jira_project_key or ""
     )
     github_issues_enabled = settings.enable_github_issues is not False
-
-    # Find session: check DB first, then disk
-    if not last_session_id:
-        last_session_id = find_session_id_on_disk(job_id, ai_provider)
 
     # Save user message AFTER workspace setup so the existing try/except covers rollback
     user_msg_id = await storage.add_chat_message(

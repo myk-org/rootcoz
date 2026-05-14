@@ -27,7 +27,7 @@ def get_chat_workspace(job_id: str) -> Path:
     # Verify the resolved path is still under /tmp/
     resolved = workspace.resolve()
     tmp_resolved = Path("/tmp").resolve()
-    if not str(resolved).startswith(str(tmp_resolved)):
+    if not resolved.is_relative_to(tmp_resolved):
         raise ValueError(f"Invalid job_id for workspace: {job_id}")
     return workspace
 
@@ -40,36 +40,14 @@ def ensure_chat_workspace(job_id: str) -> Path:
     return workspace
 
 
-def find_session_id_on_disk(job_id: str, ai_provider: str) -> str | None:
-    """Check if a CLI session exists on disk for this job.
-
-    Different providers store sessions in different locations.
-    Returns the session_id if found, None otherwise.
-    """
-    workspace = get_chat_workspace(job_id)
-    if not workspace.exists():
-        return None
-
-    # Claude stores sessions in .claude/ directory
-    claude_sessions = workspace / ".claude" / "projects"
-    if ai_provider == "claude" and claude_sessions.exists():
-        # Claude session dirs contain conversation state
-        for session_dir in claude_sessions.iterdir():
-            if session_dir.is_dir():
-                return session_dir.name
-
-    # For other providers, we rely on the session_id stored in the DB
-    return None
-
-
 async def clone_chat_repos(
     workspace: Path,
     request_params: dict,
 ) -> bool:
     """Clone repos into the chat workspace.
 
-    Skips if repos are already cloned (marker file exists).
-    Returns True if repos are available.
+    Skips repos already present in the workspace.
+    Returns True if any repos are available.
 
     Note:
         Repo tokens may be embedded in git remote URLs within the workspace.
@@ -79,10 +57,6 @@ async def clone_chat_repos(
     from rootcoz.config import parse_repo_ref
     from rootcoz.repository import RepositoryManager, derive_test_repo_name
     from rootcoz.models import AdditionalRepo
-
-    marker = workspace / ".repos_cloned"
-    if marker.exists():
-        return True
 
     tests_repo_url = request_params.get("tests_repo_url", "")
     additional_repos = request_params.get("additional_repos") or []
@@ -98,16 +72,19 @@ async def clone_chat_repos(
             try:
                 clean_url, ref = parse_repo_ref(str(tests_repo_url))
                 repo_name = derive_test_repo_name(clean_url, additional_repos)
-                token = request_params.get("tests_repo_token", "")
-                await asyncio.to_thread(
-                    repo_manager.clone_into,
-                    clean_url,
-                    workspace / repo_name,
-                    depth=50,
-                    branch=ref,
-                    token=token or None,
-                )
-                cloned_any = True
+                if (workspace / repo_name).exists():
+                    cloned_any = True
+                else:
+                    token = request_params.get("tests_repo_token", "")
+                    await asyncio.to_thread(
+                        repo_manager.clone_into,
+                        clean_url,
+                        workspace / repo_name,
+                        depth=50,
+                        branch=ref,
+                        token=token or None,
+                    )
+                    cloned_any = True
             except Exception:
                 logger.warning("Failed to clone test repo for chat", exc_info=True)
 
@@ -118,6 +95,9 @@ async def clone_chat_repos(
             ]
             for repo in repos:
                 try:
+                    if (workspace / repo.name).exists():
+                        cloned_any = True
+                        continue
                     token = getattr(repo, "token", None) or ""
                     await asyncio.to_thread(
                         repo_manager.clone_into,
@@ -132,9 +112,6 @@ async def clone_chat_repos(
                     logger.warning(
                         f"Failed to clone repo {repo.name} for chat", exc_info=True
                     )
-
-        if cloned_any:
-            marker.touch()
     except Exception:
         logger.warning("Chat repo cloning failed", exc_info=True)
 
@@ -146,10 +123,6 @@ def cleanup_chat_repos(job_id: str) -> None:
     workspace = get_chat_workspace(job_id)
     if not workspace.exists():
         return
-
-    marker = workspace / ".repos_cloned"
-    if marker.exists():
-        marker.unlink()
 
     # Delete everything except hidden dirs (which contain session data)
     for item in workspace.iterdir():
