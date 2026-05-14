@@ -213,6 +213,7 @@ async def call_ai_cli_with_retry(
     ai_cli_timeout: int | None = None,
     cli_flags: list[str] | None = None,
     max_retries: int = 3,
+    session_id: str | None = None,
 ) -> AIResult:
     """Call AI CLI with retry on known transient errors.
 
@@ -227,6 +228,7 @@ async def call_ai_cli_with_retry(
         ai_cli_timeout: Timeout in minutes for the CLI process.
         cli_flags: Extra CLI flags forwarded to the provider.
         max_retries: Maximum number of retry attempts after the initial call.
+        session_id: Optional session ID to resume a prior conversation.
 
     Returns:
         AIResult from the final attempt.
@@ -241,6 +243,7 @@ async def call_ai_cli_with_retry(
             ai_cli_timeout=ai_cli_timeout,
             cli_flags=cli_flags,
             output_format="json",
+            session_id=session_id,
         )
         if result.success:
             return result

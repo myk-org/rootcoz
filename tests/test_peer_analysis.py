@@ -661,6 +661,7 @@ class TestAnalyzeWithPeers:
             ai_cli_timeout=None,
             cli_flags=None,
             max_retries=3,
+            session_id=None,
         ):
             return AIResult(success=True, text=peer_response)
 
@@ -732,6 +733,7 @@ class TestAnalyzeWithPeers:
             ai_cli_timeout=None,
             cli_flags=None,
             max_retries=3,
+            session_id=None,
         ):
             nonlocal call_count
             call_count += 1
@@ -808,6 +810,7 @@ class TestAnalyzeWithPeers:
             ai_cli_timeout=None,
             cli_flags=None,
             max_retries=3,
+            session_id=None,
         ):
             nonlocal call_count
             call_count += 1
@@ -886,6 +889,7 @@ class TestAnalyzeWithPeers:
             ai_cli_timeout=None,
             cli_flags=None,
             max_retries=3,
+            session_id=None,
         ):
             nonlocal call_count
             call_count += 1
@@ -986,6 +990,7 @@ class TestAnalyzeWithPeers:
             ai_cli_timeout=None,
             cli_flags=None,
             max_retries=3,
+            session_id=None,
         ):
             nonlocal call_count
             call_count += 1
@@ -1089,6 +1094,7 @@ class TestAnalyzeWithPeers:
             ai_cli_timeout=None,
             cli_flags=None,
             max_retries=3,
+            session_id=None,
         ):
             nonlocal call_count
             call_count += 1
@@ -1186,6 +1192,7 @@ class TestAnalyzeWithPeers:
             ai_cli_timeout=None,
             cli_flags=None,
             max_retries=3,
+            session_id=None,
         ):
             nonlocal call_count
             call_count += 1
@@ -1259,6 +1266,7 @@ class TestAnalyzeWithPeers:
             ai_cli_timeout=None,
             cli_flags=None,
             max_retries=3,
+            session_id=None,
         ):
             # Revision calls: main AI always returns same classification
             if "revision" in prompt.lower() or "revise" in prompt.lower():
@@ -1349,6 +1357,7 @@ class TestAnalyzeWithPeers:
             ai_cli_timeout=None,
             cli_flags=None,
             max_retries=3,
+            session_id=None,
         ):
             return AIResult(success=True, text=peer_response)
 
@@ -1410,6 +1419,7 @@ class TestAnalyzeWithPeers:
             ai_cli_timeout=None,
             cli_flags=None,
             max_retries=3,
+            session_id=None,
         ):
             nonlocal call_count
             call_count += 1
@@ -1483,6 +1493,7 @@ class TestAnalyzeWithPeers:
             ai_cli_timeout=None,
             cli_flags=None,
             max_retries=3,
+            session_id=None,
         ):
             nonlocal call_count
             call_count += 1
@@ -1565,6 +1576,7 @@ class TestAnalyzeWithPeers:
             ai_cli_timeout=None,
             cli_flags=None,
             max_retries=3,
+            session_id=None,
         ):
             nonlocal call_count
             call_count += 1
@@ -1635,6 +1647,7 @@ class TestAnalyzeWithPeers:
             ai_cli_timeout=None,
             cli_flags=None,
             max_retries=3,
+            session_id=None,
         ):
             return AIResult(success=True, text=peer_agree)
 
@@ -1699,6 +1712,7 @@ class TestAnalyzeWithPeers:
             ai_cli_timeout=None,
             cli_flags=None,
             max_retries=3,
+            session_id=None,
         ):
             nonlocal call_count
             call_count += 1
@@ -1853,6 +1867,7 @@ class TestAnalyzeWithPeers:
             ai_cli_timeout=None,
             cli_flags=None,
             max_retries=3,
+            session_id=None,
         ):
             return AIResult(success=True, text=peer_response)
 
@@ -2074,6 +2089,7 @@ class TestAnalyzeWithPeers:
             ai_cli_timeout=None,
             cli_flags=None,
             max_retries=3,
+            session_id=None,
         ):
             nonlocal call_count
             call_count += 1
@@ -2166,6 +2182,7 @@ class TestAnalyzeWithPeers:
             ai_cli_timeout=None,
             cli_flags=None,
             max_retries=3,
+            session_id=None,
         ):
             nonlocal call_count
             call_count += 1
@@ -2259,6 +2276,7 @@ class TestAnalyzeWithPeers:
             ai_cli_timeout=None,
             cli_flags=None,
             max_retries=3,
+            session_id=None,
         ):
             nonlocal call_count
             call_count += 1
@@ -2353,6 +2371,7 @@ class TestAnalyzeWithPeers:
             ai_cli_timeout=None,
             cli_flags=None,
             max_retries=3,
+            session_id=None,
         ):
             nonlocal call_count
             call_count += 1
@@ -2419,6 +2438,7 @@ class TestAnalyzeWithPeers:
             ai_cli_timeout=None,
             cli_flags=None,
             max_retries=3,
+            session_id=None,
         ):
             nonlocal peer_call_count
             peer_call_count += 1
@@ -2521,6 +2541,7 @@ class TestAnalyzeWithPeers:
             ai_cli_timeout=None,
             cli_flags=None,
             max_retries=3,
+            session_id=None,
         ):
             nonlocal call_count
             call_count += 1
@@ -2635,6 +2656,7 @@ class TestAnalyzeWithPeers:
             ai_cli_timeout=None,
             cli_flags=None,
             max_retries=3,
+            session_id=None,
         ):
             nonlocal call_count
             call_count += 1
@@ -2689,3 +2711,109 @@ class TestAnalyzeWithPeers:
             assert f"UNIQUE_PEER_{idx}_REASONING" not in prompt, (
                 f"Peer {idx} should NOT see its own UNIQUE_PEER_{idx}_REASONING"
             )
+
+    @pytest.mark.asyncio
+    async def test_peer_sessions_tracked_across_rounds(self) -> None:
+        """Session IDs are captured per-peer in round 1 and reused in round 2+.
+
+        Verifies:
+        - Round 1: no session_id passed (fresh call)
+        - Round 2: session_id from round 1 is passed per peer
+        - Sessions are per-peer (peer 0 gets its own, peer 1 gets its own)
+        """
+        from unittest.mock import AsyncMock
+
+        from rootcoz.models import AnalysisDetail
+        from rootcoz.peer_analysis import analyze_failure_group_with_peers
+
+        mock_orchestrator = AsyncMock(
+            return_value=(
+                AnalysisDetail(classification="CODE ISSUE", details="Test is broken"),
+                "sig123",
+            )
+        )
+
+        main_response_r2 = _make_ai_json_response(
+            classification="CODE ISSUE",
+            details="Revised analysis",
+        )
+
+        # Round 1: peers disagree
+        peer_disagree = _make_peer_json_response(
+            agrees=False,
+            classification="PRODUCT BUG",
+            reasoning="disagree",
+        )
+        # Round 2: peers agree
+        peer_agree = _make_peer_json_response(
+            agrees=True,
+            classification="CODE ISSUE",
+        )
+
+        # Track (call_index, session_id_passed) for each peer call
+        captured_sessions: list[tuple[int, str | None]] = []
+        call_count = 0
+
+        async def mock_calls(
+            prompt,
+            *,
+            cwd=None,
+            ai_provider="",
+            ai_model="",
+            ai_cli_timeout=None,
+            cli_flags=None,
+            max_retries=3,
+            session_id=None,
+        ):
+            nonlocal call_count
+            call_count += 1
+            # Calls 1-2: round 1 peers
+            if call_count <= 2:
+                captured_sessions.append((call_count, session_id))
+                return AIResult(
+                    success=True,
+                    text=peer_disagree,
+                    session_id=f"session-peer-{call_count - 1}",
+                )
+            # Call 3: revision
+            if call_count == 3:
+                return AIResult(success=True, text=main_response_r2)
+            # Calls 4-5: round 2 peers
+            captured_sessions.append((call_count, session_id))
+            return AIResult(
+                success=True,
+                text=peer_agree,
+                session_id=f"session-peer-{call_count - 4}",
+            )
+
+        with (
+            patch(
+                "rootcoz.peer_analysis.run_single_ai_analysis",
+                mock_orchestrator,
+            ),
+            patch(
+                "rootcoz.peer_analysis.call_ai_cli_with_retry",
+                side_effect=mock_calls,
+            ),
+        ):
+            await analyze_failure_group_with_peers(
+                failures=[_make_failure()],
+                console_context="console output",
+                repo_path=None,
+                main_ai_provider="claude",
+                main_ai_model="claude-sonnet-4-20250514",
+                peer_ai_configs=_peer_configs(),
+                max_rounds=3,
+            )
+
+        # Should have 4 captured peer calls (2 per round)
+        assert len(captured_sessions) == 4
+
+        # Round 1 calls (indices 0,1): no session_id passed (fresh calls)
+        assert captured_sessions[0] == (1, None)
+        assert captured_sessions[1] == (2, None)
+
+        # Round 2 calls (indices 2,3): session_id from round 1 is reused
+        # Peer 0 gets session-peer-0, peer 1 gets session-peer-1
+        assert captured_sessions[2] == (4, "session-peer-0")
+        assert captured_sessions[3] == (5, "session-peer-1")

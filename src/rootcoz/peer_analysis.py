@@ -416,6 +416,9 @@ async def analyze_failure_group_with_peers(
     rounds_used = 0
     group_suffix = f" (group {group_label})" if group_label else ""
 
+    # Track AI CLI sessions per peer for conversation continuity
+    peer_sessions: dict[int, str] = {}  # peer_idx -> session_id
+
     # Step 2: Debate loop
     for round_num in range(1, max_rounds + 1):
         rounds_used = round_num
@@ -490,6 +493,7 @@ async def analyze_failure_group_with_peers(
                 ai_model=config.ai_model,
                 ai_cli_timeout=ai_cli_timeout,
                 cli_flags=PROVIDER_CLI_FLAGS.get(config.ai_provider, []),
+                session_id=peer_sessions.get(idx),
             )
             await record_ai_usage(
                 job_id=job_id,
@@ -507,6 +511,14 @@ async def analyze_failure_group_with_peers(
         peer_results = await run_parallel_with_limit(
             peer_tasks, max_concurrency=max_concurrent_ai_calls
         )
+
+        # Capture session IDs from peer responses
+        for i, result in enumerate(peer_results):
+            if isinstance(result, Exception):
+                continue
+            _cfg_r, ai_result_r = result
+            if ai_result_r.session_id:
+                peer_sessions[i] = ai_result_r.session_id
 
         # Process peer responses
         round_peer_entries: list[PeerRound] = []
