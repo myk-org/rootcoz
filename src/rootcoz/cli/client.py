@@ -168,6 +168,18 @@ class RootCozClient:
             json={"role": role},
         )
 
+    def approve_user(self, username: str) -> dict:
+        """Approve a pending user. POST /api/admin/users/{username}/approve"""
+        return self._request("POST", f"/api/admin/users/{username}/approve")
+
+    def reject_user(self, username: str) -> dict:
+        """Reject a pending user. POST /api/admin/users/{username}/reject"""
+        return self._request("POST", f"/api/admin/users/{username}/reject")
+
+    def list_pending_users(self) -> dict:
+        """List users awaiting approval. GET /api/admin/users/pending"""
+        return self._request("GET", "/api/admin/users/pending")
+
     # -- Health ---------------------------------------------------------------
 
     def health(self) -> dict:

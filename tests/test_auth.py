@@ -33,6 +33,7 @@ def client(_init_db, temp_db_path):
             "ROOTCOZ_ENCRYPTION_KEY": "test-encryption-key-for-hmac",  # pragma: allowlist secret
             "SECURE_COOKIES": "false",
             "DB_PATH": str(temp_db_path),
+            "REQUIRE_APPROVAL": "false",
         },
     ):
         get_settings.cache_clear()
@@ -985,6 +986,7 @@ class TestProxyHeaders:
                 "SECURE_COOKIES": "false",
                 "DB_PATH": str(temp_db_path),
                 "TRUST_PROXY_HEADERS": "true",
+                "REQUIRE_APPROVAL": "false",
             },
         ):
             get_settings.cache_clear()

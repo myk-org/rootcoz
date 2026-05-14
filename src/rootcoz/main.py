@@ -1299,6 +1299,29 @@ class AuthMiddleware(BaseHTTPMiddleware):
                 },
             )
 
+        # Check pending user status when REQUIRE_APPROVAL is enabled.
+        # Admin users and the bootstrap admin always bypass this check.
+        if (
+            has_valid_session
+            and username
+            and not is_admin
+            and settings.require_approval
+            and path not in self._PUBLIC_PATHS
+        ):
+            user_status = await storage.get_user_status(username)
+            if user_status == "pending":
+                return JSONResponse(
+                    status_code=403,
+                    content={"detail": "Your account is awaiting admin approval."},
+                )
+            elif user_status == "rejected":
+                return JSONResponse(
+                    status_code=403,
+                    content={
+                        "detail": "Your account has been rejected. Contact an admin."
+                    },
+                )
+
         response = await call_next(request)
 
         # Set rootcoz_username cookie from X-Forwarded-User header (SSO)
@@ -6178,6 +6201,8 @@ async def register_user(request: Request) -> JSONResponse:
     """Register a new user or generate API key for existing user without one.
 
     Returns the generated API key (shown once).
+    When REQUIRE_APPROVAL is True, new users are created with 'pending' status
+    and must be approved by an admin before accessing protected endpoints.
     """
     body = await _read_json_object(request)
     raw_username = body.get("username", "")
@@ -6194,22 +6219,38 @@ async def register_user(request: Request) -> JSONResponse:
             status_code=403, detail="Registration is restricted. Contact an admin."
         )
 
+    # Determine user status based on REQUIRE_APPROVAL setting
+    user_status = "pending" if settings.require_approval else "active"
+
     try:
         _, raw_key = await storage.create_user(username)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
+    # Set the user's status (create_user defaults to active via DB default)
+    if user_status == "pending":
+        await storage.set_user_status(username, "pending")
+
     # Create a session for the user
     session_token = await storage.create_session(username, is_admin=False)
 
+    content: dict = {
+        "username": username,
+        "api_key": raw_key,
+        "role": "user",
+        "is_admin": False,
+        "status": user_status,
+    }
+    if user_status == "pending":
+        content["message"] = (
+            "Your account is awaiting admin approval. "
+            "Save this API key \u2014 you'll need it to log in once approved."
+        )
+    else:
+        content["message"] = "Save this API key \u2014 you won't see it again."
+
     response = JSONResponse(
-        content={
-            "username": username,
-            "api_key": raw_key,
-            "role": "user",
-            "is_admin": False,
-            "message": "Save this API key \u2014 you won't see it again.",
-        },
+        content=content,
         headers={
             "Cache-Control": "no-store, no-cache, must-revalidate",
             "Pragma": "no-cache",
@@ -6239,7 +6280,7 @@ async def register_user(request: Request) -> JSONResponse:
     )
     response.delete_cookie("jji_username", path="/")
 
-    logger.info(f"[AUDIT] User registered: {username}")
+    logger.info(f"[AUDIT] User registered: {username} (status={user_status})")
     return response
 
 
@@ -6485,6 +6526,56 @@ async def list_users_endpoint(request: Request) -> dict:
     _require_admin(request)
     users = await storage.list_users()
     return {"users": users}
+
+
+@app.get("/api/admin/users/pending")
+async def list_pending_users_endpoint(request: Request) -> dict:
+    """List users awaiting approval."""
+    _require_admin(request)
+    users = await storage.list_pending_users()
+    return {"users": users}
+
+
+@app.post("/api/admin/users/{username}/approve")
+async def approve_user(username: str, request: Request) -> dict:
+    """Approve a pending user registration."""
+    _require_admin(request)
+    status = await storage.get_user_status(username)
+    if status is None:
+        raise HTTPException(status_code=404, detail=f"User '{username}' not found")
+    if status != "pending":
+        raise HTTPException(
+            status_code=400,
+            detail=f"User '{username}' is not pending (current status: {status})",
+        )
+    await storage.set_user_status(username, "active")
+    logger.info(f"[AUDIT] Admin '{request.state.username}' approved user '{username}'")
+    return {
+        "username": username,
+        "status": "active",
+        "message": f"User '{username}' has been approved.",
+    }
+
+
+@app.post("/api/admin/users/{username}/reject")
+async def reject_user(username: str, request: Request) -> dict:
+    """Reject a pending user registration."""
+    _require_admin(request)
+    status = await storage.get_user_status(username)
+    if status is None:
+        raise HTTPException(status_code=404, detail=f"User '{username}' not found")
+    if status != "pending":
+        raise HTTPException(
+            status_code=400,
+            detail=f"User '{username}' is not pending (current status: {status})",
+        )
+    await storage.set_user_status(username, "rejected")
+    logger.info(f"[AUDIT] Admin '{request.state.username}' rejected user '{username}'")
+    return {
+        "username": username,
+        "status": "rejected",
+        "message": f"User '{username}' has been rejected.",
+    }
 
 
 @app.post("/api/admin/users/{username}/rotate-key")

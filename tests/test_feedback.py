@@ -720,6 +720,7 @@ class TestFeedbackEndpoint:
         env["ROOTCOZ_ENCRYPTION_KEY"] = (
             "test-encryption-key-for-hmac"  # pragma: allowlist secret
         )
+        env["REQUIRE_APPROVAL"] = "false"
         if github_token:
             env["GITHUB_TOKEN"] = github_token
         if enable_github_issues:

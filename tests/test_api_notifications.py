@@ -40,6 +40,7 @@ def _make_client(
         "ALLOWED_USERS": "",
         "ADMIN_KEY": "test-admin-key-16chars",  # pragma: allowlist secret
         "ROOTCOZ_ENCRYPTION_KEY": "test-encryption-key-for-hmac",  # pragma: allowlist secret
+        "REQUIRE_APPROVAL": "false",
     }
     if vapid_env:
         env.update(vapid_env)
@@ -320,6 +321,7 @@ class TestCommentMentionNotification:
             "ALLOWED_USERS": "",
             "ADMIN_KEY": "test-admin-key-16chars",  # pragma: allowlist secret
             "ROOTCOZ_ENCRYPTION_KEY": "test-encryption-key-for-hmac",  # pragma: allowlist secret
+            "REQUIRE_APPROVAL": "false",
             **_VAPID_ENV,
         }
         with (
@@ -379,6 +381,7 @@ class TestCommentMentionNotification:
             "ALLOWED_USERS": "",
             "ADMIN_KEY": "test-admin-key-16chars",  # pragma: allowlist secret
             "ROOTCOZ_ENCRYPTION_KEY": "test-encryption-key-for-hmac",  # pragma: allowlist secret
+            "REQUIRE_APPROVAL": "false",
             **_VAPID_ENV,
         }
         with (

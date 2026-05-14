@@ -398,6 +398,11 @@ async def init_db() -> None:
         for col in ("github_token_enc", "jira_email_enc", "jira_token_enc"):
             await _migrate_add_column(db, "users", col, "TEXT NOT NULL DEFAULT ''")
 
+        # Migration: add status column to users table (for admin approval flow)
+        await _migrate_add_column(
+            db, "users", "status", "TEXT NOT NULL DEFAULT 'active'"
+        )
+
         # Sessions table — admin session tokens
         await db.execute("""
             CREATE TABLE IF NOT EXISTS sessions (
@@ -2991,6 +2996,72 @@ async def create_user(username: str) -> tuple[str, str]:
                 raise ValueError(msg) from exc
             raise
     return username, raw_key
+
+
+async def register_user_with_status(
+    username: str, api_key_hash: str, status: str = "active"
+) -> int:
+    """Register a user with a specific status.
+
+    Creates a new user row with the given API key hash and status.
+    Returns the user's row ID.
+
+    Raises ValueError if username is invalid or already exists.
+    """
+    _validate_username(username)
+    async with _connect_db() as db:
+        try:
+            cursor = await db.execute(
+                "INSERT INTO users (username, api_key_hash, role, status) VALUES (?, ?, 'user', ?)",
+                (username, api_key_hash, status),
+            )
+            await db.commit()
+            return cursor.lastrowid
+        except Exception as exc:
+            if "UNIQUE constraint" in str(exc):
+                msg = f"User '{username}' already exists"
+                raise ValueError(msg) from exc
+            raise
+
+
+async def set_user_status(username: str, status: str) -> bool:
+    """Set user status (active/pending/rejected).
+
+    Returns True if the user was found and updated, False otherwise.
+    """
+    if status not in ("active", "pending", "rejected"):
+        msg = f"Invalid status: '{status}'. Must be 'active', 'pending', or 'rejected'."
+        raise ValueError(msg)
+    async with _connect_db() as db:
+        cursor = await db.execute(
+            "UPDATE users SET status = ? WHERE username = ?",
+            (status, username),
+        )
+        await db.commit()
+        return cursor.rowcount > 0
+
+
+async def get_user_status(username: str) -> str | None:
+    """Get user status. Returns None if user not found."""
+    async with _connect_db() as db:
+        cursor = await db.execute(
+            "SELECT status FROM users WHERE username = ?",
+            (username,),
+        )
+        row = await cursor.fetchone()
+        if row is None:
+            return None
+        return row["status"] if "status" in row.keys() else "active"
+
+
+async def list_pending_users() -> list[dict]:
+    """List users with pending status."""
+    async with _connect_db() as db:
+        cursor = await db.execute(
+            "SELECT id, username, role, status, created_at, last_seen "
+            "FROM users WHERE status = 'pending' ORDER BY created_at DESC"
+        )
+        return [dict(row) for row in await cursor.fetchall()]
 
 
 async def rotate_user_key(username: str) -> str:
