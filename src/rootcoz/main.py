@@ -7110,8 +7110,9 @@ async def init_chat(job_id: str, request: Request) -> dict:
 
 
 @app.post("/api/chat/{job_id}/close")
-async def close_chat(job_id: str) -> dict:
+async def close_chat(job_id: str, request: Request) -> dict:
     """Clean up chat repos when user leaves the chat page. Keeps session files."""
+    _check_allow_list(request)
     from rootcoz.engine.chat import cleanup_chat_repos
 
     cleanup_chat_repos(job_id)
@@ -7150,6 +7151,11 @@ async def send_chat_message(
 
     if not ai_provider:
         raise HTTPException(status_code=400, detail="No AI provider configured")
+
+    if not ai_model:
+        logger.debug(
+            "Chat: no ai_model specified, using provider default for %s", ai_provider
+        )
 
     # Strip sensitive data before passing to chat engine
     safe_result = strip_sensitive_from_response(dict(result_data))

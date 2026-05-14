@@ -72,8 +72,14 @@ async def clone_chat_repos(
         if tests_repo_url:
             try:
                 clean_url, ref = parse_repo_ref(str(tests_repo_url))
-                repo_name = derive_test_repo_name(clean_url, additional_repos)
-                if (workspace / repo_name).exists():
+                raw_name = derive_test_repo_name(clean_url, additional_repos)
+                repo_name = (
+                    raw_name.replace("/", "_").replace("..", "_").replace("\\", "_")
+                )
+                target = workspace / repo_name
+                if not target.resolve().is_relative_to(workspace.resolve()):
+                    logger.warning("Skipping test repo with unsafe name: %s", raw_name)
+                elif target.exists():
                     logger.debug(
                         "Chat: repo %s already cloned in %s", repo_name, workspace
                     )
@@ -84,7 +90,7 @@ async def clone_chat_repos(
                     await asyncio.to_thread(
                         repo_manager.clone_into,
                         clean_url,
-                        workspace / repo_name,
+                        target,
                         depth=50,
                         branch=ref,
                         token=token or None,
@@ -100,18 +106,27 @@ async def clone_chat_repos(
             ]
             for repo in repos:
                 try:
-                    if (workspace / repo.name).exists():
+                    safe_name = (
+                        repo.name.replace("/", "_")
+                        .replace("..", "_")
+                        .replace("\\", "_")
+                    )
+                    target = workspace / safe_name
+                    if not target.resolve().is_relative_to(workspace.resolve()):
+                        logger.warning("Skipping repo with unsafe name: %s", repo.name)
+                        continue
+                    if target.exists():
                         logger.debug(
-                            "Chat: repo %s already cloned in %s", repo.name, workspace
+                            "Chat: repo %s already cloned in %s", safe_name, workspace
                         )
                         cloned_any = True
                         continue
-                    logger.info("Chat: cloning repo %s into %s", repo.name, workspace)
+                    logger.info("Chat: cloning repo %s into %s", safe_name, workspace)
                     token = getattr(repo, "token", None) or ""
                     await asyncio.to_thread(
                         repo_manager.clone_into,
                         str(repo.url),
-                        workspace / repo.name,
+                        target,
                         depth=50,
                         branch=getattr(repo, "ref", "") or "",
                         token=token or None,
