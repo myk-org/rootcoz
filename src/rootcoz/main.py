@@ -70,7 +70,6 @@ from rootcoz.encryption import (
     SENSITIVE_KEYS,
     decrypt_sensitive_fields,
     encrypt_sensitive_fields,
-    strip_sensitive_from_response,
 )
 from rootcoz.engine.core import (
     JOB_INSIGHT_ISSUE_PROMPT_FILENAME,
@@ -7237,6 +7236,7 @@ async def _process_chat_message(
         chat_with_ai,
         ensure_chat_workspace,
         clone_chat_repos,
+        setup_chat_scripts,
     )
 
     lock = _get_chat_lock(job_id)
@@ -7266,8 +7266,6 @@ async def _process_chat_message(
 
             if not ai_provider:
                 raise RuntimeError("No AI provider configured")
-
-            safe_result = strip_sensitive_from_response(dict(result_data))
 
             # Get conversation history (limit to last 50 messages)
             all_history = await storage.get_chat_messages(job_id)
@@ -7304,36 +7302,77 @@ async def _process_chat_message(
             repos_available = await clone_chat_repos(workspace, decrypted_params)
 
             settings = get_settings()
-            jira_configured = bool(
-                decrypted_params.get("jira_url") or settings.jira_url
-            )
+
+            # Get user tokens for Jira/GitHub access
+            user_tokens = await storage.get_user_tokens(username)
+
+            # Extract github repo from tests_repo_url (e.g., "https://github.com/org/repo" -> "org/repo")
+            github_repo = ""
+            tests_repo_url = decrypted_params.get("tests_repo_url", "")
+            if tests_repo_url:
+                # Parse owner/repo from URL like https://github.com/org/repo.git
+                import re
+
+                match = re.search(
+                    r"github\.com[/:]([^/]+/[^/]+?)(?:\.git)?$", str(tests_repo_url)
+                )
+                if match:
+                    github_repo = match.group(1)
+
+            # Determine Jira credentials: user tokens > job params > server settings
             jira_url = decrypted_params.get("jira_url", "") or str(
                 settings.jira_url or ""
             )
-            jira_project_key = decrypted_params.get("jira_project_key", "") or str(
-                settings.jira_project_key or ""
+            jira_email = (
+                user_tokens.get("jira_email", "")
+                or decrypted_params.get("jira_email", "")
+                or str(settings.jira_email or "")
             )
-            github_issues_enabled = settings.enable_github_issues is not False
+            jira_token = (
+                user_tokens.get("jira_token", "")
+                or decrypted_params.get("jira_api_token", "")
+                or decrypted_params.get("jira_pat", "")
+            )
+            if not jira_token and settings.jira_api_token:
+                jira_token = settings.jira_api_token.get_secret_value()
+            if not jira_token and settings.jira_pat:
+                jira_token = settings.jira_pat.get_secret_value()
+
+            # Determine GitHub token: user tokens > server settings
+            github_token = user_tokens.get("github_token", "")
+            if not github_token and settings.github_token:
+                github_token = settings.github_token.get_secret_value()
 
             server_url = _build_internal_server_url()
             auth_header = await _create_ai_auth_header(username)
 
+            # Setup scripts in workspace
+            available_scripts = setup_chat_scripts(
+                workspace,
+                server_url=server_url,
+                auth_token=auth_header.removeprefix("Bearer ").strip()
+                if auth_header
+                else "",
+                job_id=job_id,
+                jira_url=jira_url,
+                jira_email=jira_email,
+                jira_token=jira_token,
+                github_token=github_token,
+                github_repo=github_repo,
+            )
+
             success, response_text, new_session_id = await chat_with_ai(
                 job_id=job_id,
-                result_data=safe_result,
+                job_name=result_data.get("job_name", "unknown"),
+                build_number=result_data.get("build_number", 0),
                 message=message,
                 history=history,
                 ai_provider=ai_provider,
                 ai_model=ai_model,
-                server_url=server_url,
                 repo_path=workspace,
                 ai_cli_timeout=settings.ai_cli_timeout,
-                auth_header=auth_header,
                 session_id=last_session_id,
-                jira_configured=jira_configured,
-                jira_url=jira_url,
-                jira_project_key=jira_project_key,
-                github_issues_enabled=github_issues_enabled,
+                available_scripts=available_scripts,
                 repos_available=repos_available,
             )
 

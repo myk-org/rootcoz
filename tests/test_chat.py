@@ -69,134 +69,78 @@ class TestBuildSystemPrompt:
     """Tests for build_system_prompt."""
 
     def test_basic_prompt_structure(self):
-        result_data = {
-            "job_name": "test-job",
-            "build_number": 42,
-            "summary": "2 failures analyzed",
-            "ai_provider": "claude",
-            "ai_model": "sonnet-4",
-            "jenkins_url": "http://jenkins/job/test/42",
-            "failures": [
-                {
-                    "id": "uuid-1",
-                    "test_name": "test_foo",
-                    "analysis": {"classification": "PRODUCT BUG"},
-                },
-                {
-                    "id": "uuid-2",
-                    "test_name": "test_bar",
-                    "analysis": {"classification": "INFRASTRUCTURE"},
-                },
-            ],
-        }
-        prompt = build_system_prompt(result_data, "job-123", "http://localhost:8000")
+        prompt = build_system_prompt(
+            job_name="test-job",
+            build_number=42,
+            job_id="job-123",
+            available_scripts=["rootcoz-chat-job"],
+        )
         assert "test-job" in prompt
         assert "#42" in prompt
-        assert "uuid-1" in prompt
-        assert "uuid-2" in prompt
-        assert "test_foo" in prompt
-        assert "test_bar" in prompt
-        assert "PRODUCT BUG" in prompt
-        assert "INFRASTRUCTURE" in prompt
+        assert "job-123" in prompt
+        assert "rootcoz-chat-job" in prompt
         assert "read-only" in prompt.lower()
-        assert "http://localhost:8000" in prompt
+        assert "./bin/rootcoz-chat-job" in prompt
 
-    def test_child_job_failures_included(self):
-        result_data = {
-            "job_name": "pipeline",
-            "build_number": 1,
-            "summary": "pipeline failed",
-            "failures": [],
-            "child_job_analyses": [
-                {
-                    "job_name": "child-a",
-                    "build_number": 10,
-                    "failures": [
-                        {
-                            "id": "child-uuid-1",
-                            "test_name": "test_child",
-                            "analysis": {"classification": "CODE ISSUE"},
-                        }
-                    ],
-                    "failed_children": [],
-                }
+    def test_all_scripts_listed(self):
+        prompt = build_system_prompt(
+            job_name="test-job",
+            build_number=1,
+            job_id="j1",
+            available_scripts=[
+                "rootcoz-chat-job",
+                "rootcoz-chat-jira",
+                "rootcoz-chat-github",
             ],
-        }
-        prompt = build_system_prompt(result_data, "job-456", "")
-        assert "child-a#10" in prompt
-        assert "child-uuid-1" in prompt
-        assert "test_child" in prompt
+        )
+        assert "./bin/rootcoz-chat-job" in prompt
+        assert "./bin/rootcoz-chat-jira" in prompt
+        assert "./bin/rootcoz-chat-github" in prompt
+        assert "Jira" in prompt
+        assert "GitHub" in prompt
 
-    def test_no_failures(self):
-        result_data = {
-            "job_name": "clean",
-            "build_number": 1,
-            "summary": "ok",
-            "failures": [],
-        }
-        prompt = build_system_prompt(result_data, "job-789", "")
-        assert "(no failures)" in prompt
+    def test_no_scripts(self):
+        prompt = build_system_prompt(
+            job_name="clean",
+            build_number=1,
+            job_id="job-789",
+            available_scripts=[],
+        )
+        assert "clean" in prompt
+        assert "#1" in prompt
+        # No script lines but prompt still valid
+        assert "Available Tools" in prompt
 
-    def test_no_server_url_omits_api_section(self):
-        result_data = {
-            "job_name": "j",
-            "build_number": 1,
-            "summary": "s",
-            "failures": [],
-        }
-        prompt = build_system_prompt(result_data, "j1", "")
-        assert "Available API Endpoints" not in prompt
+    def test_repos_available_note(self):
+        prompt = build_system_prompt(
+            job_name="j",
+            build_number=1,
+            job_id="j1",
+            available_scripts=["rootcoz-chat-job"],
+            repos_available=True,
+        )
+        assert "Source repositories are cloned" in prompt
 
-    def test_server_url_includes_api_endpoints(self):
-        result_data = {
-            "job_name": "j",
-            "build_number": 1,
-            "summary": "s",
-            "failures": [],
-        }
-        prompt = build_system_prompt(result_data, "j1", "http://srv:8000")
-        assert "Available API Endpoints" in prompt
-        assert "/api/results/j1" in prompt
-        assert "/api/results/j1/comments" in prompt
+    def test_repos_not_available(self):
+        prompt = build_system_prompt(
+            job_name="j",
+            build_number=1,
+            job_id="j1",
+            available_scripts=["rootcoz-chat-job"],
+            repos_available=False,
+        )
+        assert "Source repositories are cloned" not in prompt
 
-    def test_nested_child_failures(self):
-        result_data = {
-            "job_name": "top",
-            "build_number": 1,
-            "summary": "nested",
-            "failures": [],
-            "child_job_analyses": [
-                {
-                    "job_name": "child",
-                    "build_number": 5,
-                    "failures": [],
-                    "failed_children": [
-                        {
-                            "job_name": "grandchild",
-                            "build_number": 3,
-                            "failures": [
-                                {
-                                    "id": "nested-uuid",
-                                    "test_name": "test_nested",
-                                    "analysis": {"classification": "ENVIRONMENT"},
-                                }
-                            ],
-                        }
-                    ],
-                }
-            ],
-        }
-        prompt = build_system_prompt(result_data, "top-1", "")
-        assert "grandchild#3" in prompt
-        assert "nested-uuid" in prompt
-        assert "test_nested" in prompt
-
-    def test_missing_optional_fields(self):
-        """Prompt builds safely when optional fields are absent."""
-        result_data = {"failures": []}
-        prompt = build_system_prompt(result_data, "x", "")
-        assert "unknown" in prompt
-        assert "#0" in prompt
+    def test_only_job_script(self):
+        prompt = build_system_prompt(
+            job_name="j",
+            build_number=1,
+            job_id="j1",
+            available_scripts=["rootcoz-chat-job"],
+        )
+        assert "./bin/rootcoz-chat-job" in prompt
+        assert "./bin/rootcoz-chat-jira" not in prompt
+        assert "./bin/rootcoz-chat-github" not in prompt
 
 
 # ---------------------------------------------------------------------------

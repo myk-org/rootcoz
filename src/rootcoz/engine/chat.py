@@ -4,7 +4,9 @@ Builds job-scoped system prompts and manages AI CLI conversations.
 """
 
 import asyncio
+import importlib.resources
 import shutil
+import stat
 from pathlib import Path
 
 from simple_logger.logger import get_logger
@@ -17,6 +19,12 @@ from rootcoz.engine.core import (
 logger = get_logger(name=__name__)
 
 _CHAT_WORKSPACE_PREFIX = "rootcoz-chat-"
+
+_CHAT_SCRIPTS = [
+    "rootcoz_chat_job.py",
+    "rootcoz_chat_jira.py",
+    "rootcoz_chat_github.py",
+]
 
 
 def get_chat_workspace(job_id: str) -> Path:
@@ -156,6 +164,95 @@ async def clone_chat_repos(
     return cloned_any
 
 
+def setup_chat_scripts(
+    workspace: Path,
+    *,
+    server_url: str,
+    auth_token: str,
+    job_id: str,
+    jira_url: str = "",
+    jira_email: str = "",
+    jira_token: str = "",
+    github_token: str = "",
+    github_repo: str = "",
+) -> list[str]:
+    """Copy chat scripts into workspace and write env config.
+
+    Returns list of available script names (only scripts whose required
+    env vars are configured).
+    """
+    scripts_dir = workspace / "bin"
+    scripts_dir.mkdir(exist_ok=True)
+
+    # Copy scripts from package
+    scripts_pkg = importlib.resources.files("rootcoz.chat_scripts")
+    for script_name in _CHAT_SCRIPTS:
+        source = scripts_pkg.joinpath(script_name)
+        target = scripts_dir / script_name
+        target.write_bytes(source.read_bytes())
+        target.chmod(target.stat().st_mode | stat.S_IEXEC)
+
+    # Write env file that scripts read
+    env_lines = [
+        f"ROOTCOZ_SERVER_URL={server_url}",
+        f"ROOTCOZ_AUTH_TOKEN={auth_token}",
+        f"ROOTCOZ_JOB_ID={job_id}",
+    ]
+    if jira_url:
+        env_lines.append(f"ROOTCOZ_JIRA_URL={jira_url}")
+    if jira_email:
+        env_lines.append(f"ROOTCOZ_JIRA_EMAIL={jira_email}")
+    if jira_token:
+        env_lines.append(f"ROOTCOZ_JIRA_TOKEN={jira_token}")
+    if github_token:
+        env_lines.append(f"ROOTCOZ_GITHUB_TOKEN={github_token}")
+    if github_repo:
+        env_lines.append(f"ROOTCOZ_GITHUB_REPO={github_repo}")
+
+    env_file = workspace / ".chat_env"
+    env_file.write_text("\n".join(env_lines) + "\n")
+    env_file.chmod(0o600)  # Restrict access — contains tokens
+
+    # Write wrapper scripts that source the env and call uv run
+    available = []
+
+    # Job script is always available
+    _write_wrapper(scripts_dir, "rootcoz-chat-job", "rootcoz_chat_job.py", workspace)
+    available.append("rootcoz-chat-job")
+
+    # Jira script only if configured
+    if jira_url and jira_token:
+        _write_wrapper(
+            scripts_dir, "rootcoz-chat-jira", "rootcoz_chat_jira.py", workspace
+        )
+        available.append("rootcoz-chat-jira")
+
+    # GitHub script only if configured
+    if github_token and github_repo:
+        _write_wrapper(
+            scripts_dir, "rootcoz-chat-github", "rootcoz_chat_github.py", workspace
+        )
+        available.append("rootcoz-chat-github")
+
+    logger.info("Chat scripts setup in %s: %s", workspace, ", ".join(available))
+    return available
+
+
+def _write_wrapper(
+    scripts_dir: Path, name: str, script_file: str, workspace: Path
+) -> None:
+    """Write a shell wrapper that sources env and runs the script via uv."""
+    wrapper = scripts_dir / name
+    wrapper.write_text(
+        f"#!/bin/bash\n"
+        f"set -a\n"
+        f"source {workspace}/.chat_env\n"
+        f"set +a\n"
+        f'exec uv run "{scripts_dir / script_file}" "$@"\n'
+    )
+    wrapper.chmod(wrapper.stat().st_mode | stat.S_IEXEC)
+
+
 def cleanup_chat_repos(job_id: str) -> None:
     """Delete cloned repos from chat workspace but keep session files."""
     workspace = get_chat_workspace(job_id)
@@ -182,134 +279,65 @@ def cleanup_chat_workspace(job_id: str) -> None:
         logger.info(f"Deleted chat workspace for job {job_id}")
 
 
-def _get_classification(failure: dict) -> str:
-    """Safely extract classification from a failure dict."""
-    analysis = failure.get("analysis")
-    if isinstance(analysis, dict):
-        return analysis.get("classification", "?")
-    return "?"
-
-
-def _collect_child_failures(children: list[dict], lines: list[str]) -> None:
-    """Recursively collect failure lines from child job analyses."""
-    for child in children:
-        child_name = child.get("job_name", "?")
-        child_num = child.get("build_number", 0)
-        for f in child.get("failures", []):
-            fid = f.get("id", "?")
-            name = f.get("test_name", "unknown")
-            classification = _get_classification(f)
-            lines.append(
-                f"  - [{child_name}#{child_num}] {name} (UUID: {fid}) \u2014 {classification}"
-            )
-        _collect_child_failures(child.get("failed_children", []), lines)
-
-
 def build_system_prompt(
-    result_data: dict,
+    job_name: str,
+    build_number: int,
     job_id: str,
-    server_url: str,
-    auth_header: str = "",
-    jira_configured: bool = False,
-    jira_url: str = "",
-    jira_project_key: str = "",
-    github_issues_enabled: bool = False,
+    available_scripts: list[str],
     repos_available: bool = False,
 ) -> str:
     """Build a system prompt that scopes the AI to a specific analyzed job.
 
-    The prompt provides:
-    - Job metadata (name, build number, status, summary)
-    - List of failures with test_name and UUID for reference
-    - API endpoints the AI can use to query details
-    - Instructions constraining the AI to read-only, job-scoped behavior
+    The prompt only defines the AI's role and lists available tools.
+    All data access happens through scripts — no static data in the prompt.
     """
-    job_name = result_data.get("job_name", "unknown")
-    build_number = result_data.get("build_number", 0)
-    summary = result_data.get("summary", "")
-    ai_provider = result_data.get("ai_provider", "")
-    ai_model = result_data.get("ai_model", "")
-    jenkins_url = result_data.get("jenkins_url", "")
+    # Build tools section
+    tools_lines = []
+    for script in available_scripts:
+        if script == "rootcoz-chat-job":
+            tools_lines.append(
+                f"- `./bin/{script}` — Query job data (failures, analyses, comments, history). "
+                f"Run `./bin/{script} --help` for all commands."
+            )
+        elif script == "rootcoz-chat-jira":
+            tools_lines.append(
+                f"- `./bin/{script}` — Search Jira issues, get issue details, find related tickets. "
+                f"Run `./bin/{script} --help` for all commands."
+            )
+        elif script == "rootcoz-chat-github":
+            tools_lines.append(
+                f"- `./bin/{script}` — Search GitHub issues/PRs, get details. "
+                f"Run `./bin/{script} --help` for all commands."
+            )
+    tools_section = "\n".join(tools_lines)
 
-    # Build failure reference list
-    failure_lines = []
-    for i, f in enumerate(result_data.get("failures", []), 1):
-        fid = f.get("id", "?")
-        name = f.get("test_name", "unknown")
-        classification = _get_classification(f)
-        failure_lines.append(f"  {i}. {name} (UUID: {fid}) — {classification}")
-
-    # Include child job failures (recursive)
-    _collect_child_failures(result_data.get("child_job_analyses", []), failure_lines)
-
-    failures_section = "\n".join(failure_lines) if failure_lines else "  (no failures)"
-
-    # API endpoints the AI can use
-    api_section = ""
-    if server_url:
-        auth_flag = f" -H 'Authorization: {auth_header}'" if auth_header else ""
-        api_section = f"""
-## Available API Endpoints (read-only)
-You can use curl to query these endpoints for more details:
-- `curl{auth_flag} {server_url}/api/results/{job_id}` — Full job result with all failure analyses
-- `curl{auth_flag} {server_url}/api/results/{job_id}/comments` — Get comments on this job
-"""
-
-    # Build integrations section
-    integration_lines = []
-    if jira_configured:
-        integration_lines.append(
-            f"Jira: Configured (URL: {jira_url}, Project: {jira_project_key}). "
-            "Check failure's product_bug_report.jira_matches for existing tickets."
-        )
-    else:
-        integration_lines.append(
-            "Jira: Not configured. Tell user to configure Jira credentials in Settings."
-        )
-    if github_issues_enabled:
-        integration_lines.append("GitHub Issues: Enabled.")
-    else:
-        integration_lines.append(
-            "GitHub Issues: Not configured. Tell user to configure GitHub token in Settings."
-        )
+    repos_note = ""
     if repos_available:
-        integration_lines.append(
-            "Source Repositories: Cloned in your working directory. Explore test/product code."
+        repos_note = (
+            "\n\nSource repositories are cloned in your working directory. "
+            "You can explore test and product code directly."
         )
-    else:
-        integration_lines.append("Source Repositories: Not available.")
-    integrations_section = "\n".join(f"- {line}" for line in integration_lines)
 
-    return f"""You are a read-only assistant helping a user understand a CI/CD failure analysis.
+    return f"""You are a CI/CD failure analysis expert. You are helping a user understand the analysis results for job **{job_name} #{build_number}** (job ID: {job_id}).
 
-## Scope — STRICT RULES
-- You MUST only discuss this specific analyzed job and its failures.
-- If the user asks something unrelated to this job (e.g., "what's the time?", general coding questions, anything not about this analysis), respond ONLY with: "I can only discuss the analysis results for this job. How can I help you understand the failures?"
-- Do NOT explore the filesystem, curl endpoints, or run any tools unless the user specifically asks about a failure or test in this job.
-- Do NOT modify any data, create issues, or perform any mutations.
-- Keep responses concise and focused. Do NOT dump entire analysis results unless explicitly asked.
-
-## Job Context
-- **Job:** {job_name} #{build_number}
-- **Job ID:** {job_id}
-- **Summary:** {summary}
-- **AI Provider/Model:** {ai_provider} / {ai_model}
-- **Jenkins URL:** {jenkins_url or "N/A"}
-
-## Failures in this job
-{failures_section}
-
-When the user references a test, use the UUID to look up its details.
-{api_section}
-## Integrations
-{integrations_section}
-
-## Instructions
-- Answer questions about the failures, their root causes, classifications, and suggested fixes
-- If the user asks about a specific test, use the UUID to reference it
-- You can explore the cloned repository (if available in your working directory) to understand test code
+## Your Role
+- Help the user understand test failures, their root causes, and classifications
+- Suggest fixes and identify patterns across failures
+- Search for related Jira tickets or GitHub issues when asked
+- Explore cloned source code to understand test logic when relevant
 - Be concise and technical
-- If you don't have enough information, say so and suggest what data would help
+
+## Available Tools
+Scripts in your working directory (under `bin/`) — use these to access data:
+{tools_section}
+
+**IMPORTANT:** Always use these scripts to get data. Start by running `./bin/rootcoz-chat-job summary` and `./bin/rootcoz-chat-job failures` to understand the job before answering.{repos_note}
+
+## Rules
+- Stay focused on this specific job and its failures
+- If the user asks something unrelated, redirect to the job analysis
+- Do NOT modify any data — read-only access only
+- Do NOT run arbitrary curl commands — use the provided scripts
 """
 
 
@@ -342,36 +370,33 @@ def build_chat_prompt(
 async def chat_with_ai(
     *,
     job_id: str,
-    result_data: dict,
+    job_name: str,
+    build_number: int,
     message: str,
     history: list[dict],
     ai_provider: str,
     ai_model: str,
-    server_url: str = "",
     repo_path: Path | None = None,
     ai_cli_timeout: int | None = None,
-    auth_header: str = "",
     session_id: str | None = None,
-    jira_configured: bool = False,
-    jira_url: str = "",
-    jira_project_key: str = "",
-    github_issues_enabled: bool = False,
+    available_scripts: list[str] | None = None,
     repos_available: bool = False,
 ) -> tuple[bool, str, str | None]:
     """Send a chat message and get an AI response.
 
     Args:
         job_id: The analyzed job ID.
-        result_data: The job's result data (stripped of sensitive fields).
+        job_name: The job name for display in the prompt.
+        build_number: The build number for display in the prompt.
         message: The user's new message.
         history: Previous chat messages (list of dicts with role/content).
         ai_provider: AI provider to use.
         ai_model: AI model to use.
-        server_url: Internal server URL for AI to query APIs.
         repo_path: Path to cloned repos (if available).
         ai_cli_timeout: Timeout for AI CLI call.
-        auth_header: Bearer auth header for AI to use when curling API.
         session_id: Session ID for conversation continuity.
+        available_scripts: List of available script names.
+        repos_available: Whether source repos are cloned.
 
     Returns:
         Tuple of (success, response_text, session_id).
@@ -391,14 +416,10 @@ async def chat_with_ai(
     else:
         # First message — build full system prompt
         system_prompt = build_system_prompt(
-            result_data,
-            job_id,
-            server_url,
-            auth_header=auth_header,
-            jira_configured=jira_configured,
-            jira_url=jira_url,
-            jira_project_key=jira_project_key,
-            github_issues_enabled=github_issues_enabled,
+            job_name=job_name,
+            build_number=build_number,
+            job_id=job_id,
+            available_scripts=available_scripts or [],
             repos_available=repos_available,
         )
         prompt = build_chat_prompt(system_prompt, history, message)
