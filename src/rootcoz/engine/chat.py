@@ -402,7 +402,10 @@ async def init_chat_session(
         repos_available=repos_available,
     )
     # Build a minimal prompt with the system context
-    init_prompt = system_prompt + "\n\n**User:** hi\n\n**Assistant:** "
+    init_prompt = (
+        system_prompt
+        + "\n\n**User:** answer only with hi, do not think\n\n**Assistant:** "
+    )
 
     logger.info(
         "Chat: initializing session for job %s (provider=%s)", job_id, ai_provider

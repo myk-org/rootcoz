@@ -8,7 +8,7 @@ import { useProviderModels } from '@/hooks/useProviderModels'
 import { Tooltip, TooltipTrigger, TooltipContent } from '@/components/ui/tooltip'
 import { TooltipProvider } from '@/components/ui/tooltip'
 import { Textarea } from '@/components/ui/textarea'
-import { Send, Trash2, ArrowLeft, Loader2, Bot, User, Copy, Check } from 'lucide-react'
+import { Send, ArrowLeft, Loader2, Bot, User, Copy, Check } from 'lucide-react'
 
 interface ChatMessage {
   id: number
@@ -51,26 +51,52 @@ export function ChatPage() {
 
   const hasPending = messages.some(m => m.status === 'pending')
 
-  // Initialize chat workspace (clone repos)
+  // Load chat history + job info, only init if no existing session
   useEffect(() => {
     if (!jobId) return
     let ignore = false
+    setLoading(true)
     setChatReady(false)
-    setInitMessage('Initializing workspace...')
-    api.post<{ ready: boolean; repos_cloned: boolean; repo_names: string[] }>(`/api/chat/${jobId}/init`, {})
-      .then(res => {
-        if (ignore) return
-        if (res.repos_cloned && res.repo_names.length > 0) {
-          setInitMessage(`Repos cloned: ${res.repo_names.join(', ')}`)
+
+    Promise.all([
+      api.get<{ messages: ChatMessage[]; total: number }>(`/api/chat/${jobId}`),
+      api.get<{ result: { job_name: string; build_number: number; summary: string; ai_provider: string; ai_model: string } }>(`/results/${jobId}`),
+    ]).then(async ([chatRes, resultRes]) => {
+      if (ignore) return
+      setMessages(chatRes.messages)
+      if (resultRes.result) {
+        const r = resultRes.result
+        setJobInfo({ job_name: r.job_name, build_number: r.build_number, summary: r.summary, ai_provider: r.ai_provider, ai_model: r.ai_model })
+        setAiProvider(r.ai_provider || 'claude')
+        setAiModel(r.ai_model || '')
+      }
+
+      if (chatRes.messages.length > 0) {
+        // Session already exists — skip init
+        setChatReady(true)
+      } else {
+        // No messages — initialize workspace
+        setInitMessage('Initializing workspace...')
+        try {
+          const initRes = await api.post<{ ready: boolean; repos_cloned: boolean; repo_names: string[] }>(`/api/chat/${jobId}/init`, {})
+          if (ignore) return
+          if (initRes.repos_cloned && initRes.repo_names.length > 0) {
+            setInitMessage(`Repos cloned: ${initRes.repo_names.join(', ')}`)
+          }
+        } catch {
+          if (ignore) return
+          setInitMessage('')
         }
         setChatReady(true)
-      })
-      .catch(() => {
-        if (ignore) return
-        // Init failed but chat can still work without repos
-        setChatReady(true)
-        setInitMessage('')
-      })
+      }
+    }).catch(err => {
+      if (ignore) return
+      setError(err instanceof Error ? err.message : 'Failed to load chat')
+      setChatReady(true)
+    }).finally(() => {
+      if (!ignore) setLoading(false)
+    })
+
     return () => { ignore = true }
   }, [jobId])
 
@@ -82,33 +108,6 @@ export function ChatPage() {
         api.post(`/api/chat/${jobId}/close`, {}).catch(() => {})
       }
     }
-  }, [jobId])
-
-  // Load chat history + job info
-  useEffect(() => {
-    if (!jobId) return
-    let ignore = false
-    setLoading(true)
-
-    Promise.all([
-      api.get<{ messages: ChatMessage[]; total: number }>(`/api/chat/${jobId}`),
-      api.get<{ result: { job_name: string; build_number: number; summary: string; ai_provider: string; ai_model: string } }>(`/results/${jobId}`),
-    ]).then(([chatRes, resultRes]) => {
-      if (ignore) return
-      setMessages(chatRes.messages)
-      if (resultRes.result) {
-        const r = resultRes.result
-        setJobInfo({ job_name: r.job_name, build_number: r.build_number, summary: r.summary, ai_provider: r.ai_provider, ai_model: r.ai_model })
-        setAiProvider(r.ai_provider || 'claude')
-        setAiModel(r.ai_model || '')
-      }
-    }).catch(err => {
-      if (ignore) return
-      setError(err instanceof Error ? err.message : 'Failed to load chat')
-    }).finally(() => {
-      if (!ignore) setLoading(false)
-    })
-    return () => { ignore = true }
   }, [jobId])
 
   // SSE: listen for chat message updates (AI responses)
@@ -196,13 +195,24 @@ export function ChatPage() {
     } catch { /* clipboard not available */ }
   }, [])
 
-  const handleClear = useCallback(async () => {
+  const handleNewSession = useCallback(async () => {
     if (!jobId) return
+    setChatReady(false)
+    setInitMessage('Starting new session...')
+    setMessages([])
+    setError('')
     try {
+      // Clear existing chat history
       await api.delete(`/api/chat/${jobId}`)
-      setMessages([])
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to clear chat')
+      // Re-initialize workspace (clones repos, creates new AI session)
+      const res = await api.post<{ ready: boolean; repos_cloned: boolean; repo_names: string[] }>(`/api/chat/${jobId}/init`, {})
+      if (res.repos_cloned && res.repo_names.length > 0) {
+        setInitMessage(`Repos cloned: ${res.repo_names.join(', ')}`)
+      }
+      setChatReady(true)
+    } catch {
+      setChatReady(true)
+      setInitMessage('')
     }
   }, [jobId])
 
@@ -259,15 +269,15 @@ export function ChatPage() {
               options={availableModels}
               placeholder="Model"
             />
-            {/* Clear button */}
-            <Tooltip>
-              <TooltipTrigger asChild>
-                <Button variant="ghost" size="sm" onClick={handleClear} disabled={messages.length === 0 || hasPending} aria-label="Clear chat history">
-                  <Trash2 className="h-4 w-4" />
-                </Button>
-              </TooltipTrigger>
-              <TooltipContent>Clear chat history</TooltipContent>
-            </Tooltip>
+            <Button
+              variant="ghost"
+              size="sm"
+              className="h-7 px-3 text-xs"
+              onClick={handleNewSession}
+              disabled={hasPending}
+            >
+              New Session
+            </Button>
           </div>
         </div>
 

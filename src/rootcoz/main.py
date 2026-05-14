@@ -7414,8 +7414,10 @@ async def _process_chat_message(
             ][-50:]
 
             # Find session_id from the last completed assistant message
+            # Scan all_history (not filtered history) because the init message
+            # has empty content but carries the session_id
             last_session_id = None
-            for msg in reversed(history):
+            for msg in reversed(all_history):
                 if (
                     msg.get("role") == "assistant"
                     and msg.get("session_id")
