@@ -89,6 +89,7 @@ export function ReAnalyzeDialog({ open, onOpenChange, result, jobId, failureUuid
   const [force, setForce] = useState(init.force)
 
   const [availableModels, setAvailableModels] = useState<ModelOption[]>([])
+  const [peerModels, setPeerModels] = useState<Record<number, ModelOption[]>>({})
 
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState('')
@@ -103,6 +104,20 @@ export function ReAnalyzeDialog({ open, onOpenChange, result, jobId, failureUuid
       .catch(() => { if (!ignore) setAvailableModels([]) })
     return () => { ignore = true }
   }, [aiProvider])
+
+  // Fetch models for each peer provider
+  useEffect(() => {
+    if (!enablePeers) return
+    peerConfigs.forEach((peer, i) => {
+      if (!peer.ai_provider) {
+        setPeerModels(prev => ({ ...prev, [i]: [] }))
+        return
+      }
+      api.get<{ models: ModelOption[] }>(`/api/ai-models?provider=${peer.ai_provider}`)
+        .then(res => setPeerModels(prev => ({ ...prev, [i]: res.models ?? [] })))
+        .catch(() => setPeerModels(prev => ({ ...prev, [i]: [] })))
+    })
+  }, [enablePeers, peerConfigs.map(p => p.ai_provider).join(',')])
 
   // Reset form state when dialog opens
   useEffect(() => {
@@ -287,15 +302,15 @@ export function ReAnalyzeDialog({ open, onOpenChange, result, jobId, failureUuid
                           <SelectItem value="cursor">Cursor</SelectItem>
                         </SelectContent>
                       </Select>
-                      <Input
-                        className="flex-1"
-                        placeholder="Model"
+                      <ModelCombobox
                         value={peer.ai_model}
-                        onChange={(e) => {
+                        onChange={(val) => {
                           const next = [...peerConfigs]
-                          next[i] = { ...next[i], ai_model: e.target.value }
+                          next[i] = { ...next[i], ai_model: val }
                           setPeerConfigs(next)
                         }}
+                        options={peerModels[i] ?? []}
+                        placeholder="Model"
                       />
                       <button
                         type="button"
