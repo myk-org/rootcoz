@@ -206,6 +206,15 @@ export function ChatPage() {
     }
   }, [jobId])
 
+  const handleAbort = useCallback(async () => {
+    if (!jobId) return
+    try {
+      await api.post(`/api/chat/${jobId}/abort`, {})
+    } catch {
+      // Abort is best-effort — SSE will update the message status
+    }
+  }, [jobId])
+
   const handleKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault()
@@ -296,6 +305,15 @@ export function ChatPage() {
                   <div className="flex items-center gap-2 text-text-tertiary">
                     <Loader2 className="h-4 w-4 animate-spin" />
                     <span className="text-sm">Thinking...</span>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      className="h-6 px-2 text-xs text-signal-red border-signal-red/30 hover:bg-signal-red/10 ml-2"
+                      onClick={handleAbort}
+                    >
+                      Stop
+                    </Button>
                   </div>
                 ) : (
                   <div className="whitespace-pre-wrap break-words">{msg.content}</div>

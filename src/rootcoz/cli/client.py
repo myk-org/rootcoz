@@ -965,3 +965,7 @@ class RootCozClient:
     def clear_chat(self, job_id: str) -> dict:
         """Clear chat history for a job. DELETE /api/chat/{job_id}"""
         return self._request("DELETE", f"/api/chat/{job_id}")
+
+    def abort_chat(self, job_id: str) -> dict:
+        """Abort the currently processing chat message. POST /api/chat/{job_id}/abort"""
+        return self._request("POST", f"/api/chat/{job_id}/abort")

@@ -7135,6 +7135,28 @@ async def close_chat(job_id: str, request: Request) -> dict:
     return {"status": "ok"}
 
 
+@app.post("/api/chat/{job_id}/abort")
+async def abort_chat(job_id: str, request: Request) -> dict:
+    """Abort the currently processing chat message for this user."""
+    _check_allow_list(request)
+    username = request.state.username
+    key = f"{job_id}:{username}"
+    signal = _get_chat_abort_signal(key)
+    signal.set()
+
+    # Also mark any pending messages as failed
+    pending = await storage.get_pending_chat_messages(job_id, username=username)
+    for msg in pending:
+        await storage.update_chat_message_content(msg["id"], "Aborted by user.")
+        await storage.update_chat_message_status(msg["id"], "failed")
+
+    if pending:
+        notify_chat_changed(job_id, username=username)
+
+    logger.info("Chat: user %s aborted chat for job %s", username, job_id)
+    return {"aborted": len(pending)}
+
+
 # Per-job chat processing locks — ensures sequential message processing
 _chat_locks: dict[str, asyncio.Lock] = {}
 
@@ -7144,6 +7166,17 @@ def _get_chat_lock(job_id: str) -> asyncio.Lock:
     if job_id not in _chat_locks:
         _chat_locks[job_id] = asyncio.Lock()
     return _chat_locks[job_id]
+
+
+# Per-job:user abort signals — set to cancel in-progress chat processing
+_chat_abort_signals: dict[str, asyncio.Event] = {}
+
+
+def _get_chat_abort_signal(key: str) -> asyncio.Event:
+    """Get or create an abort signal for a job:user chat."""
+    if key not in _chat_abort_signals:
+        _chat_abort_signals[key] = asyncio.Event()
+    return _chat_abort_signals[key]
 
 
 @app.get("/api/chat/{job_id}/stream")
@@ -7370,6 +7403,21 @@ async def _process_chat_message(
                 github_repo=github_repo,
             )
 
+            # Check if aborted before starting AI call
+            abort_key = f"{job_id}:{username}"
+            abort_signal = _get_chat_abort_signal(abort_key)
+            if abort_signal.is_set():
+                abort_signal.clear()
+                await storage.update_chat_message_content(
+                    assistant_msg_id, "Aborted by user."
+                )
+                await storage.update_chat_message_status(assistant_msg_id, "failed")
+                notify_chat_changed(job_id, username=username)
+                logger.info(
+                    "Chat: aborted before AI call for job %s, user %s", job_id, username
+                )
+                return
+
             success, response_text, new_session_id = await chat_with_ai(
                 job_id=job_id,
                 job_name=result_data.get("job_name", "unknown"),
@@ -7384,6 +7432,19 @@ async def _process_chat_message(
                 available_scripts=available_scripts,
                 repos_available=repos_available,
             )
+
+            # Check if aborted during AI call
+            if abort_signal.is_set():
+                abort_signal.clear()
+                await storage.update_chat_message_content(
+                    assistant_msg_id, "Aborted by user."
+                )
+                await storage.update_chat_message_status(assistant_msg_id, "failed")
+                notify_chat_changed(job_id, username=username)
+                logger.info(
+                    "Chat: aborted after AI call for job %s, user %s", job_id, username
+                )
+                return
 
             if not success:
                 logger.error(
@@ -7436,6 +7497,10 @@ async def _process_chat_message(
                     exc_info=True,
                 )
         finally:
+            # Clear abort signal if still set
+            _abort = _chat_abort_signals.get(f"{job_id}:{username}")
+            if _abort:
+                _abort.clear()
             await _cleanup_ai_session(auth_header)
 
 

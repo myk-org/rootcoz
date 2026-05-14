@@ -2767,6 +2767,21 @@ def chat_send(
             typer.echo(assistant.get("content", ""))
 
 
+@chat_app.command("abort")
+def chat_abort(
+    job_id: str = typer.Argument(help="Job ID to abort chat for."),
+    json_output: bool = _JSON_OPTION,
+) -> None:
+    """Abort the currently processing chat message."""
+    data = _run_client_command(
+        json_output,
+        lambda c: c.abort_chat(job_id),
+        emit_output=False,
+    )
+    if not _state.get("json", False):
+        typer.echo(f"Aborted {data.get('aborted', 0)} pending message(s)")
+
+
 @chat_app.command("clear")
 def chat_clear(
     job_id: str = typer.Argument(help="Job ID to clear chat for."),
