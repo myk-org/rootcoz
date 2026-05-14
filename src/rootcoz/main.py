@@ -1312,13 +1312,17 @@ class AuthMiddleware(BaseHTTPMiddleware):
             if user_status == "pending":
                 return JSONResponse(
                     status_code=403,
-                    content={"detail": "Your account is awaiting admin approval."},
+                    content={
+                        "detail": "Your account is awaiting admin approval",
+                        "status": "pending",
+                    },
                 )
             elif user_status == "rejected":
                 return JSONResponse(
                     status_code=403,
                     content={
-                        "detail": "Your account has been rejected. Contact an admin."
+                        "detail": "Your account has been rejected",
+                        "status": "rejected",
                     },
                 )
 
@@ -6079,6 +6083,28 @@ async def login(request: Request) -> JSONResponse:
         logger.info(f"[AUDIT] Failed login attempt for username '{username}'")
         raise HTTPException(status_code=401, detail="Invalid username or API key")
 
+    # Check pending/rejected status before creating a session (non-admin only)
+    if not is_admin and settings.require_approval:
+        user_status = await storage.get_user_status(username)
+        if user_status == "pending":
+            logger.info(f"[AUDIT] Login blocked for pending user '{username}'")
+            return JSONResponse(
+                status_code=403,
+                content={
+                    "detail": "Your account is awaiting admin approval",
+                    "status": "pending",
+                },
+            )
+        elif user_status == "rejected":
+            logger.info(f"[AUDIT] Login blocked for rejected user '{username}'")
+            return JSONResponse(
+                status_code=403,
+                content={
+                    "detail": "Your account has been rejected",
+                    "status": "rejected",
+                },
+            )
+
     session_token = await storage.create_session(username, is_admin=is_admin)
     response = JSONResponse(
         content={
@@ -6243,7 +6269,7 @@ async def register_user(request: Request) -> JSONResponse:
     }
     if user_status == "pending":
         content["message"] = (
-            "Your account is awaiting admin approval. "
+            "Your account has been created and is awaiting admin approval. "
             "Save this API key \u2014 you'll need it to log in once approved."
         )
     else:

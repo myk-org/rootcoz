@@ -22,7 +22,7 @@ import {
 import { ConfirmDialog } from '@/components/shared/ConfirmDialog'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
-import { Copy, Check, RefreshCw, Trash2, UserPlus, Shield } from 'lucide-react'
+import { Copy, Check, RefreshCw, Trash2, UserPlus, Shield, CheckCircle, XCircle } from 'lucide-react'
 import { Select, SelectTrigger, SelectValue, SelectContent, SelectItem } from '@/components/ui/select'
 import { formatTimestamp, formatRelativeTime } from '@/lib/utils'
 import type { AdminUser, CreateUserResponse, RotateKeyResponse, ChangeRoleResponse } from '@/types'
@@ -77,6 +77,10 @@ export function UsersPage() {
   // Delete dialog
   const [deleteTarget, setDeleteTarget] = useState<string | null>(null)
   const [deleting, setDeleting] = useState(false)
+
+  // Approve/reject
+  const [approving, setApproving] = useState<string | null>(null)
+  const [rejecting, setRejecting] = useState<string | null>(null)
 
   // Action error
   const [actionError, setActionError] = useState<string | null>(null)
@@ -201,12 +205,58 @@ export function UsersPage() {
     setActionError(null)
   }
 
+  async function handleApprove(username: string) {
+    setApproving(username)
+    setActionError(null)
+    try {
+      await api.post(`/api/admin/users/${encodeURIComponent(username)}/approve`)
+      fetchUsers()
+    } catch (err) {
+      if (err instanceof ApiError) {
+        const body = err.body as { detail?: string } | null
+        setActionError(body?.detail ?? `Failed to approve user (${err.status})`)
+      } else {
+        setActionError('Failed to approve user')
+      }
+    } finally {
+      setApproving(null)
+    }
+  }
+
+  async function handleReject(username: string) {
+    setRejecting(username)
+    setActionError(null)
+    try {
+      await api.post(`/api/admin/users/${encodeURIComponent(username)}/reject`)
+      fetchUsers()
+    } catch (err) {
+      if (err instanceof ApiError) {
+        const body = err.body as { detail?: string } | null
+        setActionError(body?.detail ?? `Failed to reject user (${err.status})`)
+      } else {
+        setActionError('Failed to reject user')
+      }
+    } finally {
+      setRejecting(null)
+    }
+  }
+
   return (
     <div className="space-y-6">
       {/* Header */}
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="font-display text-xl font-bold text-text-primary">User Management</h1>
+          <h1 className="font-display text-xl font-bold text-text-primary">
+            User Management
+            {(() => {
+              const pendingCount = users.filter((u) => u.status === 'pending').length
+              return pendingCount > 0 ? (
+                <span className="ml-2 inline-flex items-center rounded-full bg-signal-amber/10 px-2 py-0.5 text-xs font-medium text-signal-amber">
+                  {pendingCount} pending
+                </span>
+              ) : null
+            })()}
+          </h1>
           <p className="mt-0.5 text-sm text-text-tertiary">
             {users.length} {users.length === 1 ? 'user' : 'users'}
           </p>
@@ -241,6 +291,7 @@ export function UsersPage() {
           <TableHeader>
             <TableRow className="bg-surface-card hover:bg-surface-card">
               <TableHead>Username</TableHead>
+              <TableHead>Status</TableHead>
               <TableHead>Role</TableHead>
               <TableHead>Created</TableHead>
               <TableHead>Last Seen</TableHead>
@@ -264,6 +315,21 @@ export function UsersPage() {
                   </span>
                 </TableCell>
                 <TableCell>
+                  {user.status === 'pending' ? (
+                    <span className="inline-flex items-center rounded-full bg-signal-amber/10 px-2 py-0.5 text-xs font-medium text-signal-amber">
+                      pending
+                    </span>
+                  ) : user.status === 'rejected' ? (
+                    <span className="inline-flex items-center rounded-full bg-signal-red/10 px-2 py-0.5 text-xs font-medium text-signal-red">
+                      rejected
+                    </span>
+                  ) : (
+                    <span className="inline-flex items-center rounded-full bg-signal-green/10 px-2 py-0.5 text-xs font-medium text-signal-green">
+                      active
+                    </span>
+                  )}
+                </TableCell>
+                <TableCell>
                   {user.role === 'admin' ? (
                     <span className="inline-flex items-center rounded-full bg-signal-amber/10 px-2 py-0.5 text-xs font-medium text-signal-amber">
                       admin
@@ -283,6 +349,58 @@ export function UsersPage() {
                 <TableCell className="text-right">
                   {user.username === 'admin' ? (
                     <span className="text-xs text-text-tertiary italic">built-in</span>
+                  ) : user.status === 'pending' ? (
+                    <div className="flex items-center justify-end gap-1">
+                      <TooltipProvider delayDuration={200}>
+                        <Tooltip>
+                          <TooltipTrigger asChild>
+                            <Button
+                              type="button"
+                              variant="ghost"
+                              size="icon"
+                              aria-label={`Approve ${user.username}`}
+                              className="h-7 w-7"
+                              disabled={approving === user.username}
+                              onClick={() => handleApprove(user.username)}
+                            >
+                              <CheckCircle className="h-3.5 w-3.5 text-signal-green" />
+                            </Button>
+                          </TooltipTrigger>
+                          <TooltipContent>Approve</TooltipContent>
+                        </Tooltip>
+                        <Tooltip>
+                          <TooltipTrigger asChild>
+                            <Button
+                              type="button"
+                              variant="ghost"
+                              size="icon"
+                              aria-label={`Reject ${user.username}`}
+                              className="h-7 w-7"
+                              disabled={rejecting === user.username}
+                              onClick={() => handleReject(user.username)}
+                            >
+                              <XCircle className="h-3.5 w-3.5 text-signal-red" />
+                            </Button>
+                          </TooltipTrigger>
+                          <TooltipContent>Reject</TooltipContent>
+                        </Tooltip>
+                        <Tooltip>
+                          <TooltipTrigger asChild>
+                            <Button
+                              type="button"
+                              variant="ghost"
+                              size="icon"
+                              aria-label={`Delete ${user.username}`}
+                              className="h-7 w-7"
+                              onClick={() => setDeleteTarget(user.username)}
+                            >
+                              <Trash2 className="h-3.5 w-3.5 text-text-tertiary hover:text-signal-red" />
+                            </Button>
+                          </TooltipTrigger>
+                          <TooltipContent>Delete user</TooltipContent>
+                        </Tooltip>
+                      </TooltipProvider>
+                    </div>
                   ) : (
                     <div className="flex items-center justify-end gap-1">
                       {/* Role select */}

@@ -12,6 +12,7 @@ import { TrackerTokensFields } from '@/components/shared/TrackerTokensFields'
 import { NotificationToggle } from '@/components/shared/NotificationToggle'
 
 type Mode = 'login' | 'register' | 'key-reveal'
+type RegistrationStatus = 'active' | 'pending'
 
 function ApiKeyReveal({ apiKey, onAcknowledge }: { apiKey: string; onAcknowledge: () => void }) {
   const [copied, setCopied] = useState(false)
@@ -53,6 +54,7 @@ export function RegisterPage() {
   const [apiKey, setApiKey] = useState('')
   const [showApiKey, setShowApiKey] = useState(false)
   const [newApiKey, setNewApiKey] = useState('')
+  const [registrationStatus, setRegistrationStatus] = useState<RegistrationStatus>('active')
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(false)
   const [githubToken, setGithubTokenValue] = useState('')
@@ -73,8 +75,9 @@ export function RegisterPage() {
     setLoading(true)
     setError('')
     try {
-      const result = await api.post<{ username: string; api_key: string }>('/api/auth/register', { username: trimmed })
+      const result = await api.post<{ username: string; api_key: string; status?: string }>('/api/auth/register', { username: trimmed })
       setNewApiKey(result.api_key)
+      setRegistrationStatus(result.status === 'pending' ? 'pending' : 'active')
 
       // Persist tracker tokens if provided
       const gh = githubToken.trim()
@@ -116,8 +119,17 @@ export function RegisterPage() {
       await login(trimmed, apiKey.trim())
       navigate('/', { replace: true })
     } catch (err) {
-      if (err instanceof ApiError && err.status === 401) {
-        setError('Invalid username or API key.')
+      if (err instanceof ApiError && (err.status === 401 || err.status === 403)) {
+        const detail = typeof err.body === 'object' && err.body !== null && 'detail' in err.body
+          ? String((err.body as { detail: string }).detail)
+          : ''
+        if (err.status === 403 && /pending|awaiting/i.test(detail)) {
+          setError('Your account is awaiting admin approval.')
+        } else if (err.status === 403 && /rejected/i.test(detail)) {
+          setError('Your account has been rejected. Contact an admin.')
+        } else {
+          setError('Invalid username or API key.')
+        }
       } else {
         setError(err instanceof Error ? err.message : 'Login failed. Check your API key.')
       }
@@ -127,6 +139,11 @@ export function RegisterPage() {
   }
 
   async function handleKeyAcknowledged() {
+    if (registrationStatus === 'pending') {
+      // Pending users can't access the app — go to login
+      setMode('login')
+      return
+    }
     try {
       await refreshAuth()
     } catch {
@@ -173,6 +190,13 @@ export function RegisterPage() {
                 <>
                   <h2 className="mb-4 font-display text-base font-semibold text-text-primary">Registration Complete</h2>
                   <ApiKeyReveal apiKey={newApiKey} onAcknowledge={handleKeyAcknowledged} />
+                  {registrationStatus === 'pending' && (
+                    <div className="mt-4 rounded-md border border-signal-amber/30 bg-signal-amber/10 p-3">
+                      <p className="text-xs font-medium text-signal-amber">
+                        Your account is pending admin approval. You can save your API key now, but you won't be able to log in until an admin approves your account.
+                      </p>
+                    </div>
+                  )}
                 </>
               ) : mode === 'register' ? (
                 <form onSubmit={handleRegister} className="space-y-4">
