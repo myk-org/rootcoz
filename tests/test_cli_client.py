@@ -1310,6 +1310,45 @@ class TestRootCozClientReAnalyze:
         assert result["job_id"] == "new-reanalysis-1"
 
 
+class TestRootCozClientFailure:
+    def test_get_failure(self):
+        response_data = {
+            "job_id": "job-1",
+            "failure": {"id": "uuid-1", "test_name": "test_x", "error": "err"},
+            "child_job_name": "",
+            "child_build_number": 0,
+        }
+
+        def handler(request):
+            assert request.method == "GET"
+            assert "/api/failures/uuid-1" in str(request.url)
+            return httpx.Response(200, json=response_data)
+
+        client = _make_client(handler)
+        result = client.get_failure("uuid-1")
+        assert result["job_id"] == "job-1"
+        assert result["failure"]["id"] == "uuid-1"
+
+    def test_re_analyze_failure(self):
+        response_data = {
+            "status": "queued",
+            "job_id": "new-job-1",
+            "message": "Failure re-analysis job queued.",
+        }
+
+        def handler(request):
+            assert request.method == "POST"
+            assert "/api/failures/uuid-1/re-analyze" in str(request.url)
+            body = json.loads(request.content)
+            assert body == {}
+            return httpx.Response(202, json=response_data)
+
+        client = _make_client(handler)
+        result = client.re_analyze_failure("uuid-1")
+        assert result["status"] == "queued"
+        assert result["job_id"] == "new-job-1"
+
+
 class TestRootCozClientPushReportPortal:
     def test_push_reportportal(self):
         response_data = {

@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo, type ReactNode } from 'react'
+import { useState, useEffect, useMemo, useRef, type ReactNode } from 'react'
 import { useLocation } from 'react-router-dom'
 import { useClipboard } from '@/lib/useClipboard'
 import type { GroupedFailure } from '@/types'
@@ -10,6 +10,7 @@ import { useSessionState } from '@/lib/useSessionState'
 import { unescapeCodeContent } from '@/lib/format'
 import { useReportState, useReportDispatch, reviewKey } from './ReportContext'
 import { Card, CardContent } from '@/components/ui/card'
+import { Tooltip, TooltipTrigger, TooltipContent } from '@/components/ui/tooltip'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { ClassificationBadge } from '@/components/shared/ClassificationBadge'
@@ -19,9 +20,11 @@ import { ReviewToggle } from './ReviewToggle'
 import { CommentsSection } from './CommentsSection'
 import { ClassificationSelect } from './ClassificationSelect'
 import { BugCreationDialog } from './BugCreationDialog'
+import { ReAnalyzeDialog } from './ReAnalyzeDialog'
 import { useReviewSuggestion } from './useReviewSuggestion'
 import { ConfirmDialog } from '@/components/shared/ConfirmDialog'
-import { ChevronDown, ChevronRight, Bug, MessageSquare, CheckCircle2, Copy, Check } from 'lucide-react'
+import { UuidCopyButton } from '@/components/shared/UuidCopyButton'
+import { ChevronDown, ChevronRight, Bug, MessageSquare, CheckCircle2, Copy, Check, RotateCw } from 'lucide-react'
 
 function IssueButton({ disabled, tooltip, label, onClick }: {
   disabled: boolean
@@ -34,7 +37,12 @@ function IssueButton({ disabled, tooltip, label, onClick }: {
       <Bug className="h-3.5 w-3.5 mr-1" /> {label}
     </Button>
   )
-  return tooltip ? <span title={tooltip} className="inline-flex">{button}</span> : button
+  return tooltip ? (
+    <Tooltip>
+      <TooltipTrigger asChild><span className="inline-flex">{button}</span></TooltipTrigger>
+      <TooltipContent>{tooltip}</TooltipContent>
+    </Tooltip>
+  ) : button
 }
 
 function CopyableSectionHeader({ title, content, sectionId, copiedSection, onCopy, extra }: {
@@ -51,15 +59,19 @@ function CopyableSectionHeader({ title, content, sectionId, copiedSection, onCop
         <h4 className="text-xs font-display uppercase tracking-widest text-text-tertiary">{title}</h4>
         {extra}
       </div>
-      <button
-        type="button"
-        className="text-text-tertiary hover:text-text-primary transition-colors"
-        onClick={() => onCopy(content, sectionId)}
-        title={copiedSection === sectionId ? `Copied ${title}` : `Copy ${title} to clipboard`}
-        aria-label={copiedSection === sectionId ? `Copied ${title}` : `Copy ${title} to clipboard`}
-      >
-        {copiedSection === sectionId ? <Check className="h-3 w-3 text-signal-green" /> : <Copy className="h-3 w-3" />}
-      </button>
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <button
+            type="button"
+            className="text-text-tertiary hover:text-text-primary transition-colors"
+            onClick={() => onCopy(content, sectionId)}
+            aria-label={copiedSection === sectionId ? `Copied ${title}` : `Copy ${title} to clipboard`}
+          >
+            {copiedSection === sectionId ? <Check className="h-3 w-3 text-signal-green" /> : <Copy className="h-3 w-3" />}
+          </button>
+        </TooltipTrigger>
+        <TooltipContent>{copiedSection === sectionId ? `Copied ${title}` : `Copy ${title} to clipboard`}</TooltipContent>
+      </Tooltip>
     </div>
   )
 }
@@ -90,21 +102,38 @@ interface FailureCardProps {
   childJobName?: string
   childBuildNumber?: number
   index: number
+  /** Hash fragment (without #) from the URL, used for auto-expand & scroll-to on load. */
+  activeHash?: string
 }
 
-export function FailureCard({ group, jobId, childJobName, childBuildNumber, index }: FailureCardProps) {
+export function FailureCard({ group, jobId, childJobName, childBuildNumber, index, activeHash }: FailureCardProps) {
   const scopedChildJobName = childJobName ?? ''
   const scopedChildBuildNumber = childBuildNumber ?? 0
   const { githubIssuesEnabled, jiraIssuesEnabled, serverJiraProjectKey, comments, reviews, aiConfigs, result, classifications } = useReportState()
   const dispatch = useReportDispatch()
   const expandKey = `rootcoz-expand-${jobId}-${scopedChildJobName}-${scopedChildBuildNumber}-${group.id}`
   const [expanded, setExpanded] = useSessionState<boolean>(expandKey, false)
+  const cardRef = useRef<HTMLDivElement>(null)
+  const expandedByHashRef = useRef(false)
+
+  // Auto-expand and scroll when URL hash targets this failure group
+  useEffect(() => {
+    if (activeHash === group.id && !expandedByHashRef.current) {
+      setExpanded(true)
+      expandedByHashRef.current = true
+      cardRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+    }
+    if (activeHash !== group.id) {
+      expandedByHashRef.current = false
+    }
+  }, [activeHash, group.id])
   const [bugTarget, setBugTarget] = useState<'github' | 'jira' | null>(null)
   const [reviewingAll, setReviewingAll] = useState(false)
   const [reviewAllError, setReviewAllError] = useState<string | null>(null)
   const [selectedProvider, setSelectedProvider] = useState(result?.ai_provider ?? '')
   const [selectedModel, setSelectedModel] = useState(result?.ai_model ?? '')
   const [includeLinks, setIncludeLinks] = useState(false)
+  const [reAnalyzeOpen, setReAnalyzeOpen] = useState(false)
   const { copiedKey: copiedSection, copy: copyToClipboard } = useClipboard()
 
   const rep = group.tests[0]
@@ -222,7 +251,9 @@ export function FailureCard({ group, jobId, childJobName, childBuildNumber, inde
   return (
     <>
       <Card
-        className={`border-l-4 ${borderColor} animate-slide-up`}
+        ref={cardRef}
+        id={group.id}
+        className={`border-l-4 ${borderColor} animate-slide-up scroll-mt-24${activeHash === group.id ? ' ring-2 ring-accent-blue/50' : ''}`}
         style={{ animationDelay: `${index * 50}ms`, animationFillMode: 'backwards' }}
       >
         {/* Header */}
@@ -234,21 +265,66 @@ export function FailureCard({ group, jobId, childJobName, childBuildNumber, inde
           >
             {expanded ? <ChevronDown className="h-4 w-4 shrink-0 text-text-tertiary" /> : <ChevronRight className="h-4 w-4 shrink-0 text-text-tertiary" />}
             <div className="min-w-0 flex-1">
-              <p className="truncate font-display text-sm font-medium text-text-primary" title={rep.test_name}>{rep.test_name}</p>
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <p className="truncate font-display text-sm font-medium text-text-primary">{rep.test_name}</p>
+                </TooltipTrigger>
+                <TooltipContent className="max-w-md break-all">{rep.test_name}</TooltipContent>
+              </Tooltip>
               {group.count > 1 && <span className="text-xs text-text-tertiary">+{group.count - 1} more with same error</span>}
             </div>
           </button>
-          <button
-            type="button"
-            className="text-text-tertiary hover:text-text-primary transition-colors shrink-0"
-            onClick={(e) => { e.stopPropagation(); copyToClipboard(rep.test_name, 'test-name') }}
-            title={copiedSection === 'test-name' ? 'Copied test name' : 'Copy test name to clipboard'}
-            aria-label={copiedSection === 'test-name' ? 'Copied test name' : 'Copy test name to clipboard'}
-          >
-            {copiedSection === 'test-name' ? <Check className="h-3 w-3 text-signal-green" /> : <Copy className="h-3 w-3" />}
-          </button>
+          <div className="flex items-center gap-1.5 shrink-0">
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <button
+                  type="button"
+                  className="text-text-tertiary hover:text-text-primary transition-colors"
+                  onClick={(e) => { e.stopPropagation(); copyToClipboard(rep.test_name, 'test-name') }}
+                  aria-label={copiedSection === 'test-name' ? 'Copied test name' : 'Copy test name to clipboard'}
+                >
+                  {copiedSection === 'test-name' ? <Check className="h-3 w-3 text-signal-green" /> : <Copy className="h-3 w-3" />}
+                </button>
+              </TooltipTrigger>
+              <TooltipContent>{copiedSection === 'test-name' ? 'Copied test name' : 'Copy test name to clipboard'}</TooltipContent>
+            </Tooltip>
+            <UuidCopyButton uuid={rep.id} sectionKey="uuid" copiedSection={copiedSection} onCopy={copyToClipboard} />
+          </div>
           <div className="flex items-center gap-2 shrink-0">
+            {rep.reanalysis_status === 'running' && (
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <span className="flex items-center gap-1 rounded-md bg-accent-blue/15 px-2 py-1 text-[10px] font-mono text-accent-blue animate-pulse">
+                    <RotateCw className="h-3 w-3 animate-spin" />
+                    Re-analyzing
+                  </span>
+                </TooltipTrigger>
+                <TooltipContent>
+                  Re-analyzing using {rep.reanalyzed_with?.ai_provider ?? 'unknown'}{rep.reanalyzed_with?.ai_model ? ` / ${rep.reanalyzed_with.ai_model}` : ''}...
+                </TooltipContent>
+              </Tooltip>
+            )}
+            {rep.reanalysis_status === 'failed' && (
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <span className="flex items-center gap-1 rounded-md bg-signal-red/15 px-2 py-1 text-[10px] font-mono text-signal-red">
+                    Re-analysis failed
+                  </span>
+                </TooltipTrigger>
+                <TooltipContent className="max-w-md break-all">{rep.reanalysis_error || 'Unknown error'}</TooltipContent>
+              </Tooltip>
+            )}
             <ClassificationBadge classification={classification} />
+            {rep.reanalyzed_with && rep.reanalysis_status !== 'running' && (
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <span className="rounded-md bg-surface-elevated px-2 py-1 text-[10px] font-mono text-text-tertiary cursor-default">
+                    {rep.reanalyzed_with.ai_provider}{rep.reanalyzed_with.ai_model ? ` / ${rep.reanalyzed_with.ai_model}` : ''}
+                  </span>
+                </TooltipTrigger>
+                <TooltipContent>Re-analyzed with different AI</TooltipContent>
+              </Tooltip>
+            )}
             {(() => {
               const secondaryBadges = new Set<string>()
               for (const t of group.tests) {
@@ -260,8 +336,26 @@ export function FailureCard({ group, jobId, childJobName, childBuildNumber, inde
                 <ClassificationBadge key={cls} classification={cls} />
               ))
             })()}
-            {group.count === 1 && (
+            {group.count === 1 ? (
               <ReviewToggle jobId={jobId} testName={rep.test_name} childJobName={scopedChildJobName} childBuildNumber={scopedChildBuildNumber} />
+            ) : (
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <button
+                    onClick={(e) => { e.stopPropagation(); handleReviewAll() }}
+                    disabled={reviewingAll}
+                    className={`flex items-center gap-1 rounded-md px-2 py-1 text-[10px] font-mono transition-colors ${
+                      allReviewed
+                        ? 'bg-signal-green/15 text-signal-green'
+                        : 'bg-surface-elevated text-text-tertiary hover:text-text-secondary'
+                    }`}
+                  >
+                    <CheckCircle2 className="h-3 w-3" />
+                    {allReviewed ? 'Reviewed' : `Review ${reviewedCount}/${group.count}`}
+                  </button>
+                </TooltipTrigger>
+                <TooltipContent>{allReviewed ? 'All reviewed' : `Review all ${group.count} tests`}</TooltipContent>
+              </Tooltip>
             )}
             {commentCount > 0 && (
               <span className="flex items-center gap-1 rounded-md bg-surface-elevated px-2 py-1 text-[10px] font-mono text-text-tertiary">
@@ -301,7 +395,15 @@ export function FailureCard({ group, jobId, childJobName, childBuildNumber, inde
                 <div className="space-y-1">
                   {group.tests.map((t) => (
                     <div key={t.test_name} className="flex items-center justify-between gap-2">
-                      <p className="font-mono text-xs text-text-secondary truncate" title={t.test_name}>{t.test_name}</p>
+                      <div className="flex items-center gap-1.5 min-w-0">
+                        <Tooltip>
+                          <TooltipTrigger asChild>
+                            <p className="font-mono text-xs text-text-secondary truncate">{t.test_name}</p>
+                          </TooltipTrigger>
+                          <TooltipContent className="max-w-md break-all">{t.test_name}</TooltipContent>
+                        </Tooltip>
+                        <UuidCopyButton uuid={t.id} sectionKey={`uuid-${t.id}`} copiedSection={copiedSection} onCopy={copyToClipboard} />
+                      </div>
                       <ReviewToggle jobId={jobId} testName={t.test_name} childJobName={scopedChildJobName} childBuildNumber={scopedChildBuildNumber} disabled={reviewingAll} />
                     </div>
                   ))}
@@ -330,6 +432,19 @@ export function FailureCard({ group, jobId, childJobName, childBuildNumber, inde
                 />
                 <div className="rounded-md bg-glow-blue p-3 text-sm text-text-secondary whitespace-pre-wrap"><LinkedText text={analysis.details} repoUrls={repoUrls} /></div>
               </div>
+            )}
+
+            {/* Previous Analysis (from re-analysis) */}
+            {rep.previous_analysis && (
+              <details className="group">
+                <summary className="flex items-center gap-2 cursor-pointer text-xs font-display uppercase tracking-widest text-text-tertiary hover:text-text-secondary transition-colors">
+                  <ChevronRight className="h-3 w-3 group-open:rotate-90 transition-transform" />
+                  Previous Analysis
+                </summary>
+                <div className="mt-2 rounded-md bg-surface-elevated/50 border border-border-muted p-3 text-sm text-text-tertiary whitespace-pre-wrap opacity-75">
+                  <LinkedText text={rep.previous_analysis.details || ''} repoUrls={repoUrls} />
+                </div>
+              </details>
             )}
 
             {/* Artifacts evidence */}
@@ -478,6 +593,10 @@ export function FailureCard({ group, jobId, childJobName, childBuildNumber, inde
                   Include links
                 </label>
               )}
+              <Button variant="outline" size="sm" onClick={() => setReAnalyzeOpen(true)} disabled={rep.reanalysis_status === 'running'}>
+                <RotateCw className={`h-3.5 w-3.5 mr-1${rep.reanalysis_status === 'running' ? ' animate-spin' : ''}`} />
+                Re-analyze
+              </Button>
               <IssueButton
                 disabled={!githubIssuesEnabled}
                 tooltip={!githubIssuesEnabled ? 'GitHub issues are disabled on this server' : undefined}
@@ -533,6 +652,15 @@ export function FailureCard({ group, jobId, childJobName, childBuildNumber, inde
       />
       {bugReviewError && (
         <span className="text-sm text-destructive" role="alert">{bugReviewError}</span>
+      )}
+      {result && (
+        <ReAnalyzeDialog
+          open={reAnalyzeOpen}
+          onOpenChange={setReAnalyzeOpen}
+          result={result}
+          jobId={jobId}
+          failureUuid={rep.id}
+        />
       )}
     </>
   )

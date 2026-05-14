@@ -2,6 +2,7 @@
 
 from datetime import datetime
 from typing import Annotated, Literal
+from uuid import uuid4
 
 from pydantic import (
     BaseModel,
@@ -15,6 +16,11 @@ from pydantic import (
 from rootcoz.repository import RESERVED_REPO_NAMES
 
 _SYSTEM_TAGS: set[str] = {"re-analyze"}
+
+
+def _uuid_str() -> str:
+    """Return a new UUID4 as a string.  Shared default-factory."""
+    return str(uuid4())
 
 
 def _normalize_tags_list(tags: object) -> list[str]:
@@ -444,6 +450,10 @@ class PeerDebate(BaseModel):
 class FailureAnalysis(BaseModel):
     """Analysis result for a single test failure."""
 
+    id: str = Field(
+        default_factory=_uuid_str,
+        description="Stable UUID for referencing this failure",
+    )
     test_name: str = Field(description="Name of the failed test")
     error: str = Field(description="Error message or exception")
     analysis: AnalysisDetail = Field(description="Structured AI analysis output")
@@ -473,6 +483,10 @@ class FailureAnalysis(BaseModel):
 class ChildJobAnalysis(BaseModel):
     """Analysis result for a failed child job in a pipeline."""
 
+    id: str = Field(
+        default_factory=_uuid_str,
+        description="Stable UUID for referencing this child job analysis",
+    )
     job_name: str = Field(description="Name of the child job")
     build_number: int = Field(description="Build number of the child job")
     jenkins_url: str | None = Field(
@@ -842,6 +856,26 @@ class ClassifyTestRequest(BaseModel):
     @classmethod
     def normalize_classification(cls, v: str) -> str:
         return v.upper() if isinstance(v, str) else v
+
+
+class ReAnalyzeFailureRequest(BaseModel):
+    """Optional overrides for per-failure re-analysis.
+
+    Fields mirror BaseAnalysisRequest but are all optional since
+    unset values fall back to the parent job's stored settings.
+    """
+
+    ai_provider: str | None = None
+    ai_model: str | None = None
+    ai_cli_timeout: int | None = None
+    raw_prompt: str | None = None
+    peer_ai_configs: list[dict] | None = None
+    peer_analysis_max_rounds: int | None = None
+    tests_repo_url: str | None = None
+    enable_jira: bool | None = None
+    jira_url: str | None = None
+    jira_project_key: str | None = None
+    additional_repos: list[dict] | None = None
 
 
 class ReportPortalPushResult(BaseModel):

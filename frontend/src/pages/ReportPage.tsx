@@ -48,15 +48,19 @@ function CliCommand({ jobId }: { jobId: string }) {
     <p className="flex items-center gap-1.5">
       CLI:{' '}
       <code className="font-mono bg-background-offset px-1.5 py-0.5 rounded">{command}</code>
-      <button
-        type="button"
-        onClick={() => copy(command)}
-        className="inline-flex items-center hover:text-text-secondary transition-colors"
-        title="Copy CLI command"
-        aria-label={isCopied() ? 'CLI command copied' : 'Copy CLI command'}
-      >
-        {isCopied() ? <Check className="h-3.5 w-3.5" /> : <Copy className="h-3.5 w-3.5" />}
-      </button>
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <button
+            type="button"
+            onClick={() => copy(command)}
+            className="inline-flex items-center hover:text-text-secondary transition-colors"
+            aria-label={isCopied() ? 'CLI command copied' : 'Copy CLI command'}
+          >
+            {isCopied() ? <Check className="h-3.5 w-3.5" /> : <Copy className="h-3.5 w-3.5" />}
+          </button>
+        </TooltipTrigger>
+        <TooltipContent>Copy CLI command</TooltipContent>
+      </Tooltip>
     </p>
   )
 }
@@ -233,6 +237,30 @@ function ReportContent() {
       eventSource.close()
     }
   }, [jobId, fetchComments])
+
+  // SSE stream for real-time result updates (e.g., per-failure re-analysis completion)
+  useEffect(() => {
+    if (!jobId) return
+
+    const eventSource = new EventSource(`/api/results/${jobId}/stream`)
+    eventSource.addEventListener('status-changed', async () => {
+      try {
+        const resultRes = await api.get<ResultResponse>(`/results/${jobId}`)
+        if (resultRes.result) {
+          dispatch({ type: 'SET_RESULT', payload: { result: resultRes.result, createdAt: resultRes.created_at, completedAt: resultRes.completed_at ?? '', analysisStartedAt: resultRes.analysis_started_at ?? '', reanalyzedFromJobId: resultRes.reanalyzed_from_job_id, originJobName: resultRes.origin_job_name } })
+        }
+      } catch {
+        // best-effort refresh
+      }
+    })
+    eventSource.onerror = () => {
+      console.debug('Result SSE error')
+    }
+
+    return () => {
+      eventSource.close()
+    }
+  }, [jobId])
 
   // Preserve scroll position across F5 refreshes
   const scrollKey = `rootcoz-scroll-${jobId}`
@@ -547,7 +575,7 @@ function ReportContent() {
           </div>
           <div className="space-y-3" key={failureRemountKey}>
             {groups.map((g, i) => (
-              <FailureCard key={g.id} group={g} jobId={result.job_id} index={i} />
+              <FailureCard key={g.id} group={g} jobId={result.job_id} index={i} activeHash={activeHash} />
             ))}
           </div>
         </section>

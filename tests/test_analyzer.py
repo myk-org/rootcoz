@@ -611,14 +611,14 @@ class TestAnalyzeFailureGroupPeerDelegation:
         assert mock_peer.call_args.kwargs["max_concurrent_ai_calls"] == 7
 
 
-class TestConsoleOnlyPeerWarning:
-    """Tests that console-only fallback branches warn when peer analysis is configured."""
+class TestConsoleOnlyPeerAnalysis:
+    """Tests that console-only fallback branches delegate to analyze_failure_group with peer configs."""
 
     @pytest.mark.asyncio
-    async def test_child_job_console_only_warns_when_peers_configured(
+    async def test_child_job_console_only_passes_peers_to_analyze_failure_group(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """analyze_child_job console-only path logs warning when peer_ai_configs set."""
+        """analyze_child_job console-only path passes peer_ai_configs to analyze_failure_group."""
 
         mock_client = MagicMock()
         mock_client.get_build_info_safe.return_value = {
@@ -629,36 +629,40 @@ class TestConsoleOnlyPeerWarning:
         mock_client.get_test_report.return_value = None
 
         _patch_jenkins_client(monkeypatch, mock_client)
-        monkeypatch.setattr(
-            "rootcoz.engine.core.call_ai_cli_with_retry",
-            AsyncMock(
-                return_value=AIResult(
-                    success=True,
-                    text='{"classification": "CODE ISSUE", "details": "d"}',
+
+        mock_afg = AsyncMock(
+            return_value=[
+                FailureAnalysis(
+                    test_name="child-job#1",
+                    error="Console-only analysis",
+                    analysis=AnalysisDetail(classification="CODE ISSUE", details="d"),
                 )
-            ),
+            ]
+        )
+        monkeypatch.setattr(
+            "rootcoz.sources.jenkins_source.analyze_failure_group",
+            mock_afg,
         )
 
         child_settings = _make_jenkins_settings()
         peers = [AiConfigEntry(ai_provider="gemini", ai_model="pro")]
 
-        with patch("rootcoz.sources.jenkins_source.logger") as mock_logger:
-            await analyze_child_job(
-                job_name="child-job",
-                build_number=1,
-                settings=child_settings,
-                peer_ai_configs=peers,
-            )
+        await analyze_child_job(
+            job_name="child-job",
+            build_number=1,
+            settings=child_settings,
+            peer_ai_configs=peers,
+        )
 
-            mock_logger.warning.assert_any_call(
-                "Peer analysis not supported for console-only failures (no test report)"
-            )
+        mock_afg.assert_called_once()
+        call_kwargs = mock_afg.call_args.kwargs
+        assert call_kwargs["peer_ai_configs"] == peers
 
     @pytest.mark.asyncio
-    async def test_child_job_console_only_no_warning_without_peers(
+    async def test_child_job_console_only_no_peers_when_not_configured(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """analyze_child_job console-only path does NOT warn when no peers."""
+        """analyze_child_job console-only path passes None peer_ai_configs when no peers."""
 
         mock_client = MagicMock()
         mock_client.get_build_info_safe.return_value = {
@@ -669,35 +673,39 @@ class TestConsoleOnlyPeerWarning:
         mock_client.get_test_report.return_value = None
 
         _patch_jenkins_client(monkeypatch, mock_client)
-        monkeypatch.setattr(
-            "rootcoz.engine.core.call_ai_cli_with_retry",
-            AsyncMock(
-                return_value=AIResult(
-                    success=True,
-                    text='{"classification": "CODE ISSUE", "details": "d"}',
+
+        mock_afg = AsyncMock(
+            return_value=[
+                FailureAnalysis(
+                    test_name="child-job#1",
+                    error="Console-only analysis",
+                    analysis=AnalysisDetail(classification="CODE ISSUE", details="d"),
                 )
-            ),
+            ]
+        )
+        monkeypatch.setattr(
+            "rootcoz.sources.jenkins_source.analyze_failure_group",
+            mock_afg,
         )
 
         child_settings = _make_jenkins_settings()
 
-        with patch("rootcoz.sources.jenkins_source.logger") as mock_logger:
-            await analyze_child_job(
-                job_name="child-job",
-                build_number=1,
-                settings=child_settings,
-                peer_ai_configs=None,
-            )
+        await analyze_child_job(
+            job_name="child-job",
+            build_number=1,
+            settings=child_settings,
+            peer_ai_configs=None,
+        )
 
-            # Ensure no warning about peer analysis was logged
-            for call in mock_logger.warning.call_args_list:
-                assert "Peer analysis not supported" not in str(call)
+        mock_afg.assert_called_once()
+        call_kwargs = mock_afg.call_args.kwargs
+        assert call_kwargs["peer_ai_configs"] is None
 
     @pytest.mark.asyncio
-    async def test_analyze_job_console_only_warns_when_peers_configured(
+    async def test_analyze_job_console_only_passes_peers_to_analyze_failure_group(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """analyze_job console-only path logs warning when peer_ai_configs set."""
+        """analyze_job console-only path passes peer_ai_configs to analyze_failure_group."""
 
         body = AnalyzeRequest(
             job_name="my-job",
@@ -720,34 +728,38 @@ class TestConsoleOnlyPeerWarning:
             AsyncMock(return_value=AIResult(success=True, text="")),
         )
         monkeypatch.setattr(
-            "rootcoz.engine.core.call_ai_cli_with_retry",
-            AsyncMock(
-                return_value=AIResult(
-                    success=True,
-                    text='{"classification": "CODE ISSUE", "details": "d"}',
-                )
-            ),
-        )
-        monkeypatch.setattr(
             "rootcoz.engine.core.update_progress_phase",
             AsyncMock(),
         )
 
+        mock_afg = AsyncMock(
+            return_value=[
+                FailureAnalysis(
+                    test_name="my-job#123",
+                    error="Console-only analysis",
+                    analysis=AnalysisDetail(classification="CODE ISSUE", details="d"),
+                )
+            ]
+        )
+        monkeypatch.setattr(
+            "rootcoz.sources.jenkins_source.analyze_failure_group",
+            mock_afg,
+        )
+
         peers = [AiConfigEntry(ai_provider="gemini", ai_model="pro")]
 
-        with patch("rootcoz.sources.jenkins_source.logger") as mock_logger:
-            await analyze_job(
-                body,
-                merged,
-                ai_provider="claude",
-                ai_model="test-model",
-                job_id="test-job-id",
-                peer_ai_configs=peers,
-            )
+        await analyze_job(
+            body,
+            merged,
+            ai_provider="claude",
+            ai_model="test-model",
+            job_id="test-job-id",
+            peer_ai_configs=peers,
+        )
 
-            mock_logger.warning.assert_any_call(
-                "Peer analysis not supported for console-only failures (no test report)"
-            )
+        mock_afg.assert_called_once()
+        call_kwargs = mock_afg.call_args.kwargs
+        assert call_kwargs["peer_ai_configs"] == peers
 
 
 class TestAnalyzeJobProgressPhases:

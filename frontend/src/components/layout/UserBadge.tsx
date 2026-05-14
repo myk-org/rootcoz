@@ -1,5 +1,6 @@
 import { useNavigate } from 'react-router-dom'
 import { useAuth } from '@/lib/auth'
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
 import { LogOut, Settings, Shield } from 'lucide-react'
 
 export function UserBadge() {
@@ -9,7 +10,7 @@ export function UserBadge() {
 
   async function handleLogout() {
     await logout()
-    navigate('/register')
+    navigate('/login')
   }
 
   return (
@@ -25,14 +26,26 @@ export function UserBadge() {
           Admin
         </span>
       )}
-      <button type="button" aria-label="Settings" onClick={() => navigate('/settings')}
-        className="ml-1 rounded-sm p-0.5 text-text-tertiary transition-colors hover:text-signal-blue" title="Settings">
-        <Settings className="h-3 w-3" />
-      </button>
-      <button type="button" aria-label="Logout" onClick={handleLogout}
-        className="rounded-sm p-0.5 text-text-tertiary transition-colors hover:text-signal-red" title="Logout">
-        <LogOut className="h-3 w-3" />
-      </button>
+      <TooltipProvider delayDuration={200}>
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <button type="button" aria-label="Settings" onClick={() => navigate('/settings')}
+              className="ml-1 rounded-sm p-0.5 text-text-tertiary transition-colors hover:text-signal-blue">
+              <Settings className="h-3 w-3" />
+            </button>
+          </TooltipTrigger>
+          <TooltipContent>Settings</TooltipContent>
+        </Tooltip>
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <button type="button" aria-label="Logout" onClick={handleLogout}
+              className="rounded-sm p-0.5 text-text-tertiary transition-colors hover:text-signal-red">
+              <LogOut className="h-3 w-3" />
+            </button>
+          </TooltipTrigger>
+          <TooltipContent>Logout</TooltipContent>
+        </Tooltip>
+      </TooltipProvider>
     </div>
   )
 }

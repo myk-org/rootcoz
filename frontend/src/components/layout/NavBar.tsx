@@ -4,6 +4,7 @@ import { BookOpen, MessageSquarePlus, Plus, type LucideIcon } from 'lucide-react
 import { UserBadge } from './UserBadge'
 import { FeedbackDialog } from '@/components/shared/FeedbackDialog'
 import { NavBadge } from '@/components/shared/NavBadge'
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
 import { useAuth } from '@/lib/auth'
 import { api } from '@/lib/api'
 import { cn } from '@/lib/utils'
@@ -140,30 +141,39 @@ export function NavBar() {
           </nav>
         </div>
         <div className="flex items-center gap-3">
-          {EXTERNAL_NAV_LINKS.map(({ href, label, title, icon: Icon }) => (
-            <a
-              key={href}
-              href={href}
-              target="_blank"
-              rel="noopener noreferrer"
-              title={title}
-              className="flex items-center gap-1.5 rounded-md px-2.5 py-1 text-xs font-medium text-text-tertiary transition-colors duration-150 hover:bg-surface-hover hover:text-text-secondary"
-            >
-              <Icon className="h-4 w-4 shrink-0" />
-              {label}
-            </a>
-          ))}
-          {feedbackEnabled && (
-            <button
-              type="button"
-              onClick={() => setFeedbackOpen(true)}
-              title="Send feedback"
-              className="flex items-center gap-1.5 rounded-md px-2.5 py-1 text-xs font-medium text-text-tertiary transition-colors duration-150 hover:bg-surface-hover hover:text-text-secondary"
-            >
-              <MessageSquarePlus className="h-4 w-4 shrink-0" />
-              Feedback
-            </button>
-          )}
+          <TooltipProvider delayDuration={200}>
+            {EXTERNAL_NAV_LINKS.map(({ href, label, title, icon: Icon }) => (
+              <Tooltip key={href}>
+                <TooltipTrigger asChild>
+                  <a
+                    href={href}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="flex items-center gap-1.5 rounded-md px-2.5 py-1 text-xs font-medium text-text-tertiary transition-colors duration-150 hover:bg-surface-hover hover:text-text-secondary"
+                  >
+                    <Icon className="h-4 w-4 shrink-0" />
+                    {label}
+                  </a>
+                </TooltipTrigger>
+                <TooltipContent>{title}</TooltipContent>
+              </Tooltip>
+            ))}
+            {feedbackEnabled && (
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <button
+                    type="button"
+                    onClick={() => setFeedbackOpen(true)}
+                    className="flex items-center gap-1.5 rounded-md px-2.5 py-1 text-xs font-medium text-text-tertiary transition-colors duration-150 hover:bg-surface-hover hover:text-text-secondary"
+                  >
+                    <MessageSquarePlus className="h-4 w-4 shrink-0" />
+                    Feedback
+                  </button>
+                </TooltipTrigger>
+                <TooltipContent>Send feedback</TooltipContent>
+              </Tooltip>
+            )}
+          </TooltipProvider>
           <UserBadge />
           {feedbackEnabled && (
             <FeedbackDialog open={feedbackOpen} onOpenChange={setFeedbackOpen} />

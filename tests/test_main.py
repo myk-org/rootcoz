@@ -4542,6 +4542,163 @@ class TestReAnalyzeEndpoint:
         assert "origin_job_name" not in data
 
 
+class TestGetFailureByUUID:
+    """Tests for GET /api/failures/{failure_uuid}."""
+
+    @pytest.mark.asyncio
+    async def test_get_failure_by_uuid_found(self, test_client) -> None:
+        """Returns the failure and parent job_id when found."""
+        from rootcoz import storage
+
+        fa = FailureAnalysis(
+            test_name="tests.TestFoo.test_bar",
+            error="AssertionError",
+            analysis=AnalysisDetail(classification="CODE ISSUE"),
+        )
+        result_data = {
+            "summary": "1 failure",
+            "failures": [fa.model_dump(mode="json")],
+        }
+        await storage.save_result("job-uuid-1", "", "completed", result_data)
+
+        response = test_client.get(f"/api/failures/{fa.id}")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["job_id"] == "job-uuid-1"
+        assert data["failure"]["test_name"] == "tests.TestFoo.test_bar"
+        assert data["failure"]["id"] == fa.id
+
+    def test_get_failure_by_uuid_not_found(self, test_client) -> None:
+        """Returns 404 for unknown UUID."""
+        response = test_client.get("/api/failures/nonexistent-uuid")
+        assert response.status_code == 404
+
+    @pytest.mark.asyncio
+    async def test_get_failure_by_uuid_in_child_job(self, test_client) -> None:
+        """Finds failure inside a child job analysis."""
+        from rootcoz import storage
+        from rootcoz.models import ChildJobAnalysis
+
+        fa = FailureAnalysis(
+            test_name="tests.TestChild.test_nested",
+            error="RuntimeError",
+            analysis=AnalysisDetail(classification="PRODUCT BUG"),
+        )
+        cja = ChildJobAnalysis(
+            job_name="child-runner",
+            build_number=5,
+            failures=[fa],
+        )
+        result_data = {
+            "summary": "nested failure",
+            "failures": [],
+            "child_job_analyses": [cja.model_dump(mode="json")],
+        }
+        await storage.save_result("job-uuid-child", "", "completed", result_data)
+
+        response = test_client.get(f"/api/failures/{fa.id}")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["job_id"] == "job-uuid-child"
+        assert data["child_job_name"] == "child-runner"
+        assert data["child_build_number"] == 5
+
+
+class TestReAnalyzeFailure:
+    """Tests for POST /api/failures/{failure_uuid}/re-analyze."""
+
+    def test_re_analyze_failure_not_found(self, test_client) -> None:
+        """Returns 404 for unknown failure UUID."""
+        response = test_client.post("/api/failures/nonexistent-uuid/re-analyze")
+        assert response.status_code == 404
+
+    @pytest.mark.asyncio
+    async def test_re_analyze_failure_success(self, test_client) -> None:
+        """Patches the failure in-place in the parent job."""
+        from rootcoz import storage
+
+        fa = FailureAnalysis(
+            test_name="tests.TestReAnalyze.test_one",
+            error="ValueError",
+            analysis=AnalysisDetail(classification="CODE ISSUE"),
+        )
+        fa_dict = fa.model_dump(mode="json")
+        # Add extra fields that should survive the in-place patch
+        fa_dict["stack_trace"] = "Traceback (most recent call last):\n  ValueError"
+        fa_dict["duration"] = 12.5
+        fa_dict["status"] = "FAILED"
+        result_data = {
+            "summary": "1 failure",
+            "failures": [fa_dict],
+            "request_params": encrypt_sensitive_fields(
+                {
+                    "ai_provider": "claude",
+                    "ai_model": "opus",
+                    "submitted_by": "admin",
+                }
+            ),
+        }
+        result_data["request_params"]["submitted_by"] = "admin"
+        await storage.save_result("job-reanalyze-f", "", "completed", result_data)
+
+        # Mock analyze_failure_group to return a new analysis
+        new_analysis = FailureAnalysis(
+            test_name="tests.TestReAnalyze.test_one",
+            error="ValueError",
+            analysis=AnalysisDetail(classification="PRODUCT ISSUE"),
+        )
+        with (
+            patch(
+                "rootcoz.main.analyze_failure_group",
+                new_callable=AsyncMock,
+                return_value=[new_analysis],
+            ),
+            patch(
+                "rootcoz.main._create_ai_auth_header",
+                new_callable=AsyncMock,
+                return_value="",
+            ),
+            patch(
+                "rootcoz.main.RepositoryManager",
+            ),
+        ):
+            response = test_client.post(f"/api/failures/{fa.id}/re-analyze")
+            # Wait for background task to complete
+            import asyncio
+
+            for _ in range(50):
+                await asyncio.sleep(0.1)
+                _stored = await storage.get_result("job-reanalyze-f")
+                if _stored:
+                    _failures = _stored.get("result", {}).get("failures", [])
+                    if _failures and _failures[0].get("reanalysis_status") is None:
+                        break
+        assert response.status_code == 202
+        data = response.json()
+        assert data["status"] == "accepted"
+        assert data["job_id"] == "job-reanalyze-f"
+        assert data["failure_uuid"] == fa.id
+
+        # Verify the failure was patched in-place
+        stored = await storage.get_result("job-reanalyze-f")
+        result = stored["result"]
+        failure = result["failures"][0]
+        assert failure["analysis"]["classification"] == "PRODUCT ISSUE"
+        assert "previous_analysis" in failure
+        assert failure["previous_analysis"]["classification"] == "CODE ISSUE"
+        assert "reanalysis_status" not in failure
+        assert failure["reanalyzed_with"] == {
+            "ai_provider": "claude",
+            "ai_model": "opus",
+        }
+        # Verify metadata fields survived the in-place patch
+        assert (
+            failure["stack_trace"] == "Traceback (most recent call last):\n  ValueError"
+        )
+        assert failure["duration"] == 12.5
+        assert failure["status"] == "FAILED"
+
+
 class TestBuildEffectiveJiraSettings:
     """Tests for _build_effective_jira_settings helper."""
 

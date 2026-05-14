@@ -2974,6 +2974,76 @@ class TestReAnalyzeCommand:
         assert "404" in result.output or "not found" in result.output.lower()
 
 
+class TestFailureCommands:
+    def test_failure_show(self, mock_client):
+        mock_client.get_failure.return_value = {
+            "job_id": "job-1",
+            "failure": {
+                "id": "uuid-1",
+                "test_name": "tests.TestFoo.test_bar",
+                "error": "AssertionError",
+                "analysis": {
+                    "classification": "CODE ISSUE",
+                    "details": "Missing import",
+                },
+            },
+            "child_job_name": "",
+            "child_build_number": 0,
+        }
+        result = runner.invoke(app, ["failure", "show", "uuid-1"])
+        assert result.exit_code == 0
+        assert "job-1" in result.output
+        assert "tests.TestFoo.test_bar" in result.output
+        mock_client.get_failure.assert_called_once_with("uuid-1")
+
+    def test_failure_show_json(self, mock_client):
+        mock_client.get_failure.return_value = {
+            "job_id": "job-1",
+            "failure": {"id": "uuid-1", "test_name": "test_x"},
+        }
+        result = runner.invoke(app, ["--json", "failure", "show", "uuid-1"])
+        assert result.exit_code == 0
+        parsed = json.loads(result.output)
+        assert parsed["job_id"] == "job-1"
+
+    def test_failure_show_not_found(self, mock_client):
+        mock_client.get_failure.side_effect = RootCozError(
+            status_code=404, detail="Failure not found"
+        )
+        result = runner.invoke(app, ["failure", "show", "nonexistent"])
+        assert result.exit_code != 0
+
+    def test_failure_re_analyze(self, mock_client):
+        mock_client.re_analyze_failure.return_value = {
+            "status": "queued",
+            "job_id": "new-1",
+            "result_url": "/results/new-1",
+        }
+        result = runner.invoke(app, ["failure", "re-analyze", "uuid-1"])
+        assert result.exit_code == 0
+        assert "new-1" in result.output
+        assert "queued" in result.output.lower()
+        mock_client.re_analyze_failure.assert_called_once_with("uuid-1")
+
+    def test_failure_re_analyze_json(self, mock_client):
+        mock_client.re_analyze_failure.return_value = {
+            "status": "queued",
+            "job_id": "new-1",
+            "result_url": "/results/new-1",
+        }
+        result = runner.invoke(app, ["--json", "failure", "re-analyze", "uuid-1"])
+        assert result.exit_code == 0
+        parsed = json.loads(result.output)
+        assert parsed["status"] == "queued"
+
+    def test_failure_re_analyze_error(self, mock_client):
+        mock_client.re_analyze_failure.side_effect = RootCozError(
+            status_code=404, detail="Failure not found"
+        )
+        result = runner.invoke(app, ["failure", "re-analyze", "nonexistent"])
+        assert result.exit_code != 0
+
+
 class TestAbortCommand:
     def test_abort(self, mock_client):
         mock_client.abort_job.return_value = {"status": "aborted", "job_id": "job-123"}

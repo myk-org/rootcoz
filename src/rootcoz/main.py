@@ -1,4 +1,5 @@
 import asyncio
+import copy
 import hmac
 import json
 import logging
@@ -90,6 +91,7 @@ from rootcoz.logging_context import JobIdFilter, get_log_file, job_id_var
 from rootcoz.metadata_rules import match_job_metadata
 from rootcoz.models import (
     AddCommentRequest,
+    AdditionalRepo,
     AnalyzeCommentRequest,
     AnalyzeCommentResponse,
     AnalyzeRequest,
@@ -99,6 +101,7 @@ from rootcoz.models import (
     ChildJobAnalysis,
     ClassifyTestRequest,
     CreateIssueRequest,
+    FailedTest,
     FailureAnalysis,
     FailureAnalysisResult,
     FeedbackCreateRequest,
@@ -109,6 +112,7 @@ from rootcoz.models import (
     OverrideClassificationRequest,
     PreviewIssueRequest,
     PushSubscriptionRequest,
+    ReAnalyzeFailureRequest,
     ReportPortalPushResult,
     SetReviewedRequest,
     UnifiedAnalyzeRequest,
@@ -567,6 +571,77 @@ def _recompose_repo_spec(url: str, ref: str) -> str:
 def _is_encrypted_value(value: Any) -> bool:
     """Return True if *value* looks like an undecrypted encrypted field."""
     return isinstance(value, str) and value.startswith("enc:")
+
+
+def _check_reanalyze_authorization(request: Request, params: dict) -> None:
+    """Check that requester is original submitter or admin."""
+    original_submitter = params.get("submitted_by", "")
+    requesting_user = getattr(request.state, "username", "")
+    is_admin = getattr(request.state, "is_admin", False)
+    if not is_admin and requesting_user != original_submitter:
+        raise HTTPException(
+            status_code=403,
+            detail="Only the original submitter or an admin can re-analyze this job",
+        )
+
+
+def _validate_decrypted_sensitive_fields(decrypted_params: dict) -> None:
+    """Fail fast if any sensitive field is still encrypted (key changed / corrupt)."""
+    for key in SENSITIVE_KEYS:
+        value = decrypted_params.get(key)
+        if _is_encrypted_value(value):
+            raise HTTPException(
+                status_code=400,
+                detail=f"Cannot re-analyze: stored {key} could not be decrypted",
+            )
+    for repo in decrypted_params.get("additional_repos") or []:
+        if isinstance(repo, dict) and _is_encrypted_value(repo.get("token")):
+            raise HTTPException(
+                status_code=400,
+                detail="Cannot re-analyze: stored additional_repos token could not be decrypted",
+            )
+
+
+_ANALYSIS_SETTINGS_FIELDS = (
+    "ai_provider",
+    "ai_model",
+    "raw_prompt",
+    "issue_prompt",
+    "tests_repo_url",
+    "tests_repo_token",
+    "peer_analysis_max_rounds",
+    "enable_jira",
+    "jira_url",
+    "jira_email",
+    "jira_api_token",
+    "jira_pat",
+    "jira_project_key",
+    "jira_ssl_verify",
+    "jira_max_results",
+    "github_token",
+    "ai_cli_timeout",
+    "max_concurrent_ai_calls",
+)
+
+
+def _copy_analysis_settings(decrypted_params: dict, unified_fields: dict) -> None:
+    """Copy analysis settings from stored params to unified request fields."""
+    for field in _ANALYSIS_SETTINGS_FIELDS:
+        if field in decrypted_params and decrypted_params[field] is not None:
+            if field == "tests_repo_url":
+                ref = decrypted_params.get("tests_repo_ref", "")
+                url = decrypted_params[field]
+                unified_fields[field] = f"{url}:{ref}" if ref else url
+            else:
+                unified_fields[field] = decrypted_params[field]
+
+    if "peer_ai_configs" in decrypted_params:
+        unified_fields["peer_ai_configs"] = decrypted_params["peer_ai_configs"]
+    if (
+        "additional_repos" in decrypted_params
+        and decrypted_params["additional_repos"] is not None
+    ):
+        unified_fields["additional_repos"] = decrypted_params["additional_repos"]
 
 
 def _reconstruct_from_params(
@@ -2741,20 +2816,13 @@ async def re_analyze(
     )
 
     # Authorization: only the original submitter or an admin may re-analyze
-    original_submitter = result_data.get("request_params", {}).get("submitted_by", "")
-    requesting_user = getattr(request.state, "username", "")
-    is_admin = getattr(request.state, "is_admin", False)
-    if not is_admin and requesting_user != original_submitter:
-        raise HTTPException(
-            status_code=403,
-            detail="Only the original submitter or an admin can re-analyze this job",
-        )
-
     if "request_params" not in result_data:
         raise HTTPException(
             status_code=400,
             detail="Original analysis has no stored request_params; cannot re-analyze",
         )
+
+    _check_reanalyze_authorization(request, result_data["request_params"])
 
     # Detect analysis type from stored params
     params = result_data.get("request_params", {})
@@ -2772,20 +2840,7 @@ async def re_analyze(
                 detail=f"Failed to decrypt stored params: {exc}",
             ) from exc
 
-        # Fail fast if any sensitive field is still encrypted (key changed / corrupt)
-        for key in SENSITIVE_KEYS:
-            value = decrypted_params.get(key)
-            if _is_encrypted_value(value):
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"Cannot re-analyze: stored {key} could not be decrypted",
-                )
-        for repo in decrypted_params.get("additional_repos") or []:
-            if isinstance(repo, dict) and _is_encrypted_value(repo.get("token")):
-                raise HTTPException(
-                    status_code=400,
-                    detail="Cannot re-analyze: stored additional_repos token could not be decrypted",
-                )
+        _validate_decrypted_sensitive_fields(decrypted_params)
 
         # Build unified request from stored params
         # Prefer the original user-supplied name (before UUID suffix was added)
@@ -2816,42 +2871,7 @@ async def re_analyze(
                 )
             unified_fields["failures"] = stored_failures
 
-        # Copy over shared analysis settings
-        for field in (
-            "ai_provider",
-            "ai_model",
-            "raw_prompt",
-            "issue_prompt",
-            "tests_repo_url",
-            "tests_repo_token",
-            "peer_analysis_max_rounds",
-            "enable_jira",
-            "jira_url",
-            "jira_email",
-            "jira_api_token",
-            "jira_pat",
-            "jira_project_key",
-            "jira_ssl_verify",
-            "jira_max_results",
-            "github_token",
-            "ai_cli_timeout",
-            "max_concurrent_ai_calls",
-        ):
-            if field in decrypted_params and decrypted_params[field] is not None:
-                if field == "tests_repo_url":
-                    ref = decrypted_params.get("tests_repo_ref", "")
-                    url = decrypted_params[field]
-                    unified_fields[field] = f"{url}:{ref}" if ref else url
-                else:
-                    unified_fields[field] = decrypted_params[field]
-
-        if "peer_ai_configs" in decrypted_params:
-            unified_fields["peer_ai_configs"] = decrypted_params["peer_ai_configs"]
-        if (
-            "additional_repos" in decrypted_params
-            and decrypted_params["additional_repos"] is not None
-        ):
-            unified_fields["additional_repos"] = decrypted_params["additional_repos"]
+        _copy_analysis_settings(decrypted_params, unified_fields)
 
         # Apply overrides from request body
         for field_name in body.model_fields_set:
@@ -2960,6 +2980,345 @@ async def get_job_result(
     if result.get("status") in IN_PROGRESS_STATUSES:
         response.status_code = 202
     return result
+
+
+@app.get("/api/failures/{failure_uuid}")
+async def get_failure_by_uuid(failure_uuid: str) -> dict:
+    """Look up a single failure analysis by its UUID.
+
+    Searches across all stored jobs for a failure with the given UUID.
+    Returns the failure details plus the parent job_id.
+    """
+    result = await storage.find_failure_by_uuid(failure_uuid)
+    if not result:
+        raise HTTPException(status_code=404, detail=f"Failure {failure_uuid} not found")
+    return result
+
+
+async def _reanalyze_failure_background(
+    job_id: str,
+    failure_uuid: str,
+    failure_dict: dict,
+    ai_provider: str,
+    ai_model: str,
+    ai_cli_timeout: int | None,
+    raw_prompt: str,
+    peer_ai_configs: list | None,
+    peer_analysis_max_rounds: int,
+    tests_repo_url: str,
+    tests_repo_ref: str,
+    tests_repo_token: str,
+    additional_repos_list: list,
+    username: str,
+    max_concurrent_ai_calls: int,
+) -> None:
+    """Background task: re-analyze a single failure in-place."""
+    job_id_var.set(job_id)
+    auth_header = ""
+    repo_manager: RepositoryManager | None = None
+
+    try:
+        auth_header = await _create_ai_auth_header(username)
+
+        # Clone repos if configured
+        repo_manager = RepositoryManager()
+        cloned_repos: dict[str, Path] = {}
+        repo_path = repo_manager.create_workspace()
+
+        if tests_repo_url:
+            try:
+                repo_name = derive_test_repo_name(
+                    str(tests_repo_url), additional_repos_list
+                )
+                await asyncio.to_thread(
+                    repo_manager.clone_into,
+                    str(tests_repo_url),
+                    repo_path / repo_name,
+                    depth=50,
+                    branch=tests_repo_ref,
+                    token=tests_repo_token or None,
+                )
+                cloned_repos[repo_name] = repo_path / repo_name
+            except Exception:
+                logger.warning(
+                    "Failed to clone test repository for failure re-analysis",
+                    exc_info=True,
+                )
+
+        if additional_repos_list:
+            additional_repos_cloned, repo_path = await clone_additional_repos(
+                repo_manager, additional_repos_list, repo_path
+            )
+            cloned_repos.update(additional_repos_cloned)
+
+        # Build a FailedTest from the failure dict
+        _ft_kwargs: dict = {
+            "test_name": failure_dict.get("test_name", ""),
+            "error_message": failure_dict.get("error", ""),
+        }
+        if "stack_trace" in failure_dict:
+            _ft_kwargs["stack_trace"] = failure_dict["stack_trace"]
+        if "duration" in failure_dict:
+            _ft_kwargs["duration"] = failure_dict["duration"]
+        if "status" in failure_dict:
+            _ft_kwargs["status"] = failure_dict["status"]
+        test_failure = FailedTest(**_ft_kwargs)
+
+        server_url = _build_internal_server_url()
+
+        # Analyze the single failure
+        analyses = await analyze_failure_group(
+            failures=[test_failure],
+            console_context="",
+            repo_path=repo_path,
+            ai_provider=ai_provider,
+            ai_model=ai_model,
+            ai_cli_timeout=ai_cli_timeout,
+            custom_prompt=raw_prompt,
+            server_url=server_url,
+            job_id=job_id,
+            peer_ai_configs=peer_ai_configs,
+            peer_analysis_max_rounds=peer_analysis_max_rounds,
+            additional_repos=cloned_repos or None,
+            max_concurrent_ai_calls=max_concurrent_ai_calls,
+            auth_header=auth_header,
+        )
+
+        if not analyses:
+            raise RuntimeError("analyze_failure_group returned no results")
+
+        new_analysis = analyses[0]
+
+        # Patch the failure in the parent job result on success
+        def _patch_success(result_data: dict) -> None:
+            failure = _find_failure_by_uuid_in_result(result_data, failure_uuid)
+            if not failure:
+                logger.error(
+                    "Failure %s not found in result during success patch", failure_uuid
+                )
+                return
+            # Save previous analysis
+            if "analysis" in failure:
+                failure["previous_analysis"] = copy.deepcopy(failure["analysis"])
+            # Replace with new analysis
+            new_data = new_analysis.model_dump(mode="json")
+            failure["analysis"] = new_data.get("analysis")
+            if new_data.get("peer_debate"):
+                failure["peer_debate"] = new_data["peer_debate"]
+            else:
+                failure.pop("peer_debate", None)
+            # Remove running status and any previous error
+            failure.pop("reanalysis_status", None)
+            failure.pop("reanalysis_error", None)
+
+        await patch_result_json(job_id, _patch_success)
+        logger.info(
+            "Failure %s re-analysis completed successfully in job %s",
+            failure_uuid,
+            job_id,
+        )
+
+    except Exception as exc:
+        error_msg = "Re-analysis failed unexpectedly. Check server logs for details."
+        logger.error(
+            "Failure %s re-analysis failed in job %s: %s: %s",
+            failure_uuid,
+            job_id,
+            type(exc).__name__,
+            exc,
+            exc_info=True,
+        )
+
+        # Patch failure status to "failed" with error message
+        def _patch_error(result_data: dict) -> None:
+            failure = _find_failure_by_uuid_in_result(result_data, failure_uuid)
+            if failure:
+                failure["reanalysis_status"] = "failed"
+                failure["reanalysis_error"] = error_msg
+
+        try:
+            await patch_result_json(job_id, _patch_error)
+        except Exception:
+            logger.error(
+                "Failed to patch error status for failure %s",
+                failure_uuid,
+                exc_info=True,
+            )
+
+    finally:
+        notify_job_status_changed(job_id)
+        await _cleanup_ai_session(auth_header)
+        if repo_manager:
+            try:
+                repo_manager.cleanup()
+            except Exception:
+                logger.warning("Failed to cleanup repos", exc_info=True)
+
+
+@app.post("/api/failures/{failure_uuid}/re-analyze", status_code=202)
+async def re_analyze_failure(
+    failure_uuid: str,
+    request: Request,
+) -> dict:
+    """Re-analyze a single failure in-place within its parent job.
+
+    Patches the failure directly in the parent job's stored result instead
+    of creating a new job.  Accepts an optional JSON body with settings
+    overrides; defaults come from the parent job's request_params.
+    """
+    _check_allow_list(request)
+
+    # Parse optional body
+    body_data: dict = {}
+    raw_body = await request.body()
+    if raw_body:
+        try:
+            body_data = await request.json()
+        except Exception as exc:
+            raise HTTPException(
+                status_code=400, detail=f"Invalid JSON body: {exc}"
+            ) from exc
+        if not isinstance(body_data, dict):
+            raise HTTPException(
+                status_code=400, detail="Request body must be a JSON object"
+            )
+    overrides = ReAnalyzeFailureRequest(**body_data)
+
+    # Find the failure across all stored results
+    match = await storage.find_failure_by_uuid(failure_uuid)
+    if not match:
+        raise HTTPException(status_code=404, detail=f"Failure {failure_uuid} not found")
+
+    parent_job_id = match["job_id"]
+    failure_dict = match["failure"]
+
+    # Load the parent job to get AI config
+    stored = await get_result(parent_job_id, strip_sensitive=False)
+    if not stored or not stored.get("result"):
+        raise HTTPException(
+            status_code=404, detail=f"Parent job {parent_job_id} not found"
+        )
+
+    result_data = stored["result"]
+    params = result_data.get("request_params", {})
+
+    if not params:
+        raise HTTPException(
+            status_code=400,
+            detail="Original analysis has no stored request_params; cannot re-analyze",
+        )
+
+    # Authorization: only the original submitter or an admin may re-analyze
+    _check_reanalyze_authorization(request, params)
+
+    # Decrypt parent settings
+    try:
+        decrypted_params = decrypt_sensitive_fields(dict(params))
+    except Exception as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Failed to decrypt stored params: {exc}",
+        ) from exc
+
+    _validate_decrypted_sensitive_fields(decrypted_params)
+
+    # Resolve settings: parent defaults + overrides from request body
+    ai_provider = decrypted_params.get("ai_provider", "")
+    ai_model = decrypted_params.get("ai_model", "")
+    if overrides.ai_provider is not None:
+        ai_provider = overrides.ai_provider
+    if overrides.ai_model is not None:
+        ai_model = overrides.ai_model
+    ai_provider, ai_model = _resolve_ai_config_values(ai_provider, ai_model)
+
+    ai_cli_timeout = decrypted_params.get("ai_cli_timeout")
+    if overrides.ai_cli_timeout is not None:
+        ai_cli_timeout = overrides.ai_cli_timeout
+
+    raw_prompt = decrypted_params.get("raw_prompt", "")
+    if overrides.raw_prompt is not None:
+        raw_prompt = overrides.raw_prompt
+
+    peer_ai_configs = decrypted_params.get("peer_ai_configs")
+    if overrides.peer_ai_configs is not None:
+        peer_ai_configs = overrides.peer_ai_configs
+
+    peer_analysis_max_rounds = decrypted_params.get("peer_analysis_max_rounds", 3)
+    if overrides.peer_analysis_max_rounds is not None:
+        peer_analysis_max_rounds = overrides.peer_analysis_max_rounds
+
+    tests_repo_url = decrypted_params.get("tests_repo_url", "")
+    tests_repo_ref = decrypted_params.get("tests_repo_ref", "")
+    tests_repo_token = decrypted_params.get("tests_repo_token", "")
+    if overrides.tests_repo_url is not None:
+        tests_repo_url, tests_repo_ref = parse_repo_ref(overrides.tests_repo_url)
+
+    additional_repos_list_raw = decrypted_params.get("additional_repos") or []
+    additional_repos_list: list[AdditionalRepo] = [
+        AdditionalRepo(**r) if isinstance(r, dict) else r
+        for r in additional_repos_list_raw
+    ]
+    if overrides.additional_repos is not None:
+        additional_repos_list = [
+            AdditionalRepo(**r) if isinstance(r, dict) else r
+            for r in overrides.additional_repos
+        ]
+
+    max_concurrent_ai_calls = decrypted_params.get("max_concurrent_ai_calls", 3)
+
+    # Immediately patch the failure as "running"
+    already_running = False
+
+    def _patch_running(result_data: dict) -> None:
+        nonlocal already_running
+        failure = _find_failure_by_uuid_in_result(result_data, failure_uuid)
+        if failure:
+            if failure.get("reanalysis_status") == "running":
+                already_running = True
+                return
+            failure["reanalysis_status"] = "running"
+            failure["reanalyzed_with"] = {
+                "ai_provider": ai_provider,
+                "ai_model": ai_model,
+            }
+
+    await patch_result_json(parent_job_id, _patch_running)
+
+    if already_running:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Failure {failure_uuid} is already being re-analyzed",
+        )
+    notify_job_status_changed(parent_job_id)
+
+    # Start background task
+    task = asyncio.create_task(
+        _reanalyze_failure_background(
+            job_id=parent_job_id,
+            failure_uuid=failure_uuid,
+            failure_dict=failure_dict,
+            ai_provider=ai_provider,
+            ai_model=ai_model,
+            ai_cli_timeout=ai_cli_timeout,
+            raw_prompt=raw_prompt,
+            peer_ai_configs=peer_ai_configs,
+            peer_analysis_max_rounds=peer_analysis_max_rounds,
+            tests_repo_url=tests_repo_url,
+            tests_repo_ref=tests_repo_ref,
+            tests_repo_token=tests_repo_token,
+            additional_repos_list=additional_repos_list,
+            username=request.state.username,
+            max_concurrent_ai_calls=max_concurrent_ai_calls,
+        )
+    )
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
+
+    return {
+        "status": "accepted",
+        "job_id": parent_job_id,
+        "failure_uuid": failure_uuid,
+    }
 
 
 def _find_test_in_children(
@@ -3079,6 +3438,32 @@ def _find_failure_in_result(
     for f in result_data.get("failures", []):
         if f.get("test_name") == test_name:
             return f
+    return None
+
+
+def _find_failure_by_uuid_in_child(child: dict, failure_uuid: str) -> dict | None:
+    """Recursively search a child job dict for a failure by UUID."""
+    for f in child.get("failures", []):
+        if f.get("id") == failure_uuid:
+            return f
+    for nested in child.get("failed_children", []):
+        found = _find_failure_by_uuid_in_child(nested, failure_uuid)
+        if found:
+            return found
+    return None
+
+
+def _find_failure_by_uuid_in_result(
+    result_data: dict, failure_uuid: str
+) -> dict | None:
+    """Find a failure dict by UUID in the result data (top-level + children)."""
+    for f in result_data.get("failures", []):
+        if f.get("id") == failure_uuid:
+            return f
+    for child in result_data.get("child_job_analyses", []):
+        found = _find_failure_by_uuid_in_child(child, failure_uuid)
+        if found:
+            return found
     return None
 
 

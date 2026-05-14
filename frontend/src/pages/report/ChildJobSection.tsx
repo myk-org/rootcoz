@@ -30,7 +30,7 @@ export function ChildJobSection({ child, jobId, depth = 0, activeHash, parentHas
 
   // Auto-expand and scroll when the URL hash targets this child job or any descendant
   useEffect(() => {
-    if (activeHash && (activeHash === hashId || activeHash.startsWith(`${hashId}--`))) {
+    if (activeHash && (activeHash === hashId || activeHash.startsWith(`${hashId}--`) || activeHash.startsWith(`child-${hashId}-`))) {
       if (!expanded) {
         setExpanded(true)
       }
@@ -148,6 +148,7 @@ export function ChildJobSection({ child, jobId, depth = 0, activeHash, parentHas
                 childJobName={child.job_name}
                 childBuildNumber={child.build_number}
                 index={i}
+                activeHash={activeHash}
               />
             ))}
           </div>

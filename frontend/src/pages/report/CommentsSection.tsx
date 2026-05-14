@@ -10,6 +10,7 @@ import { LinkedText } from '@/components/shared/LinkedText'
 import { ConfirmDialog } from '@/components/shared/ConfirmDialog'
 import { MentionTextarea } from './MentionTextarea'
 import { useReviewSuggestion } from './useReviewSuggestion'
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
 import { Trash2, MessageSquare } from 'lucide-react'
 import type { Comment } from '@/types'
 
@@ -185,6 +186,7 @@ export function CommentsSection({ jobId, testNames, childJobName, childBuildNumb
       </div>
 
       {testComments.length > 0 && (
+        <TooltipProvider delayDuration={200}>
         <div className="space-y-2">
           {testComments.map((c) => {
             const badges = enrichments[String(c.id)] ?? []
@@ -226,21 +228,26 @@ export function CommentsSection({ jobId, testNames, childJobName, childBuildNumb
                   </p>
                 </div>
                 {username && c.username === username && (
-                  <button
-                    type="button"
-                    aria-label="Delete comment"
-                    onClick={() => setDeleteTarget(c.id)}
-                    disabled={deletingIds.has(c.id)}
-                    className="shrink-0 opacity-0 transition-opacity group-hover:opacity-100 focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-signal-blue disabled:opacity-50"
-                    title="Delete comment"
-                  >
-                    <Trash2 className="h-3.5 w-3.5 text-text-tertiary hover:text-signal-red" />
-                  </button>
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <button
+                        type="button"
+                        aria-label="Delete comment"
+                        onClick={() => setDeleteTarget(c.id)}
+                        disabled={deletingIds.has(c.id)}
+                        className="shrink-0 opacity-0 transition-opacity group-hover:opacity-100 focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-signal-blue disabled:opacity-50"
+                      >
+                        <Trash2 className="h-3.5 w-3.5 text-text-tertiary hover:text-signal-red" />
+                      </button>
+                    </TooltipTrigger>
+                    <TooltipContent>Delete comment</TooltipContent>
+                  </Tooltip>
                 )}
               </div>
             )
           })}
         </div>
+        </TooltipProvider>
       )}
 
       <div className="space-y-1">

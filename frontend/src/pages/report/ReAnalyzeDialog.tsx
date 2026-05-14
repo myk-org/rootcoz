@@ -31,6 +31,7 @@ interface ReAnalyzeDialogProps {
   onOpenChange: (open: boolean) => void
   result: AnalysisResult
   jobId: string
+  failureUuid?: string
 }
 
 function initFormState(p: AnalysisResult['request_params']) {
@@ -58,7 +59,7 @@ function initFormState(p: AnalysisResult['request_params']) {
   }
 }
 
-export function ReAnalyzeDialog({ open, onOpenChange, result, jobId }: ReAnalyzeDialogProps) {
+export function ReAnalyzeDialog({ open, onOpenChange, result, jobId, failureUuid }: ReAnalyzeDialogProps) {
   const navigate = useNavigate()
   const params = result.request_params
 
@@ -153,9 +154,14 @@ export function ReAnalyzeDialog({ open, onOpenChange, result, jobId }: ReAnalyze
             ...(r.ref && { ref: r.ref }),
           })),
       }
-      const data = await api.post<{ job_id: string }>(`/re-analyze/${jobId}`, body)
-      onOpenChange(false)
-      navigate(`/results/${data.job_id}`)
+      if (failureUuid) {
+        await api.post(`/api/failures/${failureUuid}/re-analyze`, body)
+        onOpenChange(false)
+      } else {
+        const data = await api.post<{ job_id: string }>(`/re-analyze/${jobId}`, body)
+        onOpenChange(false)
+        navigate(`/results/${data.job_id}`)
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to submit re-analysis')
     } finally {
@@ -181,15 +187,18 @@ export function ReAnalyzeDialog({ open, onOpenChange, result, jobId }: ReAnalyze
     jobId,
     onOpenChange,
     navigate,
+    failureUuid,
   ])
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="sm:max-w-[600px] max-h-[85vh] flex flex-col bg-surface-card border-border-default p-0">
         <DialogHeader className="px-6 pt-5 pb-4 border-b border-border-default flex-shrink-0">
-          <DialogTitle>🔄 Re-Analyze Job</DialogTitle>
+          <DialogTitle>🔄 {failureUuid ? 'Re-Analyze Test' : 'Re-Analyze Job'}</DialogTitle>
           <DialogDescription>
-            Adjust settings and re-run analysis. A new analysis will be created.
+            {failureUuid
+              ? 'Adjust settings and re-run analysis for this test failure. The result will update in-place.'
+              : 'Adjust settings and re-run analysis. A new analysis will be created.'}
           </DialogDescription>
         </DialogHeader>
 

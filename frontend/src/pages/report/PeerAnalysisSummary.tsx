@@ -4,6 +4,7 @@ import type { RepoUrl } from '@/lib/autoLink'
 import { Badge } from '@/components/ui/badge'
 import { PeerRoundEntry } from '@/components/shared/PeerRoundEntry'
 import { groupPeerRounds } from '@/lib/peerDebate'
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { ChevronDown, ChevronRight, Users } from 'lucide-react'
 
 interface FailureWithDebate {
@@ -172,13 +173,23 @@ function DebateEntry({ testName, siblingTestNames, jobLabel, debate, repoUrls }:
           {jobLabel && (
             <span className="block text-[10px] text-text-tertiary font-display">{jobLabel}</span>
           )}
-          <span className="font-mono text-xs text-text-secondary truncate block" title={testName}>
-            {testName}
-          </span>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <span className="font-mono text-xs text-text-secondary truncate block">
+                {testName}
+              </span>
+            </TooltipTrigger>
+            <TooltipContent className="max-w-md break-all">{testName}</TooltipContent>
+          </Tooltip>
           {siblingTestNames.length > 0 && (
-            <span className="text-[10px] text-text-tertiary" title={siblingTestNames.join('\n')}>
-              +{siblingTestNames.length} test{siblingTestNames.length > 1 ? 's' : ''} with same error
-            </span>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <span className="text-[10px] text-text-tertiary">
+                  +{siblingTestNames.length} test{siblingTestNames.length > 1 ? 's' : ''} with same error
+                </span>
+              </TooltipTrigger>
+              <TooltipContent className="max-w-md break-all whitespace-pre-line">{siblingTestNames.join('\n')}</TooltipContent>
+            </Tooltip>
           )}
         </div>
         <Badge variant={debate.consensus_reached ? 'success' : 'warning'} className="text-[10px] shrink-0">

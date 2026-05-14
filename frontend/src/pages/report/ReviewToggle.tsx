@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { api } from '@/lib/api'
 import { getUsername } from '@/lib/cookies'
 import { useReportState, useReportDispatch, reviewKey } from './ReportContext'
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { CheckCircle2 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 
@@ -62,28 +63,32 @@ export function ReviewToggle({ jobId, testName, childJobName, childBuildNumber, 
 
   return (
     <span className="inline-flex items-center gap-1">
-      <button
-        type="button"
-        aria-pressed={reviewed}
-        onClick={(e) => {
-          e.stopPropagation()
-          toggle()
-        }}
-        disabled={loading || externalDisabled}
-        className={cn(
-          'flex items-center gap-1.5 rounded-md px-2 py-1 text-xs font-medium transition-colors duration-150',
-          reviewed
-            ? 'bg-signal-green/15 text-signal-green'
-            : 'bg-surface-elevated text-text-tertiary hover:text-text-secondary',
-        )}
-        title={tooltipText}
-      >
-        <CheckCircle2 className="h-3.5 w-3.5" />
-        {reviewed ? 'Reviewed' : 'Review'}
-        {reviewed && reviewedBy && (
-          <span className="text-signal-green/70">by {reviewedBy}</span>
-        )}
-      </button>
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <button
+            type="button"
+            aria-pressed={reviewed}
+            onClick={(e) => {
+              e.stopPropagation()
+              toggle()
+            }}
+            disabled={loading || externalDisabled}
+            className={cn(
+              'flex items-center gap-1.5 rounded-md px-2 py-1 text-xs font-medium transition-colors duration-150',
+              reviewed
+                ? 'bg-signal-green/15 text-signal-green'
+                : 'bg-surface-elevated text-text-tertiary hover:text-text-secondary',
+            )}
+          >
+            <CheckCircle2 className="h-3.5 w-3.5" />
+            {reviewed ? 'Reviewed' : 'Review'}
+            {reviewed && reviewedBy && (
+              <span className="text-signal-green/70">by {reviewedBy}</span>
+            )}
+          </button>
+        </TooltipTrigger>
+        <TooltipContent>{tooltipText}</TooltipContent>
+      </Tooltip>
       {error && <span role="alert" className="text-signal-red text-[10px]">{error}</span>}
     </span>
   )

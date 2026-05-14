@@ -102,14 +102,20 @@ export interface PeerDebate {
 }
 
 export interface FailureAnalysis {
+  id: string
   test_name: string
   error: string
   analysis: AnalysisDetail
   error_signature: string
   peer_debate?: PeerDebate | null
+  previous_analysis?: AnalysisDetail | null
+  reanalysis_status?: 'running' | 'failed' | null
+  reanalysis_error?: string | null
+  reanalyzed_with?: { ai_provider: string; ai_model: string } | null
 }
 
 export interface ChildJobAnalysis {
+  id: string
   job_name: string
   build_number: number
   jenkins_url: string | null
