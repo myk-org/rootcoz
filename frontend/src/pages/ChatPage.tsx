@@ -2,15 +2,9 @@ import { useState, useEffect, useRef, useCallback, type FormEvent } from 'react'
 import { useParams, Link } from 'react-router-dom'
 import { api } from '@/lib/api'
 import { Button } from '@/components/ui/button'
-import {
-  Select,
-  SelectTrigger,
-  SelectContent,
-  SelectItem,
-  SelectValue,
-} from '@/components/ui/select'
+import { ProviderSelect } from '@/components/shared/ProviderSelect'
 import { ModelCombobox } from '@/components/shared/ModelCombobox'
-import type { ModelOption } from '@/components/shared/ModelCombobox'
+import { useProviderModels } from '@/hooks/useProviderModels'
 import { Tooltip, TooltipTrigger, TooltipContent } from '@/components/ui/tooltip'
 import { TooltipProvider } from '@/components/ui/tooltip'
 import { Textarea } from '@/components/ui/textarea'
@@ -48,7 +42,7 @@ export function ChatPage() {
 
   const [aiProvider, setAiProvider] = useState('')
   const [aiModel, setAiModel] = useState('')
-  const [availableModels, setAvailableModels] = useState<ModelOption[]>([])
+  const availableModels = useProviderModels(aiProvider)
 
   const [copiedMsgId, setCopiedMsgId] = useState<number | null>(null)
 
@@ -105,23 +99,6 @@ export function ChatPage() {
       setError(err instanceof Error ? err.message : 'Failed to load chat')
     }).finally(() => setLoading(false))
   }, [jobId])
-
-  // Fetch models when provider changes
-  useEffect(() => {
-    if (!aiProvider) { setAvailableModels([]); setAiModel(''); return }
-    let ignore = false
-    api.get<{ models: ModelOption[] }>(`/api/ai-models?provider=${aiProvider}`)
-      .then(res => {
-        if (ignore) return
-        const models = res.models ?? []
-        setAvailableModels(models)
-        if (aiModel && !models.some(m => m.id === aiModel)) {
-          setAiModel(models[0]?.id ?? '')
-        }
-      })
-      .catch(() => { if (!ignore) { setAvailableModels([]); setAiModel('') } })
-    return () => { ignore = true }
-  }, [aiProvider])
 
   // Auto-scroll
   useEffect(() => {
@@ -249,18 +226,7 @@ export function ChatPage() {
             </div>
           </div>
           <div className="flex items-center gap-3">
-            {/* Provider selector */}
-            <Select value={aiProvider} onValueChange={setAiProvider}>
-              <SelectTrigger className="w-[120px] h-8 text-xs">
-                <SelectValue placeholder="Provider" />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="claude">Claude</SelectItem>
-                <SelectItem value="gemini">Gemini</SelectItem>
-                <SelectItem value="cursor">Cursor</SelectItem>
-              </SelectContent>
-            </Select>
-            {/* Model selector */}
+            <ProviderSelect value={aiProvider} onChange={setAiProvider} compact />
             <ModelCombobox
               value={aiModel}
               onChange={setAiModel}

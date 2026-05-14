@@ -14,8 +14,10 @@ import type { AiConfig } from '@/types'
 import { Section } from '@/components/shared/Section'
 import { Toggle } from '@/components/shared/Toggle'
 import { FieldLabel } from '@/components/shared/FieldLabel'
+import { ProviderSelect } from '@/components/shared/ProviderSelect'
 import { ModelCombobox } from '@/components/shared/ModelCombobox'
 import type { ModelOption } from '@/components/shared/ModelCombobox'
+import { useProviderModels } from '@/hooks/useProviderModels'
 import { Plus, Trash2, Send, Upload } from 'lucide-react'
 
 function toIntInRange(value: string, min: number, max: number, fallback: number): number {
@@ -47,7 +49,7 @@ export function NewAnalysisPage() {
   // AI configuration
   const [aiProvider, setAiProvider] = useState('claude')
   const [aiModel, setAiModel] = useState('')
-  const [availableModels, setAvailableModels] = useState<ModelOption[]>([])
+  const availableModels = useProviderModels(aiProvider)
   const [aiCliTimeout, setAiCliTimeout] = useState<number | undefined>(undefined)
   const [rawPrompt, setRawPrompt] = useState('')
 
@@ -79,17 +81,6 @@ export function NewAnalysisPage() {
   const [maxArtifactsSize, setMaxArtifactsSize] = useState<number | undefined>(undefined)
 
   const fileInputRef = useRef<HTMLInputElement>(null)
-
-  // Fetch available models when provider changes
-  useEffect(() => {
-    if (!aiProvider) { setAvailableModels([]); return }
-    let ignore = false
-    setAvailableModels([])
-    api.get<{ models: ModelOption[] }>(`/api/ai-models?provider=${aiProvider}`)
-      .then(res => { if (!ignore) setAvailableModels(res.models ?? []) })
-      .catch(() => { if (!ignore) setAvailableModels([]) })
-    return () => { ignore = true }
-  }, [aiProvider])
 
   // Fetch models for each peer provider
   useEffect(() => {
@@ -411,16 +402,7 @@ export function NewAnalysisPage() {
             <div className="grid grid-cols-2 gap-3">
               <div className="space-y-1.5">
                 <FieldLabel>AI Provider</FieldLabel>
-                <Select value={aiProvider} onValueChange={setAiProvider}>
-                  <SelectTrigger>
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="claude">Claude</SelectItem>
-                    <SelectItem value="gemini">Gemini</SelectItem>
-                    <SelectItem value="cursor">Cursor</SelectItem>
-                  </SelectContent>
-                </Select>
+                <ProviderSelect value={aiProvider} onChange={setAiProvider} />
               </div>
               <div className="space-y-1.5">
                 <FieldLabel>AI CLI Timeout</FieldLabel>
@@ -439,7 +421,6 @@ export function NewAnalysisPage() {
                 value={aiModel}
                 onChange={setAiModel}
                 options={availableModels}
-                placeholder="Default model"
               />
             </div>
             <div className="space-y-1.5">
