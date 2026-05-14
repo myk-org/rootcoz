@@ -27,22 +27,30 @@ _CHAT_SCRIPTS = [
 ]
 
 
-def get_chat_workspace(job_id: str) -> Path:
-    """Get the chat workspace path for a job."""
+def get_chat_workspace(job_id: str, username: str = "") -> Path:
+    """Get the chat workspace path for a job and user."""
     # Sanitize job_id to prevent path traversal
     safe_id = job_id.replace("/", "_").replace("..", "_").replace("\\", "_")
-    workspace = Path(f"/tmp/{_CHAT_WORKSPACE_PREFIX}{safe_id}")
+    safe_user = (
+        username.replace("/", "_").replace("..", "_").replace("\\", "_")
+        if username
+        else ""
+    )
+    if safe_user:
+        workspace = Path(f"/tmp/{_CHAT_WORKSPACE_PREFIX}{safe_id}/{safe_user}")
+    else:
+        workspace = Path(f"/tmp/{_CHAT_WORKSPACE_PREFIX}{safe_id}")
     # Verify the resolved path is still under /tmp/
     resolved = workspace.resolve()
     tmp_resolved = Path("/tmp").resolve()
     if not resolved.is_relative_to(tmp_resolved):
-        raise ValueError(f"Invalid job_id for workspace: {job_id}")
+        raise ValueError(f"Invalid job_id/username for workspace: {job_id}/{username}")
     return workspace
 
 
-def ensure_chat_workspace(job_id: str) -> Path:
+def ensure_chat_workspace(job_id: str, username: str = "") -> Path:
     """Create the chat workspace directory if it doesn't exist."""
-    workspace = get_chat_workspace(job_id)
+    workspace = get_chat_workspace(job_id, username)
     workspace.mkdir(parents=True, exist_ok=True)
     workspace.chmod(0o700)
     logger.info("Chat workspace created: %s", workspace)
@@ -253,9 +261,9 @@ def _write_wrapper(
     wrapper.chmod(wrapper.stat().st_mode | stat.S_IEXEC)
 
 
-def cleanup_chat_repos(job_id: str) -> None:
+def cleanup_chat_repos(job_id: str, username: str = "") -> None:
     """Delete cloned repos from chat workspace but keep session files."""
-    workspace = get_chat_workspace(job_id)
+    workspace = get_chat_workspace(job_id, username)
     if not workspace.exists():
         return
 
@@ -271,9 +279,9 @@ def cleanup_chat_repos(job_id: str) -> None:
     logger.info(f"Cleaned up chat repos for job {job_id} (kept sessions)")
 
 
-def cleanup_chat_workspace(job_id: str) -> None:
+def cleanup_chat_workspace(job_id: str, username: str = "") -> None:
     """Delete the entire chat workspace including sessions."""
-    workspace = get_chat_workspace(job_id)
+    workspace = get_chat_workspace(job_id, username)
     if workspace.exists():
         shutil.rmtree(workspace, ignore_errors=True)
         logger.info(f"Deleted chat workspace for job {job_id}")

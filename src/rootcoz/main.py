@@ -228,9 +228,10 @@ def notify_token_usage_changed() -> None:
         event.set()
 
 
-def notify_chat_changed(job_id: str) -> None:
-    """Signal SSE listeners for a specific job that chat messages changed."""
-    for event in _chat_listeners.get(job_id, set()).copy():
+def notify_chat_changed(job_id: str, username: str = "") -> None:
+    """Signal SSE listeners for a specific job+user that chat messages changed."""
+    key = f"{job_id}:{username}" if username else job_id
+    for event in _chat_listeners.get(key, set()).copy():
         event.set()
 
 
@@ -7051,6 +7052,7 @@ async def create_feedback(request: Request, body: FeedbackCreateRequest):
 @app.get("/api/chat/{job_id}")
 async def get_chat_history(
     job_id: str,
+    request: Request,
     limit: int = Query(default=200, ge=1, le=500),
     offset: int = Query(default=0, ge=0),
 ) -> dict:
@@ -7059,8 +7061,11 @@ async def get_chat_history(
     if not result:
         raise HTTPException(status_code=404, detail="Job not found")
 
-    messages = await storage.get_chat_messages(job_id, limit=limit, offset=offset)
-    total = await storage.count_chat_messages(job_id)
+    username = getattr(request.state, "username", "")
+    messages = await storage.get_chat_messages(
+        job_id, limit=limit, offset=offset, username=username
+    )
+    total = await storage.count_chat_messages(job_id, username=username)
     return {"messages": messages, "total": total}
 
 
@@ -7081,7 +7086,8 @@ async def init_chat(job_id: str, request: Request) -> dict:
     params = result_data.get("request_params", {})
 
     # Create workspace
-    workspace = ensure_chat_workspace(job_id)
+    username = getattr(request.state, "username", "")
+    workspace = ensure_chat_workspace(job_id, username=username)
 
     # Decrypt params for repo cloning
     decrypted_params: dict = {}
@@ -7143,12 +7149,14 @@ def _get_chat_lock(job_id: str) -> asyncio.Lock:
 @app.get("/api/chat/{job_id}/stream")
 async def chat_stream(job_id: str, request: Request) -> StreamingResponse:
     """SSE stream for real-time chat message updates."""
+    username = getattr(request.state, "username", "")
+    listener_key = f"{job_id}:{username}" if username else job_id
     return _make_sse_stream(
         request,
         set(),
         "chat-changed",
         per_key_listeners=_chat_listeners,
-        listener_key=job_id,
+        listener_key=listener_key,
     )
 
 
@@ -7185,12 +7193,13 @@ async def send_chat_message(
         job_id=job_id,
         role="assistant",
         content="",
+        username=request.state.username,
         ai_provider=body.ai_provider or "",
         ai_model=body.ai_model or "",
         status="pending",
     )
 
-    notify_chat_changed(job_id)
+    notify_chat_changed(job_id, username=request.state.username)
 
     # Kick off background processing
     background_tasks.add_task(
@@ -7239,7 +7248,7 @@ async def _process_chat_message(
         setup_chat_scripts,
     )
 
-    lock = _get_chat_lock(job_id)
+    lock = _get_chat_lock(f"{job_id}:{username}")
     auth_header = ""
 
     async with lock:
@@ -7268,7 +7277,7 @@ async def _process_chat_message(
                 raise RuntimeError("No AI provider configured")
 
             # Get conversation history (limit to last 50 messages)
-            all_history = await storage.get_chat_messages(job_id)
+            all_history = await storage.get_chat_messages(job_id, username=username)
             # Filter to only completed messages for context
             history = [m for m in all_history if m.get("status") != "pending"][-50:]
 
@@ -7290,7 +7299,7 @@ async def _process_chat_message(
                     )
                     break
 
-            workspace = ensure_chat_workspace(job_id)
+            workspace = ensure_chat_workspace(job_id, username=username)
 
             decrypted_params = {}
             try:
@@ -7385,7 +7394,7 @@ async def _process_chat_message(
                     assistant_msg_id, f"Error: {response_text}"
                 )
                 await storage.update_chat_message_status(assistant_msg_id, "failed")
-                notify_chat_changed(job_id)
+                notify_chat_changed(job_id, username=username)
                 return
 
             # Update the pending assistant message with the real response
@@ -7404,7 +7413,7 @@ async def _process_chat_message(
                 job_id,
                 new_session_id,
             )
-            notify_chat_changed(job_id)
+            notify_chat_changed(job_id, username=username)
 
         except Exception:
             logger.error(
@@ -7419,7 +7428,7 @@ async def _process_chat_message(
                     "An error occurred while processing your message. Please try again.",
                 )
                 await storage.update_chat_message_status(assistant_msg_id, "failed")
-                notify_chat_changed(job_id)
+                notify_chat_changed(job_id, username=username)
             except Exception:
                 logger.error(
                     "Failed to update error status for chat msg %d",
@@ -7432,36 +7441,25 @@ async def _process_chat_message(
 
 @app.delete("/api/chat/{job_id}")
 async def clear_chat_history(job_id: str, request: Request) -> dict:
-    """Clear all chat messages for a job."""
+    """Clear chat messages for the current user on a job."""
     _check_allow_list(request)
     from rootcoz.engine.chat import cleanup_chat_workspace
 
-    stored = await get_result(job_id, strip_sensitive=False)
-    if not stored or not stored.get("result"):
+    stored = await get_result(job_id)
+    if not stored:
         raise HTTPException(status_code=404, detail="Job not found")
 
-    result_data = stored["result"]
-    params = result_data.get("request_params", {})
-    if params:
-        original_submitter = params.get("submitted_by", "")
-        requesting_user = getattr(request.state, "username", "")
-        is_admin = getattr(request.state, "is_admin", False)
-        if not is_admin and requesting_user != original_submitter:
-            raise HTTPException(
-                status_code=403,
-                detail="Only the original submitter or an admin can clear chat history",
-            )
-    elif not getattr(request.state, "is_admin", False):
-        raise HTTPException(
-            status_code=403,
-            detail="Cannot determine job ownership; only admins can clear chat for legacy jobs",
-        )
-
-    count = await storage.delete_chat_messages(job_id)
+    username = request.state.username
+    count = await storage.delete_chat_messages(job_id, username=username)
     try:
-        cleanup_chat_workspace(job_id)
+        cleanup_chat_workspace(job_id, username=username)
     except Exception:
-        logger.warning("Failed to cleanup chat workspace for %s", job_id, exc_info=True)
+        logger.warning(
+            "Failed to cleanup chat workspace for %s/%s",
+            job_id,
+            username,
+            exc_info=True,
+        )
     return {"deleted": count}
 
 

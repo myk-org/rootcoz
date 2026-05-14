@@ -199,7 +199,7 @@ class TestChatStorage:
         )
         assert msg_id > 0
 
-        messages = await storage.get_chat_messages("test-job-chat")
+        messages = await storage.get_chat_messages("test-job-chat", username="testuser")
         assert len(messages) == 1
         assert messages[0]["role"] == "user"
         assert messages[0]["content"] == "hello"
@@ -207,30 +207,36 @@ class TestChatStorage:
 
     @pytest.mark.asyncio
     async def test_count_messages(self, setup_test_db):
-        await storage.add_chat_message("count-job", "user", "msg1")
-        await storage.add_chat_message("count-job", "assistant", "msg2")
-        count = await storage.count_chat_messages("count-job")
+        await storage.add_chat_message("count-job", "user", "msg1", username="u1")
+        await storage.add_chat_message("count-job", "assistant", "msg2", username="u1")
+        count = await storage.count_chat_messages("count-job", username="u1")
         assert count == 2
 
     @pytest.mark.asyncio
     async def test_delete_messages(self, setup_test_db):
-        await storage.add_chat_message("del-job", "user", "msg")
-        deleted = await storage.delete_chat_messages("del-job")
+        await storage.add_chat_message("del-job", "user", "msg", username="u1")
+        deleted = await storage.delete_chat_messages("del-job", username="u1")
         assert deleted == 1
-        messages = await storage.get_chat_messages("del-job")
+        messages = await storage.get_chat_messages("del-job", username="u1")
         assert len(messages) == 0
 
     @pytest.mark.asyncio
     async def test_get_messages_pagination(self, setup_test_db):
         for i in range(5):
-            await storage.add_chat_message("page-job", "user", f"msg-{i}")
+            await storage.add_chat_message(
+                "page-job", "user", f"msg-{i}", username="u1"
+            )
 
-        messages = await storage.get_chat_messages("page-job", limit=2, offset=0)
+        messages = await storage.get_chat_messages(
+            "page-job", limit=2, offset=0, username="u1"
+        )
         assert len(messages) == 2
         assert messages[0]["content"] == "msg-0"
         assert messages[1]["content"] == "msg-1"
 
-        messages = await storage.get_chat_messages("page-job", limit=2, offset=3)
+        messages = await storage.get_chat_messages(
+            "page-job", limit=2, offset=3, username="u1"
+        )
         assert len(messages) == 2
         assert messages[0]["content"] == "msg-3"
         assert messages[1]["content"] == "msg-4"
@@ -251,12 +257,13 @@ class TestChatStorage:
             job_id="ai-job",
             role="assistant",
             content="AI response",
+            username="u1",
             ai_provider="claude",
             ai_model="sonnet-4",
         )
         assert msg_id > 0
 
-        messages = await storage.get_chat_messages("ai-job")
+        messages = await storage.get_chat_messages("ai-job", username="u1")
         assert len(messages) == 1
         assert messages[0]["ai_provider"] == "claude"
         assert messages[0]["ai_model"] == "sonnet-4"
@@ -265,6 +272,54 @@ class TestChatStorage:
     async def test_delete_returns_zero_when_empty(self, setup_test_db):
         deleted = await storage.delete_chat_messages("nothing-here")
         assert deleted == 0
+
+    @pytest.mark.asyncio
+    async def test_messages_scoped_by_username(self, setup_test_db):
+        """Messages are isolated per user when username is provided."""
+        await storage.add_chat_message(
+            "scope-job", "user", "from alice", username="alice"
+        )
+        await storage.add_chat_message("scope-job", "user", "from bob", username="bob")
+
+        alice_msgs = await storage.get_chat_messages("scope-job", username="alice")
+        assert len(alice_msgs) == 1
+        assert alice_msgs[0]["content"] == "from alice"
+
+        bob_msgs = await storage.get_chat_messages("scope-job", username="bob")
+        assert len(bob_msgs) == 1
+        assert bob_msgs[0]["content"] == "from bob"
+
+        # Without username filter, all messages are returned
+        all_msgs = await storage.get_chat_messages("scope-job")
+        assert len(all_msgs) == 2
+
+    @pytest.mark.asyncio
+    async def test_delete_scoped_by_username(self, setup_test_db):
+        """Deleting with username only removes that user's messages."""
+        await storage.add_chat_message(
+            "del-scope-job", "user", "alice msg", username="alice"
+        )
+        await storage.add_chat_message(
+            "del-scope-job", "user", "bob msg", username="bob"
+        )
+
+        deleted = await storage.delete_chat_messages("del-scope-job", username="alice")
+        assert deleted == 1
+
+        remaining = await storage.get_chat_messages("del-scope-job")
+        assert len(remaining) == 1
+        assert remaining[0]["username"] == "bob"
+
+    @pytest.mark.asyncio
+    async def test_count_scoped_by_username(self, setup_test_db):
+        """Count with username only counts that user's messages."""
+        await storage.add_chat_message("cnt-scope-job", "user", "a", username="alice")
+        await storage.add_chat_message("cnt-scope-job", "user", "b", username="alice")
+        await storage.add_chat_message("cnt-scope-job", "user", "c", username="bob")
+
+        assert await storage.count_chat_messages("cnt-scope-job", username="alice") == 2
+        assert await storage.count_chat_messages("cnt-scope-job", username="bob") == 1
+        assert await storage.count_chat_messages("cnt-scope-job") == 3
 
 
 # ---------------------------------------------------------------------------

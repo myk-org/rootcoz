@@ -3845,25 +3845,39 @@ async def add_chat_message(
 
 
 async def get_chat_messages(
-    job_id: str, limit: int = 200, offset: int = 0
+    job_id: str, limit: int = 200, offset: int = 0, username: str = ""
 ) -> list[dict]:
     """Get chat messages for a job, ordered by id ASC."""
     async with _connect_db() as db:
-        cursor = await db.execute(
-            "SELECT id, job_id, role, content, username, ai_provider, ai_model, session_id, status, created_at FROM chat_messages WHERE job_id = ? ORDER BY id ASC LIMIT ? OFFSET ?",
-            (job_id, limit, offset),
-        )
+        if username:
+            cursor = await db.execute(
+                "SELECT id, job_id, role, content, username, ai_provider, ai_model, session_id, status, created_at "
+                "FROM chat_messages WHERE job_id = ? AND username = ? ORDER BY id ASC LIMIT ? OFFSET ?",
+                (job_id, username, limit, offset),
+            )
+        else:
+            cursor = await db.execute(
+                "SELECT id, job_id, role, content, username, ai_provider, ai_model, session_id, status, created_at "
+                "FROM chat_messages WHERE job_id = ? ORDER BY id ASC LIMIT ? OFFSET ?",
+                (job_id, limit, offset),
+            )
         rows = await cursor.fetchall()
         return [dict(row) for row in rows]
 
 
-async def count_chat_messages(job_id: str) -> int:
+async def count_chat_messages(job_id: str, username: str = "") -> int:
     """Count total chat messages for a job."""
     async with _connect_db() as db:
-        cursor = await db.execute(
-            "SELECT COUNT(*) FROM chat_messages WHERE job_id = ?",
-            (job_id,),
-        )
+        if username:
+            cursor = await db.execute(
+                "SELECT COUNT(*) FROM chat_messages WHERE job_id = ? AND username = ?",
+                (job_id, username),
+            )
+        else:
+            cursor = await db.execute(
+                "SELECT COUNT(*) FROM chat_messages WHERE job_id = ?",
+                (job_id,),
+            )
         row = await cursor.fetchone()
         return row[0] if row else 0
 
@@ -3875,25 +3889,38 @@ async def delete_chat_message_by_id(msg_id: int) -> None:
         await db.commit()
 
 
-async def delete_chat_messages(job_id: str) -> int:
-    """Delete all chat messages for a job. Returns count deleted."""
+async def delete_chat_messages(job_id: str, username: str = "") -> int:
+    """Delete all chat messages for a job (optionally scoped to a user). Returns count deleted."""
     async with _connect_db() as db:
-        cursor = await db.execute(
-            "DELETE FROM chat_messages WHERE job_id = ?",
-            (job_id,),
-        )
+        if username:
+            cursor = await db.execute(
+                "DELETE FROM chat_messages WHERE job_id = ? AND username = ?",
+                (job_id, username),
+            )
+        else:
+            cursor = await db.execute(
+                "DELETE FROM chat_messages WHERE job_id = ?",
+                (job_id,),
+            )
         await db.commit()
         return cursor.rowcount
 
 
-async def get_pending_chat_messages(job_id: str) -> list[dict]:
+async def get_pending_chat_messages(job_id: str, username: str = "") -> list[dict]:
     """Get pending (queued) chat messages for a job."""
     async with _connect_db() as db:
-        cursor = await db.execute(
-            "SELECT id, job_id, role, content, username, ai_provider, ai_model, session_id, status, created_at "
-            "FROM chat_messages WHERE job_id = ? AND status = 'pending' ORDER BY id ASC",
-            (job_id,),
-        )
+        if username:
+            cursor = await db.execute(
+                "SELECT id, job_id, role, content, username, ai_provider, ai_model, session_id, status, created_at "
+                "FROM chat_messages WHERE job_id = ? AND username = ? AND status = 'pending' ORDER BY id ASC",
+                (job_id, username),
+            )
+        else:
+            cursor = await db.execute(
+                "SELECT id, job_id, role, content, username, ai_provider, ai_model, session_id, status, created_at "
+                "FROM chat_messages WHERE job_id = ? AND status = 'pending' ORDER BY id ASC",
+                (job_id,),
+            )
         rows = await cursor.fetchall()
         return [dict(r) for r in rows]
 
