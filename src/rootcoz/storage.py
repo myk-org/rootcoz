@@ -2983,8 +2983,8 @@ async def create_user(username: str, *, status: str = "active") -> tuple[str, st
                     raise ValueError(msg)
                 # Existing user without key — generate one
                 update_cursor = await db.execute(
-                    "UPDATE users SET api_key_hash = ?, status = ? WHERE username = ? AND role = 'user'",
-                    (key_hash, status, username),
+                    "UPDATE users SET api_key_hash = ? WHERE username = ? AND role = 'user'",
+                    (key_hash, username),
                 )
                 if update_cursor.rowcount == 0:
                     msg = f"User '{username}' not found or is not a regular user"
