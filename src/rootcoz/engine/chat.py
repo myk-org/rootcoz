@@ -37,6 +37,7 @@ def ensure_chat_workspace(job_id: str) -> Path:
     workspace = get_chat_workspace(job_id)
     workspace.mkdir(parents=True, exist_ok=True)
     workspace.chmod(0o700)
+    logger.info("Chat workspace created: %s", workspace)
     return workspace
 
 
@@ -73,8 +74,12 @@ async def clone_chat_repos(
                 clean_url, ref = parse_repo_ref(str(tests_repo_url))
                 repo_name = derive_test_repo_name(clean_url, additional_repos)
                 if (workspace / repo_name).exists():
+                    logger.debug(
+                        "Chat: repo %s already cloned in %s", repo_name, workspace
+                    )
                     cloned_any = True
                 else:
+                    logger.info("Chat: cloning repo %s into %s", repo_name, workspace)
                     token = request_params.get("tests_repo_token", "")
                     await asyncio.to_thread(
                         repo_manager.clone_into,
@@ -96,8 +101,12 @@ async def clone_chat_repos(
             for repo in repos:
                 try:
                     if (workspace / repo.name).exists():
+                        logger.debug(
+                            "Chat: repo %s already cloned in %s", repo.name, workspace
+                        )
                         cloned_any = True
                         continue
+                    logger.info("Chat: cloning repo %s into %s", repo.name, workspace)
                     token = getattr(repo, "token", None) or ""
                     await asyncio.to_thread(
                         repo_manager.clone_into,
@@ -339,6 +348,14 @@ async def chat_with_ai(
         Tuple of (success, response_text, session_id).
         session_id is returned from the AI CLI for session continuity.
     """
+    logger.info(
+        "Chat: %s session for job %s (provider=%s, model=%s)",
+        "resuming" if session_id else "new",
+        job_id,
+        ai_provider,
+        ai_model,
+    )
+
     if session_id:
         # Continue existing session — just send the new message
         prompt = message

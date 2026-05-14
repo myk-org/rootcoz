@@ -7085,6 +7085,13 @@ async def init_chat(job_id: str, request: Request) -> dict:
     # Clone repos
     repos_available = await clone_chat_repos(workspace, decrypted_params)
 
+    logger.info(
+        "Chat init for job %s: workspace=%s, repos=%s",
+        job_id,
+        workspace,
+        repos_available,
+    )
+
     # Collect repo names that were cloned
     repo_names = []
     if workspace.exists():
@@ -7108,6 +7115,7 @@ async def close_chat(job_id: str) -> dict:
     from rootcoz.engine.chat import cleanup_chat_repos
 
     cleanup_chat_repos(job_id)
+    logger.info("Chat close for job %s", job_id)
     return {"status": "ok"}
 
 
@@ -7160,6 +7168,12 @@ async def send_chat_message(
             and msg.get("ai_model") == ai_model
         ):
             last_session_id = msg["session_id"]
+            logger.debug(
+                "Chat: found session %s from history (provider=%s, model=%s)",
+                last_session_id,
+                ai_provider,
+                ai_model,
+            )
             break
 
     # Set up chat workspace
@@ -7225,6 +7239,8 @@ async def send_chat_message(
         raise
     finally:
         await _cleanup_ai_session(auth_header)
+
+    logger.debug("Chat: AI returned session_id=%s", new_session_id)
 
     if not success:
         # Delete the user message we saved — don't persist failed turns
