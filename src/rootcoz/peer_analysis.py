@@ -420,6 +420,11 @@ async def analyze_failure_group_with_peers(
     peer_sessions: dict[int, str] = {}  # peer_idx -> session_id
 
     # Step 2: Debate loop
+    logger.info(
+        "Peer analysis: %d peers configured, max %d rounds, sessions enabled",
+        len(peer_ai_configs),
+        max_rounds,
+    )
     for round_num in range(1, max_rounds + 1):
         rounds_used = round_num
         logger.info(f"Peer analysis: starting debate round {round_num}/{max_rounds}")
@@ -486,6 +491,13 @@ async def analyze_failure_group_with_peers(
             _peer_prompts: dict[int, str] = peer_prompts,
         ) -> tuple[AiConfigEntry, AIResult]:
             prompt = _peer_prompts[idx]
+            logger.info(
+                "Peer %d (%s/%s): resuming session %s",
+                idx,
+                config.ai_provider,
+                config.ai_model,
+                peer_sessions.get(idx, "new"),
+            )
             ai_result = await call_ai_cli_with_retry(
                 prompt,
                 cwd=repo_path,
@@ -519,6 +531,13 @@ async def analyze_failure_group_with_peers(
             _cfg_r, ai_result_r = result
             if ai_result_r.session_id:
                 peer_sessions[i] = ai_result_r.session_id
+                logger.info(
+                    "Peer %d (%s/%s): captured session_id=%s",
+                    i,
+                    _cfg_r.ai_provider,
+                    _cfg_r.ai_model,
+                    ai_result_r.session_id,
+                )
 
         # Process peer responses
         round_peer_entries: list[PeerRound] = []
