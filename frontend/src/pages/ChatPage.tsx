@@ -76,6 +76,16 @@ export function ChatPage() {
       })
   }, [jobId])
 
+  // Cleanup repos when leaving chat (keep sessions)
+  useEffect(() => {
+    return () => {
+      if (jobId) {
+        // Fire-and-forget cleanup — don't await
+        api.post(`/api/chat/${jobId}/close`, {}).catch(() => {})
+      }
+    }
+  }, [jobId])
+
   // Load chat history + job info
   useEffect(() => {
     if (!jobId) return

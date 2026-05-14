@@ -7101,6 +7101,15 @@ async def init_chat(job_id: str, request: Request) -> dict:
     }
 
 
+@app.post("/api/chat/{job_id}/close")
+async def close_chat(job_id: str) -> dict:
+    """Clean up chat repos when user leaves the chat page. Keeps session files."""
+    from rootcoz.engine.chat import cleanup_chat_repos
+
+    cleanup_chat_repos(job_id)
+    return {"status": "ok"}
+
+
 @app.post("/api/chat/{job_id}")
 async def send_chat_message(
     job_id: str, body: ChatMessageRequest, request: Request
