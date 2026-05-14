@@ -214,7 +214,6 @@ async def call_ai_cli_with_retry(
     ai_model: str = "",
     ai_cli_timeout: int | None = None,
     cli_flags: list[str] | None = None,
-    session_id: str | None = None,
     max_retries: int = 3,
     session_id: str | None = None,
 ) -> AIResult:
