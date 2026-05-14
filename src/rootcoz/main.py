@@ -7120,12 +7120,13 @@ async def init_chat(job_id: str, request: Request) -> dict:
 
 @app.post("/api/chat/{job_id}/close")
 async def close_chat(job_id: str, request: Request) -> dict:
-    """Clean up chat repos when user leaves the chat page. Keeps session files."""
-    _check_allow_list(request)
-    from rootcoz.engine.chat import cleanup_chat_repos
+    """Signal that a user left the chat page.
 
-    cleanup_chat_repos(job_id)
-    logger.info("Chat close for job %s", job_id)
+    Does NOT clean up the workspace — other users/tabs may still be active.
+    Workspace cleanup only happens on DELETE /api/chat/{job_id} (clear history).
+    """
+    _check_allow_list(request)
+    logger.info("Chat: user left chat page for job %s", job_id)
     return {"status": "ok"}
 
 

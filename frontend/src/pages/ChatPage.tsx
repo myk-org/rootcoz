@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback, type FormEvent } from 'react'
+import { useState, useEffect, useRef, useCallback, type FormEvent, type KeyboardEvent } from 'react'
 import { useParams, Link } from 'react-router-dom'
 import { api } from '@/lib/api'
 import { Button } from '@/components/ui/button'
@@ -54,20 +54,24 @@ export function ChatPage() {
   // Initialize chat workspace (clone repos)
   useEffect(() => {
     if (!jobId) return
+    let ignore = false
     setChatReady(false)
     setInitMessage('Initializing workspace...')
     api.post<{ ready: boolean; repos_cloned: boolean; repo_names: string[] }>(`/api/chat/${jobId}/init`, {})
       .then(res => {
+        if (ignore) return
         if (res.repos_cloned && res.repo_names.length > 0) {
           setInitMessage(`Repos cloned: ${res.repo_names.join(', ')}`)
         }
         setChatReady(true)
       })
       .catch(() => {
+        if (ignore) return
         // Init failed but chat can still work without repos
         setChatReady(true)
         setInitMessage('')
       })
+    return () => { ignore = true }
   }, [jobId])
 
   // Cleanup repos when leaving chat (keep sessions)
@@ -83,12 +87,14 @@ export function ChatPage() {
   // Load chat history + job info
   useEffect(() => {
     if (!jobId) return
+    let ignore = false
     setLoading(true)
 
     Promise.all([
       api.get<{ messages: ChatMessage[]; total: number }>(`/api/chat/${jobId}`),
       api.get<{ result: { job_name: string; build_number: number; summary: string; ai_provider: string; ai_model: string } }>(`/results/${jobId}`),
     ]).then(([chatRes, resultRes]) => {
+      if (ignore) return
       setMessages(chatRes.messages)
       if (resultRes.result) {
         const r = resultRes.result
@@ -97,8 +103,12 @@ export function ChatPage() {
         setAiModel(r.ai_model || '')
       }
     }).catch(err => {
+      if (ignore) return
       setError(err instanceof Error ? err.message : 'Failed to load chat')
-    }).finally(() => setLoading(false))
+    }).finally(() => {
+      if (!ignore) setLoading(false)
+    })
+    return () => { ignore = true }
   }, [jobId])
 
   // SSE: listen for chat message updates (AI responses)
@@ -196,7 +206,7 @@ export function ChatPage() {
     }
   }, [jobId])
 
-  const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+  const handleKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault()
       handleSend()
@@ -218,12 +228,12 @@ export function ChatPage() {
         {/* Header */}
         <div className="flex items-center justify-between border-b border-border-muted px-6 py-3 shrink-0">
           <div className="flex items-center gap-3">
-            <Link to={`/results/${jobId}`}>
-              <Button variant="ghost" size="sm">
+            <Button asChild variant="ghost" size="sm">
+              <Link to={`/results/${jobId}`}>
                 <ArrowLeft className="h-4 w-4 mr-1" />
                 Results
-              </Button>
-            </Link>
+              </Link>
+            </Button>
             <div>
               <h1 className="text-sm font-display font-medium text-text-primary">
                 Chat: {jobInfo?.job_name || jobId}
@@ -243,7 +253,7 @@ export function ChatPage() {
             {/* Clear button */}
             <Tooltip>
               <TooltipTrigger asChild>
-                <Button variant="ghost" size="sm" onClick={handleClear} disabled={messages.length === 0 || hasPending}>
+                <Button variant="ghost" size="sm" onClick={handleClear} disabled={messages.length === 0 || hasPending} aria-label="Clear chat history">
                   <Trash2 className="h-4 w-4" />
                 </Button>
               </TooltipTrigger>
@@ -306,6 +316,7 @@ export function ChatPage() {
                           type="button"
                           className="text-text-tertiary hover:text-text-primary transition-colors"
                           onClick={() => copyMessage(msg.content, msg.id)}
+                          aria-label="Copy message"
                         >
                           {copiedMsgId === msg.id ? <Check className="h-3 w-3 text-signal-green" /> : <Copy className="h-3 w-3" />}
                         </button>
@@ -346,7 +357,7 @@ export function ChatPage() {
               className="flex-1 resize-none min-h-[44px] max-h-[120px]"
               rows={1}
             />
-            <Button type="submit" disabled={!input.trim() || !chatReady} size="sm" className="self-end">
+            <Button type="submit" disabled={!input.trim() || !chatReady} size="sm" className="self-end" aria-label="Send message">
               <Send className="h-4 w-4" />
             </Button>
           </form>

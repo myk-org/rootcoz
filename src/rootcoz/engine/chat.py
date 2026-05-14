@@ -41,6 +41,21 @@ def ensure_chat_workspace(job_id: str) -> Path:
     return workspace
 
 
+def _resolve_chat_repo_target(workspace: Path, repo_name: str) -> tuple[str, Path]:
+    """Sanitize and validate a repo name for the chat workspace.
+
+    Returns (safe_name, target_path). Raises ValueError if the name is
+    invalid (empty, dot-prefixed, or escapes the workspace).
+    """
+    safe_name = repo_name.replace("/", "_").replace("..", "_").replace("\\", "_")
+    if not safe_name or safe_name.startswith("."):
+        raise ValueError(f"Invalid repo name for chat workspace: {repo_name}")
+    target = (workspace / safe_name).resolve()
+    if not target.is_relative_to(workspace.resolve()):
+        raise ValueError(f"Repo target escapes chat workspace: {repo_name}")
+    return safe_name, target
+
+
 async def clone_chat_repos(
     workspace: Path,
     request_params: dict,
@@ -73,29 +88,30 @@ async def clone_chat_repos(
             try:
                 clean_url, ref = parse_repo_ref(str(tests_repo_url))
                 raw_name = derive_test_repo_name(clean_url, additional_repos)
-                repo_name = (
-                    raw_name.replace("/", "_").replace("..", "_").replace("\\", "_")
-                )
-                target = workspace / repo_name
-                if not target.resolve().is_relative_to(workspace.resolve()):
+                try:
+                    repo_name, target = _resolve_chat_repo_target(workspace, raw_name)
+                except ValueError:
                     logger.warning("Skipping test repo with unsafe name: %s", raw_name)
-                elif target.exists():
-                    logger.debug(
-                        "Chat: repo %s already cloned in %s", repo_name, workspace
-                    )
-                    cloned_any = True
                 else:
-                    logger.info("Chat: cloning repo %s into %s", repo_name, workspace)
-                    token = request_params.get("tests_repo_token", "")
-                    await asyncio.to_thread(
-                        repo_manager.clone_into,
-                        clean_url,
-                        target,
-                        depth=50,
-                        branch=ref,
-                        token=token or None,
-                    )
-                    cloned_any = True
+                    if target.exists():
+                        logger.debug(
+                            "Chat: repo %s already cloned in %s", repo_name, workspace
+                        )
+                        cloned_any = True
+                    else:
+                        logger.info(
+                            "Chat: cloning repo %s into %s", repo_name, workspace
+                        )
+                        token = request_params.get("tests_repo_token", "")
+                        await asyncio.to_thread(
+                            repo_manager.clone_into,
+                            clean_url,
+                            target,
+                            depth=50,
+                            branch=ref,
+                            token=token or None,
+                        )
+                        cloned_any = True
             except Exception:
                 logger.warning("Failed to clone test repo for chat", exc_info=True)
 
@@ -106,13 +122,11 @@ async def clone_chat_repos(
             ]
             for repo in repos:
                 try:
-                    safe_name = (
-                        repo.name.replace("/", "_")
-                        .replace("..", "_")
-                        .replace("\\", "_")
-                    )
-                    target = workspace / safe_name
-                    if not target.resolve().is_relative_to(workspace.resolve()):
+                    try:
+                        safe_name, target = _resolve_chat_repo_target(
+                            workspace, repo.name
+                        )
+                    except ValueError:
                         logger.warning("Skipping repo with unsafe name: %s", repo.name)
                         continue
                     if target.exists():

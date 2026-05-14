@@ -1854,6 +1854,27 @@ class TestRootCozClientApiKeyHeader:
 
 
 class TestRootCozClientChat:
+    def test_init_chat(self):
+        """Test init_chat method."""
+        response_data = {
+            "ready": True,
+            "repos_cloned": True,
+            "repo_names": ["test-repo"],
+            "job_name": "test-job",
+            "build_number": 1,
+        }
+
+        def handler(request):
+            assert request.method == "POST"
+            assert "/api/chat/test-job-id/init" in str(request.url)
+            return httpx.Response(200, json=response_data)
+
+        client = _make_client(handler)
+        result = client.init_chat("test-job-id")
+        assert result["ready"] is True
+        assert result["repos_cloned"] is True
+        assert result["repo_names"] == ["test-repo"]
+
     def test_get_chat_history(self):
         sample = {
             "messages": [
