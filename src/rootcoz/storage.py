@@ -3042,7 +3042,7 @@ async def set_user_status(username: str, status: str) -> bool:
     _validate_user_status(status)
     async with _connect_db() as db:
         cursor = await db.execute(
-            "UPDATE users SET status = ? WHERE username = ?",
+            "UPDATE users SET status = ? WHERE username = ? AND role != 'admin'",
             (status, username),
         )
         await db.commit()
@@ -3067,7 +3067,7 @@ async def list_pending_users() -> list[dict]:
     async with _connect_db() as db:
         cursor = await db.execute(
             "SELECT id, username, role, status, created_at, last_seen "
-            "FROM users WHERE status = 'pending' ORDER BY created_at DESC"
+            "FROM users WHERE status = 'pending' AND role != 'admin' ORDER BY created_at DESC"
         )
         return [dict(row) for row in await cursor.fetchall()]
 
