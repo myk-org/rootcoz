@@ -42,6 +42,8 @@ export function ChatPage() {
   const [sending, setSending] = useState(false)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
+  const [chatReady, setChatReady] = useState(false)
+  const [initMessage, setInitMessage] = useState('')
   const [jobInfo, setJobInfo] = useState<JobInfo | null>(null)
 
   const [aiProvider, setAiProvider] = useState('')
@@ -54,6 +56,25 @@ export function ChatPage() {
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLTextAreaElement>(null)
   const cancelledRef = useRef(false)
+
+  // Initialize chat workspace (clone repos)
+  useEffect(() => {
+    if (!jobId) return
+    setChatReady(false)
+    setInitMessage('Initializing workspace...')
+    api.post<{ ready: boolean; repos_cloned: boolean; repo_names: string[] }>(`/api/chat/${jobId}/init`, {})
+      .then(res => {
+        if (res.repos_cloned && res.repo_names.length > 0) {
+          setInitMessage(`Repos cloned: ${res.repo_names.join(', ')}`)
+        }
+        setChatReady(true)
+      })
+      .catch(() => {
+        // Init failed but chat can still work without repos
+        setChatReady(true)
+        setInitMessage('')
+      })
+  }, [jobId])
 
   // Load chat history + job info
   useEffect(() => {
@@ -192,10 +213,11 @@ export function ChatPage() {
     }
   }
 
-  if (loading) {
+  if (loading || !chatReady) {
     return (
-      <div className="flex items-center justify-center h-[60vh]">
-        <Loader2 className="h-8 w-8 animate-spin text-text-tertiary" />
+      <div className="flex flex-col items-center justify-center h-[60vh] gap-3">
+        <Loader2 className="h-8 w-8 animate-spin text-accent-blue" />
+        <p className="text-sm text-text-tertiary">{initMessage || 'Loading chat...'}</p>
       </div>
     )
   }
@@ -350,7 +372,7 @@ export function ChatPage() {
               rows={1}
               disabled={sending}
             />
-            <Button type="submit" disabled={!input.trim() || sending} size="sm" className="self-end">
+            <Button type="submit" disabled={!input.trim() || sending || !chatReady} size="sm" className="self-end">
               <Send className="h-4 w-4" />
             </Button>
           </form>

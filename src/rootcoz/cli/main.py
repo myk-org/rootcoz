@@ -2688,6 +2688,29 @@ def metadata_preview(
 # -- Chat ---------------------------------------------------------------------
 
 
+@chat_app.command("init")
+def chat_init(
+    job_id: str = typer.Argument(help="Job ID to initialize chat for."),
+    json_output: bool = _JSON_OPTION,
+) -> None:
+    """Initialize chat workspace (clone repos)."""
+    data = _run_client_command(
+        json_output,
+        lambda c: c.init_chat(job_id),
+        emit_output=False,
+    )
+    if not _state.get("json", False):
+        ready = data.get("ready", False)
+        workspace = data.get("workspace", "")
+        repos = data.get("repo_names", [])
+        typer.echo(f"Ready: {ready}")
+        typer.echo(f"Workspace: {workspace}")
+        if repos:
+            typer.echo(f"Repos: {', '.join(repos)}")
+        else:
+            typer.echo("No repos cloned.")
+
+
 @chat_app.command("history")
 def chat_history(
     job_id: str = typer.Argument(help="Job ID to get chat history for."),

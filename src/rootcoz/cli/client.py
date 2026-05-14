@@ -941,6 +941,10 @@ class RootCozClient:
 
     # -- Chat -----------------------------------------------------------------
 
+    def init_chat(self, job_id: str) -> dict:
+        """Initialize chat workspace. POST /api/chat/{job_id}/init"""
+        return self._request("POST", f"/api/chat/{job_id}/init")
+
     def get_chat_history(self, job_id: str, limit: int = 200) -> dict:
         """Get chat history for a job. GET /api/chat/{job_id}"""
         return self._request("GET", f"/api/chat/{job_id}", params={"limit": limit})

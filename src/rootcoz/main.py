@@ -7056,6 +7056,51 @@ async def get_chat_history(
     return {"messages": messages, "total": total}
 
 
+@app.post("/api/chat/{job_id}/init")
+async def init_chat(job_id: str, request: Request) -> dict:
+    """Initialize chat workspace: create directory and clone repos."""
+    from rootcoz.engine.chat import (
+        ensure_chat_workspace,
+        clone_chat_repos,
+    )
+
+    stored = await get_result(job_id, strip_sensitive=False)
+    if not stored or not stored.get("result"):
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    result_data = stored["result"]
+    params = result_data.get("request_params", {})
+
+    # Create workspace
+    workspace = ensure_chat_workspace(job_id)
+
+    # Decrypt params for repo cloning
+    decrypted_params: dict = {}
+    try:
+        decrypted_params = decrypt_sensitive_fields(dict(params))
+    except Exception:
+        logger.warning("Failed to decrypt request_params for chat init", exc_info=True)
+
+    # Clone repos
+    repos_available = await clone_chat_repos(workspace, decrypted_params)
+
+    # Collect repo names that were cloned
+    repo_names = []
+    if workspace.exists():
+        for item in workspace.iterdir():
+            if item.is_dir() and not item.name.startswith("."):
+                repo_names.append(item.name)
+
+    return {
+        "ready": True,
+        "workspace": str(workspace),
+        "repos_cloned": repos_available,
+        "repo_names": repo_names,
+        "job_name": result_data.get("job_name", ""),
+        "build_number": result_data.get("build_number", 0),
+    }
+
+
 @app.post("/api/chat/{job_id}")
 async def send_chat_message(
     job_id: str, body: ChatMessageRequest, request: Request
