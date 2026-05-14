@@ -108,15 +108,17 @@ export function ReAnalyzeDialog({ open, onOpenChange, result, jobId, failureUuid
   // Fetch models for each peer provider
   useEffect(() => {
     if (!enablePeers) return
+    let ignore = false
     peerConfigs.forEach((peer, i) => {
       if (!peer.ai_provider) {
-        setPeerModels(prev => ({ ...prev, [i]: [] }))
+        if (!ignore) setPeerModels(prev => ({ ...prev, [i]: [] }))
         return
       }
       api.get<{ models: ModelOption[] }>(`/api/ai-models?provider=${peer.ai_provider}`)
-        .then(res => setPeerModels(prev => ({ ...prev, [i]: res.models ?? [] })))
-        .catch(() => setPeerModels(prev => ({ ...prev, [i]: [] })))
+        .then(res => { if (!ignore) setPeerModels(prev => ({ ...prev, [i]: res.models ?? [] })) })
+        .catch(() => { if (!ignore) setPeerModels(prev => ({ ...prev, [i]: [] })) })
     })
+    return () => { ignore = true }
   }, [enablePeers, peerConfigs.map(p => p.ai_provider).join(',')])
 
   // Reset form state when dialog opens

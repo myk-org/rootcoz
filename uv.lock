@@ -1198,7 +1198,6 @@ requires-dist = [
     { name = "python-multipart" },
     { name = "python-simple-logger" },
     { name = "pywebpush" },
-    { name = "pyyaml" },
     { name = "pyyaml", specifier = ">=6.0.3" },
     { name = "reportportal-client", specifier = ">=5.7.4" },
     { name = "typer", specifier = ">=0.9.0" },

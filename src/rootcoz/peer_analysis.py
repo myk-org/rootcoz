@@ -491,13 +491,22 @@ async def analyze_failure_group_with_peers(
             _peer_prompts: dict[int, str] = peer_prompts,
         ) -> tuple[AiConfigEntry, AIResult]:
             prompt = _peer_prompts[idx]
-            logger.info(
-                "Peer %d (%s/%s): resuming session %s",
-                idx,
-                config.ai_provider,
-                config.ai_model,
-                peer_sessions.get(idx, "new"),
-            )
+            session = peer_sessions.get(idx)
+            if session:
+                logger.info(
+                    "Peer %d (%s/%s): resuming session %s",
+                    idx,
+                    config.ai_provider,
+                    config.ai_model,
+                    session,
+                )
+            else:
+                logger.info(
+                    "Peer %d (%s/%s): starting new session",
+                    idx,
+                    config.ai_provider,
+                    config.ai_model,
+                )
             ai_result = await call_ai_cli_with_retry(
                 prompt,
                 cwd=repo_path,

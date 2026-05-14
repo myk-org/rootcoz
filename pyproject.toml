@@ -14,7 +14,6 @@ dependencies = [
   "pydantic-settings",
   "python-jenkins",
   "python-multipart",
-  "pyyaml",
   "pywebpush",
   "python-simple-logger",
   "reportportal-client>=5.7.4",
