@@ -79,6 +79,7 @@ def _make_client(temp_db_path, allowed_users: str = "", admin_key: str = ""):
     env["DB_PATH"] = str(temp_db_path)
     env["ADMIN_KEY"] = effective_admin_key
     env["ROOTCOZ_ENCRYPTION_KEY"] = "test-key-for-hmac"  # pragma: allowlist secret
+    env["REQUIRE_APPROVAL"] = "false"
     if allowed_users:
         env["ALLOWED_USERS"] = allowed_users
     with patch.dict(os.environ, env, clear=True):

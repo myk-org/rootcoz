@@ -285,6 +285,16 @@ class Settings(BaseSettings):
         description="Path to a YAML/JSON file defining name-based metadata rules for auto-assignment",
     )
 
+    # Admin approval for new user registrations
+    require_approval: bool = Field(
+        default=True,
+        description=(
+            "When True, new user registrations require admin approval. "
+            "Users are created with 'pending' status and cannot access "
+            "protected endpoints until approved."
+        ),
+    )
+
     @model_validator(mode="after")
     def _normalize_optional_strings(self) -> "Settings":
         """Strip whitespace from optional string fields; blank becomes None."""

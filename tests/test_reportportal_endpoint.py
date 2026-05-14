@@ -18,6 +18,7 @@ def _rp_disabled_env():
         "AI_MODEL": "test-model",
         "ADMIN_KEY": "test-admin-key-16chars",  # pragma: allowlist secret
         "ROOTCOZ_ENCRYPTION_KEY": "test-encryption-key-for-hmac",  # pragma: allowlist secret
+        "REQUIRE_APPROVAL": "false",
     }
     with patch.dict(os.environ, env, clear=True):
         from rootcoz.config import get_settings
@@ -42,6 +43,7 @@ def _rp_enabled_env():
         "PUBLIC_BASE_URL": "https://rootcoz.example.com",
         "ADMIN_KEY": "test-admin-key-16chars",  # pragma: allowlist secret
         "ROOTCOZ_ENCRYPTION_KEY": "test-encryption-key-for-hmac",  # pragma: allowlist secret
+        "REQUIRE_APPROVAL": "false",
     }
     with patch.dict(os.environ, env, clear=True):
         from rootcoz.config import get_settings

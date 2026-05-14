@@ -183,6 +183,7 @@ def _mock_settings(temp_db_path):
         "DB_PATH": str(temp_db_path),
         "ADMIN_KEY": _TEST_ADMIN_KEY,  # pragma: allowlist secret
         "ROOTCOZ_ENCRYPTION_KEY": "test-encryption-key-for-hmac",  # pragma: allowlist secret
+        "REQUIRE_APPROVAL": "false",
     }
     with patch.dict(os.environ, env, clear=True):
         from rootcoz.config import get_settings

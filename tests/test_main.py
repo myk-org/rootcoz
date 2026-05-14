@@ -129,6 +129,7 @@ def mock_settings(temp_db_path: Path):
         "DB_PATH": str(temp_db_path),
         "ADMIN_KEY": _TEST_ADMIN_KEY,  # pragma: allowlist secret
         "ROOTCOZ_ENCRYPTION_KEY": _TEST_ENCRYPTION_KEY,  # pragma: allowlist secret
+        "REQUIRE_APPROVAL": "false",
     }
     with patch.dict(os.environ, env, clear=True):
         # Clear the lru_cache to use fresh settings

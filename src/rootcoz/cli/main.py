@@ -2312,6 +2312,59 @@ def admin_users_change_role(
             _echo_api_key_warning(api_key)
 
 
+@admin_users_app.command("pending")
+def admin_users_pending(
+    json_output: bool = _JSON_OPTION,
+):
+    """List users awaiting admin approval."""
+    data = _run_client_command(
+        json_output,
+        lambda c: c.list_pending_users(),
+        emit_output=False,
+    )
+    if not _state.get("json", False):
+        users = data.get("users", [])
+        if users:
+            print_output(
+                users,
+                columns=["username", "status", "created_at"],
+                labels={"created_at": "CREATED"},
+                as_json=False,
+            )
+        else:
+            typer.echo("No pending users.")
+
+
+@admin_users_app.command("approve")
+def admin_users_approve(
+    username: str = typer.Argument(..., help="Username to approve."),
+    json_output: bool = _JSON_OPTION,
+):
+    """Approve a pending user registration."""
+    data = _run_client_command(
+        json_output,
+        lambda c: c.approve_user(username),
+        emit_output=False,
+    )
+    if not _state.get("json", False):
+        typer.echo(f"Approved user: {data.get('username', username)}")
+
+
+@admin_users_app.command("reject")
+def admin_users_reject(
+    username: str = typer.Argument(..., help="Username to reject."),
+    json_output: bool = _JSON_OPTION,
+):
+    """Reject a pending user registration."""
+    data = _run_client_command(
+        json_output,
+        lambda c: c.reject_user(username),
+        emit_output=False,
+    )
+    if not _state.get("json", False):
+        typer.echo(f"Rejected user: {data.get('username', username)}")
+
+
 # -- Token Usage (Admin) ------------------------------------------------------
 
 

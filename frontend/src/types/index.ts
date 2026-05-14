@@ -24,6 +24,7 @@ export interface AuthUser {
 export interface AdminUser {
   username: string
   role: string
+  status: 'active' | 'pending' | 'rejected'
   created_at: string
   last_seen: string | null
 }

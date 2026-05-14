@@ -1097,6 +1097,23 @@ def _set_username_cookie(response: Response, username: str, *, secure: bool) -> 
     response.delete_cookie("jji_username", path="/")
 
 
+_APPROVAL_STATUS_RESPONSES: dict[str, str] = {
+    "pending": "Your account is awaiting admin approval",
+    "rejected": "Your account has been rejected",
+}
+
+
+def _blocked_user_status_response(user_status: str | None) -> JSONResponse | None:
+    """Return a 403 JSONResponse if user_status is pending/rejected, else None."""
+    detail = _APPROVAL_STATUS_RESPONSES.get(user_status or "")
+    if detail is None:
+        return None
+    return JSONResponse(
+        status_code=403,
+        content={"detail": detail, "status": user_status},
+    )
+
+
 class AuthMiddleware(BaseHTTPMiddleware):
     """Authenticate all requests via session cookie, Bearer token, or trusted SSO header.
 
@@ -1298,6 +1315,20 @@ class AuthMiddleware(BaseHTTPMiddleware):
                     "detail": "Authentication required. Please log in with your API key."
                 },
             )
+
+        # Check pending user status when REQUIRE_APPROVAL is enabled.
+        # Admin users and the bootstrap admin always bypass this check.
+        if (
+            has_valid_session
+            and username
+            and not is_admin
+            and settings.require_approval
+            and path not in self._PUBLIC_PATHS
+        ):
+            user_status = await storage.get_user_status(username)
+            blocked = _blocked_user_status_response(user_status)
+            if blocked is not None:
+                return blocked
 
         response = await call_next(request)
 
@@ -6056,6 +6087,14 @@ async def login(request: Request) -> JSONResponse:
         logger.info(f"[AUDIT] Failed login attempt for username '{username}'")
         raise HTTPException(status_code=401, detail="Invalid username or API key")
 
+    # Check pending/rejected status before creating a session (non-admin only)
+    if not is_admin and settings.require_approval:
+        user_status = await storage.get_user_status(username)
+        blocked = _blocked_user_status_response(user_status)
+        if blocked is not None:
+            logger.info(f"[AUDIT] Login blocked for {user_status} user '{username}'")
+            return blocked
+
     session_token = await storage.create_session(username, is_admin=is_admin)
     response = JSONResponse(
         content={
@@ -6178,6 +6217,8 @@ async def register_user(request: Request) -> JSONResponse:
     """Register a new user or generate API key for existing user without one.
 
     Returns the generated API key (shown once).
+    When REQUIRE_APPROVAL is True, new users are created with 'pending' status
+    and must be approved by an admin before accessing protected endpoints.
     """
     body = await _read_json_object(request)
     raw_username = body.get("username", "")
@@ -6194,22 +6235,34 @@ async def register_user(request: Request) -> JSONResponse:
             status_code=403, detail="Registration is restricted. Contact an admin."
         )
 
+    # Determine user status based on REQUIRE_APPROVAL setting
+    user_status = "pending" if settings.require_approval else "active"
+
     try:
-        _, raw_key = await storage.create_user(username)
+        _, raw_key = await storage.create_user(username, status=user_status)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     # Create a session for the user
     session_token = await storage.create_session(username, is_admin=False)
 
+    content: dict = {
+        "username": username,
+        "api_key": raw_key,
+        "role": "user",
+        "is_admin": False,
+        "status": user_status,
+    }
+    if user_status == "pending":
+        content["message"] = (
+            "Your account has been created and is awaiting admin approval. "
+            "Save this API key \u2014 you'll need it to log in once approved."
+        )
+    else:
+        content["message"] = "Save this API key \u2014 you won't see it again."
+
     response = JSONResponse(
-        content={
-            "username": username,
-            "api_key": raw_key,
-            "role": "user",
-            "is_admin": False,
-            "message": "Save this API key \u2014 you won't see it again.",
-        },
+        content=content,
         headers={
             "Cache-Control": "no-store, no-cache, must-revalidate",
             "Pragma": "no-cache",
@@ -6239,7 +6292,7 @@ async def register_user(request: Request) -> JSONResponse:
     )
     response.delete_cookie("jji_username", path="/")
 
-    logger.info(f"[AUDIT] User registered: {username}")
+    logger.info(f"[AUDIT] User registered: {username} (status={user_status})")
     return response
 
 
@@ -6485,6 +6538,56 @@ async def list_users_endpoint(request: Request) -> dict:
     _require_admin(request)
     users = await storage.list_users()
     return {"users": users}
+
+
+@app.get("/api/admin/users/pending")
+async def list_pending_users_endpoint(request: Request) -> dict:
+    """List users awaiting approval."""
+    _require_admin(request)
+    users = await storage.list_pending_users()
+    return {"users": users}
+
+
+@app.post("/api/admin/users/{username}/approve")
+async def approve_user(username: str, request: Request) -> dict:
+    """Approve a pending user registration."""
+    _require_admin(request)
+    status = await storage.get_user_status(username)
+    if status is None:
+        raise HTTPException(status_code=404, detail=f"User '{username}' not found")
+    if status != "pending":
+        raise HTTPException(
+            status_code=400,
+            detail=f"User '{username}' is not pending (current status: {status})",
+        )
+    await storage.set_user_status(username, "active")
+    logger.info(f"[AUDIT] Admin '{request.state.username}' approved user '{username}'")
+    return {
+        "username": username,
+        "status": "active",
+        "message": f"User '{username}' has been approved.",
+    }
+
+
+@app.post("/api/admin/users/{username}/reject")
+async def reject_user(username: str, request: Request) -> dict:
+    """Reject a pending user registration."""
+    _require_admin(request)
+    status = await storage.get_user_status(username)
+    if status is None:
+        raise HTTPException(status_code=404, detail=f"User '{username}' not found")
+    if status != "pending":
+        raise HTTPException(
+            status_code=400,
+            detail=f"User '{username}' is not pending (current status: {status})",
+        )
+    await storage.set_user_status(username, "rejected")
+    logger.info(f"[AUDIT] Admin '{request.state.username}' rejected user '{username}'")
+    return {
+        "username": username,
+        "status": "rejected",
+        "message": f"User '{username}' has been rejected.",
+    }
 
 
 @app.post("/api/admin/users/{username}/rotate-key")

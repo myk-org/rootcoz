@@ -30,6 +30,7 @@ export function NavBar() {
   const { isAdmin, username } = useAuth()
   const [unreadCount, setUnreadCount] = useState(0)
   const [activeCount, setActiveCount] = useState(0)
+  const [pendingCount, setPendingCount] = useState(0)
   const [feedbackOpen, setFeedbackOpen] = useState(false)
   const [feedbackEnabled, setFeedbackEnabled] = useState(false)
   // Unified SSE stream for navbar badges — server pushes both counts in real-time
@@ -61,11 +62,20 @@ export function NavBar() {
     }
   }, [username])
 
+  // Fetch pending user count for admin badge
+  useEffect(() => {
+    if (!isAdmin) return
+    api.get<{ users: { username: string }[] }>('/api/admin/users/pending')
+      .then(res => setPendingCount(res.users?.length ?? 0))
+      .catch(() => setPendingCount(0))
+  }, [isAdmin])
+
   // Clear stale counts when user is logged out
   useEffect(() => {
     if (!username) {
       setUnreadCount(0)
       setActiveCount(0)
+      setPendingCount(0)
     }
   }, [username])
 
@@ -123,6 +133,7 @@ export function NavBar() {
                 {label}
                 {to === '/' && <NavBadge count={activeCount} color="orange" tooltip={`${activeCount} ${activeCount === 1 ? 'analysis' : 'analyses'} running`} pulse />}
                 {to === '/mentions' && <NavBadge count={unreadCount} color="blue" tooltip={`${unreadCount} unread ${unreadCount === 1 ? 'mention' : 'mentions'}`} />}
+                {to === '/admin/users' && <NavBadge count={pendingCount} color="orange" tooltip={`${pendingCount} pending ${pendingCount === 1 ? 'approval' : 'approvals'}`} />}
               </Link>
             ))}
             <div className="h-6 w-px bg-border-default" />
