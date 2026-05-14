@@ -1097,6 +1097,23 @@ def _set_username_cookie(response: Response, username: str, *, secure: bool) -> 
     response.delete_cookie("jji_username", path="/")
 
 
+_APPROVAL_STATUS_RESPONSES: dict[str, str] = {
+    "pending": "Your account is awaiting admin approval",
+    "rejected": "Your account has been rejected",
+}
+
+
+def _blocked_user_status_response(user_status: str | None) -> JSONResponse | None:
+    """Return a 403 JSONResponse if user_status is pending/rejected, else None."""
+    detail = _APPROVAL_STATUS_RESPONSES.get(user_status or "")
+    if detail is None:
+        return None
+    return JSONResponse(
+        status_code=403,
+        content={"detail": detail, "status": user_status},
+    )
+
+
 class AuthMiddleware(BaseHTTPMiddleware):
     """Authenticate all requests via session cookie, Bearer token, or trusted SSO header.
 
@@ -1309,22 +1326,9 @@ class AuthMiddleware(BaseHTTPMiddleware):
             and path not in self._PUBLIC_PATHS
         ):
             user_status = await storage.get_user_status(username)
-            if user_status == "pending":
-                return JSONResponse(
-                    status_code=403,
-                    content={
-                        "detail": "Your account is awaiting admin approval",
-                        "status": "pending",
-                    },
-                )
-            elif user_status == "rejected":
-                return JSONResponse(
-                    status_code=403,
-                    content={
-                        "detail": "Your account has been rejected",
-                        "status": "rejected",
-                    },
-                )
+            blocked = _blocked_user_status_response(user_status)
+            if blocked is not None:
+                return blocked
 
         response = await call_next(request)
 
@@ -6086,24 +6090,10 @@ async def login(request: Request) -> JSONResponse:
     # Check pending/rejected status before creating a session (non-admin only)
     if not is_admin and settings.require_approval:
         user_status = await storage.get_user_status(username)
-        if user_status == "pending":
-            logger.info(f"[AUDIT] Login blocked for pending user '{username}'")
-            return JSONResponse(
-                status_code=403,
-                content={
-                    "detail": "Your account is awaiting admin approval",
-                    "status": "pending",
-                },
-            )
-        elif user_status == "rejected":
-            logger.info(f"[AUDIT] Login blocked for rejected user '{username}'")
-            return JSONResponse(
-                status_code=403,
-                content={
-                    "detail": "Your account has been rejected",
-                    "status": "rejected",
-                },
-            )
+        blocked = _blocked_user_status_response(user_status)
+        if blocked is not None:
+            logger.info(f"[AUDIT] Login blocked for {user_status} user '{username}'")
+            return blocked
 
     session_token = await storage.create_session(username, is_admin=is_admin)
     response = JSONResponse(
@@ -6249,13 +6239,9 @@ async def register_user(request: Request) -> JSONResponse:
     user_status = "pending" if settings.require_approval else "active"
 
     try:
-        _, raw_key = await storage.create_user(username)
+        _, raw_key = await storage.create_user(username, status=user_status)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-    # Set the user's status (create_user defaults to active via DB default)
-    if user_status == "pending":
-        await storage.set_user_status(username, "pending")
 
     # Create a session for the user
     session_token = await storage.create_session(username, is_admin=False)

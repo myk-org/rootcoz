@@ -78,9 +78,8 @@ export function UsersPage() {
   const [deleteTarget, setDeleteTarget] = useState<string | null>(null)
   const [deleting, setDeleting] = useState(false)
 
-  // Approve/reject
-  const [approving, setApproving] = useState<string | null>(null)
-  const [rejecting, setRejecting] = useState<string | null>(null)
+  // Approve/reject — single guard prevents concurrent actions on same user
+  const [actionInProgress, setActionInProgress] = useState<string | null>(null)
 
   // Action error
   const [actionError, setActionError] = useState<string | null>(null)
@@ -206,7 +205,7 @@ export function UsersPage() {
   }
 
   async function handleApprove(username: string) {
-    setApproving(username)
+    setActionInProgress(username)
     setActionError(null)
     try {
       await api.post(`/api/admin/users/${encodeURIComponent(username)}/approve`)
@@ -219,12 +218,12 @@ export function UsersPage() {
         setActionError('Failed to approve user')
       }
     } finally {
-      setApproving(null)
+      setActionInProgress(null)
     }
   }
 
   async function handleReject(username: string) {
-    setRejecting(username)
+    setActionInProgress(username)
     setActionError(null)
     try {
       await api.post(`/api/admin/users/${encodeURIComponent(username)}/reject`)
@@ -237,7 +236,7 @@ export function UsersPage() {
         setActionError('Failed to reject user')
       }
     } finally {
-      setRejecting(null)
+      setActionInProgress(null)
     }
   }
 
@@ -360,7 +359,7 @@ export function UsersPage() {
                               size="icon"
                               aria-label={`Approve ${user.username}`}
                               className="h-7 w-7"
-                              disabled={approving === user.username}
+                              disabled={actionInProgress === user.username}
                               onClick={() => handleApprove(user.username)}
                             >
                               <CheckCircle className="h-3.5 w-3.5 text-signal-green" />
@@ -376,7 +375,7 @@ export function UsersPage() {
                               size="icon"
                               aria-label={`Reject ${user.username}`}
                               className="h-7 w-7"
-                              disabled={rejecting === user.username}
+                              disabled={actionInProgress === user.username}
                               onClick={() => handleReject(user.username)}
                             >
                               <XCircle className="h-3.5 w-3.5 text-signal-red" />

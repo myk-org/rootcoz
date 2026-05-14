@@ -76,6 +76,7 @@ def _parse_session_ttl() -> int:
 SESSION_TTL_HOURS = _parse_session_ttl()
 SESSION_TTL_SECONDS = SESSION_TTL_HOURS * 3600
 MIN_KEY_LENGTH = 16
+VALID_USER_STATUSES = ("active", "pending", "rejected")
 
 
 def validate_api_key(key: str) -> None:
@@ -2942,7 +2943,14 @@ async def delete_session(token: str) -> None:
         await db.commit()
 
 
-async def create_user(username: str) -> tuple[str, str]:
+def _validate_user_status(status: str) -> None:
+    """Validate that status is one of the allowed user statuses."""
+    if status not in VALID_USER_STATUSES:
+        msg = f"Invalid status: '{status}'. Must be one of {VALID_USER_STATUSES}."
+        raise ValueError(msg)
+
+
+async def create_user(username: str, *, status: str = "active") -> tuple[str, str]:
     """Create a new user or generate an API key for an existing user without one.
 
     Returns (username, raw_api_key).
@@ -2952,6 +2960,7 @@ async def create_user(username: str) -> tuple[str, str]:
     existence check and the INSERT.
     """
     _validate_username(username)
+    _validate_user_status(status)
 
     raw_key = generate_api_key()
     key_hash = hash_api_key(raw_key)
@@ -2974,16 +2983,16 @@ async def create_user(username: str) -> tuple[str, str]:
                     raise ValueError(msg)
                 # Existing user without key — generate one
                 update_cursor = await db.execute(
-                    "UPDATE users SET api_key_hash = ? WHERE username = ? AND role = 'user'",
-                    (key_hash, username),
+                    "UPDATE users SET api_key_hash = ?, status = ? WHERE username = ? AND role = 'user'",
+                    (key_hash, status, username),
                 )
                 if update_cursor.rowcount == 0:
                     msg = f"User '{username}' not found or is not a regular user"
                     raise ValueError(msg)
             else:
                 await db.execute(
-                    "INSERT INTO users (username, api_key_hash, role) VALUES (?, ?, 'user')",
-                    (username, key_hash),
+                    "INSERT INTO users (username, api_key_hash, role, status) VALUES (?, ?, 'user', ?)",
+                    (username, key_hash, status),
                 )
             await db.commit()
         except ValueError:
@@ -3006,9 +3015,10 @@ async def register_user_with_status(
     Creates a new user row with the given API key hash and status.
     Returns the user's row ID.
 
-    Raises ValueError if username is invalid or already exists.
+    Raises ValueError if username is invalid, status is invalid, or already exists.
     """
     _validate_username(username)
+    _validate_user_status(status)
     async with _connect_db() as db:
         try:
             cursor = await db.execute(
@@ -3029,9 +3039,7 @@ async def set_user_status(username: str, status: str) -> bool:
 
     Returns True if the user was found and updated, False otherwise.
     """
-    if status not in ("active", "pending", "rejected"):
-        msg = f"Invalid status: '{status}'. Must be 'active', 'pending', or 'rejected'."
-        raise ValueError(msg)
+    _validate_user_status(status)
     async with _connect_db() as db:
         cursor = await db.execute(
             "UPDATE users SET status = ? WHERE username = ?",

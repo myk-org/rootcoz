@@ -120,12 +120,11 @@ export function RegisterPage() {
       navigate('/', { replace: true })
     } catch (err) {
       if (err instanceof ApiError && (err.status === 401 || err.status === 403)) {
-        const detail = typeof err.body === 'object' && err.body !== null && 'detail' in err.body
-          ? String((err.body as { detail: string }).detail)
-          : ''
-        if (err.status === 403 && /pending|awaiting/i.test(detail)) {
+        const body = typeof err.body === 'object' && err.body !== null ? err.body as Record<string, unknown> : {}
+        const status = typeof body.status === 'string' ? body.status : ''
+        if (err.status === 403 && status === 'pending') {
           setError('Your account is awaiting admin approval.')
-        } else if (err.status === 403 && /rejected/i.test(detail)) {
+        } else if (err.status === 403 && status === 'rejected') {
           setError('Your account has been rejected. Contact an admin.')
         } else {
           setError('Invalid username or API key.')
