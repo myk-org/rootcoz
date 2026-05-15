@@ -83,6 +83,12 @@ src/rootcoz/
     core.py                 # Failure grouping, AI CLI orchestration, prompt building,
                             # JSON response parsing, deduplication. Has ZERO knowledge
                             # of any specific CI system.
+    chat.py                 # Chat session management: system prompt, session init,
+                            # workspace setup, script deployment, AI CLI conversation
+  chat_scripts/             # Standalone Python scripts for AI chat tool access
+    rootcoz_chat_job.py     # Job data queries (failures, analyses, comments, history)
+    rootcoz_chat_jira.py    # Jira integration (search, issue details, related tickets)
+    rootcoz_chat_github.py  # GitHub integration (search issues/PRs, details)
   sources/                  # CI source plugins (data fetching)
     base.py                 # CISource ABC + CISourceResult dataclass
     jenkins_source.py       # Jenkins plugin: JenkinsSource, analyze_job, analyze_child_job,
@@ -109,8 +115,9 @@ src/rootcoz/
   - Two roles: `user` and `admin`. A bootstrap `admin` superuser (via `ADMIN_KEY` env var) always exists outside the DB.
   - All API endpoints require authentication except public paths (`/register`, `/health`, `/api/health`, `/api/auth/register`, `/api/auth/login`, `/api/auth/needs-key`, `/api/releases/latest`, `/metrics`). `/api/releases/latest` is intentionally public — it only proxies GitHub release metadata (version, changelog) with no sensitive data.
   - CORS preflight (OPTIONS) requests bypass authentication on all endpoints.
-  - **Users** can: register, login, rotate their own API key (`POST /api/auth/rotate-key`), manage their own tracker tokens, submit analyses.
-  - **Admins** can: everything users can, plus rotate any user's key (`POST /api/admin/users/{username}/rotate-key`), create/delete/promote/demote users, access admin-only endpoints (`/api/admin/*`).
+  - **Users** can: register (requires admin approval when `REQUIRE_APPROVAL` is set), login, rotate their own API key (`POST /api/auth/rotate-key`), manage their own tracker tokens, submit analyses.
+  - **User statuses**: `active` (approved, can use the system), `pending` (awaiting admin approval), `rejected` (denied by admin, can be re-approved). Non-active users are blocked at the auth middleware level.
+  - **Admins** can: everything users can, plus approve/reject pending users, rotate any user's key (`POST /api/admin/users/{username}/rotate-key`), create/delete/promote/demote users, access admin-only endpoints (`/api/admin/*`). Promoting a user to admin requires the user to be `active` first.
 - **Real-time updates**: Server-Sent Events (SSE) push real-time updates to the frontend — no polling. Backend broadcasts via per-connection `asyncio.Event` objects. Available SSE streams:
   - `/api/navbar/stream` — navbar badge counts (active analyses, unread mentions)
   - `/api/dashboard/stream` — dashboard job list changes
@@ -118,6 +125,33 @@ src/rootcoz/
   - `/api/results/{job_id}/comments/stream` — per-job comment changes
   - `/api/admin/token-usage/stream` — token usage data changes
   - `/api/chat/{job_id}/stream` — per-job chat message changes
+
+### Frontend UI Components — MANDATORY
+
+**NEVER use raw HTML elements for form controls. Always use the shared components.**
+
+| Element | Component | Location | Notes |
+|---------|-----------|----------|-------|
+| Dropdown/select | `Select` + `SelectTrigger` + `SelectContent` + `SelectItem` | `components/ui/select` | shadcn pill-style select |
+| Provider dropdown | `ProviderSelect` | `components/shared/ProviderSelect` | Wraps `Select` with claude/gemini/cursor options |
+| Model selector | `ModelCombobox` + `useProviderModels` hook | `components/shared/ModelCombobox`, `hooks/useProviderModels` | Combobox with fuzzy search + API fetch |
+| Text input | `Input` | `components/ui/input` | All `<input type="text">`, `<input type="number">`, etc. |
+| Textarea | `Textarea` | `components/ui/textarea` | All multi-line text inputs |
+| Search input | `SearchInput` | `components/shared/SearchInput` | Wraps `Input` with search icon |
+| Date range | `DateRangeFilter` | `components/shared/DateRangeFilter` | Wraps two `Input` date pickers |
+
+**Exceptions (raw HTML OK):**
+- `<input type="checkbox">` — no shared component yet
+- `<input type="file">` — specialized behavior
+
+**Design language (pill/chip style):**
+- Selects/dropdowns: `rounded-full`, `bg-white/5`, `border-white/10`, `hover:bg-white/10`
+- Text inputs/textareas: `rounded-xl`, `bg-white/5`, `border-white/10`, `hover:bg-white/10`
+- Dropdown panels: `rounded-xl`, `border-white/10`, `backdrop-blur-sm`
+- No `shadow-sm` on any form control
+- All form controls must visually match — if you change one, update all
+
+**Violations:** Using raw `<input type="text">`, `<select>`, or `<textarea>` instead of the shared components is a bug and will be rejected in review.
 
 ### Auto-Generated Documentation
 
@@ -171,6 +205,27 @@ When `ENABLE_REPORTPORTAL=true`, users can push test classifications back to Rep
 ### Feedback System
 
 Users submit feedback (bugs, feature requests) via the FeedbackDialog component. Feedback is previewed with AI-generated issue content, then created as a GitHub issue. This replaces the old "Report Bug" flow.
+
+### Chat Feature
+
+Interactive AI chat for discussing analyzed job results. Per-user sessions with tool access.
+
+**Architecture:**
+- `engine/chat.py` — system prompt builder, session init, AI CLI orchestration
+- `chat_scripts/` — standalone Python scripts (PEP 723 inline metadata) the AI can execute:
+  - `rootcoz_chat_job.py` — query job data (failures, analyses, comments, history)
+  - `rootcoz_chat_jira.py` — search Jira issues, get details, find related tickets
+  - `rootcoz_chat_github.py` — search GitHub issues/PRs, get details
+- Scripts run via `uv run` with inline `httpx` dependency — fully self-contained
+- Scripts are copied to workspace `.scripts/` dir, shell wrappers in `bin/` source `.chat_env` and exec via `uv run`
+
+**Session management:**
+- Hidden init call with `output_format="json"` to obtain `session_id` (user never sees this)
+- All user messages use `output_format=None` with `--resume <session_id>` for clean output
+- Session ID stored in DB as a hidden chat message (empty content, completed status)
+- Per-user isolation: workspace at `/tmp/rootcoz-chat-{job_id}/{username}/`, DB messages filtered by username
+
+**Data access principle:** The AI gets tools (scripts), NOT pre-fed data. The system prompt describes the role and available scripts — the AI decides what to fetch based on the user's question.
 
 ### Logging
 
