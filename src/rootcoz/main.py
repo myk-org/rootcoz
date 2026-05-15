@@ -7249,6 +7249,11 @@ async def abort_chat(job_id: str, request: Request) -> dict:
     if pending:
         notify_chat_changed(job_id, username=username)
 
+    # Clear signal to prevent stale abort on the next message.
+    # If a background task is currently running, it already saw the signal
+    # (the pending messages were marked failed above).
+    signal.clear()
+
     logger.info("Chat: user %s aborted chat for job %s", username, job_id)
     return {"aborted": len(pending)}
 

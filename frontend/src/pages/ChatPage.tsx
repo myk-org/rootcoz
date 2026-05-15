@@ -51,51 +51,46 @@ export function ChatPage() {
 
   const hasPending = messages.some(m => m.status === 'pending')
 
-  // Load chat history + job info, only init if no existing session
+  // Always init workspace first, then load history
   useEffect(() => {
     if (!jobId) return
     let ignore = false
     setLoading(true)
     setChatReady(false)
+    setInitMessage('Initializing...')
 
-    Promise.all([
-      api.get<{ messages: ChatMessage[]; total: number }>(`/api/chat/${jobId}`),
-      api.get<{ result: { job_name: string; build_number: number; summary: string; ai_provider: string; ai_model: string } }>(`/results/${jobId}`),
-    ]).then(async ([chatRes, resultRes]) => {
-      if (ignore) return
-      setMessages(chatRes.messages)
-      if (resultRes.result) {
-        const r = resultRes.result
-        setJobInfo({ job_name: r.job_name, build_number: r.build_number, summary: r.summary, ai_provider: r.ai_provider, ai_model: r.ai_model })
-        setAiProvider(r.ai_provider || 'claude')
-        setAiModel(r.ai_model || '')
-      }
-
-      if (chatRes.messages.length > 0) {
-        // Session already exists — skip init
-        setChatReady(true)
-      } else {
-        // No messages — initialize workspace
-        setInitMessage('Initializing workspace...')
-        try {
-          const initRes = await api.post<{ ready: boolean; repos_cloned: boolean; repo_names: string[] }>(`/api/chat/${jobId}/init`, {})
-          if (ignore) return
-          if (initRes.repos_cloned && initRes.repo_names.length > 0) {
-            setInitMessage(`Repos cloned: ${initRes.repo_names.join(', ')}`)
-          }
-        } catch {
-          if (ignore) return
-          setInitMessage('')
+    // Always init workspace first, then load history
+    api.post<{ ready: boolean; repos_cloned: boolean; repo_names: string[] }>(`/api/chat/${jobId}/init`, {})
+      .catch(() => {}) // Init is best-effort
+      .then(() => {
+        if (ignore) return
+        return Promise.all([
+          api.get<{ messages: ChatMessage[]; total: number }>(`/api/chat/${jobId}`),
+          api.get<{ result: { job_name: string; build_number: number; summary: string; ai_provider: string; ai_model: string } }>(`/results/${jobId}`),
+        ])
+      })
+      .then((results) => {
+        if (ignore || !results) return
+        const [chatRes, resultRes] = results
+        setMessages(chatRes.messages)
+        if (resultRes.result) {
+          const r = resultRes.result
+          setJobInfo({ job_name: r.job_name, build_number: r.build_number, summary: r.summary, ai_provider: r.ai_provider, ai_model: r.ai_model })
+          setAiProvider(r.ai_provider || 'claude')
+          setAiModel(r.ai_model || '')
         }
         setChatReady(true)
-      }
-    }).catch(err => {
-      if (ignore) return
-      setError(err instanceof Error ? err.message : 'Failed to load chat')
-      setChatReady(true)
-    }).finally(() => {
-      if (!ignore) setLoading(false)
-    })
+        setInitMessage('')
+      })
+      .catch(err => {
+        if (ignore) return
+        setError(err instanceof Error ? err.message : 'Failed to load chat')
+        setChatReady(true)
+        setInitMessage('')
+      })
+      .finally(() => {
+        if (!ignore) setLoading(false)
+      })
 
     return () => { ignore = true }
   }, [jobId])

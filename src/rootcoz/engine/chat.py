@@ -192,11 +192,14 @@ def setup_chat_scripts(
     scripts_dir = workspace / "bin"
     scripts_dir.mkdir(exist_ok=True)
 
-    # Copy scripts from package
+    # Copy raw Python scripts to a hidden dir (not directly accessible by AI)
+    raw_scripts_dir = workspace / ".scripts"
+    raw_scripts_dir.mkdir(exist_ok=True)
+
     scripts_pkg = importlib.resources.files("rootcoz.chat_scripts")
     for script_name in _CHAT_SCRIPTS:
         source = scripts_pkg.joinpath(script_name)
-        target = scripts_dir / script_name
+        target = raw_scripts_dir / script_name
         target.write_bytes(source.read_bytes())
         target.chmod(target.stat().st_mode | stat.S_IEXEC)
 
@@ -251,12 +254,13 @@ def _write_wrapper(
 ) -> None:
     """Write a shell wrapper that sources env and runs the script via uv."""
     wrapper = scripts_dir / name
+    raw_script = workspace / ".scripts" / script_file
     wrapper.write_text(
         f"#!/bin/bash\n"
         f"set -a\n"
         f"source {workspace}/.chat_env\n"
         f"set +a\n"
-        f'exec uv run "{scripts_dir / script_file}" "$@"\n'
+        f'exec uv run "{raw_script}" "$@"\n'
     )
     wrapper.chmod(wrapper.stat().st_mode | stat.S_IEXEC)
 
