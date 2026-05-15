@@ -10,6 +10,7 @@ import {
 } from '@/components/ui/dialog'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
+import { Textarea } from '@/components/ui/textarea'
 import {
   Select,
   SelectTrigger,
@@ -239,8 +240,8 @@ export function ReAnalyzeDialog({ open, onOpenChange, result, jobId, failureUuid
             </div>
             <div className="space-y-1.5">
               <FieldLabel>Raw Prompt</FieldLabel>
-              <textarea
-                className="flex w-full rounded-md border border-border-default bg-surface-elevated px-3 py-2 text-sm text-text-primary placeholder:text-text-tertiary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-border-accent min-h-[80px] resize-y"
+              <Textarea
+                className="min-h-[80px] resize-y"
                 placeholder="Custom prompt to send to AI..."
                 value={rawPrompt}
                 onChange={(e) => setRawPrompt(e.target.value)}

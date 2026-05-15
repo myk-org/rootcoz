@@ -302,7 +302,7 @@ export function BugCreationDialog({
               <div className="space-y-2">
                 <label htmlFor="bug-jira-project" className="text-xs font-display uppercase tracking-widest text-text-tertiary">Jira Project</label>
                 <div className="relative">
-                  <input
+                  <Input
                     id="bug-jira-project"
                     type="text"
                     value={jiraProjectKey}
@@ -320,7 +320,7 @@ export function BugCreationDialog({
                     onBlur={() => setTimeout(() => setShowProjectDropdown(false), 200)}
                     placeholder="Type to search projects..."
                     autoComplete="off"
-                    className="w-full h-9 rounded-md border border-border-default bg-surface-elevated px-2 text-sm text-text-primary placeholder:text-text-tertiary"
+                    className="w-full h-9 border bg-surface-elevated px-2 text-sm text-text-primary placeholder:text-text-tertiary"
                   />
                   {showProjectDropdown && jiraProjects.length > 0 && (
                     <div className="absolute z-50 mt-1 max-h-48 w-full overflow-y-auto rounded-md border border-border-default bg-surface-card shadow-lg">
@@ -360,13 +360,13 @@ export function BugCreationDialog({
                   </SelectContent>
                 </Select>
                 {jiraIssueType === '__custom__' && (
-                  <input
+                  <Input
                     type="text"
                     value={customIssueType}
                     onChange={(e) => setCustomIssueType(e.target.value)}
                     placeholder="Enter custom issue type..."
                     autoComplete="off"
-                    className="w-full h-9 rounded-md border border-border-default bg-surface-elevated px-2 text-sm text-text-primary placeholder:text-text-tertiary mt-1"
+                    className="w-full h-9 border bg-surface-elevated px-2 text-sm text-text-primary placeholder:text-text-tertiary mt-1"
                   />
                 )}
               </div>
@@ -375,7 +375,7 @@ export function BugCreationDialog({
               <div className="space-y-2">
                 <label htmlFor="bug-security-level" className="text-xs font-display uppercase tracking-widest text-text-tertiary">Security Level</label>
                 <div className="relative">
-                  <input
+                  <Input
                     id="bug-security-level"
                     type="text"
                     value={jiraSecurityLevel}
@@ -387,7 +387,7 @@ export function BugCreationDialog({
                     onBlur={() => setTimeout(() => setShowSecurityDropdown(false), 200)}
                     placeholder="None (public)"
                     autoComplete="off"
-                    className="w-full h-9 rounded-md border border-border-default bg-surface-elevated px-2 text-sm text-text-primary placeholder:text-text-tertiary"
+                    className="w-full h-9 border bg-surface-elevated px-2 text-sm text-text-primary placeholder:text-text-tertiary"
                   />
                   {showSecurityDropdown && securityLevels.length > 0 && (
                     <div className="absolute z-50 mt-1 max-h-48 w-full overflow-y-auto rounded-md border border-border-default bg-surface-card shadow-lg">
