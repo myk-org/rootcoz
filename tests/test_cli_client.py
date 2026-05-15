@@ -509,32 +509,6 @@ class TestRootCozClientMentions:
         assert result["marked_read"] == 5
 
 
-class TestRootCozClientAiConfigs:
-    def test_get_ai_configs(self):
-        sample = [
-            {"ai_provider": "claude", "ai_model": "opus-4"},
-            {"ai_provider": "gemini", "ai_model": "2.5-pro"},
-        ]
-
-        def handler(request):
-            assert request.method == "GET"
-            assert "/ai-configs" in str(request.url)
-            return httpx.Response(200, json=sample)
-
-        client = _make_client(handler)
-        result = client.get_ai_configs()
-        assert len(result) == 2
-        assert result[0]["ai_provider"] == "claude"
-
-    def test_get_ai_configs_empty(self):
-        def handler(request):
-            return httpx.Response(200, json=[])
-
-        client = _make_client(handler)
-        result = client.get_ai_configs()
-        assert result == []
-
-
 class TestRootCozClientPreviewWithAiConfig:
     def test_preview_github_issue_with_ai_config(self):
         def handler(request):

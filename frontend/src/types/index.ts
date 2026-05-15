@@ -278,6 +278,18 @@ export interface AiConfig {
   ai_model: string
 }
 
+/** Model entry returned by GET /api/ai-models */
+export interface AiModel {
+  id: string
+  name: string
+  provider: string
+}
+
+/** Response shape from GET /api/ai-models (no provider filter) */
+export interface AiModelsResponse {
+  providers: Record<string, AiModel[]>
+}
+
 // -- Result wrapper (from GET /results/{jobId}) ---------------------
 
 export interface ResultResponse {

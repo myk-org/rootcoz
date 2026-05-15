@@ -1151,34 +1151,6 @@ class TestCapabilitiesCommand:
         mock_client.capabilities.assert_called_once()
 
 
-class TestAiConfigsCommand:
-    def test_ai_configs(self, mock_client):
-        mock_client.get_ai_configs.return_value = [
-            {"ai_provider": "claude", "ai_model": "opus-4"},
-            {"ai_provider": "gemini", "ai_model": "2.5-pro"},
-        ]
-        result = runner.invoke(app, ["ai-configs"])
-        assert result.exit_code == 0
-        assert "claude" in result.output
-        assert "opus-4" in result.output
-
-    def test_ai_configs_json(self, mock_client):
-        mock_client.get_ai_configs.return_value = [
-            {"ai_provider": "claude", "ai_model": "opus-4"},
-        ]
-        result = runner.invoke(app, ["ai-configs", "--json"])
-        assert result.exit_code == 0
-        parsed = json.loads(result.output)
-        assert isinstance(parsed, list)
-        assert parsed[0]["ai_provider"] == "claude"
-
-    def test_ai_configs_empty(self, mock_client):
-        mock_client.get_ai_configs.return_value = []
-        result = runner.invoke(app, ["ai-configs"])
-        assert result.exit_code == 0
-        assert "No AI configurations found" in result.output
-
-
 class TestAiModelsCommand:
     def test_ai_models_with_provider(self, mock_client):
         mock_client.list_ai_models.return_value = {

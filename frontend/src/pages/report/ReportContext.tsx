@@ -1,7 +1,7 @@
 import { createContext, useContext, useReducer, useRef, useCallback, type Dispatch, type ReactNode } from 'react'
 import { api } from '@/lib/api'
 import { reviewKey } from '@/lib/reviewKey'
-import type { AnalysisResult, Comment, ReviewState, CommentsAndReviews, AiConfig, CommentEnrichment } from '@/types'
+import type { AnalysisResult, Comment, ReviewState, CommentsAndReviews, CommentEnrichment, AiModel } from '@/types'
 
 interface ReportState {
   result: AnalysisResult | null
@@ -17,7 +17,7 @@ interface ReportState {
   reportportalAvailable: boolean
   reportportalProject: string
   serverJiraProjectKey: string
-  aiConfigs: AiConfig[]
+  aiModels: Record<string, AiModel[]>
   loading: boolean
   error: string
   /** Number of comment editors with non-empty text (pauses comment polling when > 0). */
@@ -43,7 +43,7 @@ type ReportAction =
   | { type: 'SET_REPORTPORTAL_AVAILABLE'; payload: boolean }
   | { type: 'SET_REPORTPORTAL_PROJECT'; payload: string }
   | { type: 'SET_SERVER_JIRA_PROJECT_KEY'; payload: string }
-  | { type: 'SET_AI_CONFIGS'; payload: AiConfig[] }
+  | { type: 'SET_AI_MODELS'; payload: Record<string, AiModel[]> }
   | { type: 'SET_ENRICHMENTS'; payload: Record<string, CommentEnrichment[]> }
   | { type: 'SET_CLASSIFICATIONS'; payload: Record<string, string> }
   | { type: 'SET_LOADING'; payload: boolean }
@@ -76,7 +76,7 @@ const initialState: ReportState = {
   reportportalAvailable: false,
   reportportalProject: '',
   serverJiraProjectKey: '',
-  aiConfigs: [],
+  aiModels: {},
   loading: true,
   error: '',
   commentDraftCount: 0,
@@ -108,8 +108,8 @@ function reportReducer(state: ReportState, action: ReportAction): ReportState {
       return { ...state, reportportalProject: action.payload }
     case 'SET_SERVER_JIRA_PROJECT_KEY':
       return { ...state, serverJiraProjectKey: action.payload }
-    case 'SET_AI_CONFIGS':
-      return { ...state, aiConfigs: action.payload }
+    case 'SET_AI_MODELS':
+      return { ...state, aiModels: action.payload }
     case 'SET_ENRICHMENTS':
       return { ...state, enrichments: action.payload }
     case 'SET_CLASSIFICATIONS':

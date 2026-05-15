@@ -109,7 +109,7 @@ interface FailureCardProps {
 export function FailureCard({ group, jobId, childJobName, childBuildNumber, index, activeHash }: FailureCardProps) {
   const scopedChildJobName = childJobName ?? ''
   const scopedChildBuildNumber = childBuildNumber ?? 0
-  const { githubIssuesEnabled, jiraIssuesEnabled, serverJiraProjectKey, comments, reviews, aiConfigs, result, classifications } = useReportState()
+  const { githubIssuesEnabled, jiraIssuesEnabled, serverJiraProjectKey, comments, reviews, aiModels, result, classifications } = useReportState()
   const dispatch = useReportDispatch()
   const expandKey = `rootcoz-expand-${jobId}-${scopedChildJobName}-${scopedChildBuildNumber}-${group.id}`
   const [expanded, setExpanded] = useSessionState<boolean>(expandKey, false)
@@ -151,20 +151,16 @@ export function FailureCard({ group, jobId, childJobName, childBuildNumber, inde
     [result?.request_params],
   )
 
-  function getModelsForProvider(provider: string) {
-    return [...new Set(aiConfigs.filter((c) => c.ai_provider === provider).map((c) => c.ai_model))]
-  }
-
-  const providers = [...new Set(aiConfigs.map((c) => c.ai_provider))]
-  const models = getModelsForProvider(selectedProvider)
+  const providers = Object.keys(aiModels)
+  const models = (aiModels[selectedProvider] ?? []).map((m) => m.id)
 
   function handleProviderChange(provider: string) {
     setSelectedProvider(provider)
-    const providerModels = getModelsForProvider(provider)
-    if (providerModels.length === 0) {
+    const providerModelIds = (aiModels[provider] ?? []).map((m) => m.id)
+    if (providerModelIds.length === 0) {
       setSelectedModel('')
-    } else if (!providerModels.includes(selectedModel)) {
-      setSelectedModel(providerModels[0])
+    } else if (!providerModelIds.includes(selectedModel)) {
+      setSelectedModel(providerModelIds[0])
     }
   }
 

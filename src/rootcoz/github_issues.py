@@ -11,7 +11,6 @@ Mirrors the Jira integration pattern in ``jira.py``.
 import asyncio
 import os
 from collections.abc import Sequence
-
 import httpx
 from simple_logger.logger import get_logger
 

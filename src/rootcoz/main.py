@@ -134,7 +134,6 @@ from rootcoz.request_resolution import resolve_tests_repo_token
 from rootcoz.sources import CISource, FileSource, RawSource
 from rootcoz.sources.jenkins_source import analyze_job, wait_for_jenkins_completion
 from rootcoz.storage import (
-    get_ai_configs,
     get_effective_classification,
     get_history_classification,
     get_result,
@@ -1711,7 +1710,11 @@ async def _enrich_result_with_jira(
 
     all_failures = _collect_all_failures(failures)
     await enrich_with_jira_matches(
-        all_failures, settings, ai_provider, ai_model, job_id=job_id
+        all_failures,
+        settings,
+        ai_provider,
+        ai_model,
+        job_id=job_id,
     )
 
 
@@ -1758,7 +1761,11 @@ async def _enrich_result_with_tests_repo_matches(
 
     all_failures = _collect_all_failures(failures)
     await enrich_with_tests_repo_matches(
-        all_failures, settings, ai_provider, ai_model, job_id=job_id
+        all_failures,
+        settings,
+        ai_provider,
+        ai_model,
+        job_id=job_id,
     )
 
 
@@ -5818,13 +5825,6 @@ async def get_classifications(
         job_id=job_id,
     )
     return {"classifications": classifications}
-
-
-@app.get("/ai-configs")
-async def get_ai_configs_endpoint() -> list[dict]:
-    """Get distinct AI provider/model pairs from completed analyses."""
-    logger.debug("GET /ai-configs")
-    return await get_ai_configs()
 
 
 @app.get("/api/ai-models")
