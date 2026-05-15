@@ -1,0 +1,20 @@
+{
+  "name": "rootcoz-sidecar",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node dist/server.js",
+    "build": "tsc"
+  },
+  "dependencies": {
+    "@earendil-works/pi-coding-agent": "^0.74.0",
+    "@earendil-works/pi-ai": "^0.74.0",
+    "pi-vertex-claude": "https://github.com/myk-org/pi-vertex-claude/tarball/main",
+    "pi-orchestrator-config": "https://github.com/myk-org/pi-config/tarball/main"
+  },
+  "devDependencies": {
+    "typescript": "^5.7.0",
+    "@types/node": "^22.0.0"
+  }
+}

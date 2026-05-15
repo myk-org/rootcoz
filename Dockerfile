@@ -15,6 +15,19 @@ COPY frontend/ .
 # Build the frontend (vite build only — type checking runs in tox/CI)
 RUN npx vite build
 
+# Sidecar build stage
+FROM node:20-slim AS sidecar-builder
+
+WORKDIR /sidecar
+
+RUN apt-get update && apt-get install -y --no-install-recommends git && rm -rf /var/lib/apt/lists/*
+
+COPY sidecar/package.json sidecar/package-lock.json* ./
+RUN npm ci --ignore-scripts
+
+COPY sidecar/ .
+RUN npx tsc
+
 FROM python:3.12-slim AS builder
 
 WORKDIR /app
@@ -39,7 +52,7 @@ FROM python:3.12-slim
 
 WORKDIR /app
 
-# Install bash (needed for CLI install scripts), git (required at runtime for gitpython), curl (for Claude CLI), and nodejs/npm (for Gemini CLI)
+# Install bash, git (runtime for gitpython), curl (for Cursor CLI install), nodejs/npm (for sidecar)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     bash \
     git \
@@ -61,16 +74,14 @@ COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 # Switch to non-root user for CLI installs
 USER appuser
 
-# Install Claude Code CLI (installs to ~/.local/bin)
-RUN /bin/bash -o pipefail -c "curl -fsSL https://claude.ai/install.sh | bash"
-
 # Install Cursor Agent CLI (installs to ~/.local/bin)
+# Claude and Gemini are handled by the Pi SDK sidecar — no CLI needed
 RUN /bin/bash -o pipefail -c "curl -fsSL https://cursor.com/install | bash"
 
-# Configure npm for non-root global installs and install Gemini CLI
+# Configure npm for non-root global installs and install acpx CLI (needed by sidecar acpx-provider extension)
 RUN mkdir -p /home/appuser/.npm-global \
     && npm config set prefix '/home/appuser/.npm-global' \
-    && npm install -g @google/gemini-cli
+    && npm install -g acpx
 
 # Switch to root for file copies and permission fixes
 USER root
@@ -86,6 +97,11 @@ COPY --chown=appuser:0 --from=builder /app/src /app/src
 
 # Copy built frontend assets from frontend builder
 COPY --chown=appuser:0 --from=frontend-builder /frontend/dist /app/frontend/dist
+
+# Copy sidecar
+COPY --chown=appuser:0 --from=sidecar-builder /sidecar/dist /app/sidecar/dist
+COPY --chown=appuser:0 --from=sidecar-builder /sidecar/node_modules /app/sidecar/node_modules
+COPY --chown=appuser:0 --from=sidecar-builder /sidecar/package.json /app/sidecar/package.json
 
 # Copy entrypoint script
 COPY --chown=appuser:0 entrypoint.sh /app/entrypoint.sh
@@ -113,7 +129,7 @@ ENV HOME="/home/appuser"
 EXPOSE 8000
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-    CMD curl -f http://localhost:${PORT:-8000}/health || exit 1
+    CMD curl -f http://localhost:${PORT:-8000}/health && curl -f http://localhost:${SIDECAR_PORT:-9100}/health || exit 1
 
 # Use uv run for uvicorn
 # --no-sync prevents uv from attempting to modify the venv at runtime.
