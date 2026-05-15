@@ -252,15 +252,21 @@ def setup_chat_scripts(
 def _write_wrapper(
     scripts_dir: Path, name: str, script_file: str, workspace: Path
 ) -> None:
-    """Write a shell wrapper that sources env and runs the script via uv."""
+    """Write a Python wrapper that loads env safely and runs the script via uv."""
     wrapper = scripts_dir / name
+    env_file = workspace / ".chat_env"
     raw_script = workspace / ".scripts" / script_file
     wrapper.write_text(
-        f"#!/bin/bash\n"
-        f"set -a\n"
-        f"source {workspace}/.chat_env\n"
-        f"set +a\n"
-        f'exec uv run "{raw_script}" "$@"\n'
+        "#!/usr/bin/env python3\n"
+        "import os, subprocess, sys\n"
+        f"env_file = {str(env_file)!r}\n"
+        "with open(env_file) as f:\n"
+        "    for line in f:\n"
+        "        line = line.strip()\n"
+        "        if line and '=' in line and not line.startswith('#'):\n"
+        "            k, _, v = line.partition('=')\n"
+        "            os.environ[k] = v\n"
+        f"sys.exit(subprocess.call(['uv', 'run', {str(raw_script)!r}] + sys.argv[1:]))\n"
     )
     wrapper.chmod(wrapper.stat().st_mode | stat.S_IEXEC)
 
@@ -279,6 +285,14 @@ def cleanup_chat_repos(job_id: str, username: str = "") -> None:
             shutil.rmtree(item, ignore_errors=True)
         else:
             item.unlink(missing_ok=True)
+
+    # Also delete sensitive files that are dot-prefixed but not session dirs
+    for sensitive in (".chat_env", ".scripts"):
+        target = workspace / sensitive
+        if target.is_file():
+            target.unlink(missing_ok=True)
+        elif target.is_dir():
+            shutil.rmtree(target, ignore_errors=True)
 
     logger.info(f"Cleaned up chat repos for job {job_id} (kept sessions)")
 

@@ -7249,10 +7249,10 @@ async def abort_chat(job_id: str, request: Request) -> dict:
     if pending:
         notify_chat_changed(job_id, username=username)
 
-    # Clear signal to prevent stale abort on the next message.
-    # If a background task is currently running, it already saw the signal
-    # (the pending messages were marked failed above).
-    signal.clear()
+    if not pending:
+        # No worker running to consume the signal — clear it immediately
+        signal.clear()
+    # If pending messages exist, the worker will clear the signal in its finally block
 
     logger.info("Chat: user %s aborted chat for job %s", username, job_id)
     return {"aborted": len(pending)}
@@ -7387,6 +7387,16 @@ async def _process_chat_message(
 
     async with lock:
         try:
+            # Check if this message was already aborted before we started
+            current_status = await storage.get_chat_message_status(assistant_msg_id)
+            if current_status != "pending":
+                logger.info(
+                    "Chat: message %d already %s, skipping processing",
+                    assistant_msg_id,
+                    current_status,
+                )
+                return
+
             stored = await get_result(job_id, strip_sensitive=False)
             if not stored or not stored.get("result"):
                 raise RuntimeError(f"Job {job_id} not found during chat processing")
@@ -7615,13 +7625,29 @@ async def _process_chat_message(
 async def clear_chat_history(job_id: str, request: Request) -> dict:
     """Clear chat messages for the current user on a job."""
     _check_allow_list(request)
+    from rootcoz.engine.chat import cleanup_chat_repos
 
     stored = await get_result(job_id)
     if not stored:
         raise HTTPException(status_code=404, detail="Job not found")
 
     username = request.state.username
-    count = await storage.delete_chat_messages(job_id, username=username)
+
+    # Acquire the per-user chat lock to prevent tearing down workspace
+    # while a background worker is still processing
+    lock = _get_chat_lock(f"{job_id}:{username}")
+    async with lock:
+        count = await storage.delete_chat_messages(job_id, username=username)
+        try:
+            cleanup_chat_repos(job_id, username=username)
+        except Exception:
+            logger.warning(
+                "Failed to cleanup chat repos for %s/%s",
+                job_id,
+                username,
+                exc_info=True,
+            )
+
     logger.info(
         "Chat: cleared %d messages for job %s, user %s", count, job_id, username
     )

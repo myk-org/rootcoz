@@ -229,10 +229,7 @@ def cmd_failures(client: httpx.Client, job_id: str, _args: argparse.Namespace) -
         print(f"  Classification: {classification}")
         print(f"  Has Analysis:   {'Yes' if has_anal else 'No'}")
         if error:
-            truncated = error[:500]
-            if len(error) > 500:
-                truncated += "... (truncated, use `failure <uuid>` for full details)"
-            print(f"  Error:          {truncated}")
+            print(f"  Error:          {error}")
 
 
 def cmd_failure(client: httpx.Client, job_id: str, args: argparse.Namespace) -> None:
@@ -451,10 +448,7 @@ def cmd_history(client: httpx.Client, _job_id: str, args: argparse.Namespace) ->
         print(f"  Analyzed At:    {entry.get('analyzed_at', 'N/A')}")
         error = entry.get("error", "")
         if error:
-            truncated = error[:300]
-            if len(error) > 300:
-                truncated += "..."
-            print(f"  Error:          {truncated}")
+            print(f"  Error:          {error}")
 
 
 # ---------------------------------------------------------------------------

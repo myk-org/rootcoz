@@ -291,11 +291,16 @@ export function BugCreationDialog({
             {target === 'github' && availableRepos && availableRepos.length > 1 && (
               <div className="space-y-2">
                 <label htmlFor="bug-repo" className="text-xs font-display uppercase tracking-widest text-text-tertiary">Repository</label>
-                <select id="bug-repo" value={selectedRepo} onChange={(e) => setSelectedRepo(e.target.value)} className="w-full h-9 rounded-md border border-border-default bg-surface-elevated px-2 text-sm text-text-primary">
-                  {availableRepos.map((r) => (
-                    <option key={r.url} value={r.url}>{r.name}</option>
-                  ))}
-                </select>
+                <Select value={selectedRepo} onValueChange={setSelectedRepo}>
+                  <SelectTrigger id="bug-repo">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {availableRepos.map((r) => (
+                      <SelectItem key={r.url} value={r.url}>{r.name}</SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
               </div>
             )}
             {target === 'jira' && (

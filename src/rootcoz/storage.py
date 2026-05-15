@@ -3925,6 +3925,17 @@ async def get_pending_chat_messages(job_id: str, username: str = "") -> list[dic
         return [dict(r) for r in rows]
 
 
+async def get_chat_message_status(msg_id: int) -> str | None:
+    """Get the status of a chat message by ID. Returns None if not found."""
+    async with _connect_db() as db:
+        cursor = await db.execute(
+            "SELECT status FROM chat_messages WHERE id = ?",
+            (msg_id,),
+        )
+        row = await cursor.fetchone()
+        return row["status"] if row else None
+
+
 async def update_chat_message_status(msg_id: int, status: str) -> None:
     """Update the status of a chat message."""
     async with _connect_db() as db:

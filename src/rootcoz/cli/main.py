@@ -2701,10 +2701,8 @@ def chat_init(
     )
     if not _state.get("json", False):
         ready = data.get("ready", False)
-        workspace = data.get("workspace", "")
         repos = data.get("repo_names", [])
         typer.echo(f"Ready: {ready}")
-        typer.echo(f"Workspace: {workspace}")
         if repos:
             typer.echo(f"Repos: {', '.join(repos)}")
         else:

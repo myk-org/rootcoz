@@ -138,8 +138,6 @@ def cmd_issue(args: argparse.Namespace) -> None:
     assignees = ", ".join(a["login"] for a in issue.get("assignees", [])) or "None"
     labels = format_labels(issue.get("labels", []))
     body = issue.get("body") or ""
-    if len(body) > 2000:
-        body = body[:2000] + "\n... (truncated)"
 
     print(f"Issue #{issue['number']}: {issue['title']}")
     print("=" * 60)
@@ -166,8 +164,6 @@ def cmd_pr(args: argparse.Namespace) -> None:
     pr = resp.json()
 
     body = pr.get("body") or ""
-    if len(body) > 2000:
-        body = body[:2000] + "\n... (truncated)"
 
     merged = pr.get("merged", False)
     merged_str = f"Yes (at {format_date(pr.get('merged_at'))})" if merged else "No"

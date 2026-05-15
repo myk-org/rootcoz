@@ -88,9 +88,9 @@ def _extract_description(issue: dict, version: str) -> str:
     if desc is None:
         return ""
     if isinstance(desc, str):
-        return desc[:2000]
+        return desc
     # API v3 returns Atlassian Document Format (ADF)
-    return _adf_to_text(desc)[:2000]
+    return _adf_to_text(desc)
 
 
 def _adf_to_text(node: dict | list | str) -> str:
