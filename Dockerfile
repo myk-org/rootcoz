@@ -1,5 +1,5 @@
 # Frontend build stage
-FROM node:20-slim AS frontend-builder
+FROM node:22-slim AS frontend-builder
 
 WORKDIR /frontend
 
@@ -16,14 +16,14 @@ COPY frontend/ .
 RUN npx vite build
 
 # Sidecar build stage
-FROM node:20-slim AS sidecar-builder
+FROM node:22-slim AS sidecar-builder
 
 WORKDIR /sidecar
 
 RUN apt-get update && apt-get install -y --no-install-recommends git && rm -rf /var/lib/apt/lists/*
 
 COPY sidecar/package.json sidecar/package-lock.json* ./
-RUN npm ci --ignore-scripts
+RUN npm install --ignore-scripts
 
 COPY sidecar/ .
 RUN npx tsc

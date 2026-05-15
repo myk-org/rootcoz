@@ -784,11 +784,11 @@ async def analyze_failure_group_with_peers(
 
     # Clean up all peer sessions
     client = get_sidecar_client()
-    for session_id in peer_sessions.values():
+    for peer_sid in peer_sessions.values():
         try:
-            await client.delete_session(session_id)
+            await client.delete_session(peer_sid)
         except Exception:
-            pass
+            logger.debug("Failed to delete peer session %s", peer_sid, exc_info=True)
 
     # Apply analysis to all failures in the group.
     # All failures share the same signature (that's how they were grouped),

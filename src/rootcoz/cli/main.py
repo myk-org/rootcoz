@@ -1546,32 +1546,6 @@ def jira_security_levels_cmd(
             )
 
 
-@app.command("ai-configs")
-def ai_configs(
-    json_output: bool = _JSON_OPTION,
-):
-    """List known AI provider/model configurations from successful analyses."""
-    _set_json(json_output)
-    try:
-        client = _get_client()
-        data = client.get_ai_configs()
-    except RootCozError as err:
-        _handle_error(err)
-
-    if _state.get("json", False):
-        print_output(data, columns=[], as_json=True)
-    else:
-        if not data:
-            typer.echo("No AI configurations found from completed analyses.")
-            raise typer.Exit()
-        print_output(
-            data,
-            columns=["ai_provider", "ai_model"],
-            labels={"ai_provider": "AI PROVIDER", "ai_model": "AI MODEL"},
-            as_json=False,
-        )
-
-
 # -- AI Models ----------------------------------------------------------------
 
 

@@ -5,6 +5,8 @@ then uses AI to determine actual relevance, helping teams avoid
 filing duplicate bug reports.
 """
 
+from __future__ import annotations
+
 import asyncio
 import os
 from collections.abc import Sequence
