@@ -11,10 +11,7 @@ from pathlib import Path
 
 from simple_logger.logger import get_logger
 
-from rootcoz.engine.core import (
-    PROVIDER_CLI_FLAGS,
-    call_ai_and_record,
-)
+from rootcoz.sidecar_client import call_ai, get_sidecar_client
 
 logger = get_logger(name=__name__)
 
@@ -405,12 +402,12 @@ async def init_chat_session(
     available_scripts: list[str] | None = None,
     repos_available: bool = False,
 ) -> str | None:
-    """Initialize a chat session with a hidden AI call to obtain a session_id.
+    """Initialize a chat session via the sidecar.
 
-    Sends the system prompt + a trivial message with output_format="json"
-    to get the session_id. The user never sees this exchange.
+    Creates a sidecar session with the system prompt. The sidecar
+    session_id is the session identifier — no hidden AI call needed.
 
-    Returns the session_id, or None if the call failed.
+    Returns the session_id, or None if creation failed.
     """
     system_prompt = build_system_prompt(
         job_name=job_name,
@@ -419,39 +416,29 @@ async def init_chat_session(
         available_scripts=available_scripts or [],
         repos_available=repos_available,
     )
-    # Build init prompt — establish session with system context but NO tool execution
-    init_prompt = (
-        system_prompt
-        + "\n\n**IMPORTANT OVERRIDE FOR THIS MESSAGE ONLY:** Do NOT run any scripts or tools right now. "
-        "Do NOT analyze the job yet. Do NOT fetch any data. Simply acknowledge that you understand "
-        "your role and are ready to help. Reply with only: "
-        '"I\'m ready to help you understand the analysis for this job. What would you like to know?"'
-        "\n\n**User:** hi\n\n**Assistant:** "
-    )
 
     logger.info(
-        "Chat: initializing session for job %s (provider=%s)", job_id, ai_provider
+        "Chat: creating session for job %s (provider=%s, model=%s)",
+        job_id,
+        ai_provider,
+        ai_model,
     )
 
-    result, _ = await call_ai_and_record(
-        init_prompt,
-        job_id=job_id,
-        call_type="chat_init",
-        cwd=repo_path,
-        ai_provider=ai_provider,
-        ai_model=ai_model,
-        cli_flags=PROVIDER_CLI_FLAGS.get(ai_provider, []),
-        output_format="json",  # Need JSON to extract session_id
-    )
-
-    if result.success and result.session_id:
-        logger.info(
-            "Chat: session initialized for job %s: %s", job_id, result.session_id
+    try:
+        client = get_sidecar_client()
+        session_id = await client.create_session(
+            provider=ai_provider,
+            model=ai_model,
+            system_prompt=system_prompt,
+            cwd=str(repo_path) if repo_path else "/tmp",
         )
-        return result.session_id
-
-    logger.warning("Chat: failed to initialize session for job %s", job_id)
-    return None
+        logger.info("Chat: session created for job %s: %s", job_id, session_id)
+        return session_id
+    except Exception:
+        logger.warning(
+            "Chat: failed to create session for job %s", job_id, exc_info=True
+        )
+        return None
 
 
 async def chat_with_ai(
@@ -469,7 +456,7 @@ async def chat_with_ai(
     available_scripts: list[str] | None = None,
     repos_available: bool = False,
 ) -> tuple[bool, str, str | None]:
-    """Send a chat message and get an AI response.
+    """Send a chat message and get an AI response via the sidecar.
 
     Args:
         job_id: The analyzed job ID.
@@ -481,13 +468,12 @@ async def chat_with_ai(
         ai_model: AI model to use.
         repo_path: Path to cloned repos (if available).
         ai_cli_timeout: Timeout for AI CLI call.
-        session_id: Session ID for conversation continuity.
+        session_id: Sidecar session ID for conversation continuity.
         available_scripts: List of available script names.
         repos_available: Whether source repos are cloned.
 
     Returns:
         Tuple of (success, response_text, session_id).
-        session_id is returned from the AI CLI for session continuity.
     """
     logger.info(
         "Chat: %s session for job %s (provider=%s, model=%s)",
@@ -498,10 +484,10 @@ async def chat_with_ai(
     )
 
     if session_id:
-        # Continue existing session — just send the new message
+        # Continue existing sidecar session — just send the message
         prompt = message
     else:
-        # First message — build full system prompt
+        # First message without a session — build full prompt with history
         system_prompt = build_system_prompt(
             job_name=job_name,
             build_number=build_number,
@@ -512,25 +498,33 @@ async def chat_with_ai(
         prompt = build_chat_prompt(system_prompt, history, message)
 
     logger.info(
-        f"Chat message for job {job_id}: {len(message)} chars, "
-        f"session_id={'yes' if session_id else 'new'}, prompt: {len(prompt)} chars"
+        "Chat message for job %s: %d chars, session_id=%s, prompt: %d chars",
+        job_id,
+        len(message),
+        "yes" if session_id else "new",
+        len(prompt),
     )
 
-    result, _ = await call_ai_and_record(
+    result = await call_ai(
         prompt,
-        job_id=job_id,
-        call_type="chat",
-        cwd=repo_path,
         ai_provider=ai_provider,
         ai_model=ai_model,
+        cwd=str(repo_path) if repo_path else None,
         ai_cli_timeout=ai_cli_timeout,
-        cli_flags=PROVIDER_CLI_FLAGS.get(ai_provider, []),
         session_id=session_id,
-        output_format=None,  # Clean output, no chain-of-thought
+    )
+
+    # Record usage
+    await result.record_usage(
+        job_id=job_id,
+        call_type="chat",
+        prompt_chars=len(prompt),
+        ai_provider=ai_provider,
+        ai_model=ai_model,
     )
 
     if not result.success:
-        logger.error(f"Chat AI call failed for job {job_id}: {result.text}")
+        logger.error("Chat AI call failed for job %s: %s", job_id, result.text)
         return False, result.text, None
 
     return True, result.text, result.session_id
