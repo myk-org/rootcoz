@@ -14,11 +14,11 @@ import os
 import re
 from pathlib import Path
 
-from ai_cli_runner import AIResult, call_ai_cli
 from simple_logger.logger import get_logger
 
 from rootcoz.config import Settings, parse_additional_repos
 from rootcoz.logging_context import get_log_file
+from rootcoz.sidecar_client import call_ai_once
 from rootcoz.models import (
     AdditionalRepo,
     AiConfigEntry,
@@ -31,7 +31,6 @@ from rootcoz.models import (
 )
 from rootcoz.repository import RepositoryManager
 from rootcoz.storage import update_progress_phase
-from rootcoz.token_tracking import record_ai_usage
 
 _log_file = get_log_file()
 
@@ -140,124 +139,12 @@ JOB_INSIGHT_FAILURE_HISTORY_PROMPT_FILENAME = (
 )
 
 
-# CLI flags that were previously hardcoded in provider command builders.
-# The ai-cli-runner package handles structural flags (-p for claude, --print
-# for cursor) internally; these are the extra per-provider flags.
-PROVIDER_CLI_FLAGS: dict[str, list[str]] = {
-    "claude": ["--dangerously-skip-permissions"],
-    "gemini": ["--yolo"],
-    "cursor": ["--force"],
-}
-
-# Known transient AI CLI errors that are retried (up to max_retries times).
-# Add new patterns here when new transient failures are discovered.
-RETRYABLE_AI_CLI_PATTERNS: list[str] = [
-    "ENOENT: no such file or directory",  # Cursor CLI config race condition
-]
-
 # Pattern for error detection in console output (word boundaries, case-insensitive)
 CONSOLE_ERROR_PATTERN = re.compile(
     r"\b(?:errors?|fail(?:ed|ures?)?|tracebacks?|warn(?:ings?)?|critical|fatal|assert(?:ion)?(?:error)?s?)\b"
     r"|(?:^|[\s\[])[A-Za-z_][\w.]*?(?:error|exception)(?=[:\s\]]|$)",
     re.IGNORECASE,
 )
-
-
-async def call_ai_and_record(
-    prompt: str,
-    *,
-    job_id: str,
-    call_type: str,
-    cwd: Path | None = None,
-    ai_provider: str = "",
-    ai_model: str = "",
-    ai_cli_timeout: int | None = None,
-    cli_flags: list[str] | None = None,
-) -> tuple[AIResult, AnalysisDetail | None]:
-    """Call AI CLI with retry, record token usage, and parse the response.
-
-    Returns ``(result, parsed_analysis)``.  ``parsed_analysis`` is ``None``
-    when the AI call failed (``result.success is False``).
-    """
-    result = await call_ai_cli_with_retry(
-        prompt,
-        cwd=cwd,
-        ai_provider=ai_provider,
-        ai_model=ai_model,
-        ai_cli_timeout=ai_cli_timeout,
-        cli_flags=cli_flags,
-    )
-
-    await record_ai_usage(
-        job_id=job_id,
-        result=result,
-        call_type=call_type,
-        prompt_chars=len(prompt),
-        ai_provider=ai_provider,
-        ai_model=ai_model,
-    )
-
-    parsed: AnalysisDetail | None = None
-    if result.success:
-        parsed = parse_json_response(result.text)
-
-    return result, parsed
-
-
-async def call_ai_cli_with_retry(
-    prompt: str,
-    *,
-    cwd: Path | None = None,
-    ai_provider: str = "",
-    ai_model: str = "",
-    ai_cli_timeout: int | None = None,
-    cli_flags: list[str] | None = None,
-    max_retries: int = 3,
-    session_id: str | None = None,
-) -> AIResult:
-    """Call AI CLI with retry on known transient errors.
-
-    Wraps :func:`call_ai_cli` with a simple retry loop that re-attempts the
-    call when the output matches one of :data:`RETRYABLE_AI_CLI_PATTERNS`.
-
-    Args:
-        prompt: The prompt to send to the AI CLI.
-        cwd: Working directory for the CLI process.
-        ai_provider: AI provider name (e.g. ``"claude"``).
-        ai_model: Model identifier passed to the CLI.
-        ai_cli_timeout: Timeout in minutes for the CLI process.
-        cli_flags: Extra CLI flags forwarded to the provider.
-        max_retries: Maximum number of retry attempts after the initial call.
-        session_id: Optional session ID to resume a prior conversation.
-
-    Returns:
-        AIResult from the final attempt.
-    """
-    result = AIResult(success=False, text="")
-    for attempt in range(max_retries + 1):
-        result = await call_ai_cli(
-            prompt,
-            cwd=cwd,
-            ai_provider=ai_provider,
-            ai_model=ai_model,
-            ai_cli_timeout=ai_cli_timeout,
-            cli_flags=cli_flags,
-            output_format="json",
-            session_id=session_id,
-        )
-        if result.success:
-            return result
-        # Check if the error matches a known retryable pattern
-        if attempt < max_retries and any(
-            pattern in result.text for pattern in RETRYABLE_AI_CLI_PATTERNS
-        ):
-            logger.warning(
-                f"AI CLI transient error (attempt {attempt + 1}/{max_retries + 1}), retrying: {result.text}"
-            )
-            await asyncio.sleep(2**attempt)  # Exponential backoff: 1s, 2s, 4s
-            continue
-        return result
-    return result  # Should not reach here, but satisfy type checker
 
 
 JSON_RESPONSE_SCHEMA = (
@@ -1043,17 +930,25 @@ Note: Multiple tests failed with the same error. Provide ONE analysis that appli
         f"Calling {ai_provider.upper()} CLI for failure group ({len(failures)} tests with same error)"
     )
     logger.info(f"Calling AI CLI with {format_timeout_log(ai_cli_timeout)}")
-    result, parsed = await call_ai_and_record(
+    result = await call_ai_once(
         prompt,
-        job_id=job_id,
-        call_type="primary",
-        cwd=repo_path,
         ai_provider=ai_provider,
         ai_model=ai_model,
+        cwd=str(repo_path) if repo_path else None,
         ai_cli_timeout=ai_cli_timeout,
-        cli_flags=PROVIDER_CLI_FLAGS.get(ai_provider, []),
     )
 
+    await result.record_usage(
+        job_id=job_id,
+        call_type="primary",
+        prompt_chars=len(prompt),
+        ai_provider=ai_provider,
+        ai_model=ai_model,
+    )
+
+    parsed: AnalysisDetail | None = None
+    if result.success:
+        parsed = parse_json_response(result.text)
     if parsed is None:
         parsed = AnalysisDetail(details=result.text)
 

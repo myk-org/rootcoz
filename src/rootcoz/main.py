@@ -18,12 +18,11 @@ from typing import Annotated, Any, Literal
 import aiosqlite
 import httpx
 import uvicorn
-from ai_cli_runner import (
+from rootcoz.sidecar_client import (
     VALID_AI_PROVIDERS,
-    call_ai_cli,
-    check_ai_cli_available,
-    model_cache,
-    pricing_cache,
+    call_ai_once,
+    check_sidecar_available,
+    list_models,
     run_parallel_with_limit,
 )
 from fastapi import Depends, FastAPI, HTTPException, Query, Request
@@ -73,7 +72,6 @@ from rootcoz.encryption import (
 )
 from rootcoz.engine.core import (
     JOB_INSIGHT_ISSUE_PROMPT_FILENAME,
-    PROVIDER_CLI_FLAGS,
     analyze_failure_group,
     clone_additional_repos,
     get_failure_signature,
@@ -148,7 +146,7 @@ from rootcoz.storage import (
     save_result,
     update_status,
 )
-from rootcoz.token_tracking import build_token_usage_summary, record_ai_usage
+from rootcoz.token_tracking import build_token_usage_summary
 from rootcoz.utils import (
     is_sensitive_key,
     mask_sensitive_fields,
@@ -943,9 +941,9 @@ async def _resume_waiting_jobs(waiting_jobs: list[dict]) -> None:
 
 
 async def _safe_preload_cursor_models() -> None:
-    """Pre-populate cursor model cache in background. Best-effort."""
+    """Pre-populate cursor model list in background. Best-effort."""
     try:
-        await model_cache.list_models("cursor")
+        await list_models("cursor")
     except Exception:
         logger.debug("Failed to preload cursor models", exc_info=True)
 
@@ -977,14 +975,7 @@ async def lifespan(_app: FastAPI):
     await init_db()
     await storage.cleanup_expired_sessions()
 
-    # Load LLM pricing cache asynchronously (best-effort, non-blocking)
-    _warmup = asyncio.create_task(pricing_cache.load())
-    _background_tasks.add(_warmup)
-    _warmup.add_done_callback(_background_tasks.discard)
-
     try:
-        await pricing_cache.start_background_refresh()
-
         # Pre-populate cursor models in background (don't block startup)
         task = asyncio.create_task(_safe_preload_cursor_models())
         _background_tasks.add(task)
@@ -1002,7 +993,7 @@ async def lifespan(_app: FastAPI):
 
         yield
     finally:
-        await pricing_cache.stop_background_refresh()
+        pass
 
 
 app = FastAPI(
@@ -2503,12 +2494,10 @@ async def _process_file_raw_analysis(
         notify_job_status_changed(job_id)
 
         # Pre-flight: verify AI CLI is reachable before spawning parallel tasks
-        preflight_result = await check_ai_cli_available(
-            ai_provider, ai_model, cli_flags=PROVIDER_CLI_FLAGS.get(ai_provider, [])
-        )
-        if not preflight_result.success:
+        preflight_available, preflight_msg = await check_sidecar_available()
+        if not preflight_available:
             logger.error(
-                "AI CLI sanity check failed for job %s (%s/%s)",
+                "AI sidecar sanity check failed for job %s (%s/%s)",
                 job_id,
                 ai_provider,
                 ai_model,
@@ -2519,7 +2508,7 @@ async def _process_file_raw_analysis(
             fail_result = FailureAnalysisResult(
                 job_id=job_id,
                 status="failed",
-                summary=make_user_friendly_error(preflight_result.text),
+                summary=make_user_friendly_error(preflight_msg),
                 ai_provider=ai_provider,
                 ai_model=ai_model,
             )
@@ -5857,14 +5846,14 @@ async def list_ai_models(
                         f"Valid providers: {', '.join(sorted(VALID_AI_PROVIDERS))}"
                     ),
                 )
-            models = await model_cache.list_models(provider)
+            models = await list_models(provider)
             return {"provider": provider, "models": models}
 
         # No provider specified — return models for all known providers
         all_models: dict[str, list[dict]] = {}
         for p in sorted(VALID_AI_PROVIDERS):
             try:
-                models = await model_cache.list_models(p)
+                models = await list_models(p)
                 all_models[p] = models
             except Exception:
                 logger.warning(
@@ -7060,18 +7049,15 @@ Comment:
 Respond with ONLY a JSON object:
 {"suggests_reviewed": true/false, "reason": "brief explanation"}"""
 
-    result = await call_ai_cli(
+    result = await call_ai_once(
         prompt,
         ai_provider=ai_provider,
         ai_model=ai_model,
         ai_cli_timeout=2,
-        cli_flags=PROVIDER_CLI_FLAGS.get(ai_provider, []),
-        output_format="json",
     )
 
-    await record_ai_usage(
+    await result.record_usage(
         job_id="comment-intent",
-        result=result,
         call_type="comment_intent",
         prompt_chars=len(prompt),
         ai_provider=ai_provider,

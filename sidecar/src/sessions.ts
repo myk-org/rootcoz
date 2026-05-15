@@ -190,7 +190,7 @@ export class SessionStore {
     entry.lastActivity = Date.now();
 
     let responseText = "";
-    const usage = { input_tokens: 0, output_tokens: 0, cost_usd: 0, duration_ms: 0 };
+    const usage = { input_tokens: 0, output_tokens: 0, cache_read_tokens: 0, cache_write_tokens: 0, cost_usd: 0, duration_ms: 0 };
     const startTime = Date.now();
 
     const unsubscribe = entry.session.subscribe((event) => {
@@ -202,6 +202,8 @@ export class SessionStore {
           if (msg.role === "assistant" && msg.usage) {
             usage.input_tokens += msg.usage.input || 0;
             usage.output_tokens += msg.usage.output || 0;
+            usage.cache_read_tokens += msg.usage.cacheRead || 0;
+            usage.cache_write_tokens += msg.usage.cacheWrite || 0;
             usage.cost_usd += msg.usage.cost?.total || 0;
           }
         }

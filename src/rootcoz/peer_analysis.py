@@ -11,14 +11,18 @@ from collections.abc import Coroutine
 from pathlib import Path
 from typing import Any, Literal, TypedDict, cast, get_args
 
-from ai_cli_runner import AIResult, run_parallel_with_limit
+from rootcoz.sidecar_client import (
+    AIResult,
+    call_ai,
+    call_ai_once,
+    get_sidecar_client,
+    run_parallel_with_limit,
+)
 from simple_logger.logger import get_logger
 
 from rootcoz.engine.core import (
     JSON_RESPONSE_SCHEMA,
-    PROVIDER_CLI_FLAGS,
     build_prompt_sections,
-    call_ai_cli_with_retry,
     parse_json_response,
     run_single_ai_analysis,
     safe_update_progress,
@@ -31,7 +35,6 @@ from rootcoz.models import (
     PeerDebate,
     PeerRound,
 )
-from rootcoz.token_tracking import record_ai_usage
 
 logger = get_logger(name=__name__, level=os.environ.get("LOG_LEVEL", "INFO"))
 
@@ -507,18 +510,16 @@ async def analyze_failure_group_with_peers(
                     config.ai_provider,
                     config.ai_model,
                 )
-            ai_result = await call_ai_cli_with_retry(
+            ai_result = await call_ai(
                 prompt,
-                cwd=repo_path,
                 ai_provider=config.ai_provider,
                 ai_model=config.ai_model,
+                cwd=str(repo_path) if repo_path else None,
                 ai_cli_timeout=ai_cli_timeout,
-                cli_flags=PROVIDER_CLI_FLAGS.get(config.ai_provider, []),
-                session_id=peer_sessions.get(idx),
+                session_id=session,
             )
-            await record_ai_usage(
+            await ai_result.record_usage(
                 job_id=job_id,
-                result=ai_result,
                 call_type="peer",
                 prompt_chars=len(prompt),
                 ai_provider=config.ai_provider,
@@ -694,17 +695,15 @@ async def analyze_failure_group_with_peers(
 
             previous_analysis = parsed_analysis
             try:
-                rev_result = await call_ai_cli_with_retry(
+                rev_result = await call_ai_once(
                     revision_prompt,
-                    cwd=repo_path,
                     ai_provider=main_ai_provider,
                     ai_model=main_ai_model,
+                    cwd=str(repo_path) if repo_path else None,
                     ai_cli_timeout=ai_cli_timeout,
-                    cli_flags=PROVIDER_CLI_FLAGS.get(main_ai_provider, []),
                 )
-                await record_ai_usage(
+                await rev_result.record_usage(
                     job_id=job_id,
-                    result=rev_result,
                     call_type="revision",
                     prompt_chars=len(revision_prompt),
                     ai_provider=main_ai_provider,
@@ -782,6 +781,14 @@ async def analyze_failure_group_with_peers(
         ],
         rounds=all_rounds,
     )
+
+    # Clean up all peer sessions
+    client = get_sidecar_client()
+    for session_id in peer_sessions.values():
+        try:
+            await client.delete_session(session_id)
+        except Exception:
+            pass
 
     # Apply analysis to all failures in the group.
     # All failures share the same signature (that's how they were grouped),

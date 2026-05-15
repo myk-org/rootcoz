@@ -9,12 +9,11 @@ import json
 import os
 import re
 
-from ai_cli_runner import call_ai_cli
 from simple_logger.logger import get_logger
 
 from rootcoz.bug_creation import GITHUB_AI_FOOTER, create_github_issue
 from rootcoz.config import Settings
-from rootcoz.engine.core import PROVIDER_CLI_FLAGS
+from rootcoz.sidecar_client import call_ai_once
 from rootcoz.models import (
     FeedbackPreviewResponse,
     FeedbackRequest,
@@ -167,13 +166,11 @@ For feature requests, the body should include:
 Do NOT include any sensitive data (tokens, passwords, etc.) in the output."""
 
     try:
-        result = await call_ai_cli(
+        result = await call_ai_once(
             prompt,
             ai_provider=ai_provider,
             ai_model=ai_model,
             ai_cli_timeout=ai_cli_timeout,
-            cli_flags=PROVIDER_CLI_FLAGS.get(ai_provider, []),
-            output_format="json",
         )
     except Exception as exc:  # feedback formatting should fall back
         logger.warning("AI CLI call failed for feedback formatting: %s", exc)

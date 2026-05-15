@@ -5,7 +5,7 @@ import os
 from unittest.mock import patch
 
 import pytest
-from ai_cli_runner import AIResult
+from rootcoz.sidecar_client import AIResult
 from fastapi.testclient import TestClient
 
 from rootcoz import storage
@@ -288,7 +288,7 @@ class TestFormatFeedbackWithAi:
                 "labels": ["bug"],
             }
         )
-        with patch("rootcoz.feedback.call_ai_cli") as mock_ai:
+        with patch("rootcoz.feedback.call_ai_once") as mock_ai:
             mock_ai.return_value = AIResult(success=True, text=ai_response)
             title, body, labels = await format_feedback_with_ai(
                 req, settings, ai_provider="claude", ai_model="test-model"
@@ -308,7 +308,7 @@ class TestFormatFeedbackWithAi:
                 "labels": ["enhancement"],
             }
         )
-        with patch("rootcoz.feedback.call_ai_cli") as mock_ai:
+        with patch("rootcoz.feedback.call_ai_once") as mock_ai:
             mock_ai.return_value = AIResult(success=True, text=ai_response)
             title, _, labels = await format_feedback_with_ai(
                 req, settings, ai_provider="claude", ai_model="test-model"
@@ -320,7 +320,7 @@ class TestFormatFeedbackWithAi:
         req = FeedbackRequest(
             description="Add export to CSV",
         )
-        with patch("rootcoz.feedback.call_ai_cli") as mock_ai:
+        with patch("rootcoz.feedback.call_ai_once") as mock_ai:
             mock_ai.return_value = AIResult(success=False, text="CLI error")
             title, body, labels = await format_feedback_with_ai(
                 req, settings, ai_provider="claude", ai_model="test-model"
@@ -333,7 +333,7 @@ class TestFormatFeedbackWithAi:
         req = FeedbackRequest(
             description="Something broke",
         )
-        with patch("rootcoz.feedback.call_ai_cli") as mock_ai:
+        with patch("rootcoz.feedback.call_ai_once") as mock_ai:
             mock_ai.return_value = AIResult(success=True, text="not json at all")
             title, _, labels = await format_feedback_with_ai(
                 req, settings, ai_provider="claude", ai_model="test-model"
@@ -356,7 +356,7 @@ class TestFormatFeedbackWithAi:
             )
             + "\n```"
         )
-        with patch("rootcoz.feedback.call_ai_cli") as mock_ai:
+        with patch("rootcoz.feedback.call_ai_once") as mock_ai:
             mock_ai.return_value = AIResult(success=True, text=ai_response)
             title, _, labels = await format_feedback_with_ai(
                 req, settings, ai_provider="claude", ai_model="test-model"
@@ -377,7 +377,7 @@ class TestFormatFeedbackWithAi:
             captured_prompt = prompt
             return AIResult(success=False, text="fail")
 
-        with patch("rootcoz.feedback.call_ai_cli", side_effect=capture_call):
+        with patch("rootcoz.feedback.call_ai_once", side_effect=capture_call):
             await format_feedback_with_ai(
                 req, settings, ai_provider="claude", ai_model="test-model"
             )
@@ -396,7 +396,7 @@ class TestFormatFeedbackWithAi:
                 "body": "Some body",
             }
         )
-        with patch("rootcoz.feedback.call_ai_cli") as mock_ai:
+        with patch("rootcoz.feedback.call_ai_once") as mock_ai:
             mock_ai.return_value = AIResult(success=True, text=ai_response)
             _, _, labels = await format_feedback_with_ai(
                 req, settings, ai_provider="claude", ai_model="test-model"
@@ -407,7 +407,7 @@ class TestFormatFeedbackWithAi:
         req = FeedbackRequest(
             description="Something broke",
         )
-        with patch("rootcoz.feedback.call_ai_cli") as mock_ai:
+        with patch("rootcoz.feedback.call_ai_once") as mock_ai:
             mock_ai.side_effect = RuntimeError("AI down")
             title, _, labels = await format_feedback_with_ai(
                 req, settings, ai_provider="claude", ai_model="test-model"
@@ -420,7 +420,7 @@ class TestFormatFeedbackWithAi:
             description="Page crashed",
             console_errors=["TypeError: x is not a function"],
         )
-        with patch("rootcoz.feedback.call_ai_cli") as mock_ai:
+        with patch("rootcoz.feedback.call_ai_once") as mock_ai:
             mock_ai.return_value = AIResult(success=False, text="fail")
             _, _, labels = await format_feedback_with_ai(
                 req, settings, ai_provider="claude", ai_model="test-model"
@@ -434,7 +434,7 @@ class TestFormatFeedbackWithAi:
                 FailedApiCall(status=500, endpoint="/api/x", error="err")
             ],
         )
-        with patch("rootcoz.feedback.call_ai_cli") as mock_ai:
+        with patch("rootcoz.feedback.call_ai_once") as mock_ai:
             mock_ai.side_effect = RuntimeError("AI down")
             _, _, labels = await format_feedback_with_ai(
                 req, settings, ai_provider="claude", ai_model="test-model"
@@ -444,7 +444,7 @@ class TestFormatFeedbackWithAi:
     async def test_ai_returns_blank_title_uses_fallback(self, settings):
         req = FeedbackRequest(description="Some feedback")
         ai_response = json.dumps({"title": "", "body": "Details", "labels": ["bug"]})
-        with patch("rootcoz.feedback.call_ai_cli") as mock_ai:
+        with patch("rootcoz.feedback.call_ai_once") as mock_ai:
             mock_ai.return_value = AIResult(success=True, text=ai_response)
             title, _, labels = await format_feedback_with_ai(
                 req, settings, ai_provider="claude", ai_model="test-model"
