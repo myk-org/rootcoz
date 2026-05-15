@@ -6,7 +6,7 @@ and build token usage summaries for analysis results.
 
 import os
 
-from ai_cli_runner import AIResult, pricing_cache
+from rootcoz.sidecar_client import AIResult
 from simple_logger.logger import get_logger
 
 from rootcoz import storage
@@ -36,24 +36,6 @@ async def record_ai_usage(
         resolved_provider = (usage.provider if usage else "") or ai_provider
         resolved_model = (usage.model if usage else "") or ai_model
         cost = usage.cost_usd if usage else None
-
-        # If CLI didn't provide cost, calculate from pricing cache
-        if cost is None and usage is not None:
-            try:
-                cost = pricing_cache.calculate_cost(
-                    provider=resolved_provider,
-                    model=resolved_model,
-                    input_tokens=usage.input_tokens,
-                    output_tokens=usage.output_tokens,
-                    cache_read_tokens=usage.cache_read_tokens,
-                    cache_write_tokens=usage.cache_write_tokens,
-                )
-            except Exception:
-                logger.debug(
-                    "Failed to calculate cost from pricing cache for job %s",
-                    job_id,
-                    exc_info=True,
-                )
 
         await storage.record_token_usage(
             job_id=job_id,

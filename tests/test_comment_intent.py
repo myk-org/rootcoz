@@ -6,7 +6,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pytest
-from ai_cli_runner import AIResult
+from rootcoz.sidecar_client import AIResult
 
 from rootcoz import storage
 from tests.conftest import build_test_env
@@ -56,7 +56,7 @@ class TestAnalyzeCommentIntent:
             success=True,
             text='{"suggests_reviewed": true, "reason": "Bug filed with Jira link"}',
         )
-        with patch("rootcoz.main.call_ai_cli", return_value=ai_response) as mock_ai:
+        with patch("rootcoz.main.call_ai_once", return_value=ai_response) as mock_ai:
             response = client.post(
                 "/api/analyze-comment-intent",
                 json={"comment": "Filed JIRA-123 for this failure"},
@@ -74,7 +74,7 @@ class TestAnalyzeCommentIntent:
             success=True,
             text='{"suggests_reviewed": false, "reason": "Sharing a URL for context, no resolution indicated"}',
         )
-        with patch("rootcoz.main.call_ai_cli", return_value=ai_response):
+        with patch("rootcoz.main.call_ai_once", return_value=ai_response):
             response = client.post(
                 "/api/analyze-comment-intent",
                 json={
@@ -92,7 +92,7 @@ class TestAnalyzeCommentIntent:
             success=False,
             text="AI service unavailable",
         )
-        with patch("rootcoz.main.call_ai_cli", return_value=ai_response):
+        with patch("rootcoz.main.call_ai_once", return_value=ai_response):
             response = client.post(
                 "/api/analyze-comment-intent",
                 json={"comment": "Fixed in commit abc123"},
@@ -109,7 +109,7 @@ class TestAnalyzeCommentIntent:
             success=True,
             text="This is not valid JSON at all",
         )
-        with patch("rootcoz.main.call_ai_cli", return_value=ai_response):
+        with patch("rootcoz.main.call_ai_once", return_value=ai_response):
             response = client.post(
                 "/api/analyze-comment-intent",
                 json={"comment": "some comment"},
@@ -126,8 +126,8 @@ class TestAnalyzeCommentIntent:
             text='{"suggests_reviewed": false, "reason": "test"}',
         )
         with (
-            patch("rootcoz.main.call_ai_cli", return_value=ai_response),
-            patch("rootcoz.main.record_ai_usage") as mock_record,
+            patch("rootcoz.main.call_ai_once", return_value=ai_response),
+            patch("rootcoz.token_tracking.record_ai_usage") as mock_record,
         ):
             response = client.post(
                 "/api/analyze-comment-intent",
@@ -154,7 +154,7 @@ class TestAnalyzeCommentIntent:
             success=True,
             text='{"suggests_reviewed": true, "reason": "Bug filed"}',
         )
-        with patch("rootcoz.main.call_ai_cli", return_value=ai_response) as mock_ai:
+        with patch("rootcoz.main.call_ai_once", return_value=ai_response) as mock_ai:
             response = client.post(
                 "/api/analyze-comment-intent",
                 json={
@@ -243,7 +243,7 @@ class TestAnalyzeCommentIntentJobFallback:
             success=True,
             text='{"suggests_reviewed": true, "reason": "Bug filed"}',
         )
-        with patch("rootcoz.main.call_ai_cli", return_value=ai_response) as mock_ai:
+        with patch("rootcoz.main.call_ai_once", return_value=ai_response) as mock_ai:
             response = client_no_ai.post(
                 "/api/analyze-comment-intent",
                 json={"comment": "Filed JIRA-123", "job_id": "job-123"},
@@ -276,7 +276,7 @@ class TestAnalyzeCommentIntentJobFallback:
             success=True,
             text='{"suggests_reviewed": false, "reason": "No resolution"}',
         )
-        with patch("rootcoz.main.call_ai_cli", return_value=ai_response) as mock_ai:
+        with patch("rootcoz.main.call_ai_once", return_value=ai_response) as mock_ai:
             response = client_no_ai.post(
                 "/api/analyze-comment-intent",
                 json={
@@ -326,7 +326,7 @@ class TestAnalyzeCommentIntentJobFallback:
 
             with TestClient(app, headers=_ADMIN_AUTH_HEADERS) as client_env:
                 with patch(
-                    "rootcoz.main.call_ai_cli", return_value=ai_response
+                    "rootcoz.main.call_ai_once", return_value=ai_response
                 ) as mock_ai:
                     response = client_env.post(
                         "/api/analyze-comment-intent",

@@ -20,13 +20,12 @@ from pathlib import Path
 from typing import Any, NoReturn
 
 import jenkins
-from ai_cli_runner import check_ai_cli_available, run_parallel_with_limit
+from rootcoz.sidecar_client import check_sidecar_available, run_parallel_with_limit
 from pydantic import HttpUrl
 from simple_logger.logger import get_logger
 
 from rootcoz.config import Settings, parse_repo_ref
 from rootcoz.engine.core import (
-    PROVIDER_CLI_FLAGS,
     analyze_failure_group,
     clone_additional_repos,
     derive_error_details,
@@ -1059,13 +1058,11 @@ async def analyze_job(
                 )
                 cloned_repos.update(additional_repos_cloned)
 
-            # Pre-flight: verify AI CLI is reachable before spawning parallel tasks
-            preflight_result = await check_ai_cli_available(
-                ai_provider, ai_model, cli_flags=PROVIDER_CLI_FLAGS.get(ai_provider, [])
-            )
-            if not preflight_result.success:
+            # Pre-flight: verify AI sidecar is reachable before spawning parallel tasks
+            preflight_available, preflight_msg = await check_sidecar_available()
+            if not preflight_available:
                 logger.error(
-                    "AI CLI sanity check failed for job %s (%s/%s)",
+                    "AI sidecar sanity check failed for job %s (%s/%s)",
                     job_id,
                     ai_provider,
                     ai_model,
@@ -1079,7 +1076,7 @@ async def analyze_job(
                     build_number=request.build_number,
                     jenkins_url=HttpUrl(jenkins_build_url),
                     status="failed",
-                    summary=make_user_friendly_error(preflight_result.text),
+                    summary=make_user_friendly_error(preflight_msg),
                     ai_provider=ai_provider,
                     ai_model=ai_model,
                     failures=[],

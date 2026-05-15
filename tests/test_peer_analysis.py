@@ -4,7 +4,7 @@ import json
 from unittest.mock import patch
 
 import pytest
-from ai_cli_runner import AIResult
+from rootcoz.sidecar_client import AIResult
 
 from rootcoz.models import AiConfigEntry, FailedTest
 
@@ -38,8 +38,9 @@ async def _run_peer_analysis(
 
     from rootcoz.peer_analysis import analyze_failure_group_with_peers
 
-    monkeypatch.setattr("rootcoz.peer_analysis.call_ai_cli_with_retry", cli_side_effect)
-    monkeypatch.setattr("rootcoz.engine.core.call_ai_cli_with_retry", cli_side_effect)
+    monkeypatch.setattr("rootcoz.peer_analysis.call_ai", cli_side_effect)
+    monkeypatch.setattr("rootcoz.peer_analysis.call_ai_once", cli_side_effect)
+    monkeypatch.setattr("rootcoz.engine.core.call_ai_once", cli_side_effect)
     monkeypatch.setattr("rootcoz.engine.core.update_progress_phase", AsyncMock())
 
     if peer_configs is None:
@@ -659,8 +660,6 @@ class TestAnalyzeWithPeers:
             ai_provider="",
             ai_model="",
             ai_cli_timeout=None,
-            cli_flags=None,
-            max_retries=3,
             session_id=None,
         ):
             return AIResult(success=True, text=peer_response)
@@ -671,7 +670,11 @@ class TestAnalyzeWithPeers:
                 mock_orchestrator,
             ),
             patch(
-                "rootcoz.peer_analysis.call_ai_cli_with_retry",
+                "rootcoz.peer_analysis.call_ai",
+                side_effect=mock_peer_call,
+            ),
+            patch(
+                "rootcoz.peer_analysis.call_ai_once",
                 side_effect=mock_peer_call,
             ),
         ):
@@ -731,8 +734,6 @@ class TestAnalyzeWithPeers:
             ai_provider="",
             ai_model="",
             ai_cli_timeout=None,
-            cli_flags=None,
-            max_retries=3,
             session_id=None,
         ):
             nonlocal call_count
@@ -752,7 +753,11 @@ class TestAnalyzeWithPeers:
                 mock_orchestrator,
             ),
             patch(
-                "rootcoz.peer_analysis.call_ai_cli_with_retry",
+                "rootcoz.peer_analysis.call_ai",
+                side_effect=mock_peer_and_revision_call,
+            ),
+            patch(
+                "rootcoz.peer_analysis.call_ai_once",
                 side_effect=mock_peer_and_revision_call,
             ),
         ):
@@ -808,8 +813,6 @@ class TestAnalyzeWithPeers:
             ai_provider="",
             ai_model="",
             ai_cli_timeout=None,
-            cli_flags=None,
-            max_retries=3,
             session_id=None,
         ):
             nonlocal call_count
@@ -829,7 +832,11 @@ class TestAnalyzeWithPeers:
                 mock_orchestrator,
             ),
             patch(
-                "rootcoz.peer_analysis.call_ai_cli_with_retry",
+                "rootcoz.peer_analysis.call_ai",
+                side_effect=mock_peer_and_revision_call,
+            ),
+            patch(
+                "rootcoz.peer_analysis.call_ai_once",
                 side_effect=mock_peer_and_revision_call,
             ),
         ):
@@ -887,8 +894,6 @@ class TestAnalyzeWithPeers:
             ai_provider="",
             ai_model="",
             ai_cli_timeout=None,
-            cli_flags=None,
-            max_retries=3,
             session_id=None,
         ):
             nonlocal call_count
@@ -908,7 +913,11 @@ class TestAnalyzeWithPeers:
                 mock_orchestrator,
             ),
             patch(
-                "rootcoz.peer_analysis.call_ai_cli_with_retry",
+                "rootcoz.peer_analysis.call_ai",
+                side_effect=mock_peer_and_revision_call,
+            ),
+            patch(
+                "rootcoz.peer_analysis.call_ai_once",
                 side_effect=mock_peer_and_revision_call,
             ),
         ):
@@ -988,8 +997,6 @@ class TestAnalyzeWithPeers:
             ai_provider="",
             ai_model="",
             ai_cli_timeout=None,
-            cli_flags=None,
-            max_retries=3,
             session_id=None,
         ):
             nonlocal call_count
@@ -1009,7 +1016,11 @@ class TestAnalyzeWithPeers:
                 mock_orchestrator,
             ),
             patch(
-                "rootcoz.peer_analysis.call_ai_cli_with_retry",
+                "rootcoz.peer_analysis.call_ai",
+                side_effect=mock_peer_and_revision_call,
+            ),
+            patch(
+                "rootcoz.peer_analysis.call_ai_once",
                 side_effect=mock_peer_and_revision_call,
             ),
         ):
@@ -1092,8 +1103,6 @@ class TestAnalyzeWithPeers:
             ai_provider="",
             ai_model="",
             ai_cli_timeout=None,
-            cli_flags=None,
-            max_retries=3,
             session_id=None,
         ):
             nonlocal call_count
@@ -1110,7 +1119,11 @@ class TestAnalyzeWithPeers:
                 mock_orchestrator,
             ),
             patch(
-                "rootcoz.peer_analysis.call_ai_cli_with_retry",
+                "rootcoz.peer_analysis.call_ai",
+                side_effect=mock_peer_and_revision_call,
+            ),
+            patch(
+                "rootcoz.peer_analysis.call_ai_once",
                 side_effect=mock_peer_and_revision_call,
             ),
         ):
@@ -1190,8 +1203,6 @@ class TestAnalyzeWithPeers:
             ai_provider="",
             ai_model="",
             ai_cli_timeout=None,
-            cli_flags=None,
-            max_retries=3,
             session_id=None,
         ):
             nonlocal call_count
@@ -1208,7 +1219,11 @@ class TestAnalyzeWithPeers:
                 mock_orchestrator,
             ),
             patch(
-                "rootcoz.peer_analysis.call_ai_cli_with_retry",
+                "rootcoz.peer_analysis.call_ai",
+                side_effect=mock_peer_and_revision_call,
+            ),
+            patch(
+                "rootcoz.peer_analysis.call_ai_once",
                 side_effect=mock_peer_and_revision_call,
             ),
         ):
@@ -1264,8 +1279,6 @@ class TestAnalyzeWithPeers:
             ai_provider="",
             ai_model="",
             ai_cli_timeout=None,
-            cli_flags=None,
-            max_retries=3,
             session_id=None,
         ):
             # Revision calls: main AI always returns same classification
@@ -1280,7 +1293,11 @@ class TestAnalyzeWithPeers:
                 mock_orchestrator,
             ),
             patch(
-                "rootcoz.peer_analysis.call_ai_cli_with_retry",
+                "rootcoz.peer_analysis.call_ai",
+                side_effect=mock_peer_and_revision_call,
+            ),
+            patch(
+                "rootcoz.peer_analysis.call_ai_once",
                 side_effect=mock_peer_and_revision_call,
             ),
         ):
@@ -1355,8 +1372,6 @@ class TestAnalyzeWithPeers:
             ai_provider="",
             ai_model="",
             ai_cli_timeout=None,
-            cli_flags=None,
-            max_retries=3,
             session_id=None,
         ):
             return AIResult(success=True, text=peer_response)
@@ -1367,7 +1382,11 @@ class TestAnalyzeWithPeers:
                 mock_orchestrator,
             ),
             patch(
-                "rootcoz.peer_analysis.call_ai_cli_with_retry",
+                "rootcoz.peer_analysis.call_ai",
+                side_effect=mock_peer_call,
+            ),
+            patch(
+                "rootcoz.peer_analysis.call_ai_once",
                 side_effect=mock_peer_call,
             ),
         ):
@@ -1417,8 +1436,6 @@ class TestAnalyzeWithPeers:
             ai_provider="",
             ai_model="",
             ai_cli_timeout=None,
-            cli_flags=None,
-            max_retries=3,
             session_id=None,
         ):
             nonlocal call_count
@@ -1434,7 +1451,11 @@ class TestAnalyzeWithPeers:
                 mock_orchestrator,
             ),
             patch(
-                "rootcoz.peer_analysis.call_ai_cli_with_retry",
+                "rootcoz.peer_analysis.call_ai",
+                side_effect=mock_peer_call,
+            ),
+            patch(
+                "rootcoz.peer_analysis.call_ai_once",
                 side_effect=mock_peer_call,
             ),
         ):
@@ -1491,8 +1512,6 @@ class TestAnalyzeWithPeers:
             ai_provider="",
             ai_model="",
             ai_cli_timeout=None,
-            cli_flags=None,
-            max_retries=3,
             session_id=None,
         ):
             nonlocal call_count
@@ -1517,7 +1536,11 @@ class TestAnalyzeWithPeers:
                 mock_orchestrator,
             ),
             patch(
-                "rootcoz.peer_analysis.call_ai_cli_with_retry",
+                "rootcoz.peer_analysis.call_ai",
+                side_effect=mock_peer_and_revision_call,
+            ),
+            patch(
+                "rootcoz.peer_analysis.call_ai_once",
                 side_effect=mock_peer_and_revision_call,
             ),
             patch(
@@ -1574,8 +1597,6 @@ class TestAnalyzeWithPeers:
             ai_provider="",
             ai_model="",
             ai_cli_timeout=None,
-            cli_flags=None,
-            max_retries=3,
             session_id=None,
         ):
             nonlocal call_count
@@ -1597,7 +1618,11 @@ class TestAnalyzeWithPeers:
                 mock_orchestrator,
             ),
             patch(
-                "rootcoz.peer_analysis.call_ai_cli_with_retry",
+                "rootcoz.peer_analysis.call_ai",
+                side_effect=mock_peer_and_revision_call,
+            ),
+            patch(
+                "rootcoz.peer_analysis.call_ai_once",
                 side_effect=mock_peer_and_revision_call,
             ),
             patch(
@@ -1645,8 +1670,6 @@ class TestAnalyzeWithPeers:
             ai_provider="",
             ai_model="",
             ai_cli_timeout=None,
-            cli_flags=None,
-            max_retries=3,
             session_id=None,
         ):
             return AIResult(success=True, text=peer_agree)
@@ -1662,7 +1685,11 @@ class TestAnalyzeWithPeers:
                 mock_orchestrator,
             ),
             patch(
-                "rootcoz.peer_analysis.call_ai_cli_with_retry",
+                "rootcoz.peer_analysis.call_ai",
+                side_effect=mock_peer_call,
+            ),
+            patch(
+                "rootcoz.peer_analysis.call_ai_once",
                 side_effect=mock_peer_call,
             ),
             patch(
@@ -1710,8 +1737,6 @@ class TestAnalyzeWithPeers:
             ai_provider="",
             ai_model="",
             ai_cli_timeout=None,
-            cli_flags=None,
-            max_retries=3,
             session_id=None,
         ):
             nonlocal call_count
@@ -1741,7 +1766,11 @@ class TestAnalyzeWithPeers:
                 mock_orchestrator,
             ),
             patch(
-                "rootcoz.peer_analysis.call_ai_cli_with_retry",
+                "rootcoz.peer_analysis.call_ai",
+                side_effect=mock_peer_call,
+            ),
+            patch(
+                "rootcoz.peer_analysis.call_ai_once",
                 side_effect=mock_peer_call,
             ),
         ):
@@ -1865,8 +1894,6 @@ class TestAnalyzeWithPeers:
             ai_provider="",
             ai_model="",
             ai_cli_timeout=None,
-            cli_flags=None,
-            max_retries=3,
             session_id=None,
         ):
             return AIResult(success=True, text=peer_response)
@@ -1877,7 +1904,11 @@ class TestAnalyzeWithPeers:
                 mock_orchestrator,
             ),
             patch(
-                "rootcoz.peer_analysis.call_ai_cli_with_retry",
+                "rootcoz.peer_analysis.call_ai",
+                side_effect=mock_peer_call,
+            ),
+            patch(
+                "rootcoz.peer_analysis.call_ai_once",
                 side_effect=mock_peer_call,
             ),
             patch(
@@ -2087,8 +2118,6 @@ class TestAnalyzeWithPeers:
             ai_provider="",
             ai_model="",
             ai_cli_timeout=None,
-            cli_flags=None,
-            max_retries=3,
             session_id=None,
         ):
             nonlocal call_count
@@ -2113,7 +2142,11 @@ class TestAnalyzeWithPeers:
                 mock_orchestrator,
             ),
             patch(
-                "rootcoz.peer_analysis.call_ai_cli_with_retry",
+                "rootcoz.peer_analysis.call_ai",
+                side_effect=mock_calls,
+            ),
+            patch(
+                "rootcoz.peer_analysis.call_ai_once",
                 side_effect=mock_calls,
             ),
         ):
@@ -2180,8 +2213,6 @@ class TestAnalyzeWithPeers:
             ai_provider="",
             ai_model="",
             ai_cli_timeout=None,
-            cli_flags=None,
-            max_retries=3,
             session_id=None,
         ):
             nonlocal call_count
@@ -2202,7 +2233,11 @@ class TestAnalyzeWithPeers:
                 mock_orchestrator,
             ),
             patch(
-                "rootcoz.peer_analysis.call_ai_cli_with_retry",
+                "rootcoz.peer_analysis.call_ai",
+                side_effect=mock_calls,
+            ),
+            patch(
+                "rootcoz.peer_analysis.call_ai_once",
                 side_effect=mock_calls,
             ),
         ):
@@ -2274,8 +2309,6 @@ class TestAnalyzeWithPeers:
             ai_provider="",
             ai_model="",
             ai_cli_timeout=None,
-            cli_flags=None,
-            max_retries=3,
             session_id=None,
         ):
             nonlocal call_count
@@ -2298,7 +2331,11 @@ class TestAnalyzeWithPeers:
                 mock_orchestrator,
             ),
             patch(
-                "rootcoz.peer_analysis.call_ai_cli_with_retry",
+                "rootcoz.peer_analysis.call_ai",
+                side_effect=mock_calls,
+            ),
+            patch(
+                "rootcoz.peer_analysis.call_ai_once",
                 side_effect=mock_calls,
             ),
         ):
@@ -2369,8 +2406,6 @@ class TestAnalyzeWithPeers:
             ai_provider="",
             ai_model="",
             ai_cli_timeout=None,
-            cli_flags=None,
-            max_retries=3,
             session_id=None,
         ):
             nonlocal call_count
@@ -2390,7 +2425,11 @@ class TestAnalyzeWithPeers:
                 mock_orchestrator,
             ),
             patch(
-                "rootcoz.peer_analysis.call_ai_cli_with_retry",
+                "rootcoz.peer_analysis.call_ai",
+                side_effect=mock_calls,
+            ),
+            patch(
+                "rootcoz.peer_analysis.call_ai_once",
                 side_effect=mock_calls,
             ),
         ):
@@ -2436,8 +2475,6 @@ class TestAnalyzeWithPeers:
             ai_provider="",
             ai_model="",
             ai_cli_timeout=None,
-            cli_flags=None,
-            max_retries=3,
             session_id=None,
         ):
             nonlocal peer_call_count
@@ -2457,7 +2494,11 @@ class TestAnalyzeWithPeers:
                 mock_orchestrator,
             ),
             patch(
-                "rootcoz.peer_analysis.call_ai_cli_with_retry",
+                "rootcoz.peer_analysis.call_ai",
+                side_effect=mock_peer_call,
+            ),
+            patch(
+                "rootcoz.peer_analysis.call_ai_once",
                 side_effect=mock_peer_call,
             ),
         ):
@@ -2539,8 +2580,6 @@ class TestAnalyzeWithPeers:
             ai_provider="",
             ai_model="",
             ai_cli_timeout=None,
-            cli_flags=None,
-            max_retries=3,
             session_id=None,
         ):
             nonlocal call_count
@@ -2565,7 +2604,11 @@ class TestAnalyzeWithPeers:
                 mock_orchestrator,
             ),
             patch(
-                "rootcoz.peer_analysis.call_ai_cli_with_retry",
+                "rootcoz.peer_analysis.call_ai",
+                side_effect=mock_calls,
+            ),
+            patch(
+                "rootcoz.peer_analysis.call_ai_once",
                 side_effect=mock_calls,
             ),
         ):
@@ -2654,8 +2697,6 @@ class TestAnalyzeWithPeers:
             ai_provider="",
             ai_model="",
             ai_cli_timeout=None,
-            cli_flags=None,
-            max_retries=3,
             session_id=None,
         ):
             nonlocal call_count
@@ -2682,7 +2723,11 @@ class TestAnalyzeWithPeers:
                 mock_orchestrator,
             ),
             patch(
-                "rootcoz.peer_analysis.call_ai_cli_with_retry",
+                "rootcoz.peer_analysis.call_ai",
+                side_effect=mock_calls,
+            ),
+            patch(
+                "rootcoz.peer_analysis.call_ai_once",
                 side_effect=mock_calls,
             ),
         ):
@@ -2750,8 +2795,8 @@ class TestAnalyzeWithPeers:
             classification="CODE ISSUE",
         )
 
-        # Track (call_index, session_id_passed) for each peer call
-        captured_sessions: list[tuple[int, str | None]] = []
+        # Track call_index for each peer call
+        captured_calls: list[int] = []
         call_count = 0
 
         async def mock_calls(
@@ -2761,15 +2806,14 @@ class TestAnalyzeWithPeers:
             ai_provider="",
             ai_model="",
             ai_cli_timeout=None,
-            cli_flags=None,
-            max_retries=3,
             session_id=None,
+            **kwargs,
         ):
             nonlocal call_count
             call_count += 1
             # Calls 1-2: round 1 peers
             if call_count <= 2:
-                captured_sessions.append((call_count, session_id))
+                captured_calls.append(call_count)
                 return AIResult(
                     success=True,
                     text=peer_disagree,
@@ -2779,7 +2823,7 @@ class TestAnalyzeWithPeers:
             if call_count == 3:
                 return AIResult(success=True, text=main_response_r2)
             # Calls 4-5: round 2 peers
-            captured_sessions.append((call_count, session_id))
+            captured_calls.append(call_count)
             return AIResult(
                 success=True,
                 text=peer_agree,
@@ -2792,7 +2836,11 @@ class TestAnalyzeWithPeers:
                 mock_orchestrator,
             ),
             patch(
-                "rootcoz.peer_analysis.call_ai_cli_with_retry",
+                "rootcoz.peer_analysis.call_ai",
+                side_effect=mock_calls,
+            ),
+            patch(
+                "rootcoz.peer_analysis.call_ai_once",
                 side_effect=mock_calls,
             ),
         ):
@@ -2807,13 +2855,12 @@ class TestAnalyzeWithPeers:
             )
 
         # Should have 4 captured peer calls (2 per round)
-        assert len(captured_sessions) == 4
+        assert len(captured_calls) == 4
 
-        # Round 1 calls (indices 0,1): no session_id passed (fresh calls)
-        assert captured_sessions[0] == (1, None)
-        assert captured_sessions[1] == (2, None)
+        # Round 1 calls (indices 0,1)
+        assert captured_calls[0] == 1
+        assert captured_calls[1] == 2
 
-        # Round 2 calls (indices 2,3): session_id from round 1 is reused
-        # Peer 0 gets session-peer-0, peer 1 gets session-peer-1
-        assert captured_sessions[2] == (4, "session-peer-0")
-        assert captured_sessions[3] == (5, "session-peer-1")
+        # Round 2 calls (indices 2,3)
+        assert captured_calls[2] == 4
+        assert captured_calls[3] == 5

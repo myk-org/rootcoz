@@ -7,11 +7,9 @@ issues from any tracker match a given bug/failure description.
 import json
 import os
 
-from ai_cli_runner import call_ai_cli
 from simple_logger.logger import get_logger
 
-from rootcoz.engine.core import PROVIDER_CLI_FLAGS
-from rootcoz.token_tracking import record_ai_usage
+from rootcoz.sidecar_client import call_ai_once
 
 logger = get_logger(name=__name__, level=os.environ.get("LOG_LEVEL", "INFO"))
 
@@ -89,19 +87,16 @@ Example: [{{"key": "PROJ-123", "relevant": true, "score": 0.9}}, {{"key": "PROJ-
 
 Respond with ONLY the JSON array, no other text."""
 
-    result = await call_ai_cli(
+    result = await call_ai_once(
         prompt,
         ai_provider=ai_provider,
         ai_model=ai_model,
         ai_cli_timeout=ai_cli_timeout,
-        cli_flags=PROVIDER_CLI_FLAGS.get(ai_provider, []),
-        output_format="json",
     )
 
     if job_id:
-        await record_ai_usage(
+        await result.record_usage(
             job_id=job_id,
-            result=result,
             call_type=call_type,
             prompt_chars=len(prompt),
             ai_provider=ai_provider,
