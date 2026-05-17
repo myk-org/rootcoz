@@ -107,7 +107,6 @@ class SidecarClient:
         model: str,
         system_prompt: str,
         cwd: str = "/tmp",
-        tools_config: dict | None = None,
     ) -> str:
         """Create a new AI session. Returns session_id."""
         sidecar_provider, sidecar_model = _map_provider_model(provider, model)
@@ -117,8 +116,6 @@ class SidecarClient:
             "system_prompt": system_prompt,
             "cwd": cwd,
         }
-        if tools_config:
-            body["tools_config"] = tools_config
         resp = await self._client.post("/sessions", json=body)
         resp.raise_for_status()
         return resp.json()["session_id"]
@@ -207,6 +204,7 @@ async def call_ai(
       previous result to continue the conversation.
     """
     client = get_sidecar_client()
+    created_session = False
     try:
         if not session_id:
             session_id = await client.create_session(
@@ -215,6 +213,7 @@ async def call_ai(
                 system_prompt=system_prompt or "You are a helpful assistant.",
                 cwd=cwd or "/tmp",
             )
+            created_session = True
         # Convert minutes to seconds for httpx timeout
         timeout = ai_cli_timeout * 60.0 if ai_cli_timeout else None
         result = await client.prompt(session_id, prompt, timeout=timeout)
@@ -223,6 +222,14 @@ async def call_ai(
         return result
     except Exception as e:
         logger.error("Sidecar call failed: %s", e)
+        # Clean up session if WE created it and the prompt failed
+        if created_session and session_id:
+            try:
+                await client.delete_session(session_id)
+            except Exception:
+                logger.debug(
+                    "Failed to cleanup leaked session %s", session_id, exc_info=True
+                )
         return AIResult(success=False, text=str(e))
 
 

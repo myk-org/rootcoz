@@ -23,7 +23,7 @@ WORKDIR /sidecar
 RUN apt-get update && apt-get install -y --no-install-recommends git && rm -rf /var/lib/apt/lists/*
 
 COPY sidecar/package.json sidecar/package-lock.json* ./
-RUN npm install --ignore-scripts
+RUN npm ci --ignore-scripts
 
 COPY sidecar/ .
 RUN npx tsc

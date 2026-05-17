@@ -10,7 +10,6 @@ import {
   SettingsManager,
 } from "@earendil-works/pi-coding-agent";
 import { getModel } from "@earendil-works/pi-ai";
-import { createTools } from "./tools.js";
 
 interface SessionEntry {
   session: AgentSession;
@@ -22,16 +21,6 @@ interface CreateSessionOptions {
   model: string;
   systemPrompt: string;
   cwd: string;
-  toolsConfig?: {
-    serverUrl: string;
-    authToken: string;
-    jobId: string;
-    jiraUrl?: string;
-    jiraEmail?: string;
-    jiraToken?: string;
-    githubToken?: string;
-    githubRepo?: string;
-  };
 }
 
 // Extension paths — set during container build
@@ -128,6 +117,12 @@ export class SessionStore {
       // Try built-in models
       model = getModel(options.provider as any, options.model) || undefined;
     }
+    if (!options.model) {
+      throw new Error(`Model is required. Use GET /models to list available models.`);
+    }
+    if (!model) {
+      throw new Error(`Model '${options.model}' not found for provider '${options.provider}'. Use GET /models to list available models.`);
+    }
 
     // Build extension paths (only include existing files)
     const extensionPaths: string[] = [];
@@ -149,9 +144,6 @@ export class SessionStore {
     }
     console.log(`[sidecar] Loading ${extensionPaths.length} extensions`);
 
-    // Build custom tools from config
-    const customTools = options.toolsConfig ? createTools(options.toolsConfig) : [];
-
     const settingsManager = SettingsManager.inMemory({
       compaction: { enabled: false },
     });
@@ -169,8 +161,8 @@ export class SessionStore {
       cwd: options.cwd,
       model,
       thinkingLevel: "off",
-      tools: ["read", "grep", "find", "ls"],
-      customTools,
+      tools: ["read", "grep", "find", "ls", "bash"],
+      customTools: [],
       resourceLoader: loader,
       sessionManager: SessionManager.inMemory(),
       settingsManager,
@@ -190,7 +182,7 @@ export class SessionStore {
     entry.lastActivity = Date.now();
 
     let responseText = "";
-    const usage = { input_tokens: 0, output_tokens: 0, cache_read_tokens: 0, cache_write_tokens: 0, cost_usd: 0, duration_ms: 0 };
+    const usage = { input_tokens: 0, output_tokens: 0, cache_read_tokens: 0, cache_write_tokens: 0, cost_usd: null as number | null, duration_ms: 0 };
     const startTime = Date.now();
 
     const unsubscribe = entry.session.subscribe((event) => {
@@ -204,7 +196,9 @@ export class SessionStore {
             usage.output_tokens += msg.usage.output || 0;
             usage.cache_read_tokens += msg.usage.cacheRead || 0;
             usage.cache_write_tokens += msg.usage.cacheWrite || 0;
-            usage.cost_usd += msg.usage.cost?.total || 0;
+            if (msg.usage.cost?.total != null) {
+              usage.cost_usd = (usage.cost_usd ?? 0) + msg.usage.cost.total;
+            }
           }
         }
       }

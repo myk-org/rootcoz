@@ -294,6 +294,46 @@ def get_failure_signature(failure: FailedTest) -> str:
     return hashlib.sha256(signature_text.encode()).hexdigest()
 
 
+def extract_json_dict(raw_text: str) -> dict | None:
+    """Extract a JSON object from AI response text.
+
+    Tries three strategies in order:
+    1. Direct ``json.loads`` on the stripped text.
+    2. Find the outermost ``{…}`` substring using brace matching.
+    3. Extract from markdown code blocks (````` ``` ````` / ````` ```json `````).
+
+    Args:
+        raw_text: The raw text potentially containing a JSON object.
+
+    Returns:
+        The parsed dict, or None if no valid JSON object could be extracted.
+    """
+    text = raw_text.strip()
+    if not text:
+        return None
+
+    # Strategy 1: Try parsing the entire text as JSON directly
+    if text.startswith("{"):
+        try:
+            data = json.loads(text)
+            if isinstance(data, dict):
+                return data
+        except Exception:
+            pass
+
+    # Strategy 2: Find the outermost JSON object using brace matching
+    result = _extract_json_by_braces(text)
+    if result is not None:
+        return result
+
+    # Strategy 3: Try markdown code block extraction
+    result = _extract_json_from_code_blocks(text)
+    if result is not None:
+        return result
+
+    return None
+
+
 def parse_json_response(raw_text: str) -> AnalysisDetail:
     """Parse AI CLI JSON response into an AnalysisDetail.
 
@@ -314,29 +354,9 @@ def parse_json_response(raw_text: str) -> AnalysisDetail:
         An AnalysisDetail instance parsed from the JSON, or a
         fallback instance with the raw text stored in details.
     """
-    text = raw_text.strip()
-
-    # Strategy 1: Try parsing the entire text as JSON directly
-    # TODO: This only handles JSON objects; top-level JSON arrays are not
-    # supported.  Current callers always expect an object schema so this is
-    # fine, but revisit if array responses become possible.
-    if text.startswith("{"):
-        try:
-            data = json.loads(text)
-            return AnalysisDetail(**data)
-        except Exception:
-            pass
-
-    # Strategy 2: Find the outermost JSON object using brace matching
-    result = _extract_json_by_braces(text)
-    if result is not None:
-        return result
-
-    # Strategy 3: Try markdown code block extraction
-    # Find ALL ```json or ``` blocks and try each one
-    result = _extract_json_from_code_blocks(text)
-    if result is not None:
-        return result
+    data = extract_json_dict(raw_text)
+    if data is not None:
+        return AnalysisDetail(**data)
 
     # Fallback: store raw text in details, then attempt recovery
     fallback = AnalysisDetail(details=raw_text)
@@ -535,8 +555,8 @@ def recover_from_details(result: AnalysisDetail) -> AnalysisDetail:
     )
 
 
-def _extract_json_by_braces(text: str) -> AnalysisDetail | None:
-    """Extract JSON by finding matching outermost braces.
+def _extract_json_by_braces(text: str) -> dict | None:
+    """Extract a JSON object dict by finding matching outermost braces.
 
     Handles cases where JSON values contain embedded code blocks
     or other special characters by tracking brace nesting depth
@@ -546,7 +566,7 @@ def _extract_json_by_braces(text: str) -> AnalysisDetail | None:
         text: Text potentially containing a JSON object.
 
     Returns:
-        Parsed AnalysisDetail or None if extraction fails.
+        Parsed dict or None if extraction fails.
     """
     first_brace = text.find("{")
     if first_brace == -1:
@@ -591,13 +611,15 @@ def _extract_json_by_braces(text: str) -> AnalysisDetail | None:
     json_str = text[first_brace : end_pos + 1]
     try:
         data = json.loads(json_str)
-        return AnalysisDetail(**data)
+        if isinstance(data, dict):
+            return data
     except Exception:
-        return None
+        pass
+    return None
 
 
-def _extract_json_from_code_blocks(text: str) -> AnalysisDetail | None:
-    """Extract JSON from markdown code blocks in the text.
+def _extract_json_from_code_blocks(text: str) -> dict | None:
+    """Extract a JSON object dict from markdown code blocks in the text.
 
     Finds code blocks (```json or ```) and attempts to parse
     each one as JSON. Uses brace matching within each block
@@ -607,7 +629,7 @@ def _extract_json_from_code_blocks(text: str) -> AnalysisDetail | None:
         text: Text containing markdown code blocks.
 
     Returns:
-        Parsed AnalysisDetail or None if no valid JSON found.
+        Parsed dict or None if no valid JSON found.
     """
     # Find all code block positions using a pattern that matches
     # opening ``` markers (with optional language tag)
@@ -621,7 +643,8 @@ def _extract_json_from_code_blocks(text: str) -> AnalysisDetail | None:
         # Try parsing the block content directly
         try:
             data = json.loads(block_content)
-            return AnalysisDetail(**data)
+            if isinstance(data, dict):
+                return data
         except Exception:
             pass
 
