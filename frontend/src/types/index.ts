@@ -102,6 +102,16 @@ export interface PeerDebate {
   rounds: PeerRound[]
 }
 
+export interface SupersededBy {
+  ai_provider: string
+  ai_model: string
+  timestamp: string
+}
+
+export interface PreviousAnalysis extends AnalysisDetail {
+  _superseded_by?: SupersededBy | null
+}
+
 export interface FailureAnalysis {
   id: string
   test_name: string
@@ -110,6 +120,7 @@ export interface FailureAnalysis {
   error_signature: string
   peer_debate?: PeerDebate | null
   previous_analysis?: AnalysisDetail | null
+  previous_analyses?: PreviousAnalysis[] | null
   reanalysis_status?: 'running' | 'failed' | null
   reanalysis_error?: string | null
   reanalyzed_with?: { ai_provider: string; ai_model: string } | null
