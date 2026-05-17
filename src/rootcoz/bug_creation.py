@@ -11,7 +11,7 @@ import httpx
 from simple_logger.logger import get_logger
 
 from rootcoz.config import Settings
-from rootcoz.ai_client import call_ai_once
+from pi_sidecar_client import call_ai_once
 from rootcoz.jira import JiraClient
 from rootcoz.models import (
     AnalysisDetail,
@@ -238,7 +238,7 @@ async def generate_github_issue_content(
     ai_provider: str = "",
     ai_model: str = "",
     jenkins_url: str = "",
-    ai_cli_timeout: int | None = None,
+    ai_call_timeout: int | None = None,
     include_links: bool = False,
     job_id: str = "",
     issue_prompt: str = "",
@@ -253,7 +253,7 @@ async def generate_github_issue_content(
         ai_provider: AI provider to use.
         ai_model: AI model to use.
         jenkins_url: URL or reference text for the Jenkins build.
-        ai_cli_timeout: AI CLI timeout in minutes.
+        ai_call_timeout: AI timeout in minutes.
         include_links: When True, include full URLs as clickable links.
             When False, include plain-text references only.
         job_id: Job identifier for token usage tracking.
@@ -343,7 +343,7 @@ Do not wrap in code blocks or JSON. Just the title on the first line, then the b
         prompt,
         ai_provider=ai_provider,
         ai_model=ai_model,
-        ai_cli_timeout=ai_cli_timeout,
+        ai_call_timeout=ai_call_timeout,
     )
 
     if job_id:
@@ -365,7 +365,7 @@ Do not wrap in code blocks or JSON. Just the title on the first line, then the b
             result.text,
         )
     else:
-        logger.debug("AI CLI call failed for GitHub issue: %s", result.text)
+        logger.debug("AI call failed for GitHub issue: %s", result.text)
 
     logger.warning(
         "AI content generation failed for GitHub issue, using fallback template"
@@ -383,7 +383,7 @@ async def generate_jira_bug_content(
     ai_provider: str = "",
     ai_model: str = "",
     jenkins_url: str = "",
-    ai_cli_timeout: int | None = None,
+    ai_call_timeout: int | None = None,
     include_links: bool = False,
     job_id: str = "",
     issue_prompt: str = "",
@@ -398,7 +398,7 @@ async def generate_jira_bug_content(
         ai_provider: AI provider to use.
         ai_model: AI model to use.
         jenkins_url: URL or reference text for the Jenkins build.
-        ai_cli_timeout: AI CLI timeout in minutes.
+        ai_call_timeout: AI timeout in minutes.
         include_links: When True, include full URLs as clickable links.
             When False, include plain-text references only.
         job_id: Job identifier for token usage tracking.
@@ -480,7 +480,7 @@ Do not wrap in code blocks or JSON. Just the summary on the first line, then the
         prompt,
         ai_provider=ai_provider,
         ai_model=ai_model,
-        ai_cli_timeout=ai_cli_timeout,
+        ai_call_timeout=ai_call_timeout,
     )
 
     if job_id:
@@ -502,7 +502,7 @@ Do not wrap in code blocks or JSON. Just the summary on the first line, then the
             result.text,
         )
     else:
-        logger.debug("AI CLI call failed for Jira bug: %s", result.text)
+        logger.debug("AI call failed for Jira bug: %s", result.text)
 
     logger.warning("AI content generation failed for Jira bug, using fallback template")
     content = _build_fallback_jira_content(ctx, jenkins_url, report_url, include_links)

@@ -34,7 +34,7 @@ class ServerConfig:
     # AI
     ai_provider: str = ""
     ai_model: str = ""
-    ai_cli_timeout: int = 0  # 0 means use server default
+    ai_call_timeout: int = 0  # 0 means use server default
     max_concurrent_ai_calls: int = 0  # 0 means use server default
     # Jira
     jira_url: str = ""
@@ -224,7 +224,7 @@ def _server_config_from_dict(data: dict) -> ServerConfig:
         # AI
         ai_provider=data.get("ai_provider", ""),
         ai_model=data.get("ai_model", ""),
-        ai_cli_timeout=data.get("ai_cli_timeout", 0),
+        ai_call_timeout=data.get("ai_call_timeout", 0),
         max_concurrent_ai_calls=_validated_non_negative_int(
             data, "max_concurrent_ai_calls"
         ),

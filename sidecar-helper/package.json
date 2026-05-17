@@ -8,9 +8,7 @@
     "build": "tsc"
   },
   "dependencies": {
-    "@earendil-works/pi-coding-agent": "^0.74.0",
-    "@earendil-works/pi-ai": "^0.74.0",
-    "pi-vertex-claude": "https://github.com/myk-org/pi-vertex-claude/tarball/main",
+    "@myk-org/pi-sidecar": "latest",
     "pi-orchestrator-config": "https://github.com/myk-org/pi-config/tarball/v3.0.1"
   },
   "devDependencies": {

@@ -22,18 +22,15 @@ WORKDIR /sidecar
 
 RUN apt-get update && apt-get install -y --no-install-recommends git && rm -rf /var/lib/apt/lists/*
 
-COPY sidecar/package.json sidecar/package-lock.json* ./
-RUN npm ci --ignore-scripts
+COPY sidecar-helper/package.json sidecar-helper/package-lock.json* ./
+RUN npm ci
 
-COPY sidecar/ .
+COPY sidecar-helper/ .
 RUN npx tsc
 
-FROM python:3.12-slim AS builder
+FROM ghcr.io/astral-sh/uv:python3.14-bookworm-slim AS builder
 
 WORKDIR /app
-
-# Install uv
-COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 
 # Install git (needed for gitpython dependency)
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -48,18 +45,22 @@ COPY src/ src/
 RUN uv sync --frozen --no-dev
 
 # Production stage
-FROM python:3.12-slim
+FROM ghcr.io/astral-sh/uv:python3.14-bookworm-slim
 
 WORKDIR /app
 
-# Install bash, git (runtime for gitpython), curl (for Cursor CLI install), nodejs/npm (for sidecar)
+# Install bash, git (runtime for gitpython), curl (for Cursor CLI install)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     bash \
     git \
     curl \
-    nodejs \
-    npm \
     && rm -rf /var/lib/apt/lists/*
+
+# Copy Node.js 22 from the build stage (Debian apt only has Node 18/20)
+COPY --from=sidecar-builder /usr/local/bin/node /usr/local/bin/node
+COPY --from=sidecar-builder /usr/local/lib/node_modules/npm /usr/local/lib/node_modules/npm
+RUN ln -s /usr/local/lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm \
+    && ln -s /usr/local/lib/node_modules/npm/bin/npx-cli.js /usr/local/bin/npx
 
 # Create non-root user, data directory, and set permissions
 # OpenShift runs containers as a random UID in the root group (GID 0)
@@ -67,9 +68,6 @@ RUN useradd --create-home --shell /bin/bash -g 0 appuser \
     && mkdir -p /data \
     && chown appuser:0 /data \
     && chmod -R g+w /data
-
-# Copy uv for runtime
-COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 
 # Switch to non-root user for CLI installs
 USER appuser
@@ -99,9 +97,9 @@ COPY --chown=appuser:0 --from=builder /app/src /app/src
 COPY --chown=appuser:0 --from=frontend-builder /frontend/dist /app/frontend/dist
 
 # Copy sidecar
-COPY --chown=appuser:0 --from=sidecar-builder /sidecar/dist /app/sidecar/dist
-COPY --chown=appuser:0 --from=sidecar-builder /sidecar/node_modules /app/sidecar/node_modules
-COPY --chown=appuser:0 --from=sidecar-builder /sidecar/package.json /app/sidecar/package.json
+COPY --chown=appuser:0 --from=sidecar-builder /sidecar/dist /app/sidecar-helper/dist
+COPY --chown=appuser:0 --from=sidecar-builder /sidecar/node_modules /app/sidecar-helper/node_modules
+COPY --chown=appuser:0 --from=sidecar-builder /sidecar/package.json /app/sidecar-helper/package.json
 
 # Copy entrypoint script
 COPY --chown=appuser:0 entrypoint.sh /app/entrypoint.sh

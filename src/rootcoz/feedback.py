@@ -13,7 +13,7 @@ from simple_logger.logger import get_logger
 
 from rootcoz.bug_creation import GITHUB_AI_FOOTER, create_github_issue
 from rootcoz.config import Settings
-from rootcoz.ai_client import call_ai_once
+from pi_sidecar_client import call_ai_once
 from rootcoz.models import (
     FeedbackPreviewResponse,
     FeedbackRequest,
@@ -96,7 +96,7 @@ async def format_feedback_with_ai(
     Returns:
         Tuple of (title, body, labels) for the GitHub issue.
     """
-    ai_cli_timeout = settings.ai_cli_timeout
+    ai_call_timeout = settings.ai_call_timeout
 
     context_parts: list[str] = []
     context_parts.append(f"Description: {scrub_sensitive_data(request.description)}")
@@ -170,10 +170,10 @@ Do NOT include any sensitive data (tokens, passwords, etc.) in the output."""
             prompt,
             ai_provider=ai_provider,
             ai_model=ai_model,
-            ai_cli_timeout=ai_cli_timeout,
+            ai_call_timeout=ai_call_timeout,
         )
     except Exception as exc:  # feedback formatting should fall back
-        logger.warning("AI CLI call failed for feedback formatting: %s", exc)
+        logger.warning("AI call failed for feedback formatting: %s", exc)
         title, body = _build_fallback_feedback(request)
         return title, body, _derive_fallback_labels(request)
 
@@ -191,7 +191,7 @@ Do NOT include any sensitive data (tokens, passwords, etc.) in the output."""
             "AI response JSON parsing failed, using fallback. Output: %s", result.text
         )
     else:
-        logger.debug("AI CLI call failed for feedback formatting: %s", result.text)
+        logger.debug("AI call failed for feedback formatting: %s", result.text)
 
     logger.warning("AI formatting failed for feedback, using fallback template")
     title, body = _build_fallback_feedback(request)
@@ -219,8 +219,8 @@ def _parse_json_response(text: str) -> dict | None:
             if not isinstance(data["body"], str) or not data["body"].strip():
                 return None
             return data
-    except (json.JSONDecodeError, ValueError):
-        pass
+    except (json.JSONDecodeError, ValueError) as e:
+        logger.debug("Feedback JSON parse failed: %s", e)
     return None
 
 

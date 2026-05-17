@@ -69,7 +69,8 @@ def _parse_session_ttl() -> int:
     try:
         value = int(raw)
         return max(1, value)
-    except ValueError:
+    except ValueError as e:
+        logger.warning("Invalid SESSION_TTL_HOURS value, using default 720h: %s", e)
         return 24 * 30
 
 
@@ -3205,7 +3206,8 @@ def _job_metadata_row_to_dict(row) -> dict:
     try:
         parsed = json.loads(labels_raw) if labels_raw else []
         d["labels"] = parsed if isinstance(parsed, list) else []
-    except (json.JSONDecodeError, TypeError):
+    except (json.JSONDecodeError, TypeError) as e:
+        logger.debug("Failed to parse labels JSON, defaulting to empty: %s", e)
         d["labels"] = []
     return d
 
@@ -3419,7 +3421,7 @@ async def record_token_usage(
     prompt_chars: int = 0,
     response_chars: int = 0,
 ) -> str:
-    """Record a single AI CLI call's token usage. Returns the record ID."""
+    """Record a single AI call's token usage. Returns the record ID."""
     record_id = str(uuid.uuid4())
     total_tokens = input_tokens + output_tokens
     async with _connect_db() as db:

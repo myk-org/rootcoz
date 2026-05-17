@@ -9,7 +9,7 @@ import os
 
 from simple_logger.logger import get_logger
 
-from rootcoz.ai_client import call_ai_once
+from pi_sidecar_client import call_ai_once
 
 logger = get_logger(name=__name__, level=os.environ.get("LOG_LEVEL", "INFO"))
 
@@ -20,7 +20,7 @@ async def filter_issue_matches_with_ai(
     candidates: list[dict],
     ai_provider: str,
     ai_model: str,
-    ai_cli_timeout: int | None = None,
+    ai_call_timeout: int | None = None,
     job_id: str = "",
     call_type: str = "issue_filter",
 ) -> list[dict]:
@@ -41,7 +41,7 @@ async def filter_issue_matches_with_ai(
             and ``status`` fields.
         ai_provider: AI provider name.
         ai_model: AI model identifier.
-        ai_cli_timeout: Timeout in minutes (overrides AI_CLI_TIMEOUT env var).
+        ai_call_timeout: Timeout in minutes (overrides AI_CALL_TIMEOUT env var).
         job_id: Job identifier for token usage tracking.
         call_type: Token tracking call type label.
 
@@ -91,7 +91,7 @@ Respond with ONLY the JSON array, no other text."""
         prompt,
         ai_provider=ai_provider,
         ai_model=ai_model,
-        ai_cli_timeout=ai_cli_timeout,
+        ai_call_timeout=ai_call_timeout,
     )
 
     if job_id:
@@ -138,7 +138,8 @@ Respond with ONLY the JSON array, no other text."""
         is_relevant = evaluation.get("relevant", False)
         try:
             score = float(evaluation.get("score", 0.0))
-        except (ValueError, TypeError):
+        except (ValueError, TypeError) as e:
+            logger.debug("Failed to parse relevance score, defaulting to 0.0: %s", e)
             score = 0.0
 
         if is_relevant and key:

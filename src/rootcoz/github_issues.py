@@ -217,7 +217,7 @@ async def enrich_with_tests_repo_matches(
                     candidates=candidates,
                     ai_provider=ai_provider,
                     ai_model=ai_model,
-                    ai_cli_timeout=settings.ai_cli_timeout,
+                    ai_call_timeout=settings.ai_call_timeout,
                     job_id=job_id,
                     call_type="tests_repo_filter",
                 )

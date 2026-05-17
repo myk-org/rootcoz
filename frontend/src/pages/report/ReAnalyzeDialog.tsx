@@ -38,7 +38,7 @@ function initFormState(p: AnalysisResult['request_params']) {
   return {
     aiProvider: p?.ai_provider || 'claude',
     aiModel: p?.ai_model || '',
-    aiCliTimeout: p?.ai_cli_timeout != null ? (p.ai_cli_timeout as number) : undefined,
+    aiCallTimeout: p?.ai_call_timeout != null ? (p.ai_call_timeout as number) : undefined,
     rawPrompt: (p?.raw_prompt as string) || '',
     enablePeers: !!(p?.peer_ai_configs?.length),
     peerConfigs: p?.peer_ai_configs || [],
@@ -66,7 +66,7 @@ export function ReAnalyzeDialog({ open, onOpenChange, result, jobId, failureUuid
   const init = initFormState(params)
   const [aiProvider, setAiProvider] = useState(init.aiProvider)
   const [aiModel, setAiModel] = useState(init.aiModel)
-  const [aiCliTimeout, setAiCliTimeout] = useState<number | undefined>(init.aiCliTimeout)
+  const [aiCallTimeout, setAiCallTimeout] = useState<number | undefined>(init.aiCallTimeout)
   const [rawPrompt, setRawPrompt] = useState(init.rawPrompt)
 
   const [enablePeers, setEnablePeers] = useState(init.enablePeers)
@@ -127,7 +127,7 @@ export function ReAnalyzeDialog({ open, onOpenChange, result, jobId, failureUuid
     const s = initFormState(result.request_params)
     setAiProvider(s.aiProvider)
     setAiModel(s.aiModel)
-    setAiCliTimeout(s.aiCliTimeout)
+    setAiCallTimeout(s.aiCallTimeout)
     setRawPrompt(s.rawPrompt)
     setEnablePeers(s.enablePeers)
     setPeerConfigs(s.peerConfigs)
@@ -153,7 +153,7 @@ export function ReAnalyzeDialog({ open, onOpenChange, result, jobId, failureUuid
         ai_provider: aiProvider,
         ai_model: aiModel,
         force,
-        ...(aiCliTimeout !== undefined && { ai_cli_timeout: aiCliTimeout }),
+        ...(aiCallTimeout !== undefined && { ai_call_timeout: aiCallTimeout }),
         ...(enableJira !== undefined && { enable_jira: enableJira }),
         ...(jiraUrl && { jira_url: jiraUrl }),
         ...(jiraProjectKey && { jira_project_key: jiraProjectKey }),
@@ -188,7 +188,7 @@ export function ReAnalyzeDialog({ open, onOpenChange, result, jobId, failureUuid
     aiProvider,
     aiModel,
     force,
-    aiCliTimeout,
+    aiCallTimeout,
     rawPrompt,
     enablePeers,
     peerConfigs,
@@ -241,9 +241,9 @@ export function ReAnalyzeDialog({ open, onOpenChange, result, jobId, failureUuid
                 <Input
                   type="number"
                   min={1}
-                  value={aiCliTimeout ?? ''}
+                  value={aiCallTimeout ?? ''}
                   placeholder="10"
-                  onChange={(e) => setAiCliTimeout(e.target.value ? Number(e.target.value) || 1 : undefined)}
+                  onChange={(e) => setAiCallTimeout(e.target.value ? Number(e.target.value) || 1 : undefined)}
                 />
               </div>
             </div>

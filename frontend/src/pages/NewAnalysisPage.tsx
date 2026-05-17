@@ -48,7 +48,7 @@ export function NewAnalysisPage() {
   const [aiProvider, setAiProvider] = useState('claude')
   const [aiModel, setAiModel] = useState('')
   const [availableModels, setAvailableModels] = useState<ModelOption[]>([])
-  const [aiCliTimeout, setAiCliTimeout] = useState<number | undefined>(undefined)
+  const [aiCallTimeout, setAiCallTimeout] = useState<number | undefined>(undefined)
   const [rawPrompt, setRawPrompt] = useState('')
 
   // Peer analysis
@@ -143,7 +143,7 @@ export function NewAnalysisPage() {
       const commonFields: Record<string, unknown> = {
         ai_provider: aiProvider,
         ...(aiModel && { ai_model: aiModel }),
-        ...(aiCliTimeout !== undefined && { ai_cli_timeout: aiCliTimeout }),
+        ...(aiCallTimeout !== undefined && { ai_call_timeout: aiCallTimeout }),
         ...(rawPrompt && { raw_prompt: rawPrompt }),
         enable_jira: enableJira,
         ...(jiraUrl && { jira_url: jiraUrl }),
@@ -209,7 +209,7 @@ export function NewAnalysisPage() {
     waitForCompletion,
     pollInterval,
     maxWait,
-    aiCliTimeout,
+    aiCallTimeout,
     rawPrompt,
     jenkinsUrl,
     jenkinsUser,
@@ -427,9 +427,9 @@ export function NewAnalysisPage() {
                 <Input
                   type="number"
                   min={1}
-                  value={aiCliTimeout ?? ''}
+                  value={aiCallTimeout ?? ''}
                   placeholder="10"
-                  onChange={(e) => setAiCliTimeout(e.target.value ? toIntInRange(e.target.value, 1, 3600, 1) : undefined)}
+                  onChange={(e) => setAiCallTimeout(e.target.value ? toIntInRange(e.target.value, 1, 3600, 1) : undefined)}
                 />
               </div>
             </div>

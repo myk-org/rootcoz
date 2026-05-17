@@ -1,17 +1,6 @@
-"""AI client adapter — re-exports from pi-sidecar-client with rootcoz setup."""
+"""AI client adapter — rootcoz-specific AI setup."""
 
-from pi_sidecar_client import (
-    AIResult,
-    AITokenUsage,
-    SidecarClient,
-    call_ai,
-    call_ai_once,
-    check_sidecar_available,
-    get_sidecar_client,
-    list_models,
-    run_parallel_with_limit,
-    set_usage_recorder,
-)
+from pi_sidecar_client import AIResult, set_usage_recorder
 
 # rootcoz-specific: valid providers for this application
 VALID_AI_PROVIDERS = {"claude", "cursor", "gemini"}
@@ -50,15 +39,6 @@ def _setup_usage_recorder() -> None:
 
 
 __all__ = [
-    "AIResult",
-    "AITokenUsage",
-    "SidecarClient",
     "VALID_AI_PROVIDERS",
-    "call_ai",
-    "call_ai_once",
-    "check_sidecar_available",
-    "get_sidecar_client",
-    "list_models",
-    "run_parallel_with_limit",
     "_setup_usage_recorder",
 ]

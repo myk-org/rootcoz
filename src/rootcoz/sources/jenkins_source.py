@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Any, NoReturn
 
 import jenkins
-from rootcoz.ai_client import check_sidecar_available, run_parallel_with_limit
+from pi_sidecar_client import check_sidecar_available, run_parallel_with_limit
 from pydantic import HttpUrl
 from simple_logger.logger import get_logger
 
@@ -207,6 +207,10 @@ def extract_failed_child_jobs(build_info: dict) -> list[tuple[str, int]]:
                             try:
                                 job_name, _ = JenkinsClient.parse_jenkins_url(url)
                             except ValueError:
+                                logger.warning(
+                                    "Skipping child job with unparseable build number: %s",
+                                    url,
+                                )
                                 continue
                     build_num = triggered.get("number", triggered.get("buildNumber", 0))
                     if job_name and build_num and (job_name, build_num) not in seen:
@@ -505,7 +509,7 @@ async def analyze_child_job(
     repo_path: Path | None = None,
     ai_provider: str = "",
     ai_model: str = "",
-    ai_cli_timeout: int | None = None,
+    ai_call_timeout: int | None = None,
     custom_prompt: str = "",
     server_url: str = "",
     job_id: str = "",
@@ -517,7 +521,7 @@ async def analyze_child_job(
 ) -> ChildJobAnalysis:
     """Analyze a single child job, recursively analyzing its failed children.
 
-    Each child job gets its own Claude CLI call to manage context size.
+    Each child job gets its own AI call to manage context size.
 
     Args:
         job_name: Name of the Jenkins job to analyze.
@@ -528,14 +532,14 @@ async def analyze_child_job(
         repo_path: Path to cloned test repository for source code lookup.
         ai_provider: AI provider to use.
         ai_model: AI model to use.
-        ai_cli_timeout: Timeout in minutes (overrides AI_CLI_TIMEOUT env var).
+        ai_call_timeout: Timeout in minutes (overrides AI_CALL_TIMEOUT env var).
         custom_prompt: Additional instructions from request payload (raw_prompt).
         server_url: Base URL of this server for AI history API access.
         job_id: Current job ID to exclude from history queries.
         peer_ai_configs: Peer AI configurations for multi-AI consensus analysis.
         peer_analysis_max_rounds: Maximum debate rounds for peer analysis (default: 3).
         additional_repos: Extra cloned repositories for AI context.
-        max_concurrent_ai_calls: Maximum concurrent AI CLI processes (default: 3).
+        max_concurrent_ai_calls: Maximum concurrent AI calls (default: 3).
 
     Returns:
         ChildJobAnalysis with analysis results or nested child analyses.
@@ -585,7 +589,7 @@ async def analyze_child_job(
             repo_path=source_result.extract_path or repo_path,
             ai_provider=ai_provider,
             ai_model=ai_model,
-            ai_cli_timeout=ai_cli_timeout,
+            ai_call_timeout=ai_call_timeout,
             custom_prompt=custom_prompt,
             server_url=server_url,
             job_id=job_id,
@@ -609,7 +613,7 @@ async def _analyze_grouped_failures(
     additional_repos: dict[str, Path] | None = None,
     ai_provider: str = "",
     ai_model: str = "",
-    ai_cli_timeout: int | None = None,
+    ai_call_timeout: int | None = None,
     custom_prompt: str = "",
     server_url: str = "",
     job_id: str = "",
@@ -652,7 +656,7 @@ async def _analyze_grouped_failures(
                 repo_path=repo_path,
                 ai_provider=ai_provider,
                 ai_model=ai_model,
-                ai_cli_timeout=ai_cli_timeout,
+                ai_call_timeout=ai_call_timeout,
                 custom_prompt=custom_prompt,
                 artifacts_context=artifacts_context,
                 server_url=server_url,
@@ -702,7 +706,7 @@ async def _run_console_only_analysis(
     repo_path: Path | None,
     ai_provider: str,
     ai_model: str,
-    ai_cli_timeout: int | None,
+    ai_call_timeout: int | None,
     custom_prompt: str,
     server_url: str,
     job_id: str,
@@ -743,7 +747,7 @@ async def _run_console_only_analysis(
             repo_path=repo_path,
             ai_provider=ai_provider,
             ai_model=ai_model,
-            ai_cli_timeout=ai_cli_timeout,
+            ai_call_timeout=ai_call_timeout,
             custom_prompt=custom_prompt,
             artifacts_context=artifacts_context,
             server_url=server_url,
@@ -774,7 +778,7 @@ async def _analyze_child_job_inner(
     repo_path: Path | None,
     ai_provider: str,
     ai_model: str,
-    ai_cli_timeout: int | None,
+    ai_call_timeout: int | None,
     custom_prompt: str,
     server_url: str,
     job_id: str,
@@ -800,7 +804,7 @@ async def _analyze_child_job_inner(
                 repo_path,
                 ai_provider,
                 ai_model,
-                ai_cli_timeout,
+                ai_call_timeout,
                 custom_prompt,
                 server_url=server_url,
                 job_id=job_id,
@@ -850,7 +854,7 @@ async def _analyze_child_job_inner(
             additional_repos=additional_repos,
             ai_provider=ai_provider,
             ai_model=ai_model,
-            ai_cli_timeout=ai_cli_timeout,
+            ai_call_timeout=ai_call_timeout,
             custom_prompt=custom_prompt,
             server_url=server_url,
             job_id=job_id,
@@ -890,7 +894,7 @@ async def _analyze_child_job_inner(
             failures=failures,
         )
 
-    # No structured test failures - fall back to single AI CLI analysis of console output
+    # No structured test failures - fall back to single AI analysis of console output
     success, failures, error_text = await _run_console_only_analysis(
         job_name=job_name,
         build_number=build_number,
@@ -899,7 +903,7 @@ async def _analyze_child_job_inner(
         repo_path=repo_path,
         ai_provider=ai_provider,
         ai_model=ai_model,
-        ai_cli_timeout=ai_cli_timeout,
+        ai_call_timeout=ai_call_timeout,
         custom_prompt=custom_prompt,
         server_url=server_url,
         job_id=job_id,
@@ -1068,7 +1072,7 @@ async def analyze_job(
                     ai_model,
                 )
                 logger.error(
-                    "AI preflight failed for job %s: %s", job_id, preflight_result.text
+                    "AI preflight failed for job %s: %s", job_id, preflight_msg
                 )
                 return AnalysisResult(
                     job_id=job_id,
@@ -1095,7 +1099,7 @@ async def analyze_job(
                         repo_path=repo_path,
                         ai_provider=ai_provider,
                         ai_model=ai_model,
-                        ai_cli_timeout=settings.ai_cli_timeout,
+                        ai_call_timeout=settings.ai_call_timeout,
                         custom_prompt=custom_prompt,
                         server_url=server_url,
                         job_id=job_id,
@@ -1180,7 +1184,7 @@ async def analyze_job(
                     additional_repos=cloned_repos or None,
                     ai_provider=ai_provider,
                     ai_model=ai_model,
-                    ai_cli_timeout=settings.ai_cli_timeout,
+                    ai_call_timeout=settings.ai_call_timeout,
                     custom_prompt=custom_prompt,
                     server_url=server_url,
                     job_id=job_id,
@@ -1205,7 +1209,7 @@ async def analyze_job(
                         child_job_analyses=child_job_analyses,
                     )
             else:
-                # No structured test failures - fall back to single AI CLI analysis
+                # No structured test failures - fall back to single AI analysis
                 success, failures, error_text = await _run_console_only_analysis(
                     job_name=job_name,
                     build_number=build_number,
@@ -1214,7 +1218,7 @@ async def analyze_job(
                     repo_path=repo_path,
                     ai_provider=ai_provider,
                     ai_model=ai_model,
-                    ai_cli_timeout=settings.ai_cli_timeout,
+                    ai_call_timeout=settings.ai_call_timeout,
                     custom_prompt=custom_prompt,
                     server_url=server_url,
                     job_id=job_id,

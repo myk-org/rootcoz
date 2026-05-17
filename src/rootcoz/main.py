@@ -18,14 +18,13 @@ from typing import Annotated, Any, Literal
 import aiosqlite
 import httpx
 import uvicorn
-from rootcoz.ai_client import (
-    VALID_AI_PROVIDERS,
-    _setup_usage_recorder,
+from pi_sidecar_client import (
     call_ai_once,
     check_sidecar_available,
     list_models,
     run_parallel_with_limit,
 )
+from rootcoz.ai_client import VALID_AI_PROVIDERS, _setup_usage_recorder
 from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
@@ -624,7 +623,7 @@ _ANALYSIS_SETTINGS_FIELDS = (
     "jira_ssl_verify",
     "jira_max_results",
     "github_token",
-    "ai_cli_timeout",
+    "ai_call_timeout",
     "max_concurrent_ai_calls",
 )
 
@@ -721,7 +720,7 @@ def _reconstruct_from_params(
         "jira_project_key",
         "jira_ssl_verify",
         "jira_max_results",
-        "ai_cli_timeout",
+        "ai_call_timeout",
         "max_concurrent_ai_calls",
         "jenkins_artifacts_max_size_mb",
         "get_job_artifacts",
@@ -1024,7 +1023,9 @@ if _FRONTEND_DIR.is_dir():
 class ErrorTrackingMiddleware(BaseHTTPMiddleware):
     """Track request counts and error rates for monitoring."""
 
-    _SKIP_PATHS = frozenset({"/health", "/api/health", "/metrics", "/favicon.ico"})
+    _SKIP_PATHS = frozenset(
+        {"/health", "/api/health", "/metrics", "/favicon.ico", "/favicon.svg"}
+    )
 
     def _schedule_high_error_rate_alert(self) -> None:
         """Check 5xx error rate and schedule an alert if it exceeds the threshold."""
@@ -1139,6 +1140,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
             "/metrics",
             "/pending",
             "/favicon.ico",
+            "/favicon.svg",
             "/sw.js",
         }
     )
@@ -1264,7 +1266,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
                             authenticated_admin = True
                     else:
                         # Fall back to session token via Bearer header
-                        # (used by AI CLI for internal API calls)
+                        # (used by AI for internal API calls)
                         session = await storage.get_session(token)
                         if session:
                             is_admin = bool(session["is_admin"])
@@ -1430,43 +1432,48 @@ def _mask_pydantic_error(error: dict) -> dict:
 async def _validation_error_handler(
     request: Request, exc: RequestValidationError
 ) -> JSONResponse:
-    """Log 422 validation error details at DEBUG level, then return standard response."""
+    """Log 422 validation error details and return standard response."""
     if request.url.path in _BODY_LOGGING_SKIP_PATHS:
         raw_errors = jsonable_encoder(exc.errors())
         masked_errors = [_mask_pydantic_error(e) for e in raw_errors]
         for error in masked_errors:
             if "input" in error:
                 error["input"] = "<redacted>"
+        logger.error(
+            "RequestValidationError on %s %s: errors=%s body=<skipped>",
+            request.method,
+            request.url.path,
+            masked_errors,
+        )
         return JSONResponse(
             status_code=422,
             content={"detail": masked_errors},
         )
-    if logger.isEnabledFor(logging.DEBUG):
-        masked_body = None
-        if exc.body is not None:
-            try:
-                if isinstance(exc.body, (dict, list)):
-                    masked_body = mask_sensitive_fields(exc.body)
-                elif isinstance(exc.body, (str, bytes, bytearray)):
-                    size = (
-                        len(exc.body.encode("utf-8"))
-                        if isinstance(exc.body, str)
-                        else len(exc.body)
-                    )
-                    masked_body = f"<non-JSON, {size} bytes>"
-                else:
-                    masked_body = f"<non-JSON body: {type(exc.body).__name__}>"
-            except Exception:  # masking must never break the 422 response
-                masked_body = "<unable to mask>"
-        raw_errors = jsonable_encoder(exc.errors())
-        masked_errors = [_mask_pydantic_error(e) for e in raw_errors]
-        logger.debug(
-            "RequestValidationError on %s %s: errors=%s body=%s",
-            request.method,
-            request.url.path,
-            masked_errors,
-            masked_body,
-        )
+    masked_body = None
+    if exc.body is not None:
+        try:
+            if isinstance(exc.body, (dict, list)):
+                masked_body = mask_sensitive_fields(exc.body)
+            elif isinstance(exc.body, (str, bytes, bytearray)):
+                size = (
+                    len(exc.body.encode("utf-8"))
+                    if isinstance(exc.body, str)
+                    else len(exc.body)
+                )
+                masked_body = f"<non-JSON, {size} bytes>"
+            else:
+                masked_body = f"<non-JSON body: {type(exc.body).__name__}>"
+        except Exception:  # masking must never break the 422 response
+            masked_body = "<unable to mask>"
+    raw_errors = jsonable_encoder(exc.errors())
+    masked_errors = [_mask_pydantic_error(e) for e in raw_errors]
+    logger.error(
+        "RequestValidationError on %s %s: errors=%s body=%s",
+        request.method,
+        request.url.path,
+        masked_errors,
+        masked_body,
+    )
     # Mask sensitive values in the response body as well.
     response_errors = jsonable_encoder(exc.errors())
     masked_response = [_mask_pydantic_error(e) for e in response_errors]
@@ -1607,7 +1614,7 @@ def _merge_settings(body: BaseAnalysisRequest, settings: Settings) -> Settings:
         "jira_project_key",
         "jira_ssl_verify",
         "jira_max_results",
-        "ai_cli_timeout",
+        "ai_call_timeout",
         "max_concurrent_ai_calls",
         "enable_jira",
         "jenkins_artifacts_max_size_mb",
@@ -1778,7 +1785,7 @@ async def _enrich_result_with_tests_repo_matches(
     )
 
 
-_AI_SESSION_TTL_HOURS = 8  # Short-lived for AI CLI internal API calls
+_AI_SESSION_TTL_HOURS = 8  # Short-lived for AI internal API calls
 
 
 def _get_display_name(body: AnalyzeRequest | UnifiedAnalyzeRequest) -> str:
@@ -1803,7 +1810,7 @@ async def _auto_assign_metadata(
 
 
 async def _create_ai_auth_header(username: str) -> str:
-    """Create a short-lived session token for AI CLI internal API calls.
+    """Create a short-lived session token for AI internal API calls.
 
     Returns a Bearer auth header string, or empty string on failure/no user.
     """
@@ -2149,10 +2156,10 @@ def _apply_base_analysis_overrides(
         if body.github_token is not None
         else (merged.github_token.get_secret_value() if merged.github_token else "")
     )
-    params["ai_cli_timeout"] = (
-        body.ai_cli_timeout
-        if body.ai_cli_timeout is not None
-        else merged.ai_cli_timeout
+    params["ai_call_timeout"] = (
+        body.ai_call_timeout
+        if body.ai_call_timeout is not None
+        else merged.ai_call_timeout
     )
     params["max_concurrent_ai_calls"] = (
         body.max_concurrent_ai_calls
@@ -2509,7 +2516,7 @@ async def _process_file_raw_analysis(
         notify_dashboard_changed()
         notify_job_status_changed(job_id)
 
-        # Pre-flight: verify AI CLI is reachable before spawning parallel tasks
+        # Pre-flight: verify AI is reachable before spawning parallel tasks
         preflight_available, preflight_msg = await check_sidecar_available()
         if not preflight_available:
             logger.error(
@@ -2518,9 +2525,7 @@ async def _process_file_raw_analysis(
                 ai_provider,
                 ai_model,
             )
-            logger.error(
-                "AI preflight failed for job %s: %s", job_id, preflight_result.text
-            )
+            logger.error("AI preflight failed for job %s: %s", job_id, preflight_msg)
             fail_result = FailureAnalysisResult(
                 job_id=job_id,
                 status="failed",
@@ -2603,7 +2608,7 @@ async def _process_file_raw_analysis(
                 repo_path=repo_path,
                 ai_provider=ai_provider,
                 ai_model=ai_model,
-                ai_cli_timeout=merged.ai_cli_timeout,
+                ai_call_timeout=merged.ai_call_timeout,
                 custom_prompt=custom_prompt,
                 server_url=server_url,
                 job_id=job_id,
@@ -3056,7 +3061,7 @@ async def _reanalyze_failure_background(
     failure_dict: dict,
     ai_provider: str,
     ai_model: str,
-    ai_cli_timeout: int | None,
+    ai_call_timeout: int | None,
     raw_prompt: str,
     peer_ai_configs: list | None,
     peer_analysis_max_rounds: int,
@@ -3128,7 +3133,7 @@ async def _reanalyze_failure_background(
             repo_path=repo_path,
             ai_provider=ai_provider,
             ai_model=ai_model,
-            ai_cli_timeout=ai_cli_timeout,
+            ai_call_timeout=ai_call_timeout,
             custom_prompt=raw_prompt,
             server_url=server_url,
             job_id=job_id,
@@ -3303,9 +3308,9 @@ async def re_analyze_failure(
         ai_model = overrides.ai_model
     ai_provider, ai_model = _resolve_ai_config_values(ai_provider, ai_model)
 
-    ai_cli_timeout = decrypted_params.get("ai_cli_timeout")
-    if overrides.ai_cli_timeout is not None:
-        ai_cli_timeout = overrides.ai_cli_timeout
+    ai_call_timeout = decrypted_params.get("ai_call_timeout")
+    if overrides.ai_call_timeout is not None:
+        ai_call_timeout = overrides.ai_call_timeout
 
     raw_prompt = decrypted_params.get("raw_prompt", "")
     if overrides.raw_prompt is not None:
@@ -3371,7 +3376,7 @@ async def re_analyze_failure(
             failure_dict=failure_dict,
             ai_provider=ai_provider,
             ai_model=ai_model,
-            ai_cli_timeout=ai_cli_timeout,
+            ai_call_timeout=ai_call_timeout,
             raw_prompt=raw_prompt,
             peer_ai_configs=peer_ai_configs,
             peer_analysis_max_rounds=peer_analysis_max_rounds,
@@ -7079,7 +7084,7 @@ Respond with ONLY a JSON object:
         prompt,
         ai_provider=ai_provider,
         ai_model=ai_model,
-        ai_cli_timeout=2,
+        ai_call_timeout=2,
     )
 
     await result.record_usage(
@@ -7091,7 +7096,7 @@ Respond with ONLY a JSON object:
     )
 
     if not result.success:
-        logger.debug("AI CLI call failed for comment intent analysis: %s", result.text)
+        logger.debug("AI call failed for comment intent analysis: %s", result.text)
         return AnalyzeCommentResponse(suggests_reviewed=False)
 
     parsed = extract_json_dict(result.text)
