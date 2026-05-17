@@ -4685,8 +4685,9 @@ class TestReAnalyzeFailure:
         result = stored["result"]
         failure = result["failures"][0]
         assert failure["analysis"]["classification"] == "PRODUCT ISSUE"
-        assert "previous_analysis" in failure
-        assert failure["previous_analysis"]["classification"] == "CODE ISSUE"
+        assert "previous_analyses" in failure
+        assert len(failure["previous_analyses"]) == 1
+        assert failure["previous_analyses"][0]["classification"] == "CODE ISSUE"
         assert "reanalysis_status" not in failure
         assert failure["reanalyzed_with"] == {
             "ai_provider": "claude",

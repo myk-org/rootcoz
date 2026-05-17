@@ -3151,7 +3151,24 @@ async def _reanalyze_failure_background(
                 return
             # Save previous analysis
             if "analysis" in failure:
-                failure["previous_analysis"] = copy.deepcopy(failure["analysis"])
+                prev_entry = copy.deepcopy(failure["analysis"])
+                # Tag: this analysis was superseded by a re-analysis using the new provider/model
+                prev_entry["_superseded_by"] = {
+                    "ai_provider": ai_provider,
+                    "ai_model": ai_model,
+                    "timestamp": datetime.now(UTC).isoformat(),
+                }
+                if "previous_analyses" not in failure:
+                    # Migrate: if old single previous_analysis exists, start the list with it
+                    failure["previous_analyses"] = []
+                    if "previous_analysis" in failure:
+                        failure["previous_analyses"].append(
+                            failure.pop("previous_analysis")
+                        )
+                # Prepend current analysis (most recent previous first)
+                failure["previous_analyses"].insert(0, prev_entry)
+                # Clean up old field if still present
+                failure.pop("previous_analysis", None)
             # Replace with new analysis
             new_data = new_analysis.model_dump(mode="json")
             failure["analysis"] = new_data.get("analysis")
