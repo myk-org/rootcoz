@@ -74,6 +74,7 @@ from rootcoz.engine.core import (
     JOB_INSIGHT_ISSUE_PROMPT_FILENAME,
     analyze_failure_group,
     clone_additional_repos,
+    extract_json_dict,
     get_failure_signature,
     resolve_additional_repos,
     safe_update_progress,
@@ -7091,15 +7092,15 @@ Respond with ONLY a JSON object:
         logger.debug("AI CLI call failed for comment intent analysis: %s", result.text)
         return AnalyzeCommentResponse(suggests_reviewed=False)
 
-    try:
-        parsed = json.loads(result.text)
+    parsed = extract_json_dict(result.text)
+    if parsed is not None:
         return AnalyzeCommentResponse(
             suggests_reviewed=bool(parsed.get("suggests_reviewed", False)),
             reason=str(parsed.get("reason", "")),
         )
-    except (json.JSONDecodeError, AttributeError):
-        logger.debug("Failed to parse AI response for comment intent: %s", result.text)
-        return AnalyzeCommentResponse(suggests_reviewed=False)
+
+    logger.debug("Failed to parse AI response for comment intent: %s", result.text)
+    return AnalyzeCommentResponse(suggests_reviewed=False)
 
 
 @app.post(

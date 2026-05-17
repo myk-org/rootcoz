@@ -76,7 +76,7 @@ const server = createServer(async (req, res) => {
     // POST /sessions
     if (method === "POST" && url === "/sessions") {
       const body = await parseBody(req);
-      const { provider, model, system_prompt, cwd, tools_config } = body;
+      const { provider, model, system_prompt, cwd } = body;
       if (!provider || !system_prompt) {
         sendJson(res, 400, { error: "provider and system_prompt are required" });
         return;
@@ -86,7 +86,6 @@ const server = createServer(async (req, res) => {
         model: model || "",
         systemPrompt: system_prompt,
         cwd: cwd || process.cwd(),
-        toolsConfig: tools_config,
       });
       sendJson(res, 201, { session_id: sessionId });
       return;
