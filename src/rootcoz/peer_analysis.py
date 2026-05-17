@@ -11,7 +11,7 @@ from collections.abc import Coroutine
 from pathlib import Path
 from typing import Any, Literal, TypedDict, cast, get_args
 
-from rootcoz.sidecar_client import (
+from rootcoz.ai_client import (
     AIResult,
     call_ai,
     call_ai_once,
@@ -519,7 +519,7 @@ async def analyze_failure_group_with_peers(
                 session_id=session,
             )
             await ai_result.record_usage(
-                job_id=job_id,
+                request_id=job_id,
                 call_type="peer",
                 prompt_chars=len(prompt),
                 ai_provider=config.ai_provider,
@@ -703,7 +703,7 @@ async def analyze_failure_group_with_peers(
                     ai_cli_timeout=ai_cli_timeout,
                 )
                 await rev_result.record_usage(
-                    job_id=job_id,
+                    request_id=job_id,
                     call_type="revision",
                     prompt_chars=len(revision_prompt),
                     ai_provider=main_ai_provider,

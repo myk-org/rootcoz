@@ -4,7 +4,7 @@ import os
 from functools import lru_cache
 from urllib.parse import urlsplit, urlunsplit
 
-from rootcoz.sidecar_client import VALID_AI_PROVIDERS
+from rootcoz.ai_client import VALID_AI_PROVIDERS
 from pydantic import Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from simple_logger.logger import get_logger

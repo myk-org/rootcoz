@@ -18,8 +18,9 @@ from typing import Annotated, Any, Literal
 import aiosqlite
 import httpx
 import uvicorn
-from rootcoz.sidecar_client import (
+from rootcoz.ai_client import (
     VALID_AI_PROVIDERS,
+    _setup_usage_recorder,
     call_ai_once,
     check_sidecar_available,
     list_models,
@@ -968,6 +969,7 @@ async def _deferred_resume_waiting_jobs(waiting_jobs: list[dict]) -> None:
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     _install_job_id_filter()
+    _setup_usage_recorder()
 
     # Startup config validation
     config_result = validate_startup_config()
@@ -7081,7 +7083,7 @@ Respond with ONLY a JSON object:
     )
 
     await result.record_usage(
-        job_id="comment-intent",
+        request_id="comment-intent",
         call_type="comment_intent",
         prompt_chars=len(prompt),
         ai_provider=ai_provider,

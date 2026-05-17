@@ -9,7 +9,7 @@ import os
 
 from simple_logger.logger import get_logger
 
-from rootcoz.sidecar_client import call_ai_once
+from rootcoz.ai_client import call_ai_once
 
 logger = get_logger(name=__name__, level=os.environ.get("LOG_LEVEL", "INFO"))
 
@@ -96,7 +96,7 @@ Respond with ONLY the JSON array, no other text."""
 
     if job_id:
         await result.record_usage(
-            job_id=job_id,
+            request_id=job_id,
             call_type=call_type,
             prompt_chars=len(prompt),
             ai_provider=ai_provider,

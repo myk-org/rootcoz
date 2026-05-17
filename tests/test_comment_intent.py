@@ -6,7 +6,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pytest
-from rootcoz.sidecar_client import AIResult
+from rootcoz.ai_client import AIResult
 
 from rootcoz import storage
 from tests.conftest import build_test_env

@@ -19,7 +19,7 @@ from simple_logger.logger import get_logger
 
 from rootcoz.config import Settings, parse_additional_repos
 from rootcoz.logging_context import get_log_file
-from rootcoz.sidecar_client import call_ai_once
+from rootcoz.ai_client import call_ai_once
 from rootcoz.models import (
     AdditionalRepo,
     AiConfigEntry,
@@ -980,7 +980,7 @@ Note: Multiple tests failed with the same error. Provide ONE analysis that appli
     )
 
     await result.record_usage(
-        job_id=job_id,
+        request_id=job_id,
         call_type="primary",
         prompt_chars=len(prompt),
         ai_provider=ai_provider,

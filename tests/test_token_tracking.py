@@ -3,7 +3,7 @@
 from unittest.mock import AsyncMock, patch
 
 import pytest
-from rootcoz.sidecar_client import AIResult, AITokenUsage
+from rootcoz.ai_client import AIResult, AITokenUsage
 
 from rootcoz.token_tracking import (
     build_token_usage_summary,
