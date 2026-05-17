@@ -430,19 +430,6 @@ export function FailureCard({ group, jobId, childJobName, childBuildNumber, inde
               </div>
             )}
 
-            {/* Previous Analysis (from re-analysis) */}
-            {rep.previous_analysis && (
-              <details className="group">
-                <summary className="flex items-center gap-2 cursor-pointer text-xs font-display uppercase tracking-widest text-text-tertiary hover:text-text-secondary transition-colors">
-                  <ChevronRight className="h-3 w-3 group-open:rotate-90 transition-transform" />
-                  Previous Analysis
-                </summary>
-                <div className="mt-2 rounded-md bg-surface-elevated/50 border border-border-muted p-3 text-sm text-text-tertiary whitespace-pre-wrap opacity-75">
-                  <LinkedText text={rep.previous_analysis.details || ''} repoUrls={repoUrls} />
-                </div>
-              </details>
-            )}
-
             {/* Artifacts evidence */}
             {analysis.artifacts_evidence && (
               <div>
@@ -529,6 +516,19 @@ export function FailureCard({ group, jobId, childJobName, childBuildNumber, inde
                   )}
                 </div>
               </div>
+            )}
+
+            {/* Previous Analysis (from re-analysis) */}
+            {rep.previous_analysis && (
+              <details className="group">
+                <summary className="flex items-center gap-2 cursor-pointer text-xs font-display uppercase tracking-widest text-text-tertiary hover:text-text-secondary transition-colors">
+                  <ChevronRight className="h-3 w-3 group-open:rotate-90 transition-transform" />
+                  Previous Analysis
+                </summary>
+                <div className="mt-2 rounded-md bg-surface-elevated/50 border border-border-muted p-3 text-sm text-text-tertiary whitespace-pre-wrap opacity-75">
+                  <LinkedText text={rep.previous_analysis.details || ''} repoUrls={repoUrls} />
+                </div>
+              </details>
             )}
 
             {/* Peer debate trail */}
