@@ -77,6 +77,7 @@ from rootcoz.engine.core import (
     get_failure_signature,
     resolve_additional_repos,
     safe_update_progress,
+    set_progress_callback,
 )
 from rootcoz.error_messages import make_user_friendly_error
 from rootcoz.feedback import (
@@ -205,6 +206,11 @@ def notify_job_status_changed(job_id: str) -> None:
     if listeners:
         for event in listeners:
             event.set()
+
+
+# Register progress callback so engine/core.py can trigger SSE
+# notifications without importing from main.py.
+set_progress_callback(notify_job_status_changed)
 
 
 def notify_comments_changed(job_id: str) -> None:

@@ -12,6 +12,7 @@ import importlib
 import json
 import os
 import re
+from collections.abc import Callable
 from pathlib import Path
 
 from simple_logger.logger import get_logger
@@ -100,12 +101,29 @@ async def clone_additional_repos(
     return cloned, repo_path
 
 
+# Module-level callback for SSE notifications.
+# main.py registers this at startup to avoid circular imports.
+_on_progress_updated: Callable[[str], None] | None = None
+
+
+def set_progress_callback(callback: Callable[[str], None]) -> None:
+    """Register a callback invoked after each progress update.
+
+    Args:
+        callback: Function that takes a job_id and notifies SSE listeners.
+    """
+    global _on_progress_updated
+    _on_progress_updated = callback
+
+
 async def safe_update_progress(job_id: str | None, phase: str) -> None:
     """Best-effort progress update; failures are swallowed and logged."""
     if not job_id:
         return
     try:
         await update_progress_phase(job_id, phase)
+        if _on_progress_updated:
+            _on_progress_updated(job_id)
     except Exception:
         logger.debug("Failed to update progress phase", exc_info=True)
 
