@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import jenkins
 import pytest
 import requests
-from rootcoz.sidecar_client import AIResult
+from rootcoz.ai_client import AIResult
 
 from rootcoz.config import Settings, get_settings
 from rootcoz.engine.core import (

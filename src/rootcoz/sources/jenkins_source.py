@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Any, NoReturn
 
 import jenkins
-from rootcoz.sidecar_client import check_sidecar_available, run_parallel_with_limit
+from rootcoz.ai_client import check_sidecar_available, run_parallel_with_limit
 from pydantic import HttpUrl
 from simple_logger.logger import get_logger
 

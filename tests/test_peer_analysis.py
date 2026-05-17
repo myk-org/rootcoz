@@ -4,7 +4,7 @@ import json
 from unittest.mock import patch
 
 import pytest
-from rootcoz.sidecar_client import AIResult
+from rootcoz.ai_client import AIResult
 
 from rootcoz.models import AiConfigEntry, FailedTest
 

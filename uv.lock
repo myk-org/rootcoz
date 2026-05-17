@@ -726,6 +726,15 @@ wheels = [
 ]
 
 [[package]]
+name = "pi-sidecar-client"
+version = "0.1.0"
+source = { git = "https://github.com/myk-org/pi-sidecar.git?rev=feat%2Fissue-1-extract-sidecar#d875c3bed92ba3dd1f9c56ce2f87c86cd1620439" }
+dependencies = [
+    { name = "httpx" },
+    { name = "python-simple-logger" },
+]
+
+[[package]]
 name = "pluggy"
 version = "1.6.0"
 source = { registry = "https://pypi.org/simple" }
@@ -1147,6 +1156,7 @@ dependencies = [
     { name = "fastapi" },
     { name = "gitpython" },
     { name = "httpx" },
+    { name = "pi-sidecar-client" },
     { name = "pydantic-settings" },
     { name = "python-jenkins" },
     { name = "python-multipart" },
@@ -1178,6 +1188,7 @@ requires-dist = [
     { name = "fastapi" },
     { name = "gitpython" },
     { name = "httpx" },
+    { name = "pi-sidecar-client", git = "https://github.com/myk-org/pi-sidecar.git?rev=feat%2Fissue-1-extract-sidecar" },
     { name = "pydantic-settings" },
     { name = "pytest", marker = "extra == 'tests'" },
     { name = "pytest-asyncio", marker = "extra == 'tests'" },

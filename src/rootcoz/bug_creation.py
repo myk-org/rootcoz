@@ -11,7 +11,7 @@ import httpx
 from simple_logger.logger import get_logger
 
 from rootcoz.config import Settings
-from rootcoz.sidecar_client import call_ai_once
+from rootcoz.ai_client import call_ai_once
 from rootcoz.jira import JiraClient
 from rootcoz.models import (
     AnalysisDetail,
@@ -348,7 +348,7 @@ Do not wrap in code blocks or JSON. Just the title on the first line, then the b
 
     if job_id:
         await result.record_usage(
-            job_id=job_id,
+            request_id=job_id,
             call_type="github_preview",
             prompt_chars=len(prompt),
             ai_provider=ai_provider,
@@ -485,7 +485,7 @@ Do not wrap in code blocks or JSON. Just the summary on the first line, then the
 
     if job_id:
         await result.record_usage(
-            job_id=job_id,
+            request_id=job_id,
             call_type="jira_preview",
             prompt_chars=len(prompt),
             ai_provider=ai_provider,

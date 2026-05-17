@@ -8,8 +8,7 @@ from unittest.mock import MagicMock, patch
 
 import httpx
 import pytest
-from rootcoz.sidecar_client import AIResult
-
+from rootcoz.ai_client import AIResult, _setup_usage_recorder
 from rootcoz.cli.client import RootCozClient
 from rootcoz.config import Settings
 from rootcoz.models import (
@@ -19,6 +18,13 @@ from rootcoz.models import (
     FailureAnalysis,
     ProductBugReport,
 )
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _register_usage_recorder() -> None:
+    """Ensure the pi-sidecar usage recorder is wired up for all tests."""
+    _setup_usage_recorder()
+
 
 CLI_TEST_BASE_URL = "http://localhost:8700"
 

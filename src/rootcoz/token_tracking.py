@@ -6,7 +6,7 @@ and build token usage summaries for analysis results.
 
 import os
 
-from rootcoz.sidecar_client import AIResult
+from rootcoz.ai_client import AIResult
 from simple_logger.logger import get_logger
 
 from rootcoz import storage

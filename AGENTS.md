@@ -93,7 +93,7 @@ src/rootcoz/
   models.py                 # Pydantic request/response models
   config.py                 # Settings (env vars)
   storage.py                # SQLite persistence
-  sidecar_client.py           # Python HTTP client for Pi SDK sidecar API
+  ai_client.py              # AI client adapter (re-exports from pi-sidecar-client)
   sidecar/                  # Pi SDK sidecar service (Node.js/TypeScript)
     src/server.ts           # HTTP API server (sessions, prompts, models, health)
     src/sessions.ts         # Session lifecycle, model discovery, extension loading
@@ -198,7 +198,7 @@ Node.js service running inside the same container, wrapping the Pi coding agent 
 - `POST /models/refresh` — re-discover models from extensions
 - `GET /health` — returns 503 during startup model discovery, 200 when ready
 
-**Python client (`sidecar_client.py`):**
+**Python client (`ai_client.py` → `pi-sidecar-client`):**
 - `call_ai_once()` — single-shot AI call with automatic session cleanup
 - `call_ai()` — multi-turn AI call (caller manages session lifecycle)
 - `AIResult.record_usage()` — record token usage to DB

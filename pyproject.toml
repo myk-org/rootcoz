@@ -5,6 +5,7 @@ description = "AI-powered root cause analysis for CI/CD test failures"
 requires-python = ">=3.12"
 dependencies = [
   "aiosqlite",
+  "pi-sidecar-client @ git+https://github.com/myk-org/pi-sidecar.git@feat/issue-1-extract-sidecar",
   "cryptography>=46.0.5",
   "defusedxml>=0.7.1",
   "fastapi",
@@ -53,6 +54,9 @@ filterwarnings = [
     # Async transport cleanup during parallel test teardown
     "ignore:unclosed transport:ResourceWarning",
 ]
+
+[tool.hatch.metadata]
+allow-direct-references = true
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/rootcoz"]
