@@ -89,6 +89,9 @@ async def clone_chat_repos(
 
     tests_repo_url = request_params.get("tests_repo_url", "")
     additional_repos = request_params.get("additional_repos") or []
+    additional_repos = [
+        AdditionalRepo(**ar) if isinstance(ar, dict) else ar for ar in additional_repos
+    ]
 
     if not tests_repo_url and not additional_repos:
         return False
