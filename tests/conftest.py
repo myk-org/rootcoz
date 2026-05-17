@@ -8,7 +8,8 @@ from unittest.mock import MagicMock, patch
 
 import httpx
 import pytest
-from rootcoz.ai_client import AIResult, _setup_usage_recorder
+from pi_sidecar_client import AIResult
+from rootcoz.ai_client import _setup_usage_recorder
 from rootcoz.cli.client import RootCozClient
 from rootcoz.config import Settings
 from rootcoz.models import (

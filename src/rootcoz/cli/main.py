@@ -720,8 +720,8 @@ def analyze(
     github_token: str = typer.Option(
         "", "--github-token", envvar="GITHUB_TOKEN", help="GitHub API token."
     ),
-    ai_cli_timeout: int = typer.Option(
-        None, "--ai-cli-timeout", help="AI CLI timeout in minutes."
+    ai_call_timeout: int = typer.Option(
+        None, "--ai-call-timeout", help="AI timeout in minutes."
     ),
     raw_prompt: str = typer.Option(
         "", "--raw-prompt", help="Raw prompt to append as additional AI instructions."
@@ -765,7 +765,7 @@ def analyze(
     max_concurrent: int = typer.Option(
         0,
         "--max-concurrent",
-        help="Max concurrent AI CLI calls (0 = no CLI override; config or server default will be used).",
+        help="Max concurrent AI calls (0 = no CLI override; config or server default will be used).",
     ),
     tags: list[str] = _TAG_OPTION,
     json_output: bool = _JSON_OPTION,
@@ -802,7 +802,7 @@ def analyze(
         {
             "--poll-interval": poll_interval,
             "--jira-max-results": jira_max_results,
-            "--ai-cli-timeout": ai_cli_timeout,
+            "--ai-call-timeout": ai_call_timeout,
             "--jenkins-artifacts-max-size-mb": jenkins_artifacts_max_size_mb,
             "--jenkins-timeout": jenkins_timeout,
         }
@@ -845,7 +845,7 @@ def analyze(
         # Integer fields from config -- only forward values that differ from
         # the dataclass default (0 = "use server default" for all these fields).
         _cfg_int_fields = {
-            "ai_cli_timeout": cfg.ai_cli_timeout,
+            "ai_call_timeout": cfg.ai_call_timeout,
             "max_concurrent_ai_calls": cfg.max_concurrent_ai_calls,
             "jira_max_results": cfg.jira_max_results,
             "jenkins_timeout": cfg.jenkins_timeout,
@@ -853,7 +853,7 @@ def analyze(
             "max_wait_minutes": cfg.max_wait_minutes,
         }
         _cfg_int_defaults = {
-            "ai_cli_timeout": ServerConfig.ai_cli_timeout,
+            "ai_call_timeout": ServerConfig.ai_call_timeout,
             "max_concurrent_ai_calls": ServerConfig.max_concurrent_ai_calls,
             "jira_max_results": ServerConfig.jira_max_results,
             "jenkins_timeout": ServerConfig.jenkins_timeout,
@@ -917,7 +917,7 @@ def analyze(
     # Integer options: include only if provided.
     _int_fields = {
         "jira_max_results": jira_max_results,
-        "ai_cli_timeout": ai_cli_timeout,
+        "ai_call_timeout": ai_call_timeout,
         "jenkins_artifacts_max_size_mb": jenkins_artifacts_max_size_mb,
         "jenkins_timeout": jenkins_timeout,
         "poll_interval_minutes": poll_interval,

@@ -2,7 +2,7 @@
 
 from unittest.mock import AsyncMock, patch
 
-from rootcoz.ai_client import AIResult
+from pi_sidecar_client import AIResult
 
 from rootcoz.issue_matching import filter_issue_matches_with_ai
 

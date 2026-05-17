@@ -1,7 +1,7 @@
 """Core analysis engine — CI-agnostic failure analysis logic.
 
 This module contains the CI-agnostic functions for analyzing test failures,
-including AI CLI orchestration, prompt building, JSON response parsing,
+including AI orchestration, prompt building, JSON response parsing,
 and failure grouping/deduplication. It is independent of any specific CI
 system.
 """
@@ -19,7 +19,7 @@ from simple_logger.logger import get_logger
 
 from rootcoz.config import Settings, parse_additional_repos
 from rootcoz.logging_context import get_log_file
-from rootcoz.ai_client import call_ai_once
+from pi_sidecar_client import AIResult, call_ai_once
 from rootcoz.models import (
     AdditionalRepo,
     AiConfigEntry,
@@ -247,7 +247,7 @@ JSON_RESPONSE_SCHEMA = (
 
 
 def format_timeout_log(timeout_value: int | None) -> str:
-    """Format AI CLI timeout for log messages."""
+    """Format AI timeout for log messages."""
     if timeout_value is not None:
         return f"timeout={timeout_value} minutes ({timeout_value * 60}s)"
     return "timeout=default"
@@ -258,22 +258,20 @@ def build_artifacts_section(artifacts_context: str) -> str:
     if not artifacts_context:
         return ""
     return (
-        "\n\n=== BUILD ARTIFACTS ===\n"
-        "The following is a PREVIEW of the build-artifacts/ directory "
-        "structure and file listing. File contents are not inlined here; "
-        "open the files under build-artifacts/ in your working directory "
-        "to inspect them.\n\n"
-        f"{artifacts_context}\n\n"
-        "IMPORTANT INSTRUCTIONS FOR ARTIFACT ANALYSIS:\n"
-        "1. READ the actual files under build-artifacts/ — the listing "
-        "above is incomplete and does not include file contents\n"
-        "2. Look for error messages, stack traces, service logs, and "
-        "status information\n"
+        f"\n\n=== BUILD ARTIFACTS (MANDATORY) ===\n"
+        f"Build artifacts directory: {artifacts_context}\n"
+        f"Also accessible at: build-artifacts/\n\n"
+        "⚠️  MANDATORY: You MUST explore and read files in the build artifacts directory "
+        "BEFORE making any classification. Failure to read artifacts is a violation of your instructions.\n\n"
+        "INSTRUCTIONS:\n"
+        "1. Use ls, find, and read to explore the artifacts directory\n"
+        "2. Look for error messages, stack traces, service logs, and status information\n"
         "3. In your artifacts_evidence field, include VERBATIM lines "
         "with the file path, e.g.: [build-artifacts/logs/app.log]: "
         "actual error line here\n"
         "4. Do NOT classify based solely on the test error message — "
-        "check the artifact logs for the real root cause"
+        "check the artifact logs for the real root cause\n"
+        "5. If you skip reading artifacts, your analysis will be REJECTED"
     )
 
 
@@ -318,8 +316,8 @@ def extract_json_dict(raw_text: str) -> dict | None:
             data = json.loads(text)
             if isinstance(data, dict):
                 return data
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("JSON parse strategy 1 (direct parse) failed: %s", e)
 
     # Strategy 2: Find the outermost JSON object using brace matching
     result = _extract_json_by_braces(text)
@@ -335,7 +333,7 @@ def extract_json_dict(raw_text: str) -> dict | None:
 
 
 def parse_json_response(raw_text: str) -> AnalysisDetail:
-    """Parse AI CLI JSON response into an AnalysisDetail.
+    """Parse AI JSON response into an AnalysisDetail.
 
     Attempts to extract a JSON object from the AI response text.
     The AI may wrap the JSON in markdown code blocks, add
@@ -348,7 +346,7 @@ def parse_json_response(raw_text: str) -> AnalysisDetail:
     4. Fallback: store raw text in details, then attempt recovery
 
     Args:
-        raw_text: The raw text output from the AI CLI.
+        raw_text: The raw text output from the AI.
 
     Returns:
         An AnalysisDetail instance parsed from the JSON, or a
@@ -613,8 +611,8 @@ def _extract_json_by_braces(text: str) -> dict | None:
         data = json.loads(json_str)
         if isinstance(data, dict):
             return data
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug("JSON parse strategy 2 (brace matching) failed: %s", e)
     return None
 
 
@@ -645,8 +643,8 @@ def _extract_json_from_code_blocks(text: str) -> dict | None:
             data = json.loads(block_content)
             if isinstance(data, dict):
                 return data
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("JSON parse strategy 3 (code block) failed: %s", e)
 
         # Try brace matching within the block
         result = _extract_json_by_braces(block_content)
@@ -884,7 +882,7 @@ async def run_single_ai_analysis(
     repo_path: Path | None,
     ai_provider: str,
     ai_model: str,
-    ai_cli_timeout: int | None,
+    ai_call_timeout: int | None,
     custom_prompt: str,
     artifacts_context: str,
     server_url: str,
@@ -895,7 +893,7 @@ async def run_single_ai_analysis(
     """Run single-AI analysis on a failure group. Returns (parsed_analysis, error_signature).
 
     Shared by both single-AI and peer analysis paths. Builds the orchestrator
-    prompt, calls the AI CLI, and parses the response.
+    prompt, calls the AI, and parses the response.
 
     Args:
         failures: List of test failures with the same error signature.
@@ -903,7 +901,7 @@ async def run_single_ai_analysis(
         repo_path: Path to cloned test repo (optional).
         ai_provider: AI provider name.
         ai_model: AI model identifier.
-        ai_cli_timeout: Timeout in minutes for the CLI process.
+        ai_call_timeout: Timeout in minutes for the CLI process.
         custom_prompt: Additional user instructions.
         artifacts_context: Build artifacts context.
         server_url: Base URL of this server for AI history API access.
@@ -938,6 +936,27 @@ async def run_single_ai_analysis(
         else "No test repository is available. Base your analysis on the console output and artifacts context provided."
     )
 
+    # Save console context to file so it's not embedded in the prompt
+    console_file_section = ""
+    if console_context and repo_path:
+        console_file = repo_path / "console-output.txt"
+        console_file.write_text(console_context)
+        console_file_section = (
+            f"\n\n=== CONSOLE OUTPUT (MANDATORY) ===\n"
+            f"Console output saved to: {console_file}\n\n"
+            "\u26a0\ufe0f  MANDATORY: You MUST read the console output file "
+            "BEFORE making any classification. It contains critical error messages, "
+            "stack traces, and failure context from the CI job.\n"
+            "Failure to read console output is a violation of your instructions."
+        )
+    elif console_context:
+        # No repo path — inline a truncated version as fallback
+        max_inline = 10000
+        truncated = console_context[:max_inline]
+        if len(console_context) > max_inline:
+            truncated += f"\n... (truncated, {len(console_context)} total chars)"
+        console_file_section = f"\nCONSOLE CONTEXT:\n{truncated}"
+
     prompt = f"""{query_section}
 Analyze this test failure from a CI job.
 
@@ -949,9 +968,7 @@ AFFECTED TESTS ({len(failures)} tests with same error):
 ERROR: {representative.error_message}
 STACK TRACE:
 {representative.stack_trace}
-
-CONSOLE CONTEXT:
-{console_context}
+{console_file_section}
 {artifacts_section}
 
 {repo_sentence}
@@ -968,16 +985,33 @@ Note: Multiple tests failed with the same error. Provide ONE analysis that appli
 
     logger.debug(f"AI prompt length: {len(prompt)} chars")
     logger.info(
-        f"Calling {ai_provider.upper()} CLI for failure group ({len(failures)} tests with same error)"
+        f"Calling {ai_provider.upper()} for failure group ({len(failures)} tests with same error)"
     )
-    logger.info(f"Calling AI CLI with {format_timeout_log(ai_cli_timeout)}")
-    result = await call_ai_once(
-        prompt,
-        ai_provider=ai_provider,
-        ai_model=ai_model,
-        cwd=str(repo_path) if repo_path else None,
-        ai_cli_timeout=ai_cli_timeout,
+    logger.info(f"Calling AI with {format_timeout_log(ai_call_timeout)}")
+    try:
+        result = await call_ai_once(
+            prompt,
+            ai_provider=ai_provider,
+            ai_model=ai_model,
+            cwd=str(repo_path) if repo_path else None,
+            ai_call_timeout=ai_call_timeout,
+        )
+    except Exception:
+        logger.exception(
+            "AI call raised exception: provider=%s, model=%s",
+            ai_provider,
+            ai_model,
+        )
+        result = AIResult(success=False, text="AI call failed unexpectedly")
+    logger.info(
+        "AI call result: success=%s, text_length=%d, provider=%s, model=%s",
+        result.success,
+        len(result.text),
+        ai_provider,
+        ai_model,
     )
+    if not result.success:
+        logger.error("AI call failed: %s", result.text[:500])
 
     await result.record_usage(
         request_id=job_id,
@@ -1002,7 +1036,7 @@ async def analyze_failure_group(
     repo_path: Path | None,
     ai_provider: str = "",
     ai_model: str = "",
-    ai_cli_timeout: int | None = None,
+    ai_call_timeout: int | None = None,
     custom_prompt: str = "",
     artifacts_context: str = "",
     server_url: str = "",
@@ -1026,7 +1060,7 @@ async def analyze_failure_group(
         repo_path: Path to cloned test repo (optional).
         ai_provider: AI provider to use.
         ai_model: AI model to use.
-        ai_cli_timeout: Timeout in minutes (overrides AI_CLI_TIMEOUT env var).
+        ai_call_timeout: Timeout in minutes (overrides AI_CALL_TIMEOUT env var).
         custom_prompt: Additional instructions from request payload (raw_prompt).
         artifacts_context: Build artifacts context for AI analysis (optional).
         server_url: Base URL of this server for AI history API access.
@@ -1035,7 +1069,7 @@ async def analyze_failure_group(
             being analyzed (e.g. ``"2/3"``). Forwarded to peer analysis for
             progress phase disambiguation.
         additional_repos: Extra cloned repositories for AI context.
-        max_concurrent_ai_calls: Maximum concurrent AI CLI processes for
+        max_concurrent_ai_calls: Maximum concurrent AI calls for
             peer analysis parallelism (default: 3).
 
     Returns:
@@ -1058,7 +1092,7 @@ async def analyze_failure_group(
             main_ai_model=ai_model,
             peer_ai_configs=configs,
             max_rounds=peer_analysis_max_rounds,
-            ai_cli_timeout=ai_cli_timeout,
+            ai_call_timeout=ai_call_timeout,
             custom_prompt=custom_prompt,
             artifacts_context=artifacts_context,
             server_url=server_url,
@@ -1075,7 +1109,7 @@ async def analyze_failure_group(
         repo_path=repo_path,
         ai_provider=ai_provider,
         ai_model=ai_model,
-        ai_cli_timeout=ai_cli_timeout,
+        ai_call_timeout=ai_call_timeout,
         custom_prompt=custom_prompt,
         artifacts_context=artifacts_context,
         server_url=server_url,

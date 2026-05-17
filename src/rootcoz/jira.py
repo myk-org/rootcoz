@@ -241,7 +241,7 @@ class JiraClient:
 
         response = await self._client.get(
             self._search_path,
-            params=params,
+            params=params,  # type: ignore[arg-type]
         )
         response.raise_for_status()
         data = response.json()
@@ -317,7 +317,7 @@ async def filter_matches_with_ai(
     candidates: list[dict],
     ai_provider: str,
     ai_model: str,
-    ai_cli_timeout: int | None = None,
+    ai_call_timeout: int | None = None,
     job_id: str = "",
 ) -> list[JiraMatch]:
     """Use AI to determine which Jira candidates are relevant to the bug.
@@ -331,7 +331,7 @@ async def filter_matches_with_ai(
         candidates: List of candidate dicts from Jira search.
         ai_provider: AI provider name.
         ai_model: AI model identifier.
-        ai_cli_timeout: Timeout in minutes (overrides AI_CLI_TIMEOUT env var).
+        ai_call_timeout: Timeout in minutes (overrides AI_CALL_TIMEOUT env var).
         job_id: Job identifier for token usage tracking.
 
     Returns:
@@ -344,7 +344,7 @@ async def filter_matches_with_ai(
         candidates=candidates,
         ai_provider=ai_provider,
         ai_model=ai_model,
-        ai_cli_timeout=ai_cli_timeout,
+        ai_call_timeout=ai_call_timeout,
         job_id=job_id,
         call_type="jira_filter",
     )
@@ -470,7 +470,7 @@ async def enrich_with_jira_matches(
                         candidates=candidates,
                         ai_provider=ai_provider,
                         ai_model=ai_model,
-                        ai_cli_timeout=settings.ai_cli_timeout,
+                        ai_call_timeout=settings.ai_call_timeout,
                         job_id=job_id,
                     )
                 else:

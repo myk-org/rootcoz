@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import jenkins
 import pytest
 import requests
-from rootcoz.ai_client import AIResult
+from pi_sidecar_client import AIResult
 
 from rootcoz.config import Settings, get_settings
 from rootcoz.engine.core import (
@@ -196,7 +196,7 @@ class TestRunSingleAiAnalysis:
             repo_path=None,
             ai_provider="claude",
             ai_model="opus",
-            ai_cli_timeout=None,
+            ai_call_timeout=None,
             custom_prompt="",
             artifacts_context="",
             server_url="",
@@ -224,7 +224,7 @@ class TestRunSingleAiAnalysis:
             repo_path=None,
             ai_provider="claude",
             ai_model="opus",
-            ai_cli_timeout=None,
+            ai_call_timeout=None,
             custom_prompt="",
             artifacts_context="",
             server_url="",

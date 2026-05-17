@@ -6,7 +6,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pytest
-from rootcoz.ai_client import AIResult
+from pi_sidecar_client import AIResult
 
 from rootcoz import storage
 from tests.conftest import build_test_env
@@ -38,7 +38,13 @@ def _mock_settings(temp_db_path: Path):
 @pytest.fixture
 def client(_mock_settings, temp_db_path: Path):
     """Create a test client with mocked dependencies."""
-    with patch.object(storage, "DB_PATH", temp_db_path):
+    from rootcoz import main as main_mod
+
+    with (
+        patch.object(storage, "DB_PATH", temp_db_path),
+        patch.object(main_mod, "AI_PROVIDER", "gemini"),
+        patch.object(main_mod, "AI_MODEL", "gemini-2.5-flash"),
+    ):
         from starlette.testclient import TestClient
 
         from rootcoz.main import app

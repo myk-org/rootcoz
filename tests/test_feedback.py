@@ -5,7 +5,7 @@ import os
 from unittest.mock import patch
 
 import pytest
-from rootcoz.ai_client import AIResult
+from pi_sidecar_client import AIResult
 from fastapi.testclient import TestClient
 
 from rootcoz import storage

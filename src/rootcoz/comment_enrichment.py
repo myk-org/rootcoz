@@ -236,7 +236,7 @@ async def fetch_jira_ticket_status(
             verify=ssl_verify, timeout=10, auth=auth, headers=auth_headers
         ) as client:
             for i, url in enumerate(endpoints):
-                resp = await client.get(url, params=search_params)
+                resp = await client.get(url, params=search_params)  # type: ignore[arg-type]
                 if resp.status_code == 200:
                     status = _extract_status_from_issues(resp.json())
                     logger.debug(

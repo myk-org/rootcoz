@@ -16,7 +16,7 @@ export function isAnalysisTimeout(status: string, error?: string | null, summary
     'ai timed out',
     'ai cli timed out',
     'cli timed out',
-    'ai_cli_timeout',
+    'ai_call_timeout',
   ]
   const JENKINS_TIMEOUT_PATTERN = 'timed out waiting for jenkins job'
   const check = (s?: string | null) => {

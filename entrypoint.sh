@@ -29,18 +29,17 @@ fi
 
 # Start Pi SDK sidecar in background with lifecycle coupling
 # Dev mode: rebuild TypeScript from source before starting
-if [ "${DEV_MODE:-}" = "true" ] && [ -f /app/sidecar/src/server.ts ]; then
+if [ "${DEV_MODE:-}" = "true" ] && [ -f /app/sidecar-helper/src/server.ts ]; then
     echo "[sidecar] Dev mode: compiling TypeScript..."
-    cd /app/sidecar
+    cd /app/sidecar-helper
     npm install --ignore-scripts
     npx tsc
     cd /app
 fi
-if [ -f /app/sidecar/dist/server.js ]; then
+if [ -f /app/sidecar-helper/dist/server.js ]; then
     export SIDECAR_PORT="${SIDECAR_PORT:-9100}"
-    export SIDECAR_ACPX_EXTENSION_PATH="/app/sidecar/node_modules/pi-orchestrator-config/extensions/acpx-provider/index.ts"
-    export SIDECAR_VERTEX_EXTENSION_PATH="/app/sidecar/node_modules/pi-vertex-claude/index.ts"
-    node /app/sidecar/dist/server.js &
+    export SIDECAR_ACPX_EXTENSION_PATH="/app/sidecar-helper/node_modules/pi-orchestrator-config/extensions/acpx-provider/index.ts"
+    node /app/sidecar-helper/dist/server.js &
     SIDECAR_PID=$!
     echo "[sidecar] Started Pi SDK sidecar (PID $SIDECAR_PID) on port $SIDECAR_PORT"
 

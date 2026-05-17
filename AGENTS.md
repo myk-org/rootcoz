@@ -94,7 +94,7 @@ src/rootcoz/
   config.py                 # Settings (env vars)
   storage.py                # SQLite persistence
   ai_client.py              # AI client adapter (re-exports from pi-sidecar-client)
-  sidecar/                  # Pi SDK sidecar service (Node.js/TypeScript)
+  sidecar-helper/            # Pi SDK sidecar service (Node.js/TypeScript)
     src/server.ts           # HTTP API server (sessions, prompts, models, health)
     src/sessions.ts         # Session lifecycle, model discovery, extension loading
     src/tools.ts            # Custom Pi tools (rootcoz_job, rootcoz_jira, rootcoz_github)

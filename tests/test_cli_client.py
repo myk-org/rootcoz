@@ -1079,7 +1079,7 @@ class TestRootCozClientAnalyzeExtras:
             "jira_ssl_verify": True,
             "jira_max_results": 25,
             "github_token": "ghp_abc123",
-            "ai_cli_timeout": 10,
+            "ai_call_timeout": 10,
             "enable_jira": True,
             "raw_prompt": "extra instructions",
         }

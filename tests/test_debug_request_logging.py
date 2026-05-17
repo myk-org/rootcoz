@@ -238,6 +238,14 @@ def _get_debug_messages(caplog, *, containing: str = "") -> list[str]:
     return messages
 
 
+def _get_error_messages(caplog, *, containing: str = "") -> list[str]:
+    """Extract ERROR-level messages from caplog, optionally filtered by substring."""
+    messages = [r.message for r in caplog.records if r.levelno == logging.ERROR]
+    if containing:
+        messages = [m for m in messages if containing in m]
+    return messages
+
+
 def test_middleware_logs_masked_body(test_client, caplog):
     """POST request body is logged at DEBUG with sensitive fields masked.
 
@@ -296,12 +304,12 @@ def test_skip_path_body_not_logged(test_client, caplog):
         _restore_logger(main_logger, orig_level, caplog)
 
 
-def test_validation_error_logged_at_debug(test_client, caplog):
-    """422 validation errors are logged at DEBUG with masked body.
+def test_validation_error_logged_at_error(test_client, caplog):
+    """422 validation errors are logged at ERROR with masked body.
 
     Uses /api/validate-token (not in _BODY_LOGGING_SKIP_PATHS) with an
     invalid payload to trigger RequestValidationError and verify the
-    debug log contains masked sensitive values.
+    error log contains masked sensitive values.
     """
     main_logger, orig_level = _capture_debug_logs(caplog)
     try:
@@ -318,10 +326,10 @@ def test_validation_error_logged_at_debug(test_client, caplog):
 
         assert resp.status_code == 422
 
-        validation_logs = _get_debug_messages(
+        validation_logs = _get_error_messages(
             caplog, containing="RequestValidationError"
         )
-        assert validation_logs, "Expected a DEBUG log for the validation error"
+        assert validation_logs, "Expected an ERROR log for the validation error"
         log_entry = validation_logs[0]
         # Sensitive values must be masked
         assert "oops-secret" not in log_entry
@@ -331,7 +339,7 @@ def test_validation_error_logged_at_debug(test_client, caplog):
 
 
 def test_validation_error_skip_path_no_debug_body(test_client, caplog):
-    """422 on a skip-path endpoint must NOT log body at DEBUG."""
+    """422 on a skip-path endpoint must log errors with redacted input and body=<skipped>."""
     main_logger, orig_level = _capture_debug_logs(caplog)
     try:
         # Missing required fields triggers 422 on /analyze
@@ -347,12 +355,20 @@ def test_validation_error_skip_path_no_debug_body(test_client, caplog):
 
         assert resp.status_code == 422
 
-        validation_logs = _get_debug_messages(
+        validation_logs = _get_error_messages(
             caplog, containing="RequestValidationError"
         )
-        assert not validation_logs, (
-            "/analyze is in skip-paths; validation error body should NOT be DEBUG-logged"
+        assert validation_logs, (
+            "/analyze is in skip-paths; validation errors should still be logged"
         )
+        log_text = " ".join(validation_logs)
+        assert "body=<skipped>" in log_text, (
+            "skip-path log must show body=<skipped>, not the actual body"
+        )
+        assert "oops-secret" not in log_text, (
+            "sensitive input must not appear in skip-path validation log"
+        )
+        assert "<redacted>" in log_text, "skip-path log must redact input values"
     finally:
         _restore_logger(main_logger, orig_level, caplog)
 

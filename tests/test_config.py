@@ -321,6 +321,56 @@ class TestParsePeerConfigs:
         with pytest.raises(ValueError, match="Empty entry"):
             parse_peer_configs("claude:opus,")
 
+    def test_parse_peer_configs_model_with_brackets_no_commas(self) -> None:
+        """Model name with brackets but no internal commas parses correctly."""
+        result = parse_peer_configs("cursor:composer-2[fast=true]")
+        assert result == [
+            {"ai_provider": "cursor", "ai_model": "composer-2[fast=true]"}
+        ]
+
+    def test_parse_peer_configs_model_with_brackets_and_commas(self) -> None:
+        """Model name with commas inside brackets is not split."""
+        result = parse_peer_configs(
+            "cursor:composer-2[fast=true],cursor:gpt-5.4[context=272k,reasoning=medium,fast=false]"
+        )
+        assert result == [
+            {"ai_provider": "cursor", "ai_model": "composer-2[fast=true]"},
+            {
+                "ai_provider": "cursor",
+                "ai_model": "gpt-5.4[context=272k,reasoning=medium,fast=false]",
+            },
+        ]
+
+    def test_parse_peer_configs_mixed_bracket_and_plain(self) -> None:
+        """Mix of plain model and bracketed model with commas."""
+        result = parse_peer_configs(
+            "claude:claude-opus-4-6-1m,cursor:gpt-5.4[context=272k,reasoning=medium,fast=false]"
+        )
+        assert result == [
+            {"ai_provider": "claude", "ai_model": "claude-opus-4-6-1m"},
+            {
+                "ai_provider": "cursor",
+                "ai_model": "gpt-5.4[context=272k,reasoning=medium,fast=false]",
+            },
+        ]
+
+    def test_parse_peer_configs_multiple_bracketed_models(self) -> None:
+        """Multiple models with commas inside brackets."""
+        result = parse_peer_configs(
+            "cursor:gpt-5.4[context=272k,reasoning=medium,fast=false],"
+            "cursor:claude-sonnet-4-6[thinking=true,context=200k,effort=medium]"
+        )
+        assert result == [
+            {
+                "ai_provider": "cursor",
+                "ai_model": "gpt-5.4[context=272k,reasoning=medium,fast=false]",
+            },
+            {
+                "ai_provider": "cursor",
+                "ai_model": "claude-sonnet-4-6[thinking=true,context=200k,effort=medium]",
+            },
+        ]
+
 
 class TestParseAdditionalRepos:
     """Tests for parse_additional_repos function."""

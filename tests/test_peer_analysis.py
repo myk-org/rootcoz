@@ -4,7 +4,7 @@ import json
 from unittest.mock import patch
 
 import pytest
-from rootcoz.ai_client import AIResult
+from pi_sidecar_client import AIResult
 
 from rootcoz.models import AiConfigEntry, FailedTest
 
@@ -659,7 +659,7 @@ class TestAnalyzeWithPeers:
             cwd=None,
             ai_provider="",
             ai_model="",
-            ai_cli_timeout=None,
+            ai_call_timeout=None,
             session_id=None,
         ):
             return AIResult(success=True, text=peer_response)
@@ -733,7 +733,7 @@ class TestAnalyzeWithPeers:
             cwd=None,
             ai_provider="",
             ai_model="",
-            ai_cli_timeout=None,
+            ai_call_timeout=None,
             session_id=None,
         ):
             nonlocal call_count
@@ -812,7 +812,7 @@ class TestAnalyzeWithPeers:
             cwd=None,
             ai_provider="",
             ai_model="",
-            ai_cli_timeout=None,
+            ai_call_timeout=None,
             session_id=None,
         ):
             nonlocal call_count
@@ -893,7 +893,7 @@ class TestAnalyzeWithPeers:
             cwd=None,
             ai_provider="",
             ai_model="",
-            ai_cli_timeout=None,
+            ai_call_timeout=None,
             session_id=None,
         ):
             nonlocal call_count
@@ -996,7 +996,7 @@ class TestAnalyzeWithPeers:
             cwd=None,
             ai_provider="",
             ai_model="",
-            ai_cli_timeout=None,
+            ai_call_timeout=None,
             session_id=None,
         ):
             nonlocal call_count
@@ -1102,7 +1102,7 @@ class TestAnalyzeWithPeers:
             cwd=None,
             ai_provider="",
             ai_model="",
-            ai_cli_timeout=None,
+            ai_call_timeout=None,
             session_id=None,
         ):
             nonlocal call_count
@@ -1202,7 +1202,7 @@ class TestAnalyzeWithPeers:
             cwd=None,
             ai_provider="",
             ai_model="",
-            ai_cli_timeout=None,
+            ai_call_timeout=None,
             session_id=None,
         ):
             nonlocal call_count
@@ -1278,7 +1278,7 @@ class TestAnalyzeWithPeers:
             cwd=None,
             ai_provider="",
             ai_model="",
-            ai_cli_timeout=None,
+            ai_call_timeout=None,
             session_id=None,
         ):
             # Revision calls: main AI always returns same classification
@@ -1371,7 +1371,7 @@ class TestAnalyzeWithPeers:
             cwd=None,
             ai_provider="",
             ai_model="",
-            ai_cli_timeout=None,
+            ai_call_timeout=None,
             session_id=None,
         ):
             return AIResult(success=True, text=peer_response)
@@ -1435,7 +1435,7 @@ class TestAnalyzeWithPeers:
             cwd=None,
             ai_provider="",
             ai_model="",
-            ai_cli_timeout=None,
+            ai_call_timeout=None,
             session_id=None,
         ):
             nonlocal call_count
@@ -1511,7 +1511,7 @@ class TestAnalyzeWithPeers:
             cwd=None,
             ai_provider="",
             ai_model="",
-            ai_cli_timeout=None,
+            ai_call_timeout=None,
             session_id=None,
         ):
             nonlocal call_count
@@ -1596,7 +1596,7 @@ class TestAnalyzeWithPeers:
             cwd=None,
             ai_provider="",
             ai_model="",
-            ai_cli_timeout=None,
+            ai_call_timeout=None,
             session_id=None,
         ):
             nonlocal call_count
@@ -1669,7 +1669,7 @@ class TestAnalyzeWithPeers:
             cwd=None,
             ai_provider="",
             ai_model="",
-            ai_cli_timeout=None,
+            ai_call_timeout=None,
             session_id=None,
         ):
             return AIResult(success=True, text=peer_agree)
@@ -1736,7 +1736,7 @@ class TestAnalyzeWithPeers:
             cwd=None,
             ai_provider="",
             ai_model="",
-            ai_cli_timeout=None,
+            ai_call_timeout=None,
             session_id=None,
         ):
             nonlocal call_count
@@ -1893,7 +1893,7 @@ class TestAnalyzeWithPeers:
             cwd=None,
             ai_provider="",
             ai_model="",
-            ai_cli_timeout=None,
+            ai_call_timeout=None,
             session_id=None,
         ):
             return AIResult(success=True, text=peer_response)
@@ -2117,7 +2117,7 @@ class TestAnalyzeWithPeers:
             cwd=None,
             ai_provider="",
             ai_model="",
-            ai_cli_timeout=None,
+            ai_call_timeout=None,
             session_id=None,
         ):
             nonlocal call_count
@@ -2212,7 +2212,7 @@ class TestAnalyzeWithPeers:
             cwd=None,
             ai_provider="",
             ai_model="",
-            ai_cli_timeout=None,
+            ai_call_timeout=None,
             session_id=None,
         ):
             nonlocal call_count
@@ -2308,7 +2308,7 @@ class TestAnalyzeWithPeers:
             cwd=None,
             ai_provider="",
             ai_model="",
-            ai_cli_timeout=None,
+            ai_call_timeout=None,
             session_id=None,
         ):
             nonlocal call_count
@@ -2405,7 +2405,7 @@ class TestAnalyzeWithPeers:
             cwd=None,
             ai_provider="",
             ai_model="",
-            ai_cli_timeout=None,
+            ai_call_timeout=None,
             session_id=None,
         ):
             nonlocal call_count
@@ -2474,7 +2474,7 @@ class TestAnalyzeWithPeers:
             cwd=None,
             ai_provider="",
             ai_model="",
-            ai_cli_timeout=None,
+            ai_call_timeout=None,
             session_id=None,
         ):
             nonlocal peer_call_count
@@ -2579,7 +2579,7 @@ class TestAnalyzeWithPeers:
             cwd=None,
             ai_provider="",
             ai_model="",
-            ai_cli_timeout=None,
+            ai_call_timeout=None,
             session_id=None,
         ):
             nonlocal call_count
@@ -2696,7 +2696,7 @@ class TestAnalyzeWithPeers:
             cwd=None,
             ai_provider="",
             ai_model="",
-            ai_cli_timeout=None,
+            ai_call_timeout=None,
             session_id=None,
         ):
             nonlocal call_count
@@ -2805,7 +2805,7 @@ class TestAnalyzeWithPeers:
             cwd=None,
             ai_provider="",
             ai_model="",
-            ai_cli_timeout=None,
+            ai_call_timeout=None,
             session_id=None,
             **kwargs,
         ):

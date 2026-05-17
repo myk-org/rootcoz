@@ -4,7 +4,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 import pytest
-from rootcoz.ai_client import AIResult
+from pi_sidecar_client import AIResult
 
 from rootcoz.models import (
     AnalysisDetail,

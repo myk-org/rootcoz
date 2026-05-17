@@ -11,7 +11,7 @@ from collections.abc import Coroutine
 from pathlib import Path
 from typing import Any, Literal, TypedDict, cast, get_args
 
-from rootcoz.ai_client import (
+from pi_sidecar_client import (
     AIResult,
     call_ai,
     call_ai_once,
@@ -151,7 +151,7 @@ def _parse_peer_response(raw: str) -> dict:
     is excluded from consensus.
 
     Args:
-        raw: Raw text from the peer AI CLI call.
+        raw: Raw text from the peer AI call.
 
     Returns:
         Parsed dict with peer review fields, or a ``_failed`` marker dict.
@@ -163,8 +163,8 @@ def _parse_peer_response(raw: str) -> dict:
         data = json.loads(raw)
         if _is_peer_response_dict(data):
             return data
-    except (json.JSONDecodeError, TypeError):
-        pass
+    except (json.JSONDecodeError, TypeError) as e:
+        logger.debug("Peer response parse strategy 1 (direct parse) failed: %s", e)
 
     # Strategy 2: extract from markdown code blocks (try all blocks)
     for block in re.findall(r"```(?:json)?\s*\n?(.*?)\n?```", raw, re.DOTALL):
@@ -172,7 +172,8 @@ def _parse_peer_response(raw: str) -> dict:
             data = json.loads(block.strip())
             if _is_peer_response_dict(data):
                 return data
-        except (json.JSONDecodeError, TypeError):
+        except (json.JSONDecodeError, TypeError) as e:
+            logger.debug("Peer response parse strategy 2 (code block) failed: %s", e)
             continue
 
     # Strategy 3: try brace-delimited substrings, starting from the last '{'.
@@ -186,7 +187,10 @@ def _parse_peer_response(raw: str) -> dict:
             data, _ = decoder.raw_decode(raw, match.start())
             if _is_peer_response_dict(data):
                 return data
-        except (json.JSONDecodeError, TypeError, ValueError):
+        except (json.JSONDecodeError, TypeError, ValueError) as e:
+            logger.debug(
+                "Peer response parse strategy 3 (brace-delimited) failed: %s", e
+            )
             continue
 
     return _failed
@@ -329,7 +333,7 @@ async def analyze_failure_group_with_peers(
     main_ai_model: str,
     peer_ai_configs: list[AiConfigEntry],
     max_rounds: int = 3,
-    ai_cli_timeout: int | None = None,
+    ai_call_timeout: int | None = None,
     custom_prompt: str = "",
     artifacts_context: str = "",
     server_url: str = "",
@@ -356,7 +360,7 @@ async def analyze_failure_group_with_peers(
         main_ai_model: AI model for the main/orchestrator analysis.
         peer_ai_configs: List of peer AI configurations.
         max_rounds: Maximum debate rounds before accepting main AI result.
-        ai_cli_timeout: Timeout in minutes for AI CLI calls.
+        ai_call_timeout: Timeout in minutes for AI calls.
         custom_prompt: Additional user instructions.
         artifacts_context: Jenkins artifacts context.
         server_url: Base URL of this server for AI history API access.
@@ -365,7 +369,7 @@ async def analyze_failure_group_with_peers(
             being analyzed (e.g. ``"2/3"`` for group 2 of 3). Used in progress
             phase names to disambiguate concurrent groups.
         additional_repos: Extra cloned repositories for AI context.
-        max_concurrent_ai_calls: Maximum concurrent AI CLI processes for
+        max_concurrent_ai_calls: Maximum concurrent AI calls for
             peer analysis parallelism (default: 3).
 
     Returns:
@@ -382,7 +386,7 @@ async def analyze_failure_group_with_peers(
         repo_path=repo_path,
         ai_provider=main_ai_provider,
         ai_model=main_ai_model,
-        ai_cli_timeout=ai_cli_timeout,
+        ai_call_timeout=ai_call_timeout,
         custom_prompt=custom_prompt,
         artifacts_context=artifacts_context,
         server_url=server_url,
@@ -419,7 +423,7 @@ async def analyze_failure_group_with_peers(
     rounds_used = 0
     group_suffix = f" (group {group_label})" if group_label else ""
 
-    # Track AI CLI sessions per peer for conversation continuity
+    # Track AI sessions per peer for conversation continuity
     peer_sessions: dict[int, str] = {}  # peer_idx -> session_id
 
     # Step 2: Debate loop
@@ -515,9 +519,19 @@ async def analyze_failure_group_with_peers(
                 ai_provider=config.ai_provider,
                 ai_model=config.ai_model,
                 cwd=str(repo_path) if repo_path else None,
-                ai_cli_timeout=ai_cli_timeout,
+                ai_call_timeout=ai_call_timeout,
                 session_id=session,
             )
+            logger.info(
+                "Peer %d (%s/%s) AI result: success=%s, text_length=%d",
+                idx,
+                config.ai_provider,
+                config.ai_model,
+                ai_result.success,
+                len(ai_result.text),
+            )
+            if not ai_result.success:
+                logger.error("Peer %d AI call failed: %s", idx, ai_result.text[:500])
             await ai_result.record_usage(
                 request_id=job_id,
                 call_type="peer",
@@ -554,7 +568,7 @@ async def analyze_failure_group_with_peers(
         for i, result in enumerate(peer_results):
             if isinstance(result, Exception):
                 exc_config = peer_ai_configs[i]
-                logger.warning(
+                logger.error(
                     f"Peer {exc_config.ai_provider}/{exc_config.ai_model} "
                     f"raised exception: {result}"
                 )
@@ -572,8 +586,8 @@ async def analyze_failure_group_with_peers(
                 continue
             config, ai_result = result
             if not ai_result.success:
-                logger.warning(
-                    f"Peer {config.ai_provider}/{config.ai_model} CLI failed: "
+                logger.error(
+                    f"Peer {config.ai_provider}/{config.ai_model} call failed: "
                     f"{ai_result.text if ai_result.text else 'no output'}"
                 )
                 entry = PeerRound(
@@ -700,8 +714,22 @@ async def analyze_failure_group_with_peers(
                     ai_provider=main_ai_provider,
                     ai_model=main_ai_model,
                     cwd=str(repo_path) if repo_path else None,
-                    ai_cli_timeout=ai_cli_timeout,
+                    ai_call_timeout=ai_call_timeout,
                 )
+                logger.info(
+                    "Revision round %d AI result: success=%s, text_length=%d, provider=%s, model=%s",
+                    round_num,
+                    rev_result.success,
+                    len(rev_result.text),
+                    main_ai_provider,
+                    main_ai_model,
+                )
+                if not rev_result.success:
+                    logger.error(
+                        "Revision round %d AI call failed: %s",
+                        round_num,
+                        rev_result.text[:500],
+                    )
                 await rev_result.record_usage(
                     request_id=job_id,
                     call_type="revision",
