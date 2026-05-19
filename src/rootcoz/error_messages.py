@@ -5,6 +5,10 @@ Converts internal/technical errors into messages suitable for end users.
 
 from __future__ import annotations
 
+from simple_logger.logger import get_logger
+
+logger = get_logger(name=__name__)
+
 
 def make_user_friendly_error(error: str | Exception) -> str:
     """Convert internal errors to user-friendly messages.
@@ -20,6 +24,7 @@ def make_user_friendly_error(error: str | Exception) -> str:
         or "job does not exist" in err_lower
         or "404" in err_lower
     ):
+        logger.debug("Error mapped to Jenkins-not-found: %s", err_str[:200])
         return (
             "The requested Jenkins job or build is no longer available. "
             "The build data may have been deleted or expired."
@@ -30,6 +35,7 @@ def make_user_friendly_error(error: str | Exception) -> str:
         or "unauthorized" in err_lower
         or "401" in err_lower
     ):
+        logger.debug("Error mapped to Jenkins-auth-failed: %s", err_str[:200])
         return "Jenkins authentication failed. Please verify your Jenkins credentials."
 
     if (
@@ -37,24 +43,34 @@ def make_user_friendly_error(error: str | Exception) -> str:
         or "timeout" in err_lower
         or "unreachable" in err_lower
     ):
+        logger.debug("Error mapped to Jenkins-connection: %s", err_str[:200])
         return (
             "Could not connect to Jenkins. The server may be temporarily unavailable."
         )
 
-    if "sidecar" in err_lower or "ai" in err_lower and "failed" in err_lower:
+    if (
+        "sidecar" in err_lower
+        or ("ai service" in err_lower and "failed" in err_lower)
+        or "ai call failed" in err_lower
+    ):
+        logger.debug("Error mapped to AI-service-unavailable: %s", err_str[:200])
         return "The AI service is temporarily unavailable. Please try again."
 
     if "ssl" in err_lower or "certificate" in err_lower:
+        logger.debug("Error mapped to SSL-certificate: %s", err_str[:200])
         return "SSL certificate verification failed when connecting to an external service."
 
     if "clone" in err_lower or "repository" in err_lower:
+        logger.debug("Error mapped to repo-clone: %s", err_str[:200])
         return (
             "Failed to clone a source code repository. "
             "The repository may be unavailable or require authentication."
         )
 
     if "decrypt" in err_lower:
+        logger.debug("Error mapped to decrypt-failure: %s", err_str[:200])
         return "Could not decrypt stored credentials. The server encryption key may have changed."
 
     # Generic fallback — no internal details
+    logger.debug("Error mapped to generic fallback: %s", err_str[:200])
     return "Analysis encountered an unexpected error. Please try again or contact an admin if the issue persists."

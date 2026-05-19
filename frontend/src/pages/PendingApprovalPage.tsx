@@ -7,9 +7,11 @@ export function PendingApprovalPage() {
   const navigate = useNavigate()
 
   useEffect(() => {
+    let cancelled = false
     api.get('/api/auth/pending-status')
-      .then(() => setLoading(false))
-      .catch(() => navigate('/login', { replace: true }))
+      .then(() => { if (!cancelled) setLoading(false) })
+      .catch(() => { if (!cancelled) navigate('/login', { replace: true }) })
+    return () => { cancelled = true }
   }, [navigate])
 
   if (loading) {
