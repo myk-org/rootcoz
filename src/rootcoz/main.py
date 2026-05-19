@@ -76,8 +76,8 @@ from rootcoz.engine.core import (
     PROVIDER_CLI_FLAGS,
     analyze_failure_group,
     clone_additional_repos,
-    format_exception_with_type,
     get_failure_signature,
+    make_user_friendly_error,
     resolve_additional_repos,
     safe_update_progress,
 )
@@ -1970,6 +1970,17 @@ async def process_analysis_with_id(
             f"process_analysis_with_id: saving completed result, job_id={job_id}"
         )
         result_data = result.model_dump(mode="json")
+        if result.status == "failed":
+            # Prefer child job error notes over the generic summary
+            child_errors = [
+                c.get("note", "")
+                for c in result_data.get("child_job_analyses", [])
+                if c.get("note")
+            ]
+            if child_errors:
+                result_data["error"] = "; ".join(child_errors)
+            else:
+                result_data["error"] = result.summary
         await _preserve_request_params(job_id, result_data)
 
         # Attach token usage summary before persisting
@@ -2011,13 +2022,13 @@ async def process_analysis_with_id(
 
     except Exception as e:
         logger.exception(f"Analysis failed for job {job_id}")
-        error_detail = format_exception_with_type(e)
+        user_error = make_user_friendly_error(e)
         display_name = _get_display_name(body)
         error_data: dict = {
             "job_name": body.job_name,
             "display_name": display_name,
             "build_number": body.build_number,
-            "error": error_detail,
+            "error": user_error,
         }
         await _preserve_request_params(job_id, error_data)
 
@@ -2501,14 +2512,18 @@ async def _process_file_raw_analysis(
                 ai_provider,
                 ai_model,
             )
+            logger.error(
+                "AI preflight failed for job %s: %s", job_id, preflight_result.text
+            )
             fail_result = FailureAnalysisResult(
                 job_id=job_id,
                 status="failed",
-                summary=preflight_result.text,
+                summary=make_user_friendly_error(preflight_result.text),
                 ai_provider=ai_provider,
                 ai_model=ai_model,
             )
             fail_data = fail_result.model_dump(mode="json")
+            fail_data["error"] = fail_result.summary
             fail_data["job_name"] = display_name
             await _preserve_request_params(job_id, fail_data)
             await update_status(job_id, "failed", fail_data)
@@ -2628,11 +2643,12 @@ async def _process_file_raw_analysis(
             fail_result = FailureAnalysisResult(
                 job_id=job_id,
                 status="failed",
-                summary=f"Analysis failed: {error_msg}",
+                summary=make_user_friendly_error(error_msg),
                 ai_provider=ai_provider,
                 ai_model=ai_model,
             )
             fail_data = fail_result.model_dump(mode="json")
+            fail_data["error"] = fail_result.summary
             fail_data["job_name"] = display_name
             await _preserve_request_params(job_id, fail_data)
             await _attach_token_usage(job_id, fail_data)
@@ -2725,15 +2741,16 @@ async def _process_file_raw_analysis(
 
     except Exception as e:
         logger.exception(f"File/raw analysis failed for job {job_id}")
-        error_detail = format_exception_with_type(e)
+        user_error = make_user_friendly_error(e)
         fail_result = FailureAnalysisResult(
             job_id=job_id,
             status="failed",
-            summary=f"Analysis failed: {error_detail}",
+            summary=user_error,
             ai_provider=ai_provider,
             ai_model=ai_model,
         )
         fail_data = fail_result.model_dump(mode="json")
+        fail_data["error"] = fail_result.summary
         fail_data["job_name"] = display_name
         await _preserve_request_params(job_id, fail_data)
 
