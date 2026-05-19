@@ -33,10 +33,10 @@ from rootcoz.engine.core import (
     extract_relevant_console_lines,
     format_exception_with_type,
     get_failure_signature,
-    make_user_friendly_error,
     resolve_additional_repos,
     safe_update_progress,
 )
+from rootcoz.error_messages import make_user_friendly_error
 from rootcoz.jenkins import JenkinsClient
 from rootcoz.jenkins_artifacts import cleanup_extract_dir, process_build_artifacts
 from rootcoz.models import (
@@ -867,9 +867,7 @@ async def _analyze_child_job_inner(
                 job_name=job_name,
                 build_number=build_number,
                 jenkins_url=jenkins_url,
-                note=make_user_friendly_error(
-                    f"All {unique_errors} analysis group(s) failed"
-                ),
+                note=f"All {unique_errors} analysis group(s) failed",
                 failures=failures,
             )
 
@@ -1140,9 +1138,7 @@ async def analyze_job(
                         build_number=request.build_number,
                         jenkins_url=HttpUrl(jenkins_build_url),
                         status="failed",
-                        summary=make_user_friendly_error(
-                            f"All {len(child_job_analyses)} child job analyses failed"
-                        ),
+                        summary=f"All {len(child_job_analyses)} child job analyses failed",
                         ai_provider=ai_provider,
                         ai_model=ai_model,
                         failures=[],
@@ -1205,9 +1201,7 @@ async def analyze_job(
                         build_number=request.build_number,
                         jenkins_url=HttpUrl(jenkins_build_url),
                         status="failed",
-                        summary=make_user_friendly_error(
-                            f"All {unique_errors} analysis group(s) failed"
-                        ),
+                        summary=f"All {unique_errors} analysis group(s) failed",
                         ai_provider=ai_provider,
                         ai_model=ai_model,
                         failures=failures,

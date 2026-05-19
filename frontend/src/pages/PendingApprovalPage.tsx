@@ -1,4 +1,25 @@
+import { useEffect, useState } from 'react'
+import { useNavigate } from 'react-router-dom'
+import { api } from '@/lib/api'
+
 export function PendingApprovalPage() {
+  const [loading, setLoading] = useState(true)
+  const navigate = useNavigate()
+
+  useEffect(() => {
+    api.get('/api/auth/pending-status')
+      .then(() => setLoading(false))
+      .catch(() => navigate('/login', { replace: true }))
+  }, [navigate])
+
+  if (loading) {
+    return (
+      <div className="flex min-h-screen items-center justify-center">
+        <p className="text-sm text-text-secondary">Loading...</p>
+      </div>
+    )
+  }
+
   return (
     <div className="flex min-h-screen items-center justify-center">
       <div className="rounded-xl border border-border-default bg-surface-card p-8 max-w-md text-center space-y-4">
@@ -6,9 +27,6 @@ export function PendingApprovalPage() {
         <p className="text-sm text-text-secondary">
           Your account has been created and is awaiting admin approval.
           You'll be able to access the application once an admin approves your registration.
-        </p>
-        <p className="text-xs text-text-tertiary">
-          Please save your API key — you'll need it to log in once approved.
         </p>
       </div>
     </div>

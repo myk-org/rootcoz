@@ -77,10 +77,10 @@ from rootcoz.engine.core import (
     analyze_failure_group,
     clone_additional_repos,
     get_failure_signature,
-    make_user_friendly_error,
     resolve_additional_repos,
     safe_update_progress,
 )
+from rootcoz.error_messages import make_user_friendly_error
 from rootcoz.feedback import (
     create_feedback_from_preview,
     generate_feedback_preview,
@@ -1138,6 +1138,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
             "/api/auth/pending-status",
             "/api/releases/latest",
             "/metrics",
+            "/pending",
             "/favicon.ico",
             "/sw.js",
         }
@@ -6503,8 +6504,11 @@ async def admin_create_user_endpoint(request: Request) -> JSONResponse:
             username, raw_key = await storage.create_admin_user(username)
         else:
             _, raw_key = await storage.create_user(username, status="active")
-    except (ValueError, Exception) as exc:
+    except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.exception("Failed to create user '%s'", username)
+        raise HTTPException(status_code=500, detail="Internal server error") from exc
 
     logger.info(
         f"[AUDIT] Admin '{request.state.username}' created {role} user '{username}'"
