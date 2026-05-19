@@ -269,14 +269,14 @@ class TestAuthEnforcement:
         )
 
     def test_html_redirect_without_auth(self, client):
-        """Browser requests without auth redirect to /register."""
+        """Browser requests without auth redirect to /login."""
         resp = client.get(
             "/some-page",
             headers={"accept": "text/html"},
             follow_redirects=False,
         )
         assert resp.status_code == 303
-        assert resp.headers["location"] == "/register"
+        assert resp.headers["location"] == "/login"
 
 
 class TestKeyRotation:

@@ -109,7 +109,7 @@ When `TRUST_PROXY_HEADERS=true` and `X-Forwarded-User` is present:
 
 1. The header value is used as the RootCoz username
 2. A `rootcoz_username` cookie is automatically set so all downstream code works unchanged
-3. The `/register` page redirects to the dashboard (no manual registration needed)
+3. The `/login` page redirects to the dashboard (no manual registration needed)
 4. Admin sessions and Bearer tokens still take precedence over the header
 
 When the header is absent, the standard cookie-based registration flow is used (backward compatible).
