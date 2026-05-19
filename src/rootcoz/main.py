@@ -1129,7 +1129,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
     # sensitive data, similar to /health.
     _PUBLIC_PATHS = frozenset(
         {
-            "/register",
+            "/login",
             "/health",
             "/api/health",
             "/api/auth/register",
@@ -1173,29 +1173,29 @@ class AuthMiddleware(BaseHTTPMiddleware):
         request.state.role = "user"
 
         # Public paths and static assets — pass through
-        # (but /register may need SSO redirect, handled below;
+        # (but /login may need SSO redirect, handled below;
         #  it stays in _PUBLIC_PATHS for non-SSO users who need the page)
         if path.startswith("/assets/") or (
-            path in self._PUBLIC_PATHS and path != "/register"
+            path in self._PUBLIC_PATHS and path != "/login"
         ):
             return await call_next(request)
 
         settings = get_settings()
 
         # SSO: when trust_proxy_headers is enabled and X-Forwarded-User is
-        # present, auto-identify the user and redirect /register → /
+        # present, auto-identify the user and redirect /login → /
         proxy_username = ""
         if settings.trust_proxy_headers:
             proxy_username = request.headers.get("x-forwarded-user", "").strip()
 
-        if path.startswith("/register"):
+        if path.startswith("/login"):
             if proxy_username and proxy_username.lower() != "admin":
                 # Session auth takes precedence over X-Forwarded-User —
                 # only check when an SSO redirect would otherwise fire.
                 session_token = _read_cookie(request, "rootcoz_session")
                 if session_token and await storage.get_session(session_token):
                     return await call_next(request)
-                # SSO user hitting /register — redirect to dashboard
+                # SSO user hitting /login — redirect to dashboard
                 response = RedirectResponse(url="/", status_code=303)
                 if _read_cookie(request, "rootcoz_username") != proxy_username:
                     _set_username_cookie(
@@ -1308,7 +1308,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
         if not has_valid_session and path not in self._PUBLIC_PATHS:
             accept = request.headers.get("accept", "")
             if "text/html" in accept and not path.startswith("/api/"):
-                return RedirectResponse(url="/register", status_code=303)
+                return RedirectResponse(url="/login", status_code=303)
             return JSONResponse(
                 status_code=401,
                 content={
@@ -7135,7 +7135,7 @@ async def create_feedback(request: Request, body: FeedbackCreateRequest):
 
 
 # SPA catch-all routes — must be AFTER all API routes
-@app.get("/register", include_in_schema=False)
+@app.get("/login", include_in_schema=False)
 async def serve_spa_known_routes() -> HTMLResponse:
     """Serve the React SPA for known frontend routes."""
     return _serve_spa()

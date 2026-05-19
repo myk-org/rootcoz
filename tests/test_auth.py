@@ -1043,10 +1043,10 @@ class TestProxyHeaders:
         )
         assert resp.status_code == 401
 
-    def test_register_redirects_for_sso_user(self, proxy_client):
-        """SSO user hitting /register is redirected to dashboard."""
+    def test_login_redirects_for_sso_user(self, proxy_client):
+        """SSO user hitting /login is redirected to dashboard."""
         resp = proxy_client.get(
-            "/register",
+            "/login",
             headers={"X-Forwarded-User": "sso-user"},
             follow_redirects=False,
         )
@@ -1054,21 +1054,21 @@ class TestProxyHeaders:
         assert resp.headers["location"] == "/"
         assert resp.cookies.get("rootcoz_username") == "sso-user"
 
-    def test_register_admin_no_redirect(self, proxy_client):
-        """SSO user 'admin' hitting /register must NOT redirect (prevents loop)."""
+    def test_login_admin_no_redirect(self, proxy_client):
+        """SSO user 'admin' hitting /login must NOT redirect (prevents loop)."""
         for name in ("admin", "Admin", "ADMIN"):
             resp = proxy_client.get(
-                "/register",
+                "/login",
                 headers={"X-Forwarded-User": name},
                 follow_redirects=False,
             )
             assert resp.status_code != 303, f"admin variant '{name}' caused redirect"
             assert resp.cookies.get("rootcoz_username") is None
 
-    def test_register_no_redirect_without_header(self, proxy_client):
-        """Non-SSO user can access /register normally (no SSO redirect)."""
+    def test_login_no_redirect_without_header(self, proxy_client):
+        """Non-SSO user can access /login normally (no SSO redirect)."""
         resp = proxy_client.get(
-            "/register",
+            "/login",
             follow_redirects=False,
         )
         # Should NOT redirect — either 200 (SPA served) or 404 (no frontend build)
@@ -1087,11 +1087,11 @@ class TestProxyHeaders:
         assert data["username"] == "admin"
         assert data["is_admin"] is True
 
-    def test_register_session_takes_precedence_over_header(self, proxy_client):
-        """Session auth takes precedence over X-Forwarded-User on /register."""
+    def test_login_session_takes_precedence_over_header(self, proxy_client):
+        """Session auth takes precedence over X-Forwarded-User on /login."""
         cookies = _admin_login(proxy_client)
         resp = proxy_client.get(
-            "/register",
+            "/login",
             headers={"X-Forwarded-User": "header_user"},
             cookies=cookies,
             follow_redirects=False,

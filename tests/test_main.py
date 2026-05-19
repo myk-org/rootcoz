@@ -917,7 +917,7 @@ class TestSpaRoutes:
         "path",
         [
             "/dashboard",
-            "/register",
+            "/login",
             "/",
             "/some/unknown/route",
         ],
