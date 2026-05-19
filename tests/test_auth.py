@@ -189,7 +189,9 @@ class TestAdminUsers:
     def test_create_admin_user(self, client):
         cookies = _admin_login(client)
         resp = client.post(
-            "/api/admin/users", json={"username": "newadmin"}, cookies=cookies
+            "/api/admin/users/create",
+            json={"username": "newadmin", "role": "admin"},
+            cookies=cookies,
         )
         assert resp.status_code == 200
         data = resp.json()
@@ -198,14 +200,16 @@ class TestAdminUsers:
         assert "api_key" in data
 
     def test_create_admin_requires_auth(self, client):
-        resp = client.post("/api/admin/users", json={"username": "newadmin"})
+        resp = client.post(
+            "/api/admin/users/create", json={"username": "newadmin", "role": "admin"}
+        )
         assert resp.status_code == 403
 
     def test_create_admin_regular_user_forbidden(self, client):
         """Cookie-only user cannot access admin endpoints (gets 401 before 403)."""
         resp = client.post(
-            "/api/admin/users",
-            json={"username": "newadmin"},
+            "/api/admin/users/create",
+            json={"username": "newadmin", "role": "admin"},
             cookies={"rootcoz_username": "regular"},
         )
         assert resp.status_code in (401, 403)
@@ -224,7 +228,11 @@ class TestAdminUsers:
     def test_delete_admin_user(self, client):
         cookies = _admin_login(client)
         # Bootstrap admin (ADMIN_KEY) is always available — safe to delete DB admins
-        client.post("/api/admin/users", json={"username": "todelete"}, cookies=cookies)
+        client.post(
+            "/api/admin/users/create",
+            json={"username": "todelete", "role": "admin"},
+            cookies=cookies,
+        )
         resp = client.delete("/api/admin/users/todelete", cookies=cookies)
         assert resp.status_code == 200
         assert resp.json()["deleted"] == "todelete"
@@ -242,7 +250,9 @@ class TestAdminUsers:
     def test_rotate_key(self, client):
         cookies = _admin_login(client)
         client.post(
-            "/api/admin/users", json={"username": "rotateuser"}, cookies=cookies
+            "/api/admin/users/create",
+            json={"username": "rotateuser", "role": "admin"},
+            cookies=cookies,
         )
         resp = client.post("/api/admin/users/rotateuser/rotate-key", cookies=cookies)
         assert resp.status_code == 200
@@ -334,8 +344,8 @@ class TestBearerTokenAuth:
         """Bearer token with user API key works."""
         # Create admin user via Bearer token (admin key)
         create_resp = client.post(
-            "/api/admin/users",
-            json={"username": "apiuser"},
+            "/api/admin/users/create",
+            json={"username": "apiuser", "role": "admin"},
             headers={"Authorization": "Bearer test-admin-key-16chars"},
         )
         assert create_resp.status_code == 200
@@ -380,8 +390,8 @@ class TestBearerTokenAuth:
     def test_bearer_admin_api_key_unchanged(self, client):
         """Bearer token with admin API key still grants admin access."""
         create_resp = client.post(
-            "/api/admin/users",
-            json={"username": "admin-key-user"},
+            "/api/admin/users/create",
+            json={"username": "admin-key-user", "role": "admin"},
             headers={"Authorization": "Bearer test-admin-key-16chars"},
         )
         assert create_resp.status_code == 200
@@ -433,7 +443,9 @@ class TestChangeUserRole:
         cookies = _admin_login(client)
         # Create admin and save their key
         create_resp = client.post(
-            "/api/admin/users", json={"username": "demoteme"}, cookies=cookies
+            "/api/admin/users/create",
+            json={"username": "demoteme", "role": "admin"},
+            cookies=cookies,
         )
         old_key = create_resp.json()["api_key"]
         # Demote to user — key should be preserved
@@ -457,7 +469,11 @@ class TestChangeUserRole:
         """Demoting the last DB admin is allowed — bootstrap admin (ADMIN_KEY) is always available."""
         cookies = _admin_login(client)
         # Create a single admin — demoting should succeed
-        client.post("/api/admin/users", json={"username": "onlyadmin"}, cookies=cookies)
+        client.post(
+            "/api/admin/users/create",
+            json={"username": "onlyadmin", "role": "admin"},
+            cookies=cookies,
+        )
         resp = client.put(
             "/api/admin/users/onlyadmin/role",
             json={"role": "user"},
@@ -489,7 +505,9 @@ class TestChangeUserRole:
     def test_change_role_same_role(self, client):
         cookies = _admin_login(client)
         client.post(
-            "/api/admin/users", json={"username": "alreadyadmin"}, cookies=cookies
+            "/api/admin/users/create",
+            json={"username": "alreadyadmin", "role": "admin"},
+            cookies=cookies,
         )
         resp = client.put(
             "/api/admin/users/alreadyadmin/role",

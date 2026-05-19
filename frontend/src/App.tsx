@@ -15,6 +15,7 @@ import { UsersPage } from '@/pages/UsersPage'
 import { TokenUsagePage } from '@/pages/TokenUsagePage'
 import { MentionsPage } from '@/pages/MentionsPage'
 import { NewAnalysisPage } from '@/pages/NewAnalysisPage'
+import { PendingApprovalPage } from '@/pages/PendingApprovalPage'
 
 export default function App() {
   return (
@@ -22,6 +23,7 @@ export default function App() {
       <BrowserRouter basename="/">
         <Routes>
           <Route path="/login" element={<RegisterPage />} />
+          <Route path="/pending" element={<PendingApprovalPage />} />
           <Route element={<Layout />}>
             <Route index element={<ProtectedRoute><DashboardPage /></ProtectedRoute>} />
             <Route path="/dashboard" element={<Navigate to="/" replace />} />

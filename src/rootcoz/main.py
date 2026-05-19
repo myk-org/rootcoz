@@ -1135,6 +1135,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
             "/api/auth/register",
             "/api/auth/login",
             "/api/auth/needs-key",
+            "/api/auth/pending-status",
             "/api/releases/latest",
             "/metrics",
             "/favicon.ico",
@@ -6343,6 +6344,17 @@ async def check_needs_key(request: Request) -> JSONResponse:
     )
 
 
+@app.get("/api/auth/pending-status")
+async def pending_status(request: Request) -> JSONResponse:
+    """Return pending status info for unauthenticated users."""
+    return JSONResponse(
+        content={
+            "status": "pending",
+            "message": "Your account is awaiting admin approval. Please wait for an admin to approve your registration.",
+        }
+    )
+
+
 # --- User token endpoints ---
 
 
@@ -6452,39 +6464,49 @@ async def get_token_usage_for_job(request: Request, job_id: str) -> dict:
     return {"job_id": job_id, "records": records}
 
 
-@app.post("/api/admin/users")
-async def create_admin_user_endpoint(request: Request) -> JSONResponse:
-    """Create a new admin user. Returns the generated API key."""
+@app.post("/api/admin/users/create")
+async def admin_create_user_endpoint(request: Request) -> JSONResponse:
+    """Admin creates a new user. Does NOT set session cookies (admin stays logged in)."""
     _require_admin(request)
     body = await _read_json_object(request)
 
     username = body.get("username", "")
+    if not isinstance(username, str):
+        raise HTTPException(status_code=400, detail="Username must be a string")
+    username = username.strip()
     if not username:
         raise HTTPException(status_code=400, detail="Username is required")
 
+    role = body.get("role", "user")
+    if role not in ("user", "admin"):
+        raise HTTPException(status_code=400, detail="Role must be 'user' or 'admin'")
+
     try:
-        username, raw_key = await storage.create_admin_user(username)
-    except Exception as exc:
+        if role == "admin":
+            username, raw_key = await storage.create_admin_user(username)
+        else:
+            _, raw_key = await storage.create_user(username, status="active")
+    except (ValueError, Exception) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     logger.info(
-        f"[AUDIT] Admin '{request.state.username}' created admin user '{username}'"
+        f"[AUDIT] Admin '{request.state.username}' created {role} user '{username}'"
     )
     return JSONResponse(
-        content={"username": username, "api_key": raw_key, "role": "admin"},
+        content={"username": username, "api_key": raw_key, "role": role},
         headers={"Cache-Control": "no-store"},
     )
 
 
 @app.delete("/api/admin/users/{username}")
-async def delete_admin_user_endpoint(request: Request, username: str) -> dict:
+async def delete_user_endpoint(request: Request, username: str) -> dict:
     """Delete a user. Bootstrap admin (ADMIN_KEY) is always available as fallback."""
     _require_admin(request)
     if username == request.state.username:
         raise HTTPException(status_code=400, detail="Cannot delete your own account")
 
     try:
-        deleted = await storage.delete_admin_user(username)
+        deleted = await storage.delete_user(username)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     if not deleted:
