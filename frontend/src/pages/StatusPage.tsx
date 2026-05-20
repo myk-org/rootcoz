@@ -6,7 +6,7 @@ import type { ResultResponse } from '@/types'
 import { Card, CardContent } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
-import { Clock, ExternalLink, Loader2, RotateCw, XCircle } from 'lucide-react'
+import { AlertTriangle, Clock, ExternalLink, Loader2, RotateCw, XCircle } from 'lucide-react'
 import { StatusChip } from '@/components/shared/StatusChip'
 import { ConfirmDialog } from '@/components/shared/ConfirmDialog'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
@@ -401,9 +401,23 @@ export function StatusPage() {
                     <h2 className="font-display text-lg font-semibold text-signal-red">
                       {terminalErrorTitles[terminalErrorKind] ?? terminalErrorTitles.failed}
                     </h2>
-                    <p className="mt-2 text-sm text-signal-red/80 bg-signal-red/10 rounded-md px-3 py-2">
-                      {error}
-                    </p>
+                    {data?.result?.error ? (
+                      <div className="mt-3 w-full rounded-lg border border-signal-red/20 bg-signal-red/5 p-4 text-left">
+                        <div className="flex items-start gap-2.5">
+                          <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-signal-red/70" />
+                          <div className="min-w-0 space-y-1">
+                            <p className="text-xs font-medium uppercase tracking-wide text-signal-red/70">Error Details</p>
+                            <p className="text-sm text-text-secondary whitespace-pre-wrap break-words">
+                              {data.result.error}
+                            </p>
+                          </div>
+                        </div>
+                      </div>
+                    ) : (
+                      <p className="mt-2 text-sm text-signal-red/80 bg-signal-red/10 rounded-md px-3 py-2">
+                        {error}
+                      </p>
+                    )}
                   </>
                 )
               ) : (

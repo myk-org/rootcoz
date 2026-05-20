@@ -36,6 +36,7 @@ from rootcoz.engine.core import (
     resolve_additional_repos,
     safe_update_progress,
 )
+from rootcoz.error_messages import make_user_friendly_error
 from rootcoz.jenkins import JenkinsClient
 from rootcoz.jenkins_artifacts import cleanup_extract_dir, process_build_artifacts
 from rootcoz.models import (
@@ -71,12 +72,18 @@ def _normalize_child_results(
     for i, result in enumerate(child_results):
         if isinstance(result, Exception):
             child_name, child_num = failed_children[i]
+            logger.error(
+                "Child job %s #%d analysis failed: %s",
+                child_name,
+                child_num,
+                format_exception_with_type(result),
+            )
             analyses.append(
                 ChildJobAnalysis(
                     job_name=child_name,
                     build_number=child_num,
                     jenkins_url="",
-                    note=f"Analysis failed: {format_exception_with_type(result)}",
+                    note=make_user_friendly_error(result),
                 )
             )
         else:
@@ -555,12 +562,15 @@ async def analyze_child_job(
     try:
         source_result = await source.fetch()
     except Exception as e:
+        logger.error(
+            "Child job %s #%d build info fetch failed: %s", job_name, build_number, e
+        )
         source.cleanup()
         return ChildJobAnalysis(
             job_name=job_name,
             build_number=build_number,
             jenkins_url=jenkins_url,
-            note=f"Failed to get build info: {e}",
+            note=make_user_friendly_error(e),
         )
 
     try:
@@ -903,11 +913,17 @@ async def _analyze_child_job_inner(
     )
 
     if not success:
+        logger.error(
+            "Console-only analysis failed for %s #%d: %s",
+            job_name,
+            build_number,
+            error_text,
+        )
         return ChildJobAnalysis(
             job_name=job_name,
             build_number=build_number,
             jenkins_url=jenkins_url,
-            note=f"Analysis failed: {error_text}",
+            note=make_user_friendly_error(error_text),
         )
 
     return ChildJobAnalysis(
@@ -1054,13 +1070,16 @@ async def analyze_job(
                     ai_provider,
                     ai_model,
                 )
+                logger.error(
+                    "AI preflight failed for job %s: %s", job_id, preflight_result.text
+                )
                 return AnalysisResult(
                     job_id=job_id,
                     job_name=request.job_name,
                     build_number=request.build_number,
                     jenkins_url=HttpUrl(jenkins_build_url),
                     status="failed",
-                    summary=preflight_result.text,
+                    summary=make_user_friendly_error(preflight_result.text),
                     ai_provider=ai_provider,
                     ai_model=ai_model,
                     failures=[],
@@ -1212,13 +1231,18 @@ async def analyze_job(
                 )
 
                 if not success:
+                    logger.error(
+                        "Console-only analysis failed for job %s: %s",
+                        job_id,
+                        error_text,
+                    )
                     return AnalysisResult(
                         job_id=job_id,
                         job_name=request.job_name,
                         build_number=request.build_number,
                         jenkins_url=HttpUrl(jenkins_build_url),
                         status="failed",
-                        summary=error_text,
+                        summary=make_user_friendly_error(error_text),
                         ai_provider=ai_provider,
                         ai_model=ai_model,
                         failures=[],

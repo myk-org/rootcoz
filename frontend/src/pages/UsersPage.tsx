@@ -104,9 +104,10 @@ export function UsersPage() {
     setCreating(true)
     setCreateError(null)
     try {
-      const result = newUserRole === 'admin'
-        ? await api.post<CreateUserResponse>('/api/admin/users', { username: trimmed })
-        : await api.post<CreateUserResponse>('/api/auth/register', { username: trimmed })
+      const result = await api.post<CreateUserResponse>('/api/admin/users/create', {
+        username: trimmed,
+        role: newUserRole,
+      })
       setCreatedUser(result)
       fetchUsers()
     } catch (err) {

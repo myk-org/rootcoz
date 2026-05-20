@@ -2760,15 +2760,11 @@ async def get_user_by_username(username: str) -> dict | None:
         return dict(row) if row else None
 
 
-async def delete_admin_user(username: str) -> bool:
-    """Delete an admin user. Returns True if deleted.
-
-    The bootstrap 'admin' user (via ADMIN_KEY env var) is never stored
-    in the users table, so there is always a fallback admin.
-    """
+async def delete_user(username: str) -> bool:
+    """Delete a user and their sessions. Returns True if deleted."""
     async with _connect_db() as db:
         cursor = await db.execute(
-            "DELETE FROM users WHERE username = ? AND role = 'admin'",
+            "DELETE FROM users WHERE username = ?",
             (username,),
         )
         if cursor.rowcount > 0:
