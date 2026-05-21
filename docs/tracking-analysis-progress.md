@@ -87,7 +87,7 @@ Use these flags when the default progress behavior is not enough:
 wait_for_completion = true
 poll_interval_minutes = 2
 max_wait_minutes = 0
-ai_call_timeout = 10
+ai_cli_timeout = 10
 ```
 
 Put default wait and timeout values in `~/.config/rootcoz/config.toml` if you do not want to repeat them on every run.

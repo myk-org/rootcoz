@@ -239,8 +239,8 @@ def _get_debug_messages(caplog, *, containing: str = "") -> list[str]:
 
 
 def _get_error_messages(caplog, *, containing: str = "") -> list[str]:
-    """Extract ERROR-level messages from caplog, optionally filtered by substring."""
-    messages = [r.message for r in caplog.records if r.levelno == logging.ERROR]
+    """Extract WARNING-level messages from caplog, optionally filtered by substring."""
+    messages = [r.message for r in caplog.records if r.levelno == logging.WARNING]
     if containing:
         messages = [m for m in messages if containing in m]
     return messages
@@ -305,7 +305,7 @@ def test_skip_path_body_not_logged(test_client, caplog):
 
 
 def test_validation_error_logged_at_error(test_client, caplog):
-    """422 validation errors are logged at ERROR with masked body.
+    """422 validation errors are logged at WARNING with masked body.
 
     Uses /api/validate-token (not in _BODY_LOGGING_SKIP_PATHS) with an
     invalid payload to trigger RequestValidationError and verify the
@@ -329,7 +329,7 @@ def test_validation_error_logged_at_error(test_client, caplog):
         validation_logs = _get_error_messages(
             caplog, containing="RequestValidationError"
         )
-        assert validation_logs, "Expected an ERROR log for the validation error"
+        assert validation_logs, "Expected a WARNING log for the validation error"
         log_entry = validation_logs[0]
         # Sensitive values must be masked
         assert "oops-secret" not in log_entry

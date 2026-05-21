@@ -1439,7 +1439,7 @@ async def _validation_error_handler(
         for error in masked_errors:
             if "input" in error:
                 error["input"] = "<redacted>"
-        logger.error(
+        logger.warning(
             "RequestValidationError on %s %s: errors=%s body=<skipped>",
             request.method,
             request.url.path,
@@ -1467,7 +1467,7 @@ async def _validation_error_handler(
             masked_body = "<unable to mask>"
     raw_errors = jsonable_encoder(exc.errors())
     masked_errors = [_mask_pydantic_error(e) for e in raw_errors]
-    logger.error(
+    logger.warning(
         "RequestValidationError on %s %s: errors=%s body=%s",
         request.method,
         request.url.path,

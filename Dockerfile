@@ -126,7 +126,7 @@ ENV HOME="/home/appuser"
 
 EXPOSE 8000
 
-HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
     CMD curl -f http://localhost:${PORT:-8000}/health && curl -f http://localhost:${SIDECAR_PORT:-9100}/health || exit 1
 
 # Use uv run for uvicorn

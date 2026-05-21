@@ -8,6 +8,7 @@ import { api } from '@/lib/api'
 import { getUsername } from '@/lib/cookies'
 import { useSessionState } from '@/lib/useSessionState'
 import { unescapeCodeContent } from '@/lib/format'
+import { formatRelativeTime } from '@/lib/utils'
 import { useReportState, useReportDispatch, reviewKey } from './ReportContext'
 import { Card, CardContent } from '@/components/ui/card'
 import { Tooltip, TooltipTrigger, TooltipContent } from '@/components/ui/tooltip'
@@ -25,21 +26,6 @@ import { useReviewSuggestion } from './useReviewSuggestion'
 import { ConfirmDialog } from '@/components/shared/ConfirmDialog'
 import { UuidCopyButton } from '@/components/shared/UuidCopyButton'
 import { ChevronDown, ChevronRight, Bug, MessageSquare, CheckCircle2, Copy, Check, RotateCw } from 'lucide-react'
-
-function formatRelativeTime(iso: string): string {
-  const now = Date.now()
-  const then = new Date(iso).getTime()
-  if (Number.isNaN(then)) return iso
-  const seconds = Math.floor((now - then) / 1000)
-  if (seconds < 0) return iso
-  if (seconds < 60) return 'just now'
-  const minutes = Math.floor(seconds / 60)
-  if (minutes < 60) return `${minutes}m ago`
-  const hours = Math.floor(minutes / 60)
-  if (hours < 24) return `${hours}h ago`
-  // For older timestamps, show localized date/time
-  return new Date(iso).toLocaleString()
-}
 
 function PreviousAnalysisEntry({ prev, index, repoUrls }: {
   prev: PreviousAnalysis

@@ -198,7 +198,7 @@ def mock_jenkins_client() -> MagicMock:
 
 
 @pytest.fixture
-def mock_ai_cli() -> Generator[MagicMock, None, None]:
+def mock_ai() -> Generator[MagicMock, None, None]:
     """Mock the call_ai function."""
     with patch("rootcoz.engine.core.call_ai_once") as mock:
         mock.return_value = AIResult(
