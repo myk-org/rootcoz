@@ -21,7 +21,7 @@ jenkins_ssl_verify = true
 tests_repo_url = "https://github.com/your-org/your-tests"
 ai_provider = "claude"
 ai_model = "claude-opus-4-6[1m]"
-ai_cli_timeout = 10
+ai_call_timeout = 10
 # Peer analysis (multi-AI consensus)
 # peers = "cursor:gpt-5.4-xhigh,gemini:gemini-2.5-pro"
 # peer_analysis_max_rounds = 3

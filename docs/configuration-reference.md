@@ -73,7 +73,7 @@ Effect: These values become the default Jenkins connection, wait behavior, artif
 | --- | --- | --- | --- |
 | `AI_PROVIDER` | string | `unset` | Default AI provider. Supported values are `claude`, `gemini`, and `cursor`. |
 | `AI_MODEL` | string | `unset` | Default AI model identifier. |
-| `AI_CLI_TIMEOUT` | integer | `10` | Default AI CLI timeout in minutes. |
+| `AI_CALL_TIMEOUT` | integer | `10` | Default AI call timeout in minutes. |
 | `MAX_CONCURRENT_AI_CALLS` | integer | `3` | Maximum concurrent AI calls for one analysis request. |
 | `PEER_AI_CONFIGS` | string | `unset` | Default peer-analysis list in `provider:model,provider:model` format. |
 | `PEER_ANALYSIS_MAX_ROUNDS` | integer | `3` | Maximum debate rounds for peer analysis. Valid range is `1`-`10`. |
@@ -82,7 +82,7 @@ Effect: These values become the default Jenkins connection, wait behavior, artif
 ```bash
 export AI_PROVIDER=claude
 export AI_MODEL=claude-opus-4-6
-export AI_CLI_TIMEOUT=10
+export AI_CALL_TIMEOUT=10
 export MAX_CONCURRENT_AI_CALLS=3
 export PEER_AI_CONFIGS=cursor:gpt-5.4-xhigh,gemini:gemini-2.5-pro
 export PEER_ANALYSIS_MAX_ROUNDS=3
@@ -268,7 +268,7 @@ Effect: These keys set the CLI's server target, default user identity, TLS behav
 | `tests_repo_token` | string | empty | Default tests repo token for `rootcoz analyze`. |
 | `ai_provider` | string | empty | Default AI provider for `rootcoz analyze`. |
 | `ai_model` | string | empty | Default AI model for `rootcoz analyze`. |
-| `ai_cli_timeout` | integer | `0` | Default AI timeout override. `0` means the CLI sends no override. |
+| `ai_call_timeout` | integer | `0` | Default AI timeout override. `0` means the CLI sends no override. |
 | `max_concurrent_ai_calls` | integer | `0` | Default concurrency override. `0` means the CLI sends no override. |
 | `peers` | string | empty | Default peer-analysis list in `provider:model,provider:model` format. |
 | `peer_analysis_max_rounds` | integer | `0` | Default peer-round override. `0` means the CLI sends no override. |
@@ -297,7 +297,7 @@ force = true
 
 Effect: When `rootcoz analyze` runs without explicit flags, the CLI fills matching request-body fields from the selected profile. Explicit CLI flags still override the profile.
 
-> **Note:** In `config.toml`, `0` means "do not send a CLI override" for `ai_cli_timeout`, `max_concurrent_ai_calls`, `jenkins_timeout`, `jira_max_results`, `poll_interval_minutes`, `max_wait_minutes`, and `peer_analysis_max_rounds`. This is different from request-body `max_wait_minutes: 0`, which means "no limit".
+> **Note:** In `config.toml`, `0` means "do not send a CLI override" for `ai_call_timeout`, `max_concurrent_ai_calls`, `jenkins_timeout`, `jira_max_results`, `poll_interval_minutes`, `max_wait_minutes`, and `peer_analysis_max_rounds`. This is different from request-body `max_wait_minutes: 0`, which means "no limit".
 
 ### Tracker Default Keys
 
@@ -407,7 +407,7 @@ Effect: `ADMIN_KEY` or an admin user's API key gives admin access. A non-admin u
 | `ai_provider` | string | `null` | Overrides `AI_PROVIDER`. Supported values are `claude`, `gemini`, and `cursor`. |
 | `ai_model` | string | `null` | Overrides `AI_MODEL`. |
 | `enable_jira` | boolean | `null` | Per-request Jira-enrichment toggle. `false` disables Jira duplicate search for this request even if the server is configured. |
-| `ai_cli_timeout` | integer | `null` | Overrides `AI_CLI_TIMEOUT` in minutes. Must be greater than `0`. |
+| `ai_call_timeout` | integer | `null` | Overrides `AI_CALL_TIMEOUT` in minutes. Must be greater than `0`. |
 | `max_concurrent_ai_calls` | integer | `null` | Overrides `MAX_CONCURRENT_AI_CALLS`. Must be greater than `0`. |
 | `jira_url` | string | `null` | Overrides `JIRA_URL` for this request. |
 | `jira_email` | string | `null` | Overrides `JIRA_EMAIL` for this request. |

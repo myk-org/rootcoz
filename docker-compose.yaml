@@ -95,8 +95,8 @@ services:
       # Cursor Agent CLI - API key
       # - CURSOR_API_KEY=${CURSOR_API_KEY:-}
 
-      # AI CLI timeout in minutes (default: 10)
-      - AI_CLI_TIMEOUT=${AI_CLI_TIMEOUT:-10}
+      # AI call timeout in minutes (default: 10)
+      - AI_CALL_TIMEOUT=${AI_CALL_TIMEOUT:-10}
 
       # ===================
       # Optional Configuration

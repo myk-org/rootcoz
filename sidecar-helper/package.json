@@ -8,8 +8,7 @@
     "build": "tsc"
   },
   "dependencies": {
-    "@myk-org/pi-sidecar": "latest",
-    "pi-orchestrator-config": "https://github.com/myk-org/pi-config/tarball/v3.0.1"
+    "@myk-org/pi-sidecar": "^1.0.5"
   },
   "devDependencies": {
     "typescript": "^5.7.0",

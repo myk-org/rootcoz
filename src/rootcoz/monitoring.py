@@ -227,17 +227,35 @@ async def check_jenkins(settings: Any) -> dict[str, str]:
 
 
 async def check_ai_provider() -> dict[str, str]:
-    """Check that an AI provider is configured."""
+    """Check that an AI provider is configured and sidecar is reachable."""
     provider = os.getenv("AI_PROVIDER", "")
     model = os.getenv("AI_MODEL", "")
-    if provider and model:
-        return {"status": "ok", "provider": provider, "model": model}
-    missing = []
+    env_issues = []
     if not provider:
-        missing.append("AI_PROVIDER")
+        env_issues.append("AI_PROVIDER")
     if not model:
-        missing.append("AI_MODEL")
-    return {"status": "not_configured", "detail": f"Missing: {', '.join(missing)}"}
+        env_issues.append("AI_MODEL")
+
+    # Check sidecar health
+    sidecar_port = os.getenv("SIDECAR_PORT", "9100")
+    sidecar_url = f"http://127.0.0.1:{sidecar_port}/health"
+    try:
+        async with httpx.AsyncClient(timeout=3) as client:
+            resp = await client.get(sidecar_url)
+            if resp.status_code != 200:
+                return {
+                    "status": "error",
+                    "detail": f"Sidecar unhealthy (HTTP {resp.status_code})",
+                }
+    except Exception:
+        return {"status": "error", "detail": "Sidecar unreachable"}
+
+    if env_issues:
+        return {
+            "status": "not_configured",
+            "detail": f"Missing: {', '.join(env_issues)}",
+        }
+    return {"status": "ok", "provider": provider, "model": model}
 
 
 async def check_reportportal(settings: Any) -> dict[str, str]:
