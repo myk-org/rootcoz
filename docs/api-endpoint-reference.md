@@ -22,7 +22,7 @@ Shared JSON fields accepted by analysis endpoints. `POST /analyze` adds Jenkins-
 | `ai_provider` | `string \| null` | `null` | AI provider override. Allowed values: `claude`, `gemini`, `cursor`. |
 | `ai_model` | `string \| null` | `null` | AI model override. |
 | `enable_jira` | `boolean \| null` | `null` | Enables or disables Jira duplicate matching for this request. |
-| `ai_call_timeout` | `integer \| null` | `null` | AI call timeout in minutes. |
+| `ai_cli_timeout` | `integer \| null` | `null` | AI CLI timeout in minutes. |
 | `max_concurrent_ai_calls` | `integer \| null` | `null` | Maximum concurrent AI CLI calls. |
 | `jira_url` | `string \| null` | `null` | Jira base URL override. |
 | `jira_email` | `string \| null` | `null` | Jira Cloud email override. |
@@ -61,7 +61,7 @@ Shared JSON fields accepted by analysis endpoints. `POST /analyze` adds Jenkins-
   "ai_provider": "claude",
   "ai_model": "claude-sonnet-4-20250514",
   "enable_jira": true,
-  "ai_call_timeout": 15,
+  "ai_cli_timeout": 15,
   "max_concurrent_ai_calls": 4,
   "peer_ai_configs": [
     {

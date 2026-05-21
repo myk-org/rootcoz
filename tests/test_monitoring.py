@@ -185,22 +185,60 @@ class TestHealthChecks:
         assert result["status"] == "error"
 
     async def test_check_ai_provider_configured(self):
+        mock_response = MagicMock()
+        mock_response.status_code = 200
         with patch.dict(os.environ, {"AI_PROVIDER": "claude", "AI_MODEL": "test"}):
-            result = await check_ai_provider()
+            with patch("rootcoz.monitoring.httpx.AsyncClient") as mock_client:
+                mock_client.return_value.__aenter__ = AsyncMock(
+                    return_value=MagicMock(get=AsyncMock(return_value=mock_response))
+                )
+                mock_client.return_value.__aexit__ = AsyncMock(return_value=False)
+                result = await check_ai_provider()
         assert result["status"] == "ok"
         assert result["provider"] == "claude"
 
     async def test_check_ai_provider_missing(self):
+        mock_response = MagicMock()
+        mock_response.status_code = 200
         with patch.dict(os.environ, {}, clear=True):
-            # Remove keys if present
             env = {
                 k: v
                 for k, v in os.environ.items()
                 if k not in ("AI_PROVIDER", "AI_MODEL")
             }
             with patch.dict(os.environ, env, clear=True):
-                result = await check_ai_provider()
-        assert result["status"] == "not_configured"
+                with patch("rootcoz.monitoring.httpx.AsyncClient") as mock_client:
+                    mock_client.return_value.__aenter__ = AsyncMock(
+                        return_value=MagicMock(
+                            get=AsyncMock(return_value=mock_response)
+                        )
+                    )
+                    mock_client.return_value.__aexit__ = AsyncMock(return_value=False)
+                    result = await check_ai_provider()
+        assert result["status"] == "error"
+        assert "AI_PROVIDER" in result["detail"]
+        assert "AI_MODEL" in result["detail"]
+
+    async def test_check_ai_provider_sidecar_unreachable_and_env_missing(self):
+        with patch.dict(os.environ, {}, clear=True):
+            env = {
+                k: v
+                for k, v in os.environ.items()
+                if k not in ("AI_PROVIDER", "AI_MODEL")
+            }
+            with patch.dict(os.environ, env, clear=True):
+                with patch("rootcoz.monitoring.httpx.AsyncClient") as mock_client:
+                    mock_client.return_value.__aenter__ = AsyncMock(
+                        return_value=MagicMock(
+                            get=AsyncMock(side_effect=Exception("Connection refused"))
+                        )
+                    )
+                    mock_client.return_value.__aexit__ = AsyncMock(return_value=False)
+                    result = await check_ai_provider()
+        assert result["status"] == "error"
+        assert "AI_PROVIDER" in result["detail"]
+        assert "AI_MODEL" in result["detail"]
+        assert "Sidecar unreachable" in result["detail"]
 
     async def test_check_reportportal_not_configured(self):
         settings = MagicMock()
@@ -255,8 +293,14 @@ class TestHealthChecks:
         settings.jenkins_url = ""
         settings.reportportal_enabled = False
 
+        ai_ok = {"status": "ok", "provider": "claude", "model": "test"}
         with patch.dict(os.environ, {"AI_PROVIDER": "claude", "AI_MODEL": "test"}):
-            result = await build_health_response(settings, str(temp_db_path))
+            with patch(
+                "rootcoz.monitoring.check_ai_provider",
+                new_callable=AsyncMock,
+                return_value=ai_ok,
+            ):
+                result = await build_health_response(settings, str(temp_db_path))
 
         assert result["status"] == "healthy"
         assert "checks" in result
@@ -268,8 +312,14 @@ class TestHealthChecks:
         settings.jenkins_url = ""
         settings.reportportal_enabled = False
 
+        ai_ok = {"status": "ok", "provider": "claude", "model": "test"}
         with patch.dict(os.environ, {"AI_PROVIDER": "claude", "AI_MODEL": "test"}):
-            result = await build_health_response(settings, "/nonexistent/db.sqlite")
+            with patch(
+                "rootcoz.monitoring.check_ai_provider",
+                new_callable=AsyncMock,
+                return_value=ai_ok,
+            ):
+                result = await build_health_response(settings, "/nonexistent/db.sqlite")
 
         assert result["status"] == "unhealthy"
         assert result["checks"]["database"]["status"] == "error"
@@ -566,6 +616,15 @@ class TestHealthEndpointIntegration:
                         "rootcoz.monitoring.check_jenkins",
                         new_callable=AsyncMock,
                         return_value={"status": "not_configured"},
+                    ),
+                    mock_patch(
+                        "rootcoz.monitoring.check_ai_provider",
+                        new_callable=AsyncMock,
+                        return_value={
+                            "status": "ok",
+                            "provider": "claude",
+                            "model": "test",
+                        },
                     ),
                 ):
                     from starlette.testclient import TestClient

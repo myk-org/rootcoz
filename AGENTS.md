@@ -93,12 +93,9 @@ src/rootcoz/
   models.py                 # Pydantic request/response models
   config.py                 # Settings (env vars)
   storage.py                # SQLite persistence
-  ai_client.py              # AI client adapter (re-exports from pi-sidecar-client)
+  ai_client.py              # AI provider constants and usage recording setup
   sidecar-helper/            # Pi SDK sidecar service (Node.js/TypeScript)
-    src/server.ts           # HTTP API server (sessions, prompts, models, health)
-    src/sessions.ts         # Session lifecycle, model discovery, extension loading
-    src/tools.ts            # Custom Pi tools (rootcoz_job, rootcoz_jira, rootcoz_github)
-    src/watchdog.ts         # Python backend health monitoring
+    src/server.ts           # Thin wrapper calling @myk-org/pi-sidecar startSidecar()
   cli/                      # CLI client (rootcoz command)
   peer_analysis.py          # Multi-AI peer debate loop
   ...                       # Other modules (jira, github_issues, monitoring, etc.)

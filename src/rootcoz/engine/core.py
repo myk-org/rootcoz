@@ -901,7 +901,7 @@ async def run_single_ai_analysis(
         repo_path: Path to cloned test repo (optional).
         ai_provider: AI provider name.
         ai_model: AI model identifier.
-        ai_call_timeout: Timeout in minutes for the CLI process.
+        ai_call_timeout: Timeout in minutes for the AI call.
         custom_prompt: Additional user instructions.
         artifacts_context: Build artifacts context.
         server_url: Base URL of this server for AI history API access.
@@ -938,6 +938,7 @@ async def run_single_ai_analysis(
 
     # Save console context to file so it's not embedded in the prompt
     console_file_section = ""
+    console_dir: Path | None = None
     if console_context and repo_path:
         console_file = repo_path / "console-output.txt"
         console_file.write_text(console_context)
@@ -997,45 +998,52 @@ Note: Multiple tests failed with the same error. Provide ONE analysis that appli
     )
     logger.info(f"Calling AI with {format_timeout_log(ai_call_timeout)}")
     try:
-        result = await call_ai_once(
-            prompt,
-            ai_provider=ai_provider,
-            ai_model=ai_model,
-            cwd=str(repo_path) if repo_path else None,
-            ai_call_timeout=ai_call_timeout,
-        )
-    except Exception:
-        logger.exception(
-            "AI call raised exception: provider=%s, model=%s",
+        try:
+            result = await call_ai_once(
+                prompt,
+                ai_provider=ai_provider,
+                ai_model=ai_model,
+                cwd=str(repo_path) if repo_path else None,
+                ai_call_timeout=ai_call_timeout,
+            )
+        except Exception:
+            logger.exception(
+                "AI call raised exception: provider=%s, model=%s",
+                ai_provider,
+                ai_model,
+            )
+            result = AIResult(success=False, text="AI call failed unexpectedly")
+        logger.info(
+            "AI call result: success=%s, text_length=%d, provider=%s, model=%s",
+            result.success,
+            len(result.text),
             ai_provider,
             ai_model,
         )
-        result = AIResult(success=False, text="AI call failed unexpectedly")
-    logger.info(
-        "AI call result: success=%s, text_length=%d, provider=%s, model=%s",
-        result.success,
-        len(result.text),
-        ai_provider,
-        ai_model,
-    )
-    if not result.success:
-        logger.error("AI call failed: %s", result.text[:500])
+        if not result.success:
+            logger.error("AI call failed: %s", result.text[:500])
 
-    await result.record_usage(
-        request_id=job_id,
-        call_type="primary",
-        prompt_chars=len(prompt),
-        ai_provider=ai_provider,
-        ai_model=ai_model,
-    )
+        await result.record_usage(
+            request_id=job_id,
+            call_type="primary",
+            prompt_chars=len(prompt),
+            ai_provider=ai_provider,
+            ai_model=ai_model,
+        )
 
-    parsed: AnalysisDetail | None = None
-    if result.success:
-        parsed = parse_json_response(result.text)
-    if parsed is None:
-        parsed = AnalysisDetail(details=result.text)
+        parsed: AnalysisDetail | None = None
+        if result.success:
+            parsed = parse_json_response(result.text)
+        if parsed is None:
+            parsed = AnalysisDetail(details=result.text)
 
-    return parsed, error_signature
+        return parsed, error_signature
+    finally:
+        # Clean up temp console dir if created
+        if console_dir and console_dir.exists():
+            import shutil
+
+            shutil.rmtree(console_dir, ignore_errors=True)
 
 
 async def analyze_failure_group(

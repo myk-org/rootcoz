@@ -237,7 +237,7 @@ export function ReAnalyzeDialog({ open, onOpenChange, result, jobId, failureUuid
                 </Select>
               </div>
               <div className="space-y-1.5">
-                <FieldLabel>AI CLI Timeout</FieldLabel>
+                <FieldLabel>AI Call Timeout</FieldLabel>
                 <Input
                   type="number"
                   min={1}
