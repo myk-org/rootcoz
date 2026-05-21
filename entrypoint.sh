@@ -38,7 +38,7 @@ if [ "${DEV_MODE:-}" = "true" ] && [ -f /app/sidecar-helper/src/server.ts ]; the
 fi
 if [ -f /app/sidecar-helper/dist/server.js ]; then
     export SIDECAR_PORT="${SIDECAR_PORT:-9100}"
-    export SIDECAR_ACPX_EXTENSION_PATH="/app/sidecar-helper/node_modules/pi-orchestrator-config/extensions/acpx-provider/index.ts"
+    export SIDECAR_ACPX_EXTENSION_PATH="/app/sidecar-helper/node_modules/@myk-org/pi-sidecar/node_modules/pi-orchestrator-config/extensions/acpx-provider/index.ts"
     node /app/sidecar-helper/dist/server.js &
     SIDECAR_PID=$!
     echo "[sidecar] Started Pi SDK sidecar (PID $SIDECAR_PID) on port $SIDECAR_PORT"

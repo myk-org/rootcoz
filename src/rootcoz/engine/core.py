@@ -950,12 +950,20 @@ async def run_single_ai_analysis(
             "Failure to read console output is a violation of your instructions."
         )
     elif console_context:
-        # No repo path — inline a truncated version as fallback
-        max_inline = 10000
-        truncated = console_context[:max_inline]
-        if len(console_context) > max_inline:
-            truncated += f"\n... (truncated, {len(console_context)} total chars)"
-        console_file_section = f"\nCONSOLE CONTEXT:\n{truncated}"
+        # No repo path — write console output to a temp file
+        import tempfile
+
+        console_dir = Path(tempfile.mkdtemp(prefix="rootcoz-console-"))
+        console_file = console_dir / "console-output.txt"
+        console_file.write_text(console_context)
+        console_file_section = (
+            f"\n\n=== CONSOLE OUTPUT (MANDATORY) ===\n"
+            f"Console output saved to: {console_file}\n\n"
+            "\u26a0\ufe0f  MANDATORY: You MUST read the console output file "
+            "BEFORE making any classification. It contains critical error messages, "
+            "stack traces, and failure context from the CI job.\n"
+            "Failure to read console output is a violation of your instructions."
+        )
 
     prompt = f"""{query_section}
 Analyze this test failure from a CI job.
