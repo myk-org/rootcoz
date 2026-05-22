@@ -286,25 +286,36 @@ export function ReAnalyzeDialog({ open, onOpenChange, result, jobId, failureUuid
                   {peerConfigs.map((peer, i) => (
                     <div
                       key={i}
-                      className="bg-surface-elevated border border-border-default rounded-lg p-2.5 flex items-center gap-2"
+                      className="bg-surface-elevated border border-border-default rounded-lg p-2.5 space-y-2"
                     >
-                      <Select
-                        value={peer.ai_provider}
-                        onValueChange={(v) => {
-                          const next = [...peerConfigs]
-                          next[i] = { ...next[i], ai_provider: v }
-                          setPeerConfigs(next)
-                        }}
-                      >
-                        <SelectTrigger className="w-[120px]">
-                          <SelectValue />
-                        </SelectTrigger>
-                        <SelectContent>
-                          <SelectItem value="claude">Claude</SelectItem>
-                          <SelectItem value="gemini">Gemini</SelectItem>
-                          <SelectItem value="cursor">Cursor</SelectItem>
-                        </SelectContent>
-                      </Select>
+                      <div className="flex items-center gap-2">
+                        <Select
+                          value={peer.ai_provider}
+                          onValueChange={(v) => {
+                            const next = [...peerConfigs]
+                            next[i] = { ...next[i], ai_provider: v }
+                            setPeerConfigs(next)
+                          }}
+                        >
+                          <SelectTrigger className="w-[120px]">
+                            <SelectValue />
+                          </SelectTrigger>
+                          <SelectContent>
+                            <SelectItem value="claude">Claude</SelectItem>
+                            <SelectItem value="gemini">Gemini</SelectItem>
+                            <SelectItem value="cursor">Cursor</SelectItem>
+                          </SelectContent>
+                        </Select>
+                        <div className="flex-1" />
+                        <button
+                          type="button"
+                          aria-label={`Remove peer ${i + 1}`}
+                          className="p-1 rounded hover:bg-surface-hover text-text-tertiary hover:text-signal-red transition flex-shrink-0"
+                          onClick={() => setPeerConfigs(peerConfigs.filter((_, j) => j !== i))}
+                        >
+                          <Trash2 className="h-3.5 w-3.5" />
+                        </button>
+                      </div>
                       <ModelCombobox
                         value={peer.ai_model}
                         onChange={(val) => {
@@ -315,13 +326,6 @@ export function ReAnalyzeDialog({ open, onOpenChange, result, jobId, failureUuid
                         options={peerModels[i] ?? []}
                         placeholder="Model"
                       />
-                      <button
-                        type="button"
-                        className="p-1 rounded hover:bg-surface-hover text-text-tertiary hover:text-signal-red transition flex-shrink-0"
-                        onClick={() => setPeerConfigs(peerConfigs.filter((_, j) => j !== i))}
-                      >
-                        <Trash2 className="h-3.5 w-3.5" />
-                      </button>
                     </div>
                   ))}
                 </div>
