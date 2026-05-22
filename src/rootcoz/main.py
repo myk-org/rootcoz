@@ -1913,7 +1913,11 @@ async def process_analysis_with_id(
             ai_model,
             display_name,
             build_number=body.build_number,
-            jenkins_url=settings.jenkins_url or "",
+            jenkins_url=build_jenkins_url(
+                settings.jenkins_url or "", body.job_name or "", body.build_number or 0
+            )
+            if settings.jenkins_url
+            else "",
             job_name=body.job_name or "",
         ):
             return
@@ -3204,6 +3208,7 @@ async def _reanalyze_failure_background(
                 # Strip transient re-analysis fields from archived entry
                 prev_entry.pop("reanalysis_status", None)
                 prev_entry.pop("reanalyzed_with", None)
+                prev_entry.pop("reanalysis_error", None)
                 # Tag: this analysis was superseded by a re-analysis using the new provider/model
                 prev_entry["_superseded_by"] = {
                     "ai_provider": ai_provider,

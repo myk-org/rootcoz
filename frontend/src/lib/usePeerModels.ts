@@ -17,9 +17,12 @@ export function usePeerModels(
   useEffect(() => {
     if (!enablePeers) return
     let ignore = false
+    // Reset all peer models before fetching to clear stale options
+    const resetModels: Record<string, ModelOption[]> = {}
+    peerConfigs.forEach(p => { resetModels[p.id] = [] })
+    setPeerModels(resetModels)
     peerConfigs.forEach((peer) => {
       if (!peer.ai_provider) {
-        if (!ignore) setPeerModels(prev => ({ ...prev, [peer.id]: [] }))
         return
       }
       api.get<{ models: ModelOption[] }>(`/ai-models?provider=${encodeURIComponent(peer.ai_provider)}`)

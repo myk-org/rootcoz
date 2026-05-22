@@ -143,11 +143,11 @@ export function ReAnalyzeDialog({ open, onOpenChange, result, jobId, failureUuid
         peer_ai_configs: enablePeers ? peerConfigs.map(({ ai_provider, ai_model }) => ({ ai_provider, ai_model })) : [],
         peer_analysis_max_rounds: maxRounds,
         additional_repos: additionalRepos
-          .filter((r) => r.name && r.url)
+          .filter((r) => r.name.trim() && r.url.trim())
           .map((r) => ({
-            name: r.name,
-            url: r.url,
-            ...(r.ref && { ref: r.ref }),
+            name: r.name.trim(),
+            url: r.url.trim(),
+            ...(r.ref.trim() && { ref: r.ref.trim() }),
           })),
       }
       if (failureUuid) {
