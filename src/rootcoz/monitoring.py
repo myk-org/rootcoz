@@ -241,7 +241,7 @@ async def check_ai_provider() -> dict[str, str]:
     # Check sidecar health using shared helper
     sidecar_port = os.getenv("SIDECAR_PORT", "9100")
     sidecar_url = f"http://127.0.0.1:{sidecar_port}/health"
-    sidecar_result = await _check_http_service(sidecar_url)
+    sidecar_result = await _check_http_service(sidecar_url, ok_below=300)
     if sidecar_result["status"] == "error":
         error_issues.append(f"Sidecar unreachable: {sidecar_result.get('detail', '')}")
     elif sidecar_result["status"] == "degraded":

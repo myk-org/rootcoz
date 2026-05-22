@@ -1846,6 +1846,7 @@ async def _preflight_sidecar_check(
     display_name: str,
     build_number: int | None = None,
     jenkins_url: str = "",
+    job_name: str = "",
 ) -> bool:
     """Check sidecar availability, fail the job if unreachable. Returns True if available."""
     available, msg = await check_sidecar_available()
@@ -1867,7 +1868,7 @@ async def _preflight_sidecar_check(
     )
     fail_data = fail_result.model_dump(mode="json")
     fail_data["error"] = fail_result.summary
-    fail_data["job_name"] = display_name
+    fail_data["job_name"] = job_name or display_name
     if build_number is not None:
         fail_data["build_number"] = build_number
     if jenkins_url:
@@ -1913,6 +1914,7 @@ async def process_analysis_with_id(
             display_name,
             build_number=body.build_number,
             jenkins_url=settings.jenkins_url or "",
+            job_name=body.job_name or "",
         ):
             return
 
@@ -2571,7 +2573,11 @@ async def _process_file_raw_analysis(
 
         # Pre-flight: verify AI is reachable before spawning parallel tasks
         if not await _preflight_sidecar_check(
-            job_id, ai_provider, ai_model, display_name
+            job_id,
+            ai_provider,
+            ai_model,
+            display_name,
+            job_name=body.job_name or "",
         ):
             return
 
@@ -3195,6 +3201,9 @@ async def _reanalyze_failure_background(
                 # Remove nested previous_analyses to avoid recursion
                 prev_entry.pop("previous_analyses", None)
                 prev_entry.pop("previous_analysis", None)
+                # Strip transient re-analysis fields from archived entry
+                prev_entry.pop("reanalysis_status", None)
+                prev_entry.pop("reanalyzed_with", None)
                 # Tag: this analysis was superseded by a re-analysis using the new provider/model
                 prev_entry["_superseded_by"] = {
                     "ai_provider": ai_provider,

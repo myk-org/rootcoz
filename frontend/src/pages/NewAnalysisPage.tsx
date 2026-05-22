@@ -1,5 +1,6 @@
-import { useState, useCallback, useRef, useEffect, useMemo } from 'react'
+import { useState, useCallback, useRef } from 'react'
 import { useProviderModels } from '@/lib/useProviderModels'
+import { usePeerModels } from '@/lib/usePeerModels'
 import { useNavigate } from 'react-router-dom'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -53,8 +54,6 @@ export function NewAnalysisPage() {
   const [enablePeers, setEnablePeers] = useState(false)
   const [peerConfigs, setPeerConfigs] = useState<PeerConfigWithId[]>([])
   const [maxRounds, setMaxRounds] = useState(3)
-  const [peerModels, setPeerModels] = useState<Record<string, ModelOption[]>>({})
-
   // Source repositories
   const [testsRepoUrl, setTestsRepoUrl] = useState('')
   const [testsRepoRef, setTestsRepoRef] = useState('')
@@ -77,23 +76,7 @@ export function NewAnalysisPage() {
   const fileInputRef = useRef<HTMLInputElement>(null)
 
   const availableModels = useProviderModels(aiProvider)
-
-  // Fetch models for each peer provider
-  const peerProvidersKey = useMemo(() => peerConfigs.map(p => p.id + ':' + p.ai_provider).join('|'), [peerConfigs])
-  useEffect(() => {
-    if (!enablePeers) return
-    let ignore = false
-    peerConfigs.forEach((peer) => {
-      if (!peer.ai_provider) {
-        if (!ignore) setPeerModels(prev => ({ ...prev, [peer.id]: [] }))
-        return
-      }
-      api.get<{ models: ModelOption[] }>(`/ai-models?provider=${peer.ai_provider}`)
-        .then(res => { if (!ignore) setPeerModels(prev => ({ ...prev, [peer.id]: res.models ?? [] })) })
-        .catch(() => { if (!ignore) setPeerModels(prev => ({ ...prev, [peer.id]: [] })) })
-    })
-    return () => { ignore = true }
-  }, [enablePeers, peerProvidersKey])
+  const peerModels = usePeerModels(peerConfigs, enablePeers)
 
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState('')

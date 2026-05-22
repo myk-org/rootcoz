@@ -8,8 +8,10 @@ interface AdditionalReposListProps {
   setRepos: React.Dispatch<React.SetStateAction<RepoWithId[]>>
 }
 
+type EditableRepoField = Exclude<keyof RepoWithId, 'id'>
+
 export function AdditionalReposList({ repos, setRepos }: AdditionalReposListProps) {
-  const updateRepo = (id: string, field: keyof RepoWithId, value: string) => {
+  const updateRepo = (id: string, field: EditableRepoField, value: string) => {
     setRepos((prev) => prev.map((r) => (r.id === id ? { ...r, [field]: value } : r)))
   }
 

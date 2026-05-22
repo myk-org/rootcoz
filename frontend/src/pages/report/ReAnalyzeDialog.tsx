@@ -1,5 +1,6 @@
-import { useState, useCallback, useEffect, useMemo } from 'react'
+import { useState, useCallback, useEffect } from 'react'
 import { useProviderModels } from '@/lib/useProviderModels'
+import { usePeerModels } from '@/lib/usePeerModels'
 import { useNavigate } from 'react-router-dom'
 import {
   Dialog,
@@ -94,27 +95,10 @@ export function ReAnalyzeDialog({ open, onOpenChange, result, jobId, failureUuid
   const [force, setForce] = useState(init.force)
 
   const availableModels = useProviderModels(aiProvider)
-  const [peerModels, setPeerModels] = useState<Record<string, ModelOption[]>>({})
+  const peerModels = usePeerModels(peerConfigs, enablePeers)
 
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState('')
-
-  // Fetch models for each peer provider
-  const peerProvidersKey = useMemo(() => peerConfigs.map(p => p.id + ':' + p.ai_provider).join('|'), [peerConfigs])
-  useEffect(() => {
-    if (!enablePeers) return
-    let ignore = false
-    peerConfigs.forEach((peer) => {
-      if (!peer.ai_provider) {
-        if (!ignore) setPeerModels(prev => ({ ...prev, [peer.id]: [] }))
-        return
-      }
-      api.get<{ models: ModelOption[] }>(`/ai-models?provider=${peer.ai_provider}`)
-        .then(res => { if (!ignore) setPeerModels(prev => ({ ...prev, [peer.id]: res.models ?? [] })) })
-        .catch(() => { if (!ignore) setPeerModels(prev => ({ ...prev, [peer.id]: [] })) })
-    })
-    return () => { ignore = true }
-  }, [enablePeers, peerProvidersKey])
 
   // Reset form state when dialog opens
   useEffect(() => {

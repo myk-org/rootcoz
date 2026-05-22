@@ -1026,7 +1026,7 @@ Note: Multiple tests failed with the same error. Provide ONE analysis that appli
             ai_model,
         )
         if not result.success:
-            logger.error("AI call failed: %s", result.text)
+            logger.error("AI call failed (text_length=%d)", len(result.text))
 
         await result.record_usage(
             request_id=job_id,
