@@ -26,6 +26,15 @@ FAKE_JENKINS_PASSWORD = "not-a-real-password"  # noqa: S105  # pragma: allowlist
 FAKE_GITHUB_TOKEN = "not-a-real-token"  # noqa: S105
 
 
+def _patch_preflight():
+    """Patch _preflight_sidecar_check to always return True."""
+    return patch(
+        "rootcoz.main._preflight_sidecar_check",
+        new_callable=AsyncMock,
+        return_value=True,
+    )
+
+
 @contextmanager
 def _with_github_issue_config():
     """Temporarily enable GitHub issue creation settings for tests."""
@@ -2971,11 +2980,7 @@ class TestProcessAnalysisWaiting:
                 "rootcoz.main._preserve_request_params",
                 new_callable=AsyncMock,
             ),
-            patch(
-                "rootcoz.main._preflight_sidecar_check",
-                new_callable=AsyncMock,
-                return_value=True,
-            ),
+            _patch_preflight(),
         ):
             mock_analyze.return_value = AnalysisResult(
                 job_id="test-id",
@@ -3034,11 +3039,7 @@ class TestProcessAnalysisWaiting:
                 "rootcoz.main._preserve_request_params",
                 new_callable=AsyncMock,
             ),
-            patch(
-                "rootcoz.main._preflight_sidecar_check",
-                new_callable=AsyncMock,
-                return_value=True,
-            ),
+            _patch_preflight(),
         ):
             mock_analyze.return_value = AnalysisResult(
                 job_id="test-id",
@@ -3097,6 +3098,7 @@ class TestProcessAnalysisWaiting:
                 "rootcoz.main._preserve_request_params",
                 new_callable=AsyncMock,
             ) as mock_preserve,
+            _patch_preflight(),
         ):
             await process_analysis_with_id("test-id", body, merged)
             mock_analyze.assert_not_called()
@@ -3161,11 +3163,7 @@ class TestProcessAnalysisWaiting:
                 "rootcoz.main._preserve_request_params",
                 new_callable=AsyncMock,
             ),
-            patch(
-                "rootcoz.main._preflight_sidecar_check",
-                new_callable=AsyncMock,
-                return_value=True,
-            ),
+            _patch_preflight(),
         ):
             mock_analyze.return_value = AnalysisResult(
                 job_id="test-id",
@@ -3958,11 +3956,7 @@ class TestProgressPhaseTracking:
                 "rootcoz.main._preserve_request_params",
                 new_callable=AsyncMock,
             ),
-            patch(
-                "rootcoz.main._preflight_sidecar_check",
-                new_callable=AsyncMock,
-                return_value=True,
-            ),
+            _patch_preflight(),
         ):
             mock_analyze.return_value = AnalysisResult(
                 job_id="test-id",
@@ -4020,11 +4014,7 @@ class TestProgressPhaseTracking:
                 "rootcoz.main._preserve_request_params",
                 new_callable=AsyncMock,
             ),
-            patch(
-                "rootcoz.main._preflight_sidecar_check",
-                new_callable=AsyncMock,
-                return_value=True,
-            ),
+            _patch_preflight(),
         ):
             mock_analyze.return_value = AnalysisResult(
                 job_id="test-id",
@@ -4084,11 +4074,7 @@ class TestProgressPhaseTracking:
                 "rootcoz.main._preserve_request_params",
                 new_callable=AsyncMock,
             ),
-            patch(
-                "rootcoz.main._preflight_sidecar_check",
-                new_callable=AsyncMock,
-                return_value=True,
-            ),
+            _patch_preflight(),
         ):
             mock_analyze.return_value = AnalysisResult(
                 job_id="test-id",
@@ -4139,11 +4125,7 @@ class TestProgressPhaseTracking:
                 "rootcoz.main._preserve_request_params",
                 new_callable=AsyncMock,
             ),
-            patch(
-                "rootcoz.main._preflight_sidecar_check",
-                new_callable=AsyncMock,
-                return_value=True,
-            ),
+            _patch_preflight(),
         ):
             mock_analyze.return_value = AnalysisResult(
                 job_id="test-id",
@@ -4705,10 +4687,8 @@ class TestReAnalyzeFailure:
             for _ in range(50):
                 await asyncio.sleep(0.1)
                 _stored = await storage.get_result("job-reanalyze-f")
-                if _stored:
-                    _failures = _stored.get("result", {}).get("failures", [])
-                    if _failures and _failures[0].get("reanalysis_status") is not None:
-                        break
+                if _stored and _stored.get("status") == "completed":
+                    break
         assert response.status_code == 202
         data = response.json()
         assert data["status"] == "accepted"
@@ -4722,7 +4702,10 @@ class TestReAnalyzeFailure:
         assert failure["analysis"]["classification"] == "PRODUCT ISSUE"
         assert "previous_analyses" in failure
         assert len(failure["previous_analyses"]) == 1
-        assert failure["previous_analyses"][0]["classification"] == "CODE ISSUE"
+        assert (
+            failure["previous_analyses"][0]["analysis"]["classification"]
+            == "CODE ISSUE"
+        )
         assert "reanalysis_status" not in failure
         assert failure["reanalyzed_with"] == {
             "ai_provider": "claude",

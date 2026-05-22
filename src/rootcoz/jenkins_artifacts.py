@@ -338,6 +338,16 @@ def _extract_nested_archives(
                 archive_path.name
             )
             try:
+                max_bytes = max_size_mb * 1024 * 1024
+                archive_size = archive_path.stat().st_size
+                if archive_size > max_bytes:
+                    logger.debug(
+                        "Skipping nested archive %s: size %.1f MB exceeds limit %d MB",
+                        relative,
+                        archive_size / (1024 * 1024),
+                        max_size_mb,
+                    )
+                    continue
                 data = archive_path.read_bytes()
                 result = validate_and_extract_archive(
                     data, max_size_mb, extract_dir=extract_subdir

@@ -354,7 +354,12 @@ def parse_json_response(raw_text: str) -> AnalysisDetail:
     """
     data = extract_json_dict(raw_text)
     if data is not None:
-        return AnalysisDetail(**data)
+        try:
+            return AnalysisDetail(**data)
+        except Exception as exc:
+            logger.warning(
+                "AI JSON validated as object but failed schema parsing: %s", exc
+            )
 
     # Fallback: store raw text in details, then attempt recovery
     fallback = AnalysisDetail(details=raw_text)
@@ -940,7 +945,7 @@ async def run_single_ai_analysis(
     console_file_section = ""
     console_dir: Path | None = None
     if console_context and repo_path:
-        console_file = repo_path / "console-output.txt"
+        console_file = repo_path / f"console-output-{error_signature[:12]}.txt"
         console_file.write_text(console_context)
         console_file_section = (
             f"\n\n=== CONSOLE OUTPUT (MANDATORY) ===\n"
@@ -955,7 +960,7 @@ async def run_single_ai_analysis(
         import tempfile
 
         console_dir = Path(tempfile.mkdtemp(prefix="rootcoz-console-"))
-        console_file = console_dir / "console-output.txt"
+        console_file = console_dir / f"console-output-{error_signature[:12]}.txt"
         console_file.write_text(console_context)
         console_file_section = (
             f"\n\n=== CONSOLE OUTPUT (MANDATORY) ===\n"
@@ -1021,7 +1026,7 @@ Note: Multiple tests failed with the same error. Provide ONE analysis that appli
             ai_model,
         )
         if not result.success:
-            logger.error("AI call failed: %s", result.text[:500])
+            logger.error("AI call failed: %s", result.text)
 
         await result.record_usage(
             request_id=job_id,

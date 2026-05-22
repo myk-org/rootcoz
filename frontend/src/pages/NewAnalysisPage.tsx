@@ -1,4 +1,5 @@
 import { useState, useCallback, useRef, useEffect, useMemo } from 'react'
+import { useProviderModels } from '@/lib/useProviderModels'
 import { useNavigate } from 'react-router-dom'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -45,7 +46,6 @@ export function NewAnalysisPage() {
   // AI configuration
   const [aiProvider, setAiProvider] = useState('claude')
   const [aiModel, setAiModel] = useState('')
-  const [availableModels, setAvailableModels] = useState<ModelOption[]>([])
   const [aiCallTimeout, setAiCallTimeout] = useState<number | undefined>(undefined)
   const [rawPrompt, setRawPrompt] = useState('')
 
@@ -76,16 +76,7 @@ export function NewAnalysisPage() {
 
   const fileInputRef = useRef<HTMLInputElement>(null)
 
-  // Fetch available models when provider changes
-  useEffect(() => {
-    if (!aiProvider) { setAvailableModels([]); return }
-    let ignore = false
-    setAvailableModels([])
-    api.get<{ models: ModelOption[] }>(`/api/ai-models?provider=${aiProvider}`)
-      .then(res => { if (!ignore) setAvailableModels(res.models ?? []) })
-      .catch(() => { if (!ignore) setAvailableModels([]) })
-    return () => { ignore = true }
-  }, [aiProvider])
+  const availableModels = useProviderModels(aiProvider)
 
   // Fetch models for each peer provider
   const peerProvidersKey = useMemo(() => peerConfigs.map(p => p.id + ':' + p.ai_provider).join('|'), [peerConfigs])
@@ -97,7 +88,7 @@ export function NewAnalysisPage() {
         if (!ignore) setPeerModels(prev => ({ ...prev, [peer.id]: [] }))
         return
       }
-      api.get<{ models: ModelOption[] }>(`/api/ai-models?provider=${peer.ai_provider}`)
+      api.get<{ models: ModelOption[] }>(`/ai-models?provider=${peer.ai_provider}`)
         .then(res => { if (!ignore) setPeerModels(prev => ({ ...prev, [peer.id]: res.models ?? [] })) })
         .catch(() => { if (!ignore) setPeerModels(prev => ({ ...prev, [peer.id]: [] })) })
     })

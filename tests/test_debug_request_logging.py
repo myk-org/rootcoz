@@ -230,20 +230,20 @@ def _restore_logger(main_logger, original_level, caplog):
     main_logger.setLevel(original_level)
 
 
-def _get_debug_messages(caplog, *, containing: str = "") -> list[str]:
-    """Extract DEBUG-level messages from caplog, optionally filtered by substring."""
-    messages = [r.message for r in caplog.records if r.levelno == logging.DEBUG]
+def _get_messages_by_level(caplog, *, level: int, containing: str = "") -> list[str]:
+    """Extract messages at a given level from caplog, optionally filtered by substring."""
+    messages = [r.message for r in caplog.records if r.levelno == level]
     if containing:
         messages = [m for m in messages if containing in m]
     return messages
+
+
+def _get_debug_messages(caplog, *, containing: str = "") -> list[str]:
+    return _get_messages_by_level(caplog, level=logging.DEBUG, containing=containing)
 
 
 def _get_error_messages(caplog, *, containing: str = "") -> list[str]:
-    """Extract WARNING-level messages from caplog, optionally filtered by substring."""
-    messages = [r.message for r in caplog.records if r.levelno == logging.WARNING]
-    if containing:
-        messages = [m for m in messages if containing in m]
-    return messages
+    return _get_messages_by_level(caplog, level=logging.WARNING, containing=containing)
 
 
 def test_middleware_logs_masked_body(test_client, caplog):

@@ -9,6 +9,10 @@ interface AdditionalReposListProps {
 }
 
 export function AdditionalReposList({ repos, setRepos }: AdditionalReposListProps) {
+  const updateRepo = (id: string, field: keyof RepoWithId, value: string) => {
+    setRepos((prev) => prev.map((r) => (r.id === id ? { ...r, [field]: value } : r)))
+  }
+
   return (
     <>
       {repos.map((repo) => (
@@ -21,37 +25,19 @@ export function AdditionalReposList({ repos, setRepos }: AdditionalReposListProp
               className="w-32"
               placeholder="Name"
               value={repo.name}
-              onChange={(e) =>
-                setRepos((prev) =>
-                  prev.map((r) =>
-                    r.id === repo.id ? { ...r, name: e.target.value } : r
-                  )
-                )
-              }
+              onChange={(e) => updateRepo(repo.id, 'name', e.target.value)}
             />
             <Input
               className="flex-1"
               placeholder="URL"
               value={repo.url}
-              onChange={(e) =>
-                setRepos((prev) =>
-                  prev.map((r) =>
-                    r.id === repo.id ? { ...r, url: e.target.value } : r
-                  )
-                )
-              }
+              onChange={(e) => updateRepo(repo.id, 'url', e.target.value)}
             />
             <Input
               className="w-24"
               placeholder="Ref"
               value={repo.ref}
-              onChange={(e) =>
-                setRepos((prev) =>
-                  prev.map((r) =>
-                    r.id === repo.id ? { ...r, ref: e.target.value } : r
-                  )
-                )
-              }
+              onChange={(e) => updateRepo(repo.id, 'ref', e.target.value)}
             />
             <button
               type="button"

@@ -31,10 +31,10 @@ fi
 # Dev mode: rebuild TypeScript from source before starting
 if [ "${DEV_MODE:-}" = "true" ] && [ -f /app/sidecar-helper/src/server.ts ]; then
     echo "[sidecar] Dev mode: compiling TypeScript..."
-    cd /app/sidecar-helper
-    npm install --ignore-scripts
-    npx tsc
-    cd /app
+    cd /app/sidecar-helper || { echo "[sidecar] Failed to enter sidecar-helper"; exit 1; }
+    npm install --ignore-scripts || { echo "[sidecar] npm install failed"; exit 1; }
+    npx tsc || { echo "[sidecar] TypeScript build failed"; exit 1; }
+    cd /app || { echo "[sidecar] Failed to return to /app"; exit 1; }
 fi
 if [ -f /app/sidecar-helper/dist/server.js ]; then
     export SIDECAR_PORT="${SIDECAR_PORT:-9100}"

@@ -171,7 +171,7 @@ function ReportContent() {
 
         // AI configs and classifications are best-effort
         const [aiModelsResult, classificationsResult] = await Promise.allSettled([
-          api.get<AiModelsResponse>('/api/ai-models'),
+          api.get<AiModelsResponse>('/ai-models'),
           api.get<{ classifications: Array<{ test_name: string; classification: string; job_name: string; parent_job_name: string; reason: string; references_info: string; created_by: string; job_id: string; child_build_number: number; created_at: string }> }>(
             `/history/classifications?job_id=${jobId}`,
           ),

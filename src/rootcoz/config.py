@@ -26,12 +26,16 @@ def _split_outside_brackets(raw: str) -> list[str]:
             current.append(ch)
         elif ch == "]":
             depth -= 1
+            if depth < 0:
+                raise ValueError("Unmatched closing bracket in peer config")
             current.append(ch)
         elif ch == "," and depth == 0:
             parts.append("".join(current))
             current = []
         else:
             current.append(ch)
+    if depth != 0:
+        raise ValueError("Unmatched opening bracket in peer config")
     parts.append("".join(current))
     return parts
 

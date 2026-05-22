@@ -1840,7 +1840,12 @@ async def _cleanup_ai_session(auth_header: str) -> None:
 
 
 async def _preflight_sidecar_check(
-    job_id: str, ai_provider: str, ai_model: str, display_name: str
+    job_id: str,
+    ai_provider: str,
+    ai_model: str,
+    display_name: str,
+    build_number: int | None = None,
+    jenkins_url: str = "",
 ) -> bool:
     """Check sidecar availability, fail the job if unreachable. Returns True if available."""
     available, msg = await check_sidecar_available()
@@ -1863,6 +1868,10 @@ async def _preflight_sidecar_check(
     fail_data = fail_result.model_dump(mode="json")
     fail_data["error"] = fail_result.summary
     fail_data["job_name"] = display_name
+    if build_number is not None:
+        fail_data["build_number"] = build_number
+    if jenkins_url:
+        fail_data["jenkins_url"] = jenkins_url
     await _preserve_request_params(job_id, fail_data)
     await update_status(job_id, "failed", fail_data)
     notify_active_count_changed()
@@ -1894,6 +1903,18 @@ async def process_analysis_with_id(
         # Validate AI config early -- before potentially waiting hours for Jenkins.
         # This ensures invalid provider/model fails fast instead of after a long wait.
         ai_provider, ai_model = _resolve_ai_config(body)
+
+        # Pre-flight: verify AI is reachable before expensive Jenkins wait
+        display_name = _get_display_name(body)
+        if not await _preflight_sidecar_check(
+            job_id,
+            ai_provider,
+            ai_model,
+            display_name,
+            build_number=body.build_number,
+            jenkins_url=settings.jenkins_url or "",
+        ):
+            return
 
         # Wait for Jenkins job to finish if requested and Jenkins is configured
         if settings.wait_for_completion and not settings.jenkins_url:
@@ -1941,13 +1962,6 @@ async def process_analysis_with_id(
                 return
 
         auth_header = await _create_ai_auth_header(username)
-
-        # Pre-flight: verify AI is reachable before expensive Jenkins setup
-        display_name = _get_display_name(body)
-        if not await _preflight_sidecar_check(
-            job_id, ai_provider, ai_model, display_name
-        ):
-            return
 
         logger.debug(
             f"process_analysis_with_id: updating status to running, job_id={job_id}"
@@ -3177,7 +3191,10 @@ async def _reanalyze_failure_background(
                 return
             # Save previous analysis
             if "analysis" in failure:
-                prev_entry = copy.deepcopy(failure["analysis"])
+                prev_entry = copy.deepcopy(failure)
+                # Remove nested previous_analyses to avoid recursion
+                prev_entry.pop("previous_analyses", None)
+                prev_entry.pop("previous_analysis", None)
                 # Tag: this analysis was superseded by a re-analysis using the new provider/model
                 prev_entry["_superseded_by"] = {
                     "ai_provider": ai_provider,
@@ -7102,7 +7119,7 @@ Respond with ONLY a JSON object:
         prompt,
         ai_provider=ai_provider,
         ai_model=ai_model,
-        ai_call_timeout=2,
+        ai_call_timeout=None,
     )
 
     await result.record_usage(

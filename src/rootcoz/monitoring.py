@@ -230,26 +230,28 @@ async def check_ai_provider() -> dict[str, str]:
     """Check that an AI provider is configured and sidecar is reachable."""
     provider = os.getenv("AI_PROVIDER", "")
     model = os.getenv("AI_MODEL", "")
-    issues = []
+    config_issues = []
+    error_issues = []
 
     if not provider:
-        issues.append("AI_PROVIDER not set")
+        config_issues.append("AI_PROVIDER not set")
     if not model:
-        issues.append("AI_MODEL not set")
+        config_issues.append("AI_MODEL not set")
 
-    # Check sidecar health
+    # Check sidecar health using shared helper
     sidecar_port = os.getenv("SIDECAR_PORT", "9100")
     sidecar_url = f"http://127.0.0.1:{sidecar_port}/health"
-    try:
-        async with httpx.AsyncClient(timeout=3) as client:
-            resp = await client.get(sidecar_url)
-            if resp.status_code != 200:
-                issues.append(f"Sidecar unhealthy (HTTP {resp.status_code})")
-    except Exception:
-        issues.append("Sidecar unreachable")
+    sidecar_result = await _check_http_service(sidecar_url)
+    if sidecar_result["status"] == "error":
+        error_issues.append(f"Sidecar unreachable: {sidecar_result.get('detail', '')}")
+    elif sidecar_result["status"] == "degraded":
+        error_issues.append(f"Sidecar unhealthy ({sidecar_result.get('detail', '')})")
 
-    if issues:
-        return {"status": "error", "detail": "; ".join(issues)}
+    if error_issues:
+        all_issues = config_issues + error_issues
+        return {"status": "error", "detail": "; ".join(all_issues)}
+    if config_issues:
+        return {"status": "not_configured", "detail": "; ".join(config_issues)}
     return {"status": "ok", "provider": provider, "model": model}
 
 

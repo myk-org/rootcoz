@@ -13,7 +13,7 @@ from simple_logger.logger import get_logger
 
 from rootcoz.bug_creation import GITHUB_AI_FOOTER, create_github_issue
 from rootcoz.config import Settings
-from pi_sidecar_client import call_ai_once
+from rootcoz.ai_client import call_ai_once
 from rootcoz.models import (
     FeedbackPreviewResponse,
     FeedbackRequest,

@@ -184,57 +184,57 @@ class TestHealthChecks:
             result = await check_jenkins(settings)
         assert result["status"] == "error"
 
-    async def test_check_ai_provider_configured(self):
-        mock_response = MagicMock()
-        mock_response.status_code = 200
-        with patch.dict(os.environ, {"AI_PROVIDER": "claude", "AI_MODEL": "test"}):
-            with patch("rootcoz.monitoring.httpx.AsyncClient") as mock_client:
-                mock_client.return_value.__aenter__ = AsyncMock(
-                    return_value=MagicMock(get=AsyncMock(return_value=mock_response))
+    @staticmethod
+    def _mock_sidecar(*, status_code: int = 200, side_effect=None):
+        """Return a context manager that patches httpx.AsyncClient for sidecar checks."""
+        mock_client = patch("rootcoz.monitoring.httpx.AsyncClient")
+
+        class _Ctx:
+            def __enter__(self_ctx):
+                cls_mock = mock_client.__enter__()
+                if side_effect:
+                    get_mock = AsyncMock(side_effect=side_effect)
+                else:
+                    resp = MagicMock(status_code=status_code)
+                    get_mock = AsyncMock(return_value=resp)
+                cls_mock.return_value.__aenter__ = AsyncMock(
+                    return_value=MagicMock(get=get_mock)
                 )
-                mock_client.return_value.__aexit__ = AsyncMock(return_value=False)
+                cls_mock.return_value.__aexit__ = AsyncMock(return_value=False)
+                return cls_mock
+
+            def __exit__(self_ctx, *args):
+                mock_client.__exit__(*args)
+
+        return _Ctx()
+
+    @staticmethod
+    def _env_without_ai():
+        """Return a patch.dict that removes AI_PROVIDER and AI_MODEL."""
+        env = {
+            k: v for k, v in os.environ.items() if k not in ("AI_PROVIDER", "AI_MODEL")
+        }
+        return patch.dict(os.environ, env, clear=True)
+
+    async def test_check_ai_provider_configured(self):
+        with patch.dict(os.environ, {"AI_PROVIDER": "claude", "AI_MODEL": "test"}):
+            with self._mock_sidecar():
                 result = await check_ai_provider()
         assert result["status"] == "ok"
         assert result["provider"] == "claude"
 
     async def test_check_ai_provider_missing(self):
-        mock_response = MagicMock()
-        mock_response.status_code = 200
-        with patch.dict(os.environ, {}, clear=True):
-            env = {
-                k: v
-                for k, v in os.environ.items()
-                if k not in ("AI_PROVIDER", "AI_MODEL")
-            }
-            with patch.dict(os.environ, env, clear=True):
-                with patch("rootcoz.monitoring.httpx.AsyncClient") as mock_client:
-                    mock_client.return_value.__aenter__ = AsyncMock(
-                        return_value=MagicMock(
-                            get=AsyncMock(return_value=mock_response)
-                        )
-                    )
-                    mock_client.return_value.__aexit__ = AsyncMock(return_value=False)
-                    result = await check_ai_provider()
-        assert result["status"] == "error"
+        with self._env_without_ai():
+            with self._mock_sidecar():
+                result = await check_ai_provider()
+        assert result["status"] == "not_configured"
         assert "AI_PROVIDER" in result["detail"]
         assert "AI_MODEL" in result["detail"]
 
     async def test_check_ai_provider_sidecar_unreachable_and_env_missing(self):
-        with patch.dict(os.environ, {}, clear=True):
-            env = {
-                k: v
-                for k, v in os.environ.items()
-                if k not in ("AI_PROVIDER", "AI_MODEL")
-            }
-            with patch.dict(os.environ, env, clear=True):
-                with patch("rootcoz.monitoring.httpx.AsyncClient") as mock_client:
-                    mock_client.return_value.__aenter__ = AsyncMock(
-                        return_value=MagicMock(
-                            get=AsyncMock(side_effect=Exception("Connection refused"))
-                        )
-                    )
-                    mock_client.return_value.__aexit__ = AsyncMock(return_value=False)
-                    result = await check_ai_provider()
+        with self._env_without_ai():
+            with self._mock_sidecar(side_effect=Exception("Connection refused")):
+                result = await check_ai_provider()
         assert result["status"] == "error"
         assert "AI_PROVIDER" in result["detail"]
         assert "AI_MODEL" in result["detail"]

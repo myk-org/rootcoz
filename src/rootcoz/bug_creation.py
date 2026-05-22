@@ -252,13 +252,18 @@ async def _generate_issue_content_via_ai(
         return None
 
     if job_id:
-        await result.record_usage(
-            request_id=job_id,
-            call_type=call_type,
-            prompt_chars=len(prompt),
-            ai_provider=ai_provider,
-            ai_model=ai_model,
-        )
+        try:
+            await result.record_usage(
+                request_id=job_id,
+                call_type=call_type,
+                prompt_chars=len(prompt),
+                ai_provider=ai_provider,
+                ai_model=ai_model,
+            )
+        except Exception:
+            logger.debug(
+                "Failed to record AI usage for %s issue", issue_type, exc_info=True
+            )
 
     if result.success:
         parsed = _parse_ai_issue_response(result.text)
@@ -266,12 +271,14 @@ async def _generate_issue_content_via_ai(
             parsed["body"] += footer
             return parsed
         logger.debug(
-            "AI returned output but parsing failed for %s issue, output=%s",
+            "AI returned output but parsing failed for %s issue (text_length=%d)",
             issue_type,
-            result.text,
+            len(result.text),
         )
     else:
-        logger.debug("AI call failed for %s issue: %s", issue_type, result.text)
+        logger.debug(
+            "AI call failed for %s issue (text_length=%d)", issue_type, len(result.text)
+        )
 
     return None
 

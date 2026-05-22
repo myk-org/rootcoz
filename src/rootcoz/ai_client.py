@@ -1,6 +1,6 @@
 """AI client adapter — rootcoz-specific AI setup."""
 
-from pi_sidecar_client import AIResult, set_usage_recorder
+from pi_sidecar_client import AIResult, call_ai, call_ai_once, set_usage_recorder
 
 # rootcoz-specific: valid providers for this application
 VALID_AI_PROVIDERS = {"claude", "cursor", "gemini"}
@@ -39,6 +39,9 @@ def _setup_usage_recorder() -> None:
 
 
 __all__ = [
+    "AIResult",
     "VALID_AI_PROVIDERS",
     "_setup_usage_recorder",
+    "call_ai",
+    "call_ai_once",
 ]

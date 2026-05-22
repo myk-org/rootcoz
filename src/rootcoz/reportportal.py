@@ -452,7 +452,7 @@ class ReportPortalClient:
                             else None
                         )
                         rp_message = raw if isinstance(raw, str) else ""
-                    except Exception as e:
+                    except (ValueError, KeyError) as e:
                         logger.debug("Failed to parse RP error response: %s", e)
                 log_body = response_body.replace("\r", "\\r").replace("\n", "\\n")
                 logger.error(

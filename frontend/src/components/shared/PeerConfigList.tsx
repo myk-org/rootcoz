@@ -30,6 +30,10 @@ export function PeerConfigList({
   maxRounds,
   setMaxRounds,
 }: PeerConfigListProps) {
+  const updatePeer = (id: string, patch: Partial<PeerConfigWithId>) => {
+    setPeerConfigs((prev) => prev.map((p) => (p.id === id ? { ...p, ...patch } : p)))
+  }
+
   return (
     <>
       <div className="space-y-2">
@@ -41,11 +45,7 @@ export function PeerConfigList({
             <div className="flex items-center gap-2">
               <Select
                 value={peer.ai_provider}
-                onValueChange={(v) =>
-                  setPeerConfigs((prev) =>
-                    prev.map((p) => (p.id === peer.id ? { ...p, ai_provider: v } : p))
-                  )
-                }
+                onValueChange={(v) => updatePeer(peer.id, { ai_provider: v })}
               >
                 <SelectTrigger className="w-[120px]">
                   <SelectValue />
@@ -68,13 +68,7 @@ export function PeerConfigList({
             </div>
             <ModelCombobox
               value={peer.ai_model}
-              onChange={(val) =>
-                setPeerConfigs((prev) =>
-                  prev.map((p) =>
-                    p.id === peer.id ? { ...p, ai_model: val } : p
-                  )
-                )
-              }
+              onChange={(val) => updatePeer(peer.id, { ai_model: val })}
               options={peerModels[peer.id] ?? []}
               placeholder="Model"
             />
