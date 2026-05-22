@@ -225,6 +225,57 @@ def _parse_ai_issue_response(output: str) -> dict | None:
     return {"title": title, "body": body}
 
 
+async def _generate_issue_content_via_ai(
+    prompt: str,
+    *,
+    ai_provider: str,
+    ai_model: str,
+    ai_call_timeout: int | None,
+    job_id: str,
+    call_type: str,
+    footer: str,
+    issue_type: str,
+) -> dict | None:
+    """Shared AI issue content generation with fallback handling.
+
+    Returns parsed dict with footer appended if AI succeeds, None if AI fails.
+    """
+    try:
+        result = await call_ai_once(
+            prompt,
+            ai_provider=ai_provider,
+            ai_model=ai_model,
+            ai_call_timeout=ai_call_timeout,
+        )
+    except Exception:
+        logger.exception("AI call raised for %s issue", issue_type)
+        return None
+
+    if job_id:
+        await result.record_usage(
+            request_id=job_id,
+            call_type=call_type,
+            prompt_chars=len(prompt),
+            ai_provider=ai_provider,
+            ai_model=ai_model,
+        )
+
+    if result.success:
+        parsed = _parse_ai_issue_response(result.text)
+        if parsed:
+            parsed["body"] += footer
+            return parsed
+        logger.debug(
+            "AI returned output but parsing failed for %s issue, output=%s",
+            issue_type,
+            result.text,
+        )
+    else:
+        logger.debug("AI call failed for %s issue: %s", issue_type, result.text)
+
+    return None
+
+
 # NOTE: The content generation functions below intentionally pass failure data
 # directly into the AI prompt. This is NOT the same as the analysis pipeline
 # where the AI should be given tools to explore data autonomously (per
@@ -339,33 +390,18 @@ Then a blank line, followed by the body in well-formatted markdown with sections
 
 Do not wrap in code blocks or JSON. Just the title on the first line, then the body."""
 
-    result = await call_ai_once(
+    parsed = await _generate_issue_content_via_ai(
         prompt,
         ai_provider=ai_provider,
         ai_model=ai_model,
         ai_call_timeout=ai_call_timeout,
+        job_id=job_id,
+        call_type="github_preview",
+        footer=GITHUB_AI_FOOTER,
+        issue_type="GitHub",
     )
-
-    if job_id:
-        await result.record_usage(
-            request_id=job_id,
-            call_type="github_preview",
-            prompt_chars=len(prompt),
-            ai_provider=ai_provider,
-            ai_model=ai_model,
-        )
-
-    if result.success:
-        parsed = _parse_ai_issue_response(result.text)
-        if parsed:
-            parsed["body"] += GITHUB_AI_FOOTER
-            return parsed
-        logger.debug(
-            "AI returned output but JSON parsing failed for GitHub issue, output=%s",
-            result.text,
-        )
-    else:
-        logger.debug("AI call failed for GitHub issue: %s", result.text)
+    if parsed:
+        return parsed
 
     logger.warning(
         "AI content generation failed for GitHub issue, using fallback template"
@@ -476,33 +512,18 @@ Then a blank line, followed by the description with sections:
 
 Do not wrap in code blocks or JSON. Just the summary on the first line, then the description."""
 
-    result = await call_ai_once(
+    parsed = await _generate_issue_content_via_ai(
         prompt,
         ai_provider=ai_provider,
         ai_model=ai_model,
         ai_call_timeout=ai_call_timeout,
+        job_id=job_id,
+        call_type="jira_preview",
+        footer=JIRA_AI_FOOTER,
+        issue_type="Jira",
     )
-
-    if job_id:
-        await result.record_usage(
-            request_id=job_id,
-            call_type="jira_preview",
-            prompt_chars=len(prompt),
-            ai_provider=ai_provider,
-            ai_model=ai_model,
-        )
-
-    if result.success:
-        parsed = _parse_ai_issue_response(result.text)
-        if parsed:
-            parsed["body"] += JIRA_AI_FOOTER
-            return parsed
-        logger.debug(
-            "AI returned output but JSON parsing failed for Jira bug, output=%s",
-            result.text,
-        )
-    else:
-        logger.debug("AI call failed for Jira bug: %s", result.text)
+    if parsed:
+        return parsed
 
     logger.warning("AI content generation failed for Jira bug, using fallback template")
     content = _build_fallback_jira_content(ctx, jenkins_url, report_url, include_links)

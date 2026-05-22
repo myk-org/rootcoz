@@ -27,6 +27,7 @@ RUN npm ci
 
 COPY sidecar-helper/ .
 RUN npx tsc
+RUN npm prune --omit=dev
 
 FROM ghcr.io/astral-sh/uv:python3.14-bookworm-slim AS builder
 

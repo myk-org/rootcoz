@@ -1,6 +1,7 @@
 """Tests for peer analysis debate loop module."""
 
 import json
+from contextlib import contextmanager
 from unittest.mock import patch
 
 import pytest
@@ -10,6 +11,18 @@ from rootcoz.models import AiConfigEntry, FailedTest
 
 # ---------------------------------------------------------------------------
 # Helpers
+
+
+@contextmanager
+def _patch_peer_ai_calls(side_effect):
+    """Patch both call_ai and call_ai_once in peer_analysis."""
+    with (
+        patch("rootcoz.peer_analysis.call_ai", side_effect=side_effect),
+        patch("rootcoz.peer_analysis.call_ai_once", side_effect=side_effect),
+    ):
+        yield
+
+
 # ---------------------------------------------------------------------------
 
 
@@ -669,14 +682,7 @@ class TestAnalyzeWithPeers:
                 "rootcoz.peer_analysis.run_single_ai_analysis",
                 mock_orchestrator,
             ),
-            patch(
-                "rootcoz.peer_analysis.call_ai",
-                side_effect=mock_peer_call,
-            ),
-            patch(
-                "rootcoz.peer_analysis.call_ai_once",
-                side_effect=mock_peer_call,
-            ),
+            _patch_peer_ai_calls(mock_peer_call),
         ):
             results = await analyze_failure_group_with_peers(
                 failures=[_make_failure()],
@@ -752,14 +758,7 @@ class TestAnalyzeWithPeers:
                 "rootcoz.peer_analysis.run_single_ai_analysis",
                 mock_orchestrator,
             ),
-            patch(
-                "rootcoz.peer_analysis.call_ai",
-                side_effect=mock_peer_and_revision_call,
-            ),
-            patch(
-                "rootcoz.peer_analysis.call_ai_once",
-                side_effect=mock_peer_and_revision_call,
-            ),
+            _patch_peer_ai_calls(mock_peer_and_revision_call),
         ):
             results = await analyze_failure_group_with_peers(
                 failures=[_make_failure()],
@@ -831,14 +830,7 @@ class TestAnalyzeWithPeers:
                 "rootcoz.peer_analysis.run_single_ai_analysis",
                 mock_orchestrator,
             ),
-            patch(
-                "rootcoz.peer_analysis.call_ai",
-                side_effect=mock_peer_and_revision_call,
-            ),
-            patch(
-                "rootcoz.peer_analysis.call_ai_once",
-                side_effect=mock_peer_and_revision_call,
-            ),
+            _patch_peer_ai_calls(mock_peer_and_revision_call),
         ):
             results = await analyze_failure_group_with_peers(
                 failures=[_make_failure()],
@@ -912,14 +904,7 @@ class TestAnalyzeWithPeers:
                 "rootcoz.peer_analysis.run_single_ai_analysis",
                 mock_orchestrator,
             ),
-            patch(
-                "rootcoz.peer_analysis.call_ai",
-                side_effect=mock_peer_and_revision_call,
-            ),
-            patch(
-                "rootcoz.peer_analysis.call_ai_once",
-                side_effect=mock_peer_and_revision_call,
-            ),
+            _patch_peer_ai_calls(mock_peer_and_revision_call),
         ):
             results = await analyze_failure_group_with_peers(
                 failures=[_make_failure()],
@@ -1015,14 +1000,7 @@ class TestAnalyzeWithPeers:
                 "rootcoz.peer_analysis.run_single_ai_analysis",
                 mock_orchestrator,
             ),
-            patch(
-                "rootcoz.peer_analysis.call_ai",
-                side_effect=mock_peer_and_revision_call,
-            ),
-            patch(
-                "rootcoz.peer_analysis.call_ai_once",
-                side_effect=mock_peer_and_revision_call,
-            ),
+            _patch_peer_ai_calls(mock_peer_and_revision_call),
         ):
             results = await analyze_failure_group_with_peers(
                 failures=[_make_failure()],
@@ -1118,14 +1096,7 @@ class TestAnalyzeWithPeers:
                 "rootcoz.peer_analysis.run_single_ai_analysis",
                 mock_orchestrator,
             ),
-            patch(
-                "rootcoz.peer_analysis.call_ai",
-                side_effect=mock_peer_and_revision_call,
-            ),
-            patch(
-                "rootcoz.peer_analysis.call_ai_once",
-                side_effect=mock_peer_and_revision_call,
-            ),
+            _patch_peer_ai_calls(mock_peer_and_revision_call),
         ):
             results = await analyze_failure_group_with_peers(
                 failures=[_make_failure()],
@@ -1218,14 +1189,7 @@ class TestAnalyzeWithPeers:
                 "rootcoz.peer_analysis.run_single_ai_analysis",
                 mock_orchestrator,
             ),
-            patch(
-                "rootcoz.peer_analysis.call_ai",
-                side_effect=mock_peer_and_revision_call,
-            ),
-            patch(
-                "rootcoz.peer_analysis.call_ai_once",
-                side_effect=mock_peer_and_revision_call,
-            ),
+            _patch_peer_ai_calls(mock_peer_and_revision_call),
         ):
             results = await analyze_failure_group_with_peers(
                 failures=[_make_failure()],
@@ -1292,14 +1256,7 @@ class TestAnalyzeWithPeers:
                 "rootcoz.peer_analysis.run_single_ai_analysis",
                 mock_orchestrator,
             ),
-            patch(
-                "rootcoz.peer_analysis.call_ai",
-                side_effect=mock_peer_and_revision_call,
-            ),
-            patch(
-                "rootcoz.peer_analysis.call_ai_once",
-                side_effect=mock_peer_and_revision_call,
-            ),
+            _patch_peer_ai_calls(mock_peer_and_revision_call),
         ):
             results = await analyze_failure_group_with_peers(
                 failures=[_make_failure()],
@@ -1381,14 +1338,7 @@ class TestAnalyzeWithPeers:
                 "rootcoz.peer_analysis.run_single_ai_analysis",
                 mock_orchestrator,
             ),
-            patch(
-                "rootcoz.peer_analysis.call_ai",
-                side_effect=mock_peer_call,
-            ),
-            patch(
-                "rootcoz.peer_analysis.call_ai_once",
-                side_effect=mock_peer_call,
-            ),
+            _patch_peer_ai_calls(mock_peer_call),
         ):
             results = await analyze_failure_group_with_peers(
                 failures=[_make_failure()],
@@ -1450,14 +1400,7 @@ class TestAnalyzeWithPeers:
                 "rootcoz.peer_analysis.run_single_ai_analysis",
                 mock_orchestrator,
             ),
-            patch(
-                "rootcoz.peer_analysis.call_ai",
-                side_effect=mock_peer_call,
-            ),
-            patch(
-                "rootcoz.peer_analysis.call_ai_once",
-                side_effect=mock_peer_call,
-            ),
+            _patch_peer_ai_calls(mock_peer_call),
         ):
             results = await analyze_failure_group_with_peers(
                 failures=[_make_failure()],
@@ -1535,14 +1478,7 @@ class TestAnalyzeWithPeers:
                 "rootcoz.peer_analysis.run_single_ai_analysis",
                 mock_orchestrator,
             ),
-            patch(
-                "rootcoz.peer_analysis.call_ai",
-                side_effect=mock_peer_and_revision_call,
-            ),
-            patch(
-                "rootcoz.peer_analysis.call_ai_once",
-                side_effect=mock_peer_and_revision_call,
-            ),
+            _patch_peer_ai_calls(mock_peer_and_revision_call),
             patch(
                 "rootcoz.engine.core.update_progress_phase",
                 side_effect=capture_phase,
@@ -1617,14 +1553,7 @@ class TestAnalyzeWithPeers:
                 "rootcoz.peer_analysis.run_single_ai_analysis",
                 mock_orchestrator,
             ),
-            patch(
-                "rootcoz.peer_analysis.call_ai",
-                side_effect=mock_peer_and_revision_call,
-            ),
-            patch(
-                "rootcoz.peer_analysis.call_ai_once",
-                side_effect=mock_peer_and_revision_call,
-            ),
+            _patch_peer_ai_calls(mock_peer_and_revision_call),
             patch(
                 "rootcoz.engine.core.update_progress_phase",
                 side_effect=capture_phase,
@@ -1684,14 +1613,7 @@ class TestAnalyzeWithPeers:
                 "rootcoz.peer_analysis.run_single_ai_analysis",
                 mock_orchestrator,
             ),
-            patch(
-                "rootcoz.peer_analysis.call_ai",
-                side_effect=mock_peer_call,
-            ),
-            patch(
-                "rootcoz.peer_analysis.call_ai_once",
-                side_effect=mock_peer_call,
-            ),
+            _patch_peer_ai_calls(mock_peer_call),
             patch(
                 "rootcoz.engine.core.update_progress_phase",
                 side_effect=capture_phase,
@@ -1765,14 +1687,7 @@ class TestAnalyzeWithPeers:
                 "rootcoz.peer_analysis.run_single_ai_analysis",
                 mock_orchestrator,
             ),
-            patch(
-                "rootcoz.peer_analysis.call_ai",
-                side_effect=mock_peer_call,
-            ),
-            patch(
-                "rootcoz.peer_analysis.call_ai_once",
-                side_effect=mock_peer_call,
-            ),
+            _patch_peer_ai_calls(mock_peer_call),
         ):
             results = await analyze_failure_group_with_peers(
                 failures=[_make_failure()],
@@ -1903,14 +1818,7 @@ class TestAnalyzeWithPeers:
                 "rootcoz.peer_analysis.run_single_ai_analysis",
                 mock_orchestrator,
             ),
-            patch(
-                "rootcoz.peer_analysis.call_ai",
-                side_effect=mock_peer_call,
-            ),
-            patch(
-                "rootcoz.peer_analysis.call_ai_once",
-                side_effect=mock_peer_call,
-            ),
+            _patch_peer_ai_calls(mock_peer_call),
             patch(
                 "rootcoz.engine.core.update_progress_phase",
                 new_callable=AsyncMock,
@@ -2141,14 +2049,7 @@ class TestAnalyzeWithPeers:
                 "rootcoz.peer_analysis.run_single_ai_analysis",
                 mock_orchestrator,
             ),
-            patch(
-                "rootcoz.peer_analysis.call_ai",
-                side_effect=mock_calls,
-            ),
-            patch(
-                "rootcoz.peer_analysis.call_ai_once",
-                side_effect=mock_calls,
-            ),
+            _patch_peer_ai_calls(mock_calls),
         ):
             await analyze_failure_group_with_peers(
                 failures=[_make_failure()],
@@ -2232,14 +2133,7 @@ class TestAnalyzeWithPeers:
                 "rootcoz.peer_analysis.run_single_ai_analysis",
                 mock_orchestrator,
             ),
-            patch(
-                "rootcoz.peer_analysis.call_ai",
-                side_effect=mock_calls,
-            ),
-            patch(
-                "rootcoz.peer_analysis.call_ai_once",
-                side_effect=mock_calls,
-            ),
+            _patch_peer_ai_calls(mock_calls),
         ):
             await analyze_failure_group_with_peers(
                 failures=[_make_failure()],
@@ -2330,14 +2224,7 @@ class TestAnalyzeWithPeers:
                 "rootcoz.peer_analysis.run_single_ai_analysis",
                 mock_orchestrator,
             ),
-            patch(
-                "rootcoz.peer_analysis.call_ai",
-                side_effect=mock_calls,
-            ),
-            patch(
-                "rootcoz.peer_analysis.call_ai_once",
-                side_effect=mock_calls,
-            ),
+            _patch_peer_ai_calls(mock_calls),
         ):
             await analyze_failure_group_with_peers(
                 failures=[_make_failure()],
@@ -2424,14 +2311,7 @@ class TestAnalyzeWithPeers:
                 "rootcoz.peer_analysis.run_single_ai_analysis",
                 mock_orchestrator,
             ),
-            patch(
-                "rootcoz.peer_analysis.call_ai",
-                side_effect=mock_calls,
-            ),
-            patch(
-                "rootcoz.peer_analysis.call_ai_once",
-                side_effect=mock_calls,
-            ),
+            _patch_peer_ai_calls(mock_calls),
         ):
             results = await analyze_failure_group_with_peers(
                 failures=[_make_failure()],
@@ -2493,14 +2373,7 @@ class TestAnalyzeWithPeers:
                 "rootcoz.peer_analysis.run_single_ai_analysis",
                 mock_orchestrator,
             ),
-            patch(
-                "rootcoz.peer_analysis.call_ai",
-                side_effect=mock_peer_call,
-            ),
-            patch(
-                "rootcoz.peer_analysis.call_ai_once",
-                side_effect=mock_peer_call,
-            ),
+            _patch_peer_ai_calls(mock_peer_call),
         ):
             results = await analyze_failure_group_with_peers(
                 failures=[_make_failure()],
@@ -2603,14 +2476,7 @@ class TestAnalyzeWithPeers:
                 "rootcoz.peer_analysis.run_single_ai_analysis",
                 mock_orchestrator,
             ),
-            patch(
-                "rootcoz.peer_analysis.call_ai",
-                side_effect=mock_calls,
-            ),
-            patch(
-                "rootcoz.peer_analysis.call_ai_once",
-                side_effect=mock_calls,
-            ),
+            _patch_peer_ai_calls(mock_calls),
         ):
             await analyze_failure_group_with_peers(
                 failures=[_make_failure()],
@@ -2722,14 +2588,7 @@ class TestAnalyzeWithPeers:
                 "rootcoz.peer_analysis.run_single_ai_analysis",
                 mock_orchestrator,
             ),
-            patch(
-                "rootcoz.peer_analysis.call_ai",
-                side_effect=mock_calls,
-            ),
-            patch(
-                "rootcoz.peer_analysis.call_ai_once",
-                side_effect=mock_calls,
-            ),
+            _patch_peer_ai_calls(mock_calls),
         ):
             await analyze_failure_group_with_peers(
                 failures=[_make_failure()],
@@ -2795,8 +2654,8 @@ class TestAnalyzeWithPeers:
             classification="CODE ISSUE",
         )
 
-        # Track call_index for each peer call
-        captured_calls: list[int] = []
+        # Track (call_index, session_id) for each peer call
+        captured_calls: list[tuple[int, str | None]] = []
         call_count = 0
 
         async def mock_calls(
@@ -2813,7 +2672,7 @@ class TestAnalyzeWithPeers:
             call_count += 1
             # Calls 1-2: round 1 peers
             if call_count <= 2:
-                captured_calls.append(call_count)
+                captured_calls.append((call_count, session_id))
                 return AIResult(
                     success=True,
                     text=peer_disagree,
@@ -2823,7 +2682,7 @@ class TestAnalyzeWithPeers:
             if call_count == 3:
                 return AIResult(success=True, text=main_response_r2)
             # Calls 4-5: round 2 peers
-            captured_calls.append(call_count)
+            captured_calls.append((call_count, session_id))
             return AIResult(
                 success=True,
                 text=peer_agree,
@@ -2835,14 +2694,7 @@ class TestAnalyzeWithPeers:
                 "rootcoz.peer_analysis.run_single_ai_analysis",
                 mock_orchestrator,
             ),
-            patch(
-                "rootcoz.peer_analysis.call_ai",
-                side_effect=mock_calls,
-            ),
-            patch(
-                "rootcoz.peer_analysis.call_ai_once",
-                side_effect=mock_calls,
-            ),
+            _patch_peer_ai_calls(mock_calls),
         ):
             await analyze_failure_group_with_peers(
                 failures=[_make_failure()],
@@ -2857,10 +2709,10 @@ class TestAnalyzeWithPeers:
         # Should have 4 captured peer calls (2 per round)
         assert len(captured_calls) == 4
 
-        # Round 1 calls (indices 0,1)
-        assert captured_calls[0] == 1
-        assert captured_calls[1] == 2
+        # Round 1 calls: no session_id (fresh calls)
+        assert captured_calls[0] == (1, None)
+        assert captured_calls[1] == (2, None)
 
-        # Round 2 calls (indices 2,3)
-        assert captured_calls[2] == 4
-        assert captured_calls[3] == 5
+        # Round 2 calls: session_id from round 1 is passed per peer
+        assert captured_calls[2] == (4, "session-peer-0")
+        assert captured_calls[3] == (5, "session-peer-1")

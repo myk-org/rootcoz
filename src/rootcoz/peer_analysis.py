@@ -531,7 +531,7 @@ async def analyze_failure_group_with_peers(
                 len(ai_result.text),
             )
             if not ai_result.success:
-                logger.error("Peer %d AI call failed: %s", idx, ai_result.text[:500])
+                logger.error("Peer %d AI call failed: %s", idx, ai_result.text)
             await ai_result.record_usage(
                 request_id=job_id,
                 call_type="peer",
@@ -728,7 +728,7 @@ async def analyze_failure_group_with_peers(
                     logger.error(
                         "Revision round %d AI call failed: %s",
                         round_num,
-                        rev_result.text[:500],
+                        rev_result.text,
                     )
                 await rev_result.record_usage(
                     request_id=job_id,

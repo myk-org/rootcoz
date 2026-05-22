@@ -2971,6 +2971,11 @@ class TestProcessAnalysisWaiting:
                 "rootcoz.main._preserve_request_params",
                 new_callable=AsyncMock,
             ),
+            patch(
+                "rootcoz.main._preflight_sidecar_check",
+                new_callable=AsyncMock,
+                return_value=True,
+            ),
         ):
             mock_analyze.return_value = AnalysisResult(
                 job_id="test-id",
@@ -3028,6 +3033,11 @@ class TestProcessAnalysisWaiting:
             patch(
                 "rootcoz.main._preserve_request_params",
                 new_callable=AsyncMock,
+            ),
+            patch(
+                "rootcoz.main._preflight_sidecar_check",
+                new_callable=AsyncMock,
+                return_value=True,
             ),
         ):
             mock_analyze.return_value = AnalysisResult(
@@ -3150,6 +3160,11 @@ class TestProcessAnalysisWaiting:
             patch(
                 "rootcoz.main._preserve_request_params",
                 new_callable=AsyncMock,
+            ),
+            patch(
+                "rootcoz.main._preflight_sidecar_check",
+                new_callable=AsyncMock,
+                return_value=True,
             ),
         ):
             mock_analyze.return_value = AnalysisResult(
@@ -3943,6 +3958,11 @@ class TestProgressPhaseTracking:
                 "rootcoz.main._preserve_request_params",
                 new_callable=AsyncMock,
             ),
+            patch(
+                "rootcoz.main._preflight_sidecar_check",
+                new_callable=AsyncMock,
+                return_value=True,
+            ),
         ):
             mock_analyze.return_value = AnalysisResult(
                 job_id="test-id",
@@ -3999,6 +4019,11 @@ class TestProgressPhaseTracking:
             patch(
                 "rootcoz.main._preserve_request_params",
                 new_callable=AsyncMock,
+            ),
+            patch(
+                "rootcoz.main._preflight_sidecar_check",
+                new_callable=AsyncMock,
+                return_value=True,
             ),
         ):
             mock_analyze.return_value = AnalysisResult(
@@ -4059,6 +4084,11 @@ class TestProgressPhaseTracking:
                 "rootcoz.main._preserve_request_params",
                 new_callable=AsyncMock,
             ),
+            patch(
+                "rootcoz.main._preflight_sidecar_check",
+                new_callable=AsyncMock,
+                return_value=True,
+            ),
         ):
             mock_analyze.return_value = AnalysisResult(
                 job_id="test-id",
@@ -4108,6 +4138,11 @@ class TestProgressPhaseTracking:
             patch(
                 "rootcoz.main._preserve_request_params",
                 new_callable=AsyncMock,
+            ),
+            patch(
+                "rootcoz.main._preflight_sidecar_check",
+                new_callable=AsyncMock,
+                return_value=True,
             ),
         ):
             mock_analyze.return_value = AnalysisResult(

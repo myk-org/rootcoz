@@ -56,6 +56,23 @@ def _make_jenkins_settings(**overrides: object) -> Settings:
     return Settings.model_validate(data)
 
 
+def _patch_sidecar_analysis_success(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    ai_text: str = '{"classification": "CODE ISSUE", "details": "d"}',
+) -> None:
+    """Patch sidecar availability and AI calls for successful analysis tests."""
+    monkeypatch.setattr(
+        "rootcoz.sources.jenkins_source.check_sidecar_available",
+        AsyncMock(return_value=(True, "")),
+    )
+    monkeypatch.setattr(
+        "rootcoz.engine.core.call_ai_once",
+        AsyncMock(return_value=AIResult(success=True, text=ai_text)),
+    )
+    monkeypatch.setattr("rootcoz.engine.core.update_progress_phase", AsyncMock())
+
+
 def _patch_jenkins_client(
     monkeypatch: pytest.MonkeyPatch,
     mock_client: MagicMock,
@@ -659,14 +676,7 @@ class TestConsoleOnlyPeerAnalysis:
         mock_client.session = MagicMock()
 
         _patch_jenkins_client(monkeypatch, mock_client)
-        monkeypatch.setattr(
-            "rootcoz.sources.jenkins_source.check_sidecar_available",
-            AsyncMock(return_value=(True, "")),
-        )
-        monkeypatch.setattr(
-            "rootcoz.engine.core.update_progress_phase",
-            AsyncMock(),
-        )
+        _patch_sidecar_analysis_success(monkeypatch)
 
         mock_afg = AsyncMock(
             return_value=[
@@ -730,10 +740,7 @@ class TestAnalyzeJobProgressPhases:
         mock_client.get_test_report.return_value = None
 
         _patch_jenkins_client(monkeypatch, mock_client)
-        monkeypatch.setattr(
-            "rootcoz.sources.jenkins_source.check_sidecar_available",
-            AsyncMock(return_value=(True, "")),
-        )
+        _patch_sidecar_analysis_success(monkeypatch)
 
         # Mock child job analysis
         child_result = ChildJobAnalysis(
@@ -809,10 +816,7 @@ class TestAnalyzeJobProgressPhases:
         mock_client.session = MagicMock()
 
         _patch_jenkins_client(monkeypatch, mock_client)
-        monkeypatch.setattr(
-            "rootcoz.sources.jenkins_source.check_sidecar_available",
-            AsyncMock(return_value=(True, "")),
-        )
+        _patch_sidecar_analysis_success(monkeypatch)
 
         mock_failure = FailureAnalysis(
             test_name="com.example.test_foo",
@@ -924,10 +928,7 @@ class TestAnalyzeJobProgressPhases:
         mock_client.session = MagicMock()
 
         _patch_jenkins_client(monkeypatch, mock_client)
-        monkeypatch.setattr(
-            "rootcoz.sources.jenkins_source.check_sidecar_available",
-            AsyncMock(return_value=(True, "")),
-        )
+        _patch_sidecar_analysis_success(monkeypatch)
 
         mock_failure = FailureAnalysis(
             test_name="com.example.test_foo",
@@ -1023,19 +1024,7 @@ class TestForceAnalysisSuccessfulBuild:
         mock_client.get_test_report.return_value = None
 
         _patch_jenkins_client(monkeypatch, mock_client)
-        monkeypatch.setattr(
-            "rootcoz.sources.jenkins_source.check_sidecar_available",
-            AsyncMock(return_value=(True, "")),
-        )
-        monkeypatch.setattr(
-            "rootcoz.engine.core.call_ai_once",
-            AsyncMock(
-                return_value=AIResult(
-                    success=True,
-                    text='{"classification": "CODE ISSUE", "details": "d"}',
-                )
-            ),
-        )
+        _patch_sidecar_analysis_success(monkeypatch)
 
         # With force=True, it should NOT return the early "Build passed" result.
         # It will proceed into the analysis flow.
@@ -1074,19 +1063,7 @@ class TestForceAnalysisSuccessfulBuild:
         mock_client.get_test_report.return_value = None
 
         _patch_jenkins_client(monkeypatch, mock_client)
-        monkeypatch.setattr(
-            "rootcoz.sources.jenkins_source.check_sidecar_available",
-            AsyncMock(return_value=(True, "")),
-        )
-        monkeypatch.setattr(
-            "rootcoz.engine.core.call_ai_once",
-            AsyncMock(
-                return_value=AIResult(
-                    success=True,
-                    text='{"classification": "CODE ISSUE", "details": "d"}',
-                )
-            ),
-        )
+        _patch_sidecar_analysis_success(monkeypatch)
 
         await analyze_job(
             body,
@@ -1563,23 +1540,7 @@ class TestAnalyzeJobWorkspacePattern:
             "rootcoz.sources.jenkins_source.asyncio.to_thread",
             fake_to_thread,
         )
-        monkeypatch.setattr(
-            "rootcoz.sources.jenkins_source.check_sidecar_available",
-            AsyncMock(return_value=(True, "")),
-        )
-        monkeypatch.setattr(
-            "rootcoz.engine.core.call_ai_once",
-            AsyncMock(
-                return_value=AIResult(
-                    success=True,
-                    text='{"classification": "CODE ISSUE", "details": "d"}',
-                )
-            ),
-        )
-        monkeypatch.setattr(
-            "rootcoz.engine.core.update_progress_phase",
-            AsyncMock(),
-        )
+        _patch_sidecar_analysis_success(monkeypatch)
 
         # Track RepositoryManager calls
         clone_into_calls = []
@@ -1663,23 +1624,7 @@ class TestAnalyzeJobWorkspacePattern:
             "rootcoz.sources.jenkins_source.asyncio.to_thread",
             fake_to_thread,
         )
-        monkeypatch.setattr(
-            "rootcoz.sources.jenkins_source.check_sidecar_available",
-            AsyncMock(return_value=(True, "")),
-        )
-        monkeypatch.setattr(
-            "rootcoz.engine.core.call_ai_once",
-            AsyncMock(
-                return_value=AIResult(
-                    success=True,
-                    text='{"classification": "CODE ISSUE", "details": "d"}',
-                )
-            ),
-        )
-        monkeypatch.setattr(
-            "rootcoz.engine.core.update_progress_phase",
-            AsyncMock(),
-        )
+        _patch_sidecar_analysis_success(monkeypatch)
 
         clone_into_calls = []
         mock_repo_manager = MagicMock()
@@ -1755,23 +1700,7 @@ class TestAnalyzeJobWorkspacePattern:
             "rootcoz.sources.jenkins_source.asyncio.to_thread",
             fake_to_thread,
         )
-        monkeypatch.setattr(
-            "rootcoz.sources.jenkins_source.check_sidecar_available",
-            AsyncMock(return_value=(True, "")),
-        )
-        monkeypatch.setattr(
-            "rootcoz.engine.core.call_ai_once",
-            AsyncMock(
-                return_value=AIResult(
-                    success=True,
-                    text='{"classification": "CODE ISSUE", "details": "d"}',
-                )
-            ),
-        )
-        monkeypatch.setattr(
-            "rootcoz.engine.core.update_progress_phase",
-            AsyncMock(),
-        )
+        _patch_sidecar_analysis_success(monkeypatch)
 
         mock_repo_manager = MagicMock()
         mock_repo_manager.create_workspace.return_value = workspace_dir
@@ -1858,23 +1787,7 @@ class TestAnalyzeJobWorkspacePattern:
             "rootcoz.sources.jenkins_source.asyncio.to_thread",
             fake_to_thread,
         )
-        monkeypatch.setattr(
-            "rootcoz.sources.jenkins_source.check_sidecar_available",
-            AsyncMock(return_value=(True, "")),
-        )
-        monkeypatch.setattr(
-            "rootcoz.engine.core.call_ai_once",
-            AsyncMock(
-                return_value=AIResult(
-                    success=True,
-                    text='{"classification": "CODE ISSUE", "details": "d"}',
-                )
-            ),
-        )
-        monkeypatch.setattr(
-            "rootcoz.engine.core.update_progress_phase",
-            AsyncMock(),
-        )
+        _patch_sidecar_analysis_success(monkeypatch)
 
         clone_into_calls = []
         mock_repo_manager = MagicMock()
@@ -1979,14 +1892,7 @@ class TestAnalyzeJobWorkspacePattern:
             "rootcoz.sources.jenkins_source.asyncio.to_thread",
             fake_to_thread,
         )
-        monkeypatch.setattr(
-            "rootcoz.sources.jenkins_source.check_sidecar_available",
-            AsyncMock(return_value=(True, "")),
-        )
-        monkeypatch.setattr(
-            "rootcoz.engine.core.update_progress_phase",
-            AsyncMock(),
-        )
+        _patch_sidecar_analysis_success(monkeypatch)
 
         mock_repo_manager = MagicMock()
         mock_repo_manager.create_workspace.return_value = workspace_dir
@@ -2155,23 +2061,7 @@ class TestWorkspaceAlwaysCreated:
             "rootcoz.sources.jenkins_source.asyncio.to_thread",
             fake_to_thread,
         )
-        monkeypatch.setattr(
-            "rootcoz.sources.jenkins_source.check_sidecar_available",
-            AsyncMock(return_value=(True, "")),
-        )
-        monkeypatch.setattr(
-            "rootcoz.engine.core.call_ai_once",
-            AsyncMock(
-                return_value=AIResult(
-                    success=True,
-                    text='{"classification": "CODE ISSUE", "details": "d"}',
-                )
-            ),
-        )
-        monkeypatch.setattr(
-            "rootcoz.engine.core.update_progress_phase",
-            AsyncMock(),
-        )
+        _patch_sidecar_analysis_success(monkeypatch)
 
         mock_repo_manager = MagicMock()
         mock_repo_manager.create_workspace.return_value = workspace_dir
@@ -2368,23 +2258,7 @@ class TestAnalyzeJobParsesRepoRef:
             "rootcoz.sources.jenkins_source.asyncio.to_thread",
             fake_to_thread,
         )
-        monkeypatch.setattr(
-            "rootcoz.sources.jenkins_source.check_sidecar_available",
-            AsyncMock(return_value=(True, "")),
-        )
-        monkeypatch.setattr(
-            "rootcoz.engine.core.call_ai_once",
-            AsyncMock(
-                return_value=AIResult(
-                    success=True,
-                    text='{"classification": "CODE ISSUE", "details": "d"}',
-                )
-            ),
-        )
-        monkeypatch.setattr(
-            "rootcoz.engine.core.update_progress_phase",
-            AsyncMock(),
-        )
+        _patch_sidecar_analysis_success(monkeypatch)
 
         clone_into_calls = []
         mock_repo_manager = MagicMock()
@@ -2466,23 +2340,7 @@ class TestAnalyzeJobParsesRepoRef:
             "rootcoz.sources.jenkins_source.asyncio.to_thread",
             fake_to_thread,
         )
-        monkeypatch.setattr(
-            "rootcoz.sources.jenkins_source.check_sidecar_available",
-            AsyncMock(return_value=(True, "")),
-        )
-        monkeypatch.setattr(
-            "rootcoz.engine.core.call_ai_once",
-            AsyncMock(
-                return_value=AIResult(
-                    success=True,
-                    text='{"classification": "CODE ISSUE", "details": "d"}',
-                )
-            ),
-        )
-        monkeypatch.setattr(
-            "rootcoz.engine.core.update_progress_phase",
-            AsyncMock(),
-        )
+        _patch_sidecar_analysis_success(monkeypatch)
 
         clone_into_calls = []
         mock_repo_manager = MagicMock()

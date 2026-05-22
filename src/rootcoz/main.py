@@ -1839,6 +1839,38 @@ async def _cleanup_ai_session(auth_header: str) -> None:
         logger.warning("Failed to delete AI session token", exc_info=True)
 
 
+async def _preflight_sidecar_check(
+    job_id: str, ai_provider: str, ai_model: str, display_name: str
+) -> bool:
+    """Check sidecar availability, fail the job if unreachable. Returns True if available."""
+    available, msg = await check_sidecar_available()
+    if available:
+        return True
+    logger.error(
+        "AI sidecar sanity check failed for job %s (%s/%s)",
+        job_id,
+        ai_provider,
+        ai_model,
+    )
+    logger.error("AI preflight failed for job %s: %s", job_id, msg)
+    fail_result = FailureAnalysisResult(
+        job_id=job_id,
+        status="failed",
+        summary=make_user_friendly_error(msg),
+        ai_provider=ai_provider,
+        ai_model=ai_model,
+    )
+    fail_data = fail_result.model_dump(mode="json")
+    fail_data["error"] = fail_result.summary
+    fail_data["job_name"] = display_name
+    await _preserve_request_params(job_id, fail_data)
+    await update_status(job_id, "failed", fail_data)
+    notify_active_count_changed()
+    notify_dashboard_changed()
+    notify_job_status_changed(job_id)
+    return False
+
+
 async def process_analysis_with_id(
     job_id: str, body: AnalyzeRequest, settings: Settings, username: str = ""
 ) -> None:
@@ -1909,6 +1941,13 @@ async def process_analysis_with_id(
                 return
 
         auth_header = await _create_ai_auth_header(username)
+
+        # Pre-flight: verify AI is reachable before expensive Jenkins setup
+        display_name = _get_display_name(body)
+        if not await _preflight_sidecar_check(
+            job_id, ai_provider, ai_model, display_name
+        ):
+            return
 
         logger.debug(
             f"process_analysis_with_id: updating status to running, job_id={job_id}"
@@ -2517,30 +2556,9 @@ async def _process_file_raw_analysis(
         notify_job_status_changed(job_id)
 
         # Pre-flight: verify AI is reachable before spawning parallel tasks
-        preflight_available, preflight_msg = await check_sidecar_available()
-        if not preflight_available:
-            logger.error(
-                "AI sidecar sanity check failed for job %s (%s/%s)",
-                job_id,
-                ai_provider,
-                ai_model,
-            )
-            logger.error("AI preflight failed for job %s: %s", job_id, preflight_msg)
-            fail_result = FailureAnalysisResult(
-                job_id=job_id,
-                status="failed",
-                summary=make_user_friendly_error(preflight_msg),
-                ai_provider=ai_provider,
-                ai_model=ai_model,
-            )
-            fail_data = fail_result.model_dump(mode="json")
-            fail_data["error"] = fail_result.summary
-            fail_data["job_name"] = display_name
-            await _preserve_request_params(job_id, fail_data)
-            await update_status(job_id, "failed", fail_data)
-            notify_active_count_changed()
-            notify_dashboard_changed()
-            notify_job_status_changed(job_id)
+        if not await _preflight_sidecar_check(
+            job_id, ai_provider, ai_model, display_name
+        ):
             return
 
         auth_header = await _create_ai_auth_header(username)
