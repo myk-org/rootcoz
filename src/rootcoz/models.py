@@ -1056,5 +1056,52 @@ class FeedbackResponse(BaseModel):
     title: str = Field(description="Issue title as created")
 
 
+class ChatMessageRequest(BaseModel):
+    """Request to send a chat message about an analyzed job."""
+
+    message: str = Field(
+        description="User's message text",
+        min_length=1,
+        max_length=50000,
+    )
+
+    @field_validator("message")
+    @classmethod
+    def message_not_blank(cls, v: str) -> str:
+        if not v.strip():
+            raise ValueError("Message cannot be blank")
+        return v
+
+    ai_provider: str | None = Field(
+        default=None,
+        description="AI provider to use for response (defaults to job's provider)",
+    )
+    ai_model: str | None = Field(
+        default=None,
+        description="AI model to use for response (defaults to job's model)",
+    )
+
+
+class ChatMessageResponse(BaseModel):
+    """A single chat message."""
+
+    id: int
+    job_id: str
+    role: str  # 'user' or 'assistant'
+    content: str
+    username: str = ""
+    ai_provider: str = ""
+    ai_model: str = ""
+    status: str = "completed"
+    created_at: str
+
+
+class ChatHistoryResponse(BaseModel):
+    """Chat history for a job."""
+
+    messages: list[ChatMessageResponse]
+    total: int
+
+
 # Resolve forward references (CodeFix references SimilarIssue which is defined later)
 CodeFix.model_rebuild()

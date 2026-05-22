@@ -10,6 +10,7 @@ import {
 } from '@/components/ui/dialog'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
+import { Textarea } from '@/components/ui/textarea'
 import {
   Select,
   SelectTrigger,
@@ -22,8 +23,10 @@ import type { AnalysisResult, AiConfig } from '@/types'
 import { Section } from '@/components/shared/Section'
 import { Toggle } from '@/components/shared/Toggle'
 import { FieldLabel } from '@/components/shared/FieldLabel'
+import { ProviderSelect } from '@/components/shared/ProviderSelect'
 import { ModelCombobox } from '@/components/shared/ModelCombobox'
 import type { ModelOption } from '@/components/shared/ModelCombobox'
+import { useProviderModels } from '@/hooks/useProviderModels'
 import { Plus, Trash2, RotateCw } from 'lucide-react'
 
 interface ReAnalyzeDialogProps {
@@ -88,22 +91,11 @@ export function ReAnalyzeDialog({ open, onOpenChange, result, jobId, failureUuid
 
   const [force, setForce] = useState(init.force)
 
-  const [availableModels, setAvailableModels] = useState<ModelOption[]>([])
+  const availableModels = useProviderModels(aiProvider)
   const [peerModels, setPeerModels] = useState<Record<number, ModelOption[]>>({})
 
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState('')
-
-  // Fetch available models when provider changes
-  useEffect(() => {
-    if (!aiProvider) { setAvailableModels([]); return }
-    let ignore = false
-    setAvailableModels([])
-    api.get<{ models: ModelOption[] }>(`/api/ai-models?provider=${aiProvider}`)
-      .then(res => { if (!ignore) setAvailableModels(res.models ?? []) })
-      .catch(() => { if (!ignore) setAvailableModels([]) })
-    return () => { ignore = true }
-  }, [aiProvider])
 
   // Fetch models for each peer provider
   useEffect(() => {
@@ -225,16 +217,7 @@ export function ReAnalyzeDialog({ open, onOpenChange, result, jobId, failureUuid
             <div className="grid grid-cols-2 gap-3">
               <div className="space-y-1.5">
                 <FieldLabel>AI Provider</FieldLabel>
-                <Select value={aiProvider} onValueChange={setAiProvider}>
-                  <SelectTrigger>
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="claude">Claude</SelectItem>
-                    <SelectItem value="gemini">Gemini</SelectItem>
-                    <SelectItem value="cursor">Cursor</SelectItem>
-                  </SelectContent>
-                </Select>
+                <ProviderSelect value={aiProvider} onChange={setAiProvider} />
               </div>
               <div className="space-y-1.5">
                 <FieldLabel>AI CLI Timeout</FieldLabel>
@@ -253,13 +236,12 @@ export function ReAnalyzeDialog({ open, onOpenChange, result, jobId, failureUuid
                 value={aiModel}
                 onChange={setAiModel}
                 options={availableModels}
-                placeholder="Default model"
               />
             </div>
             <div className="space-y-1.5">
               <FieldLabel>Raw Prompt</FieldLabel>
-              <textarea
-                className="flex w-full rounded-md border border-border-default bg-surface-elevated px-3 py-2 text-sm text-text-primary placeholder:text-text-tertiary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-border-accent min-h-[80px] resize-y"
+              <Textarea
+                className="min-h-[80px] resize-y"
                 placeholder="Custom prompt to send to AI..."
                 value={rawPrompt}
                 onChange={(e) => setRawPrompt(e.target.value)}

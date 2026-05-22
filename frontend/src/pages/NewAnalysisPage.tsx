@@ -2,6 +2,7 @@ import { useState, useCallback, useRef, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
+import { Textarea } from '@/components/ui/textarea'
 import {
   Select,
   SelectTrigger,
@@ -14,8 +15,10 @@ import type { AiConfig } from '@/types'
 import { Section } from '@/components/shared/Section'
 import { Toggle } from '@/components/shared/Toggle'
 import { FieldLabel } from '@/components/shared/FieldLabel'
+import { ProviderSelect } from '@/components/shared/ProviderSelect'
 import { ModelCombobox } from '@/components/shared/ModelCombobox'
 import type { ModelOption } from '@/components/shared/ModelCombobox'
+import { useProviderModels } from '@/hooks/useProviderModels'
 import { Plus, Trash2, Send, Upload } from 'lucide-react'
 
 function toIntInRange(value: string, min: number, max: number, fallback: number): number {
@@ -47,7 +50,7 @@ export function NewAnalysisPage() {
   // AI configuration
   const [aiProvider, setAiProvider] = useState('claude')
   const [aiModel, setAiModel] = useState('')
-  const [availableModels, setAvailableModels] = useState<ModelOption[]>([])
+  const availableModels = useProviderModels(aiProvider)
   const [aiCliTimeout, setAiCliTimeout] = useState<number | undefined>(undefined)
   const [rawPrompt, setRawPrompt] = useState('')
 
@@ -79,17 +82,6 @@ export function NewAnalysisPage() {
   const [maxArtifactsSize, setMaxArtifactsSize] = useState<number | undefined>(undefined)
 
   const fileInputRef = useRef<HTMLInputElement>(null)
-
-  // Fetch available models when provider changes
-  useEffect(() => {
-    if (!aiProvider) { setAvailableModels([]); return }
-    let ignore = false
-    setAvailableModels([])
-    api.get<{ models: ModelOption[] }>(`/api/ai-models?provider=${aiProvider}`)
-      .then(res => { if (!ignore) setAvailableModels(res.models ?? []) })
-      .catch(() => { if (!ignore) setAvailableModels([]) })
-    return () => { ignore = true }
-  }, [aiProvider])
 
   // Fetch models for each peer provider
   useEffect(() => {
@@ -346,8 +338,8 @@ export function NewAnalysisPage() {
           <Section title="Paste XML" dotColor="bg-signal-red" defaultOpen>
             <div className="space-y-1.5">
               <FieldLabel>JUnit XML Content *</FieldLabel>
-              <textarea
-                className="flex w-full rounded-md border border-border-default bg-surface-elevated px-3 py-2 text-sm text-text-primary placeholder:text-text-tertiary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-border-accent min-h-[200px] resize-y font-mono"
+              <Textarea
+                className="min-h-[200px] resize-y font-mono"
                 placeholder="Paste JUnit XML content..."
                 value={rawXml}
                 onChange={(e) => setRawXml(e.target.value)}
@@ -411,16 +403,7 @@ export function NewAnalysisPage() {
             <div className="grid grid-cols-2 gap-3">
               <div className="space-y-1.5">
                 <FieldLabel>AI Provider</FieldLabel>
-                <Select value={aiProvider} onValueChange={setAiProvider}>
-                  <SelectTrigger>
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="claude">Claude</SelectItem>
-                    <SelectItem value="gemini">Gemini</SelectItem>
-                    <SelectItem value="cursor">Cursor</SelectItem>
-                  </SelectContent>
-                </Select>
+                <ProviderSelect value={aiProvider} onChange={setAiProvider} />
               </div>
               <div className="space-y-1.5">
                 <FieldLabel>AI CLI Timeout</FieldLabel>
@@ -439,13 +422,12 @@ export function NewAnalysisPage() {
                 value={aiModel}
                 onChange={setAiModel}
                 options={availableModels}
-                placeholder="Default model"
               />
             </div>
             <div className="space-y-1.5">
               <FieldLabel>Raw Prompt</FieldLabel>
-              <textarea
-                className="flex w-full rounded-md border border-border-default bg-surface-elevated px-3 py-2 text-sm text-text-primary placeholder:text-text-tertiary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-border-accent min-h-[80px] resize-y"
+              <Textarea
+                className="min-h-[80px] resize-y"
                 placeholder="Custom prompt to send to AI..."
                 value={rawPrompt}
                 onChange={(e) => setRawPrompt(e.target.value)}

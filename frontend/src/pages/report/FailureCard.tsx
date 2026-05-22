@@ -10,6 +10,7 @@ import { useSessionState } from '@/lib/useSessionState'
 import { unescapeCodeContent } from '@/lib/format'
 import { useReportState, useReportDispatch, reviewKey } from './ReportContext'
 import { Card, CardContent } from '@/components/ui/card'
+import { Input } from '@/components/ui/input'
 import { Tooltip, TooltipTrigger, TooltipContent } from '@/components/ui/tooltip'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
@@ -552,13 +553,13 @@ export function FailureCard({ group, jobId, childJobName, childBuildNumber, inde
                 <>
                   <span className="text-xs text-text-tertiary whitespace-nowrap">AI for issue generation:</span>
                   <div className="flex items-center gap-2">
-                    <input
+                    <Input
                       list={`provider-options-${group.id}`}
                       value={selectedProvider}
                       onChange={(e) => handleProviderChange(e.target.value)}
                       placeholder="provider"
                       aria-label="AI provider"
-                      className="h-7 rounded-md border border-border-default bg-surface-card px-2 text-xs text-text-primary w-24"
+                      className="h-7 border bg-surface-card px-2 text-xs text-text-primary w-24"
                     />
                     <datalist id={`provider-options-${group.id}`}>
                       {providers.map((p) => (
@@ -566,13 +567,13 @@ export function FailureCard({ group, jobId, childJobName, childBuildNumber, inde
                       ))}
                     </datalist>
 
-                    <input
+                    <Input
                       list={`model-options-${group.id}`}
                       value={selectedModel}
                       onChange={(e) => setSelectedModel(e.target.value)}
                       placeholder="model"
                       aria-label="AI model"
-                      className="h-7 rounded-md border border-border-default bg-surface-card px-2 text-xs text-text-primary w-44"
+                      className="h-7 border bg-surface-card px-2 text-xs text-text-primary w-44"
                     />
                     <datalist id={`model-options-${group.id}`}>
                       {models.map((m) => (

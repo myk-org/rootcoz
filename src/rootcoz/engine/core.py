@@ -173,6 +173,8 @@ async def call_ai_and_record(
     ai_model: str = "",
     ai_cli_timeout: int | None = None,
     cli_flags: list[str] | None = None,
+    session_id: str | None = None,
+    output_format: str | None = "json",
 ) -> tuple[AIResult, AnalysisDetail | None]:
     """Call AI CLI with retry, record token usage, and parse the response.
 
@@ -186,6 +188,8 @@ async def call_ai_and_record(
         ai_model=ai_model,
         ai_cli_timeout=ai_cli_timeout,
         cli_flags=cli_flags,
+        session_id=session_id,
+        output_format=output_format,
     )
 
     await record_ai_usage(
@@ -214,6 +218,7 @@ async def call_ai_cli_with_retry(
     cli_flags: list[str] | None = None,
     max_retries: int = 3,
     session_id: str | None = None,
+    output_format: str | None = "json",
 ) -> AIResult:
     """Call AI CLI with retry on known transient errors.
 
@@ -242,7 +247,7 @@ async def call_ai_cli_with_retry(
             ai_model=ai_model,
             ai_cli_timeout=ai_cli_timeout,
             cli_flags=cli_flags,
-            output_format="json",
+            output_format=output_format,
             session_id=session_id,
         )
         if result.success:
