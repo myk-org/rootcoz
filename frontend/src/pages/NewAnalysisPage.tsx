@@ -1,4 +1,4 @@
-import { useState, useCallback, useRef, useEffect } from 'react'
+import { useState, useCallback, useRef, useEffect, useMemo } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -92,18 +92,21 @@ export function NewAnalysisPage() {
   }, [aiProvider])
 
   // Fetch models for each peer provider
+  const peerProvidersKey = useMemo(() => peerConfigs.map(p => p.id + ':' + p.ai_provider).join('|'), [peerConfigs])
   useEffect(() => {
     if (!enablePeers) return
+    let ignore = false
     peerConfigs.forEach((peer) => {
       if (!peer.ai_provider) {
-        setPeerModels(prev => ({ ...prev, [peer.id]: [] }))
+        if (!ignore) setPeerModels(prev => ({ ...prev, [peer.id]: [] }))
         return
       }
       api.get<{ models: ModelOption[] }>(`/api/ai-models?provider=${peer.ai_provider}`)
-        .then(res => setPeerModels(prev => ({ ...prev, [peer.id]: res.models ?? [] })))
-        .catch(() => setPeerModels(prev => ({ ...prev, [peer.id]: [] })))
+        .then(res => { if (!ignore) setPeerModels(prev => ({ ...prev, [peer.id]: res.models ?? [] })) })
+        .catch(() => { if (!ignore) setPeerModels(prev => ({ ...prev, [peer.id]: [] })) })
     })
-  }, [enablePeers, peerConfigs.map(p => p.ai_provider).join(',')])
+    return () => { ignore = true }
+  }, [enablePeers, peerProvidersKey])
 
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState('')

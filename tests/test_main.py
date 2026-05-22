@@ -4672,7 +4672,7 @@ class TestReAnalyzeFailure:
                 _stored = await storage.get_result("job-reanalyze-f")
                 if _stored:
                     _failures = _stored.get("result", {}).get("failures", [])
-                    if _failures and _failures[0].get("reanalysis_status") is None:
+                    if _failures and _failures[0].get("reanalysis_status") is not None:
                         break
         assert response.status_code == 202
         data = response.json()
