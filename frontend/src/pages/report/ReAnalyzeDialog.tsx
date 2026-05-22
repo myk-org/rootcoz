@@ -18,13 +18,18 @@ import {
   SelectValue,
 } from '@/components/ui/select'
 import { api } from '@/lib/api'
-import type { AnalysisResult, AiConfig } from '@/types'
+import { toIntInRange } from '@/lib/utils'
+import type { AnalysisResult } from '@/types'
 import { Section } from '@/components/shared/Section'
 import { Toggle } from '@/components/shared/Toggle'
 import { FieldLabel } from '@/components/shared/FieldLabel'
 import { ModelCombobox } from '@/components/shared/ModelCombobox'
 import type { ModelOption } from '@/components/shared/ModelCombobox'
-import { Plus, Trash2, RotateCw } from 'lucide-react'
+import { PeerConfigList } from '@/components/shared/PeerConfigList'
+import type { PeerConfigWithId } from '@/components/shared/PeerConfigList'
+import { AdditionalReposList } from '@/components/shared/AdditionalReposList'
+import type { RepoWithId } from '@/components/shared/AdditionalReposList'
+import { RotateCw } from 'lucide-react'
 
 interface ReAnalyzeDialogProps {
   open: boolean
@@ -41,11 +46,12 @@ function initFormState(p: AnalysisResult['request_params']) {
     aiCallTimeout: p?.ai_call_timeout != null ? (p.ai_call_timeout as number) : undefined,
     rawPrompt: (p?.raw_prompt as string) || '',
     enablePeers: !!(p?.peer_ai_configs?.length),
-    peerConfigs: p?.peer_ai_configs || [],
+    peerConfigs: (p?.peer_ai_configs || []).map(c => ({ ...c, id: crypto.randomUUID() })),
     maxRounds: p?.peer_analysis_max_rounds || 3,
     testsRepoUrl: p?.tests_repo_url || '',
     testsRepoRef: p?.tests_repo_ref || '',
     additionalRepos: (p?.additional_repos || []).map((r) => ({
+      id: crypto.randomUUID(),
       name: r.name,
       url: r.url,
       ref: r.ref || '',
@@ -70,14 +76,12 @@ export function ReAnalyzeDialog({ open, onOpenChange, result, jobId, failureUuid
   const [rawPrompt, setRawPrompt] = useState(init.rawPrompt)
 
   const [enablePeers, setEnablePeers] = useState(init.enablePeers)
-  const [peerConfigs, setPeerConfigs] = useState<AiConfig[]>(init.peerConfigs)
+  const [peerConfigs, setPeerConfigs] = useState<PeerConfigWithId[]>(init.peerConfigs)
   const [maxRounds, setMaxRounds] = useState(init.maxRounds)
 
   const [testsRepoUrl, setTestsRepoUrl] = useState(init.testsRepoUrl)
   const [testsRepoRef, setTestsRepoRef] = useState(init.testsRepoRef)
-  const [additionalRepos, setAdditionalRepos] = useState<
-    Array<{ name: string; url: string; ref: string }>
-  >(init.additionalRepos)
+  const [additionalRepos, setAdditionalRepos] = useState<RepoWithId[]>(init.additionalRepos)
 
   const [enableJira, setEnableJira] = useState<boolean | undefined>(init.enableJira)
   const [jiraUrl, setJiraUrl] = useState(init.jiraUrl)
@@ -89,7 +93,7 @@ export function ReAnalyzeDialog({ open, onOpenChange, result, jobId, failureUuid
   const [force, setForce] = useState(init.force)
 
   const [availableModels, setAvailableModels] = useState<ModelOption[]>([])
-  const [peerModels, setPeerModels] = useState<Record<number, ModelOption[]>>({})
+  const [peerModels, setPeerModels] = useState<Record<string, ModelOption[]>>({})
 
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState('')
@@ -106,18 +110,18 @@ export function ReAnalyzeDialog({ open, onOpenChange, result, jobId, failureUuid
   }, [aiProvider])
 
   // Fetch models for each peer provider
-  const peerProvidersKey = useMemo(() => peerConfigs.map(p => p.ai_provider).join('|'), [peerConfigs])
+  const peerProvidersKey = useMemo(() => peerConfigs.map(p => p.id + ':' + p.ai_provider).join('|'), [peerConfigs])
   useEffect(() => {
     if (!enablePeers) return
     let ignore = false
-    peerConfigs.forEach((peer, i) => {
+    peerConfigs.forEach((peer) => {
       if (!peer.ai_provider) {
-        if (!ignore) setPeerModels(prev => ({ ...prev, [i]: [] }))
+        if (!ignore) setPeerModels(prev => ({ ...prev, [peer.id]: [] }))
         return
       }
       api.get<{ models: ModelOption[] }>(`/api/ai-models?provider=${peer.ai_provider}`)
-        .then(res => { if (!ignore) setPeerModels(prev => ({ ...prev, [i]: res.models ?? [] })) })
-        .catch(() => { if (!ignore) setPeerModels(prev => ({ ...prev, [i]: [] })) })
+        .then(res => { if (!ignore) setPeerModels(prev => ({ ...prev, [peer.id]: res.models ?? [] })) })
+        .catch(() => { if (!ignore) setPeerModels(prev => ({ ...prev, [peer.id]: [] })) })
     })
     return () => { ignore = true }
   }, [enablePeers, peerProvidersKey])
@@ -162,7 +166,7 @@ export function ReAnalyzeDialog({ open, onOpenChange, result, jobId, failureUuid
         ...(maxArtifactsSize !== undefined && { jenkins_artifacts_max_size_mb: maxArtifactsSize }),
         ...(rawPrompt && { raw_prompt: rawPrompt }),
         ...(testsRepoUrl && { tests_repo_url: testsRepoRef ? `${testsRepoUrl}:${testsRepoRef}` : testsRepoUrl }),
-        peer_ai_configs: enablePeers ? peerConfigs : [],
+        peer_ai_configs: enablePeers ? peerConfigs.map(({ ai_provider, ai_model }) => ({ ai_provider, ai_model })) : [],
         peer_analysis_max_rounds: maxRounds,
         additional_repos: additionalRepos
           .filter((r) => r.name && r.url)
@@ -244,7 +248,7 @@ export function ReAnalyzeDialog({ open, onOpenChange, result, jobId, failureUuid
                   min={1}
                   value={aiCallTimeout ?? ''}
                   placeholder="10"
-                  onChange={(e) => setAiCallTimeout(e.target.value ? Number(e.target.value) || 1 : undefined)}
+                  onChange={(e) => setAiCallTimeout(e.target.value ? toIntInRange(e.target.value, 1, 3600, 1) : undefined)}
                 />
               </div>
             </div>
@@ -278,79 +282,21 @@ export function ReAnalyzeDialog({ open, onOpenChange, result, jobId, failureUuid
           >
             <div className="flex items-center justify-between">
               <span className="text-sm text-text-secondary">Enable peer review</span>
-              <Toggle checked={enablePeers} onChange={setEnablePeers} label="Enable peer review" />
+              <Toggle checked={enablePeers} onChange={(v) => {
+                setEnablePeers(v)
+                if (v && peerConfigs.length === 0) {
+                  setPeerConfigs([{ id: crypto.randomUUID(), ai_provider: 'claude', ai_model: '' }])
+                }
+              }} label="Enable peer review" />
             </div>
             {enablePeers && (
-              <>
-                <div className="space-y-2">
-                  {peerConfigs.map((peer, i) => (
-                    <div
-                      key={i}
-                      className="bg-surface-elevated border border-border-default rounded-lg p-2.5 space-y-2"
-                    >
-                      <div className="flex items-center gap-2">
-                        <Select
-                          value={peer.ai_provider}
-                          onValueChange={(v) => {
-                            const next = [...peerConfigs]
-                            next[i] = { ...next[i], ai_provider: v }
-                            setPeerConfigs(next)
-                          }}
-                        >
-                          <SelectTrigger className="w-[120px]">
-                            <SelectValue />
-                          </SelectTrigger>
-                          <SelectContent>
-                            <SelectItem value="claude">Claude</SelectItem>
-                            <SelectItem value="gemini">Gemini</SelectItem>
-                            <SelectItem value="cursor">Cursor</SelectItem>
-                          </SelectContent>
-                        </Select>
-                        <div className="flex-1" />
-                        <button
-                          type="button"
-                          aria-label={`Remove peer ${i + 1}`}
-                          className="p-1 rounded hover:bg-surface-hover text-text-tertiary hover:text-signal-red transition flex-shrink-0"
-                          onClick={() => setPeerConfigs(peerConfigs.filter((_, j) => j !== i))}
-                        >
-                          <Trash2 className="h-3.5 w-3.5" />
-                        </button>
-                      </div>
-                      <ModelCombobox
-                        value={peer.ai_model}
-                        onChange={(val) => {
-                          const next = [...peerConfigs]
-                          next[i] = { ...next[i], ai_model: val }
-                          setPeerConfigs(next)
-                        }}
-                        options={peerModels[i] ?? []}
-                        placeholder="Model"
-                      />
-                    </div>
-                  ))}
-                </div>
-                <button
-                  type="button"
-                  className="text-xs text-text-link hover:text-signal-blue font-medium flex items-center gap-1"
-                  onClick={() =>
-                    setPeerConfigs([...peerConfigs, { ai_provider: 'claude', ai_model: '' }])
-                  }
-                >
-                  <Plus className="h-3.5 w-3.5" />
-                  Add Peer
-                </button>
-                <div className="space-y-1.5">
-                  <FieldLabel>Max Rounds</FieldLabel>
-                  <Input
-                    type="number"
-                    min={1}
-                    max={10}
-                    value={maxRounds}
-                    onChange={(e) => setMaxRounds(Number(e.target.value) || 1)}
-                    className="w-24"
-                  />
-                </div>
-              </>
+              <PeerConfigList
+                peerConfigs={peerConfigs}
+                setPeerConfigs={setPeerConfigs}
+                peerModels={peerModels}
+                maxRounds={maxRounds}
+                setMaxRounds={setMaxRounds}
+              />
             )}
           </Section>
 
@@ -378,64 +324,7 @@ export function ReAnalyzeDialog({ open, onOpenChange, result, jobId, failureUuid
             </div>
             <div className="space-y-2">
               <FieldLabel>Additional Repositories</FieldLabel>
-              {additionalRepos.map((repo, i) => (
-                <div
-                  key={i}
-                  className="bg-surface-elevated border border-border-default rounded-lg p-2.5 space-y-2"
-                >
-                  <div className="flex items-center gap-2">
-                    <Input
-                      className="w-32"
-                      placeholder="Name"
-                      value={repo.name}
-                      onChange={(e) => {
-                        const next = [...additionalRepos]
-                        next[i] = { ...next[i], name: e.target.value }
-                        setAdditionalRepos(next)
-                      }}
-                    />
-                    <Input
-                      className="flex-1"
-                      placeholder="URL"
-                      value={repo.url}
-                      onChange={(e) => {
-                        const next = [...additionalRepos]
-                        next[i] = { ...next[i], url: e.target.value }
-                        setAdditionalRepos(next)
-                      }}
-                    />
-                    <Input
-                      className="w-24"
-                      placeholder="Ref"
-                      value={repo.ref}
-                      onChange={(e) => {
-                        const next = [...additionalRepos]
-                        next[i] = { ...next[i], ref: e.target.value }
-                        setAdditionalRepos(next)
-                      }}
-                    />
-                    <button
-                      type="button"
-                      className="p-1 rounded hover:bg-surface-hover text-text-tertiary hover:text-signal-red transition flex-shrink-0"
-                      onClick={() =>
-                        setAdditionalRepos(additionalRepos.filter((_, j) => j !== i))
-                      }
-                    >
-                      <Trash2 className="h-3.5 w-3.5" />
-                    </button>
-                  </div>
-                </div>
-              ))}
-              <button
-                type="button"
-                className="text-xs text-text-link hover:text-signal-blue font-medium flex items-center gap-1"
-                onClick={() =>
-                  setAdditionalRepos([...additionalRepos, { name: '', url: '', ref: '' }])
-                }
-              >
-                <Plus className="h-3.5 w-3.5" />
-                Add Repository
-              </button>
+              <AdditionalReposList repos={additionalRepos} setRepos={setAdditionalRepos} />
             </div>
           </Section>
 
@@ -503,7 +392,7 @@ export function ReAnalyzeDialog({ open, onOpenChange, result, jobId, failureUuid
                   min={1}
                   value={maxArtifactsSize ?? ''}
                   placeholder="50"
-                  onChange={(e) => setMaxArtifactsSize(e.target.value ? Number(e.target.value) || 1 : undefined)}
+                  onChange={(e) => setMaxArtifactsSize(e.target.value ? toIntInRange(e.target.value, 1, 10000, 1) : undefined)}
                 />
               </div>
             )}

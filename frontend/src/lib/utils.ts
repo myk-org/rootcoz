@@ -5,6 +5,13 @@ export function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs))
 }
 
+/** Clamp a string to an integer within [min, max], returning fallback on invalid input. */
+export function toIntInRange(value: string, min: number, max: number, fallback: number): number {
+  const n = Number(value)
+  if (!value || Number.isNaN(n)) return fallback
+  return Math.max(min, Math.min(max, Math.floor(n)))
+}
+
 /** Fallback value for invalid or missing dates. */
 export const INVALID_DATE_FALLBACK = '\u2014'
 
