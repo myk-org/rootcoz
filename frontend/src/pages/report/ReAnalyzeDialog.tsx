@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect } from 'react'
+import { useState, useCallback, useEffect, useMemo } from 'react'
 import { useNavigate } from 'react-router-dom'
 import {
   Dialog,
@@ -106,6 +106,7 @@ export function ReAnalyzeDialog({ open, onOpenChange, result, jobId, failureUuid
   }, [aiProvider])
 
   // Fetch models for each peer provider
+  const peerProvidersKey = useMemo(() => peerConfigs.map(p => p.ai_provider).join('|'), [peerConfigs])
   useEffect(() => {
     if (!enablePeers) return
     let ignore = false
@@ -119,7 +120,7 @@ export function ReAnalyzeDialog({ open, onOpenChange, result, jobId, failureUuid
         .catch(() => { if (!ignore) setPeerModels(prev => ({ ...prev, [i]: [] })) })
     })
     return () => { ignore = true }
-  }, [enablePeers, peerConfigs.map(p => p.ai_provider).join(',')])
+  }, [enablePeers, peerProvidersKey])
 
   // Reset form state when dialog opens
   useEffect(() => {
