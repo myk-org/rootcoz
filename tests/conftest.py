@@ -4,7 +4,7 @@ import os
 import tempfile
 from collections.abc import Awaitable, Callable, Generator
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 import pytest
@@ -211,3 +211,21 @@ def mock_ai() -> Generator[MagicMock, None, None]:
             ),
         )
         yield mock
+
+
+@pytest.fixture(autouse=True)
+def _mock_sidecar_calls():
+    """Prevent ALL tests from hitting a real sidecar service.
+
+    Mocks list_models and check_sidecar_available at the main module level
+    so no test accidentally calls the real sidecar on localhost:9100.
+    """
+    with (
+        patch("rootcoz.main.list_models", new_callable=AsyncMock, return_value=[]),
+        patch(
+            "rootcoz.main.check_sidecar_available",
+            new_callable=AsyncMock,
+            return_value=(True, "mocked"),
+        ),
+    ):
+        yield

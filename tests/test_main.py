@@ -160,6 +160,8 @@ def test_client(mock_settings, temp_db_path: Path):
 
     Includes admin Bearer auth headers so endpoints that require
     authentication (all non-public paths) work out of the box.
+    Mocks list_models and check_sidecar_available to prevent tests
+    from hitting a real sidecar service.
     """
     with patch.object(storage, "DB_PATH", temp_db_path):
         from starlette.testclient import TestClient

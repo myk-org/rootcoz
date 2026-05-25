@@ -54,12 +54,13 @@ export function MultiSelectFilter({ label, options, selected, onToggle, onClear,
         {selected.size > 0 && (
           <>
             <DropdownMenuSeparator />
-            <DropdownMenuCheckboxItem
-              checked={false}
-              onCheckedChange={() => onClear()}
+            <button
+              type="button"
+              onClick={() => onClear()}
+              className="flex w-full cursor-default select-none items-center rounded-lg py-1.5 pl-3 pr-3 text-sm text-text-tertiary outline-none hover:bg-white/10"
             >
               Clear all
-            </DropdownMenuCheckboxItem>
+            </button>
           </>
         )}
       </DropdownMenuContent>
