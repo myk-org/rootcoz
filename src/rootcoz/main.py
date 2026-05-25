@@ -1468,10 +1468,15 @@ async def _validation_error_handler(
     raw_errors = jsonable_encoder(exc.errors())
     masked_errors = [_mask_pydantic_error(e) for e in raw_errors]
     logger.warning(
-        "RequestValidationError on %s %s: errors=%s body=%s",
+        "RequestValidationError on %s %s: errors=%s",
         request.method,
         request.url.path,
         masked_errors,
+    )
+    logger.debug(
+        "RequestValidationError body on %s %s: %s",
+        request.method,
+        request.url.path,
         masked_body,
     )
     # Mask sensitive values in the response body as well.

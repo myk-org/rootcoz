@@ -945,7 +945,7 @@ async def run_single_ai_analysis(
     console_file_section = ""
     console_dir: Path | None = None
     if console_context and repo_path:
-        console_file = repo_path / f"console-output-{error_signature[:12]}.txt"
+        console_file = repo_path / f"console-output-{error_signature}.txt"
         console_file.write_text(console_context)
         console_file_section = (
             f"\n\n=== CONSOLE OUTPUT (MANDATORY) ===\n"
@@ -960,7 +960,7 @@ async def run_single_ai_analysis(
         import tempfile
 
         console_dir = Path(tempfile.mkdtemp(prefix="rootcoz-console-"))
-        console_file = console_dir / f"console-output-{error_signature[:12]}.txt"
+        console_file = console_dir / f"console-output-{error_signature}.txt"
         console_file.write_text(console_context)
         console_file_section = (
             f"\n\n=== CONSOLE OUTPUT (MANDATORY) ===\n"

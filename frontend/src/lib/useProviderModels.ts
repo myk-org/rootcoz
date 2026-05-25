@@ -9,7 +9,7 @@ export function useProviderModels(provider: string): ModelOption[] {
     if (!provider) { setModels([]); return }
     let ignore = false
     setModels([])
-    api.get<{ models: ModelOption[] }>(`/ai-models?provider=${encodeURIComponent(provider)}`)
+    api.get<{ models: ModelOption[] }>(`/api/ai-models?provider=${encodeURIComponent(provider)}`)
       .then(res => { if (!ignore) setModels(res.models ?? []) })
       .catch(() => { if (!ignore) setModels([]) })
     return () => { ignore = true }

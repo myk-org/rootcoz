@@ -25,7 +25,7 @@ export function usePeerModels(
       if (!peer.ai_provider) {
         return
       }
-      api.get<{ models: ModelOption[] }>(`/ai-models?provider=${encodeURIComponent(peer.ai_provider)}`)
+      api.get<{ models: ModelOption[] }>(`/api/ai-models?provider=${encodeURIComponent(peer.ai_provider)}`)
         .then(res => { if (!ignore) setPeerModels(prev => ({ ...prev, [peer.id]: res.models ?? [] })) })
         .catch(() => { if (!ignore) setPeerModels(prev => ({ ...prev, [peer.id]: [] })) })
     })

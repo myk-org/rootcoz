@@ -62,7 +62,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Node.js 22 from NodeSource (no Docker Hub dependency)
-RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
+RUN bash -o pipefail -c "curl -fsSL https://deb.nodesource.com/setup_22.x | bash -" \
     && apt-get install -y --no-install-recommends nodejs \
     && rm -rf /var/lib/apt/lists/* \
     && node --version && npm --version
