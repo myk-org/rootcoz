@@ -2877,6 +2877,8 @@ def chat_send(
     json_output: bool = _JSON_OPTION,
 ) -> None:
     """Send a chat message and queue AI processing."""
+    import time
+
     data = _run_client_command(
         json_output,
         lambda c: c.send_chat_message(
@@ -2888,8 +2890,32 @@ def chat_send(
         assistant = data.get("assistant_message", {})
         status = assistant.get("status", "completed")
         if status == "pending":
+            assistant_id = assistant.get("id")
             typer.echo(
-                f"Message queued (id={assistant.get('id', '?')}). AI processing in background."
+                f"Message queued (id={assistant_id or '?'}). Waiting for AI response..."
+            )
+            # Poll for the response
+            client = _get_client()
+            for _ in range(120):  # up to ~2 minutes
+                time.sleep(1)
+                try:
+                    history = client.get_chat_history(job_id)
+                    messages = history.get("messages", [])
+                    for msg in reversed(messages):
+                        if msg.get("id") == assistant_id:
+                            if msg.get("status") in ("completed", "failed"):
+                                content = msg.get("content", "")
+                                if msg.get("status") == "failed":
+                                    typer.echo(f"\nError: {content}", err=True)
+                                else:
+                                    typer.echo(f"\n{content}")
+                                return
+                            break
+                except Exception:
+                    pass
+            typer.echo(
+                "\nTimed out waiting for response. "
+                "Use 'rootcoz chat history' to check later."
             )
         else:
             typer.echo(assistant.get("content", ""))
@@ -2924,6 +2950,21 @@ def chat_clear(
     if not _state.get("json", False):
         deleted = data.get("deleted", 0)
         typer.echo(f"Deleted {deleted} message(s) for job {job_id}.")
+
+
+@chat_app.command("close")
+def chat_close(
+    job_id: str = typer.Argument(help="Job ID to close chat for."),
+    json_output: bool = _JSON_OPTION,
+) -> None:
+    """Signal that you left the chat page."""
+    _run_client_command(
+        json_output,
+        lambda c: c.close_chat(job_id),
+        emit_output=False,
+    )
+    if not _state.get("json", False):
+        typer.echo(f"Chat closed for job {job_id}.")
 
 
 # -- Config -------------------------------------------------------------------

@@ -1022,3 +1022,7 @@ class RootCozClient:
     def abort_chat(self, job_id: str) -> dict:
         """Abort the currently processing chat message. POST /api/chat/{job_id}/abort"""
         return self._request("POST", f"/api/chat/{job_id}/abort")
+
+    def close_chat(self, job_id: str) -> dict:
+        """Signal that the user left the chat page. POST /api/chat/{job_id}/close"""
+        return self._request("POST", f"/api/chat/{job_id}/close")

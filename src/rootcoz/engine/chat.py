@@ -5,6 +5,7 @@ Builds job-scoped system prompts and manages AI CLI conversations.
 
 import asyncio
 import importlib.resources
+import shlex
 import shutil
 import stat
 from pathlib import Path
@@ -203,22 +204,26 @@ def setup_chat_scripts(
         target.write_bytes(source.read_bytes())
         target.chmod(target.stat().st_mode | stat.S_IEXEC)
 
-    # Write env file that scripts read
+    # Write env file that scripts read.
+    # Values are shell-quoted to prevent injection via newlines or special chars.
+    def _env_line(key: str, value: str) -> str:
+        return f"{key}={shlex.quote(value)}"
+
     env_lines = [
-        f"ROOTCOZ_SERVER_URL={server_url}",
-        f"ROOTCOZ_AUTH_TOKEN={auth_token}",
-        f"ROOTCOZ_JOB_ID={job_id}",
+        _env_line("ROOTCOZ_SERVER_URL", server_url),
+        _env_line("ROOTCOZ_AUTH_TOKEN", auth_token),
+        _env_line("ROOTCOZ_JOB_ID", job_id),
     ]
     if jira_url:
-        env_lines.append(f"ROOTCOZ_JIRA_URL={jira_url}")
+        env_lines.append(_env_line("ROOTCOZ_JIRA_URL", jira_url))
     if jira_email:
-        env_lines.append(f"ROOTCOZ_JIRA_EMAIL={jira_email}")
+        env_lines.append(_env_line("ROOTCOZ_JIRA_EMAIL", jira_email))
     if jira_token:
-        env_lines.append(f"ROOTCOZ_JIRA_TOKEN={jira_token}")
+        env_lines.append(_env_line("ROOTCOZ_JIRA_TOKEN", jira_token))
     if github_token:
-        env_lines.append(f"ROOTCOZ_GITHUB_TOKEN={github_token}")
+        env_lines.append(_env_line("ROOTCOZ_GITHUB_TOKEN", github_token))
     if github_repo:
-        env_lines.append(f"ROOTCOZ_GITHUB_REPO={github_repo}")
+        env_lines.append(_env_line("ROOTCOZ_GITHUB_REPO", github_repo))
 
     env_file = workspace / ".chat_env"
     env_file.write_text("\n".join(env_lines) + "\n")
@@ -260,11 +265,17 @@ def _write_wrapper(
         "#!/usr/bin/env python3\n"
         "import os, subprocess, sys\n"
         f"env_file = {str(env_file)!r}\n"
+        "import shlex\n"
         "with open(env_file) as f:\n"
         "    for line in f:\n"
         "        line = line.strip()\n"
         "        if line and '=' in line and not line.startswith('#'):\n"
         "            k, _, v = line.partition('=')\n"
+        "            # Strip shell quoting added by shlex.quote()\n"
+        "            try:\n"
+        "                v = shlex.split(v)[0] if v else v\n"
+        "            except ValueError:\n"
+        "                pass\n"
         "            os.environ[k] = v\n"
         f"sys.exit(subprocess.call(['uv', 'run', {str(raw_script)!r}] + sys.argv[1:]))\n"
     )
@@ -298,9 +309,21 @@ def cleanup_chat_repos(job_id: str, username: str = "") -> None:
 
 
 def cleanup_chat_workspace(job_id: str, username: str = "") -> None:
-    """Delete the entire chat workspace including sessions."""
+    """Delete the entire chat workspace including sessions.
+
+    Explicitly removes sensitive files (.chat_env) first to ensure
+    tokens are scrubbed even if the full rmtree partially fails.
+    """
     workspace = get_chat_workspace(job_id, username)
     if workspace.exists():
+        # Scrub sensitive token files first (defense in depth)
+        env_file = workspace / ".chat_env"
+        if env_file.is_file():
+            env_file.unlink(missing_ok=True)
+        scripts_dir = workspace / ".scripts"
+        if scripts_dir.is_dir():
+            shutil.rmtree(scripts_dir, ignore_errors=True)
+
         shutil.rmtree(workspace, ignore_errors=True)
         logger.info(f"Deleted chat workspace for job {job_id}")
 

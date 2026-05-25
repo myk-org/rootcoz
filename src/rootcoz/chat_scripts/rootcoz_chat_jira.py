@@ -177,7 +177,7 @@ def cmd_search(args: argparse.Namespace) -> None:
         summary = fields.get("summary", "")
         status = fields.get("status", {}).get("name", "Unknown")
         assignee = _extract_assignee(issue, version)
-        created = fields.get("created", "")[:10]
+        created = fields.get("created", "")
         url = f"{jira_url}/browse/{key}"
 
         print(f"\n{i}. [{key}] {summary}")
@@ -217,8 +217,8 @@ def cmd_issue(args: argparse.Namespace) -> None:
     components = (
         ", ".join(c.get("name", "") for c in fields.get("components", [])) or "None"
     )
-    created = fields.get("created", "")[:10]
-    updated = fields.get("updated", "")[:10]
+    created = fields.get("created", "")
+    updated = fields.get("updated", "")
     url = f"{jira_url}/browse/{key}"
 
     print(f"Issue: {key}")

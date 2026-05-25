@@ -5542,6 +5542,18 @@ async def bulk_delete_jobs_endpoint(body: BulkDeleteRequest, request: Request) -
     _require_admin(request)
 
     result = await storage.delete_jobs_bulk(body.job_ids)
+
+    # Clean up chat workspaces for all deleted jobs
+    from rootcoz.engine.chat import cleanup_chat_workspace
+
+    for job_id in result["deleted"]:
+        try:
+            cleanup_chat_workspace(job_id)
+        except Exception:
+            logger.warning(
+                "Failed to cleanup chat workspace for %s", job_id, exc_info=True
+            )
+
     notify_active_count_changed()
     notify_dashboard_changed()
 
@@ -5564,6 +5576,15 @@ async def delete_job_endpoint(
         raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
 
     await storage.delete_job(job_id)
+
+    # Clean up chat workspace (files, tokens, sessions)
+    try:
+        from rootcoz.engine.chat import cleanup_chat_workspace
+
+        cleanup_chat_workspace(job_id)
+    except Exception:
+        logger.warning("Failed to cleanup chat workspace for %s", job_id, exc_info=True)
+
     notify_active_count_changed()
     notify_dashboard_changed()
     logger.info(f"[AUDIT] Admin '{request.state.username}' deleted job {job_id}")
@@ -7758,6 +7779,59 @@ async def create_feedback(request: Request, body: FeedbackCreateRequest):
         ) from exc
 
 
+# -- Chat helpers --
+
+
+async def _resolve_chat_credentials(
+    decrypted_params: dict, username: str
+) -> tuple[str, str, str, str, str]:
+    """Resolve Jira and GitHub credentials for chat.
+
+    Priority: user tokens > job params > server settings.
+
+    Returns:
+        (jira_url, jira_email, jira_token, github_token, github_repo)
+    """
+    import re
+
+    settings = get_settings()
+    user_tokens = await storage.get_user_tokens(username)
+
+    # Extract github repo from tests_repo_url
+    github_repo = ""
+    tests_repo_url = decrypted_params.get("tests_repo_url", "")
+    if tests_repo_url:
+        match = re.search(
+            r"github\.com[/:]([^/]+/[^/]+?)(?:\.git)?$", str(tests_repo_url)
+        )
+        if match:
+            github_repo = match.group(1)
+
+    # Resolve Jira credentials
+    jira_url = decrypted_params.get("jira_url", "") or str(settings.jira_url or "")
+    jira_email = (
+        user_tokens.get("jira_email", "")
+        or decrypted_params.get("jira_email", "")
+        or str(settings.jira_email or "")
+    )
+    jira_token = (
+        user_tokens.get("jira_token", "")
+        or decrypted_params.get("jira_api_token", "")
+        or decrypted_params.get("jira_pat", "")
+    )
+    if not jira_token and settings.jira_api_token:
+        jira_token = settings.jira_api_token.get_secret_value()
+    if not jira_token and settings.jira_pat:
+        jira_token = settings.jira_pat.get_secret_value()
+
+    # Resolve GitHub token
+    github_token = user_tokens.get("github_token", "")
+    if not github_token and settings.github_token:
+        github_token = settings.github_token.get_secret_value()
+
+    return jira_url, jira_email, jira_token, github_token, github_repo
+
+
 # -- Chat endpoints --
 
 
@@ -7769,6 +7843,7 @@ async def get_chat_history(
     offset: int = Query(default=0, ge=0),
 ) -> dict:
     """Get chat message history for an analyzed job."""
+    _check_allow_list(request)
     result = await get_result(job_id)
     if not result:
         raise HTTPException(status_code=404, detail="Job not found")
@@ -7821,44 +7896,13 @@ async def init_chat(job_id: str, request: Request) -> dict:
     )
     ai_model = result_data.get("ai_model", "") or params.get("ai_model", "") or AI_MODEL
 
-    settings = get_settings()
-
-    # Get user tokens for Jira/GitHub access
-    user_tokens = await storage.get_user_tokens(username)
-
-    # Extract github repo
-    github_repo = ""
-    tests_repo_url = decrypted_params.get("tests_repo_url", "")
-    if tests_repo_url:
-        import re
-
-        match = re.search(
-            r"github\.com[/:]([^/]+/[^/]+?)(?:\.git)?$", str(tests_repo_url)
-        )
-        if match:
-            github_repo = match.group(1)
-
-    # Resolve Jira credentials
-    jira_url = decrypted_params.get("jira_url", "") or str(settings.jira_url or "")
-    jira_email = (
-        user_tokens.get("jira_email", "")
-        or decrypted_params.get("jira_email", "")
-        or str(settings.jira_email or "")
-    )
-    jira_token = (
-        user_tokens.get("jira_token", "")
-        or decrypted_params.get("jira_api_token", "")
-        or decrypted_params.get("jira_pat", "")
-    )
-    if not jira_token and settings.jira_api_token:
-        jira_token = settings.jira_api_token.get_secret_value()
-    if not jira_token and settings.jira_pat:
-        jira_token = settings.jira_pat.get_secret_value()
-
-    # Resolve GitHub token
-    github_token = user_tokens.get("github_token", "")
-    if not github_token and settings.github_token:
-        github_token = settings.github_token.get_secret_value()
+    (
+        jira_url,
+        jira_email,
+        jira_token,
+        github_token,
+        github_repo,
+    ) = await _resolve_chat_credentials(decrypted_params, username)
 
     # Clone repos and setup scripts
     repos_available = await clone_chat_repos(workspace, decrypted_params)
@@ -7995,6 +8039,7 @@ def _get_chat_abort_signal(key: str) -> asyncio.Event:
 @app.get("/api/chat/{job_id}/stream")
 async def chat_stream(job_id: str, request: Request) -> StreamingResponse:
     """SSE stream for real-time chat message updates."""
+    _check_allow_list(request)
     username = getattr(request.state, "username", "")
     listener_key = f"{job_id}:{username}" if username else job_id
     return _make_sse_stream(
@@ -8132,14 +8177,14 @@ async def _process_chat_message(
             if not ai_provider:
                 raise RuntimeError("No AI provider configured")
 
-            # Get conversation history (limit to last 50 messages)
+            # Get conversation history
             all_history = await storage.get_chat_messages(job_id, username=username)
             # Filter to only completed messages for context
             history = [
                 m
                 for m in all_history
                 if m.get("status") != "pending" and m.get("content")
-            ][-50:]
+            ]
 
             # Find session_id from the last completed assistant message
             # Scan all_history (not filtered history) because the init message
@@ -8174,45 +8219,13 @@ async def _process_chat_message(
 
             settings = get_settings()
 
-            # Get user tokens for Jira/GitHub access
-            user_tokens = await storage.get_user_tokens(username)
-
-            # Extract github repo from tests_repo_url (e.g., "https://github.com/org/repo" -> "org/repo")
-            github_repo = ""
-            tests_repo_url = decrypted_params.get("tests_repo_url", "")
-            if tests_repo_url:
-                # Parse owner/repo from URL like https://github.com/org/repo.git
-                import re
-
-                match = re.search(
-                    r"github\.com[/:]([^/]+/[^/]+?)(?:\.git)?$", str(tests_repo_url)
-                )
-                if match:
-                    github_repo = match.group(1)
-
-            # Determine Jira credentials: user tokens > job params > server settings
-            jira_url = decrypted_params.get("jira_url", "") or str(
-                settings.jira_url or ""
-            )
-            jira_email = (
-                user_tokens.get("jira_email", "")
-                or decrypted_params.get("jira_email", "")
-                or str(settings.jira_email or "")
-            )
-            jira_token = (
-                user_tokens.get("jira_token", "")
-                or decrypted_params.get("jira_api_token", "")
-                or decrypted_params.get("jira_pat", "")
-            )
-            if not jira_token and settings.jira_api_token:
-                jira_token = settings.jira_api_token.get_secret_value()
-            if not jira_token and settings.jira_pat:
-                jira_token = settings.jira_pat.get_secret_value()
-
-            # Determine GitHub token: user tokens > server settings
-            github_token = user_tokens.get("github_token", "")
-            if not github_token and settings.github_token:
-                github_token = settings.github_token.get_secret_value()
+            (
+                jira_url,
+                jira_email,
+                jira_token,
+                github_token,
+                github_repo,
+            ) = await _resolve_chat_credentials(decrypted_params, username)
 
             server_url = _build_internal_server_url()
             auth_header = await _create_ai_auth_header(username)
