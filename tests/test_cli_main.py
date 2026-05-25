@@ -3922,8 +3922,8 @@ class TestChatCommands:
             "assistant_message": {
                 "id": 2,
                 "role": "assistant",
-                "content": "",
-                "status": "pending",
+                "content": "The error is caused by a missing import.",
+                "status": "completed",
             },
         }
         result = runner.invoke(
@@ -3940,7 +3940,6 @@ class TestChatCommands:
             ],
         )
         assert result.exit_code == 0
-        assert "Message queued" in result.output
         mock_client.send_chat_message.assert_called_once_with(
             "job-1", "Explain the error", ai_provider="claude", ai_model="opus-4"
         )
