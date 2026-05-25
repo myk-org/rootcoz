@@ -143,43 +143,57 @@ export function MetadataDropdowns({
 interface MetadataLabelChipsProps {
   allLabels: string[]
   labels: string[]
+  excludeLabels: string[]
   onLabelsChange: (value: string[]) => void
+  onExcludeLabelsChange: (value: string[]) => void
 }
 
-/** Renders a row of toggle-able label chips. Renders nothing if no labels exist. */
-export function MetadataLabelChips({ allLabels, labels, onLabelsChange }: MetadataLabelChipsProps) {
-  const toggleLabel = useCallback((label: string) => {
+/** Renders a row of toggle-able label chips. Cycles: off → include → exclude → off. */
+export function MetadataLabelChips({ allLabels, labels, excludeLabels, onLabelsChange, onExcludeLabelsChange }: MetadataLabelChipsProps) {
+  const cycleLabel = useCallback((label: string) => {
     if (labels.includes(label)) {
+      // include → exclude
       onLabelsChange(labels.filter((l) => l !== label))
+      onExcludeLabelsChange([...excludeLabels, label])
+    } else if (excludeLabels.includes(label)) {
+      // exclude → off
+      onExcludeLabelsChange(excludeLabels.filter((l) => l !== label))
     } else {
+      // off → include
       onLabelsChange([...labels, label])
     }
-  }, [labels, onLabelsChange])
+  }, [labels, excludeLabels, onLabelsChange, onExcludeLabelsChange])
 
-  if (allLabels.length === 0 && labels.length === 0) return null
+  if (allLabels.length === 0 && labels.length === 0 && excludeLabels.length === 0) return null
 
   const displayLabels = allLabels.length > 0
-    ? [...new Set([...allLabels, ...labels])].sort()
-    : labels
+    ? [...new Set([...allLabels, ...labels, ...excludeLabels])].sort()
+    : [...new Set([...labels, ...excludeLabels])].sort()
 
   return (
     <div className="flex flex-wrap items-center gap-2">
       <span className="text-xs text-text-tertiary">Filter by tag:</span>
-      {displayLabels.map((label) => (
-        <button
-          type="button"
-          key={label}
-          aria-pressed={labels.includes(label)}
-          className={`cursor-pointer text-xs px-2 py-0.5 rounded-md border transition-colors ${
-            labels.includes(label)
-              ? 'bg-signal-green/20 text-signal-green border-signal-green/40 hover:bg-signal-green/30'
-              : 'border-border-muted text-text-tertiary hover:bg-surface-hover hover:text-text-secondary'
-          }`}
-          onClick={() => toggleLabel(label)}
-        >
-          {label}
-        </button>
-      ))}
+      {displayLabels.map((label) => {
+        const isIncluded = labels.includes(label)
+        const isExcluded = excludeLabels.includes(label)
+        return (
+          <button
+            type="button"
+            key={label}
+            aria-pressed={isIncluded ? 'true' : isExcluded ? 'mixed' : 'false'}
+            className={`cursor-pointer text-xs px-2 py-0.5 rounded-md border transition-colors ${
+              isIncluded
+                ? 'bg-signal-blue/10 text-signal-blue border-signal-blue/30 hover:bg-signal-blue/20'
+                : isExcluded
+                  ? 'bg-signal-red/10 text-signal-red border-signal-red/30 line-through hover:bg-signal-red/20'
+                  : 'bg-surface-elevated text-text-tertiary border-border-default hover:bg-surface-hover hover:text-text-secondary'
+            }`}
+            onClick={() => cycleLabel(label)}
+          >
+            {isExcluded ? `× ${label}` : label}
+          </button>
+        )
+      })}
     </div>
   )
 }

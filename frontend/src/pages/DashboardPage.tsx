@@ -36,7 +36,7 @@ import { ConfirmDialog } from '@/components/shared/ConfirmDialog'
 import { SortableHeader } from '@/components/shared/SortableHeader'
 import { DateRangeFilter } from '@/components/shared/DateRangeFilter'
 import { useTableSort } from '@/lib/useTableSort'
-import { Trash2, MessageSquare, CheckCircle2, GitFork, AlertTriangle, Github } from 'lucide-react'
+import { Trash2, MessageSquare, CheckCircle2, GitFork, AlertTriangle, Github, List, FolderOpen, ChevronRight } from 'lucide-react'
 import { useAuth } from '@/lib/auth'
 import { useMetadataOptions, MetadataDropdowns, MetadataLabelChips, MetadataClearButton } from '@/components/shared/MetadataFilterBar'
 import { MetadataBadges } from '@/components/shared/MetadataBadges'
@@ -44,6 +44,8 @@ import { WhatsNewDialog } from '@/components/shared/WhatsNewDialog'
 
 const STATUS_FILTER_ALL = 'ALL'
 const STATUS_FILTER_OPTIONS = [STATUS_FILTER_ALL, 'completed', 'running', 'waiting', 'pending', 'failed', 'timeout', 'aborted'] as const
+const ANALYSIS_FILTER_ALL = 'ALL'
+const ANALYSIS_FILTER_OPTIONS = [ANALYSIS_FILTER_ALL, 'analyzed', 'not-analyzed'] as const
 const BULK_DELETE_LIMIT = 500
 
 const BULK_SELECT_CHECKBOX_CLASS =
@@ -114,6 +116,7 @@ export function DashboardPage() {
   const [loading, setLoading] = useState(true)
   const [search, setSearch] = useState('')
   const [statusFilter, setStatusFilter] = useState(STATUS_FILTER_ALL)
+  const [analysisFilter, setAnalysisFilter] = useState(ANALYSIS_FILTER_ALL)
   const { sortKey, sortDir, handleSort } = useTableSort('dash', 'created_at', 'desc', ['created_at'])
   const [page, setPage] = useState(1)
   const [perPage, setPerPage] = useState(20)
@@ -126,6 +129,7 @@ export function DashboardPage() {
   const metaTier = searchParams.get('tier') ?? ''
   const metaVersion = searchParams.get('version') ?? ''
   const metaLabels = useMemo(() => searchParams.getAll('label'), [searchParams])
+  const metaExcludeLabels = useMemo(() => searchParams.getAll('exclude_label'), [searchParams])
   const setMetaParam = useCallback((key: string, value: string) => {
     setSearchParams((prev) => {
       const next = new URLSearchParams(prev)
@@ -142,6 +146,14 @@ export function DashboardPage() {
       return next
     }, { replace: true })
   }, [setSearchParams])
+  const setMetaExcludeLabels = useCallback((labels: string[]) => {
+    setSearchParams((prev) => {
+      const next = new URLSearchParams(prev)
+      next.delete('exclude_label')
+      for (const l of labels) next.append('exclude_label', l)
+      return next
+    }, { replace: true })
+  }, [setSearchParams])
   const clearMetadataFilters = useCallback(() => {
     setSearchParams((prev) => {
       const next = new URLSearchParams(prev)
@@ -149,10 +161,11 @@ export function DashboardPage() {
       next.delete('tier')
       next.delete('version')
       next.delete('label')
+      next.delete('exclude_label')
       return next
     }, { replace: true })
   }, [setSearchParams])
-  const hasMetadataFilters = !!(metaTeam || metaTier || metaVersion || metaLabels.length > 0)
+  const hasMetadataFilters = !!(metaTeam || metaTier || metaVersion || metaLabels.length > 0 || metaExcludeLabels.length > 0)
   const { options: metadataOptions } = useMetadataOptions()
   const setDateFrom = useCallback((value: string) => {
     setSearchParams((prev) => {
@@ -186,6 +199,8 @@ export function DashboardPage() {
   const [bulkDeleteConfirm, setBulkDeleteConfirm] = useState(false)
   const [bulkResultMessage, setBulkResultMessage] = useState<string | null>(null)
   const selectAllRef = useRef<HTMLInputElement>(null)
+  const [viewMode, setViewMode] = useState<'flat' | 'grouped'>('flat')
+  const [expandedGroups, setExpandedGroups] = useState<Set<string>>(new Set())
 
   const showCheckboxes = selectedIds.size > 0
 
@@ -207,6 +222,7 @@ export function DashboardPage() {
       if (metaTier) params.set('tier', metaTier)
       if (metaVersion) params.set('version', metaVersion)
       for (const l of metaLabels) params.append('label', l)
+      for (const l of metaExcludeLabels) params.append('exclude_label', l)
       const qs = params.toString()
       if (qs) url += `?${qs}`
       const data = await api.get<DashboardJobWithMetadata[]>(url)
@@ -223,7 +239,7 @@ export function DashboardPage() {
         setLoading(false)
       }
     }
-  }, [metaTeam, metaTier, metaVersion, metaLabels])
+  }, [metaTeam, metaTier, metaVersion, metaLabels, metaExcludeLabels])
 
   const fetchJobsRef = useLatestRef(fetchJobs)
 
@@ -246,7 +262,7 @@ export function DashboardPage() {
       eventSource.close()
     }
   }, [])
-  useEffect(() => { setPage(1) }, [search, statusFilter, perPage, dateFrom, dateTo, metaTeam, metaTier, metaVersion, metaLabels])
+  useEffect(() => { setPage(1) }, [search, statusFilter, analysisFilter, perPage, dateFrom, dateTo, metaTeam, metaTier, metaVersion, metaLabels, metaExcludeLabels])
 
   const filtered = useMemo(() => {
     const fromBound = dateFrom ? utcStartOfDateInput(dateFrom) : null
@@ -255,6 +271,8 @@ export function DashboardPage() {
     return jobs.filter((j) => {
       const displayStatus = isAnalysisTimeout(j.status, j.error, j.summary) ? 'timeout' : j.status
       if (statusFilter !== STATUS_FILTER_ALL && displayStatus !== statusFilter) return false
+      if (analysisFilter === 'analyzed' && !(j.failure_count && j.failure_count > 0)) return false
+      if (analysisFilter === 'not-analyzed' && j.failure_count && j.failure_count > 0) return false
 
       if (fromBound || toBound) {
         const jobDate = parseApiTimestamp(j.created_at)
@@ -267,7 +285,7 @@ export function DashboardPage() {
       const q = search.toLowerCase()
       return (j.job_name ?? '').toLowerCase().includes(q) || j.job_id.toLowerCase().includes(q)
     })
-  }, [jobs, search, statusFilter, dateFrom, dateTo])
+  }, [jobs, search, statusFilter, analysisFilter, dateFrom, dateTo])
 
   const sorted = useMemo(() => {
     const copy = [...filtered]
@@ -293,6 +311,31 @@ export function DashboardPage() {
     })
     return copy
   }, [filtered, sortKey, sortDir])
+
+  interface JobGroup {
+    jobName: string
+    runs: DashboardJobWithMetadata[]
+  }
+
+  const grouped: JobGroup[] = useMemo(() => {
+    if (viewMode !== 'grouped') return []
+    const groups = new Map<string, DashboardJobWithMetadata[]>()
+    for (const job of sorted) {
+      const name = job.job_name || job.job_id
+      if (!groups.has(name)) groups.set(name, [])
+      groups.get(name)!.push(job)
+    }
+    return Array.from(groups.entries()).map(([jobName, runs]) => ({ jobName, runs }))
+  }, [sorted, viewMode])
+
+  function toggleGroup(name: string) {
+    setExpandedGroups(prev => {
+      const next = new Set(prev)
+      if (next.has(name)) next.delete(name)
+      else next.add(name)
+      return next
+    })
+  }
 
   const totalPages = Math.max(1, Math.ceil(sorted.length / perPage))
   const safePage = Math.min(page, totalPages)
@@ -432,6 +475,16 @@ export function DashboardPage() {
               ))}
             </SelectContent>
           </Select>
+          <Select value={analysisFilter} onValueChange={setAnalysisFilter}>
+            <SelectTrigger aria-label="Filter by analysis" className="w-full sm:w-40">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="ALL">All results</SelectItem>
+              <SelectItem value="analyzed">Analyzed</SelectItem>
+              <SelectItem value="not-analyzed">Not analyzed</SelectItem>
+            </SelectContent>
+          </Select>
           <DateRangeFilter from={dateFrom} to={dateTo} onFromChange={setDateFrom} onToChange={setDateTo} onClear={clearDates} />
           <Select value={String(perPage)} onValueChange={(v) => setPerPage(Number(v))}>
             <SelectTrigger aria-label="Rows per page" className="w-full sm:w-20">
@@ -443,6 +496,24 @@ export function DashboardPage() {
               <SelectItem value="50">50</SelectItem>
             </SelectContent>
           </Select>
+          <div className="flex items-center gap-1 border border-border-default rounded-md">
+            <button
+              type="button"
+              onClick={() => setViewMode('flat')}
+              className={`p-1.5 rounded-l-md transition-colors ${viewMode === 'flat' ? 'bg-signal-blue text-white' : 'text-text-tertiary hover:text-text-secondary'}`}
+              aria-label="Flat list view"
+            >
+              <List className="h-4 w-4" />
+            </button>
+            <button
+              type="button"
+              onClick={() => setViewMode('grouped')}
+              className={`p-1.5 rounded-r-md transition-colors ${viewMode === 'grouped' ? 'bg-signal-blue text-white' : 'text-text-tertiary hover:text-text-secondary'}`}
+              aria-label="Grouped by job view"
+            >
+              <FolderOpen className="h-4 w-4" />
+            </button>
+          </div>
           <MetadataClearButton hasFilters={hasMetadataFilters} onClearAll={clearMetadataFilters} />
         </div>
 
@@ -450,7 +521,9 @@ export function DashboardPage() {
         <MetadataLabelChips
           allLabels={metadataOptions.allLabels}
           labels={metaLabels}
+          excludeLabels={metaExcludeLabels}
           onLabelsChange={setMetaLabels}
+          onExcludeLabelsChange={setMetaExcludeLabels}
         />
 
         {/* Summary row: count + View Issues */}
@@ -503,15 +576,17 @@ export function DashboardPage() {
               <Skeleton key={i} className="h-11 w-full" />
             ))}
           </div>
-        ) : pageJobs.length === 0 && (!error || jobs.length > 0) ? (
+        ) : (viewMode === 'flat' ? pageJobs.length === 0 : sorted.length === 0) && (!error || jobs.length > 0) ? (
           <div className="flex flex-col items-center justify-center rounded-lg border border-border-muted bg-surface-card py-16 text-center animate-fade-in">
             <p className="text-text-secondary">
               {search || statusFilter !== STATUS_FILTER_ALL || dateFrom || dateTo || hasMetadataFilters
                 ? 'No jobs match your filters.'
+                : analysisFilter !== ANALYSIS_FILTER_ALL
+                ? 'No jobs match your filters.'
                 : 'No analysis runs yet.'}
             </p>
           </div>
-        ) : error && jobs.length === 0 ? null : (
+        ) : error && jobs.length === 0 ? null : viewMode === 'flat' ? (
           <Table>
             <TableHeader>
               <TableRow className="bg-surface-card hover:bg-surface-card">
@@ -708,9 +783,205 @@ export function DashboardPage() {
               })}
             </TableBody>
           </Table>
+        ) : (
+          /* Grouped-by-job view */
+          <div className="space-y-2">
+            {grouped.map((group) => {
+              const isExpanded = expandedGroups.has(group.jobName)
+              return (
+                <div key={group.jobName} className="rounded-lg border border-border-muted bg-surface-card overflow-hidden">
+                  <button
+                    type="button"
+                    onClick={() => toggleGroup(group.jobName)}
+                    className="flex w-full items-center gap-2 px-4 py-3 text-left transition-colors hover:bg-surface-hover"
+                  >
+                    <ChevronRight className={`h-4 w-4 shrink-0 text-text-tertiary transition-transform ${isExpanded ? 'rotate-90' : ''}`} />
+                    <span className="font-display text-sm font-medium text-text-primary truncate">{group.jobName}</span>
+                    <span className="text-xs text-text-tertiary">({group.runs.length} {group.runs.length === 1 ? 'run' : 'runs'})</span>
+                  </button>
+                  {isExpanded && (
+                    <Table>
+                      <TableHeader>
+                        <TableRow className="bg-surface-elevated/40 hover:bg-surface-elevated/40">
+                          {isAdmin && (
+                            <TableHead className="w-10">
+                              <span className="sr-only">Select</span>
+                            </TableHead>
+                          )}
+                          <TableHead className="w-[40%]">Job</TableHead>
+                          <TableHead>Status</TableHead>
+                          <TableHead className="text-center">Failures</TableHead>
+                          <TableHead className="text-center">Reviewed</TableHead>
+                          <TableHead className="text-center">Comments</TableHead>
+                          <TableHead className="text-center">Children</TableHead>
+                          <TableHead className="text-right">Created</TableHead>
+                          {isAdmin && (
+                            <TableHead className="w-10">
+                              <span className="sr-only">Actions</span>
+                            </TableHead>
+                          )}
+                        </TableRow>
+                      </TableHeader>
+                      <TableBody>
+                        {group.runs.map((job, i) => {
+                          const displayStatus = isAnalysisTimeout(job.status, job.error, job.summary) ? 'timeout' : job.status
+                          const borderColor = STATUS_BORDER[displayStatus] ?? 'border-l-border-default'
+                          const failureCount = job.failure_count ?? 0
+                          const failureHint = job.summary || job.error
+                          const rowDest = getJobRoute(job)
+
+                          return (
+                            <TableRow
+                              key={job.job_id}
+                              className={`group cursor-pointer animate-slide-up ${selectedIds.has(job.job_id) ? 'bg-accent-blue/10' : i % 2 === 0 ? 'bg-surface-card' : 'bg-surface-elevated/40'}`}
+                              style={{ animationDelay: `${i * 30}ms`, animationFillMode: 'backwards' }}
+                              onClick={() => isAdmin && selectedIds.size > 0 ? toggleSelect(job.job_id) : handleRowClick(job)}
+                            >
+                              {isAdmin && (
+                                <TableCell className="w-10">
+                                  <input
+                                    type="checkbox"
+                                    checked={selectedIds.has(job.job_id)}
+                                    onChange={(e) => { e.stopPropagation(); toggleSelect(job.job_id) }}
+                                    onClick={(e) => e.stopPropagation()}
+                                    className={`${BULK_SELECT_CHECKBOX_CLASS} ${showCheckboxes ? '' : 'opacity-0 group-hover:opacity-100'}`}
+                                    aria-label={`Select ${getJobDisplayName(job)}`}
+                                  />
+                                </TableCell>
+                              )}
+                              <TableCell className={`border-l-4 ${borderColor}`}>
+                                <div>
+                                  <Link
+                                    to={rowDest}
+                                    className="font-display text-sm font-medium text-text-primary hover:underline focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent-blue"
+                                    onClick={(e) => e.stopPropagation()}
+                                    aria-label={`Open ${getJobDisplayName(job)}${job.build_number !== undefined ? ` #${job.build_number}` : ''}`}
+                                  >
+                                    {getJobDisplayName(job)}
+                                  </Link>
+                                  {job.build_number !== undefined && (
+                                    <span className="ml-2 font-mono text-xs text-text-tertiary">#{job.build_number}</span>
+                                  )}
+                                </div>
+                                <MetadataBadges metadata={job.metadata} />
+                                {job.tags && job.tags.length > 0 && (
+                                  <div className="flex flex-wrap gap-1 mt-1">
+                                    {job.tags.map((tag) => (
+                                      <span
+                                        key={tag}
+                                        className={`inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-medium ${
+                                          tag === 're-analyze'
+                                            ? 'bg-signal-orange/10 text-signal-orange'
+                                            : 'bg-signal-blue/10 text-signal-blue'
+                                        }`}
+                                      >
+                                        {tag}
+                                      </span>
+                                    ))}
+                                  </div>
+                                )}
+                                {failureHint && (
+                                  <Tooltip>
+                                    <TooltipTrigger asChild>
+                                      <p className="mt-0.5 max-w-xs truncate text-xs text-text-tertiary">{failureHint}</p>
+                                    </TooltipTrigger>
+                                    <TooltipContent className="max-w-sm whitespace-pre-wrap">{failureHint}</TooltipContent>
+                                  </Tooltip>
+                                )}
+                              </TableCell>
+                              <TableCell>
+                                <Tooltip>
+                                  <TooltipTrigger asChild>
+                                    <span><StatusChip status={displayStatus} /></span>
+                                  </TooltipTrigger>
+                                  <TooltipContent>{displayStatus === 'timeout' ? 'AI analysis timed out' : `Analysis status: ${job.status}`}</TooltipContent>
+                                </Tooltip>
+                              </TableCell>
+                              <MetricCell
+                                value={failureCount}
+                                icon={<AlertTriangle className="h-3 w-3" />}
+                                tone="text-signal-red"
+                                tooltipText={`${failureCount} test ${failureCount === 1 ? 'failure' : 'failures'}`}
+                              />
+                              <MetricCell
+                                value={failureCount}
+                                displayValue={<>{job.reviewed_count}/{failureCount}</>}
+                                icon={<CheckCircle2 className="h-3 w-3" />}
+                                tone={
+                                  job.reviewed_count === failureCount
+                                    ? 'text-signal-green'
+                                    : job.reviewed_count > 0
+                                      ? 'text-signal-orange'
+                                      : 'text-signal-red'
+                                }
+                                tooltipText={`${job.reviewed_count} of ${failureCount} failures reviewed`}
+                              />
+                              <MetricCell
+                                value={job.comment_count}
+                                icon={<MessageSquare className="h-3 w-3" />}
+                                tone="text-text-secondary"
+                                tooltipText={`${job.comment_count} ${job.comment_count === 1 ? 'comment' : 'comments'}`}
+                              />
+                              <MetricCell
+                                value={job.child_job_count}
+                                icon={<GitFork className="h-3 w-3" />}
+                                tone="text-text-secondary"
+                                tooltipText={`${job.child_job_count ?? 0} child ${job.child_job_count === 1 ? 'job' : 'jobs'}`}
+                              />
+                              <TableCell className="text-right">
+                                <Tooltip>
+                                  <TooltipTrigger asChild>
+                                    <span className="font-mono text-xs text-text-tertiary">{relativeTime(job.created_at)}</span>
+                                  </TooltipTrigger>
+                                  <TooltipContent>
+                                    <span>Created: {formatTimestamp(job.created_at)}</span>
+                                    {(() => {
+                                      const startTime = job.analysis_started_at || job.created_at
+                                      const start = startTime ? parseApiTimestamp(startTime) : null
+                                      const end = job.completed_at ? parseApiTimestamp(job.completed_at) : null
+                                      const duration = start && end && !Number.isNaN(start.getTime()) && !Number.isNaN(end.getTime())
+                                        ? formatDuration(start, end)
+                                        : null
+                                      return duration ? (
+                                        <>
+                                          <br />
+                                          <span>Analysis took: {duration}</span>
+                                        </>
+                                      ) : null
+                                    })()}
+                                  </TooltipContent>
+                                </Tooltip>
+                              </TableCell>
+                              {isAdmin && (
+                                <TableCell>
+                                  <Button
+                                    type="button"
+                                    variant="ghost"
+                                    size="icon"
+                                    aria-label={`Delete analysis ${getJobDisplayName(job)}`}
+                                    className="h-7 w-7 opacity-0 transition-opacity group-hover:opacity-100 focus-visible:opacity-100"
+                                    onClick={(e) => {
+                                      e.stopPropagation()
+                                      setDeleteTarget(job)
+                                    }}
+                                  >
+                                    <Trash2 className="h-3.5 w-3.5 text-text-tertiary hover:text-signal-red" />
+                                  </Button>
+                                </TableCell>
+                              )}
+                            </TableRow>
+                          )
+                        })}
+                      </TableBody>
+                    </Table>
+                  )}
+                </div>
+              )
+            })}
+          </div>
         )}
 
-        {(!error || jobs.length > 0) && (
+        {(!error || jobs.length > 0) && viewMode === 'flat' && (
           <Pagination page={safePage} totalPages={totalPages} onPageChange={setPage} />
         )}
 

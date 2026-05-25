@@ -6764,30 +6764,39 @@ async def _metadata_filters(
     tier: Annotated[str, Query()] = "",
     version: Annotated[str, Query()] = "",
     label: Annotated[list[str] | None, Query()] = None,
+    exclude_label: Annotated[list[str] | None, Query()] = None,
 ) -> dict:
     """Shared dependency for metadata filter query parameters."""
-    return {"team": team, "tier": tier, "version": version, "label": label or []}
+    return {
+        "team": team,
+        "tier": tier,
+        "version": version,
+        "label": label or [],
+        "exclude_label": exclude_label or [],
+    }
 
 
 def _unpack_metadata_filters(
     filters: dict, endpoint: str
-) -> tuple[str, str, str, list[str]]:
+) -> tuple[str, str, str, list[str], list[str]]:
     """Unpack metadata filter dict and log at DEBUG level."""
-    team, tier, version, label = (
+    team, tier, version, label, exclude_label = (
         filters["team"],
         filters["tier"],
         filters["version"],
         filters["label"],
+        filters["exclude_label"],
     )
     logger.debug(
-        "%s: team=%r, tier=%r, version=%r, label=%r",
+        "%s: team=%r, tier=%r, version=%r, label=%r, exclude_label=%r",
         endpoint,
         team,
         tier,
         version,
         label,
+        exclude_label,
     )
-    return team, tier, version, label
+    return team, tier, version, label, exclude_label
 
 
 @app.get("/api/jobs/metadata")
@@ -6795,7 +6804,7 @@ async def list_jobs_metadata(
     filters: Annotated[dict, Depends(_metadata_filters)],
 ) -> list[dict]:
     """List all job metadata, optionally filtered by team, tier, version, or labels."""
-    team, tier, version, label = _unpack_metadata_filters(
+    team, tier, version, label, _exclude_label = _unpack_metadata_filters(
         filters, "GET /api/jobs/metadata"
     )
     return await storage.list_jobs_with_metadata(
@@ -6915,7 +6924,7 @@ async def api_dashboard_filtered(
     provided, returns all jobs (same as /api/dashboard but with
     metadata attached).
     """
-    team, tier, version, label = _unpack_metadata_filters(
+    team, tier, version, label, exclude_label = _unpack_metadata_filters(
         filters, "GET /api/dashboard/filtered"
     )
     jobs = await list_results_for_dashboard()
@@ -6936,6 +6945,12 @@ async def api_dashboard_filtered(
         # Only include jobs whose job_name matches filtered metadata
         filtered_names = set(metadata_by_name.keys())
         jobs = [j for j in jobs if j.get("job_name", "") in filtered_names]
+
+    if exclude_label:
+        # Get metadata for all jobs that match excluded labels
+        excluded_metadata = await storage.list_jobs_with_metadata(labels=exclude_label)
+        excluded_names = {m["job_name"] for m in excluded_metadata}
+        jobs = [j for j in jobs if j.get("job_name", "") not in excluded_names]
 
     # Attach metadata to each job
     for job in jobs:
