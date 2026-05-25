@@ -538,7 +538,6 @@ export function DashboardPage() {
               <FolderOpen className="h-4 w-4" />
             </button>
           </div>
-          <MetadataClearButton hasFilters={hasMetadataFilters} onClearAll={clearMetadataFilters} />
         </div>
 
         {/* Tag filter chips — only shown when labels exist */}
@@ -548,6 +547,7 @@ export function DashboardPage() {
           excludeLabels={metaExcludeLabels}
           onLabelToggle={handleLabelToggle}
         />
+        <MetadataClearButton hasFilters={hasMetadataFilters} onClearAll={clearMetadataFilters} />
 
         {/* Summary row: count + View Issues */}
         <div className="flex items-center gap-3">

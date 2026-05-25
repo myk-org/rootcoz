@@ -26,16 +26,16 @@ export function MultiSelectFilter({ label, options, selected, onToggle, onClear,
           type="button"
           aria-label={label}
           className={cn(
-            "flex h-9 w-full items-center justify-between rounded-md border border-border-default bg-surface-elevated px-3 py-2 text-sm text-text-primary shadow-sm ring-offset-surface-card placeholder:text-text-tertiary focus:outline-none focus:ring-2 focus:ring-border-accent disabled:cursor-not-allowed disabled:opacity-50 [&>span]:line-clamp-1",
+            "flex h-9 w-full items-center justify-between rounded-full border border-white/10 bg-white/5 px-4 py-2 text-sm text-text-primary ring-offset-surface-card transition-colors hover:bg-white/10 focus:outline-none focus:ring-2 focus:ring-border-accent focus:ring-offset-1 disabled:cursor-not-allowed disabled:opacity-50 [&>span]:line-clamp-1",
             className,
           )}
         >
           <span>{triggerText}</span>
-          <ChevronDown className="h-4 w-4 opacity-50" />
+          <ChevronDown className="h-3.5 w-3.5 opacity-30" />
         </button>
       </PopoverTrigger>
       <PopoverContent
-        className="relative z-50 max-h-96 min-w-[8rem] overflow-hidden rounded-md border border-border-default bg-surface-card p-1 shadow-lg data-[state=open]:animate-fade-in"
+        className="relative z-50 max-h-96 min-w-[8rem] overflow-hidden rounded-xl border border-white/10 bg-surface-card p-1 shadow-lg backdrop-blur-sm data-[state=open]:animate-fade-in"
         align="start"
       >
         {options.map((option) => {
@@ -45,7 +45,7 @@ export function MultiSelectFilter({ label, options, selected, onToggle, onClear,
               key={option}
               type="button"
               onClick={() => onToggle(option)}
-              className="relative flex w-full cursor-default select-none items-center rounded-sm py-1.5 pl-2 pr-8 text-sm text-text-primary outline-none hover:bg-surface-hover"
+              className="relative flex w-full cursor-default select-none items-center rounded-lg py-1.5 pl-3 pr-8 text-sm text-text-primary outline-none hover:bg-white/10"
             >
               {option}
               {isActive && (
@@ -62,7 +62,7 @@ export function MultiSelectFilter({ label, options, selected, onToggle, onClear,
             <button
               type="button"
               onClick={onClear}
-              className="flex w-full cursor-default select-none items-center rounded-sm py-1.5 pl-2 pr-8 text-sm text-text-tertiary outline-none hover:bg-surface-hover"
+              className="flex w-full cursor-default select-none items-center rounded-lg py-1.5 pl-3 pr-8 text-sm text-text-tertiary outline-none hover:bg-white/10"
             >
               Clear all
             </button>
