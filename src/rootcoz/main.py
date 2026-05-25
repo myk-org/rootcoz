@@ -141,6 +141,7 @@ from rootcoz.storage import (
     get_result,
     init_db,
     list_results,
+    list_distinct_job_names,
     list_results_for_dashboard,
     patch_result_json,
     populate_failure_history,
@@ -958,8 +959,10 @@ async def _backfill_job_metadata(rules: list[dict]) -> None:
     """Retroactively assign metadata to existing jobs missing metadata. Best-effort."""
     try:
         # Get all unique job names from results
-        all_jobs = await list_results_for_dashboard(limit=0)
-        job_names = {j.get("job_name", "") for j in all_jobs if j.get("job_name")}
+        job_names = await list_distinct_job_names()
+        logger.info(
+            "Backfill: scanning %d distinct job name(s) for metadata", len(job_names)
+        )
 
         assigned = 0
         for name in job_names:

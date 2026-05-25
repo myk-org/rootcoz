@@ -1881,6 +1881,17 @@ async def count_active_analyses() -> int:
         return row[0] if row else 0
 
 
+async def list_distinct_job_names() -> set[str]:
+    """Return distinct non-empty job names from results. Lightweight query for backfill."""
+    async with _connect_db() as db:
+        cursor = await db.execute(
+            "SELECT DISTINCT json_extract(result_json, '$.job_name') AS job_name "
+            "FROM results WHERE result_json IS NOT NULL"
+        )
+        rows = await cursor.fetchall()
+        return {row[0] for row in rows if row[0]}
+
+
 async def list_results_for_dashboard(
     limit: int = DEFAULT_DASHBOARD_LIMIT,
 ) -> list[dict]:

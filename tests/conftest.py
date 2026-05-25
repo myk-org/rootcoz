@@ -241,5 +241,10 @@ def _mock_sidecar_calls():
             "rootcoz.peer_analysis.get_sidecar_client",
             return_value=mock_client,
         ),
+        patch(
+            "rootcoz.sources.jenkins_source.check_sidecar_available",
+            new_callable=AsyncMock,
+            return_value=(True, "mocked"),
+        ),
     ):
         yield
