@@ -12,6 +12,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select'
+import { MultiSelectFilter } from '@/components/shared/MultiSelectFilter'
 import {
   Table,
   TableBody,
@@ -36,8 +37,7 @@ import { ConfirmDialog } from '@/components/shared/ConfirmDialog'
 import { SortableHeader } from '@/components/shared/SortableHeader'
 import { DateRangeFilter } from '@/components/shared/DateRangeFilter'
 import { useTableSort } from '@/lib/useTableSort'
-import { Trash2, MessageSquare, Check, CheckCircle2, GitFork, AlertTriangle, Github, List, FolderOpen, ChevronRight, ChevronDown } from 'lucide-react'
-import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
+import { Trash2, MessageSquare, CheckCircle2, GitFork, AlertTriangle, Github, List, FolderOpen, ChevronRight } from 'lucide-react'
 import { useAuth } from '@/lib/auth'
 import { useMetadataOptions, MetadataDropdowns, MetadataLabelChips, MetadataClearButton } from '@/components/shared/MetadataFilterBar'
 import { MetadataBadges } from '@/components/shared/MetadataBadges'
@@ -141,17 +141,32 @@ export function DashboardPage() {
   const dateFrom = searchParams.get('date_from') ?? ''
   const dateTo = searchParams.get('date_to') ?? ''
 
-  // Metadata filter state — persisted in URL query params
-  const metaTeam = searchParams.get('team') ?? ''
-  const metaTier = searchParams.get('tier') ?? ''
-  const metaVersion = searchParams.get('version') ?? ''
+  // Metadata filter state — persisted in URL query params (multi-select)
+  const metaTeams = useMemo(() => new Set(searchParams.getAll('team')), [searchParams])
+  const metaTiers = useMemo(() => new Set(searchParams.getAll('tier')), [searchParams])
+  const metaVersions = useMemo(() => new Set(searchParams.getAll('version')), [searchParams])
   const metaLabels = useMemo(() => searchParams.getAll('label'), [searchParams])
   const metaExcludeLabels = useMemo(() => searchParams.getAll('exclude_label'), [searchParams])
-  const setMetaParam = useCallback((key: string, value: string) => {
+
+  const toggleMetaParam = useCallback((key: string, value: string) => {
     setSearchParams((prev) => {
       const next = new URLSearchParams(prev)
-      if (value) next.set(key, value)
-      else next.delete(key)
+      const current = next.getAll(key)
+      next.delete(key)
+      if (current.includes(value)) {
+        for (const v of current) { if (v !== value) next.append(key, v) }
+      } else {
+        for (const v of current) next.append(key, v)
+        next.append(key, value)
+      }
+      return next
+    }, { replace: true })
+  }, [setSearchParams])
+
+  const clearMetaParam = useCallback((key: string) => {
+    setSearchParams((prev) => {
+      const next = new URLSearchParams(prev)
+      next.delete(key)
       return next
     }, { replace: true })
   }, [setSearchParams])
@@ -185,7 +200,7 @@ export function DashboardPage() {
       return next
     }, { replace: true })
   }, [setSearchParams])
-  const hasMetadataFilters = !!(metaTeam || metaTier || metaVersion || metaLabels.length > 0 || metaExcludeLabels.length > 0)
+  const hasMetadataFilters = !!(metaTeams.size > 0 || metaTiers.size > 0 || metaVersions.size > 0 || metaLabels.length > 0 || metaExcludeLabels.length > 0)
   const { options: metadataOptions } = useMetadataOptions()
   const setDateFrom = useCallback((value: string) => {
     setSearchParams((prev) => {
@@ -238,9 +253,9 @@ export function DashboardPage() {
     try {
       let url = '/api/dashboard/filtered'
       const params = new URLSearchParams()
-      if (metaTeam) params.set('team', metaTeam)
-      if (metaTier) params.set('tier', metaTier)
-      if (metaVersion) params.set('version', metaVersion)
+      for (const t of metaTeams) params.append('team', t)
+      for (const t of metaTiers) params.append('tier', t)
+      for (const v of metaVersions) params.append('version', v)
       for (const l of metaLabels) params.append('label', l)
       for (const l of metaExcludeLabels) params.append('exclude_label', l)
       const qs = params.toString()
@@ -259,7 +274,7 @@ export function DashboardPage() {
         setLoading(false)
       }
     }
-  }, [metaTeam, metaTier, metaVersion, metaLabels, metaExcludeLabels])
+  }, [metaTeams, metaTiers, metaVersions, metaLabels, metaExcludeLabels])
 
   const fetchJobsRef = useLatestRef(fetchJobs)
 
@@ -282,7 +297,7 @@ export function DashboardPage() {
       eventSource.close()
     }
   }, [])
-  useEffect(() => { setPage(1) }, [search, selectedStatuses, perPage, dateFrom, dateTo, metaTeam, metaTier, metaVersion, metaLabels, metaExcludeLabels])
+  useEffect(() => { setPage(1) }, [search, selectedStatuses, perPage, dateFrom, dateTo, metaTeams, metaTiers, metaVersions, metaLabels, metaExcludeLabels])
 
   const filtered = useMemo(() => {
     const fromBound = dateFrom ? utcStartOfDateInput(dateFrom) : null
@@ -476,66 +491,24 @@ export function DashboardPage() {
           <SearchInput value={search} onChange={setSearch} placeholder="Filter jobs..." className="w-full sm:w-64" />
           <MetadataDropdowns
             options={metadataOptions}
-            team={metaTeam}
-            tier={metaTier}
-            version={metaVersion}
-            onTeamChange={(v) => setMetaParam('team', v)}
-            onTierChange={(v) => setMetaParam('tier', v)}
-            onVersionChange={(v) => setMetaParam('version', v)}
+            teams={metaTeams}
+            tiers={metaTiers}
+            versions={metaVersions}
+            onTeamToggle={(v) => toggleMetaParam('team', v)}
+            onTierToggle={(v) => toggleMetaParam('tier', v)}
+            onVersionToggle={(v) => toggleMetaParam('version', v)}
+            onTeamClear={() => clearMetaParam('team')}
+            onTierClear={() => clearMetaParam('tier')}
+            onVersionClear={() => clearMetaParam('version')}
           />
-          <Popover>
-            <PopoverTrigger asChild>
-              <button
-                type="button"
-                aria-label="Filter by status"
-                className="flex h-9 w-full sm:w-40 items-center justify-between rounded-full border border-white/10 bg-white/5 px-4 py-2 text-sm text-text-primary ring-offset-surface-card transition-colors hover:bg-white/10 focus:outline-none focus:ring-2 focus:ring-border-accent focus:ring-offset-1 [&>span]:line-clamp-1"
-              >
-                <span>
-                  {selectedStatuses.size === 0
-                    ? 'All statuses'
-                    : selectedStatuses.size === 1
-                      ? [...selectedStatuses][0].charAt(0).toUpperCase() + [...selectedStatuses][0].slice(1)
-                      : `${selectedStatuses.size} statuses`}
-                </span>
-                <ChevronDown className="h-3.5 w-3.5 opacity-30" />
-              </button>
-            </PopoverTrigger>
-            <PopoverContent
-              className="z-50 max-h-96 min-w-[8rem] overflow-hidden rounded-md border border-border-default bg-surface-card p-1 shadow-lg animate-fade-in"
-              align="start"
-            >
-              {STATUS_FILTER_OPTIONS.map((s) => {
-                const isActive = selectedStatuses.has(s)
-                return (
-                  <button
-                    key={s}
-                    type="button"
-                    onClick={() => toggleStatus(s)}
-                    className="relative flex w-full cursor-default select-none items-center rounded-sm py-1.5 pl-2 pr-8 text-sm text-text-primary outline-none hover:bg-surface-hover"
-                  >
-                    {s.charAt(0).toUpperCase() + s.slice(1)}
-                    {isActive && (
-                      <span className="absolute right-2 flex h-3.5 w-3.5 items-center justify-center">
-                        <Check className="h-4 w-4" />
-                      </span>
-                    )}
-                  </button>
-                )
-              })}
-              {selectedStatuses.size > 0 && (
-                <>
-                  <hr className="my-1 border-border-muted" />
-                  <button
-                    type="button"
-                    onClick={() => setSelectedStatuses(new Set())}
-                    className="flex w-full cursor-default select-none items-center rounded-sm py-1.5 pl-2 pr-8 text-sm text-text-tertiary outline-none hover:bg-surface-hover"
-                  >
-                    Clear all
-                  </button>
-                </>
-              )}
-            </PopoverContent>
-          </Popover>
+          <MultiSelectFilter
+            label="All statuses"
+            options={[...STATUS_FILTER_OPTIONS]}
+            selected={selectedStatuses}
+            onToggle={toggleStatus}
+            onClear={() => setSelectedStatuses(new Set())}
+            className="w-full sm:w-40"
+          />
           <DateRangeFilter from={dateFrom} to={dateTo} onFromChange={setDateFrom} onToChange={setDateTo} onClear={clearDates} />
           <Select value={String(perPage)} onValueChange={(v) => setPerPage(Number(v))}>
             <SelectTrigger aria-label="Rows per page" className="w-full sm:w-20">
