@@ -41,7 +41,6 @@ export default defineConfig({
       '/history': createSpaProxy(),
       '/status': createSpaProxy(),
       '/health': BACKEND_URL,
-      '/ai-configs': BACKEND_URL,
     },
   },
 })

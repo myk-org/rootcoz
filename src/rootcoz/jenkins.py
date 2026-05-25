@@ -90,7 +90,9 @@ class JenkinsClient(jenkins.Jenkins):
         try:
             return self.get_build_test_report(job_name, build_number)
         except jenkins.NotFoundException:
-            # No test report available (404)
+            logger.debug(
+                "No test report found for %s #%s (404)", job_name, build_number
+            )
             return None
         except jenkins.JenkinsException as err:
             logger.warning(

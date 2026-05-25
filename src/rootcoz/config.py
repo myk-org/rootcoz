@@ -4,7 +4,7 @@ import os
 from functools import lru_cache
 from urllib.parse import urlsplit, urlunsplit
 
-from ai_cli_runner import VALID_AI_PROVIDERS
+from rootcoz.ai_client import VALID_AI_PROVIDERS
 from pydantic import Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from simple_logger.logger import get_logger
@@ -15,15 +15,43 @@ from rootcoz.vapid import get_vapid_config
 logger = get_logger(name=__name__, level=os.environ.get("LOG_LEVEL", "INFO"))
 
 
+def _split_outside_brackets(raw: str) -> list[str]:
+    """Split string on commas that are not inside square brackets."""
+    parts: list[str] = []
+    current: list[str] = []
+    depth = 0
+    for ch in raw:
+        if ch == "[":
+            depth += 1
+            current.append(ch)
+        elif ch == "]":
+            depth -= 1
+            if depth < 0:
+                raise ValueError("Unmatched closing bracket in peer config")
+            current.append(ch)
+        elif ch == "," and depth == 0:
+            parts.append("".join(current))
+            current = []
+        else:
+            current.append(ch)
+    if depth != 0:
+        raise ValueError("Unmatched opening bracket in peer config")
+    parts.append("".join(current))
+    return parts
+
+
 def parse_peer_configs(raw: str) -> list[dict]:
     """Parse 'provider:model,provider:model' into list of dicts.
+
+    Model names may contain commas inside square brackets
+    (e.g. ``cursor:gpt-5.4[context=272k,reasoning=medium]``).
 
     Raises ValueError on malformed input. Empty string returns [].
     """
     if not raw or not raw.strip():
         return []
     result = []
-    for i, entry in enumerate(raw.split(",")):
+    for i, entry in enumerate(_split_outside_brackets(raw)):
         entry = entry.strip()
         if not entry:
             raise ValueError(f"Empty entry at position {i + 1} in peer config: '{raw}'")
@@ -200,10 +228,10 @@ class Settings(BaseSettings):
         description="Enable Jira bug creation. When None, defaults to enabled. Independent of enable_jira.",
     )
 
-    # AI CLI timeout in minutes
-    ai_cli_timeout: int = Field(default=10, gt=0)
+    # AI timeout in minutes
+    ai_call_timeout: int = Field(default=10, gt=0)
 
-    # Max concurrent AI CLI calls
+    # Max concurrent AI calls
     max_concurrent_ai_calls: int = Field(default=3, gt=0)
 
     # Peer analysis configuration

@@ -6,7 +6,7 @@ import { parseApiTimestamp, isAnalysisTimeout, formatDuration, formatTimestamp }
 import { buildRepoUrls, type RepoUrl } from '@/lib/autoLink'
 import { groupFailures } from '@/lib/grouping'
 import { useExpandCollapseAll } from '@/lib/useExpandCollapseAll'
-import type { ResultResponse, CommentsAndReviews, AiConfig } from '@/types'
+import type { ResultResponse, CommentsAndReviews, AiModelsResponse } from '@/types'
 import { ReportProvider, useReportState, useReportDispatch, useRefreshEnrichments } from './report/ReportContext'
 import { FailureCard } from './report/FailureCard'
 import { ChildJobSection } from './report/ChildJobSection'
@@ -170,16 +170,16 @@ function ReportContent() {
         fetchComments(jobId)
 
         // AI configs and classifications are best-effort
-        const [aiConfigsResult, classificationsResult] = await Promise.allSettled([
-          api.get<AiConfig[]>('/ai-configs'),
+        const [aiModelsResult, classificationsResult] = await Promise.allSettled([
+          api.get<AiModelsResponse>('/api/ai-models'),
           api.get<{ classifications: Array<{ test_name: string; classification: string; job_name: string; parent_job_name: string; reason: string; references_info: string; created_by: string; job_id: string; child_build_number: number; created_at: string }> }>(
             `/history/classifications?job_id=${jobId}`,
           ),
         ])
         if (cancelled) return
 
-        if (aiConfigsResult.status === 'fulfilled') {
-          dispatch({ type: 'SET_AI_CONFIGS', payload: aiConfigsResult.value })
+        if (aiModelsResult.status === 'fulfilled') {
+          dispatch({ type: 'SET_AI_MODELS', payload: aiModelsResult.value.providers ?? {} })
         }
         if (classificationsResult.status === 'fulfilled') {
           const classMap: Record<string, string> = {}

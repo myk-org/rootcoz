@@ -3,16 +3,6 @@ revision = 3
 requires-python = ">=3.12"
 
 [[package]]
-name = "ai-cli-runner"
-version = "0.4.0"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "httpx" },
-    { name = "python-simple-logger" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/b9/d8/7e407155a39351c4ecf6592195c6e22718fc79eb1db1d4963071d0043c09/ai_cli_runner-0.4.0.tar.gz", hash = "sha256:f4051a79cd2bf220f665dbd86421cc60aa1422ad6075940706c1f430fb3c0105", size = 47905, upload-time = "2026-05-13T04:19:02.173Z" }
-
-[[package]]
 name = "aiohappyeyeballs"
 version = "2.6.1"
 source = { registry = "https://pypi.org/simple" }
@@ -736,6 +726,16 @@ wheels = [
 ]
 
 [[package]]
+name = "pi-sidecar-client"
+version = "1.0.5"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "httpx" },
+    { name = "python-simple-logger" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/8a/58/d47b2d3670eb34e73d3a2bce912bb783756d72f5ff789c8dde831103af73/pi_sidecar_client-1.0.5.tar.gz", hash = "sha256:eb816caea285f3848dc7741e16eef3d155dee87cc1af9f606ff68e1c01990769", size = 11770, upload-time = "2026-05-20T17:57:45.106Z" }
+
+[[package]]
 name = "pluggy"
 version = "1.6.0"
 source = { registry = "https://pypi.org/simple" }
@@ -1151,13 +1151,13 @@ name = "rootcoz"
 version = "4.1.0"
 source = { editable = "." }
 dependencies = [
-    { name = "ai-cli-runner" },
     { name = "aiosqlite" },
     { name = "cryptography" },
     { name = "defusedxml" },
     { name = "fastapi" },
     { name = "gitpython" },
     { name = "httpx" },
+    { name = "pi-sidecar-client" },
     { name = "pydantic-settings" },
     { name = "python-jenkins" },
     { name = "python-multipart" },
@@ -1183,13 +1183,13 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "ai-cli-runner", specifier = ">=0.4.0" },
     { name = "aiosqlite" },
     { name = "cryptography", specifier = ">=46.0.5" },
     { name = "defusedxml", specifier = ">=0.7.1" },
     { name = "fastapi" },
     { name = "gitpython" },
     { name = "httpx" },
+    { name = "pi-sidecar-client", specifier = ">=1.0.4" },
     { name = "pydantic-settings" },
     { name = "pytest", marker = "extra == 'tests'" },
     { name = "pytest-asyncio", marker = "extra == 'tests'" },

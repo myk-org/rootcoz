@@ -1006,7 +1006,7 @@ class TestAnalyzeAllOptions:
         "cli_flag,cli_value,body_key,expected_value",
         [
             ("--jira-max-results", "25", "jira_max_results", 25),
-            ("--ai-cli-timeout", "10", "ai_cli_timeout", 10),
+            ("--ai-call-timeout", "10", "ai_call_timeout", 10),
             (
                 "--jenkins-artifacts-max-size-mb",
                 "50",
@@ -1149,34 +1149,6 @@ class TestCapabilitiesCommand:
         assert data["github_issues_enabled"] is True
         assert data["jira_issues_enabled"] is False
         mock_client.capabilities.assert_called_once()
-
-
-class TestAiConfigsCommand:
-    def test_ai_configs(self, mock_client):
-        mock_client.get_ai_configs.return_value = [
-            {"ai_provider": "claude", "ai_model": "opus-4"},
-            {"ai_provider": "gemini", "ai_model": "2.5-pro"},
-        ]
-        result = runner.invoke(app, ["ai-configs"])
-        assert result.exit_code == 0
-        assert "claude" in result.output
-        assert "opus-4" in result.output
-
-    def test_ai_configs_json(self, mock_client):
-        mock_client.get_ai_configs.return_value = [
-            {"ai_provider": "claude", "ai_model": "opus-4"},
-        ]
-        result = runner.invoke(app, ["ai-configs", "--json"])
-        assert result.exit_code == 0
-        parsed = json.loads(result.output)
-        assert isinstance(parsed, list)
-        assert parsed[0]["ai_provider"] == "claude"
-
-    def test_ai_configs_empty(self, mock_client):
-        mock_client.get_ai_configs.return_value = []
-        result = runner.invoke(app, ["ai-configs"])
-        assert result.exit_code == 0
-        assert "No AI configurations found" in result.output
 
 
 class TestAiModelsCommand:
@@ -1969,7 +1941,7 @@ class TestAnalyzeConfigDefaults:
         tests_repo_url="https://github.com/cfg/tests",
         ai_provider="gemini",
         ai_model="2.5-pro",
-        ai_cli_timeout=20,
+        ai_call_timeout=20,
         max_concurrent_ai_calls=5,
         jira_url="https://jira.cfg.local",
         jira_email="cfg@example.com",
@@ -2026,7 +1998,7 @@ class TestAnalyzeConfigDefaults:
         )
         assert result.exit_code == 0
         kwargs = client.analyze.call_args[1]
-        assert kwargs["ai_cli_timeout"] == 20
+        assert kwargs["ai_call_timeout"] == 20
         assert kwargs["max_concurrent_ai_calls"] == 5
         assert kwargs["jira_max_results"] == 40
         assert kwargs["jenkins_timeout"] == 45
@@ -2080,7 +2052,7 @@ class TestAnalyzeConfigDefaults:
                 "my-job",
                 "--build-number",
                 "1",
-                "--ai-cli-timeout",
+                "--ai-call-timeout",
                 "99",
                 "--jira-max-results",
                 "5",
@@ -2088,7 +2060,7 @@ class TestAnalyzeConfigDefaults:
         )
         assert result.exit_code == 0
         kwargs = client.analyze.call_args[1]
-        assert kwargs["ai_cli_timeout"] == 99
+        assert kwargs["ai_call_timeout"] == 99
         assert kwargs["jira_max_results"] == 5
 
     def test_cli_flags_override_config_bool_fields(self):

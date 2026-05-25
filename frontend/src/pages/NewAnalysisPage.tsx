@@ -1,4 +1,6 @@
-import { useState, useCallback, useRef, useEffect } from 'react'
+import { useState, useCallback, useRef } from 'react'
+import { useProviderModels } from '@/lib/useProviderModels'
+import { usePeerModels } from '@/lib/usePeerModels'
 import { useNavigate } from 'react-router-dom'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -10,19 +12,17 @@ import {
   SelectValue,
 } from '@/components/ui/select'
 import { api } from '@/lib/api'
-import type { AiConfig } from '@/types'
+import { toIntInRange } from '@/lib/utils'
 import { Section } from '@/components/shared/Section'
 import { Toggle } from '@/components/shared/Toggle'
 import { FieldLabel } from '@/components/shared/FieldLabel'
 import { ModelCombobox } from '@/components/shared/ModelCombobox'
 import type { ModelOption } from '@/components/shared/ModelCombobox'
-import { Plus, Trash2, Send, Upload } from 'lucide-react'
-
-function toIntInRange(value: string, min: number, max: number, fallback: number): number {
-  const n = Number(value)
-  if (!value || Number.isNaN(n)) return fallback
-  return Math.max(min, Math.min(max, Math.floor(n)))
-}
+import { PeerConfigList } from '@/components/shared/PeerConfigList'
+import type { PeerConfigWithId } from '@/components/shared/PeerConfigList'
+import { AdditionalReposList } from '@/components/shared/AdditionalReposList'
+import type { RepoWithId } from '@/components/shared/AdditionalReposList'
+import { Send, Upload } from 'lucide-react'
 
 export function NewAnalysisPage() {
   const navigate = useNavigate()
@@ -47,22 +47,17 @@ export function NewAnalysisPage() {
   // AI configuration
   const [aiProvider, setAiProvider] = useState('claude')
   const [aiModel, setAiModel] = useState('')
-  const [availableModels, setAvailableModels] = useState<ModelOption[]>([])
-  const [aiCliTimeout, setAiCliTimeout] = useState<number | undefined>(undefined)
+  const [aiCallTimeout, setAiCallTimeout] = useState<number | undefined>(undefined)
   const [rawPrompt, setRawPrompt] = useState('')
 
   // Peer analysis
   const [enablePeers, setEnablePeers] = useState(false)
-  const [peerConfigs, setPeerConfigs] = useState<Array<AiConfig & { id: string }>>([])
+  const [peerConfigs, setPeerConfigs] = useState<PeerConfigWithId[]>([])
   const [maxRounds, setMaxRounds] = useState(3)
-  const [peerModels, setPeerModels] = useState<Record<string, ModelOption[]>>({})
-
   // Source repositories
   const [testsRepoUrl, setTestsRepoUrl] = useState('')
   const [testsRepoRef, setTestsRepoRef] = useState('')
-  const [additionalRepos, setAdditionalRepos] = useState<
-    Array<{ id: string; name: string; url: string; ref: string }>
-  >([])
+  const [additionalRepos, setAdditionalRepos] = useState<RepoWithId[]>([])
 
   // Jira integration
   const [enableJira, setEnableJira] = useState(true)
@@ -80,30 +75,8 @@ export function NewAnalysisPage() {
 
   const fileInputRef = useRef<HTMLInputElement>(null)
 
-  // Fetch available models when provider changes
-  useEffect(() => {
-    if (!aiProvider) { setAvailableModels([]); return }
-    let ignore = false
-    setAvailableModels([])
-    api.get<{ models: ModelOption[] }>(`/api/ai-models?provider=${aiProvider}`)
-      .then(res => { if (!ignore) setAvailableModels(res.models ?? []) })
-      .catch(() => { if (!ignore) setAvailableModels([]) })
-    return () => { ignore = true }
-  }, [aiProvider])
-
-  // Fetch models for each peer provider
-  useEffect(() => {
-    if (!enablePeers) return
-    peerConfigs.forEach((peer) => {
-      if (!peer.ai_provider) {
-        setPeerModels(prev => ({ ...prev, [peer.id]: [] }))
-        return
-      }
-      api.get<{ models: ModelOption[] }>(`/api/ai-models?provider=${peer.ai_provider}`)
-        .then(res => setPeerModels(prev => ({ ...prev, [peer.id]: res.models ?? [] })))
-        .catch(() => setPeerModels(prev => ({ ...prev, [peer.id]: [] })))
-    })
-  }, [enablePeers, peerConfigs.map(p => p.ai_provider).join(',')])
+  const availableModels = useProviderModels(aiProvider)
+  const peerModels = usePeerModels(peerConfigs, enablePeers)
 
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState('')
@@ -143,7 +116,7 @@ export function NewAnalysisPage() {
       const commonFields: Record<string, unknown> = {
         ai_provider: aiProvider,
         ...(aiModel && { ai_model: aiModel }),
-        ...(aiCliTimeout !== undefined && { ai_cli_timeout: aiCliTimeout }),
+        ...(aiCallTimeout !== undefined && { ai_call_timeout: aiCallTimeout }),
         ...(rawPrompt && { raw_prompt: rawPrompt }),
         enable_jira: enableJira,
         ...(jiraUrl && { jira_url: jiraUrl }),
@@ -209,7 +182,7 @@ export function NewAnalysisPage() {
     waitForCompletion,
     pollInterval,
     maxWait,
-    aiCliTimeout,
+    aiCallTimeout,
     rawPrompt,
     jenkinsUrl,
     jenkinsUser,
@@ -423,13 +396,13 @@ export function NewAnalysisPage() {
                 </Select>
               </div>
               <div className="space-y-1.5">
-                <FieldLabel>AI CLI Timeout</FieldLabel>
+                <FieldLabel>AI Call Timeout</FieldLabel>
                 <Input
                   type="number"
                   min={1}
-                  value={aiCliTimeout ?? ''}
+                  value={aiCallTimeout ?? ''}
                   placeholder="10"
-                  onChange={(e) => setAiCliTimeout(e.target.value ? toIntInRange(e.target.value, 1, 3600, 1) : undefined)}
+                  onChange={(e) => setAiCallTimeout(e.target.value ? toIntInRange(e.target.value, 1, 3600, 1) : undefined)}
                 />
               </div>
             </div>
@@ -467,78 +440,13 @@ export function NewAnalysisPage() {
               }} label="Enable peer review" />
             </div>
             {enablePeers && (
-              <>
-                <div className="space-y-2">
-                  {peerConfigs.map((peer, i) => (
-                    <div
-                      key={peer.id}
-                      className="bg-surface-elevated border border-border-default rounded-lg p-2.5 flex items-center gap-2"
-                    >
-                      <Select
-                        value={peer.ai_provider}
-                        onValueChange={(v) =>
-                          setPeerConfigs((prev) =>
-                            prev.map((p) => (p.id === peer.id ? { ...p, ai_provider: v } : p))
-                          )
-                        }
-                      >
-                        <SelectTrigger className="w-[120px]">
-                          <SelectValue />
-                        </SelectTrigger>
-                        <SelectContent>
-                          <SelectItem value="claude">Claude</SelectItem>
-                          <SelectItem value="gemini">Gemini</SelectItem>
-                          <SelectItem value="cursor">Cursor</SelectItem>
-                        </SelectContent>
-                      </Select>
-                      <ModelCombobox
-                        value={peer.ai_model}
-                        onChange={(val) =>
-                          setPeerConfigs((prev) =>
-                            prev.map((p) =>
-                              p.id === peer.id ? { ...p, ai_model: val } : p
-                            )
-                          )
-                        }
-                        options={peerModels[peer.id] ?? []}
-                        placeholder="Model"
-                      />
-                      <button
-                        type="button"
-                        aria-label={`Remove peer ${i + 1}`}
-                        className="p-1 rounded hover:bg-surface-hover text-text-tertiary hover:text-signal-red transition flex-shrink-0"
-                        onClick={() => setPeerConfigs((prev) => prev.filter((p) => p.id !== peer.id))}
-                      >
-                        <Trash2 className="h-3.5 w-3.5" />
-                      </button>
-                    </div>
-                  ))}
-                </div>
-                <button
-                  type="button"
-                  className="text-xs text-text-link hover:text-signal-blue font-medium flex items-center gap-1"
-                  onClick={() =>
-                    setPeerConfigs((prev) => [
-                      ...prev,
-                      { id: crypto.randomUUID(), ai_provider: 'claude', ai_model: '' },
-                    ])
-                  }
-                >
-                  <Plus className="h-3.5 w-3.5" />
-                  Add Peer
-                </button>
-                <div className="space-y-1.5">
-                  <FieldLabel>Max Rounds</FieldLabel>
-                  <Input
-                    type="number"
-                    min={1}
-                    max={10}
-                    value={maxRounds}
-                    onChange={(e) => setMaxRounds(toIntInRange(e.target.value, 1, 10, 1))}
-                    className="w-24"
-                  />
-                </div>
-              </>
+              <PeerConfigList
+                peerConfigs={peerConfigs}
+                setPeerConfigs={setPeerConfigs}
+                peerModels={peerModels}
+                maxRounds={maxRounds}
+                setMaxRounds={setMaxRounds}
+              />
             )}
           </Section>
 
@@ -566,74 +474,7 @@ export function NewAnalysisPage() {
             </div>
             <div className="space-y-2">
               <FieldLabel>Additional Repositories</FieldLabel>
-              {additionalRepos.map((repo) => (
-                <div
-                  key={repo.id}
-                  className="bg-surface-elevated border border-border-default rounded-lg p-2.5 space-y-2"
-                >
-                  <div className="flex items-center gap-2">
-                    <Input
-                      className="w-32"
-                      placeholder="Name"
-                      value={repo.name}
-                      onChange={(e) =>
-                        setAdditionalRepos((prev) =>
-                          prev.map((r) =>
-                            r.id === repo.id ? { ...r, name: e.target.value } : r
-                          )
-                        )
-                      }
-                    />
-                    <Input
-                      className="flex-1"
-                      placeholder="URL"
-                      value={repo.url}
-                      onChange={(e) =>
-                        setAdditionalRepos((prev) =>
-                          prev.map((r) =>
-                            r.id === repo.id ? { ...r, url: e.target.value } : r
-                          )
-                        )
-                      }
-                    />
-                    <Input
-                      className="w-24"
-                      placeholder="Ref"
-                      value={repo.ref}
-                      onChange={(e) =>
-                        setAdditionalRepos((prev) =>
-                          prev.map((r) =>
-                            r.id === repo.id ? { ...r, ref: e.target.value } : r
-                          )
-                        )
-                      }
-                    />
-                    <button
-                      type="button"
-                      aria-label={`Remove repository ${repo.name || repo.id}`}
-                      className="p-1 rounded hover:bg-surface-hover text-text-tertiary hover:text-signal-red transition flex-shrink-0"
-                      onClick={() =>
-                        setAdditionalRepos((prev) => prev.filter((r) => r.id !== repo.id))
-                      }
-                    >
-                      <Trash2 className="h-3.5 w-3.5" />
-                    </button>
-                  </div>
-                </div>
-              ))}
-              <button
-                type="button"
-                className="text-xs text-text-link hover:text-signal-blue font-medium flex items-center gap-1"
-                onClick={() =>
-                  setAdditionalRepos((prev) => [
-                    ...prev,
-                    { id: crypto.randomUUID(), name: '', url: '', ref: '' },
-                  ])
-                }
-              >
-                <Plus className="h-3.5 w-3.5" />
-                Add Repository
-              </button>
+              <AdditionalReposList repos={additionalRepos} setRepos={setAdditionalRepos} />
             </div>
           </Section>
 

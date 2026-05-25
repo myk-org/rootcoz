@@ -69,7 +69,8 @@ def _parse_session_ttl() -> int:
     try:
         value = int(raw)
         return max(1, value)
-    except ValueError:
+    except ValueError as e:
+        logger.warning("Invalid SESSION_TTL_HOURS value, using default 720h: %s", e)
         return 24 * 30
 
 
@@ -2685,34 +2686,6 @@ async def mark_stale_results_failed() -> list[dict]:
     return waiting_jobs
 
 
-async def get_ai_configs() -> list[dict]:
-    """Get distinct AI provider/model pairs from completed analysis results.
-
-    Queries the results table for unique (ai_provider, ai_model) combinations
-    from successfully completed analyses. These represent known-working configs.
-
-    Returns:
-        List of dicts with 'ai_provider' and 'ai_model' keys.
-    """
-    async with _connect_db() as db:
-        cursor = await db.execute(
-            """
-            SELECT DISTINCT
-                json_extract(result_json, '$.ai_provider') as ai_provider,
-                json_extract(result_json, '$.ai_model') as ai_model
-            FROM results
-            WHERE status = 'completed'
-              AND json_extract(result_json, '$.ai_provider') IS NOT NULL
-              AND json_extract(result_json, '$.ai_provider') != ''
-              AND json_extract(result_json, '$.ai_model') IS NOT NULL
-              AND json_extract(result_json, '$.ai_model') != ''
-            ORDER BY ai_provider, ai_model
-            """
-        )
-        rows = await cursor.fetchall()
-        return [{"ai_provider": row[0], "ai_model": row[1]} for row in rows]
-
-
 # --- Auth storage functions ---
 
 
@@ -3233,7 +3206,8 @@ def _job_metadata_row_to_dict(row) -> dict:
     try:
         parsed = json.loads(labels_raw) if labels_raw else []
         d["labels"] = parsed if isinstance(parsed, list) else []
-    except (json.JSONDecodeError, TypeError):
+    except (json.JSONDecodeError, TypeError) as e:
+        logger.debug("Failed to parse labels JSON, defaulting to empty: %s", e)
         d["labels"] = []
     return d
 
@@ -3447,7 +3421,7 @@ async def record_token_usage(
     prompt_chars: int = 0,
     response_chars: int = 0,
 ) -> str:
-    """Record a single AI CLI call's token usage. Returns the record ID."""
+    """Record a single AI call's token usage. Returns the record ID."""
     record_id = str(uuid.uuid4())
     total_tokens = input_tokens + output_tokens
     async with _connect_db() as db:

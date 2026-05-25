@@ -120,13 +120,13 @@ class BaseAnalysisRequest(BaseModel):
         default=None,
         description="Enable Jira bug search (default: true when Jira is configured, set false to skip)",
     )
-    ai_cli_timeout: Annotated[int, Field(gt=0)] | None = Field(
+    ai_call_timeout: Annotated[int, Field(gt=0)] | None = Field(
         default=None,
-        description="AI CLI timeout in minutes (overrides AI_CLI_TIMEOUT env var)",
+        description="AI timeout in minutes (overrides AI_CALL_TIMEOUT env var)",
     )
     max_concurrent_ai_calls: Annotated[int, Field(gt=0)] | None = Field(
         default=None,
-        description="Max concurrent AI CLI calls (overrides MAX_CONCURRENT_AI_CALLS env var)",
+        description="Max concurrent AI calls (overrides MAX_CONCURRENT_AI_CALLS env var)",
     )
     jira_url: str | None = Field(
         default=None,
@@ -507,7 +507,7 @@ class ChildJobAnalysis(BaseModel):
 
 
 class TokenUsageEntry(BaseModel):
-    """Token usage for a single AI CLI call."""
+    """Token usage for a single AI call."""
 
     provider: str = ""
     model: str = ""
@@ -867,7 +867,7 @@ class ReAnalyzeFailureRequest(BaseModel):
 
     ai_provider: str | None = None
     ai_model: str | None = None
-    ai_cli_timeout: int | None = None
+    ai_call_timeout: int | None = None
     raw_prompt: str | None = None
     peer_ai_configs: list[dict] | None = None
     peer_analysis_max_rounds: int | None = None

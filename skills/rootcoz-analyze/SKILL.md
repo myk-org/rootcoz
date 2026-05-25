@@ -115,7 +115,7 @@ rootcoz --server <server> results review-status <job_id>
 | `rootcoz results enrich-comments <job_id>` | Refresh comment enrichments |
 | `rootcoz health` | Check server health |
 | `rootcoz capabilities` | Show server automation features |
-| `rootcoz ai-configs` | List known AI provider/model pairs |
+| `rootcoz ai-models [provider]` | List available AI models (optionally filter by provider) |
 | `rootcoz history search` | Search failure history |
 | `rootcoz history test <name>` | Get test failure history |
 | `rootcoz history stats` | Get failure statistics |

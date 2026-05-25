@@ -310,93 +310,67 @@ def validate_and_extract_archive(
     return extract_dir
 
 
-def _discover_files(extract_path: Path) -> list[tuple[str, int]]:
-    """Discover files in extracted archive.
+def _extract_nested_archives(
+    root_dir: Path, max_size_mb: int = 500, max_depth: int = 5
+) -> int:
+    """Recursively extract archives found inside extracted directories.
+
+    Walks the directory, extracts any archive files found, deletes the
+    archive after successful extraction, and repeats until no more
+    archives are found or max_depth is reached.
 
     Returns:
-        List of (relative_path, size_in_bytes) tuples.
+        Total number of nested archives extracted.
     """
-    all_files: list[tuple[str, int]] = []
-
-    for file_path in extract_path.rglob("*"):
-        if not file_path.is_file():
-            continue
-        relative = str(file_path.relative_to(extract_path))
-        try:
-            size = file_path.stat().st_size
-        except OSError:
-            size = 0
-        all_files.append((relative, size))
-
-    return all_files
-
-
-def build_artifacts_context(extract_path: Path) -> str:
-    """Walk an extracted archive directory and build a structured artifacts summary."""
-    logger.info(f"Building artifacts context from {extract_path}")
-
-    all_files = _discover_files(extract_path)
-    total_size = sum(size for _, size in all_files)
-    total_size_mb = total_size / (1024 * 1024)
-
-    logger.info(
-        f"Archive file discovery: {len(all_files)} total files ({total_size_mb:.1f} MB)"
-    )
-
-    # Build the structured context
-    sections: list[str] = [
-        "=== BUILD ARTIFACTS CONTEXT ===",
-        f"Artifacts directory: {extract_path}",
-        "Also accessible at: build-artifacts/ (or current working directory if no test repo)",
-        f"Contains {len(all_files)} files ({total_size_mb:.1f} MB total).",
-        "",
-        "IMPORTANT: You MUST explore the build-artifacts/ directory (or the absolute path above).",
-        "The index below lists paths and sizes. Read files under the artifacts directory for full content.",
-        "",
-    ]
-
-    # Aggregate per-directory stats in a single pass
-    dir_stats: dict[str, tuple[int, int]] = {}  # dir -> (count, total_size)
-    root_files: list[tuple[str, int]] = []
-    for path, size in all_files:
-        parent = str(Path(path).parent)
-        if parent == ".":
-            root_files.append((path, size))
-        else:
-            count, total = dir_stats.get(parent, (0, 0))
-            dir_stats[parent] = (count + 1, total + size)
-
-    if dir_stats or root_files:
-        sections.append("--- Directory Structure ---")
-        for d in sorted(dir_stats):
-            file_count, dir_size = dir_stats[d]
-            if dir_size >= 1024 * 1024:
-                sections.append(
-                    f"  {d}/ ({file_count} files, {dir_size / (1024 * 1024):.1f} MB)"
+    total_extracted = 0
+    for depth in range(1, max_depth + 1):
+        archives = [
+            f for f in root_dir.rglob("*") if f.is_file() and _is_archive(f.name)
+        ]
+        if not archives:
+            break
+        logger.debug(
+            "Nested archive scan depth %d: found %d archive(s)", depth, len(archives)
+        )
+        for archive_path in archives:
+            relative = archive_path.relative_to(root_dir)
+            extract_subdir = archive_path.parent / _strip_archive_extension(
+                archive_path.name
+            )
+            try:
+                max_bytes = max_size_mb * 1024 * 1024
+                archive_size = archive_path.stat().st_size
+                if archive_size > max_bytes:
+                    logger.debug(
+                        "Skipping nested archive %s: size %.1f MB exceeds limit %d MB",
+                        relative,
+                        archive_size / (1024 * 1024),
+                        max_size_mb,
+                    )
+                    continue
+                data = archive_path.read_bytes()
+                result = validate_and_extract_archive(
+                    data, max_size_mb, extract_dir=extract_subdir
                 )
-            elif dir_size >= 1024:
-                sections.append(
-                    f"  {d}/ ({file_count} files, {dir_size / 1024:.1f} KB)"
-                )
-            else:
-                sections.append(f"  {d}/ ({file_count} files, {dir_size} B)")
-        if root_files:
-            for path, size in root_files:
-                if size >= 1024:
-                    sections.append(f"  {path} ({size / 1024:.1f} KB)")
+                if result is not None:
+                    logger.debug(
+                        "Extracted nested archive: %s -> %s", relative, extract_subdir
+                    )
+                    archive_path.unlink()
+                    total_extracted += 1
                 else:
-                    sections.append(f"  {path} ({size} B)")
-        sections.append("")
+                    logger.debug("Could not extract nested archive: %s", relative)
+            except Exception as exc:
+                logger.debug("Failed to extract nested archive %s: %s", relative, exc)
+    if total_extracted:
+        logger.info("Extracted %d nested archive(s)", total_extracted)
+    return total_extracted
 
-    sections.append(f"--- Full artifacts available at: {extract_path} ---")
-    sections.append(
-        "Explore the build-artifacts/ directory (or current working"
-        " directory) for complete evidence before classifying."
-    )
 
-    context = "\n".join(sections)
-    logger.info(f"Artifacts context built: {len(context)} chars")
-    return context
+def get_artifacts_path(extract_path: Path) -> str:
+    """Return the artifacts directory path for the AI to explore with tools."""
+    logger.info(f"Build artifacts available at {extract_path}")
+    return str(extract_path)
 
 
 def process_build_artifacts(
@@ -454,7 +428,11 @@ def process_build_artifacts(
         logger.info(
             f"Downloaded and stored {downloaded}/{len(artifact_list)} artifacts"
         )
-        context = build_artifacts_context(artifacts_dir)
+
+        # Recursively extract any nested archives and delete the archive files
+        _extract_nested_archives(artifacts_dir, max_size_mb)
+
+        context = get_artifacts_path(artifacts_dir)
         return context, artifacts_dir
 
     except Exception:

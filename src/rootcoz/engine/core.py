@@ -1,7 +1,7 @@
 """Core analysis engine — CI-agnostic failure analysis logic.
 
 This module contains the CI-agnostic functions for analyzing test failures,
-including AI CLI orchestration, prompt building, JSON response parsing,
+including AI orchestration, prompt building, JSON response parsing,
 and failure grouping/deduplication. It is independent of any specific CI
 system.
 """
@@ -12,13 +12,14 @@ import importlib
 import json
 import os
 import re
+from collections.abc import Callable
 from pathlib import Path
 
-from ai_cli_runner import AIResult, call_ai_cli
 from simple_logger.logger import get_logger
 
 from rootcoz.config import Settings, parse_additional_repos
 from rootcoz.logging_context import get_log_file
+from pi_sidecar_client import AIResult, call_ai_once
 from rootcoz.models import (
     AdditionalRepo,
     AiConfigEntry,
@@ -31,7 +32,6 @@ from rootcoz.models import (
 )
 from rootcoz.repository import RepositoryManager
 from rootcoz.storage import update_progress_phase
-from rootcoz.token_tracking import record_ai_usage
 
 _log_file = get_log_file()
 
@@ -101,12 +101,29 @@ async def clone_additional_repos(
     return cloned, repo_path
 
 
+# Module-level callback for SSE notifications.
+# main.py registers this at startup to avoid circular imports.
+_on_progress_updated: Callable[[str], None] | None = None
+
+
+def set_progress_callback(callback: Callable[[str], None]) -> None:
+    """Register a callback invoked after each progress update.
+
+    Args:
+        callback: Function that takes a job_id and notifies SSE listeners.
+    """
+    global _on_progress_updated
+    _on_progress_updated = callback
+
+
 async def safe_update_progress(job_id: str | None, phase: str) -> None:
     """Best-effort progress update; failures are swallowed and logged."""
     if not job_id:
         return
     try:
         await update_progress_phase(job_id, phase)
+        if _on_progress_updated:
+            _on_progress_updated(job_id)
     except Exception:
         logger.debug("Failed to update progress phase", exc_info=True)
 
@@ -140,124 +157,12 @@ JOB_INSIGHT_FAILURE_HISTORY_PROMPT_FILENAME = (
 )
 
 
-# CLI flags that were previously hardcoded in provider command builders.
-# The ai-cli-runner package handles structural flags (-p for claude, --print
-# for cursor) internally; these are the extra per-provider flags.
-PROVIDER_CLI_FLAGS: dict[str, list[str]] = {
-    "claude": ["--dangerously-skip-permissions"],
-    "gemini": ["--yolo"],
-    "cursor": ["--force"],
-}
-
-# Known transient AI CLI errors that are retried (up to max_retries times).
-# Add new patterns here when new transient failures are discovered.
-RETRYABLE_AI_CLI_PATTERNS: list[str] = [
-    "ENOENT: no such file or directory",  # Cursor CLI config race condition
-]
-
 # Pattern for error detection in console output (word boundaries, case-insensitive)
 CONSOLE_ERROR_PATTERN = re.compile(
     r"\b(?:errors?|fail(?:ed|ures?)?|tracebacks?|warn(?:ings?)?|critical|fatal|assert(?:ion)?(?:error)?s?)\b"
     r"|(?:^|[\s\[])[A-Za-z_][\w.]*?(?:error|exception)(?=[:\s\]]|$)",
     re.IGNORECASE,
 )
-
-
-async def call_ai_and_record(
-    prompt: str,
-    *,
-    job_id: str,
-    call_type: str,
-    cwd: Path | None = None,
-    ai_provider: str = "",
-    ai_model: str = "",
-    ai_cli_timeout: int | None = None,
-    cli_flags: list[str] | None = None,
-) -> tuple[AIResult, AnalysisDetail | None]:
-    """Call AI CLI with retry, record token usage, and parse the response.
-
-    Returns ``(result, parsed_analysis)``.  ``parsed_analysis`` is ``None``
-    when the AI call failed (``result.success is False``).
-    """
-    result = await call_ai_cli_with_retry(
-        prompt,
-        cwd=cwd,
-        ai_provider=ai_provider,
-        ai_model=ai_model,
-        ai_cli_timeout=ai_cli_timeout,
-        cli_flags=cli_flags,
-    )
-
-    await record_ai_usage(
-        job_id=job_id,
-        result=result,
-        call_type=call_type,
-        prompt_chars=len(prompt),
-        ai_provider=ai_provider,
-        ai_model=ai_model,
-    )
-
-    parsed: AnalysisDetail | None = None
-    if result.success:
-        parsed = parse_json_response(result.text)
-
-    return result, parsed
-
-
-async def call_ai_cli_with_retry(
-    prompt: str,
-    *,
-    cwd: Path | None = None,
-    ai_provider: str = "",
-    ai_model: str = "",
-    ai_cli_timeout: int | None = None,
-    cli_flags: list[str] | None = None,
-    max_retries: int = 3,
-    session_id: str | None = None,
-) -> AIResult:
-    """Call AI CLI with retry on known transient errors.
-
-    Wraps :func:`call_ai_cli` with a simple retry loop that re-attempts the
-    call when the output matches one of :data:`RETRYABLE_AI_CLI_PATTERNS`.
-
-    Args:
-        prompt: The prompt to send to the AI CLI.
-        cwd: Working directory for the CLI process.
-        ai_provider: AI provider name (e.g. ``"claude"``).
-        ai_model: Model identifier passed to the CLI.
-        ai_cli_timeout: Timeout in minutes for the CLI process.
-        cli_flags: Extra CLI flags forwarded to the provider.
-        max_retries: Maximum number of retry attempts after the initial call.
-        session_id: Optional session ID to resume a prior conversation.
-
-    Returns:
-        AIResult from the final attempt.
-    """
-    result = AIResult(success=False, text="")
-    for attempt in range(max_retries + 1):
-        result = await call_ai_cli(
-            prompt,
-            cwd=cwd,
-            ai_provider=ai_provider,
-            ai_model=ai_model,
-            ai_cli_timeout=ai_cli_timeout,
-            cli_flags=cli_flags,
-            output_format="json",
-            session_id=session_id,
-        )
-        if result.success:
-            return result
-        # Check if the error matches a known retryable pattern
-        if attempt < max_retries and any(
-            pattern in result.text for pattern in RETRYABLE_AI_CLI_PATTERNS
-        ):
-            logger.warning(
-                f"AI CLI transient error (attempt {attempt + 1}/{max_retries + 1}), retrying: {result.text}"
-            )
-            await asyncio.sleep(2**attempt)  # Exponential backoff: 1s, 2s, 4s
-            continue
-        return result
-    return result  # Should not reach here, but satisfy type checker
 
 
 JSON_RESPONSE_SCHEMA = (
@@ -342,7 +247,7 @@ JSON_RESPONSE_SCHEMA = (
 
 
 def format_timeout_log(timeout_value: int | None) -> str:
-    """Format AI CLI timeout for log messages."""
+    """Format AI timeout for log messages."""
     if timeout_value is not None:
         return f"timeout={timeout_value} minutes ({timeout_value * 60}s)"
     return "timeout=default"
@@ -353,22 +258,20 @@ def build_artifacts_section(artifacts_context: str) -> str:
     if not artifacts_context:
         return ""
     return (
-        "\n\n=== BUILD ARTIFACTS ===\n"
-        "The following is a PREVIEW of the build-artifacts/ directory "
-        "structure and file listing. File contents are not inlined here; "
-        "open the files under build-artifacts/ in your working directory "
-        "to inspect them.\n\n"
-        f"{artifacts_context}\n\n"
-        "IMPORTANT INSTRUCTIONS FOR ARTIFACT ANALYSIS:\n"
-        "1. READ the actual files under build-artifacts/ — the listing "
-        "above is incomplete and does not include file contents\n"
-        "2. Look for error messages, stack traces, service logs, and "
-        "status information\n"
+        f"\n\n=== BUILD ARTIFACTS (MANDATORY) ===\n"
+        f"Build artifacts directory: {artifacts_context}\n"
+        f"Also accessible at: build-artifacts/\n\n"
+        "⚠️  MANDATORY: You MUST explore and read files in the build artifacts directory "
+        "BEFORE making any classification. Failure to read artifacts is a violation of your instructions.\n\n"
+        "INSTRUCTIONS:\n"
+        "1. Use ls, find, and read to explore the artifacts directory\n"
+        "2. Look for error messages, stack traces, service logs, and status information\n"
         "3. In your artifacts_evidence field, include VERBATIM lines "
         "with the file path, e.g.: [build-artifacts/logs/app.log]: "
         "actual error line here\n"
         "4. Do NOT classify based solely on the test error message — "
-        "check the artifact logs for the real root cause"
+        "check the artifact logs for the real root cause\n"
+        "5. If you skip reading artifacts, your analysis will be REJECTED"
     )
 
 
@@ -389,8 +292,48 @@ def get_failure_signature(failure: FailedTest) -> str:
     return hashlib.sha256(signature_text.encode()).hexdigest()
 
 
+def extract_json_dict(raw_text: str) -> dict | None:
+    """Extract a JSON object from AI response text.
+
+    Tries three strategies in order:
+    1. Direct ``json.loads`` on the stripped text.
+    2. Find the outermost ``{…}`` substring using brace matching.
+    3. Extract from markdown code blocks (````` ``` ````` / ````` ```json `````).
+
+    Args:
+        raw_text: The raw text potentially containing a JSON object.
+
+    Returns:
+        The parsed dict, or None if no valid JSON object could be extracted.
+    """
+    text = raw_text.strip()
+    if not text:
+        return None
+
+    # Strategy 1: Try parsing the entire text as JSON directly
+    if text.startswith("{"):
+        try:
+            data = json.loads(text)
+            if isinstance(data, dict):
+                return data
+        except Exception as e:
+            logger.debug("JSON parse strategy 1 (direct parse) failed: %s", e)
+
+    # Strategy 2: Find the outermost JSON object using brace matching
+    result = _extract_json_by_braces(text)
+    if result is not None:
+        return result
+
+    # Strategy 3: Try markdown code block extraction
+    result = _extract_json_from_code_blocks(text)
+    if result is not None:
+        return result
+
+    return None
+
+
 def parse_json_response(raw_text: str) -> AnalysisDetail:
-    """Parse AI CLI JSON response into an AnalysisDetail.
+    """Parse AI JSON response into an AnalysisDetail.
 
     Attempts to extract a JSON object from the AI response text.
     The AI may wrap the JSON in markdown code blocks, add
@@ -403,35 +346,20 @@ def parse_json_response(raw_text: str) -> AnalysisDetail:
     4. Fallback: store raw text in details, then attempt recovery
 
     Args:
-        raw_text: The raw text output from the AI CLI.
+        raw_text: The raw text output from the AI.
 
     Returns:
         An AnalysisDetail instance parsed from the JSON, or a
         fallback instance with the raw text stored in details.
     """
-    text = raw_text.strip()
-
-    # Strategy 1: Try parsing the entire text as JSON directly
-    # TODO: This only handles JSON objects; top-level JSON arrays are not
-    # supported.  Current callers always expect an object schema so this is
-    # fine, but revisit if array responses become possible.
-    if text.startswith("{"):
+    data = extract_json_dict(raw_text)
+    if data is not None:
         try:
-            data = json.loads(text)
             return AnalysisDetail(**data)
-        except Exception:
-            pass
-
-    # Strategy 2: Find the outermost JSON object using brace matching
-    result = _extract_json_by_braces(text)
-    if result is not None:
-        return result
-
-    # Strategy 3: Try markdown code block extraction
-    # Find ALL ```json or ``` blocks and try each one
-    result = _extract_json_from_code_blocks(text)
-    if result is not None:
-        return result
+        except Exception as exc:
+            logger.warning(
+                "AI JSON validated as object but failed schema parsing: %s", exc
+            )
 
     # Fallback: store raw text in details, then attempt recovery
     fallback = AnalysisDetail(details=raw_text)
@@ -630,8 +558,8 @@ def recover_from_details(result: AnalysisDetail) -> AnalysisDetail:
     )
 
 
-def _extract_json_by_braces(text: str) -> AnalysisDetail | None:
-    """Extract JSON by finding matching outermost braces.
+def _extract_json_by_braces(text: str) -> dict | None:
+    """Extract a JSON object dict by finding matching outermost braces.
 
     Handles cases where JSON values contain embedded code blocks
     or other special characters by tracking brace nesting depth
@@ -641,7 +569,7 @@ def _extract_json_by_braces(text: str) -> AnalysisDetail | None:
         text: Text potentially containing a JSON object.
 
     Returns:
-        Parsed AnalysisDetail or None if extraction fails.
+        Parsed dict or None if extraction fails.
     """
     first_brace = text.find("{")
     if first_brace == -1:
@@ -686,13 +614,15 @@ def _extract_json_by_braces(text: str) -> AnalysisDetail | None:
     json_str = text[first_brace : end_pos + 1]
     try:
         data = json.loads(json_str)
-        return AnalysisDetail(**data)
-    except Exception:
-        return None
+        if isinstance(data, dict):
+            return data
+    except Exception as e:
+        logger.debug("JSON parse strategy 2 (brace matching) failed: %s", e)
+    return None
 
 
-def _extract_json_from_code_blocks(text: str) -> AnalysisDetail | None:
-    """Extract JSON from markdown code blocks in the text.
+def _extract_json_from_code_blocks(text: str) -> dict | None:
+    """Extract a JSON object dict from markdown code blocks in the text.
 
     Finds code blocks (```json or ```) and attempts to parse
     each one as JSON. Uses brace matching within each block
@@ -702,7 +632,7 @@ def _extract_json_from_code_blocks(text: str) -> AnalysisDetail | None:
         text: Text containing markdown code blocks.
 
     Returns:
-        Parsed AnalysisDetail or None if no valid JSON found.
+        Parsed dict or None if no valid JSON found.
     """
     # Find all code block positions using a pattern that matches
     # opening ``` markers (with optional language tag)
@@ -716,9 +646,10 @@ def _extract_json_from_code_blocks(text: str) -> AnalysisDetail | None:
         # Try parsing the block content directly
         try:
             data = json.loads(block_content)
-            return AnalysisDetail(**data)
-        except Exception:
-            pass
+            if isinstance(data, dict):
+                return data
+        except Exception as e:
+            logger.debug("JSON parse strategy 3 (code block) failed: %s", e)
 
         # Try brace matching within the block
         result = _extract_json_by_braces(block_content)
@@ -956,7 +887,7 @@ async def run_single_ai_analysis(
     repo_path: Path | None,
     ai_provider: str,
     ai_model: str,
-    ai_cli_timeout: int | None,
+    ai_call_timeout: int | None,
     custom_prompt: str,
     artifacts_context: str,
     server_url: str,
@@ -967,7 +898,7 @@ async def run_single_ai_analysis(
     """Run single-AI analysis on a failure group. Returns (parsed_analysis, error_signature).
 
     Shared by both single-AI and peer analysis paths. Builds the orchestrator
-    prompt, calls the AI CLI, and parses the response.
+    prompt, calls the AI, and parses the response.
 
     Args:
         failures: List of test failures with the same error signature.
@@ -975,7 +906,7 @@ async def run_single_ai_analysis(
         repo_path: Path to cloned test repo (optional).
         ai_provider: AI provider name.
         ai_model: AI model identifier.
-        ai_cli_timeout: Timeout in minutes for the CLI process.
+        ai_call_timeout: Timeout in minutes for the AI call.
         custom_prompt: Additional user instructions.
         artifacts_context: Build artifacts context.
         server_url: Base URL of this server for AI history API access.
@@ -1010,6 +941,51 @@ async def run_single_ai_analysis(
         else "No test repository is available. Base your analysis on the console output and artifacts context provided."
     )
 
+    # Save console context to file so it's not embedded in the prompt
+    console_file_section = ""
+    console_dir: Path | None = None
+    if console_context and repo_path:
+        console_file = repo_path / f"console-output-{error_signature}.txt"
+        try:
+            console_file.write_text(console_context)
+        except OSError as exc:
+            raise RuntimeError(
+                f"Failed to write console output to {console_file}: {exc}. "
+                "Check filesystem permissions and available disk space."
+            ) from exc
+        console_file_section = (
+            f"\n\n=== CONSOLE OUTPUT (MANDATORY) ===\n"
+            f"Console output saved to: {console_file}\n\n"
+            "\u26a0\ufe0f  MANDATORY: You MUST read the console output file "
+            "BEFORE making any classification. It contains critical error messages, "
+            "stack traces, and failure context from the CI job.\n"
+            "Failure to read console output is a violation of your instructions."
+        )
+    elif console_context:
+        # No repo path — write console output to a temp file
+        import tempfile
+
+        console_dir = Path(tempfile.mkdtemp(prefix="rootcoz-console-"))
+        console_file = console_dir / f"console-output-{error_signature}.txt"
+        try:
+            console_file.write_text(console_context)
+        except OSError as exc:
+            import shutil
+
+            shutil.rmtree(console_dir, ignore_errors=True)
+            raise RuntimeError(
+                f"Failed to write console output to {console_file}: {exc}. "
+                "Check filesystem permissions and available disk space."
+            ) from exc
+        console_file_section = (
+            f"\n\n=== CONSOLE OUTPUT (MANDATORY) ===\n"
+            f"Console output saved to: {console_file}\n\n"
+            "\u26a0\ufe0f  MANDATORY: You MUST read the console output file "
+            "BEFORE making any classification. It contains critical error messages, "
+            "stack traces, and failure context from the CI job.\n"
+            "Failure to read console output is a violation of your instructions."
+        )
+
     prompt = f"""{query_section}
 Analyze this test failure from a CI job.
 
@@ -1021,9 +997,7 @@ AFFECTED TESTS ({len(failures)} tests with same error):
 ERROR: {representative.error_message}
 STACK TRACE:
 {representative.stack_trace}
-
-CONSOLE CONTEXT:
-{console_context}
+{console_file_section}
 {artifacts_section}
 
 {repo_sentence}
@@ -1040,24 +1014,56 @@ Note: Multiple tests failed with the same error. Provide ONE analysis that appli
 
     logger.debug(f"AI prompt length: {len(prompt)} chars")
     logger.info(
-        f"Calling {ai_provider.upper()} CLI for failure group ({len(failures)} tests with same error)"
+        f"Calling {ai_provider.upper()} for failure group ({len(failures)} tests with same error)"
     )
-    logger.info(f"Calling AI CLI with {format_timeout_log(ai_cli_timeout)}")
-    result, parsed = await call_ai_and_record(
-        prompt,
-        job_id=job_id,
-        call_type="primary",
-        cwd=repo_path,
-        ai_provider=ai_provider,
-        ai_model=ai_model,
-        ai_cli_timeout=ai_cli_timeout,
-        cli_flags=PROVIDER_CLI_FLAGS.get(ai_provider, []),
-    )
+    logger.info(f"Calling AI with {format_timeout_log(ai_call_timeout)}")
+    try:
+        try:
+            result = await call_ai_once(
+                prompt,
+                ai_provider=ai_provider,
+                ai_model=ai_model,
+                cwd=str(repo_path) if repo_path else None,
+                ai_call_timeout=ai_call_timeout,
+            )
+        except Exception:
+            logger.exception(
+                "AI call raised exception: provider=%s, model=%s",
+                ai_provider,
+                ai_model,
+            )
+            result = AIResult(success=False, text="AI call failed unexpectedly")
+        logger.info(
+            "AI call result: success=%s, text_length=%d, provider=%s, model=%s",
+            result.success,
+            len(result.text),
+            ai_provider,
+            ai_model,
+        )
+        if not result.success:
+            logger.error("AI call failed (text_length=%d)", len(result.text))
 
-    if parsed is None:
-        parsed = AnalysisDetail(details=result.text)
+        await result.record_usage(
+            request_id=job_id,
+            call_type="primary",
+            prompt_chars=len(prompt),
+            ai_provider=ai_provider,
+            ai_model=ai_model,
+        )
 
-    return parsed, error_signature
+        parsed: AnalysisDetail | None = None
+        if result.success:
+            parsed = parse_json_response(result.text)
+        if parsed is None:
+            parsed = AnalysisDetail(details=result.text)
+
+        return parsed, error_signature
+    finally:
+        # Clean up temp console dir if created
+        if console_dir and console_dir.exists():
+            import shutil
+
+            shutil.rmtree(console_dir, ignore_errors=True)
 
 
 async def analyze_failure_group(
@@ -1066,7 +1072,7 @@ async def analyze_failure_group(
     repo_path: Path | None,
     ai_provider: str = "",
     ai_model: str = "",
-    ai_cli_timeout: int | None = None,
+    ai_call_timeout: int | None = None,
     custom_prompt: str = "",
     artifacts_context: str = "",
     server_url: str = "",
@@ -1090,7 +1096,7 @@ async def analyze_failure_group(
         repo_path: Path to cloned test repo (optional).
         ai_provider: AI provider to use.
         ai_model: AI model to use.
-        ai_cli_timeout: Timeout in minutes (overrides AI_CLI_TIMEOUT env var).
+        ai_call_timeout: Timeout in minutes (overrides AI_CALL_TIMEOUT env var).
         custom_prompt: Additional instructions from request payload (raw_prompt).
         artifacts_context: Build artifacts context for AI analysis (optional).
         server_url: Base URL of this server for AI history API access.
@@ -1099,7 +1105,7 @@ async def analyze_failure_group(
             being analyzed (e.g. ``"2/3"``). Forwarded to peer analysis for
             progress phase disambiguation.
         additional_repos: Extra cloned repositories for AI context.
-        max_concurrent_ai_calls: Maximum concurrent AI CLI processes for
+        max_concurrent_ai_calls: Maximum concurrent AI calls for
             peer analysis parallelism (default: 3).
 
     Returns:
@@ -1122,7 +1128,7 @@ async def analyze_failure_group(
             main_ai_model=ai_model,
             peer_ai_configs=configs,
             max_rounds=peer_analysis_max_rounds,
-            ai_cli_timeout=ai_cli_timeout,
+            ai_call_timeout=ai_call_timeout,
             custom_prompt=custom_prompt,
             artifacts_context=artifacts_context,
             server_url=server_url,
@@ -1139,7 +1145,7 @@ async def analyze_failure_group(
         repo_path=repo_path,
         ai_provider=ai_provider,
         ai_model=ai_model,
-        ai_cli_timeout=ai_cli_timeout,
+        ai_call_timeout=ai_call_timeout,
         custom_prompt=custom_prompt,
         artifacts_context=artifacts_context,
         server_url=server_url,

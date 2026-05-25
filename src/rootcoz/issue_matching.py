@@ -7,11 +7,9 @@ issues from any tracker match a given bug/failure description.
 import json
 import os
 
-from ai_cli_runner import call_ai_cli
 from simple_logger.logger import get_logger
 
-from rootcoz.engine.core import PROVIDER_CLI_FLAGS
-from rootcoz.token_tracking import record_ai_usage
+from pi_sidecar_client import call_ai_once
 
 logger = get_logger(name=__name__, level=os.environ.get("LOG_LEVEL", "INFO"))
 
@@ -22,7 +20,7 @@ async def filter_issue_matches_with_ai(
     candidates: list[dict],
     ai_provider: str,
     ai_model: str,
-    ai_cli_timeout: int | None = None,
+    ai_call_timeout: int | None = None,
     job_id: str = "",
     call_type: str = "issue_filter",
 ) -> list[dict]:
@@ -43,7 +41,7 @@ async def filter_issue_matches_with_ai(
             and ``status`` fields.
         ai_provider: AI provider name.
         ai_model: AI model identifier.
-        ai_cli_timeout: Timeout in minutes (overrides AI_CLI_TIMEOUT env var).
+        ai_call_timeout: Timeout in minutes (overrides AI_CALL_TIMEOUT env var).
         job_id: Job identifier for token usage tracking.
         call_type: Token tracking call type label.
 
@@ -89,19 +87,16 @@ Example: [{{"key": "PROJ-123", "relevant": true, "score": 0.9}}, {{"key": "PROJ-
 
 Respond with ONLY the JSON array, no other text."""
 
-    result = await call_ai_cli(
+    result = await call_ai_once(
         prompt,
         ai_provider=ai_provider,
         ai_model=ai_model,
-        ai_cli_timeout=ai_cli_timeout,
-        cli_flags=PROVIDER_CLI_FLAGS.get(ai_provider, []),
-        output_format="json",
+        ai_call_timeout=ai_call_timeout,
     )
 
     if job_id:
-        await record_ai_usage(
-            job_id=job_id,
-            result=result,
+        await result.record_usage(
+            request_id=job_id,
             call_type=call_type,
             prompt_chars=len(prompt),
             ai_provider=ai_provider,
@@ -143,7 +138,8 @@ Respond with ONLY the JSON array, no other text."""
         is_relevant = evaluation.get("relevant", False)
         try:
             score = float(evaluation.get("score", 0.0))
-        except (ValueError, TypeError):
+        except (ValueError, TypeError) as e:
+            logger.debug("Failed to parse relevance score, defaulting to 0.0: %s", e)
             score = 0.0
 
         if is_relevant and key:

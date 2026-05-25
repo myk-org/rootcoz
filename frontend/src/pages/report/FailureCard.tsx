@@ -1,13 +1,14 @@
 import { useState, useEffect, useMemo, useRef, type ReactNode } from 'react'
 import { useLocation } from 'react-router-dom'
 import { useClipboard } from '@/lib/useClipboard'
-import type { GroupedFailure } from '@/types'
+import type { GroupedFailure, PreviousAnalysis } from '@/types'
 import { buildFileUrl, buildRepoUrls, isSafeHref, matchRepo, type RepoUrl } from '@/lib/autoLink'
 import { isCommentInScope } from '@/lib/grouping'
 import { api } from '@/lib/api'
 import { getUsername } from '@/lib/cookies'
 import { useSessionState } from '@/lib/useSessionState'
 import { unescapeCodeContent } from '@/lib/format'
+import { formatRelativeTime } from '@/lib/utils'
 import { useReportState, useReportDispatch, reviewKey } from './ReportContext'
 import { Card, CardContent } from '@/components/ui/card'
 import { Tooltip, TooltipTrigger, TooltipContent } from '@/components/ui/tooltip'
@@ -25,6 +26,75 @@ import { useReviewSuggestion } from './useReviewSuggestion'
 import { ConfirmDialog } from '@/components/shared/ConfirmDialog'
 import { UuidCopyButton } from '@/components/shared/UuidCopyButton'
 import { ChevronDown, ChevronRight, Bug, MessageSquare, CheckCircle2, Copy, Check, RotateCw } from 'lucide-react'
+
+function PreviousAnalysisEntry({ prev, index, repoUrls }: {
+  prev: PreviousAnalysis
+  index: number
+  repoUrls: RepoUrl[]
+}) {
+  const superseded = prev._superseded_by
+  const supersededLabel = superseded
+    ? ` — re-analyzed with ${superseded.ai_provider}/${superseded.ai_model}${superseded.timestamp ? ` (${formatRelativeTime(superseded.timestamp)})` : ''}`
+    : ''
+
+  return (
+    <details className="group/prev">
+      <summary className="flex items-center gap-2 cursor-pointer text-xs font-display uppercase tracking-widest text-text-tertiary hover:text-text-secondary transition-colors">
+        <ChevronRight className="h-3 w-3 group-open/prev:rotate-90 transition-transform" />
+        <span>Previous Analysis #{index + 1}</span>
+        {prev.classification && (
+          <ClassificationBadge classification={prev.classification} className="opacity-60 text-[10px]" />
+        )}
+        {supersededLabel && <span className="normal-case tracking-normal font-normal text-text-tertiary">{supersededLabel}</span>}
+      </summary>
+      <div className="mt-2 rounded-md bg-surface-elevated/50 border border-border-muted p-3 opacity-75 space-y-3">
+        {prev.details && (
+          <div>
+            <h4 className="text-xs font-display uppercase tracking-widest text-text-tertiary mb-1">Details</h4>
+            <div className="text-sm text-text-tertiary whitespace-pre-wrap">
+              <LinkedText text={prev.details} repoUrls={repoUrls} />
+            </div>
+          </div>
+        )}
+        {prev.artifacts_evidence && (
+          <div>
+            <h4 className="text-xs font-display uppercase tracking-widest text-text-tertiary mb-1">Artifacts Evidence</h4>
+            <div className="overflow-x-auto rounded-md bg-surface-elevated p-2 text-xs text-text-tertiary font-mono whitespace-pre-wrap max-h-48 overflow-y-auto">
+              <LinkedText text={prev.artifacts_evidence} repoUrls={repoUrls} />
+            </div>
+          </div>
+        )}
+        {prev.code_fix && typeof prev.code_fix === 'object' && (
+          <div>
+            <h4 className="text-xs font-display uppercase tracking-widest text-text-tertiary mb-1">Suggested Fix</h4>
+            <div className="rounded-md bg-surface-elevated p-2 text-sm text-text-tertiary space-y-1">
+              {prev.code_fix.file && (
+                <p className="font-mono text-xs">{prev.code_fix.file}{prev.code_fix.line && `:${prev.code_fix.line}`}</p>
+              )}
+              {prev.code_fix.change && <p className="whitespace-pre-wrap text-xs"><LinkedText text={prev.code_fix.change} repoUrls={repoUrls} /></p>}
+              {prev.code_fix.original_code != null && (
+                <CodeFixLiteralBlock title="Original Code" content={prev.code_fix.original_code} className="text-text-tertiary" />
+              )}
+              {prev.code_fix.suggested_code != null && (
+                <CodeFixLiteralBlock title="Suggested Code" content={prev.code_fix.suggested_code} className="text-text-tertiary" />
+              )}
+            </div>
+          </div>
+        )}
+        {prev.product_bug_report && typeof prev.product_bug_report === 'object' && (
+          <div>
+            <h4 className="text-xs font-display uppercase tracking-widest text-text-tertiary mb-1">Bug Report</h4>
+            <div className="rounded-md bg-surface-elevated p-2 text-sm text-text-tertiary space-y-1">
+              {prev.product_bug_report.title && <p className="font-medium">{prev.product_bug_report.title}</p>}
+              {prev.product_bug_report.severity && <Badge variant="outline" className="text-[10px] opacity-75">{prev.product_bug_report.severity}</Badge>}
+              {prev.product_bug_report.description && <p className="whitespace-pre-wrap text-xs"><LinkedText text={prev.product_bug_report.description} repoUrls={repoUrls} /></p>}
+            </div>
+          </div>
+        )}
+      </div>
+    </details>
+  )
+}
 
 function IssueButton({ disabled, tooltip, label, onClick }: {
   disabled: boolean
@@ -109,7 +179,7 @@ interface FailureCardProps {
 export function FailureCard({ group, jobId, childJobName, childBuildNumber, index, activeHash }: FailureCardProps) {
   const scopedChildJobName = childJobName ?? ''
   const scopedChildBuildNumber = childBuildNumber ?? 0
-  const { githubIssuesEnabled, jiraIssuesEnabled, serverJiraProjectKey, comments, reviews, aiConfigs, result, classifications } = useReportState()
+  const { githubIssuesEnabled, jiraIssuesEnabled, serverJiraProjectKey, comments, reviews, aiModels, result, classifications } = useReportState()
   const dispatch = useReportDispatch()
   const expandKey = `rootcoz-expand-${jobId}-${scopedChildJobName}-${scopedChildBuildNumber}-${group.id}`
   const [expanded, setExpanded] = useSessionState<boolean>(expandKey, false)
@@ -151,20 +221,16 @@ export function FailureCard({ group, jobId, childJobName, childBuildNumber, inde
     [result?.request_params],
   )
 
-  function getModelsForProvider(provider: string) {
-    return [...new Set(aiConfigs.filter((c) => c.ai_provider === provider).map((c) => c.ai_model))]
-  }
-
-  const providers = [...new Set(aiConfigs.map((c) => c.ai_provider))]
-  const models = getModelsForProvider(selectedProvider)
+  const providers = Object.keys(aiModels)
+  const models = (aiModels[selectedProvider] ?? []).map((m) => m.id)
 
   function handleProviderChange(provider: string) {
     setSelectedProvider(provider)
-    const providerModels = getModelsForProvider(provider)
-    if (providerModels.length === 0) {
+    const providerModelIds = (aiModels[provider] ?? []).map((m) => m.id)
+    if (providerModelIds.length === 0) {
       setSelectedModel('')
-    } else if (!providerModels.includes(selectedModel)) {
-      setSelectedModel(providerModels[0])
+    } else if (!providerModelIds.includes(selectedModel)) {
+      setSelectedModel(providerModelIds[0])
     }
   }
 
@@ -434,19 +500,6 @@ export function FailureCard({ group, jobId, childJobName, childBuildNumber, inde
               </div>
             )}
 
-            {/* Previous Analysis (from re-analysis) */}
-            {rep.previous_analysis && (
-              <details className="group">
-                <summary className="flex items-center gap-2 cursor-pointer text-xs font-display uppercase tracking-widest text-text-tertiary hover:text-text-secondary transition-colors">
-                  <ChevronRight className="h-3 w-3 group-open:rotate-90 transition-transform" />
-                  Previous Analysis
-                </summary>
-                <div className="mt-2 rounded-md bg-surface-elevated/50 border border-border-muted p-3 text-sm text-text-tertiary whitespace-pre-wrap opacity-75">
-                  <LinkedText text={rep.previous_analysis.details || ''} repoUrls={repoUrls} />
-                </div>
-              </details>
-            )}
-
             {/* Artifacts evidence */}
             {analysis.artifacts_evidence && (
               <div>
@@ -534,6 +587,22 @@ export function FailureCard({ group, jobId, childJobName, childBuildNumber, inde
                 </div>
               </div>
             )}
+
+            {/* Previous Analyses (from re-analysis) */}
+            {(() => {
+              const prevList: PreviousAnalysis[] = rep.previous_analyses && rep.previous_analyses.length > 0
+                ? rep.previous_analyses
+                : rep.previous_analysis
+                  ? [rep.previous_analysis]
+                  : []
+              return prevList.length > 0 && (
+                <div className="space-y-2">
+                  {prevList.map((prev, idx) => (
+                    <PreviousAnalysisEntry key={idx} prev={prev} index={idx} repoUrls={repoUrls} />
+                  ))}
+                </div>
+              )
+            })()}
 
             {/* Peer debate trail */}
             {rep.peer_debate && <PeerDebateSection debate={rep.peer_debate} repoUrls={repoUrls} />}

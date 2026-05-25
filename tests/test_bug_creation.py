@@ -4,7 +4,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 import pytest
-from ai_cli_runner import AIResult
+from pi_sidecar_client import AIResult
 
 from rootcoz.models import (
     AnalysisDetail,
@@ -75,7 +75,7 @@ class TestGenerateGithubIssueContent:
     async def test_generates_title_and_body(self, code_issue_failure):
         from rootcoz.bug_creation import generate_github_issue_content
 
-        with patch("rootcoz.bug_creation.call_ai_cli") as mock_ai:
+        with patch("rootcoz.bug_creation.call_ai_once") as mock_ai:
             mock_ai.return_value = AIResult(
                 success=True,
                 text="Fix: login handler missing ValueError catch\n\n"
@@ -104,7 +104,7 @@ class TestGenerateGithubIssueContent:
     async def test_fallback_on_ai_failure(self, code_issue_failure):
         from rootcoz.bug_creation import generate_github_issue_content
 
-        with patch("rootcoz.bug_creation.call_ai_cli") as mock_ai:
+        with patch("rootcoz.bug_creation.call_ai_once") as mock_ai:
             mock_ai.return_value = AIResult(success=False, text="AI CLI timed out")
 
             result = await generate_github_issue_content(
@@ -122,7 +122,7 @@ class TestGenerateGithubIssueContent:
     async def test_fallback_includes_code_fix(self, code_issue_failure):
         from rootcoz.bug_creation import generate_github_issue_content
 
-        with patch("rootcoz.bug_creation.call_ai_cli") as mock_ai:
+        with patch("rootcoz.bug_creation.call_ai_once") as mock_ai:
             mock_ai.return_value = AIResult(success=False, text="AI CLI timed out")
 
             result = await generate_github_issue_content(
@@ -140,7 +140,7 @@ class TestGenerateJiraBugContent:
     async def test_generates_summary_and_description(self, product_bug_failure):
         from rootcoz.bug_creation import generate_jira_bug_content
 
-        with patch("rootcoz.bug_creation.call_ai_cli") as mock_ai:
+        with patch("rootcoz.bug_creation.call_ai_once") as mock_ai:
             mock_ai.return_value = AIResult(
                 success=True,
                 text="DNS resolution timeout on internal resolver\n\n"
@@ -163,7 +163,7 @@ class TestGenerateJiraBugContent:
     async def test_fallback_on_ai_failure(self, product_bug_failure):
         from rootcoz.bug_creation import generate_jira_bug_content
 
-        with patch("rootcoz.bug_creation.call_ai_cli") as mock_ai:
+        with patch("rootcoz.bug_creation.call_ai_once") as mock_ai:
             mock_ai.return_value = AIResult(success=False, text="error")
 
             result = await generate_jira_bug_content(

@@ -11,7 +11,7 @@ import pytest
 
 from rootcoz import jenkins_artifacts
 from rootcoz.jenkins_artifacts import (
-    build_artifacts_context,
+    get_artifacts_path,
     cleanup_extract_dir,
     download_artifact,
     process_build_artifacts,
@@ -175,94 +175,22 @@ class TestExtractZip:
 
 
 class TestBuildArtifactsContext:
-    """Tests for build_artifacts_context."""
+    """Tests for get_artifacts_path."""
 
-    def test_does_not_include_error_lines_in_context(self, tmp_path: Path) -> None:
-        """Context contains directory structure but not pre-extracted error lines."""
+    def test_returns_path_string(self, tmp_path: Path) -> None:
+        """get_artifacts_path returns the directory path as a string."""
+        result = get_artifacts_path(tmp_path)
+        assert result == str(tmp_path)
+
+    def test_does_not_include_file_contents(self, tmp_path: Path) -> None:
+        """Path string does not contain any file content."""
         log_dir = tmp_path / "logs"
         log_dir.mkdir()
-        log_file = log_dir / "app.log"
-        log_file.write_text(
-            "2024-01-01 INFO Starting up\n"
-            "2024-01-01 ERROR Connection refused\n"
-            "2024-01-01 INFO Retrying\n"
-            "2024-01-01 FAILURE Something broke\n"
-        )
+        (log_dir / "app.log").write_text("ERROR Connection refused\n")
 
-        context = build_artifacts_context(tmp_path)
-
-        assert "BUILD ARTIFACTS CONTEXT" in context
-        assert "logs/" in context
-        # Error lines should NOT be pre-extracted into the context
-        assert "Connection refused" not in context
-        assert "FAILURE Something broke" not in context
-
-    def test_does_not_include_warning_events_in_context(self, tmp_path: Path) -> None:
-        """Context contains directory structure but not pre-extracted warning events."""
-        event_dir = tmp_path / "cluster-scoped-resources"
-        event_dir.mkdir(parents=True)
-        event_file = event_dir / "events.yaml"
-        event_file.write_text(
-            "kind: Event\n"
-            "type: Warning\n"
-            "message: Back-off restarting failed container\n"
-            "type: Normal\n"
-            "message: Scheduled successfully\n"
-        )
-
-        context = build_artifacts_context(tmp_path)
-
-        assert "BUILD ARTIFACTS CONTEXT" in context
-        assert "cluster-scoped-resources/" in context
-        # Warning events should NOT be pre-extracted
-        assert "Warning Events" not in context
-        assert "type: Warning" not in context
-
-    def test_does_not_include_status_issues_in_context(self, tmp_path: Path) -> None:
-        """Context contains directory structure but not pre-extracted status issues."""
-        resource_dir = tmp_path / "namespaces" / "default"
-        resource_dir.mkdir(parents=True)
-        pod_file = resource_dir / "pods.yaml"
-        pod_file.write_text(
-            "apiVersion: v1\n"
-            "kind: Pod\n"
-            "status:\n"
-            "  phase: Failed\n"
-            "  containerStatuses:\n"
-            "    - state:\n"
-            "        terminated:\n"
-            "          reason: Error pulling image\n"
-        )
-
-        context = build_artifacts_context(tmp_path)
-
-        assert "BUILD ARTIFACTS CONTEXT" in context
-        assert "namespaces/default/" in context
-        # Status issues should NOT be pre-extracted
-        assert "Abnormal Status Indicators" not in context
-
-    def test_empty_directory_returns_note(self, tmp_path: Path) -> None:
-        """Empty directory still produces valid context with header."""
-        context = build_artifacts_context(tmp_path)
-
-        assert "BUILD ARTIFACTS CONTEXT" in context
-        assert "Contains 0 files" in context
-        # The old "no issues found" message should not appear
-        assert "No errors, warnings, or status issues found" not in context
-
-    def test_root_only_files_listed_in_directory_structure(
-        self, tmp_path: Path
-    ) -> None:
-        """Root-level files with no subdirectories still produce a directory structure."""
-        (tmp_path / "build.log").write_text("some log content\n")
-        (tmp_path / "results.xml").write_text("<results/>\n")
-
-        context = build_artifacts_context(tmp_path)
-
-        assert "BUILD ARTIFACTS CONTEXT" in context
-        assert "Directory Structure" in context
-        assert "build.log" in context
-        assert "results.xml" in context
+        result = get_artifacts_path(tmp_path)
+        assert "Connection refused" not in result
+        assert result == str(tmp_path)
 
 
 class TestCleanupExtractDir:
@@ -465,8 +393,8 @@ class TestProcessBuildArtifacts:
         # Both artifacts should be stored
         assert (artifacts_dir / "logs" / "app.log").exists()
         assert (artifacts_dir / "config.yaml").exists()
-        # Context should contain artifacts output from the stored files
-        assert "BUILD ARTIFACTS CONTEXT" in context
+        # Context should be the artifacts directory path
+        assert context == str(artifacts_dir)
 
         # Cleanup
         shutil.rmtree(artifacts_dir, ignore_errors=True)

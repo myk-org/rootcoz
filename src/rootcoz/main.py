@@ -18,14 +18,13 @@ from typing import Annotated, Any, Literal
 import aiosqlite
 import httpx
 import uvicorn
-from ai_cli_runner import (
-    VALID_AI_PROVIDERS,
-    call_ai_cli,
-    check_ai_cli_available,
-    model_cache,
-    pricing_cache,
+from pi_sidecar_client import (
+    call_ai_once,
+    check_sidecar_available,
+    list_models,
     run_parallel_with_limit,
 )
+from rootcoz.ai_client import VALID_AI_PROVIDERS, _setup_usage_recorder
 from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
@@ -73,12 +72,13 @@ from rootcoz.encryption import (
 )
 from rootcoz.engine.core import (
     JOB_INSIGHT_ISSUE_PROMPT_FILENAME,
-    PROVIDER_CLI_FLAGS,
     analyze_failure_group,
     clone_additional_repos,
+    extract_json_dict,
     get_failure_signature,
     resolve_additional_repos,
     safe_update_progress,
+    set_progress_callback,
 )
 from rootcoz.error_messages import make_user_friendly_error
 from rootcoz.feedback import (
@@ -136,7 +136,6 @@ from rootcoz.request_resolution import resolve_tests_repo_token
 from rootcoz.sources import CISource, FileSource, RawSource
 from rootcoz.sources.jenkins_source import analyze_job, wait_for_jenkins_completion
 from rootcoz.storage import (
-    get_ai_configs,
     get_effective_classification,
     get_history_classification,
     get_result,
@@ -148,7 +147,7 @@ from rootcoz.storage import (
     save_result,
     update_status,
 )
-from rootcoz.token_tracking import build_token_usage_summary, record_ai_usage
+from rootcoz.token_tracking import build_token_usage_summary
 from rootcoz.utils import (
     is_sensitive_key,
     mask_sensitive_fields,
@@ -208,6 +207,11 @@ def notify_job_status_changed(job_id: str) -> None:
     if listeners:
         for event in listeners:
             event.set()
+
+
+# Register progress callback so engine/core.py can trigger SSE
+# notifications without importing from main.py.
+set_progress_callback(notify_job_status_changed)
 
 
 def notify_comments_changed(job_id: str) -> None:
@@ -619,7 +623,7 @@ _ANALYSIS_SETTINGS_FIELDS = (
     "jira_ssl_verify",
     "jira_max_results",
     "github_token",
-    "ai_cli_timeout",
+    "ai_call_timeout",
     "max_concurrent_ai_calls",
 )
 
@@ -716,7 +720,7 @@ def _reconstruct_from_params(
         "jira_project_key",
         "jira_ssl_verify",
         "jira_max_results",
-        "ai_cli_timeout",
+        "ai_call_timeout",
         "max_concurrent_ai_calls",
         "jenkins_artifacts_max_size_mb",
         "get_job_artifacts",
@@ -943,9 +947,9 @@ async def _resume_waiting_jobs(waiting_jobs: list[dict]) -> None:
 
 
 async def _safe_preload_cursor_models() -> None:
-    """Pre-populate cursor model cache in background. Best-effort."""
+    """Pre-populate cursor model list in background. Best-effort."""
     try:
-        await model_cache.list_models("cursor")
+        await list_models("cursor")
     except Exception:
         logger.debug("Failed to preload cursor models", exc_info=True)
 
@@ -964,6 +968,7 @@ async def _deferred_resume_waiting_jobs(waiting_jobs: list[dict]) -> None:
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     _install_job_id_filter()
+    _setup_usage_recorder()
 
     # Startup config validation
     config_result = validate_startup_config()
@@ -977,14 +982,7 @@ async def lifespan(_app: FastAPI):
     await init_db()
     await storage.cleanup_expired_sessions()
 
-    # Load LLM pricing cache asynchronously (best-effort, non-blocking)
-    _warmup = asyncio.create_task(pricing_cache.load())
-    _background_tasks.add(_warmup)
-    _warmup.add_done_callback(_background_tasks.discard)
-
     try:
-        await pricing_cache.start_background_refresh()
-
         # Pre-populate cursor models in background (don't block startup)
         task = asyncio.create_task(_safe_preload_cursor_models())
         _background_tasks.add(task)
@@ -1002,7 +1000,7 @@ async def lifespan(_app: FastAPI):
 
         yield
     finally:
-        await pricing_cache.stop_background_refresh()
+        pass
 
 
 app = FastAPI(
@@ -1025,7 +1023,9 @@ if _FRONTEND_DIR.is_dir():
 class ErrorTrackingMiddleware(BaseHTTPMiddleware):
     """Track request counts and error rates for monitoring."""
 
-    _SKIP_PATHS = frozenset({"/health", "/api/health", "/metrics", "/favicon.ico"})
+    _SKIP_PATHS = frozenset(
+        {"/health", "/api/health", "/metrics", "/favicon.ico", "/favicon.svg"}
+    )
 
     def _schedule_high_error_rate_alert(self) -> None:
         """Check 5xx error rate and schedule an alert if it exceeds the threshold."""
@@ -1140,6 +1140,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
             "/metrics",
             "/pending",
             "/favicon.ico",
+            "/favicon.svg",
             "/sw.js",
         }
     )
@@ -1265,7 +1266,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
                             authenticated_admin = True
                     else:
                         # Fall back to session token via Bearer header
-                        # (used by AI CLI for internal API calls)
+                        # (used by AI for internal API calls)
                         session = await storage.get_session(token)
                         if session:
                             is_admin = bool(session["is_admin"])
@@ -1431,43 +1432,53 @@ def _mask_pydantic_error(error: dict) -> dict:
 async def _validation_error_handler(
     request: Request, exc: RequestValidationError
 ) -> JSONResponse:
-    """Log 422 validation error details at DEBUG level, then return standard response."""
+    """Log 422 validation error details and return standard response."""
     if request.url.path in _BODY_LOGGING_SKIP_PATHS:
         raw_errors = jsonable_encoder(exc.errors())
         masked_errors = [_mask_pydantic_error(e) for e in raw_errors]
         for error in masked_errors:
             if "input" in error:
                 error["input"] = "<redacted>"
+        logger.warning(
+            "RequestValidationError on %s %s: errors=%s body=<skipped>",
+            request.method,
+            request.url.path,
+            masked_errors,
+        )
         return JSONResponse(
             status_code=422,
             content={"detail": masked_errors},
         )
-    if logger.isEnabledFor(logging.DEBUG):
-        masked_body = None
-        if exc.body is not None:
-            try:
-                if isinstance(exc.body, (dict, list)):
-                    masked_body = mask_sensitive_fields(exc.body)
-                elif isinstance(exc.body, (str, bytes, bytearray)):
-                    size = (
-                        len(exc.body.encode("utf-8"))
-                        if isinstance(exc.body, str)
-                        else len(exc.body)
-                    )
-                    masked_body = f"<non-JSON, {size} bytes>"
-                else:
-                    masked_body = f"<non-JSON body: {type(exc.body).__name__}>"
-            except Exception:  # masking must never break the 422 response
-                masked_body = "<unable to mask>"
-        raw_errors = jsonable_encoder(exc.errors())
-        masked_errors = [_mask_pydantic_error(e) for e in raw_errors]
-        logger.debug(
-            "RequestValidationError on %s %s: errors=%s body=%s",
-            request.method,
-            request.url.path,
-            masked_errors,
-            masked_body,
-        )
+    masked_body = None
+    if exc.body is not None:
+        try:
+            if isinstance(exc.body, (dict, list)):
+                masked_body = mask_sensitive_fields(exc.body)
+            elif isinstance(exc.body, (str, bytes, bytearray)):
+                size = (
+                    len(exc.body.encode("utf-8"))
+                    if isinstance(exc.body, str)
+                    else len(exc.body)
+                )
+                masked_body = f"<non-JSON, {size} bytes>"
+            else:
+                masked_body = f"<non-JSON body: {type(exc.body).__name__}>"
+        except Exception:  # masking must never break the 422 response
+            masked_body = "<unable to mask>"
+    raw_errors = jsonable_encoder(exc.errors())
+    masked_errors = [_mask_pydantic_error(e) for e in raw_errors]
+    logger.warning(
+        "RequestValidationError on %s %s: errors=%s",
+        request.method,
+        request.url.path,
+        masked_errors,
+    )
+    logger.debug(
+        "RequestValidationError body on %s %s: %s",
+        request.method,
+        request.url.path,
+        masked_body,
+    )
     # Mask sensitive values in the response body as well.
     response_errors = jsonable_encoder(exc.errors())
     masked_response = [_mask_pydantic_error(e) for e in response_errors]
@@ -1608,7 +1619,7 @@ def _merge_settings(body: BaseAnalysisRequest, settings: Settings) -> Settings:
         "jira_project_key",
         "jira_ssl_verify",
         "jira_max_results",
-        "ai_cli_timeout",
+        "ai_call_timeout",
         "max_concurrent_ai_calls",
         "enable_jira",
         "jenkins_artifacts_max_size_mb",
@@ -1720,7 +1731,11 @@ async def _enrich_result_with_jira(
 
     all_failures = _collect_all_failures(failures)
     await enrich_with_jira_matches(
-        all_failures, settings, ai_provider, ai_model, job_id=job_id
+        all_failures,
+        settings,
+        ai_provider,
+        ai_model,
+        job_id=job_id,
     )
 
 
@@ -1767,11 +1782,15 @@ async def _enrich_result_with_tests_repo_matches(
 
     all_failures = _collect_all_failures(failures)
     await enrich_with_tests_repo_matches(
-        all_failures, settings, ai_provider, ai_model, job_id=job_id
+        all_failures,
+        settings,
+        ai_provider,
+        ai_model,
+        job_id=job_id,
     )
 
 
-_AI_SESSION_TTL_HOURS = 8  # Short-lived for AI CLI internal API calls
+_AI_SESSION_TTL_HOURS = 8  # Short-lived for AI internal API calls
 
 
 def _get_display_name(body: AnalyzeRequest | UnifiedAnalyzeRequest) -> str:
@@ -1796,7 +1815,7 @@ async def _auto_assign_metadata(
 
 
 async def _create_ai_auth_header(username: str) -> str:
-    """Create a short-lived session token for AI CLI internal API calls.
+    """Create a short-lived session token for AI internal API calls.
 
     Returns a Bearer auth header string, or empty string on failure/no user.
     """
@@ -1825,6 +1844,48 @@ async def _cleanup_ai_session(auth_header: str) -> None:
         logger.warning("Failed to delete AI session token", exc_info=True)
 
 
+async def _preflight_sidecar_check(
+    job_id: str,
+    ai_provider: str,
+    ai_model: str,
+    display_name: str,
+    build_number: int | None = None,
+    jenkins_url: str = "",
+    job_name: str = "",
+) -> bool:
+    """Check sidecar availability, fail the job if unreachable. Returns True if available."""
+    available, msg = await check_sidecar_available()
+    if available:
+        return True
+    logger.error(
+        "AI sidecar sanity check failed for job %s (%s/%s)",
+        job_id,
+        ai_provider,
+        ai_model,
+    )
+    logger.error("AI preflight failed for job %s: %s", job_id, msg)
+    fail_result = FailureAnalysisResult(
+        job_id=job_id,
+        status="failed",
+        summary=make_user_friendly_error(msg),
+        ai_provider=ai_provider,
+        ai_model=ai_model,
+    )
+    fail_data = fail_result.model_dump(mode="json")
+    fail_data["error"] = fail_result.summary
+    fail_data["job_name"] = job_name or display_name
+    if build_number is not None:
+        fail_data["build_number"] = build_number
+    if jenkins_url:
+        fail_data["jenkins_url"] = jenkins_url
+    await _preserve_request_params(job_id, fail_data)
+    await update_status(job_id, "failed", fail_data)
+    notify_active_count_changed()
+    notify_dashboard_changed()
+    notify_job_status_changed(job_id)
+    return False
+
+
 async def process_analysis_with_id(
     job_id: str, body: AnalyzeRequest, settings: Settings, username: str = ""
 ) -> None:
@@ -1848,6 +1909,23 @@ async def process_analysis_with_id(
         # Validate AI config early -- before potentially waiting hours for Jenkins.
         # This ensures invalid provider/model fails fast instead of after a long wait.
         ai_provider, ai_model = _resolve_ai_config(body)
+
+        # Pre-flight: verify AI is reachable before expensive Jenkins wait
+        display_name = _get_display_name(body)
+        if not await _preflight_sidecar_check(
+            job_id,
+            ai_provider,
+            ai_model,
+            display_name,
+            build_number=body.build_number,
+            jenkins_url=build_jenkins_url(
+                settings.jenkins_url or "", body.job_name or "", body.build_number or 0
+            )
+            if settings.jenkins_url
+            else "",
+            job_name=body.job_name or "",
+        ):
+            return
 
         # Wait for Jenkins job to finish if requested and Jenkins is configured
         if settings.wait_for_completion and not settings.jenkins_url:
@@ -2142,10 +2220,10 @@ def _apply_base_analysis_overrides(
         if body.github_token is not None
         else (merged.github_token.get_secret_value() if merged.github_token else "")
     )
-    params["ai_cli_timeout"] = (
-        body.ai_cli_timeout
-        if body.ai_cli_timeout is not None
-        else merged.ai_cli_timeout
+    params["ai_call_timeout"] = (
+        body.ai_call_timeout
+        if body.ai_call_timeout is not None
+        else merged.ai_call_timeout
     )
     params["max_concurrent_ai_calls"] = (
         body.max_concurrent_ai_calls
@@ -2502,35 +2580,14 @@ async def _process_file_raw_analysis(
         notify_dashboard_changed()
         notify_job_status_changed(job_id)
 
-        # Pre-flight: verify AI CLI is reachable before spawning parallel tasks
-        preflight_result = await check_ai_cli_available(
-            ai_provider, ai_model, cli_flags=PROVIDER_CLI_FLAGS.get(ai_provider, [])
-        )
-        if not preflight_result.success:
-            logger.error(
-                "AI CLI sanity check failed for job %s (%s/%s)",
-                job_id,
-                ai_provider,
-                ai_model,
-            )
-            logger.error(
-                "AI preflight failed for job %s: %s", job_id, preflight_result.text
-            )
-            fail_result = FailureAnalysisResult(
-                job_id=job_id,
-                status="failed",
-                summary=make_user_friendly_error(preflight_result.text),
-                ai_provider=ai_provider,
-                ai_model=ai_model,
-            )
-            fail_data = fail_result.model_dump(mode="json")
-            fail_data["error"] = fail_result.summary
-            fail_data["job_name"] = display_name
-            await _preserve_request_params(job_id, fail_data)
-            await update_status(job_id, "failed", fail_data)
-            notify_active_count_changed()
-            notify_dashboard_changed()
-            notify_job_status_changed(job_id)
+        # Pre-flight: verify AI is reachable before spawning parallel tasks
+        if not await _preflight_sidecar_check(
+            job_id,
+            ai_provider,
+            ai_model,
+            display_name,
+            job_name=body.job_name or "",
+        ):
             return
 
         auth_header = await _create_ai_auth_header(username)
@@ -2598,7 +2655,7 @@ async def _process_file_raw_analysis(
                 repo_path=repo_path,
                 ai_provider=ai_provider,
                 ai_model=ai_model,
-                ai_cli_timeout=merged.ai_cli_timeout,
+                ai_call_timeout=merged.ai_call_timeout,
                 custom_prompt=custom_prompt,
                 server_url=server_url,
                 job_id=job_id,
@@ -3051,7 +3108,7 @@ async def _reanalyze_failure_background(
     failure_dict: dict,
     ai_provider: str,
     ai_model: str,
-    ai_cli_timeout: int | None,
+    ai_call_timeout: int | None,
     raw_prompt: str,
     peer_ai_configs: list | None,
     peer_analysis_max_rounds: int,
@@ -3123,7 +3180,7 @@ async def _reanalyze_failure_background(
             repo_path=repo_path,
             ai_provider=ai_provider,
             ai_model=ai_model,
-            ai_cli_timeout=ai_cli_timeout,
+            ai_call_timeout=ai_call_timeout,
             custom_prompt=raw_prompt,
             server_url=server_url,
             job_id=job_id,
@@ -3149,7 +3206,31 @@ async def _reanalyze_failure_background(
                 return
             # Save previous analysis
             if "analysis" in failure:
-                failure["previous_analysis"] = copy.deepcopy(failure["analysis"])
+                prev_entry = copy.deepcopy(failure)
+                # Remove nested previous_analyses to avoid recursion
+                prev_entry.pop("previous_analyses", None)
+                prev_entry.pop("previous_analysis", None)
+                # Strip transient re-analysis fields from archived entry
+                prev_entry.pop("reanalysis_status", None)
+                prev_entry.pop("reanalyzed_with", None)
+                prev_entry.pop("reanalysis_error", None)
+                # Tag: this analysis was superseded by a re-analysis using the new provider/model
+                prev_entry["_superseded_by"] = {
+                    "ai_provider": ai_provider,
+                    "ai_model": ai_model,
+                    "timestamp": datetime.now(UTC).isoformat(),
+                }
+                if "previous_analyses" not in failure:
+                    # Migrate: if old single previous_analysis exists, start the list with it
+                    failure["previous_analyses"] = []
+                    if "previous_analysis" in failure:
+                        failure["previous_analyses"].append(
+                            failure.pop("previous_analysis")
+                        )
+                # Prepend current analysis (most recent previous first)
+                failure["previous_analyses"].insert(0, prev_entry)
+                # Clean up old field if still present
+                failure.pop("previous_analysis", None)
             # Replace with new analysis
             new_data = new_analysis.model_dump(mode="json")
             failure["analysis"] = new_data.get("analysis")
@@ -3281,9 +3362,9 @@ async def re_analyze_failure(
         ai_model = overrides.ai_model
     ai_provider, ai_model = _resolve_ai_config_values(ai_provider, ai_model)
 
-    ai_cli_timeout = decrypted_params.get("ai_cli_timeout")
-    if overrides.ai_cli_timeout is not None:
-        ai_cli_timeout = overrides.ai_cli_timeout
+    ai_call_timeout = decrypted_params.get("ai_call_timeout")
+    if overrides.ai_call_timeout is not None:
+        ai_call_timeout = overrides.ai_call_timeout
 
     raw_prompt = decrypted_params.get("raw_prompt", "")
     if overrides.raw_prompt is not None:
@@ -3349,7 +3430,7 @@ async def re_analyze_failure(
             failure_dict=failure_dict,
             ai_provider=ai_provider,
             ai_model=ai_model,
-            ai_cli_timeout=ai_cli_timeout,
+            ai_call_timeout=ai_call_timeout,
             raw_prompt=raw_prompt,
             peer_ai_configs=peer_ai_configs,
             peer_analysis_max_rounds=peer_analysis_max_rounds,
@@ -5831,13 +5912,6 @@ async def get_classifications(
     return {"classifications": classifications}
 
 
-@app.get("/ai-configs")
-async def get_ai_configs_endpoint() -> list[dict]:
-    """Get distinct AI provider/model pairs from completed analyses."""
-    logger.debug("GET /ai-configs")
-    return await get_ai_configs()
-
-
 @app.get("/api/ai-models")
 async def list_ai_models(
     provider: str = Query(
@@ -5857,14 +5931,14 @@ async def list_ai_models(
                         f"Valid providers: {', '.join(sorted(VALID_AI_PROVIDERS))}"
                     ),
                 )
-            models = await model_cache.list_models(provider)
+            models = await list_models(provider)
             return {"provider": provider, "models": models}
 
         # No provider specified — return models for all known providers
         all_models: dict[str, list[dict]] = {}
         for p in sorted(VALID_AI_PROVIDERS):
             try:
-                models = await model_cache.list_models(p)
+                models = await list_models(p)
                 all_models[p] = models
             except Exception:
                 logger.warning(
@@ -7060,18 +7134,15 @@ Comment:
 Respond with ONLY a JSON object:
 {"suggests_reviewed": true/false, "reason": "brief explanation"}"""
 
-    result = await call_ai_cli(
+    result = await call_ai_once(
         prompt,
         ai_provider=ai_provider,
         ai_model=ai_model,
-        ai_cli_timeout=2,
-        cli_flags=PROVIDER_CLI_FLAGS.get(ai_provider, []),
-        output_format="json",
+        ai_call_timeout=None,
     )
 
-    await record_ai_usage(
-        job_id="comment-intent",
-        result=result,
+    await result.record_usage(
+        request_id="comment-intent",
         call_type="comment_intent",
         prompt_chars=len(prompt),
         ai_provider=ai_provider,
@@ -7079,18 +7150,18 @@ Respond with ONLY a JSON object:
     )
 
     if not result.success:
-        logger.debug("AI CLI call failed for comment intent analysis: %s", result.text)
+        logger.debug("AI call failed for comment intent analysis: %s", result.text)
         return AnalyzeCommentResponse(suggests_reviewed=False)
 
-    try:
-        parsed = json.loads(result.text)
+    parsed = extract_json_dict(result.text)
+    if parsed is not None:
         return AnalyzeCommentResponse(
             suggests_reviewed=bool(parsed.get("suggests_reviewed", False)),
             reason=str(parsed.get("reason", "")),
         )
-    except (json.JSONDecodeError, AttributeError):
-        logger.debug("Failed to parse AI response for comment intent: %s", result.text)
-        return AnalyzeCommentResponse(suggests_reviewed=False)
+
+    logger.debug("Failed to parse AI response for comment intent: %s", result.text)
+    return AnalyzeCommentResponse(suggests_reviewed=False)
 
 
 @app.post(

@@ -227,17 +227,32 @@ async def check_jenkins(settings: Any) -> dict[str, str]:
 
 
 async def check_ai_provider() -> dict[str, str]:
-    """Check that an AI provider is configured."""
+    """Check that an AI provider is configured and sidecar is reachable."""
     provider = os.getenv("AI_PROVIDER", "")
     model = os.getenv("AI_MODEL", "")
-    if provider and model:
-        return {"status": "ok", "provider": provider, "model": model}
-    missing = []
+    config_issues = []
+    error_issues = []
+
     if not provider:
-        missing.append("AI_PROVIDER")
+        config_issues.append("AI_PROVIDER not set")
     if not model:
-        missing.append("AI_MODEL")
-    return {"status": "not_configured", "detail": f"Missing: {', '.join(missing)}"}
+        config_issues.append("AI_MODEL not set")
+
+    # Check sidecar health using shared helper
+    sidecar_port = os.getenv("SIDECAR_PORT", "9100")
+    sidecar_url = f"http://127.0.0.1:{sidecar_port}/health"
+    sidecar_result = await _check_http_service(sidecar_url, ok_below=300)
+    if sidecar_result["status"] == "error":
+        error_issues.append(f"Sidecar unreachable: {sidecar_result.get('detail', '')}")
+    elif sidecar_result["status"] == "degraded":
+        error_issues.append(f"Sidecar unhealthy ({sidecar_result.get('detail', '')})")
+
+    if error_issues:
+        all_issues = config_issues + error_issues
+        return {"status": "error", "detail": "; ".join(all_issues)}
+    if config_issues:
+        return {"status": "not_configured", "detail": "; ".join(config_issues)}
+    return {"status": "ok", "provider": provider, "model": model}
 
 
 async def check_reportportal(settings: Any) -> dict[str, str]:

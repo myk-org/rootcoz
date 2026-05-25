@@ -828,12 +828,6 @@ class RootCozClient:
             params["provider"] = provider
         return self._request("GET", "/api/ai-models", params=params)
 
-    # -- AI Configs -----------------------------------------------------------
-
-    def get_ai_configs(self) -> list[dict]:
-        """Get distinct AI provider/model pairs from completed analyses. GET /ai-configs"""
-        return self._request("GET", "/ai-configs")
-
     # -- Classification Override ----------------------------------------------
 
     def override_classification(

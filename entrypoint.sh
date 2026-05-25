@@ -22,12 +22,32 @@ export PORT="${PORT:-8000}"
 if [ "${DEV_MODE:-}" = "true" ] && [ -f /app/frontend/package.json ]; then
     echo "[DEV] Frontend source detected, starting Vite dev server..."
     cd /app/frontend || { echo "[DEV] Failed to change to frontend directory"; exit 1; }
-    if [ ! -d node_modules ]; then
-        echo "[DEV] Installing frontend dependencies..."
-        npm install --no-audit --no-fund
-    fi
+    npm install --no-audit --no-fund
     npm run dev -- --host 0.0.0.0 --port 5173 &
     cd /app || { echo "[DEV] Failed to return to app directory"; exit 1; }
+fi
+
+# Start Pi SDK sidecar in background with lifecycle coupling
+# Dev mode: rebuild TypeScript from source before starting
+if [ "${DEV_MODE:-}" = "true" ] && [ -f /app/sidecar-helper/src/server.ts ]; then
+    echo "[sidecar] Dev mode: compiling TypeScript..."
+    cd /app/sidecar-helper || { echo "[sidecar] Failed to enter sidecar-helper"; exit 1; }
+    npm install --ignore-scripts || { echo "[sidecar] npm install failed"; exit 1; }
+    npx tsc || { echo "[sidecar] TypeScript build failed"; exit 1; }
+    cd /app || { echo "[sidecar] Failed to return to /app"; exit 1; }
+fi
+if [ -f /app/sidecar-helper/dist/server.js ]; then
+    export SIDECAR_PORT="${SIDECAR_PORT:-9100}"
+    export SIDECAR_ACPX_EXTENSION_PATH="/app/sidecar-helper/node_modules/@myk-org/pi-sidecar/node_modules/pi-orchestrator-config/extensions/acpx-provider/index.ts"
+    node /app/sidecar-helper/dist/server.js &
+    SIDECAR_PID=$!
+    echo "[sidecar] Started Pi SDK sidecar (PID $SIDECAR_PID) on port $SIDECAR_PORT"
+
+    # Kill sidecar when main process exits
+    trap 'kill $SIDECAR_PID 2>/dev/null; wait $SIDECAR_PID 2>/dev/null' EXIT
+
+    # Monitor sidecar — if it dies, kill the main process too
+    (while kill -0 $SIDECAR_PID 2>/dev/null; do sleep 5; done; echo "[sidecar] Sidecar died, shutting down container"; kill 1 2>/dev/null) &
 fi
 
 # Check if any argument contains "uvicorn" to detect all uvicorn invocations

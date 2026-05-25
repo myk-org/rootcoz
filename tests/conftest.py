@@ -8,8 +8,8 @@ from unittest.mock import MagicMock, patch
 
 import httpx
 import pytest
-from ai_cli_runner import AIResult
-
+from pi_sidecar_client import AIResult
+from rootcoz.ai_client import _setup_usage_recorder
 from rootcoz.cli.client import RootCozClient
 from rootcoz.config import Settings
 from rootcoz.models import (
@@ -19,6 +19,13 @@ from rootcoz.models import (
     FailureAnalysis,
     ProductBugReport,
 )
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _register_usage_recorder() -> None:
+    """Ensure the pi-sidecar usage recorder is wired up for all tests."""
+    _setup_usage_recorder()
+
 
 CLI_TEST_BASE_URL = "http://localhost:8700"
 
@@ -191,9 +198,9 @@ def mock_jenkins_client() -> MagicMock:
 
 
 @pytest.fixture
-def mock_ai_cli() -> Generator[MagicMock, None, None]:
-    """Mock the call_ai_cli function."""
-    with patch("rootcoz.engine.core.call_ai_cli") as mock:
+def mock_ai() -> Generator[MagicMock, None, None]:
+    """Mock the call_ai function."""
+    with patch("rootcoz.engine.core.call_ai_once") as mock:
         mock.return_value = AIResult(
             success=True,
             text=(

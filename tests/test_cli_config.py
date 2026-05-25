@@ -35,7 +35,7 @@ jenkins_ssl_verify = false
 tests_repo_url = "https://github.com/org/tests"
 ai_provider = "claude"
 ai_model = "opus-4"
-ai_cli_timeout = 15
+ai_call_timeout = 15
 max_concurrent_ai_calls = 7
 jira_url = "https://jira.dev.local"
 jira_email = "dev@example.com"
@@ -243,7 +243,7 @@ class TestGetServerConfig:
         assert cfg.tests_repo_url == "https://github.com/org/tests"
         assert cfg.ai_provider == "claude"
         assert cfg.ai_model == "opus-4"
-        assert cfg.ai_cli_timeout == 15
+        assert cfg.ai_call_timeout == 15
         assert cfg.max_concurrent_ai_calls == 7
         assert cfg.jira_url == "https://jira.dev.local"
         assert cfg.jira_email == "dev@example.com"
@@ -268,7 +268,7 @@ class TestGetServerConfig:
         assert cfg.jenkins_url == ""
         assert cfg.jenkins_ssl_verify is None
         assert cfg.ai_provider == ""
-        assert cfg.ai_cli_timeout == 0
+        assert cfg.ai_call_timeout == 0
         assert cfg.max_concurrent_ai_calls == 0
         assert cfg.jira_ssl_verify is None
         assert cfg.jira_max_results == 0

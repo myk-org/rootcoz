@@ -11,14 +11,18 @@ from collections.abc import Coroutine
 from pathlib import Path
 from typing import Any, Literal, TypedDict, cast, get_args
 
-from ai_cli_runner import AIResult, run_parallel_with_limit
+from pi_sidecar_client import (
+    AIResult,
+    call_ai,
+    call_ai_once,
+    get_sidecar_client,
+    run_parallel_with_limit,
+)
 from simple_logger.logger import get_logger
 
 from rootcoz.engine.core import (
     JSON_RESPONSE_SCHEMA,
-    PROVIDER_CLI_FLAGS,
     build_prompt_sections,
-    call_ai_cli_with_retry,
     parse_json_response,
     run_single_ai_analysis,
     safe_update_progress,
@@ -31,7 +35,6 @@ from rootcoz.models import (
     PeerDebate,
     PeerRound,
 )
-from rootcoz.token_tracking import record_ai_usage
 
 logger = get_logger(name=__name__, level=os.environ.get("LOG_LEVEL", "INFO"))
 
@@ -148,7 +151,7 @@ def _parse_peer_response(raw: str) -> dict:
     is excluded from consensus.
 
     Args:
-        raw: Raw text from the peer AI CLI call.
+        raw: Raw text from the peer AI call.
 
     Returns:
         Parsed dict with peer review fields, or a ``_failed`` marker dict.
@@ -160,8 +163,8 @@ def _parse_peer_response(raw: str) -> dict:
         data = json.loads(raw)
         if _is_peer_response_dict(data):
             return data
-    except (json.JSONDecodeError, TypeError):
-        pass
+    except (json.JSONDecodeError, TypeError) as e:
+        logger.debug("Peer response parse strategy 1 (direct parse) failed: %s", e)
 
     # Strategy 2: extract from markdown code blocks (try all blocks)
     for block in re.findall(r"```(?:json)?\s*\n?(.*?)\n?```", raw, re.DOTALL):
@@ -169,7 +172,8 @@ def _parse_peer_response(raw: str) -> dict:
             data = json.loads(block.strip())
             if _is_peer_response_dict(data):
                 return data
-        except (json.JSONDecodeError, TypeError):
+        except (json.JSONDecodeError, TypeError) as e:
+            logger.debug("Peer response parse strategy 2 (code block) failed: %s", e)
             continue
 
     # Strategy 3: try brace-delimited substrings, starting from the last '{'.
@@ -183,7 +187,10 @@ def _parse_peer_response(raw: str) -> dict:
             data, _ = decoder.raw_decode(raw, match.start())
             if _is_peer_response_dict(data):
                 return data
-        except (json.JSONDecodeError, TypeError, ValueError):
+        except (json.JSONDecodeError, TypeError, ValueError) as e:
+            logger.debug(
+                "Peer response parse strategy 3 (brace-delimited) failed: %s", e
+            )
             continue
 
     return _failed
@@ -326,7 +333,7 @@ async def analyze_failure_group_with_peers(
     main_ai_model: str,
     peer_ai_configs: list[AiConfigEntry],
     max_rounds: int = 3,
-    ai_cli_timeout: int | None = None,
+    ai_call_timeout: int | None = None,
     custom_prompt: str = "",
     artifacts_context: str = "",
     server_url: str = "",
@@ -353,7 +360,7 @@ async def analyze_failure_group_with_peers(
         main_ai_model: AI model for the main/orchestrator analysis.
         peer_ai_configs: List of peer AI configurations.
         max_rounds: Maximum debate rounds before accepting main AI result.
-        ai_cli_timeout: Timeout in minutes for AI CLI calls.
+        ai_call_timeout: Timeout in minutes for AI calls.
         custom_prompt: Additional user instructions.
         artifacts_context: Jenkins artifacts context.
         server_url: Base URL of this server for AI history API access.
@@ -362,7 +369,7 @@ async def analyze_failure_group_with_peers(
             being analyzed (e.g. ``"2/3"`` for group 2 of 3). Used in progress
             phase names to disambiguate concurrent groups.
         additional_repos: Extra cloned repositories for AI context.
-        max_concurrent_ai_calls: Maximum concurrent AI CLI processes for
+        max_concurrent_ai_calls: Maximum concurrent AI calls for
             peer analysis parallelism (default: 3).
 
     Returns:
@@ -379,7 +386,7 @@ async def analyze_failure_group_with_peers(
         repo_path=repo_path,
         ai_provider=main_ai_provider,
         ai_model=main_ai_model,
-        ai_cli_timeout=ai_cli_timeout,
+        ai_call_timeout=ai_call_timeout,
         custom_prompt=custom_prompt,
         artifacts_context=artifacts_context,
         server_url=server_url,
@@ -416,7 +423,7 @@ async def analyze_failure_group_with_peers(
     rounds_used = 0
     group_suffix = f" (group {group_label})" if group_label else ""
 
-    # Track AI CLI sessions per peer for conversation continuity
+    # Track AI sessions per peer for conversation continuity
     peer_sessions: dict[int, str] = {}  # peer_idx -> session_id
 
     # Step 2: Debate loop
@@ -425,171 +432,174 @@ async def analyze_failure_group_with_peers(
         len(peer_ai_configs),
         max_rounds,
     )
-    for round_num in range(1, max_rounds + 1):
-        rounds_used = round_num
-        logger.info(f"Peer analysis: starting debate round {round_num}/{max_rounds}")
-
-        await safe_update_progress(
-            job_id, f"peer_review_round_{round_num}{group_suffix}"
-        )
-
-        # Build orchestrator analysis text for peers
-        orchestrator_analysis_text = (
-            f"Classification: {parsed_analysis.classification}\n"
-            f"Details: {parsed_analysis.details}"
-        )
-
-        # Record orchestrator entry for this round
-        all_rounds.append(
-            PeerRound(
-                round=round_num,
-                ai_provider=main_ai_provider,
-                ai_model=main_ai_model,
-                role="orchestrator",
-                classification=parsed_analysis.classification,
-                details=parsed_analysis.details,
-                agrees_with_orchestrator=True,
+    try:
+        for round_num in range(1, max_rounds + 1):
+            rounds_used = round_num
+            logger.info(
+                f"Peer analysis: starting debate round {round_num}/{max_rounds}"
             )
-        )
 
-        # Collect previous round peer data for cross-peer visibility.
-        # Build a mapping from peer_ai_configs index to PeerResponseSummary
-        # (None for peers that failed).  Peer entries in all_rounds appear in
-        # the same order as peer_ai_configs because run_parallel_with_limit
-        # preserves input order, so we can zip them by position.
-        prev_round_by_idx: dict[int, PeerResponseSummary] = {}
-        if round_num > 1:
-            prev_round_entries = [
-                r for r in all_rounds if r.round == round_num - 1 and r.role == "peer"
-            ]
-            for peer_idx, entry in enumerate(prev_round_entries):
-                if entry.agrees_with_orchestrator is not None:
-                    prev_round_by_idx[peer_idx] = PeerResponseSummary(
-                        ai_provider=entry.ai_provider,
-                        ai_model=entry.ai_model,
-                        classification=entry.classification,
-                        reasoning=entry.details,
+            await safe_update_progress(
+                job_id, f"peer_review_round_{round_num}{group_suffix}"
+            )
+
+            # Build orchestrator analysis text for peers
+            orchestrator_analysis_text = (
+                f"Classification: {parsed_analysis.classification}\n"
+                f"Details: {parsed_analysis.details}"
+            )
+
+            # Record orchestrator entry for this round
+            all_rounds.append(
+                PeerRound(
+                    round=round_num,
+                    ai_provider=main_ai_provider,
+                    ai_model=main_ai_model,
+                    role="orchestrator",
+                    classification=parsed_analysis.classification,
+                    details=parsed_analysis.details,
+                    agrees_with_orchestrator=True,
+                )
+            )
+
+            # Collect previous round peer data for cross-peer visibility.
+            # Build a mapping from peer_ai_configs index to PeerResponseSummary
+            # (None for peers that failed).  Peer entries in all_rounds appear in
+            # the same order as peer_ai_configs because run_parallel_with_limit
+            # preserves input order, so we can zip them by position.
+            prev_round_by_idx: dict[int, PeerResponseSummary] = {}
+            if round_num > 1:
+                prev_round_entries = [
+                    r
+                    for r in all_rounds
+                    if r.round == round_num - 1 and r.role == "peer"
+                ]
+                for peer_idx, entry in enumerate(prev_round_entries):
+                    if entry.agrees_with_orchestrator is not None:
+                        prev_round_by_idx[peer_idx] = PeerResponseSummary(
+                            ai_provider=entry.ai_provider,
+                            ai_model=entry.ai_model,
+                            classification=entry.classification,
+                            reasoning=entry.details,
+                        )
+
+            # Build per-peer prompts (each peer sees others' responses, excluding self by index)
+            peer_prompts: dict[int, str] = {}
+            for idx, _cfg in enumerate(peer_ai_configs):
+                other_responses: list[PeerResponseSummary] = [
+                    resp
+                    for peer_idx, resp in prev_round_by_idx.items()
+                    if peer_idx != idx
+                ]
+                peer_prompts[idx] = _build_peer_review_prompt(
+                    failure_summary=failure_summary,
+                    orchestrator_analysis=orchestrator_analysis_text,
+                    custom_prompt=custom_prompt,
+                    resources_section=resources_section,
+                    other_peer_responses=other_responses if other_responses else None,
+                )
+
+            async def _call_peer(
+                idx: int,
+                config: AiConfigEntry,
+                _peer_prompts: dict[int, str] = peer_prompts,
+            ) -> tuple[AiConfigEntry, AIResult]:
+                prompt = _peer_prompts[idx]
+                session = peer_sessions.get(idx)
+                if session:
+                    logger.debug(
+                        "Peer %d (%s/%s): resuming session %s",
+                        idx,
+                        config.ai_provider,
+                        config.ai_model,
+                        session,
                     )
-
-        # Build per-peer prompts (each peer sees others' responses, excluding self by index)
-        peer_prompts: dict[int, str] = {}
-        for idx, _cfg in enumerate(peer_ai_configs):
-            other_responses: list[PeerResponseSummary] = [
-                resp for peer_idx, resp in prev_round_by_idx.items() if peer_idx != idx
-            ]
-            peer_prompts[idx] = _build_peer_review_prompt(
-                failure_summary=failure_summary,
-                orchestrator_analysis=orchestrator_analysis_text,
-                custom_prompt=custom_prompt,
-                resources_section=resources_section,
-                other_peer_responses=other_responses if other_responses else None,
-            )
-
-        async def _call_peer(
-            idx: int,
-            config: AiConfigEntry,
-            _peer_prompts: dict[int, str] = peer_prompts,
-        ) -> tuple[AiConfigEntry, AIResult]:
-            prompt = _peer_prompts[idx]
-            session = peer_sessions.get(idx)
-            if session:
-                logger.info(
-                    "Peer %d (%s/%s): resuming session %s",
-                    idx,
-                    config.ai_provider,
-                    config.ai_model,
-                    session,
-                )
-            else:
-                logger.info(
-                    "Peer %d (%s/%s): starting new session",
-                    idx,
-                    config.ai_provider,
-                    config.ai_model,
-                )
-            ai_result = await call_ai_cli_with_retry(
-                prompt,
-                cwd=repo_path,
-                ai_provider=config.ai_provider,
-                ai_model=config.ai_model,
-                ai_cli_timeout=ai_cli_timeout,
-                cli_flags=PROVIDER_CLI_FLAGS.get(config.ai_provider, []),
-                session_id=peer_sessions.get(idx),
-            )
-            await record_ai_usage(
-                job_id=job_id,
-                result=ai_result,
-                call_type="peer",
-                prompt_chars=len(prompt),
-                ai_provider=config.ai_provider,
-                ai_model=config.ai_model,
-            )
-            return config, ai_result
-
-        peer_tasks: list[Coroutine[Any, Any, Any]] = [
-            _call_peer(idx, cfg) for idx, cfg in enumerate(peer_ai_configs)
-        ]
-        peer_results = await run_parallel_with_limit(
-            peer_tasks, max_concurrency=max_concurrent_ai_calls
-        )
-
-        # Capture session IDs from peer responses
-        for i, result in enumerate(peer_results):
-            if isinstance(result, Exception):
-                continue
-            _cfg_r, ai_result_r = result
-            if ai_result_r.session_id:
-                peer_sessions[i] = ai_result_r.session_id
-                logger.info(
-                    "Peer %d (%s/%s): captured session_id=%s",
-                    i,
-                    _cfg_r.ai_provider,
-                    _cfg_r.ai_model,
-                    ai_result_r.session_id,
-                )
-
-        # Process peer responses
-        round_peer_entries: list[PeerRound] = []
-        for i, result in enumerate(peer_results):
-            if isinstance(result, Exception):
-                exc_config = peer_ai_configs[i]
-                logger.warning(
-                    f"Peer {exc_config.ai_provider}/{exc_config.ai_model} "
-                    f"raised exception: {result}"
-                )
-                entry = PeerRound(
-                    round=round_num,
-                    ai_provider=exc_config.ai_provider,
-                    ai_model=exc_config.ai_model,
-                    role="peer",
-                    classification="",
-                    details=str(result),
-                    agrees_with_orchestrator=None,
-                )
-                round_peer_entries.append(entry)
-                all_rounds.append(entry)
-                continue
-            config, ai_result = result
-            if not ai_result.success:
-                logger.warning(
-                    f"Peer {config.ai_provider}/{config.ai_model} CLI failed: "
-                    f"{ai_result.text if ai_result.text else 'no output'}"
-                )
-                entry = PeerRound(
-                    round=round_num,
+                else:
+                    logger.debug(
+                        "Peer %d (%s/%s): starting new session",
+                        idx,
+                        config.ai_provider,
+                        config.ai_model,
+                    )
+                ai_result = await call_ai(
+                    prompt,
                     ai_provider=config.ai_provider,
                     ai_model=config.ai_model,
-                    role="peer",
-                    classification="",
-                    details=ai_result.text,
-                    agrees_with_orchestrator=None,
+                    cwd=str(repo_path) if repo_path else None,
+                    ai_call_timeout=ai_call_timeout,
+                    session_id=session,
                 )
-            else:
-                peer_data = _parse_peer_response(ai_result.text)
-                if peer_data.get("_failed"):
-                    logger.warning(
-                        f"Peer {config.ai_provider}/{config.ai_model} returned "
-                        f"unparseable response"
+                logger.debug(
+                    "Peer %d (%s/%s) AI result: success=%s, text_length=%d",
+                    idx,
+                    config.ai_provider,
+                    config.ai_model,
+                    ai_result.success,
+                    len(ai_result.text),
+                )
+                if not ai_result.success:
+                    logger.error(
+                        "Peer %d AI call failed (text_length=%d)",
+                        idx,
+                        len(ai_result.text),
+                    )
+                await ai_result.record_usage(
+                    request_id=job_id,
+                    call_type="peer",
+                    prompt_chars=len(prompt),
+                    ai_provider=config.ai_provider,
+                    ai_model=config.ai_model,
+                )
+                return config, ai_result
+
+            peer_tasks: list[Coroutine[Any, Any, Any]] = [
+                _call_peer(idx, cfg) for idx, cfg in enumerate(peer_ai_configs)
+            ]
+            peer_results = await run_parallel_with_limit(
+                peer_tasks, max_concurrency=max_concurrent_ai_calls
+            )
+
+            # Capture session IDs from peer responses
+            for i, result in enumerate(peer_results):
+                if isinstance(result, Exception):
+                    continue
+                _cfg_r, ai_result_r = result
+                if ai_result_r.session_id:
+                    peer_sessions[i] = ai_result_r.session_id
+                    logger.debug(
+                        "Peer %d (%s/%s): captured session_id=%s",
+                        i,
+                        _cfg_r.ai_provider,
+                        _cfg_r.ai_model,
+                        ai_result_r.session_id,
+                    )
+
+            # Process peer responses
+            round_peer_entries: list[PeerRound] = []
+            for i, result in enumerate(peer_results):
+                if isinstance(result, Exception):
+                    exc_config = peer_ai_configs[i]
+                    logger.error(
+                        f"Peer {exc_config.ai_provider}/{exc_config.ai_model} "
+                        f"raised exception: {result}"
+                    )
+                    entry = PeerRound(
+                        round=round_num,
+                        ai_provider=exc_config.ai_provider,
+                        ai_model=exc_config.ai_model,
+                        role="peer",
+                        classification="",
+                        details=str(result),
+                        agrees_with_orchestrator=None,
+                    )
+                    round_peer_entries.append(entry)
+                    all_rounds.append(entry)
+                    continue
+                config, ai_result = result
+                if not ai_result.success:
+                    logger.error(
+                        f"Peer {config.ai_provider}/{config.ai_model} call failed "
+                        f"(text_length={len(ai_result.text)})"
                     )
                     entry = PeerRound(
                         round=round_num,
@@ -601,187 +611,229 @@ async def analyze_failure_group_with_peers(
                         agrees_with_orchestrator=None,
                     )
                 else:
-                    raw_peer_classification = peer_data.get("classification", "")
-                    peer_classification = (
-                        raw_peer_classification
-                        if isinstance(raw_peer_classification, str)
-                        else ""
-                    )
-                    peer_reasoning = str(peer_data.get("reasoning", "") or "")
-                    peer_suggested_changes = str(
-                        peer_data.get("suggested_changes", "") or ""
-                    )
-                    peer_details = peer_reasoning
-                    if peer_suggested_changes:
-                        peer_details = (
-                            f"{peer_reasoning}\n\nSuggested changes:\n{peer_suggested_changes}"
-                            if peer_reasoning
-                            else f"Suggested changes:\n{peer_suggested_changes}"
-                        )
-                    normalized = _normalize_classification(peer_classification)
-                    if normalized not in _VALID_CLASSIFICATIONS:
-                        # Invalid classification -- exclude from consensus
+                    peer_data = _parse_peer_response(ai_result.text)
+                    if peer_data.get("_failed"):
                         logger.warning(
                             f"Peer {config.ai_provider}/{config.ai_model} returned "
-                            f"invalid classification: {raw_peer_classification!r}"
+                            f"unparseable response"
                         )
                         entry = PeerRound(
                             round=round_num,
                             ai_provider=config.ai_provider,
                             ai_model=config.ai_model,
                             role="peer",
-                            classification=peer_classification,
-                            details=peer_details,
+                            classification="",
+                            details=ai_result.text,
                             agrees_with_orchestrator=None,
                         )
                     else:
-                        # Derive agreement from normalized classification match
-                        agrees = normalized == _normalize_classification(
-                            parsed_analysis.classification
+                        raw_peer_classification = peer_data.get("classification", "")
+                        peer_classification = (
+                            raw_peer_classification
+                            if isinstance(raw_peer_classification, str)
+                            else ""
                         )
-                        entry = PeerRound(
-                            round=round_num,
-                            ai_provider=config.ai_provider,
-                            ai_model=config.ai_model,
-                            role="peer",
-                            classification=normalized,
-                            details=peer_details,
-                            agrees_with_orchestrator=agrees,
+                        peer_reasoning = str(peer_data.get("reasoning", "") or "")
+                        peer_suggested_changes = str(
+                            peer_data.get("suggested_changes", "") or ""
                         )
-            round_peer_entries.append(entry)
-            all_rounds.append(entry)
+                        peer_details = peer_reasoning
+                        if peer_suggested_changes:
+                            peer_details = (
+                                f"{peer_reasoning}\n\nSuggested changes:\n{peer_suggested_changes}"
+                                if peer_reasoning
+                                else f"Suggested changes:\n{peer_suggested_changes}"
+                            )
+                        normalized = _normalize_classification(peer_classification)
+                        if normalized not in _VALID_CLASSIFICATIONS:
+                            # Invalid classification -- exclude from consensus
+                            logger.warning(
+                                f"Peer {config.ai_provider}/{config.ai_model} returned "
+                                f"invalid classification: {raw_peer_classification!r}"
+                            )
+                            entry = PeerRound(
+                                round=round_num,
+                                ai_provider=config.ai_provider,
+                                ai_model=config.ai_model,
+                                role="peer",
+                                classification=peer_classification,
+                                details=peer_details,
+                                agrees_with_orchestrator=None,
+                            )
+                        else:
+                            # Derive agreement from normalized classification match
+                            agrees = normalized == _normalize_classification(
+                                parsed_analysis.classification
+                            )
+                            entry = PeerRound(
+                                round=round_num,
+                                ai_provider=config.ai_provider,
+                                ai_model=config.ai_model,
+                                role="peer",
+                                classification=normalized,
+                                details=peer_details,
+                                agrees_with_orchestrator=agrees,
+                            )
+                round_peer_entries.append(entry)
+                all_rounds.append(entry)
 
-        # Check if all peers failed this round
-        if all(r.agrees_with_orchestrator is None for r in round_peer_entries):
-            logger.warning(
-                f"All peers failed in round {round_num}; using main AI result"
-            )
-            break
-
-        # Check consensus
-        orchestrator_classification = parsed_analysis.classification
-        if _check_consensus(orchestrator_classification, round_peer_entries):
-            logger.info(f"Peer analysis: consensus reached in round {round_num}")
-            consensus_reached = True
-            break
-
-        # No consensus and more rounds available -> main AI revises
-        if round_num < max_rounds:
-            logger.info(f"No consensus in round {round_num}; main AI revising analysis")
-
-            await safe_update_progress(
-                job_id, f"orchestrator_revising_round_{round_num}{group_suffix}"
-            )
-            # Collect peer feedback
-            feedback_parts = []
-            for entry in round_peer_entries:
-                if entry.agrees_with_orchestrator is not None:
-                    feedback_parts.append(
-                        f"Peer ({entry.ai_provider}/{entry.ai_model}):\n"
-                        f"  Agrees: {entry.agrees_with_orchestrator}\n"
-                        f"  Classification: {entry.classification}\n"
-                        f"  Reasoning: {entry.details}"
-                    )
-            peer_feedback = "\n\n".join(feedback_parts)
-
-            revision_prompt = _build_revision_prompt(
-                failure_summary=failure_summary,
-                current_analysis=orchestrator_analysis_text,
-                peer_feedback=peer_feedback,
-                custom_prompt=custom_prompt,
-                resources_section=resources_section,
-            )
-
-            previous_analysis = parsed_analysis
-            try:
-                rev_result = await call_ai_cli_with_retry(
-                    revision_prompt,
-                    cwd=repo_path,
-                    ai_provider=main_ai_provider,
-                    ai_model=main_ai_model,
-                    ai_cli_timeout=ai_cli_timeout,
-                    cli_flags=PROVIDER_CLI_FLAGS.get(main_ai_provider, []),
-                )
-                await record_ai_usage(
-                    job_id=job_id,
-                    result=rev_result,
-                    call_type="revision",
-                    prompt_chars=len(revision_prompt),
-                    ai_provider=main_ai_provider,
-                    ai_model=main_ai_model,
-                )
-            except Exception as exc:
+            # Check if all peers failed this round
+            if all(r.agrees_with_orchestrator is None for r in round_peer_entries):
                 logger.warning(
-                    f"Revision round {round_num} raised {type(exc).__name__}: {exc}; keeping prior analysis"
+                    f"All peers failed in round {round_num}; using main AI result"
                 )
-                parsed_analysis = previous_analysis
-                continue
+                break
 
-            if rev_result.success:
-                revised = parse_json_response(rev_result.text)
-                normalized_revised = _coerce_supported_classification(
-                    revised.classification
+            # Check consensus
+            orchestrator_classification = parsed_analysis.classification
+            if _check_consensus(orchestrator_classification, round_peer_entries):
+                logger.info(f"Peer analysis: consensus reached in round {round_num}")
+                consensus_reached = True
+                break
+
+            # No consensus and more rounds available -> main AI revises
+            if round_num < max_rounds:
+                logger.info(
+                    f"No consensus in round {round_num}; main AI revising analysis"
                 )
-                if normalized_revised:
-                    revised = revised.model_copy(
-                        update={"classification": normalized_revised}
-                    )
-                    # Merge forward: when revision keeps the same classification
-                    # but drops structured fields, preserve non-empty fields from
-                    # the prior analysis so a partial revision doesn't erase a
-                    # richer earlier result.
-                    if _normalize_classification(
-                        revised.classification
-                    ) == _normalize_classification(previous_analysis.classification):
-                        _merge_fields = (
-                            "details",
-                            "artifacts_evidence",
-                            "code_fix",
-                            "product_bug_report",
+
+                await safe_update_progress(
+                    job_id, f"orchestrator_revising_round_{round_num}{group_suffix}"
+                )
+                # Collect peer feedback
+                feedback_parts = []
+                for entry in round_peer_entries:
+                    if entry.agrees_with_orchestrator is not None:
+                        feedback_parts.append(
+                            f"Peer ({entry.ai_provider}/{entry.ai_model}):\n"
+                            f"  Agrees: {entry.agrees_with_orchestrator}\n"
+                            f"  Classification: {entry.classification}\n"
+                            f"  Reasoning: {entry.details}"
                         )
-                        updates: dict = {}
-                        for field in _merge_fields:
-                            revised_val = getattr(revised, field)
-                            prev_val = getattr(previous_analysis, field)
-                            # Keep previous value when revised dropped it
-                            if not revised_val and prev_val:
-                                updates[field] = prev_val
-                        if updates:
-                            revised = revised.model_copy(update=updates)
-                    parsed_analysis = revised
-                elif revised.classification:
+                peer_feedback = "\n\n".join(feedback_parts)
+
+                revision_prompt = _build_revision_prompt(
+                    failure_summary=failure_summary,
+                    current_analysis=orchestrator_analysis_text,
+                    peer_feedback=peer_feedback,
+                    custom_prompt=custom_prompt,
+                    resources_section=resources_section,
+                )
+
+                previous_analysis = parsed_analysis
+                try:
+                    rev_result = await call_ai_once(
+                        revision_prompt,
+                        ai_provider=main_ai_provider,
+                        ai_model=main_ai_model,
+                        cwd=str(repo_path) if repo_path else None,
+                        ai_call_timeout=ai_call_timeout,
+                    )
+                    logger.debug(
+                        "Revision round %d AI result: success=%s, text_length=%d, provider=%s, model=%s",
+                        round_num,
+                        rev_result.success,
+                        len(rev_result.text),
+                        main_ai_provider,
+                        main_ai_model,
+                    )
+                    if not rev_result.success:
+                        logger.error(
+                            "Revision round %d AI call failed (text_length=%d)",
+                            round_num,
+                            len(rev_result.text),
+                        )
+                    await rev_result.record_usage(
+                        request_id=job_id,
+                        call_type="revision",
+                        prompt_chars=len(revision_prompt),
+                        ai_provider=main_ai_provider,
+                        ai_model=main_ai_model,
+                    )
+                except Exception as exc:
                     logger.warning(
-                        f"Revision round {round_num} returned invalid classification: "
-                        f"{revised.classification!r}; keeping prior analysis"
+                        f"Revision round {round_num} raised {type(exc).__name__}: {exc}; keeping prior analysis"
                     )
                     parsed_analysis = previous_analysis
+                    continue
+
+                if rev_result.success:
+                    revised = parse_json_response(rev_result.text)
+                    normalized_revised = _coerce_supported_classification(
+                        revised.classification
+                    )
+                    if normalized_revised:
+                        revised = revised.model_copy(
+                            update={"classification": normalized_revised}
+                        )
+                        # Merge forward: when revision keeps the same classification
+                        # but drops structured fields, preserve non-empty fields from
+                        # the prior analysis so a partial revision doesn't erase a
+                        # richer earlier result.
+                        if _normalize_classification(
+                            revised.classification
+                        ) == _normalize_classification(
+                            previous_analysis.classification
+                        ):
+                            _merge_fields = (
+                                "details",
+                                "artifacts_evidence",
+                                "code_fix",
+                                "product_bug_report",
+                            )
+                            updates: dict = {}
+                            for field in _merge_fields:
+                                revised_val = getattr(revised, field)
+                                prev_val = getattr(previous_analysis, field)
+                                # Keep previous value when revised dropped it
+                                if not revised_val and prev_val:
+                                    updates[field] = prev_val
+                            if updates:
+                                revised = revised.model_copy(update=updates)
+                        parsed_analysis = revised
+                    elif revised.classification:
+                        logger.warning(
+                            f"Revision round {round_num} returned invalid classification: "
+                            f"{revised.classification!r}; keeping prior analysis"
+                        )
+                        parsed_analysis = previous_analysis
+                    else:
+                        logger.warning(
+                            f"Revision round {round_num} returned no classification; keeping prior analysis"
+                        )
+                        parsed_analysis = previous_analysis
                 else:
                     logger.warning(
-                        f"Revision round {round_num} returned no classification; keeping prior analysis"
+                        f"Revision round {round_num} failed; keeping prior analysis"
                     )
                     parsed_analysis = previous_analysis
-            else:
-                logger.warning(
-                    f"Revision round {round_num} failed; keeping prior analysis"
-                )
-                parsed_analysis = previous_analysis
 
-    # Build PeerDebate trail
-    peer_debate = PeerDebate(
-        consensus_reached=consensus_reached,
-        rounds_used=rounds_used,
-        max_rounds=max_rounds,
-        ai_configs=[
-            AiConfigEntry(
-                ai_provider=cast(
-                    Literal["claude", "gemini", "cursor"], main_ai_provider
+        # Build PeerDebate trail
+        peer_debate = PeerDebate(
+            consensus_reached=consensus_reached,
+            rounds_used=rounds_used,
+            max_rounds=max_rounds,
+            ai_configs=[
+                AiConfigEntry(
+                    ai_provider=cast(
+                        Literal["claude", "gemini", "cursor"], main_ai_provider
+                    ),
+                    ai_model=main_ai_model,
                 ),
-                ai_model=main_ai_model,
-            ),
-            *peer_ai_configs,
-        ],
-        rounds=all_rounds,
-    )
+                *peer_ai_configs,
+            ],
+            rounds=all_rounds,
+        )
+    finally:
+        # Clean up all peer sessions
+        client = get_sidecar_client()
+        for peer_sid in peer_sessions.values():
+            try:
+                await client.delete_session(peer_sid)
+            except Exception:
+                logger.debug(
+                    "Failed to delete peer session %s", peer_sid, exc_info=True
+                )
 
     # Apply analysis to all failures in the group.
     # All failures share the same signature (that's how they were grouped),
