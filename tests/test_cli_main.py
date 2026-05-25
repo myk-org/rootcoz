@@ -3938,19 +3938,20 @@ class TestChatCommands:
             ],
             "total": 1,
         }
-        result = runner.invoke(
-            app,
-            [
-                "chat",
-                "send",
-                "job-1",
-                "Explain the error",
-                "--provider",
-                "claude",
-                "--model",
-                "opus-4",
-            ],
-        )
+        with patch("time.sleep"):
+            result = runner.invoke(
+                app,
+                [
+                    "chat",
+                    "send",
+                    "job-1",
+                    "Explain the error",
+                    "--provider",
+                    "claude",
+                    "--model",
+                    "opus-4",
+                ],
+            )
         assert result.exit_code == 0
         mock_client.send_chat_message.assert_called_once_with(
             "job-1", "Explain the error", ai_provider="claude", ai_model="opus-4"
