@@ -488,16 +488,16 @@ export function DashboardPage() {
               <button
                 type="button"
                 aria-label="Filter by status"
-                className="flex h-9 w-full sm:w-40 items-center justify-between rounded-md border border-border-default bg-surface-elevated px-3 py-2 text-sm text-text-primary shadow-sm ring-offset-surface-card placeholder:text-text-tertiary focus:outline-none focus:ring-2 focus:ring-border-accent disabled:cursor-not-allowed disabled:opacity-50 [&>span]:line-clamp-1"
+                className="flex h-9 w-full sm:w-40 items-center justify-between rounded-full border border-white/10 bg-white/5 px-4 py-2 text-sm text-text-primary ring-offset-surface-card transition-colors hover:bg-white/10 focus:outline-none focus:ring-2 focus:ring-border-accent focus:ring-offset-1 [&>span]:line-clamp-1"
               >
-                <span className="text-text-primary">
+                <span>
                   {selectedStatuses.size === 0
                     ? 'All statuses'
                     : selectedStatuses.size === 1
                       ? [...selectedStatuses][0].charAt(0).toUpperCase() + [...selectedStatuses][0].slice(1)
                       : `${selectedStatuses.size} statuses`}
                 </span>
-                <ChevronDown className="h-4 w-4 opacity-50" />
+                <ChevronDown className="h-3.5 w-3.5 opacity-30" />
               </button>
             </PopoverTrigger>
             <PopoverContent

@@ -33,6 +33,10 @@ export default defineConfig({
     css: true,
   },
   server: {
+    watch: {
+      usePolling: true,
+      interval: 1000,
+    },
     proxy: {
       '/api': BACKEND_URL,
       '/analyze': BACKEND_URL,
