@@ -116,7 +116,15 @@ export function DashboardPage() {
   const [loading, setLoading] = useState(true)
   const [search, setSearch] = useState('')
   const [statusFilter, setStatusFilter] = useState(STATUS_FILTER_ALL)
-  const [analysisFilter, setAnalysisFilter] = useState(ANALYSIS_FILTER_ALL)
+  const analysisFilter = searchParams.get('analysis') ?? ANALYSIS_FILTER_ALL
+  const setAnalysisFilter = useCallback((value: string) => {
+    setSearchParams((prev) => {
+      const next = new URLSearchParams(prev)
+      if (value === ANALYSIS_FILTER_ALL) next.delete('analysis')
+      else next.set('analysis', value)
+      return next
+    }, { replace: true })
+  }, [setSearchParams])
   const { sortKey, sortDir, handleSort } = useTableSort('dash', 'created_at', 'desc', ['created_at'])
   const [page, setPage] = useState(1)
   const [perPage, setPerPage] = useState(20)
@@ -162,6 +170,7 @@ export function DashboardPage() {
       next.delete('version')
       next.delete('label')
       next.delete('exclude_label')
+      next.delete('analysis')
       return next
     }, { replace: true })
   }, [setSearchParams])
@@ -271,8 +280,8 @@ export function DashboardPage() {
     return jobs.filter((j) => {
       const displayStatus = isAnalysisTimeout(j.status, j.error, j.summary) ? 'timeout' : j.status
       if (statusFilter !== STATUS_FILTER_ALL && displayStatus !== statusFilter) return false
-      if (analysisFilter === 'analyzed' && !(j.failure_count && j.failure_count > 0)) return false
-      if (analysisFilter === 'not-analyzed' && j.failure_count && j.failure_count > 0) return false
+      if (analysisFilter === 'analyzed' && j.status !== 'completed') return false
+      if (analysisFilter === 'not-analyzed' && j.status === 'completed') return false
 
       if (fromBound || toBound) {
         const jobDate = parseApiTimestamp(j.created_at)
@@ -579,9 +588,7 @@ export function DashboardPage() {
         ) : (viewMode === 'flat' ? pageJobs.length === 0 : sorted.length === 0) && (!error || jobs.length > 0) ? (
           <div className="flex flex-col items-center justify-center rounded-lg border border-border-muted bg-surface-card py-16 text-center animate-fade-in">
             <p className="text-text-secondary">
-              {search || statusFilter !== STATUS_FILTER_ALL || dateFrom || dateTo || hasMetadataFilters
-                ? 'No jobs match your filters.'
-                : analysisFilter !== ANALYSIS_FILTER_ALL
+              {search || statusFilter !== STATUS_FILTER_ALL || dateFrom || dateTo || hasMetadataFilters || analysisFilter !== ANALYSIS_FILTER_ALL
                 ? 'No jobs match your filters.'
                 : 'No analysis runs yet.'}
             </p>

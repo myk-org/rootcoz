@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useLatestRef } from '@/lib/useLatestRef'
 import { api } from '@/lib/api'
 import { formatCompactNumber, formatCost } from '@/lib/format'
@@ -73,6 +73,20 @@ const GROUP_BY_OPTIONS = [
 ] as const
 
 type GroupByValue = typeof GROUP_BY_OPTIONS[number]['value']
+
+const CALL_TYPE_LABELS: Record<string, string> = {
+  primary: 'Analysis',
+  peer: 'Peer Debate',
+  revision: 'Peer Revision',
+  github_preview: 'GitHub Issue',
+  jira_preview: 'Jira Bug',
+  comment_intent: 'Comment Review',
+  feedback: 'Feedback',
+}
+
+function formatCallType(raw: string): string {
+  return CALL_TYPE_LABELS[raw] ?? raw
+}
 
 function SummaryCard({ title, icon, calls, tokens, inputTokens, outputTokens, cost }: {
   title: string
@@ -446,7 +460,7 @@ export function TokenUsagePage() {
         <div className="flex flex-wrap gap-2">
           {categoryTotals.map(cat => (
             <div key={cat.group} className="inline-flex items-center gap-2 rounded-lg border border-border-default bg-surface-card px-3 py-1.5">
-              <span className="text-xs font-medium text-text-secondary">{cat.group}</span>
+              <span className="text-xs font-medium text-text-secondary">{formatCallType(cat.group)}</span>
               <span className="font-mono text-xs text-text-tertiary">{cat.calls} calls</span>
               <span className="font-mono text-xs text-signal-green">{formatCostCell(cat.cost_usd)}</span>
             </div>
@@ -512,9 +526,8 @@ export function TokenUsagePage() {
               const subRows = isExpanded ? jobDetails[row.group] : undefined
 
               return (
-                <>
+                <Fragment key={row.group}>
                   <TableRow
-                    key={row.group}
                     className={`${i % 2 === 0 ? 'bg-surface-card' : 'bg-surface-elevated/40'}${isJobGroup ? ' cursor-pointer' : ''}`}
                     onClick={isJobGroup ? () => toggleJobExpand(row.group) : undefined}
                   >
@@ -526,7 +539,7 @@ export function TokenUsagePage() {
                             aria-hidden="true"
                           />
                         )}
-                        {row.group}
+                        {groupBy === 'call_type' ? formatCallType(row.group) : row.group}
                       </span>
                     </TableCell>
                     <TableCell className="text-right font-mono text-xs text-text-secondary">{row.calls.toLocaleString()}</TableCell>
@@ -546,7 +559,7 @@ export function TokenUsagePage() {
                   )}
                   {isExpanded && subRows && subRows.map((sub) => (
                     <TableRow key={`${row.group}-${sub.group}`} className="bg-surface-elevated/20">
-                      <TableCell className="pl-10 font-mono text-xs text-text-secondary italic">{sub.group}</TableCell>
+                      <TableCell className="pl-10 font-mono text-xs text-text-secondary italic">{formatCallType(sub.group)}</TableCell>
                       <TableCell className="text-right font-mono text-xs text-text-tertiary">{sub.calls.toLocaleString()}</TableCell>
                       <TableCell className="text-right font-mono text-xs text-text-tertiary">{formatCompactNumber(sub.input_tokens)}</TableCell>
                       <TableCell className="text-right font-mono text-xs text-text-tertiary">{formatCompactNumber(sub.output_tokens)}</TableCell>
@@ -556,7 +569,7 @@ export function TokenUsagePage() {
                       <TableCell className="text-right font-mono text-xs text-text-tertiary">{formatDurationMs(sub.avg_duration_ms)}</TableCell>
                     </TableRow>
                   ))}
-                </>
+                </Fragment>
               )
             })}
           </TableBody>
