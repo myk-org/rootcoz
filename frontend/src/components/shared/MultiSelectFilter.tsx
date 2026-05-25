@@ -32,12 +32,12 @@ export function MultiSelectFilter({ label, options, selected, onToggle, onClear,
           type="button"
           aria-label={label}
           className={cn(
-            "flex h-9 w-full items-center justify-between rounded-md border border-border-default bg-surface-elevated px-3 py-2 text-sm text-text-primary shadow-sm ring-offset-surface-card placeholder:text-text-tertiary focus:outline-none focus:ring-2 focus:ring-border-accent disabled:cursor-not-allowed disabled:opacity-50 [&>span]:line-clamp-1",
+            "flex h-9 w-full items-center justify-between rounded-full border border-white/10 bg-white/5 px-4 py-2 text-sm text-text-primary ring-offset-surface-card transition-colors hover:bg-white/10 focus:outline-none focus:ring-2 focus:ring-border-accent focus:ring-offset-1 disabled:cursor-not-allowed disabled:opacity-50 [&>span]:line-clamp-1",
             className,
           )}
         >
           <span>{triggerText}</span>
-          <ChevronDown className="h-4 w-4 opacity-50" />
+          <ChevronDown className="h-3.5 w-3.5 opacity-30" />
         </button>
       </DropdownMenuTrigger>
       <DropdownMenuContent align="start" className="p-1">
