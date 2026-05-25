@@ -36,7 +36,7 @@ import { ConfirmDialog } from '@/components/shared/ConfirmDialog'
 import { SortableHeader } from '@/components/shared/SortableHeader'
 import { DateRangeFilter } from '@/components/shared/DateRangeFilter'
 import { useTableSort } from '@/lib/useTableSort'
-import { Trash2, MessageSquare, CheckCircle2, GitFork, AlertTriangle, Github, List, FolderOpen, ChevronRight, ChevronDown } from 'lucide-react'
+import { Trash2, MessageSquare, Check, CheckCircle2, GitFork, AlertTriangle, Github, List, FolderOpen, ChevronRight, ChevronDown } from 'lucide-react'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 import { useAuth } from '@/lib/auth'
 import { useMetadataOptions, MetadataDropdowns, MetadataLabelChips, MetadataClearButton } from '@/components/shared/MetadataFilterBar'
@@ -484,15 +484,23 @@ export function DashboardPage() {
             <PopoverTrigger asChild>
               <button
                 type="button"
-                className="flex items-center gap-1.5 h-9 px-3 rounded-md border border-border-default bg-surface-elevated text-sm text-text-secondary hover:bg-surface-hover transition-colors"
+                aria-label="Filter by status"
+                className="flex h-9 w-full sm:w-40 items-center justify-between rounded-md border border-border-default bg-surface-elevated px-3 py-2 text-sm text-text-primary shadow-sm ring-offset-surface-card focus:outline-none focus:ring-2 focus:ring-border-accent [&>span]:line-clamp-1"
               >
-                {selectedStatuses.size === 0
-                  ? 'All statuses'
-                  : `${selectedStatuses.size} selected`}
-                <ChevronDown className="h-3.5 w-3.5 text-text-tertiary" />
+                <span className="text-text-primary">
+                  {selectedStatuses.size === 0
+                    ? 'All statuses'
+                    : selectedStatuses.size === 1
+                      ? [...selectedStatuses][0].charAt(0).toUpperCase() + [...selectedStatuses][0].slice(1)
+                      : `${selectedStatuses.size} statuses`}
+                </span>
+                <ChevronDown className="h-4 w-4 opacity-50" />
               </button>
             </PopoverTrigger>
-            <PopoverContent className="w-48 p-1" align="start">
+            <PopoverContent
+              className="z-50 max-h-96 min-w-[8rem] overflow-hidden rounded-md border border-border-default bg-surface-card p-1 shadow-lg animate-fade-in"
+              align="start"
+            >
               {STATUS_FILTER_OPTIONS.map((s) => {
                 const isActive = selectedStatuses.has(s)
                 return (
@@ -500,18 +508,14 @@ export function DashboardPage() {
                     key={s}
                     type="button"
                     onClick={() => toggleStatus(s)}
-                    className={`flex items-center gap-2 w-full px-2 py-1.5 rounded text-sm transition-colors ${
-                      isActive
-                        ? 'bg-signal-blue/10 text-signal-blue'
-                        : 'text-text-secondary hover:bg-surface-hover'
-                    }`}
+                    className="relative flex w-full cursor-default select-none items-center rounded-sm py-1.5 pl-2 pr-8 text-sm text-text-primary outline-none hover:bg-surface-hover"
                   >
-                    <div className={`h-3.5 w-3.5 rounded-sm border flex items-center justify-center ${
-                      isActive ? 'bg-signal-blue border-signal-blue' : 'border-border-default'
-                    }`}>
-                      {isActive && <span className="text-white text-[10px]">✓</span>}
-                    </div>
                     {s.charAt(0).toUpperCase() + s.slice(1)}
+                    {isActive && (
+                      <span className="absolute right-2 flex h-3.5 w-3.5 items-center justify-center">
+                        <Check className="h-4 w-4" />
+                      </span>
+                    )}
                   </button>
                 )
               })}
@@ -521,7 +525,7 @@ export function DashboardPage() {
                   <button
                     type="button"
                     onClick={() => setSelectedStatuses(new Set())}
-                    className="w-full px-2 py-1.5 rounded text-xs text-text-tertiary hover:bg-surface-hover text-left"
+                    className="flex w-full cursor-default select-none items-center rounded-sm py-1.5 pl-2 pr-8 text-sm text-text-tertiary outline-none hover:bg-surface-hover"
                   >
                     Clear all
                   </button>
