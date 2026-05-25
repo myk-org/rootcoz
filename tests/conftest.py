@@ -237,5 +237,9 @@ def _mock_sidecar_calls():
             "pi_sidecar_client.get_sidecar_client",
             return_value=mock_client,
         ),
+        patch(
+            "rootcoz.peer_analysis.get_sidecar_client",
+            return_value=mock_client,
+        ),
     ):
         yield
