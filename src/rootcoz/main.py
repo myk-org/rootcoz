@@ -958,7 +958,7 @@ async def _backfill_job_metadata(rules: list[dict]) -> None:
     """Retroactively assign metadata to existing jobs missing metadata. Best-effort."""
     try:
         # Get all unique job names from results
-        all_jobs = await list_results_for_dashboard()
+        all_jobs = await list_results_for_dashboard(limit=0)
         job_names = {j.get("job_name", "") for j in all_jobs if j.get("job_name")}
 
         assigned = 0
@@ -6786,17 +6786,17 @@ async def rotate_key_endpoint(request: Request, username: str) -> JSONResponse:
 
 
 async def _metadata_filters(
-    team: Annotated[str, Query()] = "",
-    tier: Annotated[str, Query()] = "",
-    version: Annotated[str, Query()] = "",
+    team: Annotated[list[str] | None, Query()] = None,
+    tier: Annotated[list[str] | None, Query()] = None,
+    version: Annotated[list[str] | None, Query()] = None,
     label: Annotated[list[str] | None, Query()] = None,
     exclude_label: Annotated[list[str] | None, Query()] = None,
 ) -> dict:
     """Shared dependency for metadata filter query parameters."""
     return {
-        "team": team,
-        "tier": tier,
-        "version": version,
+        "team": team or [],
+        "tier": tier or [],
+        "version": version or [],
         "label": label or [],
         "exclude_label": exclude_label or [],
     }
@@ -6804,7 +6804,7 @@ async def _metadata_filters(
 
 def _unpack_metadata_filters(
     filters: dict, endpoint: str
-) -> tuple[str, str, str, list[str], list[str]]:
+) -> tuple[list[str], list[str], list[str], list[str], list[str]]:
     """Unpack metadata filter dict and log at DEBUG level."""
     team, tier, version, label, exclude_label = (
         filters["team"],

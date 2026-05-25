@@ -38,11 +38,11 @@ export function MultiSelectFilter({ label, options, selected, onToggle, onClear,
         </button>
       </PopoverTrigger>
       <PopoverContent
-        className="relative z-50 max-h-96 min-w-[8rem] overflow-hidden rounded-xl border border-white/10 bg-surface-card p-1 shadow-lg backdrop-blur-sm data-[state=open]:animate-fade-in"
+        className="relative z-50 max-h-96 min-w-[8rem] overflow-auto rounded-xl border border-white/10 bg-surface-card p-1 shadow-lg backdrop-blur-sm data-[state=open]:animate-fade-in"
         align="start"
         onOpenAutoFocus={(e) => e.preventDefault()}
       >
-        {options.map((option) => {
+        {[...new Set([...options, ...selected])].map((option) => {
           const isActive = selected.has(option)
           return (
             <button
