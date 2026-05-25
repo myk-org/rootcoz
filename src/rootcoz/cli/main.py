@@ -47,6 +47,7 @@ metadata_app = typer.Typer(help="Manage job metadata.", no_args_is_help=True)
 failure_app = typer.Typer(
     help="Look up and re-analyze individual failures.", no_args_is_help=True
 )
+chat_app = typer.Typer(help="Chat with AI about analyzed jobs.", no_args_is_help=True)
 
 app.add_typer(results_app, name="results")
 app.add_typer(history_app, name="history")
@@ -54,6 +55,7 @@ app.add_typer(comments_app, name="comments")
 app.add_typer(classifications_app, name="classifications")
 app.add_typer(metadata_app, name="metadata")
 app.add_typer(failure_app, name="failure")
+app.add_typer(chat_app, name="chat")
 app.add_typer(config_app, name="config")
 app.add_typer(auth_app, name="auth")
 app.add_typer(admin_app, name="admin")
@@ -2811,6 +2813,117 @@ def metadata_preview(
                 typer.echo(f"  labels: {meta['labels']}")
         else:
             typer.echo(f"No rules matched '{job_name}'.")
+
+
+# -- Chat ---------------------------------------------------------------------
+
+
+@chat_app.command("init")
+def chat_init(
+    job_id: str = typer.Argument(help="Job ID to initialize chat for."),
+    json_output: bool = _JSON_OPTION,
+) -> None:
+    """Initialize chat workspace (clone repos)."""
+    data = _run_client_command(
+        json_output,
+        lambda c: c.init_chat(job_id),
+        emit_output=False,
+    )
+    if not _state.get("json", False):
+        ready = data.get("ready", False)
+        repos = data.get("repo_names", [])
+        typer.echo(f"Ready: {ready}")
+        if repos:
+            typer.echo(f"Repos: {', '.join(repos)}")
+        else:
+            typer.echo("No repos cloned.")
+
+
+@chat_app.command("history")
+def chat_history(
+    job_id: str = typer.Argument(help="Job ID to get chat history for."),
+    limit: int = typer.Option(200, "--limit", "-l", help="Maximum messages to return."),
+    json_output: bool = _JSON_OPTION,
+) -> None:
+    """Show chat history for an analyzed job."""
+    data = _run_client_command(
+        json_output,
+        lambda c: c.get_chat_history(job_id, limit=limit),
+        emit_output=False,
+    )
+    if not _state.get("json", False):
+        messages = data.get("messages", [])
+        if not messages:
+            typer.echo("No chat messages.")
+            return
+        for msg in messages:
+            role = msg.get("role", "unknown").upper()
+            ts = msg.get("created_at", "")
+            content = msg.get("content", "")
+            header = f"[{role}]"
+            if ts:
+                header += f" {ts}"
+            typer.echo(header)
+            typer.echo(content)
+            typer.echo("")
+
+
+@chat_app.command("send")
+def chat_send(
+    job_id: str = typer.Argument(help="Job ID to chat about."),
+    message: str = typer.Argument(help="Message to send."),
+    ai_provider: str = typer.Option("", "--provider", "-p", help="AI provider."),
+    ai_model: str = typer.Option("", "--model", "-m", help="AI model."),
+    json_output: bool = _JSON_OPTION,
+) -> None:
+    """Send a chat message and queue AI processing."""
+    data = _run_client_command(
+        json_output,
+        lambda c: c.send_chat_message(
+            job_id, message, ai_provider=ai_provider, ai_model=ai_model
+        ),
+        emit_output=False,
+    )
+    if not _state.get("json", False):
+        assistant = data.get("assistant_message", {})
+        status = assistant.get("status", "completed")
+        if status == "pending":
+            typer.echo(
+                f"Message queued (id={assistant.get('id', '?')}). AI processing in background."
+            )
+        else:
+            typer.echo(assistant.get("content", ""))
+
+
+@chat_app.command("abort")
+def chat_abort(
+    job_id: str = typer.Argument(help="Job ID to abort chat for."),
+    json_output: bool = _JSON_OPTION,
+) -> None:
+    """Abort the currently processing chat message."""
+    data = _run_client_command(
+        json_output,
+        lambda c: c.abort_chat(job_id),
+        emit_output=False,
+    )
+    if not _state.get("json", False):
+        typer.echo(f"Aborted {data.get('aborted', 0)} pending message(s)")
+
+
+@chat_app.command("clear")
+def chat_clear(
+    job_id: str = typer.Argument(help="Job ID to clear chat for."),
+    json_output: bool = _JSON_OPTION,
+) -> None:
+    """Clear chat history for an analyzed job."""
+    data = _run_client_command(
+        json_output,
+        lambda c: c.clear_chat(job_id),
+        emit_output=False,
+    )
+    if not _state.get("json", False):
+        deleted = data.get("deleted", 0)
+        typer.echo(f"Deleted {deleted} message(s) for job {job_id}.")
 
 
 # -- Config -------------------------------------------------------------------

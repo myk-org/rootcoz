@@ -10,6 +10,7 @@ import { StatusPage } from '@/pages/StatusPage'
 import { SettingsPage } from '@/pages/SettingsPage'
 import { HistoryPage } from '@/pages/HistoryPage'
 import { ReportPage } from '@/pages/ReportPage'
+import { ChatPage } from '@/pages/ChatPage'
 import { TestHistoryPage } from '@/pages/TestHistoryPage'
 import { UsersPage } from '@/pages/UsersPage'
 import { TokenUsagePage } from '@/pages/TokenUsagePage'
@@ -33,6 +34,7 @@ export default function App() {
             <Route path="/history/test/:testName" element={<ProtectedRoute><TestHistoryPage /></ProtectedRoute>} />
             <Route path="/mentions" element={<ProtectedRoute><MentionsPage /></ProtectedRoute>} />
             <Route path="/results/:jobId" element={<ProtectedRoute><ReportPage /></ProtectedRoute>} />
+            <Route path="/chat/:jobId" element={<ProtectedRoute><ChatPage /></ProtectedRoute>} />
             <Route path="/status/:jobId" element={<ProtectedRoute><StatusPage /></ProtectedRoute>} />
             <Route path="/settings" element={<ProtectedRoute><SettingsPage /></ProtectedRoute>} />
             <Route path="/admin/users" element={<ProtectedRoute adminOnly><UsersPage /></ProtectedRoute>} />

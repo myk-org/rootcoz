@@ -1870,3 +1870,130 @@ class TestRootCozClientApiKeyHeader:
 
         client = _make_client(check_no_auth)
         client.health()
+
+
+class TestRootCozClientChat:
+    def test_init_chat(self):
+        """Test init_chat method."""
+        response_data = {
+            "ready": True,
+            "repos_cloned": True,
+            "repo_names": ["test-repo"],
+            "job_name": "test-job",
+            "build_number": 1,
+        }
+
+        def handler(request):
+            assert request.method == "POST"
+            assert "/api/chat/test-job-id/init" in str(request.url)
+            return httpx.Response(200, json=response_data)
+
+        client = _make_client(handler)
+        result = client.init_chat("test-job-id")
+        assert result["ready"] is True
+        assert result["repos_cloned"] is True
+        assert result["repo_names"] == ["test-repo"]
+
+    def test_get_chat_history(self):
+        sample = {
+            "messages": [
+                {"role": "user", "content": "Why did this test fail?"},
+                {"role": "assistant", "content": "The test failed due to a timeout."},
+            ],
+            "total": 2,
+        }
+
+        def handler(request):
+            assert request.method == "GET"
+            assert "/api/chat/job-1" in str(request.url)
+            assert request.url.params["limit"] == "200"
+            return httpx.Response(200, json=sample)
+
+        client = _make_client(handler)
+        result = client.get_chat_history("job-1")
+        assert result["total"] == 2
+        assert len(result["messages"]) == 2
+        assert result["messages"][0]["role"] == "user"
+
+    def test_get_chat_history_custom_limit(self):
+        def handler(request):
+            assert request.url.params["limit"] == "10"
+            return httpx.Response(200, json={"messages": [], "total": 0})
+
+        client = _make_client(handler)
+        result = client.get_chat_history("job-1", limit=10)
+        assert result["total"] == 0
+
+    def test_send_chat_message(self):
+        response_data = {
+            "user_message": {
+                "role": "user",
+                "content": "Why did this test fail?",
+                "status": "completed",
+            },
+            "assistant_message": {
+                "role": "assistant",
+                "content": "",
+                "status": "pending",
+            },
+        }
+
+        def handler(request):
+            assert request.method == "POST"
+            assert "/api/chat/job-1" in str(request.url)
+            body = json.loads(request.content)
+            assert body["message"] == "Why did this test fail?"
+            assert "ai_provider" not in body
+            assert "ai_model" not in body
+            return httpx.Response(202, json=response_data)
+
+        client = _make_client(handler)
+        result = client.send_chat_message("job-1", "Why did this test fail?")
+        assert result["assistant_message"]["role"] == "assistant"
+        assert result["assistant_message"]["status"] == "pending"
+
+    def test_send_chat_message_with_ai_config(self):
+        def handler(request):
+            body = json.loads(request.content)
+            assert body["message"] == "Explain the error"
+            assert body["ai_provider"] == "claude"
+            assert body["ai_model"] == "opus-4"
+            return httpx.Response(
+                202,
+                json={
+                    "user_message": {
+                        "role": "user",
+                        "content": "Explain the error",
+                        "status": "completed",
+                    },
+                    "assistant_message": {
+                        "role": "assistant",
+                        "content": "",
+                        "status": "pending",
+                    },
+                },
+            )
+
+        client = _make_client(handler)
+        result = client.send_chat_message(
+            "job-1", "Explain the error", ai_provider="claude", ai_model="opus-4"
+        )
+        assert result["assistant_message"]["status"] == "pending"
+
+    def test_clear_chat(self):
+        def handler(request):
+            assert request.method == "DELETE"
+            assert "/api/chat/job-1" in str(request.url)
+            return httpx.Response(200, json={"deleted": 1})
+
+        client = _make_client(handler)
+        result = client.clear_chat("job-1")
+        assert result["deleted"] == 1
+
+    def test_get_chat_history_not_found(self):
+        client = _make_client(
+            lambda request: httpx.Response(404, json={"detail": "Job not found"})
+        )
+        with pytest.raises(RootCozError) as exc_info:
+            client.get_chat_history("nonexistent")
+        assert exc_info.value.status_code == 404
