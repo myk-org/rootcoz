@@ -3910,6 +3910,7 @@ class TestChatCommands:
         mock_client.send_chat_message.assert_called_once_with(
             "job-1", "Why did this test fail?", ai_provider="", ai_model=""
         )
+        assert "The test failed because of a null pointer." in result.output
 
     def test_chat_send_with_ai_config(self, mock_client):
         mock_client.send_chat_message.return_value = {
@@ -3922,9 +3923,20 @@ class TestChatCommands:
             "assistant_message": {
                 "id": 2,
                 "role": "assistant",
-                "content": "The error is caused by a missing import.",
-                "status": "completed",
+                "content": "",
+                "status": "pending",
             },
+        }
+        mock_client.get_chat_history.return_value = {
+            "messages": [
+                {
+                    "id": 2,
+                    "role": "assistant",
+                    "content": "The error is caused by a missing import.",
+                    "status": "completed",
+                }
+            ],
+            "total": 1,
         }
         result = runner.invoke(
             app,
@@ -3943,6 +3955,7 @@ class TestChatCommands:
         mock_client.send_chat_message.assert_called_once_with(
             "job-1", "Explain the error", ai_provider="claude", ai_model="opus-4"
         )
+        assert "The error is caused by a missing import." in result.output
 
     def test_chat_send_json(self, mock_client):
         payload = {

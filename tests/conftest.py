@@ -217,8 +217,9 @@ def mock_ai() -> Generator[MagicMock, None, None]:
 def _mock_sidecar_calls():
     """Prevent ALL tests from hitting a real sidecar service.
 
-    Mocks list_models, check_sidecar_available, and get_sidecar_client
-    so no test accidentally calls the real sidecar on localhost:9100.
+    Mocks list_models, check_sidecar_available, get_sidecar_client,
+    call_ai, and call_ai_once so no test accidentally calls the real
+    sidecar on localhost:9100.
     """
     mock_client = MagicMock()
     mock_client.delete_session = AsyncMock()
@@ -247,5 +248,20 @@ def _mock_sidecar_calls():
             return_value=(True, "mocked"),
         ),
         patch("rootcoz.engine.chat.get_sidecar_client", return_value=mock_client),
+        patch(
+            "rootcoz.engine.chat.call_ai",
+            new_callable=AsyncMock,
+            side_effect=AssertionError("Unexpected sidecar call in test"),
+        ),
+        patch(
+            "rootcoz.peer_analysis.call_ai",
+            new_callable=AsyncMock,
+            side_effect=AssertionError("Unexpected sidecar call in test"),
+        ),
+        patch(
+            "rootcoz.peer_analysis.call_ai_once",
+            new_callable=AsyncMock,
+            side_effect=AssertionError("Unexpected sidecar call in test"),
+        ),
     ):
         yield
