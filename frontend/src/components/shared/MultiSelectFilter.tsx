@@ -1,7 +1,12 @@
-import { useRef, useState } from 'react'
+import {
+  DropdownMenu,
+  DropdownMenuTrigger,
+  DropdownMenuContent,
+  DropdownMenuCheckboxItem,
+  DropdownMenuSeparator,
+} from '@/components/ui/dropdown-menu'
+import { ChevronDown } from 'lucide-react'
 import { cn } from '@/lib/utils'
-import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
-import { ChevronDown, Check } from 'lucide-react'
 
 export interface MultiSelectFilterProps {
   label: string
@@ -20,63 +25,43 @@ export function MultiSelectFilter({ label, options, selected, onToggle, onClear,
         ? [...selected][0]
         : `${selected.size} selected`
 
-  const [open, setOpen] = useState(false)
-  const togglingRef = useRef(false)
-
   return (
-    <Popover open={open} onOpenChange={(v) => {
-      if (togglingRef.current) { togglingRef.current = false; return }
-      setOpen(v)
-    }}>
-      <PopoverTrigger asChild>
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
         <button
           type="button"
           aria-label={label}
           className={cn(
-            "flex h-9 w-full items-center justify-between rounded-full border border-white/10 bg-white/5 px-4 py-2 text-sm text-text-primary ring-offset-surface-card transition-colors hover:bg-white/10 focus:outline-none focus:ring-2 focus:ring-border-accent focus:ring-offset-1 disabled:cursor-not-allowed disabled:opacity-50 [&>span]:line-clamp-1",
+            "flex h-9 w-full items-center justify-between rounded-md border border-border-default bg-surface-elevated px-3 py-2 text-sm text-text-primary shadow-sm ring-offset-surface-card placeholder:text-text-tertiary focus:outline-none focus:ring-2 focus:ring-border-accent disabled:cursor-not-allowed disabled:opacity-50 [&>span]:line-clamp-1",
             className,
           )}
         >
           <span>{triggerText}</span>
-          <ChevronDown className="h-3.5 w-3.5 opacity-30" />
+          <ChevronDown className="h-4 w-4 opacity-50" />
         </button>
-      </PopoverTrigger>
-      <PopoverContent
-        className="relative z-50 max-h-96 min-w-[8rem] overflow-auto rounded-xl border border-white/10 bg-surface-card p-1 shadow-lg backdrop-blur-sm data-[state=open]:animate-fade-in"
-        align="start"
-        onOpenAutoFocus={(e) => e.preventDefault()}
-      >
-        {[...new Set([...options, ...selected])].map((option) => {
-          const isActive = selected.has(option)
-          return (
-            <button
-              key={option}
-              type="button"
-              onClick={() => { togglingRef.current = true; onToggle(option); setOpen(true) }}
-              className="relative flex w-full cursor-default select-none items-center rounded-lg py-1.5 pl-3 pr-8 text-sm text-text-primary outline-none hover:bg-white/10"
-            >
-              {option}
-              {isActive && (
-                <span className="absolute right-2 flex h-3.5 w-3.5 items-center justify-center">
-                  <Check className="h-4 w-4" />
-                </span>
-              )}
-            </button>
-          )
-        })}
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="start" className="p-1">
+        {[...new Set([...options, ...selected])].map((option) => (
+          <DropdownMenuCheckboxItem
+            key={option}
+            checked={selected.has(option)}
+            onCheckedChange={() => onToggle(option)}
+          >
+            {option}
+          </DropdownMenuCheckboxItem>
+        ))}
         {selected.size > 0 && (
           <>
-            <hr className="my-1 border-border-muted" />
-            <button
-              type="button"
-              onClick={() => { onClear(); setOpen(false) }}
-              className="flex w-full cursor-default select-none items-center rounded-lg py-1.5 pl-3 pr-8 text-sm text-text-tertiary outline-none hover:bg-white/10"
+            <DropdownMenuSeparator />
+            <DropdownMenuCheckboxItem
+              checked={false}
+              onCheckedChange={() => onClear()}
             >
               Clear all
-            </button>
+            </DropdownMenuCheckboxItem>
           </>
         )}
-      </PopoverContent>
-    </Popover>
+      </DropdownMenuContent>
+    </DropdownMenu>
   )
 }
