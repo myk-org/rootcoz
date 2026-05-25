@@ -8179,7 +8179,7 @@ async def _process_chat_message(
 
             # Get conversation history
             all_history = await storage.get_chat_messages(
-                job_id, username=username, limit=None
+                job_id, username=username, limit=1000
             )
             # Filter to only completed messages for context
             history = [
