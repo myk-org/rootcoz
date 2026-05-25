@@ -148,13 +148,12 @@ interface MetadataLabelChipsProps {
   onExcludeLabelsChange: (value: string[]) => void
 }
 
-/** Renders a row of toggle-able label chips. Cycles: off → include → exclude → off. */
+/** Renders a row of toggle-able label chips. Clicking toggles between off and included. Excluded chips can be clicked to turn off. */
 export function MetadataLabelChips({ allLabels, labels, excludeLabels, onLabelsChange, onExcludeLabelsChange }: MetadataLabelChipsProps) {
-  const cycleLabel = useCallback((label: string) => {
+  const toggleLabel = useCallback((label: string) => {
     if (labels.includes(label)) {
-      // include → exclude
+      // include → off
       onLabelsChange(labels.filter((l) => l !== label))
-      onExcludeLabelsChange([...excludeLabels, label])
     } else if (excludeLabels.includes(label)) {
       // exclude → off
       onExcludeLabelsChange(excludeLabels.filter((l) => l !== label))
@@ -181,14 +180,14 @@ export function MetadataLabelChips({ allLabels, labels, excludeLabels, onLabelsC
             type="button"
             key={label}
             aria-pressed={isIncluded ? 'true' : isExcluded ? 'mixed' : 'false'}
-            className={`cursor-pointer text-xs px-2 py-0.5 rounded-md border transition-colors ${
+            className={`cursor-pointer rounded-full px-2.5 py-0.5 text-[10px] font-medium border transition-colors ${
               isIncluded
-                ? 'bg-signal-blue/10 text-signal-blue border-signal-blue/30 hover:bg-signal-blue/20'
+                ? 'bg-signal-blue/10 text-signal-blue border-signal-blue/30'
                 : isExcluded
-                  ? 'bg-signal-red/10 text-signal-red border-signal-red/30 line-through hover:bg-signal-red/20'
-                  : 'bg-surface-elevated text-text-tertiary border-border-default hover:bg-surface-hover hover:text-text-secondary'
+                  ? 'bg-signal-red/10 text-signal-red border-signal-red/30 line-through'
+                  : 'bg-surface-elevated text-text-tertiary border-border-default hover:bg-surface-hover'
             }`}
-            onClick={() => cycleLabel(label)}
+            onClick={() => toggleLabel(label)}
           >
             {isExcluded ? `× ${label}` : label}
           </button>

@@ -485,7 +485,7 @@ export function DashboardPage() {
               <button
                 type="button"
                 aria-label="Filter by status"
-                className="flex h-9 w-full sm:w-40 items-center justify-between rounded-md border border-border-default bg-surface-elevated px-3 py-2 text-sm text-text-primary shadow-sm ring-offset-surface-card focus:outline-none focus:ring-2 focus:ring-border-accent [&>span]:line-clamp-1"
+                className="flex h-9 w-full sm:w-40 items-center justify-between rounded-md border border-border-default bg-surface-elevated px-3 py-2 text-sm text-text-primary shadow-sm ring-offset-surface-card placeholder:text-text-tertiary focus:outline-none focus:ring-2 focus:ring-border-accent disabled:cursor-not-allowed disabled:opacity-50 [&>span]:line-clamp-1"
               >
                 <span className="text-text-primary">
                   {selectedStatuses.size === 0
