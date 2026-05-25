@@ -246,5 +246,6 @@ def _mock_sidecar_calls():
             new_callable=AsyncMock,
             return_value=(True, "mocked"),
         ),
+        patch("rootcoz.engine.chat.get_sidecar_client", return_value=mock_client),
     ):
         yield

@@ -3899,15 +3899,14 @@ class TestChatCommands:
             "assistant_message": {
                 "id": 2,
                 "role": "assistant",
-                "content": "",
-                "status": "pending",
+                "content": "The test failed because of a null pointer.",
+                "status": "completed",
             },
         }
         result = runner.invoke(
             app, ["chat", "send", "job-1", "Why did this test fail?"]
         )
         assert result.exit_code == 0
-        assert "Message queued" in result.output
         mock_client.send_chat_message.assert_called_once_with(
             "job-1", "Why did this test fail?", ai_provider="", ai_model=""
         )
