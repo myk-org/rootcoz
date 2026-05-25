@@ -132,12 +132,20 @@ export function DashboardPage() {
     }, { replace: true })
   }, [setSearchParams])
 
-  function toggleStatus(status: string) {
-    const next = new Set(selectedStatuses)
-    if (next.has(status)) next.delete(status)
-    else next.add(status)
-    setSelectedStatuses(next)
-  }
+  const toggleStatus = useCallback((status: string) => {
+    setSearchParams((prev) => {
+      const next = new URLSearchParams(prev)
+      const current = next.getAll('status')
+      next.delete('status')
+      if (current.includes(status)) {
+        for (const s of current) { if (s !== status) next.append('status', s) }
+      } else {
+        for (const s of current) next.append('status', s)
+        next.append('status', status)
+      }
+      return next
+    }, { replace: true })
+  }, [setSearchParams])
   const dateFrom = searchParams.get('date_from') ?? ''
   const dateTo = searchParams.get('date_to') ?? ''
 
