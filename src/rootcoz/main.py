@@ -954,6 +954,25 @@ async def _safe_preload_cursor_models() -> None:
         logger.debug("Failed to preload cursor models", exc_info=True)
 
 
+async def _backfill_job_metadata(rules: list[dict]) -> None:
+    """Retroactively assign metadata to existing jobs missing metadata. Best-effort."""
+    try:
+        # Get all unique job names from results
+        all_jobs = await list_results_for_dashboard()
+        job_names = {j.get("job_name", "") for j in all_jobs if j.get("job_name")}
+
+        assigned = 0
+        for name in job_names:
+            result = await storage.auto_assign_job_metadata(name, rules)
+            if result is not None:
+                assigned += 1
+
+        if assigned:
+            logger.info("Backfilled metadata for %d job(s)", assigned)
+    except Exception:
+        logger.debug("Failed to backfill job metadata", exc_info=True)
+
+
 async def _deferred_resume_waiting_jobs(waiting_jobs: list[dict]) -> None:
     """Resume waiting jobs after startup is complete.
 
@@ -987,6 +1006,13 @@ async def lifespan(_app: FastAPI):
         task = asyncio.create_task(_safe_preload_cursor_models())
         _background_tasks.add(task)
         task.add_done_callback(_background_tasks.discard)
+
+        # Retroactively assign metadata to jobs that don't have it yet
+        settings = get_settings()
+        if settings.metadata_rules:
+            task = asyncio.create_task(_backfill_job_metadata(settings.metadata_rules))
+            _background_tasks.add(task)
+            task.add_done_callback(_background_tasks.discard)
 
         waiting_jobs = await storage.mark_stale_results_failed()
         notify_active_count_changed()
