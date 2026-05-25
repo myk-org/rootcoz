@@ -970,6 +970,9 @@ async def run_single_ai_analysis(
         try:
             console_file.write_text(console_context)
         except OSError as exc:
+            import shutil
+
+            shutil.rmtree(console_dir, ignore_errors=True)
             raise RuntimeError(
                 f"Failed to write console output to {console_file}: {exc}. "
                 "Check filesystem permissions and available disk space."
