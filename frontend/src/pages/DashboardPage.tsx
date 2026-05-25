@@ -116,6 +116,10 @@ export function DashboardPage() {
   const [loading, setLoading] = useState(true)
   const [search, setSearch] = useState('')
   const [statusFilter, setStatusFilter] = useState(STATUS_FILTER_ALL)
+  const { sortKey, sortDir, handleSort } = useTableSort('dash', 'created_at', 'desc', ['created_at'])
+  const [page, setPage] = useState(1)
+  const [perPage, setPerPage] = useState(20)
+  const [searchParams, setSearchParams] = useSearchParams()
   const analysisFilter = searchParams.get('analysis') ?? ANALYSIS_FILTER_ALL
   const setAnalysisFilter = useCallback((value: string) => {
     setSearchParams((prev) => {
@@ -125,10 +129,6 @@ export function DashboardPage() {
       return next
     }, { replace: true })
   }, [setSearchParams])
-  const { sortKey, sortDir, handleSort } = useTableSort('dash', 'created_at', 'desc', ['created_at'])
-  const [page, setPage] = useState(1)
-  const [perPage, setPerPage] = useState(20)
-  const [searchParams, setSearchParams] = useSearchParams()
   const dateFrom = searchParams.get('date_from') ?? ''
   const dateTo = searchParams.get('date_to') ?? ''
 

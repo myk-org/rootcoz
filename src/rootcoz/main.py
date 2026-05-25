@@ -6948,10 +6948,16 @@ async def api_dashboard_filtered(
 
     if exclude_label:
         # Exclude jobs matching ANY excluded label (OR semantics)
+        # Fetch all metadata (unfiltered) to check labels without N+1 queries
+        all_meta_for_exclude = (
+            all_metadata if not has_filters else await storage.list_jobs_with_metadata()
+        )
+        exclude_set = set(exclude_label)
         excluded_names: set[str] = set()
-        for lbl in exclude_label:
-            excluded_meta = await storage.list_jobs_with_metadata(labels=[lbl])
-            excluded_names.update(m["job_name"] for m in excluded_meta)
+        for m in all_meta_for_exclude:
+            job_labels = set(m.get("labels") or [])
+            if job_labels & exclude_set:
+                excluded_names.add(m["job_name"])
         jobs = [j for j in jobs if j.get("job_name", "") not in excluded_names]
 
     # Attach metadata to each job
