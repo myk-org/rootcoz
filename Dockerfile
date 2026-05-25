@@ -1,6 +1,7 @@
 # Frontend build stage
-FROM node:22-slim AS frontend-builder
+FROM registry.access.redhat.com/ubi9/nodejs-22-minimal AS frontend-builder
 
+USER 0
 WORKDIR /frontend
 
 # Copy package files first for layer caching
@@ -16,11 +17,12 @@ COPY frontend/ .
 RUN npx vite build
 
 # Sidecar build stage
-FROM node:22-slim AS sidecar-builder
+FROM registry.access.redhat.com/ubi9/nodejs-22-minimal AS sidecar-builder
 
+USER 0
 WORKDIR /sidecar
 
-RUN apt-get update && apt-get install -y --no-install-recommends git && rm -rf /var/lib/apt/lists/*
+RUN microdnf install -y --nodocs --setopt=install_weak_deps=0 git && microdnf clean all
 
 COPY sidecar-helper/package.json sidecar-helper/package-lock.json* ./
 RUN npm ci
@@ -50,18 +52,20 @@ FROM ghcr.io/astral-sh/uv:python3.14-bookworm-slim
 
 WORKDIR /app
 
-# Install bash, git (runtime for gitpython), curl (for Cursor CLI install)
+# Install bash, git (runtime for gitpython), curl (for Cursor CLI + NodeSource setup)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     bash \
     git \
     curl \
+    ca-certificates \
+    gnupg \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy Node.js 22 from the build stage (Debian apt only has Node 18/20)
-COPY --from=sidecar-builder /usr/local/bin/node /usr/local/bin/node
-COPY --from=sidecar-builder /usr/local/lib/node_modules/npm /usr/local/lib/node_modules/npm
-RUN ln -s /usr/local/lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm \
-    && ln -s /usr/local/lib/node_modules/npm/bin/npx-cli.js /usr/local/bin/npx
+# Install Node.js 22 from NodeSource (no Docker Hub dependency)
+RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
+    && apt-get install -y --no-install-recommends nodejs \
+    && rm -rf /var/lib/apt/lists/* \
+    && node --version && npm --version
 
 # Create non-root user, data directory, and set permissions
 # OpenShift runs containers as a random UID in the root group (GID 0)
