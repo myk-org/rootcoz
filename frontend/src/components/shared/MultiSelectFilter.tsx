@@ -1,3 +1,4 @@
+import { useState } from 'react'
 import { cn } from '@/lib/utils'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 import { ChevronDown, Check } from 'lucide-react'
@@ -19,8 +20,10 @@ export function MultiSelectFilter({ label, options, selected, onToggle, onClear,
         ? [...selected][0]
         : `${selected.size} selected`
 
+  const [open, setOpen] = useState(false)
+
   return (
-    <Popover>
+    <Popover open={open} onOpenChange={setOpen}>
       <PopoverTrigger asChild>
         <button
           type="button"
@@ -37,6 +40,7 @@ export function MultiSelectFilter({ label, options, selected, onToggle, onClear,
       <PopoverContent
         className="relative z-50 max-h-96 min-w-[8rem] overflow-hidden rounded-xl border border-white/10 bg-surface-card p-1 shadow-lg backdrop-blur-sm data-[state=open]:animate-fade-in"
         align="start"
+        onOpenAutoFocus={(e) => e.preventDefault()}
       >
         {options.map((option) => {
           const isActive = selected.has(option)
@@ -61,7 +65,7 @@ export function MultiSelectFilter({ label, options, selected, onToggle, onClear,
             <hr className="my-1 border-border-muted" />
             <button
               type="button"
-              onClick={onClear}
+              onClick={() => { onClear(); setOpen(false) }}
               className="flex w-full cursor-default select-none items-center rounded-lg py-1.5 pl-3 pr-8 text-sm text-text-tertiary outline-none hover:bg-white/10"
             >
               Clear all
