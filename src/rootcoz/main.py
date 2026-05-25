@@ -6929,36 +6929,35 @@ async def api_dashboard_filtered(
     )
     jobs = await list_results_for_dashboard()
 
-    # If no filters, attach metadata and return all
-    has_filters = bool(team or tier or version or label)
+    has_include_filters = bool(team or tier or version or label)
 
-    # Build a lookup of job metadata
-    all_metadata = await storage.list_jobs_with_metadata(
-        team=team if has_filters else "",
-        tier=tier if has_filters else "",
-        version=version if has_filters else "",
-        labels=label if has_filters and label else None,
-    )
-    metadata_by_name = {m["job_name"]: m for m in all_metadata}
+    # Fetch all metadata once (unfiltered) — used for both include/exclude and display
+    all_metadata_unfiltered = await storage.list_jobs_with_metadata()
+    all_metadata_by_name = {m["job_name"]: m for m in all_metadata_unfiltered}
 
-    if has_filters:
-        # Only include jobs whose job_name matches filtered metadata
-        filtered_names = set(metadata_by_name.keys())
+    if has_include_filters:
+        # Build filtered set for include matching
+        filtered_metadata = await storage.list_jobs_with_metadata(
+            team=team,
+            tier=tier,
+            version=version,
+            labels=label if label else None,
+        )
+        filtered_names = {m["job_name"] for m in filtered_metadata}
         jobs = [j for j in jobs if j.get("job_name", "") in filtered_names]
 
     if exclude_label:
         # Exclude jobs matching ANY excluded label (OR semantics)
-        # Fetch all metadata (unfiltered) to check labels without N+1 queries
-        all_meta_for_exclude = (
-            all_metadata if not has_filters else await storage.list_jobs_with_metadata()
-        )
         exclude_set = set(exclude_label)
         excluded_names: set[str] = set()
-        for m in all_meta_for_exclude:
+        for m in all_metadata_unfiltered:
             job_labels = set(m.get("labels") or [])
             if job_labels & exclude_set:
                 excluded_names.add(m["job_name"])
         jobs = [j for j in jobs if j.get("job_name", "") not in excluded_names]
+
+    # Use unfiltered metadata for display attachment
+    metadata_by_name = all_metadata_by_name
 
     # Attach metadata to each job
     for job in jobs:
