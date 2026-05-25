@@ -46,6 +46,7 @@ export function MultiSelectFilter({ label, options, selected, onToggle, onClear,
             key={option}
             checked={selected.has(option)}
             onCheckedChange={() => onToggle(option)}
+            onSelect={(e) => e.preventDefault()}
           >
             {option}
           </DropdownMenuCheckboxItem>
