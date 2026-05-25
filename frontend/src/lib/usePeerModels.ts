@@ -1,7 +1,7 @@
 import { useState, useEffect, useMemo } from 'react'
-import { api } from '@/lib/api'
 import type { ModelOption } from '@/components/shared/ModelCombobox'
 import type { PeerConfigWithId } from '@/components/shared/PeerConfigList'
+import { fetchModelsForProvider } from '@/lib/useProviderModels'
 
 export function usePeerModels(
   peerConfigs: PeerConfigWithId[],
@@ -25,8 +25,8 @@ export function usePeerModels(
       if (!peer.ai_provider) {
         return
       }
-      api.get<{ models: ModelOption[] }>(`/api/ai-models?provider=${encodeURIComponent(peer.ai_provider)}`)
-        .then(res => { if (!ignore) setPeerModels(prev => ({ ...prev, [peer.id]: res.models ?? [] })) })
+      fetchModelsForProvider(peer.ai_provider)
+        .then(m => { if (!ignore) setPeerModels(prev => ({ ...prev, [peer.id]: m })) })
         .catch(() => { if (!ignore) setPeerModels(prev => ({ ...prev, [peer.id]: [] })) })
     })
     return () => { ignore = true }

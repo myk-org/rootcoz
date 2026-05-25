@@ -944,32 +944,47 @@ async def run_single_ai_analysis(
     # Save console context to file so it's not embedded in the prompt
     console_file_section = ""
     console_dir: Path | None = None
+    console_file: Path | None = None
     if console_context and repo_path:
         console_file = repo_path / f"console-output-{error_signature}.txt"
-        console_file.write_text(console_context)
-        console_file_section = (
-            f"\n\n=== CONSOLE OUTPUT (MANDATORY) ===\n"
-            f"Console output saved to: {console_file}\n\n"
-            "\u26a0\ufe0f  MANDATORY: You MUST read the console output file "
-            "BEFORE making any classification. It contains critical error messages, "
-            "stack traces, and failure context from the CI job.\n"
-            "Failure to read console output is a violation of your instructions."
-        )
+        try:
+            console_file.write_text(console_context)
+        except OSError:
+            logger.warning(
+                "Failed to write console output to %s", console_file, exc_info=True
+            )
+            console_file = None
+        if console_file is not None:
+            console_file_section = (
+                f"\n\n=== CONSOLE OUTPUT (MANDATORY) ===\n"
+                f"Console output saved to: {console_file}\n\n"
+                "\u26a0\ufe0f  MANDATORY: You MUST read the console output file "
+                "BEFORE making any classification. It contains critical error messages, "
+                "stack traces, and failure context from the CI job.\n"
+                "Failure to read console output is a violation of your instructions."
+            )
     elif console_context:
         # No repo path — write console output to a temp file
         import tempfile
 
         console_dir = Path(tempfile.mkdtemp(prefix="rootcoz-console-"))
         console_file = console_dir / f"console-output-{error_signature}.txt"
-        console_file.write_text(console_context)
-        console_file_section = (
-            f"\n\n=== CONSOLE OUTPUT (MANDATORY) ===\n"
-            f"Console output saved to: {console_file}\n\n"
-            "\u26a0\ufe0f  MANDATORY: You MUST read the console output file "
-            "BEFORE making any classification. It contains critical error messages, "
-            "stack traces, and failure context from the CI job.\n"
-            "Failure to read console output is a violation of your instructions."
-        )
+        try:
+            console_file.write_text(console_context)
+        except OSError:
+            logger.warning(
+                "Failed to write console output to %s", console_file, exc_info=True
+            )
+            console_file = None
+        if console_file is not None:
+            console_file_section = (
+                f"\n\n=== CONSOLE OUTPUT (MANDATORY) ===\n"
+                f"Console output saved to: {console_file}\n\n"
+                "\u26a0\ufe0f  MANDATORY: You MUST read the console output file "
+                "BEFORE making any classification. It contains critical error messages, "
+                "stack traces, and failure context from the CI job.\n"
+                "Failure to read console output is a violation of your instructions."
+            )
 
     prompt = f"""{query_section}
 Analyze this test failure from a CI job.
