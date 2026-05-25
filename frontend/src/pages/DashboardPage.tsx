@@ -155,19 +155,22 @@ export function DashboardPage() {
       return next
     }, { replace: true })
   }, [setSearchParams])
-  const setMetaLabels = useCallback((labels: string[]) => {
+  const handleLabelToggle = useCallback((label: string, action: 'include' | 'exclude' | 'off') => {
     setSearchParams((prev) => {
       const next = new URLSearchParams(prev)
+      // Get current values, removing the toggled label from both lists
+      const currentLabels = next.getAll('label').filter(l => l !== label)
+      const currentExclude = next.getAll('exclude_label').filter(l => l !== label)
+      // Clear both
       next.delete('label')
-      for (const l of labels) next.append('label', l)
-      return next
-    }, { replace: true })
-  }, [setSearchParams])
-  const setMetaExcludeLabels = useCallback((labels: string[]) => {
-    setSearchParams((prev) => {
-      const next = new URLSearchParams(prev)
       next.delete('exclude_label')
-      for (const l of labels) next.append('exclude_label', l)
+      // Re-add filtered values
+      for (const l of currentLabels) next.append('label', l)
+      for (const l of currentExclude) next.append('exclude_label', l)
+      // Add the toggled label to the right list
+      if (action === 'include') next.append('label', label)
+      else if (action === 'exclude') next.append('exclude_label', label)
+      // 'off' = don't add to either
       return next
     }, { replace: true })
   }, [setSearchParams])
@@ -570,8 +573,7 @@ export function DashboardPage() {
           allLabels={metadataOptions.allLabels}
           labels={metaLabels}
           excludeLabels={metaExcludeLabels}
-          onLabelsChange={setMetaLabels}
-          onExcludeLabelsChange={setMetaExcludeLabels}
+          onLabelToggle={handleLabelToggle}
         />
 
         {/* Summary row: count + View Issues */}

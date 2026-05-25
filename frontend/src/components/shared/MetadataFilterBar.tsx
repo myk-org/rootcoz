@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useEffect, useState } from 'react'
 import { api } from '@/lib/api'
 import type { JobMetadata } from '@/types'
 import {
@@ -144,25 +144,11 @@ interface MetadataLabelChipsProps {
   allLabels: string[]
   labels: string[]
   excludeLabels: string[]
-  onLabelsChange: (value: string[]) => void
-  onExcludeLabelsChange: (value: string[]) => void
+  onLabelToggle: (label: string, action: 'include' | 'exclude' | 'off') => void
 }
 
-/** Renders a row of toggle-able label chips. Clicking toggles between off and included. Excluded chips can be clicked to turn off. */
-export function MetadataLabelChips({ allLabels, labels, excludeLabels, onLabelsChange, onExcludeLabelsChange }: MetadataLabelChipsProps) {
-  const toggleLabel = useCallback((label: string) => {
-    if (labels.includes(label)) {
-      // include → off
-      onLabelsChange(labels.filter((l) => l !== label))
-    } else if (excludeLabels.includes(label)) {
-      // exclude → off
-      onExcludeLabelsChange(excludeLabels.filter((l) => l !== label))
-    } else {
-      // off → include
-      onLabelsChange([...labels, label])
-    }
-  }, [labels, excludeLabels, onLabelsChange, onExcludeLabelsChange])
-
+/** Renders a row of toggle-able label chips. Left-click toggles include/off. Right-click toggles exclude. */
+export function MetadataLabelChips({ allLabels, labels, excludeLabels, onLabelToggle }: MetadataLabelChipsProps) {
   if (allLabels.length === 0 && labels.length === 0 && excludeLabels.length === 0) return null
 
   const displayLabels = allLabels.length > 0
@@ -170,8 +156,8 @@ export function MetadataLabelChips({ allLabels, labels, excludeLabels, onLabelsC
     : [...new Set([...labels, ...excludeLabels])].sort()
 
   return (
-    <div className="flex flex-wrap items-center gap-2">
-      <span className="text-xs text-text-tertiary">Filter by tag:</span>
+    <div className="flex flex-wrap items-center gap-1.5">
+      <span className="text-xs text-text-tertiary">Tags:</span>
       {displayLabels.map((label) => {
         const isIncluded = labels.includes(label)
         const isExcluded = excludeLabels.includes(label)
@@ -179,15 +165,23 @@ export function MetadataLabelChips({ allLabels, labels, excludeLabels, onLabelsC
           <button
             type="button"
             key={label}
-            aria-pressed={isIncluded ? 'true' : isExcluded ? 'mixed' : 'false'}
-            className={`cursor-pointer rounded-full px-2.5 py-0.5 text-[10px] font-medium border transition-colors ${
+            className={`inline-flex items-center rounded-full px-2.5 py-0.5 text-[10px] font-medium cursor-pointer transition-colors ${
               isIncluded
-                ? 'bg-signal-blue/10 text-signal-blue border-signal-blue/30'
+                ? 'bg-signal-blue/10 text-signal-blue'
                 : isExcluded
-                  ? 'bg-signal-red/10 text-signal-red border-signal-red/30 line-through'
-                  : 'bg-surface-elevated text-text-tertiary border-border-default hover:bg-surface-hover'
+                  ? 'bg-signal-red/10 text-signal-red line-through'
+                  : 'bg-surface-elevated text-text-tertiary hover:bg-surface-hover hover:text-text-secondary'
             }`}
-            onClick={() => toggleLabel(label)}
+            onClick={() => {
+              if (isIncluded) onLabelToggle(label, 'off')
+              else if (isExcluded) onLabelToggle(label, 'off')
+              else onLabelToggle(label, 'include')
+            }}
+            onContextMenu={(e) => {
+              e.preventDefault()
+              if (isExcluded) onLabelToggle(label, 'off')
+              else onLabelToggle(label, 'exclude')
+            }}
           >
             {isExcluded ? `× ${label}` : label}
           </button>
