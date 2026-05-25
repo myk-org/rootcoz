@@ -4041,22 +4041,34 @@ async def add_chat_message(
 
 
 async def get_chat_messages(
-    job_id: str, limit: int = 200, offset: int = 0, username: str = ""
+    job_id: str, limit: int | None = 200, offset: int = 0, username: str = ""
 ) -> list[dict]:
-    """Get chat messages for a job, ordered by id ASC."""
+    """Get chat messages for a job, ordered by id ASC.
+
+    Args:
+        limit: Max messages to return. None = no limit.
+    """
     async with _connect_db() as db:
+        limit_clause = "LIMIT ? OFFSET ?" if limit is not None else ""
+        params: tuple
         if username:
-            cursor = await db.execute(
+            base = (
                 "SELECT id, job_id, role, content, username, ai_provider, ai_model, session_id, status, created_at "
-                "FROM chat_messages WHERE job_id = ? AND username = ? ORDER BY id ASC LIMIT ? OFFSET ?",
-                (job_id, username, limit, offset),
+                f"FROM chat_messages WHERE job_id = ? AND username = ? ORDER BY id ASC {limit_clause}"
             )
+            params = (
+                (job_id, username, limit, offset)
+                if limit is not None
+                else (job_id, username)
+            )
+            cursor = await db.execute(base, params)
         else:
-            cursor = await db.execute(
+            base = (
                 "SELECT id, job_id, role, content, username, ai_provider, ai_model, session_id, status, created_at "
-                "FROM chat_messages WHERE job_id = ? ORDER BY id ASC LIMIT ? OFFSET ?",
-                (job_id, limit, offset),
+                f"FROM chat_messages WHERE job_id = ? ORDER BY id ASC {limit_clause}"
             )
+            params = (job_id, limit, offset) if limit is not None else (job_id,)
+            cursor = await db.execute(base, params)
         rows = await cursor.fetchall()
         return [dict(row) for row in rows]
 

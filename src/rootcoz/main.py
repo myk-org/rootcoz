@@ -7802,7 +7802,7 @@ async def _resolve_chat_credentials(
     tests_repo_url = decrypted_params.get("tests_repo_url", "")
     if tests_repo_url:
         match = re.search(
-            r"github\.com[/:]([^/]+/[^/]+?)(?:\.git)?$", str(tests_repo_url)
+            r"github\.com[/:]([^/]+/[^/]+?)(?:\.git)?/?$", str(tests_repo_url)
         )
         if match:
             github_repo = match.group(1)
@@ -8178,7 +8178,9 @@ async def _process_chat_message(
                 raise RuntimeError("No AI provider configured")
 
             # Get conversation history
-            all_history = await storage.get_chat_messages(job_id, username=username)
+            all_history = await storage.get_chat_messages(
+                job_id, username=username, limit=None
+            )
             # Filter to only completed messages for context
             history = [
                 m
