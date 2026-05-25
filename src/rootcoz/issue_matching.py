@@ -88,7 +88,11 @@ Example: [{{"key": "PROJ-123", "relevant": true, "score": 0.9}}, {{"key": "PROJ-
 Respond with ONLY the JSON array, no other text."""
 
     logger.info(
-        "AI call: provider=%s, model=%s, call_type=jira_match", ai_provider, ai_model
+        "AI call: provider=%s, model=%s, call_type=%s, job_id=%s",
+        ai_provider,
+        ai_model,
+        call_type,
+        job_id,
     )
     result = await call_ai_once(
         prompt,
