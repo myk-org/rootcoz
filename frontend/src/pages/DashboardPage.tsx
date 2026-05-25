@@ -36,7 +36,8 @@ import { ConfirmDialog } from '@/components/shared/ConfirmDialog'
 import { SortableHeader } from '@/components/shared/SortableHeader'
 import { DateRangeFilter } from '@/components/shared/DateRangeFilter'
 import { useTableSort } from '@/lib/useTableSort'
-import { Trash2, MessageSquare, CheckCircle2, GitFork, AlertTriangle, Github, List, FolderOpen, ChevronRight } from 'lucide-react'
+import { Trash2, MessageSquare, CheckCircle2, GitFork, AlertTriangle, Github, List, FolderOpen, ChevronRight, ChevronDown } from 'lucide-react'
+import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 import { useAuth } from '@/lib/auth'
 import { useMetadataOptions, MetadataDropdowns, MetadataLabelChips, MetadataClearButton } from '@/components/shared/MetadataFilterBar'
 import { MetadataBadges } from '@/components/shared/MetadataBadges'
@@ -479,34 +480,55 @@ export function DashboardPage() {
             onTierChange={(v) => setMetaParam('tier', v)}
             onVersionChange={(v) => setMetaParam('version', v)}
           />
-          <div className="flex flex-wrap items-center gap-1.5">
-            {STATUS_FILTER_OPTIONS.map((s) => {
-              const isActive = selectedStatuses.has(s)
-              return (
-                <button
-                  key={s}
-                  type="button"
-                  onClick={() => toggleStatus(s)}
-                  className={`text-xs px-2 py-0.5 rounded-md border transition-colors ${
-                    isActive
-                      ? 'bg-signal-blue/10 text-signal-blue border-signal-blue/30'
-                      : 'bg-surface-elevated text-text-tertiary border-border-default hover:bg-surface-hover'
-                  }`}
-                >
-                  {s.charAt(0).toUpperCase() + s.slice(1)}
-                </button>
-              )
-            })}
-            {selectedStatuses.size > 0 && (
+          <Popover>
+            <PopoverTrigger asChild>
               <button
                 type="button"
-                onClick={() => setSelectedStatuses(new Set())}
-                className="text-xs text-text-tertiary hover:text-text-secondary ml-1"
+                className="flex items-center gap-1.5 h-9 px-3 rounded-md border border-border-default bg-surface-elevated text-sm text-text-secondary hover:bg-surface-hover transition-colors"
               >
-                Clear
+                {selectedStatuses.size === 0
+                  ? 'All statuses'
+                  : `${selectedStatuses.size} selected`}
+                <ChevronDown className="h-3.5 w-3.5 text-text-tertiary" />
               </button>
-            )}
-          </div>
+            </PopoverTrigger>
+            <PopoverContent className="w-48 p-1" align="start">
+              {STATUS_FILTER_OPTIONS.map((s) => {
+                const isActive = selectedStatuses.has(s)
+                return (
+                  <button
+                    key={s}
+                    type="button"
+                    onClick={() => toggleStatus(s)}
+                    className={`flex items-center gap-2 w-full px-2 py-1.5 rounded text-sm transition-colors ${
+                      isActive
+                        ? 'bg-signal-blue/10 text-signal-blue'
+                        : 'text-text-secondary hover:bg-surface-hover'
+                    }`}
+                  >
+                    <div className={`h-3.5 w-3.5 rounded-sm border flex items-center justify-center ${
+                      isActive ? 'bg-signal-blue border-signal-blue' : 'border-border-default'
+                    }`}>
+                      {isActive && <span className="text-white text-[10px]">✓</span>}
+                    </div>
+                    {s.charAt(0).toUpperCase() + s.slice(1)}
+                  </button>
+                )
+              })}
+              {selectedStatuses.size > 0 && (
+                <>
+                  <hr className="my-1 border-border-muted" />
+                  <button
+                    type="button"
+                    onClick={() => setSelectedStatuses(new Set())}
+                    className="w-full px-2 py-1.5 rounded text-xs text-text-tertiary hover:bg-surface-hover text-left"
+                  >
+                    Clear all
+                  </button>
+                </>
+              )}
+            </PopoverContent>
+          </Popover>
           <DateRangeFilter from={dateFrom} to={dateTo} onFromChange={setDateFrom} onToChange={setDateTo} onClear={clearDates} />
           <Select value={String(perPage)} onValueChange={(v) => setPerPage(Number(v))}>
             <SelectTrigger aria-label="Rows per page" className="w-full sm:w-20">
