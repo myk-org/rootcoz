@@ -7156,6 +7156,11 @@ Comment:
 Respond with ONLY a JSON object:
 {"suggests_reviewed": true/false, "reason": "brief explanation"}"""
 
+    logger.info(
+        "AI call: provider=%s, model=%s, call_type=comment_intent",
+        ai_provider,
+        ai_model,
+    )
     result = await call_ai_once(
         prompt,
         ai_provider=ai_provider,

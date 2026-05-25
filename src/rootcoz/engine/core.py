@@ -1017,6 +1017,12 @@ Note: Multiple tests failed with the same error. Provide ONE analysis that appli
         f"Calling {ai_provider.upper()} for failure group ({len(failures)} tests with same error)"
     )
     logger.info(f"Calling AI with {format_timeout_log(ai_call_timeout)}")
+    logger.info(
+        "AI call: provider=%s, model=%s, call_type=primary, job_id=%s",
+        ai_provider,
+        ai_model,
+        job_id,
+    )
     try:
         try:
             result = await call_ai_once(

@@ -241,6 +241,12 @@ async def _generate_issue_content_via_ai(
     Returns parsed dict with footer appended if AI succeeds, None if AI fails.
     """
     try:
+        logger.info(
+            "AI call: provider=%s, model=%s, call_type=%s",
+            ai_provider,
+            ai_model,
+            call_type,
+        )
         result = await call_ai_once(
             prompt,
             ai_provider=ai_provider,
