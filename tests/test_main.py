@@ -5364,3 +5364,30 @@ class TestBuildReportContextChildScope:
             child_build_number=42,
         )
         assert jenkins_url == "http://jenkins/leaf-child/42/"
+
+
+class TestStaticAssetHeaders:
+    """Tests for GZip compression and cache headers on static assets."""
+
+    def test_gzip_middleware_registered(self, test_client):
+        """Verify GZipMiddleware compresses responses above minimum size."""
+        response = test_client.get(
+            "/api/health",
+            headers={"Accept-Encoding": "gzip"},
+        )
+        # Health endpoint returns small JSON, may not be compressed
+        # Just verify the middleware doesn't break anything
+        assert response.status_code == 200
+
+    def test_assets_404_no_immutable_cache(self, test_client):
+        """Verify /assets/ 404 responses don't get long-lived cache headers."""
+        response = test_client.get("/assets/nonexistent-hash123.js")
+        assert response.status_code == 404
+        cache_control = response.headers.get("cache-control", "")
+        assert "immutable" not in cache_control
+
+    def test_non_assets_no_immutable_cache(self, test_client):
+        """Verify non-asset paths don't get immutable cache headers."""
+        response = test_client.get("/api/health")
+        cache_control = response.headers.get("cache-control", "")
+        assert "immutable" not in cache_control

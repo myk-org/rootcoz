@@ -39,6 +39,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, SecretStr, ValidationError
 from simple_logger.logger import get_logger
 from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.middleware.gzip import GZipMiddleware
 
 from rootcoz import storage
 from rootcoz.bug_creation import (
@@ -1047,6 +1048,7 @@ if _FRONTEND_DIR.is_dir():
         StaticFiles(directory=str(_FRONTEND_DIR / "assets")),
         name="frontend-assets",
     )
+    logger.info("Static assets directory mounted at /assets/")
 
 
 class ErrorTrackingMiddleware(BaseHTTPMiddleware):
@@ -1443,6 +1445,23 @@ class RequestBodyLoggingMiddleware(BaseHTTPMiddleware):
 
 
 app.add_middleware(RequestBodyLoggingMiddleware)
+
+
+class CacheControlMiddleware(BaseHTTPMiddleware):
+    """Add long-lived cache headers for Vite-hashed static assets."""
+
+    async def dispatch(self, request: Request, call_next):
+        response = await call_next(request)
+        if (
+            request.url.path.startswith("/assets/")
+            and 200 <= response.status_code < 400
+        ):
+            response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+        return response
+
+
+app.add_middleware(CacheControlMiddleware)
+app.add_middleware(GZipMiddleware, minimum_size=500)
 
 
 def _mask_pydantic_error(error: dict) -> dict:
