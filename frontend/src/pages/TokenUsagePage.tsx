@@ -1,4 +1,5 @@
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { Link } from 'react-router-dom'
 import { useLatestRef } from '@/lib/useLatestRef'
 import { api } from '@/lib/api'
 import { formatCompactNumber, formatCost } from '@/lib/format'
@@ -441,7 +442,7 @@ export function TokenUsagePage() {
                 <div className="space-y-2">
                   {summary.top_jobs.map((j) => (
                     <div key={j.job_id} className="flex items-center justify-between">
-                      <span className="font-mono text-xs text-text-secondary truncate">{j.job_id}</span>
+                      <Link to={`/results/${j.job_id}`} className="font-mono text-xs text-text-secondary truncate hover:underline hover:text-text-primary transition-colors">{j.job_id}</Link>
                       <div className="flex items-center gap-3">
                         <span className="font-mono text-xs text-text-tertiary">{j.calls.toLocaleString()} calls</span>
                         <span className="font-mono text-xs text-signal-green">{formatCostCell(j.cost_usd)}</span>

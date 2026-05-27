@@ -37,11 +37,12 @@ import { ConfirmDialog } from '@/components/shared/ConfirmDialog'
 import { SortableHeader } from '@/components/shared/SortableHeader'
 import { DateRangeFilter } from '@/components/shared/DateRangeFilter'
 import { useTableSort } from '@/lib/useTableSort'
-import { Trash2, MessageSquare, CheckCircle2, GitFork, AlertTriangle, Github, List, FolderOpen, ChevronRight } from 'lucide-react'
+import { Trash2, MessageSquare, CheckCircle2, GitFork, AlertTriangle, Github, List, ListTree, ChevronRight } from 'lucide-react'
 import { useAuth } from '@/lib/auth'
 import { useMetadataOptions, MetadataDropdowns, MetadataLabelChips, MetadataClearButton } from '@/components/shared/MetadataFilterBar'
 import { MetadataBadges } from '@/components/shared/MetadataBadges'
 import { WhatsNewDialog } from '@/components/shared/WhatsNewDialog'
+import { ExpandCollapseButtons } from '@/components/shared/ExpandCollapseButtons'
 
 const STATUS_FILTER_OPTIONS = ['completed', 'running', 'waiting', 'pending', 'failed', 'timeout', 'aborted'] as const
 const BULK_DELETE_LIMIT = 500
@@ -543,9 +544,15 @@ export function DashboardPage() {
               className={`p-1.5 rounded-r-md transition-colors ${viewMode === 'grouped' ? 'bg-signal-blue text-white' : 'text-text-tertiary hover:text-text-secondary'}`}
               aria-label="Grouped by job view"
             >
-              <FolderOpen className="h-4 w-4" />
+              <ListTree className="h-4 w-4" />
             </button>
           </div>
+          {viewMode === 'grouped' && (
+            <ExpandCollapseButtons
+              onExpandAll={() => setExpandedGroups(new Set(grouped.map(g => g.jobName)))}
+              onCollapseAll={() => setExpandedGroups(new Set())}
+            />
+          )}
         </div>
 
         {/* Tag filter chips — only shown when labels exist */}
