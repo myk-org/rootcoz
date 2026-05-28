@@ -37,7 +37,9 @@ export function PendingApprovalPage() {
           You'll be able to access the application once an admin approves your registration.
         </p>
         {customMessage && (
-          <p className="text-sm text-text-secondary font-medium">{customMessage}</p>
+          <div className="rounded-lg border border-signal-orange/30 bg-signal-orange/10 p-4">
+            <p className="text-sm font-medium text-signal-orange">{customMessage}</p>
+          </div>
         )}
       </div>
     </div>
