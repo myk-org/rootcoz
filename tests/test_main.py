@@ -5391,3 +5391,109 @@ class TestStaticAssetHeaders:
         response = test_client.get("/api/health")
         cache_control = response.headers.get("cache-control", "")
         assert "immutable" not in cache_control
+
+
+class TestAdminSettingsEndpoints:
+    """Tests for /api/admin/settings endpoints."""
+
+    _NO_ADMIN_HEADERS = {"Authorization": ""}
+
+    def test_get_settings_returns_metadata(self, test_client) -> None:
+        """GET /api/admin/settings returns all settings with metadata."""
+        response = test_client.get("/api/admin/settings")
+        assert response.status_code == 200
+        data = response.json()
+        assert isinstance(data, list)
+        assert len(data) > 0
+        # Check structure of first item
+        item = data[0]
+        assert "key" in item
+        assert "env_var" in item
+        assert "value" in item
+        assert "source" in item
+        assert "category" in item
+        assert "type" in item
+        assert "sensitive" in item
+        assert "description" in item
+        # Verify sensitive values are masked
+        sensitive_items = [i for i in data if i["sensitive"] and i["value"]]
+        for si in sensitive_items:
+            assert si["value"] == "••••••••", f"Sensitive field {si['key']} not masked"
+
+    def test_get_settings_non_admin_forbidden(self, test_client) -> None:
+        """Non-admin users cannot access settings."""
+        response = test_client.get(
+            "/api/admin/settings",
+            headers=self._NO_ADMIN_HEADERS,
+        )
+        assert response.status_code in (401, 403)
+
+    def test_put_settings_updates_value(self, test_client) -> None:
+        """PUT /api/admin/settings stores and applies settings."""
+        response = test_client.put(
+            "/api/admin/settings",
+            json={"settings": {"ai_call_timeout": "20"}},
+        )
+        assert response.status_code == 200
+        assert "ai_call_timeout" in response.json()["updated"]
+
+        # Verify the setting is now returned with source=db
+        get_resp = test_client.get("/api/admin/settings")
+        settings = get_resp.json()
+        ai_timeout = next(s for s in settings if s["key"] == "ai_call_timeout")
+        assert ai_timeout["source"] == "db"
+        assert ai_timeout["value"] == "20"
+
+    def test_put_settings_invalid_key(self, test_client) -> None:
+        """PUT with unknown key returns 400."""
+        response = test_client.put(
+            "/api/admin/settings",
+            json={"settings": {"nonexistent_key": "value"}},
+        )
+        assert response.status_code == 400
+        assert "Unknown settings" in response.json()["detail"]
+
+    def test_put_settings_empty_body(self, test_client) -> None:
+        """PUT with no settings returns 400."""
+        response = test_client.put(
+            "/api/admin/settings",
+            json={"settings": {}},
+        )
+        assert response.status_code == 400
+
+    def test_delete_setting_resets(self, test_client) -> None:
+        """DELETE removes DB override."""
+        # First set a value
+        test_client.put(
+            "/api/admin/settings",
+            json={"settings": {"ai_call_timeout": "30"}},
+        )
+        # Then reset
+        response = test_client.delete("/api/admin/settings/ai_call_timeout")
+        assert response.status_code == 200
+        assert response.json()["reset"] == "ai_call_timeout"
+
+        # Verify it's no longer source=db
+        get_resp = test_client.get("/api/admin/settings")
+        settings = get_resp.json()
+        ai_timeout = next(s for s in settings if s["key"] == "ai_call_timeout")
+        assert ai_timeout["source"] != "db"
+
+    def test_delete_unknown_key(self, test_client) -> None:
+        """DELETE with unknown key returns 404."""
+        response = test_client.delete("/api/admin/settings/nonexistent_key")
+        assert response.status_code == 404
+
+    def test_delete_no_override(self, test_client) -> None:
+        """DELETE when no DB override exists returns 404."""
+        response = test_client.delete("/api/admin/settings/jenkins_url")
+        assert response.status_code == 404
+
+    def test_put_settings_non_admin_forbidden(self, test_client) -> None:
+        """Non-admin users cannot update settings."""
+        response = test_client.put(
+            "/api/admin/settings",
+            json={"settings": {"ai_call_timeout": "20"}},
+            headers=self._NO_ADMIN_HEADERS,
+        )
+        assert response.status_code in (401, 403)

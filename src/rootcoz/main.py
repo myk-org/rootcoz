@@ -162,6 +162,179 @@ from rootcoz.xml_enrichment import (
 # Module-level Depends singletons (B008: avoid function calls in defaults)
 _SETTINGS_DEP = Depends(get_settings)
 
+# --- Server Settings metadata ---
+
+# Fields that contain sensitive data (passwords, tokens, keys)
+_SENSITIVE_SETTINGS: frozenset[str] = frozenset(
+    {
+        "jenkins_password",
+        "jenkins_user",
+        "jira_api_token",
+        "jira_pat",
+        "jira_email",
+        "github_token",
+        "tests_repo_token",
+        "reportportal_api_token",
+        "admin_key",
+        "vapid_private_key",
+    }
+)
+
+# Fields that require server restart to take effect
+_RESTART_REQUIRED_SETTINGS: frozenset[str] = frozenset(
+    {
+        "secure_cookies",
+        "trust_proxy_headers",
+        "metadata_rules_file",
+        "vapid_public_key",
+        "vapid_private_key",
+        "vapid_claim_email",
+    }
+)
+
+# Category grouping for UI display
+_SETTINGS_CATEGORIES: dict[str, list[str]] = {
+    "Jenkins": [
+        "jenkins_url",
+        "jenkins_user",
+        "jenkins_password",
+        "jenkins_ssl_verify",
+        "jenkins_timeout",
+        "jenkins_artifacts_max_size_mb",
+        "get_job_artifacts",
+    ],
+    "AI": [
+        "ai_call_timeout",
+        "max_concurrent_ai_calls",
+        "peer_ai_configs",
+        "peer_analysis_max_rounds",
+        "force_analysis",
+    ],
+    "Jira": [
+        "jira_url",
+        "jira_email",
+        "jira_api_token",
+        "jira_pat",
+        "jira_project_key",
+        "jira_ssl_verify",
+        "jira_max_results",
+        "enable_jira",
+        "enable_jira_issues",
+    ],
+    "GitHub": [
+        "github_token",
+        "tests_repo_url",
+        "tests_repo_token",
+        "enable_github_issues",
+    ],
+    "Report Portal": [
+        "reportportal_url",
+        "reportportal_api_token",
+        "reportportal_project",
+        "reportportal_verify_ssl",
+        "enable_reportportal",
+    ],
+    "Auth & Security": [
+        "admin_key",
+        "secure_cookies",
+        "trust_proxy_headers",
+        "require_approval",
+        "admin_wait_approve_msg",
+        "allowed_users",
+    ],
+    "Server": [
+        "public_base_url",
+        "additional_repos",
+        "wait_for_completion",
+        "poll_interval_minutes",
+        "max_wait_minutes",
+        "metadata_rules_file",
+    ],
+    "Web Push": [
+        "vapid_public_key",
+        "vapid_private_key",
+        "vapid_claim_email",
+    ],
+}
+
+# Reverse lookup: field -> category
+_FIELD_TO_CATEGORY: dict[str, str] = {}
+for _cat, _fields in _SETTINGS_CATEGORIES.items():
+    for _f in _fields:
+        _FIELD_TO_CATEGORY[_f] = _cat
+
+
+def _get_settings_metadata() -> list[dict]:
+    """Build metadata for all Settings fields with current values and sources."""
+    settings = get_settings()
+
+    result = []
+    for field_name, field_info in Settings.model_fields.items():
+        # Get the current value
+        value = getattr(settings, field_name)
+
+        # Handle SecretStr
+        if isinstance(value, SecretStr):
+            value = value.get_secret_value() if value else ""
+
+        # Convert to string for display
+        if value is None:
+            display_value = ""
+        elif isinstance(value, bool):
+            display_value = str(value).lower()
+        else:
+            display_value = str(value)
+
+        # Determine the field type
+        annotation = field_info.annotation
+        field_type = "string"
+        if annotation is bool or (
+            hasattr(annotation, "__args__")
+            and bool in getattr(annotation, "__args__", ())
+        ):
+            field_type = "boolean"
+        elif annotation is int or (
+            hasattr(annotation, "__args__")
+            and int in getattr(annotation, "__args__", ())
+        ):
+            field_type = "integer"
+
+        # Get description
+        description = ""
+        if field_info.description:
+            description = field_info.description
+
+        # Get default
+        default = field_info.default
+        if default is None:
+            default_str = ""
+        elif isinstance(default, bool):
+            default_str = str(default).lower()
+        else:
+            default_str = str(default) if default != "" else ""
+
+        is_sensitive = field_name in _SENSITIVE_SETTINGS
+
+        result.append(
+            {
+                "key": field_name,
+                "env_var": field_name.upper(),
+                "value": "••••••••"
+                if is_sensitive and display_value
+                else display_value,
+                "default": default_str,
+                "description": description,
+                "type": field_type,
+                "category": _FIELD_TO_CATEGORY.get(field_name, "Other"),
+                "sensitive": is_sensitive,
+                "restart_required": field_name in _RESTART_REQUIRED_SETTINGS,
+                "source": "default",  # Will be overridden by caller
+            }
+        )
+
+    return result
+
+
 # Inline favicon
 
 
@@ -1004,6 +1177,11 @@ async def lifespan(_app: FastAPI):
 
     await init_db()
     await storage.cleanup_expired_sessions()
+
+    # Load DB setting overrides into env before get_settings() is called
+    from rootcoz.config import load_db_settings_into_env
+
+    await load_db_settings_into_env()
 
     try:
         # Pre-populate cursor models in background (don't block startup)
@@ -6815,6 +6993,132 @@ async def rotate_key_endpoint(request: Request, username: str) -> JSONResponse:
             "Pragma": "no-cache",
         },
     )
+
+
+# --- SSE for settings changes ---
+_settings_listeners: set[asyncio.Event] = set()
+
+
+def _broadcast_settings_change() -> None:
+    """Signal all SSE listeners that settings changed."""
+    for ev in _settings_listeners:
+        ev.set()
+
+
+@app.get("/api/admin/settings/stream")
+async def settings_stream(request: Request):
+    """SSE stream for server settings changes."""
+    _require_admin(request)
+    return _make_sse_stream(request, _settings_listeners, "settings-changed")
+
+
+@app.get("/api/admin/settings")
+async def get_admin_settings(request: Request) -> JSONResponse:
+    """Get all server settings with metadata, current values, and sources."""
+    _require_admin(request)
+    metadata = _get_settings_metadata()
+
+    # Get DB overrides
+    db_overrides = await storage.get_server_settings()
+
+    # Update source and value for DB-overridden settings
+    for item in metadata:
+        key = item["key"]
+        if key in db_overrides:
+            override = db_overrides[key]
+            item["source"] = "db"
+            if not item["sensitive"]:
+                item["value"] = override["value"]
+            item["updated_by"] = override.get("updated_by", "")
+            item["updated_at"] = override.get("updated_at", "")
+        elif item["value"] and item["value"] != item["default"]:
+            item["source"] = "env"
+        else:
+            item["source"] = "default"
+
+    return JSONResponse(content=metadata)
+
+
+@app.put("/api/admin/settings")
+async def update_admin_settings(request: Request) -> JSONResponse:
+    """Update one or more server settings. Body: {"settings": {"key": "value", ...}}"""
+    _require_admin(request)
+    body = await request.json()
+    settings_updates = body.get("settings", {})
+
+    if not settings_updates:
+        raise HTTPException(status_code=400, detail="No settings provided")
+
+    # Validate keys exist in Settings model
+    valid_keys = set(Settings.model_fields.keys())
+    invalid_keys = set(settings_updates.keys()) - valid_keys
+    if invalid_keys:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unknown settings: {', '.join(sorted(invalid_keys))}",
+        )
+
+    username = request.state.username or "admin"
+
+    # Save each setting to DB and apply to running process
+    for key, value in settings_updates.items():
+        str_value = str(value)
+
+        # Store in DB (encrypt sensitive values)
+        if key in _SENSITIVE_SETTINGS and str_value:
+            from rootcoz.encryption import encrypt_value
+
+            db_value = encrypt_value(str_value)
+        else:
+            db_value = str_value
+        await storage.set_server_setting(key, db_value, updated_by=username)
+
+        # Apply plain text value to env vars for runtime effect
+        env_key = key.upper()
+        if str_value == "" or value is None:
+            os.environ.pop(env_key, None)
+        else:
+            os.environ[env_key] = str_value
+
+    # Clear cached settings so next get_settings() picks up env changes
+    get_settings.cache_clear()
+
+    _broadcast_settings_change()
+
+    logger.info(
+        "Admin settings updated: keys=%s, by=%s",
+        list(settings_updates.keys()),
+        username,
+    )
+
+    return JSONResponse(
+        content={"updated": list(settings_updates.keys())},
+        status_code=200,
+    )
+
+
+@app.delete("/api/admin/settings/{key}")
+async def reset_admin_setting(request: Request, key: str) -> JSONResponse:
+    """Reset a server setting to its env/default value (removes DB override)."""
+    _require_admin(request)
+    if key not in Settings.model_fields:
+        raise HTTPException(status_code=404, detail=f"Unknown setting: {key}")
+
+    deleted = await storage.delete_server_setting(key)
+    if not deleted:
+        raise HTTPException(
+            status_code=404, detail=f"Setting '{key}' has no DB override"
+        )
+
+    # Remove the env var override so get_settings() falls back to actual env/default
+    os.environ.pop(key.upper(), None)
+    get_settings.cache_clear()
+
+    _broadcast_settings_change()
+
+    logger.info("Admin setting reset: key=%s, by=%s", key, request.state.username)
+
+    return JSONResponse(content={"reset": key})
 
 
 # -- Job Metadata Endpoints ---------------------------------------------------

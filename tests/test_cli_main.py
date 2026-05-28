@@ -3417,6 +3417,105 @@ class TestAdminUsersChangeRole:
         assert output["role"] == "admin"
 
 
+class TestAdminSettingsCommand:
+    def test_admin_settings_list(self, mock_client):
+        mock_client.admin_list_settings.return_value = [
+            {
+                "env_var": "JENKINS_URL",
+                "value": "http://jenkins",
+                "source": "env",
+                "category": "jenkins",
+            },
+            {
+                "env_var": "JIRA_URL",
+                "value": "http://jira",
+                "source": "default",
+                "category": "jira",
+            },
+        ]
+        result = runner.invoke(app, ["admin", "settings", "list"])
+        assert result.exit_code == 0
+        assert "JENKINS_URL" in result.output
+        assert "JIRA_URL" in result.output
+
+    def test_admin_settings_list_category_filter(self, mock_client):
+        mock_client.admin_list_settings.return_value = [
+            {
+                "env_var": "JENKINS_URL",
+                "value": "http://jenkins",
+                "source": "env",
+                "category": "jenkins",
+            },
+            {
+                "env_var": "JIRA_URL",
+                "value": "http://jira",
+                "source": "default",
+                "category": "jira",
+            },
+        ]
+        result = runner.invoke(
+            app, ["admin", "settings", "list", "--category", "jenkins"]
+        )
+        assert result.exit_code == 0
+        assert "JENKINS_URL" in result.output
+        assert "JIRA_URL" not in result.output
+
+    def test_admin_settings_list_json(self, mock_client):
+        mock_client.admin_list_settings.return_value = [
+            {
+                "env_var": "JENKINS_URL",
+                "value": "http://jenkins",
+                "source": "env",
+                "category": "jenkins",
+            },
+        ]
+        result = runner.invoke(app, ["--json", "admin", "settings", "list"])
+        assert result.exit_code == 0
+        parsed = json.loads(result.output)
+        assert len(parsed) == 1
+        assert parsed[0]["env_var"] == "JENKINS_URL"
+
+    def test_admin_settings_set(self, mock_client):
+        mock_client.admin_set_setting.return_value = {
+            "updated": {"jenkins_url": "http://new"}
+        }
+        result = runner.invoke(
+            app, ["admin", "settings", "set", "JENKINS_URL", "http://new"]
+        )
+        assert result.exit_code == 0
+        assert "Updated: jenkins_url" in result.output
+        mock_client.admin_set_setting.assert_called_once_with(
+            "jenkins_url", "http://new"
+        )
+
+    def test_admin_settings_set_json(self, mock_client):
+        mock_client.admin_set_setting.return_value = {
+            "updated": {"jenkins_url": "http://new"}
+        }
+        result = runner.invoke(
+            app, ["--json", "admin", "settings", "set", "jenkins_url", "http://new"]
+        )
+        assert result.exit_code == 0
+        parsed = json.loads(result.output)
+        assert parsed["updated"]["jenkins_url"] == "http://new"
+
+    def test_admin_settings_reset(self, mock_client):
+        mock_client.admin_reset_setting.return_value = {"reset": "jenkins_url"}
+        result = runner.invoke(app, ["admin", "settings", "reset", "JENKINS_URL"])
+        assert result.exit_code == 0
+        assert "Reset: jenkins_url" in result.output
+        mock_client.admin_reset_setting.assert_called_once_with("jenkins_url")
+
+    def test_admin_settings_reset_json(self, mock_client):
+        mock_client.admin_reset_setting.return_value = {"reset": "jenkins_url"}
+        result = runner.invoke(
+            app, ["--json", "admin", "settings", "reset", "jenkins_url"]
+        )
+        assert result.exit_code == 0
+        parsed = json.loads(result.output)
+        assert parsed["reset"] == "jenkins_url"
+
+
 class TestTokenUsageCommand:
     def test_token_usage_summary_default(self, mock_client):
         """No flags → summary mode."""

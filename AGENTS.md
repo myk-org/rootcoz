@@ -121,6 +121,13 @@ src/rootcoz/
   - `/api/results/{job_id}/comments/stream` — per-job comment changes
   - `/api/admin/token-usage/stream` — token usage data changes
 
+### Server Settings Page
+
+Every new environment variable added to `Settings` in `config.py` **MUST** also be registered in the server settings metadata in `main.py`:
+1. Add the field to the appropriate category in `_SETTINGS_CATEGORIES`
+2. Add to `_SENSITIVE_SETTINGS` if it contains passwords/tokens/keys
+3. Add to `_RESTART_REQUIRED_SETTINGS` if it requires server restart to take effect
+
 ### Auto-Generated Documentation
 
 The `docs/` directory is **auto-generated** by [docsfy](https://github.com/myk-org/docsfy). **NEVER edit files in `docs/` manually** — all changes will be overwritten. To update documentation, modify source code and regenerate with docsfy, or edit `AGENTS.md` / `README.md` for project-level docs.

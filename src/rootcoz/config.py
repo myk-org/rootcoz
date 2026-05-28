@@ -562,6 +562,39 @@ def resolve_jira_auth(settings: Settings) -> tuple[bool, str]:
     return False, ""
 
 
+async def load_db_settings_into_env() -> None:
+    """Load server_settings DB overrides into os.environ.
+
+    Called once at startup before get_settings() is first invoked.
+    DB values take precedence over existing env vars.
+    """
+    try:
+        # Late import to avoid circular dependency
+        from rootcoz import storage
+        from rootcoz.encryption import decrypt_value
+
+        db_settings = await storage.get_server_settings()
+        if not db_settings:
+            return
+
+        count = 0
+        for key, entry in db_settings.items():
+            env_key = key.upper()
+            value = entry["value"]
+            # Decrypt if encrypted (sensitive values are stored encrypted)
+            try:
+                value = decrypt_value(value)
+            except Exception:
+                pass  # Not encrypted or decryption failed — use as-is
+            os.environ[env_key] = value
+            count += 1
+
+        if count:
+            logger.info("[startup] Loaded %d server setting(s) from DB into env", count)
+    except Exception:
+        logger.warning("Failed to load server settings from DB", exc_info=True)
+
+
 @lru_cache
 def get_settings() -> Settings:
     """Get application settings instance."""

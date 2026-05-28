@@ -41,6 +41,7 @@ config_app = typer.Typer(help="Manage rootcoz configuration.")
 auth_app = typer.Typer(help="Authentication commands.", no_args_is_help=True)
 admin_app = typer.Typer(help="Admin management commands.", no_args_is_help=True)
 admin_users_app = typer.Typer(help="Manage admin users.", no_args_is_help=True)
+admin_settings_app = typer.Typer(help="Manage server settings.", no_args_is_help=True)
 
 metadata_app = typer.Typer(help="Manage job metadata.", no_args_is_help=True)
 failure_app = typer.Typer(
@@ -57,6 +58,7 @@ app.add_typer(config_app, name="config")
 app.add_typer(auth_app, name="auth")
 app.add_typer(admin_app, name="admin")
 admin_app.add_typer(admin_users_app, name="users")
+admin_app.add_typer(admin_settings_app, name="settings")
 
 # -- Global state managed via app callback ------------------------------------
 
@@ -2351,6 +2353,70 @@ def admin_users_reject(
     )
     if not _state.get("json", False):
         typer.echo(f"Rejected user: {data.get('username', username)}")
+
+
+# -- Admin Settings -----------------------------------------------------------
+
+
+@admin_settings_app.command("list")
+def admin_settings_list(
+    category: str = typer.Option("", "--category", "-c", help="Filter by category."),
+    json_output: bool = _JSON_OPTION,
+):
+    """List all server settings with current values and sources."""
+
+    def _fetch(c):
+        data = c.admin_list_settings()
+        if category:
+            data = [
+                d for d in data if d.get("category", "").lower() == category.lower()
+            ]
+        return data
+
+    _run_client_command(
+        json_output,
+        _fetch,
+        columns=["env_var", "value", "source", "category"],
+        labels={
+            "env_var": "ENV VAR",
+            "value": "VALUE",
+            "source": "SOURCE",
+            "category": "CATEGORY",
+        },
+    )
+
+
+@admin_settings_app.command("set")
+def admin_settings_set(
+    key: str = typer.Argument(help="Setting key (e.g., jenkins_url or JENKINS_URL)."),
+    value: str = typer.Argument(help="New value for the setting."),
+    json_output: bool = _JSON_OPTION,
+):
+    """Set a server setting (persisted to DB)."""
+    key = key.lower()
+    _run_client_command(
+        json_output,
+        lambda c: c.admin_set_setting(key, value),
+        emit_output=False,
+    )
+    if not _state.get("json", False):
+        typer.echo(f"Updated: {key}")
+
+
+@admin_settings_app.command("reset")
+def admin_settings_reset(
+    key: str = typer.Argument(help="Setting key to reset to env/default."),
+    json_output: bool = _JSON_OPTION,
+):
+    """Reset a server setting to env/default (removes DB override)."""
+    key = key.lower()
+    _run_client_command(
+        json_output,
+        lambda c: c.admin_reset_setting(key),
+        emit_output=False,
+    )
+    if not _state.get("json", False):
+        typer.echo(f"Reset: {key}")
 
 
 # -- Token Usage (Admin) ------------------------------------------------------

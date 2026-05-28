@@ -505,6 +505,15 @@ async def init_db() -> None:
             "CREATE INDEX IF NOT EXISTS idx_mention_reads_username ON mention_reads (username)"
         )
 
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS server_settings (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL,
+                updated_by TEXT NOT NULL DEFAULT '',
+                updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+            )
+        """)
+
         await db.commit()
 
     # Backfill failure_history from existing results (runs once when table is empty).
@@ -3849,3 +3858,67 @@ async def mark_all_mentions_read(username: str) -> int:
         f"mark_all_mentions_read: username={username}, marked={len(comment_ids)}"
     )
     return len(comment_ids)
+
+
+async def get_server_settings() -> dict[str, dict]:
+    """Get all server setting overrides from DB.
+
+    Returns dict of {key: {"value": str, "updated_by": str, "updated_at": str}}.
+    """
+    async with _connect_db() as db:
+        cursor = await db.execute(
+            "SELECT key, value, updated_by, updated_at FROM server_settings"
+        )
+        rows = await cursor.fetchall()
+        return {
+            row["key"]: {
+                "value": row["value"],
+                "updated_by": row["updated_by"],
+                "updated_at": row["updated_at"],
+            }
+            for row in rows
+        }
+
+
+async def get_server_setting(key: str) -> dict | None:
+    """Get a single server setting override. Returns None if not set."""
+    async with _connect_db() as db:
+        cursor = await db.execute(
+            "SELECT key, value, updated_by, updated_at FROM server_settings WHERE key = ?",
+            (key,),
+        )
+        row = await cursor.fetchone()
+        if not row:
+            return None
+        return {
+            "value": row["value"],
+            "updated_by": row["updated_by"],
+            "updated_at": row["updated_at"],
+        }
+
+
+async def set_server_setting(key: str, value: str, updated_by: str = "") -> None:
+    """Set a server setting override (upsert)."""
+    async with _connect_db() as db:
+        await db.execute(
+            """INSERT INTO server_settings (key, value, updated_by, updated_at)
+               VALUES (?, ?, ?, datetime('now'))
+               ON CONFLICT(key) DO UPDATE SET
+                 value = excluded.value,
+                 updated_by = excluded.updated_by,
+                 updated_at = excluded.updated_at""",
+            (key, value, updated_by),
+        )
+        await db.commit()
+    logger.info("Server setting updated: key=%s, by=%s", key, updated_by)
+
+
+async def delete_server_setting(key: str) -> bool:
+    """Delete a server setting override (reset to env/default). Returns True if deleted."""
+    async with _connect_db() as db:
+        cursor = await db.execute("DELETE FROM server_settings WHERE key = ?", (key,))
+        await db.commit()
+        deleted = cursor.rowcount > 0
+    if deleted:
+        logger.info("Server setting reset: key=%s", key)
+    return deleted
