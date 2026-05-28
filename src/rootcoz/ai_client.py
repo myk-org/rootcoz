@@ -2,7 +2,6 @@
 
 from pi_sidecar_client import (
     AIResult,
-    _PROVIDER_MAP,
     call_ai,
     call_ai_once,
     set_usage_recorder,
@@ -11,8 +10,13 @@ from simple_logger.logger import get_logger
 
 logger = get_logger(name=__name__)
 
-# Reverse map: sidecar provider name -> rootcoz provider name (module-level constant)
-_REVERSE_PROVIDER_MAP: dict[str, str] = {v: k for k, v in _PROVIDER_MAP.items()}
+# Map sidecar provider names to rootcoz provider names.
+# This is OUR mapping, not imported from pi_sidecar_client internals.
+_SIDECAR_TO_ROOTCOZ_PROVIDER: dict[str, str] = {
+    "google-vertex-claude": "claude",
+    "acpx-cursor": "cursor",
+    "google": "gemini",
+}
 
 # Cache for model→provider lookups (short TTL to avoid stale data)
 _model_provider_cache: dict[str, tuple[str | None, float]] = {}
@@ -78,7 +82,7 @@ async def get_provider_for_model(model: str) -> str | None:
             mid = m.get("id", "")
             sidecar_provider = m.get("provider", "")
             _model_provider_cache[mid] = (
-                _REVERSE_PROVIDER_MAP.get(sidecar_provider),
+                _SIDECAR_TO_ROOTCOZ_PROVIDER.get(sidecar_provider),
                 now,
             )
         # Return result for requested model
