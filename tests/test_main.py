@@ -5415,10 +5415,13 @@ class TestAdminSettingsEndpoints:
         assert "type" in item
         assert "sensitive" in item
         assert "description" in item
-        # Verify sensitive values are masked
+        # Verify sensitive values are returned unmasked (admin-only endpoint;
+        # frontend handles masking via the 'sensitive' flag)
         sensitive_items = [i for i in data if i["sensitive"] and i["value"]]
         for si in sensitive_items:
-            assert si["value"] == "••••••••", f"Sensitive field {si['key']} not masked"
+            assert si["value"] != "••••••••", (
+                f"Sensitive field {si['key']} should not be masked for admins"
+            )
 
     def test_get_settings_non_admin_forbidden(self, test_client) -> None:
         """Non-admin users cannot access settings."""

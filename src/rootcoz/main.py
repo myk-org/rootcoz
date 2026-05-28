@@ -319,9 +319,7 @@ def _get_settings_metadata() -> list[dict]:
             {
                 "key": field_name,
                 "env_var": field_name.upper(),
-                "value": "••••••••"
-                if is_sensitive and display_value
-                else display_value,
+                "value": display_value,
                 "default": default_str,
                 "description": description,
                 "type": field_type,
@@ -7027,8 +7025,16 @@ async def get_admin_settings(request: Request) -> JSONResponse:
         if key in db_overrides:
             override = db_overrides[key]
             item["source"] = "db"
-            if not item["sensitive"]:
-                item["value"] = override["value"]
+            db_value = override["value"]
+            # Decrypt sensitive values stored encrypted in DB
+            if item["sensitive"] and db_value:
+                try:
+                    from rootcoz.encryption import decrypt_value
+
+                    db_value = decrypt_value(db_value)
+                except Exception:
+                    pass  # Use as-is if decryption fails
+            item["value"] = db_value
             item["updated_by"] = override.get("updated_by", "")
             item["updated_at"] = override.get("updated_at", "")
         elif item["value"] and item["value"] != item["default"]:
