@@ -1014,10 +1014,7 @@ async def lifespan(_app: FastAPI):
         # Retroactively assign metadata to jobs that don't have it yet
         settings = get_settings()
         if settings.admin_wait_approve_msg:
-            logger.info(
-                "[startup] ADMIN_WAIT_APPROVE_MSG configured: %s",
-                settings.admin_wait_approve_msg,
-            )
+            logger.info("[startup] ADMIN_WAIT_APPROVE_MSG configured")
         if settings.metadata_rules:
             task = asyncio.create_task(_backfill_job_metadata(settings.metadata_rules))
             _background_tasks.add(task)

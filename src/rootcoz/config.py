@@ -351,6 +351,10 @@ class Settings(BaseSettings):
             value = getattr(self, field_name)
             if isinstance(value, str):
                 object.__setattr__(self, field_name, value.strip())
+        # Strip whitespace from admin message
+        value = self.admin_wait_approve_msg
+        if isinstance(value, str):
+            object.__setattr__(self, "admin_wait_approve_msg", value.strip())
         # Strip whitespace from secret fields; blank becomes None
         for field_name in (
             "github_token",
