@@ -7208,7 +7208,8 @@ async def analyze_comment_intent(
     _check_allow_list(request)
 
     ai_provider = body.ai_provider or ""
-    ai_model = body.ai_model or AI_MODEL
+    ai_model = body.ai_model or ""
+    # Fall back to the job's stored AI config before env defaults
     if (not ai_provider or not ai_model) and body.job_id:
         stored = await storage.get_result(body.job_id)
         if stored and stored.get("result"):
@@ -7217,6 +7218,7 @@ async def analyze_comment_intent(
                 ai_provider = params.get("ai_provider", "")
             if not ai_model:
                 ai_model = params.get("ai_model", "")
+    # Env default (AI_MODEL) is applied inside _resolve_ai_config_values as last resort
     ai_provider, ai_model = await _resolve_ai_config_values(ai_provider, ai_model)
 
     prompt = """You are analyzing a comment left on a test failure report.

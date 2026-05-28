@@ -306,13 +306,14 @@ class TestAnalyzeCommentIntentJobFallback:
         )
         assert response.status_code == 400
 
-    def test_env_ai_model_takes_precedence_over_job(
+    def test_job_ai_config_takes_precedence_over_env(
         self, _mock_settings, temp_db_path: Path
     ) -> None:
-        """Server-level AI_MODEL env takes precedence over stored job's model.
+        """Stored job's AI config takes precedence over env defaults.
 
-        When no provider is set via env (AI_PROVIDER removed), the stored job's
-        provider is used as fallback, while AI_MODEL env overrides the model.
+        When no explicit provider/model is set in the request, the stored job's
+        AI config is used so comment analysis uses the same AI that analyzed the job.
+        Env defaults (AI_MODEL) are only used as a last resort.
         """
         from rootcoz import main as main_mod
 
@@ -346,6 +347,6 @@ class TestAnalyzeCommentIntentJobFallback:
 
         assert response.status_code == 200
         call_kwargs = mock_ai.call_args
-        # AI_MODEL from env takes precedence; provider falls back to stored job's "claude"
+        # Job's stored AI config wins over env defaults
         assert call_kwargs.kwargs["ai_provider"] == "claude"
-        assert call_kwargs.kwargs["ai_model"] == "gemini-2.5-flash"
+        assert call_kwargs.kwargs["ai_model"] == "claude-sonnet-4-20250514"
