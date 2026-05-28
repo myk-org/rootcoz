@@ -16,6 +16,7 @@ docker run -d -p 8000:8000 -v ./data:/data \
   -e JENKINS_URL=https://jenkins.example.com \
   -e JENKINS_USER=your-username \
   -e JENKINS_PASSWORD=your-api-token \
+  -e AI_PROVIDER=claude \
   -e AI_MODEL=your-model-name \
   ghcr.io/myk-org/rootcoz:latest
 ```

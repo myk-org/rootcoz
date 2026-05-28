@@ -45,6 +45,13 @@ def setup_ai_analysis(session) -> None:
         )
         session.config.option.analyze_with_ai = False
     else:
+        if not os.environ.get("ROOTCOZ_AI_PROVIDER"):
+            logger.warning(
+                "ROOTCOZ_AI_PROVIDER is not set. Set it explicitly (e.g., 'claude', 'gemini', 'cursor')."
+            )
+            session.config.option.analyze_with_ai = False
+            return
+
         if not os.environ.get("ROOTCOZ_AI_MODEL"):
             logger.warning(
                 "ROOTCOZ_AI_MODEL is not set. Set it explicitly to the desired model name."
@@ -77,9 +84,12 @@ def enrich_junit_xml(session) -> None:
         )
         return
 
+    ai_provider = os.environ.get("ROOTCOZ_AI_PROVIDER", "")
     ai_model = os.environ.get("ROOTCOZ_AI_MODEL", "")
-    if not ai_model:
-        logger.warning("ROOTCOZ_AI_MODEL must be set, skipping AI analysis enrichment")
+    if not ai_provider or not ai_model:
+        logger.warning(
+            "ROOTCOZ_AI_PROVIDER and ROOTCOZ_AI_MODEL must be set, skipping AI analysis enrichment"
+        )
         return
 
     server_url = os.environ.get("ROOTCOZ_SERVER", "")
@@ -97,6 +107,7 @@ def enrich_junit_xml(session) -> None:
             json={
                 "type": "file",
                 "raw_xml": raw_xml,
+                "ai_provider": ai_provider,
                 "ai_model": ai_model,
             },
             timeout=60,

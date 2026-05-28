@@ -72,7 +72,7 @@ uvx --with tox-uv tox -e frontend   # Frontend only
 
 - **Backend**: Python + FastAPI + SQLite (aiosqlite)
 - **Frontend**: Vite + React 19 + TypeScript + Tailwind CSS + shadcn/ui (in `/frontend/`)
-- **AI Integration**: Pi SDK sidecar — Node.js service wrapping the Pi coding agent SDK. Provides Claude (via Vertex), Cursor (via acpx), and Gemini models. No direct CLI dependencies. Provider is auto-derived from model via sidecar.
+- **AI Integration**: Pi SDK sidecar — Node.js service wrapping the Pi coding agent SDK. Provides Claude (via Vertex), Cursor (via acpx), and Gemini models. No direct CLI dependencies. `AI_PROVIDER` env var selects provider.
 - **CLI**: `rootcoz` CLI tool for querying the API — run `rootcoz --help` for available commands
 
 ### Backend Module Layout

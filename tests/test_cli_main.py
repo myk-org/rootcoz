@@ -1967,6 +1967,7 @@ class TestAnalyzeConfigDefaults:
         jenkins_ssl_verify=False,
         jenkins_timeout=45,
         tests_repo_url="https://github.com/cfg/tests",
+        ai_provider="gemini",
         ai_model="2.5-pro",
         ai_call_timeout=20,
         max_concurrent_ai_calls=5,
@@ -2009,7 +2010,7 @@ class TestAnalyzeConfigDefaults:
         assert kwargs["jenkins_user"] == "cfg-jenkins-user"
         assert kwargs["jenkins_password"] == _FAKE_JENKINS_PASSWORD
         assert kwargs["tests_repo_url"] == "https://github.com/cfg/tests"
-        assert "ai_provider" not in kwargs
+        assert kwargs["ai_provider"] == "gemini"
         assert kwargs["ai_model"] == "2.5-pro"
         assert kwargs["jira_url"] == "https://jira.cfg.local"
         assert kwargs["jira_email"] == "cfg@example.com"

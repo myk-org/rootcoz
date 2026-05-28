@@ -366,6 +366,7 @@ async def _bind_job_id(job_id: str) -> None:
 # Statuses that indicate the analysis is still in progress.
 IN_PROGRESS_STATUSES = ("pending", "running", "waiting")
 
+AI_PROVIDER = os.getenv("AI_PROVIDER", "").lower()
 AI_MODEL = os.getenv("AI_MODEL", "")
 
 _VALID_GROUP_BY = frozenset(
@@ -1556,38 +1557,32 @@ async def root() -> HTMLResponse:
     return _serve_spa()
 
 
-async def _resolve_ai_config_values(
+def _resolve_ai_config_values(
     ai_provider: str | None, ai_model: str | None
 ) -> tuple[str, str]:
-    """Resolve and validate AI provider and model.
+    """Resolve and validate AI provider and model from given values or env defaults.
 
-    When provider is not specified, derives it from the model via the sidecar.
+    Args:
+        ai_provider: Provider from request body (or None).
+        ai_model: Model from request body (or None).
+
+    Returns:
+        Tuple of (ai_provider, ai_model).
+
+    Raises:
+        HTTPException: If provider or model is not configured.
     """
-    from rootcoz.ai_client import get_provider_for_model
-
-    provider = ai_provider or ""
+    provider = ai_provider or AI_PROVIDER
     model = ai_model or AI_MODEL
-
-    if not model:
+    if not provider:
         raise HTTPException(
             status_code=400,
-            detail="No AI model configured. Set AI_MODEL env var or pass ai_model in request body.",
+            detail=(
+                f"No AI provider configured. Set AI_PROVIDER env var or"
+                f" pass ai_provider in request body."
+                f" Valid providers: {', '.join(sorted(VALID_AI_PROVIDERS))}"
+            ),
         )
-
-    if not provider:
-        derived = await get_provider_for_model(model)
-        if derived:
-            logger.debug("Derived ai_provider=%s from model=%s", derived, model)
-            provider = derived
-        else:
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    f"Could not derive provider for model '{model}'. "
-                    f"Ensure the model is available in the sidecar."
-                ),
-            )
-
     if provider not in VALID_AI_PROVIDERS:
         raise HTTPException(
             status_code=400,
@@ -1596,13 +1591,17 @@ async def _resolve_ai_config_values(
                 f"Valid providers: {', '.join(sorted(VALID_AI_PROVIDERS))}"
             ),
         )
-
+    if not model:
+        raise HTTPException(
+            status_code=400,
+            detail="No AI model configured. Set AI_MODEL env var or pass ai_model in request body.",
+        )
     return provider, model
 
 
-async def _resolve_ai_config(body: BaseAnalysisRequest) -> tuple[str, str]:
+def _resolve_ai_config(body: BaseAnalysisRequest) -> tuple[str, str]:
     """Resolve AI config from an AnalyzeRequest."""
-    return await _resolve_ai_config_values(body.ai_provider, body.ai_model)
+    return _resolve_ai_config_values(body.ai_provider, body.ai_model)
 
 
 def _resolve_peer_ai_configs(
@@ -1972,7 +1971,7 @@ async def process_analysis_with_id(
     try:
         # Validate AI config early -- before potentially waiting hours for Jenkins.
         # This ensures invalid provider/model fails fast instead of after a long wait.
-        ai_provider, ai_model = await _resolve_ai_config(body)
+        ai_provider, ai_model = _resolve_ai_config(body)
 
         # Pre-flight: verify AI is reachable before expensive Jenkins wait
         display_name = _get_display_name(body)
@@ -2324,8 +2323,6 @@ async def _enqueue_file_raw_analysis(
     message_prefix: str = "Analysis",
     reanalyzed_from_job_id: str = "",
     reanalyzed_from_job_name: str = "",
-    resolved_ai_provider: str = "",
-    resolved_ai_model: str = "",
 ) -> dict:
     """Build params, persist initial state, spawn task, and return response.
 
@@ -2348,12 +2345,7 @@ async def _enqueue_file_raw_analysis(
     Returns:
         JSON-serialisable response dict with ``status``, ``job_id``, links.
     """
-    if resolved_ai_provider and resolved_ai_model:
-        ai_provider, ai_model = resolved_ai_provider, resolved_ai_model
-    else:
-        ai_provider, ai_model = await _resolve_ai_config_values(
-            body.ai_provider, body.ai_model
-        )
+    ai_provider, ai_model = _resolve_ai_config_values(body.ai_provider, body.ai_model)
 
     # Resolve repos
     tests_repo_url_raw = (
@@ -2526,8 +2518,6 @@ async def _enqueue_analysis_job(
     username: str = "",
     reanalyzed_from_job_id: str = "",
     reanalyzed_from_job_name: str = "",
-    resolved_ai_provider: str = "",
-    resolved_ai_model: str = "",
 ) -> dict:
     """Create, save, and enqueue a new analysis job.
 
@@ -2547,8 +2537,8 @@ async def _enqueue_analysis_job(
         "request_params": _build_request_params(
             body,
             merged,
-            resolved_ai_provider or body.ai_provider or "",
-            resolved_ai_model or body.ai_model or AI_MODEL,
+            body.ai_provider or AI_PROVIDER,
+            body.ai_model or AI_MODEL,
             peer_ai_configs_resolved=resolved_peers,
         ),
     }
@@ -2917,7 +2907,7 @@ async def analyze(
     base_url = _extract_base_url()
 
     # Validate AI config early
-    ai_provider, ai_model = await _resolve_ai_config(body)
+    _resolve_ai_config(body)
 
     # Resolve display name
     display_name: str = body.name or ""
@@ -2950,8 +2940,6 @@ async def analyze(
             resolved_peers,
             base_url,
             username=request.state.username,
-            resolved_ai_provider=ai_provider,
-            resolved_ai_model=ai_model,
         )
 
     # File or Raw — enqueue as async background task
@@ -2966,8 +2954,6 @@ async def analyze(
         base_url=base_url,
         username=request.state.username,
         message_prefix="Analysis",
-        resolved_ai_provider=ai_provider,
-        resolved_ai_model=ai_model,
     )
 
 
@@ -3074,7 +3060,7 @@ async def re_analyze(
         unified_body.tags = existing_tags
 
         # Validate and merge settings
-        await _resolve_ai_config(unified_body)
+        _resolve_ai_config(unified_body)
         merged = _merge_settings(unified_body, get_settings())
         resolved_peers = _validate_peer_configs(unified_body, merged)
 
@@ -3125,7 +3111,7 @@ async def re_analyze(
     merged = _merge_settings(original_body, original_settings)
 
     # Validate AI config and peers
-    re_ai_provider, re_ai_model = await _resolve_ai_config(original_body)
+    _resolve_ai_config(original_body)
     resolved_peers = _validate_peer_configs(original_body, merged)
 
     return await _enqueue_analysis_job(
@@ -3137,8 +3123,6 @@ async def re_analyze(
         username=request.state.username,
         reanalyzed_from_job_id=job_id,
         reanalyzed_from_job_name=origin_job_display_name,
-        resolved_ai_provider=re_ai_provider,
-        resolved_ai_model=re_ai_model,
     )
 
 
@@ -3439,7 +3423,7 @@ async def re_analyze_failure(
         ai_provider = overrides.ai_provider
     if overrides.ai_model is not None:
         ai_model = overrides.ai_model
-    ai_provider, ai_model = await _resolve_ai_config_values(ai_provider, ai_model)
+    ai_provider, ai_model = _resolve_ai_config_values(ai_provider, ai_model)
 
     ai_call_timeout = decrypted_params.get("ai_call_timeout")
     if overrides.ai_call_timeout is not None:
@@ -4275,13 +4259,8 @@ async def preview_github_issue(
     )
 
     # AI config is best-effort for preview — fallback content is generated if not configured
-    try:
-        ai_provider, ai_model = await _resolve_ai_config_values(
-            body.ai_provider, body.ai_model
-        )
-    except HTTPException:
-        ai_provider = body.ai_provider or ""
-        ai_model = body.ai_model or AI_MODEL
+    ai_provider = body.ai_provider or AI_PROVIDER
+    ai_model = body.ai_model or AI_MODEL
     base_url = _extract_base_url()
     effective_include_links = body.include_links and bool(base_url)
     report_url, jenkins_url = _build_report_context(
@@ -4359,13 +4338,8 @@ async def preview_jira_bug(
     )
 
     # AI config is best-effort for preview — fallback content is generated if not configured
-    try:
-        ai_provider, ai_model = await _resolve_ai_config_values(
-            body.ai_provider, body.ai_model
-        )
-    except HTTPException:
-        ai_provider = body.ai_provider or ""
-        ai_model = body.ai_model or AI_MODEL
+    ai_provider = body.ai_provider or AI_PROVIDER
+    ai_model = body.ai_model or AI_MODEL
     base_url = _extract_base_url()
     effective_include_links = body.include_links and bool(base_url)
     report_url, jenkins_url = _build_report_context(
@@ -4407,7 +4381,9 @@ async def preview_jira_bug(
             )
             # AI relevance filtering — only if AI is configured and candidates exist
             request_params = result_data.get("request_params") or {}
-            ai_provider = body.ai_provider or request_params.get("ai_provider", "")
+            ai_provider = (
+                body.ai_provider or request_params.get("ai_provider", "") or AI_PROVIDER
+            )
             ai_model = body.ai_model or request_params.get("ai_model", "") or AI_MODEL
             if candidates and ai_provider and ai_model:
                 try:
@@ -4484,7 +4460,9 @@ def _build_capabilities(settings: Settings) -> dict[str, bool | str]:
         "server_jira_project_key": settings.jira_project_key or "",
         "reportportal": settings.reportportal_enabled,
         "reportportal_project": settings.reportportal_project or "",
-        "feedback_enabled": settings.feedback_enabled and bool(AI_MODEL),
+        "feedback_enabled": settings.feedback_enabled
+        and bool(AI_PROVIDER)
+        and bool(AI_MODEL),
     }
 
 
@@ -7207,8 +7185,8 @@ async def analyze_comment_intent(
     """Analyze a comment to determine if it implies a failure has been reviewed/resolved."""
     _check_allow_list(request)
 
-    ai_provider = body.ai_provider or ""
-    ai_model = body.ai_model or ""
+    ai_provider = body.ai_provider or AI_PROVIDER
+    ai_model = body.ai_model or AI_MODEL
     # Fall back to the job's stored AI config as an atomic pair
     # Only use stored config when request doesn't set either field
     if not ai_provider and not ai_model and body.job_id:
@@ -7217,8 +7195,7 @@ async def analyze_comment_intent(
             params = stored["result"].get("request_params", {})
             ai_provider = params.get("ai_provider", "")
             ai_model = params.get("ai_model", "")
-    # Env default (AI_MODEL) is applied inside _resolve_ai_config_values as last resort
-    ai_provider, ai_model = await _resolve_ai_config_values(ai_provider, ai_model)
+    ai_provider, ai_model = _resolve_ai_config_values(ai_provider, ai_model)
 
     prompt = """You are analyzing a comment left on a test failure report.
 Does this comment imply the failure has been reviewed or resolved?
@@ -7297,13 +7274,13 @@ async def preview_feedback(request: Request, body: FeedbackRequest):
             status_code=503, detail="Feedback submission is disabled on this server"
         )
     try:
-        ai_provider, ai_model = await _resolve_ai_config_values(None, None)
+        ai_provider, ai_model = _resolve_ai_config_values(None, None)
     except HTTPException as exc:
         raise HTTPException(
             status_code=503,
             detail=(
-                "AI not configured on this server. "
-                "Configure AI_MODEL environment variable "
+                "AI provider not configured on this server. "
+                "Configure AI_PROVIDER and AI_MODEL environment variables "
                 "to enable AI-powered feedback."
             ),
         ) from exc

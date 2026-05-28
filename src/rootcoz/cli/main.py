@@ -849,6 +849,7 @@ def analyze(
             "jira_pat": cfg.jira_pat,
             "jira_project_key": cfg.jira_project_key,
             "github_token": cfg.github_token,
+            "ai_provider": cfg.ai_provider,
             "ai_model": cfg.ai_model,
         }
         for key, value in _cfg_str_fields.items():
@@ -1767,9 +1768,7 @@ def preview_issue(
         False, "--include-links", help="Include full URLs as clickable links."
     ),
     ai_provider: str = typer.Option(
-        "",
-        "--ai-provider",
-        help="[Deprecated] AI provider — auto-derived from model. Ignored if set.",
+        "", "--ai-provider", help="AI provider for content generation."
     ),
     ai_model: str = typer.Option(
         "", "--ai-model", help="AI model for content generation."
@@ -1810,11 +1809,6 @@ def preview_issue(
     json_output: bool = _JSON_OPTION,
 ):
     """Preview generated issue content (GitHub or Jira)."""
-    if ai_provider:
-        typer.echo(
-            "Warning: --ai-provider is deprecated. Provider is now auto-derived from the model.",
-            err=True,
-        )
     _set_json(json_output)
     normalized_type = _validate_issue_type(issue_type)
     (
@@ -2110,9 +2104,7 @@ def analyze_comment_intent_cmd(
         "", "--job-id", help="Job ID to resolve AI config from the analyzed job."
     ),
     ai_provider: str = typer.Option(
-        "",
-        "--ai-provider",
-        help="[Deprecated] AI provider — auto-derived from model. Ignored if set.",
+        "", "--ai-provider", help="AI provider for content generation."
     ),
     ai_model: str = typer.Option(
         "", "--ai-model", help="AI model for content generation."
@@ -2120,11 +2112,6 @@ def analyze_comment_intent_cmd(
     json_output: bool = _JSON_OPTION,
 ):
     """Analyze whether a comment suggests a failure has been reviewed/resolved."""
-    if ai_provider:
-        typer.echo(
-            "Warning: --ai-provider is deprecated. Provider is now auto-derived from the model.",
-            err=True,
-        )
     _set_json(json_output)
     try:
         client = _get_client()

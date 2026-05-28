@@ -210,30 +210,32 @@ class TestHealthChecks:
 
     @staticmethod
     def _env_without_ai():
-        """Return a patch.dict that removes AI_MODEL."""
-        env = {k: v for k, v in os.environ.items() if k not in ("AI_MODEL",)}
+        """Return a patch.dict that removes AI_PROVIDER and AI_MODEL."""
+        env = {
+            k: v for k, v in os.environ.items() if k not in ("AI_PROVIDER", "AI_MODEL")
+        }
         return patch.dict(os.environ, env, clear=True)
 
     async def test_check_ai_provider_configured(self):
-        with patch.dict(os.environ, {"AI_MODEL": "test"}):
+        with patch.dict(os.environ, {"AI_PROVIDER": "claude", "AI_MODEL": "test"}):
             with self._mock_sidecar():
                 result = await check_ai_provider()
         assert result["status"] == "ok"
-        assert result["model"] == "test"
+        assert result["provider"] == "claude"
 
     async def test_check_ai_provider_missing(self):
         with self._env_without_ai():
             with self._mock_sidecar():
                 result = await check_ai_provider()
         assert result["status"] == "not_configured"
-        assert "AI_MODEL" in result["detail"]
+        assert "AI_PROVIDER" in result["detail"]
 
     async def test_check_ai_provider_sidecar_unreachable_and_env_missing(self):
         with self._env_without_ai():
             with self._mock_sidecar(side_effect=Exception("Connection refused")):
                 result = await check_ai_provider()
         assert result["status"] == "error"
-        assert "AI_MODEL" in result["detail"]
+        assert "AI_PROVIDER" in result["detail"]
         assert "Sidecar unreachable" in result["detail"]
 
     async def test_check_reportportal_not_configured(self):
@@ -308,8 +310,8 @@ class TestHealthChecks:
         settings.jenkins_url = ""
         settings.reportportal_enabled = False
 
-        ai_ok = {"status": "ok", "model": "test"}
-        with patch.dict(os.environ, {"AI_MODEL": "test"}):
+        ai_ok = {"status": "ok", "provider": "claude", "model": "test"}
+        with patch.dict(os.environ, {"AI_PROVIDER": "claude", "AI_MODEL": "test"}):
             with patch(
                 "rootcoz.monitoring.check_ai_provider",
                 new_callable=AsyncMock,
@@ -332,6 +334,7 @@ class TestStartupConfigValidation:
     def test_no_warnings_with_good_config(self, tmp_path):
         db_path = str(tmp_path / "test.db")
         env = {
+            "AI_PROVIDER": "claude",
             "AI_MODEL": "test-model",
             "ROOTCOZ_ENCRYPTION_KEY": "test-key",
             "DB_PATH": db_path,
@@ -343,19 +346,23 @@ class TestStartupConfigValidation:
         }
         with patch.dict(os.environ, env, clear=True):
             result = validate_startup_config()
-        ai_warnings = [w for w in result.warnings if "AI_MODEL" in w]
+        ai_warnings = [
+            w for w in result.warnings if "AI_PROVIDER" in w or "AI_MODEL" in w
+        ]
         assert len(ai_warnings) == 0
         assert len(result.errors) == 0
 
-    def test_missing_ai_model(self):
+    def test_missing_ai_provider(self):
         with patch.dict(os.environ, {}, clear=True):
-            env = {k: v for k, v in os.environ.items() if k != "AI_MODEL"}
+            env = {k: v for k, v in os.environ.items() if k != "AI_PROVIDER"}
             with patch.dict(os.environ, env, clear=True):
                 result = validate_startup_config()
-        assert any("AI_MODEL" in w for w in result.warnings)
+        assert any("AI_PROVIDER" in w for w in result.warnings)
 
     def test_missing_encryption_key(self):
-        with patch.dict(os.environ, {"AI_MODEL": "test"}, clear=True):
+        with patch.dict(
+            os.environ, {"AI_PROVIDER": "claude", "AI_MODEL": "test"}, clear=True
+        ):
             result = validate_startup_config()
         assert any("ROOTCOZ_ENCRYPTION_KEY" in w for w in result.warnings)
 
@@ -363,6 +370,7 @@ class TestStartupConfigValidation:
         with patch.dict(
             os.environ,
             {
+                "AI_PROVIDER": "claude",
                 "AI_MODEL": "test",
                 "SLACK_WEBHOOK_URL": "http://not-https",
             },
@@ -375,6 +383,7 @@ class TestStartupConfigValidation:
         with patch.dict(
             os.environ,
             {
+                "AI_PROVIDER": "claude",
                 "AI_MODEL": "test",
                 "SMTP_HOST": "smtp.example.com",
             },
@@ -387,6 +396,7 @@ class TestStartupConfigValidation:
         with patch.dict(
             os.environ,
             {
+                "AI_PROVIDER": "claude",
                 "AI_MODEL": "test",
                 "DB_PATH": "/nonexistent/path/test.db",
             },

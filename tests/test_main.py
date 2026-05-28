@@ -226,8 +226,8 @@ class TestAnalyzeEndpoint:
     def test_analyze_accepts_tests_repo_url_with_ref(self, test_client) -> None:
         """Test that tests_repo_url with ':ref' suffix is accepted (no URL validation)."""
         with (
+            patch("rootcoz.main.AI_PROVIDER", ""),
             patch("rootcoz.main.AI_MODEL", ""),
-            patch("rootcoz.ai_client.get_provider_for_model", return_value=None),
         ):
             response = test_client.post(
                 "/analyze",
@@ -240,7 +240,7 @@ class TestAnalyzeEndpoint:
             )
             # 400 from missing AI config, not 422 from URL validation
             assert response.status_code == 400
-            assert "AI model" in response.json()["detail"]
+            assert "AI provider" in response.json()["detail"]
 
     def test_analyze_missing_required_field(self, test_client) -> None:
         """Test that missing required field returns 422."""
@@ -254,10 +254,10 @@ class TestAnalyzeEndpoint:
         assert response.status_code == 422
 
     def test_analyze_missing_ai_provider_returns_400(self, test_client) -> None:
-        """Test that missing AI provider returns 400 when derivation fails."""
+        """Test that missing AI provider returns 400 before queuing."""
         with (
+            patch("rootcoz.main.AI_PROVIDER", ""),
             patch("rootcoz.main.AI_MODEL", ""),
-            patch("rootcoz.ai_client.get_provider_for_model", return_value=None),
         ):
             response = test_client.post(
                 "/analyze",
@@ -269,10 +269,7 @@ class TestAnalyzeEndpoint:
                 },
             )
             assert response.status_code == 400
-            assert (
-                "Ensure the model is available in the sidecar"
-                in response.json()["detail"]
-            )
+            assert "AI provider" in response.json()["detail"]
 
     def test_analyze_always_saves_request_params(self, test_client) -> None:
         """request_params is persisted even when wait_for_completion is False.
@@ -473,10 +470,10 @@ class TestAnalyzeFailuresEndpoint:
         assert response.status_code == 422
 
     def test_analyze_failures_missing_ai_provider(self, test_client) -> None:
-        """Test that missing AI provider (derivation fails) returns 400."""
+        """Test that missing AI provider (no env var, no body param) returns 400."""
         with (
+            patch("rootcoz.main.AI_PROVIDER", ""),
             patch("rootcoz.main.AI_MODEL", ""),
-            patch("rootcoz.ai_client.get_provider_for_model", return_value=None),
         ):
             response = test_client.post(
                 "/analyze",
@@ -492,14 +489,14 @@ class TestAnalyzeFailuresEndpoint:
                 },
             )
             assert response.status_code == 400
-            assert (
-                "Ensure the model is available in the sidecar"
-                in response.json()["detail"]
-            )
+            assert "AI provider" in response.json()["detail"]
 
     def test_analyze_failures_missing_ai_model(self, test_client) -> None:
         """Test that missing AI model returns 400."""
-        with patch("rootcoz.main.AI_MODEL", ""):
+        with (
+            patch("rootcoz.main.AI_PROVIDER", ""),
+            patch("rootcoz.main.AI_MODEL", ""),
+        ):
             response = test_client.post(
                 "/analyze",
                 json={
