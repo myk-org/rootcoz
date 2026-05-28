@@ -2324,6 +2324,8 @@ async def _enqueue_file_raw_analysis(
     message_prefix: str = "Analysis",
     reanalyzed_from_job_id: str = "",
     reanalyzed_from_job_name: str = "",
+    resolved_ai_provider: str = "",
+    resolved_ai_model: str = "",
 ) -> dict:
     """Build params, persist initial state, spawn task, and return response.
 
@@ -2346,9 +2348,12 @@ async def _enqueue_file_raw_analysis(
     Returns:
         JSON-serialisable response dict with ``status``, ``job_id``, links.
     """
-    ai_provider, ai_model = await _resolve_ai_config_values(
-        body.ai_provider, body.ai_model
-    )
+    if resolved_ai_provider and resolved_ai_model:
+        ai_provider, ai_model = resolved_ai_provider, resolved_ai_model
+    else:
+        ai_provider, ai_model = await _resolve_ai_config_values(
+            body.ai_provider, body.ai_model
+        )
 
     # Resolve repos
     tests_repo_url_raw = (
@@ -2961,6 +2966,8 @@ async def analyze(
         base_url=base_url,
         username=request.state.username,
         message_prefix="Analysis",
+        resolved_ai_provider=ai_provider,
+        resolved_ai_model=ai_model,
     )
 
 
