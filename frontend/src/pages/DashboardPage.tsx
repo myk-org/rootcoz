@@ -243,6 +243,7 @@ export function DashboardPage() {
   const [bulkDeleteConfirm, setBulkDeleteConfirm] = useState(false)
   const [bulkResultMessage, setBulkResultMessage] = useState<string | null>(null)
   const selectAllRef = useRef<HTMLInputElement>(null)
+  const expandRafRef = useRef<number>(0)
   const [viewMode, setViewMode] = useState<'flat' | 'grouped'>('flat')
   const [expandedGroups, setExpandedGroups] = useState<Set<string>>(new Set())
 
@@ -394,6 +395,10 @@ export function DashboardPage() {
       selectAllRef.current.indeterminate = somePageSelected && !allPageSelected
     }
   }, [somePageSelected, allPageSelected])
+
+  useEffect(() => {
+    return () => cancelAnimationFrame(expandRafRef.current)
+  }, [viewMode])
 
   useEffect(() => {
     if (page !== safePage) setPage(safePage)
@@ -556,7 +561,8 @@ export function DashboardPage() {
                   setExpandedGroups(new Set(names))
                   return
                 }
-                // Expand in batches to avoid freezing
+                // Cancel any in-progress expansion
+                cancelAnimationFrame(expandRafRef.current)
                 const BATCH = 30
                 let idx = 0
                 const expandBatch = () => {
@@ -564,12 +570,15 @@ export function DashboardPage() {
                   idx += BATCH
                   setExpandedGroups(new Set(batch))
                   if (idx < names.length) {
-                    requestAnimationFrame(expandBatch)
+                    expandRafRef.current = requestAnimationFrame(expandBatch)
                   }
                 }
                 expandBatch()
               }}
-              onCollapseAll={() => setExpandedGroups(new Set())}
+              onCollapseAll={() => {
+                cancelAnimationFrame(expandRafRef.current)
+                setExpandedGroups(new Set())
+              }}
             />
           )}
         </div>

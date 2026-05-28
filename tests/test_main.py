@@ -269,7 +269,10 @@ class TestAnalyzeEndpoint:
                 },
             )
             assert response.status_code == 400
-            assert "Could not derive provider" in response.json()["detail"]
+            assert (
+                "Ensure the model is available in the sidecar"
+                in response.json()["detail"]
+            )
 
     def test_analyze_always_saves_request_params(self, test_client) -> None:
         """request_params is persisted even when wait_for_completion is False.
@@ -489,7 +492,10 @@ class TestAnalyzeFailuresEndpoint:
                 },
             )
             assert response.status_code == 400
-            assert "Could not derive provider" in response.json()["detail"]
+            assert (
+                "Ensure the model is available in the sidecar"
+                in response.json()["detail"]
+            )
 
     def test_analyze_failures_missing_ai_model(self, test_client) -> None:
         """Test that missing AI model returns 400."""

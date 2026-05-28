@@ -1584,8 +1584,7 @@ async def _resolve_ai_config_values(
                 status_code=400,
                 detail=(
                     f"Could not derive provider for model '{model}'. "
-                    f"Pass ai_provider in request body. "
-                    f"Valid providers: {', '.join(sorted(VALID_AI_PROVIDERS))}"
+                    f"Ensure the model is available in the sidecar."
                 ),
             )
 
@@ -2522,6 +2521,8 @@ async def _enqueue_analysis_job(
     username: str = "",
     reanalyzed_from_job_id: str = "",
     reanalyzed_from_job_name: str = "",
+    resolved_ai_provider: str = "",
+    resolved_ai_model: str = "",
 ) -> dict:
     """Create, save, and enqueue a new analysis job.
 
@@ -2541,8 +2542,8 @@ async def _enqueue_analysis_job(
         "request_params": _build_request_params(
             body,
             merged,
-            body.ai_provider or "",
-            body.ai_model or AI_MODEL,
+            resolved_ai_provider or body.ai_provider or "",
+            resolved_ai_model or body.ai_model or AI_MODEL,
             peer_ai_configs_resolved=resolved_peers,
         ),
     }
@@ -2911,7 +2912,7 @@ async def analyze(
     base_url = _extract_base_url()
 
     # Validate AI config early
-    await _resolve_ai_config(body)
+    ai_provider, ai_model = await _resolve_ai_config(body)
 
     # Resolve display name
     display_name: str = body.name or ""
@@ -2944,6 +2945,8 @@ async def analyze(
             resolved_peers,
             base_url,
             username=request.state.username,
+            resolved_ai_provider=ai_provider,
+            resolved_ai_model=ai_model,
         )
 
     # File or Raw — enqueue as async background task
@@ -3115,7 +3118,7 @@ async def re_analyze(
     merged = _merge_settings(original_body, original_settings)
 
     # Validate AI config and peers
-    await _resolve_ai_config(original_body)
+    re_ai_provider, re_ai_model = await _resolve_ai_config(original_body)
     resolved_peers = _validate_peer_configs(original_body, merged)
 
     return await _enqueue_analysis_job(
@@ -3127,6 +3130,8 @@ async def re_analyze(
         username=request.state.username,
         reanalyzed_from_job_id=job_id,
         reanalyzed_from_job_name=origin_job_display_name,
+        resolved_ai_provider=re_ai_provider,
+        resolved_ai_model=re_ai_model,
     )
 
 
@@ -4263,8 +4268,13 @@ async def preview_github_issue(
     )
 
     # AI config is best-effort for preview — fallback content is generated if not configured
-    ai_provider = body.ai_provider or ""
-    ai_model = body.ai_model or AI_MODEL
+    try:
+        ai_provider, ai_model = await _resolve_ai_config_values(
+            body.ai_provider, body.ai_model
+        )
+    except HTTPException:
+        ai_provider = body.ai_provider or ""
+        ai_model = body.ai_model or AI_MODEL
     base_url = _extract_base_url()
     effective_include_links = body.include_links and bool(base_url)
     report_url, jenkins_url = _build_report_context(
@@ -4342,8 +4352,13 @@ async def preview_jira_bug(
     )
 
     # AI config is best-effort for preview — fallback content is generated if not configured
-    ai_provider = body.ai_provider or ""
-    ai_model = body.ai_model or AI_MODEL
+    try:
+        ai_provider, ai_model = await _resolve_ai_config_values(
+            body.ai_provider, body.ai_model
+        )
+    except HTTPException:
+        ai_provider = body.ai_provider or ""
+        ai_model = body.ai_model or AI_MODEL
     base_url = _extract_base_url()
     effective_include_links = body.include_links and bool(base_url)
     report_url, jenkins_url = _build_report_context(
