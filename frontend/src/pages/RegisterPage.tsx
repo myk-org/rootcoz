@@ -10,6 +10,7 @@ import { Button } from '@/components/ui/button'
 import { TokenField } from '@/components/shared/TokenField'
 import { TrackerTokensFields } from '@/components/shared/TrackerTokensFields'
 import { NotificationToggle } from '@/components/shared/NotificationToggle'
+import { CustomMessageBanner } from '@/components/shared/CustomMessageBanner'
 
 type Mode = 'login' | 'register' | 'key-reveal'
 type RegistrationStatus = 'active' | 'pending'
@@ -208,11 +209,7 @@ export function RegisterPage() {
                       <p className="text-xs font-medium text-signal-amber">
                         Your account is pending admin approval. You can save your API key now, but you won't be able to log in until an admin approves your account.
                       </p>
-                      {pendingCustomMessage && (
-                        <div className="mt-2 rounded-md border border-signal-orange/30 bg-signal-orange/10 p-3">
-                          <p className="text-xs font-medium text-signal-orange">{pendingCustomMessage}</p>
-                        </div>
-                      )}
+                      <CustomMessageBanner message={pendingCustomMessage} className="mt-2" />
                     </div>
                   )}
                 </>
@@ -275,11 +272,7 @@ export function RegisterPage() {
                       </div>
                     )}
 
-                    {loginCustomMessage && (
-                      <div className="rounded-lg border border-signal-orange/30 bg-signal-orange/10 p-4">
-                        <p className="text-sm font-medium text-signal-orange">{loginCustomMessage}</p>
-                      </div>
-                    )}
+                    <CustomMessageBanner message={loginCustomMessage} />
 
                     <div className="space-y-1.5">
                       <label htmlFor="login-username" className="block font-display text-xs font-medium uppercase tracking-widest text-text-secondary">

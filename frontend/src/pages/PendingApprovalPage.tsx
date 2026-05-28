@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { api } from '@/lib/api'
+import { CustomMessageBanner } from '@/components/shared/CustomMessageBanner'
 
 export function PendingApprovalPage() {
   const [loading, setLoading] = useState(true)
@@ -36,11 +37,7 @@ export function PendingApprovalPage() {
           Your account has been created and is awaiting admin approval.
           You'll be able to access the application once an admin approves your registration.
         </p>
-        {customMessage && (
-          <div className="rounded-lg border border-signal-orange/30 bg-signal-orange/10 p-4">
-            <p className="text-sm font-medium text-signal-orange">{customMessage}</p>
-          </div>
-        )}
+        <CustomMessageBanner message={customMessage} />
       </div>
     </div>
   )
