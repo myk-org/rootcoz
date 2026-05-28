@@ -229,6 +229,7 @@ class TestHealthChecks:
                 result = await check_ai_provider()
         assert result["status"] == "not_configured"
         assert "AI_PROVIDER" in result["detail"]
+        assert "AI_MODEL" in result["detail"]
 
     async def test_check_ai_provider_sidecar_unreachable_and_env_missing(self):
         with self._env_without_ai():
@@ -236,6 +237,7 @@ class TestHealthChecks:
                 result = await check_ai_provider()
         assert result["status"] == "error"
         assert "AI_PROVIDER" in result["detail"]
+        assert "AI_MODEL" in result["detail"]
         assert "Sidecar unreachable" in result["detail"]
 
     async def test_check_reportportal_not_configured(self):
@@ -291,8 +293,8 @@ class TestHealthChecks:
         settings.jenkins_url = ""
         settings.reportportal_enabled = False
 
-        ai_ok = {"status": "ok", "model": "test"}
-        with patch.dict(os.environ, {"AI_MODEL": "test"}):
+        ai_ok = {"status": "ok", "provider": "claude", "model": "test"}
+        with patch.dict(os.environ, {"AI_PROVIDER": "claude", "AI_MODEL": "test"}):
             with patch(
                 "rootcoz.monitoring.check_ai_provider",
                 new_callable=AsyncMock,

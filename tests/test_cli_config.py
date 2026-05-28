@@ -304,8 +304,8 @@ class TestListServers:
     def test_list_servers_includes_analyze_fields(self, config_file: Path):
         config = load_config(config_file)
         dev = list_servers(config)["dev"]
-        assert dev.ai_provider == "claude"
         assert dev.jenkins_url == "https://jenkins.dev.local"
+        assert dev.ai_provider == "claude"
         assert dev.enable_jira is True
 
 
@@ -664,18 +664,18 @@ class TestGlobalDefaults:
         """list_servers also applies [defaults] to every server."""
         config = load_config(defaults_config_file)
         servers = list_servers(config)
-        assert servers["dev"].ai_provider == "claude"
         assert servers["dev"].jenkins_url == "https://jenkins.shared.local"
-        assert servers["prod"].ai_provider == "cursor"
+        assert servers["dev"].ai_provider == "claude"
         assert servers["prod"].jenkins_url == "https://jenkins.shared.local"
+        assert servers["prod"].ai_provider == "cursor"
 
     def test_no_defaults_section_still_works(self, config_file: Path):
         """Config without [defaults] works exactly as before."""
         config = load_config(config_file)
         cfg = get_server_config("dev", config)
         assert cfg is not None
-        assert cfg.ai_provider == "claude"
         assert cfg.jenkins_url == "https://jenkins.dev.local"
+        assert cfg.ai_provider == "claude"
 
     def test_empty_defaults_section(self, tmp_path: Path):
         """An empty [defaults] section has no effect."""
@@ -687,8 +687,8 @@ class TestGlobalDefaults:
         cfg = get_server_config("a", config)
         assert cfg is not None
         assert cfg.url == "http://a"
-        assert cfg.ai_provider == ""
         assert cfg.jenkins_url == ""
+        assert cfg.ai_provider == ""
 
 
 # -- _server_config_from_dict type validation ---------------------------------

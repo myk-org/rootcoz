@@ -933,18 +933,6 @@ class TestFeedbackEndpoint:
             assert resp.status_code == 200
             assert resp.json()["feedback_enabled"] is False
 
-    def test_capabilities_feedback_disabled_without_ai_model(
-        self, _init_db, temp_db_path
-    ):
-        for client in self._make_client(
-            temp_db_path,
-            github_token=_TEST_GITHUB_TOKEN,
-            ai_model="",
-        ):
-            resp = client.get("/api/capabilities")
-            assert resp.status_code == 200
-            assert resp.json()["feedback_enabled"] is False
-
     def test_capabilities_feedback_disabled_without_ai_provider(
         self, _init_db, temp_db_path
     ):
@@ -952,6 +940,18 @@ class TestFeedbackEndpoint:
             temp_db_path,
             github_token=_TEST_GITHUB_TOKEN,
             ai_provider="",
+        ):
+            resp = client.get("/api/capabilities")
+            assert resp.status_code == 200
+            assert resp.json()["feedback_enabled"] is False
+
+    def test_capabilities_feedback_disabled_without_ai_model(
+        self, _init_db, temp_db_path
+    ):
+        for client in self._make_client(
+            temp_db_path,
+            github_token=_TEST_GITHUB_TOKEN,
+            ai_model="",
         ):
             resp = client.get("/api/capabilities")
             assert resp.status_code == 200
