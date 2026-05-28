@@ -455,19 +455,28 @@ export function ServerSettingsPage() {
   }
 
   // ---- Show history ----
+  const historyKeyRef = useRef('')
+
   async function handleShowHistory(key: string) {
     if (state.historyKey === key) {
       dispatch({ type: 'HIDE_HISTORY' })
+      historyKeyRef.current = ''
       return
     }
     dispatch({ type: 'SHOW_HISTORY', key })
+    historyKeyRef.current = key
     try {
       const data = await api.get<HistoryEntry[]>(
         `/api/admin/settings/history?key=${encodeURIComponent(key)}&limit=20`
       )
-      dispatch({ type: 'SET_HISTORY', history: data })
+      // Only update if this is still the active history request
+      if (historyKeyRef.current === key) {
+        dispatch({ type: 'SET_HISTORY', history: data })
+      }
     } catch {
-      dispatch({ type: 'SET_HISTORY', history: [] })
+      if (historyKeyRef.current === key) {
+        dispatch({ type: 'SET_HISTORY', history: [] })
+      }
     }
   }
 
@@ -1067,7 +1076,7 @@ function HistoryToggle({
             history.map((entry) => (
               <div key={entry.id} className="text-xs text-text-secondary">
                 <span className="text-text-tertiary">
-                  {new Date(entry.changed_at + 'Z').toLocaleString()}
+                  {new Date(entry.changed_at.replace(' ', 'T') + 'Z').toLocaleString()}
                 </span>
                 {' · '}
                 <span className={entry.action === 'reset' ? 'text-signal-amber' : 'text-signal-blue'}>

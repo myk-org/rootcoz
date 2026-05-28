@@ -7185,6 +7185,13 @@ async def get_settings_history(
     """Get server settings change history."""
     _require_admin(request)
     history = await storage.get_server_settings_history(key=key or None, limit=limit)
+    # Mask sensitive values in history
+    for entry in history:
+        if entry.get("key") in _SENSITIVE_SETTINGS:
+            if entry.get("value"):
+                entry["value"] = "••••••••"
+            if entry.get("previous_value"):
+                entry["previous_value"] = "••••••••"
     return JSONResponse(content=history)
 
 
