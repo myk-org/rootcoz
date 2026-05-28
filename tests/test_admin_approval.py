@@ -356,6 +356,93 @@ class TestStorageFunctions:
                 assert status == "active"
 
 
+class TestAdminWaitApproveMsg:
+    """Tests for the ADMIN_WAIT_APPROVE_MSG feature (issue #90)."""
+
+    @pytest.fixture
+    def client_with_custom_msg(self, _init_db, temp_db_path):
+        """Create a test client with ADMIN_WAIT_APPROVE_MSG set."""
+        with patch.dict(
+            os.environ,
+            {
+                "ADMIN_KEY": "test-admin-key-16chars",  # pragma: allowlist secret
+                "ROOTCOZ_ENCRYPTION_KEY": "test-encryption-key-for-hmac",  # pragma: allowlist secret
+                "SECURE_COOKIES": "false",
+                "DB_PATH": str(temp_db_path),
+                "REQUIRE_APPROVAL": "true",
+                "ADMIN_WAIT_APPROVE_MSG": "Contact @admin in Slack",
+            },
+        ):
+            get_settings.cache_clear()
+            with patch.object(storage, "DB_PATH", temp_db_path):
+                from rootcoz.main import app
+
+                with TestClient(app) as c:
+                    yield c
+            get_settings.cache_clear()
+
+    @pytest.fixture
+    def client_without_custom_msg(self, _init_db, temp_db_path):
+        """Create a test client without ADMIN_WAIT_APPROVE_MSG."""
+        with patch.dict(
+            os.environ,
+            {
+                "ADMIN_KEY": "test-admin-key-16chars",  # pragma: allowlist secret
+                "ROOTCOZ_ENCRYPTION_KEY": "test-encryption-key-for-hmac",  # pragma: allowlist secret
+                "SECURE_COOKIES": "false",
+                "DB_PATH": str(temp_db_path),
+                "REQUIRE_APPROVAL": "true",
+                "ADMIN_WAIT_APPROVE_MSG": "",
+            },
+        ):
+            get_settings.cache_clear()
+            with patch.object(storage, "DB_PATH", temp_db_path):
+                from rootcoz.main import app
+
+                with TestClient(app) as c:
+                    yield c
+            get_settings.cache_clear()
+
+    def test_pending_status_returns_custom_message(self, client_with_custom_msg):
+        """GET /api/auth/pending-status includes custom_message when ADMIN_WAIT_APPROVE_MSG is set."""
+        resp = client_with_custom_msg.get("/api/auth/pending-status")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["status"] == "pending"
+        assert data["custom_message"] == "Contact @admin in Slack"
+
+    def test_pending_status_omits_custom_message_when_unset(
+        self, client_without_custom_msg
+    ):
+        """GET /api/auth/pending-status omits custom_message when ADMIN_WAIT_APPROVE_MSG is empty."""
+        resp = client_without_custom_msg.get("/api/auth/pending-status")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["status"] == "pending"
+        assert "custom_message" not in data
+
+    def test_blocked_user_response_includes_custom_message_for_pending(
+        self, client_with_custom_msg
+    ):
+        """A pending user gets 403 with custom_message from _blocked_user_status_response."""
+        # Register a user (becomes pending because REQUIRE_APPROVAL=true)
+        reg = client_with_custom_msg.post(
+            "/api/auth/register", json={"username": "custmsguser"}
+        )
+        assert reg.status_code == 200
+        api_key = reg.json()["api_key"]
+
+        # Try to access a protected endpoint — should trigger _blocked_user_status_response
+        resp = client_with_custom_msg.get(
+            "/api/dashboard",
+            headers={"Authorization": f"Bearer {api_key}"},
+        )
+        assert resp.status_code == 403
+        data = resp.json()
+        assert data["status"] == "pending"
+        assert data["custom_message"] == "Contact @admin in Slack"
+
+
 class TestConfigSetting:
     """Test the REQUIRE_APPROVAL configuration setting."""
 

@@ -322,6 +322,13 @@ class Settings(BaseSettings):
             "protected endpoints until approved."
         ),
     )
+    admin_wait_approve_msg: str = Field(
+        default="",
+        description=(
+            "Custom message appended to admin approval notices. "
+            "Used to tell users how to get approved (e.g., 'Contact @admin in Slack')."
+        ),
+    )
 
     @model_validator(mode="after")
     def _normalize_optional_strings(self) -> "Settings":
@@ -339,8 +346,13 @@ class Settings(BaseSettings):
             if isinstance(value, str):
                 stripped = value.strip()
                 object.__setattr__(self, field_name, stripped or None)
-        # Strip whitespace from Jenkins credentials (empty-string defaults)
-        for field_name in ("jenkins_url", "jenkins_user", "jenkins_password"):
+        # Strip whitespace from string fields with empty-string defaults
+        for field_name in (
+            "jenkins_url",
+            "jenkins_user",
+            "jenkins_password",
+            "admin_wait_approve_msg",
+        ):
             value = getattr(self, field_name)
             if isinstance(value, str):
                 object.__setattr__(self, field_name, value.strip())

@@ -1013,6 +1013,8 @@ async def lifespan(_app: FastAPI):
 
         # Retroactively assign metadata to jobs that don't have it yet
         settings = get_settings()
+        if settings.admin_wait_approve_msg:
+            logger.info("[startup] ADMIN_WAIT_APPROVE_MSG configured")
         if settings.metadata_rules:
             task = asyncio.create_task(_backfill_job_metadata(settings.metadata_rules))
             _background_tasks.add(task)
@@ -1134,14 +1136,24 @@ _APPROVAL_STATUS_RESPONSES: dict[str, str] = {
 }
 
 
+def _maybe_add_custom_approval_msg(content: dict, settings: Settings) -> None:
+    """Append custom admin approval message to response content if configured."""
+    if settings.admin_wait_approve_msg:
+        content["custom_message"] = settings.admin_wait_approve_msg
+
+
 def _blocked_user_status_response(user_status: str | None) -> JSONResponse | None:
     """Return a 403 JSONResponse if user_status is pending/rejected, else None."""
     detail = _APPROVAL_STATUS_RESPONSES.get(user_status or "")
     if detail is None:
         return None
+    settings = get_settings()
+    content: dict = {"detail": detail, "status": user_status}
+    if user_status == "pending":
+        _maybe_add_custom_approval_msg(content, settings)
     return JSONResponse(
         status_code=403,
-        content={"detail": detail, "status": user_status},
+        content=content,
     )
 
 
@@ -6487,12 +6499,13 @@ async def check_needs_key(request: Request) -> JSONResponse:
 @app.get("/api/auth/pending-status")
 async def pending_status(request: Request) -> JSONResponse:
     """Return pending status info for unauthenticated users."""
-    return JSONResponse(
-        content={
-            "status": "pending",
-            "message": "Your account is awaiting admin approval. Please wait for an admin to approve your registration.",
-        }
-    )
+    settings = get_settings()
+    content: dict = {
+        "status": "pending",
+        "message": "Your account is awaiting admin approval. Please wait for an admin to approve your registration.",
+    }
+    _maybe_add_custom_approval_msg(content, settings)
+    return JSONResponse(content=content)
 
 
 # --- User token endpoints ---
@@ -7171,14 +7184,14 @@ async def analyze_comment_intent(
 
     ai_provider = body.ai_provider or AI_PROVIDER
     ai_model = body.ai_model or AI_MODEL
-    if (not ai_provider or not ai_model) and body.job_id:
+    # Fall back to the job's stored AI config as an atomic pair
+    # Only use stored config when request doesn't set either field
+    if not ai_provider and not ai_model and body.job_id:
         stored = await storage.get_result(body.job_id)
         if stored and stored.get("result"):
             params = stored["result"].get("request_params", {})
-            if not ai_provider:
-                ai_provider = params.get("ai_provider", "")
-            if not ai_model:
-                ai_model = params.get("ai_model", "")
+            ai_provider = params.get("ai_provider", "")
+            ai_model = params.get("ai_model", "")
     ai_provider, ai_model = _resolve_ai_config_values(ai_provider, ai_model)
 
     prompt = """You are analyzing a comment left on a test failure report.

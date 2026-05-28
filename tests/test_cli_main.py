@@ -418,6 +418,56 @@ class TestDashboardCommand:
         assert result.exit_code == 0
         mock_client.dashboard.assert_called_once_with()
 
+    def test_dashboard_exclude_tag(self, mock_client):
+        mock_client.dashboard_filtered.return_value = [
+            {
+                "job_id": "kept-1",
+                "job_name": "pr-check-job",
+                "status": "completed",
+                "failure_count": 2,
+                "reviewed_count": 1,
+                "comment_count": 0,
+                "created_at": "2024-01-15T10:00:00",
+            }
+        ]
+        result = runner.invoke(
+            app, ["results", "dashboard", "--exclude-tag", "nightly"]
+        )
+        assert result.exit_code == 0
+        mock_client.dashboard_filtered.assert_called_once_with(
+            labels=None, exclude_labels=["nightly"]
+        )
+        assert "pr-check-job" in result.output
+
+    def test_dashboard_exclude_tag_multiple(self, mock_client):
+        mock_client.dashboard_filtered.return_value = [
+            {
+                "job_id": "kept-2",
+                "job_name": "unit-test-job",
+                "status": "completed",
+                "failure_count": 1,
+                "reviewed_count": 0,
+                "comment_count": 0,
+                "created_at": "2024-01-15T11:00:00",
+            }
+        ]
+        result = runner.invoke(
+            app,
+            [
+                "results",
+                "dashboard",
+                "--exclude-tag",
+                "nightly",
+                "--exclude-tag",
+                "smoke",
+            ],
+        )
+        assert result.exit_code == 0
+        mock_client.dashboard_filtered.assert_called_once_with(
+            labels=None, exclude_labels=["nightly", "smoke"]
+        )
+        assert "unit-test-job" in result.output
+
 
 class TestAnalyzeCommand:
     def test_analyze_async(self, mock_client):

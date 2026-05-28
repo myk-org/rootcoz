@@ -243,6 +243,7 @@ export function DashboardPage() {
   const [bulkDeleteConfirm, setBulkDeleteConfirm] = useState(false)
   const [bulkResultMessage, setBulkResultMessage] = useState<string | null>(null)
   const selectAllRef = useRef<HTMLInputElement>(null)
+  const expandRafRef = useRef<number>(0)
   const [viewMode, setViewMode] = useState<'flat' | 'grouped'>('flat')
   const [expandedGroups, setExpandedGroups] = useState<Set<string>>(new Set())
 
@@ -394,6 +395,10 @@ export function DashboardPage() {
       selectAllRef.current.indeterminate = somePageSelected && !allPageSelected
     }
   }, [somePageSelected, allPageSelected])
+
+  useEffect(() => {
+    return () => cancelAnimationFrame(expandRafRef.current)
+  }, [viewMode])
 
   useEffect(() => {
     if (page !== safePage) setPage(safePage)
@@ -549,8 +554,31 @@ export function DashboardPage() {
           </div>
           {viewMode === 'grouped' && (
             <ExpandCollapseButtons
-              onExpandAll={() => setExpandedGroups(new Set(grouped.map(g => g.jobName)))}
-              onCollapseAll={() => setExpandedGroups(new Set())}
+              onExpandAll={() => {
+                const MAX_INSTANT = 50
+                const names = grouped.map(g => g.jobName)
+                if (names.length <= MAX_INSTANT) {
+                  setExpandedGroups(new Set(names))
+                  return
+                }
+                // Cancel any in-progress expansion
+                cancelAnimationFrame(expandRafRef.current)
+                const BATCH = 30
+                let idx = 0
+                const expandBatch = () => {
+                  const batch = names.slice(0, idx + BATCH)
+                  idx += BATCH
+                  setExpandedGroups(new Set(batch))
+                  if (idx < names.length) {
+                    expandRafRef.current = requestAnimationFrame(expandBatch)
+                  }
+                }
+                expandBatch()
+              }}
+              onCollapseAll={() => {
+                cancelAnimationFrame(expandRafRef.current)
+                setExpandedGroups(new Set())
+              }}
             />
           )}
         </div>

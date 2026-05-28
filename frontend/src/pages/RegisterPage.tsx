@@ -10,6 +10,7 @@ import { Button } from '@/components/ui/button'
 import { TokenField } from '@/components/shared/TokenField'
 import { TrackerTokensFields } from '@/components/shared/TrackerTokensFields'
 import { NotificationToggle } from '@/components/shared/NotificationToggle'
+import { CustomMessageBanner } from '@/components/shared/CustomMessageBanner'
 
 type Mode = 'login' | 'register' | 'key-reveal'
 type RegistrationStatus = 'active' | 'pending'
@@ -60,6 +61,8 @@ export function RegisterPage() {
   const [githubToken, setGithubTokenValue] = useState('')
   const [jiraEmail, setJiraEmailValue] = useState('')
   const [jiraToken, setJiraTokenValue] = useState('')
+  const [pendingCustomMessage, setPendingCustomMessage] = useState('')
+  const [loginCustomMessage, setLoginCustomMessage] = useState('')
 
   useEffect(() => {
     if (!authLoading && authenticated) {
@@ -77,7 +80,15 @@ export function RegisterPage() {
     try {
       const result = await api.post<{ username: string; api_key: string; status?: string }>('/api/auth/register', { username: trimmed })
       setNewApiKey(result.api_key)
-      setRegistrationStatus(result.status === 'pending' ? 'pending' : 'active')
+      const isPending = result.status === 'pending'
+      setRegistrationStatus(isPending ? 'pending' : 'active')
+
+      if (isPending) {
+        // Fetch custom approval message
+        api.get<{ custom_message?: string }>('/api/auth/pending-status')
+          .then((data) => { if (data.custom_message) setPendingCustomMessage(data.custom_message) })
+          .catch(() => { /* custom message is optional — non-blocking */ })
+      }
 
       // Persist tracker tokens if provided
       const gh = githubToken.trim()
@@ -115,6 +126,7 @@ export function RegisterPage() {
 
     setLoading(true)
     setError('')
+    setLoginCustomMessage('')
     try {
       await login(trimmed, apiKey.trim())
       navigate('/', { replace: true })
@@ -123,7 +135,9 @@ export function RegisterPage() {
         const body = typeof err.body === 'object' && err.body !== null ? err.body as Record<string, unknown> : {}
         const status = typeof body.status === 'string' ? body.status : ''
         if (err.status === 403 && status === 'pending') {
+          const customMsg = typeof body.custom_message === 'string' ? body.custom_message : ''
           setError('Your account is awaiting admin approval.')
+          setLoginCustomMessage(customMsg)
         } else if (err.status === 403 && status === 'rejected') {
           setError('Your account has been rejected. Contact an admin.')
         } else {
@@ -154,6 +168,7 @@ export function RegisterPage() {
   function switchMode(next: 'login' | 'register') {
     setMode(next)
     setError('')
+    setLoginCustomMessage('')
   }
 
   const subtitle = mode === 'key-reveal'
@@ -194,6 +209,7 @@ export function RegisterPage() {
                       <p className="text-xs font-medium text-signal-amber">
                         Your account is pending admin approval. You can save your API key now, but you won't be able to log in until an admin approves your account.
                       </p>
+                      <CustomMessageBanner message={pendingCustomMessage} className="mt-2" />
                     </div>
                   )}
                 </>
@@ -255,6 +271,8 @@ export function RegisterPage() {
                         <p className="text-xs text-signal-amber">{error}</p>
                       </div>
                     )}
+
+                    <CustomMessageBanner message={loginCustomMessage} />
 
                     <div className="space-y-1.5">
                       <label htmlFor="login-username" className="block font-display text-xs font-medium uppercase tracking-widest text-text-secondary">
