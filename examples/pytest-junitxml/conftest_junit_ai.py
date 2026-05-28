@@ -10,7 +10,6 @@ Usage:
     3. Install dependencies: pip install requests python-dotenv
     4. Create a .env file or set environment variables:
        - ROOTCOZ_SERVER: rootcoz server URL (required)
-       - ROOTCOZ_AI_PROVIDER: AI provider - claude, gemini, or cursor (default: claude)
        - ROOTCOZ_AI_MODEL: AI model (default: claude-opus-4-6[1m])
        - ROOTCOZ_TIMEOUT: request timeout in seconds (default: 600)
     5. Run: pytest --junitxml=report.xml --analyze-with-ai
