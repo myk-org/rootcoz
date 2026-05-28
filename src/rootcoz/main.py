@@ -1181,6 +1181,14 @@ async def lifespan(_app: FastAPI):
 
     await load_db_settings_into_env()
 
+    # Track which env vars came from DB (for safe cleanup on DELETE)
+    try:
+        db_settings = await storage.get_server_settings()
+        for db_key in db_settings:
+            _db_injected_env_vars.add(db_key.upper())
+    except Exception:
+        pass
+
     try:
         # Pre-populate cursor models in background (don't block startup)
         task = asyncio.create_task(_safe_preload_cursor_models())
@@ -6996,6 +7004,9 @@ async def rotate_key_endpoint(request: Request, username: str) -> JSONResponse:
 # --- SSE for settings changes ---
 _settings_listeners: set[asyncio.Event] = set()
 
+# Track env vars injected from DB overrides (vs. actual deployment env vars)
+_db_injected_env_vars: set[str] = set()
+
 
 def _broadcast_settings_change() -> None:
     """Signal all SSE listeners that settings changed."""
@@ -7037,7 +7048,7 @@ async def get_admin_settings(request: Request) -> JSONResponse:
             item["value"] = db_value
             item["updated_by"] = override.get("updated_by", "")
             item["updated_at"] = override.get("updated_at", "")
-        elif item["value"] and item["value"] != item["default"]:
+        elif os.environ.get(item["env_var"]) is not None:
             item["source"] = "env"
         else:
             item["source"] = "default"
@@ -7064,11 +7075,59 @@ async def update_admin_settings(request: Request) -> JSONResponse:
             detail=f"Unknown settings: {', '.join(sorted(invalid_keys))}",
         )
 
+    # Validate values against Settings field types and constraints
+    errors = []
+    for key, value in settings_updates.items():
+        field_info = Settings.model_fields[key]
+        # Skip validation for None/empty — those reset to default
+        if value is None or value == "":
+            continue
+        # Check integer fields
+        annotation = field_info.annotation
+        is_int = annotation is int or (
+            hasattr(annotation, "__args__")
+            and int in getattr(annotation, "__args__", ())
+        )
+        if is_int:
+            try:
+                int_val = int(value)
+                # Check constraints from Field metadata
+                metadata = field_info.metadata
+                for meta in metadata:
+                    if (
+                        hasattr(meta, "gt")
+                        and meta.gt is not None
+                        and int_val <= meta.gt
+                    ):
+                        errors.append(f"{key}: must be > {meta.gt}")
+                    if (
+                        hasattr(meta, "ge")
+                        and meta.ge is not None
+                        and int_val < meta.ge
+                    ):
+                        errors.append(f"{key}: must be >= {meta.ge}")
+                    if (
+                        hasattr(meta, "le")
+                        and meta.le is not None
+                        and int_val > meta.le
+                    ):
+                        errors.append(f"{key}: must be <= {meta.le}")
+            except (ValueError, TypeError):
+                errors.append(f"{key}: must be an integer")
+    if errors:
+        raise HTTPException(
+            status_code=400, detail=f"Invalid settings: {'; '.join(errors)}"
+        )
+
     username = request.state.username or "admin"
 
     # Save each setting to DB and apply to running process
     for key, value in settings_updates.items():
-        str_value = str(value)
+        # Handle null values — treat as empty string (reset-like)
+        if value is None:
+            str_value = ""
+        else:
+            str_value = str(value)
 
         # Store in DB (encrypt sensitive values)
         if key in _SENSITIVE_SETTINGS and str_value:
@@ -7083,8 +7142,10 @@ async def update_admin_settings(request: Request) -> JSONResponse:
         env_key = key.upper()
         if str_value == "" or value is None:
             os.environ.pop(env_key, None)
+            _db_injected_env_vars.discard(env_key)
         else:
             os.environ[env_key] = str_value
+            _db_injected_env_vars.add(env_key)
 
     # Clear cached settings so next get_settings() picks up env changes
     get_settings.cache_clear()
@@ -7116,8 +7177,11 @@ async def reset_admin_setting(request: Request, key: str) -> JSONResponse:
             status_code=404, detail=f"Setting '{key}' has no DB override"
         )
 
-    # Remove the env var override so get_settings() falls back to actual env/default
-    os.environ.pop(key.upper(), None)
+    # Only remove the env var if it was injected by a DB override (not set by deployment)
+    env_key = key.upper()
+    if env_key in _db_injected_env_vars:
+        os.environ.pop(env_key, None)
+        _db_injected_env_vars.discard(env_key)
     get_settings.cache_clear()
 
     _broadcast_settings_change()

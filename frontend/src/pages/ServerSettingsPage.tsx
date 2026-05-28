@@ -211,8 +211,8 @@ export function ServerSettingsPage() {
     return () => eventSource.close()
   }, [])
 
-  // ---- Save setting ----
-  async function handleSave(key: string, value: string) {
+  // ---- Shared save helper ----
+  async function saveSettingValue(key: string, value: string) {
     dispatch({ type: 'SAVE_START' })
     try {
       await api.put('/api/admin/settings', { settings: { [key]: value } })
@@ -226,6 +226,11 @@ export function ServerSettingsPage() {
       }
       dispatch({ type: 'SAVE_ERROR', error: msg })
     }
+  }
+
+  // ---- Save setting ----
+  async function handleSave(key: string, value: string) {
+    await saveSettingValue(key, value)
   }
 
   // ---- Reset setting ----
@@ -244,19 +249,7 @@ export function ServerSettingsPage() {
   // ---- Boolean toggle (save immediately) ----
   async function handleBooleanToggle(key: string, currentValue: string) {
     const newValue = currentValue === 'true' ? 'false' : 'true'
-    dispatch({ type: 'SAVE_START' })
-    try {
-      await api.put('/api/admin/settings', { settings: { [key]: newValue } })
-      dispatch({ type: 'SAVE_SUCCESS' })
-      fetchSettings()
-    } catch (err) {
-      let msg = 'Failed to save'
-      if (err instanceof ApiError) {
-        const body = err.body as { detail?: string } | null
-        msg = body?.detail ?? `Save failed (${err.status})`
-      }
-      dispatch({ type: 'SAVE_ERROR', error: msg })
-    }
+    await saveSettingValue(key, newValue)
   }
 
   // ---- Group & filter ----
