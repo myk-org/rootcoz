@@ -418,6 +418,34 @@ class TestDashboardCommand:
         assert result.exit_code == 0
         mock_client.dashboard.assert_called_once_with()
 
+    def test_dashboard_exclude_tag(self, mock_client):
+        mock_client.dashboard_filtered.return_value = []
+        result = runner.invoke(
+            app, ["results", "dashboard", "--exclude-tag", "nightly"]
+        )
+        assert result.exit_code == 0
+        mock_client.dashboard_filtered.assert_called_once_with(
+            labels=None, exclude_labels=["nightly"]
+        )
+
+    def test_dashboard_exclude_tag_multiple(self, mock_client):
+        mock_client.dashboard_filtered.return_value = []
+        result = runner.invoke(
+            app,
+            [
+                "results",
+                "dashboard",
+                "--exclude-tag",
+                "nightly",
+                "--exclude-tag",
+                "smoke",
+            ],
+        )
+        assert result.exit_code == 0
+        mock_client.dashboard_filtered.assert_called_once_with(
+            labels=None, exclude_labels=["nightly", "smoke"]
+        )
+
 
 class TestAnalyzeCommand:
     def test_analyze_async(self, mock_client):
@@ -1939,7 +1967,6 @@ class TestAnalyzeConfigDefaults:
         jenkins_ssl_verify=False,
         jenkins_timeout=45,
         tests_repo_url="https://github.com/cfg/tests",
-        ai_provider="gemini",
         ai_model="2.5-pro",
         ai_call_timeout=20,
         max_concurrent_ai_calls=5,
@@ -1982,7 +2009,7 @@ class TestAnalyzeConfigDefaults:
         assert kwargs["jenkins_user"] == "cfg-jenkins-user"
         assert kwargs["jenkins_password"] == _FAKE_JENKINS_PASSWORD
         assert kwargs["tests_repo_url"] == "https://github.com/cfg/tests"
-        assert kwargs["ai_provider"] == "gemini"
+        assert "ai_provider" not in kwargs
         assert kwargs["ai_model"] == "2.5-pro"
         assert kwargs["jira_url"] == "https://jira.cfg.local"
         assert kwargs["jira_email"] == "cfg@example.com"

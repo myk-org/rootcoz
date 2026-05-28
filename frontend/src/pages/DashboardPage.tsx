@@ -549,7 +549,26 @@ export function DashboardPage() {
           </div>
           {viewMode === 'grouped' && (
             <ExpandCollapseButtons
-              onExpandAll={() => setExpandedGroups(new Set(grouped.map(g => g.jobName)))}
+              onExpandAll={() => {
+                const MAX_INSTANT = 50
+                const names = grouped.map(g => g.jobName)
+                if (names.length <= MAX_INSTANT) {
+                  setExpandedGroups(new Set(names))
+                  return
+                }
+                // Expand in batches to avoid freezing
+                const BATCH = 30
+                let idx = 0
+                const expandBatch = () => {
+                  const batch = names.slice(0, idx + BATCH)
+                  idx += BATCH
+                  setExpandedGroups(new Set(batch))
+                  if (idx < names.length) {
+                    requestAnimationFrame(expandBatch)
+                  }
+                }
+                expandBatch()
+              }}
               onCollapseAll={() => setExpandedGroups(new Set())}
             />
           )}

@@ -33,7 +33,6 @@ def _make_client(
     return ``{}`` so that auto-generation does not kick in.
     """
     env = {
-        "AI_PROVIDER": "claude",
         "AI_MODEL": "test",
         "SECURE_COOKIES": "false",
         "DB_PATH": str(temp_db_path),
@@ -314,7 +313,6 @@ class TestCommentMentionNotification:
     ):
         """Adding a comment with @mention triggers send_mention_notifications."""
         _comment_env = {
-            "AI_PROVIDER": "claude",
             "AI_MODEL": "test",
             "SECURE_COOKIES": "false",
             "DB_PATH": str(temp_db_path),
@@ -374,7 +372,6 @@ class TestCommentMentionNotification:
     def test_comment_without_mention_no_notification(self, _seed_result, temp_db_path):
         """A comment without @mentions does not trigger notifications."""
         _comment_env = {
-            "AI_PROVIDER": "claude",
             "AI_MODEL": "test",
             "SECURE_COOKIES": "false",
             "DB_PATH": str(temp_db_path),

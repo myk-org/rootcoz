@@ -33,7 +33,6 @@ jenkins_user = "jenkins-dev"
 jenkins_password = "dev-token"  # pragma: allowlist secret
 jenkins_ssl_verify = false
 tests_repo_url = "https://github.com/org/tests"
-ai_provider = "claude"
 ai_model = "opus-4"
 ai_call_timeout = 15
 max_concurrent_ai_calls = 7
@@ -70,7 +69,6 @@ server = "dev"
 jenkins_url = "https://jenkins.shared.local"
 jenkins_user = "shared-user"
 jenkins_password = "shared-token"  # pragma: allowlist secret
-ai_provider = "claude"
 ai_model = "opus-4"
 tests_repo_url = "https://github.com/org/tests"
 
@@ -82,7 +80,6 @@ jenkins_ssl_verify = false
 [servers.prod]
 url = "https://rootcoz.example.com"
 username = "prod-user"
-ai_provider = "cursor"
 ai_model = "gpt-5"
 """
 
@@ -241,7 +238,6 @@ class TestGetServerConfig:
         assert cfg.jenkins_password == "dev-token"  # pragma: allowlist secret
         assert cfg.jenkins_ssl_verify is False
         assert cfg.tests_repo_url == "https://github.com/org/tests"
-        assert cfg.ai_provider == "claude"
         assert cfg.ai_model == "opus-4"
         assert cfg.ai_call_timeout == 15
         assert cfg.max_concurrent_ai_calls == 7
@@ -267,7 +263,6 @@ class TestGetServerConfig:
         assert cfg is not None
         assert cfg.jenkins_url == ""
         assert cfg.jenkins_ssl_verify is None
-        assert cfg.ai_provider == ""
         assert cfg.ai_call_timeout == 0
         assert cfg.max_concurrent_ai_calls == 0
         assert cfg.jira_ssl_verify is None
@@ -305,7 +300,6 @@ class TestListServers:
         config = load_config(config_file)
         dev = list_servers(config)["dev"]
         assert dev.jenkins_url == "https://jenkins.dev.local"
-        assert dev.ai_provider == "claude"
         assert dev.enable_jira is True
 
 
@@ -636,7 +630,6 @@ class TestGlobalDefaults:
         assert cfg.jenkins_url == "https://jenkins.shared.local"
         assert cfg.jenkins_user == "shared-user"
         assert cfg.jenkins_password == "shared-token"  # pragma: allowlist secret
-        assert cfg.ai_provider == "claude"
         assert cfg.ai_model == "opus-4"
         assert cfg.tests_repo_url == "https://github.com/org/tests"
         # From [servers.dev]
@@ -645,12 +638,11 @@ class TestGlobalDefaults:
         assert cfg.jenkins_ssl_verify is False
 
     def test_server_overrides_defaults(self, defaults_config_file: Path):
-        """prod server overrides ai_provider and ai_model from [defaults]."""
+        """prod server overrides ai_model from [defaults]."""
         config = load_config(defaults_config_file)
         cfg = get_server_config("prod", config)
         assert cfg is not None
         # Overridden by [servers.prod]
-        assert cfg.ai_provider == "cursor"
         assert cfg.ai_model == "gpt-5"
         # Still inherited from [defaults]
         assert cfg.jenkins_url == "https://jenkins.shared.local"
@@ -665,9 +657,7 @@ class TestGlobalDefaults:
         config = load_config(defaults_config_file)
         servers = list_servers(config)
         assert servers["dev"].jenkins_url == "https://jenkins.shared.local"
-        assert servers["dev"].ai_provider == "claude"
         assert servers["prod"].jenkins_url == "https://jenkins.shared.local"
-        assert servers["prod"].ai_provider == "cursor"
 
     def test_no_defaults_section_still_works(self, config_file: Path):
         """Config without [defaults] works exactly as before."""
@@ -675,7 +665,6 @@ class TestGlobalDefaults:
         cfg = get_server_config("dev", config)
         assert cfg is not None
         assert cfg.jenkins_url == "https://jenkins.dev.local"
-        assert cfg.ai_provider == "claude"
 
     def test_empty_defaults_section(self, tmp_path: Path):
         """An empty [defaults] section has no effect."""
@@ -688,7 +677,6 @@ class TestGlobalDefaults:
         assert cfg is not None
         assert cfg.url == "http://a"
         assert cfg.jenkins_url == ""
-        assert cfg.ai_provider == ""
 
 
 # -- _server_config_from_dict type validation ---------------------------------

@@ -4,12 +4,18 @@ import { api } from '@/lib/api'
 
 export function PendingApprovalPage() {
   const [loading, setLoading] = useState(true)
+  const [customMessage, setCustomMessage] = useState('')
   const navigate = useNavigate()
 
   useEffect(() => {
     let cancelled = false
-    api.get('/api/auth/pending-status')
-      .then(() => { if (!cancelled) setLoading(false) })
+    api.get<{ custom_message?: string }>('/api/auth/pending-status')
+      .then((data) => {
+        if (!cancelled) {
+          setLoading(false)
+          if (data.custom_message) setCustomMessage(data.custom_message)
+        }
+      })
       .catch(() => { if (!cancelled) navigate('/login', { replace: true }) })
     return () => { cancelled = true }
   }, [navigate])
@@ -30,6 +36,9 @@ export function PendingApprovalPage() {
           Your account has been created and is awaiting admin approval.
           You'll be able to access the application once an admin approves your registration.
         </p>
+        {customMessage && (
+          <p className="text-sm text-text-secondary font-medium">{customMessage}</p>
+        )}
       </div>
     </div>
   )

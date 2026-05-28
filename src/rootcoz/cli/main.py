@@ -849,7 +849,6 @@ def analyze(
             "jira_pat": cfg.jira_pat,
             "jira_project_key": cfg.jira_project_key,
             "github_token": cfg.github_token,
-            "ai_provider": cfg.ai_provider,
             "ai_model": cfg.ai_model,
         }
         for key, value in _cfg_str_fields.items():
@@ -1768,7 +1767,9 @@ def preview_issue(
         False, "--include-links", help="Include full URLs as clickable links."
     ),
     ai_provider: str = typer.Option(
-        "", "--ai-provider", help="AI provider for content generation."
+        "",
+        "--ai-provider",
+        help="[Deprecated] AI provider — auto-derived from model. Ignored if set.",
     ),
     ai_model: str = typer.Option(
         "", "--ai-model", help="AI model for content generation."
@@ -2104,7 +2105,9 @@ def analyze_comment_intent_cmd(
         "", "--job-id", help="Job ID to resolve AI config from the analyzed job."
     ),
     ai_provider: str = typer.Option(
-        "", "--ai-provider", help="AI provider for content generation."
+        "",
+        "--ai-provider",
+        help="[Deprecated] AI provider — auto-derived from model. Ignored if set.",
     ),
     ai_model: str = typer.Option(
         "", "--ai-model", help="AI model for content generation."

@@ -378,6 +378,168 @@ class TestJobMetadataAPI:
         assert resp.status_code == 200
         assert resp.json()["team"] == "platform"
 
+    def test_dashboard_filtered_exclude_single_label(
+        self, api_client, temp_db_path
+    ) -> None:
+        """Verify exclude_label removes jobs with the matching label."""
+        import asyncio
+
+        async def _seed():
+            with patch.object(storage, "DB_PATH", temp_db_path):
+                await storage.save_result(
+                    "id-alpha",
+                    "https://jenkins.example.com/job/alpha-job/1",
+                    "completed",
+                    {"job_name": "alpha-job", "build_number": 1, "failures": []},
+                )
+                await storage.save_result(
+                    "id-beta",
+                    "https://jenkins.example.com/job/beta-job/2",
+                    "completed",
+                    {"job_name": "beta-job", "build_number": 2, "failures": []},
+                )
+
+        asyncio.run(_seed())
+
+        api_client.put("/api/jobs/alpha-job/metadata", json={"labels": ["nightly"]})
+        api_client.put("/api/jobs/beta-job/metadata", json={"labels": ["pr-check"]})
+
+        resp = api_client.get(
+            "/api/dashboard/filtered", params={"exclude_label": "nightly"}
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        job_names = [d["job_name"] for d in data]
+        assert "beta-job" in job_names
+        assert "alpha-job" not in job_names
+
+    def test_dashboard_filtered_exclude_multiple_labels_or_semantics(
+        self, api_client, temp_db_path
+    ) -> None:
+        """Verify multiple exclude_label values use OR semantics."""
+        import asyncio
+
+        async def _seed():
+            with patch.object(storage, "DB_PATH", temp_db_path):
+                await storage.save_result(
+                    "id-alpha",
+                    "https://jenkins.example.com/job/alpha-job/1",
+                    "completed",
+                    {"job_name": "alpha-job", "build_number": 1, "failures": []},
+                )
+                await storage.save_result(
+                    "id-beta",
+                    "https://jenkins.example.com/job/beta-job/2",
+                    "completed",
+                    {"job_name": "beta-job", "build_number": 2, "failures": []},
+                )
+                await storage.save_result(
+                    "id-gamma",
+                    "https://jenkins.example.com/job/gamma-job/3",
+                    "completed",
+                    {"job_name": "gamma-job", "build_number": 3, "failures": []},
+                )
+
+        asyncio.run(_seed())
+
+        api_client.put("/api/jobs/alpha-job/metadata", json={"labels": ["nightly"]})
+        api_client.put("/api/jobs/beta-job/metadata", json={"labels": ["pr-check"]})
+        api_client.put("/api/jobs/gamma-job/metadata", json={"labels": ["smoke"]})
+
+        resp = api_client.get(
+            "/api/dashboard/filtered",
+            params={"exclude_label": ["nightly", "smoke"]},
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        job_names = [d["job_name"] for d in data]
+        assert job_names == ["beta-job"]
+
+    def test_dashboard_filtered_include_and_exclude_interaction(
+        self, api_client, temp_db_path
+    ) -> None:
+        """Verify team include + exclude_label interact correctly."""
+        import asyncio
+
+        async def _seed():
+            with patch.object(storage, "DB_PATH", temp_db_path):
+                await storage.save_result(
+                    "id-alpha",
+                    "https://jenkins.example.com/job/alpha-job/1",
+                    "completed",
+                    {"job_name": "alpha-job", "build_number": 1, "failures": []},
+                )
+                await storage.save_result(
+                    "id-beta",
+                    "https://jenkins.example.com/job/beta-job/2",
+                    "completed",
+                    {"job_name": "beta-job", "build_number": 2, "failures": []},
+                )
+                await storage.save_result(
+                    "id-gamma",
+                    "https://jenkins.example.com/job/gamma-job/3",
+                    "completed",
+                    {"job_name": "gamma-job", "build_number": 3, "failures": []},
+                )
+
+        asyncio.run(_seed())
+
+        api_client.put(
+            "/api/jobs/alpha-job/metadata",
+            json={"team": "alpha", "labels": ["nightly"]},
+        )
+        api_client.put(
+            "/api/jobs/beta-job/metadata",
+            json={"team": "alpha", "labels": ["pr-check"]},
+        )
+        api_client.put(
+            "/api/jobs/gamma-job/metadata", json={"team": "beta", "labels": ["nightly"]}
+        )
+
+        resp = api_client.get(
+            "/api/dashboard/filtered",
+            params={"team": "alpha", "exclude_label": "nightly"},
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        job_names = [d["job_name"] for d in data]
+        assert job_names == ["beta-job"]
+
+    def test_dashboard_filtered_exclude_no_match(
+        self, api_client, temp_db_path
+    ) -> None:
+        """Verify exclude_label with no matching labels returns all jobs."""
+        import asyncio
+
+        async def _seed():
+            with patch.object(storage, "DB_PATH", temp_db_path):
+                await storage.save_result(
+                    "id-alpha",
+                    "https://jenkins.example.com/job/alpha-job/1",
+                    "completed",
+                    {"job_name": "alpha-job", "build_number": 1, "failures": []},
+                )
+                await storage.save_result(
+                    "id-beta",
+                    "https://jenkins.example.com/job/beta-job/2",
+                    "completed",
+                    {"job_name": "beta-job", "build_number": 2, "failures": []},
+                )
+
+        asyncio.run(_seed())
+
+        api_client.put("/api/jobs/alpha-job/metadata", json={"labels": ["nightly"]})
+        api_client.put("/api/jobs/beta-job/metadata", json={"labels": ["pr-check"]})
+
+        resp = api_client.get(
+            "/api/dashboard/filtered", params={"exclude_label": "nonexistent"}
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        job_names = [d["job_name"] for d in data]
+        assert "alpha-job" in job_names
+        assert "beta-job" in job_names
+
 
 # --- Non-admin access tests ---
 

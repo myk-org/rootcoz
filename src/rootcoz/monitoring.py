@@ -228,13 +228,10 @@ async def check_jenkins(settings: Any) -> dict[str, str]:
 
 async def check_ai_provider() -> dict[str, str]:
     """Check that an AI provider is configured and sidecar is reachable."""
-    provider = os.getenv("AI_PROVIDER", "")
     model = os.getenv("AI_MODEL", "")
     config_issues = []
     error_issues = []
 
-    if not provider:
-        config_issues.append("AI_PROVIDER not set")
     if not model:
         config_issues.append("AI_MODEL not set")
 
@@ -252,7 +249,7 @@ async def check_ai_provider() -> dict[str, str]:
         return {"status": "error", "detail": "; ".join(all_issues)}
     if config_issues:
         return {"status": "not_configured", "detail": "; ".join(config_issues)}
-    return {"status": "ok", "provider": provider, "model": model}
+    return {"status": "ok", "model": model}
 
 
 async def check_reportportal(settings: Any) -> dict[str, str]:
@@ -375,16 +372,8 @@ def validate_startup_config() -> StartupConfigResult:
     """
     findings: list[_ConfigFinding] = []
 
-    # AI provider (optional — can be passed per-request)
-    provider = os.getenv("AI_PROVIDER", "")
+    # AI model (optional — can be passed per-request; provider is auto-derived)
     model = os.getenv("AI_MODEL", "")
-    if not provider:
-        findings.append(
-            _ConfigFinding(
-                "warning",
-                "AI_PROVIDER is not set. Analysis requests will require ai_provider in the request body.",
-            )
-        )
     if not model:
         findings.append(
             _ConfigFinding(

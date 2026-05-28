@@ -72,7 +72,7 @@ uvx --with tox-uv tox -e frontend   # Frontend only
 
 - **Backend**: Python + FastAPI + SQLite (aiosqlite)
 - **Frontend**: Vite + React 19 + TypeScript + Tailwind CSS + shadcn/ui (in `/frontend/`)
-- **AI Integration**: Pi SDK sidecar — Node.js service wrapping the Pi coding agent SDK. Provides Claude (via Vertex), Cursor (via acpx), and Gemini models. No direct CLI dependencies. `AI_PROVIDER` env var selects provider.
+- **AI Integration**: Pi SDK sidecar — Node.js service wrapping the Pi coding agent SDK. Provides Claude (via Vertex), Cursor (via acpx), and Gemini models. No direct CLI dependencies. Provider is auto-derived from model via sidecar.
 - **CLI**: `rootcoz` CLI tool for querying the API — run `rootcoz --help` for available commands
 
 ### Backend Module Layout
@@ -235,6 +235,7 @@ When adding a new analysis setting:
 
 Exceptions (server-level only, no payload equivalent):
 - `ADMIN_KEY` — server-only bootstrap secret for admin superuser authentication; never expose via request payloads, CLI flags, or shared config files. Rotating `ADMIN_KEY` only affects the bootstrap admin login — delegated admin API keys use `ROOTCOZ_ENCRYPTION_KEY` for HMAC hashing and are not affected by `ADMIN_KEY` rotation.
+- `ADMIN_WAIT_APPROVE_MSG` — server-only custom message appended to admin approval notices; tells users how to get approved
 - `ALLOWED_USERS` — server-only comma-separated allow list of usernames permitted to create/modify data; empty = open access (backward compatible); admin users always bypass; never expose via request payloads or CLI flags. All users must authenticate (via API key session, Bearer token, or trusted proxy header when `TRUST_PROXY_HEADERS` is enabled) before the allow list is evaluated.
 - `DEBUG` — server reload toggle
 - `ENABLE_GITHUB_ISSUES` — server capability toggle for GitHub issue creation

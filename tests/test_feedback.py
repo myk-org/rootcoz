@@ -710,7 +710,6 @@ class TestFeedbackEndpoint:
                 "ROOTCOZ_ENCRYPTION_KEY",
                 "ALLOWED_USERS",
                 "ENABLE_GITHUB_ISSUES",
-                "AI_PROVIDER",
                 "AI_MODEL",
             }
         }
@@ -725,8 +724,6 @@ class TestFeedbackEndpoint:
             env["GITHUB_TOKEN"] = github_token
         if enable_github_issues:
             env["ENABLE_GITHUB_ISSUES"] = enable_github_issues
-        if ai_provider:
-            env["AI_PROVIDER"] = ai_provider
         if ai_model:
             env["AI_MODEL"] = ai_model
         with patch.dict(os.environ, env, clear=True):
@@ -735,8 +732,11 @@ class TestFeedbackEndpoint:
 
             with (
                 patch.object(storage, "DB_PATH", temp_db_path),
-                patch.object(_main_mod, "AI_PROVIDER", ai_provider),
                 patch.object(_main_mod, "AI_MODEL", ai_model),
+                patch(
+                    "rootcoz.ai_client.get_provider_for_model",
+                    return_value="claude" if ai_model else None,
+                ),
             ):
                 from rootcoz.main import app
 
@@ -759,11 +759,10 @@ class TestFeedbackEndpoint:
             assert resp.status_code == 503
             assert "disabled" in resp.json()["detail"]
 
-    def test_preview_missing_ai_provider_returns_503(self, _init_db, temp_db_path):
+    def test_preview_missing_ai_model_returns_503(self, _init_db, temp_db_path):
         for client in self._make_client(
             temp_db_path,
             github_token=_TEST_GITHUB_TOKEN,
-            ai_provider="",
             ai_model="",
         ):
             resp = client.post(
@@ -773,7 +772,7 @@ class TestFeedbackEndpoint:
                 },
             )
             assert resp.status_code == 503
-            assert "AI provider not configured" in resp.json()["detail"]
+            assert "AI not configured" in resp.json()["detail"]
 
     def test_preview_successful(self, _init_db, temp_db_path):
         for client in self._make_client(temp_db_path, github_token=_TEST_GITHUB_TOKEN):
@@ -928,18 +927,6 @@ class TestFeedbackEndpoint:
             temp_db_path,
             github_token=_TEST_GITHUB_TOKEN,
             enable_github_issues="false",
-        ):
-            resp = client.get("/api/capabilities")
-            assert resp.status_code == 200
-            assert resp.json()["feedback_enabled"] is False
-
-    def test_capabilities_feedback_disabled_without_ai_provider(
-        self, _init_db, temp_db_path
-    ):
-        for client in self._make_client(
-            temp_db_path,
-            github_token=_TEST_GITHUB_TOKEN,
-            ai_provider="",
         ):
             resp = client.get("/api/capabilities")
             assert resp.status_code == 200

@@ -322,6 +322,13 @@ class Settings(BaseSettings):
             "protected endpoints until approved."
         ),
     )
+    admin_wait_approve_msg: str = Field(
+        default="",
+        description=(
+            "Custom message appended to admin approval notices. "
+            "Used to tell users how to get approved (e.g., 'Contact @admin in Slack')."
+        ),
+    )
 
     @model_validator(mode="after")
     def _normalize_optional_strings(self) -> "Settings":

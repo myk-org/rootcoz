@@ -14,7 +14,6 @@ def _rp_disabled_env():
         "JENKINS_URL": "https://jenkins.example.com",
         "JENKINS_USER": "testuser",
         "JENKINS_PASSWORD": "testpassword",  # pragma: allowlist secret
-        "AI_PROVIDER": "claude",
         "AI_MODEL": "test-model",
         "ADMIN_KEY": "test-admin-key-16chars",  # pragma: allowlist secret
         "ROOTCOZ_ENCRYPTION_KEY": "test-encryption-key-for-hmac",  # pragma: allowlist secret
@@ -35,7 +34,6 @@ def _rp_enabled_env():
         "JENKINS_URL": "https://jenkins.example.com",
         "JENKINS_USER": "testuser",
         "JENKINS_PASSWORD": "testpassword",  # pragma: allowlist secret
-        "AI_PROVIDER": "claude",
         "AI_MODEL": "test-model",
         "REPORTPORTAL_URL": "http://rp.example.com",
         "REPORTPORTAL_API_TOKEN": "rp-token",  # pragma: allowlist secret

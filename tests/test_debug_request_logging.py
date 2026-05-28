@@ -178,7 +178,6 @@ def _mock_settings(temp_db_path):
         "JENKINS_URL": "https://jenkins.example.com",
         "JENKINS_USER": "testuser",
         "JENKINS_PASSWORD": "testpassword",  # pragma: allowlist secret
-        "AI_PROVIDER": "claude",
         "AI_MODEL": "test-model",
         "DB_PATH": str(temp_db_path),
         "ADMIN_KEY": _TEST_ADMIN_KEY,  # pragma: allowlist secret

@@ -20,7 +20,6 @@ _ADMIN_AUTH_HEADERS = {
 def _mock_settings(temp_db_path: Path):
     """Mock settings with AI provider configured."""
     env = build_test_env(
-        AI_PROVIDER="gemini",
         AI_MODEL="gemini-2.5-flash",
         DB_PATH=str(temp_db_path),
         GEMINI_API_KEY="test-key",  # pragma: allowlist secret
@@ -42,8 +41,8 @@ def client(_mock_settings, temp_db_path: Path):
 
     with (
         patch.object(storage, "DB_PATH", temp_db_path),
-        patch.object(main_mod, "AI_PROVIDER", "gemini"),
         patch.object(main_mod, "AI_MODEL", "gemini-2.5-flash"),
+        patch("rootcoz.ai_client.get_provider_for_model", return_value="gemini"),
     ):
         from starlette.testclient import TestClient
 
@@ -186,8 +185,7 @@ class TestAnalyzeCommentIntentJobFallback:
         env = build_test_env(
             DB_PATH=str(temp_db_path),
         )
-        # Remove AI_PROVIDER and AI_MODEL so env fallback is empty
-        env.pop("AI_PROVIDER", None)
+        # Remove AI_MODEL so env fallback is empty
         env.pop("AI_MODEL", None)
         with patch.dict(os.environ, env, clear=True):
             from rootcoz.config import get_settings
@@ -205,8 +203,8 @@ class TestAnalyzeCommentIntentJobFallback:
 
         with (
             patch.object(storage, "DB_PATH", temp_db_path),
-            patch.object(main_mod, "AI_PROVIDER", ""),
             patch.object(main_mod, "AI_MODEL", ""),
+            patch("rootcoz.ai_client.get_provider_for_model", return_value=None),
         ):
             from starlette.testclient import TestClient
 
@@ -308,10 +306,14 @@ class TestAnalyzeCommentIntentJobFallback:
         )
         assert response.status_code == 400
 
-    def test_env_ai_config_takes_precedence_over_job(
+    def test_env_ai_model_takes_precedence_over_job(
         self, _mock_settings, temp_db_path: Path
     ) -> None:
-        """Server-level env AI config takes precedence over job's stored config."""
+        """Server-level AI_MODEL env takes precedence over stored job's model.
+
+        When no provider is set via env (AI_PROVIDER removed), the stored job's
+        provider is used as fallback, while AI_MODEL env overrides the model.
+        """
         from rootcoz import main as main_mod
 
         self._store_job_with_ai_config(
@@ -323,8 +325,8 @@ class TestAnalyzeCommentIntentJobFallback:
         )
         with (
             patch.object(storage, "DB_PATH", temp_db_path),
-            patch.object(main_mod, "AI_PROVIDER", "gemini"),
             patch.object(main_mod, "AI_MODEL", "gemini-2.5-flash"),
+            patch("rootcoz.ai_client.get_provider_for_model", return_value="gemini"),
         ):
             from starlette.testclient import TestClient
 
@@ -344,6 +346,6 @@ class TestAnalyzeCommentIntentJobFallback:
 
         assert response.status_code == 200
         call_kwargs = mock_ai.call_args
-        # env vars are gemini/gemini-2.5-flash (from patched module constants)
-        assert call_kwargs.kwargs["ai_provider"] == "gemini"
+        # AI_MODEL from env takes precedence; provider falls back to stored job's "claude"
+        assert call_kwargs.kwargs["ai_provider"] == "claude"
         assert call_kwargs.kwargs["ai_model"] == "gemini-2.5-flash"
