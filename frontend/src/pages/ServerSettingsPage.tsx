@@ -17,6 +17,8 @@ import {
   Search,
   ChevronDown,
   ChevronRight,
+  ChevronsUpDown,
+  ChevronsDownUp,
   Eye,
   EyeOff,
   AlertTriangle,
@@ -81,6 +83,8 @@ type PageAction =
   | { type: 'RESET_START'; key: string }
   | { type: 'RESET_DONE' }
   | { type: 'TOGGLE_REVEAL'; key: string }
+  | { type: 'EXPAND_ALL' }
+  | { type: 'COLLAPSE_ALL'; categories: string[] }
 
 function reducer(state: PageState, action: PageAction): PageState {
   switch (action.type) {
@@ -120,6 +124,10 @@ function reducer(state: PageState, action: PageAction): PageState {
       else next.add(action.key)
       return { ...state, revealedKeys: next }
     }
+    case 'EXPAND_ALL':
+      return { ...state, collapsedCategories: new Set<string>() }
+    case 'COLLAPSE_ALL':
+      return { ...state, collapsedCategories: new Set<string>(action.categories) }
     default:
       return state
   }
@@ -295,15 +303,43 @@ export function ServerSettingsPage() {
               {state.settings.length} settings across {groups.length} {groups.length === 1 ? 'category' : 'categories'}
             </p>
           </div>
-          <div className="relative w-full sm:w-72">
-            <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-text-tertiary" />
-            <Input
-              value={searchInput}
-              onChange={(e) => setSearchInput(e.target.value)}
-              placeholder="Search settings..."
-              className="h-9 pl-9 text-sm"
-              aria-label="Search settings"
-            />
+          <div className="flex items-center gap-2">
+            <div className="relative w-full sm:w-72">
+              <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-text-tertiary" />
+              <Input
+                value={searchInput}
+                onChange={(e) => setSearchInput(e.target.value)}
+                placeholder="Search settings..."
+                className="h-9 pl-9 text-sm"
+                aria-label="Search settings"
+              />
+            </div>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <button
+                  type="button"
+                  onClick={() => dispatch({ type: 'EXPAND_ALL' })}
+                  className="p-1.5 rounded-md border border-border-default bg-surface-elevated hover:bg-surface-hover text-text-secondary transition-colors"
+                  aria-label="Expand all categories"
+                >
+                  <ChevronsUpDown className="h-4 w-4" />
+                </button>
+              </TooltipTrigger>
+              <TooltipContent>Expand all categories</TooltipContent>
+            </Tooltip>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <button
+                  type="button"
+                  onClick={() => dispatch({ type: 'COLLAPSE_ALL', categories: [...new Set(state.settings.map(s => s.category))] })}
+                  className="p-1.5 rounded-md border border-border-default bg-surface-elevated hover:bg-surface-hover text-text-secondary transition-colors"
+                  aria-label="Collapse all categories"
+                >
+                  <ChevronsDownUp className="h-4 w-4" />
+                </button>
+              </TooltipTrigger>
+              <TooltipContent>Collapse all categories</TooltipContent>
+            </Tooltip>
           </div>
         </div>
 
