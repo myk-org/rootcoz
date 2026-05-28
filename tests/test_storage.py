@@ -1224,3 +1224,30 @@ class TestFindFailureByUuid:
             )
             result = await storage.find_failure_by_uuid("uuid-does-not-exist")
             assert result is None
+
+
+@pytest.mark.asyncio
+async def test_list_distinct_job_names(setup_test_db: Path):
+    """list_distinct_job_names returns unique non-empty job names."""
+    with patch.object(storage, "DB_PATH", setup_test_db):
+        # Store results with various job names
+        for job_id, job_name in [
+            ("job-a", "pipeline-alpha"),
+            ("job-b", "pipeline-beta"),
+            ("job-c", "pipeline-alpha"),  # duplicate
+            ("job-d", ""),  # empty — should be filtered
+        ]:
+            await storage.save_result(
+                job_id=job_id,
+                jenkins_url="",
+                status="completed",
+                result={"job_name": job_name, "failures": []},
+            )
+
+        names = await storage.list_distinct_job_names()
+        assert isinstance(names, set)
+        assert "pipeline-alpha" in names
+        assert "pipeline-beta" in names
+        assert "" not in names
+        # Duplicates should be deduplicated
+        assert len([n for n in names if n == "pipeline-alpha"]) == 1

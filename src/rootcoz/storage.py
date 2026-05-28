@@ -1881,6 +1881,17 @@ async def count_active_analyses() -> int:
         return row[0] if row else 0
 
 
+async def list_distinct_job_names() -> set[str]:
+    """Return distinct non-empty job names from results. Lightweight query for backfill."""
+    async with _connect_db() as db:
+        cursor = await db.execute(
+            "SELECT DISTINCT json_extract(result_json, '$.job_name') AS job_name "
+            "FROM results WHERE result_json IS NOT NULL"
+        )
+        rows = await cursor.fetchall()
+        return {row[0] for row in rows if row[0]}
+
+
 async def list_results_for_dashboard(
     limit: int = DEFAULT_DASHBOARD_LIMIT,
 ) -> list[dict]:
@@ -3288,19 +3299,22 @@ async def delete_job_metadata(job_name: str) -> bool:
 
 async def list_jobs_with_metadata(
     *,
-    team: str = "",
-    tier: str = "",
-    version: str = "",
+    team: str | list[str] = "",
+    tier: str | list[str] = "",
+    version: str | list[str] = "",
     labels: list[str] | None = None,
 ) -> list[dict]:
     """List all job metadata entries, optionally filtered.
 
     Filters combine with AND logic. Multiple labels require all to match.
+    Each of *team*, *tier*, and *version* may be a single string **or** a
+    list of strings.  When a list is given the filter matches any value in
+    the list (OR within that field).
 
     Args:
-        team: Filter by team (exact match).
-        tier: Filter by tier (exact match).
-        version: Filter by version (exact match).
+        team: Filter by team (exact match or list of values).
+        tier: Filter by tier (exact match or list of values).
+        version: Filter by version (exact match or list of values).
         labels: Filter by labels (all must be present).
 
     Returns:
@@ -3309,15 +3323,16 @@ async def list_jobs_with_metadata(
     conditions: list[str] = []
     params: list[str] = []
 
-    if team:
-        conditions.append("team = ?")
-        params.append(team)
-    if tier:
-        conditions.append("tier = ?")
-        params.append(tier)
-    if version:
-        conditions.append("version = ?")
-        params.append(version)
+    for col, val in (("team", team), ("tier", tier), ("version", version)):
+        if not val:
+            continue
+        if isinstance(val, list):
+            placeholders = ", ".join("?" for _ in val)
+            conditions.append(f"{col} IN ({placeholders})")
+            params.extend(val)
+        else:
+            conditions.append(f"{col} = ?")
+            params.append(val)
 
     where = " AND ".join(conditions) if conditions else "1=1"
 

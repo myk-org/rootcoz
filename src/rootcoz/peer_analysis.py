@@ -521,6 +521,13 @@ async def analyze_failure_group_with_peers(
                         config.ai_provider,
                         config.ai_model,
                     )
+                logger.info(
+                    "AI call: provider=%s, model=%s, call_type=peer, peer_idx=%d, job_id=%s",
+                    config.ai_provider,
+                    config.ai_model,
+                    idx,
+                    job_id,
+                )
                 ai_result = await call_ai(
                     prompt,
                     ai_provider=config.ai_provider,
@@ -722,6 +729,13 @@ async def analyze_failure_group_with_peers(
 
                 previous_analysis = parsed_analysis
                 try:
+                    logger.info(
+                        "AI call: provider=%s, model=%s, call_type=revision, round=%d, job_id=%s",
+                        main_ai_provider,
+                        main_ai_model,
+                        round_num,
+                        job_id,
+                    )
                     rev_result = await call_ai_once(
                         revision_prompt,
                         ai_provider=main_ai_provider,

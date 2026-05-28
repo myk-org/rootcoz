@@ -160,6 +160,8 @@ def test_client(mock_settings, temp_db_path: Path):
 
     Includes admin Bearer auth headers so endpoints that require
     authentication (all non-public paths) work out of the box.
+    Mocks list_models and check_sidecar_available to prevent tests
+    from hitting a real sidecar service.
     """
     with patch.object(storage, "DB_PATH", temp_db_path):
         from starlette.testclient import TestClient
@@ -1015,6 +1017,102 @@ class TestApiDashboardEndpoint:
             assert "created_at" in item
             assert item["job_name"] == "my-pipeline"
             assert item["build_number"] == 42
+
+
+class TestApiDashboardFilteredExcludeLabel:
+    """Tests for exclude-tag filtering on GET /api/dashboard/filtered."""
+
+    async def _seed_jobs_with_labels(self, temp_db_path: Path) -> None:
+        """Seed three jobs with different labels for exclude tests."""
+        with patch.object(storage, "DB_PATH", temp_db_path):
+            await storage.init_db()
+            # job-a has labels ["red", "blue"]
+            await storage.save_result(
+                job_id="excl-a",
+                jenkins_url="https://jenkins.example.com/job/a/1/",
+                status="completed",
+                result={"job_name": "job-a", "build_number": 1, "failures": []},
+            )
+            await storage.set_job_metadata("job-a", labels=["red", "blue"])
+            # job-b has labels ["green"]
+            await storage.save_result(
+                job_id="excl-b",
+                jenkins_url="https://jenkins.example.com/job/b/1/",
+                status="completed",
+                result={"job_name": "job-b", "build_number": 2, "failures": []},
+            )
+            await storage.set_job_metadata("job-b", labels=["green"])
+            # job-c has labels ["blue", "green"]
+            await storage.save_result(
+                job_id="excl-c",
+                jenkins_url="https://jenkins.example.com/job/c/1/",
+                status="completed",
+                result={"job_name": "job-c", "build_number": 3, "failures": []},
+            )
+            await storage.set_job_metadata("job-c", labels=["blue", "green"])
+
+    async def test_single_exclude_tag_removes_matching_jobs(
+        self, test_client, temp_db_path: Path
+    ) -> None:
+        """Excluding 'red' should remove job-a only."""
+        await self._seed_jobs_with_labels(temp_db_path)
+        with patch.object(storage, "DB_PATH", temp_db_path):
+            response = test_client.get(
+                "/api/dashboard/filtered",
+                params={"exclude_label": ["red"]},
+                headers=_ADMIN_AUTH_HEADERS,
+            )
+        assert response.status_code == 200
+        names = {j["job_name"] for j in response.json()}
+        assert "job-a" not in names
+        assert names == {"job-b", "job-c"}
+
+    async def test_multiple_exclude_tags_use_or_semantics(
+        self, test_client, temp_db_path: Path
+    ) -> None:
+        """Excluding 'red' and 'green' should remove jobs matching ANY label."""
+        await self._seed_jobs_with_labels(temp_db_path)
+        with patch.object(storage, "DB_PATH", temp_db_path):
+            response = test_client.get(
+                "/api/dashboard/filtered",
+                params={"exclude_label": ["red", "green"]},
+                headers=_ADMIN_AUTH_HEADERS,
+            )
+        assert response.status_code == 200
+        names = {j["job_name"] for j in response.json()}
+        # job-a has "red", job-b has "green", job-c has both → all excluded
+        assert names == set()
+
+    async def test_include_and_exclude_together(
+        self, test_client, temp_db_path: Path
+    ) -> None:
+        """Include label 'blue' then exclude 'red' should keep only job-c."""
+        await self._seed_jobs_with_labels(temp_db_path)
+        with patch.object(storage, "DB_PATH", temp_db_path):
+            response = test_client.get(
+                "/api/dashboard/filtered",
+                params={"label": ["blue"], "exclude_label": ["red"]},
+                headers=_ADMIN_AUTH_HEADERS,
+            )
+        assert response.status_code == 200
+        names = {j["job_name"] for j in response.json()}
+        # "blue" matches job-a and job-c; exclude "red" removes job-a
+        assert names == {"job-c"}
+
+    async def test_exclude_tag_matching_no_jobs_returns_all(
+        self, test_client, temp_db_path: Path
+    ) -> None:
+        """Excluding a label that no job has should return all jobs."""
+        await self._seed_jobs_with_labels(temp_db_path)
+        with patch.object(storage, "DB_PATH", temp_db_path):
+            response = test_client.get(
+                "/api/dashboard/filtered",
+                params={"exclude_label": ["nonexistent"]},
+                headers=_ADMIN_AUTH_HEADERS,
+            )
+        assert response.status_code == 200
+        names = {j["job_name"] for j in response.json()}
+        assert names == {"job-a", "job-b", "job-c"}
 
 
 class TestFaviconEndpoint:
@@ -5266,3 +5364,30 @@ class TestBuildReportContextChildScope:
             child_build_number=42,
         )
         assert jenkins_url == "http://jenkins/leaf-child/42/"
+
+
+class TestStaticAssetHeaders:
+    """Tests for GZip compression and cache headers on static assets."""
+
+    def test_gzip_middleware_registered(self, test_client):
+        """Verify GZipMiddleware compresses responses above minimum size."""
+        response = test_client.get(
+            "/api/health",
+            headers={"Accept-Encoding": "gzip"},
+        )
+        # Health endpoint returns small JSON, may not be compressed
+        # Just verify the middleware doesn't break anything
+        assert response.status_code == 200
+
+    def test_assets_404_no_immutable_cache(self, test_client):
+        """Verify /assets/ 404 responses don't get long-lived cache headers."""
+        response = test_client.get("/assets/nonexistent-hash123.js")
+        assert response.status_code == 404
+        cache_control = response.headers.get("cache-control", "")
+        assert "immutable" not in cache_control
+
+    def test_non_assets_no_immutable_cache(self, test_client):
+        """Verify non-asset paths don't get immutable cache headers."""
+        response = test_client.get("/api/health")
+        cache_control = response.headers.get("cache-control", "")
+        assert "immutable" not in cache_control

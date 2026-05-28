@@ -12,6 +12,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select'
+import { MultiSelectFilter } from '@/components/shared/MultiSelectFilter'
 import {
   Table,
   TableBody,
@@ -36,14 +37,14 @@ import { ConfirmDialog } from '@/components/shared/ConfirmDialog'
 import { SortableHeader } from '@/components/shared/SortableHeader'
 import { DateRangeFilter } from '@/components/shared/DateRangeFilter'
 import { useTableSort } from '@/lib/useTableSort'
-import { Trash2, MessageSquare, CheckCircle2, GitFork, AlertTriangle, Github } from 'lucide-react'
+import { Trash2, MessageSquare, CheckCircle2, GitFork, AlertTriangle, Github, List, ListTree, ChevronRight } from 'lucide-react'
 import { useAuth } from '@/lib/auth'
 import { useMetadataOptions, MetadataDropdowns, MetadataLabelChips, MetadataClearButton } from '@/components/shared/MetadataFilterBar'
 import { MetadataBadges } from '@/components/shared/MetadataBadges'
 import { WhatsNewDialog } from '@/components/shared/WhatsNewDialog'
+import { ExpandCollapseButtons } from '@/components/shared/ExpandCollapseButtons'
 
-const STATUS_FILTER_ALL = 'ALL'
-const STATUS_FILTER_OPTIONS = [STATUS_FILTER_ALL, 'completed', 'running', 'waiting', 'pending', 'failed', 'timeout', 'aborted'] as const
+const STATUS_FILTER_OPTIONS = ['completed', 'running', 'waiting', 'pending', 'failed', 'timeout', 'aborted'] as const
 const BULK_DELETE_LIMIT = 500
 
 const BULK_SELECT_CHECKBOX_CLASS =
@@ -113,32 +114,87 @@ export function DashboardPage() {
   const [jobs, setJobs] = useState<DashboardJobWithMetadata[]>([])
   const [loading, setLoading] = useState(true)
   const [search, setSearch] = useState('')
-  const [statusFilter, setStatusFilter] = useState(STATUS_FILTER_ALL)
   const { sortKey, sortDir, handleSort } = useTableSort('dash', 'created_at', 'desc', ['created_at'])
   const [page, setPage] = useState(1)
   const [perPage, setPerPage] = useState(20)
   const [searchParams, setSearchParams] = useSearchParams()
-  const dateFrom = searchParams.get('date_from') ?? ''
-  const dateTo = searchParams.get('date_to') ?? ''
 
-  // Metadata filter state — persisted in URL query params
-  const metaTeam = searchParams.get('team') ?? ''
-  const metaTier = searchParams.get('tier') ?? ''
-  const metaVersion = searchParams.get('version') ?? ''
-  const metaLabels = useMemo(() => searchParams.getAll('label'), [searchParams])
-  const setMetaParam = useCallback((key: string, value: string) => {
+  const selectedStatuses = useMemo(() => {
+    const raw = searchParams.getAll('status')
+    return new Set(raw)
+  }, [searchParams])
+
+  const setSelectedStatuses = useCallback((statuses: Set<string>) => {
     setSearchParams((prev) => {
       const next = new URLSearchParams(prev)
-      if (value) next.set(key, value)
-      else next.delete(key)
+      next.delete('status')
+      for (const s of statuses) next.append('status', s)
       return next
     }, { replace: true })
   }, [setSearchParams])
-  const setMetaLabels = useCallback((labels: string[]) => {
+
+  const toggleStatus = useCallback((status: string) => {
     setSearchParams((prev) => {
       const next = new URLSearchParams(prev)
+      const current = next.getAll('status')
+      next.delete('status')
+      if (current.includes(status)) {
+        for (const s of current) { if (s !== status) next.append('status', s) }
+      } else {
+        for (const s of current) next.append('status', s)
+        next.append('status', status)
+      }
+      return next
+    }, { replace: true })
+  }, [setSearchParams])
+  const dateFrom = searchParams.get('date_from') ?? ''
+  const dateTo = searchParams.get('date_to') ?? ''
+
+  // Metadata filter state — persisted in URL query params (multi-select)
+  const metaTeams = useMemo(() => new Set(searchParams.getAll('team')), [searchParams])
+  const metaTiers = useMemo(() => new Set(searchParams.getAll('tier')), [searchParams])
+  const metaVersions = useMemo(() => new Set(searchParams.getAll('version')), [searchParams])
+  const metaLabels = useMemo(() => searchParams.getAll('label'), [searchParams])
+  const metaExcludeLabels = useMemo(() => searchParams.getAll('exclude_label'), [searchParams])
+
+  const toggleMetaParam = useCallback((key: string, value: string) => {
+    setSearchParams((prev) => {
+      const next = new URLSearchParams(prev)
+      const current = next.getAll(key)
+      next.delete(key)
+      if (current.includes(value)) {
+        for (const v of current) { if (v !== value) next.append(key, v) }
+      } else {
+        for (const v of current) next.append(key, v)
+        next.append(key, value)
+      }
+      return next
+    }, { replace: true })
+  }, [setSearchParams])
+
+  const clearMetaParam = useCallback((key: string) => {
+    setSearchParams((prev) => {
+      const next = new URLSearchParams(prev)
+      next.delete(key)
+      return next
+    }, { replace: true })
+  }, [setSearchParams])
+  const handleLabelToggle = useCallback((label: string, action: 'include' | 'exclude' | 'off') => {
+    setSearchParams((prev) => {
+      const next = new URLSearchParams(prev)
+      // Get current values, removing the toggled label from both lists
+      const currentLabels = next.getAll('label').filter(l => l !== label)
+      const currentExclude = next.getAll('exclude_label').filter(l => l !== label)
+      // Clear both
       next.delete('label')
-      for (const l of labels) next.append('label', l)
+      next.delete('exclude_label')
+      // Re-add filtered values
+      for (const l of currentLabels) next.append('label', l)
+      for (const l of currentExclude) next.append('exclude_label', l)
+      // Add the toggled label to the right list
+      if (action === 'include') next.append('label', label)
+      else if (action === 'exclude') next.append('exclude_label', label)
+      // 'off' = don't add to either
       return next
     }, { replace: true })
   }, [setSearchParams])
@@ -149,10 +205,11 @@ export function DashboardPage() {
       next.delete('tier')
       next.delete('version')
       next.delete('label')
+      next.delete('exclude_label')
       return next
     }, { replace: true })
   }, [setSearchParams])
-  const hasMetadataFilters = !!(metaTeam || metaTier || metaVersion || metaLabels.length > 0)
+  const hasMetadataFilters = !!(metaTeams.size > 0 || metaTiers.size > 0 || metaVersions.size > 0 || metaLabels.length > 0 || metaExcludeLabels.length > 0)
   const { options: metadataOptions } = useMetadataOptions()
   const setDateFrom = useCallback((value: string) => {
     setSearchParams((prev) => {
@@ -186,6 +243,8 @@ export function DashboardPage() {
   const [bulkDeleteConfirm, setBulkDeleteConfirm] = useState(false)
   const [bulkResultMessage, setBulkResultMessage] = useState<string | null>(null)
   const selectAllRef = useRef<HTMLInputElement>(null)
+  const [viewMode, setViewMode] = useState<'flat' | 'grouped'>('flat')
+  const [expandedGroups, setExpandedGroups] = useState<Set<string>>(new Set())
 
   const showCheckboxes = selectedIds.size > 0
 
@@ -203,10 +262,11 @@ export function DashboardPage() {
     try {
       let url = '/api/dashboard/filtered'
       const params = new URLSearchParams()
-      if (metaTeam) params.set('team', metaTeam)
-      if (metaTier) params.set('tier', metaTier)
-      if (metaVersion) params.set('version', metaVersion)
+      for (const t of metaTeams) params.append('team', t)
+      for (const t of metaTiers) params.append('tier', t)
+      for (const v of metaVersions) params.append('version', v)
       for (const l of metaLabels) params.append('label', l)
+      for (const l of metaExcludeLabels) params.append('exclude_label', l)
       const qs = params.toString()
       if (qs) url += `?${qs}`
       const data = await api.get<DashboardJobWithMetadata[]>(url)
@@ -223,7 +283,7 @@ export function DashboardPage() {
         setLoading(false)
       }
     }
-  }, [metaTeam, metaTier, metaVersion, metaLabels])
+  }, [metaTeams, metaTiers, metaVersions, metaLabels, metaExcludeLabels])
 
   const fetchJobsRef = useLatestRef(fetchJobs)
 
@@ -246,15 +306,17 @@ export function DashboardPage() {
       eventSource.close()
     }
   }, [])
-  useEffect(() => { setPage(1) }, [search, statusFilter, perPage, dateFrom, dateTo, metaTeam, metaTier, metaVersion, metaLabels])
+  useEffect(() => { setPage(1) }, [search, selectedStatuses, perPage, dateFrom, dateTo, metaTeams, metaTiers, metaVersions, metaLabels, metaExcludeLabels])
 
   const filtered = useMemo(() => {
     const fromBound = dateFrom ? utcStartOfDateInput(dateFrom) : null
     const toBound = dateTo ? utcEndOfDateInput(dateTo) : null
 
     return jobs.filter((j) => {
-      const displayStatus = isAnalysisTimeout(j.status, j.error, j.summary) ? 'timeout' : j.status
-      if (statusFilter !== STATUS_FILTER_ALL && displayStatus !== statusFilter) return false
+      if (selectedStatuses.size > 0) {
+        const displayStatus = isAnalysisTimeout(j.status, j.error, j.summary) ? 'timeout' : j.status
+        if (!selectedStatuses.has(displayStatus)) return false
+      }
 
       if (fromBound || toBound) {
         const jobDate = parseApiTimestamp(j.created_at)
@@ -267,7 +329,7 @@ export function DashboardPage() {
       const q = search.toLowerCase()
       return (j.job_name ?? '').toLowerCase().includes(q) || j.job_id.toLowerCase().includes(q)
     })
-  }, [jobs, search, statusFilter, dateFrom, dateTo])
+  }, [jobs, search, selectedStatuses, dateFrom, dateTo])
 
   const sorted = useMemo(() => {
     const copy = [...filtered]
@@ -293,6 +355,31 @@ export function DashboardPage() {
     })
     return copy
   }, [filtered, sortKey, sortDir])
+
+  interface JobGroup {
+    jobName: string
+    runs: DashboardJobWithMetadata[]
+  }
+
+  const grouped: JobGroup[] = useMemo(() => {
+    if (viewMode !== 'grouped') return []
+    const groups = new Map<string, DashboardJobWithMetadata[]>()
+    for (const job of sorted) {
+      const name = job.job_name || job.job_id
+      if (!groups.has(name)) groups.set(name, [])
+      groups.get(name)!.push(job)
+    }
+    return Array.from(groups.entries()).map(([jobName, runs]) => ({ jobName, runs }))
+  }, [sorted, viewMode])
+
+  function toggleGroup(name: string) {
+    setExpandedGroups(prev => {
+      const next = new Set(prev)
+      if (next.has(name)) next.delete(name)
+      else next.add(name)
+      return next
+    })
+  }
 
   const totalPages = Math.max(1, Math.ceil(sorted.length / perPage))
   const safePage = Math.min(page, totalPages)
@@ -413,25 +500,24 @@ export function DashboardPage() {
           <SearchInput value={search} onChange={setSearch} placeholder="Filter jobs..." className="w-full sm:w-64" />
           <MetadataDropdowns
             options={metadataOptions}
-            team={metaTeam}
-            tier={metaTier}
-            version={metaVersion}
-            onTeamChange={(v) => setMetaParam('team', v)}
-            onTierChange={(v) => setMetaParam('tier', v)}
-            onVersionChange={(v) => setMetaParam('version', v)}
+            teams={metaTeams}
+            tiers={metaTiers}
+            versions={metaVersions}
+            onTeamToggle={(v) => toggleMetaParam('team', v)}
+            onTierToggle={(v) => toggleMetaParam('tier', v)}
+            onVersionToggle={(v) => toggleMetaParam('version', v)}
+            onTeamClear={() => clearMetaParam('team')}
+            onTierClear={() => clearMetaParam('tier')}
+            onVersionClear={() => clearMetaParam('version')}
           />
-          <Select value={statusFilter} onValueChange={setStatusFilter}>
-            <SelectTrigger aria-label="Filter by status" className="w-full sm:w-40">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              {STATUS_FILTER_OPTIONS.map((s) => (
-                <SelectItem key={s} value={s}>
-                  {s === STATUS_FILTER_ALL ? 'All statuses' : s}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
+          <MultiSelectFilter
+            label="All statuses"
+            options={[...STATUS_FILTER_OPTIONS]}
+            selected={selectedStatuses}
+            onToggle={toggleStatus}
+            onClear={() => setSelectedStatuses(new Set())}
+            className="w-full sm:w-40"
+          />
           <DateRangeFilter from={dateFrom} to={dateTo} onFromChange={setDateFrom} onToChange={setDateTo} onClear={clearDates} />
           <Select value={String(perPage)} onValueChange={(v) => setPerPage(Number(v))}>
             <SelectTrigger aria-label="Rows per page" className="w-full sm:w-20">
@@ -443,15 +529,40 @@ export function DashboardPage() {
               <SelectItem value="50">50</SelectItem>
             </SelectContent>
           </Select>
-          <MetadataClearButton hasFilters={hasMetadataFilters} onClearAll={clearMetadataFilters} />
+          <div className="flex items-center gap-1 border border-border-default rounded-md">
+            <button
+              type="button"
+              onClick={() => setViewMode('flat')}
+              className={`p-1.5 rounded-l-md transition-colors ${viewMode === 'flat' ? 'bg-signal-blue text-white' : 'text-text-tertiary hover:text-text-secondary'}`}
+              aria-label="Flat list view"
+            >
+              <List className="h-4 w-4" />
+            </button>
+            <button
+              type="button"
+              onClick={() => setViewMode('grouped')}
+              className={`p-1.5 rounded-r-md transition-colors ${viewMode === 'grouped' ? 'bg-signal-blue text-white' : 'text-text-tertiary hover:text-text-secondary'}`}
+              aria-label="Grouped by job view"
+            >
+              <ListTree className="h-4 w-4" />
+            </button>
+          </div>
+          {viewMode === 'grouped' && (
+            <ExpandCollapseButtons
+              onExpandAll={() => setExpandedGroups(new Set(grouped.map(g => g.jobName)))}
+              onCollapseAll={() => setExpandedGroups(new Set())}
+            />
+          )}
         </div>
 
         {/* Tag filter chips — only shown when labels exist */}
         <MetadataLabelChips
           allLabels={metadataOptions.allLabels}
           labels={metaLabels}
-          onLabelsChange={setMetaLabels}
+          excludeLabels={metaExcludeLabels}
+          onLabelToggle={handleLabelToggle}
         />
+        <MetadataClearButton hasFilters={hasMetadataFilters} onClearAll={clearMetadataFilters} />
 
         {/* Summary row: count + View Issues */}
         <div className="flex items-center gap-3">
@@ -503,15 +614,15 @@ export function DashboardPage() {
               <Skeleton key={i} className="h-11 w-full" />
             ))}
           </div>
-        ) : pageJobs.length === 0 && (!error || jobs.length > 0) ? (
+        ) : (viewMode === 'flat' ? pageJobs.length === 0 : sorted.length === 0) && (!error || jobs.length > 0) ? (
           <div className="flex flex-col items-center justify-center rounded-lg border border-border-muted bg-surface-card py-16 text-center animate-fade-in">
             <p className="text-text-secondary">
-              {search || statusFilter !== STATUS_FILTER_ALL || dateFrom || dateTo || hasMetadataFilters
+              {search || selectedStatuses.size > 0 || dateFrom || dateTo || hasMetadataFilters
                 ? 'No jobs match your filters.'
                 : 'No analysis runs yet.'}
             </p>
           </div>
-        ) : error && jobs.length === 0 ? null : (
+        ) : error && jobs.length === 0 ? null : viewMode === 'flat' ? (
           <Table>
             <TableHeader>
               <TableRow className="bg-surface-card hover:bg-surface-card">
@@ -708,9 +819,205 @@ export function DashboardPage() {
               })}
             </TableBody>
           </Table>
+        ) : (
+          /* Grouped-by-job view */
+          <div className="space-y-2">
+            {grouped.map((group) => {
+              const isExpanded = expandedGroups.has(group.jobName)
+              return (
+                <div key={group.jobName} className="rounded-lg border border-border-muted bg-surface-card overflow-hidden">
+                  <button
+                    type="button"
+                    onClick={() => toggleGroup(group.jobName)}
+                    className="flex w-full items-center gap-2 px-4 py-3 text-left transition-colors hover:bg-surface-hover"
+                  >
+                    <ChevronRight className={`h-4 w-4 shrink-0 text-text-tertiary transition-transform ${isExpanded ? 'rotate-90' : ''}`} />
+                    <span className="font-display text-sm font-medium text-text-primary truncate">{group.jobName}</span>
+                    <span className="text-xs text-text-tertiary">({group.runs.length} {group.runs.length === 1 ? 'run' : 'runs'})</span>
+                  </button>
+                  {isExpanded && (
+                    <Table>
+                      <TableHeader>
+                        <TableRow className="bg-surface-elevated/40 hover:bg-surface-elevated/40">
+                          {isAdmin && (
+                            <TableHead className="w-10">
+                              <span className="sr-only">Select</span>
+                            </TableHead>
+                          )}
+                          <TableHead className="w-[40%]">Job</TableHead>
+                          <TableHead>Status</TableHead>
+                          <TableHead className="text-center">Failures</TableHead>
+                          <TableHead className="text-center">Reviewed</TableHead>
+                          <TableHead className="text-center">Comments</TableHead>
+                          <TableHead className="text-center">Children</TableHead>
+                          <TableHead className="text-right">Created</TableHead>
+                          {isAdmin && (
+                            <TableHead className="w-10">
+                              <span className="sr-only">Actions</span>
+                            </TableHead>
+                          )}
+                        </TableRow>
+                      </TableHeader>
+                      <TableBody>
+                        {group.runs.map((job, i) => {
+                          const displayStatus = isAnalysisTimeout(job.status, job.error, job.summary) ? 'timeout' : job.status
+                          const borderColor = STATUS_BORDER[displayStatus] ?? 'border-l-border-default'
+                          const failureCount = job.failure_count ?? 0
+                          const failureHint = job.summary || job.error
+                          const rowDest = getJobRoute(job)
+
+                          return (
+                            <TableRow
+                              key={job.job_id}
+                              className={`group cursor-pointer animate-slide-up ${selectedIds.has(job.job_id) ? 'bg-accent-blue/10' : i % 2 === 0 ? 'bg-surface-card' : 'bg-surface-elevated/40'}`}
+                              style={{ animationDelay: `${i * 30}ms`, animationFillMode: 'backwards' }}
+                              onClick={() => isAdmin && selectedIds.size > 0 ? toggleSelect(job.job_id) : handleRowClick(job)}
+                            >
+                              {isAdmin && (
+                                <TableCell className="w-10">
+                                  <input
+                                    type="checkbox"
+                                    checked={selectedIds.has(job.job_id)}
+                                    onChange={(e) => { e.stopPropagation(); toggleSelect(job.job_id) }}
+                                    onClick={(e) => e.stopPropagation()}
+                                    className={`${BULK_SELECT_CHECKBOX_CLASS} ${showCheckboxes ? '' : 'opacity-0 group-hover:opacity-100'}`}
+                                    aria-label={`Select ${getJobDisplayName(job)}`}
+                                  />
+                                </TableCell>
+                              )}
+                              <TableCell className={`border-l-4 ${borderColor}`}>
+                                <div>
+                                  <Link
+                                    to={rowDest}
+                                    className="font-display text-sm font-medium text-text-primary hover:underline focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent-blue"
+                                    onClick={(e) => e.stopPropagation()}
+                                    aria-label={`Open ${getJobDisplayName(job)}${job.build_number !== undefined ? ` #${job.build_number}` : ''}`}
+                                  >
+                                    {getJobDisplayName(job)}
+                                  </Link>
+                                  {job.build_number !== undefined && (
+                                    <span className="ml-2 font-mono text-xs text-text-tertiary">#{job.build_number}</span>
+                                  )}
+                                </div>
+                                <MetadataBadges metadata={job.metadata} />
+                                {job.tags && job.tags.length > 0 && (
+                                  <div className="flex flex-wrap gap-1 mt-1">
+                                    {job.tags.map((tag) => (
+                                      <span
+                                        key={tag}
+                                        className={`inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-medium ${
+                                          tag === 're-analyze'
+                                            ? 'bg-signal-orange/10 text-signal-orange'
+                                            : 'bg-signal-blue/10 text-signal-blue'
+                                        }`}
+                                      >
+                                        {tag}
+                                      </span>
+                                    ))}
+                                  </div>
+                                )}
+                                {failureHint && (
+                                  <Tooltip>
+                                    <TooltipTrigger asChild>
+                                      <p className="mt-0.5 max-w-xs truncate text-xs text-text-tertiary">{failureHint}</p>
+                                    </TooltipTrigger>
+                                    <TooltipContent className="max-w-sm whitespace-pre-wrap">{failureHint}</TooltipContent>
+                                  </Tooltip>
+                                )}
+                              </TableCell>
+                              <TableCell>
+                                <Tooltip>
+                                  <TooltipTrigger asChild>
+                                    <span><StatusChip status={displayStatus} /></span>
+                                  </TooltipTrigger>
+                                  <TooltipContent>{displayStatus === 'timeout' ? 'AI analysis timed out' : `Analysis status: ${job.status}`}</TooltipContent>
+                                </Tooltip>
+                              </TableCell>
+                              <MetricCell
+                                value={failureCount}
+                                icon={<AlertTriangle className="h-3 w-3" />}
+                                tone="text-signal-red"
+                                tooltipText={`${failureCount} test ${failureCount === 1 ? 'failure' : 'failures'}`}
+                              />
+                              <MetricCell
+                                value={failureCount}
+                                displayValue={<>{job.reviewed_count}/{failureCount}</>}
+                                icon={<CheckCircle2 className="h-3 w-3" />}
+                                tone={
+                                  job.reviewed_count === failureCount
+                                    ? 'text-signal-green'
+                                    : job.reviewed_count > 0
+                                      ? 'text-signal-orange'
+                                      : 'text-signal-red'
+                                }
+                                tooltipText={`${job.reviewed_count} of ${failureCount} failures reviewed`}
+                              />
+                              <MetricCell
+                                value={job.comment_count}
+                                icon={<MessageSquare className="h-3 w-3" />}
+                                tone="text-text-secondary"
+                                tooltipText={`${job.comment_count} ${job.comment_count === 1 ? 'comment' : 'comments'}`}
+                              />
+                              <MetricCell
+                                value={job.child_job_count}
+                                icon={<GitFork className="h-3 w-3" />}
+                                tone="text-text-secondary"
+                                tooltipText={`${job.child_job_count ?? 0} child ${job.child_job_count === 1 ? 'job' : 'jobs'}`}
+                              />
+                              <TableCell className="text-right">
+                                <Tooltip>
+                                  <TooltipTrigger asChild>
+                                    <span className="font-mono text-xs text-text-tertiary">{relativeTime(job.created_at)}</span>
+                                  </TooltipTrigger>
+                                  <TooltipContent>
+                                    <span>Created: {formatTimestamp(job.created_at)}</span>
+                                    {(() => {
+                                      const startTime = job.analysis_started_at || job.created_at
+                                      const start = startTime ? parseApiTimestamp(startTime) : null
+                                      const end = job.completed_at ? parseApiTimestamp(job.completed_at) : null
+                                      const duration = start && end && !Number.isNaN(start.getTime()) && !Number.isNaN(end.getTime())
+                                        ? formatDuration(start, end)
+                                        : null
+                                      return duration ? (
+                                        <>
+                                          <br />
+                                          <span>Analysis took: {duration}</span>
+                                        </>
+                                      ) : null
+                                    })()}
+                                  </TooltipContent>
+                                </Tooltip>
+                              </TableCell>
+                              {isAdmin && (
+                                <TableCell>
+                                  <Button
+                                    type="button"
+                                    variant="ghost"
+                                    size="icon"
+                                    aria-label={`Delete analysis ${getJobDisplayName(job)}`}
+                                    className="h-7 w-7 opacity-0 transition-opacity group-hover:opacity-100 focus-visible:opacity-100"
+                                    onClick={(e) => {
+                                      e.stopPropagation()
+                                      setDeleteTarget(job)
+                                    }}
+                                  >
+                                    <Trash2 className="h-3.5 w-3.5 text-text-tertiary hover:text-signal-red" />
+                                  </Button>
+                                </TableCell>
+                              )}
+                            </TableRow>
+                          )
+                        })}
+                      </TableBody>
+                    </Table>
+                  )}
+                </div>
+              )
+            })}
+          </div>
         )}
 
-        {(!error || jobs.length > 0) && (
+        {(!error || jobs.length > 0) && viewMode === 'flat' && (
           <Pagination page={safePage} totalPages={totalPages} onPageChange={setPage} />
         )}
 

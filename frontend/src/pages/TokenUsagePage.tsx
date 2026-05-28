@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { Link } from 'react-router-dom'
 import { useLatestRef } from '@/lib/useLatestRef'
 import { api } from '@/lib/api'
 import { formatCompactNumber, formatCost } from '@/lib/format'
@@ -23,7 +24,7 @@ import { SortableHeader } from '@/components/shared/SortableHeader'
 import { DateRangeFilter } from '@/components/shared/DateRangeFilter'
 import { useTableSort } from '@/lib/useTableSort'
 import type { TokenUsageDashboard } from '@/types'
-import { Zap, TrendingUp, Calendar, DollarSign, Info } from 'lucide-react'
+import { Zap, TrendingUp, Calendar, DollarSign, Info, ChevronRight, Loader2 } from 'lucide-react'
 import {
   Tooltip,
   TooltipContent,
@@ -73,6 +74,20 @@ const GROUP_BY_OPTIONS = [
 ] as const
 
 type GroupByValue = typeof GROUP_BY_OPTIONS[number]['value']
+
+const CALL_TYPE_LABELS: Record<string, string> = {
+  primary: 'Analysis',
+  peer: 'Peer Debate',
+  revision: 'Peer Revision',
+  github_preview: 'GitHub Issue',
+  jira_preview: 'Jira Bug',
+  comment_intent: 'Comment Review',
+  feedback: 'Feedback',
+}
+
+function formatCallType(raw: string): string {
+  return CALL_TYPE_LABELS[raw] ?? raw
+}
 
 function SummaryCard({ title, icon, calls, tokens, inputTokens, outputTokens, cost }: {
   title: string
@@ -144,11 +159,89 @@ export function TokenUsagePage() {
   const [providerInput, setProviderInput] = useState('')
   const [debouncedProvider, setDebouncedProvider] = useState('')
 
+  // Per-job expandable rows
+  const [expandedJobs, setExpandedJobs] = useState<Set<string>>(new Set())
+  const [jobDetails, setJobDetails] = useState<Record<string, BreakdownRow[]>>({})
+  const [jobDetailsLoading, setJobDetailsLoading] = useState<Set<string>>(new Set())
+
+  // Category totals summary
+  const [categoryTotals, setCategoryTotals] = useState<BreakdownRow[]>([])
+
   // Debounce provider filter input
   useEffect(() => {
     const timer = setTimeout(() => setDebouncedProvider(providerInput), 300)
     return () => clearTimeout(timer)
   }, [providerInput])
+
+  // Fetch category totals on mount
+  useEffect(() => {
+    api.get<TokenUsageBreakdownResponse>('/api/admin/token-usage?group_by=call_type')
+      .then(data => {
+        setCategoryTotals(data.breakdown.map(row => ({
+          group: row.group_key,
+          calls: row.call_count,
+          input_tokens: row.input_tokens,
+          output_tokens: row.output_tokens,
+          cache_read_tokens: row.cache_read_tokens,
+          cache_write_tokens: row.cache_write_tokens,
+          cost_usd: row.cost_usd,
+          avg_duration_ms: row.avg_duration_ms,
+        })))
+      })
+      .catch(() => {})
+  }, [])
+
+  // Reset expanded jobs when groupBy changes
+  useEffect(() => {
+    setExpandedJobs(new Set())
+  }, [groupBy])
+
+  async function toggleJobExpand(jobId: string) {
+    const next = new Set(expandedJobs)
+    if (next.has(jobId)) {
+      next.delete(jobId)
+    } else {
+      next.add(jobId)
+      if (!jobDetails[jobId]) {
+        setJobDetailsLoading(prev => new Set(prev).add(jobId))
+        try {
+          const records = await api.get<Array<{
+            call_type: string
+            input_tokens: number
+            output_tokens: number
+            cache_read_tokens: number
+            cache_write_tokens: number
+            cost_usd: number
+            duration_ms: number
+          }>>(`/api/admin/token-usage/${encodeURIComponent(jobId)}`)
+          // Aggregate by call_type
+          const byType = new Map<string, BreakdownRow>()
+          for (const r of records) {
+            const key = r.call_type || 'unknown'
+            const existing = byType.get(key) || { group: key, calls: 0, input_tokens: 0, output_tokens: 0, cache_read_tokens: 0, cache_write_tokens: 0, cost_usd: 0, avg_duration_ms: 0 }
+            existing.calls += 1
+            existing.input_tokens += r.input_tokens
+            existing.output_tokens += r.output_tokens
+            existing.cache_read_tokens += r.cache_read_tokens || 0
+            existing.cache_write_tokens += r.cache_write_tokens || 0
+            existing.cost_usd += r.cost_usd || 0
+            existing.avg_duration_ms += r.duration_ms || 0
+            byType.set(key, existing)
+          }
+          // Calculate averages
+          for (const row of byType.values()) {
+            if (row.calls > 0) row.avg_duration_ms /= row.calls
+          }
+          setJobDetails(prev => ({ ...prev, [jobId]: Array.from(byType.values()) }))
+        } catch {
+          // Silently fail — just don't expand
+        } finally {
+          setJobDetailsLoading(prev => { const n = new Set(prev); n.delete(jobId); return n })
+        }
+      }
+    }
+    setExpandedJobs(next)
+  }
 
   const { sortKey, sortDir, handleSort } = useTableSort('token-usage', 'cost_usd', 'desc', ['cost_usd', 'calls', 'input_tokens', 'output_tokens', 'cache_read_tokens', 'cache_write_tokens', 'avg_duration_ms'])
 
@@ -349,7 +442,7 @@ export function TokenUsagePage() {
                 <div className="space-y-2">
                   {summary.top_jobs.map((j) => (
                     <div key={j.job_id} className="flex items-center justify-between">
-                      <span className="font-mono text-xs text-text-secondary truncate">{j.job_id}</span>
+                      <Link to={`/results/${j.job_id}`} className="font-mono text-xs text-text-secondary truncate hover:underline hover:text-text-primary transition-colors">{j.job_id}</Link>
                       <div className="flex items-center gap-3">
                         <span className="font-mono text-xs text-text-tertiary">{j.calls.toLocaleString()} calls</span>
                         <span className="font-mono text-xs text-signal-green">{formatCostCell(j.cost_usd)}</span>
@@ -360,6 +453,19 @@ export function TokenUsagePage() {
               </CardContent>
             </Card>
           )}
+        </div>
+      )}
+
+      {/* Category totals summary */}
+      {categoryTotals.length > 0 && (
+        <div className="flex flex-wrap gap-2">
+          {categoryTotals.map(cat => (
+            <div key={cat.group} className="inline-flex items-center gap-2 rounded-lg border border-border-default bg-surface-card px-3 py-1.5">
+              <span className="text-xs font-medium text-text-secondary">{formatCallType(cat.group)}</span>
+              <span className="font-mono text-xs text-text-tertiary">{cat.calls} calls</span>
+              <span className="font-mono text-xs text-signal-green">{formatCostCell(cat.cost_usd)}</span>
+            </div>
+          ))}
         </div>
       )}
 
@@ -414,21 +520,59 @@ export function TokenUsagePage() {
             </TableRow>
           </TableHeader>
           <TableBody>
-            {sorted.map((row, i) => (
-              <TableRow
-                key={row.group}
-                className={i % 2 === 0 ? 'bg-surface-card' : 'bg-surface-elevated/40'}
-              >
-                <TableCell className="font-mono text-sm text-text-primary">{row.group}</TableCell>
-                <TableCell className="text-right font-mono text-xs text-text-secondary">{row.calls.toLocaleString()}</TableCell>
-                <TableCell className="text-right font-mono text-xs text-text-secondary">{formatCompactNumber(row.input_tokens)}</TableCell>
-                <TableCell className="text-right font-mono text-xs text-text-secondary">{formatCompactNumber(row.output_tokens)}</TableCell>
-                <TableCell className="text-right font-mono text-xs text-text-secondary">{formatCompactNumber(row.cache_read_tokens)}</TableCell>
-                <TableCell className="text-right font-mono text-xs text-text-secondary">{formatCompactNumber(row.cache_write_tokens)}</TableCell>
-                <TableCell className="text-right font-mono text-xs text-signal-green">{formatCostCell(row.cost_usd)}</TableCell>
-                <TableCell className="text-right font-mono text-xs text-text-tertiary">{formatDurationMs(row.avg_duration_ms)}</TableCell>
-              </TableRow>
-            ))}
+            {sorted.map((row, i) => {
+              const isJobGroup = groupBy === 'job'
+              const isExpanded = isJobGroup && expandedJobs.has(row.group)
+              const isLoading = isJobGroup && jobDetailsLoading.has(row.group)
+              const subRows = isExpanded ? jobDetails[row.group] : undefined
+
+              return (
+                <Fragment key={row.group}>
+                  <TableRow
+                    className={`${i % 2 === 0 ? 'bg-surface-card' : 'bg-surface-elevated/40'}${isJobGroup ? ' cursor-pointer' : ''}`}
+                    onClick={isJobGroup ? () => toggleJobExpand(row.group) : undefined}
+                  >
+                    <TableCell className="font-mono text-sm text-text-primary">
+                      <span className="inline-flex items-center gap-1.5">
+                        {isJobGroup && (
+                          <ChevronRight
+                            className={`h-3.5 w-3.5 text-text-tertiary transition-transform duration-150 ${isExpanded ? 'rotate-90' : ''}`}
+                            aria-hidden="true"
+                          />
+                        )}
+                        {groupBy === 'call_type' ? formatCallType(row.group) : row.group}
+                      </span>
+                    </TableCell>
+                    <TableCell className="text-right font-mono text-xs text-text-secondary">{row.calls.toLocaleString()}</TableCell>
+                    <TableCell className="text-right font-mono text-xs text-text-secondary">{formatCompactNumber(row.input_tokens)}</TableCell>
+                    <TableCell className="text-right font-mono text-xs text-text-secondary">{formatCompactNumber(row.output_tokens)}</TableCell>
+                    <TableCell className="text-right font-mono text-xs text-text-secondary">{formatCompactNumber(row.cache_read_tokens)}</TableCell>
+                    <TableCell className="text-right font-mono text-xs text-text-secondary">{formatCompactNumber(row.cache_write_tokens)}</TableCell>
+                    <TableCell className="text-right font-mono text-xs text-signal-green">{formatCostCell(row.cost_usd)}</TableCell>
+                    <TableCell className="text-right font-mono text-xs text-text-tertiary">{formatDurationMs(row.avg_duration_ms)}</TableCell>
+                  </TableRow>
+                  {isExpanded && isLoading && (
+                    <TableRow key={`${row.group}-loading`} className="bg-surface-elevated/20">
+                      <TableCell colSpan={8} className="py-3 text-center">
+                        <Loader2 className="h-4 w-4 animate-spin text-text-tertiary inline-block" />
+                      </TableCell>
+                    </TableRow>
+                  )}
+                  {isExpanded && subRows && subRows.map((sub) => (
+                    <TableRow key={`${row.group}-${sub.group}`} className="bg-surface-elevated/20">
+                      <TableCell className="pl-10 font-mono text-xs text-text-secondary italic">{formatCallType(sub.group)}</TableCell>
+                      <TableCell className="text-right font-mono text-xs text-text-tertiary">{sub.calls.toLocaleString()}</TableCell>
+                      <TableCell className="text-right font-mono text-xs text-text-tertiary">{formatCompactNumber(sub.input_tokens)}</TableCell>
+                      <TableCell className="text-right font-mono text-xs text-text-tertiary">{formatCompactNumber(sub.output_tokens)}</TableCell>
+                      <TableCell className="text-right font-mono text-xs text-text-tertiary">{formatCompactNumber(sub.cache_read_tokens)}</TableCell>
+                      <TableCell className="text-right font-mono text-xs text-text-tertiary">{formatCompactNumber(sub.cache_write_tokens)}</TableCell>
+                      <TableCell className="text-right font-mono text-xs text-signal-green/70">{formatCostCell(sub.cost_usd)}</TableCell>
+                      <TableCell className="text-right font-mono text-xs text-text-tertiary">{formatDurationMs(sub.avg_duration_ms)}</TableCell>
+                    </TableRow>
+                  ))}
+                </Fragment>
+              )
+            })}
           </TableBody>
         </Table>
       )}

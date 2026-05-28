@@ -205,6 +205,27 @@ class RootCozClient:
         """List analysis jobs with dashboard metadata. GET /api/dashboard"""
         return self._request("GET", "/api/dashboard")
 
+    def dashboard_filtered(
+        self,
+        *,
+        team: str = "",
+        tier: str = "",
+        version: str = "",
+        labels: list[str] | None = None,
+        exclude_labels: list[str] | None = None,
+    ) -> list[dict]:
+        """List dashboard jobs filtered by metadata. GET /api/dashboard/filtered"""
+        params: dict = {
+            "team": team,
+            "tier": tier,
+            "version": version,
+        }
+        if labels:
+            params["label"] = labels
+        if exclude_labels:
+            params["exclude_label"] = exclude_labels
+        return self._request("GET", "/api/dashboard/filtered", params=params)
+
     def get_active_count(self) -> dict:
         """Get count of currently active analyses. GET /api/dashboard/active-count"""
         return self._request("GET", "/api/dashboard/active-count")

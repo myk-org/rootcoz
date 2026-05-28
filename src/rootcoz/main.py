@@ -39,6 +39,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, SecretStr, ValidationError
 from simple_logger.logger import get_logger
 from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.middleware.gzip import GZipMiddleware
 
 from rootcoz import storage
 from rootcoz.bug_creation import (
@@ -141,6 +142,7 @@ from rootcoz.storage import (
     get_result,
     init_db,
     list_results,
+    list_distinct_job_names,
     list_results_for_dashboard,
     patch_result_json,
     populate_failure_history,
@@ -954,6 +956,27 @@ async def _safe_preload_cursor_models() -> None:
         logger.debug("Failed to preload cursor models", exc_info=True)
 
 
+async def _backfill_job_metadata(rules: list[dict]) -> None:
+    """Retroactively assign metadata to existing jobs missing metadata. Best-effort."""
+    try:
+        # Get all unique job names from results
+        job_names = await list_distinct_job_names()
+        logger.info(
+            "Backfill: scanning %d distinct job name(s) for metadata", len(job_names)
+        )
+
+        assigned = 0
+        for name in job_names:
+            result = await storage.auto_assign_job_metadata(name, rules)
+            if result is not None:
+                assigned += 1
+
+        if assigned:
+            logger.info("Backfilled metadata for %d job(s)", assigned)
+    except Exception:
+        logger.debug("Failed to backfill job metadata", exc_info=True)
+
+
 async def _deferred_resume_waiting_jobs(waiting_jobs: list[dict]) -> None:
     """Resume waiting jobs after startup is complete.
 
@@ -988,6 +1011,13 @@ async def lifespan(_app: FastAPI):
         _background_tasks.add(task)
         task.add_done_callback(_background_tasks.discard)
 
+        # Retroactively assign metadata to jobs that don't have it yet
+        settings = get_settings()
+        if settings.metadata_rules:
+            task = asyncio.create_task(_backfill_job_metadata(settings.metadata_rules))
+            _background_tasks.add(task)
+            task.add_done_callback(_background_tasks.discard)
+
         waiting_jobs = await storage.mark_stale_results_failed()
         notify_active_count_changed()
         notify_dashboard_changed()
@@ -1018,6 +1048,7 @@ if _FRONTEND_DIR.is_dir():
         StaticFiles(directory=str(_FRONTEND_DIR / "assets")),
         name="frontend-assets",
     )
+    logger.info("Static assets directory mounted at /assets/")
 
 
 class ErrorTrackingMiddleware(BaseHTTPMiddleware):
@@ -1414,6 +1445,23 @@ class RequestBodyLoggingMiddleware(BaseHTTPMiddleware):
 
 
 app.add_middleware(RequestBodyLoggingMiddleware)
+
+
+class CacheControlMiddleware(BaseHTTPMiddleware):
+    """Add long-lived cache headers for Vite-hashed static assets."""
+
+    async def dispatch(self, request: Request, call_next):
+        response = await call_next(request)
+        if (
+            request.url.path.startswith("/assets/")
+            and 200 <= response.status_code < 400
+        ):
+            response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+        return response
+
+
+app.add_middleware(CacheControlMiddleware)
+app.add_middleware(GZipMiddleware, minimum_size=500)
 
 
 def _mask_pydantic_error(error: dict) -> dict:
@@ -6760,34 +6808,43 @@ async def rotate_key_endpoint(request: Request, username: str) -> JSONResponse:
 
 
 async def _metadata_filters(
-    team: Annotated[str, Query()] = "",
-    tier: Annotated[str, Query()] = "",
-    version: Annotated[str, Query()] = "",
+    team: Annotated[list[str] | None, Query()] = None,
+    tier: Annotated[list[str] | None, Query()] = None,
+    version: Annotated[list[str] | None, Query()] = None,
     label: Annotated[list[str] | None, Query()] = None,
+    exclude_label: Annotated[list[str] | None, Query()] = None,
 ) -> dict:
     """Shared dependency for metadata filter query parameters."""
-    return {"team": team, "tier": tier, "version": version, "label": label or []}
+    return {
+        "team": team or [],
+        "tier": tier or [],
+        "version": version or [],
+        "label": label or [],
+        "exclude_label": exclude_label or [],
+    }
 
 
 def _unpack_metadata_filters(
     filters: dict, endpoint: str
-) -> tuple[str, str, str, list[str]]:
+) -> tuple[list[str], list[str], list[str], list[str], list[str]]:
     """Unpack metadata filter dict and log at DEBUG level."""
-    team, tier, version, label = (
+    team, tier, version, label, exclude_label = (
         filters["team"],
         filters["tier"],
         filters["version"],
         filters["label"],
+        filters["exclude_label"],
     )
     logger.debug(
-        "%s: team=%r, tier=%r, version=%r, label=%r",
+        "%s: team=%r, tier=%r, version=%r, label=%r, exclude_label=%r",
         endpoint,
         team,
         tier,
         version,
         label,
+        exclude_label,
     )
-    return team, tier, version, label
+    return team, tier, version, label, exclude_label
 
 
 @app.get("/api/jobs/metadata")
@@ -6795,7 +6852,7 @@ async def list_jobs_metadata(
     filters: Annotated[dict, Depends(_metadata_filters)],
 ) -> list[dict]:
     """List all job metadata, optionally filtered by team, tier, version, or labels."""
-    team, tier, version, label = _unpack_metadata_filters(
+    team, tier, version, label, _exclude_label = _unpack_metadata_filters(
         filters, "GET /api/jobs/metadata"
     )
     return await storage.list_jobs_with_metadata(
@@ -6915,27 +6972,40 @@ async def api_dashboard_filtered(
     provided, returns all jobs (same as /api/dashboard but with
     metadata attached).
     """
-    team, tier, version, label = _unpack_metadata_filters(
+    team, tier, version, label, exclude_label = _unpack_metadata_filters(
         filters, "GET /api/dashboard/filtered"
     )
     jobs = await list_results_for_dashboard()
 
-    # If no filters, attach metadata and return all
-    has_filters = bool(team or tier or version or label)
+    has_include_filters = bool(team or tier or version or label)
 
-    # Build a lookup of job metadata
-    all_metadata = await storage.list_jobs_with_metadata(
-        team=team if has_filters else "",
-        tier=tier if has_filters else "",
-        version=version if has_filters else "",
-        labels=label if has_filters and label else None,
-    )
-    metadata_by_name = {m["job_name"]: m for m in all_metadata}
+    # Fetch all metadata once (unfiltered) — used for both include/exclude and display
+    all_metadata_unfiltered = await storage.list_jobs_with_metadata()
+    all_metadata_by_name = {m["job_name"]: m for m in all_metadata_unfiltered}
 
-    if has_filters:
-        # Only include jobs whose job_name matches filtered metadata
-        filtered_names = set(metadata_by_name.keys())
+    if has_include_filters:
+        # Build filtered set for include matching
+        filtered_metadata = await storage.list_jobs_with_metadata(
+            team=team,
+            tier=tier,
+            version=version,
+            labels=label if label else None,
+        )
+        filtered_names = {m["job_name"] for m in filtered_metadata}
         jobs = [j for j in jobs if j.get("job_name", "") in filtered_names]
+
+    if exclude_label:
+        # Exclude jobs matching ANY excluded label (OR semantics)
+        exclude_set = set(exclude_label)
+        excluded_names: set[str] = set()
+        for m in all_metadata_unfiltered:
+            job_labels = set(m.get("labels") or [])
+            if job_labels & exclude_set:
+                excluded_names.add(m["job_name"])
+        jobs = [j for j in jobs if j.get("job_name", "") not in excluded_names]
+
+    # Use unfiltered metadata for display attachment
+    metadata_by_name = all_metadata_by_name
 
     # Attach metadata to each job
     for job in jobs:
@@ -7134,6 +7204,11 @@ Comment:
 Respond with ONLY a JSON object:
 {"suggests_reviewed": true/false, "reason": "brief explanation"}"""
 
+    logger.info(
+        "AI call: provider=%s, model=%s, call_type=comment_intent",
+        ai_provider,
+        ai_model,
+    )
     result = await call_ai_once(
         prompt,
         ai_provider=ai_provider,

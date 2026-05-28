@@ -1,27 +1,10 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useEffect, useState } from 'react'
 import { api } from '@/lib/api'
 import type { JobMetadata } from '@/types'
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from '@/components/ui/select'
 import { Button } from '@/components/ui/button'
+import { Tooltip, TooltipTrigger, TooltipContent } from '@/components/ui/tooltip'
 import { X } from 'lucide-react'
-
-const ALL_VALUE = '__ALL__'
-const OPTION_PREFIX = 'value:'
-
-function encodeSelectValue(value: string): string {
-  return `${OPTION_PREFIX}${encodeURIComponent(value)}`
-}
-
-function decodeSelectValue(value: string): string {
-  if (value === ALL_VALUE) return ''
-  return decodeURIComponent(value.slice(OPTION_PREFIX.length))
-}
+import { MultiSelectFilter } from '@/components/shared/MultiSelectFilter'
 
 export interface MetadataOptions {
   teams: string[]
@@ -73,67 +56,60 @@ export function useMetadataOptions(): { options: MetadataOptions; loadError: boo
   return { options, loadError }
 }
 
-// ─── Select-based dropdowns (team / tier / version) ────────────────────────
+// ─── Multi-select dropdowns (team / tier / version) ────────────────────────
 
 interface MetadataDropdownsProps {
   options: MetadataOptions
-  team: string
-  tier: string
-  version: string
-  onTeamChange: (value: string) => void
-  onTierChange: (value: string) => void
-  onVersionChange: (value: string) => void
+  teams: Set<string>
+  tiers: Set<string>
+  versions: Set<string>
+  onTeamToggle: (value: string) => void
+  onTierToggle: (value: string) => void
+  onVersionToggle: (value: string) => void
+  onTeamClear: () => void
+  onTierClear: () => void
+  onVersionClear: () => void
 }
 
 const SELECT_FILTERS_CONFIG = [
-  { key: 'team', allLabel: 'All teams', aria: 'Filter by team' },
-  { key: 'tier', allLabel: 'All tiers', aria: 'Filter by tier' },
-  { key: 'version', allLabel: 'All versions', aria: 'Filter by version' },
+  { key: 'team', allLabel: 'All teams' },
+  { key: 'tier', allLabel: 'All tiers' },
+  { key: 'version', allLabel: 'All versions' },
 ] as const
 
-function buildOptionItems(options: string[], activeValue: string): string[] {
-  if (!activeValue || options.includes(activeValue)) return options
-  return [activeValue, ...options]
-}
-
-/** Renders team/tier/version select dropdowns. Renders nothing if no options exist. */
+/** Renders team/tier/version multi-select dropdowns. Renders nothing if no options exist. */
 export function MetadataDropdowns({
   options,
-  team,
-  tier,
-  version,
-  onTeamChange,
-  onTierChange,
-  onVersionChange,
+  teams,
+  tiers,
+  versions,
+  onTeamToggle,
+  onTierToggle,
+  onVersionToggle,
+  onTeamClear,
+  onTierClear,
+  onVersionClear,
 }: MetadataDropdownsProps) {
-  const values: Record<string, string> = { team, tier, version }
+  const selectedMap: Record<string, Set<string>> = { team: teams, tier: tiers, version: versions }
   const optionsMap: Record<string, string[]> = { team: options.teams, tier: options.tiers, version: options.versions }
-  const handlers: Record<string, (v: string) => void> = { team: onTeamChange, tier: onTierChange, version: onVersionChange }
+  const toggleHandlers: Record<string, (v: string) => void> = { team: onTeamToggle, tier: onTierToggle, version: onVersionToggle }
+  const clearHandlers: Record<string, () => void> = { team: onTeamClear, tier: onTierClear, version: onVersionClear }
 
   return (
     <>
       {SELECT_FILTERS_CONFIG
-        .filter((f) => optionsMap[f.key].length > 0 || !!values[f.key])
-        .map((f) => {
-          const items = buildOptionItems(optionsMap[f.key], values[f.key])
-          return (
-            <Select
-              key={f.key}
-              value={values[f.key] ? encodeSelectValue(values[f.key]) : ALL_VALUE}
-              onValueChange={(v) => handlers[f.key](decodeSelectValue(v))}
-            >
-              <SelectTrigger aria-label={f.aria} className="w-full sm:w-32">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value={ALL_VALUE}>{f.allLabel}</SelectItem>
-                {items.map((option) => (
-                  <SelectItem key={option} value={encodeSelectValue(option)}>{option}</SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          )
-        })}
+        .filter((f) => optionsMap[f.key].length > 0 || selectedMap[f.key].size > 0)
+        .map((f) => (
+          <MultiSelectFilter
+            key={f.key}
+            label={f.allLabel}
+            options={optionsMap[f.key]}
+            selected={selectedMap[f.key]}
+            onToggle={toggleHandlers[f.key]}
+            onClear={clearHandlers[f.key]}
+            className="w-full sm:w-32"
+          />
+        ))}
     </>
   )
 }
@@ -143,43 +119,59 @@ export function MetadataDropdowns({
 interface MetadataLabelChipsProps {
   allLabels: string[]
   labels: string[]
-  onLabelsChange: (value: string[]) => void
+  excludeLabels: string[]
+  onLabelToggle: (label: string, action: 'include' | 'exclude' | 'off') => void
 }
 
-/** Renders a row of toggle-able label chips. Renders nothing if no labels exist. */
-export function MetadataLabelChips({ allLabels, labels, onLabelsChange }: MetadataLabelChipsProps) {
-  const toggleLabel = useCallback((label: string) => {
-    if (labels.includes(label)) {
-      onLabelsChange(labels.filter((l) => l !== label))
-    } else {
-      onLabelsChange([...labels, label])
-    }
-  }, [labels, onLabelsChange])
-
-  if (allLabels.length === 0 && labels.length === 0) return null
+/** Renders a row of toggle-able label chips. Left-click toggles include/off. Right-click toggles exclude. */
+export function MetadataLabelChips({ allLabels, labels, excludeLabels, onLabelToggle }: MetadataLabelChipsProps) {
+  if (allLabels.length === 0 && labels.length === 0 && excludeLabels.length === 0) return null
 
   const displayLabels = allLabels.length > 0
-    ? [...new Set([...allLabels, ...labels])].sort()
-    : labels
+    ? [...new Set([...allLabels, ...labels, ...excludeLabels])].sort()
+    : [...new Set([...labels, ...excludeLabels])].sort()
 
   return (
-    <div className="flex flex-wrap items-center gap-2">
-      <span className="text-xs text-text-tertiary">Filter by tag:</span>
-      {displayLabels.map((label) => (
-        <button
-          type="button"
-          key={label}
-          aria-pressed={labels.includes(label)}
-          className={`cursor-pointer text-xs px-2 py-0.5 rounded-md border transition-colors ${
-            labels.includes(label)
-              ? 'bg-signal-green/20 text-signal-green border-signal-green/40 hover:bg-signal-green/30'
-              : 'border-border-muted text-text-tertiary hover:bg-surface-hover hover:text-text-secondary'
-          }`}
-          onClick={() => toggleLabel(label)}
-        >
-          {label}
-        </button>
-      ))}
+    <div className="flex flex-wrap items-center gap-1.5">
+      <span className="text-xs text-text-tertiary">Tags:</span>
+      {displayLabels.map((label) => {
+        const isIncluded = labels.includes(label)
+        const isExcluded = excludeLabels.includes(label)
+        const tooltipText = isIncluded
+          ? 'Click to remove filter • Right-click to exclude'
+          : isExcluded
+            ? 'Click to remove exclusion'
+            : 'Click to filter by this tag • Right-click to exclude'
+        return (
+          <Tooltip key={label}>
+            <TooltipTrigger asChild>
+              <button
+                type="button"
+                className={`inline-flex items-center rounded-full px-2.5 py-0.5 text-[10px] font-medium cursor-pointer transition-colors ${
+                  isIncluded
+                    ? 'bg-signal-blue/10 text-signal-blue'
+                    : isExcluded
+                      ? 'bg-signal-red/10 text-signal-red line-through'
+                      : 'bg-surface-elevated text-text-tertiary hover:bg-surface-hover hover:text-text-secondary'
+                }`}
+                onClick={() => {
+                  if (isIncluded) onLabelToggle(label, 'off')
+                  else if (isExcluded) onLabelToggle(label, 'off')
+                  else onLabelToggle(label, 'include')
+                }}
+                onContextMenu={(e) => {
+                  e.preventDefault()
+                  if (isExcluded) onLabelToggle(label, 'off')
+                  else onLabelToggle(label, 'exclude')
+                }}
+              >
+                {isExcluded ? `× ${label}` : label}
+              </button>
+            </TooltipTrigger>
+            <TooltipContent>{tooltipText}</TooltipContent>
+          </Tooltip>
+        )
+      })}
     </div>
   )
 }

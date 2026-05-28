@@ -6,7 +6,7 @@ function makeRound(round: number, role: 'orchestrator' | 'peer', provider = 'cla
   return {
     round,
     ai_provider: provider,
-    ai_model: 'opus',
+    ai_model: 'test-model',
     role,
     classification: 'CODE ISSUE',
     details: 'some details',

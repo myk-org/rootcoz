@@ -4,7 +4,7 @@ import os
 import tempfile
 from collections.abc import Awaitable, Callable, Generator
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 import pytest
@@ -211,3 +211,40 @@ def mock_ai() -> Generator[MagicMock, None, None]:
             ),
         )
         yield mock
+
+
+@pytest.fixture(autouse=True)
+def _mock_sidecar_calls():
+    """Prevent ALL tests from hitting a real sidecar service.
+
+    Mocks list_models, check_sidecar_available, and get_sidecar_client
+    so no test accidentally calls the real sidecar on localhost:9100.
+    """
+    mock_client = MagicMock()
+    mock_client.delete_session = AsyncMock()
+    mock_client.get_models = AsyncMock(return_value=[])
+    mock_client.health = AsyncMock(return_value={"status": "ok"})
+    mock_client.create_session = AsyncMock(return_value="mock-session")
+    mock_client.prompt = AsyncMock()
+    with (
+        patch("rootcoz.main.list_models", new_callable=AsyncMock, return_value=[]),
+        patch(
+            "rootcoz.main.check_sidecar_available",
+            new_callable=AsyncMock,
+            return_value=(True, "mocked"),
+        ),
+        patch(
+            "pi_sidecar_client.get_sidecar_client",
+            return_value=mock_client,
+        ),
+        patch(
+            "rootcoz.peer_analysis.get_sidecar_client",
+            return_value=mock_client,
+        ),
+        patch(
+            "rootcoz.sources.jenkins_source.check_sidecar_available",
+            new_callable=AsyncMock,
+            return_value=(True, "mocked"),
+        ),
+    ):
+        yield

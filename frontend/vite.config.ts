@@ -33,6 +33,11 @@ export default defineConfig({
     css: true,
   },
   server: {
+    // Polling required for Docker bind mount — inotify doesn't work across container boundaries
+    watch: {
+      usePolling: true,
+      interval: 2000,
+    },
     proxy: {
       '/api': BACKEND_URL,
       '/analyze': BACKEND_URL,

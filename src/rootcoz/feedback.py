@@ -166,6 +166,9 @@ For feature requests, the body should include:
 Do NOT include any sensitive data (tokens, passwords, etc.) in the output."""
 
     try:
+        logger.info(
+            "AI call: provider=%s, model=%s, call_type=feedback", ai_provider, ai_model
+        )
         result = await call_ai_once(
             prompt,
             ai_provider=ai_provider,

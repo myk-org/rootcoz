@@ -393,14 +393,28 @@ def results_list(
     )
 
 
+_EXCLUDE_TAG_OPTION = typer.Option(
+    [], "--exclude-tag", help="Exclude results with this tag (can repeat)."
+)
+
+
 @results_app.command("dashboard")
 def dashboard(
+    label: list[str] = _LABEL_FILTER_OPTION,
+    exclude_tag: list[str] = _EXCLUDE_TAG_OPTION,
     json_output: bool = _JSON_OPTION,
 ):
     """List analysis jobs with dashboard metadata (failure counts, review progress)."""
+    use_filtered = bool(label or exclude_tag)
     _run_client_command(
         json_output,
-        lambda c: c.dashboard(),
+        lambda c: (
+            c.dashboard_filtered(
+                labels=label or None, exclude_labels=exclude_tag or None
+            )
+            if use_filtered
+            else c.dashboard()
+        ),
         columns=[
             "job_id",
             "job_name",
