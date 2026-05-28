@@ -25,6 +25,11 @@ import {
   RotateCcw,
   Loader2,
 } from 'lucide-react'
+import { PeerConfigList } from '@/components/shared/PeerConfigList'
+import type { PeerConfigWithId } from '@/components/shared/PeerConfigList'
+import { usePeerModels } from '@/lib/usePeerModels'
+import { AdditionalReposList } from '@/components/shared/AdditionalReposList'
+import type { RepoWithId } from '@/components/shared/AdditionalReposList'
 
 // ---------------------------------------------------------------------------
 // Types
@@ -148,6 +153,58 @@ const initialState: PageState = {
 }
 
 // ---------------------------------------------------------------------------
+// Parse / serialize helpers
+// ---------------------------------------------------------------------------
+
+function parsePeerConfigString(raw: string): PeerConfigWithId[] {
+  if (!raw || !raw.trim()) return []
+  return raw.split(',').map(entry => {
+    const trimmed = entry.trim()
+    if (!trimmed.includes(':')) return null
+    const [provider, ...modelParts] = trimmed.split(':')
+    return {
+      id: crypto.randomUUID(),
+      ai_provider: provider.trim(),
+      ai_model: modelParts.join(':').trim(),
+    }
+  }).filter((p): p is PeerConfigWithId => p !== null && !!p.ai_provider && !!p.ai_model)
+}
+
+function serializePeerConfigs(configs: PeerConfigWithId[]): string {
+  return configs
+    .filter(c => c.ai_provider && c.ai_model)
+    .map(c => `${c.ai_provider}:${c.ai_model}`)
+    .join(',')
+}
+
+function parseAdditionalReposString(raw: string): RepoWithId[] {
+  if (!raw || !raw.trim()) return []
+  return raw.split(',').map(entry => {
+    const trimmed = entry.trim()
+    if (!trimmed.includes(':')) return null
+    const [name, ...rest] = trimmed.split(':')
+    const urlAndRef = rest.join(':')
+    return {
+      id: crypto.randomUUID(),
+      name: name.trim(),
+      url: urlAndRef.trim(),
+      ref: '',
+    }
+  }).filter((r): r is RepoWithId => r !== null && !!r.name)
+}
+
+function serializeAdditionalRepos(repos: RepoWithId[]): string {
+  return repos
+    .filter(r => r.name.trim() && r.url.trim())
+    .map(r => {
+      let entry = `${r.name.trim()}:${r.url.trim()}`
+      if (r.ref.trim()) entry += `:${r.ref.trim()}`
+      return entry
+    })
+    .join(',')
+}
+
+// ---------------------------------------------------------------------------
 // Source badge
 // ---------------------------------------------------------------------------
 
@@ -171,6 +228,16 @@ function SourceBadge({ source }: { source: 'default' | 'env' | 'db' }) {
 export function ServerSettingsPage() {
   const { isAdmin } = useAuth()
   const [state, dispatch] = useReducer(reducer, initialState)
+
+  // Peer config structured editor state
+  const [peerConfigs, setPeerConfigs] = useState<PeerConfigWithId[]>([])
+  const [peerMaxRounds, setPeerMaxRounds] = useState(3)
+  const [peerEditing, setPeerEditing] = useState(false)
+  const peerModels = usePeerModels(peerConfigs, peerEditing)
+
+  // Additional repos structured editor state
+  const [additionalRepos, setAdditionalRepos] = useState<RepoWithId[]>([])
+  const [reposEditing, setReposEditing] = useState(false)
 
   // Debounced search
   const [searchInput, setSearchInput] = useState('')
@@ -250,6 +317,46 @@ export function ServerSettingsPage() {
   async function handleBooleanToggle(key: string, currentValue: string) {
     const newValue = currentValue === 'true' ? 'false' : 'true'
     await saveSettingValue(key, newValue)
+  }
+
+  // ---- Peer config structured editor ----
+  function handleStartPeerEdit(setting: ServerSetting) {
+    setPeerConfigs(parsePeerConfigString(setting.value))
+    const maxRoundsSetting = state.settings.find(s => s.key === 'peer_analysis_max_rounds')
+    setPeerMaxRounds(maxRoundsSetting ? parseInt(maxRoundsSetting.value) || 3 : 3)
+    setPeerEditing(true)
+  }
+
+  async function handleSavePeerConfig() {
+    const configStr = serializePeerConfigs(peerConfigs)
+    const updates: Record<string, string> = { peer_ai_configs: configStr }
+    updates.peer_analysis_max_rounds = String(peerMaxRounds)
+    dispatch({ type: 'SAVE_START' })
+    try {
+      await api.put('/api/admin/settings', { settings: updates })
+      dispatch({ type: 'SAVE_SUCCESS' })
+      fetchSettings()
+    } catch (err) {
+      let msg = 'Failed to save'
+      if (err instanceof ApiError) {
+        const body = err.body as { detail?: string } | null
+        msg = body?.detail ?? 'Save failed'
+      }
+      dispatch({ type: 'SAVE_ERROR', error: msg })
+    }
+    setPeerEditing(false)
+  }
+
+  // ---- Additional repos structured editor ----
+  function handleStartReposEdit(setting: ServerSetting) {
+    setAdditionalRepos(parseAdditionalReposString(setting.value))
+    setReposEditing(true)
+  }
+
+  async function handleSaveRepos() {
+    const reposStr = serializeAdditionalRepos(additionalRepos)
+    await saveSettingValue('additional_repos', reposStr)
+    setReposEditing(false)
   }
 
   // ---- Group & filter ----
@@ -388,30 +495,167 @@ export function ServerSettingsPage() {
                   {!isCollapsed && (
                     <CardContent className="px-4 pb-4 pt-0">
                       <div className="divide-y divide-border-default">
-                        {settings.map((setting) => (
-                          <SettingRow
-                            key={setting.key}
-                            setting={setting}
-                            isEditing={state.editingKey === setting.key}
-                            editValue={state.editValue}
-                            saving={state.saving}
-                            resetting={state.resettingKey === setting.key}
-                            revealed={state.revealedKeys.has(setting.key)}
-                            onStartEdit={() =>
-                              dispatch({
-                                type: 'START_EDIT',
-                                key: setting.key,
-                                currentValue: setting.value,
-                              })
-                            }
-                            onCancelEdit={() => dispatch({ type: 'CANCEL_EDIT' })}
-                            onSetEditValue={(v) => dispatch({ type: 'SET_EDIT_VALUE', value: v })}
-                            onSave={() => handleSave(setting.key, state.editValue)}
-                            onReset={() => handleReset(setting.key)}
-                            onToggleReveal={() => dispatch({ type: 'TOGGLE_REVEAL', key: setting.key })}
-                            onBooleanToggle={() => handleBooleanToggle(setting.key, setting.value)}
-                          />
-                        ))}
+                        {settings.map((setting) => {
+                          // ---- PEER_AI_CONFIGS: structured editor ----
+                          if (setting.key === 'peer_ai_configs') {
+                            return (
+                              <div key={setting.key} className="py-3 space-y-2">
+                                <div className="flex items-center gap-2">
+                                  <span className="font-mono text-xs font-semibold text-text-primary">{setting.env_var}</span>
+                                  <SourceBadge source={setting.source} />
+                                </div>
+                                {peerEditing ? (
+                                  <div className="space-y-3">
+                                    <PeerConfigList
+                                      peerConfigs={peerConfigs}
+                                      setPeerConfigs={setPeerConfigs}
+                                      peerModels={peerModels}
+                                      maxRounds={peerMaxRounds}
+                                      setMaxRounds={setPeerMaxRounds}
+                                    />
+                                    <div className="flex items-center gap-2 pt-1">
+                                      <Button size="sm" onClick={handleSavePeerConfig} disabled={state.saving} className="h-7 text-xs">
+                                        {state.saving ? <><Loader2 className="mr-1 h-3 w-3 animate-spin" />Saving</> : 'Save'}
+                                      </Button>
+                                      <Button size="sm" variant="outline" onClick={() => setPeerEditing(false)} className="h-7 text-xs">Cancel</Button>
+                                      {setting.source === 'db' && (
+                                        <Button size="sm" variant="ghost" onClick={() => handleReset(setting.key)} className="h-7 text-xs text-text-tertiary hover:text-signal-red">
+                                          <RotateCcw className="mr-1 h-3 w-3" /> Reset
+                                        </Button>
+                                      )}
+                                    </div>
+                                  </div>
+                                ) : (
+                                  <div>
+                                    {setting.value ? (
+                                      <div className="flex flex-wrap gap-1.5">
+                                        {setting.value.split(',').map((entry, i) => {
+                                          const trimmed = entry.trim()
+                                          const colonIdx = trimmed.indexOf(':')
+                                          const provider = colonIdx > 0 ? trimmed.slice(0, colonIdx) : trimmed
+                                          const model = colonIdx > 0 ? trimmed.slice(colonIdx + 1) : ''
+                                          return (
+                                            <span key={i} className="inline-flex items-center gap-1 rounded-md bg-surface-elevated px-2 py-0.5 text-xs font-mono border border-border-default">
+                                              <span className="text-text-tertiary">{provider}</span>
+                                              <span className="text-text-tertiary">/</span>
+                                              <span className="text-text-primary">{model}</span>
+                                            </span>
+                                          )
+                                        })}
+                                      </div>
+                                    ) : (
+                                      <span className="text-xs text-text-tertiary italic">Not configured</span>
+                                    )}
+                                    <button type="button" onClick={() => handleStartPeerEdit(setting)} className="mt-1.5 text-xs text-text-link hover:text-signal-blue font-medium">
+                                      Configure peers
+                                    </button>
+                                  </div>
+                                )}
+                                <p className="text-xs text-text-tertiary">{setting.description}</p>
+                                {setting.source === 'db' && setting.updated_by && (
+                                  <p className="text-xs text-text-quaternary">Modified by {setting.updated_by}</p>
+                                )}
+                              </div>
+                            )
+                          }
+
+                          // ---- PEER_ANALYSIS_MAX_ROUNDS: managed by PeerConfigList ----
+                          if (setting.key === 'peer_analysis_max_rounds') {
+                            return (
+                              <div key={setting.key} className="py-3 space-y-1">
+                                <div className="flex items-center gap-2">
+                                  <span className="font-mono text-xs font-semibold text-text-primary">{setting.env_var}</span>
+                                  <SourceBadge source={setting.source} />
+                                </div>
+                                <p className="text-xs text-text-tertiary">
+                                  Managed via Peer AI Configs above. Current: <span className="font-mono font-medium text-text-primary">{setting.value || '3'}</span>
+                                </p>
+                              </div>
+                            )
+                          }
+
+                          // ---- ADDITIONAL_REPOS: structured editor ----
+                          if (setting.key === 'additional_repos') {
+                            return (
+                              <div key={setting.key} className="py-3 space-y-2">
+                                <div className="flex items-center gap-2">
+                                  <span className="font-mono text-xs font-semibold text-text-primary">{setting.env_var}</span>
+                                  <SourceBadge source={setting.source} />
+                                </div>
+                                {reposEditing ? (
+                                  <div className="space-y-3">
+                                    <AdditionalReposList repos={additionalRepos} setRepos={setAdditionalRepos} />
+                                    <div className="flex items-center gap-2 pt-1">
+                                      <Button size="sm" onClick={handleSaveRepos} disabled={state.saving} className="h-7 text-xs">
+                                        {state.saving ? <><Loader2 className="mr-1 h-3 w-3 animate-spin" />Saving</> : 'Save'}
+                                      </Button>
+                                      <Button size="sm" variant="outline" onClick={() => setReposEditing(false)} className="h-7 text-xs">Cancel</Button>
+                                      {setting.source === 'db' && (
+                                        <Button size="sm" variant="ghost" onClick={() => handleReset(setting.key)} className="h-7 text-xs text-text-tertiary hover:text-signal-red">
+                                          <RotateCcw className="mr-1 h-3 w-3" /> Reset
+                                        </Button>
+                                      )}
+                                    </div>
+                                  </div>
+                                ) : (
+                                  <div>
+                                    {setting.value ? (
+                                      <div className="space-y-1">
+                                        {setting.value.split(',').map((entry, i) => {
+                                          const trimmed = entry.trim()
+                                          const colonIdx = trimmed.indexOf(':')
+                                          const name = colonIdx > 0 ? trimmed.slice(0, colonIdx) : trimmed
+                                          const urlPart = colonIdx > 0 ? trimmed.slice(colonIdx + 1) : ''
+                                          return (
+                                            <div key={i} className="inline-flex items-center gap-2 rounded-md bg-surface-elevated px-2 py-1 text-xs font-mono border border-border-default mr-1.5">
+                                              <span className="font-semibold text-text-primary">{name}</span>
+                                              <span className="text-text-tertiary truncate max-w-[300px]">{urlPart}</span>
+                                            </div>
+                                          )
+                                        })}
+                                      </div>
+                                    ) : (
+                                      <span className="text-xs text-text-tertiary italic">Not configured</span>
+                                    )}
+                                    <button type="button" onClick={() => handleStartReposEdit(setting)} className="mt-1.5 text-xs text-text-link hover:text-signal-blue font-medium">
+                                      Configure repositories
+                                    </button>
+                                  </div>
+                                )}
+                                <p className="text-xs text-text-tertiary">{setting.description}</p>
+                                {setting.source === 'db' && setting.updated_by && (
+                                  <p className="text-xs text-text-quaternary">Modified by {setting.updated_by}</p>
+                                )}
+                              </div>
+                            )
+                          }
+
+                          // ---- Default: generic SettingRow ----
+                          return (
+                            <SettingRow
+                              key={setting.key}
+                              setting={setting}
+                              isEditing={state.editingKey === setting.key}
+                              editValue={state.editValue}
+                              saving={state.saving}
+                              resetting={state.resettingKey === setting.key}
+                              revealed={state.revealedKeys.has(setting.key)}
+                              onStartEdit={() =>
+                                dispatch({
+                                  type: 'START_EDIT',
+                                  key: setting.key,
+                                  currentValue: setting.value,
+                                })
+                              }
+                              onCancelEdit={() => dispatch({ type: 'CANCEL_EDIT' })}
+                              onSetEditValue={(v) => dispatch({ type: 'SET_EDIT_VALUE', value: v })}
+                              onSave={() => handleSave(setting.key, state.editValue)}
+                              onReset={() => handleReset(setting.key)}
+                              onToggleReveal={() => dispatch({ type: 'TOGGLE_REVEAL', key: setting.key })}
+                              onBooleanToggle={() => handleBooleanToggle(setting.key, setting.value)}
+                            />
+                          )
+                        })}
                       </div>
                     </CardContent>
                   )}
