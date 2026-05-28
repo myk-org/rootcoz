@@ -156,9 +156,23 @@ const initialState: PageState = {
 // Parse / serialize helpers
 // ---------------------------------------------------------------------------
 
+function splitOutsideBrackets(raw: string): string[] {
+  const parts: string[] = []
+  let current = ''
+  let depth = 0
+  for (const ch of raw) {
+    if (ch === '[') { depth++; current += ch }
+    else if (ch === ']') { depth--; current += ch }
+    else if (ch === ',' && depth === 0) { parts.push(current); current = '' }
+    else { current += ch }
+  }
+  if (current) parts.push(current)
+  return parts
+}
+
 function parsePeerConfigString(raw: string): PeerConfigWithId[] {
   if (!raw || !raw.trim()) return []
-  return raw.split(',').map(entry => {
+  return splitOutsideBrackets(raw).map(entry => {
     const trimmed = entry.trim()
     if (!trimmed.includes(':')) return null
     const [provider, ...modelParts] = trimmed.split(':')
@@ -182,14 +196,32 @@ function parseAdditionalReposString(raw: string): RepoWithId[] {
   return raw.split(',').map(entry => {
     const trimmed = entry.trim()
     if (!trimmed.includes(':')) return null
-    const [name, ...rest] = trimmed.split(':')
-    const urlAndRef = rest.join(':')
-    return {
-      id: crypto.randomUUID(),
-      name: name.trim(),
-      url: urlAndRef.trim(),
-      ref: '',
+    const colonIdx = trimmed.indexOf(':')
+    const name = trimmed.slice(0, colonIdx).trim()
+    const urlAndRef = trimmed.slice(colonIdx + 1).trim()
+
+    // URL contains :// — find the path portion after the netloc
+    // Format: https://host/org/repo or https://host/org/repo:ref
+    // The ref is after the LAST colon in the path (not in the scheme)
+    let url = urlAndRef
+    let ref = ''
+
+    // Find the end of scheme+netloc (after ://)
+    const schemeEnd = urlAndRef.indexOf('://')
+    if (schemeEnd >= 0) {
+      const pathStart = urlAndRef.indexOf('/', schemeEnd + 3)
+      if (pathStart >= 0) {
+        const pathPortion = urlAndRef.slice(pathStart)
+        const lastColon = pathPortion.lastIndexOf(':')
+        if (lastColon > 0) {
+          // There's a colon in the path — it's the ref separator
+          ref = pathPortion.slice(lastColon + 1)
+          url = urlAndRef.slice(0, pathStart + lastColon)
+        }
+      }
     }
+
+    return { id: crypto.randomUUID(), name, url, ref }
   }).filter((r): r is RepoWithId => r !== null && !!r.name)
 }
 
@@ -279,12 +311,13 @@ export function ServerSettingsPage() {
   }, [])
 
   // ---- Shared save helper ----
-  async function saveSettingValue(key: string, value: string) {
+  async function saveSettingValue(key: string, value: string): Promise<boolean> {
     dispatch({ type: 'SAVE_START' })
     try {
       await api.put('/api/admin/settings', { settings: { [key]: value } })
       dispatch({ type: 'SAVE_SUCCESS' })
       fetchSettings()
+      return true
     } catch (err) {
       let msg = 'Failed to save'
       if (err instanceof ApiError) {
@@ -292,6 +325,7 @@ export function ServerSettingsPage() {
         msg = body?.detail ?? `Save failed (${err.status})`
       }
       dispatch({ type: 'SAVE_ERROR', error: msg })
+      return false
     }
   }
 
@@ -336,6 +370,7 @@ export function ServerSettingsPage() {
       await api.put('/api/admin/settings', { settings: updates })
       dispatch({ type: 'SAVE_SUCCESS' })
       fetchSettings()
+      setPeerEditing(false)  // Only close on success
     } catch (err) {
       let msg = 'Failed to save'
       if (err instanceof ApiError) {
@@ -343,8 +378,8 @@ export function ServerSettingsPage() {
         msg = body?.detail ?? 'Save failed'
       }
       dispatch({ type: 'SAVE_ERROR', error: msg })
+      // Don't close — user can fix and retry
     }
-    setPeerEditing(false)
   }
 
   // ---- Additional repos structured editor ----
@@ -355,8 +390,8 @@ export function ServerSettingsPage() {
 
   async function handleSaveRepos() {
     const reposStr = serializeAdditionalRepos(additionalRepos)
-    await saveSettingValue('additional_repos', reposStr)
-    setReposEditing(false)
+    const ok = await saveSettingValue('additional_repos', reposStr)
+    if (ok) setReposEditing(false)
   }
 
   // ---- Group & filter ----
@@ -529,7 +564,7 @@ export function ServerSettingsPage() {
                                   <div>
                                     {setting.value ? (
                                       <div className="flex flex-wrap gap-1.5">
-                                        {setting.value.split(',').map((entry, i) => {
+                                        {splitOutsideBrackets(setting.value).map((entry, i) => {
                                           const trimmed = entry.trim()
                                           const colonIdx = trimmed.indexOf(':')
                                           const provider = colonIdx > 0 ? trimmed.slice(0, colonIdx) : trimmed
@@ -601,18 +636,13 @@ export function ServerSettingsPage() {
                                   <div>
                                     {setting.value ? (
                                       <div className="space-y-1">
-                                        {setting.value.split(',').map((entry, i) => {
-                                          const trimmed = entry.trim()
-                                          const colonIdx = trimmed.indexOf(':')
-                                          const name = colonIdx > 0 ? trimmed.slice(0, colonIdx) : trimmed
-                                          const urlPart = colonIdx > 0 ? trimmed.slice(colonIdx + 1) : ''
-                                          return (
-                                            <div key={i} className="inline-flex items-center gap-2 rounded-md bg-surface-elevated px-2 py-1 text-xs font-mono border border-border-default mr-1.5">
-                                              <span className="font-semibold text-text-primary">{name}</span>
-                                              <span className="text-text-tertiary truncate max-w-[300px]">{urlPart}</span>
-                                            </div>
-                                          )
-                                        })}
+                                        {parseAdditionalReposString(setting.value).map((repo) => (
+                                          <div key={repo.id} className="inline-flex items-center gap-2 rounded-md bg-surface-elevated px-2 py-1 text-xs font-mono border border-border-default mr-1.5">
+                                            <span className="font-semibold text-text-primary">{repo.name}</span>
+                                            <span className="text-text-tertiary truncate max-w-[300px]">{repo.url}</span>
+                                            {repo.ref && <span className="text-signal-blue">{repo.ref}</span>}
+                                          </div>
+                                        ))}
                                       </div>
                                     ) : (
                                       <span className="text-xs text-text-tertiary italic">Not configured</span>
