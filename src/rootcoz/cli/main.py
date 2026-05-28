@@ -2361,6 +2361,9 @@ def admin_users_reject(
 @admin_settings_app.command("list")
 def admin_settings_list(
     category: str = typer.Option("", "--category", "-c", help="Filter by category."),
+    reveal: bool = typer.Option(
+        False, "--reveal", help="Show sensitive values (default: masked)."
+    ),
     json_output: bool = _JSON_OPTION,
 ):
     """List all server settings with current values and sources."""
@@ -2371,6 +2374,10 @@ def admin_settings_list(
             data = [
                 d for d in data if d.get("category", "").lower() == category.lower()
             ]
+        if not reveal:
+            for d in data:
+                if d.get("sensitive") and d.get("value"):
+                    d["value"] = "••••••••"
         return data
 
     _run_client_command(
