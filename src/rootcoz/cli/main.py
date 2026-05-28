@@ -2369,15 +2369,11 @@ def admin_settings_list(
     """List all server settings with current values and sources."""
 
     def _fetch(c):
-        data = c.admin_list_settings()
+        data = c.admin_list_settings(reveal=reveal)
         if category:
             data = [
                 d for d in data if d.get("category", "").lower() == category.lower()
             ]
-        if not reveal:
-            for d in data:
-                if d.get("sensitive") and d.get("value"):
-                    d["value"] = "••••••••"
         return data
 
     _run_client_command(
@@ -2408,6 +2404,26 @@ def admin_settings_set(
     )
     if not _state.get("json", False):
         typer.echo(f"Updated: {key}")
+
+
+@admin_settings_app.command("history")
+def admin_settings_history(
+    key: str = typer.Option("", "--key", "-k", help="Filter by setting key."),
+    limit: int = typer.Option(50, "--limit", "-l", help="Max entries to return."),
+    json_output: bool = _JSON_OPTION,
+):
+    """Show server settings change history."""
+    _run_client_command(
+        json_output,
+        lambda c: c.admin_settings_history(key=key.lower() if key else "", limit=limit),
+        columns=["changed_at", "key", "action", "changed_by"],
+        labels={
+            "changed_at": "TIME",
+            "key": "SETTING",
+            "action": "ACTION",
+            "changed_by": "BY",
+        },
+    )
 
 
 @admin_settings_app.command("reset")

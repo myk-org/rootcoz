@@ -5415,12 +5415,11 @@ class TestAdminSettingsEndpoints:
         assert "type" in item
         assert "sensitive" in item
         assert "description" in item
-        # Verify sensitive values are returned unmasked (admin-only endpoint;
-        # frontend handles masking via the 'sensitive' flag)
+        # Sensitive values are masked by default
         sensitive_items = [i for i in data if i["sensitive"] and i["value"]]
         for si in sensitive_items:
-            assert si["value"] != "••••••••", (
-                f"Sensitive field {si['key']} should not be masked for admins"
+            assert si["value"] == "••••••••", (
+                f"Sensitive field {si['key']} not masked by default"
             )
 
     def test_get_settings_non_admin_forbidden(self, test_client) -> None:
@@ -5498,5 +5497,13 @@ class TestAdminSettingsEndpoints:
             "/api/admin/settings",
             json={"settings": {"ai_call_timeout": "20"}},
             headers=self._NO_ADMIN_HEADERS,
+        )
+        assert response.status_code in (401, 403)
+
+    def test_delete_settings_non_admin_forbidden(self, test_client) -> None:
+        """Non-admin users cannot reset settings."""
+        response = test_client.delete(
+            "/api/admin/settings/jenkins_url",
+            headers={"Authorization": ""},
         )
         assert response.status_code in (401, 403)

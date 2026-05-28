@@ -7022,7 +7022,12 @@ async def settings_stream(request: Request):
 
 
 @app.get("/api/admin/settings")
-async def get_admin_settings(request: Request) -> JSONResponse:
+async def get_admin_settings(
+    request: Request,
+    reveal_key: str = Query(
+        "", description="Setting key to reveal (or '__all__' for all)"
+    ),
+) -> JSONResponse:
     """Get all server settings with metadata, current values, and sources."""
     _require_admin(request)
     metadata = _get_settings_metadata()
@@ -7052,6 +7057,13 @@ async def get_admin_settings(request: Request) -> JSONResponse:
             item["source"] = "env"
         else:
             item["source"] = "default"
+
+    # Mask sensitive values — only reveal the specifically requested key
+    reveal_all = reveal_key == "__all__"
+    for item in metadata:
+        if item["sensitive"] and item["value"]:
+            if not reveal_all and item["key"] != reveal_key:
+                item["value"] = "••••••••"
 
     return JSONResponse(content=metadata)
 
@@ -7164,6 +7176,18 @@ async def update_admin_settings(request: Request) -> JSONResponse:
     )
 
 
+@app.get("/api/admin/settings/history")
+async def get_settings_history(
+    request: Request,
+    key: str = Query("", description="Filter by setting key"),
+    limit: int = Query(100, description="Max entries to return", gt=0, le=1000),
+) -> JSONResponse:
+    """Get server settings change history."""
+    _require_admin(request)
+    history = await storage.get_server_settings_history(key=key or None, limit=limit)
+    return JSONResponse(content=history)
+
+
 @app.delete("/api/admin/settings/{key}")
 async def reset_admin_setting(request: Request, key: str) -> JSONResponse:
     """Reset a server setting to its env/default value (removes DB override)."""
@@ -7171,7 +7195,9 @@ async def reset_admin_setting(request: Request, key: str) -> JSONResponse:
     if key not in Settings.model_fields:
         raise HTTPException(status_code=404, detail=f"Unknown setting: {key}")
 
-    deleted = await storage.delete_server_setting(key)
+    deleted = await storage.delete_server_setting(
+        key, deleted_by=request.state.username or "admin"
+    )
     if not deleted:
         raise HTTPException(
             status_code=404, detail=f"Setting '{key}' has no DB override"

@@ -168,9 +168,14 @@ class RootCozClient:
             json={"role": role},
         )
 
-    def admin_list_settings(self) -> list[dict]:
+    def admin_list_settings(self, reveal: bool = False) -> list[dict]:
         """List all server settings. GET /api/admin/settings"""
-        return self._request("GET", "/api/admin/settings")
+        params = {}
+        if reveal:
+            params["reveal_key"] = "__all__"
+        return self._request(
+            "GET", "/api/admin/settings", params=params if params else None
+        )
 
     def admin_set_setting(self, key: str, value: str) -> dict:
         """Set a server setting. PUT /api/admin/settings"""
@@ -181,6 +186,13 @@ class RootCozClient:
     def admin_reset_setting(self, key: str) -> dict:
         """Reset a server setting to env/default. DELETE /api/admin/settings/{key}"""
         return self._request("DELETE", f"/api/admin/settings/{key}")
+
+    def admin_settings_history(self, key: str = "", limit: int = 100) -> list[dict]:
+        """Get server settings change history."""
+        params: dict = {"limit": limit}
+        if key:
+            params["key"] = key
+        return self._request("GET", "/api/admin/settings/history", params=params)
 
     def approve_user(self, username: str) -> dict:
         """Approve a pending user. POST /api/admin/users/{username}/approve"""

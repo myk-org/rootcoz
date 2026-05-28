@@ -24,6 +24,7 @@ import {
   AlertTriangle,
   RotateCcw,
   Loader2,
+  Clock,
 } from 'lucide-react'
 import { PeerConfigList } from '@/components/shared/PeerConfigList'
 import type { PeerConfigWithId } from '@/components/shared/PeerConfigList'
@@ -59,6 +60,16 @@ interface CategoryGroup {
 // State reducer
 // ---------------------------------------------------------------------------
 
+interface HistoryEntry {
+  id: number
+  key: string
+  value: string
+  previous_value: string | null
+  action: string
+  changed_by: string
+  changed_at: string
+}
+
 interface PageState {
   settings: ServerSetting[]
   loading: boolean
@@ -71,6 +82,10 @@ interface PageState {
   saveError: string | null
   resettingKey: string | null
   revealedKeys: Set<string>
+  revealedValues: Record<string, string>
+  historyKey: string
+  history: HistoryEntry[]
+  historyLoading: boolean
 }
 
 type PageAction =
@@ -87,9 +102,14 @@ type PageAction =
   | { type: 'SAVE_ERROR'; error: string }
   | { type: 'RESET_START'; key: string }
   | { type: 'RESET_DONE' }
-  | { type: 'TOGGLE_REVEAL'; key: string }
+  | { type: 'REVEAL_VALUE'; key: string; value: string }
+  | { type: 'HIDE_VALUE'; key: string }
   | { type: 'EXPAND_ALL' }
   | { type: 'COLLAPSE_ALL'; categories: string[] }
+  | { type: 'SHOW_HISTORY'; key: string }
+  | { type: 'HIDE_HISTORY' }
+  | { type: 'SET_HISTORY'; history: HistoryEntry[] }
+  | { type: 'SET_HISTORY_LOADING'; loading: boolean }
 
 function reducer(state: PageState, action: PageAction): PageState {
   switch (action.type) {
@@ -123,16 +143,33 @@ function reducer(state: PageState, action: PageAction): PageState {
       return { ...state, resettingKey: action.key }
     case 'RESET_DONE':
       return { ...state, resettingKey: null }
-    case 'TOGGLE_REVEAL': {
-      const next = new Set(state.revealedKeys)
-      if (next.has(action.key)) next.delete(action.key)
-      else next.add(action.key)
-      return { ...state, revealedKeys: next }
+    case 'REVEAL_VALUE': {
+      const nextKeys = new Set(state.revealedKeys)
+      nextKeys.add(action.key)
+      return {
+        ...state,
+        revealedKeys: nextKeys,
+        revealedValues: { ...state.revealedValues, [action.key]: action.value },
+      }
+    }
+    case 'HIDE_VALUE': {
+      const nextKeys = new Set(state.revealedKeys)
+      nextKeys.delete(action.key)
+      const { [action.key]: _, ...restValues } = state.revealedValues
+      return { ...state, revealedKeys: nextKeys, revealedValues: restValues }
     }
     case 'EXPAND_ALL':
       return { ...state, collapsedCategories: new Set<string>() }
     case 'COLLAPSE_ALL':
       return { ...state, collapsedCategories: new Set<string>(action.categories) }
+    case 'SHOW_HISTORY':
+      return { ...state, historyKey: action.key, history: [], historyLoading: true }
+    case 'HIDE_HISTORY':
+      return { ...state, historyKey: '', history: [], historyLoading: false }
+    case 'SET_HISTORY':
+      return { ...state, history: action.history, historyLoading: false }
+    case 'SET_HISTORY_LOADING':
+      return { ...state, historyLoading: action.loading }
     default:
       return state
   }
@@ -150,6 +187,10 @@ const initialState: PageState = {
   saveError: null,
   resettingKey: null,
   revealedKeys: new Set(),
+  revealedValues: {},
+  historyKey: '',
+  history: [],
+  historyLoading: false,
 }
 
 // ---------------------------------------------------------------------------
@@ -394,6 +435,42 @@ export function ServerSettingsPage() {
     if (ok) setReposEditing(false)
   }
 
+  // ---- Toggle reveal (fetch real value from server) ----
+  async function handleToggleReveal(key: string) {
+    if (state.revealedKeys.has(key)) {
+      dispatch({ type: 'HIDE_VALUE', key })
+      return
+    }
+    try {
+      const data = await api.get<ServerSetting[]>(
+        `/api/admin/settings?reveal_key=${encodeURIComponent(key)}`
+      )
+      const item = data.find(s => s.key === key)
+      if (item) {
+        dispatch({ type: 'REVEAL_VALUE', key, value: item.value })
+      }
+    } catch {
+      // Silently fail — can't reveal
+    }
+  }
+
+  // ---- Show history ----
+  async function handleShowHistory(key: string) {
+    if (state.historyKey === key) {
+      dispatch({ type: 'HIDE_HISTORY' })
+      return
+    }
+    dispatch({ type: 'SHOW_HISTORY', key })
+    try {
+      const data = await api.get<HistoryEntry[]>(
+        `/api/admin/settings/history?key=${encodeURIComponent(key)}&limit=20`
+      )
+      dispatch({ type: 'SET_HISTORY', history: data })
+    } catch {
+      dispatch({ type: 'SET_HISTORY', history: [] })
+    }
+  }
+
   // ---- Group & filter ----
   const groups: CategoryGroup[] = useMemo(() => {
     const query = state.search.toLowerCase()
@@ -590,6 +667,16 @@ export function ServerSettingsPage() {
                                 {setting.source === 'db' && setting.updated_by && (
                                   <p className="text-xs text-text-quaternary">Modified by {setting.updated_by}</p>
                                 )}
+                                {setting.source === 'db' && (
+                                  <HistoryToggle
+                                    settingKey={setting.key}
+                                    sensitive={setting.sensitive}
+                                    historyKey={state.historyKey}
+                                    history={state.history}
+                                    historyLoading={state.historyLoading}
+                                    onShowHistory={() => handleShowHistory(setting.key)}
+                                  />
+                                )}
                               </div>
                             )
                           }
@@ -656,6 +743,16 @@ export function ServerSettingsPage() {
                                 {setting.source === 'db' && setting.updated_by && (
                                   <p className="text-xs text-text-quaternary">Modified by {setting.updated_by}</p>
                                 )}
+                                {setting.source === 'db' && (
+                                  <HistoryToggle
+                                    settingKey={setting.key}
+                                    sensitive={setting.sensitive}
+                                    historyKey={state.historyKey}
+                                    history={state.history}
+                                    historyLoading={state.historyLoading}
+                                    onShowHistory={() => handleShowHistory(setting.key)}
+                                  />
+                                )}
                               </div>
                             )
                           }
@@ -670,18 +767,23 @@ export function ServerSettingsPage() {
                               saving={state.saving}
                               resetting={state.resettingKey === setting.key}
                               revealed={state.revealedKeys.has(setting.key)}
+                              historyKey={state.historyKey}
+                              history={state.history}
+                              historyLoading={state.historyLoading}
+                              onShowHistory={() => handleShowHistory(setting.key)}
+                              revealedValue={state.revealedValues[setting.key]}
                               onStartEdit={() =>
                                 dispatch({
                                   type: 'START_EDIT',
                                   key: setting.key,
-                                  currentValue: setting.value,
+                                  currentValue: state.revealedValues[setting.key] ?? setting.value,
                                 })
                               }
                               onCancelEdit={() => dispatch({ type: 'CANCEL_EDIT' })}
                               onSetEditValue={(v) => dispatch({ type: 'SET_EDIT_VALUE', value: v })}
                               onSave={() => handleSave(setting.key, state.editValue)}
                               onReset={() => handleReset(setting.key)}
-                              onToggleReveal={() => dispatch({ type: 'TOGGLE_REVEAL', key: setting.key })}
+                              onToggleReveal={() => handleToggleReveal(setting.key)}
                               onBooleanToggle={() => handleBooleanToggle(setting.key, setting.value)}
                             />
                           )
@@ -710,6 +812,11 @@ interface SettingRowProps {
   saving: boolean
   resetting: boolean
   revealed: boolean
+  revealedValue?: string
+  historyKey: string
+  history: HistoryEntry[]
+  historyLoading: boolean
+  onShowHistory: () => void
   onStartEdit: () => void
   onCancelEdit: () => void
   onSetEditValue: (value: string) => void
@@ -726,6 +833,11 @@ function SettingRow({
   saving,
   resetting,
   revealed,
+  revealedValue,
+  historyKey,
+  history,
+  historyLoading,
+  onShowHistory,
   onStartEdit,
   onCancelEdit,
   onSetEditValue,
@@ -743,7 +855,9 @@ function SettingRow({
     }
   }, [isEditing])
 
-  const displayValue = setting.sensitive && !revealed ? '••••••••' : setting.value
+  const displayValue = setting.sensitive
+    ? (revealed && revealedValue !== undefined ? revealedValue : '••••••••')
+    : setting.value
 
   // ---- Editing mode ----
   if (isEditing) {
@@ -855,6 +969,18 @@ function SettingRow({
               )}
             </p>
           )}
+
+          {/* History toggle & entries */}
+          {setting.source === 'db' && (
+            <HistoryToggle
+              settingKey={setting.key}
+              sensitive={setting.sensitive}
+              historyKey={historyKey}
+              history={history}
+              historyLoading={historyLoading}
+              onShowHistory={onShowHistory}
+            />
+          )}
         </div>
 
         {/* Right side: actions */}
@@ -893,6 +1019,75 @@ function SettingRow({
         </div>
       </div>
     </div>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// History Toggle
+// ---------------------------------------------------------------------------
+
+interface HistoryToggleProps {
+  settingKey: string
+  sensitive: boolean
+  historyKey: string
+  history: HistoryEntry[]
+  historyLoading: boolean
+  onShowHistory: () => void
+}
+
+function HistoryToggle({
+  settingKey,
+  sensitive,
+  historyKey,
+  history,
+  historyLoading,
+  onShowHistory,
+}: HistoryToggleProps) {
+  const isOpen = historyKey === settingKey
+  return (
+    <>
+      <div className="flex items-center gap-2 mt-1">
+        <button
+          type="button"
+          onClick={onShowHistory}
+          className="inline-flex items-center gap-1 text-xs text-text-link hover:text-signal-blue font-medium"
+        >
+          <Clock className="h-3 w-3" />
+          {isOpen ? 'Hide history' : 'Show history'}
+        </button>
+      </div>
+
+      {isOpen && (
+        <div className="mt-2 space-y-1 border-l-2 border-border-default pl-3">
+          {historyLoading ? (
+            <p className="text-xs text-text-tertiary">Loading...</p>
+          ) : history.length === 0 ? (
+            <p className="text-xs text-text-tertiary italic">No history</p>
+          ) : (
+            history.map((entry) => (
+              <div key={entry.id} className="text-xs text-text-secondary">
+                <span className="text-text-tertiary">
+                  {new Date(entry.changed_at + 'Z').toLocaleString()}
+                </span>
+                {' · '}
+                <span className={entry.action === 'reset' ? 'text-signal-amber' : 'text-signal-blue'}>
+                  {entry.action}
+                </span>
+                {entry.changed_by && <> by <span className="font-medium">{entry.changed_by}</span></>}
+                {entry.action === 'set' && entry.previous_value !== null && (
+                  <span className="text-text-quaternary">
+                    {' · '}
+                    <span className="line-through">{sensitive ? '••••' : (entry.previous_value || '(empty)')}</span>
+                    {' → '}
+                    {sensitive ? '••••' : (entry.value || '(empty)')}
+                  </span>
+                )}
+              </div>
+            ))
+          )}
+        </div>
+      )}
+    </>
   )
 }
 
