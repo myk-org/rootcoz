@@ -565,6 +565,31 @@ async def chat_with_ai(
         session_id=session_id,
     )
 
+    # If session was lost (sidecar restart, expiry), retry with a fresh session
+    if not result.success and session_id and "not found" in result.text.lower():
+        logger.warning(
+            "Chat: session %s lost for job %s, rebuilding with full context",
+            session_id,
+            job_id,
+        )
+        # Rebuild full prompt with system prompt + history (same as first message)
+        system_prompt = build_system_prompt(
+            job_name=job_name,
+            build_number=build_number,
+            job_id=job_id,
+            available_scripts=available_scripts or [],
+            repos_available=repos_available,
+        )
+        prompt = build_chat_prompt(system_prompt, history, message)
+        result = await call_ai(
+            prompt,
+            ai_provider=ai_provider,
+            ai_model=ai_model,
+            cwd=str(repo_path) if repo_path else None,
+            ai_call_timeout=ai_call_timeout,
+            session_id=None,  # Force new session
+        )
+
     # Record usage
     await result.record_usage(
         request_id=job_id,

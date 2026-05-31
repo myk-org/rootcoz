@@ -8309,8 +8309,17 @@ async def _process_chat_message(
                     "Chat AI call failed for job %s: %s", job_id, response_text
                 )
                 # Update assistant message with error
+                # Show user-friendly error, not raw sidecar messages
+                user_error = response_text
+                if (
+                    "not found" in response_text.lower()
+                    or "session" in response_text.lower()
+                ):
+                    user_error = (
+                        "AI session expired. Please try sending your message again."
+                    )
                 await storage.update_chat_message_content(
-                    assistant_msg_id, f"Error: {response_text}"
+                    assistant_msg_id, f"Error: {user_error}"
                 )
                 await storage.update_chat_message_status(assistant_msg_id, "failed")
                 notify_chat_changed(job_id, username=username)
