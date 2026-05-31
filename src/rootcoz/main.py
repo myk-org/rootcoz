@@ -7907,35 +7907,37 @@ async def init_chat(job_id: str, request: Request) -> dict:
         github_repo,
     ) = await _resolve_chat_credentials(decrypted_params, username)
 
-    # Clone repos and setup scripts
+    # Clone repos
     repos_available = await clone_chat_repos(workspace, decrypted_params)
 
-    # Initialize AI session (scripts will be set up later during message processing)
-    session_id = await init_chat_session(
-        job_id=job_id,
-        job_name=result_data.get("job_name", "unknown"),
-        build_number=result_data.get("build_number", 0),
-        ai_provider=ai_provider,
-        ai_model=ai_model,
-        repo_path=workspace,
-        available_scripts=[],
-        repos_available=repos_available,
-    )
-
-    # Store session_id for this user+job — only on first init (avoid duplicate hidden rows)
-    if session_id:
+    # Only create sidecar session on first init (avoid wasting sessions on re-init)
+    # Use per-user lock to prevent duplicate hidden rows from concurrent requests
+    session_id: str | None = ""
+    lock = _get_chat_lock(f"{job_id}:{username}")
+    async with lock:
         existing = await storage.get_chat_messages(job_id, limit=1, username=username)
         if not existing:
-            await storage.add_chat_message(
+            session_id = await init_chat_session(
                 job_id=job_id,
-                role="assistant",
-                content="",  # Hidden init message
-                username=username,
+                job_name=result_data.get("job_name", "unknown"),
+                build_number=result_data.get("build_number", 0),
                 ai_provider=ai_provider,
                 ai_model=ai_model,
-                session_id=session_id,
-                status="completed",
+                repo_path=workspace,
+                available_scripts=[],
+                repos_available=repos_available,
             )
+            if session_id:
+                await storage.add_chat_message(
+                    job_id=job_id,
+                    role="assistant",
+                    content="",  # Hidden init message
+                    username=username,
+                    ai_provider=ai_provider,
+                    ai_model=ai_model,
+                    session_id=session_id,
+                    status="completed",
+                )
 
     logger.info(
         "Chat init for job %s: workspace=%s, repos=%s, session=%s",
