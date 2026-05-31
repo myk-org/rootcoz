@@ -572,6 +572,14 @@ async def chat_with_ai(
             session_id,
             job_id,
         )
+        # Record usage for the failed attempt before retrying
+        await result.record_usage(
+            request_id=job_id,
+            call_type="chat",
+            prompt_chars=len(prompt),
+            ai_provider=ai_provider,
+            ai_model=ai_model,
+        )
         # Rebuild full prompt with system prompt + history (same as first message)
         system_prompt = build_system_prompt(
             job_name=job_name,
