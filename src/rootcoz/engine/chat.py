@@ -359,11 +359,16 @@ def build_chat_custom_tools(
         tools.append(
             {
                 "name": "search_jira",
-                "description": "Search Jira for issues matching keywords. Returns up to 5 results.",
+                "description": "Search Jira for issues matching keywords.",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "query": {"type": "string", "description": "Search keywords"},
+                        "limit": {
+                            "type": "string",
+                            "description": "Max results (default 10)",
+                            "default": "10",
+                        },
                     },
                     "required": ["query"],
                 },
@@ -373,7 +378,7 @@ def build_chat_custom_tools(
                     "headers": {**jira_auth, "Accept": "application/json"},
                     "query_params": {
                         "jql": 'summary ~ "{query}" ORDER BY updated DESC',
-                        "maxResults": "5",
+                        "maxResults": "{limit}",
                         "fields": "summary,status,assignee,created,updated",
                     },
                 },
@@ -416,6 +421,11 @@ def build_chat_custom_tools(
                     "type": "object",
                     "properties": {
                         "query": {"type": "string", "description": "Search keywords"},
+                        "limit": {
+                            "type": "string",
+                            "description": "Max results (default 10)",
+                            "default": "10",
+                        },
                     },
                     "required": ["query"],
                 },
@@ -425,7 +435,7 @@ def build_chat_custom_tools(
                     "headers": gh_headers,
                     "query_params": {
                         "q": "{query} repo:" + github_repo,
-                        "per_page": "5",
+                        "per_page": "{limit}",
                     },
                 },
             }

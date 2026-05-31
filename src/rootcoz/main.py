@@ -8265,18 +8265,22 @@ async def _process_chat_message(
             auth_header = await _create_ai_auth_header(username)
 
             # Build HTTP-backed custom tools
-            custom_tools = build_chat_custom_tools(
-                server_url=server_url,
-                auth_token=auth_header.removeprefix("Bearer ").strip()
-                if auth_header
-                else "",
-                job_id=job_id,
-                jira_url=jira_url,
-                jira_email=jira_email,
-                jira_token=jira_token,
-                github_token=github_token,
-                github_repo=github_repo,
-            )
+            custom_tools: list[dict] = []
+            if auth_header:
+                custom_tools = build_chat_custom_tools(
+                    server_url=server_url,
+                    auth_token=auth_header.removeprefix("Bearer ").strip(),
+                    job_id=job_id,
+                    jira_url=jira_url,
+                    jira_email=jira_email,
+                    jira_token=jira_token,
+                    github_token=github_token,
+                    github_repo=github_repo,
+                )
+            else:
+                logger.warning(
+                    "Chat: no auth token for %s — tools unavailable", username
+                )
 
             # Check if aborted before starting AI call
             abort_key = f"{job_id}:{username}"
