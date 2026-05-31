@@ -138,6 +138,7 @@ from rootcoz.request_resolution import resolve_tests_repo_token
 from rootcoz.sources import CISource, FileSource, RawSource
 from rootcoz.sources.jenkins_source import analyze_job, wait_for_jenkins_completion
 from rootcoz.storage import (
+    DB_PATH,
     get_effective_classification,
     get_history_classification,
     get_result,
@@ -8493,7 +8494,8 @@ async def init_admin_chat(request: Request) -> dict:
                     server_url=server_url,
                     auth_token=auth_header.removeprefix("Bearer ").strip(),
                     job_id=ADMIN_CHAT_JOB_ID,
-                    scripts=["rootcoz-chat-server"],
+                    scripts=["rootcoz-chat-db"],
+                    db_path=str(DB_PATH),
                 )
             else:
                 logger.warning("Admin chat init: no auth token for %s", username)
@@ -8735,7 +8737,8 @@ async def _process_admin_chat_message(
                 if auth_header
                 else "",
                 job_id=ADMIN_CHAT_JOB_ID,
-                scripts=["rootcoz-chat-server"],
+                scripts=["rootcoz-chat-db"],
+                db_path=str(DB_PATH),
             )
 
             abort_key = f"{ADMIN_CHAT_JOB_ID}:{username}"

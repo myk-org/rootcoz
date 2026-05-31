@@ -23,7 +23,7 @@ _CHAT_SCRIPTS = [
     "rootcoz_chat_job.py",
     "rootcoz_chat_jira.py",
     "rootcoz_chat_github.py",
-    "rootcoz_chat_server.py",
+    "rootcoz_chat_db.py",
 ]
 
 # Maps wrapper name -> (script file, condition checker)
@@ -32,7 +32,7 @@ _SCRIPT_WRAPPERS: dict[str, str] = {
     "rootcoz-chat-job": "rootcoz_chat_job.py",
     "rootcoz-chat-jira": "rootcoz_chat_jira.py",
     "rootcoz-chat-github": "rootcoz_chat_github.py",
-    "rootcoz-chat-server": "rootcoz_chat_server.py",
+    "rootcoz-chat-db": "rootcoz_chat_db.py",
 }
 
 
@@ -196,12 +196,13 @@ def setup_chat_scripts(
     github_token: str = "",
     github_repo: str = "",
     scripts: list[str] | None = None,
+    db_path: str = "",
 ) -> list[str]:
     """Copy chat scripts into workspace and write env config.
 
     Args:
         scripts: If provided, install only these wrapper scripts (by wrapper name,
-                 e.g. ["rootcoz-chat-server"]). If None, use the default
+                 e.g. ["rootcoz-chat-db"]). If None, use the default
                  job-scoped script selection (job + optional jira/github).
 
     Returns list of available script names (only scripts whose required
@@ -241,6 +242,8 @@ def setup_chat_scripts(
         env_lines.append(_env_line("ROOTCOZ_GITHUB_TOKEN", github_token))
     if github_repo:
         env_lines.append(_env_line("ROOTCOZ_GITHUB_REPO", github_repo))
+    if db_path:
+        env_lines.append(_env_line("ROOTCOZ_DB_PATH", db_path))
 
     env_file = workspace / ".chat_env"
     env_file.write_text("\n".join(env_lines) + "\n")
@@ -359,7 +362,7 @@ _SCRIPT_DESCRIPTIONS: dict[str, str] = {
     "rootcoz-chat-job": "Query job data (failures, analyses, comments, history)",
     "rootcoz-chat-jira": "Search Jira issues, get issue details, find related tickets",
     "rootcoz-chat-github": "Search GitHub issues/PRs, get details",
-    "rootcoz-chat-server": "Query server-wide data: list jobs, failure stats, user activity, test history, search failures, server settings",
+    "rootcoz-chat-db": "Read-only SQL query tool — run 'schema' to see tables, 'query <SQL>' to execute queries",
 }
 
 
@@ -473,7 +476,9 @@ def build_admin_system_prompt(
 Scripts in your working directory (under `bin/`) — use these to access data:
 {tools_section}
 
-**IMPORTANT:** Use these scripts to get data when the user asks a question. Do NOT run scripts proactively — only fetch data that's relevant to what the user is asking about.{unavailable_section}
+**WORKFLOW:** First run `./bin/rootcoz-chat-db schema` to understand the database structure, then write targeted SQL queries with `./bin/rootcoz-chat-db query "SELECT ..."` to answer questions.
+
+**SENSITIVE DATA:** Some columns contain encrypted values (tokens, passwords). Never output raw encrypted field values — they are ciphertext and useless to the user.{unavailable_section}
 
 ## Rules — STRICT
 - You MUST only discuss server data and CI/CD analytics
