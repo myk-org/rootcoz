@@ -542,7 +542,7 @@ async def chat_with_ai(
 
     # Record usage
     await result.record_usage(
-        job_id=job_id,
+        request_id=job_id,
         call_type="chat",
         prompt_chars=len(prompt),
         ai_provider=ai_provider,
