@@ -7900,7 +7900,10 @@ async def init_chat(job_id: str, request: Request) -> dict:
     session_id: str | None = ""
     lock = _get_chat_lock(f"{job_id}:{username}")
     async with lock:
-        # Clone repos inside lock to prevent concurrent clones with _process_chat_message
+        # Clone repos inside lock to prevent concurrent clones with _process_chat_message.
+        # Tradeoff: this blocks message processing until cloning finishes, but the frontend
+        # init has a 10s timeout so user input is never blocked indefinitely. Without the lock,
+        # concurrent init + message can clone into the same workspace causing corruption.
         repos_available = await clone_chat_repos(workspace, decrypted_params)
 
         existing = await storage.get_chat_messages(job_id, limit=1, username=username)

@@ -12,6 +12,8 @@ import { Send, ArrowLeft, Loader2, Bot, User, Copy, Check } from 'lucide-react'
 import { LinkedText } from '@/components/shared/LinkedText'
 import { ChatMarkdown } from '@/components/shared/ChatMarkdown'
 
+const EMPTY_REPO_URLS: string[] = []
+
 interface ChatMessage {
   id: number
   job_id: string
@@ -350,14 +352,12 @@ export function ChatPage() {
                       Stop
                     </Button>
                   </div>
+                ) : msg.role === 'assistant' ? (
+                  <ChatMarkdown content={msg.content} />
                 ) : (
-                  {msg.role === 'assistant' ? (
-                    <ChatMarkdown content={msg.content} />
-                  ) : (
-                    <div className="whitespace-pre-wrap break-words">
-                      <LinkedText text={msg.content} repoUrls={[]} />
-                    </div>
-                  )}
+                  <div className="whitespace-pre-wrap break-words">
+                    <LinkedText text={msg.content} repoUrls={EMPTY_REPO_URLS} />
+                  </div>
                 )}
                 <div className="flex items-center justify-between mt-2">
                   <div className="flex items-center gap-2 text-[10px] text-text-tertiary">
