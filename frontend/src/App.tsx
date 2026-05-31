@@ -18,6 +18,7 @@ import { MentionsPage } from '@/pages/MentionsPage'
 import { NewAnalysisPage } from '@/pages/NewAnalysisPage'
 import { PendingApprovalPage } from '@/pages/PendingApprovalPage'
 import { ServerSettingsPage } from '@/pages/ServerSettingsPage'
+import { AdminChatPage } from '@/pages/AdminChatPage'
 
 export default function App() {
   return (
@@ -40,6 +41,7 @@ export default function App() {
             <Route path="/admin/users" element={<ProtectedRoute adminOnly><UsersPage /></ProtectedRoute>} />
             <Route path="/admin/token-usage" element={<ProtectedRoute adminOnly><TokenUsagePage /></ProtectedRoute>} />
             <Route path="/admin/settings" element={<ProtectedRoute adminOnly><ServerSettingsPage /></ProtectedRoute>} />
+            <Route path="/admin/chat" element={<ProtectedRoute adminOnly><AdminChatPage /></ProtectedRoute>} />
           </Route>
         </Routes>
       </BrowserRouter>

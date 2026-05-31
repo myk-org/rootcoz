@@ -105,7 +105,7 @@ export function NavBar() {
     : BASE_NAV_LINKS
 
   const navLinks = isAdmin
-    ? [...baseNavLinks, { to: '/admin/users', label: 'Users' }, { to: '/admin/token-usage', label: 'Token Usage' }, { to: '/admin/settings', label: 'Settings' }]
+    ? [...baseNavLinks, { to: '/admin/users', label: 'Users' }, { to: '/admin/token-usage', label: 'Token Usage' }, { to: '/admin/settings', label: 'Settings' }, { to: '/admin/chat', label: 'Server Chat' }]
     : baseNavLinks
 
   return (

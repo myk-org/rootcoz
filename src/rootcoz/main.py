@@ -8053,6 +8053,8 @@ async def abort_chat(job_id: str, request: Request) -> dict:
 # Per-job chat processing locks — ensures sequential message processing
 _chat_locks: dict[str, asyncio.Lock] = {}
 
+ADMIN_CHAT_JOB_ID = "__admin_chat__"
+
 
 def _get_chat_lock(job_id: str) -> asyncio.Lock:
     """Get or create a per-job chat processing lock."""
@@ -8431,6 +8433,419 @@ async def clear_chat_history(job_id: str, request: Request) -> dict:
     logger.info(
         "Chat: cleared %d messages for job %s, user %s", count, job_id, username
     )
+    return {"deleted": count}
+
+
+# -- Admin chat endpoints --
+
+
+@app.get("/api/admin/chat")
+async def get_admin_chat_history(
+    request: Request,
+    limit: int = Query(default=200, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
+) -> dict:
+    """Get admin chat history."""
+    _require_admin(request)
+    username = getattr(request.state, "username", "")
+    messages = await storage.get_chat_messages(
+        ADMIN_CHAT_JOB_ID, limit=limit, offset=offset, username=username
+    )
+    messages = [
+        m
+        for m in messages
+        if m.get("content") or m.get("status") in ("pending", "failed")
+    ]
+    total = await storage.count_chat_messages(ADMIN_CHAT_JOB_ID, username=username)
+    return {"messages": messages, "total": total}
+
+
+@app.post("/api/admin/chat/init")
+async def init_admin_chat(request: Request) -> dict:
+    """Initialize admin chat workspace and AI session."""
+    _require_admin(request)
+    from rootcoz.engine.chat import (
+        ensure_chat_workspace,
+        setup_chat_scripts,
+        init_admin_chat_session,
+    )
+
+    username = getattr(request.state, "username", "")
+    ai_provider = AI_PROVIDER
+    ai_model = AI_MODEL
+
+    workspace = ensure_chat_workspace(ADMIN_CHAT_JOB_ID, username=username)
+
+    session_id: str | None = ""
+    lock = _get_chat_lock(f"{ADMIN_CHAT_JOB_ID}:{username}")
+    async with lock:
+        existing = await storage.get_chat_messages(
+            ADMIN_CHAT_JOB_ID, limit=1, username=username
+        )
+        if not existing:
+            available_scripts: list[str] = []
+            auth_header = await _create_ai_auth_header(username)
+            if auth_header:
+                server_url = _build_internal_server_url()
+                available_scripts = setup_chat_scripts(
+                    workspace,
+                    server_url=server_url,
+                    auth_token=auth_header.removeprefix("Bearer ").strip(),
+                    job_id=ADMIN_CHAT_JOB_ID,
+                    scripts=["rootcoz-chat-server"],
+                )
+            else:
+                logger.warning("Admin chat init: no auth token for %s", username)
+
+            session_id = await init_admin_chat_session(
+                ai_provider=ai_provider,
+                ai_model=ai_model,
+                repo_path=workspace,
+                available_scripts=available_scripts,
+            )
+            if session_id:
+                await storage.add_chat_message(
+                    job_id=ADMIN_CHAT_JOB_ID,
+                    role="assistant",
+                    content="",
+                    username=username,
+                    ai_provider=ai_provider,
+                    ai_model=ai_model,
+                    session_id=session_id,
+                    status="completed",
+                )
+            await _cleanup_ai_session(auth_header)
+
+    logger.info("Admin chat init: workspace=%s, session=%s", workspace, session_id)
+    return {"ready": True, "session_id": session_id or ""}
+
+
+@app.post("/api/admin/chat/close")
+async def close_admin_chat(request: Request) -> dict:
+    """Signal that a user left the admin chat page."""
+    _require_admin(request)
+    logger.info("Admin chat: user left admin chat page")
+    return {"status": "ok"}
+
+
+@app.post("/api/admin/chat/abort")
+async def abort_admin_chat(request: Request) -> dict:
+    """Abort the currently processing admin chat message for this user."""
+    _require_admin(request)
+    username = request.state.username
+    key = f"{ADMIN_CHAT_JOB_ID}:{username}"
+    signal = _get_chat_abort_signal(key)
+    signal.set()
+
+    pending = await storage.get_pending_chat_messages(
+        ADMIN_CHAT_JOB_ID, username=username
+    )
+    for msg in pending:
+        await storage.update_chat_message_content(msg["id"], "Aborted by user.")
+        await storage.update_chat_message_status(msg["id"], "failed")
+
+    if pending:
+        notify_chat_changed(ADMIN_CHAT_JOB_ID, username=username)
+
+    try:
+        target_session_id = None
+        for msg in pending:
+            if msg.get("session_id"):
+                target_session_id = msg["session_id"]
+                break
+        if not target_session_id:
+            total = await storage.count_chat_messages(
+                ADMIN_CHAT_JOB_ID, username=username
+            )
+            if total > 0:
+                tail_offset = max(total - 10, 0)
+                recent = await storage.get_chat_messages(
+                    ADMIN_CHAT_JOB_ID, username=username, limit=10, offset=tail_offset
+                )
+                for msg in reversed(recent):
+                    if msg.get("role") == "assistant" and msg.get("session_id"):
+                        target_session_id = msg["session_id"]
+                        break
+
+        if target_session_id:
+            from pi_sidecar_client import get_sidecar_client
+
+            client = get_sidecar_client()
+            await client.abort(target_session_id)
+            logger.debug("Admin chat: aborted sidecar session")
+    except Exception:
+        logger.debug("Admin chat: sidecar abort best-effort failed", exc_info=True)
+
+    if not pending:
+        signal.clear()
+
+    logger.info("Admin chat: user %s aborted admin chat", username)
+    return {"aborted": len(pending)}
+
+
+@app.get("/api/admin/chat/stream")
+async def admin_chat_stream(request: Request) -> StreamingResponse:
+    """SSE stream for real-time admin chat message updates."""
+    _require_admin(request)
+    username = getattr(request.state, "username", "")
+    listener_key = f"{ADMIN_CHAT_JOB_ID}:{username}" if username else ADMIN_CHAT_JOB_ID
+    return _make_sse_stream(
+        request,
+        set(),
+        "chat-changed",
+        per_key_listeners=_chat_listeners,
+        listener_key=listener_key,
+    )
+
+
+@app.post("/api/admin/chat", status_code=202)
+async def send_admin_chat_message(
+    body: ChatMessageRequest,
+    request: Request,
+    background_tasks: BackgroundTasks,
+) -> dict:
+    """Queue an admin chat message for AI processing."""
+    _require_admin(request)
+
+    user_msg_id = await storage.add_chat_message(
+        job_id=ADMIN_CHAT_JOB_ID,
+        role="user",
+        content=body.message,
+        username=request.state.username,
+        status="completed",
+    )
+    logger.info("Admin chat: queued user message %d", user_msg_id)
+
+    assistant_msg_id = await storage.add_chat_message(
+        job_id=ADMIN_CHAT_JOB_ID,
+        role="assistant",
+        content="",
+        username=request.state.username,
+        ai_provider=body.ai_provider or "",
+        ai_model=body.ai_model or "",
+        status="pending",
+    )
+
+    notify_chat_changed(ADMIN_CHAT_JOB_ID, username=request.state.username)
+
+    background_tasks.add_task(
+        _process_admin_chat_message,
+        user_msg_id=user_msg_id,
+        assistant_msg_id=assistant_msg_id,
+        message=body.message,
+        ai_provider_override=body.ai_provider,
+        ai_model_override=body.ai_model,
+        username=request.state.username,
+    )
+
+    return {
+        "user_message": {
+            "id": user_msg_id,
+            "role": "user",
+            "content": body.message,
+            "username": request.state.username,
+            "status": "completed",
+        },
+        "assistant_message": {
+            "id": assistant_msg_id,
+            "role": "assistant",
+            "content": "",
+            "status": "pending",
+        },
+    }
+
+
+async def _process_admin_chat_message(
+    *,
+    user_msg_id: int,
+    assistant_msg_id: int,
+    message: str,
+    ai_provider_override: str | None,
+    ai_model_override: str | None,
+    username: str,
+) -> None:
+    """Background task: process a single admin chat message with AI."""
+    from rootcoz.engine.chat import (
+        admin_chat_with_ai,
+        ensure_chat_workspace,
+        setup_chat_scripts,
+    )
+
+    lock = _get_chat_lock(f"{ADMIN_CHAT_JOB_ID}:{username}")
+    auth_header = ""
+
+    async with lock:
+        try:
+            current_status = await storage.get_chat_message_status(assistant_msg_id)
+            if current_status != "pending":
+                logger.info(
+                    "Admin chat: message %d already %s, skipping processing",
+                    assistant_msg_id,
+                    current_status,
+                )
+                return
+
+            ai_provider = ai_provider_override or AI_PROVIDER
+            ai_model = ai_model_override or AI_MODEL
+
+            if not ai_provider:
+                raise RuntimeError("No AI provider configured")
+
+            all_history = await storage.get_chat_messages(
+                ADMIN_CHAT_JOB_ID, username=username, limit=1000
+            )
+            history = [
+                m
+                for m in all_history
+                if m.get("status") != "pending" and m.get("content")
+            ]
+
+            last_session_id = None
+            for msg in reversed(all_history):
+                if (
+                    msg.get("role") == "assistant"
+                    and msg.get("session_id")
+                    and msg.get("ai_provider") == ai_provider
+                    and msg.get("ai_model") == ai_model
+                ):
+                    last_session_id = msg["session_id"]
+                    logger.debug(
+                        "Admin chat: found session %s from history (provider=%s, model=%s)",
+                        last_session_id,
+                        ai_provider,
+                        ai_model,
+                    )
+                    break
+
+            workspace = ensure_chat_workspace(ADMIN_CHAT_JOB_ID, username=username)
+
+            settings = get_settings()
+
+            server_url = _build_internal_server_url()
+            auth_header = await _create_ai_auth_header(username)
+
+            available_scripts = setup_chat_scripts(
+                workspace,
+                server_url=server_url,
+                auth_token=auth_header.removeprefix("Bearer ").strip()
+                if auth_header
+                else "",
+                job_id=ADMIN_CHAT_JOB_ID,
+                scripts=["rootcoz-chat-server"],
+            )
+
+            abort_key = f"{ADMIN_CHAT_JOB_ID}:{username}"
+            abort_signal = _get_chat_abort_signal(abort_key)
+            if abort_signal.is_set():
+                abort_signal.clear()
+                await storage.update_chat_message_content(
+                    assistant_msg_id, "Aborted by user."
+                )
+                await storage.update_chat_message_status(assistant_msg_id, "failed")
+                notify_chat_changed(ADMIN_CHAT_JOB_ID, username=username)
+                logger.info("Admin chat: aborted before AI call, user %s", username)
+                return
+
+            success, response_text, new_session_id = await admin_chat_with_ai(
+                message=message,
+                history=history,
+                ai_provider=ai_provider,
+                ai_model=ai_model,
+                repo_path=workspace,
+                ai_call_timeout=settings.ai_call_timeout,
+                session_id=last_session_id,
+                available_scripts=available_scripts,
+            )
+
+            if abort_signal.is_set():
+                abort_signal.clear()
+                await storage.update_chat_message_content(
+                    assistant_msg_id, "Aborted by user."
+                )
+                await storage.update_chat_message_status(assistant_msg_id, "failed")
+                notify_chat_changed(ADMIN_CHAT_JOB_ID, username=username)
+                logger.info("Admin chat: aborted after AI call, user %s", username)
+                return
+
+            if not success:
+                logger.error("Admin chat AI call failed: %s", response_text)
+                user_error = response_text
+                if (
+                    "not found" in response_text.lower()
+                    or "session" in response_text.lower()
+                ):
+                    user_error = (
+                        "AI session expired. Please try sending your message again."
+                    )
+                await storage.update_chat_message_content(
+                    assistant_msg_id, f"Error: {user_error}"
+                )
+                await storage.update_chat_message_status(assistant_msg_id, "failed")
+                notify_chat_changed(ADMIN_CHAT_JOB_ID, username=username)
+                return
+
+            await storage.update_chat_message_content(assistant_msg_id, response_text)
+            await storage.update_chat_message_status(assistant_msg_id, "completed")
+            await storage.update_chat_message_ai_fields(
+                assistant_msg_id,
+                ai_provider=ai_provider,
+                ai_model=ai_model,
+                session_id=new_session_id or "",
+            )
+            logger.info(
+                "Admin chat: message %d processed (session=%s)",
+                assistant_msg_id,
+                new_session_id,
+            )
+            notify_chat_changed(ADMIN_CHAT_JOB_ID, username=username)
+
+        except Exception:
+            logger.error(
+                "Admin chat processing failed for msg %d",
+                assistant_msg_id,
+                exc_info=True,
+            )
+            try:
+                await storage.update_chat_message_content(
+                    assistant_msg_id,
+                    "An error occurred while processing your message. Please try again.",
+                )
+                await storage.update_chat_message_status(assistant_msg_id, "failed")
+                notify_chat_changed(ADMIN_CHAT_JOB_ID, username=username)
+            except Exception:
+                logger.error(
+                    "Failed to update error status for admin chat msg %d",
+                    assistant_msg_id,
+                    exc_info=True,
+                )
+        finally:
+            _cleanup_chat_state(f"{ADMIN_CHAT_JOB_ID}:{username}")
+            await _cleanup_ai_session(auth_header)
+
+
+@app.delete("/api/admin/chat")
+async def clear_admin_chat_history(request: Request) -> dict:
+    """Clear admin chat messages for the current user."""
+    _require_admin(request)
+    from rootcoz.engine.chat import cleanup_chat_repos
+
+    username = request.state.username
+
+    lock = _get_chat_lock(f"{ADMIN_CHAT_JOB_ID}:{username}")
+    async with lock:
+        count = await storage.delete_chat_messages(ADMIN_CHAT_JOB_ID, username=username)
+        notify_chat_changed(ADMIN_CHAT_JOB_ID, username=username)
+        try:
+            cleanup_chat_repos(ADMIN_CHAT_JOB_ID, username=username)
+        except Exception:
+            logger.warning(
+                "Failed to cleanup admin chat repos for %s",
+                username,
+                exc_info=True,
+            )
+
+    _cleanup_chat_state(f"{ADMIN_CHAT_JOB_ID}:{username}")
+    logger.info("Admin chat: cleared %d messages for user %s", count, username)
     return {"deleted": count}
 
 

@@ -2973,6 +2973,118 @@ def chat_close(
         typer.echo(f"Chat closed for job {job_id}.")
 
 
+# -- Admin Chat ---------------------------------------------------------------
+
+admin_chat_app = typer.Typer(help="Admin server-wide chat.", no_args_is_help=True)
+app.add_typer(admin_chat_app, name="admin-chat")
+
+
+@admin_chat_app.command("send")
+def admin_chat_send(
+    message: str = typer.Argument(help="Message to send."),
+    ai_provider: str = typer.Option("", "--provider", "-p", help="AI provider."),
+    ai_model: str = typer.Option("", "--model", "-m", help="AI model."),
+    json_output: bool = _JSON_OPTION,
+) -> None:
+    """Send a message to the admin server chat."""
+    import time
+
+    client = _get_client()
+    # Init best-effort
+    try:
+        client.init_admin_chat()
+    except Exception:
+        pass
+    data = _run_client_command(
+        json_output,
+        lambda c: c.send_admin_chat_message(
+            message, ai_provider=ai_provider, ai_model=ai_model
+        ),
+        emit_output=False,
+    )
+    if not _state.get("json", False):
+        assistant = data.get("assistant_message", {})
+        status = assistant.get("status", "completed")
+        if status == "pending":
+            assistant_id = assistant.get("id")
+            typer.echo(
+                f"Message queued (id={assistant_id or '?'}). Waiting for AI response..."
+            )
+            for _ in range(120):  # up to ~2 minutes
+                time.sleep(1)
+                try:
+                    history = client.get_admin_chat_history()
+                    total = history.get("total", 0)
+                    if total > 200:
+                        history = client.get_admin_chat_history(
+                            offset=max(total - 200, 0)
+                        )
+                    messages = history.get("messages", [])
+                    for msg in reversed(messages):
+                        if msg.get("id") == assistant_id:
+                            if msg.get("status") in ("completed", "failed"):
+                                content = msg.get("content", "")
+                                if msg.get("status") == "failed":
+                                    typer.echo(f"\nError: {content}", err=True)
+                                else:
+                                    typer.echo(f"\n{content}")
+                                return
+                            break
+                except Exception:
+                    pass
+            typer.echo(
+                "\nTimed out waiting for response. "
+                "Use 'rootcoz admin-chat history' to check later."
+            )
+        else:
+            typer.echo(assistant.get("content", ""))
+
+
+@admin_chat_app.command("history")
+def admin_chat_history(
+    limit: int = typer.Option(200, "--limit", "-l", help="Maximum messages to return."),
+    json_output: bool = _JSON_OPTION,
+) -> None:
+    """Show admin chat history."""
+    data = _run_client_command(
+        json_output,
+        lambda c: c.get_admin_chat_history(limit=limit),
+        emit_output=False,
+    )
+    if not _state.get("json", False):
+        messages = data.get("messages", [])
+        if not messages:
+            typer.echo("No admin chat history.")
+            return
+        for msg in messages:
+            role = msg.get("role", "unknown").upper()
+            ts = msg.get("created_at", "")
+            content = msg.get("content", "")
+            status = msg.get("status", "")
+            header = f"[{role}]"
+            if status == "failed":
+                header = "[ASSISTANT (failed)]"
+            if ts:
+                header += f" {ts}"
+            typer.echo(header)
+            typer.echo(content)
+            typer.echo("")
+
+
+@admin_chat_app.command("clear")
+def admin_chat_clear(
+    json_output: bool = _JSON_OPTION,
+) -> None:
+    """Clear admin chat history."""
+    data = _run_client_command(
+        json_output,
+        lambda c: c.clear_admin_chat(),
+        emit_output=False,
+    )
+    if not _state.get("json", False):
+        typer.echo(f"Cleared {data.get('deleted', 0)} messages.")
+
+
 # -- Config -------------------------------------------------------------------
 
 

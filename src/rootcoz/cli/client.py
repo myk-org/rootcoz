@@ -1029,3 +1029,37 @@ class RootCozClient:
     def close_chat(self, job_id: str) -> dict:
         """Signal that the user left the chat page. POST /api/chat/{job_id}/close"""
         return self._request("POST", f"/api/chat/{job_id}/close")
+
+    # -- Admin Chat --------------------------------------------------------
+
+    def init_admin_chat(self) -> dict:
+        """Initialize admin chat workspace. POST /api/admin/chat/init"""
+        return self._request("POST", "/api/admin/chat/init")
+
+    def get_admin_chat_history(self, limit: int = 200, offset: int = 0) -> dict:
+        """Get admin chat history. GET /api/admin/chat"""
+        params: dict = {"limit": limit}
+        if offset:
+            params["offset"] = offset
+        return self._request("GET", "/api/admin/chat", params=params)
+
+    def send_admin_chat_message(
+        self, message: str, ai_provider: str = "", ai_model: str = ""
+    ) -> dict:
+        """Send admin chat message. POST /api/admin/chat"""
+        body: dict = {"message": message}
+        if ai_provider:
+            body["ai_provider"] = ai_provider
+        if ai_model:
+            body["ai_model"] = ai_model
+        return self._request(
+            "POST", "/api/admin/chat", json=body, accept_statuses=(202,)
+        )
+
+    def clear_admin_chat(self) -> dict:
+        """Clear admin chat history. DELETE /api/admin/chat"""
+        return self._request("DELETE", "/api/admin/chat")
+
+    def abort_admin_chat(self) -> dict:
+        """Abort admin chat. POST /api/admin/chat/abort"""
+        return self._request("POST", "/api/admin/chat/abort")
