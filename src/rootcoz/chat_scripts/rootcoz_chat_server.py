@@ -138,6 +138,22 @@ def _unwrap_result(data: Any) -> dict[str, Any]:
     return data
 
 
+def _fetch_job_details(client: httpx.Client, limit: int = 100) -> list[dict[str, Any]]:
+    """Fetch full details for recent jobs (list endpoint only has summaries)."""
+    data = _get(client, "/results", params={"limit": limit})
+    job_list = data if isinstance(data, list) else data.get("results", [])
+    jobs: list[dict[str, Any]] = []
+    for j in job_list:
+        jid = j.get("job_id", "")
+        if jid:
+            try:
+                detail = _get(client, f"/results/{jid}")
+                jobs.append(detail)
+            except Exception:
+                pass
+    return jobs
+
+
 # ---------------------------------------------------------------------------
 # Command handlers
 # ---------------------------------------------------------------------------
@@ -201,9 +217,7 @@ def cmd_get_job_summary(client: httpx.Client, args: argparse.Namespace) -> None:
 
 def cmd_failure_stats(client: httpx.Client, _args: argparse.Namespace) -> None:
     """Aggregate failure counts by classification across jobs."""
-    data = _get(client, "/results", params={"limit": 100})
-
-    jobs = data if isinstance(data, list) else data.get("results", [])
+    jobs = _fetch_job_details(client)
 
     classifications: dict[str, int] = {}
     total_failures = 0
@@ -236,9 +250,7 @@ def cmd_failure_stats(client: httpx.Client, _args: argparse.Namespace) -> None:
 
 def cmd_user_stats(client: httpx.Client, _args: argparse.Namespace) -> None:
     """Aggregate comments and reviews per username."""
-    data = _get(client, "/results", params={"limit": 100})
-
-    jobs = data if isinstance(data, list) else data.get("results", [])
+    jobs = _fetch_job_details(client)
 
     user_comments: dict[str, int] = {}
     user_reviews: dict[str, int] = {}
@@ -323,9 +335,7 @@ def cmd_test_history(client: httpx.Client, args: argparse.Namespace) -> None:
 
 def cmd_search_failures(client: httpx.Client, args: argparse.Namespace) -> None:
     """Search failure messages matching a query across jobs."""
-    data = _get(client, "/results", params={"limit": 100})
-
-    jobs = data if isinstance(data, list) else data.get("results", [])
+    jobs = _fetch_job_details(client)
     query_lower = args.query.lower()
     matches: list[dict[str, Any]] = []
 

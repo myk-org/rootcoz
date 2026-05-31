@@ -8225,8 +8225,9 @@ async def _process_chat_message(
                 raise RuntimeError("No AI provider configured")
 
             # Get conversation history
+            msg_count = await storage.count_chat_messages(job_id, username=username)
             all_history = await storage.get_chat_messages(
-                job_id, username=username, limit=1000
+                job_id, username=username, limit=max(msg_count, 1)
             )
             # Filter to only completed messages for context
             history = [
@@ -8691,8 +8692,11 @@ async def _process_admin_chat_message(
             if not ai_provider:
                 raise RuntimeError("No AI provider configured")
 
+            msg_count = await storage.count_chat_messages(
+                ADMIN_CHAT_JOB_ID, username=username
+            )
             all_history = await storage.get_chat_messages(
-                ADMIN_CHAT_JOB_ID, username=username, limit=1000
+                ADMIN_CHAT_JOB_ID, username=username, limit=max(msg_count, 1)
             )
             history = [
                 m

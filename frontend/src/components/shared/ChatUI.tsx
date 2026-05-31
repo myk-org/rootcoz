@@ -136,11 +136,12 @@ export function ChatUI({
 
   // SSE: listen for chat message updates (AI responses)
   useEffect(() => {
+    let cancelled = false
     const evtSource = new EventSource(`${apiBasePath}/stream`)
 
     evtSource.addEventListener('chat-changed', () => {
       fetchMessages()
-        .then(msgs => setMessages(msgs))
+        .then(msgs => { if (!cancelled) setMessages(msgs) })
         .catch(() => {})  // Silently ignore fetch errors during SSE updates
     })
 
@@ -148,7 +149,10 @@ export function ChatUI({
       // EventSource auto-reconnects
     }
 
-    return () => evtSource.close()
+    return () => {
+      cancelled = true
+      evtSource.close()
+    }
   }, [apiBasePath, fetchMessages])
 
   // Auto-scroll

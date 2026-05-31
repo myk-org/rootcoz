@@ -1063,3 +1063,7 @@ class RootCozClient:
     def abort_admin_chat(self) -> dict:
         """Abort admin chat. POST /api/admin/chat/abort"""
         return self._request("POST", "/api/admin/chat/abort")
+
+    def close_admin_chat(self) -> dict:
+        """Signal user left admin chat page. POST /api/admin/chat/close"""
+        return self._request("POST", "/api/admin/chat/close")
