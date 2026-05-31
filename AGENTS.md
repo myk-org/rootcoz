@@ -83,6 +83,7 @@ src/rootcoz/
     core.py                 # Failure grouping, AI CLI orchestration, prompt building,
                             # JSON response parsing, deduplication. Has ZERO knowledge
                             # of any specific CI system.
+    chat.py                 # Chat engine: workspace, AI session, prompt builder
   sources/                  # CI source plugins (data fetching)
     base.py                 # CISource ABC + CISourceResult dataclass
     jenkins_source.py       # Jenkins plugin: JenkinsSource, analyze_job, analyze_child_job,
@@ -98,6 +99,10 @@ src/rootcoz/
     src/server.ts           # Thin wrapper calling @myk-org/pi-sidecar startSidecar()
   cli/                      # CLI client (rootcoz command)
   peer_analysis.py          # Multi-AI peer debate loop
+  chat_scripts/             # AI-accessible scripts for chat workspace
+    rootcoz_chat_job.py     # Query job data (failures, analyses, comments)
+    rootcoz_chat_jira.py    # Search/query Jira issues
+    rootcoz_chat_github.py  # Search/query GitHub issues/PRs
   ...                       # Other modules (jira, github_issues, monitoring, etc.)
 ```
 
@@ -120,6 +125,7 @@ src/rootcoz/
   - `/api/results/{job_id}/stream` — per-job status changes
   - `/api/results/{job_id}/comments/stream` — per-job comment changes
   - `/api/admin/token-usage/stream` — token usage data changes
+  - `/api/chat/{job_id}/stream` — per-job chat message changes
 
 ### Server Settings Page
 
@@ -154,7 +160,7 @@ Every new API endpoint MUST also be supported via the `rootcoz` CLI tool. When a
 3. Add tests for both in `tests/test_cli_client.py` and `tests/test_cli_main.py`
 
 **Exceptions (no CLI equivalent needed):**
-- SSE streaming endpoints (`/api/navbar/stream`, `/api/dashboard/stream`, `/api/results/*/stream`, `/api/admin/token-usage/stream`) — CLI is a one-shot tool, not a long-lived stream consumer. Equivalent GET endpoints remain available for CLI use.
+- SSE streaming endpoints (`/api/navbar/stream`, `/api/dashboard/stream`, `/api/results/*/stream`, `/api/admin/token-usage/stream`, `/api/chat/*/stream`) — CLI is a one-shot tool, not a long-lived stream consumer. Equivalent GET endpoints remain available for CLI use.
 - SPA bootstrap helpers (`/api/auth/needs-key`) — browser-only identity probes with no CLI use case
 
 ### Failure Deduplication

@@ -7854,7 +7854,11 @@ async def get_chat_history(
     )
     # Filter out hidden init messages (empty content + completed status, used for session_id storage)
     # Keep pending messages even if empty (they show "Thinking..." in the UI)
-    messages = [m for m in messages if m.get("content") or m.get("status") == "pending"]
+    messages = [
+        m
+        for m in messages
+        if m.get("content") or m.get("status") in ("pending", "failed")
+    ]
     total = await storage.count_chat_messages(job_id, username=username)
     return {"messages": messages, "total": total}
 
@@ -7866,7 +7870,6 @@ async def init_chat(job_id: str, request: Request) -> dict:
     from rootcoz.engine.chat import (
         ensure_chat_workspace,
         clone_chat_repos,
-        setup_chat_scripts,
         init_chat_session,
     )
 
@@ -7907,22 +7910,7 @@ async def init_chat(job_id: str, request: Request) -> dict:
     # Clone repos and setup scripts
     repos_available = await clone_chat_repos(workspace, decrypted_params)
 
-    server_url = _build_internal_server_url()
-    auth_header = await _create_ai_auth_header(username)
-
-    available_scripts = setup_chat_scripts(
-        workspace,
-        server_url=server_url,
-        auth_token=auth_header.removeprefix("Bearer ").strip() if auth_header else "",
-        job_id=job_id,
-        jira_url=jira_url,
-        jira_email=jira_email,
-        jira_token=jira_token,
-        github_token=github_token,
-        github_repo=github_repo,
-    )
-
-    # Initialize AI session (needs workspace with scripts ready)
+    # Initialize AI session (scripts will be set up later during message processing)
     session_id = await init_chat_session(
         job_id=job_id,
         job_name=result_data.get("job_name", "unknown"),
@@ -7930,7 +7918,7 @@ async def init_chat(job_id: str, request: Request) -> dict:
         ai_provider=ai_provider,
         ai_model=ai_model,
         repo_path=workspace,
-        available_scripts=available_scripts,
+        available_scripts=[],
         repos_available=repos_available,
     )
 
@@ -7946,9 +7934,6 @@ async def init_chat(job_id: str, request: Request) -> dict:
             session_id=session_id,
             status="completed",
         )
-
-    # Clean up the auth header created for script setup
-    await _cleanup_ai_session(auth_header)
 
     logger.info(
         "Chat init for job %s: workspace=%s, repos=%s, session=%s",
