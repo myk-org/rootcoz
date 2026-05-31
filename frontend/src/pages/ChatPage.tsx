@@ -38,6 +38,7 @@ export function ChatPage() {
   const [error, setError] = useState('')
   const [chatReady, setChatReady] = useState(false)
   const [initMessage, setInitMessage] = useState('')
+  const [initComplete, setInitComplete] = useState(false)
   const [jobInfo, setJobInfo] = useState<JobInfo | null>(null)
 
   const [aiProvider, setAiProvider] = useState('')
@@ -60,7 +61,9 @@ export function ChatPage() {
     setInitMessage('Initializing...')
 
     // Start init in background (best-effort, repos clone on first message if needed)
-    api.post(`/api/chat/${jobId}/init`, {}).catch(() => {})
+    api.post(`/api/chat/${jobId}/init`, {})
+      .then(() => { if (!ignore) setInitComplete(true) })
+      .catch(() => { if (!ignore) setInitComplete(true) })
 
     // Load history + results immediately (don't wait for init)
     Promise.all([
@@ -203,6 +206,7 @@ export function ChatPage() {
   const handleNewSession = useCallback(async () => {
     if (!jobId) return
     setChatReady(false)
+    setInitComplete(false)
     setInitMessage('Starting new session...')
     setMessages([])
     setError('')
@@ -219,6 +223,7 @@ export function ChatPage() {
       // Init failure is non-fatal — chat still works, repos clone on first message
     } finally {
       setChatReady(true)
+      setInitComplete(true)
       setInitMessage('')
     }
   }, [jobId])
@@ -389,11 +394,12 @@ export function ChatPage() {
               value={input}
               onChange={e => setInput(e.target.value)}
               onKeyDown={handleKeyDown}
-              placeholder="Ask about this analysis... (Enter to send, Shift+Enter for newline)"
+              disabled={!initComplete}
+              placeholder={initComplete ? "Ask about this analysis... (Enter to send, Shift+Enter for newline)" : "Initializing workspace..."}
               className="flex-1 resize-none min-h-[44px] max-h-[120px]"
               rows={1}
             />
-            <Button type="submit" disabled={!input.trim() || !chatReady} size="sm" className="self-end" aria-label="Send message">
+            <Button type="submit" disabled={!input.trim() || !chatReady || !initComplete} size="sm" className="self-end" aria-label="Send message">
               <Send className="h-4 w-4" />
             </Button>
           </form>
