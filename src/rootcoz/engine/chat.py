@@ -689,6 +689,7 @@ async def _create_chat_session(
     repo_path: Path | None = None,
     log_prefix: str = "Chat",
     custom_tools: list[dict] | None = None,
+    restrict_tools: bool = True,
 ) -> str | None:
     """Create a sidecar session with the given system prompt. Returns session_id or None."""
     logger.info(
@@ -699,13 +700,17 @@ async def _create_chat_session(
     )
     try:
         client = get_sidecar_client()
-        session_id = await client.create_session(
-            provider=ai_provider,
-            model=ai_model,
-            system_prompt=system_prompt,
-            cwd=str(repo_path) if repo_path else "/tmp",
-            custom_tools=custom_tools,
-        )
+        create_kwargs: dict = {
+            "provider": ai_provider,
+            "model": ai_model,
+            "system_prompt": system_prompt,
+            "cwd": str(repo_path) if repo_path else "/tmp",
+        }
+        if custom_tools:
+            create_kwargs["custom_tools"] = custom_tools
+        if restrict_tools:
+            create_kwargs["tools"] = ["read", "ls", "find"]
+        session_id = await client.create_session(**create_kwargs)
         logger.info("%s: session created: %s", log_prefix, session_id)
         return session_id
     except Exception:
@@ -739,6 +744,7 @@ async def init_chat_session(
         repo_path=repo_path,
         log_prefix=f"Chat(job={job_id})",
         custom_tools=custom_tools,
+        restrict_tools=True,
     )
 
 
@@ -757,6 +763,7 @@ async def init_admin_chat_session(
         ai_model=ai_model,
         repo_path=repo_path,
         log_prefix="Admin chat",
+        restrict_tools=False,
     )
 
 
@@ -771,6 +778,7 @@ async def _chat_with_ai_impl(
     ai_call_timeout: int | None = None,
     session_id: str | None = None,
     custom_tools: list[dict] | None = None,
+    restrict_tools: bool = True,
     log_prefix: str = "Chat",
     request_id: str = "",
     call_type: str = "chat",
@@ -798,15 +806,16 @@ async def _chat_with_ai_impl(
         len(prompt),
     )
 
-    result = await call_ai(
-        prompt,
-        ai_provider=ai_provider,
-        ai_model=ai_model,
-        cwd=str(repo_path) if repo_path else None,
-        ai_call_timeout=ai_call_timeout,
-        session_id=session_id,
-        custom_tools=custom_tools,
-    )
+    call_kwargs: dict = {
+        "ai_provider": ai_provider,
+        "ai_model": ai_model,
+        "cwd": str(repo_path) if repo_path else None,
+        "ai_call_timeout": ai_call_timeout,
+        "session_id": session_id,
+    }
+    if custom_tools:
+        call_kwargs["custom_tools"] = custom_tools
+    result = await call_ai(prompt, **call_kwargs)
 
     # If session was lost, retry with fresh session
     if not result.success and session_id and "not found" in result.text.lower():
@@ -820,15 +829,16 @@ async def _chat_with_ai_impl(
         )
         system_prompt = build_prompt_fn()
         prompt = build_chat_prompt(system_prompt, history, message)
-        result = await call_ai(
-            prompt,
-            ai_provider=ai_provider,
-            ai_model=ai_model,
-            cwd=str(repo_path) if repo_path else None,
-            ai_call_timeout=ai_call_timeout,
-            session_id=None,
-            custom_tools=custom_tools,
-        )
+        retry_kwargs: dict = {
+            "ai_provider": ai_provider,
+            "ai_model": ai_model,
+            "cwd": str(repo_path) if repo_path else None,
+            "ai_call_timeout": ai_call_timeout,
+            "session_id": None,
+        }
+        if custom_tools:
+            retry_kwargs["custom_tools"] = custom_tools
+        result = await call_ai(prompt, **retry_kwargs)
 
     await result.record_usage(
         request_id=request_id,
@@ -881,6 +891,7 @@ async def chat_with_ai(
         ai_call_timeout=ai_call_timeout,
         session_id=session_id,
         custom_tools=custom_tools,
+        restrict_tools=True,
         log_prefix=f"Chat(job={job_id})",
         request_id=job_id,
         call_type="chat",
@@ -912,6 +923,7 @@ async def admin_chat_with_ai(
         repo_path=repo_path,
         ai_call_timeout=ai_call_timeout,
         session_id=session_id,
+        restrict_tools=False,
         log_prefix="Admin chat",
         request_id="__admin_chat__",
         call_type="admin_chat",
