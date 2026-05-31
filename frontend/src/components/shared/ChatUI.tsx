@@ -171,14 +171,13 @@ export function ChatUI({
     try {
       const res = await api.post<{
         user_message: { id: number; role: string; content: string; username: string; status: string }
-        assistant_message: { id: number; role: string; content: string; status: string }
       }>(apiBasePath, {
         message: trimmed,
         ai_provider: aiProvider || undefined,
         ai_model: aiModel || undefined,
       })
 
-      // Add user message + pending assistant message
+      // Add user message only — assistant placeholder arrives via SSE when processing starts
       setMessages(prev => [
         ...prev,
         {
@@ -190,17 +189,6 @@ export function ChatUI({
           ai_provider: '',
           ai_model: '',
           status: 'completed',
-          created_at: new Date().toISOString(),
-        },
-        {
-          id: res.assistant_message.id,
-          job_id: '',
-          role: 'assistant' as const,
-          content: '',
-          username: '',
-          ai_provider: '',
-          ai_model: '',
-          status: 'pending',
           created_at: new Date().toISOString(),
         },
       ])

@@ -2887,44 +2887,42 @@ def chat_send(
         emit_output=False,
     )
     if not _state.get("json", False):
-        assistant = data.get("assistant_message", {})
-        status = assistant.get("status", "completed")
-        if status == "pending":
-            assistant_id = assistant.get("id")
-            typer.echo(
-                f"Message queued (id={assistant_id or '?'}). Waiting for AI response..."
-            )
-            # Poll for the response
-            client = _get_client()
-            for _ in range(120):  # up to ~2 minutes
-                time.sleep(1)
-                try:
-                    history = client.get_chat_history(job_id)
-                    total = history.get("total", 0)
-                    # Fetch last page to ensure we see the latest messages
-                    if total > 200:
-                        history = client.get_chat_history(
-                            job_id, offset=max(total - 200, 0)
-                        )
-                    messages = history.get("messages", [])
-                    for msg in reversed(messages):
-                        if msg.get("id") == assistant_id:
-                            if msg.get("status") in ("completed", "failed"):
-                                content = msg.get("content", "")
-                                if msg.get("status") == "failed":
-                                    typer.echo(f"\nError: {content}", err=True)
-                                else:
-                                    typer.echo(f"\n{content}")
-                                return
-                            break
-                except Exception:
-                    pass
-            typer.echo(
-                "\nTimed out waiting for response. "
-                "Use 'rootcoz chat history' to check later."
-            )
-        else:
-            typer.echo(assistant.get("content", ""))
+        user_msg_id = data.get("user_message", {}).get("id")
+        typer.echo("Message queued. Waiting for AI response...")
+        # Poll for the assistant response (created in background)
+        client = _get_client()
+        for _ in range(120):  # up to ~2 minutes
+            time.sleep(1)
+            try:
+                history = client.get_chat_history(job_id)
+                total = history.get("total", 0)
+                # Fetch last page to ensure we see the latest messages
+                if total > 200:
+                    history = client.get_chat_history(
+                        job_id, offset=max(total - 200, 0)
+                    )
+                messages = history.get("messages", [])
+                # Find the assistant message right after our user message
+                for msg in reversed(messages):
+                    if (
+                        msg.get("role") == "assistant"
+                        and user_msg_id
+                        and msg.get("id", 0) > user_msg_id
+                    ):
+                        if msg.get("status") in ("completed", "failed"):
+                            content = msg.get("content", "")
+                            if msg.get("status") == "failed":
+                                typer.echo(f"\nError: {content}", err=True)
+                            else:
+                                typer.echo(f"\n{content}")
+                            return
+                        break
+            except Exception:
+                pass
+        typer.echo(
+            "\nTimed out waiting for response. "
+            "Use 'rootcoz chat history' to check later."
+        )
 
 
 @chat_app.command("abort")
@@ -3003,41 +3001,36 @@ def admin_chat_send(
         emit_output=False,
     )
     if not _state.get("json", False):
-        assistant = data.get("assistant_message", {})
-        status = assistant.get("status", "completed")
-        if status == "pending":
-            assistant_id = assistant.get("id")
-            typer.echo(
-                f"Message queued (id={assistant_id or '?'}). Waiting for AI response..."
-            )
-            for _ in range(120):  # up to ~2 minutes
-                time.sleep(1)
-                try:
-                    history = client.get_admin_chat_history()
-                    total = history.get("total", 0)
-                    if total > 200:
-                        history = client.get_admin_chat_history(
-                            offset=max(total - 200, 0)
-                        )
-                    messages = history.get("messages", [])
-                    for msg in reversed(messages):
-                        if msg.get("id") == assistant_id:
-                            if msg.get("status") in ("completed", "failed"):
-                                content = msg.get("content", "")
-                                if msg.get("status") == "failed":
-                                    typer.echo(f"\nError: {content}", err=True)
-                                else:
-                                    typer.echo(f"\n{content}")
-                                return
-                            break
-                except Exception:
-                    pass
-            typer.echo(
-                "\nTimed out waiting for response. "
-                "Use 'rootcoz admin-chat history' to check later."
-            )
-        else:
-            typer.echo(assistant.get("content", ""))
+        user_msg_id = data.get("user_message", {}).get("id")
+        typer.echo("Message queued. Waiting for AI response...")
+        for _ in range(120):  # up to ~2 minutes
+            time.sleep(1)
+            try:
+                history = client.get_admin_chat_history()
+                total = history.get("total", 0)
+                if total > 200:
+                    history = client.get_admin_chat_history(offset=max(total - 200, 0))
+                messages = history.get("messages", [])
+                for msg in reversed(messages):
+                    if (
+                        msg.get("role") == "assistant"
+                        and user_msg_id
+                        and msg.get("id", 0) > user_msg_id
+                    ):
+                        if msg.get("status") in ("completed", "failed"):
+                            content = msg.get("content", "")
+                            if msg.get("status") == "failed":
+                                typer.echo(f"\nError: {content}", err=True)
+                            else:
+                                typer.echo(f"\n{content}")
+                            return
+                        break
+            except Exception:
+                pass
+        typer.echo(
+            "\nTimed out waiting for response. "
+            "Use 'rootcoz admin-chat history' to check later."
+        )
 
 
 @admin_chat_app.command("history")

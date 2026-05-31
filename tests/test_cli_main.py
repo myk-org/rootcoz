@@ -3896,16 +3896,22 @@ class TestChatCommands:
                 "content": "Why did this test fail?",
                 "status": "completed",
             },
-            "assistant_message": {
-                "id": 2,
-                "role": "assistant",
-                "content": "The test failed because of a null pointer.",
-                "status": "completed",
-            },
         }
-        result = runner.invoke(
-            app, ["chat", "send", "job-1", "Why did this test fail?"]
-        )
+        mock_client.get_chat_history.return_value = {
+            "messages": [
+                {
+                    "id": 2,
+                    "role": "assistant",
+                    "content": "The test failed because of a null pointer.",
+                    "status": "completed",
+                }
+            ],
+            "total": 1,
+        }
+        with patch("time.sleep"):
+            result = runner.invoke(
+                app, ["chat", "send", "job-1", "Why did this test fail?"]
+            )
         assert result.exit_code == 0
         mock_client.send_chat_message.assert_called_once_with(
             "job-1", "Why did this test fail?", ai_provider="", ai_model=""
@@ -3919,12 +3925,6 @@ class TestChatCommands:
                 "role": "user",
                 "content": "Explain the error",
                 "status": "completed",
-            },
-            "assistant_message": {
-                "id": 2,
-                "role": "assistant",
-                "content": "",
-                "status": "pending",
             },
         }
         mock_client.get_chat_history.return_value = {
@@ -3966,19 +3966,13 @@ class TestChatCommands:
                 "content": "question",
                 "status": "completed",
             },
-            "assistant_message": {
-                "id": 2,
-                "role": "assistant",
-                "content": "",
-                "status": "pending",
-            },
         }
         mock_client.send_chat_message.return_value = payload
         result = runner.invoke(app, ["--json", "chat", "send", "job-1", "question"])
         assert result.exit_code == 0
         parsed = json.loads(result.output)
-        assert parsed["assistant_message"]["role"] == "assistant"
-        assert parsed["assistant_message"]["status"] == "pending"
+        assert parsed["user_message"]["role"] == "user"
+        assert parsed["user_message"]["status"] == "completed"
 
     def test_chat_clear(self, mock_client):
         mock_client.clear_chat.return_value = {"deleted": 5}
@@ -4058,14 +4052,20 @@ class TestAdminChatCommands:
                 "content": "Server status?",
                 "status": "completed",
             },
-            "assistant_message": {
-                "id": 2,
-                "role": "assistant",
-                "content": "All systems operational.",
-                "status": "completed",
-            },
         }
-        result = runner.invoke(app, ["admin-chat", "send", "Server status?"])
+        mock_client.get_admin_chat_history.return_value = {
+            "messages": [
+                {
+                    "id": 2,
+                    "role": "assistant",
+                    "content": "All systems operational.",
+                    "status": "completed",
+                }
+            ],
+            "total": 1,
+        }
+        with patch("time.sleep"):
+            result = runner.invoke(app, ["admin-chat", "send", "Server status?"])
         assert result.exit_code == 0
         mock_client.send_admin_chat_message.assert_called_once_with(
             "Server status?", ai_provider="", ai_model=""
@@ -4080,12 +4080,6 @@ class TestAdminChatCommands:
                 "role": "user",
                 "content": "Explain",
                 "status": "completed",
-            },
-            "assistant_message": {
-                "id": 2,
-                "role": "assistant",
-                "content": "",
-                "status": "pending",
             },
         }
         mock_client.get_admin_chat_history.return_value = {
@@ -4126,20 +4120,14 @@ class TestAdminChatCommands:
                 "content": "question",
                 "status": "completed",
             },
-            "assistant_message": {
-                "id": 2,
-                "role": "assistant",
-                "content": "",
-                "status": "pending",
-            },
         }
         mock_client.init_admin_chat.return_value = {"ready": True}
         mock_client.send_admin_chat_message.return_value = payload
         result = runner.invoke(app, ["--json", "admin-chat", "send", "question"])
         assert result.exit_code == 0
         parsed = json.loads(result.output)
-        assert parsed["assistant_message"]["role"] == "assistant"
-        assert parsed["assistant_message"]["status"] == "pending"
+        assert parsed["user_message"]["role"] == "user"
+        assert parsed["user_message"]["status"] == "completed"
 
     def test_admin_chat_clear(self, mock_client):
         mock_client.clear_admin_chat.return_value = {"deleted": 5}

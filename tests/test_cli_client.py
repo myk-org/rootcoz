@@ -1941,11 +1941,6 @@ class TestRootCozClientChat:
                 "content": "Why did this test fail?",
                 "status": "completed",
             },
-            "assistant_message": {
-                "role": "assistant",
-                "content": "",
-                "status": "pending",
-            },
         }
 
         def handler(request):
@@ -1959,8 +1954,8 @@ class TestRootCozClientChat:
 
         client = _make_client(handler)
         result = client.send_chat_message("job-1", "Why did this test fail?")
-        assert result["assistant_message"]["role"] == "assistant"
-        assert result["assistant_message"]["status"] == "pending"
+        assert result["user_message"]["role"] == "user"
+        assert result["user_message"]["status"] == "completed"
 
     def test_send_chat_message_with_ai_config(self):
         def handler(request):
@@ -1976,11 +1971,6 @@ class TestRootCozClientChat:
                         "content": "Explain the error",
                         "status": "completed",
                     },
-                    "assistant_message": {
-                        "role": "assistant",
-                        "content": "",
-                        "status": "pending",
-                    },
                 },
             )
 
@@ -1988,7 +1978,7 @@ class TestRootCozClientChat:
         result = client.send_chat_message(
             "job-1", "Explain the error", ai_provider="claude", ai_model="opus-4"
         )
-        assert result["assistant_message"]["status"] == "pending"
+        assert result["user_message"]["status"] == "completed"
 
     def test_clear_chat(self):
         def handler(request):
@@ -2070,11 +2060,6 @@ class TestRootCozClientAdminChat:
                 "content": "Server status?",
                 "status": "completed",
             },
-            "assistant_message": {
-                "role": "assistant",
-                "content": "",
-                "status": "pending",
-            },
         }
 
         def handler(request):
@@ -2089,7 +2074,7 @@ class TestRootCozClientAdminChat:
 
         client = _make_client(handler)
         result = client.send_admin_chat_message("Server status?")
-        assert result["assistant_message"]["status"] == "pending"
+        assert result["user_message"]["status"] == "completed"
 
     def test_send_admin_chat_message_with_ai_config(self):
         def handler(request):
@@ -2105,11 +2090,6 @@ class TestRootCozClientAdminChat:
                         "content": "Explain",
                         "status": "completed",
                     },
-                    "assistant_message": {
-                        "role": "assistant",
-                        "content": "",
-                        "status": "pending",
-                    },
                 },
             )
 
@@ -2117,7 +2097,7 @@ class TestRootCozClientAdminChat:
         result = client.send_admin_chat_message(
             "Explain", ai_provider="claude", ai_model="opus-4"
         )
-        assert result["assistant_message"]["status"] == "pending"
+        assert result["user_message"]["status"] == "completed"
 
     def test_clear_admin_chat(self):
         def handler(request):

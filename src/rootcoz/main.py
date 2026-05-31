@@ -8129,25 +8129,13 @@ async def send_chat_message(
     )
     logger.info("Chat: queued user message %d for job %s", user_msg_id, job_id)
 
-    # Save a pending assistant placeholder so the frontend knows a response is coming
-    assistant_msg_id = await storage.add_chat_message(
-        job_id=job_id,
-        role="assistant",
-        content="",
-        username=request.state.username,
-        ai_provider=body.ai_provider or "",
-        ai_model=body.ai_model or "",
-        status="pending",
-    )
-
     notify_chat_changed(job_id, username=request.state.username)
 
-    # Kick off background processing
+    # Kick off background processing — assistant placeholder created inside after lock
     background_tasks.add_task(
         _process_chat_message,
         job_id=job_id,
         user_msg_id=user_msg_id,
-        assistant_msg_id=assistant_msg_id,
         message=body.message,
         ai_provider_override=body.ai_provider,
         ai_model_override=body.ai_model,
@@ -8162,12 +8150,6 @@ async def send_chat_message(
             "username": request.state.username,
             "status": "completed",
         },
-        "assistant_message": {
-            "id": assistant_msg_id,
-            "role": "assistant",
-            "content": "",
-            "status": "pending",
-        },
     }
 
 
@@ -8175,7 +8157,6 @@ async def _process_chat_message(
     *,
     job_id: str,
     user_msg_id: int,
-    assistant_msg_id: int,
     message: str,
     ai_provider_override: str | None,
     ai_model_override: str | None,
@@ -8194,15 +8175,17 @@ async def _process_chat_message(
 
     async with lock:
         try:
-            # Check if this message was already aborted before we started
-            current_status = await storage.get_chat_message_status(assistant_msg_id)
-            if current_status != "pending":
-                logger.info(
-                    "Chat: message %d already %s, skipping processing",
-                    assistant_msg_id,
-                    current_status,
-                )
-                return
+            # Create pending assistant placeholder now that we're actually processing
+            assistant_msg_id = await storage.add_chat_message(
+                job_id=job_id,
+                role="assistant",
+                content="",
+                username=username,
+                ai_provider=ai_provider_override or "",
+                ai_model=ai_model_override or "",
+                status="pending",
+            )
+            notify_chat_changed(job_id, username=username)
 
             stored = await get_result(job_id, strip_sensitive=False)
             if not stored or not stored.get("result"):
@@ -8632,22 +8615,11 @@ async def send_admin_chat_message(
     )
     logger.info("Admin chat: queued user message %d", user_msg_id)
 
-    assistant_msg_id = await storage.add_chat_message(
-        job_id=ADMIN_CHAT_JOB_ID,
-        role="assistant",
-        content="",
-        username=request.state.username,
-        ai_provider=body.ai_provider or "",
-        ai_model=body.ai_model or "",
-        status="pending",
-    )
-
     notify_chat_changed(ADMIN_CHAT_JOB_ID, username=request.state.username)
 
     background_tasks.add_task(
         _process_admin_chat_message,
         user_msg_id=user_msg_id,
-        assistant_msg_id=assistant_msg_id,
         message=body.message,
         ai_provider_override=body.ai_provider,
         ai_model_override=body.ai_model,
@@ -8662,19 +8634,12 @@ async def send_admin_chat_message(
             "username": request.state.username,
             "status": "completed",
         },
-        "assistant_message": {
-            "id": assistant_msg_id,
-            "role": "assistant",
-            "content": "",
-            "status": "pending",
-        },
     }
 
 
 async def _process_admin_chat_message(
     *,
     user_msg_id: int,
-    assistant_msg_id: int,
     message: str,
     ai_provider_override: str | None,
     ai_model_override: str | None,
@@ -8692,14 +8657,17 @@ async def _process_admin_chat_message(
 
     async with lock:
         try:
-            current_status = await storage.get_chat_message_status(assistant_msg_id)
-            if current_status != "pending":
-                logger.info(
-                    "Admin chat: message %d already %s, skipping processing",
-                    assistant_msg_id,
-                    current_status,
-                )
-                return
+            # Create pending assistant placeholder now that we're actually processing
+            assistant_msg_id = await storage.add_chat_message(
+                job_id=ADMIN_CHAT_JOB_ID,
+                role="assistant",
+                content="",
+                username=username,
+                ai_provider=ai_provider_override or "",
+                ai_model=ai_model_override or "",
+                status="pending",
+            )
+            notify_chat_changed(ADMIN_CHAT_JOB_ID, username=username)
 
             ai_provider = ai_provider_override or AI_PROVIDER
             ai_model = ai_model_override or AI_MODEL
