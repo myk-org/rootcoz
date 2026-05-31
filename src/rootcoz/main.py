@@ -7895,14 +7895,14 @@ async def init_chat(job_id: str, request: Request) -> dict:
         github_repo,
     ) = await _resolve_chat_credentials(decrypted_params, username)
 
-    # Clone repos
-    repos_available = await clone_chat_repos(workspace, decrypted_params)
-
     # Only create sidecar session on first init (avoid wasting sessions on re-init)
-    # Use per-user lock to prevent duplicate hidden rows from concurrent requests
+    # Use per-user lock to serialize cloning and session creation with _process_chat_message
     session_id: str | None = ""
     lock = _get_chat_lock(f"{job_id}:{username}")
     async with lock:
+        # Clone repos inside lock to prevent concurrent clones with _process_chat_message
+        repos_available = await clone_chat_repos(workspace, decrypted_params)
+
         existing = await storage.get_chat_messages(job_id, limit=1, username=username)
         if not existing:
             # Set up tool scripts so the session's system prompt includes the tool inventory.
