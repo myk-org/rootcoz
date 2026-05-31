@@ -1,4 +1,5 @@
 import ReactMarkdown from 'react-markdown'
+import remarkGfm from 'remark-gfm'
 import { isSafeHref } from '@/lib/autoLink'
 
 interface ChatMarkdownProps {
@@ -16,6 +17,7 @@ export function ChatMarkdown({ content }: ChatMarkdownProps) {
       prose-table:text-xs prose-th:text-left prose-th:p-2 prose-td:p-2
       prose-strong:text-text-primary">
       <ReactMarkdown
+        remarkPlugins={[remarkGfm]}
         components={{
           a: ({ href, children }) => {
             if (!href || !isSafeHref(href)) {

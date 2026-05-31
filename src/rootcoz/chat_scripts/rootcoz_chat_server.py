@@ -161,9 +161,7 @@ def _fetch_job_details(client: httpx.Client, limit: int = 100) -> list[dict[str,
 
 def cmd_list_jobs(client: httpx.Client, args: argparse.Namespace) -> None:
     """List recent jobs."""
-    data = _get(client, "/results", params={"limit": args.limit})
-
-    jobs = data if isinstance(data, list) else data.get("results", [])
+    jobs = _fetch_job_details(client, limit=args.limit)
 
     if not jobs:
         print("No jobs found.")
@@ -174,12 +172,19 @@ def cmd_list_jobs(client: httpx.Client, args: argparse.Namespace) -> None:
     print("=" * 60)
 
     for i, job in enumerate(jobs, 1):
+        result = _unwrap_result(job)
         print(f"\n--- Job {i} ---")
-        print(f"  Job ID:       {job.get('job_id', 'N/A')}")
-        print(f"  Job Name:     {job.get('job_name', 'N/A')}")
-        print(f"  Build Number: {job.get('build_number', 'N/A')}")
-        print(f"  Status:       {job.get('status', 'N/A')}")
-        print(f"  Created At:   {job.get('created_at', 'N/A')}")
+        print(f"  Job ID:       {result.get('job_id', 'N/A')}")
+        print(f"  Job Name:     {result.get('job_name', 'N/A')}")
+        print(f"  Build Number: {result.get('build_number', 'N/A')}")
+        print(f"  Status:       {job.get('status', result.get('status', 'N/A'))}")
+        print(
+            f"  Created At:   {job.get('created_at', result.get('created_at', 'N/A'))}"
+        )
+        # Show failure count
+        failures = _collect_all_failures(result)
+        if failures:
+            print(f"  Failures:     {len(failures)}")
 
 
 def cmd_get_job_summary(client: httpx.Client, args: argparse.Namespace) -> None:
