@@ -99,8 +99,6 @@ src/rootcoz/
     src/server.ts           # Thin wrapper calling @myk-org/pi-sidecar startSidecar()
   cli/                      # CLI client (rootcoz command)
   peer_analysis.py          # Multi-AI peer debate loop
-  chat_scripts/             # AI-accessible scripts for chat workspace
-    rootcoz_chat_db.py      # Read-only SQL queries for admin chat analytics
   ...                       # Other modules (jira, github_issues, monitoring, etc.)
 ```
 
@@ -149,6 +147,17 @@ Never pre-feed data to the AI in the prompt. Give the AI tools (API endpoints, s
 - Pre-query the database and stuff results into the prompt
 - Summarize or filter data before the AI sees it
 - Make decisions about what data the AI needs — let the AI decide
+
+### AI Chat Tool Restriction (MANDATORY)
+
+AI chat sessions MUST use restricted tool sets — **never give bash access**.
+
+- **Allowed builtin tools**: `["read", "ls", "find", "grep"]` — filesystem browsing only
+- **Data access**: Use HTTP-backed custom tools via pi-sidecar (pi-sidecar ≥1.1.0)
+- **Never**: `bash`, `exec`, `write`, `edit` — the AI must not execute arbitrary commands or modify files
+- Custom tools define exactly which API endpoints the AI can call — nothing else is reachable
+- Per-job chat tools: `get_job_result`, `get_job_comments`, `search_jira`, `get_jira_issue`, `search_github_issues`, `get_github_issue` (conditional on user credentials)
+- Admin chat tools: `db_schema`, `db_query` (read-only SQL against the database)
 
 ### CLI Parity
 

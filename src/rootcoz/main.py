@@ -5,6 +5,7 @@ import json
 import logging
 import math
 import os
+import sqlite3
 import time as _time
 import urllib.parse
 import uuid
@@ -8433,6 +8434,81 @@ async def clear_chat_history(job_id: str, request: Request) -> dict:
     return {"deleted": count}
 
 
+# -- Admin DB endpoints (used by admin chat tools) --
+
+
+@app.get("/api/admin/db/schema")
+async def admin_db_schema(request: Request) -> dict:
+    """Get database schema — tables, columns, types, row counts. Admin only."""
+    _require_admin(request)
+
+    conn = sqlite3.connect(f"file:{DB_PATH}?mode=ro", uri=True)
+    conn.row_factory = sqlite3.Row
+    try:
+        tables = []
+        cursor = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"
+        )
+        for row in cursor.fetchall():
+            table_name = row["name"]
+            cols = conn.execute(f"PRAGMA table_info({table_name})")
+            columns = [
+                {
+                    "name": c["name"],
+                    "type": c["type"],
+                    "pk": bool(c["pk"]),
+                    "notnull": bool(c["notnull"]),
+                }
+                for c in cols.fetchall()
+            ]
+            count = conn.execute(
+                f"SELECT COUNT(*) as c FROM [{table_name}]"
+            ).fetchone()["c"]
+            tables.append({"name": table_name, "columns": columns, "row_count": count})
+        return {"tables": tables}
+    finally:
+        conn.close()
+
+
+@app.post("/api/admin/db/query")
+async def admin_db_query(request: Request) -> dict:
+    """Execute a read-only SQL query. Admin only."""
+    _require_admin(request)
+
+    body = await request.json()
+    sql = body.get("sql", "").strip()
+    if not sql:
+        raise HTTPException(status_code=400, detail="Empty query")
+
+    first_word = sql.split()[0].upper() if sql.split() else ""
+    if first_word in (
+        "INSERT",
+        "UPDATE",
+        "DELETE",
+        "DROP",
+        "ALTER",
+        "CREATE",
+        "REPLACE",
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Write operations not allowed (got {first_word})",
+        )
+
+    conn = sqlite3.connect(f"file:{DB_PATH}?mode=ro", uri=True)
+    conn.row_factory = sqlite3.Row
+    try:
+        cursor = conn.execute(sql)
+        rows = cursor.fetchall()
+        columns = [desc[0] for desc in cursor.description] if cursor.description else []
+        results = [dict(row) for row in rows]
+        return {"columns": columns, "rows": results, "count": len(results)}
+    except sqlite3.OperationalError as e:
+        raise HTTPException(status_code=400, detail=f"SQL Error: {e}")
+    finally:
+        conn.close()
+
+
 # -- Admin chat endpoints --
 
 
@@ -8463,7 +8539,7 @@ async def init_admin_chat(request: Request) -> dict:
     _require_admin(request)
     from rootcoz.engine.chat import (
         ensure_chat_workspace,
-        setup_chat_scripts,
+        build_admin_custom_tools,
         init_admin_chat_session,
     )
 
@@ -8480,17 +8556,13 @@ async def init_admin_chat(request: Request) -> dict:
             ADMIN_CHAT_JOB_ID, limit=1, username=username
         )
         if not existing:
-            available_scripts: list[str] = []
+            custom_tools: list[dict] = []
             auth_header = await _create_ai_auth_header(username)
             if auth_header:
                 server_url = _build_internal_server_url()
-                available_scripts = setup_chat_scripts(
-                    workspace,
+                custom_tools = build_admin_custom_tools(
                     server_url=server_url,
                     auth_token=auth_header.removeprefix("Bearer ").strip(),
-                    job_id=ADMIN_CHAT_JOB_ID,
-                    scripts=["rootcoz-chat-db"],
-                    db_path=str(DB_PATH),
                 )
             else:
                 logger.warning("Admin chat init: no auth token for %s", username)
@@ -8499,7 +8571,7 @@ async def init_admin_chat(request: Request) -> dict:
                 ai_provider=ai_provider,
                 ai_model=ai_model,
                 repo_path=workspace,
-                available_scripts=available_scripts,
+                custom_tools=custom_tools,
             )
             if session_id:
                 await storage.add_chat_message(
@@ -8645,7 +8717,7 @@ async def _process_admin_chat_message(
     from rootcoz.engine.chat import (
         admin_chat_with_ai,
         ensure_chat_workspace,
-        setup_chat_scripts,
+        build_admin_custom_tools,
     )
 
     lock = _get_chat_lock(f"{ADMIN_CHAT_JOB_ID}:{username}")
@@ -8707,15 +8779,11 @@ async def _process_admin_chat_message(
             server_url = _build_internal_server_url()
             auth_header = await _create_ai_auth_header(username)
 
-            available_scripts = setup_chat_scripts(
-                workspace,
+            custom_tools = build_admin_custom_tools(
                 server_url=server_url,
                 auth_token=auth_header.removeprefix("Bearer ").strip()
                 if auth_header
                 else "",
-                job_id=ADMIN_CHAT_JOB_ID,
-                scripts=["rootcoz-chat-db"],
-                db_path=str(DB_PATH),
             )
 
             abort_key = f"{ADMIN_CHAT_JOB_ID}:{username}"
@@ -8738,7 +8806,7 @@ async def _process_admin_chat_message(
                 repo_path=workspace,
                 ai_call_timeout=settings.ai_call_timeout,
                 session_id=last_session_id,
-                available_scripts=available_scripts,
+                custom_tools=custom_tools,
             )
 
             if abort_signal.is_set():

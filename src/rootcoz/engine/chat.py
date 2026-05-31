@@ -5,10 +5,7 @@ Builds job-scoped system prompts and manages AI CLI conversations.
 
 import asyncio
 import base64
-import importlib.resources
-import shlex
 import shutil
-import stat
 from collections.abc import Callable
 from pathlib import Path
 
@@ -19,13 +16,6 @@ from pi_sidecar_client import call_ai, get_sidecar_client
 logger = get_logger(name=__name__)
 
 _CHAT_WORKSPACE_PREFIX = "rootcoz-chat-"
-
-# Admin chat still uses the script-based DB tool
-_CHAT_SCRIPTS = ["rootcoz_chat_db.py"]
-
-_SCRIPT_WRAPPERS: dict[str, str] = {
-    "rootcoz-chat-db": "rootcoz_chat_db.py",
-}
 
 
 def get_chat_workspace(job_id: str, username: str = "") -> Path:
@@ -191,120 +181,6 @@ async def clone_chat_repos(
     return cloned_any
 
 
-def setup_chat_scripts(
-    workspace: Path,
-    *,
-    server_url: str,
-    auth_token: str,
-    job_id: str,
-    jira_url: str = "",
-    jira_email: str = "",
-    jira_token: str = "",
-    github_token: str = "",
-    github_repo: str = "",
-    scripts: list[str] | None = None,
-    db_path: str = "",
-) -> list[str]:
-    """Copy chat scripts into workspace and write env config.
-
-    Used by admin chat for the DB query tool. Per-job chat uses
-    HTTP-backed custom tools instead (see build_chat_custom_tools).
-
-    Args:
-        scripts: If provided, install only these wrapper scripts (by wrapper name,
-                 e.g. ["rootcoz-chat-db"]). If None, installs all available wrappers.
-
-    Returns list of available script names.
-    """
-    scripts_dir = workspace / "bin"
-    scripts_dir.mkdir(exist_ok=True)
-
-    # Copy raw Python scripts to a hidden dir (not directly accessible by AI)
-    raw_scripts_dir = workspace / ".scripts"
-    raw_scripts_dir.mkdir(exist_ok=True)
-
-    scripts_pkg = importlib.resources.files("rootcoz.chat_scripts")
-    for script_name in _CHAT_SCRIPTS:
-        source = scripts_pkg.joinpath(script_name)
-        target = raw_scripts_dir / script_name
-        target.write_bytes(source.read_bytes())
-        target.chmod(target.stat().st_mode | stat.S_IEXEC)
-
-    # Write env file that scripts read.
-    # Values are shell-quoted to prevent injection via newlines or special chars.
-    def _env_line(key: str, value: str) -> str:
-        return f"{key}={shlex.quote(value)}"
-
-    env_lines = [
-        _env_line("ROOTCOZ_SERVER_URL", server_url),
-        _env_line("ROOTCOZ_AUTH_TOKEN", auth_token),
-        _env_line("ROOTCOZ_JOB_ID", job_id),
-    ]
-    if jira_url:
-        env_lines.append(_env_line("ROOTCOZ_JIRA_URL", jira_url))
-    if jira_email:
-        env_lines.append(_env_line("ROOTCOZ_JIRA_EMAIL", jira_email))
-    if jira_token:
-        env_lines.append(_env_line("ROOTCOZ_JIRA_TOKEN", jira_token))
-    if github_token:
-        env_lines.append(_env_line("ROOTCOZ_GITHUB_TOKEN", github_token))
-    if github_repo:
-        env_lines.append(_env_line("ROOTCOZ_GITHUB_REPO", github_repo))
-    if db_path:
-        env_lines.append(_env_line("ROOTCOZ_DB_PATH", db_path))
-
-    env_file = workspace / ".chat_env"
-    env_file.write_text("\n".join(env_lines) + "\n")
-    env_file.chmod(0o600)  # Restrict access — contains tokens
-
-    # Write wrapper scripts that source the env and call uv run
-    available = []
-
-    if scripts is not None:
-        # Explicit script list — install exactly what was requested
-        for wrapper_name in scripts:
-            script_file = _SCRIPT_WRAPPERS.get(wrapper_name)
-            if script_file:
-                _write_wrapper(scripts_dir, wrapper_name, script_file, workspace)
-                available.append(wrapper_name)
-    else:
-        # Install all available wrappers
-        for wrapper_name, script_file in _SCRIPT_WRAPPERS.items():
-            _write_wrapper(scripts_dir, wrapper_name, script_file, workspace)
-            available.append(wrapper_name)
-
-    logger.info("Chat scripts setup in %s: %s", workspace, ", ".join(available))
-    return available
-
-
-def _write_wrapper(
-    scripts_dir: Path, name: str, script_file: str, workspace: Path
-) -> None:
-    """Write a Python wrapper that loads env safely and runs the script via uv."""
-    wrapper = scripts_dir / name
-    env_file = workspace / ".chat_env"
-    raw_script = workspace / ".scripts" / script_file
-    wrapper.write_text(
-        "#!/usr/bin/env python3\n"
-        "import os, subprocess, sys\n"
-        f"env_file = {str(env_file)!r}\n"
-        "import shlex\n"
-        "with open(env_file) as f:\n"
-        "    for line in f:\n"
-        "        line = line.strip()\n"
-        "        if line and '=' in line and not line.startswith('#'):\n"
-        "            k, _, v = line.partition('=')\n"
-        "            # Strip shell quoting added by shlex.quote()\n"
-        "            try:\n"
-        "                v = shlex.split(v)[0] if v else v\n"
-        "            except ValueError:\n"
-        "                pass\n"
-        "            os.environ[k] = v\n"
-        f"sys.exit(subprocess.call(['uv', 'run', {str(raw_script)!r}] + sys.argv[1:]))\n"
-    )
-    wrapper.chmod(wrapper.stat().st_mode | stat.S_IEXEC)
-
-
 def build_chat_custom_tools(
     *,
     server_url: str,
@@ -466,6 +342,54 @@ def build_chat_custom_tools(
     return tools
 
 
+def build_admin_custom_tools(
+    *,
+    server_url: str,
+    auth_token: str,
+) -> list[dict]:
+    """Build HTTP-backed custom tools for admin chat."""
+    auth_headers = {"Authorization": f"Bearer {auth_token}"}
+
+    return [
+        {
+            "name": "db_schema",
+            "description": (
+                "Get the database schema — all tables with columns, types, "
+                "and row counts. Run this first to understand the data structure."
+            ),
+            "parameters": {"type": "object", "properties": {}},
+            "http": {
+                "method": "GET",
+                "url": f"{server_url}/api/admin/db/schema",
+                "headers": auth_headers,
+            },
+        },
+        {
+            "name": "db_query",
+            "description": (
+                "Execute a read-only SQL query against the database. "
+                "Use this to answer analytics questions. Write SELECT queries."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "sql": {
+                        "type": "string",
+                        "description": "SQL SELECT query to execute",
+                    },
+                },
+                "required": ["sql"],
+            },
+            "http": {
+                "method": "POST",
+                "url": f"{server_url}/api/admin/db/query",
+                "headers": {**auth_headers, "Content-Type": "application/json"},
+                "body_template": {"sql": "{sql}"},
+            },
+        },
+    ]
+
+
 def cleanup_chat_repos(job_id: str, username: str = "") -> None:
     """Delete cloned repos from chat workspace but keep session files."""
     workspace = get_chat_workspace(job_id, username)
@@ -481,42 +405,18 @@ def cleanup_chat_repos(job_id: str, username: str = "") -> None:
         else:
             item.unlink(missing_ok=True)
 
-    # Also delete sensitive files that are dot-prefixed but not session dirs
-    for sensitive in (".chat_env", ".scripts"):
-        target = workspace / sensitive
-        if target.is_file():
-            target.unlink(missing_ok=True)
-        elif target.is_dir():
-            shutil.rmtree(target, ignore_errors=True)
-
     logger.info(f"Cleaned up chat repos for job {job_id} (kept sessions)")
 
 
 def cleanup_chat_workspace(job_id: str, username: str = "") -> None:
-    """Delete the entire chat workspace including sessions.
-
-    Explicitly removes sensitive files (.chat_env) first to ensure
-    tokens are scrubbed even if the full rmtree partially fails.
-    """
+    """Delete the entire chat workspace including sessions."""
     workspace = get_chat_workspace(job_id, username)
     if workspace.exists():
-        # Scrub sensitive token files first (defense in depth)
-        env_file = workspace / ".chat_env"
-        if env_file.is_file():
-            env_file.unlink(missing_ok=True)
-        scripts_dir = workspace / ".scripts"
-        if scripts_dir.is_dir():
-            shutil.rmtree(scripts_dir, ignore_errors=True)
-
         shutil.rmtree(workspace, ignore_errors=True)
         logger.info(f"Deleted chat workspace for job {job_id}")
 
 
 # -- Shared prompt building helpers --
-
-_SCRIPT_DESCRIPTIONS: dict[str, str] = {
-    "rootcoz-chat-db": "Read-only SQL query tool — run 'schema' to see tables, 'query <SQL>' to execute queries",
-}
 
 
 def _build_tools_section(custom_tools: list[dict]) -> str:
@@ -529,49 +429,11 @@ def _build_tools_section(custom_tools: list[dict]) -> str:
     return "\n".join(lines)
 
 
-def _build_script_tools_section(available_scripts: list[str]) -> str:
-    """Build the tools section listing available scripts (admin chat)."""
-    lines = []
-    for script in available_scripts:
-        desc = _SCRIPT_DESCRIPTIONS.get(script, "Run for details")
-        lines.append(
-            f"- `./bin/{script}` — {desc}. "
-            f"Run `./bin/{script} --help` for all commands."
-        )
-    return "\n".join(lines)
-
-
 def _build_unavailable_section(custom_tools: list[dict]) -> str:
     """Build notice about unavailable tools (Jira/GitHub not configured)."""
     tool_names = {t["name"] for t in custom_tools}
     jira_configured = "search_jira" in tool_names
     github_configured = "search_github_issues" in tool_names
-
-    lines = []
-    if not jira_configured:
-        lines.append(
-            "- **Jira search** is not available. If the user asks about Jira tickets, "
-            'tell them: "Jira search is not available for your account. To enable it, '
-            "go to your User Settings page and configure your Jira credentials "
-            '(URL, email, and API token), then start a new chat session."'
-        )
-    if not github_configured:
-        lines.append(
-            "- **GitHub search** is not available. If the user asks about GitHub issues or PRs, "
-            'tell them: "GitHub search is not available. To enable it, '
-            "configure your GitHub token on the User Settings page, "
-            'then start a new chat session."'
-        )
-
-    if not lines:
-        return ""
-    return "\n\n## Unavailable Tools\n" + "\n".join(lines)
-
-
-def _build_admin_unavailable_section(available_scripts: list[str]) -> str:
-    """Build notice about unavailable tools for admin chat (script-based)."""
-    jira_configured = "rootcoz-chat-jira" in available_scripts
-    github_configured = "rootcoz-chat-github" in available_scripts
 
     lines = []
     if not jira_configured:
@@ -640,11 +502,11 @@ You have structured tools that you can call directly:
 
 
 def build_admin_system_prompt(
-    available_scripts: list[str],
+    custom_tools: list[dict],
 ) -> str:
     """Build system prompt for admin global chat — server-wide scope."""
-    tools_section = _build_script_tools_section(available_scripts)
-    unavailable_section = _build_admin_unavailable_section(available_scripts)
+    tools_section = _build_tools_section(custom_tools)
+    unavailable_section = _build_unavailable_section(custom_tools)
 
     return f"""You are a CI/CD analytics expert with access to the entire rootcoz server data.
 
@@ -663,12 +525,12 @@ def build_admin_system_prompt(
 - You CAN answer aggregate questions about failures (e.g., "how many infrastructure failures in the last week", "which tests fail most often")
 
 ## Available Tools
-Scripts in your working directory (under `bin/`) — use these to access data:
+You have structured tools — call them directly:
 {tools_section}
 
-**WORKFLOW:** First run `./bin/rootcoz-chat-db schema` to understand the database structure, then write targeted SQL queries with `./bin/rootcoz-chat-db query "SELECT ..."` to answer questions.
+**WORKFLOW:** First call `db_schema` to understand the database structure, then write targeted SQL queries with `db_query`.
 
-**SENSITIVE DATA:** Some columns contain encrypted values (tokens, passwords). Never output raw encrypted field values — they are ciphertext and useless to the user.{unavailable_section}
+**SENSITIVE DATA:** Some columns contain encrypted values (tokens, passwords). Never output raw encrypted field values.{unavailable_section}
 
 ## Rules — STRICT
 - You MUST only discuss server data and CI/CD analytics
@@ -732,7 +594,7 @@ async def _create_chat_session(
         if custom_tools:
             create_kwargs["custom_tools"] = custom_tools
         if restrict_tools:
-            create_kwargs["tools"] = ["read", "ls", "find"]
+            create_kwargs["tools"] = ["read", "ls", "find", "grep"]
         session_id = await client.create_session(**create_kwargs)
         logger.info("%s: session created: %s", log_prefix, session_id)
         return session_id
@@ -776,17 +638,17 @@ async def init_admin_chat_session(
     ai_provider: str,
     ai_model: str,
     repo_path: Path | None = None,
-    available_scripts: list[str] | None = None,
+    custom_tools: list[dict] | None = None,
 ) -> str | None:
     """Initialize an admin chat session via the sidecar. Returns session_id or None."""
-    system_prompt = build_admin_system_prompt(available_scripts=available_scripts or [])
+    system_prompt = build_admin_system_prompt(custom_tools=custom_tools or [])
     return await _create_chat_session(
         system_prompt=system_prompt,
         ai_provider=ai_provider,
         ai_model=ai_model,
         repo_path=repo_path,
         log_prefix="Admin chat",
-        restrict_tools=False,
+        custom_tools=custom_tools,
     )
 
 
@@ -930,12 +792,12 @@ async def admin_chat_with_ai(
     repo_path: Path | None = None,
     ai_call_timeout: int | None = None,
     session_id: str | None = None,
-    available_scripts: list[str] | None = None,
+    custom_tools: list[dict] | None = None,
 ) -> tuple[bool, str, str | None]:
     """Send an admin chat message and get an AI response."""
 
     def _build_prompt() -> str:
-        return build_admin_system_prompt(available_scripts=available_scripts or [])
+        return build_admin_system_prompt(custom_tools=custom_tools or [])
 
     return await _chat_with_ai_impl(
         message=message,
@@ -946,7 +808,7 @@ async def admin_chat_with_ai(
         repo_path=repo_path,
         ai_call_timeout=ai_call_timeout,
         session_id=session_id,
-        restrict_tools=False,
+        custom_tools=custom_tools,
         log_prefix="Admin chat",
         request_id="__admin_chat__",
         call_type="admin_chat",
