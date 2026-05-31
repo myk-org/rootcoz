@@ -51,7 +51,7 @@ export function ChatPage() {
 
   const hasPending = messages.some(m => m.status === 'pending')
 
-  // Always init workspace first, then load history
+  // Init workspace in background, load history immediately
   useEffect(() => {
     if (!jobId) return
     let ignore = false
@@ -59,45 +59,39 @@ export function ChatPage() {
     setChatReady(false)
     setInitMessage('Initializing...')
 
-    // Always init workspace first, then load history
-    api.post<{ ready: boolean; repos_cloned: boolean; repo_names: string[] }>(`/api/chat/${jobId}/init`, {})
-      .catch(() => {}) // Init is best-effort
-      .then(() => {
-        if (ignore) return
-        return Promise.all([
-          api.get<{ messages: ChatMessage[]; total: number }>(`/api/chat/${jobId}`),
-          api.get<{ result: { job_name: string; build_number: number; summary: string; ai_provider: string; ai_model: string } }>(`/results/${jobId}`),
-        ])
-      })
-      .then(async (results) => {
-        if (ignore || !results) return
-        const [chatRes, resultRes] = results
-        if (chatRes.total > 200) {
-          const lastPage = await api.get<{ messages: ChatMessage[]; total: number }>(
-            `/api/chat/${jobId}?offset=${Math.max(chatRes.total - 200, 0)}`
-          )
-          setMessages(lastPage.messages)
-        } else {
-          setMessages(chatRes.messages)
-        }
-        if (resultRes.result) {
-          const r = resultRes.result
-          setJobInfo({ job_name: r.job_name, build_number: r.build_number, summary: r.summary, ai_provider: r.ai_provider, ai_model: r.ai_model })
-          setAiProvider(r.ai_provider || 'claude')
-          setAiModel(r.ai_model || '')
-        }
-        setChatReady(true)
-        setInitMessage('')
-      })
-      .catch(err => {
-        if (ignore) return
-        setError(err instanceof Error ? err.message : 'Failed to load chat')
-        setChatReady(true)
-        setInitMessage('')
-      })
-      .finally(() => {
-        if (!ignore) setLoading(false)
-      })
+    // Start init in background (best-effort, repos clone on first message if needed)
+    api.post(`/api/chat/${jobId}/init`, {}).catch(() => {})
+
+    // Load history + results immediately (don't wait for init)
+    Promise.all([
+      api.get<{ messages: ChatMessage[]; total: number }>(`/api/chat/${jobId}`),
+      api.get<{ result: { job_name: string; build_number: number; summary: string; ai_provider: string; ai_model: string } }>(`/results/${jobId}`),
+    ]).then(async ([chatRes, resultRes]) => {
+      if (ignore) return
+      if (chatRes.total > 200) {
+        const lastPage = await api.get<{ messages: ChatMessage[]; total: number }>(
+          `/api/chat/${jobId}?offset=${Math.max(chatRes.total - 200, 0)}`
+        )
+        setMessages(lastPage.messages)
+      } else {
+        setMessages(chatRes.messages)
+      }
+      if (resultRes.result) {
+        const r = resultRes.result
+        setJobInfo({ job_name: r.job_name, build_number: r.build_number, summary: r.summary, ai_provider: r.ai_provider, ai_model: r.ai_model })
+        setAiProvider(r.ai_provider || 'claude')
+        setAiModel(r.ai_model || '')
+      }
+      setChatReady(true)
+      setInitMessage('')
+    }).catch(err => {
+      if (ignore) return
+      setError(err instanceof Error ? err.message : 'Failed to load chat')
+      setChatReady(true)
+      setInitMessage('')
+    }).finally(() => {
+      if (!ignore) setLoading(false)
+    })
 
     return () => { ignore = true }
   }, [jobId])
@@ -213,10 +207,16 @@ export function ChatPage() {
     setError('')
     try {
       await api.delete(`/api/chat/${jobId}`)
-      await api.post<{ ready: boolean; repos_cloned: boolean; repo_names: string[] }>(`/api/chat/${jobId}/init`, {})
-      setChatReady(true)
-      setInitMessage('')
+      // Init may take a while for repo cloning — don't block on it
+      // Repos will be cloned on first message if init times out
+      const initTimeout = new Promise<void>((resolve) => setTimeout(resolve, 10000))
+      await Promise.race([
+        api.post(`/api/chat/${jobId}/init`, {}),
+        initTimeout,
+      ])
     } catch {
+      // Init failure is non-fatal — chat still works, repos clone on first message
+    } finally {
       setChatReady(true)
       setInitMessage('')
     }
