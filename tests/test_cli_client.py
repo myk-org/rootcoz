@@ -1547,6 +1547,51 @@ class TestRootCozClientAdminUsers:
         assert exc_info.value.status_code == 403
 
 
+class TestAdminSettings:
+    def test_admin_list_settings(self):
+        def handler(request):
+            assert request.method == "GET"
+            assert request.url.path == "/api/admin/settings"
+            return httpx.Response(
+                200,
+                json=[
+                    {
+                        "env_var": "JENKINS_URL",
+                        "value": "http://jenkins",
+                        "source": "env",
+                        "category": "jenkins",
+                    }
+                ],
+            )
+
+        client = _make_client(handler)
+        result = client.admin_list_settings()
+        assert len(result) == 1
+        assert result[0]["env_var"] == "JENKINS_URL"
+
+    def test_admin_set_setting(self):
+        def handler(request):
+            assert request.method == "PUT"
+            assert request.url.path == "/api/admin/settings"
+            body = json.loads(request.content)
+            assert body == {"settings": {"jenkins_url": "http://new"}}
+            return httpx.Response(200, json={"updated": {"jenkins_url": "http://new"}})
+
+        client = _make_client(handler)
+        result = client.admin_set_setting("jenkins_url", "http://new")
+        assert result["updated"]["jenkins_url"] == "http://new"
+
+    def test_admin_reset_setting(self):
+        def handler(request):
+            assert request.method == "DELETE"
+            assert "/api/admin/settings/jenkins_url" in str(request.url)
+            return httpx.Response(200, json={"reset": "jenkins_url"})
+
+        client = _make_client(handler)
+        result = client.admin_reset_setting("jenkins_url")
+        assert result["reset"] == "jenkins_url"
+
+
 class TestTokenUsage:
     def test_get_token_usage_no_params(self):
         def handler(request):

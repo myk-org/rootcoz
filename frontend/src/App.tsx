@@ -16,6 +16,7 @@ import { TokenUsagePage } from '@/pages/TokenUsagePage'
 import { MentionsPage } from '@/pages/MentionsPage'
 import { NewAnalysisPage } from '@/pages/NewAnalysisPage'
 import { PendingApprovalPage } from '@/pages/PendingApprovalPage'
+import { ServerSettingsPage } from '@/pages/ServerSettingsPage'
 
 export default function App() {
   return (
@@ -36,6 +37,7 @@ export default function App() {
             <Route path="/settings" element={<ProtectedRoute><SettingsPage /></ProtectedRoute>} />
             <Route path="/admin/users" element={<ProtectedRoute adminOnly><UsersPage /></ProtectedRoute>} />
             <Route path="/admin/token-usage" element={<ProtectedRoute adminOnly><TokenUsagePage /></ProtectedRoute>} />
+            <Route path="/admin/settings" element={<ProtectedRoute adminOnly><ServerSettingsPage /></ProtectedRoute>} />
           </Route>
         </Routes>
       </BrowserRouter>
