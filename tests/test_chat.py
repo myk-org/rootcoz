@@ -142,6 +142,66 @@ class TestBuildSystemPrompt:
         assert "./bin/rootcoz-chat-jira" not in prompt
         assert "./bin/rootcoz-chat-github" not in prompt
 
+    def test_unavailable_jira_notice(self):
+        """When jira is not configured, system prompt includes unavailable notice."""
+        prompt = build_system_prompt(
+            job_name="j",
+            build_number=1,
+            job_id="j1",
+            available_scripts=["rootcoz-chat-job"],
+            jira_configured=False,
+            github_configured=True,
+        )
+        assert "Unavailable Tools" in prompt
+        assert "Jira search" in prompt
+        assert "User Settings" in prompt
+        assert "GitHub search" not in prompt  # GitHub IS configured
+
+    def test_unavailable_github_notice(self):
+        """When github is not configured, system prompt includes unavailable notice."""
+        prompt = build_system_prompt(
+            job_name="j",
+            build_number=1,
+            job_id="j1",
+            available_scripts=["rootcoz-chat-job"],
+            jira_configured=True,
+            github_configured=False,
+        )
+        assert "Unavailable Tools" in prompt
+        assert "GitHub search" in prompt
+        assert "User Settings" in prompt
+        assert "Jira search" not in prompt  # Jira IS configured
+
+    def test_both_unavailable_notices(self):
+        """When neither jira nor github configured, both notices appear."""
+        prompt = build_system_prompt(
+            job_name="j",
+            build_number=1,
+            job_id="j1",
+            available_scripts=["rootcoz-chat-job"],
+            jira_configured=False,
+            github_configured=False,
+        )
+        assert "Unavailable Tools" in prompt
+        assert "Jira search" in prompt
+        assert "GitHub search" in prompt
+
+    def test_no_unavailable_when_all_configured(self):
+        """When both are configured, no unavailable section."""
+        prompt = build_system_prompt(
+            job_name="j",
+            build_number=1,
+            job_id="j1",
+            available_scripts=[
+                "rootcoz-chat-job",
+                "rootcoz-chat-jira",
+                "rootcoz-chat-github",
+            ],
+            jira_configured=True,
+            github_configured=True,
+        )
+        assert "Unavailable Tools" not in prompt
+
 
 # ---------------------------------------------------------------------------
 # build_chat_prompt tests

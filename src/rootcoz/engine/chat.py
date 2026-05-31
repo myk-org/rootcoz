@@ -334,6 +334,8 @@ def build_system_prompt(
     job_id: str,
     available_scripts: list[str],
     repos_available: bool = False,
+    jira_configured: bool = False,
+    github_configured: bool = False,
 ) -> str:
     """Build a system prompt that scopes the AI to a specific analyzed job.
 
@@ -367,6 +369,29 @@ def build_system_prompt(
             "You can explore test and product code directly."
         )
 
+    # Build unavailable tools notice
+    unavailable_lines = []
+    if not jira_configured:
+        unavailable_lines.append(
+            "- **Jira search** is not available. If the user asks about Jira tickets, "
+            'tell them: "Jira search is not available for your account. To enable it, '
+            "go to your User Settings page and configure your Jira credentials (URL, email, and API token), "
+            'then start a new chat session."'
+        )
+    if not github_configured:
+        unavailable_lines.append(
+            "- **GitHub search** is not available. If the user asks about GitHub issues or PRs, "
+            'tell them: "GitHub search is not available for your account. To enable it, '
+            "go to your User Settings page and configure your GitHub token, "
+            'then start a new chat session."'
+        )
+
+    unavailable_section = ""
+    if unavailable_lines:
+        unavailable_section = "\n\n## Unavailable Tools\n" + "\n".join(
+            unavailable_lines
+        )
+
     return f"""You are a CI/CD failure analysis expert. You are helping a user understand the analysis results for job **{job_name} #{build_number}** (job ID: {job_id}).
 
 ## Your Role
@@ -380,7 +405,7 @@ def build_system_prompt(
 Scripts in your working directory (under `bin/`) — use these to access data:
 {tools_section}
 
-**IMPORTANT:** Use these scripts to get data when the user asks a question. Do NOT run scripts proactively — only fetch data that's relevant to what the user is asking about.{repos_note}
+**IMPORTANT:** Use these scripts to get data when the user asks a question. Do NOT run scripts proactively — only fetch data that's relevant to what the user is asking about.{repos_note}{unavailable_section}
 
 ## Rules — STRICT
 - You MUST only discuss this specific job and its failures
@@ -435,12 +460,16 @@ async def init_chat_session(
 
     Returns the session_id, or None if creation failed.
     """
+    jira_configured = "rootcoz-chat-jira" in (available_scripts or [])
+    github_configured = "rootcoz-chat-github" in (available_scripts or [])
     system_prompt = build_system_prompt(
         job_name=job_name,
         build_number=build_number,
         job_id=job_id,
         available_scripts=available_scripts or [],
         repos_available=repos_available,
+        jira_configured=jira_configured,
+        github_configured=github_configured,
     )
 
     logger.info(
@@ -514,12 +543,16 @@ async def chat_with_ai(
         prompt = message
     else:
         # First message without a session — build full prompt with history
+        jira_configured = "rootcoz-chat-jira" in (available_scripts or [])
+        github_configured = "rootcoz-chat-github" in (available_scripts or [])
         system_prompt = build_system_prompt(
             job_name=job_name,
             build_number=build_number,
             job_id=job_id,
             available_scripts=available_scripts or [],
             repos_available=repos_available,
+            jira_configured=jira_configured,
+            github_configured=github_configured,
         )
         prompt = build_chat_prompt(system_prompt, history, message)
 
