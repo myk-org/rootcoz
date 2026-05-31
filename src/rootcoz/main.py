@@ -8012,21 +8012,31 @@ async def abort_chat(job_id: str, request: Request) -> dict:
 
     # Abort the sidecar session to interrupt the AI call
     try:
-        all_messages = await storage.get_chat_messages(
-            job_id, username=username, limit=1000
-        )
-        for msg in reversed(all_messages):
-            if msg.get("role") == "assistant" and msg.get("session_id"):
-                from pi_sidecar_client import get_sidecar_client
-
-                client = get_sidecar_client()
-                await client.abort(msg["session_id"])
-                logger.info(
-                    "Chat: aborted sidecar session %s for job %s",
-                    msg["session_id"],
-                    job_id,
-                )
+        # Find session_id: check pending messages first, then last assistant message
+        target_session_id = None
+        for msg in pending:
+            if msg.get("session_id"):
+                target_session_id = msg["session_id"]
                 break
+        if not target_session_id:
+            # Fetch the tail of history to find the most recent session_id
+            total = await storage.count_chat_messages(job_id, username=username)
+            if total > 0:
+                tail_offset = max(total - 10, 0)
+                recent = await storage.get_chat_messages(
+                    job_id, username=username, limit=10, offset=tail_offset
+                )
+                for msg in reversed(recent):
+                    if msg.get("role") == "assistant" and msg.get("session_id"):
+                        target_session_id = msg["session_id"]
+                        break
+
+        if target_session_id:
+            from pi_sidecar_client import get_sidecar_client
+
+            client = get_sidecar_client()
+            await client.abort(target_session_id)
+            logger.debug("Chat: aborted sidecar session for job %s", job_id)
     except Exception:
         logger.debug("Chat: sidecar abort best-effort failed", exc_info=True)
 
