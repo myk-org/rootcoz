@@ -73,6 +73,17 @@ def _resolve_chat_repo_target(workspace: Path, repo_name: str) -> tuple[str, Pat
     return safe_name, target
 
 
+def _is_github_url(url: str) -> bool:
+    """Check if URL is a GitHub host (github.com or common GHE patterns)."""
+    from urllib.parse import urlsplit
+
+    try:
+        host = urlsplit(url).netloc.lower()
+        return host.endswith("github.com") or "github" in host
+    except Exception:
+        return False
+
+
 async def clone_chat_repos(
     workspace: Path,
     request_params: dict,
@@ -123,8 +134,10 @@ async def clone_chat_repos(
                         logger.info(
                             "Chat: cloning repo %s into %s", repo_name, workspace
                         )
-                        # Use user-scoped token, not job params credential
-                        token = user_repo_token
+                        # Only use token for GitHub hosts (prevent credential leaks to other hosts)
+                        token = ""
+                        if user_repo_token and _is_github_url(clean_url):
+                            token = user_repo_token
                         await asyncio.to_thread(
                             repo_manager.clone_into,
                             clean_url,

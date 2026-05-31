@@ -8045,9 +8045,6 @@ async def abort_chat(job_id: str, request: Request) -> dict:
     except Exception:
         logger.debug("Chat: sidecar abort best-effort failed", exc_info=True)
 
-    if not pending:
-        signal.clear()
-
     logger.info("Chat: user %s aborted chat for job %s", username, job_id)
     return {"aborted": len(pending)}
 
@@ -8572,9 +8569,6 @@ async def abort_admin_chat(request: Request) -> dict:
             logger.debug("Admin chat: aborted sidecar session")
     except Exception:
         logger.debug("Admin chat: sidecar abort best-effort failed", exc_info=True)
-
-    if not pending:
-        signal.clear()
 
     logger.info("Admin chat: user %s aborted admin chat", username)
     return {"aborted": len(pending)}
