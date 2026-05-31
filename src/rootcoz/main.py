@@ -8010,10 +8010,28 @@ async def abort_chat(job_id: str, request: Request) -> dict:
     if pending:
         notify_chat_changed(job_id, username=username)
 
+    # Abort the sidecar session to interrupt the AI call
+    try:
+        all_messages = await storage.get_chat_messages(
+            job_id, username=username, limit=1000
+        )
+        for msg in reversed(all_messages):
+            if msg.get("role") == "assistant" and msg.get("session_id"):
+                from pi_sidecar_client import get_sidecar_client
+
+                client = get_sidecar_client()
+                await client.abort(msg["session_id"])
+                logger.info(
+                    "Chat: aborted sidecar session %s for job %s",
+                    msg["session_id"],
+                    job_id,
+                )
+                break
+    except Exception:
+        logger.debug("Chat: sidecar abort best-effort failed", exc_info=True)
+
     if not pending:
-        # No worker running to consume the signal — clear it immediately
         signal.clear()
-    # If pending messages exist, the worker will clear the signal in its finally block
 
     logger.info("Chat: user %s aborted chat for job %s", username, job_id)
     return {"aborted": len(pending)}

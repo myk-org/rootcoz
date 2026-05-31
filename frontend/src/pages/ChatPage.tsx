@@ -232,6 +232,12 @@ export function ChatPage() {
     if (!jobId) return
     try {
       await api.post(`/api/chat/${jobId}/abort`, {})
+      // Optimistically mark pending messages as failed locally
+      setMessages(prev => prev.map(m =>
+        m.status === 'pending'
+          ? { ...m, status: 'failed' as const, content: 'Aborted by user.' }
+          : m
+      ))
     } catch {
       // Abort is best-effort — SSE will update the message status
     }
