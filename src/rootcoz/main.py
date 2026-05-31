@@ -7922,18 +7922,20 @@ async def init_chat(job_id: str, request: Request) -> dict:
         repos_available=repos_available,
     )
 
-    # Store session_id for this user+job+provider+model
+    # Store session_id for this user+job — only on first init (avoid duplicate hidden rows)
     if session_id:
-        await storage.add_chat_message(
-            job_id=job_id,
-            role="assistant",
-            content="",  # Hidden init message
-            username=username,
-            ai_provider=ai_provider,
-            ai_model=ai_model,
-            session_id=session_id,
-            status="completed",
-        )
+        existing = await storage.get_chat_messages(job_id, limit=1, username=username)
+        if not existing:
+            await storage.add_chat_message(
+                job_id=job_id,
+                role="assistant",
+                content="",  # Hidden init message
+                username=username,
+                ai_provider=ai_provider,
+                ai_model=ai_model,
+                session_id=session_id,
+                status="completed",
+            )
 
     logger.info(
         "Chat init for job %s: workspace=%s, repos=%s, session=%s",

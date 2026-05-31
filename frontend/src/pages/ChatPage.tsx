@@ -72,6 +72,7 @@ export function ChatPage() {
         const lastPage = await api.get<{ messages: ChatMessage[]; total: number }>(
           `/api/chat/${jobId}?offset=${Math.max(chatRes.total - 200, 0)}`
         )
+        if (ignore) return
         setMessages(lastPage.messages)
       } else {
         setMessages(chatRes.messages)
