@@ -7905,7 +7905,9 @@ async def init_chat(job_id: str, request: Request) -> dict:
         # Tradeoff: this blocks message processing until cloning finishes, but the frontend
         # init has a 10s timeout so user input is never blocked indefinitely. Without the lock,
         # concurrent init + message can clone into the same workspace causing corruption.
-        repos_available = await clone_chat_repos(workspace, decrypted_params)
+        repos_available = await clone_chat_repos(
+            workspace, decrypted_params, user_repo_token=github_token
+        )
 
         existing = await storage.get_chat_messages(job_id, limit=1, username=username)
         if not existing:
@@ -8266,10 +8268,6 @@ async def _process_chat_message(
                 logger.warning(
                     "Failed to decrypt request_params for chat context", exc_info=True
                 )
-            repos_available = await clone_chat_repos(workspace, decrypted_params)
-
-            settings = get_settings()
-
             (
                 jira_url,
                 jira_email,
@@ -8277,6 +8275,12 @@ async def _process_chat_message(
                 github_token,
                 github_repo,
             ) = await _resolve_chat_credentials(decrypted_params, username)
+
+            repos_available = await clone_chat_repos(
+                workspace, decrypted_params, user_repo_token=github_token
+            )
+
+            settings = get_settings()
 
             server_url = _build_internal_server_url()
             auth_header = await _create_ai_auth_header(username)
@@ -8358,6 +8362,15 @@ async def _process_chat_message(
                 )
                 await storage.update_chat_message_status(assistant_msg_id, "failed")
                 notify_chat_changed(job_id, username=username)
+                return
+
+            # Check if message was aborted while AI was processing
+            current_status = await storage.get_chat_message_status(assistant_msg_id)
+            if current_status == "failed":
+                logger.info(
+                    "Chat: message %d was aborted during processing, discarding response",
+                    assistant_msg_id,
+                )
                 return
 
             # Update the pending assistant message with the real response
@@ -8789,6 +8802,15 @@ async def _process_admin_chat_message(
                 )
                 await storage.update_chat_message_status(assistant_msg_id, "failed")
                 notify_chat_changed(ADMIN_CHAT_JOB_ID, username=username)
+                return
+
+            # Check if message was aborted while AI was processing
+            current_status = await storage.get_chat_message_status(assistant_msg_id)
+            if current_status == "failed":
+                logger.info(
+                    "Chat: message %d was aborted during processing, discarding response",
+                    assistant_msg_id,
+                )
                 return
 
             await storage.update_chat_message_content(assistant_msg_id, response_text)

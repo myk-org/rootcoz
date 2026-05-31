@@ -84,6 +84,7 @@ def _resolve_chat_repo_target(workspace: Path, repo_name: str) -> tuple[str, Pat
 async def clone_chat_repos(
     workspace: Path,
     request_params: dict,
+    user_repo_token: str = "",
 ) -> bool:
     """Clone repos into the chat workspace.
 
@@ -130,7 +131,8 @@ async def clone_chat_repos(
                         logger.info(
                             "Chat: cloning repo %s into %s", repo_name, workspace
                         )
-                        token = request_params.get("tests_repo_token", "")
+                        # Use user-scoped token, not job params credential
+                        token = user_repo_token
                         await asyncio.to_thread(
                             repo_manager.clone_into,
                             clean_url,

@@ -542,6 +542,10 @@ async def init_db() -> None:
         await db.execute(
             "CREATE INDEX IF NOT EXISTS idx_chat_messages_job_id ON chat_messages (job_id)"
         )
+        await db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_chat_messages_job_user "
+            "ON chat_messages (job_id, username)"
+        )
 
         # Migration: add session_id to chat_messages
         await _migrate_add_column(
@@ -551,6 +555,10 @@ async def init_db() -> None:
         # Migration: add status to chat_messages (pending/completed/failed)
         await _migrate_add_column(
             db, "chat_messages", "status", "TEXT NOT NULL DEFAULT 'completed'"
+        )
+        await db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_chat_messages_job_user_status "
+            "ON chat_messages (job_id, username, status)"
         )
         await db.commit()
 
