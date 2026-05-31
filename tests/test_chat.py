@@ -148,9 +148,7 @@ class TestBuildSystemPrompt:
             job_name="j",
             build_number=1,
             job_id="j1",
-            available_scripts=["rootcoz-chat-job"],
-            jira_configured=False,
-            github_configured=True,
+            available_scripts=["rootcoz-chat-job", "rootcoz-chat-github"],
         )
         assert "Unavailable Tools" in prompt
         assert "Jira search" in prompt
@@ -163,9 +161,7 @@ class TestBuildSystemPrompt:
             job_name="j",
             build_number=1,
             job_id="j1",
-            available_scripts=["rootcoz-chat-job"],
-            jira_configured=True,
-            github_configured=False,
+            available_scripts=["rootcoz-chat-job", "rootcoz-chat-jira"],
         )
         assert "Unavailable Tools" in prompt
         assert "GitHub search" in prompt
@@ -179,8 +175,6 @@ class TestBuildSystemPrompt:
             build_number=1,
             job_id="j1",
             available_scripts=["rootcoz-chat-job"],
-            jira_configured=False,
-            github_configured=False,
         )
         assert "Unavailable Tools" in prompt
         assert "Jira search" in prompt
@@ -197,8 +191,6 @@ class TestBuildSystemPrompt:
                 "rootcoz-chat-jira",
                 "rootcoz-chat-github",
             ],
-            jira_configured=True,
-            github_configured=True,
         )
         assert "Unavailable Tools" not in prompt
 
