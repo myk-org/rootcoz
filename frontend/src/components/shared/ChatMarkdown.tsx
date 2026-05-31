@@ -1,4 +1,5 @@
 import ReactMarkdown from 'react-markdown'
+import { isSafeHref } from '@/lib/autoLink'
 
 interface ChatMarkdownProps {
   content: string
@@ -14,7 +15,22 @@ export function ChatMarkdown({ content }: ChatMarkdownProps) {
       prose-pre:bg-surface-elevated prose-pre:rounded-md prose-pre:p-3 prose-pre:text-xs
       prose-table:text-xs prose-th:text-left prose-th:p-2 prose-td:p-2
       prose-strong:text-text-primary">
-      <ReactMarkdown>{content}</ReactMarkdown>
+      <ReactMarkdown
+        components={{
+          a: ({ href, children }) => {
+            if (!href || !isSafeHref(href)) {
+              return <span>{children}</span>
+            }
+            return (
+              <a href={href} target="_blank" rel="noopener noreferrer">
+                {children}
+              </a>
+            )
+          },
+        }}
+      >
+        {content}
+      </ReactMarkdown>
     </div>
   )
 }

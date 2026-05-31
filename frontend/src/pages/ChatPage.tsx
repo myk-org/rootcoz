@@ -11,8 +11,9 @@ import { Textarea } from '@/components/ui/textarea'
 import { Send, ArrowLeft, Loader2, Bot, User, Copy, Check } from 'lucide-react'
 import { LinkedText } from '@/components/shared/LinkedText'
 import { ChatMarkdown } from '@/components/shared/ChatMarkdown'
+import type { RepoUrl } from '@/lib/autoLink'
 
-const EMPTY_REPO_URLS: string[] = []
+const EMPTY_REPO_URLS: RepoUrl[] = []
 
 interface ChatMessage {
   id: number
