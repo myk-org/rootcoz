@@ -1924,6 +1924,16 @@ class TestRootCozClientChat:
         result = client.get_chat_history("job-1", limit=10)
         assert result["total"] == 0
 
+    def test_get_chat_history_with_offset(self):
+        def handler(request):
+            assert request.url.params["limit"] == "100"
+            assert request.url.params["offset"] == "50"
+            return httpx.Response(200, json={"messages": [], "total": 0})
+
+        client = _make_client(handler)
+        result = client.get_chat_history("job-1", limit=100, offset=50)
+        assert result == {"messages": [], "total": 0}
+
     def test_send_chat_message(self):
         response_data = {
             "user_message": {

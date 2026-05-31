@@ -998,9 +998,12 @@ class RootCozClient:
         """Initialize chat workspace. POST /api/chat/{job_id}/init"""
         return self._request("POST", f"/api/chat/{job_id}/init")
 
-    def get_chat_history(self, job_id: str, limit: int = 200) -> dict:
+    def get_chat_history(self, job_id: str, limit: int = 200, offset: int = 0) -> dict:
         """Get chat history for a job. GET /api/chat/{job_id}"""
-        return self._request("GET", f"/api/chat/{job_id}", params={"limit": limit})
+        params: dict = {"limit": limit}
+        if offset:
+            params["offset"] = offset
+        return self._request("GET", f"/api/chat/{job_id}", params=params)
 
     def send_chat_message(
         self, job_id: str, message: str, ai_provider: str = "", ai_model: str = ""

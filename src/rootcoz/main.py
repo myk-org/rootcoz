@@ -8021,6 +8021,15 @@ def _get_chat_abort_signal(key: str) -> asyncio.Event:
     return _chat_abort_signals[key]
 
 
+def _cleanup_chat_state(key: str) -> None:
+    """Remove chat lock and abort signal for a key to prevent unbounded dict growth."""
+    _chat_abort_signals.pop(key, None)
+    # Only remove locks that are NOT currently held
+    lock = _chat_locks.get(key)
+    if lock and not lock.locked():
+        _chat_locks.pop(key, None)
+
+
 @app.get("/api/chat/{job_id}/stream")
 async def chat_stream(job_id: str, request: Request) -> StreamingResponse:
     """SSE stream for real-time chat message updates."""
@@ -8326,10 +8335,7 @@ async def _process_chat_message(
                     exc_info=True,
                 )
         finally:
-            # Clear abort signal if still set
-            _abort = _chat_abort_signals.get(f"{job_id}:{username}")
-            if _abort:
-                _abort.clear()
+            _cleanup_chat_state(f"{job_id}:{username}")
             await _cleanup_ai_session(auth_header)
 
 
@@ -8350,6 +8356,7 @@ async def clear_chat_history(job_id: str, request: Request) -> dict:
     lock = _get_chat_lock(f"{job_id}:{username}")
     async with lock:
         count = await storage.delete_chat_messages(job_id, username=username)
+        notify_chat_changed(job_id, username=username)
         try:
             cleanup_chat_repos(job_id, username=username)
         except Exception:
@@ -8360,6 +8367,7 @@ async def clear_chat_history(job_id: str, request: Request) -> dict:
                 exc_info=True,
             )
 
+    _cleanup_chat_state(f"{job_id}:{username}")
     logger.info(
         "Chat: cleared %d messages for job %s, user %s", count, job_id, username
     )

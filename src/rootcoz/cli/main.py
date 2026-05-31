@@ -2900,6 +2900,12 @@ def chat_send(
                 time.sleep(1)
                 try:
                     history = client.get_chat_history(job_id)
+                    total = history.get("total", 0)
+                    # Fetch last page to ensure we see the latest messages
+                    if total > 200:
+                        history = client.get_chat_history(
+                            job_id, offset=max(total - 200, 0)
+                        )
                     messages = history.get("messages", [])
                     for msg in reversed(messages):
                         if msg.get("id") == assistant_id:

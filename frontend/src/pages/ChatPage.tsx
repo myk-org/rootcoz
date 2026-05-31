@@ -69,10 +69,17 @@ export function ChatPage() {
           api.get<{ result: { job_name: string; build_number: number; summary: string; ai_provider: string; ai_model: string } }>(`/results/${jobId}`),
         ])
       })
-      .then((results) => {
+      .then(async (results) => {
         if (ignore || !results) return
         const [chatRes, resultRes] = results
-        setMessages(chatRes.messages)
+        if (chatRes.total > 200) {
+          const lastPage = await api.get<{ messages: ChatMessage[]; total: number }>(
+            `/api/chat/${jobId}?offset=${Math.max(chatRes.total - 200, 0)}`
+          )
+          setMessages(lastPage.messages)
+        } else {
+          setMessages(chatRes.messages)
+        }
         if (resultRes.result) {
           const r = resultRes.result
           setJobInfo({ job_name: r.job_name, build_number: r.build_number, summary: r.summary, ai_provider: r.ai_provider, ai_model: r.ai_model })
@@ -112,9 +119,17 @@ export function ChatPage() {
     const evtSource = new EventSource(`/api/chat/${jobId}/stream`)
 
     evtSource.addEventListener('chat-changed', () => {
-      // Re-fetch messages to get updated content/status
+      // First fetch to get total count, then fetch last page if needed
       api.get<{ messages: ChatMessage[]; total: number }>(`/api/chat/${jobId}`)
-        .then(res => setMessages(res.messages))
+        .then(res => {
+          if (res.total > 200) {
+            return api.get<{ messages: ChatMessage[]; total: number }>(
+              `/api/chat/${jobId}?offset=${Math.max(res.total - 200, 0)}`
+            )
+          }
+          return res
+        })
+        .then(res => { if (res) setMessages(res.messages) })
         .catch(() => {})  // Silently ignore fetch errors during SSE updates
     })
 
