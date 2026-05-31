@@ -7918,22 +7918,29 @@ async def init_chat(job_id: str, request: Request) -> dict:
     async with lock:
         existing = await storage.get_chat_messages(job_id, limit=1, username=username)
         if not existing:
-            # Set up tool scripts so the session's system prompt includes the tool inventory
-            server_url = _build_internal_server_url()
+            # Set up tool scripts so the session's system prompt includes the tool inventory.
+            # The auth token is short-lived — revoked after session creation since
+            # _process_chat_message creates a fresh token on every message.
+            available_scripts: list[str] = []
             auth_header = await _create_ai_auth_header(username)
-            available_scripts = setup_chat_scripts(
-                workspace,
-                server_url=server_url,
-                auth_token=auth_header.removeprefix("Bearer ").strip()
-                if auth_header
-                else "",
-                job_id=job_id,
-                jira_url=jira_url,
-                jira_email=jira_email,
-                jira_token=jira_token,
-                github_token=github_token,
-                github_repo=github_repo,
-            )
+            if auth_header:
+                server_url = _build_internal_server_url()
+                available_scripts = setup_chat_scripts(
+                    workspace,
+                    server_url=server_url,
+                    auth_token=auth_header.removeprefix("Bearer ").strip(),
+                    job_id=job_id,
+                    jira_url=jira_url,
+                    jira_email=jira_email,
+                    jira_token=jira_token,
+                    github_token=github_token,
+                    github_repo=github_repo,
+                )
+            else:
+                logger.warning(
+                    "Chat init: no auth token for %s — tools unavailable in system prompt",
+                    username,
+                )
 
             session_id = await init_chat_session(
                 job_id=job_id,
@@ -7956,6 +7963,10 @@ async def init_chat(job_id: str, request: Request) -> dict:
                     session_id=session_id,
                     status="completed",
                 )
+
+            # Revoke the init auth token — _process_chat_message creates
+            # fresh tokens on each message
+            await _cleanup_ai_session(auth_header)
 
     logger.info(
         "Chat init for job %s: workspace=%s, repos=%s, session=%s",
