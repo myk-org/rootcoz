@@ -10,6 +10,7 @@ import { TooltipProvider } from '@/components/ui/tooltip'
 import { Textarea } from '@/components/ui/textarea'
 import { Send, ArrowLeft, Loader2, Bot, User, Copy, Check } from 'lucide-react'
 import { LinkedText } from '@/components/shared/LinkedText'
+import { ChatMarkdown } from '@/components/shared/ChatMarkdown'
 
 interface ChatMessage {
   id: number
@@ -350,9 +351,13 @@ export function ChatPage() {
                     </Button>
                   </div>
                 ) : (
-                  <div className="whitespace-pre-wrap break-words">
-                    <LinkedText text={msg.content} repoUrls={[]} />
-                  </div>
+                  {msg.role === 'assistant' ? (
+                    <ChatMarkdown content={msg.content} />
+                  ) : (
+                    <div className="whitespace-pre-wrap break-words">
+                      <LinkedText text={msg.content} repoUrls={[]} />
+                    </div>
+                  )}
                 )}
                 <div className="flex items-center justify-between mt-2">
                   <div className="flex items-center gap-2 text-[10px] text-text-tertiary">
