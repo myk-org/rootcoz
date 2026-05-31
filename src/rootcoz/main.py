@@ -7858,7 +7858,7 @@ async def init_chat(job_id: str, request: Request) -> dict:
     from rootcoz.engine.chat import (
         ensure_chat_workspace,
         clone_chat_repos,
-        setup_chat_scripts,
+        build_chat_custom_tools,
         init_chat_session,
     )
 
@@ -7911,15 +7911,14 @@ async def init_chat(job_id: str, request: Request) -> dict:
 
         existing = await storage.get_chat_messages(job_id, limit=1, username=username)
         if not existing:
-            # Set up tool scripts so the session's system prompt includes the tool inventory.
+            # Build HTTP-backed custom tools for the sidecar session.
             # The auth token is short-lived — revoked after session creation since
             # _process_chat_message creates a fresh token on every message.
-            available_scripts: list[str] = []
+            custom_tools: list[dict] = []
             auth_header = await _create_ai_auth_header(username)
             if auth_header:
                 server_url = _build_internal_server_url()
-                available_scripts = setup_chat_scripts(
-                    workspace,
+                custom_tools = build_chat_custom_tools(
                     server_url=server_url,
                     auth_token=auth_header.removeprefix("Bearer ").strip(),
                     job_id=job_id,
@@ -7942,7 +7941,7 @@ async def init_chat(job_id: str, request: Request) -> dict:
                 ai_provider=ai_provider,
                 ai_model=ai_model,
                 repo_path=workspace,
-                available_scripts=available_scripts,
+                custom_tools=custom_tools,
                 repos_available=repos_available,
             )
             if session_id:
@@ -8167,7 +8166,7 @@ async def _process_chat_message(
         chat_with_ai,
         ensure_chat_workspace,
         clone_chat_repos,
-        setup_chat_scripts,
+        build_chat_custom_tools,
     )
 
     lock = _get_chat_lock(f"{job_id}:{username}")
@@ -8268,9 +8267,8 @@ async def _process_chat_message(
             server_url = _build_internal_server_url()
             auth_header = await _create_ai_auth_header(username)
 
-            # Setup scripts in workspace
-            available_scripts = setup_chat_scripts(
-                workspace,
+            # Build HTTP-backed custom tools
+            custom_tools = build_chat_custom_tools(
                 server_url=server_url,
                 auth_token=auth_header.removeprefix("Bearer ").strip()
                 if auth_header
@@ -8309,7 +8307,7 @@ async def _process_chat_message(
                 repo_path=workspace,
                 ai_call_timeout=settings.ai_call_timeout,
                 session_id=last_session_id,
-                available_scripts=available_scripts,
+                custom_tools=custom_tools,
                 repos_available=repos_available,
             )
 

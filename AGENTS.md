@@ -100,9 +100,6 @@ src/rootcoz/
   cli/                      # CLI client (rootcoz command)
   peer_analysis.py          # Multi-AI peer debate loop
   chat_scripts/             # AI-accessible scripts for chat workspace
-    rootcoz_chat_job.py     # Query job data (failures, analyses, comments)
-    rootcoz_chat_jira.py    # Search/query Jira issues
-    rootcoz_chat_github.py  # Search/query GitHub issues/PRs
     rootcoz_chat_db.py      # Read-only SQL queries for admin chat analytics
   ...                       # Other modules (jira, github_issues, monitoring, etc.)
 ```

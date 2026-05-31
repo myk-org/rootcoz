@@ -4,6 +4,7 @@ Builds job-scoped system prompts and manages AI CLI conversations.
 """
 
 import asyncio
+import base64
 import importlib.resources
 import shlex
 import shutil
@@ -19,19 +20,10 @@ logger = get_logger(name=__name__)
 
 _CHAT_WORKSPACE_PREFIX = "rootcoz-chat-"
 
-_CHAT_SCRIPTS = [
-    "rootcoz_chat_job.py",
-    "rootcoz_chat_jira.py",
-    "rootcoz_chat_github.py",
-    "rootcoz_chat_db.py",
-]
+# Admin chat still uses the script-based DB tool
+_CHAT_SCRIPTS = ["rootcoz_chat_db.py"]
 
-# Maps wrapper name -> (script file, condition checker)
-# condition checker receives the kwargs and returns True if the script should be available
 _SCRIPT_WRAPPERS: dict[str, str] = {
-    "rootcoz-chat-job": "rootcoz_chat_job.py",
-    "rootcoz-chat-jira": "rootcoz_chat_jira.py",
-    "rootcoz-chat-github": "rootcoz_chat_github.py",
     "rootcoz-chat-db": "rootcoz_chat_db.py",
 }
 
@@ -202,13 +194,14 @@ def setup_chat_scripts(
 ) -> list[str]:
     """Copy chat scripts into workspace and write env config.
 
+    Used by admin chat for the DB query tool. Per-job chat uses
+    HTTP-backed custom tools instead (see build_chat_custom_tools).
+
     Args:
         scripts: If provided, install only these wrapper scripts (by wrapper name,
-                 e.g. ["rootcoz-chat-db"]). If None, use the default
-                 job-scoped script selection (job + optional jira/github).
+                 e.g. ["rootcoz-chat-db"]). If None, installs all available wrappers.
 
-    Returns list of available script names (only scripts whose required
-    env vars are configured).
+    Returns list of available script names.
     """
     scripts_dir = workspace / "bin"
     scripts_dir.mkdir(exist_ok=True)
@@ -262,23 +255,10 @@ def setup_chat_scripts(
                 _write_wrapper(scripts_dir, wrapper_name, script_file, workspace)
                 available.append(wrapper_name)
     else:
-        # Default job-scoped selection
-        _write_wrapper(
-            scripts_dir, "rootcoz-chat-job", "rootcoz_chat_job.py", workspace
-        )
-        available.append("rootcoz-chat-job")
-
-        if jira_url and jira_token:
-            _write_wrapper(
-                scripts_dir, "rootcoz-chat-jira", "rootcoz_chat_jira.py", workspace
-            )
-            available.append("rootcoz-chat-jira")
-
-        if github_token and github_repo:
-            _write_wrapper(
-                scripts_dir, "rootcoz-chat-github", "rootcoz_chat_github.py", workspace
-            )
-            available.append("rootcoz-chat-github")
+        # Install all available wrappers
+        for wrapper_name, script_file in _SCRIPT_WRAPPERS.items():
+            _write_wrapper(scripts_dir, wrapper_name, script_file, workspace)
+            available.append(wrapper_name)
 
     logger.info("Chat scripts setup in %s: %s", workspace, ", ".join(available))
     return available
@@ -310,6 +290,157 @@ def _write_wrapper(
         f"sys.exit(subprocess.call(['uv', 'run', {str(raw_script)!r}] + sys.argv[1:]))\n"
     )
     wrapper.chmod(wrapper.stat().st_mode | stat.S_IEXEC)
+
+
+def build_chat_custom_tools(
+    *,
+    server_url: str,
+    auth_token: str,
+    job_id: str,
+    jira_url: str = "",
+    jira_email: str = "",
+    jira_token: str = "",
+    github_token: str = "",
+    github_repo: str = "",
+) -> list[dict]:
+    """Build HTTP-backed custom tools for a chat session.
+
+    Returns tool definitions with 'http' configs that the sidecar
+    executes directly — no bash, no scripts on disk.
+    """
+    tools: list[dict] = []
+    auth_headers = {"Authorization": f"Bearer {auth_token}"}
+
+    tools.append(
+        {
+            "name": "get_job_result",
+            "description": "Get the full analysis result for this job including all failures, classifications, and AI analysis",
+            "parameters": {"type": "object", "properties": {}},
+            "http": {
+                "method": "GET",
+                "url": f"{server_url}/api/results/{job_id}",
+                "headers": auth_headers,
+            },
+        }
+    )
+
+    tools.append(
+        {
+            "name": "get_job_comments",
+            "description": "Get user comments and discussion on this job",
+            "parameters": {"type": "object", "properties": {}},
+            "http": {
+                "method": "GET",
+                "url": f"{server_url}/api/results/{job_id}/comments",
+                "headers": auth_headers,
+            },
+        }
+    )
+
+    if jira_url and jira_token:
+        jira_auth: dict[str, str] = {"Authorization": f"Bearer {jira_token}"}
+        if jira_email:
+            encoded = base64.b64encode(f"{jira_email}:{jira_token}".encode()).decode()
+            jira_auth = {"Authorization": f"Basic {encoded}"}
+
+        tools.append(
+            {
+                "name": "search_jira",
+                "description": "Search Jira for issues matching keywords. Returns up to 5 results.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "query": {"type": "string", "description": "Search keywords"},
+                    },
+                    "required": ["query"],
+                },
+                "http": {
+                    "method": "GET",
+                    "url": f"{jira_url}/rest/api/2/search",
+                    "headers": {**jira_auth, "Accept": "application/json"},
+                    "query_params": {
+                        "jql": 'summary ~ "{query}" ORDER BY updated DESC',
+                        "maxResults": "5",
+                        "fields": "summary,status,assignee,created,updated",
+                    },
+                },
+            }
+        )
+
+        tools.append(
+            {
+                "name": "get_jira_issue",
+                "description": "Get full details of a specific Jira issue by key (e.g., PROJ-123)",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "issue_key": {
+                            "type": "string",
+                            "description": "Jira issue key",
+                        },
+                    },
+                    "required": ["issue_key"],
+                },
+                "http": {
+                    "method": "GET",
+                    "url": f"{jira_url}/rest/api/2/issue/{{issue_key}}",
+                    "headers": {**jira_auth, "Accept": "application/json"},
+                },
+            }
+        )
+
+    if github_token and github_repo:
+        gh_headers = {
+            "Authorization": f"Bearer {github_token}",
+            "Accept": "application/vnd.github+json",
+        }
+
+        tools.append(
+            {
+                "name": "search_github_issues",
+                "description": "Search GitHub issues and PRs in the test repository",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "query": {"type": "string", "description": "Search keywords"},
+                    },
+                    "required": ["query"],
+                },
+                "http": {
+                    "method": "GET",
+                    "url": "https://api.github.com/search/issues",
+                    "headers": gh_headers,
+                    "query_params": {
+                        "q": "{query} repo:" + github_repo,
+                        "per_page": "5",
+                    },
+                },
+            }
+        )
+
+        tools.append(
+            {
+                "name": "get_github_issue",
+                "description": "Get full details of a GitHub issue or PR by number",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "number": {
+                            "type": "string",
+                            "description": "Issue or PR number",
+                        },
+                    },
+                    "required": ["number"],
+                },
+                "http": {
+                    "method": "GET",
+                    "url": f"https://api.github.com/repos/{github_repo}/issues/{{number}}",
+                    "headers": gh_headers,
+                },
+            }
+        )
+
+    return tools
 
 
 def cleanup_chat_repos(job_id: str, username: str = "") -> None:
@@ -361,15 +492,22 @@ def cleanup_chat_workspace(job_id: str, username: str = "") -> None:
 # -- Shared prompt building helpers --
 
 _SCRIPT_DESCRIPTIONS: dict[str, str] = {
-    "rootcoz-chat-job": "Query job data (failures, analyses, comments, history)",
-    "rootcoz-chat-jira": "Search Jira issues, get issue details, find related tickets",
-    "rootcoz-chat-github": "Search GitHub issues/PRs, get details",
     "rootcoz-chat-db": "Read-only SQL query tool — run 'schema' to see tables, 'query <SQL>' to execute queries",
 }
 
 
-def _build_tools_section(available_scripts: list[str]) -> str:
-    """Build the tools section listing available scripts."""
+def _build_tools_section(custom_tools: list[dict]) -> str:
+    """Build tools section from custom tool definitions."""
+    if not custom_tools:
+        return "(No tools available)"
+    lines = []
+    for tool in custom_tools:
+        lines.append(f"- `{tool['name']}` — {tool['description']}")
+    return "\n".join(lines)
+
+
+def _build_script_tools_section(available_scripts: list[str]) -> str:
+    """Build the tools section listing available scripts (admin chat)."""
     lines = []
     for script in available_scripts:
         desc = _SCRIPT_DESCRIPTIONS.get(script, "Run for details")
@@ -380,8 +518,35 @@ def _build_tools_section(available_scripts: list[str]) -> str:
     return "\n".join(lines)
 
 
-def _build_unavailable_section(available_scripts: list[str]) -> str:
+def _build_unavailable_section(custom_tools: list[dict]) -> str:
     """Build notice about unavailable tools (Jira/GitHub not configured)."""
+    tool_names = {t["name"] for t in custom_tools}
+    jira_configured = "search_jira" in tool_names
+    github_configured = "search_github_issues" in tool_names
+
+    lines = []
+    if not jira_configured:
+        lines.append(
+            "- **Jira search** is not available. If the user asks about Jira tickets, "
+            'tell them: "Jira search is not available for your account. To enable it, '
+            "go to your User Settings page and configure your Jira credentials "
+            '(URL, email, and API token), then start a new chat session."'
+        )
+    if not github_configured:
+        lines.append(
+            "- **GitHub search** is not available. If the user asks about GitHub issues or PRs, "
+            'tell them: "GitHub search is not available. To enable it, '
+            "configure your GitHub token on the User Settings page, "
+            'then start a new chat session."'
+        )
+
+    if not lines:
+        return ""
+    return "\n\n## Unavailable Tools\n" + "\n".join(lines)
+
+
+def _build_admin_unavailable_section(available_scripts: list[str]) -> str:
+    """Build notice about unavailable tools for admin chat (script-based)."""
     jira_configured = "rootcoz-chat-jira" in available_scripts
     github_configured = "rootcoz-chat-github" in available_scripts
 
@@ -407,19 +572,19 @@ def _build_unavailable_section(available_scripts: list[str]) -> str:
 
 
 _COMMON_RULES = """- Do NOT modify any data — read-only access only
-- Do NOT run arbitrary curl commands — use the provided scripts"""
+- Do NOT run arbitrary curl commands — use the provided tools"""
 
 
 def build_system_prompt(
     job_name: str,
     build_number: int,
     job_id: str,
-    available_scripts: list[str],
+    custom_tools: list[dict],
     repos_available: bool = False,
 ) -> str:
     """Build a system prompt that scopes the AI to a specific analyzed job."""
-    tools_section = _build_tools_section(available_scripts)
-    unavailable_section = _build_unavailable_section(available_scripts)
+    tools_section = _build_tools_section(custom_tools)
+    unavailable_section = _build_unavailable_section(custom_tools)
 
     repos_note = ""
     if repos_available:
@@ -438,10 +603,10 @@ def build_system_prompt(
 - Be concise and technical
 
 ## Available Tools
-Scripts in your working directory (under `bin/`) — use these to access data:
+You have structured tools that you can call directly:
 {tools_section}
 
-**IMPORTANT:** Use these scripts to get data when the user asks a question. Do NOT run scripts proactively — only fetch data that's relevant to what the user is asking about.{repos_note}{unavailable_section}
+**IMPORTANT:** Use these tools to get data when the user asks a question. Do NOT call tools proactively — only fetch data that's relevant to what the user is asking about.{repos_note}{unavailable_section}
 
 ## Rules — STRICT
 - You MUST only discuss this specific job and its failures
@@ -455,8 +620,8 @@ def build_admin_system_prompt(
     available_scripts: list[str],
 ) -> str:
     """Build system prompt for admin global chat — server-wide scope."""
-    tools_section = _build_tools_section(available_scripts)
-    unavailable_section = _build_unavailable_section(available_scripts)
+    tools_section = _build_script_tools_section(available_scripts)
+    unavailable_section = _build_admin_unavailable_section(available_scripts)
 
     return f"""You are a CI/CD analytics expert with access to the entire rootcoz server data.
 
@@ -523,6 +688,7 @@ async def _create_chat_session(
     ai_model: str,
     repo_path: Path | None = None,
     log_prefix: str = "Chat",
+    custom_tools: list[dict] | None = None,
 ) -> str | None:
     """Create a sidecar session with the given system prompt. Returns session_id or None."""
     logger.info(
@@ -538,6 +704,7 @@ async def _create_chat_session(
             model=ai_model,
             system_prompt=system_prompt,
             cwd=str(repo_path) if repo_path else "/tmp",
+            custom_tools=custom_tools,
         )
         logger.info("%s: session created: %s", log_prefix, session_id)
         return session_id
@@ -554,7 +721,7 @@ async def init_chat_session(
     ai_provider: str,
     ai_model: str,
     repo_path: Path | None = None,
-    available_scripts: list[str] | None = None,
+    custom_tools: list[dict] | None = None,
     repos_available: bool = False,
 ) -> str | None:
     """Initialize a chat session via the sidecar. Returns session_id or None."""
@@ -562,7 +729,7 @@ async def init_chat_session(
         job_name=job_name,
         build_number=build_number,
         job_id=job_id,
-        available_scripts=available_scripts or [],
+        custom_tools=custom_tools or [],
         repos_available=repos_available,
     )
     return await _create_chat_session(
@@ -571,6 +738,7 @@ async def init_chat_session(
         ai_model=ai_model,
         repo_path=repo_path,
         log_prefix=f"Chat(job={job_id})",
+        custom_tools=custom_tools,
     )
 
 
@@ -602,6 +770,7 @@ async def _chat_with_ai_impl(
     repo_path: Path | None = None,
     ai_call_timeout: int | None = None,
     session_id: str | None = None,
+    custom_tools: list[dict] | None = None,
     log_prefix: str = "Chat",
     request_id: str = "",
     call_type: str = "chat",
@@ -636,6 +805,7 @@ async def _chat_with_ai_impl(
         cwd=str(repo_path) if repo_path else None,
         ai_call_timeout=ai_call_timeout,
         session_id=session_id,
+        custom_tools=custom_tools,
     )
 
     # If session was lost, retry with fresh session
@@ -657,6 +827,7 @@ async def _chat_with_ai_impl(
             cwd=str(repo_path) if repo_path else None,
             ai_call_timeout=ai_call_timeout,
             session_id=None,
+            custom_tools=custom_tools,
         )
 
     await result.record_usage(
@@ -686,7 +857,7 @@ async def chat_with_ai(
     repo_path: Path | None = None,
     ai_call_timeout: int | None = None,
     session_id: str | None = None,
-    available_scripts: list[str] | None = None,
+    custom_tools: list[dict] | None = None,
     repos_available: bool = False,
 ) -> tuple[bool, str, str | None]:
     """Send a chat message and get an AI response via the sidecar."""
@@ -696,7 +867,7 @@ async def chat_with_ai(
             job_name=job_name,
             build_number=build_number,
             job_id=job_id,
-            available_scripts=available_scripts or [],
+            custom_tools=custom_tools or [],
             repos_available=repos_available,
         )
 
@@ -709,6 +880,7 @@ async def chat_with_ai(
         repo_path=repo_path,
         ai_call_timeout=ai_call_timeout,
         session_id=session_id,
+        custom_tools=custom_tools,
         log_prefix=f"Chat(job={job_id})",
         request_id=job_id,
         call_type="chat",

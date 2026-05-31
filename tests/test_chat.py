@@ -7,7 +7,11 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from rootcoz import storage
-from rootcoz.engine.chat import build_chat_prompt, build_system_prompt
+from rootcoz.engine.chat import (
+    build_chat_custom_tools,
+    build_chat_prompt,
+    build_system_prompt,
+)
 
 _TEST_ADMIN_KEY = "test-admin-key-16chars"  # pragma: allowlist secret
 _TEST_ENCRYPTION_KEY = "test-encryption-key-for-hmac"  # pragma: allowlist secret
@@ -65,90 +69,220 @@ async def setup_test_db(temp_db_path: Path):
 # ---------------------------------------------------------------------------
 
 
+class TestBuildChatCustomTools:
+    """Tests for build_chat_custom_tools."""
+
+    def test_basic_tools(self):
+        tools = build_chat_custom_tools(
+            server_url="http://localhost:8000",
+            auth_token="tok123",
+            job_id="job-1",
+        )
+        names = [t["name"] for t in tools]
+        assert "get_job_result" in names
+        assert "get_job_comments" in names
+        # No jira/github without credentials
+        assert "search_jira" not in names
+        assert "search_github_issues" not in names
+
+    def test_jira_tools(self):
+        tools = build_chat_custom_tools(
+            server_url="http://localhost:8000",
+            auth_token="tok",
+            job_id="j1",
+            jira_url="https://jira.example.com",
+            jira_token="jira-tok",
+        )
+        names = [t["name"] for t in tools]
+        assert "search_jira" in names
+        assert "get_jira_issue" in names
+
+    def test_jira_basic_auth(self):
+        tools = build_chat_custom_tools(
+            server_url="http://localhost:8000",
+            auth_token="tok",
+            job_id="j1",
+            jira_url="https://jira.example.com",
+            jira_email="user@example.com",
+            jira_token="jira-tok",
+        )
+        jira_tool = next(t for t in tools if t["name"] == "search_jira")
+        assert jira_tool["http"]["headers"]["Authorization"].startswith("Basic ")
+
+    def test_jira_bearer_auth(self):
+        tools = build_chat_custom_tools(
+            server_url="http://localhost:8000",
+            auth_token="tok",
+            job_id="j1",
+            jira_url="https://jira.example.com",
+            jira_token="jira-pat",
+        )
+        jira_tool = next(t for t in tools if t["name"] == "search_jira")
+        assert jira_tool["http"]["headers"]["Authorization"] == "Bearer jira-pat"
+
+    def test_github_tools(self):
+        tools = build_chat_custom_tools(
+            server_url="http://localhost:8000",
+            auth_token="tok",
+            job_id="j1",
+            github_token="gh-tok",
+            github_repo="org/repo",
+        )
+        names = [t["name"] for t in tools]
+        assert "search_github_issues" in names
+        assert "get_github_issue" in names
+        gh_search = next(t for t in tools if t["name"] == "search_github_issues")
+        assert "org/repo" in gh_search["http"]["query_params"]["q"]
+
+    def test_all_tools(self):
+        tools = build_chat_custom_tools(
+            server_url="http://localhost:8000",
+            auth_token="tok",
+            job_id="j1",
+            jira_url="https://jira.example.com",
+            jira_token="jira-tok",
+            github_token="gh-tok",
+            github_repo="org/repo",
+        )
+        names = [t["name"] for t in tools]
+        assert len(names) == 6  # 2 base + 2 jira + 2 github
+
+    def test_no_jira_without_token(self):
+        tools = build_chat_custom_tools(
+            server_url="http://localhost:8000",
+            auth_token="tok",
+            job_id="j1",
+            jira_url="https://jira.example.com",
+        )
+        names = [t["name"] for t in tools]
+        assert "search_jira" not in names
+
+    def test_no_github_without_repo(self):
+        tools = build_chat_custom_tools(
+            server_url="http://localhost:8000",
+            auth_token="tok",
+            job_id="j1",
+            github_token="gh-tok",
+        )
+        names = [t["name"] for t in tools]
+        assert "search_github_issues" not in names
+
+    def test_auth_header_in_tools(self):
+        tools = build_chat_custom_tools(
+            server_url="http://localhost:8000",
+            auth_token="my-secret-token",
+            job_id="j1",
+        )
+        for tool in tools:
+            assert tool["http"]["headers"]["Authorization"] == "Bearer my-secret-token"
+
+    def test_job_id_in_urls(self):
+        tools = build_chat_custom_tools(
+            server_url="http://localhost:8000",
+            auth_token="tok",
+            job_id="my-job-42",
+        )
+        result_tool = next(t for t in tools if t["name"] == "get_job_result")
+        assert "my-job-42" in result_tool["http"]["url"]
+        comments_tool = next(t for t in tools if t["name"] == "get_job_comments")
+        assert "my-job-42" in comments_tool["http"]["url"]
+
+
 class TestBuildSystemPrompt:
-    """Tests for build_system_prompt."""
+    """Tests for build_system_prompt with custom_tools."""
+
+    def _make_tools(self, *, jira: bool = False, github: bool = False) -> list[dict]:
+        """Helper to build custom tools with optional integrations."""
+        return build_chat_custom_tools(
+            server_url="http://localhost:8000",
+            auth_token="tok",
+            job_id="j1",
+            jira_url="https://jira.example.com" if jira else "",
+            jira_token="jira-tok" if jira else "",
+            github_token="gh-tok" if github else "",
+            github_repo="org/repo" if github else "",
+        )
 
     def test_basic_prompt_structure(self):
+        tools = self._make_tools()
         prompt = build_system_prompt(
             job_name="test-job",
             build_number=42,
             job_id="job-123",
-            available_scripts=["rootcoz-chat-job"],
+            custom_tools=tools,
         )
         assert "test-job" in prompt
         assert "#42" in prompt
         assert "job-123" in prompt
-        assert "rootcoz-chat-job" in prompt
+        assert "get_job_result" in prompt
         assert "read-only" in prompt.lower()
-        assert "./bin/rootcoz-chat-job" in prompt
 
-    def test_all_scripts_listed(self):
+    def test_all_tools_listed(self):
+        tools = self._make_tools(jira=True, github=True)
         prompt = build_system_prompt(
             job_name="test-job",
             build_number=1,
             job_id="j1",
-            available_scripts=[
-                "rootcoz-chat-job",
-                "rootcoz-chat-jira",
-                "rootcoz-chat-github",
-            ],
+            custom_tools=tools,
         )
-        assert "./bin/rootcoz-chat-job" in prompt
-        assert "./bin/rootcoz-chat-jira" in prompt
-        assert "./bin/rootcoz-chat-github" in prompt
-        assert "Jira" in prompt
-        assert "GitHub" in prompt
+        assert "get_job_result" in prompt
+        assert "get_job_comments" in prompt
+        assert "search_jira" in prompt
+        assert "search_github_issues" in prompt
 
-    def test_no_scripts(self):
+    def test_no_tools(self):
         prompt = build_system_prompt(
             job_name="clean",
             build_number=1,
             job_id="job-789",
-            available_scripts=[],
+            custom_tools=[],
         )
         assert "clean" in prompt
         assert "#1" in prompt
-        # No script lines but prompt still valid
         assert "Available Tools" in prompt
 
     def test_repos_available_note(self):
+        tools = self._make_tools()
         prompt = build_system_prompt(
             job_name="j",
             build_number=1,
             job_id="j1",
-            available_scripts=["rootcoz-chat-job"],
+            custom_tools=tools,
             repos_available=True,
         )
         assert "Source repositories are cloned" in prompt
 
     def test_repos_not_available(self):
+        tools = self._make_tools()
         prompt = build_system_prompt(
             job_name="j",
             build_number=1,
             job_id="j1",
-            available_scripts=["rootcoz-chat-job"],
+            custom_tools=tools,
             repos_available=False,
         )
         assert "Source repositories are cloned" not in prompt
 
-    def test_only_job_script(self):
+    def test_only_base_tools(self):
+        tools = self._make_tools()
         prompt = build_system_prompt(
             job_name="j",
             build_number=1,
             job_id="j1",
-            available_scripts=["rootcoz-chat-job"],
+            custom_tools=tools,
         )
-        assert "./bin/rootcoz-chat-job" in prompt
-        assert "./bin/rootcoz-chat-jira" not in prompt
-        assert "./bin/rootcoz-chat-github" not in prompt
+        assert "get_job_result" in prompt
+        assert "search_jira" not in prompt
+        assert "search_github_issues" not in prompt
 
     def test_unavailable_jira_notice(self):
         """When jira is not configured, system prompt includes unavailable notice."""
+        tools = self._make_tools(github=True)
         prompt = build_system_prompt(
             job_name="j",
             build_number=1,
             job_id="j1",
-            available_scripts=["rootcoz-chat-job", "rootcoz-chat-github"],
+            custom_tools=tools,
         )
         assert "Unavailable Tools" in prompt
         assert "Jira search" in prompt
@@ -157,11 +291,12 @@ class TestBuildSystemPrompt:
 
     def test_unavailable_github_notice(self):
         """When github is not configured, system prompt includes unavailable notice."""
+        tools = self._make_tools(jira=True)
         prompt = build_system_prompt(
             job_name="j",
             build_number=1,
             job_id="j1",
-            available_scripts=["rootcoz-chat-job", "rootcoz-chat-jira"],
+            custom_tools=tools,
         )
         assert "Unavailable Tools" in prompt
         assert "GitHub search" in prompt
@@ -170,11 +305,12 @@ class TestBuildSystemPrompt:
 
     def test_both_unavailable_notices(self):
         """When neither jira nor github configured, both notices appear."""
+        tools = self._make_tools()
         prompt = build_system_prompt(
             job_name="j",
             build_number=1,
             job_id="j1",
-            available_scripts=["rootcoz-chat-job"],
+            custom_tools=tools,
         )
         assert "Unavailable Tools" in prompt
         assert "Jira search" in prompt
@@ -182,15 +318,12 @@ class TestBuildSystemPrompt:
 
     def test_no_unavailable_when_all_configured(self):
         """When both are configured, no unavailable section."""
+        tools = self._make_tools(jira=True, github=True)
         prompt = build_system_prompt(
             job_name="j",
             build_number=1,
             job_id="j1",
-            available_scripts=[
-                "rootcoz-chat-job",
-                "rootcoz-chat-jira",
-                "rootcoz-chat-github",
-            ],
+            custom_tools=tools,
         )
         assert "Unavailable Tools" not in prompt
 
