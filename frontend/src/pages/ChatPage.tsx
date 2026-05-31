@@ -275,6 +275,7 @@ export function ChatPage() {
               onChange={setAiModel}
               options={availableModels}
               placeholder="Model"
+              className="w-[220px]"
             />
             <Button
               variant="ghost"
