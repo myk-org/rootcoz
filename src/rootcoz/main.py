@@ -7870,6 +7870,7 @@ async def init_chat(job_id: str, request: Request) -> dict:
     from rootcoz.engine.chat import (
         ensure_chat_workspace,
         clone_chat_repos,
+        setup_chat_scripts,
         init_chat_session,
     )
 
@@ -7917,6 +7918,23 @@ async def init_chat(job_id: str, request: Request) -> dict:
     async with lock:
         existing = await storage.get_chat_messages(job_id, limit=1, username=username)
         if not existing:
+            # Set up tool scripts so the session's system prompt includes the tool inventory
+            server_url = _build_internal_server_url()
+            auth_header = await _create_ai_auth_header(username)
+            available_scripts = setup_chat_scripts(
+                workspace,
+                server_url=server_url,
+                auth_token=auth_header.removeprefix("Bearer ").strip()
+                if auth_header
+                else "",
+                job_id=job_id,
+                jira_url=jira_url,
+                jira_email=jira_email,
+                jira_token=jira_token,
+                github_token=github_token,
+                github_repo=github_repo,
+            )
+
             session_id = await init_chat_session(
                 job_id=job_id,
                 job_name=result_data.get("job_name", "unknown"),
@@ -7924,7 +7942,7 @@ async def init_chat(job_id: str, request: Request) -> dict:
                 ai_provider=ai_provider,
                 ai_model=ai_model,
                 repo_path=workspace,
-                available_scripts=[],
+                available_scripts=available_scripts,
                 repos_available=repos_available,
             )
             if session_id:
