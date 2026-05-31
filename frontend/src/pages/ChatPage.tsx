@@ -60,8 +60,12 @@ export function ChatPage() {
     setChatReady(false)
     setInitMessage('Initializing...')
 
-    // Start init in background (best-effort, repos clone on first message if needed)
-    api.post(`/api/chat/${jobId}/init`, {})
+    // Init with timeout — don't block input indefinitely if init stalls
+    const initTimeout = new Promise<void>((resolve) => setTimeout(resolve, 10000))
+    Promise.race([
+      api.post(`/api/chat/${jobId}/init`, {}),
+      initTimeout,
+    ])
       .then(() => { if (!ignore) setInitComplete(true) })
       .catch(() => { if (!ignore) setInitComplete(true) })
 
