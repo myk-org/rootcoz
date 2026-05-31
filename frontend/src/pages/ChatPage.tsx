@@ -269,7 +269,7 @@ export function ChatPage() {
             </div>
           </div>
           <div className="flex items-center gap-3">
-            <ProviderSelect value={aiProvider} onChange={setAiProvider} compact />
+            <ProviderSelect value={aiProvider} onChange={(v) => { setAiProvider(v); setAiModel(''); }} compact />
             <ModelCombobox
               value={aiModel}
               onChange={setAiModel}
@@ -343,7 +343,7 @@ export function ChatPage() {
                       <span>{msg.ai_provider}{msg.ai_model ? ` / ${msg.ai_model}` : ''}</span>
                     )}
                     {msg.status === 'failed' && <span className="text-signal-red">Failed</span>}
-                    <span>{new Date(msg.created_at).toLocaleTimeString()}</span>
+                    <span>{new Date(msg.created_at).toLocaleString()}</span>
                   </div>
                   {msg.status !== 'pending' && (
                     <Tooltip>

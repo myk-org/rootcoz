@@ -7787,7 +7787,8 @@ async def _resolve_chat_credentials(
 ) -> tuple[str, str, str, str, str]:
     """Resolve Jira and GitHub credentials for chat.
 
-    Priority: user tokens > job params > server settings.
+    Chat uses ONLY user-scoped tokens — never global server credentials.
+    If the user hasn't configured their tokens, the tools are unavailable.
 
     Returns:
         (jira_url, jira_email, jira_token, github_token, github_repo)
@@ -7797,7 +7798,7 @@ async def _resolve_chat_credentials(
     settings = get_settings()
     user_tokens = await storage.get_user_tokens(username)
 
-    # Extract github repo from tests_repo_url
+    # Extract github repo from tests_repo_url (repo name is not a credential)
     github_repo = ""
     tests_repo_url = decrypted_params.get("tests_repo_url", "")
     if tests_repo_url:
@@ -7807,27 +7808,13 @@ async def _resolve_chat_credentials(
         if match:
             github_repo = match.group(1)
 
-    # Resolve Jira credentials
+    # Jira URL from job params or server settings (URL is not a credential)
     jira_url = decrypted_params.get("jira_url", "") or str(settings.jira_url or "")
-    jira_email = (
-        user_tokens.get("jira_email", "")
-        or decrypted_params.get("jira_email", "")
-        or str(settings.jira_email or "")
-    )
-    jira_token = (
-        user_tokens.get("jira_token", "")
-        or decrypted_params.get("jira_api_token", "")
-        or decrypted_params.get("jira_pat", "")
-    )
-    if not jira_token and settings.jira_api_token:
-        jira_token = settings.jira_api_token.get_secret_value()
-    if not jira_token and settings.jira_pat:
-        jira_token = settings.jira_pat.get_secret_value()
 
-    # Resolve GitHub token
+    # User-scoped credentials ONLY — no fallback to server settings or job params
+    jira_email = user_tokens.get("jira_email", "")
+    jira_token = user_tokens.get("jira_token", "")
     github_token = user_tokens.get("github_token", "")
-    if not github_token and settings.github_token:
-        github_token = settings.github_token.get_secret_value()
 
     return jira_url, jira_email, jira_token, github_token, github_repo
 
