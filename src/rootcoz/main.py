@@ -11,6 +11,7 @@ import urllib.parse
 import uuid
 from collections import defaultdict
 from collections.abc import Callable, Coroutine, Sequence
+import contextlib
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -1200,7 +1201,7 @@ async def lifespan(_app: FastAPI):
 
     await init_db()
     await storage.cleanup_expired_sessions()
-    asyncio.create_task(_periodic_session_cleanup())
+    cleanup_task = asyncio.create_task(_periodic_session_cleanup())
 
     # Load DB setting overrides into env before get_settings() is called
     from rootcoz.config import load_db_settings_into_env
@@ -1242,7 +1243,9 @@ async def lifespan(_app: FastAPI):
 
         yield
     finally:
-        pass
+        cleanup_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await cleanup_task
 
 
 app = FastAPI(
