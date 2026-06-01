@@ -169,7 +169,7 @@ export function ModelCombobox({
           ref={listRef}
           role="listbox"
           id={listboxId}
-          className="absolute z-50 mt-1 max-h-56 w-full overflow-auto rounded-xl border border-white/10 bg-surface-card shadow-lg backdrop-blur-sm animate-fade-in"
+          className="absolute z-50 mt-1 max-h-56 w-max overflow-auto rounded-xl border border-white/10 bg-surface-card shadow-lg backdrop-blur-sm animate-fade-in"
         >
           {filtered.map((model, i) => (
             <li
@@ -190,7 +190,7 @@ export function ModelCombobox({
                 selectModel(model.id)
               }}
             >
-              <span className="truncate">{model.id}</span>
+              <span>{model.id}</span>
               {model.name && model.name !== model.id && (
                 <span className="flex-shrink-0 text-xs text-text-tertiary truncate max-w-[40%]">
                   {model.name}

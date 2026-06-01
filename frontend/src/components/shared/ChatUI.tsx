@@ -76,12 +76,14 @@ export function ChatUI({
   const [initComplete, setInitComplete] = useState(false)
   const [initStepIndex, setInitStepIndex] = useState(0)
   const [initError, setInitError] = useState('')
+  const [sessionKey, setSessionKey] = useState(0)
 
   const [aiProvider, setAiProvider] = useState(defaultProvider)
   const [aiModel, setAiModel] = useState(defaultModel)
   const availableModels = useProviderModels(aiProvider)
 
   const [copiedMsgId, setCopiedMsgId] = useState<number | null>(null)
+  const [copiedAll, setCopiedAll] = useState(false)
 
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLTextAreaElement>(null)
@@ -96,6 +98,7 @@ export function ChatUI({
   useEffect(() => {
     if (defaultModel) setAiModel(defaultModel)
   }, [defaultModel])
+
 
   // Fetch messages with pagination (last 200)
   const fetchMessages = useCallback(async (): Promise<ChatMessage[]> => {
@@ -134,8 +137,7 @@ export function ChatUI({
       .catch(err => {
         if (ignore) return
         setInitError(err instanceof Error ? err.message : 'Failed to initialize chat')
-        // Still allow chat on init failure — session will be created on first message
-        setInitComplete(true)
+        // Do NOT set initComplete — keep showing loading page with error + retry
       })
 
     return () => { ignore = true }
@@ -151,6 +153,8 @@ export function ChatUI({
 
   // SSE: listen for chat message updates (AI responses)
   useEffect(() => {
+    if (!initComplete) return  // Don't connect SSE until init is done
+
     let cancelled = false
     const evtSource = new EventSource(`${apiBasePath}/stream`)
 
@@ -168,7 +172,7 @@ export function ChatUI({
       cancelled = true
       evtSource.close()
     }
-  }, [apiBasePath, fetchMessages])
+  }, [apiBasePath, fetchMessages, sessionKey, initComplete])
 
   // Auto-scroll
   useEffect(() => {
@@ -223,6 +227,18 @@ export function ChatUI({
     } catch { /* clipboard not available */ }
   }, [])
 
+  const copyAllMessages = useCallback(async () => {
+    const text = messages
+      .filter(m => m.content && m.status !== 'pending')
+      .map(m => `${m.role === 'user' ? `**${m.username || 'User'}:**` : '**Assistant:**'}\n${m.content}`)
+      .join('\n\n---\n\n')
+    try {
+      await navigator.clipboard.writeText(text)
+      setCopiedAll(true)
+      setTimeout(() => setCopiedAll(false), 2000)
+    } catch { /* clipboard not available */ }
+  }, [messages])
+
   const handleNewSession = useCallback(async () => {
     setInitComplete(false)
     setInitStepIndex(0)
@@ -237,11 +253,13 @@ export function ChatUI({
       const msgs = await fetchMessages()
       setMessages(msgs)
       setInitStepIndex(2)
-    } catch {
-      // Init failure is non-fatal
-    } finally {
-      setInitComplete(true)
+    } catch (err) {
+      setInitError(err instanceof Error ? err.message : 'Failed to start new session')
+      // Do NOT set initComplete — show error + retry on loading page
+      return
     }
+    setSessionKey(k => k + 1)
+    setInitComplete(true)
   }, [apiBasePath, fetchMessages])
 
   const handleAbort = useCallback(async () => {
@@ -269,7 +287,7 @@ export function ChatUI({
     const stepLabels = ['Create workspace & AI session', 'Load chat history']
     return (
       <div className="flex flex-col items-center justify-center h-[60vh] gap-4">
-        <Loader2 className="h-8 w-8 animate-spin text-accent-blue" />
+        {!initError && <Loader2 className="h-8 w-8 animate-spin text-accent-blue" />}
         <div className="text-center space-y-3">
           <p className="text-sm font-medium text-text-primary">{INIT_STEPS[initStepIndex] ?? 'Initializing...'}</p>
           <div className="flex flex-col gap-1.5 text-xs">
@@ -284,7 +302,26 @@ export function ChatUI({
           </div>
         </div>
         {initError && (
-          <p className="text-xs text-signal-red">{initError}</p>
+          <div className="text-center space-y-2">
+            <p className="text-xs text-signal-red">{initError}</p>
+            <Button variant="ghost" size="sm" onClick={() => {
+              setInitError('')
+              setInitStepIndex(0)
+              api.post(`${apiBasePath}/init`, {})
+                .then(() => {
+                  setInitStepIndex(1)
+                  return fetchMessages()
+                })
+                .then(msgs => {
+                  if (msgs) setMessages(msgs)
+                  setInitStepIndex(2)
+                  setInitComplete(true)
+                })
+                .catch(err => setInitError(err instanceof Error ? err.message : 'Retry failed'))
+            }}>
+              Retry
+            </Button>
+          </div>
         )}
       </div>
     )
@@ -292,7 +329,7 @@ export function ChatUI({
 
   return (
     <TooltipProvider delayDuration={200}>
-      <div className="flex flex-col h-[calc(100vh-4rem)]">
+      <div className="flex flex-col h-[calc(100vh-6rem)]">
         {/* Header */}
         <div className="flex items-center justify-between border-b border-border-muted px-6 py-3 shrink-0">
           {header}
@@ -302,9 +339,24 @@ export function ChatUI({
               value={aiModel}
               onChange={setAiModel}
               options={availableModels}
-              placeholder="Model"
-              className="w-[220px]"
+              placeholder={availableModels[0]?.id || "Default model"}
+              className="w-[400px]"
             />
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="h-7 px-2"
+                  onClick={copyAllMessages}
+                  disabled={messages.length === 0}
+                  aria-label="Copy all messages"
+                >
+                  {copiedAll ? <Check className="h-3.5 w-3.5 text-signal-green" /> : <Copy className="h-3.5 w-3.5" />}
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent>{copiedAll ? 'Copied!' : 'Copy all messages'}</TooltipContent>
+            </Tooltip>
             <Button
               variant="ghost"
               size="sm"
@@ -318,9 +370,9 @@ export function ChatUI({
         </div>
 
         {/* Messages area */}
-        <div className="flex-1 overflow-y-auto px-6 py-4 space-y-4">
+        <div className="flex-1 flex flex-col overflow-y-auto px-6 py-4 space-y-4">
           {messages.length === 0 && (
-            <div className="flex flex-col items-center justify-center h-full text-text-tertiary">
+            <div className="flex flex-col items-center justify-center flex-1 text-text-tertiary">
               <Bot className="h-12 w-12 mb-3 opacity-30" />
               <p className="text-sm">{emptyMessage}</p>
               {emptySubtitle && <p className="text-xs mt-1">{emptySubtitle}</p>}
@@ -419,14 +471,19 @@ export function ChatUI({
             <Textarea
               ref={inputRef}
               value={input}
-              onChange={e => setInput(e.target.value)}
+              onChange={e => {
+                setInput(e.target.value)
+                const el = e.target
+                el.style.height = 'auto'
+                el.style.height = `${Math.min(el.scrollHeight, 300)}px`
+              }}
               onKeyDown={handleKeyDown}
               placeholder="Ask a question... (Enter to send, Shift+Enter for newline)"
-              className="flex-1 resize-none min-h-[44px] max-h-[120px]"
+              className="flex-1 min-h-[44px] max-h-[300px] resize-y overflow-y-auto"
               rows={1}
             />
-            <Button type="submit" disabled={!input.trim()} size="sm" className="self-end" aria-label="Send message">
-              <Send className="h-4 w-4" />
+            <Button type="submit" disabled={!input.trim()} className="self-end h-[44px] w-[44px] shrink-0" aria-label="Send message">
+              <Send className="h-5 w-5" />
             </Button>
           </form>
         </div>
