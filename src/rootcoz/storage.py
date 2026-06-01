@@ -3184,11 +3184,14 @@ async def rotate_admin_key(username: str, custom_key: str | None = None) -> str:
     return raw_key
 
 
-async def cleanup_expired_sessions() -> None:
-    """Remove expired sessions."""
+async def cleanup_expired_sessions() -> int:
+    """Remove expired sessions. Returns count deleted."""
     async with _connect_db() as db:
-        await db.execute("DELETE FROM sessions WHERE expires_at <= datetime('now')")
+        cursor = await db.execute(
+            "DELETE FROM sessions WHERE expires_at <= datetime('now')"
+        )
         await db.commit()
+        return cursor.rowcount
 
 
 async def save_user_tokens(

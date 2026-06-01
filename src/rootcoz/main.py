@@ -344,6 +344,18 @@ _active_count_listeners: set[asyncio.Event] = set()
 _mention_listeners: dict[str, set[asyncio.Event]] = {}
 
 
+async def _periodic_session_cleanup() -> None:
+    """Periodically clean up expired sessions."""
+    while True:
+        await asyncio.sleep(3600)  # Every hour
+        try:
+            count = await storage.cleanup_expired_sessions()
+            if count:
+                logger.info("Periodic cleanup: removed %d expired sessions", count)
+        except Exception:
+            logger.debug("Periodic session cleanup failed", exc_info=True)
+
+
 def notify_active_count_changed() -> None:
     """Signal all SSE listeners that the active analysis count has changed."""
     for event in _active_count_listeners:
@@ -1188,6 +1200,7 @@ async def lifespan(_app: FastAPI):
 
     await init_db()
     await storage.cleanup_expired_sessions()
+    asyncio.create_task(_periodic_session_cleanup())
 
     # Load DB setting overrides into env before get_settings() is called
     from rootcoz.config import load_db_settings_into_env

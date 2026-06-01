@@ -227,6 +227,7 @@ def build_chat_custom_tools(
     )
 
     if jira_url and jira_token:
+        jira_url = jira_url.rstrip("/")
         jira_auth: dict[str, str] = {"Authorization": f"Bearer {jira_token}"}
         if jira_email:
             encoded = base64.b64encode(f"{jira_email}:{jira_token}".encode()).decode()
