@@ -7957,10 +7957,6 @@ async def init_chat(job_id: str, request: Request) -> dict:
                     status="completed",
                 )
 
-            # Revoke the init auth token — _process_chat_message creates
-            # fresh tokens on each message
-            await _cleanup_ai_session(auth_header)
-
     logger.info(
         "Chat init for job %s: workspace=%s, repos=%s, session=%s",
         job_id,
@@ -8396,7 +8392,8 @@ async def _process_chat_message(
                 )
         finally:
             _cleanup_chat_state(f"{job_id}:{username}")
-            await _cleanup_ai_session(auth_header)
+            # Do NOT revoke auth_header — it's embedded in custom tool HTTP headers
+            # and must stay alive for the sidecar session lifetime
 
 
 @app.delete("/api/chat/{job_id}")
@@ -8584,8 +8581,6 @@ async def init_admin_chat(request: Request) -> dict:
                     session_id=session_id,
                     status="completed",
                 )
-            await _cleanup_ai_session(auth_header)
-
     logger.info("Admin chat init: workspace=%s, session=%s", workspace, session_id)
     return {"ready": True, "session_id": session_id or ""}
 
@@ -8881,7 +8876,7 @@ async def _process_admin_chat_message(
                 )
         finally:
             _cleanup_chat_state(f"{ADMIN_CHAT_JOB_ID}:{username}")
-            await _cleanup_ai_session(auth_header)
+            # Do NOT revoke auth_header — it's embedded in custom tool HTTP headers
 
 
 @app.delete("/api/admin/chat")
