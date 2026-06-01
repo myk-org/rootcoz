@@ -2075,7 +2075,7 @@ async def _auto_assign_metadata(
         )
 
 
-async def _create_ai_auth_header(username: str) -> str:
+async def _create_ai_auth_header(username: str, is_admin: bool = False) -> str:
     """Create a short-lived session token for AI internal API calls.
 
     Returns a Bearer auth header string, or empty string on failure/no user.
@@ -2085,6 +2085,7 @@ async def _create_ai_auth_header(username: str) -> str:
     try:
         session_token = await storage.create_session(
             username,
+            is_admin=is_admin,
             ttl_hours=_AI_SESSION_TTL_HOURS,
         )
         return f"Bearer {session_token}"
@@ -8554,7 +8555,7 @@ async def init_admin_chat(request: Request) -> dict:
         )
         if not existing:
             custom_tools: list[dict] = []
-            auth_header = await _create_ai_auth_header(username)
+            auth_header = await _create_ai_auth_header(username, is_admin=True)
             if auth_header:
                 server_url = _build_internal_server_url()
                 custom_tools = build_admin_custom_tools(
@@ -8772,7 +8773,7 @@ async def _process_admin_chat_message(
             settings = get_settings()
 
             server_url = _build_internal_server_url()
-            auth_header = await _create_ai_auth_header(username)
+            auth_header = await _create_ai_auth_header(username, is_admin=True)
 
             custom_tools = build_admin_custom_tools(
                 server_url=server_url,
