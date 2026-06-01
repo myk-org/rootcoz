@@ -14,6 +14,12 @@ import { Send, Loader2, Bot, User, Copy, Check } from 'lucide-react'
 
 const EMPTY_REPO_URLS: RepoUrl[] = []
 
+const INIT_STEPS = [
+  'Initializing workspace and cloning repositories...',
+  'Loading chat history...',
+  'Ready',
+] as const
+
 export interface ChatMessage {
   id: number
   job_id: string
@@ -68,7 +74,7 @@ export function ChatUI({
   const [input, setInput] = useState('')
   const [error, setError] = useState('')
   const [initComplete, setInitComplete] = useState(false)
-  const [initStep, setInitStep] = useState('Starting...')
+  const [initStepIndex, setInitStepIndex] = useState(0)
   const [initError, setInitError] = useState('')
 
   const [aiProvider, setAiProvider] = useState(defaultProvider)
@@ -108,7 +114,7 @@ export function ChatUI({
     let ignore = false
     setInitComplete(false)
     setInitError('')
-    setInitStep('Initializing workspace and cloning repositories...')
+    setInitStepIndex(0)
 
     // Step 1: Init (blocks until workspace + repos + session ready)
     api.post<{ ready: boolean; session_id?: string }>(
@@ -116,12 +122,12 @@ export function ChatUI({
     )
       .then(() => {
         if (ignore) return
-        setInitStep('Loading chat history...')
+        setInitStepIndex(1)
         // Step 2: Load history only after init completes
         return fetchMessages().then(msgs => {
           if (ignore) return
           setMessages(msgs)
-          setInitStep('Ready')
+          setInitStepIndex(2)
           setInitComplete(true)
         })
       })
@@ -219,18 +225,18 @@ export function ChatUI({
 
   const handleNewSession = useCallback(async () => {
     setInitComplete(false)
+    setInitStepIndex(0)
     setInitError('')
-    setInitStep('Clearing history...')
     setMessages([])
     setError('')
     try {
       await api.delete(apiBasePath)
-      setInitStep('Initializing workspace and cloning repositories...')
+      setInitStepIndex(0)
       await api.post(`${apiBasePath}/init`, {})
-      setInitStep('Loading chat history...')
+      setInitStepIndex(1)
       const msgs = await fetchMessages()
       setMessages(msgs)
-      setInitStep('Ready')
+      setInitStepIndex(2)
     } catch {
       // Init failure is non-fatal
     } finally {
@@ -260,15 +266,21 @@ export function ChatUI({
   }
 
   if (!initComplete) {
+    const stepLabels = ['Create workspace & AI session', 'Load chat history']
     return (
       <div className="flex flex-col items-center justify-center h-[60vh] gap-4">
         <Loader2 className="h-8 w-8 animate-spin text-accent-blue" />
         <div className="text-center space-y-3">
-          <p className="text-sm font-medium text-text-primary">{initStep}</p>
+          <p className="text-sm font-medium text-text-primary">{INIT_STEPS[initStepIndex] ?? 'Initializing...'}</p>
           <div className="flex flex-col gap-1.5 text-xs">
-            <StepIndicator label="Create workspace" done={initStep !== 'Starting...' && initStep !== 'Initializing workspace and cloning repositories...'} active={initStep === 'Starting...' || initStep === 'Initializing workspace and cloning repositories...'} />
-            <StepIndicator label="Clone repositories & create AI session" done={initStep === 'Loading chat history...' || initStep === 'Ready'} active={initStep === 'Initializing workspace and cloning repositories...'} />
-            <StepIndicator label="Load chat history" done={initStep === 'Ready'} active={initStep === 'Loading chat history...'} />
+            {stepLabels.map((label, i) => (
+              <StepIndicator
+                key={label}
+                label={label}
+                done={initStepIndex > i}
+                active={initStepIndex === i}
+              />
+            ))}
           </div>
         </div>
         {initError && (
