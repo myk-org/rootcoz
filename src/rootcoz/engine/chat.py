@@ -232,6 +232,24 @@ def build_chat_custom_tools(
             encoded = base64.b64encode(f"{jira_email}:{jira_token}".encode()).decode()
             jira_auth = {"Authorization": f"Basic {encoded}"}
 
+        # Detect Jira Cloud vs Server — Cloud deprecated API v2
+        is_cloud = "atlassian.net" in jira_url.lower()
+        if is_cloud:
+            search_url = f"{jira_url}/rest/api/3/search/jql"
+            issue_url = f"{jira_url}/rest/api/3/issue/{{issue_key}}"
+            search_params = {
+                "jql": 'summary ~ "{query}" ORDER BY updated DESC',
+                "maxResults": "{limit}",
+            }
+        else:
+            search_url = f"{jira_url}/rest/api/2/search"
+            issue_url = f"{jira_url}/rest/api/2/issue/{{issue_key}}"
+            search_params = {
+                "jql": 'summary ~ "{query}" ORDER BY updated DESC',
+                "maxResults": "{limit}",
+                "fields": "summary,status,assignee,created,updated",
+            }
+
         tools.append(
             {
                 "name": "search_jira",
@@ -250,13 +268,9 @@ def build_chat_custom_tools(
                 },
                 "http": {
                     "method": "GET",
-                    "url": f"{jira_url}/rest/api/2/search",
+                    "url": search_url,
                     "headers": {**jira_auth, "Accept": "application/json"},
-                    "query_params": {
-                        "jql": 'summary ~ "{query}" ORDER BY updated DESC',
-                        "maxResults": "{limit}",
-                        "fields": "summary,status,assignee,created,updated",
-                    },
+                    "query_params": search_params,
                 },
             }
         )
@@ -277,7 +291,7 @@ def build_chat_custom_tools(
                 },
                 "http": {
                     "method": "GET",
-                    "url": f"{jira_url}/rest/api/2/issue/{{issue_key}}",
+                    "url": issue_url,
                     "headers": {**jira_auth, "Accept": "application/json"},
                 },
             }
