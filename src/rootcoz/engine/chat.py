@@ -455,14 +455,14 @@ def _build_unavailable_section(custom_tools: list[dict]) -> str:
         lines.append(
             "- **Jira search** is not available. If the user asks about Jira tickets, "
             'tell them: "Jira search is not available for your account. To enable it, '
-            "go to your User Settings page and configure your Jira credentials "
+            "go to your [User Settings](/settings) page and configure your Jira credentials "
             '(URL, email, and API token), then start a new chat session."'
         )
     if not github_configured:
         lines.append(
             "- **GitHub search** is not available. If the user asks about GitHub issues or PRs, "
             'tell them: "GitHub search is not available. To enable it, '
-            "configure your GitHub token on the User Settings page, "
+            "configure your GitHub token on the [User Settings](/settings) page, "
             'then start a new chat session."'
         )
 
