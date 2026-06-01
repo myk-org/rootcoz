@@ -41,6 +41,21 @@ interface ChatUIProps {
   emptySubtitle?: string
 }
 
+function StepIndicator({ label, done, active }: { label: string; done: boolean; active: boolean }) {
+  return (
+    <div className={`flex items-center gap-2 ${done ? 'text-signal-green' : active ? 'text-accent-blue' : 'text-text-tertiary'}`}>
+      {done ? (
+        <Check className="h-3 w-3" />
+      ) : active ? (
+        <Loader2 className="h-3 w-3 animate-spin" />
+      ) : (
+        <div className="h-3 w-3 rounded-full border border-current opacity-30" />
+      )}
+      <span>{label}</span>
+    </div>
+  )
+}
+
 export function ChatUI({
   apiBasePath,
   header,
@@ -51,11 +66,10 @@ export function ChatUI({
 }: ChatUIProps) {
   const [messages, setMessages] = useState<ChatMessage[]>([])
   const [input, setInput] = useState('')
-  const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
-  const [chatReady, setChatReady] = useState(false)
   const [initComplete, setInitComplete] = useState(false)
-  const [initMessage, setInitMessage] = useState('')
+  const [initStep, setInitStep] = useState('Starting...')
+  const [initError, setInitError] = useState('')
 
   const [aiProvider, setAiProvider] = useState(defaultProvider)
   const [aiModel, setAiModel] = useState(defaultModel)
@@ -89,38 +103,33 @@ export function ChatUI({
     return res.messages
   }, [apiBasePath])
 
-  // Init workspace in background, load history immediately
+  // Init workspace first, then load history
   useEffect(() => {
     let ignore = false
-    setLoading(true)
-    setChatReady(false)
-    setInitMessage('Initializing...')
+    setInitComplete(false)
+    setInitError('')
+    setInitStep('Initializing workspace and cloning repositories...')
 
-    // Init with timeout — don't block input indefinitely if init stalls
-    const initTimeout = new Promise<void>((resolve) => setTimeout(resolve, 10000))
-    Promise.race([
-      api.post(`${apiBasePath}/init`, {}),
-      initTimeout,
-    ])
-      .then(() => { if (!ignore) setInitComplete(true) })
-      .catch(() => { if (!ignore) setInitComplete(true) })
-
-    // Load history immediately (don't wait for init)
-    fetchMessages()
-      .then(msgs => {
+    // Step 1: Init (blocks until workspace + repos + session ready)
+    api.post<{ ready: boolean; session_id?: string }>(
+      `${apiBasePath}/init`, {}
+    )
+      .then(() => {
         if (ignore) return
-        setMessages(msgs)
-        setChatReady(true)
-        setInitMessage('')
+        setInitStep('Loading chat history...')
+        // Step 2: Load history only after init completes
+        return fetchMessages().then(msgs => {
+          if (ignore) return
+          setMessages(msgs)
+          setInitStep('Ready')
+          setInitComplete(true)
+        })
       })
       .catch(err => {
         if (ignore) return
-        setError(err instanceof Error ? err.message : 'Failed to load chat')
-        setChatReady(true)
-        setInitMessage('')
-      })
-      .finally(() => {
-        if (!ignore) setLoading(false)
+        setInitError(err instanceof Error ? err.message : 'Failed to initialize chat')
+        // Still allow chat on init failure — session will be created on first message
+        setInitComplete(true)
       })
 
     return () => { ignore = true }
@@ -209,28 +218,25 @@ export function ChatUI({
   }, [])
 
   const handleNewSession = useCallback(async () => {
-    setChatReady(false)
     setInitComplete(false)
-    setInitMessage('Starting new session...')
+    setInitError('')
+    setInitStep('Clearing history...')
     setMessages([])
     setError('')
     try {
       await api.delete(apiBasePath)
-      // Init may take a while for repo cloning — don't block on it
-      // Repos will be cloned on first message if init times out
-      const initTimeout = new Promise<void>((resolve) => setTimeout(resolve, 10000))
-      await Promise.race([
-        api.post(`${apiBasePath}/init`, {}),
-        initTimeout,
-      ])
+      setInitStep('Initializing workspace and cloning repositories...')
+      await api.post(`${apiBasePath}/init`, {})
+      setInitStep('Loading chat history...')
+      const msgs = await fetchMessages()
+      setMessages(msgs)
+      setInitStep('Ready')
     } catch {
-      // Init failure is non-fatal — chat still works, repos clone on first message
+      // Init failure is non-fatal
     } finally {
-      setChatReady(true)
       setInitComplete(true)
-      setInitMessage('')
     }
-  }, [apiBasePath])
+  }, [apiBasePath, fetchMessages])
 
   const handleAbort = useCallback(async () => {
     try {
@@ -253,11 +259,21 @@ export function ChatUI({
     }
   }
 
-  if (loading || !chatReady || !initComplete) {
+  if (!initComplete) {
     return (
-      <div className="flex flex-col items-center justify-center h-[60vh] gap-3">
+      <div className="flex flex-col items-center justify-center h-[60vh] gap-4">
         <Loader2 className="h-8 w-8 animate-spin text-accent-blue" />
-        <p className="text-sm text-text-tertiary">{initMessage || 'Loading chat...'}</p>
+        <div className="text-center space-y-3">
+          <p className="text-sm font-medium text-text-primary">{initStep}</p>
+          <div className="flex flex-col gap-1.5 text-xs">
+            <StepIndicator label="Create workspace" done={initStep !== 'Starting...' && initStep !== 'Initializing workspace and cloning repositories...'} active={initStep === 'Starting...' || initStep === 'Initializing workspace and cloning repositories...'} />
+            <StepIndicator label="Clone repositories & create AI session" done={initStep === 'Loading chat history...' || initStep === 'Ready'} active={initStep === 'Initializing workspace and cloning repositories...'} />
+            <StepIndicator label="Load chat history" done={initStep === 'Ready'} active={initStep === 'Loading chat history...'} />
+          </div>
+        </div>
+        {initError && (
+          <p className="text-xs text-signal-red">{initError}</p>
+        )}
       </div>
     )
   }
@@ -397,7 +413,7 @@ export function ChatUI({
               className="flex-1 resize-none min-h-[44px] max-h-[120px]"
               rows={1}
             />
-            <Button type="submit" disabled={!input.trim() || !chatReady} size="sm" className="self-end" aria-label="Send message">
+            <Button type="submit" disabled={!input.trim()} size="sm" className="self-end" aria-label="Send message">
               <Send className="h-4 w-4" />
             </Button>
           </form>
