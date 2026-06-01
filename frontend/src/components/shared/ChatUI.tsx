@@ -253,7 +253,7 @@ export function ChatUI({
     }
   }
 
-  if (loading || !chatReady) {
+  if (loading || !chatReady || !initComplete) {
     return (
       <div className="flex flex-col items-center justify-center h-[60vh] gap-3">
         <Loader2 className="h-8 w-8 animate-spin text-accent-blue" />
@@ -393,12 +393,11 @@ export function ChatUI({
               value={input}
               onChange={e => setInput(e.target.value)}
               onKeyDown={handleKeyDown}
-              disabled={!initComplete}
-              placeholder={initComplete ? "Ask a question... (Enter to send, Shift+Enter for newline)" : "Initializing workspace..."}
+              placeholder="Ask a question... (Enter to send, Shift+Enter for newline)"
               className="flex-1 resize-none min-h-[44px] max-h-[120px]"
               rows={1}
             />
-            <Button type="submit" disabled={!input.trim() || !chatReady || !initComplete} size="sm" className="self-end" aria-label="Send message">
+            <Button type="submit" disabled={!input.trim() || !chatReady} size="sm" className="self-end" aria-label="Send message">
               <Send className="h-4 w-4" />
             </Button>
           </form>

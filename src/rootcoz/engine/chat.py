@@ -207,7 +207,7 @@ def build_chat_custom_tools(
             "parameters": {"type": "object", "properties": {}},
             "http": {
                 "method": "GET",
-                "url": f"{server_url}/api/results/{job_id}",
+                "url": f"{server_url}/results/{job_id}",
                 "headers": auth_headers,
             },
         }
@@ -220,7 +220,7 @@ def build_chat_custom_tools(
             "parameters": {"type": "object", "properties": {}},
             "http": {
                 "method": "GET",
-                "url": f"{server_url}/api/results/{job_id}/comments",
+                "url": f"{server_url}/results/{job_id}/comments",
                 "headers": auth_headers,
             },
         }
