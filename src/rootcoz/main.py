@@ -8125,10 +8125,14 @@ async def send_chat_message(
     """
     _check_allow_list(request)
 
-    if body.ai_provider and body.ai_provider not in VALID_AI_PROVIDERS:
+    # Normalize provider/model — strip whitespace, treat blank as None
+    ai_provider = (body.ai_provider or "").strip() or None
+    ai_model = (body.ai_model or "").strip() or None
+
+    if ai_provider and ai_provider not in VALID_AI_PROVIDERS:
         raise HTTPException(
             status_code=422,
-            detail=f"Invalid AI provider '{body.ai_provider}'. Valid providers: {', '.join(sorted(VALID_AI_PROVIDERS))}",
+            detail=f"Invalid AI provider '{ai_provider}'. Valid providers: {', '.join(sorted(VALID_AI_PROVIDERS))}",
         )
 
     stored = await get_result(job_id, strip_sensitive=False)
@@ -8140,8 +8144,8 @@ async def send_chat_message(
         job_id=job_id,
         user_content=body.message,
         username=request.state.username,
-        ai_provider=body.ai_provider or "",
-        ai_model=body.ai_model or "",
+        ai_provider=ai_provider or "",
+        ai_model=ai_model or "",
     )
     logger.info("Chat: queued user message %d for job %s", user_msg_id, job_id)
 
@@ -8154,8 +8158,8 @@ async def send_chat_message(
         user_msg_id=user_msg_id,
         assistant_msg_id=assistant_msg_id,
         message=body.message,
-        ai_provider_override=body.ai_provider,
-        ai_model_override=body.ai_model,
+        ai_provider_override=ai_provider,
+        ai_model_override=ai_model,
         username=request.state.username,
     )
 
@@ -8683,10 +8687,14 @@ async def send_admin_chat_message(
     """Queue an admin chat message for AI processing."""
     _require_admin(request)
 
-    if body.ai_provider and body.ai_provider not in VALID_AI_PROVIDERS:
+    # Normalize provider/model — strip whitespace, treat blank as None
+    ai_provider = (body.ai_provider or "").strip() or None
+    ai_model = (body.ai_model or "").strip() or None
+
+    if ai_provider and ai_provider not in VALID_AI_PROVIDERS:
         raise HTTPException(
             status_code=422,
-            detail=f"Invalid AI provider '{body.ai_provider}'. Valid providers: {', '.join(sorted(VALID_AI_PROVIDERS))}",
+            detail=f"Invalid AI provider '{ai_provider}'. Valid providers: {', '.join(sorted(VALID_AI_PROVIDERS))}",
         )
 
     # Insert user message + assistant placeholder atomically
@@ -8694,8 +8702,8 @@ async def send_admin_chat_message(
         job_id=ADMIN_CHAT_JOB_ID,
         user_content=body.message,
         username=request.state.username,
-        ai_provider=body.ai_provider or "",
-        ai_model=body.ai_model or "",
+        ai_provider=ai_provider or "",
+        ai_model=ai_model or "",
     )
     logger.info("Admin chat: queued user message %d", user_msg_id)
 
@@ -8706,8 +8714,8 @@ async def send_admin_chat_message(
         user_msg_id=user_msg_id,
         assistant_msg_id=assistant_msg_id,
         message=body.message,
-        ai_provider_override=body.ai_provider,
-        ai_model_override=body.ai_model,
+        ai_provider_override=ai_provider,
+        ai_model_override=ai_model,
         username=request.state.username,
     )
 
