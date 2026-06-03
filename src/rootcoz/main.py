@@ -8096,6 +8096,24 @@ def _cleanup_chat_state(key: str) -> None:
         _chat_locks.pop(key, None)
 
 
+async def _create_assistant_placeholder(
+    job_id: str,
+    username: str,
+    ai_provider: str = "",
+    ai_model: str = "",
+) -> int:
+    """Create a pending assistant placeholder synchronously. Returns the message ID."""
+    return await storage.add_chat_message(
+        job_id=job_id,
+        role="assistant",
+        content="",
+        username=username,
+        ai_provider=ai_provider,
+        ai_model=ai_model,
+        status="pending",
+    )
+
+
 @app.get("/api/chat/{job_id}/stream")
 async def chat_stream(job_id: str, request: Request) -> StreamingResponse:
     """SSE stream for real-time chat message updates."""
@@ -8140,14 +8158,8 @@ async def send_chat_message(
     logger.info("Chat: queued user message %d for job %s", user_msg_id, job_id)
 
     # Create assistant placeholder synchronously so the frontend can track it by ID
-    assistant_msg_id = await storage.add_chat_message(
-        job_id=job_id,
-        role="assistant",
-        content="",
-        username=request.state.username,
-        ai_provider=body.ai_provider or "",
-        ai_model=body.ai_model or "",
-        status="pending",
+    assistant_msg_id = await _create_assistant_placeholder(
+        job_id, request.state.username, body.ai_provider or "", body.ai_model or ""
     )
 
     notify_chat_changed(job_id, username=request.state.username)
@@ -8698,14 +8710,11 @@ async def send_admin_chat_message(
     logger.info("Admin chat: queued user message %d", user_msg_id)
 
     # Create assistant placeholder synchronously so the frontend can track it by ID
-    assistant_msg_id = await storage.add_chat_message(
-        job_id=ADMIN_CHAT_JOB_ID,
-        role="assistant",
-        content="",
-        username=request.state.username,
-        ai_provider=body.ai_provider or "",
-        ai_model=body.ai_model or "",
-        status="pending",
+    assistant_msg_id = await _create_assistant_placeholder(
+        ADMIN_CHAT_JOB_ID,
+        request.state.username,
+        body.ai_provider or "",
+        body.ai_model or "",
     )
 
     notify_chat_changed(ADMIN_CHAT_JOB_ID, username=request.state.username)

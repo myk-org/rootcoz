@@ -271,20 +271,24 @@ export function ChatUI({
       })
 
       // Add user message only — assistant placeholder arrives via SSE when processing starts
-      setMessages(prev => [
-        ...prev,
-        {
-          id: res.user_message.id,
-          job_id: '',
-          role: 'user' as const,
-          content: trimmed,
-          username: res.user_message.username,
-          ai_provider: '',
-          ai_model: '',
-          status: 'completed',
-          created_at: new Date().toISOString(),
-        },
-      ])
+      setMessages(prev => {
+        // Dedupe: SSE may have already synced this message from the server
+        if (prev.some(m => m.id === res.user_message.id)) return prev
+        return [
+          ...prev,
+          {
+            id: res.user_message.id,
+            job_id: '',
+            role: 'user' as const,
+            content: trimmed,
+            username: res.user_message.username,
+            ai_provider: '',
+            ai_model: '',
+            status: 'completed',
+            created_at: new Date().toISOString(),
+          },
+        ]
+      })
 
       // Start polling fallback in case SSE connection is dead
       startPollForResponse(res.assistant_message_id)
