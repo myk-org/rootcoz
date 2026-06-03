@@ -555,7 +555,7 @@ class TestChatEndpoints:
         data = response.json()
         assert data["user_message"]["content"] == "what failed?"
         assert data["user_message"]["status"] == "completed"
-        assert "assistant_message" not in data
+        assert "assistant_message_id" in data
         # Background task runs: verify the assistant message was completed
         history = test_client.get("/api/chat/chat-send-job").json()
         assistant_msgs = [m for m in history["messages"] if m["role"] == "assistant"]

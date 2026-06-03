@@ -124,12 +124,12 @@ export function ChatUI({
     }
   }, [])
 
-  // Polling fallback: fetch messages until assistant response for userMsgId arrives
-  const startPollForResponse = useCallback((userMsgId: number) => {
+  // Polling fallback: fetch messages until the specific assistant message resolves
+  const startPollForResponse = useCallback((assistantMsgId: number) => {
     cancelPoll()
     const generation = pollGenerationRef.current
     const maxTime = Date.now() + 5 * 60 * 1000 // 5 min safety timeout
-    console.debug('[ChatUI] Poll started — generation', generation, 'waiting for response to msg', userMsgId)
+    console.debug('[ChatUI] Poll started — generation', generation, 'waiting for assistant msg', assistantMsgId)
 
     const poll = () => {
       if (pollGenerationRef.current !== generation) return
@@ -142,9 +142,9 @@ export function ChatUI({
         .then(msgs => {
           if (pollGenerationRef.current !== generation) return
           setMessages(msgs)
-          // Check if an assistant response exists after our user message
+          // Check if the specific assistant message is no longer pending
           const hasResponse = msgs.some(m =>
-            m.role === 'assistant' && m.id > userMsgId && m.status !== 'pending'
+            m.id === assistantMsgId && m.status !== 'pending'
           )
           if (hasResponse) {
             console.debug('[ChatUI] Poll completed — assistant response received')
@@ -263,6 +263,7 @@ export function ChatUI({
     try {
       const res = await api.post<{
         user_message: { id: number; role: string; content: string; username: string; status: string }
+        assistant_message_id: number
       }>(apiBasePath, {
         message: trimmed,
         ai_provider: aiProvider || undefined,
@@ -286,7 +287,7 @@ export function ChatUI({
       ])
 
       // Start polling fallback in case SSE connection is dead
-      startPollForResponse(res.user_message.id)
+      startPollForResponse(res.assistant_message_id)
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to send message')
       setInput(trimmed)
