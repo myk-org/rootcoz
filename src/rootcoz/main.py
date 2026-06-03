@@ -8096,6 +8096,24 @@ def _cleanup_chat_state(key: str) -> None:
         _chat_locks.pop(key, None)
 
 
+def _normalize_and_validate_ai_params(
+    ai_provider: str | None, ai_model: str | None
+) -> tuple[str | None, str | None]:
+    """Normalize and validate AI provider/model from request body.
+
+    Returns (provider, model) with whitespace stripped and blanks as None.
+    Raises HTTPException 422 for invalid providers.
+    """
+    provider = (ai_provider or "").strip() or None
+    model = (ai_model or "").strip() or None
+    if provider and provider not in VALID_AI_PROVIDERS:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Invalid AI provider '{provider}'. Valid providers: {', '.join(sorted(VALID_AI_PROVIDERS))}",
+        )
+    return provider, model
+
+
 @app.get("/api/chat/{job_id}/stream")
 async def chat_stream(job_id: str, request: Request) -> StreamingResponse:
     """SSE stream for real-time chat message updates."""
@@ -8124,16 +8142,9 @@ async def send_chat_message(
     The response is delivered via SSE on /api/chat/{job_id}/stream.
     """
     _check_allow_list(request)
-
-    # Normalize provider/model — strip whitespace, treat blank as None
-    ai_provider = (body.ai_provider or "").strip() or None
-    ai_model = (body.ai_model or "").strip() or None
-
-    if ai_provider and ai_provider not in VALID_AI_PROVIDERS:
-        raise HTTPException(
-            status_code=422,
-            detail=f"Invalid AI provider '{ai_provider}'. Valid providers: {', '.join(sorted(VALID_AI_PROVIDERS))}",
-        )
+    ai_provider, ai_model = _normalize_and_validate_ai_params(
+        body.ai_provider, body.ai_model
+    )
 
     stored = await get_result(job_id, strip_sensitive=False)
     if not stored or not stored.get("result"):
@@ -8686,16 +8697,9 @@ async def send_admin_chat_message(
 ) -> dict:
     """Queue an admin chat message for AI processing."""
     _require_admin(request)
-
-    # Normalize provider/model — strip whitespace, treat blank as None
-    ai_provider = (body.ai_provider or "").strip() or None
-    ai_model = (body.ai_model or "").strip() or None
-
-    if ai_provider and ai_provider not in VALID_AI_PROVIDERS:
-        raise HTTPException(
-            status_code=422,
-            detail=f"Invalid AI provider '{ai_provider}'. Valid providers: {', '.join(sorted(VALID_AI_PROVIDERS))}",
-        )
+    ai_provider, ai_model = _normalize_and_validate_ai_params(
+        body.ai_provider, body.ai_model
+    )
 
     # Insert user message + assistant placeholder atomically
     user_msg_id, assistant_msg_id = await storage.add_chat_message_pair(
