@@ -88,7 +88,7 @@ export function ChatUI({
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLTextAreaElement>(null)
   const pollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
-  const pollCancelledRef = useRef(false)
+  const pollGenerationRef = useRef(0)
   const sseReconnectCount = useRef(0)
 
   const hasPending = messages.some(m => m.status === 'pending')
@@ -117,22 +117,22 @@ export function ChatUI({
 
   // Cancel active polling
   const cancelPoll = useCallback(() => {
-    pollCancelledRef.current = true
+    pollGenerationRef.current++
     if (pollTimerRef.current) {
       clearTimeout(pollTimerRef.current)
       pollTimerRef.current = null
     }
   }, [])
 
-  // Polling fallback: fetch messages until no pending assistant messages remain
-  const startPollForResponse = useCallback(() => {
+  // Polling fallback: fetch messages until assistant response for userMsgId arrives
+  const startPollForResponse = useCallback((userMsgId: number) => {
     cancelPoll()
-    pollCancelledRef.current = false
+    const generation = pollGenerationRef.current
     const maxTime = Date.now() + 5 * 60 * 1000 // 5 min safety timeout
-    console.debug('[ChatUI] Poll started — waiting for pending message resolution')
+    console.debug('[ChatUI] Poll started — generation', generation, 'waiting for response to msg', userMsgId)
 
     const poll = () => {
-      if (pollCancelledRef.current) return
+      if (pollGenerationRef.current !== generation) return
       if (Date.now() > maxTime) {
         console.warn('[ChatUI] Poll timed out after 5 minutes')
         pollTimerRef.current = null
@@ -140,19 +140,22 @@ export function ChatUI({
       }
       fetchMessages()
         .then(msgs => {
-          if (pollCancelledRef.current) return
+          if (pollGenerationRef.current !== generation) return
           setMessages(msgs)
-          const stillPending = msgs.some(m => m.status === 'pending')
-          if (stillPending) {
-            pollTimerRef.current = setTimeout(poll, 3000)
-          } else {
-            console.debug('[ChatUI] Poll completed — pending message resolved')
+          // Check if an assistant response exists after our user message
+          const hasResponse = msgs.some(m =>
+            m.role === 'assistant' && m.id > userMsgId && m.status !== 'pending'
+          )
+          if (hasResponse) {
+            console.debug('[ChatUI] Poll completed — assistant response received')
             pollTimerRef.current = null
+          } else {
+            pollTimerRef.current = setTimeout(poll, 3000)
           }
         })
         .catch((err) => {
-          if (pollCancelledRef.current) return
-          console.warn('[ChatUI] Poll fetch failed, retrying', err)
+          if (pollGenerationRef.current !== generation) return
+          console.warn('[ChatUI] Poll fetch failed, retrying:', err instanceof Error ? err.message : 'unknown error')
           pollTimerRef.current = setTimeout(poll, 3000)
         })
     }
@@ -209,7 +212,7 @@ export function ChatUI({
 
     const syncMessages = () => fetchMessages()
       .then(msgs => { if (!cancelled) setMessages(msgs) })
-      .catch((err) => { console.warn('[ChatUI] Failed to sync messages', err) })
+      .catch((err) => { console.warn('[ChatUI] Failed to sync messages:', err instanceof Error ? err.message : 'unknown error') })
 
     evtSource.addEventListener('chat-changed', () => {
       console.debug('[ChatUI] SSE chat-changed received, cancelling poll')
@@ -283,7 +286,7 @@ export function ChatUI({
       ])
 
       // Start polling fallback in case SSE connection is dead
-      startPollForResponse()
+      startPollForResponse(res.user_message.id)
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to send message')
       setInput(trimmed)
