@@ -4051,6 +4051,32 @@ async def add_chat_message(
         return cursor.lastrowid or 0
 
 
+async def add_chat_message_pair(
+    job_id: str,
+    user_content: str,
+    username: str = "",
+    ai_provider: str = "",
+    ai_model: str = "",
+) -> tuple[int, int]:
+    """Insert user message + assistant placeholder atomically.
+
+    Returns (user_msg_id, assistant_msg_id).
+    """
+    async with _connect_db() as db:
+        cursor = await db.execute(
+            "INSERT INTO chat_messages (job_id, role, content, username, ai_provider, ai_model, session_id, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (job_id, "user", user_content, username, "", "", "", "completed"),
+        )
+        user_msg_id = cursor.lastrowid or 0
+        cursor = await db.execute(
+            "INSERT INTO chat_messages (job_id, role, content, username, ai_provider, ai_model, session_id, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (job_id, "assistant", "", username, ai_provider, ai_model, "", "pending"),
+        )
+        assistant_msg_id = cursor.lastrowid or 0
+        await db.commit()
+        return user_msg_id, assistant_msg_id
+
+
 async def get_chat_messages(
     job_id: str, limit: int | None = 200, offset: int = 0, username: str = ""
 ) -> list[dict]:
