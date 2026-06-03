@@ -628,6 +628,15 @@ class TestChatEndpoints:
         )
         assert response.status_code == 404
 
+    async def test_send_message_invalid_provider(self, test_client, temp_db_path: Path):
+        await _save_job(temp_db_path, "chat-badprov-job")
+        response = test_client.post(
+            "/api/chat/chat-badprov-job",
+            json={"message": "hello", "ai_provider": "invalid-provider"},
+        )
+        assert response.status_code == 422
+        assert "Invalid AI provider" in response.json()["detail"]
+
     async def test_send_message_ai_failure_marks_failed(
         self, test_client, temp_db_path: Path
     ):

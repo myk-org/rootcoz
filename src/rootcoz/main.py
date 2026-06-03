@@ -8125,6 +8125,12 @@ async def send_chat_message(
     """
     _check_allow_list(request)
 
+    if body.ai_provider and body.ai_provider not in VALID_AI_PROVIDERS:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Invalid AI provider '{body.ai_provider}'. Valid providers: {', '.join(sorted(VALID_AI_PROVIDERS))}",
+        )
+
     stored = await get_result(job_id, strip_sensitive=False)
     if not stored or not stored.get("result"):
         raise HTTPException(status_code=404, detail="Job not found")
@@ -8676,6 +8682,12 @@ async def send_admin_chat_message(
 ) -> dict:
     """Queue an admin chat message for AI processing."""
     _require_admin(request)
+
+    if body.ai_provider and body.ai_provider not in VALID_AI_PROVIDERS:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Invalid AI provider '{body.ai_provider}'. Valid providers: {', '.join(sorted(VALID_AI_PROVIDERS))}",
+        )
 
     # Insert user message + assistant placeholder atomically
     user_msg_id, assistant_msg_id = await storage.add_chat_message_pair(
