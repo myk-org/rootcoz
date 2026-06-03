@@ -87,6 +87,9 @@ export function ChatUI({
 
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLTextAreaElement>(null)
+  const pollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const pollCancelledRef = useRef(false)
+  const sseReconnectCount = useRef(0)
 
   const hasPending = messages.some(m => m.status === 'pending')
 
@@ -111,6 +114,52 @@ export function ChatUI({
     }
     return res.messages
   }, [apiBasePath])
+
+  // Cancel active polling
+  const cancelPoll = useCallback(() => {
+    pollCancelledRef.current = true
+    if (pollTimerRef.current) {
+      clearTimeout(pollTimerRef.current)
+      pollTimerRef.current = null
+    }
+  }, [])
+
+  // Polling fallback: fetch messages until no pending assistant messages remain
+  const startPollForResponse = useCallback(() => {
+    cancelPoll()
+    pollCancelledRef.current = false
+    const maxTime = Date.now() + 5 * 60 * 1000 // 5 min safety timeout
+    console.debug('[ChatUI] Poll started — waiting for pending message resolution')
+
+    const poll = () => {
+      if (pollCancelledRef.current) return
+      if (Date.now() > maxTime) {
+        console.warn('[ChatUI] Poll timed out after 5 minutes')
+        pollTimerRef.current = null
+        return
+      }
+      fetchMessages()
+        .then(msgs => {
+          if (pollCancelledRef.current) return
+          setMessages(msgs)
+          const stillPending = msgs.some(m => m.status === 'pending')
+          if (stillPending) {
+            pollTimerRef.current = setTimeout(poll, 3000)
+          } else {
+            console.debug('[ChatUI] Poll completed — pending message resolved')
+            pollTimerRef.current = null
+          }
+        })
+        .catch((err) => {
+          if (pollCancelledRef.current) return
+          console.warn('[ChatUI] Poll fetch failed, retrying', err)
+          pollTimerRef.current = setTimeout(poll, 3000)
+        })
+    }
+
+    // Start after short delay to give SSE a chance first
+    pollTimerRef.current = setTimeout(poll, 2000)
+  }, [fetchMessages, cancelPoll])
 
   // Init workspace first, then load history
   useEffect(() => {
@@ -158,21 +207,42 @@ export function ChatUI({
     let cancelled = false
     const evtSource = new EventSource(`${apiBasePath}/stream`)
 
+    const syncMessages = () => fetchMessages()
+      .then(msgs => { if (!cancelled) setMessages(msgs) })
+      .catch((err) => { console.warn('[ChatUI] Failed to sync messages', err) })
+
     evtSource.addEventListener('chat-changed', () => {
-      fetchMessages()
-        .then(msgs => { if (!cancelled) setMessages(msgs) })
-        .catch(() => {})  // Silently ignore fetch errors during SSE updates
+      console.debug('[ChatUI] SSE chat-changed received, cancelling poll')
+      cancelPoll()  // SSE is alive, no need for polling fallback
+      syncMessages()
     })
 
+    // SSE reconnected — fetch any messages missed while disconnected
+    evtSource.onopen = () => {
+      console.debug('[ChatUI] SSE connected')
+      sseReconnectCount.current = 0
+      syncMessages()
+    }
+
     evtSource.onerror = () => {
-      // EventSource auto-reconnects
+      console.warn(`[ChatUI] SSE error, readyState=${evtSource.readyState}`)
+      // readyState CLOSED (2) = browser gave up reconnecting — schedule a new connection with backoff
+      if (evtSource.readyState === EventSource.CLOSED) {
+        evtSource.close()
+        const delay = Math.min(1000 * 2 ** sseReconnectCount.current, 30000)
+        console.warn(`[ChatUI] SSE CLOSED — scheduling reconnect in ${delay}ms (attempt ${sseReconnectCount.current + 1})`)
+        sseReconnectCount.current++
+        setTimeout(() => { if (!cancelled) setSessionKey(k => k + 1) }, delay)
+      }
+      // readyState CONNECTING (0) = browser is auto-reconnecting — onopen will handle catch-up
     }
 
     return () => {
       cancelled = true
       evtSource.close()
+      cancelPoll()
     }
-  }, [apiBasePath, fetchMessages, sessionKey, initComplete])
+  }, [apiBasePath, fetchMessages, sessionKey, initComplete, cancelPoll])
 
   // Auto-scroll
   useEffect(() => {
@@ -211,13 +281,16 @@ export function ChatUI({
           created_at: new Date().toISOString(),
         },
       ])
+
+      // Start polling fallback in case SSE connection is dead
+      startPollForResponse()
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to send message')
       setInput(trimmed)
     }
 
     inputRef.current?.focus()
-  }, [input, apiBasePath, aiProvider, aiModel])
+  }, [input, apiBasePath, aiProvider, aiModel, startPollForResponse])
 
   const copyMessage = useCallback(async (content: string, msgId: number) => {
     try {
@@ -240,6 +313,7 @@ export function ChatUI({
   }, [messages])
 
   const handleNewSession = useCallback(async () => {
+    cancelPoll()
     setInitComplete(false)
     setInitStepIndex(0)
     setInitError('')
@@ -260,7 +334,7 @@ export function ChatUI({
     }
     setSessionKey(k => k + 1)
     setInitComplete(true)
-  }, [apiBasePath, fetchMessages])
+  }, [apiBasePath, fetchMessages, cancelPoll])
 
   const handleAbort = useCallback(async () => {
     try {

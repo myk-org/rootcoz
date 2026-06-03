@@ -115,7 +115,7 @@ src/rootcoz/
   - CORS preflight (OPTIONS) requests bypass authentication on all endpoints.
   - **Users** can: register, login, rotate their own API key (`POST /api/auth/rotate-key`), manage their own tracker tokens, submit analyses.
   - **Admins** can: everything users can, plus rotate any user's key (`POST /api/admin/users/{username}/rotate-key`), create/delete/promote/demote users, access admin-only endpoints (`/api/admin/*`).
-- **Real-time updates**: Server-Sent Events (SSE) push real-time updates to the frontend — no polling. Backend broadcasts via per-connection `asyncio.Event` objects. Available SSE streams:
+- **Real-time updates**: Server-Sent Events (SSE) push real-time updates to the frontend. A polling fallback activates after sending a chat message if the SSE connection is dead, and cancels once SSE delivers an event. Backend broadcasts via per-connection `asyncio.Event` objects. Available SSE streams:
   - `/api/navbar/stream` — navbar badge counts (active analyses, unread mentions)
   - `/api/dashboard/stream` — dashboard job list changes
   - `/api/results/{job_id}/stream` — per-job status changes
