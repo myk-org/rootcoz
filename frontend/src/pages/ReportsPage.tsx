@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useReducer, useRef } from 'react'
+import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { api } from '@/lib/api'
 import { cn, parseApiTimestamp } from '@/lib/utils'
@@ -12,7 +12,8 @@ import { useMetadataOptions, MetadataDropdowns, MetadataClearButton } from '@/co
 import { DateRangePresetFilter } from '@/components/shared/DateRangePresetFilter'
 import { ClassificationBadge } from '@/components/shared/ClassificationBadge'
 import { Pagination } from '@/components/shared/Pagination'
-import { BarChart3, ArrowRightLeft, Bug, ChevronDown, ChevronRight, ExternalLink } from 'lucide-react'
+import { ExpandCollapseButtons } from '@/components/shared/ExpandCollapseButtons'
+import { BarChart3, ArrowRightLeft, Bug, ChevronDown, ChevronRight, ExternalLink, PanelLeftClose, PanelLeft } from 'lucide-react'
 
 // ─── Types ──────────────────────────────────────────────────────────
 
@@ -87,6 +88,7 @@ interface ReportsState {
   totalsData: TotalsData | null
   overridesData: OverridesData | null
   issuesData: IssuesData | null
+  sidebarCollapsed: boolean
 }
 
 type ReportsAction =
@@ -99,8 +101,8 @@ type ReportsAction =
   | { type: 'TOGGLE_META'; field: 'teams' | 'tiers' | 'versions'; value: string }
   | { type: 'CLEAR_META'; field: 'teams' | 'tiers' | 'versions' }
   | { type: 'CLEAR_ALL_META' }
-  | { type: 'SET_DATE_FROM'; value: string }
-  | { type: 'SET_DATE_TO'; value: string }
+  | { type: 'SET_DATE_RANGE'; from: string; to: string }
+  | { type: 'TOGGLE_SIDEBAR' }
 
 const INITIAL_STATE: ReportsState = {
   activeTab: 'totals',
@@ -114,6 +116,7 @@ const INITIAL_STATE: ReportsState = {
   totalsData: null,
   overridesData: null,
   issuesData: null,
+  sidebarCollapsed: false,
 }
 
 function toggleInSet(set: Set<string>, value: string): Set<string> {
@@ -143,17 +146,17 @@ function reportsReducer(state: ReportsState, action: ReportsAction): ReportsStat
       return { ...state, [action.field]: new Set<string>() }
     case 'CLEAR_ALL_META':
       return { ...state, teams: new Set(), tiers: new Set(), versions: new Set() }
-    case 'SET_DATE_FROM':
-      return { ...state, dateFrom: action.value }
-    case 'SET_DATE_TO':
-      return { ...state, dateTo: action.value }
+    case 'SET_DATE_RANGE':
+      return { ...state, dateFrom: action.from, dateTo: action.to }
+    case 'TOGGLE_SIDEBAR':
+      return { ...state, sidebarCollapsed: !state.sidebarCollapsed }
   }
 }
 
 // ─── Report Content Components ──────────────────────────────────────
 
 function TotalsReport({ data }: { data: TotalsData }) {
-  const [expanded, toggleExpanded] = useReducer((v: boolean) => !v, false)
+  const [expanded, setExpanded] = useState(false)
   const [page, setPage] = useReducer((_: number, p: number) => p, 1)
   const totalPages = Math.max(1, Math.ceil(data.jobs.length / PAGE_SIZE))
   const pageJobs = data.jobs.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE)
@@ -167,16 +170,22 @@ function TotalsReport({ data }: { data: TotalsData }) {
       </div>
 
       {data.jobs.length > 0 && (
-        <Collapsible open={expanded} onOpenChange={toggleExpanded}>
-          <CollapsibleTrigger asChild>
-            <button
-              type="button"
-              className="flex items-center gap-1.5 text-sm font-medium text-text-secondary hover:text-text-primary transition-colors"
-            >
-              {expanded ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
-              Job Details ({data.jobs.length})
-            </button>
-          </CollapsibleTrigger>
+        <Collapsible open={expanded} onOpenChange={setExpanded}>
+          <div className="flex items-center gap-3">
+            <CollapsibleTrigger asChild>
+              <button
+                type="button"
+                className="flex items-center gap-1.5 text-sm font-medium text-text-secondary hover:text-text-primary transition-colors"
+              >
+                {expanded ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
+                Job Details ({data.jobs.length})
+              </button>
+            </CollapsibleTrigger>
+            <ExpandCollapseButtons
+              onExpandAll={() => setExpanded(true)}
+              onCollapseAll={() => setExpanded(false)}
+            />
+          </div>
 
           <CollapsibleContent>
             <Table className="mt-2">
@@ -216,19 +225,28 @@ function TotalsReport({ data }: { data: TotalsData }) {
   )
 }
 
-function expandedGroupReducer(prev: string | null, key: string | null): string | null {
-  return prev === key ? null : key
-}
-
 function OverridesReport({ data }: { data: OverridesData }) {
-  const [expandedGroup, toggleExpandedGroup] = useReducer(expandedGroupReducer, null)
+  const [expandedGroups, setExpandedGroups] = useState<Set<string>>(new Set())
+  const [selectedGroup, setSelectedGroup] = useState<string | null>(null)
   const [page, setPage] = useReducer((_: number, p: number) => p, 1)
 
+  const toggleGroup = useCallback((key: string) => {
+    setExpandedGroups(prev => {
+      const next = new Set(prev)
+      if (next.has(key)) { next.delete(key); if (selectedGroup === key) setSelectedGroup(null) }
+      else { next.add(key); setSelectedGroup(key) }
+      return next
+    })
+    setPage(1)
+  }, [selectedGroup])
+
+  const allGroupKeys = useMemo(() => data.groups.map(g => `${g.from} → ${g.to}`), [data.groups])
+
   const groupDetails = useMemo(() => {
-    if (!expandedGroup) return []
-    const [from, to] = expandedGroup.split(' → ')
+    if (!selectedGroup) return []
+    const [from, to] = selectedGroup.split(' → ')
     return data.details.filter(d => d.from_classification === from && d.to_classification === to)
-  }, [expandedGroup, data.details])
+  }, [selectedGroup, data.details])
 
   const totalPages = Math.max(1, Math.ceil(groupDetails.length / PAGE_SIZE))
   const pageDetails = groupDetails.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE)
@@ -243,11 +261,15 @@ function OverridesReport({ data }: { data: OverridesData }) {
 
       {data.groups.length > 0 && (
         <div className="space-y-2">
+          <ExpandCollapseButtons
+            onExpandAll={() => { setExpandedGroups(new Set(allGroupKeys)); setSelectedGroup(allGroupKeys[0] ?? null) }}
+            onCollapseAll={() => { setExpandedGroups(new Set()); setSelectedGroup(null) }}
+          />
           {data.groups.map((g) => {
             const key = `${g.from} → ${g.to}`
-            const isExpanded = expandedGroup === key
+            const isExpanded = expandedGroups.has(key)
             return (
-              <Collapsible key={key} open={isExpanded} onOpenChange={() => { toggleExpandedGroup(key); setPage(1) }}>
+              <Collapsible key={key} open={isExpanded} onOpenChange={() => toggleGroup(key)}>
                 <div className="rounded-lg border border-border-muted bg-surface-card overflow-hidden">
                   <CollapsibleTrigger asChild>
                     <button
@@ -399,7 +421,7 @@ function StatCard({ label, value, tone }: { label: string; value: number; tone?:
 
 export function ReportsPage() {
   const [state, dispatch] = useReducer(reportsReducer, INITIAL_STATE)
-  const { activeTab, loading, error, teams, tiers, versions, dateFrom, dateTo, totalsData, overridesData, issuesData } = state
+  const { activeTab, loading, error, teams, tiers, versions, dateFrom, dateTo, totalsData, overridesData, issuesData, sidebarCollapsed } = state
   const { options: metadataOptions } = useMetadataOptions()
   const fetchSeqRef = useRef(0)
 
@@ -474,30 +496,42 @@ export function ReportsPage() {
         <DateRangePresetFilter
           from={dateFrom}
           to={dateTo}
-          onFromChange={(v) => dispatch({ type: 'SET_DATE_FROM', value: v })}
-          onToChange={(v) => dispatch({ type: 'SET_DATE_TO', value: v })}
+          onChange={(from, to) => dispatch({ type: 'SET_DATE_RANGE', from, to })}
         />
         <MetadataClearButton hasFilters={hasMetadataFilters} onClearAll={() => dispatch({ type: 'CLEAR_ALL_META' })} />
       </div>
 
       {/* Layout: sidebar + content */}
-      <div className="flex gap-6">
+      <div className="flex gap-4">
         {/* Sidebar */}
-        <nav className="w-48 shrink-0 space-y-1">
+        <nav className={cn(
+          'shrink-0 space-y-1 transition-all duration-200',
+          sidebarCollapsed ? 'w-10' : 'w-48',
+        )}>
+          <button
+            type="button"
+            onClick={() => dispatch({ type: 'TOGGLE_SIDEBAR' })}
+            className="mb-2 flex items-center justify-center rounded-md p-1.5 text-text-tertiary hover:bg-surface-hover hover:text-text-secondary transition-colors w-full"
+            aria-label={sidebarCollapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+          >
+            {sidebarCollapsed ? <PanelLeft className="h-4 w-4" /> : <PanelLeftClose className="h-4 w-4" />}
+          </button>
           {TABS.map(({ key, label, icon: Icon }) => (
             <Button
               key={key}
               variant="ghost"
               onClick={() => dispatch({ type: 'SET_TAB', tab: key })}
               className={cn(
-                'w-full justify-start gap-2 text-sm',
+                'w-full gap-2 text-sm',
+                sidebarCollapsed ? 'justify-center px-0' : 'justify-start',
                 activeTab === key
                   ? 'bg-surface-elevated text-text-primary'
                   : 'text-text-secondary hover:bg-surface-hover hover:text-text-primary',
               )}
+              title={sidebarCollapsed ? label : undefined}
             >
-              <Icon className="h-4 w-4" />
-              {label}
+              <Icon className="h-4 w-4 shrink-0" />
+              {!sidebarCollapsed && label}
             </Button>
           ))}
         </nav>

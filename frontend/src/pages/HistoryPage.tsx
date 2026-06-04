@@ -138,13 +138,9 @@ function FailureHistoryTab() {
     setPage(1)
   }
 
-  function handleDateFromChange(v: string) {
-    setDateFrom(v)
-    setPage(1)
-  }
-
-  function handleDateToChange(v: string) {
-    setDateTo(v)
+  function handleDateRangeChange(from: string, to: string) {
+    setDateFrom(from)
+    setDateTo(to)
     setPage(1)
   }
 
@@ -191,7 +187,7 @@ function FailureHistoryTab() {
             ))}
           </SelectContent>
         </Select>
-        <DateRangePresetFilter from={dateFrom} to={dateTo} onFromChange={handleDateFromChange} onToChange={handleDateToChange} />
+        <DateRangePresetFilter from={dateFrom} to={dateTo} onChange={handleDateRangeChange} />
         <span className="ml-auto text-xs text-text-tertiary font-mono">
           {total} result{total !== 1 ? 's' : ''}
         </span>

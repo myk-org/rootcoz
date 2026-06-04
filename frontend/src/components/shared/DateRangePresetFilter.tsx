@@ -47,11 +47,10 @@ function formatDateLabel(from: string, to: string): string {
 export interface DateRangePresetFilterProps {
   from: string
   to: string
-  onFromChange: (value: string) => void
-  onToChange: (value: string) => void
+  onChange: (from: string, to: string) => void
 }
 
-export function DateRangePresetFilter({ from, to, onFromChange, onToChange }: DateRangePresetFilterProps) {
+export function DateRangePresetFilter({ from, to, onChange }: DateRangePresetFilterProps) {
   const [open, setOpen] = useState(false)
   const [showCustom, setShowCustom] = useState(false)
 
@@ -73,11 +72,9 @@ export function DateRangePresetFilter({ from, to, onFromChange, onToChange }: Da
 
   function applyPreset(preset: Preset) {
     if (preset.days === 0) {
-      onFromChange('')
-      onToChange('')
+      onChange('', '')
     } else {
-      onFromChange(daysAgoString(preset.days))
-      onToChange(todayString())
+      onChange(daysAgoString(preset.days), todayString())
     }
     setShowCustom(false)
     setOpen(false)
@@ -137,7 +134,7 @@ export function DateRangePresetFilter({ from, to, onFromChange, onToChange }: Da
                   type="date"
                   value={from}
                   max={to || undefined}
-                  onChange={(e) => onFromChange(e.target.value)}
+                  onChange={(e) => onChange(e.target.value, to)}
                   className="mt-1 h-8 text-xs"
                   aria-label="Custom from date"
                 />
@@ -148,7 +145,7 @@ export function DateRangePresetFilter({ from, to, onFromChange, onToChange }: Da
                   type="date"
                   value={to}
                   min={from || undefined}
-                  onChange={(e) => onToChange(e.target.value)}
+                  onChange={(e) => onChange(from, e.target.value)}
                   className="mt-1 h-8 text-xs"
                   aria-label="Custom to date"
                 />

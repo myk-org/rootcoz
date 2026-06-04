@@ -211,18 +211,12 @@ export function DashboardPage() {
   }, [setSearchParams])
   const hasMetadataFilters = !!(metaTeams.size > 0 || metaTiers.size > 0 || metaVersions.size > 0 || metaLabels.length > 0 || metaExcludeLabels.length > 0)
   const { options: metadataOptions } = useMetadataOptions()
-  const setDateFrom = useCallback((value: string) => {
+  const setDateRange = useCallback((from: string, to: string) => {
     setSearchParams((prev) => {
       const next = new URLSearchParams(prev)
-      if (value) next.set('date_from', value)
+      if (from) next.set('date_from', from)
       else next.delete('date_from')
-      return next
-    }, { replace: true })
-  }, [setSearchParams])
-  const setDateTo = useCallback((value: string) => {
-    setSearchParams((prev) => {
-      const next = new URLSearchParams(prev)
-      if (value) next.set('date_to', value)
+      if (to) next.set('date_to', to)
       else next.delete('date_to')
       return next
     }, { replace: true })
@@ -515,7 +509,7 @@ export function DashboardPage() {
             onClear={() => setSelectedStatuses(new Set())}
             className="w-full sm:w-40"
           />
-          <DateRangePresetFilter from={dateFrom} to={dateTo} onFromChange={setDateFrom} onToChange={setDateTo} />
+          <DateRangePresetFilter from={dateFrom} to={dateTo} onChange={setDateRange} />
           <Select value={String(perPage)} onValueChange={(v) => setPerPage(Number(v))}>
             <SelectTrigger aria-label="Rows per page" className="w-full sm:w-20">
               <SelectValue />

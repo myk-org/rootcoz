@@ -7,8 +7,7 @@ function renderFilter(overrides: Partial<ComponentProps<typeof DateRangePresetFi
   const props = {
     from: '',
     to: '',
-    onFromChange: vi.fn(),
-    onToChange: vi.fn(),
+    onChange: vi.fn(),
     ...overrides,
   }
   const result = render(<DateRangePresetFilter {...props} />)
@@ -40,20 +39,20 @@ describe('DateRangePresetFilter', () => {
     expect(screen.getByText('Custom range…')).toBeDefined()
   })
 
-  it('applies "Last 7 days" preset', () => {
+  it('applies "Last 7 days" preset with single onChange call', () => {
     const { props } = renderFilter()
     fireEvent.click(screen.getByRole('button', { name: 'Date range filter' }))
     fireEvent.click(screen.getByText('Last 7 days'))
-    expect(props.onFromChange).toHaveBeenCalledWith('2025-06-08')
-    expect(props.onToChange).toHaveBeenCalledWith('2025-06-15')
+    expect(props.onChange).toHaveBeenCalledOnce()
+    expect(props.onChange).toHaveBeenCalledWith('2025-06-08', '2025-06-15')
   })
 
-  it('applies "All time" preset (clears dates)', () => {
+  it('applies "All time" preset (clears both dates in single call)', () => {
     const { props } = renderFilter({ from: '2025-01-01', to: '2025-06-15' })
     fireEvent.click(screen.getByRole('button', { name: 'Date range filter' }))
     fireEvent.click(screen.getByText('All time'))
-    expect(props.onFromChange).toHaveBeenCalledWith('')
-    expect(props.onToChange).toHaveBeenCalledWith('')
+    expect(props.onChange).toHaveBeenCalledOnce()
+    expect(props.onChange).toHaveBeenCalledWith('', '')
   })
 
   it('shows "Last 7 days" label when matching preset is active', () => {
@@ -74,20 +73,20 @@ describe('DateRangePresetFilter', () => {
     expect(screen.getByLabelText('Custom to date')).toBeDefined()
   })
 
-  it('calls onFromChange when custom from date is changed', () => {
+  it('calls onChange with new from and existing to when custom from changes', () => {
     const { props } = renderFilter()
     fireEvent.click(screen.getByRole('button', { name: 'Date range filter' }))
     fireEvent.click(screen.getByText('Custom range…'))
     fireEvent.change(screen.getByLabelText('Custom from date'), { target: { value: '2025-03-01' } })
-    expect(props.onFromChange).toHaveBeenCalledWith('2025-03-01')
+    expect(props.onChange).toHaveBeenCalledWith('2025-03-01', '')
   })
 
-  it('calls onToChange when custom to date is changed', () => {
-    const { props } = renderFilter()
+  it('calls onChange with existing from and new to when custom to changes', () => {
+    const { props } = renderFilter({ from: '2025-01-01' })
     fireEvent.click(screen.getByRole('button', { name: 'Date range filter' }))
     fireEvent.click(screen.getByText('Custom range…'))
     fireEvent.change(screen.getByLabelText('Custom to date'), { target: { value: '2025-04-15' } })
-    expect(props.onToChange).toHaveBeenCalledWith('2025-04-15')
+    expect(props.onChange).toHaveBeenCalledWith('2025-01-01', '2025-04-15')
   })
 
   it('shows "From" label when only from is set', () => {

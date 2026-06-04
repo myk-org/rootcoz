@@ -481,7 +481,7 @@ export function TokenUsagePage() {
             </SelectContent>
           </Select>
         </div>
-        <DateRangePresetFilter from={dateFrom} to={dateTo} onFromChange={setDateFrom} onToChange={setDateTo} />
+        <DateRangePresetFilter from={dateFrom} to={dateTo} onChange={(from, to) => { setDateFrom(from); setDateTo(to) }} />
         <Input
           value={providerInput}
           onChange={(e) => setProviderInput(e.target.value)}
