@@ -5592,12 +5592,15 @@ async def bulk_delete_jobs_endpoint(body: BulkDeleteRequest, request: Request) -
 
     # Operators can only delete their own jobs; filter unauthorized ones
     job_ids = body.job_ids
+    unauthorized_ids: list[str] = []
     if not request.state.is_admin:
         username = request.state.username
         submitters = await storage.get_job_submitters(job_ids)
         job_ids = [jid for jid in job_ids if submitters.get(jid) == username]
+        unauthorized_ids = [jid for jid in body.job_ids if jid not in job_ids]
 
     result = await storage.delete_jobs_bulk(job_ids)
+    result["unauthorized"] = unauthorized_ids
 
     # Clean up chat workspaces for all deleted jobs
     from rootcoz.engine.chat import cleanup_chat_workspace
@@ -6476,9 +6479,9 @@ def _require_admin(request: Request) -> None:
 
 
 def _require_reviewer(request: Request) -> None:
-    """Raise 403 if the request is not authenticated (any role is allowed)."""
-    role = getattr(request.state, "role", "")
-    if role not in ("reviewer", "operator", "admin"):
+    """Raise 403 if the request is not from an authenticated user."""
+    username = getattr(request.state, "username", "")
+    if not username:
         raise HTTPException(status_code=403, detail="Authentication required")
 
 

@@ -382,7 +382,7 @@ export function DashboardPage() {
   const pageJobs = sorted.slice((safePage - 1) * perPage, safePage * perPage)
 
   const pageJobIds = useMemo(() => pageJobs.map(j => j.job_id), [pageJobs])
-  const deletablePageJobIds = useMemo(() => pageJobs.filter(j => canDeleteJob(j)).map(j => j.job_id), [pageJobs])
+  const deletablePageJobIds = useMemo(() => pageJobs.filter(j => canDeleteJob(j)).map(j => j.job_id), [pageJobs, isAdmin, username, canDelete])
   const allPageSelected = deletablePageJobIds.length > 0 && deletablePageJobIds.every(id => selectedIds.has(id))
   const somePageSelected = deletablePageJobIds.some(id => selectedIds.has(id))
 
