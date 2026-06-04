@@ -1316,11 +1316,13 @@ class TestRBACMigration:
         assert rows["olduser1"] == "operator"  # user -> operator
 
     async def test_valid_roles_constant(self) -> None:
-        """VALID_ROLES contains exactly the three expected roles."""
-        assert storage.VALID_ROLES == frozenset({"reviewer", "operator", "admin"})
+        """VALID_ROLES contains exactly the four expected roles."""
+        assert storage.VALID_ROLES == frozenset(
+            {"viewer", "reviewer", "operator", "admin"}
+        )
 
-    async def test_change_role_accepts_three_roles(self, setup_test_db: Path) -> None:
-        """change_user_role accepts reviewer, operator, and admin."""
+    async def test_change_role_accepts_all_roles(self, setup_test_db: Path) -> None:
+        """change_user_role accepts viewer, reviewer, operator, and admin."""
         with patch.object(storage, "DB_PATH", setup_test_db):
             await storage.create_admin_user("roletest")
             # admin -> operator
@@ -1332,7 +1334,11 @@ class TestRBACMigration:
             await storage.change_user_role("roletest", "reviewer")
             user = await storage.get_user_by_username("roletest")
             assert user["role"] == "reviewer"
-            # reviewer -> admin
+            # reviewer -> viewer
+            await storage.change_user_role("roletest", "viewer")
+            user = await storage.get_user_by_username("roletest")
+            assert user["role"] == "viewer"
+            # viewer -> admin
             await storage.change_user_role("roletest", "admin")
             user = await storage.get_user_by_username("roletest")
             assert user["role"] == "admin"

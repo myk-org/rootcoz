@@ -5,9 +5,10 @@ interface Props {
   children: React.ReactNode
   adminOnly?: boolean
   operatorOnly?: boolean
+  reviewerOnly?: boolean
 }
 
-export function ProtectedRoute({ children, adminOnly, operatorOnly }: Props) {
+export function ProtectedRoute({ children, adminOnly, operatorOnly, reviewerOnly }: Props) {
   const { isAdmin, role, loading, authenticated } = useAuth()
 
   // Wait for auth to resolve before any redirect
@@ -22,6 +23,10 @@ export function ProtectedRoute({ children, adminOnly, operatorOnly }: Props) {
   }
 
   if (operatorOnly && role !== 'operator' && role !== 'admin') {
+    return <Navigate to="/" replace />
+  }
+
+  if (reviewerOnly && role === 'viewer') {
     return <Navigate to="/" replace />
   }
 

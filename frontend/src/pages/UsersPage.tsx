@@ -409,6 +409,7 @@ export function UsersPage() {
                           <SelectValue />
                         </SelectTrigger>
                         <SelectContent>
+                          <SelectItem value="viewer">viewer</SelectItem>
                           <SelectItem value="reviewer">reviewer</SelectItem>
                           <SelectItem value="operator">operator</SelectItem>
                           <SelectItem value="admin">admin</SelectItem>
@@ -502,6 +503,7 @@ export function UsersPage() {
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
+                    <SelectItem value="viewer">Viewer</SelectItem>
                     <SelectItem value="reviewer">Reviewer</SelectItem>
                     <SelectItem value="operator">Operator</SelectItem>
                     <SelectItem value="admin">Admin</SelectItem>

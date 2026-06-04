@@ -110,10 +110,11 @@ src/rootcoz/
 - **API**: Centralized `api.get/post/put/delete` wrapper in `lib/api.ts` — do NOT use raw `fetch` calls
 - **User identification**: Session-based — all users must register (auto-generated API key) and log in (username + API key → session cookie). The `rootcoz_username` cookie is set for display, but authentication is enforced via `rootcoz_session` cookie or Bearer token. When `TRUST_PROXY_HEADERS` is enabled, trusted `X-Forwarded-User` satisfies authentication without registration.
 - **Auth roles & permissions**:
-  - Three roles: `reviewer`, `operator`, `admin`. A bootstrap `admin` superuser (via `ADMIN_KEY` env var) always exists outside the DB. `DEFAULT_USER_ROLE` env var controls the default role for new registrations (default: `reviewer`).
+  - Four roles: `viewer`, `reviewer`, `operator`, `admin`. A bootstrap `admin` superuser (via `ADMIN_KEY` env var) always exists outside the DB. `DEFAULT_USER_ROLE` env var controls the default role for new registrations (default: `reviewer`).
   - All API endpoints require authentication except public paths (`/register`, `/health`, `/api/health`, `/api/auth/register`, `/api/auth/login`, `/api/auth/needs-key`, `/api/releases/latest`, `/metrics`). `/api/releases/latest` is intentionally public — it only proxies GitHub release metadata (version, changelog) with no sensitive data.
   - CORS preflight (OPTIONS) requests bypass authentication on all endpoints.
-  - **Reviewers** can: view jobs/results, chat about jobs, comment on jobs, re-analyze existing jobs, register, login, rotate their own API key, manage their own tracker tokens.
+  - **Viewers** can: view jobs/results only. Cannot chat, comment, re-analyze, or modify anything.
+  - **Reviewers** can: everything viewers can, plus chat about jobs, comment on jobs, re-analyze existing jobs, register, login, rotate their own API key, manage their own tracker tokens.
   - **Operators** can: everything reviewers can, plus submit NEW analyses (`POST /analyze`), delete their own jobs.
   - **Admins** can: everything operators can, plus delete any job, rotate any user's key (`POST /api/admin/users/{username}/rotate-key`), create/delete users, change user roles, access admin-only endpoints (`/api/admin/*`).
 - **Real-time updates**: Server-Sent Events (SSE) push real-time updates to the frontend. A polling fallback activates after sending a chat message if the SSE connection is dead, and cancels once SSE delivers an event. Backend broadcasts via per-connection `asyncio.Event` objects. Available SSE streams:
@@ -260,7 +261,7 @@ When adding a new analysis setting:
 
 Exceptions (server-level only, no payload equivalent):
 - `ADMIN_KEY` — server-only bootstrap secret for admin superuser authentication; never expose via request payloads, CLI flags, or shared config files. Rotating `ADMIN_KEY` only affects the bootstrap admin login — delegated admin API keys use `ROOTCOZ_ENCRYPTION_KEY` for HMAC hashing and are not affected by `ADMIN_KEY` rotation.
-- `DEFAULT_USER_ROLE` — server-only default role for new user registrations (`reviewer` or `operator`); never expose via request payloads or CLI flags
+- `DEFAULT_USER_ROLE` — server-only default role for new user registrations (`viewer`, `reviewer`, or `operator`); never expose via request payloads or CLI flags
 - `ADMIN_WAIT_APPROVE_MSG` — server-only custom message appended to admin approval notices; tells users how to get approved
 - `ALLOWED_USERS` — server-only comma-separated allow list of usernames permitted to create/modify data; empty = open access (backward compatible); admin users always bypass; never expose via request payloads or CLI flags. All users must authenticate (via API key session, Bearer token, or trusted proxy header when `TRUST_PROXY_HEADERS` is enabled) before the allow list is evaluated.
 - `DEBUG` — server reload toggle

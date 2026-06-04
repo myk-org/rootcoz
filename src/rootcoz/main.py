@@ -3213,6 +3213,7 @@ async def re_analyze(
     fresh job_id.
     """
     _check_allow_list(request)
+    _require_reviewer(request)
     base_url = _extract_base_url()
 
     # Load the original result (with sensitive fields for credential reuse)
@@ -3603,6 +3604,7 @@ async def re_analyze_failure(
     overrides; defaults come from the parent job's request_params.
     """
     _check_allow_list(request)
+    _require_reviewer(request)
 
     # Parse optional body
     body_data: dict = {}
@@ -4006,6 +4008,7 @@ async def add_comment(
 ) -> dict:
     """Add a comment to a test failure."""
     _check_allow_list(request)
+    _require_reviewer(request)
     logger.debug(f"POST /results/{job_id}/comments: test_name={body.test_name}")
     await _validate_test_name_in_result(
         job_id, body.test_name, body.child_job_name, body.child_build_number
@@ -4070,6 +4073,7 @@ async def delete_comment_endpoint(
     their own comments (matched by username).
     """
     _check_allow_list(request)
+    _require_reviewer(request)
     logger.debug(f"DELETE /results/{job_id}/comments/{comment_id}")
     username = request.state.username
     if not username:
@@ -6479,10 +6483,16 @@ def _require_admin(request: Request) -> None:
 
 
 def _require_reviewer(request: Request) -> None:
-    """Raise 403 if the request is not from an authenticated user."""
+    """Raise 403 if the request is not from at least a reviewer."""
     username = getattr(request.state, "username", "")
     if not username:
         raise HTTPException(status_code=403, detail="Authentication required")
+    role = getattr(request.state, "role", "")
+    if role not in ("reviewer", "operator", "admin"):
+        raise HTTPException(
+            status_code=403,
+            detail="Reviewer access required. Viewers cannot perform this action.",
+        )
 
 
 def _require_operator(request: Request) -> None:
@@ -7863,6 +7873,7 @@ async def analyze_comment_intent(
 ) -> AnalyzeCommentResponse:
     """Analyze a comment to determine if it implies a failure has been reviewed/resolved."""
     _check_allow_list(request)
+    _require_reviewer(request)
 
     ai_provider = body.ai_provider or AI_PROVIDER
     ai_model = body.ai_model or AI_MODEL
@@ -8093,6 +8104,7 @@ async def get_chat_history(
 async def init_chat(job_id: str, request: Request) -> dict:
     """Initialize chat workspace: create directory, clone repos, and start AI session."""
     _check_allow_list(request)
+    _require_reviewer(request)
     from rootcoz.engine.chat import (
         ensure_chat_workspace,
         clone_chat_repos,
@@ -8227,6 +8239,7 @@ async def close_chat(job_id: str, request: Request) -> dict:
     Workspace cleanup only happens on DELETE /api/chat/{job_id} (clear history).
     """
     _check_allow_list(request)
+    _require_reviewer(request)
     logger.info("Chat: user left chat page for job %s", job_id)
     return {"status": "ok"}
 
@@ -8235,6 +8248,7 @@ async def close_chat(job_id: str, request: Request) -> dict:
 async def abort_chat(job_id: str, request: Request) -> dict:
     """Abort the currently processing chat message for this user."""
     _check_allow_list(request)
+    _require_reviewer(request)
     username = request.state.username
     key = f"{job_id}:{username}"
     signal = _get_chat_abort_signal(key)
@@ -8362,6 +8376,7 @@ async def send_chat_message(
     The response is delivered via SSE on /api/chat/{job_id}/stream.
     """
     _check_allow_list(request)
+    _require_reviewer(request)
     ai_provider, ai_model = _normalize_and_validate_ai_params(
         body.ai_provider, body.ai_model
     )
@@ -8649,6 +8664,7 @@ async def _process_chat_message(
 async def clear_chat_history(job_id: str, request: Request) -> dict:
     """Clear chat messages for the current user on a job."""
     _check_allow_list(request)
+    _require_reviewer(request)
     from rootcoz.engine.chat import cleanup_chat_repos
 
     stored = await get_result(job_id)

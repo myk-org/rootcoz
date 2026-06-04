@@ -668,6 +668,12 @@ class TestDefaultUserRole:
             settings = Settings(_env_file=None)
             assert settings.default_user_role == "operator"
 
+    def test_viewer_allowed(self) -> None:
+        env = _build_env(DEFAULT_USER_ROLE="viewer")
+        with patch.dict(os.environ, env, clear=True):
+            settings = Settings(_env_file=None)
+            assert settings.default_user_role == "viewer"
+
     def test_admin_rejected(self) -> None:
         """DEFAULT_USER_ROLE=admin is rejected to prevent privilege escalation."""
         env = _build_env(DEFAULT_USER_ROLE="admin")

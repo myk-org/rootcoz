@@ -109,7 +109,7 @@ def generate_api_key() -> str:
 
 
 # Valid roles for the three-tier RBAC system
-VALID_ROLES: frozenset[str] = frozenset({"reviewer", "operator", "admin"})
+VALID_ROLES: frozenset[str] = frozenset({"viewer", "reviewer", "operator", "admin"})
 
 
 def _validate_username(username: str) -> None:

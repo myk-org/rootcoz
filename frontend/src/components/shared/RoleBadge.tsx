@@ -4,6 +4,7 @@ const ROLE_STYLES: Record<UserRole, string> = {
   admin: 'bg-signal-amber/10 text-signal-amber',
   operator: 'bg-signal-blue/10 text-signal-blue',
   reviewer: 'bg-surface-elevated text-text-secondary',
+  viewer: 'bg-surface-elevated text-text-tertiary',
 }
 
 export function RoleBadge({ role }: { role: string }) {

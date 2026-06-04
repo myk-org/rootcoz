@@ -167,7 +167,7 @@ export interface AnalysisResult {
 
 // -- Dashboard ------------------------------------------------------
 
-export type UserRole = 'reviewer' | 'operator' | 'admin'
+export type UserRole = 'viewer' | 'reviewer' | 'operator' | 'admin'
 
 export interface DashboardJob {
   job_id: string

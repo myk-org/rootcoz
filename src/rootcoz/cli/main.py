@@ -112,9 +112,13 @@ def _handle_error(err: RootCozError) -> None:
                 "Hint: Your user is not on the server's allow list. Contact an administrator.",
                 err=True,
             )
-        elif "operator" in detail or "reviewer" in detail:
+        elif (
+            "operator" in detail
+            or "reviewer" in detail
+            or "Authentication required" in detail
+        ):
             typer.echo(
-                "Hint: This action requires operator or admin role. Contact an administrator to upgrade your role.",
+                "Hint: This action requires a higher role. Contact an administrator to upgrade your role.",
                 err=True,
             )
         else:
@@ -2296,7 +2300,7 @@ def admin_users_rotate_key(
 def admin_users_change_role(
     username: str = typer.Argument(..., help="Username to change role for."),
     role: str = typer.Argument(
-        ..., help="New role: 'reviewer', 'operator', or 'admin'."
+        ..., help="New role: 'viewer', 'reviewer', 'operator', or 'admin'."
     ),
     json_output: bool = _JSON_OPTION,
 ):

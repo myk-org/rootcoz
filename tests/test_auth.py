@@ -1327,7 +1327,7 @@ class TestRBACRoles:
     def test_login_returns_correct_role(self, client):
         """Login response includes the actual user role."""
         admin_cookies = _admin_login(client)
-        for role in ("reviewer", "operator", "admin"):
+        for role in ("viewer", "reviewer", "operator", "admin"):
             _, cookies = _create_user_with_role(
                 client, f"role_{role}", role, admin_cookies
             )
@@ -1360,6 +1360,113 @@ class TestRBACRoles:
         # Old session should be invalid — user gets 401
         me_resp = client.get("/api/auth/me", cookies=op_cookies)
         assert me_resp.status_code == 401
+
+    def test_viewer_can_view_jobs(self, client):
+        """Viewers can view the dashboard and job results."""
+        admin_cookies = _admin_login(client)
+        _, viewer_cookies = _create_user_with_role(
+            client, "view_only", "viewer", admin_cookies
+        )
+        resp = client.get("/api/dashboard", cookies=viewer_cookies)
+        assert resp.status_code == 200
+
+    def test_viewer_cannot_comment(self, client):
+        """Viewers cannot add comments."""
+        admin_cookies = _admin_login(client)
+        _, viewer_cookies = _create_user_with_role(
+            client, "viewer_nocomment", "viewer", admin_cookies
+        )
+        # Create a job via operator so there's something to comment on
+        _, op_cookies = _create_user_with_role(
+            client, "op_for_viewer_comment", "operator", admin_cookies
+        )
+        submit_resp = client.post(
+            "/analyze",
+            json={
+                "type": "file",
+                "raw_xml": "<testsuites><testsuite><testcase name='t1'><failure>err</failure></testcase></testsuite></testsuites>",
+                "ai_provider": "gemini",
+                "ai_model": "test-model",
+            },
+            cookies=op_cookies,
+        )
+        assert submit_resp.status_code == 202
+        job_id = submit_resp.json()["job_id"]
+        _wait_for_analysis(client, job_id, op_cookies)
+        # Viewer tries to comment
+        resp = client.post(
+            f"/results/{job_id}/comments",
+            json={"test_name": "t1", "comment": "hello"},
+            cookies=viewer_cookies,
+        )
+        assert resp.status_code == 403
+
+    def test_viewer_cannot_chat(self, client):
+        """Viewers cannot init chat sessions."""
+        admin_cookies = _admin_login(client)
+        _, viewer_cookies = _create_user_with_role(
+            client, "viewer_nochat", "viewer", admin_cookies
+        )
+        resp = client.post(
+            "/api/chat/fake-job-id/init",
+            cookies=viewer_cookies,
+        )
+        assert resp.status_code == 403
+
+    def test_viewer_cannot_reanalyze(self, client):
+        """Viewers cannot re-analyze jobs."""
+        admin_cookies = _admin_login(client)
+        _, viewer_cookies = _create_user_with_role(
+            client, "viewer_noreanalyze", "viewer", admin_cookies
+        )
+        resp = client.post(
+            "/re-analyze/fake-job-id",
+            json={"type": "file"},
+            cookies=viewer_cookies,
+        )
+        assert resp.status_code == 403
+
+    def test_viewer_cannot_submit_analysis(self, client):
+        """Viewers cannot submit new analyses."""
+        _, viewer_cookies = _create_user_with_role(client, "viewer_nosubmit", "viewer")
+        resp = client.post(
+            "/analyze",
+            json={"type": "file", "raw_xml": "<testsuites/>"},
+            cookies=viewer_cookies,
+        )
+        assert resp.status_code == 403
+
+    def test_viewer_cannot_delete_job(self, client):
+        """Viewers cannot delete jobs."""
+        _, viewer_cookies = _create_user_with_role(client, "viewer_nodelete", "viewer")
+        resp = client.delete("/results/fake-id", cookies=viewer_cookies)
+        assert resp.status_code == 403
+
+    def test_existing_users_unaffected_by_viewer_addition(self, client):
+        """Adding viewer role does not affect existing reviewer/operator users."""
+        admin_cookies = _admin_login(client)
+        _, rev_cookies = _create_user_with_role(
+            client, "existing_rev", "reviewer", admin_cookies
+        )
+        _, op_cookies = _create_user_with_role(
+            client, "existing_op", "operator", admin_cookies
+        )
+        # Reviewer can still access /api/auth/me with reviewer role
+        me = client.get("/api/auth/me", cookies=rev_cookies)
+        assert me.status_code == 200
+        assert me.json()["role"] == "reviewer"
+        # Operator can still submit analyses
+        resp = client.post(
+            "/analyze",
+            json={
+                "type": "file",
+                "raw_xml": "<testsuites><testsuite><testcase name='t1'><failure>err</failure></testcase></testsuite></testsuites>",
+                "ai_provider": "gemini",
+                "ai_model": "test-model",
+            },
+            cookies=op_cookies,
+        )
+        assert resp.status_code == 202
 
 
 def _wait_for_analysis(client, job_id, cookies, timeout=10):

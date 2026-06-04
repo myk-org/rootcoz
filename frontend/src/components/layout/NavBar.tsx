@@ -101,7 +101,7 @@ export function NavBar() {
     }
   }, [])
 
-  const baseNavLinks = username
+  const baseNavLinks = username && role !== 'viewer'
     ? [...BASE_NAV_LINKS, { to: '/mentions', label: 'Mentions' }]
     : BASE_NAV_LINKS
 

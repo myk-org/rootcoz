@@ -35,9 +35,9 @@ export default function App() {
             <Route path="/history" element={<ProtectedRoute><HistoryPage /></ProtectedRoute>} />
             <Route path="/reports" element={<ProtectedRoute adminOnly><ReportsPage /></ProtectedRoute>} />
             <Route path="/history/test/:testName" element={<ProtectedRoute><TestHistoryPage /></ProtectedRoute>} />
-            <Route path="/mentions" element={<ProtectedRoute><MentionsPage /></ProtectedRoute>} />
+            <Route path="/mentions" element={<ProtectedRoute reviewerOnly><MentionsPage /></ProtectedRoute>} />
             <Route path="/results/:jobId" element={<ProtectedRoute><ReportPage /></ProtectedRoute>} />
-            <Route path="/chat/:jobId" element={<ProtectedRoute><ChatPage /></ProtectedRoute>} />
+            <Route path="/chat/:jobId" element={<ProtectedRoute reviewerOnly><ChatPage /></ProtectedRoute>} />
             <Route path="/status/:jobId" element={<ProtectedRoute><StatusPage /></ProtectedRoute>} />
             <Route path="/settings" element={<ProtectedRoute><SettingsPage /></ProtectedRoute>} />
             <Route path="/admin/users" element={<ProtectedRoute adminOnly><UsersPage /></ProtectedRoute>} />

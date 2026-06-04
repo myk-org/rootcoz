@@ -270,14 +270,14 @@ class Settings(BaseSettings):
         default="reviewer",
         description=(
             "Default role assigned to new user registrations. "
-            "Must be 'reviewer' or 'operator'. Defaults to 'reviewer'."
+            "Must be 'viewer', 'reviewer', or 'operator'. Defaults to 'reviewer'."
         ),
     )
 
     @field_validator("default_user_role")
     @classmethod
     def _validate_default_role(cls, v: str) -> str:
-        allowed = ("reviewer", "operator")
+        allowed = ("viewer", "reviewer", "operator")
         if v not in allowed:
             raise ValueError(f"DEFAULT_USER_ROLE must be one of: {', '.join(allowed)}")
         return v
