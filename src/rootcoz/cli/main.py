@@ -115,7 +115,7 @@ def _handle_error(err: RootCozError) -> None:
         elif (
             "operator" in detail
             or "reviewer" in detail
-            or "Authentication required" in detail
+            or "authentication required" in detail
         ):
             typer.echo(
                 "Hint: This action requires a higher role. Contact an administrator to upgrade your role.",

@@ -5674,6 +5674,7 @@ async def abort_analysis(
 ) -> dict:
     """Abort a running or waiting analysis."""
     _check_allow_list(request)
+    _require_reviewer(request)
 
     result = await storage.get_result(job_id)
     if not result:
