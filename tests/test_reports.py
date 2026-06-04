@@ -85,6 +85,26 @@ async def populated_db(setup_test_db: Path):
             username="creator",
         )
 
+        # Insert a failed result with tags
+        failed_result_data = {
+            "job_name": "tagged-job",
+            "build_number": 99,
+            "tags": ["nightly", "smoke"],
+            "failures": [
+                {
+                    "test_name": "test_bar",
+                    "error": "TimeoutError",
+                    "analysis": {"classification": "INFRASTRUCTURE"},
+                }
+            ],
+        }
+        await storage.save_result(
+            job_id="job-2",
+            jenkins_url="https://jenkins.example.com/job/test/2/",
+            status="failed",
+            result=failed_result_data,
+        )
+
         yield setup_test_db
 
 
@@ -120,6 +140,40 @@ class TestReportTotals:
     async def test_team_filter(self, populated_db: Path):
         with patch.object(storage, "DB_PATH", populated_db):
             result = await storage.get_report_totals(team="nonexistent")
+            assert result["total_jobs"] == 0
+
+    @pytest.mark.asyncio
+    async def test_status_filter(self, populated_db: Path):
+        with patch.object(storage, "DB_PATH", populated_db):
+            # Default (completed only)
+            result = await storage.get_report_totals()
+            assert result["total_jobs"] == 1
+
+            # Explicit completed
+            result = await storage.get_report_totals(status="completed")
+            assert result["total_jobs"] == 1
+
+            # Failed status
+            result = await storage.get_report_totals(status="failed")
+            assert result["total_jobs"] == 1
+            assert result["jobs"][0]["job_name"] == "tagged-job"
+
+            # Non-existent status
+            result = await storage.get_report_totals(status="running")
+            assert result["total_jobs"] == 0
+
+    @pytest.mark.asyncio
+    async def test_tags_filter(self, populated_db: Path):
+        with patch.object(storage, "DB_PATH", populated_db):
+            # Tags filter on failed job
+            result = await storage.get_report_totals(status="failed", tags=["nightly"])
+            assert result["total_jobs"] == 1
+            assert result["jobs"][0]["job_name"] == "tagged-job"
+
+            # Non-matching tag
+            result = await storage.get_report_totals(
+                status="failed", tags=["nonexistent"]
+            )
             assert result["total_jobs"] == 0
 
 
@@ -178,6 +232,17 @@ class TestReportIssues:
     async def test_date_filter_excludes(self, populated_db: Path):
         with patch.object(storage, "DB_PATH", populated_db):
             result = await storage.get_report_issues_created(date_from="2099-01-01")
+            assert result["total"] == 0
+
+    @pytest.mark.asyncio
+    async def test_status_filter(self, populated_db: Path):
+        with patch.object(storage, "DB_PATH", populated_db):
+            # Issues only exist for completed jobs
+            result = await storage.get_report_issues_created(status="completed")
+            assert result["total"] == 1
+
+            # No issues for failed jobs
+            result = await storage.get_report_issues_created(status="failed")
             assert result["total"] == 0
 
     @pytest.mark.asyncio

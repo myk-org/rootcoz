@@ -11,6 +11,7 @@ import { Collapsible, CollapsibleTrigger, CollapsibleContent } from '@/component
 import { useMetadataOptions, MetadataDropdowns, MetadataClearButton } from '@/components/shared/MetadataFilterBar'
 import { DateRangePresetFilter } from '@/components/shared/DateRangePresetFilter'
 import { ClassificationBadge } from '@/components/shared/ClassificationBadge'
+import { MultiSelectFilter } from '@/components/shared/MultiSelectFilter'
 import { Pagination } from '@/components/shared/Pagination'
 import { ExpandCollapseButtons } from '@/components/shared/ExpandCollapseButtons'
 import { BarChart3, ArrowRightLeft, Bug, ChevronDown, ChevronRight, ExternalLink, PanelLeftClose, PanelLeft } from 'lucide-react'
@@ -73,6 +74,7 @@ const TABS: { key: ReportTab; label: string; icon: typeof BarChart3 }[] = [
 ]
 
 const PAGE_SIZE = 20
+const STATUS_FILTER_OPTIONS = ['completed', 'running', 'waiting', 'pending', 'failed', 'timeout', 'aborted'] as const
 
 // ─── Reducer ────────────────────────────────────────────────────────
 
@@ -85,6 +87,9 @@ interface ReportsState {
   versions: Set<string>
   dateFrom: string
   dateTo: string
+  statuses: Set<string>
+  tags: Set<string>
+  availableTags: string[]
   totalsData: TotalsData | null
   overridesData: OverridesData | null
   issuesData: IssuesData | null
@@ -105,6 +110,11 @@ type ReportsAction =
   | { type: 'SET_DATE_RANGE'; from: string; to: string }
   | { type: 'TOGGLE_SIDEBAR' }
   | { type: 'SET_SIDEBAR_WIDTH'; width: number }
+  | { type: 'TOGGLE_STATUS'; value: string }
+  | { type: 'CLEAR_STATUSES' }
+  | { type: 'TOGGLE_TAG'; value: string }
+  | { type: 'CLEAR_TAGS' }
+  | { type: 'SET_AVAILABLE_TAGS'; tags: string[] }
 
 const INITIAL_STATE: ReportsState = {
   activeTab: 'totals',
@@ -115,6 +125,9 @@ const INITIAL_STATE: ReportsState = {
   versions: new Set(),
   dateFrom: '',
   dateTo: '',
+  statuses: new Set(),
+  tags: new Set(),
+  availableTags: [],
   totalsData: null,
   overridesData: null,
   issuesData: null,
@@ -148,13 +161,23 @@ function reportsReducer(state: ReportsState, action: ReportsAction): ReportsStat
     case 'CLEAR_META':
       return { ...state, [action.field]: new Set<string>() }
     case 'CLEAR_ALL_META':
-      return { ...state, teams: new Set(), tiers: new Set(), versions: new Set() }
+      return { ...state, teams: new Set(), tiers: new Set(), versions: new Set(), statuses: new Set<string>(), tags: new Set<string>() }
     case 'SET_DATE_RANGE':
       return { ...state, dateFrom: action.from, dateTo: action.to }
     case 'TOGGLE_SIDEBAR':
       return { ...state, sidebarCollapsed: !state.sidebarCollapsed }
     case 'SET_SIDEBAR_WIDTH':
       return { ...state, sidebarWidth: action.width }
+    case 'TOGGLE_STATUS':
+      return { ...state, statuses: toggleInSet(state.statuses, action.value) }
+    case 'CLEAR_STATUSES':
+      return { ...state, statuses: new Set<string>() }
+    case 'TOGGLE_TAG':
+      return { ...state, tags: toggleInSet(state.tags, action.value) }
+    case 'CLEAR_TAGS':
+      return { ...state, tags: new Set<string>() }
+    case 'SET_AVAILABLE_TAGS':
+      return { ...state, availableTags: action.tags }
   }
 }
 
@@ -426,7 +449,7 @@ function StatCard({ label, value, tone }: { label: string; value: number; tone?:
 
 export function ReportsPage() {
   const [state, dispatch] = useReducer(reportsReducer, INITIAL_STATE)
-  const { activeTab, loading, error, teams, tiers, versions, dateFrom, dateTo, totalsData, overridesData, issuesData, sidebarCollapsed, sidebarWidth } = state
+  const { activeTab, loading, error, teams, tiers, versions, dateFrom, dateTo, statuses, tags, availableTags, totalsData, overridesData, issuesData, sidebarCollapsed, sidebarWidth } = state
   const [isResizing, setIsResizing] = useState(false)
   const sidebarRef = useRef<HTMLElement>(null)
   const SIDEBAR_MIN = 120
@@ -462,7 +485,7 @@ export function ReportsPage() {
   const { options: metadataOptions } = useMetadataOptions()
   const fetchSeqRef = useRef(0)
 
-  const hasMetadataFilters = teams.size > 0 || tiers.size > 0 || versions.size > 0
+  const hasMetadataFilters = teams.size > 0 || tiers.size > 0 || versions.size > 0 || statuses.size > 0 || tags.size > 0
 
   // Build query params shared by all endpoints
   const queryString = useMemo(() => {
@@ -475,8 +498,12 @@ export function ReportsPage() {
     if (version) params.set('version', version)
     if (dateFrom) params.set('from', dateFrom)
     if (dateTo) params.set('to', dateTo)
+    const statusVal = [...statuses].join(',')
+    if (statusVal) params.set('status', statusVal)
+    const tagsVal = [...tags].join(',')
+    if (tagsVal) params.set('tags', tagsVal)
     return params.toString()
-  }, [teams, tiers, versions, dateFrom, dateTo])
+  }, [teams, tiers, versions, dateFrom, dateTo, statuses, tags])
 
   const fetchReport = useCallback(async () => {
     const seq = ++fetchSeqRef.current
@@ -512,6 +539,16 @@ export function ReportsPage() {
     fetchReport()
   }, [fetchReport])
 
+  useEffect(() => {
+    api.get<Array<{ tags?: string[] }>>('/api/dashboard').then((jobs) => {
+      const tagSet = new Set<string>()
+      for (const job of jobs) {
+        for (const t of job.tags ?? []) tagSet.add(t)
+      }
+      dispatch({ type: 'SET_AVAILABLE_TAGS', tags: [...tagSet].sort() })
+    }).catch(() => {})
+  }, [])
+
   return (
     <div className="space-y-6">
       <h1 className="font-display text-xl font-bold text-text-primary">Reports</h1>
@@ -535,6 +572,24 @@ export function ReportsPage() {
           to={dateTo}
           onChange={(from, to) => dispatch({ type: 'SET_DATE_RANGE', from, to })}
         />
+        <MultiSelectFilter
+          label="All statuses"
+          options={[...STATUS_FILTER_OPTIONS]}
+          selected={statuses}
+          onToggle={(v) => dispatch({ type: 'TOGGLE_STATUS', value: v })}
+          onClear={() => dispatch({ type: 'CLEAR_STATUSES' })}
+          className="w-full sm:w-40"
+        />
+        {availableTags.length > 0 && (
+          <MultiSelectFilter
+            label="All tags"
+            options={availableTags}
+            selected={tags}
+            onToggle={(v) => dispatch({ type: 'TOGGLE_TAG', value: v })}
+            onClear={() => dispatch({ type: 'CLEAR_TAGS' })}
+            className="w-full sm:w-40"
+          />
+        )}
         <MetadataClearButton hasFilters={hasMetadataFilters} onClearAll={() => dispatch({ type: 'CLEAR_ALL_META' })} />
       </div>
 

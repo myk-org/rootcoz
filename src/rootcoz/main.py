@@ -7508,18 +7508,23 @@ async def reports_totals(
     version: str = Query(default=""),
     date_from: str = Query(default="", alias="from"),
     date_to: str = Query(default="", alias="to"),
+    status: str = Query(default=""),
+    tags: str = Query(default=""),
     limit: int = Query(default=0, ge=0, le=1000),
     offset: int = Query(default=0, ge=0),
 ) -> dict:
     """Aggregate totals: total jobs, failures, reviewed, with per-job detail list. Admin only."""
     _require_admin(request)
+    tag_list = [t.strip() for t in tags.split(",") if t.strip()] if tags else None
     logger.debug(
-        "GET /api/reports/totals: team=%r, tier=%r, version=%r, from=%r, to=%r",
+        "GET /api/reports/totals: team=%r, tier=%r, version=%r, from=%r, to=%r, status=%r, tags=%r",
         team,
         tier,
         version,
         date_from,
         date_to,
+        status,
+        tag_list,
     )
     return await storage.get_report_totals(
         team=team,
@@ -7527,6 +7532,8 @@ async def reports_totals(
         version=version,
         date_from=date_from,
         date_to=date_to,
+        status=status,
+        tags=tag_list,
         limit=limit,
         offset=offset,
     )
@@ -7540,18 +7547,23 @@ async def reports_classification_overrides(
     version: str = Query(default=""),
     date_from: str = Query(default="", alias="from"),
     date_to: str = Query(default="", alias="to"),
+    status: str = Query(default=""),
+    tags: str = Query(default=""),
     limit: int = Query(default=0, ge=0, le=1000),
     offset: int = Query(default=0, ge=0),
 ) -> dict:
     """Classification overrides grouped by from→to transition. Admin only."""
     _require_admin(request)
+    tag_list = [t.strip() for t in tags.split(",") if t.strip()] if tags else None
     logger.debug(
-        "GET /api/reports/classification-overrides: team=%r, tier=%r, version=%r, from=%r, to=%r",
+        "GET /api/reports/classification-overrides: team=%r, tier=%r, version=%r, from=%r, to=%r, status=%r, tags=%r",
         team,
         tier,
         version,
         date_from,
         date_to,
+        status,
+        tag_list,
     )
     return await storage.get_report_classification_overrides(
         team=team,
@@ -7559,6 +7571,8 @@ async def reports_classification_overrides(
         version=version,
         date_from=date_from,
         date_to=date_to,
+        status=status,
+        tags=tag_list,
         limit=limit,
         offset=offset,
     )
@@ -7572,18 +7586,23 @@ async def reports_issues_created(
     version: str = Query(default=""),
     date_from: str = Query(default="", alias="from"),
     date_to: str = Query(default="", alias="to"),
+    status: str = Query(default=""),
+    tags: str = Query(default=""),
     limit: int = Query(default=0, ge=0, le=1000),
     offset: int = Query(default=0, ge=0),
 ) -> dict:
     """GitHub/Jira issues created from analysis results. Admin only."""
     _require_admin(request)
+    tag_list = [t.strip() for t in tags.split(",") if t.strip()] if tags else None
     logger.debug(
-        "GET /api/reports/issues-created: team=%r, tier=%r, version=%r, from=%r, to=%r",
+        "GET /api/reports/issues-created: team=%r, tier=%r, version=%r, from=%r, to=%r, status=%r, tags=%r",
         team,
         tier,
         version,
         date_from,
         date_to,
+        status,
+        tag_list,
     )
     return await storage.get_report_issues_created(
         team=team,
@@ -7591,6 +7610,8 @@ async def reports_issues_created(
         version=version,
         date_from=date_from,
         date_to=date_to,
+        status=status,
+        tags=tag_list,
         limit=limit,
         offset=offset,
     )

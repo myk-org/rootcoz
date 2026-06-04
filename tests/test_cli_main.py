@@ -4206,6 +4206,31 @@ class TestReportsCommands:
             version="",
             date_from="2025-01-01",
             date_to="",
+            status="",
+            tags=None,
+        )
+
+    def test_reports_totals_with_status_and_tags(self, mock_client):
+        mock_client.report_totals.return_value = {
+            "total_jobs": 1,
+            "total_failures": 0,
+            "total_reviewed": 0,
+            "total_details": 1,
+            "jobs": [],
+        }
+        result = runner.invoke(
+            app,
+            ["reports", "totals", "--status", "completed", "--tags", "nightly,smoke"],
+        )
+        assert result.exit_code == 0
+        mock_client.report_totals.assert_called_once_with(
+            team="",
+            tier="",
+            version="",
+            date_from="",
+            date_to="",
+            status="completed",
+            tags=["nightly", "smoke"],
         )
 
     def test_reports_overrides(self, mock_client):

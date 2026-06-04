@@ -4289,6 +4289,29 @@ def _build_metadata_join(
     return join_sql
 
 
+def _build_tags_filter(
+    tags: list[str] | None,
+    job_id_col: str,
+    conditions: list[str],
+    params: list,
+) -> None:
+    """Append tag-filtering conditions in-place.
+
+    Tags are stored in ``result_json`` → ``$.tags`` as a JSON array.
+    Uses ``json_each`` to match any of the requested tags (OR semantics).
+    """
+    if not tags:
+        return
+    placeholders = ", ".join("?" for _ in tags)
+    conditions.append(
+        f"""{job_id_col} IN (
+            SELECT r_tags.job_id FROM results r_tags, json_each(r_tags.result_json, '$.tags') jt
+            WHERE jt.value IN ({placeholders})
+        )"""
+    )
+    params.extend(tags)
+
+
 async def get_report_totals(
     *,
     team: str = "",
@@ -4296,6 +4319,8 @@ async def get_report_totals(
     version: str = "",
     date_from: str = "",
     date_to: str = "",
+    status: str = "",
+    tags: list[str] | None = None,
     limit: int = 0,
     offset: int = 0,
 ) -> dict:
@@ -4311,10 +4336,13 @@ async def get_report_totals(
     meta_join = _build_metadata_join(
         team, tier, version, "r_data.job_name", conditions, params
     )
+    _build_tags_filter(tags, "r.job_id", conditions, params)
 
     where = (" AND " + " AND ".join(conditions)) if conditions else ""
 
     async with _connect_db() as db:
+        effective_status = status or "completed"
+        status_params = [effective_status, effective_status]
         sql = f"""
             SELECT
                 r.job_id,
@@ -4324,7 +4352,7 @@ async def get_report_totals(
                 COALESCE(fc.failure_count, 0) AS failure_count,
                 COALESCE(rv.reviewed_count, 0) AS reviewed_count
             FROM results r
-            JOIN ({_RESULT_DATA_SUBQUERY} AND status = 'completed'
+            JOIN ({_RESULT_DATA_SUBQUERY} AND status = ?
             ) r_data ON r_data.job_id = r.job_id
             {meta_join}
             LEFT JOIN (
@@ -4335,10 +4363,10 @@ async def get_report_totals(
                 SELECT job_id, COUNT(*) AS reviewed_count
                 FROM failure_reviews WHERE reviewed = 1 GROUP BY job_id
             ) rv ON rv.job_id = r.job_id
-            WHERE r.status = 'completed'{where}
+            WHERE r.status = ?{where}
             ORDER BY r.created_at DESC
         """
-        cursor = await db.execute(sql, params)
+        cursor = await db.execute(sql, status_params + params)
         rows = await cursor.fetchall()
 
     total_jobs = len(rows)
@@ -4380,6 +4408,8 @@ async def get_report_classification_overrides(
     version: str = "",
     date_from: str = "",
     date_to: str = "",
+    status: str = "",
+    tags: list[str] | None = None,
     limit: int = 0,
     offset: int = 0,
 ) -> dict:
@@ -4395,6 +4425,13 @@ async def get_report_classification_overrides(
     meta_join = _build_metadata_join(
         team, tier, version, "tc.job_name", conditions, params
     )
+    _build_tags_filter(tags, "tc.job_id", conditions, params)
+
+    status_join = ""
+    if status:
+        status_join = " JOIN results r_status ON r_status.job_id = tc.job_id"
+        conditions.append("r_status.status = ?")
+        params.append(status)
 
     where = " AND ".join(conditions)
 
@@ -4413,6 +4450,7 @@ async def get_report_classification_overrides(
                 fh.build_number
             FROM test_classifications tc
             {meta_join}
+            {status_join}
             JOIN failure_history fh
                 ON fh.job_id = tc.job_id
                 AND fh.test_name = tc.test_name
@@ -4469,6 +4507,8 @@ async def get_report_issues_created(
     version: str = "",
     date_from: str = "",
     date_to: str = "",
+    status: str = "",
+    tags: list[str] | None = None,
     limit: int = 0,
     offset: int = 0,
 ) -> dict:
@@ -4488,6 +4528,13 @@ async def get_report_issues_created(
     meta_join = _build_metadata_join(
         team, tier, version, "r_data.job_name", conditions, params
     )
+    _build_tags_filter(tags, "c.job_id", conditions, params)
+
+    status_join = ""
+    if status:
+        status_join = " JOIN results r_status ON r_status.job_id = c.job_id"
+        conditions.append("r_status.status = ?")
+        params.append(status)
 
     # Use JOIN when metadata filters narrow results, LEFT JOIN otherwise
     join_type = "JOIN" if (team or tier or version) else "LEFT JOIN"
@@ -4502,6 +4549,7 @@ async def get_report_issues_created(
             {join_type} ({_RESULT_DATA_SUBQUERY}
             ) r_data ON r_data.job_id = c.job_id
             {meta_join}
+            {status_join}
             WHERE {where}
             ORDER BY c.created_at DESC
         """

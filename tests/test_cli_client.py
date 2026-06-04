@@ -2209,3 +2209,34 @@ class TestReports:
             "from": "2025-01-01",
             "to": "2025-12-31",
         }
+
+    def test_build_report_params_with_status_and_tags(self):
+        client = _make_client(lambda r: httpx.Response(200, json={}))
+        params = client._build_report_params(
+            status="completed",
+            tags=["nightly", "smoke"],
+        )
+        assert params == {
+            "status": "completed",
+            "tags": "nightly,smoke",
+        }
+
+    def test_report_totals_with_status_and_tags(self):
+        def handler(request):
+            url = str(request.url)
+            assert "status=completed" in url
+            assert "tags=nightly" in url
+            return httpx.Response(
+                200,
+                json={
+                    "total_jobs": 1,
+                    "total_failures": 0,
+                    "total_reviewed": 0,
+                    "total_details": 1,
+                    "jobs": [],
+                },
+            )
+
+        client = _make_client(handler)
+        result = client.report_totals(status="completed", tags=["nightly"])
+        assert result["total_jobs"] == 1
