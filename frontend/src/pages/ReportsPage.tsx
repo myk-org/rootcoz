@@ -255,29 +255,18 @@ function TotalsReport({ data }: { data: TotalsData }) {
 
 function OverridesReport({ data }: { data: OverridesData }) {
   const [expandedGroups, setExpandedGroups] = useState<Set<string>>(new Set())
-  const [selectedGroup, setSelectedGroup] = useState<string | null>(null)
-  const [page, setPage] = useReducer((_: number, p: number) => p, 1)
+  const [pageByGroup, setPageByGroup] = useState<Record<string, number>>({})
 
   const toggleGroup = useCallback((key: string) => {
     setExpandedGroups(prev => {
       const next = new Set(prev)
-      if (next.has(key)) { next.delete(key); if (selectedGroup === key) setSelectedGroup(null) }
-      else { next.add(key); setSelectedGroup(key) }
+      if (next.has(key)) next.delete(key)
+      else next.add(key)
       return next
     })
-    setPage(1)
-  }, [selectedGroup])
+  }, [])
 
   const allGroupKeys = useMemo(() => data.groups.map(g => `${g.from} → ${g.to}`), [data.groups])
-
-  const groupDetails = useMemo(() => {
-    if (!selectedGroup) return []
-    const [from, to] = selectedGroup.split(' → ')
-    return data.details.filter(d => d.from_classification === from && d.to_classification === to)
-  }, [selectedGroup, data.details])
-
-  const totalPages = Math.max(1, Math.ceil(groupDetails.length / PAGE_SIZE))
-  const pageDetails = groupDetails.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE)
 
   return (
     <div className="space-y-4">
@@ -290,12 +279,18 @@ function OverridesReport({ data }: { data: OverridesData }) {
       {data.groups.length > 0 && (
         <div className="space-y-2">
           <ExpandCollapseButtons
-            onExpandAll={() => { setExpandedGroups(new Set(allGroupKeys)); setSelectedGroup(allGroupKeys[0] ?? null) }}
-            onCollapseAll={() => { setExpandedGroups(new Set()); setSelectedGroup(null) }}
+            onExpandAll={() => setExpandedGroups(new Set(allGroupKeys))}
+            onCollapseAll={() => setExpandedGroups(new Set())}
           />
           {data.groups.map((g) => {
             const key = `${g.from} → ${g.to}`
             const isExpanded = expandedGroups.has(key)
+            const groupDetails = isExpanded
+              ? data.details.filter(d => d.from_classification === g.from && d.to_classification === g.to)
+              : []
+            const groupPage = pageByGroup[key] ?? 1
+            const groupTotalPages = Math.max(1, Math.ceil(groupDetails.length / PAGE_SIZE))
+            const groupPageDetails = groupDetails.slice((groupPage - 1) * PAGE_SIZE, groupPage * PAGE_SIZE)
             return (
               <Collapsible key={key} open={isExpanded} onOpenChange={() => toggleGroup(key)}>
                 <div className="rounded-lg border border-border-muted bg-surface-card overflow-hidden">
@@ -324,7 +319,7 @@ function OverridesReport({ data }: { data: OverridesData }) {
                           </TableRow>
                         </TableHeader>
                         <TableBody>
-                          {pageDetails.map((d, i) => (
+                          {groupPageDetails.map((d, i) => (
                             <TableRow key={`${d.job_id}-${d.test_name}-${i}`} className={i % 2 === 0 ? 'bg-surface-card' : 'bg-surface-elevated/40'}>
                               <TableCell className="font-mono text-xs max-w-[300px] truncate">{d.test_name}</TableCell>
                               <TableCell>
@@ -343,7 +338,7 @@ function OverridesReport({ data }: { data: OverridesData }) {
                           ))}
                         </TableBody>
                       </Table>
-                      <Pagination page={page} totalPages={totalPages} onPageChange={setPage} />
+                      <Pagination page={groupPage} totalPages={groupTotalPages} onPageChange={(p) => setPageByGroup(prev => ({ ...prev, [key]: p }))} />
                     </div>
                   </CollapsibleContent>
                 </div>
