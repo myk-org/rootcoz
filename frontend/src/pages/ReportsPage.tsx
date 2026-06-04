@@ -161,6 +161,12 @@ function initStateFromParams(sp: URLSearchParams): ReportsState {
   }
 }
 
+function setsEqual(a: Set<string>, b: Set<string>): boolean {
+  if (a.size !== b.size) return false
+  for (const v of a) if (!b.has(v)) return false
+  return true
+}
+
 function toggleInSet(set: Set<string>, value: string): Set<string> {
   const next = new Set(set)
   if (next.has(value)) next.delete(value)
@@ -483,23 +489,35 @@ export function ReportsPage() {
   const { activeTab, loading, error, teams, tiers, versions, dateFrom, dateTo, statuses, tags, availableTags, totalsData, overridesData, issuesData, sidebarCollapsed, sidebarWidth } = state
   const [isResizing, setIsResizing] = useState(false)
   const sidebarRef = useRef<HTMLElement>(null)
-  const isInternalUpdate = useRef(false)
   const SIDEBAR_MIN = 120
   const SIDEBAR_MAX = 400
   const SIDEBAR_COLLAPSED_WIDTH = 40
 
   // ─── URL → state sync (external navigation / shared links) ─────
+  // Only dispatch when URL actually differs from current state — no flags, no races.
   useEffect(() => {
-    if (isInternalUpdate.current) {
-      isInternalUpdate.current = false
-      return
+    const urlTab = URL_KEY_TO_TAB[searchParams.get('report') ?? ''] ?? 'totals'
+    const urlFrom = searchParams.get('from') ?? ''
+    const urlTo = searchParams.get('to') ?? ''
+    const urlTeams = new Set(searchParams.getAll('team'))
+    const urlTiers = new Set(searchParams.getAll('tier'))
+    const urlVersions = new Set(searchParams.getAll('version'))
+    const urlStatuses = new Set(searchParams.getAll('status'))
+    const urlTags = new Set(searchParams.getAll('tag'))
+
+    const differs = urlTab !== activeTab
+      || urlFrom !== dateFrom || urlTo !== dateTo
+      || !setsEqual(urlTeams, teams) || !setsEqual(urlTiers, tiers)
+      || !setsEqual(urlVersions, versions) || !setsEqual(urlStatuses, statuses)
+      || !setsEqual(urlTags, tags)
+
+    if (differs) {
+      dispatch({ type: 'SYNC_FROM_URL', params: searchParams })
     }
-    dispatch({ type: 'SYNC_FROM_URL', params: searchParams })
-  }, [searchParams])
+  }, [searchParams]) // eslint-disable-line react-hooks/exhaustive-deps -- compare against state inside
 
   // ─── State → URL sync ──────────────────────────────────────────
   useEffect(() => {
-    isInternalUpdate.current = true
     const params = new URLSearchParams()
     if (activeTab !== 'totals') params.set('report', TAB_URL_KEY[activeTab])
     for (const t of teams) params.append('team', t)
@@ -510,9 +528,6 @@ export function ReportsPage() {
     for (const s of statuses) params.append('status', s)
     for (const t of tags) params.append('tag', t)
     setSearchParams(params, { replace: true })
-    // Reset flag after React processes the update — ensures the guard
-    // is cleared even when setSearchParams is a no-op (URL already matches).
-    queueMicrotask(() => { isInternalUpdate.current = false })
   }, [activeTab, teams, tiers, versions, dateFrom, dateTo, statuses, tags, setSearchParams])
 
   // Resize lifecycle: attach/detach listeners via useEffect
