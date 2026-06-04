@@ -2715,7 +2715,7 @@ async def mark_stale_results_failed() -> tuple[list[dict], list[dict]]:
         # Collect orphaned job details before updating
         placeholders = ", ".join("?" for _ in ORPHAN_STATUSES)
         cursor = await db.execute(
-            f"SELECT job_id, status FROM results WHERE status IN ({placeholders})",
+            f"SELECT job_id, status FROM results WHERE status IN ({placeholders}) AND completed_at IS NULL",
             ORPHAN_STATUSES,
         )
         orphaned_rows = await cursor.fetchall()
@@ -2729,7 +2729,7 @@ async def mark_stale_results_failed() -> tuple[list[dict], list[dict]]:
         cursor = await db.execute(
             f"UPDATE results SET status = 'failed', "
             f"error = ?, completed_at = ? "
-            f"WHERE status IN ({placeholders})",
+            f"WHERE status IN ({placeholders}) AND completed_at IS NULL",
             (RESTART_ERROR_MSG, now, *ORPHAN_STATUSES),
         )
         if cursor.rowcount > 0:
