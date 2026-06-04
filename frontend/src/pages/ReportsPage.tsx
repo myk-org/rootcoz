@@ -496,20 +496,13 @@ export function ReportsPage() {
   // ─── URL → state sync (external navigation / shared links) ─────
   // Only dispatch when URL actually differs from current state — no flags, no races.
   useEffect(() => {
-    const urlTab = URL_KEY_TO_TAB[searchParams.get('report') ?? ''] ?? 'totals'
-    const urlFrom = searchParams.get('from') ?? ''
-    const urlTo = searchParams.get('to') ?? ''
-    const urlTeams = new Set(searchParams.getAll('team'))
-    const urlTiers = new Set(searchParams.getAll('tier'))
-    const urlVersions = new Set(searchParams.getAll('version'))
-    const urlStatuses = new Set(searchParams.getAll('status'))
-    const urlTags = new Set(searchParams.getAll('tag'))
+    const nextState = initStateFromParams(searchParams)
 
-    const differs = urlTab !== activeTab
-      || urlFrom !== dateFrom || urlTo !== dateTo
-      || !setsEqual(urlTeams, teams) || !setsEqual(urlTiers, tiers)
-      || !setsEqual(urlVersions, versions) || !setsEqual(urlStatuses, statuses)
-      || !setsEqual(urlTags, tags)
+    const differs = nextState.activeTab !== activeTab
+      || nextState.dateFrom !== dateFrom || nextState.dateTo !== dateTo
+      || !setsEqual(nextState.teams, teams) || !setsEqual(nextState.tiers, tiers)
+      || !setsEqual(nextState.versions, versions) || !setsEqual(nextState.statuses, statuses)
+      || !setsEqual(nextState.tags, tags)
 
     if (differs) {
       dispatch({ type: 'SYNC_FROM_URL', params: searchParams })
