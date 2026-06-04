@@ -382,8 +382,9 @@ export function DashboardPage() {
   const pageJobs = sorted.slice((safePage - 1) * perPage, safePage * perPage)
 
   const pageJobIds = useMemo(() => pageJobs.map(j => j.job_id), [pageJobs])
-  const allPageSelected = pageJobIds.length > 0 && pageJobIds.every(id => selectedIds.has(id))
-  const somePageSelected = pageJobIds.some(id => selectedIds.has(id))
+  const deletablePageJobIds = useMemo(() => pageJobs.filter(j => canDeleteJob(j)).map(j => j.job_id), [pageJobs])
+  const allPageSelected = deletablePageJobIds.length > 0 && deletablePageJobIds.every(id => selectedIds.has(id))
+  const somePageSelected = deletablePageJobIds.some(id => selectedIds.has(id))
 
   useEffect(() => {
     if (selectAllRef.current) {
@@ -412,9 +413,9 @@ export function DashboardPage() {
     setSelectedIds(prev => {
       const next = new Set(prev)
       if (allPageSelected) {
-        pageJobIds.forEach(id => next.delete(id))
+        deletablePageJobIds.forEach(id => next.delete(id))
       } else {
-        pageJobIds.forEach(id => next.add(id))
+        deletablePageJobIds.forEach(id => next.add(id))
       }
       return next
     })
@@ -692,14 +693,16 @@ export function DashboardPage() {
                   >
                     {canDelete && (
                       <TableCell className="w-10">
-                        <input
-                          type="checkbox"
-                          checked={selectedIds.has(job.job_id)}
-                          onChange={(e) => { e.stopPropagation(); toggleSelect(job.job_id) }}
-                          onClick={(e) => e.stopPropagation()}
-                          className={`${BULK_SELECT_CHECKBOX_CLASS} ${showCheckboxes ? '' : 'opacity-0 group-hover:opacity-100'}`}
-                          aria-label={`Select ${getJobDisplayName(job)}`}
-                        />
+                        {canDeleteJob(job) && (
+                          <input
+                            type="checkbox"
+                            checked={selectedIds.has(job.job_id)}
+                            onChange={(e) => { e.stopPropagation(); toggleSelect(job.job_id) }}
+                            onClick={(e) => e.stopPropagation()}
+                            className={`${BULK_SELECT_CHECKBOX_CLASS} ${showCheckboxes ? '' : 'opacity-0 group-hover:opacity-100'}`}
+                            aria-label={`Select ${getJobDisplayName(job)}`}
+                          />
+                        )}
                       </TableCell>
                     )}
                     {/* Job name + build (with left accent border) */}
@@ -900,14 +903,16 @@ export function DashboardPage() {
                             >
                               {canDelete && (
                                 <TableCell className="w-10">
-                                  <input
-                                    type="checkbox"
-                                    checked={selectedIds.has(job.job_id)}
-                                    onChange={(e) => { e.stopPropagation(); toggleSelect(job.job_id) }}
-                                    onClick={(e) => e.stopPropagation()}
-                                    className={`${BULK_SELECT_CHECKBOX_CLASS} ${showCheckboxes ? '' : 'opacity-0 group-hover:opacity-100'}`}
-                                    aria-label={`Select ${getJobDisplayName(job)}`}
-                                  />
+                                  {canDeleteJob(job) && (
+                                    <input
+                                      type="checkbox"
+                                      checked={selectedIds.has(job.job_id)}
+                                      onChange={(e) => { e.stopPropagation(); toggleSelect(job.job_id) }}
+                                      onClick={(e) => e.stopPropagation()}
+                                      className={`${BULK_SELECT_CHECKBOX_CLASS} ${showCheckboxes ? '' : 'opacity-0 group-hover:opacity-100'}`}
+                                      aria-label={`Select ${getJobDisplayName(job)}`}
+                                    />
+                                  )}
                                 </TableCell>
                               )}
                               <TableCell className={`border-l-4 ${borderColor}`}>

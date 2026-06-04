@@ -436,6 +436,16 @@ async def init_db() -> None:
             db, "sessions", "role", "TEXT NOT NULL DEFAULT 'reviewer'"
         )
 
+        # Migration: backfill session roles from users table so existing
+        # operator/admin sessions are not downgraded to reviewer.
+        await db.execute("""
+            UPDATE sessions SET role = (
+                SELECT u.role FROM users u WHERE u.username = sessions.username
+            ) WHERE EXISTS (
+                SELECT 1 FROM users u WHERE u.username = sessions.username
+            )
+        """)
+
         await db.execute(
             "CREATE INDEX IF NOT EXISTS idx_sessions_username ON sessions (username)"
         )
@@ -1133,6 +1143,21 @@ async def get_result(job_id: str, *, strip_sensitive: bool = True) -> dict | Non
             }
         logger.debug(f"get_result: job_id={job_id}, found=False")
         return None
+
+
+async def get_job_submitters(job_ids: list[str]) -> dict[str, str]:
+    """Return {job_id: submitted_by} for multiple jobs in one query."""
+    if not job_ids:
+        return {}
+    placeholders = ", ".join("?" for _ in job_ids)
+    async with _connect_db() as db:
+        cursor = await db.execute(
+            f"SELECT job_id, json_extract(result_json, '$.request_params.submitted_by') as submitter "
+            f"FROM results WHERE job_id IN ({placeholders})",
+            job_ids,
+        )
+        rows = await cursor.fetchall()
+    return {row["job_id"]: row["submitter"] or "" for row in rows}
 
 
 def _find_failure_by_uuid_in_failures(

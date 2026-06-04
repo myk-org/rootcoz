@@ -187,6 +187,7 @@ _SENSITIVE_SETTINGS: frozenset[str] = frozenset(
 # Fields that require server restart to take effect
 _RESTART_REQUIRED_SETTINGS: frozenset[str] = frozenset(
     {
+        "default_user_role",
         "secure_cookies",
         "trust_proxy_headers",
         "metadata_rules_file",
@@ -5593,12 +5594,8 @@ async def bulk_delete_jobs_endpoint(body: BulkDeleteRequest, request: Request) -
     job_ids = body.job_ids
     if not request.state.is_admin:
         username = request.state.username
-        authorized_ids = []
-        for jid in job_ids:
-            r = await storage.get_result(jid)
-            if r and _get_job_submitter(r) == username:
-                authorized_ids.append(jid)
-        job_ids = authorized_ids
+        submitters = await storage.get_job_submitters(job_ids)
+        job_ids = [jid for jid in job_ids if submitters.get(jid) == username]
 
     result = await storage.delete_jobs_bulk(job_ids)
 
@@ -6476,6 +6473,13 @@ def _require_admin(request: Request) -> None:
     """Raise 403 if the request is not from an authenticated admin."""
     if not request.state.is_admin:
         raise HTTPException(status_code=403, detail="Admin access required")
+
+
+def _require_reviewer(request: Request) -> None:
+    """Raise 403 if the request is not authenticated (any role is allowed)."""
+    role = getattr(request.state, "role", "")
+    if role not in ("reviewer", "operator", "admin"):
+        raise HTTPException(status_code=403, detail="Authentication required")
 
 
 def _require_operator(request: Request) -> None:
