@@ -163,7 +163,7 @@ class TestAuthMe:
         data = resp.json()
         assert data["username"] == "testuser"
         assert data["is_admin"] is False
-        assert data["role"] == "user"
+        assert data["role"] == "reviewer"
 
     def test_me_cookie_only_returns_401(self, client):
         """Cookie-only user (no session) gets 401."""
@@ -372,7 +372,7 @@ class TestBearerTokenAuth:
         async def _insert():
             async with aiosqlite.connect(temp_db_path) as db:
                 await db.execute(
-                    "INSERT INTO users (username, api_key_hash, role) VALUES (?, ?, 'user')",
+                    "INSERT INTO users (username, api_key_hash, role) VALUES (?, ?, 'reviewer')",
                     ("nonadmin-key-user", key_hash),
                 )
                 await db.commit()
@@ -385,7 +385,7 @@ class TestBearerTokenAuth:
         data = resp.json()
         assert data["username"] == "nonadmin-key-user"
         assert data["is_admin"] is False
-        assert data["role"] == "user"
+        assert data["role"] == "reviewer"
 
     def test_bearer_admin_api_key_unchanged(self, client):
         """Bearer token with admin API key still grants admin access."""
@@ -439,7 +439,7 @@ class TestChangeUserRole:
         assert login_resp.status_code == 200
         assert login_resp.json()["is_admin"] is True
 
-    def test_demote_admin_to_user(self, client):
+    def test_demote_admin_to_operator(self, client):
         cookies = _admin_login(client)
         # Create admin and save their key
         create_resp = client.post(
@@ -448,15 +448,15 @@ class TestChangeUserRole:
             cookies=cookies,
         )
         old_key = create_resp.json()["api_key"]
-        # Demote to user — key should be preserved
+        # Demote to operator — key should be preserved
         resp = client.put(
             "/api/admin/users/demoteme/role",
-            json={"role": "user"},
+            json={"role": "operator"},
             cookies=cookies,
         )
         assert resp.status_code == 200
         data = resp.json()
-        assert data["role"] == "user"
+        assert data["role"] == "operator"
         # Demoted user can still login with their existing key
         login_resp = client.post(
             "/api/auth/login",
@@ -464,6 +464,7 @@ class TestChangeUserRole:
         )
         assert login_resp.status_code == 200
         assert login_resp.json()["is_admin"] is False
+        assert login_resp.json()["role"] == "operator"
 
     def test_demote_last_db_admin_allowed(self, client):
         """Demoting the last DB admin is allowed — bootstrap admin (ADMIN_KEY) is always available."""
@@ -476,11 +477,11 @@ class TestChangeUserRole:
         )
         resp = client.put(
             "/api/admin/users/onlyadmin/role",
-            json={"role": "user"},
+            json={"role": "reviewer"},
             cookies=cookies,
         )
         assert resp.status_code == 200
-        assert resp.json()["role"] == "user"
+        assert resp.json()["role"] == "reviewer"
         # Clean up
         client.delete("/api/admin/users/onlyadmin", cookies=cookies)
 
@@ -1034,7 +1035,23 @@ class TestProxyHeaders:
         data = resp.json()
         assert data["username"] == "sso-user"
         assert data["is_admin"] is False
-        assert data["role"] == "user"
+        assert data["role"] == "reviewer"
+
+    def test_header_resolves_db_role(self, proxy_client):
+        """X-Forwarded-User resolves the actual role from DB, not default."""
+        # Create an operator user via admin (Bearer auth avoids session cookies)
+        proxy_client.post(
+            "/api/admin/users/create",
+            json={"username": "sso-operator", "role": "operator"},
+            headers={"Authorization": "Bearer test-admin-key-16chars"},
+        )
+        # Access via proxy header only (no session cookie) — should resolve operator role from DB
+        resp = proxy_client.get(
+            "/api/auth/me",
+            headers={"X-Forwarded-User": "sso-operator"},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["role"] == "operator"
 
     def test_header_sets_cookie(self, proxy_client):
         """X-Forwarded-User sets rootcoz_username cookie on the response."""
@@ -1126,3 +1143,235 @@ class TestProxyHeaders:
             headers={"X-Forwarded-User": "  "},
         )
         assert resp.status_code == 401
+
+
+# -- RBAC Three-Role Tests ---------------------------------------------------
+
+
+def _create_user_with_role(client, username, role, admin_cookies=None):
+    """Create a user with a specific role and return (api_key, cookies)."""
+    if admin_cookies is None:
+        admin_cookies = _admin_login(client)
+    resp = client.post(
+        "/api/admin/users/create",
+        json={"username": username, "role": role},
+        cookies=admin_cookies,
+    )
+    assert resp.status_code == 200
+    api_key = resp.json()["api_key"]
+    login_resp = client.post(
+        "/api/auth/login",
+        json={"username": username, "api_key": api_key},
+    )
+    assert login_resp.status_code == 200
+    return api_key, dict(login_resp.cookies)
+
+
+class TestRBACRoles:
+    """Tests for the three-role (reviewer/operator/admin) RBAC system."""
+
+    def test_admin_create_reviewer(self, client):
+        cookies = _admin_login(client)
+        resp = client.post(
+            "/api/admin/users/create",
+            json={"username": "rev1", "role": "reviewer"},
+            cookies=cookies,
+        )
+        assert resp.status_code == 200
+        assert resp.json()["role"] == "reviewer"
+
+    def test_admin_create_operator(self, client):
+        cookies = _admin_login(client)
+        resp = client.post(
+            "/api/admin/users/create",
+            json={"username": "op1", "role": "operator"},
+            cookies=cookies,
+        )
+        assert resp.status_code == 200
+        assert resp.json()["role"] == "operator"
+
+    def test_admin_create_invalid_role(self, client):
+        cookies = _admin_login(client)
+        resp = client.post(
+            "/api/admin/users/create",
+            json={"username": "bad1", "role": "superuser"},
+            cookies=cookies,
+        )
+        assert resp.status_code == 400
+
+    def test_admin_create_legacy_user_role_rejected(self, client):
+        """The old 'user' role is no longer valid."""
+        cookies = _admin_login(client)
+        resp = client.post(
+            "/api/admin/users/create",
+            json={"username": "olduser", "role": "user"},
+            cookies=cookies,
+        )
+        assert resp.status_code == 400
+
+    def test_change_role_three_roles(self, client):
+        """Role can be changed between all three valid roles."""
+        cookies = _admin_login(client)
+        client.post(
+            "/api/admin/users/create",
+            json={"username": "roleuser", "role": "reviewer"},
+            cookies=cookies,
+        )
+        # reviewer -> operator
+        resp = client.put(
+            "/api/admin/users/roleuser/role",
+            json={"role": "operator"},
+            cookies=cookies,
+        )
+        assert resp.status_code == 200
+        assert resp.json()["role"] == "operator"
+        # operator -> admin
+        resp = client.put(
+            "/api/admin/users/roleuser/role",
+            json={"role": "admin"},
+            cookies=cookies,
+        )
+        assert resp.status_code == 200
+        assert resp.json()["role"] == "admin"
+        # admin -> reviewer
+        resp = client.put(
+            "/api/admin/users/roleuser/role",
+            json={"role": "reviewer"},
+            cookies=cookies,
+        )
+        assert resp.status_code == 200
+        assert resp.json()["role"] == "reviewer"
+
+    def test_reviewer_cannot_submit_analysis(self, client):
+        """Reviewers cannot submit new analyses."""
+        _, rev_cookies = _create_user_with_role(client, "rev_noanalyze", "reviewer")
+        resp = client.post(
+            "/analyze",
+            json={"type": "file", "raw_xml": "<testsuites/>"},
+            cookies=rev_cookies,
+        )
+        assert resp.status_code == 403
+        assert "operator" in resp.json()["detail"].lower()
+
+    def test_operator_can_submit_analysis(self, client):
+        """Operators can submit new analyses."""
+        _, op_cookies = _create_user_with_role(client, "op_analyze", "operator")
+        resp = client.post(
+            "/analyze",
+            json={
+                "type": "file",
+                "raw_xml": "<testsuites><testsuite><testcase name='t1'><failure>err</failure></testcase></testsuite></testsuites>",
+                "ai_provider": "gemini",
+                "ai_model": "test-model",
+            },
+            cookies=op_cookies,
+        )
+        assert resp.status_code == 202
+
+    def test_reviewer_cannot_delete_job(self, client):
+        """Reviewers cannot delete jobs."""
+        _, rev_cookies = _create_user_with_role(client, "rev_nodelete", "reviewer")
+        resp = client.delete("/results/fake-id", cookies=rev_cookies)
+        assert resp.status_code == 403
+
+    def test_operator_can_delete_own_job(self, client):
+        """Operators can delete jobs they submitted."""
+        _, op_cookies = _create_user_with_role(client, "op_deleter", "operator")
+        # Submit a job
+        submit_resp = client.post(
+            "/analyze",
+            json={
+                "type": "file",
+                "raw_xml": "<testsuites><testsuite><testcase name='t1'><failure>err</failure></testcase></testsuite></testsuites>",
+                "ai_provider": "gemini",
+                "ai_model": "test-model",
+            },
+            cookies=op_cookies,
+        )
+        assert submit_resp.status_code == 202
+        job_id = submit_resp.json()["job_id"]
+        # Wait for analysis to complete
+        _wait_for_analysis(client, job_id, op_cookies)
+        # Delete own job
+        del_resp = client.delete(f"/results/{job_id}", cookies=op_cookies)
+        assert del_resp.status_code == 200
+
+    def test_operator_cannot_delete_others_job(self, client):
+        """Operators cannot delete jobs submitted by other users."""
+        admin_cookies = _admin_login(client)
+        # Admin creates two operators
+        _, op1_cookies = _create_user_with_role(
+            client, "op_owner", "operator", admin_cookies
+        )
+        _, op2_cookies = _create_user_with_role(
+            client, "op_other", "operator", admin_cookies
+        )
+        # op1 submits a job
+        submit_resp = client.post(
+            "/analyze",
+            json={
+                "type": "file",
+                "raw_xml": "<testsuites><testsuite><testcase name='t1'><failure>err</failure></testcase></testsuite></testsuites>",
+                "ai_provider": "gemini",
+                "ai_model": "test-model",
+            },
+            cookies=op1_cookies,
+        )
+        assert submit_resp.status_code == 202
+        job_id = submit_resp.json()["job_id"]
+        _wait_for_analysis(client, job_id, op1_cookies)
+        # op2 tries to delete op1's job
+        del_resp = client.delete(f"/results/{job_id}", cookies=op2_cookies)
+        assert del_resp.status_code == 403
+
+    def test_login_returns_correct_role(self, client):
+        """Login response includes the actual user role."""
+        admin_cookies = _admin_login(client)
+        for role in ("reviewer", "operator", "admin"):
+            _, cookies = _create_user_with_role(
+                client, f"role_{role}", role, admin_cookies
+            )
+            me_resp = client.get("/api/auth/me", cookies=cookies)
+            assert me_resp.status_code == 200
+            assert me_resp.json()["role"] == role
+
+    def test_registration_default_role(self, client):
+        """New registrations get the default role (reviewer)."""
+        resp = client.post("/api/auth/register", json={"username": "newdefault"})
+        assert resp.status_code == 200
+        assert resp.json()["role"] == "reviewer"
+
+    def test_role_change_invalidates_sessions(self, client):
+        """Changing a user's role invalidates all their existing sessions."""
+        admin_cookies = _admin_login(client)
+        _, op_cookies = _create_user_with_role(
+            client, "session_inv", "operator", admin_cookies
+        )
+        # Operator can access /api/auth/me
+        me_resp = client.get("/api/auth/me", cookies=op_cookies)
+        assert me_resp.status_code == 200
+        assert me_resp.json()["role"] == "operator"
+        # Admin changes role to reviewer
+        client.put(
+            "/api/admin/users/session_inv/role",
+            json={"role": "reviewer"},
+            cookies=admin_cookies,
+        )
+        # Old session should be invalid — user gets 401
+        me_resp = client.get("/api/auth/me", cookies=op_cookies)
+        assert me_resp.status_code == 401
+
+
+def _wait_for_analysis(client, job_id, cookies, timeout=10):
+    """Poll until analysis completes or times out."""
+    import time
+
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        resp = client.get(f"/results/{job_id}", cookies=cookies)
+        if resp.status_code == 200:
+            data = resp.json()
+            if data.get("status") in ("completed", "failed"):
+                return
+        time.sleep(0.2)
+    raise TimeoutError(f"Analysis {job_id} did not complete within {timeout}s")

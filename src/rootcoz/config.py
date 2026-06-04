@@ -5,7 +5,7 @@ from functools import lru_cache
 from urllib.parse import urlsplit, urlunsplit
 
 from rootcoz.ai_client import VALID_AI_PROVIDERS
-from pydantic import Field, SecretStr, model_validator
+from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from simple_logger.logger import get_logger
 
@@ -264,6 +264,23 @@ class Settings(BaseSettings):
             "Empty = open access (no restriction). Admin users always bypass."
         ),
     )
+
+    # Default role for new user registrations
+    default_user_role: str = Field(
+        default="reviewer",
+        description=(
+            "Default role assigned to new user registrations. "
+            "Must be 'reviewer' or 'operator'. Defaults to 'reviewer'."
+        ),
+    )
+
+    @field_validator("default_user_role")
+    @classmethod
+    def _validate_default_role(cls, v: str) -> str:
+        allowed = ("reviewer", "operator")
+        if v not in allowed:
+            raise ValueError(f"DEFAULT_USER_ROLE must be one of: {', '.join(allowed)}")
+        return v
 
     # Admin authentication
     admin_key: str = Field(

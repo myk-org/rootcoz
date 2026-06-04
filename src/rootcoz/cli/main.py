@@ -112,6 +112,11 @@ def _handle_error(err: RootCozError) -> None:
                 "Hint: Your user is not on the server's allow list. Contact an administrator.",
                 err=True,
             )
+        elif "operator" in detail or "reviewer" in detail:
+            typer.echo(
+                "Hint: This action requires operator or admin role. Contact an administrator to upgrade your role.",
+                err=True,
+            )
         else:
             typer.echo(
                 "Hint: This action requires admin access. Use --api-key or set ROOTCOZ_API_KEY.",
@@ -2290,7 +2295,9 @@ def admin_users_rotate_key(
 @admin_users_app.command("change-role")
 def admin_users_change_role(
     username: str = typer.Argument(..., help="Username to change role for."),
-    role: str = typer.Argument(..., help="New role: 'admin' or 'user'."),
+    role: str = typer.Argument(
+        ..., help="New role: 'reviewer', 'operator', or 'admin'."
+    ),
     json_output: bool = _JSON_OPTION,
 ):
     """Change a user's role. Promoting to admin generates an API key."""

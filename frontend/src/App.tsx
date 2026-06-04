@@ -31,7 +31,7 @@ export default function App() {
           <Route element={<Layout />}>
             <Route index element={<ProtectedRoute><DashboardPage /></ProtectedRoute>} />
             <Route path="/dashboard" element={<Navigate to="/" replace />} />
-            <Route path="/new-analysis" element={<ProtectedRoute><NewAnalysisPage /></ProtectedRoute>} />
+            <Route path="/new-analysis" element={<ProtectedRoute operatorOnly><NewAnalysisPage /></ProtectedRoute>} />
             <Route path="/history" element={<ProtectedRoute><HistoryPage /></ProtectedRoute>} />
             <Route path="/reports" element={<ProtectedRoute adminOnly><ReportsPage /></ProtectedRoute>} />
             <Route path="/history/test/:testName" element={<ProtectedRoute><TestHistoryPage /></ProtectedRoute>} />

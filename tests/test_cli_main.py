@@ -3396,11 +3396,13 @@ class TestAdminUsersChangeRole:
     def test_change_role_demote(self, mock_client):
         mock_client.admin_change_role.return_value = {
             "username": "myuser",
-            "role": "user",
+            "role": "reviewer",
         }
-        result = runner.invoke(app, ["admin", "users", "change-role", "myuser", "user"])
+        result = runner.invoke(
+            app, ["admin", "users", "change-role", "myuser", "reviewer"]
+        )
         assert result.exit_code == 0
-        assert "user" in result.output
+        assert "reviewer" in result.output
         assert "API Key" not in result.output
 
     def test_change_role_json(self, mock_client):

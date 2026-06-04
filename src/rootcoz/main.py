@@ -245,6 +245,7 @@ _SETTINGS_CATEGORIES: dict[str, list[str]] = {
         "require_approval",
         "admin_wait_approve_msg",
         "allowed_users",
+        "default_user_role",
     ],
     "Server": [
         "public_base_url",
@@ -1412,7 +1413,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
         if request.method == "OPTIONS":
             request.state.username = ""
             request.state.is_admin = False
-            request.state.role = "user"
+            request.state.role = "reviewer"
             origin = request.headers.get("origin", "*")
             return Response(
                 status_code=200,
@@ -1435,7 +1436,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
         # Set defaults
         request.state.username = ""
         request.state.is_admin = False
-        request.state.role = "user"
+        request.state.role = "reviewer"
 
         # Public paths and static assets — pass through
         # (but /login may need SSO redirect, handled below;
@@ -1471,6 +1472,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
 
         is_admin = False
         username = ""
+        resolved_role = "reviewer"  # default role until resolved
         authenticated_admin = False
         has_valid_session = False
 
@@ -1483,6 +1485,10 @@ class AuthMiddleware(BaseHTTPMiddleware):
                 username = str(session["username"])
                 authenticated_admin = is_admin
                 has_valid_session = True
+                if is_admin:
+                    resolved_role = "admin"
+                else:
+                    resolved_role = str(session.get("role", "reviewer"))
 
                 # Renew session (sliding window) — only when <50% TTL remains
                 expires_at_str = session.get("expires_at", "")
@@ -1516,14 +1522,16 @@ class AuthMiddleware(BaseHTTPMiddleware):
                 ):
                     is_admin = True
                     username = "admin"
+                    resolved_role = "admin"
                     authenticated_admin = True
                     has_valid_session = True
                 else:
                     user = await storage.get_user_by_key(token)
                     if user:
                         username = str(user["username"])
+                        resolved_role = str(user.get("role", "reviewer"))
                         has_valid_session = True
-                        if user.get("role") == "admin":
+                        if resolved_role == "admin":
                             is_admin = True
                             authenticated_admin = True
                     else:
@@ -1533,6 +1541,9 @@ class AuthMiddleware(BaseHTTPMiddleware):
                         if session:
                             is_admin = bool(session["is_admin"])
                             username = str(session["username"])
+                            resolved_role = str(session.get("role", "reviewer"))
+                            if is_admin:
+                                resolved_role = "admin"
                             authenticated_admin = is_admin
                             has_valid_session = True
 
@@ -1541,6 +1552,13 @@ class AuthMiddleware(BaseHTTPMiddleware):
             if proxy_username.lower() != "admin":
                 username = proxy_username
                 has_valid_session = True
+                # Resolve the user's actual role from DB
+                proxy_user = await storage.get_user_by_username(username)
+                if proxy_user:
+                    resolved_role = str(proxy_user.get("role", "reviewer"))
+                    if resolved_role == "admin":
+                        is_admin = True
+                        authenticated_admin = True
                 # Flag that we need to set the rootcoz_username cookie on the response
                 request.state.set_proxy_cookie = proxy_username
 
@@ -1554,7 +1572,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
 
         request.state.username = username
         request.state.is_admin = is_admin
-        request.state.role = "admin" if is_admin else "user"
+        request.state.role = resolved_role
 
         # Track user activity only for authenticated identities
         if has_valid_session and username:
@@ -3123,7 +3141,9 @@ async def analyze(
 
     Dispatches to the appropriate CI source plugin based on the ``type`` field.
     All types return 202 with a job_id for async polling.
+    Requires operator or admin role.
     """
+    _require_operator(request)
     _check_allow_list(request)
     base_url = _extract_base_url()
 
@@ -5563,10 +5583,24 @@ async def list_job_results(limit: int = Query(50, le=100)) -> list[dict]:
 
 @app.delete("/api/results/bulk")
 async def bulk_delete_jobs_endpoint(body: BulkDeleteRequest, request: Request) -> dict:
-    """Delete multiple jobs and all related data. Admin only."""
-    _require_admin(request)
+    """Delete multiple jobs and all related data. Operator+ only.
 
-    result = await storage.delete_jobs_bulk(body.job_ids)
+    Operators can only delete their own jobs; admins can delete any.
+    """
+    _require_operator(request)
+
+    # Operators can only delete their own jobs; filter unauthorized ones
+    job_ids = body.job_ids
+    if not request.state.is_admin:
+        username = request.state.username
+        authorized_ids = []
+        for jid in job_ids:
+            r = await storage.get_result(jid)
+            if r and _get_job_submitter(r) == username:
+                authorized_ids.append(jid)
+        job_ids = authorized_ids
+
+    result = await storage.delete_jobs_bulk(job_ids)
 
     # Clean up chat workspaces for all deleted jobs
     from rootcoz.engine.chat import cleanup_chat_workspace
@@ -5583,8 +5617,9 @@ async def bulk_delete_jobs_endpoint(body: BulkDeleteRequest, request: Request) -
     notify_dashboard_changed()
 
     # Audit log each deletion individually
+    actor = request.state.username
     for job_id in result["deleted"]:
-        logger.info(f"[AUDIT] Admin '{request.state.username}' deleted job {job_id}")
+        logger.info(f"[AUDIT] User '{actor}' deleted job {job_id}")
 
     return result
 
@@ -5593,12 +5628,23 @@ async def bulk_delete_jobs_endpoint(body: BulkDeleteRequest, request: Request) -
 async def delete_job_endpoint(
     job_id: str, request: Request, _: None = Depends(_bind_job_id)
 ) -> dict:
-    """Delete an analyzed job and all related data. Admin only."""
-    _require_admin(request)
+    """Delete an analyzed job and all related data.
+
+    Operators can delete their own jobs; admins can delete any.
+    """
+    _require_operator(request)
 
     result = await storage.get_result(job_id)
     if not result:
         raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
+
+    # Operators can only delete their own jobs
+    if not request.state.is_admin:
+        if _get_job_submitter(result) != request.state.username:
+            raise HTTPException(
+                status_code=403,
+                detail="You can only delete jobs you submitted",
+            )
 
     await storage.delete_job(job_id)
 
@@ -5612,7 +5658,7 @@ async def delete_job_endpoint(
 
     notify_active_count_changed()
     notify_dashboard_changed()
-    logger.info(f"[AUDIT] Admin '{request.state.username}' deleted job {job_id}")
+    logger.info(f"[AUDIT] User '{request.state.username}' deleted job {job_id}")
     return {"status": "deleted", "job_id": job_id}
 
 
@@ -5632,9 +5678,7 @@ async def abort_analysis(
     # Enforce ownership: only submitter or admin can abort
     username = request.state.username
     is_admin_user = getattr(request.state, "is_admin", False)
-    result_data = result.get("result") or {}
-    request_params = result_data.get("request_params") or {}
-    submitter = request_params.get("submitted_by", "")
+    submitter = _get_job_submitter(result)
 
     if not is_admin_user and (not username or username != submitter):
         raise HTTPException(
@@ -6434,6 +6478,22 @@ def _require_admin(request: Request) -> None:
         raise HTTPException(status_code=403, detail="Admin access required")
 
 
+def _require_operator(request: Request) -> None:
+    """Raise 403 if the request is not from an operator or admin."""
+    role = getattr(request.state, "role", "reviewer")
+    if role not in ("operator", "admin"):
+        raise HTTPException(
+            status_code=403,
+            detail="Operator access required. Reviewers cannot perform this action.",
+        )
+
+
+def _get_job_submitter(result: dict) -> str:
+    """Extract the submitted_by username from a stored result dict."""
+    result_data = result.get("result") or {}
+    return (result_data.get("request_params") or {}).get("submitted_by", "")
+
+
 def _check_allow_list(request: Request) -> None:
     """Raise 403 if the requesting user is not on the allow list.
 
@@ -6467,6 +6527,7 @@ async def login(request: Request) -> JSONResponse:
 
     settings = get_settings()
     is_admin = False
+    resolved_role = "reviewer"
     authenticated = False
 
     # Check admin_key — username must be "admin"
@@ -6476,13 +6537,15 @@ async def login(request: Request) -> JSONResponse:
         and hmac.compare_digest(api_key, settings.admin_key)
     ):
         is_admin = True
+        resolved_role = "admin"
         authenticated = True
     else:
         # Check user API key
         user = await storage.get_user_by_key(api_key)
         if user and user["username"] == username:
             authenticated = True
-            if user.get("role") == "admin":
+            resolved_role = str(user.get("role", "reviewer"))
+            if resolved_role == "admin":
                 is_admin = True
 
     if not authenticated:
@@ -6497,11 +6560,13 @@ async def login(request: Request) -> JSONResponse:
             logger.info(f"[AUDIT] Login blocked for {user_status} user '{username}'")
             return blocked
 
-    session_token = await storage.create_session(username, is_admin=is_admin)
+    session_token = await storage.create_session(
+        username, is_admin=is_admin, role=resolved_role
+    )
     response = JSONResponse(
         content={
             "username": username,
-            "role": "admin" if is_admin else "user",
+            "role": resolved_role,
             "is_admin": is_admin,
         }
     )
@@ -6591,7 +6656,10 @@ async def rotate_own_key_endpoint(request: Request) -> JSONResponse:
 
     # Create a new session for the user so they stay logged in
     is_admin = request.state.is_admin
-    session_token = await storage.create_session(username, is_admin=is_admin)
+    current_role = request.state.role
+    session_token = await storage.create_session(
+        username, is_admin=is_admin, role=current_role
+    )
     settings = get_settings()
 
     response = JSONResponse(
@@ -6645,13 +6713,16 @@ async def register_user(request: Request) -> JSONResponse:
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    # Create a session for the user
-    session_token = await storage.create_session(username, is_admin=False)
+    # Create a session for the user with the default role
+    default_role = settings.default_user_role
+    session_token = await storage.create_session(
+        username, is_admin=False, role=default_role
+    )
 
     content: dict = {
         "username": username,
         "api_key": raw_key,
-        "role": "user",
+        "role": default_role,
         "is_admin": False,
         "status": user_status,
     }
@@ -6879,15 +6950,18 @@ async def admin_create_user_endpoint(request: Request) -> JSONResponse:
     if not username:
         raise HTTPException(status_code=400, detail="Username is required")
 
-    role = body.get("role", "user")
-    if role not in ("user", "admin"):
-        raise HTTPException(status_code=400, detail="Role must be 'user' or 'admin'")
+    role = body.get("role", "reviewer")
+    if role not in storage.VALID_ROLES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Role must be one of: {', '.join(sorted(storage.VALID_ROLES))}",
+        )
 
     try:
         if role == "admin":
             username, raw_key = await storage.create_admin_user(username)
         else:
-            _, raw_key = await storage.create_user(username, status="active")
+            _, raw_key = await storage.create_user(username, status="active", role=role)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
@@ -6923,11 +6997,11 @@ async def delete_user_endpoint(request: Request, username: str) -> dict:
 
 @app.put("/api/admin/users/{username}/role")
 async def change_user_role_endpoint(request: Request, username: str) -> JSONResponse:
-    """Change a user's role (promote to admin or demote to user).
+    """Change a user's role (reviewer, operator, or admin).
 
     When promoting to admin, an API key is generated and returned only if
     the user doesn't already have one.
-    When demoting to user, the existing API key is preserved.
+    For other role changes, the existing API key is preserved.
     """
     _require_admin(request)
     if username == request.state.username:

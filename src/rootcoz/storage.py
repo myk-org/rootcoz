@@ -108,6 +108,10 @@ def generate_api_key() -> str:
     return f"rootcoz_{secrets.token_urlsafe(32)}"
 
 
+# Valid roles for the three-tier RBAC system
+VALID_ROLES: frozenset[str] = frozenset({"reviewer", "operator", "admin"})
+
+
 def _validate_username(username: str) -> None:
     """Validate username format and reserved names."""
     if username.lower() == "admin":
@@ -406,6 +410,16 @@ async def init_db() -> None:
             db, "users", "status", "TEXT NOT NULL DEFAULT 'active'"
         )
 
+        # Migration: role='user' → role='operator' (RBAC three-role migration)
+        cursor = await db.execute(
+            "UPDATE users SET role = 'operator' WHERE role = 'user'"
+        )
+        if cursor.rowcount > 0:
+            logger.info(
+                "[migration] Migrated %d user(s) from role='user' to role='operator'",
+                cursor.rowcount,
+            )
+
         # Sessions table — admin session tokens
         await db.execute("""
             CREATE TABLE IF NOT EXISTS sessions (
@@ -416,6 +430,11 @@ async def init_db() -> None:
                 expires_at TIMESTAMP NOT NULL
             )
         """)
+
+        # Migration: add role column to sessions table
+        await _migrate_add_column(
+            db, "sessions", "role", "TEXT NOT NULL DEFAULT 'reviewer'"
+        )
 
         await db.execute(
             "CREATE INDEX IF NOT EXISTS idx_sessions_username ON sessions (username)"
@@ -2025,6 +2044,11 @@ async def list_results_for_dashboard(
                     entry["tags"] = [
                         str(t) for t in raw_tags if isinstance(t, str) and t
                     ]
+                # Expose submitted_by for ownership checks (delete permissions)
+                request_params = result_data.get("request_params") or {}
+                submitted_by = request_params.get("submitted_by", "")
+                if submitted_by:
+                    entry["submitted_by"] = submitted_by
             results.append(entry)
         return results
 
@@ -2859,21 +2883,21 @@ async def change_user_role(username: str, new_role: str) -> tuple[str, str]:
 
     When promoting to admin, generates a new API key only if the user
     doesn't already have one.
-    When demoting to user, preserves the existing API key.
+    For other role changes, the existing API key is preserved.
 
     Args:
         username: The user to change.
-        new_role: The new role ('admin' or 'user').
+        new_role: The new role ('reviewer', 'operator', or 'admin').
 
     Returns:
         Tuple of (username, raw_api_key). raw_api_key is empty when
-        demoting or when the user already has a key.
+        not promoting to admin or when the user already has a key.
 
     Raises:
         ValueError: If username not found, role is invalid, or already has the role.
     """
-    if new_role not in ("admin", "user"):
-        msg = f"Invalid role: '{new_role}'. Must be 'admin' or 'user'."
+    if new_role not in VALID_ROLES:
+        msg = f"Invalid role: '{new_role}'. Must be one of: {', '.join(sorted(VALID_ROLES))}."
         raise ValueError(msg)
     if username.lower() == "admin":
         msg = "Cannot change role of reserved 'admin' user"
@@ -2912,6 +2936,8 @@ async def change_user_role(username: str, new_role: str) -> tuple[str, str]:
                 if cursor.rowcount == 0:
                     await db.execute("ROLLBACK")
                     raise ValueError(f"User '{username}' not found")
+                # Invalidate all sessions so user must re-login with new role
+                await db.execute("DELETE FROM sessions WHERE username = ?", (username,))
                 await db.commit()
             except ValueError:
                 raise
@@ -2919,13 +2945,14 @@ async def change_user_role(username: str, new_role: str) -> tuple[str, str]:
                 await db.execute("ROLLBACK")
                 raise
         else:
-            # Demoting to user — preserve existing API key so the user
-            # can keep logging in. Bootstrap admin (ADMIN_KEY) is always
-            # available as fallback, so no last-admin guard needed.
+            # Changing to reviewer or operator — preserve existing API key
+            # so the user can keep logging in.
             await db.execute(
-                "UPDATE users SET role = 'user' WHERE username = ?",
-                (username,),
+                "UPDATE users SET role = ? WHERE username = ?",
+                (new_role, username),
             )
+            # Invalidate all sessions so user must re-login with new role
+            await db.execute("DELETE FROM sessions WHERE username = ?", (username,))
             await db.commit()
 
             return username, raw_key
@@ -2946,23 +2973,31 @@ async def track_user(username: str) -> None:
     """Track user activity — insert if new, update last_seen if existing.
 
     Skips the reserved 'admin' username (bootstrap superuser).
+    New users are assigned the DEFAULT_USER_ROLE from settings.
     """
     if username.lower() == "admin":
         return
     # Skip invalid usernames (e.g. from malformed cookies)
     if not re.match(r"^[a-zA-Z0-9][a-zA-Z0-9._-]{1,49}$", username):
         return
+
+    from rootcoz.config import get_settings
+
+    default_role = get_settings().default_user_role
     async with _connect_db() as db:
         await db.execute(
-            "INSERT INTO users (username, role) VALUES (?, 'user') "
+            "INSERT INTO users (username, role) VALUES (?, ?) "
             "ON CONFLICT(username) DO UPDATE SET last_seen = CURRENT_TIMESTAMP",
-            (username,),
+            (username, default_role),
         )
         await db.commit()
 
 
 async def create_session(
-    username: str, is_admin: bool = False, ttl_hours: int = SESSION_TTL_HOURS
+    username: str,
+    is_admin: bool = False,
+    ttl_hours: int = SESSION_TTL_HOURS,
+    role: str = "reviewer",
 ) -> str:
     """Create an opaque session token. Returns raw token."""
     token = secrets.token_urlsafe(32)
@@ -2971,8 +3006,9 @@ async def create_session(
     expires_str = expires_at.strftime("%Y-%m-%d %H:%M:%S")
     async with _connect_db() as db:
         await db.execute(
-            "INSERT INTO sessions (token, username, is_admin, expires_at) VALUES (?, ?, ?, ?)",
-            (token_hash, username, 1 if is_admin else 0, expires_str),
+            "INSERT INTO sessions (token, username, is_admin, expires_at, role)"
+            " VALUES (?, ?, ?, ?, ?)",
+            (token_hash, username, 1 if is_admin else 0, expires_str, role),
         )
         await db.commit()
     return token
@@ -2983,7 +3019,7 @@ async def get_session(token: str) -> dict | None:
     token_hash = _hash_session_token(token)
     async with _connect_db() as db:
         cursor = await db.execute(
-            "SELECT username, is_admin, created_at, expires_at"
+            "SELECT username, is_admin, role, created_at, expires_at"
             " FROM sessions"
             " WHERE token = ? AND expires_at > datetime('now')",
             (token_hash,),
@@ -3027,11 +3063,18 @@ def _validate_user_status(status: str) -> None:
         raise ValueError(msg)
 
 
-async def create_user(username: str, *, status: str = "active") -> tuple[str, str]:
+async def create_user(
+    username: str, *, status: str = "active", role: str = ""
+) -> tuple[str, str]:
     """Create a new user or generate an API key for an existing user without one.
 
     Returns (username, raw_api_key).
     Raises ValueError if username is invalid, reserved, or user already has a key.
+
+    Args:
+        username: The username to create.
+        status: Initial user status ('active', 'pending', 'rejected').
+        role: Role to assign. Empty string uses DEFAULT_USER_ROLE from settings.
 
     Uses BEGIN IMMEDIATE to prevent TOCTOU races between the
     existence check and the INSERT.
@@ -3039,6 +3082,10 @@ async def create_user(username: str, *, status: str = "active") -> tuple[str, st
     _validate_username(username)
     _validate_user_status(status)
 
+    if not role:
+        from rootcoz.config import get_settings
+
+        role = get_settings().default_user_role
     raw_key = generate_api_key()
     key_hash = hash_api_key(raw_key)
 
@@ -3052,7 +3099,7 @@ async def create_user(username: str, *, status: str = "active") -> tuple[str, st
             existing = await cursor.fetchone()
 
             if existing:
-                if existing["role"] != "user":
+                if existing["role"] == "admin":
                     msg = f"User '{username}' is not eligible for self-registration"
                     raise ValueError(msg)
                 if existing["api_key_hash"]:
@@ -3060,16 +3107,16 @@ async def create_user(username: str, *, status: str = "active") -> tuple[str, st
                     raise ValueError(msg)
                 # Existing user without key — generate one
                 update_cursor = await db.execute(
-                    "UPDATE users SET api_key_hash = ? WHERE username = ? AND role = 'user'",
+                    "UPDATE users SET api_key_hash = ? WHERE username = ? AND role != 'admin'",
                     (key_hash, username),
                 )
                 if update_cursor.rowcount == 0:
-                    msg = f"User '{username}' not found or is not a regular user"
+                    msg = f"User '{username}' not found or is an admin user"
                     raise ValueError(msg)
             else:
                 await db.execute(
-                    "INSERT INTO users (username, api_key_hash, role, status) VALUES (?, ?, 'user', ?)",
-                    (username, key_hash, status),
+                    "INSERT INTO users (username, api_key_hash, role, status) VALUES (?, ?, ?, ?)",
+                    (username, key_hash, role, status),
                 )
             await db.commit()
         except ValueError:
@@ -3096,11 +3143,14 @@ async def register_user_with_status(
     """
     _validate_username(username)
     _validate_user_status(status)
+    from rootcoz.config import get_settings
+
+    default_role = get_settings().default_user_role
     async with _connect_db() as db:
         try:
             cursor = await db.execute(
-                "INSERT INTO users (username, api_key_hash, role, status) VALUES (?, ?, 'user', ?)",
-                (username, api_key_hash, status),
+                "INSERT INTO users (username, api_key_hash, role, status) VALUES (?, ?, ?, ?)",
+                (username, api_key_hash, default_role, status),
             )
             await db.commit()
             return cursor.lastrowid
@@ -3150,19 +3200,19 @@ async def list_pending_users() -> list[dict]:
 
 
 async def rotate_user_key(username: str) -> str:
-    """Generate a new API key for a regular user. Returns the raw key.
+    """Generate a new API key for a non-admin user. Returns the raw key.
 
-    Raises ValueError if user not found or is not a regular user.
+    Raises ValueError if user not found or is an admin user.
     """
     raw_key = generate_api_key()
     key_hash = hash_api_key(raw_key)
     async with _connect_db() as db:
         cursor = await db.execute(
-            "UPDATE users SET api_key_hash = ? WHERE username = ? AND role = 'user'",
+            "UPDATE users SET api_key_hash = ? WHERE username = ? AND role != 'admin'",
             (key_hash, username),
         )
         if cursor.rowcount == 0:
-            msg = f"User '{username}' not found or is not a regular user"
+            msg = f"User '{username}' not found or is an admin user"
             raise ValueError(msg)
         # Invalidate all existing sessions for this user
         await db.execute("DELETE FROM sessions WHERE username = ?", (username,))

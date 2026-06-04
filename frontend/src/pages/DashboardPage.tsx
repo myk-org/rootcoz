@@ -110,7 +110,8 @@ function getJobDisplayName(job: DashboardJob | null | undefined): string {
 
 export function DashboardPage() {
   const navigate = useNavigate()
-  const { isAdmin } = useAuth()
+  const { isAdmin, role, username } = useAuth()
+  const canDelete = role === 'operator' || role === 'admin'
   const [jobs, setJobs] = useState<DashboardJobWithMetadata[]>([])
   const [loading, setLoading] = useState(true)
   const [search, setSearch] = useState('')
@@ -235,12 +236,20 @@ export function DashboardPage() {
 
   const showCheckboxes = selectedIds.size > 0
 
+  /** Check if the current user can delete a specific job */
+  function canDeleteJob(job: DashboardJob): boolean {
+    if (!canDelete) return false
+    if (isAdmin) return true
+    // Operators can only delete their own jobs
+    return !!job.submitted_by && job.submitted_by === username
+  }
+
   useEffect(() => {
-    if (!isAdmin && selectedIds.size > 0) {
+    if (!canDelete && selectedIds.size > 0) {
       clearSelection()
       setBulkDeleteConfirm(false)
     }
-  }, [isAdmin, selectedIds])
+  }, [canDelete, selectedIds])
 
   const fetchSeqRef = useRef(0)
 
@@ -640,7 +649,7 @@ export function DashboardPage() {
           <Table>
             <TableHeader>
               <TableRow className="bg-surface-card hover:bg-surface-card">
-                {isAdmin && (
+                {canDelete && (
                   <TableHead className="w-10">
                     <input
                       ref={selectAllRef}
@@ -659,7 +668,7 @@ export function DashboardPage() {
                 <SortableHeader label="Comments" sortKey="comment_count" currentSort={sortKey} currentDirection={sortDir} onSort={handleSort} className="text-center" />
                 <SortableHeader label="Children" sortKey="child_job_count" currentSort={sortKey} currentDirection={sortDir} onSort={handleSort} className="text-center" />
                 <SortableHeader label="Created" sortKey="created_at" currentSort={sortKey} currentDirection={sortDir} onSort={handleSort} className="text-right" />
-                {isAdmin && (
+                {canDelete && (
                   <TableHead className="w-10">
                     <span className="sr-only">Actions</span>
                   </TableHead>
@@ -679,9 +688,9 @@ export function DashboardPage() {
                     key={job.job_id}
                     className={`group cursor-pointer animate-slide-up ${selectedIds.has(job.job_id) ? 'bg-accent-blue/10' : i % 2 === 0 ? 'bg-surface-card' : 'bg-surface-elevated/40'}`}
                     style={{ animationDelay: `${i * 30}ms`, animationFillMode: 'backwards' }}
-                    onClick={() => isAdmin && selectedIds.size > 0 ? toggleSelect(job.job_id) : handleRowClick(job)}
+                    onClick={() => canDelete && selectedIds.size > 0 ? toggleSelect(job.job_id) : handleRowClick(job)}
                   >
-                    {isAdmin && (
+                    {canDelete && (
                       <TableCell className="w-10">
                         <input
                           type="checkbox"
@@ -811,21 +820,23 @@ export function DashboardPage() {
                     </TableCell>
 
                     {/* Delete */}
-                    {isAdmin && (
+                    {canDelete && (
                       <TableCell>
-                        <Button
-                          type="button"
-                          variant="ghost"
-                          size="icon"
-                          aria-label={`Delete analysis ${getJobDisplayName(job)}`}
-                          className="h-7 w-7 opacity-0 transition-opacity group-hover:opacity-100 focus-visible:opacity-100"
-                          onClick={(e) => {
-                            e.stopPropagation()
-                            setDeleteTarget(job)
-                          }}
-                        >
-                          <Trash2 className="h-3.5 w-3.5 text-text-tertiary hover:text-signal-red" />
-                        </Button>
+                        {canDeleteJob(job) && (
+                          <Button
+                            type="button"
+                            variant="ghost"
+                            size="icon"
+                            aria-label={`Delete analysis ${getJobDisplayName(job)}`}
+                            className="h-7 w-7 opacity-0 transition-opacity group-hover:opacity-100 focus-visible:opacity-100"
+                            onClick={(e) => {
+                              e.stopPropagation()
+                              setDeleteTarget(job)
+                            }}
+                          >
+                            <Trash2 className="h-3.5 w-3.5 text-text-tertiary hover:text-signal-red" />
+                          </Button>
+                        )}
                       </TableCell>
                     )}
                   </TableRow>
@@ -853,7 +864,7 @@ export function DashboardPage() {
                     <Table>
                       <TableHeader>
                         <TableRow className="bg-surface-elevated/40 hover:bg-surface-elevated/40">
-                          {isAdmin && (
+                          {canDelete && (
                             <TableHead className="w-10">
                               <span className="sr-only">Select</span>
                             </TableHead>
@@ -865,7 +876,7 @@ export function DashboardPage() {
                           <TableHead className="text-center">Comments</TableHead>
                           <TableHead className="text-center">Children</TableHead>
                           <TableHead className="text-right">Created</TableHead>
-                          {isAdmin && (
+                          {canDelete && (
                             <TableHead className="w-10">
                               <span className="sr-only">Actions</span>
                             </TableHead>
@@ -885,9 +896,9 @@ export function DashboardPage() {
                               key={job.job_id}
                               className={`group cursor-pointer animate-slide-up ${selectedIds.has(job.job_id) ? 'bg-accent-blue/10' : i % 2 === 0 ? 'bg-surface-card' : 'bg-surface-elevated/40'}`}
                               style={{ animationDelay: `${i * 30}ms`, animationFillMode: 'backwards' }}
-                              onClick={() => isAdmin && selectedIds.size > 0 ? toggleSelect(job.job_id) : handleRowClick(job)}
+                              onClick={() => canDelete && selectedIds.size > 0 ? toggleSelect(job.job_id) : handleRowClick(job)}
                             >
-                              {isAdmin && (
+                              {canDelete && (
                                 <TableCell className="w-10">
                                   <input
                                     type="checkbox"
@@ -1002,21 +1013,23 @@ export function DashboardPage() {
                                   </TooltipContent>
                                 </Tooltip>
                               </TableCell>
-                              {isAdmin && (
+                              {canDelete && (
                                 <TableCell>
-                                  <Button
-                                    type="button"
-                                    variant="ghost"
-                                    size="icon"
-                                    aria-label={`Delete analysis ${getJobDisplayName(job)}`}
-                                    className="h-7 w-7 opacity-0 transition-opacity group-hover:opacity-100 focus-visible:opacity-100"
-                                    onClick={(e) => {
-                                      e.stopPropagation()
-                                      setDeleteTarget(job)
-                                    }}
-                                  >
-                                    <Trash2 className="h-3.5 w-3.5 text-text-tertiary hover:text-signal-red" />
-                                  </Button>
+                                  {canDeleteJob(job) && (
+                                    <Button
+                                      type="button"
+                                      variant="ghost"
+                                      size="icon"
+                                      aria-label={`Delete analysis ${getJobDisplayName(job)}`}
+                                      className="h-7 w-7 opacity-0 transition-opacity group-hover:opacity-100 focus-visible:opacity-100"
+                                      onClick={(e) => {
+                                        e.stopPropagation()
+                                        setDeleteTarget(job)
+                                      }}
+                                    >
+                                      <Trash2 className="h-3.5 w-3.5 text-text-tertiary hover:text-signal-red" />
+                                    </Button>
+                                  )}
                                 </TableCell>
                               )}
                             </TableRow>
@@ -1035,7 +1048,7 @@ export function DashboardPage() {
           <Pagination page={safePage} totalPages={totalPages} onPageChange={setPage} />
         )}
 
-        {isAdmin && selectedIds.size > 0 && (
+        {canDelete && selectedIds.size > 0 && (
           <div className="fixed bottom-0 left-0 right-0 z-50 border-t border-border-muted bg-surface-card/95 backdrop-blur-sm px-6 py-3 animate-slide-up">
             <div className="mx-auto flex max-w-screen-xl items-center justify-between">
               <span className="text-sm text-text-secondary">
@@ -1073,7 +1086,7 @@ export function DashboardPage() {
         />
 
         <ConfirmDialog
-          open={isAdmin && bulkDeleteConfirm}
+          open={canDelete && bulkDeleteConfirm}
           onOpenChange={(open) => { if (!open) setBulkDeleteConfirm(false) }}
           title="Delete selected analyses"
           description={bulkDeleteDescription}

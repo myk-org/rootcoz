@@ -1273,3 +1273,75 @@ async def test_list_distinct_job_names(setup_test_db: Path):
         assert "" not in names
         # Duplicates should be deduplicated
         assert len([n for n in names if n == "pipeline-alpha"]) == 1
+
+
+class TestRBACMigration:
+    """Tests for the role='user' -> role='operator' migration."""
+
+    async def test_migration_converts_user_to_operator(
+        self, temp_db_path: Path
+    ) -> None:
+        """Existing role='user' rows are migrated to role='operator'."""
+        # Create DB with old schema: insert user with role='user'
+        async with aiosqlite.connect(temp_db_path) as db:
+            db.row_factory = aiosqlite.Row
+            await db.execute(
+                "CREATE TABLE users ("
+                "id INTEGER PRIMARY KEY, username TEXT UNIQUE, "
+                "api_key_hash TEXT, role TEXT DEFAULT 'user', "
+                "created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, "
+                "last_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP)"
+            )
+            await db.execute(
+                "INSERT INTO users (username, role) VALUES ('olduser1', 'user')"
+            )
+            await db.execute(
+                "INSERT INTO users (username, role) VALUES ('oldadmin1', 'admin')"
+            )
+            await db.commit()
+
+        # Run init_db which triggers migration
+        with patch.object(storage, "DB_PATH", temp_db_path):
+            await storage.init_db()
+
+        # Verify migration
+        async with aiosqlite.connect(temp_db_path) as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute(
+                "SELECT username, role FROM users ORDER BY username"
+            )
+            rows = {r["username"]: r["role"] for r in await cursor.fetchall()}
+
+        assert rows["oldadmin1"] == "admin"  # admin unchanged
+        assert rows["olduser1"] == "operator"  # user -> operator
+
+    async def test_valid_roles_constant(self) -> None:
+        """VALID_ROLES contains exactly the three expected roles."""
+        assert storage.VALID_ROLES == frozenset({"reviewer", "operator", "admin"})
+
+    async def test_change_role_accepts_three_roles(self, setup_test_db: Path) -> None:
+        """change_user_role accepts reviewer, operator, and admin."""
+        with patch.object(storage, "DB_PATH", setup_test_db):
+            await storage.create_admin_user("roletest")
+            # admin -> operator
+            username, _ = await storage.change_user_role("roletest", "operator")
+            assert username == "roletest"
+            user = await storage.get_user_by_username("roletest")
+            assert user["role"] == "operator"
+            # operator -> reviewer
+            await storage.change_user_role("roletest", "reviewer")
+            user = await storage.get_user_by_username("roletest")
+            assert user["role"] == "reviewer"
+            # reviewer -> admin
+            await storage.change_user_role("roletest", "admin")
+            user = await storage.get_user_by_username("roletest")
+            assert user["role"] == "admin"
+
+    async def test_change_role_rejects_invalid(self, setup_test_db: Path) -> None:
+        """change_user_role rejects invalid role values."""
+        with patch.object(storage, "DB_PATH", setup_test_db):
+            await storage.create_admin_user("badtest")
+            with pytest.raises(ValueError, match="Invalid role"):
+                await storage.change_user_role("badtest", "user")
+            with pytest.raises(ValueError, match="Invalid role"):
+                await storage.change_user_role("badtest", "superuser")

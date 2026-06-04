@@ -76,7 +76,7 @@ class TestUserRegistration:
         assert resp.status_code == 200
         data = resp.json()
         assert data["username"] == "newuser"
-        assert data["role"] == "user"
+        assert data["role"] == "reviewer"
         assert data["is_admin"] is False
         assert "api_key" in data
         assert data["api_key"].startswith("rootcoz_")
@@ -167,7 +167,7 @@ class TestUserLogin:
         data = resp.json()
         assert data["username"] == "loginuser"
         assert data["is_admin"] is False
-        assert data["role"] == "user"
+        assert data["role"] == "reviewer"
         assert "rootcoz_session" in resp.cookies
 
     def test_user_login_wrong_key(self, client):
@@ -515,7 +515,7 @@ class TestStorageCreateUser:
             user = await storage.get_user_by_key(raw_key)
             assert user is not None
             assert user["username"] == "testcreate"
-            assert user["role"] == "user"
+            assert user["role"] == "reviewer"
 
         with patch.object(storage, "DB_PATH", temp_db_path):
             asyncio.run(run())
