@@ -23,7 +23,6 @@ const EXTERNAL_NAV_LINKS: ExternalNavLink[] = [
 const BASE_NAV_LINKS = [
   { to: '/', label: 'Dashboard' },
   { to: '/history', label: 'History' },
-  { to: '/reports', label: 'Reports' },
 ]
 
 export function NavBar() {
@@ -106,7 +105,7 @@ export function NavBar() {
     : BASE_NAV_LINKS
 
   const navLinks = isAdmin
-    ? [...baseNavLinks, { to: '/admin/users', label: 'Users' }, { to: '/admin/token-usage', label: 'Tokens' }, { to: '/admin/settings', label: 'Settings' }, { to: '/admin/chat', label: 'Chat' }]
+    ? [...baseNavLinks, { to: '/admin/users', label: 'Users' }, { to: '/admin/token-usage', label: 'Tokens' }, { to: '/reports', label: 'Reports' }, { to: '/admin/settings', label: 'Settings' }, { to: '/admin/chat', label: 'Chat' }]
     : baseNavLinks
 
   return (

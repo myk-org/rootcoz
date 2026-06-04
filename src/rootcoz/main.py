@@ -7502,6 +7502,7 @@ async def api_dashboard_filtered(
 
 @app.get("/api/reports/totals")
 async def reports_totals(
+    request: Request,
     team: str = Query(default=""),
     tier: str = Query(default=""),
     version: str = Query(default=""),
@@ -7510,7 +7511,8 @@ async def reports_totals(
     limit: int = Query(default=0, ge=0, le=1000),
     offset: int = Query(default=0, ge=0),
 ) -> dict:
-    """Aggregate totals: total jobs, failures, reviewed, with per-job detail list."""
+    """Aggregate totals: total jobs, failures, reviewed, with per-job detail list. Admin only."""
+    _require_admin(request)
     logger.debug(
         "GET /api/reports/totals: team=%r, tier=%r, version=%r, from=%r, to=%r",
         team,
@@ -7532,6 +7534,7 @@ async def reports_totals(
 
 @app.get("/api/reports/classification-overrides")
 async def reports_classification_overrides(
+    request: Request,
     team: str = Query(default=""),
     tier: str = Query(default=""),
     version: str = Query(default=""),
@@ -7540,7 +7543,8 @@ async def reports_classification_overrides(
     limit: int = Query(default=0, ge=0, le=1000),
     offset: int = Query(default=0, ge=0),
 ) -> dict:
-    """Classification overrides grouped by from→to transition."""
+    """Classification overrides grouped by from→to transition. Admin only."""
+    _require_admin(request)
     logger.debug(
         "GET /api/reports/classification-overrides: team=%r, tier=%r, version=%r, from=%r, to=%r",
         team,
@@ -7562,6 +7566,7 @@ async def reports_classification_overrides(
 
 @app.get("/api/reports/issues-created")
 async def reports_issues_created(
+    request: Request,
     team: str = Query(default=""),
     tier: str = Query(default=""),
     version: str = Query(default=""),
@@ -7570,7 +7575,8 @@ async def reports_issues_created(
     limit: int = Query(default=0, ge=0, le=1000),
     offset: int = Query(default=0, ge=0),
 ) -> dict:
-    """GitHub/Jira issues created from analysis results."""
+    """GitHub/Jira issues created from analysis results. Admin only."""
+    _require_admin(request)
     logger.debug(
         "GET /api/reports/issues-created: team=%r, tier=%r, version=%r, from=%r, to=%r",
         team,
