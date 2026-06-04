@@ -428,9 +428,15 @@ export function ReportsPage() {
   const [state, dispatch] = useReducer(reportsReducer, INITIAL_STATE)
   const { activeTab, loading, error, teams, tiers, versions, dateFrom, dateTo, totalsData, overridesData, issuesData, sidebarCollapsed, sidebarWidth } = state
   const resizingRef = useRef(false)
+  const dragCleanupRef = useRef<(() => void) | null>(null)
   const SIDEBAR_MIN = 120
   const SIDEBAR_MAX = 400
   const SIDEBAR_COLLAPSED_WIDTH = 40
+
+  // Cleanup drag listeners on unmount
+  useEffect(() => {
+    return () => { dragCleanupRef.current?.() }
+  }, [])
   const { options: metadataOptions } = useMetadataOptions()
   const fetchSeqRef = useRef(0)
 
@@ -563,15 +569,17 @@ export function ReportsPage() {
                 const newWidth = Math.min(SIDEBAR_MAX, Math.max(SIDEBAR_MIN, startWidth + ev.clientX - startX))
                 dispatch({ type: 'SET_SIDEBAR_WIDTH', width: newWidth })
               }
-              const onMouseUp = () => {
+              const cleanup = () => {
                 resizingRef.current = false
                 document.removeEventListener('mousemove', onMouseMove)
-                document.removeEventListener('mouseup', onMouseUp)
+                document.removeEventListener('mouseup', cleanup)
                 document.body.style.cursor = ''
                 document.body.style.userSelect = ''
+                dragCleanupRef.current = null
               }
+              dragCleanupRef.current = cleanup
               document.addEventListener('mousemove', onMouseMove)
-              document.addEventListener('mouseup', onMouseUp)
+              document.addEventListener('mouseup', cleanup)
               document.body.style.cursor = 'col-resize'
               document.body.style.userSelect = 'none'
             }}
