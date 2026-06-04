@@ -132,7 +132,7 @@ const INITIAL_STATE: ReportsState = {
   overridesData: null,
   issuesData: null,
   sidebarCollapsed: false,
-  sidebarWidth: 192,
+  sidebarWidth: 240,
 }
 
 function toggleInSet(set: Set<string>, value: string): Set<string> {
@@ -328,7 +328,7 @@ function OverridesReport({ data }: { data: OverridesData }) {
                             <TableRow key={`${d.job_id}-${d.test_name}-${i}`} className={i % 2 === 0 ? 'bg-surface-card' : 'bg-surface-elevated/40'}>
                               <TableCell className="font-mono text-xs max-w-[300px] truncate">{d.test_name}</TableCell>
                               <TableCell>
-                                <Link to={`/results/${d.job_id}`} className="text-xs text-text-link hover:underline">
+                                <Link to={`/results/${d.job_id}?highlight=${encodeURIComponent(d.test_name)}`} className="text-xs text-text-link hover:underline">
                                   {d.job_name}
                                 </Link>
                                 {d.build_number != null && (
@@ -551,8 +551,6 @@ export function ReportsPage() {
 
   return (
     <div className="space-y-6">
-      <h1 className="font-display text-xl font-bold text-text-primary">Reports</h1>
-
       {/* Filters */}
       <div className="flex flex-wrap gap-3 items-center">
         <MetadataDropdowns
