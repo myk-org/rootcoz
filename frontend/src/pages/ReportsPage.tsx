@@ -109,6 +109,7 @@ interface ReportsState {
 
 type ReportsAction =
   | { type: 'SET_TAB'; tab: ReportTab }
+  | { type: 'SYNC_FROM_URL'; params: URLSearchParams }
   | { type: 'FETCH_START' }
   | { type: 'FETCH_ERROR'; error: string }
   | { type: 'FETCH_TOTALS'; data: TotalsData }
@@ -171,6 +172,8 @@ function reportsReducer(state: ReportsState, action: ReportsAction): ReportsStat
   switch (action.type) {
     case 'SET_TAB':
       return { ...state, activeTab: action.tab }
+    case 'SYNC_FROM_URL':
+      return { ...initStateFromParams(action.params), availableTags: state.availableTags, sidebarCollapsed: state.sidebarCollapsed, sidebarWidth: state.sidebarWidth }
     case 'FETCH_START':
       return { ...state, loading: true, error: null }
     case 'FETCH_ERROR':
@@ -480,12 +483,23 @@ export function ReportsPage() {
   const { activeTab, loading, error, teams, tiers, versions, dateFrom, dateTo, statuses, tags, availableTags, totalsData, overridesData, issuesData, sidebarCollapsed, sidebarWidth } = state
   const [isResizing, setIsResizing] = useState(false)
   const sidebarRef = useRef<HTMLElement>(null)
+  const isInternalUpdate = useRef(false)
   const SIDEBAR_MIN = 120
   const SIDEBAR_MAX = 400
   const SIDEBAR_COLLAPSED_WIDTH = 40
 
-  // ─── Sync reducer state → URL search params ────────────────────
+  // ─── URL → state sync (external navigation / shared links) ─────
   useEffect(() => {
+    if (isInternalUpdate.current) {
+      isInternalUpdate.current = false
+      return
+    }
+    dispatch({ type: 'SYNC_FROM_URL', params: searchParams })
+  }, [searchParams])
+
+  // ─── State → URL sync ──────────────────────────────────────────
+  useEffect(() => {
+    isInternalUpdate.current = true
     const params = new URLSearchParams()
     if (activeTab !== 'totals') params.set('report', TAB_URL_KEY[activeTab])
     for (const t of teams) params.append('team', t)
@@ -532,12 +546,12 @@ export function ReportsPage() {
   // Build query params shared by all endpoints
   const queryString = useMemo(() => {
     const params = new URLSearchParams()
-    const team = [...teams][0] || ''
-    const tier = [...tiers][0] || ''
-    const version = [...versions][0] || ''
-    if (team) params.set('team', team)
-    if (tier) params.set('tier', tier)
-    if (version) params.set('version', version)
+    const teamVal = [...teams].join(',')
+    const tierVal = [...tiers].join(',')
+    const versionVal = [...versions].join(',')
+    if (teamVal) params.set('team', teamVal)
+    if (tierVal) params.set('tier', tierVal)
+    if (versionVal) params.set('version', versionVal)
     if (dateFrom) params.set('from', dateFrom)
     if (dateTo) params.set('to', dateTo)
     const statusVal = [...statuses].join(',')
