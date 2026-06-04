@@ -89,6 +89,7 @@ interface ReportsState {
   overridesData: OverridesData | null
   issuesData: IssuesData | null
   sidebarCollapsed: boolean
+  sidebarWidth: number
 }
 
 type ReportsAction =
@@ -103,6 +104,7 @@ type ReportsAction =
   | { type: 'CLEAR_ALL_META' }
   | { type: 'SET_DATE_RANGE'; from: string; to: string }
   | { type: 'TOGGLE_SIDEBAR' }
+  | { type: 'SET_SIDEBAR_WIDTH'; width: number }
 
 const INITIAL_STATE: ReportsState = {
   activeTab: 'totals',
@@ -117,6 +119,7 @@ const INITIAL_STATE: ReportsState = {
   overridesData: null,
   issuesData: null,
   sidebarCollapsed: false,
+  sidebarWidth: 192,
 }
 
 function toggleInSet(set: Set<string>, value: string): Set<string> {
@@ -150,6 +153,8 @@ function reportsReducer(state: ReportsState, action: ReportsAction): ReportsStat
       return { ...state, dateFrom: action.from, dateTo: action.to }
     case 'TOGGLE_SIDEBAR':
       return { ...state, sidebarCollapsed: !state.sidebarCollapsed }
+    case 'SET_SIDEBAR_WIDTH':
+      return { ...state, sidebarWidth: action.width }
   }
 }
 
@@ -421,7 +426,11 @@ function StatCard({ label, value, tone }: { label: string; value: number; tone?:
 
 export function ReportsPage() {
   const [state, dispatch] = useReducer(reportsReducer, INITIAL_STATE)
-  const { activeTab, loading, error, teams, tiers, versions, dateFrom, dateTo, totalsData, overridesData, issuesData, sidebarCollapsed } = state
+  const { activeTab, loading, error, teams, tiers, versions, dateFrom, dateTo, totalsData, overridesData, issuesData, sidebarCollapsed, sidebarWidth } = state
+  const resizingRef = useRef(false)
+  const SIDEBAR_MIN = 120
+  const SIDEBAR_MAX = 400
+  const SIDEBAR_COLLAPSED_WIDTH = 40
   const { options: metadataOptions } = useMetadataOptions()
   const fetchSeqRef = useRef(0)
 
@@ -502,12 +511,15 @@ export function ReportsPage() {
       </div>
 
       {/* Layout: sidebar + content */}
-      <div className="flex gap-4">
+      <div className="flex">
         {/* Sidebar */}
-        <nav className={cn(
-          'shrink-0 space-y-1 transition-all duration-200',
-          sidebarCollapsed ? 'w-10' : 'w-48',
-        )}>
+        <nav
+          className={cn(
+            'shrink-0 space-y-1',
+            !resizingRef.current && 'transition-[width] duration-200',
+          )}
+          style={{ width: sidebarCollapsed ? SIDEBAR_COLLAPSED_WIDTH : sidebarWidth }}
+        >
           <button
             type="button"
             onClick={() => dispatch({ type: 'TOGGLE_SIDEBAR' })}
@@ -531,13 +543,45 @@ export function ReportsPage() {
               title={sidebarCollapsed ? label : undefined}
             >
               <Icon className="h-4 w-4 shrink-0" />
-              {!sidebarCollapsed && label}
+              {!sidebarCollapsed && <span className="truncate">{label}</span>}
             </Button>
           ))}
         </nav>
 
+        {/* Resize handle */}
+        {!sidebarCollapsed && (
+          <div
+            role="separator"
+            aria-orientation="vertical"
+            className="w-1.5 shrink-0 cursor-col-resize group flex items-center justify-center"
+            onMouseDown={(e) => {
+              e.preventDefault()
+              resizingRef.current = true
+              const startX = e.clientX
+              const startWidth = sidebarWidth
+              const onMouseMove = (ev: MouseEvent) => {
+                const newWidth = Math.min(SIDEBAR_MAX, Math.max(SIDEBAR_MIN, startWidth + ev.clientX - startX))
+                dispatch({ type: 'SET_SIDEBAR_WIDTH', width: newWidth })
+              }
+              const onMouseUp = () => {
+                resizingRef.current = false
+                document.removeEventListener('mousemove', onMouseMove)
+                document.removeEventListener('mouseup', onMouseUp)
+                document.body.style.cursor = ''
+                document.body.style.userSelect = ''
+              }
+              document.addEventListener('mousemove', onMouseMove)
+              document.addEventListener('mouseup', onMouseUp)
+              document.body.style.cursor = 'col-resize'
+              document.body.style.userSelect = 'none'
+            }}
+          >
+            <div className="w-0.5 h-8 rounded-full bg-border-default group-hover:bg-text-tertiary transition-colors" />
+          </div>
+        )}
+
         {/* Main content */}
-        <div className="flex-1 min-w-0">
+        <div className="flex-1 min-w-0 pl-2">
           {error && (
             <p className="text-center text-signal-red py-8">{error}</p>
           )}
