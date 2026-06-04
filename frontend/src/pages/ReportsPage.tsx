@@ -510,6 +510,9 @@ export function ReportsPage() {
     for (const s of statuses) params.append('status', s)
     for (const t of tags) params.append('tag', t)
     setSearchParams(params, { replace: true })
+    // Reset flag after React processes the update — ensures the guard
+    // is cleared even when setSearchParams is a no-op (URL already matches).
+    queueMicrotask(() => { isInternalUpdate.current = false })
   }, [activeTab, teams, tiers, versions, dateFrom, dateTo, statuses, tags, setSearchParams])
 
   // Resize lifecycle: attach/detach listeners via useEffect
