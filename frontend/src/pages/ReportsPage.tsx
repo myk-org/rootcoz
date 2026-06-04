@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'react'
-import { Link } from 'react-router-dom'
+import { Link, useSearchParams } from 'react-router-dom'
 import { api } from '@/lib/api'
 import { cn, parseApiTimestamp } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
@@ -73,6 +73,16 @@ const TABS: { key: ReportTab; label: string; icon: typeof BarChart3 }[] = [
   { key: 'issues', label: 'Issues Created', icon: Bug },
 ]
 
+/** URL-friendly slug ↔ internal tab key */
+const TAB_URL_KEY: Record<ReportTab, string> = {
+  totals: 'totals',
+  overrides: 'classification-overrides',
+  issues: 'issues-created',
+}
+const URL_KEY_TO_TAB: Record<string, ReportTab> = Object.fromEntries(
+  Object.entries(TAB_URL_KEY).map(([k, v]) => [v, k as ReportTab]),
+)
+
 const PAGE_SIZE = 20
 const STATUS_FILTER_OPTIONS = ['completed', 'running', 'waiting', 'pending', 'failed', 'timeout', 'aborted'] as const
 
@@ -133,6 +143,21 @@ const INITIAL_STATE: ReportsState = {
   issuesData: null,
   sidebarCollapsed: false,
   sidebarWidth: 240,
+}
+
+function initStateFromParams(sp: URLSearchParams): ReportsState {
+  const reportSlug = sp.get('report') ?? ''
+  return {
+    ...INITIAL_STATE,
+    activeTab: URL_KEY_TO_TAB[reportSlug] ?? 'totals',
+    teams: new Set(sp.getAll('team')),
+    tiers: new Set(sp.getAll('tier')),
+    versions: new Set(sp.getAll('version')),
+    dateFrom: sp.get('from') ?? '',
+    dateTo: sp.get('to') ?? '',
+    statuses: new Set(sp.getAll('status')),
+    tags: new Set(sp.getAll('tag')),
+  }
 }
 
 function toggleInSet(set: Set<string>, value: string): Set<string> {
@@ -332,10 +357,10 @@ function OverridesReport({ data }: { data: OverridesData }) {
                               <TableCell>
                                 <Link to={`/results/${d.job_id}?highlight=${encodeURIComponent(d.test_name)}`} className="text-xs text-text-link hover:underline">
                                   {d.job_name}
+                                  {d.build_number != null && (
+                                    <span className="ml-1 font-mono text-[10px]">#{d.build_number}</span>
+                                  )}
                                 </Link>
-                                {d.build_number != null && (
-                                  <span className="ml-1 font-mono text-[10px] text-text-tertiary">#{d.build_number}</span>
-                                )}
                               </TableCell>
                               <TableCell className="text-xs text-text-secondary">{d.overridden_by}</TableCell>
                               <TableCell className="text-right font-mono text-xs text-text-tertiary">
@@ -440,8 +465,8 @@ function IssuesReport({ data }: { data: IssuesData }) {
 
 function StatCard({ label, value, tone }: { label: string; value: number; tone?: string }) {
   return (
-    <div className="rounded-lg border border-border-muted bg-surface-card p-4">
-      <p className="text-xs text-text-tertiary">{label}</p>
+    <div className="rounded-lg border border-border-muted bg-surface-card p-4 text-center">
+      <p className="text-sm font-medium text-text-secondary">{label}</p>
       <p className={cn('mt-1 text-2xl font-bold font-mono', tone || 'text-text-primary')}>{value}</p>
     </div>
   )
@@ -450,13 +475,28 @@ function StatCard({ label, value, tone }: { label: string; value: number; tone?:
 // ─── Main Page ──────────────────────────────────────────────────────
 
 export function ReportsPage() {
-  const [state, dispatch] = useReducer(reportsReducer, INITIAL_STATE)
+  const [searchParams, setSearchParams] = useSearchParams()
+  const [state, dispatch] = useReducer(reportsReducer, searchParams, initStateFromParams)
   const { activeTab, loading, error, teams, tiers, versions, dateFrom, dateTo, statuses, tags, availableTags, totalsData, overridesData, issuesData, sidebarCollapsed, sidebarWidth } = state
   const [isResizing, setIsResizing] = useState(false)
   const sidebarRef = useRef<HTMLElement>(null)
   const SIDEBAR_MIN = 120
   const SIDEBAR_MAX = 400
   const SIDEBAR_COLLAPSED_WIDTH = 40
+
+  // ─── Sync reducer state → URL search params ────────────────────
+  useEffect(() => {
+    const params = new URLSearchParams()
+    if (activeTab !== 'totals') params.set('report', TAB_URL_KEY[activeTab])
+    for (const t of teams) params.append('team', t)
+    for (const t of tiers) params.append('tier', t)
+    for (const v of versions) params.append('version', v)
+    if (dateFrom) params.set('from', dateFrom)
+    if (dateTo) params.set('to', dateTo)
+    for (const s of statuses) params.append('status', s)
+    for (const t of tags) params.append('tag', t)
+    setSearchParams(params, { replace: true })
+  }, [activeTab, teams, tiers, versions, dateFrom, dateTo, statuses, tags, setSearchParams])
 
   // Resize lifecycle: attach/detach listeners via useEffect
   useEffect(() => {
@@ -552,121 +592,119 @@ export function ReportsPage() {
   }, [])
 
   return (
-    <div className="space-y-6">
-      {/* Filters */}
-      <div className="flex flex-wrap gap-3 items-center">
-        <MetadataDropdowns
-          options={metadataOptions}
-          teams={teams}
-          tiers={tiers}
-          versions={versions}
-          onTeamToggle={(v) => dispatch({ type: 'TOGGLE_META', field: 'teams', value: v })}
-          onTierToggle={(v) => dispatch({ type: 'TOGGLE_META', field: 'tiers', value: v })}
-          onVersionToggle={(v) => dispatch({ type: 'TOGGLE_META', field: 'versions', value: v })}
-          onTeamClear={() => dispatch({ type: 'CLEAR_META', field: 'teams' })}
-          onTierClear={() => dispatch({ type: 'CLEAR_META', field: 'tiers' })}
-          onVersionClear={() => dispatch({ type: 'CLEAR_META', field: 'versions' })}
-        />
-        <DateRangePresetFilter
-          from={dateFrom}
-          to={dateTo}
-          onChange={(from, to) => dispatch({ type: 'SET_DATE_RANGE', from, to })}
-        />
-        <MultiSelectFilter
-          label="All statuses"
-          options={[...STATUS_FILTER_OPTIONS]}
-          selected={statuses}
-          onToggle={(v) => dispatch({ type: 'TOGGLE_STATUS', value: v })}
-          onClear={() => dispatch({ type: 'CLEAR_STATUSES' })}
-          className="w-full sm:w-40"
-        />
-        {availableTags.length > 0 && (
+    <div className="flex">
+      {/* Sidebar */}
+      <nav
+        ref={sidebarRef}
+        className={cn(
+          'shrink-0 space-y-1',
+          !isResizing && 'transition-[width] duration-200',
+        )}
+        style={{ width: sidebarCollapsed ? SIDEBAR_COLLAPSED_WIDTH : sidebarWidth }}
+      >
+        <button
+          type="button"
+          onClick={() => dispatch({ type: 'TOGGLE_SIDEBAR' })}
+          className="mb-2 flex items-center justify-center rounded-md p-1.5 text-text-tertiary hover:bg-surface-hover hover:text-text-secondary transition-colors w-full"
+          aria-label={sidebarCollapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+        >
+          {sidebarCollapsed ? <PanelLeft className="h-4 w-4" /> : <PanelLeftClose className="h-4 w-4" />}
+        </button>
+        {TABS.map(({ key, label, icon: Icon }) => (
+          <Button
+            key={key}
+            variant="ghost"
+            onClick={() => dispatch({ type: 'SET_TAB', tab: key })}
+            className={cn(
+              'w-full gap-2 text-sm',
+              sidebarCollapsed ? 'justify-center px-0' : 'justify-start',
+              activeTab === key
+                ? 'bg-surface-elevated text-text-primary'
+                : 'text-text-secondary hover:bg-surface-hover hover:text-text-primary',
+            )}
+            title={sidebarCollapsed ? label : undefined}
+          >
+            <Icon className="h-4 w-4 shrink-0" />
+            {!sidebarCollapsed && <span className="truncate">{label}</span>}
+          </Button>
+        ))}
+      </nav>
+
+      {/* Resize handle */}
+      {!sidebarCollapsed && (
+        <div
+          role="separator"
+          aria-orientation="vertical"
+          className="w-1.5 shrink-0 cursor-col-resize group flex items-center justify-center"
+          onMouseDown={(e) => {
+            e.preventDefault()
+            setIsResizing(true)
+          }}
+        >
+          <div className="w-0.5 h-8 rounded-full bg-border-default group-hover:bg-text-tertiary transition-colors" />
+        </div>
+      )}
+
+      {/* Main content: filters + report */}
+      <div className="flex-1 min-w-0 pl-2 space-y-6">
+        {/* Filters — matching Dashboard order: Metadata → Status → DateRange → Tags */}
+        <div className="flex flex-wrap gap-3 items-center">
+          <MetadataDropdowns
+            options={metadataOptions}
+            teams={teams}
+            tiers={tiers}
+            versions={versions}
+            onTeamToggle={(v) => dispatch({ type: 'TOGGLE_META', field: 'teams', value: v })}
+            onTierToggle={(v) => dispatch({ type: 'TOGGLE_META', field: 'tiers', value: v })}
+            onVersionToggle={(v) => dispatch({ type: 'TOGGLE_META', field: 'versions', value: v })}
+            onTeamClear={() => dispatch({ type: 'CLEAR_META', field: 'teams' })}
+            onTierClear={() => dispatch({ type: 'CLEAR_META', field: 'tiers' })}
+            onVersionClear={() => dispatch({ type: 'CLEAR_META', field: 'versions' })}
+          />
           <MultiSelectFilter
-            label="All tags"
-            options={availableTags}
-            selected={tags}
-            onToggle={(v) => dispatch({ type: 'TOGGLE_TAG', value: v })}
-            onClear={() => dispatch({ type: 'CLEAR_TAGS' })}
+            label="All statuses"
+            options={[...STATUS_FILTER_OPTIONS]}
+            selected={statuses}
+            onToggle={(v) => dispatch({ type: 'TOGGLE_STATUS', value: v })}
+            onClear={() => dispatch({ type: 'CLEAR_STATUSES' })}
             className="w-full sm:w-40"
           />
-        )}
-        <MetadataClearButton hasFilters={hasMetadataFilters} onClearAll={() => dispatch({ type: 'CLEAR_ALL_META' })} />
-      </div>
-
-      {/* Layout: sidebar + content */}
-      <div className="flex">
-        {/* Sidebar */}
-        <nav
-          ref={sidebarRef}
-          className={cn(
-            'shrink-0 space-y-1',
-            !isResizing && 'transition-[width] duration-200',
+          <DateRangePresetFilter
+            from={dateFrom}
+            to={dateTo}
+            onChange={(from, to) => dispatch({ type: 'SET_DATE_RANGE', from, to })}
+          />
+          {availableTags.length > 0 && (
+            <MultiSelectFilter
+              label="All tags"
+              options={availableTags}
+              selected={tags}
+              onToggle={(v) => dispatch({ type: 'TOGGLE_TAG', value: v })}
+              onClear={() => dispatch({ type: 'CLEAR_TAGS' })}
+              className="w-full sm:w-40"
+            />
           )}
-          style={{ width: sidebarCollapsed ? SIDEBAR_COLLAPSED_WIDTH : sidebarWidth }}
-        >
-          <button
-            type="button"
-            onClick={() => dispatch({ type: 'TOGGLE_SIDEBAR' })}
-            className="mb-2 flex items-center justify-center rounded-md p-1.5 text-text-tertiary hover:bg-surface-hover hover:text-text-secondary transition-colors w-full"
-            aria-label={sidebarCollapsed ? 'Expand sidebar' : 'Collapse sidebar'}
-          >
-            {sidebarCollapsed ? <PanelLeft className="h-4 w-4" /> : <PanelLeftClose className="h-4 w-4" />}
-          </button>
-          {TABS.map(({ key, label, icon: Icon }) => (
-            <Button
-              key={key}
-              variant="ghost"
-              onClick={() => dispatch({ type: 'SET_TAB', tab: key })}
-              className={cn(
-                'w-full gap-2 text-sm',
-                sidebarCollapsed ? 'justify-center px-0' : 'justify-start',
-                activeTab === key
-                  ? 'bg-surface-elevated text-text-primary'
-                  : 'text-text-secondary hover:bg-surface-hover hover:text-text-primary',
-              )}
-              title={sidebarCollapsed ? label : undefined}
-            >
-              <Icon className="h-4 w-4 shrink-0" />
-              {!sidebarCollapsed && <span className="truncate">{label}</span>}
-            </Button>
-          ))}
-        </nav>
-
-        {/* Resize handle */}
-        {!sidebarCollapsed && (
-          <div
-            role="separator"
-            aria-orientation="vertical"
-            className="w-1.5 shrink-0 cursor-col-resize group flex items-center justify-center"
-            onMouseDown={(e) => {
-              e.preventDefault()
-              setIsResizing(true)
-            }}
-          >
-            <div className="w-0.5 h-8 rounded-full bg-border-default group-hover:bg-text-tertiary transition-colors" />
-          </div>
-        )}
-
-        {/* Main content */}
-        <div className="flex-1 min-w-0 pl-2">
-          {error && (
-            <p className="text-center text-signal-red py-8">{error}</p>
-          )}
-
-          {loading ? (
-            <div className="space-y-2">
-              {Array.from({ length: 6 }).map((_, i) => (
-                <Skeleton key={i} className="h-10 w-full" />
-              ))}
-            </div>
-          ) : (
-            <>
-              {activeTab === 'totals' && totalsData && <TotalsReport data={totalsData} />}
-              {activeTab === 'overrides' && overridesData && <OverridesReport data={overridesData} />}
-              {activeTab === 'issues' && issuesData && <IssuesReport data={issuesData} />}
-            </>
-          )}
+          <MetadataClearButton hasFilters={hasMetadataFilters} onClearAll={() => dispatch({ type: 'CLEAR_ALL_META' })} />
         </div>
+
+        {/* Report content */}
+        {error && (
+          <p className="text-center text-signal-red py-8">{error}</p>
+        )}
+
+        {loading ? (
+          <div className="space-y-2">
+            {Array.from({ length: 6 }).map((_, i) => (
+              <Skeleton key={i} className="h-10 w-full" />
+            ))}
+          </div>
+        ) : (
+          <>
+            {activeTab === 'totals' && totalsData && <TotalsReport data={totalsData} />}
+            {activeTab === 'overrides' && overridesData && <OverridesReport data={overridesData} />}
+            {activeTab === 'issues' && issuesData && <IssuesReport data={issuesData} />}
+          </>
+        )}
       </div>
     </div>
   )
