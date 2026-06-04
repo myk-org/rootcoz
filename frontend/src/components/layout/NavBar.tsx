@@ -17,7 +17,7 @@ interface ExternalNavLink {
 }
 
 const EXTERNAL_NAV_LINKS: ExternalNavLink[] = [
-  { href: 'https://myk-org.github.io/rootcoz/', label: 'Guide', title: 'Guide', icon: BookOpen },
+  { href: 'https://myk-org.github.io/rootcoz/', label: 'Guide', title: 'User Guide', icon: BookOpen },
 ]
 
 const BASE_NAV_LINKS = [
