@@ -427,16 +427,38 @@ function StatCard({ label, value, tone }: { label: string; value: number; tone?:
 export function ReportsPage() {
   const [state, dispatch] = useReducer(reportsReducer, INITIAL_STATE)
   const { activeTab, loading, error, teams, tiers, versions, dateFrom, dateTo, totalsData, overridesData, issuesData, sidebarCollapsed, sidebarWidth } = state
-  const resizingRef = useRef(false)
-  const dragCleanupRef = useRef<(() => void) | null>(null)
+  const [isResizing, setIsResizing] = useState(false)
+  const sidebarRef = useRef<HTMLElement>(null)
   const SIDEBAR_MIN = 120
   const SIDEBAR_MAX = 400
   const SIDEBAR_COLLAPSED_WIDTH = 40
 
-  // Cleanup drag listeners on unmount
+  // Resize lifecycle: attach/detach listeners via useEffect
   useEffect(() => {
-    return () => { dragCleanupRef.current?.() }
-  }, [])
+    if (!isResizing || !sidebarRef.current) return
+    const sidebarLeft = sidebarRef.current.getBoundingClientRect().left
+
+    function onMouseMove(e: MouseEvent) {
+      const newWidth = Math.min(SIDEBAR_MAX, Math.max(SIDEBAR_MIN, e.clientX - sidebarLeft))
+      dispatch({ type: 'SET_SIDEBAR_WIDTH', width: newWidth })
+    }
+    function onMouseUp() {
+      setIsResizing(false)
+    }
+
+    document.body.style.cursor = 'col-resize'
+    document.body.style.userSelect = 'none'
+    document.addEventListener('mousemove', onMouseMove)
+    document.addEventListener('mouseup', onMouseUp)
+
+    return () => {
+      document.body.style.cursor = ''
+      document.body.style.userSelect = ''
+      document.removeEventListener('mousemove', onMouseMove)
+      document.removeEventListener('mouseup', onMouseUp)
+    }
+  }, [isResizing])
+
   const { options: metadataOptions } = useMetadataOptions()
   const fetchSeqRef = useRef(0)
 
@@ -520,9 +542,10 @@ export function ReportsPage() {
       <div className="flex">
         {/* Sidebar */}
         <nav
+          ref={sidebarRef}
           className={cn(
             'shrink-0 space-y-1',
-            !resizingRef.current && 'transition-[width] duration-200',
+            !isResizing && 'transition-[width] duration-200',
           )}
           style={{ width: sidebarCollapsed ? SIDEBAR_COLLAPSED_WIDTH : sidebarWidth }}
         >
@@ -562,26 +585,7 @@ export function ReportsPage() {
             className="w-1.5 shrink-0 cursor-col-resize group flex items-center justify-center"
             onMouseDown={(e) => {
               e.preventDefault()
-              resizingRef.current = true
-              const startX = e.clientX
-              const startWidth = sidebarWidth
-              const onMouseMove = (ev: MouseEvent) => {
-                const newWidth = Math.min(SIDEBAR_MAX, Math.max(SIDEBAR_MIN, startWidth + ev.clientX - startX))
-                dispatch({ type: 'SET_SIDEBAR_WIDTH', width: newWidth })
-              }
-              const cleanup = () => {
-                resizingRef.current = false
-                document.removeEventListener('mousemove', onMouseMove)
-                document.removeEventListener('mouseup', cleanup)
-                document.body.style.cursor = ''
-                document.body.style.userSelect = ''
-                dragCleanupRef.current = null
-              }
-              dragCleanupRef.current = cleanup
-              document.addEventListener('mousemove', onMouseMove)
-              document.addEventListener('mouseup', cleanup)
-              document.body.style.cursor = 'col-resize'
-              document.body.style.userSelect = 'none'
+              setIsResizing(true)
             }}
           >
             <div className="w-0.5 h-8 rounded-full bg-border-default group-hover:bg-text-tertiary transition-colors" />
