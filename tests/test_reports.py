@@ -165,6 +165,8 @@ class TestReportIssues:
         with patch.object(storage, "DB_PATH", populated_db):
             result = await storage.get_report_issues_created()
             assert result["total"] == 1
+            assert result["github_total"] == 1
+            assert result["jira_total"] == 0
             issue = result["issues"][0]
             assert issue["issue_type"] == "GitHub Issue"
             assert issue["title"] == "Fix the bug"
@@ -221,6 +223,8 @@ class TestReportIssues:
             )
             result = await storage.get_report_issues_created()
             assert result["total"] == 1
+            assert result["github_total"] == 0
+            assert result["jira_total"] == 1
             issue = result["issues"][0]
             assert issue["issue_type"] == "Jira Bug"
             assert issue["title"] == "Login fails"
@@ -234,10 +238,10 @@ class TestDateFilterHelper:
             "col", "2025-01-01", "2025-12-31", conditions, params
         )
         assert len(conditions) == 2
-        assert "col >= ?" in conditions[0]
-        assert "col <= ?" in conditions[1]
-        assert params[0] == "2025-01-01T00:00:00"
-        assert params[1] == "2025-12-31T23:59:59"
+        assert "date(col) >= ?" in conditions[0]
+        assert "date(col) <= ?" in conditions[1]
+        assert params[0] == "2025-01-01"
+        assert params[1] == "2025-12-31"
 
     def test_build_date_filter_empty(self):
         conditions: list[str] = []
@@ -264,6 +268,53 @@ class TestDateFilterHelper:
         assert "JOIN" in result
         assert len(conditions) == 2
         assert params == ["teamA", "1"]
+
+
+class TestReportPagination:
+    @pytest.mark.asyncio
+    async def test_totals_pagination(self, populated_db: Path):
+        with patch.object(storage, "DB_PATH", populated_db):
+            # Without pagination — all results
+            result = await storage.get_report_totals()
+            assert len(result["jobs"]) == 1
+            assert result["total_details"] == 1
+
+            # With limit=1, offset=0 — first page
+            result = await storage.get_report_totals(limit=1, offset=0)
+            assert len(result["jobs"]) == 1
+            assert result["total_details"] == 1
+
+            # With offset beyond data
+            result = await storage.get_report_totals(limit=1, offset=10)
+            assert len(result["jobs"]) == 0
+            assert result["total_jobs"] == 1  # totals are unaffected
+
+    @pytest.mark.asyncio
+    async def test_issues_pagination(self, populated_db: Path):
+        with patch.object(storage, "DB_PATH", populated_db):
+            result = await storage.get_report_issues_created(limit=10, offset=0)
+            assert result["total"] == 1
+            assert len(result["issues"]) == 1
+
+            result = await storage.get_report_issues_created(limit=10, offset=10)
+            assert result["total"] == 1  # total unaffected
+            assert len(result["issues"]) == 0  # but page is empty
+
+
+class TestDateFilterBoundary:
+    @pytest.mark.asyncio
+    async def test_same_day_boundary_included(self, populated_db: Path):
+        """Records on the exact from-date should be included."""
+        with patch.object(storage, "DB_PATH", populated_db):
+            # Get today's date from the DB record
+            all_results = await storage.get_report_totals()
+            assert all_results["total_jobs"] == 1
+            created = all_results["jobs"][0]["created_at"]
+            today = created[:10]  # YYYY-MM-DD
+
+            # Filtering with from=today should include the record
+            result = await storage.get_report_totals(date_from=today)
+            assert result["total_jobs"] == 1
 
 
 class TestHistoryDateFilter:

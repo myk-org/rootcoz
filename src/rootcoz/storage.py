@@ -4253,11 +4253,11 @@ def _build_date_filter(
     Shared by all reports queries to avoid duplicating date filtering logic.
     """
     if date_from:
-        conditions.append(f"{column} >= ?")
-        params.append(f"{date_from}T00:00:00")
+        conditions.append(f"date({column}) >= ?")
+        params.append(date_from)
     if date_to:
-        conditions.append(f"{column} <= ?")
-        params.append(f"{date_to}T23:59:59")
+        conditions.append(f"date({column}) <= ?")
+        params.append(date_to)
 
 
 def _build_metadata_join(
@@ -4296,11 +4296,13 @@ async def get_report_totals(
     version: str = "",
     date_from: str = "",
     date_to: str = "",
+    limit: int = 0,
+    offset: int = 0,
 ) -> dict:
     """Aggregate totals for the reports page.
 
     Returns total jobs, total failures, total reviewed,
-    plus a per-job detail list.
+    plus a paginated per-job detail list.
     """
     conditions: list[str] = []
     params: list = []
@@ -4359,11 +4361,15 @@ async def get_report_totals(
             }
         )
 
+    # Apply pagination to the detail list (totals are always full)
+    paginated = details[offset : offset + limit] if limit > 0 else details
+
     return {
         "total_jobs": total_jobs,
         "total_failures": total_failures,
         "total_reviewed": total_reviewed,
-        "jobs": details,
+        "total_details": len(details),
+        "jobs": paginated,
     }
 
 
@@ -4374,11 +4380,13 @@ async def get_report_classification_overrides(
     version: str = "",
     date_from: str = "",
     date_to: str = "",
+    limit: int = 0,
+    offset: int = 0,
 ) -> dict:
     """Count of user classification overrides grouped by from->to.
 
     Only includes overrides where created_by is non-empty (user-initiated)
-    and the test also appears in failure_reviews.
+    and the test also appears in failure_reviews (reviewed = 1).
     """
     conditions: list[str] = ["tc.created_by != ''"]
     params: list = []
@@ -4406,12 +4414,15 @@ async def get_report_classification_overrides(
             FROM test_classifications tc
             {meta_join}
             JOIN failure_history fh
-                ON fh.job_id = tc.job_id AND fh.test_name = tc.test_name
+                ON fh.job_id = tc.job_id
+                AND fh.test_name = tc.test_name
+                AND fh.child_build_number = tc.child_build_number
             WHERE {where}
               AND tc.visible = 1
               AND EXISTS (
                   SELECT 1 FROM failure_reviews fr
                   WHERE fr.job_id = tc.job_id AND fr.test_name = tc.test_name
+                    AND fr.reviewed = 1
               )
             ORDER BY tc.created_at DESC
         """
@@ -4441,10 +4452,13 @@ async def get_report_classification_overrides(
             }
         )
 
+    # Apply pagination to the detail list (groups/total are always full)
+    paginated = details[offset : offset + limit] if limit > 0 else details
+
     return {
         "total": len(details),
         "groups": list(groups.values()),
-        "details": details,
+        "details": paginated,
     }
 
 
@@ -4455,12 +4469,15 @@ async def get_report_issues_created(
     version: str = "",
     date_from: str = "",
     date_to: str = "",
+    limit: int = 0,
+    offset: int = 0,
 ) -> dict:
     """Find GitHub/Jira issues created from comments.
 
     Matches comments containing 'GitHub Issue' or 'Jira Bug' patterns
     and parses the markdown link for URL and title.
     Only http/https URLs are included (prevents javascript: XSS).
+    Returns separate github_total and jira_total counts.
     """
     conditions: list[str] = [
         "(c.comment LIKE '%GitHub Issue%' OR c.comment LIKE '%Jira Bug%')"
@@ -4492,6 +4509,8 @@ async def get_report_issues_created(
         rows = await cursor.fetchall()
 
     issues: list[dict] = []
+    github_total = 0
+    jira_total = 0
     for row in rows:
         match = _ISSUE_LINK_PATTERN.search(row["comment"])
         if not match:
@@ -4502,6 +4521,10 @@ async def get_report_issues_created(
         # Only allow safe URL schemes — prevents javascript: XSS
         if not url.startswith(("http://", "https://")):
             continue
+        if issue_type == "GitHub Issue":
+            github_total += 1
+        else:
+            jira_total += 1
         issues.append(
             {
                 "issue_type": issue_type,
@@ -4516,7 +4539,12 @@ async def get_report_issues_created(
             }
         )
 
+    # Apply pagination to the issues list (totals are always full)
+    paginated = issues[offset : offset + limit] if limit > 0 else issues
+
     return {
         "total": len(issues),
-        "issues": issues,
+        "github_total": github_total,
+        "jira_total": jira_total,
+        "issues": paginated,
     }

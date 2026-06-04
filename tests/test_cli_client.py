@@ -2131,6 +2131,7 @@ class TestReports:
                     "total_jobs": 5,
                     "total_failures": 10,
                     "total_reviewed": 3,
+                    "total_details": 5,
                     "jobs": [],
                 },
             )
@@ -2151,6 +2152,7 @@ class TestReports:
                     "total_jobs": 1,
                     "total_failures": 2,
                     "total_reviewed": 1,
+                    "total_details": 1,
                     "jobs": [],
                 },
             )
@@ -2178,12 +2180,13 @@ class TestReports:
             assert "/api/reports/issues-created" in str(request.url)
             return httpx.Response(
                 200,
-                json={"total": 2, "issues": []},
+                json={"total": 2, "github_total": 1, "jira_total": 1, "issues": []},
             )
 
         client = _make_client(handler)
         result = client.report_issues_created()
         assert result["total"] == 2
+        assert result["github_total"] == 1
 
     def test_build_report_params_empty(self):
         client = _make_client(lambda r: httpx.Response(200, json={}))

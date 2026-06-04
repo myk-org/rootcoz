@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useReducer } from 'react'
+import { useCallback, useEffect, useMemo, useReducer, useRef } from 'react'
 import { Link } from 'react-router-dom'
 import { api } from '@/lib/api'
 import { cn, parseApiTimestamp } from '@/lib/utils'
@@ -7,6 +7,7 @@ import { Skeleton } from '@/components/ui/skeleton'
 import {
   Table, TableBody, TableCell, TableHead, TableHeader, TableRow,
 } from '@/components/ui/table'
+import { Collapsible, CollapsibleTrigger, CollapsibleContent } from '@/components/ui/collapsible'
 import { useMetadataOptions, MetadataDropdowns, MetadataClearButton } from '@/components/shared/MetadataFilterBar'
 import { DateRangePresetFilter } from '@/components/shared/DateRangePresetFilter'
 import { ClassificationBadge } from '@/components/shared/ClassificationBadge'
@@ -19,6 +20,7 @@ interface TotalsData {
   total_jobs: number
   total_failures: number
   total_reviewed: number
+  total_details: number
   jobs: Array<{
     job_id: string
     job_name: string
@@ -46,6 +48,8 @@ interface OverridesData {
 
 interface IssuesData {
   total: number
+  github_total: number
+  jira_total: number
   issues: Array<{
     issue_type: string
     title: string
@@ -62,8 +66,8 @@ interface IssuesData {
 type ReportTab = 'totals' | 'overrides' | 'issues'
 
 const TABS: { key: ReportTab; label: string; icon: typeof BarChart3 }[] = [
-  { key: 'totals', label: 'Totals', icon: BarChart3 },
-  { key: 'overrides', label: 'Overrides', icon: ArrowRightLeft },
+  { key: 'totals', label: 'Total Failures', icon: BarChart3 },
+  { key: 'overrides', label: 'Classification Overrides', icon: ArrowRightLeft },
   { key: 'issues', label: 'Issues Created', icon: Bug },
 ]
 
@@ -163,51 +167,50 @@ function TotalsReport({ data }: { data: TotalsData }) {
       </div>
 
       {data.jobs.length > 0 && (
-        <div>
-          <button
-            type="button"
-            onClick={toggleExpanded}
-            className="flex items-center gap-1.5 text-sm font-medium text-text-secondary hover:text-text-primary transition-colors"
-          >
-            {expanded ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
-            Job Details ({data.jobs.length})
-          </button>
+        <Collapsible open={expanded} onOpenChange={toggleExpanded}>
+          <CollapsibleTrigger asChild>
+            <button
+              type="button"
+              className="flex items-center gap-1.5 text-sm font-medium text-text-secondary hover:text-text-primary transition-colors"
+            >
+              {expanded ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
+              Job Details ({data.jobs.length})
+            </button>
+          </CollapsibleTrigger>
 
-          {expanded && (
-            <>
-              <Table className="mt-2">
-                <TableHeader>
-                  <TableRow className="bg-surface-card hover:bg-surface-card">
-                    <TableHead>Job</TableHead>
-                    <TableHead className="text-center">Failures</TableHead>
-                    <TableHead className="text-center">Reviewed</TableHead>
-                    <TableHead className="text-right">Date</TableHead>
+          <CollapsibleContent>
+            <Table className="mt-2">
+              <TableHeader>
+                <TableRow className="bg-surface-card hover:bg-surface-card">
+                  <TableHead>Job</TableHead>
+                  <TableHead className="text-center">Failures</TableHead>
+                  <TableHead className="text-center">Reviewed</TableHead>
+                  <TableHead className="text-right">Date</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {pageJobs.map((job, i) => (
+                  <TableRow key={job.job_id} className={i % 2 === 0 ? 'bg-surface-card' : 'bg-surface-elevated/40'}>
+                    <TableCell>
+                      <Link to={`/results/${job.job_id}`} className="text-sm text-text-link hover:underline">
+                        {job.job_name}
+                      </Link>
+                      {job.build_number != null && (
+                        <span className="ml-1 font-mono text-xs text-text-tertiary">#{job.build_number}</span>
+                      )}
+                    </TableCell>
+                    <TableCell className="text-center font-mono text-xs">{job.failure_count}</TableCell>
+                    <TableCell className="text-center font-mono text-xs">{job.reviewed_count}</TableCell>
+                    <TableCell className="text-right font-mono text-xs text-text-tertiary">
+                      {parseApiTimestamp(job.created_at).toLocaleDateString()}
+                    </TableCell>
                   </TableRow>
-                </TableHeader>
-                <TableBody>
-                  {pageJobs.map((job, i) => (
-                    <TableRow key={job.job_id} className={i % 2 === 0 ? 'bg-surface-card' : 'bg-surface-elevated/40'}>
-                      <TableCell>
-                        <Link to={`/results/${job.job_id}`} className="text-sm text-text-link hover:underline">
-                          {job.job_name}
-                        </Link>
-                        {job.build_number != null && (
-                          <span className="ml-1 font-mono text-xs text-text-tertiary">#{job.build_number}</span>
-                        )}
-                      </TableCell>
-                      <TableCell className="text-center font-mono text-xs">{job.failure_count}</TableCell>
-                      <TableCell className="text-center font-mono text-xs">{job.reviewed_count}</TableCell>
-                      <TableCell className="text-right font-mono text-xs text-text-tertiary">
-                        {parseApiTimestamp(job.created_at).toLocaleDateString()}
-                      </TableCell>
-                    </TableRow>
-                  ))}
-                </TableBody>
-              </Table>
-              <Pagination page={page} totalPages={totalPages} onPageChange={setPage} />
-            </>
-          )}
-        </div>
+                ))}
+              </TableBody>
+            </Table>
+            <Pagination page={page} totalPages={totalPages} onPageChange={setPage} />
+          </CollapsibleContent>
+        </Collapsible>
       )}
     </div>
   )
@@ -244,54 +247,57 @@ function OverridesReport({ data }: { data: OverridesData }) {
             const key = `${g.from} → ${g.to}`
             const isExpanded = expandedGroup === key
             return (
-              <div key={key} className="rounded-lg border border-border-muted bg-surface-card overflow-hidden">
-                <button
-                  type="button"
-                  onClick={() => { toggleExpandedGroup(key); setPage(1) }}
-                  className="flex w-full items-center gap-2 px-4 py-3 text-left transition-colors hover:bg-surface-hover"
-                >
-                  {isExpanded ? <ChevronDown className="h-4 w-4 text-text-tertiary" /> : <ChevronRight className="h-4 w-4 text-text-tertiary" />}
-                  <ClassificationBadge classification={g.from} />
-                  <span className="text-text-tertiary">→</span>
-                  <ClassificationBadge classification={g.to} />
-                  <span className="ml-auto font-mono text-xs text-text-tertiary">{g.count}</span>
-                </button>
+              <Collapsible key={key} open={isExpanded} onOpenChange={() => { toggleExpandedGroup(key); setPage(1) }}>
+                <div className="rounded-lg border border-border-muted bg-surface-card overflow-hidden">
+                  <CollapsibleTrigger asChild>
+                    <button
+                      type="button"
+                      className="flex w-full items-center gap-2 px-4 py-3 text-left transition-colors hover:bg-surface-hover"
+                    >
+                      {isExpanded ? <ChevronDown className="h-4 w-4 text-text-tertiary" /> : <ChevronRight className="h-4 w-4 text-text-tertiary" />}
+                      <ClassificationBadge classification={g.from} />
+                      <span className="text-text-tertiary">→</span>
+                      <ClassificationBadge classification={g.to} />
+                      <span className="ml-auto font-mono text-xs text-text-tertiary">{g.count}</span>
+                    </button>
+                  </CollapsibleTrigger>
 
-                {isExpanded && (
-                  <div className="border-t border-border-muted">
-                    <Table>
-                      <TableHeader>
-                        <TableRow className="bg-surface-elevated/40 hover:bg-surface-elevated/40">
-                          <TableHead>Test</TableHead>
-                          <TableHead>Job</TableHead>
-                          <TableHead>By</TableHead>
-                          <TableHead className="text-right">Date</TableHead>
-                        </TableRow>
-                      </TableHeader>
-                      <TableBody>
-                        {pageDetails.map((d, i) => (
-                          <TableRow key={`${d.job_id}-${d.test_name}-${i}`} className={i % 2 === 0 ? 'bg-surface-card' : 'bg-surface-elevated/40'}>
-                            <TableCell className="font-mono text-xs max-w-[300px] truncate">{d.test_name}</TableCell>
-                            <TableCell>
-                              <Link to={`/results/${d.job_id}`} className="text-xs text-text-link hover:underline">
-                                {d.job_name}
-                              </Link>
-                              {d.build_number != null && (
-                                <span className="ml-1 font-mono text-[10px] text-text-tertiary">#{d.build_number}</span>
-                              )}
-                            </TableCell>
-                            <TableCell className="text-xs text-text-secondary">{d.overridden_by}</TableCell>
-                            <TableCell className="text-right font-mono text-xs text-text-tertiary">
-                              {parseApiTimestamp(d.overridden_at).toLocaleDateString()}
-                            </TableCell>
+                  <CollapsibleContent>
+                    <div className="border-t border-border-muted">
+                      <Table>
+                        <TableHeader>
+                          <TableRow className="bg-surface-elevated/40 hover:bg-surface-elevated/40">
+                            <TableHead>Test</TableHead>
+                            <TableHead>Job</TableHead>
+                            <TableHead>By</TableHead>
+                            <TableHead className="text-right">Date</TableHead>
                           </TableRow>
-                        ))}
-                      </TableBody>
-                    </Table>
-                    <Pagination page={page} totalPages={totalPages} onPageChange={setPage} />
-                  </div>
-                )}
-              </div>
+                        </TableHeader>
+                        <TableBody>
+                          {pageDetails.map((d, i) => (
+                            <TableRow key={`${d.job_id}-${d.test_name}-${i}`} className={i % 2 === 0 ? 'bg-surface-card' : 'bg-surface-elevated/40'}>
+                              <TableCell className="font-mono text-xs max-w-[300px] truncate">{d.test_name}</TableCell>
+                              <TableCell>
+                                <Link to={`/results/${d.job_id}`} className="text-xs text-text-link hover:underline">
+                                  {d.job_name}
+                                </Link>
+                                {d.build_number != null && (
+                                  <span className="ml-1 font-mono text-[10px] text-text-tertiary">#{d.build_number}</span>
+                                )}
+                              </TableCell>
+                              <TableCell className="text-xs text-text-secondary">{d.overridden_by}</TableCell>
+                              <TableCell className="text-right font-mono text-xs text-text-tertiary">
+                                {parseApiTimestamp(d.overridden_at).toLocaleDateString()}
+                              </TableCell>
+                            </TableRow>
+                          ))}
+                        </TableBody>
+                      </Table>
+                      <Pagination page={page} totalPages={totalPages} onPageChange={setPage} />
+                    </div>
+                  </CollapsibleContent>
+                </div>
+              </Collapsible>
             )
           })}
         </div>
@@ -311,10 +317,10 @@ function IssuesReport({ data }: { data: IssuesData }) {
 
   return (
     <div className="space-y-4">
-      <div className="rounded-lg border border-border-muted bg-surface-card p-4">
-        <p className="text-sm text-text-secondary">
-          Total issues created: <span className="font-mono font-medium text-text-primary">{data.total}</span>
-        </p>
+      <div className="grid grid-cols-3 gap-4">
+        <StatCard label="Total Issues" value={data.total} />
+        <StatCard label="GitHub Issues" value={data.github_total} tone="text-signal-blue" />
+        <StatCard label="Jira Tickets" value={data.jira_total} tone="text-signal-orange" />
       </div>
 
       {data.issues.length > 0 ? (
@@ -395,13 +401,13 @@ export function ReportsPage() {
   const [state, dispatch] = useReducer(reportsReducer, INITIAL_STATE)
   const { activeTab, loading, error, teams, tiers, versions, dateFrom, dateTo, totalsData, overridesData, issuesData } = state
   const { options: metadataOptions } = useMetadataOptions()
+  const fetchSeqRef = useRef(0)
 
   const hasMetadataFilters = teams.size > 0 || tiers.size > 0 || versions.size > 0
 
   // Build query params shared by all endpoints
   const queryString = useMemo(() => {
     const params = new URLSearchParams()
-    // Only use first selected value for each metadata filter (API takes single string)
     const team = [...teams][0] || ''
     const tier = [...tiers][0] || ''
     const version = [...versions][0] || ''
@@ -414,6 +420,7 @@ export function ReportsPage() {
   }, [teams, tiers, versions, dateFrom, dateTo])
 
   const fetchReport = useCallback(async () => {
+    const seq = ++fetchSeqRef.current
     dispatch({ type: 'FETCH_START' })
     const suffix = queryString ? `?${queryString}` : ''
 
@@ -421,22 +428,24 @@ export function ReportsPage() {
       switch (activeTab) {
         case 'totals': {
           const data = await api.get<TotalsData>(`/api/reports/totals${suffix}`)
-          dispatch({ type: 'FETCH_TOTALS', data })
+          if (seq === fetchSeqRef.current) dispatch({ type: 'FETCH_TOTALS', data })
           break
         }
         case 'overrides': {
           const data = await api.get<OverridesData>(`/api/reports/classification-overrides${suffix}`)
-          dispatch({ type: 'FETCH_OVERRIDES', data })
+          if (seq === fetchSeqRef.current) dispatch({ type: 'FETCH_OVERRIDES', data })
           break
         }
         case 'issues': {
           const data = await api.get<IssuesData>(`/api/reports/issues-created${suffix}`)
-          dispatch({ type: 'FETCH_ISSUES', data })
+          if (seq === fetchSeqRef.current) dispatch({ type: 'FETCH_ISSUES', data })
           break
         }
       }
     } catch (err) {
-      dispatch({ type: 'FETCH_ERROR', error: err instanceof Error ? err.message : 'Failed to load report' })
+      if (seq === fetchSeqRef.current) {
+        dispatch({ type: 'FETCH_ERROR', error: err instanceof Error ? err.message : 'Failed to load report' })
+      }
     }
   }, [activeTab, queryString])
 

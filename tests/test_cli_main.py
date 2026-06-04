@@ -4158,6 +4158,7 @@ class TestReportsCommands:
             "total_jobs": 5,
             "total_failures": 10,
             "total_reviewed": 3,
+            "total_details": 5,
             "jobs": [
                 {
                     "job_name": "j1",
@@ -4178,6 +4179,7 @@ class TestReportsCommands:
             "total_jobs": 2,
             "total_failures": 4,
             "total_reviewed": 1,
+            "total_details": 2,
             "jobs": [],
         }
         result = runner.invoke(app, ["--json", "reports", "totals"])
@@ -4190,6 +4192,7 @@ class TestReportsCommands:
             "total_jobs": 0,
             "total_failures": 0,
             "total_reviewed": 0,
+            "total_details": 0,
             "jobs": [],
         }
         result = runner.invoke(
@@ -4230,6 +4233,8 @@ class TestReportsCommands:
     def test_reports_issues(self, mock_client):
         mock_client.report_issues_created.return_value = {
             "total": 2,
+            "github_total": 1,
+            "jira_total": 1,
             "issues": [
                 {
                     "issue_type": "GitHub Issue",
@@ -4247,6 +4252,8 @@ class TestReportsCommands:
     def test_reports_issues_json(self, mock_client):
         mock_client.report_issues_created.return_value = {
             "total": 0,
+            "github_total": 0,
+            "jira_total": 0,
             "issues": [],
         }
         result = runner.invoke(app, ["--json", "reports", "issues"])

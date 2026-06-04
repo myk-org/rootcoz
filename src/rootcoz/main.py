@@ -7507,6 +7507,8 @@ async def reports_totals(
     version: str = Query(default=""),
     date_from: str = Query(default="", alias="from"),
     date_to: str = Query(default="", alias="to"),
+    limit: int = Query(default=0, ge=0, le=1000),
+    offset: int = Query(default=0, ge=0),
 ) -> dict:
     """Aggregate totals: total jobs, failures, reviewed, with per-job detail list."""
     logger.debug(
@@ -7523,6 +7525,8 @@ async def reports_totals(
         version=version,
         date_from=date_from,
         date_to=date_to,
+        limit=limit,
+        offset=offset,
     )
 
 
@@ -7533,6 +7537,8 @@ async def reports_classification_overrides(
     version: str = Query(default=""),
     date_from: str = Query(default="", alias="from"),
     date_to: str = Query(default="", alias="to"),
+    limit: int = Query(default=0, ge=0, le=1000),
+    offset: int = Query(default=0, ge=0),
 ) -> dict:
     """Classification overrides grouped by from→to transition."""
     logger.debug(
@@ -7549,6 +7555,8 @@ async def reports_classification_overrides(
         version=version,
         date_from=date_from,
         date_to=date_to,
+        limit=limit,
+        offset=offset,
     )
 
 
@@ -7559,6 +7567,8 @@ async def reports_issues_created(
     version: str = Query(default=""),
     date_from: str = Query(default="", alias="from"),
     date_to: str = Query(default="", alias="to"),
+    limit: int = Query(default=0, ge=0, le=1000),
+    offset: int = Query(default=0, ge=0),
 ) -> dict:
     """GitHub/Jira issues created from analysis results."""
     logger.debug(
@@ -7575,6 +7585,8 @@ async def reports_issues_created(
         version=version,
         date_from=date_from,
         date_to=date_to,
+        limit=limit,
+        offset=offset,
     )
 
 

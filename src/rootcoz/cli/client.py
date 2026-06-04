@@ -1077,6 +1077,8 @@ class RootCozClient:
         version: str = "",
         date_from: str = "",
         date_to: str = "",
+        limit: int = 0,
+        offset: int = 0,
     ) -> dict:
         """Build shared query params for reports endpoints."""
         params: dict = {}
@@ -1090,6 +1092,10 @@ class RootCozClient:
             params["from"] = date_from
         if date_to:
             params["to"] = date_to
+        if limit > 0:
+            params["limit"] = limit
+        if offset > 0:
+            params["offset"] = offset
         return params
 
     def report_totals(
@@ -1099,9 +1105,13 @@ class RootCozClient:
         version: str = "",
         date_from: str = "",
         date_to: str = "",
+        limit: int = 0,
+        offset: int = 0,
     ) -> dict:
         """GET /api/reports/totals"""
-        params = self._build_report_params(team, tier, version, date_from, date_to)
+        params = self._build_report_params(
+            team, tier, version, date_from, date_to, limit, offset
+        )
         return self._request("GET", "/api/reports/totals", params=params)
 
     def report_classification_overrides(
@@ -1111,9 +1121,13 @@ class RootCozClient:
         version: str = "",
         date_from: str = "",
         date_to: str = "",
+        limit: int = 0,
+        offset: int = 0,
     ) -> dict:
         """GET /api/reports/classification-overrides"""
-        params = self._build_report_params(team, tier, version, date_from, date_to)
+        params = self._build_report_params(
+            team, tier, version, date_from, date_to, limit, offset
+        )
         return self._request(
             "GET", "/api/reports/classification-overrides", params=params
         )
@@ -1125,7 +1139,11 @@ class RootCozClient:
         version: str = "",
         date_from: str = "",
         date_to: str = "",
+        limit: int = 0,
+        offset: int = 0,
     ) -> dict:
         """GET /api/reports/issues-created"""
-        params = self._build_report_params(team, tier, version, date_from, date_to)
+        params = self._build_report_params(
+            team, tier, version, date_from, date_to, limit, offset
+        )
         return self._request("GET", "/api/reports/issues-created", params=params)
