@@ -7516,6 +7516,9 @@ async def reports_totals(
     """Aggregate totals: total jobs, failures, reviewed, with per-job detail list. Admin only."""
     _require_admin(request)
     tag_list = [t.strip() for t in tags.split(",") if t.strip()] if tags else None
+    status_list = (
+        [s.strip() for s in status.split(",") if s.strip()] if status else None
+    )
     logger.debug(
         "GET /api/reports/totals: team=%r, tier=%r, version=%r, from=%r, to=%r, status=%r, tags=%r",
         team,
@@ -7523,7 +7526,7 @@ async def reports_totals(
         version,
         date_from,
         date_to,
-        status,
+        status_list,
         tag_list,
     )
     return await storage.get_report_totals(
@@ -7532,7 +7535,7 @@ async def reports_totals(
         version=version,
         date_from=date_from,
         date_to=date_to,
-        status=status,
+        status=status_list,
         tags=tag_list,
         limit=limit,
         offset=offset,
@@ -7555,6 +7558,9 @@ async def reports_classification_overrides(
     """Classification overrides grouped by from→to transition. Admin only."""
     _require_admin(request)
     tag_list = [t.strip() for t in tags.split(",") if t.strip()] if tags else None
+    status_list = (
+        [s.strip() for s in status.split(",") if s.strip()] if status else None
+    )
     logger.debug(
         "GET /api/reports/classification-overrides: team=%r, tier=%r, version=%r, from=%r, to=%r, status=%r, tags=%r",
         team,
@@ -7562,7 +7568,7 @@ async def reports_classification_overrides(
         version,
         date_from,
         date_to,
-        status,
+        status_list,
         tag_list,
     )
     return await storage.get_report_classification_overrides(
@@ -7571,7 +7577,7 @@ async def reports_classification_overrides(
         version=version,
         date_from=date_from,
         date_to=date_to,
-        status=status,
+        status=status_list,
         tags=tag_list,
         limit=limit,
         offset=offset,
@@ -7594,6 +7600,9 @@ async def reports_issues_created(
     """GitHub/Jira issues created from analysis results. Admin only."""
     _require_admin(request)
     tag_list = [t.strip() for t in tags.split(",") if t.strip()] if tags else None
+    status_list = (
+        [s.strip() for s in status.split(",") if s.strip()] if status else None
+    )
     logger.debug(
         "GET /api/reports/issues-created: team=%r, tier=%r, version=%r, from=%r, to=%r, status=%r, tags=%r",
         team,
@@ -7601,7 +7610,7 @@ async def reports_issues_created(
         version,
         date_from,
         date_to,
-        status,
+        status_list,
         tag_list,
     )
     return await storage.get_report_issues_created(
@@ -7610,7 +7619,7 @@ async def reports_issues_created(
         version=version,
         date_from=date_from,
         date_to=date_to,
-        status=status,
+        status=status_list,
         tags=tag_list,
         limit=limit,
         offset=offset,

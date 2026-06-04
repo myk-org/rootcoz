@@ -150,29 +150,35 @@ class TestReportTotals:
             assert result["total_jobs"] == 1
 
             # Explicit completed
-            result = await storage.get_report_totals(status="completed")
+            result = await storage.get_report_totals(status=["completed"])
             assert result["total_jobs"] == 1
 
             # Failed status
-            result = await storage.get_report_totals(status="failed")
+            result = await storage.get_report_totals(status=["failed"])
             assert result["total_jobs"] == 1
             assert result["jobs"][0]["job_name"] == "tagged-job"
 
+            # Multi-status
+            result = await storage.get_report_totals(status=["completed", "failed"])
+            assert result["total_jobs"] == 2
+
             # Non-existent status
-            result = await storage.get_report_totals(status="running")
+            result = await storage.get_report_totals(status=["running"])
             assert result["total_jobs"] == 0
 
     @pytest.mark.asyncio
     async def test_tags_filter(self, populated_db: Path):
         with patch.object(storage, "DB_PATH", populated_db):
             # Tags filter on failed job
-            result = await storage.get_report_totals(status="failed", tags=["nightly"])
+            result = await storage.get_report_totals(
+                status=["failed"], tags=["nightly"]
+            )
             assert result["total_jobs"] == 1
             assert result["jobs"][0]["job_name"] == "tagged-job"
 
             # Non-matching tag
             result = await storage.get_report_totals(
-                status="failed", tags=["nonexistent"]
+                status=["failed"], tags=["nonexistent"]
             )
             assert result["total_jobs"] == 0
 
@@ -238,11 +244,11 @@ class TestReportIssues:
     async def test_status_filter(self, populated_db: Path):
         with patch.object(storage, "DB_PATH", populated_db):
             # Issues only exist for completed jobs
-            result = await storage.get_report_issues_created(status="completed")
+            result = await storage.get_report_issues_created(status=["completed"])
             assert result["total"] == 1
 
             # No issues for failed jobs
-            result = await storage.get_report_issues_created(status="failed")
+            result = await storage.get_report_issues_created(status=["failed"])
             assert result["total"] == 0
 
     @pytest.mark.asyncio

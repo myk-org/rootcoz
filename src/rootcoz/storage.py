@@ -4319,7 +4319,7 @@ async def get_report_totals(
     version: str = "",
     date_from: str = "",
     date_to: str = "",
-    status: str = "",
+    status: list[str] | None = None,
     tags: list[str] | None = None,
     limit: int = 0,
     offset: int = 0,
@@ -4338,11 +4338,14 @@ async def get_report_totals(
     )
     _build_tags_filter(tags, "r.job_id", conditions, params)
 
+    effective_status = status if status else ["completed"]
+    status_placeholders = ", ".join("?" for _ in effective_status)
+    # Status params feed both the subquery and outer WHERE
+    status_params = list(effective_status) + list(effective_status)
+
     where = (" AND " + " AND ".join(conditions)) if conditions else ""
 
     async with _connect_db() as db:
-        effective_status = status or "completed"
-        status_params = [effective_status, effective_status]
         sql = f"""
             SELECT
                 r.job_id,
@@ -4352,7 +4355,7 @@ async def get_report_totals(
                 COALESCE(fc.failure_count, 0) AS failure_count,
                 COALESCE(rv.reviewed_count, 0) AS reviewed_count
             FROM results r
-            JOIN ({_RESULT_DATA_SUBQUERY} AND status = ?
+            JOIN ({_RESULT_DATA_SUBQUERY} AND status IN ({status_placeholders})
             ) r_data ON r_data.job_id = r.job_id
             {meta_join}
             LEFT JOIN (
@@ -4363,7 +4366,7 @@ async def get_report_totals(
                 SELECT job_id, COUNT(*) AS reviewed_count
                 FROM failure_reviews WHERE reviewed = 1 GROUP BY job_id
             ) rv ON rv.job_id = r.job_id
-            WHERE r.status = ?{where}
+            WHERE r.status IN ({status_placeholders}){where}
             ORDER BY r.created_at DESC
         """
         cursor = await db.execute(sql, status_params + params)
@@ -4408,7 +4411,7 @@ async def get_report_classification_overrides(
     version: str = "",
     date_from: str = "",
     date_to: str = "",
-    status: str = "",
+    status: list[str] | None = None,
     tags: list[str] | None = None,
     limit: int = 0,
     offset: int = 0,
@@ -4430,8 +4433,9 @@ async def get_report_classification_overrides(
     status_join = ""
     if status:
         status_join = " JOIN results r_status ON r_status.job_id = tc.job_id"
-        conditions.append("r_status.status = ?")
-        params.append(status)
+        placeholders = ", ".join("?" for _ in status)
+        conditions.append(f"r_status.status IN ({placeholders})")
+        params.extend(status)
 
     where = " AND ".join(conditions)
 
@@ -4507,7 +4511,7 @@ async def get_report_issues_created(
     version: str = "",
     date_from: str = "",
     date_to: str = "",
-    status: str = "",
+    status: list[str] | None = None,
     tags: list[str] | None = None,
     limit: int = 0,
     offset: int = 0,
@@ -4533,8 +4537,9 @@ async def get_report_issues_created(
     status_join = ""
     if status:
         status_join = " JOIN results r_status ON r_status.job_id = c.job_id"
-        conditions.append("r_status.status = ?")
-        params.append(status)
+        placeholders = ", ".join("?" for _ in status)
+        conditions.append(f"r_status.status IN ({placeholders})")
+        params.extend(status)
 
     # Use JOIN when metadata filters narrow results, LEFT JOIN otherwise
     join_type = "JOIN" if (team or tier or version) else "LEFT JOIN"

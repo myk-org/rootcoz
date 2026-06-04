@@ -32,7 +32,7 @@ export function MultiSelectFilter({ label, options, selected, onToggle, onClear,
           type="button"
           aria-label={label}
           className={cn(
-            "flex h-9 w-full items-center justify-between rounded-full border border-white/10 bg-white/5 px-4 py-2 text-sm text-text-primary ring-offset-surface-card transition-colors hover:bg-white/10 focus:outline-none focus:ring-2 focus:ring-border-accent focus:ring-offset-1 disabled:cursor-not-allowed disabled:opacity-50 [&>span]:line-clamp-1",
+            "flex h-9 w-full items-center justify-between rounded-full border border-border-default bg-surface-elevated px-4 py-2 text-sm text-text-primary ring-offset-surface-card transition-colors hover:bg-surface-hover focus:outline-none focus:ring-2 focus:ring-border-accent focus:ring-offset-1 disabled:cursor-not-allowed disabled:opacity-50 [&>span]:line-clamp-1",
             className,
           )}
         >
@@ -57,7 +57,7 @@ export function MultiSelectFilter({ label, options, selected, onToggle, onClear,
             <button
               type="button"
               onClick={() => onClear()}
-              className="flex w-full cursor-default select-none items-center rounded-lg py-1.5 pl-3 pr-3 text-sm text-text-tertiary outline-none hover:bg-white/10"
+              className="flex w-full cursor-default select-none items-center rounded-lg py-1.5 pl-3 pr-3 text-sm text-text-tertiary outline-none hover:bg-surface-hover"
             >
               Clear all
             </button>
