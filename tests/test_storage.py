@@ -718,19 +718,33 @@ class TestMarkStaleResultsFailed:
         """Pending jobs are marked failed on startup."""
         with patch.object(storage, "DB_PATH", setup_test_db):
             await storage.save_result("pending-1", "http://j/1", "pending")
-            waiting = await storage.mark_stale_results_failed()
+            waiting, recovered = await storage.mark_stale_results_failed()
             assert waiting == []
+            assert len(recovered) == 1
+            assert recovered[0] == {"job_id": "pending-1", "previous_status": "pending"}
             result = await storage.get_result("pending-1")
             assert result["status"] == "failed"
+            assert (
+                result["error"]
+                == "Analysis interrupted by server restart. Please re-submit."
+            )
+            assert result["completed_at"] is not None
 
     async def test_marks_running_as_failed(self, setup_test_db: Path) -> None:
         """Running jobs are marked failed on startup."""
         with patch.object(storage, "DB_PATH", setup_test_db):
             await storage.save_result("running-1", "http://j/2", "running")
-            waiting = await storage.mark_stale_results_failed()
+            waiting, recovered = await storage.mark_stale_results_failed()
             assert waiting == []
+            assert len(recovered) == 1
+            assert recovered[0] == {"job_id": "running-1", "previous_status": "running"}
             result = await storage.get_result("running-1")
             assert result["status"] == "failed"
+            assert (
+                result["error"]
+                == "Analysis interrupted by server restart. Please re-submit."
+            )
+            assert result["completed_at"] is not None
 
     async def test_returns_waiting_jobs(self, setup_test_db: Path) -> None:
         """Waiting jobs are returned for resumption, not marked failed."""
@@ -744,7 +758,7 @@ class TestMarkStaleResultsFailed:
                 },
             }
             await storage.save_result("waiting-1", "http://j/3", "waiting", result_data)
-            waiting = await storage.mark_stale_results_failed()
+            waiting, recovered = await storage.mark_stale_results_failed()
             assert len(waiting) == 1
             assert waiting[0]["job_id"] == "waiting-1"
             assert waiting[0]["result_data"]["job_name"] == "my-job"
@@ -752,6 +766,7 @@ class TestMarkStaleResultsFailed:
                 waiting[0]["result_data"]["request_params"]["tests_repo_url"]
                 == "https://example.invalid/tests"
             )
+            assert recovered == []
             # Status should still be 'waiting' (not failed)
             result = await storage.get_result("waiting-1")
             assert result["status"] == "waiting"
@@ -777,9 +792,13 @@ class TestMarkStaleResultsFailed:
                 "c1", "http://j/4", "completed", {"summary": "ok"}
             )
 
-            waiting = await storage.mark_stale_results_failed()
+            waiting, recovered = await storage.mark_stale_results_failed()
             assert len(waiting) == 1
             assert waiting[0]["job_id"] == "w1"
+
+            # Check recovered jobs contain both pending and running
+            recovered_ids = {r["job_id"]: r["previous_status"] for r in recovered}
+            assert recovered_ids == {"p1": "pending", "r1": "running"}
 
             assert (await storage.get_result("p1"))["status"] == "failed"
             assert (await storage.get_result("r1"))["status"] == "failed"
@@ -792,8 +811,9 @@ class TestMarkStaleResultsFailed:
         """Waiting rows without result_json are marked as failed (unrecoverable)."""
         with patch.object(storage, "DB_PATH", setup_test_db):
             await storage.save_result("w-empty", "http://j/5", "waiting", None)
-            waiting = await storage.mark_stale_results_failed()
+            waiting, recovered = await storage.mark_stale_results_failed()
             assert waiting == []
+            assert recovered == []
             # Verify it was marked as failed
             result = await storage.get_result("w-empty")
             assert result["status"] == "failed"
@@ -827,8 +847,9 @@ class TestMarkStaleResultsFailed:
             await storage.save_result(
                 "w-incomplete", "http://j/6", "waiting", result_data
             )
-            waiting = await storage.mark_stale_results_failed()
+            waiting, recovered = await storage.mark_stale_results_failed()
             assert waiting == []
+            assert recovered == []
             result = await storage.get_result("w-incomplete")
             assert result["status"] == "failed"
 
@@ -845,8 +866,9 @@ class TestMarkStaleResultsFailed:
                 )
                 await db.commit()
 
-            waiting = await storage.mark_stale_results_failed()
+            waiting, recovered = await storage.mark_stale_results_failed()
             assert waiting == []
+            assert recovered == []
             assert (await storage.get_result("w-bad-json"))["status"] == "failed"
 
 
