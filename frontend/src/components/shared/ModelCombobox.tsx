@@ -119,7 +119,7 @@ export function ModelCombobox({
         <input
           ref={inputRef}
           type="text"
-          className="flex h-9 w-full rounded-md border border-border-default bg-surface-elevated px-3 pr-8 py-1 text-sm text-text-primary shadow-sm transition-colors placeholder:text-text-tertiary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-border-accent disabled:cursor-not-allowed disabled:opacity-50"
+          className="flex h-9 w-full rounded-full border border-white/10 bg-white/5 px-4 pr-8 py-1 text-sm text-text-primary transition-colors placeholder:text-text-tertiary hover:bg-white/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-border-accent focus-visible:ring-offset-1 disabled:cursor-not-allowed disabled:opacity-50"
           placeholder={placeholder}
           value={value}
           onChange={(e) => {
@@ -144,7 +144,7 @@ export function ModelCombobox({
         <button
           type="button"
           tabIndex={-1}
-          className="absolute right-0 top-0 flex h-9 w-8 items-center justify-center text-text-tertiary hover:text-text-secondary transition-colors"
+          className="absolute right-0 top-0 flex h-9 w-7 items-center justify-center text-text-tertiary hover:text-text-secondary transition-colors"
           onMouseDown={(e) => e.preventDefault()}
           onClick={() => {
             setOpen((prev) => {
@@ -157,7 +157,7 @@ export function ModelCombobox({
         >
           <ChevronDown
             className={cn(
-              'h-4 w-4 transition-transform duration-150',
+              'h-3.5 w-3.5 opacity-30 transition-transform duration-150',
               showDropdown && 'rotate-180',
             )}
           />
@@ -169,7 +169,7 @@ export function ModelCombobox({
           ref={listRef}
           role="listbox"
           id={listboxId}
-          className="absolute z-50 mt-1 max-h-56 w-full overflow-auto rounded-md border border-border-default bg-surface-card shadow-lg animate-fade-in"
+          className="absolute z-50 mt-1 max-h-56 w-max overflow-auto rounded-xl border border-white/10 bg-surface-card shadow-lg backdrop-blur-sm animate-fade-in"
         >
           {filtered.map((model, i) => (
             <li
@@ -190,7 +190,7 @@ export function ModelCombobox({
                 selectModel(model.id)
               }}
             >
-              <span className="truncate">{model.id}</span>
+              <span>{model.id}</span>
               {model.name && model.name !== model.id && (
                 <span className="flex-shrink-0 text-xs text-text-tertiary truncate max-w-[40%]">
                   {model.name}

@@ -83,6 +83,7 @@ src/rootcoz/
     core.py                 # Failure grouping, AI CLI orchestration, prompt building,
                             # JSON response parsing, deduplication. Has ZERO knowledge
                             # of any specific CI system.
+    chat.py                 # Chat engine: workspace, AI session, prompt builder
   sources/                  # CI source plugins (data fetching)
     base.py                 # CISource ABC + CISourceResult dataclass
     jenkins_source.py       # Jenkins plugin: JenkinsSource, analyze_job, analyze_child_job,
@@ -114,12 +115,13 @@ src/rootcoz/
   - CORS preflight (OPTIONS) requests bypass authentication on all endpoints.
   - **Users** can: register, login, rotate their own API key (`POST /api/auth/rotate-key`), manage their own tracker tokens, submit analyses.
   - **Admins** can: everything users can, plus rotate any user's key (`POST /api/admin/users/{username}/rotate-key`), create/delete/promote/demote users, access admin-only endpoints (`/api/admin/*`).
-- **Real-time updates**: Server-Sent Events (SSE) push real-time updates to the frontend — no polling. Backend broadcasts via per-connection `asyncio.Event` objects. Available SSE streams:
+- **Real-time updates**: Server-Sent Events (SSE) push real-time updates to the frontend. A polling fallback activates after sending a chat message if the SSE connection is dead, and cancels once SSE delivers an event. Backend broadcasts via per-connection `asyncio.Event` objects. Available SSE streams:
   - `/api/navbar/stream` — navbar badge counts (active analyses, unread mentions)
   - `/api/dashboard/stream` — dashboard job list changes
   - `/api/results/{job_id}/stream` — per-job status changes
   - `/api/results/{job_id}/comments/stream` — per-job comment changes
   - `/api/admin/token-usage/stream` — token usage data changes
+  - `/api/chat/{job_id}/stream` — per-job chat message changes
 
 ### Server Settings Page
 
@@ -146,6 +148,17 @@ Never pre-feed data to the AI in the prompt. Give the AI tools (API endpoints, s
 - Summarize or filter data before the AI sees it
 - Make decisions about what data the AI needs — let the AI decide
 
+### AI Chat Tool Restriction (MANDATORY)
+
+AI chat sessions MUST use restricted tool sets — **never give bash access**.
+
+- **Allowed builtin tools**: `["read", "ls", "find", "grep"]` — filesystem browsing only
+- **Data access**: Use HTTP-backed custom tools via pi-sidecar (pi-sidecar ≥1.1.0)
+- **Never**: `bash`, `exec`, `write`, `edit` — the AI must not execute arbitrary commands or modify files
+- Custom tools define exactly which API endpoints the AI can call — nothing else is reachable
+- Per-job chat tools: `get_job_result`, `get_job_comments`, `search_jira`, `get_jira_issue`, `search_github_issues`, `get_github_issue` (conditional on user credentials)
+- Admin chat tools: `db_schema`, `db_query` (read-only SQL against the database)
+
 ### CLI Parity
 
 Every new API endpoint MUST also be supported via the `rootcoz` CLI tool. When adding a new endpoint:
@@ -154,7 +167,7 @@ Every new API endpoint MUST also be supported via the `rootcoz` CLI tool. When a
 3. Add tests for both in `tests/test_cli_client.py` and `tests/test_cli_main.py`
 
 **Exceptions (no CLI equivalent needed):**
-- SSE streaming endpoints (`/api/navbar/stream`, `/api/dashboard/stream`, `/api/results/*/stream`, `/api/admin/token-usage/stream`) — CLI is a one-shot tool, not a long-lived stream consumer. Equivalent GET endpoints remain available for CLI use.
+- SSE streaming endpoints (`/api/navbar/stream`, `/api/dashboard/stream`, `/api/results/*/stream`, `/api/admin/token-usage/stream`, `/api/chat/*/stream`) — CLI is a one-shot tool, not a long-lived stream consumer. Equivalent GET endpoints remain available for CLI use.
 - SPA bootstrap helpers (`/api/auth/needs-key`) — browser-only identity probes with no CLI use case
 
 ### Failure Deduplication

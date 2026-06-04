@@ -3840,3 +3840,313 @@ class TestApiKeyOption:
                 verify_ssl=True,
                 api_key="cli-key",  # pragma: allowlist secret
             )
+
+
+class TestChatCommands:
+    def test_chat_history(self, mock_client):
+        mock_client.get_chat_history.return_value = {
+            "messages": [
+                {
+                    "role": "user",
+                    "content": "Why did this fail?",
+                    "created_at": "2025-01-01T00:00:00",
+                },
+                {
+                    "role": "assistant",
+                    "content": "DNS timeout.",
+                    "created_at": "2025-01-01T00:00:01",
+                },
+            ],
+            "total": 2,
+        }
+        result = runner.invoke(app, ["chat", "history", "job-1"])
+        assert result.exit_code == 0
+        assert "[USER]" in result.output
+        assert "[ASSISTANT]" in result.output
+        assert "DNS timeout." in result.output
+        mock_client.get_chat_history.assert_called_once_with("job-1", limit=200)
+
+    def test_chat_history_with_limit(self, mock_client):
+        mock_client.get_chat_history.return_value = {
+            "messages": [],
+            "total": 0,
+        }
+        result = runner.invoke(app, ["chat", "history", "job-1", "--limit", "10"])
+        assert result.exit_code == 0
+        assert "No chat messages" in result.output
+        mock_client.get_chat_history.assert_called_once_with("job-1", limit=10)
+
+    def test_chat_history_json(self, mock_client):
+        payload = {
+            "messages": [{"role": "user", "content": "hello"}],
+            "total": 1,
+        }
+        mock_client.get_chat_history.return_value = payload
+        result = runner.invoke(app, ["--json", "chat", "history", "job-1"])
+        assert result.exit_code == 0
+        parsed = json.loads(result.output)
+        assert parsed["total"] == 1
+        assert parsed["messages"][0]["role"] == "user"
+
+    def test_chat_send(self, mock_client):
+        mock_client.send_chat_message.return_value = {
+            "user_message": {
+                "id": 1,
+                "role": "user",
+                "content": "Why did this test fail?",
+                "status": "completed",
+            },
+        }
+        mock_client.get_chat_history.return_value = {
+            "messages": [
+                {
+                    "id": 2,
+                    "role": "assistant",
+                    "content": "The test failed because of a null pointer.",
+                    "status": "completed",
+                }
+            ],
+            "total": 1,
+        }
+        with patch("time.sleep"):
+            result = runner.invoke(
+                app, ["chat", "send", "job-1", "Why did this test fail?"]
+            )
+        assert result.exit_code == 0
+        mock_client.send_chat_message.assert_called_once_with(
+            "job-1", "Why did this test fail?", ai_provider="", ai_model=""
+        )
+        assert "The test failed because of a null pointer." in result.output
+
+    def test_chat_send_with_ai_config(self, mock_client):
+        mock_client.send_chat_message.return_value = {
+            "user_message": {
+                "id": 1,
+                "role": "user",
+                "content": "Explain the error",
+                "status": "completed",
+            },
+        }
+        mock_client.get_chat_history.return_value = {
+            "messages": [
+                {
+                    "id": 2,
+                    "role": "assistant",
+                    "content": "The error is caused by a missing import.",
+                    "status": "completed",
+                }
+            ],
+            "total": 1,
+        }
+        with patch("time.sleep"):
+            result = runner.invoke(
+                app,
+                [
+                    "chat",
+                    "send",
+                    "job-1",
+                    "Explain the error",
+                    "--provider",
+                    "claude",
+                    "--model",
+                    "opus-4",
+                ],
+            )
+        assert result.exit_code == 0
+        mock_client.send_chat_message.assert_called_once_with(
+            "job-1", "Explain the error", ai_provider="claude", ai_model="opus-4"
+        )
+        assert "The error is caused by a missing import." in result.output
+
+    def test_chat_send_json(self, mock_client):
+        payload = {
+            "user_message": {
+                "id": 1,
+                "role": "user",
+                "content": "question",
+                "status": "completed",
+            },
+        }
+        mock_client.send_chat_message.return_value = payload
+        result = runner.invoke(app, ["--json", "chat", "send", "job-1", "question"])
+        assert result.exit_code == 0
+        parsed = json.loads(result.output)
+        assert parsed["user_message"]["role"] == "user"
+        assert parsed["user_message"]["status"] == "completed"
+
+    def test_chat_clear(self, mock_client):
+        mock_client.clear_chat.return_value = {"deleted": 5}
+        result = runner.invoke(app, ["chat", "clear", "job-1"])
+        assert result.exit_code == 0
+        assert "Deleted 5 message(s)" in result.output
+        mock_client.clear_chat.assert_called_once_with("job-1")
+
+    def test_chat_clear_json(self, mock_client):
+        mock_client.clear_chat.return_value = {"deleted": 3}
+        result = runner.invoke(app, ["--json", "chat", "clear", "job-1"])
+        assert result.exit_code == 0
+        parsed = json.loads(result.output)
+        assert parsed["deleted"] == 3
+
+    def test_chat_history_error(self, mock_client):
+        mock_client.get_chat_history.side_effect = RootCozError(
+            status_code=404, detail="Job not found"
+        )
+        result = runner.invoke(app, ["chat", "history", "nonexistent"])
+        assert result.exit_code == 1
+        assert "404" in result.output or "not found" in result.output.lower()
+
+
+class TestAdminChatCommands:
+    def test_admin_chat_history(self, mock_client):
+        mock_client.get_admin_chat_history.return_value = {
+            "messages": [
+                {
+                    "role": "user",
+                    "content": "Server status?",
+                    "created_at": "2025-01-01T00:00:00",
+                },
+                {
+                    "role": "assistant",
+                    "content": "All systems operational.",
+                    "created_at": "2025-01-01T00:00:01",
+                },
+            ],
+            "total": 2,
+        }
+        result = runner.invoke(app, ["admin-chat", "history"])
+        assert result.exit_code == 0
+        assert "[USER]" in result.output
+        assert "[ASSISTANT]" in result.output
+        assert "All systems operational." in result.output
+        mock_client.get_admin_chat_history.assert_called_once_with(limit=200)
+
+    def test_admin_chat_history_with_limit(self, mock_client):
+        mock_client.get_admin_chat_history.return_value = {
+            "messages": [],
+            "total": 0,
+        }
+        result = runner.invoke(app, ["admin-chat", "history", "--limit", "10"])
+        assert result.exit_code == 0
+        assert "No admin chat history" in result.output
+        mock_client.get_admin_chat_history.assert_called_once_with(limit=10)
+
+    def test_admin_chat_history_json(self, mock_client):
+        payload = {
+            "messages": [{"role": "user", "content": "hello"}],
+            "total": 1,
+        }
+        mock_client.get_admin_chat_history.return_value = payload
+        result = runner.invoke(app, ["--json", "admin-chat", "history"])
+        assert result.exit_code == 0
+        parsed = json.loads(result.output)
+        assert parsed["total"] == 1
+        assert parsed["messages"][0]["role"] == "user"
+
+    def test_admin_chat_send(self, mock_client):
+        mock_client.init_admin_chat.return_value = {"ready": True}
+        mock_client.send_admin_chat_message.return_value = {
+            "user_message": {
+                "id": 1,
+                "role": "user",
+                "content": "Server status?",
+                "status": "completed",
+            },
+        }
+        mock_client.get_admin_chat_history.return_value = {
+            "messages": [
+                {
+                    "id": 2,
+                    "role": "assistant",
+                    "content": "All systems operational.",
+                    "status": "completed",
+                }
+            ],
+            "total": 1,
+        }
+        with patch("time.sleep"):
+            result = runner.invoke(app, ["admin-chat", "send", "Server status?"])
+        assert result.exit_code == 0
+        mock_client.send_admin_chat_message.assert_called_once_with(
+            "Server status?", ai_provider="", ai_model=""
+        )
+        assert "All systems operational." in result.output
+
+    def test_admin_chat_send_with_ai_config(self, mock_client):
+        mock_client.init_admin_chat.return_value = {"ready": True}
+        mock_client.send_admin_chat_message.return_value = {
+            "user_message": {
+                "id": 1,
+                "role": "user",
+                "content": "Explain",
+                "status": "completed",
+            },
+        }
+        mock_client.get_admin_chat_history.return_value = {
+            "messages": [
+                {
+                    "id": 2,
+                    "role": "assistant",
+                    "content": "The error is caused by a missing import.",
+                    "status": "completed",
+                }
+            ],
+            "total": 1,
+        }
+        with patch("time.sleep"):
+            result = runner.invoke(
+                app,
+                [
+                    "admin-chat",
+                    "send",
+                    "Explain",
+                    "--provider",
+                    "claude",
+                    "--model",
+                    "opus-4",
+                ],
+            )
+        assert result.exit_code == 0
+        mock_client.send_admin_chat_message.assert_called_once_with(
+            "Explain", ai_provider="claude", ai_model="opus-4"
+        )
+        assert "The error is caused by a missing import." in result.output
+
+    def test_admin_chat_send_json(self, mock_client):
+        payload = {
+            "user_message": {
+                "id": 1,
+                "role": "user",
+                "content": "question",
+                "status": "completed",
+            },
+        }
+        mock_client.init_admin_chat.return_value = {"ready": True}
+        mock_client.send_admin_chat_message.return_value = payload
+        result = runner.invoke(app, ["--json", "admin-chat", "send", "question"])
+        assert result.exit_code == 0
+        parsed = json.loads(result.output)
+        assert parsed["user_message"]["role"] == "user"
+        assert parsed["user_message"]["status"] == "completed"
+
+    def test_admin_chat_clear(self, mock_client):
+        mock_client.clear_admin_chat.return_value = {"deleted": 5}
+        result = runner.invoke(app, ["admin-chat", "clear"])
+        assert result.exit_code == 0
+        assert "Cleared 5 messages" in result.output
+        mock_client.clear_admin_chat.assert_called_once()
+
+    def test_admin_chat_clear_json(self, mock_client):
+        mock_client.clear_admin_chat.return_value = {"deleted": 3}
+        result = runner.invoke(app, ["--json", "admin-chat", "clear"])
+        assert result.exit_code == 0
+        parsed = json.loads(result.output)
+        assert parsed["deleted"] == 3
+
+    def test_admin_chat_history_error(self, mock_client):
+        mock_client.get_admin_chat_history.side_effect = RootCozError(
+            status_code=403, detail="Admin access required"
+        )
+        result = runner.invoke(app, ["admin-chat", "history"])
+        assert result.exit_code == 1
+        assert "403" in result.output or "admin" in result.output.lower()

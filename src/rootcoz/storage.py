@@ -526,6 +526,40 @@ async def init_db() -> None:
             )
         """)
 
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS chat_messages (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                job_id TEXT NOT NULL,
+                role TEXT NOT NULL,
+                content TEXT NOT NULL,
+                username TEXT NOT NULL DEFAULT '',
+                ai_provider TEXT NOT NULL DEFAULT '',
+                ai_model TEXT NOT NULL DEFAULT '',
+                session_id TEXT NOT NULL DEFAULT '',
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        await db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_chat_messages_job_id ON chat_messages (job_id)"
+        )
+        await db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_chat_messages_job_user "
+            "ON chat_messages (job_id, username)"
+        )
+
+        # Migration: add session_id to chat_messages
+        await _migrate_add_column(
+            db, "chat_messages", "session_id", "TEXT NOT NULL DEFAULT ''"
+        )
+
+        # Migration: add status to chat_messages (pending/completed/failed)
+        await _migrate_add_column(
+            db, "chat_messages", "status", "TEXT NOT NULL DEFAULT 'completed'"
+        )
+        await db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_chat_messages_job_user_status "
+            "ON chat_messages (job_id, username, status)"
+        )
         await db.commit()
 
     # Backfill failure_history from existing results (runs once when table is empty).
@@ -2318,6 +2352,7 @@ async def _delete_job_rows(db: aiosqlite.Connection, job_id: str) -> bool:
     await db.execute("DELETE FROM failure_history WHERE job_id = ?", (job_id,))
     await db.execute("DELETE FROM test_classifications WHERE job_id = ?", (job_id,))
     await db.execute("DELETE FROM ai_token_usage WHERE job_id = ?", (job_id,))
+    await db.execute("DELETE FROM chat_messages WHERE job_id = ?", (job_id,))
     cursor = await db.execute("DELETE FROM results WHERE job_id = ?", (job_id,))
     return cursor.rowcount > 0
 
@@ -3149,11 +3184,14 @@ async def rotate_admin_key(username: str, custom_key: str | None = None) -> str:
     return raw_key
 
 
-async def cleanup_expired_sessions() -> None:
-    """Remove expired sessions."""
+async def cleanup_expired_sessions() -> int:
+    """Remove expired sessions. Returns count deleted."""
     async with _connect_db() as db:
-        await db.execute("DELETE FROM sessions WHERE expires_at <= datetime('now')")
+        cursor = await db.execute(
+            "DELETE FROM sessions WHERE expires_at <= datetime('now')"
+        )
         await db.commit()
+        return cursor.rowcount
 
 
 async def save_user_tokens(
@@ -3982,3 +4020,198 @@ async def get_server_settings_history(
             )
         rows = await cursor.fetchall()
         return [dict(row) for row in rows]
+
+
+async def add_chat_message(
+    job_id: str,
+    role: str,
+    content: str,
+    username: str = "",
+    ai_provider: str = "",
+    ai_model: str = "",
+    session_id: str = "",
+    status: str = "completed",
+) -> int:
+    """Add a chat message and return its id."""
+    async with _connect_db() as db:
+        cursor = await db.execute(
+            "INSERT INTO chat_messages (job_id, role, content, username, ai_provider, ai_model, session_id, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                job_id,
+                role,
+                content,
+                username,
+                ai_provider,
+                ai_model,
+                session_id,
+                status,
+            ),
+        )
+        await db.commit()
+        return cursor.lastrowid or 0
+
+
+async def add_chat_message_pair(
+    job_id: str,
+    user_content: str,
+    username: str = "",
+    ai_provider: str = "",
+    ai_model: str = "",
+) -> tuple[int, int]:
+    """Insert user message + assistant placeholder atomically.
+
+    Returns (user_msg_id, assistant_msg_id).
+    """
+    async with _connect_db() as db:
+        cursor = await db.execute(
+            "INSERT INTO chat_messages (job_id, role, content, username, ai_provider, ai_model, session_id, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (job_id, "user", user_content, username, "", "", "", "completed"),
+        )
+        user_msg_id = cursor.lastrowid or 0
+        cursor = await db.execute(
+            "INSERT INTO chat_messages (job_id, role, content, username, ai_provider, ai_model, session_id, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (job_id, "assistant", "", username, ai_provider, ai_model, "", "pending"),
+        )
+        assistant_msg_id = cursor.lastrowid or 0
+        await db.commit()
+        return user_msg_id, assistant_msg_id
+
+
+async def get_chat_messages(
+    job_id: str, limit: int | None = 200, offset: int = 0, username: str = ""
+) -> list[dict]:
+    """Get chat messages for a job, ordered by id ASC.
+
+    Args:
+        limit: Max messages to return. None = no limit.
+    """
+    async with _connect_db() as db:
+        limit_clause = "LIMIT ? OFFSET ?" if limit is not None else ""
+        params: tuple
+        if username:
+            base = (
+                "SELECT id, job_id, role, content, username, ai_provider, ai_model, session_id, status, created_at "
+                f"FROM chat_messages WHERE job_id = ? AND username = ? ORDER BY id ASC {limit_clause}"
+            )
+            params = (
+                (job_id, username, limit, offset)
+                if limit is not None
+                else (job_id, username)
+            )
+            cursor = await db.execute(base, params)
+        else:
+            base = (
+                "SELECT id, job_id, role, content, username, ai_provider, ai_model, session_id, status, created_at "
+                f"FROM chat_messages WHERE job_id = ? ORDER BY id ASC {limit_clause}"
+            )
+            params = (job_id, limit, offset) if limit is not None else (job_id,)
+            cursor = await db.execute(base, params)
+        rows = await cursor.fetchall()
+        return [dict(row) for row in rows]
+
+
+async def count_chat_messages(job_id: str, username: str = "") -> int:
+    """Count total chat messages for a job."""
+    async with _connect_db() as db:
+        if username:
+            cursor = await db.execute(
+                "SELECT COUNT(*) FROM chat_messages WHERE job_id = ? AND username = ?",
+                (job_id, username),
+            )
+        else:
+            cursor = await db.execute(
+                "SELECT COUNT(*) FROM chat_messages WHERE job_id = ?",
+                (job_id,),
+            )
+        row = await cursor.fetchone()
+        return row[0] if row else 0
+
+
+async def delete_chat_message_by_id(msg_id: int) -> None:
+    """Delete a single chat message by its id."""
+    async with _connect_db() as db:
+        await db.execute("DELETE FROM chat_messages WHERE id = ?", (msg_id,))
+        await db.commit()
+
+
+async def delete_chat_messages(job_id: str, username: str = "") -> int:
+    """Delete all chat messages for a job (optionally scoped to a user). Returns count deleted."""
+    async with _connect_db() as db:
+        if username:
+            cursor = await db.execute(
+                "DELETE FROM chat_messages WHERE job_id = ? AND username = ?",
+                (job_id, username),
+            )
+        else:
+            cursor = await db.execute(
+                "DELETE FROM chat_messages WHERE job_id = ?",
+                (job_id,),
+            )
+        await db.commit()
+        return cursor.rowcount
+
+
+async def get_pending_chat_messages(job_id: str, username: str = "") -> list[dict]:
+    """Get pending (queued) chat messages for a job."""
+    async with _connect_db() as db:
+        if username:
+            cursor = await db.execute(
+                "SELECT id, job_id, role, content, username, ai_provider, ai_model, session_id, status, created_at "
+                "FROM chat_messages WHERE job_id = ? AND username = ? AND status = 'pending' ORDER BY id ASC",
+                (job_id, username),
+            )
+        else:
+            cursor = await db.execute(
+                "SELECT id, job_id, role, content, username, ai_provider, ai_model, session_id, status, created_at "
+                "FROM chat_messages WHERE job_id = ? AND status = 'pending' ORDER BY id ASC",
+                (job_id,),
+            )
+        rows = await cursor.fetchall()
+        return [dict(r) for r in rows]
+
+
+async def get_chat_message_status(msg_id: int) -> str | None:
+    """Get the status of a chat message by ID. Returns None if not found."""
+    async with _connect_db() as db:
+        cursor = await db.execute(
+            "SELECT status FROM chat_messages WHERE id = ?",
+            (msg_id,),
+        )
+        row = await cursor.fetchone()
+        return row["status"] if row else None
+
+
+async def update_chat_message_status(msg_id: int, status: str) -> None:
+    """Update the status of a chat message."""
+    async with _connect_db() as db:
+        await db.execute(
+            "UPDATE chat_messages SET status = ? WHERE id = ?",
+            (status, msg_id),
+        )
+        await db.commit()
+
+
+async def update_chat_message_content(msg_id: int, content: str) -> None:
+    """Update the content of a chat message."""
+    async with _connect_db() as db:
+        await db.execute(
+            "UPDATE chat_messages SET content = ? WHERE id = ?",
+            (content, msg_id),
+        )
+        await db.commit()
+
+
+async def update_chat_message_ai_fields(
+    msg_id: int,
+    *,
+    ai_provider: str = "",
+    ai_model: str = "",
+    session_id: str = "",
+) -> None:
+    """Update AI-related fields on a chat message."""
+    async with _connect_db() as db:
+        await db.execute(
+            "UPDATE chat_messages SET ai_provider = ?, ai_model = ?, session_id = ? WHERE id = ?",
+            (ai_provider, ai_model, session_id, msg_id),
+        )
+        await db.commit()
