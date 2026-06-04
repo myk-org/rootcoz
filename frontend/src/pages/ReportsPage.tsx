@@ -268,6 +268,15 @@ function OverridesReport({ data }: { data: OverridesData }) {
 
   const allGroupKeys = useMemo(() => data.groups.map(g => `${g.from} → ${g.to}`), [data.groups])
 
+  const detailsByGroup = useMemo(() => {
+    const map: Record<string, typeof data.details> = {}
+    for (const d of data.details) {
+      const key = `${d.from_classification} → ${d.to_classification}`
+      ;(map[key] ??= []).push(d)
+    }
+    return map
+  }, [data.details])
+
   return (
     <div className="space-y-4">
       <div className="rounded-lg border border-border-muted bg-surface-card p-4">
@@ -285,11 +294,9 @@ function OverridesReport({ data }: { data: OverridesData }) {
           {data.groups.map((g) => {
             const key = `${g.from} → ${g.to}`
             const isExpanded = expandedGroups.has(key)
-            const groupDetails = isExpanded
-              ? data.details.filter(d => d.from_classification === g.from && d.to_classification === g.to)
-              : []
-            const groupPage = pageByGroup[key] ?? 1
+            const groupDetails = isExpanded ? (detailsByGroup[key] ?? []) : []
             const groupTotalPages = Math.max(1, Math.ceil(groupDetails.length / PAGE_SIZE))
+            const groupPage = Math.min(pageByGroup[key] ?? 1, groupTotalPages)
             const groupPageDetails = groupDetails.slice((groupPage - 1) * PAGE_SIZE, groupPage * PAGE_SIZE)
             return (
               <Collapsible key={key} open={isExpanded} onOpenChange={() => toggleGroup(key)}>
