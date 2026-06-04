@@ -48,6 +48,7 @@ failure_app = typer.Typer(
     help="Look up and re-analyze individual failures.", no_args_is_help=True
 )
 chat_app = typer.Typer(help="Chat with AI about analyzed jobs.", no_args_is_help=True)
+reports_app = typer.Typer(help="Analytics reports.", no_args_is_help=True)
 
 app.add_typer(results_app, name="results")
 app.add_typer(history_app, name="history")
@@ -56,6 +57,7 @@ app.add_typer(classifications_app, name="classifications")
 app.add_typer(metadata_app, name="metadata")
 app.add_typer(failure_app, name="failure")
 app.add_typer(chat_app, name="chat")
+app.add_typer(reports_app, name="reports")
 app.add_typer(config_app, name="config")
 app.add_typer(auth_app, name="auth")
 app.add_typer(admin_app, name="admin")
@@ -3076,6 +3078,154 @@ def admin_chat_clear(
     )
     if not _state.get("json", False):
         typer.echo(f"Cleared {data.get('deleted', 0)} messages.")
+
+
+# -- Reports ------------------------------------------------------------------
+
+_REPORT_TEAM_OPTION = typer.Option("", "--team", help="Filter by team.")
+_REPORT_TIER_OPTION = typer.Option("", "--tier", help="Filter by tier.")
+_REPORT_VERSION_OPTION = typer.Option("", "--version", help="Filter by version.")
+_REPORT_FROM_OPTION = typer.Option("", "--from", help="From date (YYYY-MM-DD).")
+_REPORT_TO_OPTION = typer.Option("", "--to", help="To date (YYYY-MM-DD).")
+
+
+@reports_app.command("totals")
+def reports_totals(
+    team: str = _REPORT_TEAM_OPTION,
+    tier: str = _REPORT_TIER_OPTION,
+    version: str = _REPORT_VERSION_OPTION,
+    date_from: str = _REPORT_FROM_OPTION,
+    date_to: str = _REPORT_TO_OPTION,
+    json_output: bool = _JSON_OPTION,
+):
+    """Show aggregate totals: jobs, failures, reviewed."""
+    _set_json(json_output)
+    client = _get_client()
+    try:
+        data = client.report_totals(
+            team=team,
+            tier=tier,
+            version=version,
+            date_from=date_from,
+            date_to=date_to,
+        )
+    except RootCozError as err:
+        _handle_error(err)
+        return
+
+    if _state.get("json", False):
+        print_output(data, columns=[], as_json=True)
+    else:
+        typer.echo(
+            f"Total jobs: {data['total_jobs']}  "
+            f"Failures: {data['total_failures']}  "
+            f"Reviewed: {data['total_reviewed']}"
+        )
+        if data.get("jobs"):
+            print_output(
+                data["jobs"],
+                columns=[
+                    "job_name",
+                    "build_number",
+                    "failure_count",
+                    "reviewed_count",
+                    "created_at",
+                ],
+                labels={
+                    "build_number": "BUILD",
+                    "failure_count": "FAILURES",
+                    "reviewed_count": "REVIEWED",
+                },
+                as_json=False,
+            )
+
+
+@reports_app.command("overrides")
+def reports_overrides(
+    team: str = _REPORT_TEAM_OPTION,
+    tier: str = _REPORT_TIER_OPTION,
+    version: str = _REPORT_VERSION_OPTION,
+    date_from: str = _REPORT_FROM_OPTION,
+    date_to: str = _REPORT_TO_OPTION,
+    json_output: bool = _JSON_OPTION,
+):
+    """Show classification overrides grouped by from->to."""
+    _set_json(json_output)
+    client = _get_client()
+    try:
+        data = client.report_classification_overrides(
+            team=team,
+            tier=tier,
+            version=version,
+            date_from=date_from,
+            date_to=date_to,
+        )
+    except RootCozError as err:
+        _handle_error(err)
+        return
+
+    if _state.get("json", False):
+        print_output(data, columns=[], as_json=True)
+    else:
+        typer.echo(f"Total overrides: {data['total']}")
+        for g in data.get("groups", []):
+            typer.echo(f"  {g['from']} \u2192 {g['to']}: {g['count']}")
+        if data.get("details"):
+            print_output(
+                data["details"],
+                columns=[
+                    "test_name",
+                    "job_name",
+                    "from_classification",
+                    "to_classification",
+                    "overridden_by",
+                    "overridden_at",
+                ],
+                labels={
+                    "from_classification": "FROM",
+                    "to_classification": "TO",
+                    "overridden_by": "BY",
+                    "overridden_at": "DATE",
+                },
+                as_json=False,
+            )
+
+
+@reports_app.command("issues")
+def reports_issues(
+    team: str = _REPORT_TEAM_OPTION,
+    tier: str = _REPORT_TIER_OPTION,
+    version: str = _REPORT_VERSION_OPTION,
+    date_from: str = _REPORT_FROM_OPTION,
+    date_to: str = _REPORT_TO_OPTION,
+    json_output: bool = _JSON_OPTION,
+):
+    """Show GitHub/Jira issues created from analyses."""
+    _set_json(json_output)
+    client = _get_client()
+    try:
+        data = client.report_issues_created(
+            team=team,
+            tier=tier,
+            version=version,
+            date_from=date_from,
+            date_to=date_to,
+        )
+    except RootCozError as err:
+        _handle_error(err)
+        return
+
+    if _state.get("json", False):
+        print_output(data, columns=[], as_json=True)
+    else:
+        typer.echo(f"Total issues created: {data['total']}")
+        if data.get("issues"):
+            print_output(
+                data["issues"],
+                columns=["issue_type", "title", "job_name", "created_by", "created_at"],
+                labels={"issue_type": "TYPE", "created_by": "BY", "created_at": "DATE"},
+                as_json=False,
+            )
 
 
 # -- Config -------------------------------------------------------------------

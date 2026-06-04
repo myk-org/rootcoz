@@ -1067,3 +1067,65 @@ class RootCozClient:
     def close_admin_chat(self) -> dict:
         """Signal user left admin chat page. POST /api/admin/chat/close"""
         return self._request("POST", "/api/admin/chat/close")
+
+    # -- Reports ----------------------------------------------------------
+
+    def _build_report_params(
+        self,
+        team: str = "",
+        tier: str = "",
+        version: str = "",
+        date_from: str = "",
+        date_to: str = "",
+    ) -> dict:
+        """Build shared query params for reports endpoints."""
+        params: dict = {}
+        if team:
+            params["team"] = team
+        if tier:
+            params["tier"] = tier
+        if version:
+            params["version"] = version
+        if date_from:
+            params["from"] = date_from
+        if date_to:
+            params["to"] = date_to
+        return params
+
+    def report_totals(
+        self,
+        team: str = "",
+        tier: str = "",
+        version: str = "",
+        date_from: str = "",
+        date_to: str = "",
+    ) -> dict:
+        """GET /api/reports/totals"""
+        params = self._build_report_params(team, tier, version, date_from, date_to)
+        return self._request("GET", "/api/reports/totals", params=params)
+
+    def report_classification_overrides(
+        self,
+        team: str = "",
+        tier: str = "",
+        version: str = "",
+        date_from: str = "",
+        date_to: str = "",
+    ) -> dict:
+        """GET /api/reports/classification-overrides"""
+        params = self._build_report_params(team, tier, version, date_from, date_to)
+        return self._request(
+            "GET", "/api/reports/classification-overrides", params=params
+        )
+
+    def report_issues_created(
+        self,
+        team: str = "",
+        tier: str = "",
+        version: str = "",
+        date_from: str = "",
+        date_to: str = "",
+    ) -> dict:
+        """GET /api/reports/issues-created"""
+        params = self._build_report_params(team, tier, version, date_from, date_to)
+        return self._request("GET", "/api/reports/issues-created", params=params)

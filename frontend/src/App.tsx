@@ -19,6 +19,7 @@ import { NewAnalysisPage } from '@/pages/NewAnalysisPage'
 import { PendingApprovalPage } from '@/pages/PendingApprovalPage'
 import { ServerSettingsPage } from '@/pages/ServerSettingsPage'
 import { AdminChatPage } from '@/pages/AdminChatPage'
+import { ReportsPage } from '@/pages/ReportsPage'
 
 export default function App() {
   return (
@@ -32,6 +33,7 @@ export default function App() {
             <Route path="/dashboard" element={<Navigate to="/" replace />} />
             <Route path="/new-analysis" element={<ProtectedRoute><NewAnalysisPage /></ProtectedRoute>} />
             <Route path="/history" element={<ProtectedRoute><HistoryPage /></ProtectedRoute>} />
+            <Route path="/reports" element={<ProtectedRoute><ReportsPage /></ProtectedRoute>} />
             <Route path="/history/test/:testName" element={<ProtectedRoute><TestHistoryPage /></ProtectedRoute>} />
             <Route path="/mentions" element={<ProtectedRoute><MentionsPage /></ProtectedRoute>} />
             <Route path="/results/:jobId" element={<ProtectedRoute><ReportPage /></ProtectedRoute>} />

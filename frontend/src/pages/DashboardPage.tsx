@@ -35,7 +35,7 @@ import { SearchInput } from '@/components/shared/SearchInput'
 import { Pagination } from '@/components/shared/Pagination'
 import { ConfirmDialog } from '@/components/shared/ConfirmDialog'
 import { SortableHeader } from '@/components/shared/SortableHeader'
-import { DateRangeFilter } from '@/components/shared/DateRangeFilter'
+import { DateRangePresetFilter } from '@/components/shared/DateRangePresetFilter'
 import { useTableSort } from '@/lib/useTableSort'
 import { Trash2, MessageSquare, CheckCircle2, GitFork, AlertTriangle, Github, List, ListTree, ChevronRight } from 'lucide-react'
 import { useAuth } from '@/lib/auth'
@@ -224,14 +224,6 @@ export function DashboardPage() {
       const next = new URLSearchParams(prev)
       if (value) next.set('date_to', value)
       else next.delete('date_to')
-      return next
-    }, { replace: true })
-  }, [setSearchParams])
-  const clearDates = useCallback(() => {
-    setSearchParams((prev) => {
-      const next = new URLSearchParams(prev)
-      next.delete('date_from')
-      next.delete('date_to')
       return next
     }, { replace: true })
   }, [setSearchParams])
@@ -523,7 +515,7 @@ export function DashboardPage() {
             onClear={() => setSelectedStatuses(new Set())}
             className="w-full sm:w-40"
           />
-          <DateRangeFilter from={dateFrom} to={dateTo} onFromChange={setDateFrom} onToChange={setDateTo} onClear={clearDates} />
+          <DateRangePresetFilter from={dateFrom} to={dateTo} onFromChange={setDateFrom} onToChange={setDateTo} />
           <Select value={String(perPage)} onValueChange={(v) => setPerPage(Number(v))}>
             <SelectTrigger aria-label="Rows per page" className="w-full sm:w-20">
               <SelectValue />

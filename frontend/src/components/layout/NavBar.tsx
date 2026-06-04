@@ -23,6 +23,7 @@ const EXTERNAL_NAV_LINKS: ExternalNavLink[] = [
 const BASE_NAV_LINKS = [
   { to: '/', label: 'Dashboard' },
   { to: '/history', label: 'History' },
+  { to: '/reports', label: 'Reports' },
 ]
 
 export function NavBar() {

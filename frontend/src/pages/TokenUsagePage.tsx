@@ -21,7 +21,7 @@ import {
   TableRow,
 } from '@/components/ui/table'
 import { SortableHeader } from '@/components/shared/SortableHeader'
-import { DateRangeFilter } from '@/components/shared/DateRangeFilter'
+import { DateRangePresetFilter } from '@/components/shared/DateRangePresetFilter'
 import { useTableSort } from '@/lib/useTableSort'
 import type { TokenUsageDashboard } from '@/types'
 import { Zap, TrendingUp, Calendar, DollarSign, Info, ChevronRight, Loader2 } from 'lucide-react'
@@ -343,10 +343,7 @@ export function TokenUsagePage() {
     return copy
   }, [breakdown, sortKey, sortDir])
 
-  const clearDates = useCallback(() => {
-    setDateFrom('')
-    setDateTo('')
-  }, [])
+
 
   return (
     <TooltipProvider delayDuration={200}>
@@ -484,7 +481,7 @@ export function TokenUsagePage() {
             </SelectContent>
           </Select>
         </div>
-        <DateRangeFilter from={dateFrom} to={dateTo} onFromChange={setDateFrom} onToChange={setDateTo} onClear={clearDates} />
+        <DateRangePresetFilter from={dateFrom} to={dateTo} onFromChange={setDateFrom} onToChange={setDateTo} />
         <Input
           value={providerInput}
           onChange={(e) => setProviderInput(e.target.value)}

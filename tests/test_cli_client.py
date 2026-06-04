@@ -2118,3 +2118,91 @@ class TestRootCozClientAdminChat:
         client = _make_client(handler)
         result = client.abort_admin_chat()
         assert result["aborted"] is True
+
+
+class TestReports:
+    def test_report_totals(self):
+        def handler(request):
+            assert request.method == "GET"
+            assert "/api/reports/totals" in str(request.url)
+            return httpx.Response(
+                200,
+                json={
+                    "total_jobs": 5,
+                    "total_failures": 10,
+                    "total_reviewed": 3,
+                    "jobs": [],
+                },
+            )
+
+        client = _make_client(handler)
+        result = client.report_totals()
+        assert result["total_jobs"] == 5
+
+    def test_report_totals_with_filters(self):
+        def handler(request):
+            url = str(request.url)
+            assert "team=alpha" in url
+            assert "from=2025-01-01" in url
+            assert "to=2025-06-01" in url
+            return httpx.Response(
+                200,
+                json={
+                    "total_jobs": 1,
+                    "total_failures": 2,
+                    "total_reviewed": 1,
+                    "jobs": [],
+                },
+            )
+
+        client = _make_client(handler)
+        result = client.report_totals(
+            team="alpha", date_from="2025-01-01", date_to="2025-06-01"
+        )
+        assert result["total_jobs"] == 1
+
+    def test_report_classification_overrides(self):
+        def handler(request):
+            assert "/api/reports/classification-overrides" in str(request.url)
+            return httpx.Response(
+                200,
+                json={"total": 3, "groups": [], "details": []},
+            )
+
+        client = _make_client(handler)
+        result = client.report_classification_overrides()
+        assert result["total"] == 3
+
+    def test_report_issues_created(self):
+        def handler(request):
+            assert "/api/reports/issues-created" in str(request.url)
+            return httpx.Response(
+                200,
+                json={"total": 2, "issues": []},
+            )
+
+        client = _make_client(handler)
+        result = client.report_issues_created()
+        assert result["total"] == 2
+
+    def test_build_report_params_empty(self):
+        client = _make_client(lambda r: httpx.Response(200, json={}))
+        params = client._build_report_params()
+        assert params == {}
+
+    def test_build_report_params_with_values(self):
+        client = _make_client(lambda r: httpx.Response(200, json={}))
+        params = client._build_report_params(
+            team="a",
+            tier="1",
+            version="v1",
+            date_from="2025-01-01",
+            date_to="2025-12-31",
+        )
+        assert params == {
+            "team": "a",
+            "tier": "1",
+            "version": "v1",
+            "from": "2025-01-01",
+            "to": "2025-12-31",
+        }

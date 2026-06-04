@@ -1,0 +1,519 @@
+import { useCallback, useEffect, useMemo, useReducer } from 'react'
+import { Link } from 'react-router-dom'
+import { api } from '@/lib/api'
+import { cn, parseApiTimestamp } from '@/lib/utils'
+import { Button } from '@/components/ui/button'
+import { Skeleton } from '@/components/ui/skeleton'
+import {
+  Table, TableBody, TableCell, TableHead, TableHeader, TableRow,
+} from '@/components/ui/table'
+import { useMetadataOptions, MetadataDropdowns, MetadataClearButton } from '@/components/shared/MetadataFilterBar'
+import { DateRangePresetFilter } from '@/components/shared/DateRangePresetFilter'
+import { ClassificationBadge } from '@/components/shared/ClassificationBadge'
+import { Pagination } from '@/components/shared/Pagination'
+import { BarChart3, ArrowRightLeft, Bug, ChevronDown, ChevronRight, ExternalLink } from 'lucide-react'
+
+// ─── Types ──────────────────────────────────────────────────────────
+
+interface TotalsData {
+  total_jobs: number
+  total_failures: number
+  total_reviewed: number
+  jobs: Array<{
+    job_id: string
+    job_name: string
+    build_number: number
+    failure_count: number
+    reviewed_count: number
+    created_at: string
+  }>
+}
+
+interface OverridesData {
+  total: number
+  groups: Array<{ from: string; to: string; count: number }>
+  details: Array<{
+    test_name: string
+    job_name: string
+    job_id: string
+    build_number: number
+    from_classification: string
+    to_classification: string
+    overridden_by: string
+    overridden_at: string
+  }>
+}
+
+interface IssuesData {
+  total: number
+  issues: Array<{
+    issue_type: string
+    title: string
+    url: string
+    test_name: string
+    job_name: string
+    job_id: string
+    build_number: number
+    created_by: string
+    created_at: string
+  }>
+}
+
+type ReportTab = 'totals' | 'overrides' | 'issues'
+
+const TABS: { key: ReportTab; label: string; icon: typeof BarChart3 }[] = [
+  { key: 'totals', label: 'Totals', icon: BarChart3 },
+  { key: 'overrides', label: 'Overrides', icon: ArrowRightLeft },
+  { key: 'issues', label: 'Issues Created', icon: Bug },
+]
+
+const PAGE_SIZE = 20
+
+// ─── Reducer ────────────────────────────────────────────────────────
+
+interface ReportsState {
+  activeTab: ReportTab
+  loading: boolean
+  error: string | null
+  teams: Set<string>
+  tiers: Set<string>
+  versions: Set<string>
+  dateFrom: string
+  dateTo: string
+  totalsData: TotalsData | null
+  overridesData: OverridesData | null
+  issuesData: IssuesData | null
+}
+
+type ReportsAction =
+  | { type: 'SET_TAB'; tab: ReportTab }
+  | { type: 'FETCH_START' }
+  | { type: 'FETCH_ERROR'; error: string }
+  | { type: 'FETCH_TOTALS'; data: TotalsData }
+  | { type: 'FETCH_OVERRIDES'; data: OverridesData }
+  | { type: 'FETCH_ISSUES'; data: IssuesData }
+  | { type: 'TOGGLE_META'; field: 'teams' | 'tiers' | 'versions'; value: string }
+  | { type: 'CLEAR_META'; field: 'teams' | 'tiers' | 'versions' }
+  | { type: 'CLEAR_ALL_META' }
+  | { type: 'SET_DATE_FROM'; value: string }
+  | { type: 'SET_DATE_TO'; value: string }
+
+const INITIAL_STATE: ReportsState = {
+  activeTab: 'totals',
+  loading: false,
+  error: null,
+  teams: new Set(),
+  tiers: new Set(),
+  versions: new Set(),
+  dateFrom: '',
+  dateTo: '',
+  totalsData: null,
+  overridesData: null,
+  issuesData: null,
+}
+
+function toggleInSet(set: Set<string>, value: string): Set<string> {
+  const next = new Set(set)
+  if (next.has(value)) next.delete(value)
+  else next.add(value)
+  return next
+}
+
+function reportsReducer(state: ReportsState, action: ReportsAction): ReportsState {
+  switch (action.type) {
+    case 'SET_TAB':
+      return { ...state, activeTab: action.tab }
+    case 'FETCH_START':
+      return { ...state, loading: true, error: null }
+    case 'FETCH_ERROR':
+      return { ...state, loading: false, error: action.error }
+    case 'FETCH_TOTALS':
+      return { ...state, loading: false, totalsData: action.data }
+    case 'FETCH_OVERRIDES':
+      return { ...state, loading: false, overridesData: action.data }
+    case 'FETCH_ISSUES':
+      return { ...state, loading: false, issuesData: action.data }
+    case 'TOGGLE_META':
+      return { ...state, [action.field]: toggleInSet(state[action.field], action.value) }
+    case 'CLEAR_META':
+      return { ...state, [action.field]: new Set<string>() }
+    case 'CLEAR_ALL_META':
+      return { ...state, teams: new Set(), tiers: new Set(), versions: new Set() }
+    case 'SET_DATE_FROM':
+      return { ...state, dateFrom: action.value }
+    case 'SET_DATE_TO':
+      return { ...state, dateTo: action.value }
+  }
+}
+
+// ─── Report Content Components ──────────────────────────────────────
+
+function TotalsReport({ data }: { data: TotalsData }) {
+  const [expanded, toggleExpanded] = useReducer((v: boolean) => !v, false)
+  const [page, setPage] = useReducer((_: number, p: number) => p, 1)
+  const totalPages = Math.max(1, Math.ceil(data.jobs.length / PAGE_SIZE))
+  const pageJobs = data.jobs.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE)
+
+  return (
+    <div className="space-y-4">
+      <div className="grid grid-cols-3 gap-4">
+        <StatCard label="Total Jobs" value={data.total_jobs} />
+        <StatCard label="Total Failures" value={data.total_failures} tone="text-signal-red" />
+        <StatCard label="Total Reviewed" value={data.total_reviewed} tone="text-signal-green" />
+      </div>
+
+      {data.jobs.length > 0 && (
+        <div>
+          <button
+            type="button"
+            onClick={toggleExpanded}
+            className="flex items-center gap-1.5 text-sm font-medium text-text-secondary hover:text-text-primary transition-colors"
+          >
+            {expanded ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
+            Job Details ({data.jobs.length})
+          </button>
+
+          {expanded && (
+            <>
+              <Table className="mt-2">
+                <TableHeader>
+                  <TableRow className="bg-surface-card hover:bg-surface-card">
+                    <TableHead>Job</TableHead>
+                    <TableHead className="text-center">Failures</TableHead>
+                    <TableHead className="text-center">Reviewed</TableHead>
+                    <TableHead className="text-right">Date</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {pageJobs.map((job, i) => (
+                    <TableRow key={job.job_id} className={i % 2 === 0 ? 'bg-surface-card' : 'bg-surface-elevated/40'}>
+                      <TableCell>
+                        <Link to={`/results/${job.job_id}`} className="text-sm text-text-link hover:underline">
+                          {job.job_name}
+                        </Link>
+                        {job.build_number != null && (
+                          <span className="ml-1 font-mono text-xs text-text-tertiary">#{job.build_number}</span>
+                        )}
+                      </TableCell>
+                      <TableCell className="text-center font-mono text-xs">{job.failure_count}</TableCell>
+                      <TableCell className="text-center font-mono text-xs">{job.reviewed_count}</TableCell>
+                      <TableCell className="text-right font-mono text-xs text-text-tertiary">
+                        {parseApiTimestamp(job.created_at).toLocaleDateString()}
+                      </TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+              <Pagination page={page} totalPages={totalPages} onPageChange={setPage} />
+            </>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
+function expandedGroupReducer(prev: string | null, key: string | null): string | null {
+  return prev === key ? null : key
+}
+
+function OverridesReport({ data }: { data: OverridesData }) {
+  const [expandedGroup, toggleExpandedGroup] = useReducer(expandedGroupReducer, null)
+  const [page, setPage] = useReducer((_: number, p: number) => p, 1)
+
+  const groupDetails = useMemo(() => {
+    if (!expandedGroup) return []
+    const [from, to] = expandedGroup.split(' → ')
+    return data.details.filter(d => d.from_classification === from && d.to_classification === to)
+  }, [expandedGroup, data.details])
+
+  const totalPages = Math.max(1, Math.ceil(groupDetails.length / PAGE_SIZE))
+  const pageDetails = groupDetails.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE)
+
+  return (
+    <div className="space-y-4">
+      <div className="rounded-lg border border-border-muted bg-surface-card p-4">
+        <p className="text-sm text-text-secondary">
+          Total overrides: <span className="font-mono font-medium text-text-primary">{data.total}</span>
+        </p>
+      </div>
+
+      {data.groups.length > 0 && (
+        <div className="space-y-2">
+          {data.groups.map((g) => {
+            const key = `${g.from} → ${g.to}`
+            const isExpanded = expandedGroup === key
+            return (
+              <div key={key} className="rounded-lg border border-border-muted bg-surface-card overflow-hidden">
+                <button
+                  type="button"
+                  onClick={() => { toggleExpandedGroup(key); setPage(1) }}
+                  className="flex w-full items-center gap-2 px-4 py-3 text-left transition-colors hover:bg-surface-hover"
+                >
+                  {isExpanded ? <ChevronDown className="h-4 w-4 text-text-tertiary" /> : <ChevronRight className="h-4 w-4 text-text-tertiary" />}
+                  <ClassificationBadge classification={g.from} />
+                  <span className="text-text-tertiary">→</span>
+                  <ClassificationBadge classification={g.to} />
+                  <span className="ml-auto font-mono text-xs text-text-tertiary">{g.count}</span>
+                </button>
+
+                {isExpanded && (
+                  <div className="border-t border-border-muted">
+                    <Table>
+                      <TableHeader>
+                        <TableRow className="bg-surface-elevated/40 hover:bg-surface-elevated/40">
+                          <TableHead>Test</TableHead>
+                          <TableHead>Job</TableHead>
+                          <TableHead>By</TableHead>
+                          <TableHead className="text-right">Date</TableHead>
+                        </TableRow>
+                      </TableHeader>
+                      <TableBody>
+                        {pageDetails.map((d, i) => (
+                          <TableRow key={`${d.job_id}-${d.test_name}-${i}`} className={i % 2 === 0 ? 'bg-surface-card' : 'bg-surface-elevated/40'}>
+                            <TableCell className="font-mono text-xs max-w-[300px] truncate">{d.test_name}</TableCell>
+                            <TableCell>
+                              <Link to={`/results/${d.job_id}`} className="text-xs text-text-link hover:underline">
+                                {d.job_name}
+                              </Link>
+                              {d.build_number != null && (
+                                <span className="ml-1 font-mono text-[10px] text-text-tertiary">#{d.build_number}</span>
+                              )}
+                            </TableCell>
+                            <TableCell className="text-xs text-text-secondary">{d.overridden_by}</TableCell>
+                            <TableCell className="text-right font-mono text-xs text-text-tertiary">
+                              {parseApiTimestamp(d.overridden_at).toLocaleDateString()}
+                            </TableCell>
+                          </TableRow>
+                        ))}
+                      </TableBody>
+                    </Table>
+                    <Pagination page={page} totalPages={totalPages} onPageChange={setPage} />
+                  </div>
+                )}
+              </div>
+            )
+          })}
+        </div>
+      )}
+
+      {data.groups.length === 0 && (
+        <p className="text-sm text-text-tertiary py-8 text-center">No classification overrides found.</p>
+      )}
+    </div>
+  )
+}
+
+function IssuesReport({ data }: { data: IssuesData }) {
+  const [page, setPage] = useReducer((_: number, p: number) => p, 1)
+  const totalPages = Math.max(1, Math.ceil(data.issues.length / PAGE_SIZE))
+  const pageIssues = data.issues.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE)
+
+  return (
+    <div className="space-y-4">
+      <div className="rounded-lg border border-border-muted bg-surface-card p-4">
+        <p className="text-sm text-text-secondary">
+          Total issues created: <span className="font-mono font-medium text-text-primary">{data.total}</span>
+        </p>
+      </div>
+
+      {data.issues.length > 0 ? (
+        <>
+          <Table>
+            <TableHeader>
+              <TableRow className="bg-surface-card hover:bg-surface-card">
+                <TableHead>Type</TableHead>
+                <TableHead>Title</TableHead>
+                <TableHead>Test</TableHead>
+                <TableHead>Job</TableHead>
+                <TableHead>By</TableHead>
+                <TableHead className="text-right">Date</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {pageIssues.map((issue, i) => (
+                <TableRow key={`${issue.job_id}-${issue.test_name}-${i}`} className={i % 2 === 0 ? 'bg-surface-card' : 'bg-surface-elevated/40'}>
+                  <TableCell>
+                    <span className={cn(
+                      'inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-medium',
+                      issue.issue_type === 'GitHub Issue'
+                        ? 'bg-signal-blue/10 text-signal-blue'
+                        : 'bg-signal-orange/10 text-signal-orange',
+                    )}>
+                      {issue.issue_type}
+                    </span>
+                  </TableCell>
+                  <TableCell>
+                    <a
+                      href={issue.url}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="text-sm text-text-link hover:underline inline-flex items-center gap-1"
+                    >
+                      {issue.title}
+                      <ExternalLink className="h-3 w-3 shrink-0" />
+                    </a>
+                  </TableCell>
+                  <TableCell className="font-mono text-xs max-w-[200px] truncate">{issue.test_name}</TableCell>
+                  <TableCell>
+                    <Link to={`/results/${issue.job_id}`} className="text-xs text-text-link hover:underline">
+                      {issue.job_name}
+                    </Link>
+                    {issue.build_number != null && (
+                      <span className="ml-1 font-mono text-[10px] text-text-tertiary">#{issue.build_number}</span>
+                    )}
+                  </TableCell>
+                  <TableCell className="text-xs text-text-secondary">{issue.created_by}</TableCell>
+                  <TableCell className="text-right font-mono text-xs text-text-tertiary">
+                    {parseApiTimestamp(issue.created_at).toLocaleDateString()}
+                  </TableCell>
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
+          <Pagination page={page} totalPages={totalPages} onPageChange={setPage} />
+        </>
+      ) : (
+        <p className="text-sm text-text-tertiary py-8 text-center">No issues found.</p>
+      )}
+    </div>
+  )
+}
+
+function StatCard({ label, value, tone }: { label: string; value: number; tone?: string }) {
+  return (
+    <div className="rounded-lg border border-border-muted bg-surface-card p-4">
+      <p className="text-xs text-text-tertiary">{label}</p>
+      <p className={cn('mt-1 text-2xl font-bold font-mono', tone || 'text-text-primary')}>{value}</p>
+    </div>
+  )
+}
+
+// ─── Main Page ──────────────────────────────────────────────────────
+
+export function ReportsPage() {
+  const [state, dispatch] = useReducer(reportsReducer, INITIAL_STATE)
+  const { activeTab, loading, error, teams, tiers, versions, dateFrom, dateTo, totalsData, overridesData, issuesData } = state
+  const { options: metadataOptions } = useMetadataOptions()
+
+  const hasMetadataFilters = teams.size > 0 || tiers.size > 0 || versions.size > 0
+
+  // Build query params shared by all endpoints
+  const queryString = useMemo(() => {
+    const params = new URLSearchParams()
+    // Only use first selected value for each metadata filter (API takes single string)
+    const team = [...teams][0] || ''
+    const tier = [...tiers][0] || ''
+    const version = [...versions][0] || ''
+    if (team) params.set('team', team)
+    if (tier) params.set('tier', tier)
+    if (version) params.set('version', version)
+    if (dateFrom) params.set('from', dateFrom)
+    if (dateTo) params.set('to', dateTo)
+    return params.toString()
+  }, [teams, tiers, versions, dateFrom, dateTo])
+
+  const fetchReport = useCallback(async () => {
+    dispatch({ type: 'FETCH_START' })
+    const suffix = queryString ? `?${queryString}` : ''
+
+    try {
+      switch (activeTab) {
+        case 'totals': {
+          const data = await api.get<TotalsData>(`/api/reports/totals${suffix}`)
+          dispatch({ type: 'FETCH_TOTALS', data })
+          break
+        }
+        case 'overrides': {
+          const data = await api.get<OverridesData>(`/api/reports/classification-overrides${suffix}`)
+          dispatch({ type: 'FETCH_OVERRIDES', data })
+          break
+        }
+        case 'issues': {
+          const data = await api.get<IssuesData>(`/api/reports/issues-created${suffix}`)
+          dispatch({ type: 'FETCH_ISSUES', data })
+          break
+        }
+      }
+    } catch (err) {
+      dispatch({ type: 'FETCH_ERROR', error: err instanceof Error ? err.message : 'Failed to load report' })
+    }
+  }, [activeTab, queryString])
+
+  useEffect(() => {
+    fetchReport()
+  }, [fetchReport])
+
+  return (
+    <div className="space-y-6">
+      <h1 className="font-display text-xl font-bold text-text-primary">Reports</h1>
+
+      {/* Filters */}
+      <div className="flex flex-wrap gap-3 items-center">
+        <MetadataDropdowns
+          options={metadataOptions}
+          teams={teams}
+          tiers={tiers}
+          versions={versions}
+          onTeamToggle={(v) => dispatch({ type: 'TOGGLE_META', field: 'teams', value: v })}
+          onTierToggle={(v) => dispatch({ type: 'TOGGLE_META', field: 'tiers', value: v })}
+          onVersionToggle={(v) => dispatch({ type: 'TOGGLE_META', field: 'versions', value: v })}
+          onTeamClear={() => dispatch({ type: 'CLEAR_META', field: 'teams' })}
+          onTierClear={() => dispatch({ type: 'CLEAR_META', field: 'tiers' })}
+          onVersionClear={() => dispatch({ type: 'CLEAR_META', field: 'versions' })}
+        />
+        <DateRangePresetFilter
+          from={dateFrom}
+          to={dateTo}
+          onFromChange={(v) => dispatch({ type: 'SET_DATE_FROM', value: v })}
+          onToChange={(v) => dispatch({ type: 'SET_DATE_TO', value: v })}
+        />
+        <MetadataClearButton hasFilters={hasMetadataFilters} onClearAll={() => dispatch({ type: 'CLEAR_ALL_META' })} />
+      </div>
+
+      {/* Layout: sidebar + content */}
+      <div className="flex gap-6">
+        {/* Sidebar */}
+        <nav className="w-48 shrink-0 space-y-1">
+          {TABS.map(({ key, label, icon: Icon }) => (
+            <Button
+              key={key}
+              variant="ghost"
+              onClick={() => dispatch({ type: 'SET_TAB', tab: key })}
+              className={cn(
+                'w-full justify-start gap-2 text-sm',
+                activeTab === key
+                  ? 'bg-surface-elevated text-text-primary'
+                  : 'text-text-secondary hover:bg-surface-hover hover:text-text-primary',
+              )}
+            >
+              <Icon className="h-4 w-4" />
+              {label}
+            </Button>
+          ))}
+        </nav>
+
+        {/* Main content */}
+        <div className="flex-1 min-w-0">
+          {error && (
+            <p className="text-center text-signal-red py-8">{error}</p>
+          )}
+
+          {loading ? (
+            <div className="space-y-2">
+              {Array.from({ length: 6 }).map((_, i) => (
+                <Skeleton key={i} className="h-10 w-full" />
+              ))}
+            </div>
+          ) : (
+            <>
+              {activeTab === 'totals' && totalsData && <TotalsReport data={totalsData} />}
+              {activeTab === 'overrides' && overridesData && <OverridesReport data={overridesData} />}
+              {activeTab === 'issues' && issuesData && <IssuesReport data={issuesData} />}
+            </>
+          )}
+        </div>
+      </div>
+    </div>
+  )
+}

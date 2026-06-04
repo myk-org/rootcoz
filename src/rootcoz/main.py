@@ -6072,12 +6072,14 @@ async def get_all_failures_endpoint(
     classification: str = Query(default=""),
     limit: int = Query(default=50, le=200),
     offset: int = Query(default=0, ge=0),
+    date_from: str = Query(default="", alias="from"),
+    date_to: str = Query(default="", alias="to"),
 ) -> dict:
     """Get paginated failure history."""
     logger.debug(
         f"GET /history/failures: search={search!r}, "
         f"job_name={job_name!r}, classification={classification!r}, "
-        f"limit={limit}, offset={offset}"
+        f"limit={limit}, offset={offset}, from={date_from!r}, to={date_to!r}"
     )
     return await storage.get_all_failures(
         search=search,
@@ -6085,6 +6087,8 @@ async def get_all_failures_endpoint(
         classification=classification,
         limit=limit,
         offset=offset,
+        date_from=date_from,
+        date_to=date_to,
     )
 
 
@@ -7491,6 +7495,87 @@ async def api_dashboard_filtered(
             job["metadata"] = None
 
     return jobs
+
+
+# --- Reports endpoints ---
+
+
+@app.get("/api/reports/totals")
+async def reports_totals(
+    team: str = Query(default=""),
+    tier: str = Query(default=""),
+    version: str = Query(default=""),
+    date_from: str = Query(default="", alias="from"),
+    date_to: str = Query(default="", alias="to"),
+) -> dict:
+    """Aggregate totals: total jobs, failures, reviewed, with per-job detail list."""
+    logger.debug(
+        "GET /api/reports/totals: team=%r, tier=%r, version=%r, from=%r, to=%r",
+        team,
+        tier,
+        version,
+        date_from,
+        date_to,
+    )
+    return await storage.get_report_totals(
+        team=team,
+        tier=tier,
+        version=version,
+        date_from=date_from,
+        date_to=date_to,
+    )
+
+
+@app.get("/api/reports/classification-overrides")
+async def reports_classification_overrides(
+    team: str = Query(default=""),
+    tier: str = Query(default=""),
+    version: str = Query(default=""),
+    date_from: str = Query(default="", alias="from"),
+    date_to: str = Query(default="", alias="to"),
+) -> dict:
+    """Classification overrides grouped by from→to transition."""
+    logger.debug(
+        "GET /api/reports/classification-overrides: team=%r, tier=%r, version=%r, from=%r, to=%r",
+        team,
+        tier,
+        version,
+        date_from,
+        date_to,
+    )
+    return await storage.get_report_classification_overrides(
+        team=team,
+        tier=tier,
+        version=version,
+        date_from=date_from,
+        date_to=date_to,
+    )
+
+
+@app.get("/api/reports/issues-created")
+async def reports_issues_created(
+    team: str = Query(default=""),
+    tier: str = Query(default=""),
+    version: str = Query(default=""),
+    date_from: str = Query(default="", alias="from"),
+    date_to: str = Query(default="", alias="to"),
+) -> dict:
+    """GitHub/Jira issues created from analysis results."""
+    logger.debug(
+        "GET /api/reports/issues-created: team=%r, tier=%r, version=%r, from=%r, to=%r",
+        team,
+        tier,
+        version,
+        date_from,
+        date_to,
+    )
+    return await storage.get_report_issues_created(
+        team=team,
+        tier=tier,
+        version=version,
+        date_from=date_from,
+        date_to=date_to,
+    )
 
 
 # --- Notification endpoints ---
