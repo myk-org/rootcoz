@@ -125,11 +125,11 @@ export function StatusPage() {
           return 'terminal'
         } else if (res.status === 'failed') {
           setTerminalErrorKind('failed')
-          setError(res.result?.error ?? 'Analysis failed')
+          setError(res.error || res.result?.error || 'Analysis failed')
           return 'terminal'
         } else if (res.status === 'aborted') {
           setTerminalErrorKind('aborted')
-          setError(res.result?.error ?? 'Analysis was aborted')
+          setError(res.error || res.result?.error || 'Analysis was aborted')
           return 'terminal'
         }
       } catch (err) {
@@ -190,10 +190,10 @@ export function StatusPage() {
         navigate(`/results/${jobId}`, { replace: true })
       } else if (res.status === 'failed') {
         setTerminalErrorKind('failed')
-        setError(res.result?.error ?? 'Analysis failed')
+        setError(res.error || res.result?.error || 'Analysis failed')
       } else if (res.status === 'aborted') {
         setTerminalErrorKind('aborted')
-        setError(res.result?.error ?? 'Analysis was aborted')
+        setError(res.error || res.result?.error || 'Analysis was aborted')
       }
     } catch {
       // best-effort
