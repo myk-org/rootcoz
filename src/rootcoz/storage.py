@@ -2279,6 +2279,8 @@ async def get_all_failures(
     classification: str = "",
     limit: int = 50,
     offset: int = 0,
+    date_from: str = "",
+    date_to: str = "",
 ) -> dict:
     """Get paginated failure history with optional filters.
 
@@ -2290,6 +2292,8 @@ async def get_all_failures(
         classification: Exact match filter on classification column.
         limit: Maximum number of rows to return.
         offset: Number of rows to skip for pagination.
+        date_from: Filter failures on or after this date (YYYY-MM-DD).
+        date_to: Filter failures on or before this date (YYYY-MM-DD).
 
     Returns:
         Dict with ``failures`` (list of row dicts) and ``total`` (int).
@@ -2298,7 +2302,8 @@ async def get_all_failures(
         f"get_all_failures: search={search!r}, "
         f"job_name={job_name!r}, "
         f"classification={classification!r}, "
-        f"limit={limit}, offset={offset}"
+        f"limit={limit}, offset={offset}, "
+        f"date_from={date_from!r}, date_to={date_to!r}"
     )
     conditions: list[str] = []
     params: list[str | int] = []
@@ -2314,6 +2319,8 @@ async def get_all_failures(
     if classification:
         conditions.append("classification = ?")
         params.append(classification)
+
+    _build_date_filter("analyzed_at", date_from, date_to, conditions, params)
 
     where = " AND ".join(conditions) if conditions else "1=1"
 
@@ -4215,3 +4222,382 @@ async def update_chat_message_ai_fields(
             (ai_provider, ai_model, session_id, msg_id),
         )
         await db.commit()
+
+
+# ─── Reports queries ────────────────────────────────────────────────────────
+
+
+# Shared subquery: extracts job_name and build_number from result_json.
+_RESULT_DATA_SUBQUERY = """
+    SELECT job_id,
+           json_extract(result_json, '$.job_name') AS job_name,
+           json_extract(result_json, '$.build_number') AS build_number
+    FROM results WHERE result_json IS NOT NULL
+"""
+
+# Regex for detecting GitHub Issue / Jira Bug links in comments.
+_ISSUE_LINK_PATTERN = re.compile(
+    r"(GitHub Issue|Jira Bug)(?:\s*\[[^\]]*\])?:\s*\[([^\]]+)\]\(([^)]+)\)"
+)
+
+
+def _build_date_filter(
+    column: str,
+    date_from: str,
+    date_to: str,
+    conditions: list[str],
+    params: list,
+) -> None:
+    """Append date-range conditions and params in-place.
+
+    Shared by all reports queries to avoid duplicating date filtering logic.
+    """
+    if date_from:
+        conditions.append(f"date({column}) >= ?")
+        params.append(date_from)
+    if date_to:
+        conditions.append(f"date({column}) <= ?")
+        params.append(date_to)
+
+
+def _build_metadata_join(
+    team: str,
+    tier: str,
+    version: str,
+    job_name_col: str,
+    conditions: list[str],
+    params: list,
+) -> str:
+    """Return a JOIN clause for job_metadata filtering.
+
+    Appends conditions and params in-place. Returns the JOIN SQL fragment
+    or an empty string when no metadata filters are active.
+    Shared by all reports queries.
+    """
+    if not (team or tier or version):
+        return ""
+    join_sql = f" JOIN job_metadata jm ON jm.job_name = {job_name_col}"
+    if team:
+        conditions.append("jm.team = ?")
+        params.append(team)
+    if tier:
+        conditions.append("jm.tier = ?")
+        params.append(tier)
+    if version:
+        conditions.append("jm.version = ?")
+        params.append(version)
+    return join_sql
+
+
+def _build_tags_filter(
+    tags: list[str] | None,
+    job_id_col: str,
+    conditions: list[str],
+    params: list,
+) -> None:
+    """Append tag-filtering conditions in-place.
+
+    Tags are stored in ``result_json`` → ``$.tags`` as a JSON array.
+    Uses ``json_each`` to match any of the requested tags (OR semantics).
+    """
+    if not tags:
+        return
+    placeholders = ", ".join("?" for _ in tags)
+    conditions.append(
+        f"""{job_id_col} IN (
+            SELECT r_tags.job_id FROM results r_tags, json_each(r_tags.result_json, '$.tags') jt
+            WHERE jt.value IN ({placeholders})
+        )"""
+    )
+    params.extend(tags)
+
+
+async def get_report_totals(
+    *,
+    team: str = "",
+    tier: str = "",
+    version: str = "",
+    date_from: str = "",
+    date_to: str = "",
+    status: list[str] | None = None,
+    tags: list[str] | None = None,
+    limit: int = 0,
+    offset: int = 0,
+) -> dict:
+    """Aggregate totals for the reports page.
+
+    Returns total jobs, total failures, total reviewed,
+    plus a paginated per-job detail list.
+    """
+    conditions: list[str] = []
+    params: list = []
+
+    _build_date_filter("r.created_at", date_from, date_to, conditions, params)
+    meta_join = _build_metadata_join(
+        team, tier, version, "r_data.job_name", conditions, params
+    )
+    _build_tags_filter(tags, "r.job_id", conditions, params)
+
+    effective_status = status if status else ["completed"]
+    status_placeholders = ", ".join("?" for _ in effective_status)
+    # Status params feed both the subquery and outer WHERE
+    status_params = list(effective_status) + list(effective_status)
+
+    where = (" AND " + " AND ".join(conditions)) if conditions else ""
+
+    async with _connect_db() as db:
+        sql = f"""
+            SELECT
+                r.job_id,
+                r_data.job_name,
+                r_data.build_number,
+                r.created_at,
+                COALESCE(fc.failure_count, 0) AS failure_count,
+                COALESCE(rv.reviewed_count, 0) AS reviewed_count
+            FROM results r
+            JOIN ({_RESULT_DATA_SUBQUERY} AND status IN ({status_placeholders})
+            ) r_data ON r_data.job_id = r.job_id
+            {meta_join}
+            LEFT JOIN (
+                SELECT job_id, COUNT(*) AS failure_count
+                FROM failure_history GROUP BY job_id
+            ) fc ON fc.job_id = r.job_id
+            LEFT JOIN (
+                SELECT job_id, COUNT(*) AS reviewed_count
+                FROM failure_reviews WHERE reviewed = 1 GROUP BY job_id
+            ) rv ON rv.job_id = r.job_id
+            WHERE r.status IN ({status_placeholders}){where}
+            ORDER BY r.created_at DESC
+        """
+        cursor = await db.execute(sql, status_params + params)
+        rows = await cursor.fetchall()
+
+    total_jobs = len(rows)
+    total_failures = 0
+    total_reviewed = 0
+    details = []
+    for row in rows:
+        fc = row["failure_count"]
+        rc = row["reviewed_count"]
+        total_failures += fc
+        total_reviewed += rc
+        details.append(
+            {
+                "job_id": row["job_id"],
+                "job_name": row["job_name"] or row["job_id"],
+                "build_number": row["build_number"],
+                "failure_count": fc,
+                "reviewed_count": rc,
+                "created_at": row["created_at"],
+            }
+        )
+
+    # Apply pagination to the detail list (totals are always full)
+    paginated = details[offset : offset + limit] if limit > 0 else details
+
+    return {
+        "total_jobs": total_jobs,
+        "total_failures": total_failures,
+        "total_reviewed": total_reviewed,
+        "total_details": len(details),
+        "jobs": paginated,
+    }
+
+
+async def get_report_classification_overrides(
+    *,
+    team: str = "",
+    tier: str = "",
+    version: str = "",
+    date_from: str = "",
+    date_to: str = "",
+    status: list[str] | None = None,
+    tags: list[str] | None = None,
+    limit: int = 0,
+    offset: int = 0,
+) -> dict:
+    """Count of user classification overrides grouped by from->to.
+
+    Only includes overrides where created_by is non-empty (user-initiated)
+    and the test also appears in failure_reviews (reviewed = 1).
+    """
+    conditions: list[str] = ["tc.created_by != ''"]
+    params: list = []
+
+    _build_date_filter("tc.created_at", date_from, date_to, conditions, params)
+    meta_join = _build_metadata_join(
+        team, tier, version, "tc.job_name", conditions, params
+    )
+    _build_tags_filter(tags, "tc.job_id", conditions, params)
+
+    status_join = ""
+    if status:
+        status_join = " JOIN results r_status ON r_status.job_id = tc.job_id"
+        placeholders = ", ".join("?" for _ in status)
+        conditions.append(f"r_status.status IN ({placeholders})")
+        params.extend(status)
+
+    where = " AND ".join(conditions)
+
+    async with _connect_db() as db:
+        sql = f"""
+            SELECT
+                tc.id,
+                tc.test_name,
+                tc.job_name,
+                tc.job_id,
+                tc.child_build_number,
+                tc.classification,
+                tc.created_by,
+                tc.created_at,
+                fh.classification AS original_classification,
+                fh.build_number
+            FROM test_classifications tc
+            {meta_join}
+            {status_join}
+            JOIN failure_history fh
+                ON fh.job_id = tc.job_id
+                AND fh.test_name = tc.test_name
+                AND fh.child_build_number = tc.child_build_number
+            WHERE {where}
+              AND tc.visible = 1
+              AND EXISTS (
+                  SELECT 1 FROM failure_reviews fr
+                  WHERE fr.job_id = tc.job_id AND fr.test_name = tc.test_name
+                    AND fr.reviewed = 1
+              )
+            ORDER BY tc.created_at DESC
+        """
+        cursor = await db.execute(sql, params)
+        rows = await cursor.fetchall()
+
+    # Group by from->to
+    groups: dict[str, dict] = {}
+    details: list[dict] = []
+    for row in rows:
+        orig = row["original_classification"] or "UNKNOWN"
+        override = row["classification"]
+        key = f"{orig} → {override}"
+        if key not in groups:
+            groups[key] = {"from": orig, "to": override, "count": 0}
+        groups[key]["count"] += 1
+        details.append(
+            {
+                "test_name": row["test_name"],
+                "job_name": row["job_name"],
+                "job_id": row["job_id"],
+                "build_number": row["build_number"],
+                "from_classification": orig,
+                "to_classification": override,
+                "overridden_by": row["created_by"],
+                "overridden_at": row["created_at"],
+            }
+        )
+
+    # Apply pagination to the detail list (groups/total are always full)
+    paginated = details[offset : offset + limit] if limit > 0 else details
+
+    return {
+        "total": len(details),
+        "groups": list(groups.values()),
+        "details": paginated,
+    }
+
+
+async def get_report_issues_created(
+    *,
+    team: str = "",
+    tier: str = "",
+    version: str = "",
+    date_from: str = "",
+    date_to: str = "",
+    status: list[str] | None = None,
+    tags: list[str] | None = None,
+    limit: int = 0,
+    offset: int = 0,
+) -> dict:
+    """Find GitHub/Jira issues created from comments.
+
+    Matches comments containing 'GitHub Issue' or 'Jira Bug' patterns
+    and parses the markdown link for URL and title.
+    Only http/https URLs are included (prevents javascript: XSS).
+    Returns separate github_total and jira_total counts.
+    """
+    conditions: list[str] = [
+        "(c.comment LIKE '%GitHub Issue%' OR c.comment LIKE '%Jira Bug%')"
+    ]
+    params: list = []
+
+    _build_date_filter("c.created_at", date_from, date_to, conditions, params)
+    meta_join = _build_metadata_join(
+        team, tier, version, "r_data.job_name", conditions, params
+    )
+    _build_tags_filter(tags, "c.job_id", conditions, params)
+
+    status_join = ""
+    if status:
+        status_join = " JOIN results r_status ON r_status.job_id = c.job_id"
+        placeholders = ", ".join("?" for _ in status)
+        conditions.append(f"r_status.status IN ({placeholders})")
+        params.extend(status)
+
+    # Use JOIN when metadata filters narrow results, LEFT JOIN otherwise
+    join_type = "JOIN" if (team or tier or version) else "LEFT JOIN"
+    where = " AND ".join(conditions)
+
+    async with _connect_db() as db:
+        sql = f"""
+            SELECT c.id, c.job_id, c.test_name, c.comment,
+                   c.username, c.created_at,
+                   r_data.job_name, r_data.build_number
+            FROM comments c
+            {join_type} ({_RESULT_DATA_SUBQUERY}
+            ) r_data ON r_data.job_id = c.job_id
+            {meta_join}
+            {status_join}
+            WHERE {where}
+            ORDER BY c.created_at DESC
+        """
+        cursor = await db.execute(sql, params)
+        rows = await cursor.fetchall()
+
+    issues: list[dict] = []
+    github_total = 0
+    jira_total = 0
+    for row in rows:
+        match = _ISSUE_LINK_PATTERN.search(row["comment"])
+        if not match:
+            continue
+        issue_type = match.group(1)
+        title = match.group(2)
+        url = match.group(3)
+        # Only allow safe URL schemes — prevents javascript: XSS
+        if not url.startswith(("http://", "https://")):
+            continue
+        if issue_type == "GitHub Issue":
+            github_total += 1
+        else:
+            jira_total += 1
+        issues.append(
+            {
+                "issue_type": issue_type,
+                "title": title,
+                "url": url,
+                "test_name": row["test_name"],
+                "job_name": row["job_name"] or row["job_id"],
+                "job_id": row["job_id"],
+                "build_number": row["build_number"],
+                "created_by": row["username"],
+                "created_at": row["created_at"],
+            }
+        )
+
+    # Apply pagination to the issues list (totals are always full)
+    paginated = issues[offset : offset + limit] if limit > 0 else issues
+
+    return {
+        "total": len(issues),
+        "github_total": github_total,
+        "jira_total": jira_total,
+        "issues": paginated,
+    }

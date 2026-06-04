@@ -6072,12 +6072,14 @@ async def get_all_failures_endpoint(
     classification: str = Query(default=""),
     limit: int = Query(default=50, le=200),
     offset: int = Query(default=0, ge=0),
+    date_from: str = Query(default="", alias="from"),
+    date_to: str = Query(default="", alias="to"),
 ) -> dict:
     """Get paginated failure history."""
     logger.debug(
         f"GET /history/failures: search={search!r}, "
         f"job_name={job_name!r}, classification={classification!r}, "
-        f"limit={limit}, offset={offset}"
+        f"limit={limit}, offset={offset}, from={date_from!r}, to={date_to!r}"
     )
     return await storage.get_all_failures(
         search=search,
@@ -6085,6 +6087,8 @@ async def get_all_failures_endpoint(
         classification=classification,
         limit=limit,
         offset=offset,
+        date_from=date_from,
+        date_to=date_to,
     )
 
 
@@ -7491,6 +7495,135 @@ async def api_dashboard_filtered(
             job["metadata"] = None
 
     return jobs
+
+
+# --- Reports endpoints ---
+
+
+@app.get("/api/reports/totals")
+async def reports_totals(
+    request: Request,
+    team: str = Query(default=""),
+    tier: str = Query(default=""),
+    version: str = Query(default=""),
+    date_from: str = Query(default="", alias="from"),
+    date_to: str = Query(default="", alias="to"),
+    status: str = Query(default=""),
+    tags: str = Query(default=""),
+    limit: int = Query(default=0, ge=0, le=1000),
+    offset: int = Query(default=0, ge=0),
+) -> dict:
+    """Aggregate totals: total jobs, failures, reviewed, with per-job detail list. Admin only."""
+    _require_admin(request)
+    tag_list = [t.strip() for t in tags.split(",") if t.strip()] if tags else None
+    status_list = (
+        [s.strip() for s in status.split(",") if s.strip()] if status else None
+    )
+    logger.debug(
+        "GET /api/reports/totals: team=%r, tier=%r, version=%r, from=%r, to=%r, status=%r, tags=%r",
+        team,
+        tier,
+        version,
+        date_from,
+        date_to,
+        status_list,
+        tag_list,
+    )
+    return await storage.get_report_totals(
+        team=team,
+        tier=tier,
+        version=version,
+        date_from=date_from,
+        date_to=date_to,
+        status=status_list,
+        tags=tag_list,
+        limit=limit,
+        offset=offset,
+    )
+
+
+@app.get("/api/reports/classification-overrides")
+async def reports_classification_overrides(
+    request: Request,
+    team: str = Query(default=""),
+    tier: str = Query(default=""),
+    version: str = Query(default=""),
+    date_from: str = Query(default="", alias="from"),
+    date_to: str = Query(default="", alias="to"),
+    status: str = Query(default=""),
+    tags: str = Query(default=""),
+    limit: int = Query(default=0, ge=0, le=1000),
+    offset: int = Query(default=0, ge=0),
+) -> dict:
+    """Classification overrides grouped by from→to transition. Admin only."""
+    _require_admin(request)
+    tag_list = [t.strip() for t in tags.split(",") if t.strip()] if tags else None
+    status_list = (
+        [s.strip() for s in status.split(",") if s.strip()] if status else None
+    )
+    logger.debug(
+        "GET /api/reports/classification-overrides: team=%r, tier=%r, version=%r, from=%r, to=%r, status=%r, tags=%r",
+        team,
+        tier,
+        version,
+        date_from,
+        date_to,
+        status_list,
+        tag_list,
+    )
+    return await storage.get_report_classification_overrides(
+        team=team,
+        tier=tier,
+        version=version,
+        date_from=date_from,
+        date_to=date_to,
+        status=status_list,
+        tags=tag_list,
+        limit=limit,
+        offset=offset,
+    )
+
+
+@app.get("/api/reports/issues-created")
+async def reports_issues_created(
+    request: Request,
+    team: str = Query(default=""),
+    tier: str = Query(default=""),
+    version: str = Query(default=""),
+    date_from: str = Query(default="", alias="from"),
+    date_to: str = Query(default="", alias="to"),
+    status: str = Query(default=""),
+    tags: str = Query(default=""),
+    limit: int = Query(default=0, ge=0, le=1000),
+    offset: int = Query(default=0, ge=0),
+) -> dict:
+    """GitHub/Jira issues created from analysis results. Admin only."""
+    _require_admin(request)
+    tag_list = [t.strip() for t in tags.split(",") if t.strip()] if tags else None
+    status_list = (
+        [s.strip() for s in status.split(",") if s.strip()] if status else None
+    )
+    logger.debug(
+        "GET /api/reports/issues-created: team=%r, tier=%r, version=%r, from=%r, to=%r, status=%r, tags=%r",
+        team,
+        tier,
+        version,
+        date_from,
+        date_to,
+        status_list,
+        tag_list,
+    )
+    return await storage.get_report_issues_created(
+        team=team,
+        tier=tier,
+        version=version,
+        date_from=date_from,
+        date_to=date_to,
+        status=status_list,
+        tags=tag_list,
+        limit=limit,
+        offset=offset,
+    )
 
 
 # --- Notification endpoints ---

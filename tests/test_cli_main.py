@@ -4150,3 +4150,146 @@ class TestAdminChatCommands:
         result = runner.invoke(app, ["admin-chat", "history"])
         assert result.exit_code == 1
         assert "403" in result.output or "admin" in result.output.lower()
+
+
+class TestReportsCommands:
+    def test_reports_totals(self, mock_client):
+        mock_client.report_totals.return_value = {
+            "total_jobs": 5,
+            "total_failures": 10,
+            "total_reviewed": 3,
+            "total_details": 5,
+            "jobs": [
+                {
+                    "job_name": "j1",
+                    "build_number": 1,
+                    "failure_count": 2,
+                    "reviewed_count": 1,
+                    "created_at": "2025-01-01",
+                }
+            ],
+        }
+        result = runner.invoke(app, ["reports", "totals"])
+        assert result.exit_code == 0
+        assert "Total jobs: 5" in result.output
+        mock_client.report_totals.assert_called_once()
+
+    def test_reports_totals_json(self, mock_client):
+        mock_client.report_totals.return_value = {
+            "total_jobs": 2,
+            "total_failures": 4,
+            "total_reviewed": 1,
+            "total_details": 2,
+            "jobs": [],
+        }
+        result = runner.invoke(app, ["--json", "reports", "totals"])
+        assert result.exit_code == 0
+        parsed = json.loads(result.output)
+        assert parsed["total_jobs"] == 2
+
+    def test_reports_totals_with_filters(self, mock_client):
+        mock_client.report_totals.return_value = {
+            "total_jobs": 0,
+            "total_failures": 0,
+            "total_reviewed": 0,
+            "total_details": 0,
+            "jobs": [],
+        }
+        result = runner.invoke(
+            app,
+            ["reports", "totals", "--team", "alpha", "--from", "2025-01-01"],
+        )
+        assert result.exit_code == 0
+        mock_client.report_totals.assert_called_once_with(
+            team="alpha",
+            tier="",
+            version="",
+            date_from="2025-01-01",
+            date_to="",
+            status="",
+            tags=None,
+        )
+
+    def test_reports_totals_with_status_and_tags(self, mock_client):
+        mock_client.report_totals.return_value = {
+            "total_jobs": 1,
+            "total_failures": 0,
+            "total_reviewed": 0,
+            "total_details": 1,
+            "jobs": [],
+        }
+        result = runner.invoke(
+            app,
+            ["reports", "totals", "--status", "completed", "--tags", "nightly,smoke"],
+        )
+        assert result.exit_code == 0
+        mock_client.report_totals.assert_called_once_with(
+            team="",
+            tier="",
+            version="",
+            date_from="",
+            date_to="",
+            status="completed",
+            tags=["nightly", "smoke"],
+        )
+
+    def test_reports_overrides(self, mock_client):
+        mock_client.report_classification_overrides.return_value = {
+            "total": 3,
+            "groups": [{"from": "CODE ISSUE", "to": "PRODUCT BUG", "count": 3}],
+            "details": [],
+        }
+        result = runner.invoke(app, ["reports", "overrides"])
+        assert result.exit_code == 0
+        assert "Total overrides: 3" in result.output
+        assert "CODE ISSUE" in result.output
+
+    def test_reports_overrides_json(self, mock_client):
+        mock_client.report_classification_overrides.return_value = {
+            "total": 1,
+            "groups": [],
+            "details": [],
+        }
+        result = runner.invoke(app, ["--json", "reports", "overrides"])
+        assert result.exit_code == 0
+        parsed = json.loads(result.output)
+        assert parsed["total"] == 1
+
+    def test_reports_issues(self, mock_client):
+        mock_client.report_issues_created.return_value = {
+            "total": 2,
+            "github_total": 1,
+            "jira_total": 1,
+            "issues": [
+                {
+                    "issue_type": "GitHub Issue",
+                    "title": "Bug",
+                    "job_name": "j1",
+                    "created_by": "user1",
+                    "created_at": "2025-01-01",
+                },
+            ],
+        }
+        result = runner.invoke(app, ["reports", "issues"])
+        assert result.exit_code == 0
+        assert "Total issues created: 2" in result.output
+
+    def test_reports_issues_json(self, mock_client):
+        mock_client.report_issues_created.return_value = {
+            "total": 0,
+            "github_total": 0,
+            "jira_total": 0,
+            "issues": [],
+        }
+        result = runner.invoke(app, ["--json", "reports", "issues"])
+        assert result.exit_code == 0
+        parsed = json.loads(result.output)
+        assert parsed["total"] == 0
+
+    def test_reports_totals_error(self, mock_client):
+        mock_client.report_totals.side_effect = RootCozError(
+            status_code=500, detail="Server error"
+        )
+        result = runner.invoke(app, ["reports", "totals"])
+        assert result.exit_code == 1
+        assert "500" in result.output or "error" in result.output.lower()

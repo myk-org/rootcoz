@@ -17,7 +17,7 @@ interface ExternalNavLink {
 }
 
 const EXTERNAL_NAV_LINKS: ExternalNavLink[] = [
-  { href: 'https://myk-org.github.io/rootcoz/', label: 'User Guide', title: 'User Guide', icon: BookOpen },
+  { href: 'https://myk-org.github.io/rootcoz/', label: 'Guide', title: 'User Guide', icon: BookOpen },
 ]
 
 const BASE_NAV_LINKS = [
@@ -105,7 +105,7 @@ export function NavBar() {
     : BASE_NAV_LINKS
 
   const navLinks = isAdmin
-    ? [...baseNavLinks, { to: '/admin/users', label: 'Users' }, { to: '/admin/token-usage', label: 'Token Usage' }, { to: '/admin/settings', label: 'Settings' }, { to: '/admin/chat', label: 'Server Chat' }]
+    ? [...baseNavLinks, { to: '/admin/users', label: 'Users' }, { to: '/admin/token-usage', label: 'Tokens' }, { to: '/reports', label: 'Reports' }, { to: '/admin/settings', label: 'Settings' }, { to: '/admin/chat', label: 'Chat' }]
     : baseNavLinks
 
   return (

@@ -73,7 +73,7 @@ uvx --with tox-uv tox -e frontend   # Frontend only
 - **Backend**: Python + FastAPI + SQLite (aiosqlite)
 - **Frontend**: Vite + React 19 + TypeScript + Tailwind CSS + shadcn/ui (in `/frontend/`)
 - **AI Integration**: Pi SDK sidecar — Node.js service wrapping the Pi coding agent SDK. Provides Claude (via Vertex), Cursor (via acpx), and Gemini models. No direct CLI dependencies. `AI_PROVIDER` env var selects provider.
-- **CLI**: `rootcoz` CLI tool for querying the API — run `rootcoz --help` for available commands
+- **CLI**: `rootcoz` CLI tool for querying the API — run `rootcoz --help` for available commands. Sub-commands include `results`, `history`, `comments`, `classifications`, `metadata`, `failure`, `chat`, `reports`, `config`, `auth`, `admin`, `admin-chat`
 
 ### Backend Module Layout
 
@@ -122,6 +122,10 @@ src/rootcoz/
   - `/api/results/{job_id}/comments/stream` — per-job comment changes
   - `/api/admin/token-usage/stream` — token usage data changes
   - `/api/chat/{job_id}/stream` — per-job chat message changes
+- **Reports API**: Analytics endpoints for aggregated metrics:
+  - `GET /api/reports/totals?team=&tier=&version=&from=&to=` — total jobs, failures, reviewed with per-job detail list
+  - `GET /api/reports/classification-overrides?...` — user classification overrides grouped by from→to transition
+  - `GET /api/reports/issues-created?...` — GitHub/Jira issues created from analysis results
 
 ### Server Settings Page
 

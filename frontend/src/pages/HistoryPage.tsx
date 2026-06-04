@@ -3,6 +3,7 @@ import { Link, useNavigate } from 'react-router-dom'
 import { api } from '@/lib/api'
 import { parseApiTimestamp } from '@/lib/utils'
 import type { FailureHistoryEntry } from '@/types'
+import { DateRangePresetFilter } from '@/components/shared/DateRangePresetFilter'
 import {
   Table,
   TableBody,
@@ -58,6 +59,8 @@ function FailureHistoryTab() {
   const [inputValue, setInputValue] = useState('')
   const [search, setSearch] = useState('')
   const [classification, setClassification] = useState('ALL')
+  const [dateFrom, setDateFrom] = useState('')
+  const [dateTo, setDateTo] = useState('')
   const { sortKey, sortDir, handleSort } = useTableSort('hist', 'analyzed_at', 'desc', ['analyzed_at'])
   const [page, setPage] = useState(1)
   const debounceRef = useRef<ReturnType<typeof setTimeout>>(null)
@@ -71,7 +74,7 @@ function FailureHistoryTab() {
   }, [])
 
   const fetchData = useCallback(
-    async (s: string, cls: string, p: number) => {
+    async (s: string, cls: string, p: number, from: string, to: string) => {
       const seq = ++requestSeqRef.current
       setLoading(true)
       setError(null)
@@ -82,6 +85,8 @@ function FailureHistoryTab() {
         })
         if (s) params.set('search', s)
         if (cls && cls !== 'ALL') params.set('classification', cls)
+        if (from) params.set('from', from)
+        if (to) params.set('to', to)
 
         const res = await api.get<{ failures: FailureHistoryEntry[]; total: number }>(
           `/history/failures?${params}`,
@@ -103,10 +108,10 @@ function FailureHistoryTab() {
     [],
   )
 
-  // Fetch on page/search/classification change
+  // Fetch on page/search/classification/date change
   useEffect(() => {
-    fetchData(search, classification, page)
-  }, [page, classification, fetchData, search])
+    fetchData(search, classification, page, dateFrom, dateTo)
+  }, [page, classification, fetchData, search, dateFrom, dateTo])
 
   // Cleanup debounce on unmount
   useEffect(() => {
@@ -130,6 +135,12 @@ function FailureHistoryTab() {
     clearDebounce()
     setSearch(inputValue)
     setClassification(v)
+    setPage(1)
+  }
+
+  function handleDateRangeChange(from: string, to: string) {
+    setDateFrom(from)
+    setDateTo(to)
     setPage(1)
   }
 
@@ -176,6 +187,7 @@ function FailureHistoryTab() {
             ))}
           </SelectContent>
         </Select>
+        <DateRangePresetFilter from={dateFrom} to={dateTo} onChange={handleDateRangeChange} />
         <span className="ml-auto text-xs text-text-tertiary font-mono">
           {total} result{total !== 1 ? 's' : ''}
         </span>
