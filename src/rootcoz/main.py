@@ -1473,7 +1473,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
 
         is_admin = False
         username = ""
-        resolved_role = "reviewer"  # default role until resolved
+        resolved_role = get_settings().default_user_role  # default role until resolved
         authenticated_admin = False
         has_valid_session = False
 
@@ -5592,6 +5592,7 @@ async def bulk_delete_jobs_endpoint(body: BulkDeleteRequest, request: Request) -
 
     Operators can only delete their own jobs; admins can delete any.
     """
+    _check_allow_list(request)
     _require_operator(request)
 
     # Operators can only delete their own jobs; filter unauthorized ones
@@ -5636,6 +5637,7 @@ async def delete_job_endpoint(
 
     Operators can delete their own jobs; admins can delete any.
     """
+    _check_allow_list(request)
     _require_operator(request)
 
     result = await storage.get_result(job_id)
