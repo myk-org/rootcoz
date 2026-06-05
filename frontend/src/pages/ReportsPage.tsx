@@ -189,7 +189,14 @@ function reportsReducer(state: ReportsState, action: ReportsAction): ReportsStat
     case 'SET_SEARCH':
       return { ...state, search: action.value }
     case 'SYNC_FROM_URL':
-      return { ...initStateFromParams(action.params), totalsExpanded: state.totalsExpanded, overridesExpandedGroups: state.overridesExpandedGroups }
+      return {
+        ...initStateFromParams(action.params),
+        totalsExpanded: state.totalsExpanded,
+        overridesExpandedGroups: state.overridesExpandedGroups,
+        totalsData: state.totalsData,
+        overridesData: state.overridesData,
+        issuesData: state.issuesData,
+      }
     case 'FETCH_START':
       return { ...state, loading: true, error: null }
     case 'FETCH_ERROR':
