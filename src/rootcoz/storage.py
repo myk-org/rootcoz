@@ -333,6 +333,7 @@ async def init_db() -> None:
         # Migrations: add columns to results table
         await _migrate_add_column(db, "results", "completed_at", "TIMESTAMP")
         await _migrate_add_column(db, "results", "analysis_started_at", "TIMESTAMP")
+        await _migrate_add_column(db, "results", "error", "TEXT NOT NULL DEFAULT ''")
 
         # failure_history: denormalized table for fast history queries
         await db.execute("""
@@ -1101,6 +1102,7 @@ async def get_result(job_id: str, *, strip_sensitive: bool = True) -> dict | Non
                 "job_id": row["job_id"],
                 "jenkins_url": row["jenkins_url"],
                 "status": row["status"],
+                "error": row["error"] if "error" in row.keys() else "",
                 "result": parsed,
                 "created_at": row["created_at"],
                 "completed_at": row["completed_at"]
@@ -1917,6 +1919,12 @@ async def get_job_stats(job_name: str, exclude_job_id: str = "") -> dict:
 
 ACTIVE_STATUSES = ("running", "pending", "waiting")
 
+# Statuses whose background task is irrecoverably lost after a restart.
+# These are a subset of ACTIVE_STATUSES — "waiting" is excluded because
+# waiting jobs can be safely resumed.
+ORPHAN_STATUSES = ("pending", "running")
+RESTART_ERROR_MSG = "Analysis interrupted by server restart. Please re-submit."
+
 DEFAULT_DASHBOARD_LIMIT = 500
 
 
@@ -1968,7 +1976,7 @@ async def list_results_for_dashboard(
     async with _connect_db() as db:
         sql = """
             SELECT r.job_id, r.jenkins_url, r.status, r.result_json,
-                r.created_at, r.completed_at, r.analysis_started_at,
+                r.created_at, r.completed_at, r.analysis_started_at, r.error,
                 (SELECT COUNT(*) FROM failure_reviews fr
                  WHERE fr.job_id = r.job_id AND fr.reviewed = 1) AS reviewed_count,
                 (SELECT COUNT(*) FROM comments c
@@ -1995,6 +2003,7 @@ async def list_results_for_dashboard(
                 "analysis_started_at": row["analysis_started_at"]
                 if "analysis_started_at" in row.keys()
                 else None,
+                "error": row["error"] if "error" in row.keys() else "",
                 "reviewed_count": row["reviewed_count"],
                 "comment_count": row["comment_count"],
             }
@@ -2684,26 +2693,48 @@ async def get_effective_classification(
         return fh_row[0] if fh_row and fh_row[0] else ""
 
 
-async def mark_stale_results_failed() -> list[dict]:
+async def mark_stale_results_failed() -> tuple[list[dict], list[dict]]:
     """Mark orphaned pending/running jobs as failed. Return waiting jobs for resumption.
 
     Pending and running jobs have lost their background task and cannot recover,
-    so they are marked as failed.  Waiting jobs were polling Jenkins and can be
-    safely resumed by re-creating their background task.
+    so they are marked as failed with an error message and completion timestamp.
+
+    Waiting jobs were polling Jenkins and can be safely resumed by re-creating
+    their background task.
 
     Returns:
-        List of dicts with ``job_id`` and ``result_data`` for each waiting job.
+        Tuple of (waiting_jobs, recovered_jobs).
+        - waiting_jobs: list of dicts with ``job_id`` and ``result_data`` for
+          each waiting job to resume.
+        - recovered_jobs: list of dicts with ``job_id`` and ``previous_status``
+          for each job that was marked failed.
     """
     waiting_jobs: list[dict] = []
+    recovered_jobs: list[dict] = []
     async with _connect_db() as db:
-        # Mark pending/running as failed (background task is gone)
+        # Collect orphaned job details before updating
+        placeholders = ", ".join("?" for _ in ORPHAN_STATUSES)
         cursor = await db.execute(
-            "UPDATE results SET status = 'failed' "
-            "WHERE status IN ('pending', 'running')"
+            f"SELECT job_id, status FROM results WHERE status IN ({placeholders}) AND completed_at IS NULL",
+            ORPHAN_STATUSES,
+        )
+        orphaned_rows = await cursor.fetchall()
+        for row in orphaned_rows:
+            recovered_jobs.append(
+                {"job_id": row["job_id"], "previous_status": row["status"]}
+            )
+
+        # Mark orphaned jobs as failed with error message and completion timestamp
+        now = datetime.now(UTC).isoformat()
+        cursor = await db.execute(
+            f"UPDATE results SET status = 'failed', "
+            f"error = ?, completed_at = ? "
+            f"WHERE status IN ({placeholders}) AND completed_at IS NULL",
+            (RESTART_ERROR_MSG, now, *ORPHAN_STATUSES),
         )
         if cursor.rowcount > 0:
             logger.warning(
-                f"Marked {cursor.rowcount} stale pending/running job(s) as failed on startup"
+                f"Marked {cursor.rowcount} stale job(s) as failed on startup"
             )
 
         # Collect waiting jobs for resumption instead of failing them
@@ -2738,14 +2769,17 @@ async def mark_stale_results_failed() -> list[dict]:
                         f"Marking unrecoverable waiting job {row['job_id']} as failed"
                     )
                     await db.execute(
-                        "UPDATE results SET status = 'failed' WHERE job_id = ?",
-                        (row["job_id"],),
+                        "UPDATE results SET status = 'failed', "
+                        "error = ?, completed_at = ? WHERE job_id = ?",
+                        (RESTART_ERROR_MSG, now, row["job_id"]),
                     )
 
         # Mark waiting jobs without result_json as failed (unrecoverable)
         cursor = await db.execute(
-            "UPDATE results SET status = 'failed' "
-            "WHERE status = 'waiting' AND (result_json IS NULL OR result_json = '')"
+            "UPDATE results SET status = 'failed', "
+            "error = ?, completed_at = ? "
+            "WHERE status = 'waiting' AND (result_json IS NULL OR result_json = '')",
+            (RESTART_ERROR_MSG, now),
         )
         if cursor.rowcount > 0:
             logger.warning(
@@ -2757,7 +2791,7 @@ async def mark_stale_results_failed() -> list[dict]:
     if waiting_jobs:
         logger.info(f"Found {len(waiting_jobs)} waiting job(s) to resume")
 
-    return waiting_jobs
+    return waiting_jobs, recovered_jobs
 
 
 # --- Auth storage functions ---

@@ -1231,7 +1231,13 @@ async def lifespan(_app: FastAPI):
             _background_tasks.add(task)
             task.add_done_callback(_background_tasks.discard)
 
-        waiting_jobs = await storage.mark_stale_results_failed()
+        waiting_jobs, recovered_jobs = await storage.mark_stale_results_failed()
+        for rj in recovered_jobs:
+            logger.info(
+                "Recovered orphaned job %s (was %s) — marked failed",
+                rj["job_id"],
+                rj["previous_status"],
+            )
         notify_active_count_changed()
         notify_dashboard_changed()
         if waiting_jobs:

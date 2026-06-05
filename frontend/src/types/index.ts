@@ -307,6 +307,7 @@ export interface ResultResponse {
   job_id: string
   jenkins_url: string | null
   status: AnalysisStatus
+  error?: string
   result: AnalysisResult | null
   created_at: string
   completed_at?: string | null
