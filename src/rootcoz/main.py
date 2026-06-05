@@ -7610,17 +7610,23 @@ async def reports_totals(
     date_to: str = Query(default="", alias="to"),
     status: str = Query(default=""),
     tags: str = Query(default=""),
+    exclude_tags: str = Query(default=""),
     limit: int = Query(default=0, ge=0, le=1000),
     offset: int = Query(default=0, ge=0),
 ) -> dict:
     """Aggregate totals: total jobs, failures, reviewed, with per-job detail list. Admin only."""
     _require_admin(request)
     tag_list = [t.strip() for t in tags.split(",") if t.strip()] if tags else None
+    exclude_tag_list = (
+        [t.strip() for t in exclude_tags.split(",") if t.strip()]
+        if exclude_tags
+        else None
+    )
     status_list = (
         [s.strip() for s in status.split(",") if s.strip()] if status else None
     )
     logger.debug(
-        "GET /api/reports/totals: team=%r, tier=%r, version=%r, from=%r, to=%r, status=%r, tags=%r",
+        "GET /api/reports/totals: team=%r, tier=%r, version=%r, from=%r, to=%r, status=%r, tags=%r, exclude_tags=%r",
         team,
         tier,
         version,
@@ -7628,6 +7634,7 @@ async def reports_totals(
         date_to,
         status_list,
         tag_list,
+        exclude_tag_list,
     )
     return await storage.get_report_totals(
         team=team,
@@ -7637,6 +7644,7 @@ async def reports_totals(
         date_to=date_to,
         status=status_list,
         tags=tag_list,
+        exclude_tags=exclude_tag_list,
         limit=limit,
         offset=offset,
     )
@@ -7652,17 +7660,23 @@ async def reports_classification_overrides(
     date_to: str = Query(default="", alias="to"),
     status: str = Query(default=""),
     tags: str = Query(default=""),
+    exclude_tags: str = Query(default=""),
     limit: int = Query(default=0, ge=0, le=1000),
     offset: int = Query(default=0, ge=0),
 ) -> dict:
     """Classification overrides grouped by from→to transition. Admin only."""
     _require_admin(request)
     tag_list = [t.strip() for t in tags.split(",") if t.strip()] if tags else None
+    exclude_tag_list = (
+        [t.strip() for t in exclude_tags.split(",") if t.strip()]
+        if exclude_tags
+        else None
+    )
     status_list = (
         [s.strip() for s in status.split(",") if s.strip()] if status else None
     )
     logger.debug(
-        "GET /api/reports/classification-overrides: team=%r, tier=%r, version=%r, from=%r, to=%r, status=%r, tags=%r",
+        "GET /api/reports/classification-overrides: team=%r, tier=%r, version=%r, from=%r, to=%r, status=%r, tags=%r, exclude_tags=%r",
         team,
         tier,
         version,
@@ -7670,6 +7684,7 @@ async def reports_classification_overrides(
         date_to,
         status_list,
         tag_list,
+        exclude_tag_list,
     )
     return await storage.get_report_classification_overrides(
         team=team,
@@ -7679,6 +7694,7 @@ async def reports_classification_overrides(
         date_to=date_to,
         status=status_list,
         tags=tag_list,
+        exclude_tags=exclude_tag_list,
         limit=limit,
         offset=offset,
     )
@@ -7694,17 +7710,23 @@ async def reports_issues_created(
     date_to: str = Query(default="", alias="to"),
     status: str = Query(default=""),
     tags: str = Query(default=""),
+    exclude_tags: str = Query(default=""),
     limit: int = Query(default=0, ge=0, le=1000),
     offset: int = Query(default=0, ge=0),
 ) -> dict:
     """GitHub/Jira issues created from analysis results. Admin only."""
     _require_admin(request)
     tag_list = [t.strip() for t in tags.split(",") if t.strip()] if tags else None
+    exclude_tag_list = (
+        [t.strip() for t in exclude_tags.split(",") if t.strip()]
+        if exclude_tags
+        else None
+    )
     status_list = (
         [s.strip() for s in status.split(",") if s.strip()] if status else None
     )
     logger.debug(
-        "GET /api/reports/issues-created: team=%r, tier=%r, version=%r, from=%r, to=%r, status=%r, tags=%r",
+        "GET /api/reports/issues-created: team=%r, tier=%r, version=%r, from=%r, to=%r, status=%r, tags=%r, exclude_tags=%r",
         team,
         tier,
         version,
@@ -7712,6 +7734,7 @@ async def reports_issues_created(
         date_to,
         status_list,
         tag_list,
+        exclude_tag_list,
     )
     return await storage.get_report_issues_created(
         team=team,
@@ -7721,6 +7744,7 @@ async def reports_issues_created(
         date_to=date_to,
         status=status_list,
         tags=tag_list,
+        exclude_tags=exclude_tag_list,
         limit=limit,
         offset=offset,
     )

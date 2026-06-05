@@ -4425,6 +4425,28 @@ def _build_tags_filter(
     params.extend(tags)
 
 
+def _build_exclude_tags_filter(
+    exclude_tags: list[str] | None,
+    job_id_col: str,
+    conditions: list[str],
+    params: list,
+) -> None:
+    """Append tag-exclusion conditions in-place.
+
+    Excludes jobs that have ANY of the specified tags (NOT IN semantics).
+    """
+    if not exclude_tags:
+        return
+    placeholders = ", ".join("?" for _ in exclude_tags)
+    conditions.append(
+        f"""{job_id_col} NOT IN (
+            SELECT r_tags.job_id FROM results r_tags, json_each(r_tags.result_json, '$.tags') jt
+            WHERE jt.value IN ({placeholders})
+        )"""
+    )
+    params.extend(exclude_tags)
+
+
 async def get_report_totals(
     *,
     team: str = "",
@@ -4434,6 +4456,7 @@ async def get_report_totals(
     date_to: str = "",
     status: list[str] | None = None,
     tags: list[str] | None = None,
+    exclude_tags: list[str] | None = None,
     limit: int = 0,
     offset: int = 0,
 ) -> dict:
@@ -4450,6 +4473,7 @@ async def get_report_totals(
         team, tier, version, "r_data.job_name", conditions, params
     )
     _build_tags_filter(tags, "r.job_id", conditions, params)
+    _build_exclude_tags_filter(exclude_tags, "r.job_id", conditions, params)
 
     effective_status = status if status else ["completed"]
     status_placeholders = ", ".join("?" for _ in effective_status)
@@ -4526,6 +4550,7 @@ async def get_report_classification_overrides(
     date_to: str = "",
     status: list[str] | None = None,
     tags: list[str] | None = None,
+    exclude_tags: list[str] | None = None,
     limit: int = 0,
     offset: int = 0,
 ) -> dict:
@@ -4542,6 +4567,7 @@ async def get_report_classification_overrides(
         team, tier, version, "tc.job_name", conditions, params
     )
     _build_tags_filter(tags, "tc.job_id", conditions, params)
+    _build_exclude_tags_filter(exclude_tags, "tc.job_id", conditions, params)
 
     status_join = ""
     if status:
@@ -4627,6 +4653,7 @@ async def get_report_issues_created(
     date_to: str = "",
     status: list[str] | None = None,
     tags: list[str] | None = None,
+    exclude_tags: list[str] | None = None,
     limit: int = 0,
     offset: int = 0,
 ) -> dict:
@@ -4647,6 +4674,7 @@ async def get_report_issues_created(
         team, tier, version, "r_data.job_name", conditions, params
     )
     _build_tags_filter(tags, "c.job_id", conditions, params)
+    _build_exclude_tags_filter(exclude_tags, "c.job_id", conditions, params)
 
     status_join = ""
     if status:
