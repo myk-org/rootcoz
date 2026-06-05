@@ -8,6 +8,7 @@ import {
   Table, TableBody, TableCell, TableHead, TableHeader, TableRow,
 } from '@/components/ui/table'
 import { Collapsible, CollapsibleTrigger, CollapsibleContent } from '@/components/ui/collapsible'
+import { TooltipProvider } from '@/components/ui/tooltip'
 import { useMetadataOptions, MetadataDropdowns, MetadataLabelChips, MetadataClearButton } from '@/components/shared/MetadataFilterBar'
 import { DateRangePresetFilter } from '@/components/shared/DateRangePresetFilter'
 import { ClassificationBadge } from '@/components/shared/ClassificationBadge'
@@ -604,6 +605,7 @@ export function ReportsPage() {
   }, [fetchReport])
 
   return (
+    <TooltipProvider delayDuration={200}>
     <div className="flex gap-4">
       {/* Sidebar */}
       <nav className="w-56 shrink-0 space-y-1">
@@ -686,5 +688,6 @@ export function ReportsPage() {
         )}
       </div>
     </div>
+    </TooltipProvider>
   )
 }
