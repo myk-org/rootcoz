@@ -165,6 +165,7 @@ function initStateFromParams(sp: URLSearchParams): ReportsState {
     statuses: new Set(sp.getAll('status')),
     labels: sp.getAll('label'),
     excludeLabels: sp.getAll('exclude_label'),
+    search: sp.get('search') ?? '',
   }
 }
 
@@ -255,7 +256,8 @@ function TotalsReport({ data, search, expanded, onToggleExpanded, onSetExpanded 
     : data.jobs,
   [data.jobs, q])
   const totalPages = Math.max(1, Math.ceil(filteredJobs.length / PAGE_SIZE))
-  const pageJobs = filteredJobs.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE)
+  const safePage = Math.min(page, totalPages)
+  const pageJobs = filteredJobs.slice((safePage - 1) * PAGE_SIZE, safePage * PAGE_SIZE)
 
   return (
     <div className="space-y-4">
@@ -313,7 +315,7 @@ function TotalsReport({ data, search, expanded, onToggleExpanded, onSetExpanded 
                 ))}
               </TableBody>
             </Table>
-            <Pagination page={page} totalPages={totalPages} onPageChange={setPage} />
+            <Pagination page={safePage} totalPages={totalPages} onPageChange={setPage} />
           </CollapsibleContent>
         </Collapsible>
       )}
@@ -453,7 +455,8 @@ function IssuesReport({ data, search }: { data: IssuesData; search: string }) {
     : data.issues,
   [data.issues, q])
   const totalPages = Math.max(1, Math.ceil(filteredIssues.length / PAGE_SIZE))
-  const pageIssues = filteredIssues.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE)
+  const safePage = Math.min(page, totalPages)
+  const pageIssues = filteredIssues.slice((safePage - 1) * PAGE_SIZE, safePage * PAGE_SIZE)
 
   return (
     <div className="space-y-4">
@@ -517,7 +520,7 @@ function IssuesReport({ data, search }: { data: IssuesData; search: string }) {
               ))}
             </TableBody>
           </Table>
-          <Pagination page={page} totalPages={totalPages} onPageChange={setPage} />
+          <Pagination page={safePage} totalPages={totalPages} onPageChange={setPage} />
         </>
       ) : (
         <p className="text-sm text-text-tertiary py-8 text-center">No issues found.</p>
@@ -553,6 +556,7 @@ export function ReportsPage() {
       || !setsEqual(nextState.versions, versions) || !setsEqual(nextState.statuses, statuses)
       || JSON.stringify(nextState.labels) !== JSON.stringify(labels)
       || JSON.stringify(nextState.excludeLabels) !== JSON.stringify(excludeLabels)
+      || nextState.search !== search
 
     if (differs) {
       dispatch({ type: 'SYNC_FROM_URL', params: searchParams })
@@ -571,8 +575,9 @@ export function ReportsPage() {
     for (const s of statuses) params.append('status', s)
     for (const l of labels) params.append('label', l)
     for (const l of excludeLabels) params.append('exclude_label', l)
+    if (search) params.set('search', search)
     setSearchParams(params, { replace: true })
-  }, [activeTab, teams, tiers, versions, dateFrom, dateTo, statuses, labels, excludeLabels, setSearchParams])
+  }, [activeTab, teams, tiers, versions, dateFrom, dateTo, statuses, labels, excludeLabels, search, setSearchParams])
 
   const { options: metadataOptions } = useMetadataOptions()
   const fetchSeqRef = useRef(0)
@@ -594,9 +599,10 @@ export function ReportsPage() {
     if (statusVal) params.set('status', statusVal)
     const tagsVal = labels.join(',')
     if (tagsVal) params.set('tags', tagsVal)
-    // Note: excludeLabels handled client-side — reports API doesn't support tag exclusion
+    const excludeVal = excludeLabels.join(',')
+    if (excludeVal) params.set('exclude_tags', excludeVal)
     return params.toString()
-  }, [teams, tiers, versions, dateFrom, dateTo, statuses, labels])
+  }, [teams, tiers, versions, dateFrom, dateTo, statuses, labels, excludeLabels])
 
   const fetchReport = useCallback(async () => {
     const seq = ++fetchSeqRef.current
