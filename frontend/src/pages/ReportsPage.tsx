@@ -106,6 +106,8 @@ interface ReportsState {
   totalsData: TotalsData | null
   overridesData: OverridesData | null
   issuesData: IssuesData | null
+  totalsExpanded: boolean
+  overridesExpandedGroups: Set<string>
 }
 
 type ReportsAction =
@@ -124,6 +126,11 @@ type ReportsAction =
   | { type: 'TOGGLE_STATUS'; value: string }
   | { type: 'CLEAR_STATUSES' }
   | { type: 'TOGGLE_LABEL'; label: string; action: 'include' | 'exclude' | 'off' }
+  | { type: 'TOGGLE_TOTALS_EXPANDED' }
+  | { type: 'SET_TOTALS_EXPANDED'; value: boolean }
+  | { type: 'TOGGLE_OVERRIDE_GROUP'; key: string }
+  | { type: 'EXPAND_ALL_OVERRIDES'; keys: string[] }
+  | { type: 'COLLAPSE_ALL_OVERRIDES' }
 
 const INITIAL_STATE: ReportsState = {
   activeTab: 'totals',
@@ -141,6 +148,8 @@ const INITIAL_STATE: ReportsState = {
   totalsData: null,
   overridesData: null,
   issuesData: null,
+  totalsExpanded: true,
+  overridesExpandedGroups: new Set(),
 }
 
 function initStateFromParams(sp: URLSearchParams): ReportsState {
@@ -179,7 +188,7 @@ function reportsReducer(state: ReportsState, action: ReportsAction): ReportsStat
     case 'SET_SEARCH':
       return { ...state, search: action.value }
     case 'SYNC_FROM_URL':
-      return initStateFromParams(action.params)
+      return { ...initStateFromParams(action.params), totalsExpanded: state.totalsExpanded, overridesExpandedGroups: state.overridesExpandedGroups }
     case 'FETCH_START':
       return { ...state, loading: true, error: null }
     case 'FETCH_ERROR':
@@ -211,13 +220,34 @@ function reportsReducer(state: ReportsState, action: ReportsAction): ReportsStat
         excludeLabels: action.action === 'exclude' ? [...curExclude, action.label] : curExclude,
       }
     }
+    case 'TOGGLE_TOTALS_EXPANDED':
+      return { ...state, totalsExpanded: !state.totalsExpanded }
+    case 'SET_TOTALS_EXPANDED':
+      return { ...state, totalsExpanded: action.value }
+    case 'TOGGLE_OVERRIDE_GROUP': {
+      const next = new Set(state.overridesExpandedGroups)
+      if (next.has(action.key)) next.delete(action.key)
+      else next.add(action.key)
+      return { ...state, overridesExpandedGroups: next }
+    }
+    case 'EXPAND_ALL_OVERRIDES':
+      return { ...state, overridesExpandedGroups: new Set(action.keys) }
+    case 'COLLAPSE_ALL_OVERRIDES':
+      return { ...state, overridesExpandedGroups: new Set() }
   }
 }
 
 // ─── Report Content Components ──────────────────────────────────────
 
-function TotalsReport({ data, search }: { data: TotalsData; search: string }) {
-  const [expanded, setExpanded] = useState(true)
+interface TotalsReportProps {
+  data: TotalsData
+  search: string
+  expanded: boolean
+  onToggleExpanded: () => void
+  onSetExpanded: (v: boolean) => void
+}
+
+function TotalsReport({ data, search, expanded, onToggleExpanded, onSetExpanded }: TotalsReportProps) {
   const [page, setPage] = useReducer((_: number, p: number) => p, 1)
   const q = search.toLowerCase()
   const filteredJobs = useMemo(() => q
@@ -236,7 +266,7 @@ function TotalsReport({ data, search }: { data: TotalsData; search: string }) {
       </div>
 
       {data.jobs.length > 0 && (
-        <Collapsible open={expanded} onOpenChange={setExpanded}>
+        <Collapsible open={expanded} onOpenChange={onToggleExpanded}>
           <div className="flex items-center gap-3">
             <CollapsibleTrigger asChild>
               <button
@@ -248,8 +278,8 @@ function TotalsReport({ data, search }: { data: TotalsData; search: string }) {
               </button>
             </CollapsibleTrigger>
             <ExpandCollapseButtons
-              onExpandAll={() => setExpanded(true)}
-              onCollapseAll={() => setExpanded(false)}
+              onExpandAll={() => onSetExpanded(true)}
+              onCollapseAll={() => onSetExpanded(false)}
             />
           </div>
 
@@ -291,18 +321,17 @@ function TotalsReport({ data, search }: { data: TotalsData; search: string }) {
   )
 }
 
-function OverridesReport({ data, search }: { data: OverridesData; search: string }) {
-  const [expandedGroups, setExpandedGroups] = useState<Set<string>>(new Set())
-  const [pageByGroup, setPageByGroup] = useState<Record<string, number>>({})
+interface OverridesReportProps {
+  data: OverridesData
+  search: string
+  expandedGroups: Set<string>
+  onToggleGroup: (key: string) => void
+  onExpandAll: (keys: string[]) => void
+  onCollapseAll: () => void
+}
 
-  const toggleGroup = useCallback((key: string) => {
-    setExpandedGroups(prev => {
-      const next = new Set(prev)
-      if (next.has(key)) next.delete(key)
-      else next.add(key)
-      return next
-    })
-  }, [])
+function OverridesReport({ data, search, expandedGroups, onToggleGroup, onExpandAll, onCollapseAll }: OverridesReportProps) {
+  const [pageByGroup, setPageByGroup] = useState<Record<string, number>>({})
 
   const q = search.toLowerCase()
   const filteredDetails = useMemo(() => q
@@ -342,8 +371,8 @@ function OverridesReport({ data, search }: { data: OverridesData; search: string
       {filteredGroups.length > 0 && (
         <div className="space-y-2">
           <ExpandCollapseButtons
-            onExpandAll={() => setExpandedGroups(new Set(allGroupKeys))}
-            onCollapseAll={() => setExpandedGroups(new Set())}
+            onExpandAll={() => onExpandAll(allGroupKeys)}
+            onCollapseAll={onCollapseAll}
           />
           {filteredGroups.map((g) => {
             const key = `${g.from} → ${g.to}`
@@ -353,7 +382,7 @@ function OverridesReport({ data, search }: { data: OverridesData; search: string
             const groupPage = Math.min(pageByGroup[key] ?? 1, groupTotalPages)
             const groupPageDetails = groupDetails.slice((groupPage - 1) * PAGE_SIZE, groupPage * PAGE_SIZE)
             return (
-              <Collapsible key={key} open={isExpanded} onOpenChange={() => toggleGroup(key)}>
+              <Collapsible key={key} open={isExpanded} onOpenChange={() => onToggleGroup(key)}>
                 <div className="rounded-lg border border-border-muted bg-surface-card overflow-hidden">
                   <CollapsibleTrigger asChild>
                     <button
@@ -511,7 +540,7 @@ function StatCard({ label, value, tone }: { label: string; value: number; tone?:
 export function ReportsPage() {
   const [searchParams, setSearchParams] = useSearchParams()
   const [state, dispatch] = useReducer(reportsReducer, searchParams, initStateFromParams)
-  const { activeTab, loading, error, search, teams, tiers, versions, dateFrom, dateTo, statuses, labels, excludeLabels, totalsData, overridesData, issuesData } = state
+  const { activeTab, loading, error, search, teams, tiers, versions, dateFrom, dateTo, statuses, labels, excludeLabels, totalsData, overridesData, issuesData, totalsExpanded, overridesExpandedGroups } = state
 
   // ─── URL → state sync (external navigation / shared links) ─────
   // Only dispatch when URL actually differs from current state — no flags, no races.
@@ -680,8 +709,25 @@ export function ReportsPage() {
           </div>
         ) : (
           <>
-            {activeTab === 'totals' && totalsData && <TotalsReport data={totalsData} search={search} />}
-            {activeTab === 'overrides' && overridesData && <OverridesReport data={overridesData} search={search} />}
+            {activeTab === 'totals' && totalsData && (
+              <TotalsReport
+                data={totalsData}
+                search={search}
+                expanded={totalsExpanded}
+                onToggleExpanded={() => dispatch({ type: 'TOGGLE_TOTALS_EXPANDED' })}
+                onSetExpanded={(v) => dispatch({ type: 'SET_TOTALS_EXPANDED', value: v })}
+              />
+            )}
+            {activeTab === 'overrides' && overridesData && (
+              <OverridesReport
+                data={overridesData}
+                search={search}
+                expandedGroups={overridesExpandedGroups}
+                onToggleGroup={(key) => dispatch({ type: 'TOGGLE_OVERRIDE_GROUP', key })}
+                onExpandAll={(keys) => dispatch({ type: 'EXPAND_ALL_OVERRIDES', keys })}
+                onCollapseAll={() => dispatch({ type: 'COLLAPSE_ALL_OVERRIDES' })}
+              />
+            )}
             {activeTab === 'issues' && issuesData && <IssuesReport data={issuesData} search={search} />}
           </>
         )}
