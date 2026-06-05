@@ -8,7 +8,7 @@ import {
   Table, TableBody, TableCell, TableHead, TableHeader, TableRow,
 } from '@/components/ui/table'
 import { Collapsible, CollapsibleTrigger, CollapsibleContent } from '@/components/ui/collapsible'
-import { useMetadataOptions, MetadataDropdowns, MetadataClearButton } from '@/components/shared/MetadataFilterBar'
+import { useMetadataOptions, MetadataDropdowns, MetadataLabelChips, MetadataClearButton } from '@/components/shared/MetadataFilterBar'
 import { DateRangePresetFilter } from '@/components/shared/DateRangePresetFilter'
 import { ClassificationBadge } from '@/components/shared/ClassificationBadge'
 import { MultiSelectFilter } from '@/components/shared/MultiSelectFilter'
@@ -100,8 +100,8 @@ interface ReportsState {
   dateFrom: string
   dateTo: string
   statuses: Set<string>
-  tags: Set<string>
-  availableTags: string[]
+  labels: string[]
+  excludeLabels: string[]
   totalsData: TotalsData | null
   overridesData: OverridesData | null
   issuesData: IssuesData | null
@@ -122,9 +122,7 @@ type ReportsAction =
   | { type: 'SET_DATE_RANGE'; from: string; to: string }
   | { type: 'TOGGLE_STATUS'; value: string }
   | { type: 'CLEAR_STATUSES' }
-  | { type: 'TOGGLE_TAG'; value: string }
-  | { type: 'CLEAR_TAGS' }
-  | { type: 'SET_AVAILABLE_TAGS'; tags: string[] }
+  | { type: 'TOGGLE_LABEL'; label: string; action: 'include' | 'exclude' | 'off' }
 
 const INITIAL_STATE: ReportsState = {
   activeTab: 'totals',
@@ -137,8 +135,8 @@ const INITIAL_STATE: ReportsState = {
   dateFrom: '',
   dateTo: '',
   statuses: new Set(),
-  tags: new Set(),
-  availableTags: [],
+  labels: [],
+  excludeLabels: [],
   totalsData: null,
   overridesData: null,
   issuesData: null,
@@ -155,7 +153,8 @@ function initStateFromParams(sp: URLSearchParams): ReportsState {
     dateFrom: sp.get('from') ?? '',
     dateTo: sp.get('to') ?? '',
     statuses: new Set(sp.getAll('status')),
-    tags: new Set(sp.getAll('tag')),
+    labels: sp.getAll('label'),
+    excludeLabels: sp.getAll('exclude_label'),
   }
 }
 
@@ -179,7 +178,7 @@ function reportsReducer(state: ReportsState, action: ReportsAction): ReportsStat
     case 'SET_SEARCH':
       return { ...state, search: action.value }
     case 'SYNC_FROM_URL':
-      return { ...initStateFromParams(action.params), availableTags: state.availableTags }
+      return initStateFromParams(action.params)
     case 'FETCH_START':
       return { ...state, loading: true, error: null }
     case 'FETCH_ERROR':
@@ -195,19 +194,22 @@ function reportsReducer(state: ReportsState, action: ReportsAction): ReportsStat
     case 'CLEAR_META':
       return { ...state, [action.field]: new Set<string>() }
     case 'CLEAR_ALL_META':
-      return { ...state, teams: new Set(), tiers: new Set(), versions: new Set(), statuses: new Set<string>(), tags: new Set<string>() }
+      return { ...state, teams: new Set(), tiers: new Set(), versions: new Set(), statuses: new Set<string>(), labels: [], excludeLabels: [] }
     case 'SET_DATE_RANGE':
       return { ...state, dateFrom: action.from, dateTo: action.to }
     case 'TOGGLE_STATUS':
       return { ...state, statuses: toggleInSet(state.statuses, action.value) }
     case 'CLEAR_STATUSES':
       return { ...state, statuses: new Set<string>() }
-    case 'TOGGLE_TAG':
-      return { ...state, tags: toggleInSet(state.tags, action.value) }
-    case 'CLEAR_TAGS':
-      return { ...state, tags: new Set<string>() }
-    case 'SET_AVAILABLE_TAGS':
-      return { ...state, availableTags: action.tags }
+    case 'TOGGLE_LABEL': {
+      const curLabels = state.labels.filter(l => l !== action.label)
+      const curExclude = state.excludeLabels.filter(l => l !== action.label)
+      return {
+        ...state,
+        labels: action.action === 'include' ? [...curLabels, action.label] : curLabels,
+        excludeLabels: action.action === 'exclude' ? [...curExclude, action.label] : curExclude,
+      }
+    }
   }
 }
 
@@ -510,7 +512,7 @@ function StatCard({ label, value, tone }: { label: string; value: number; tone?:
 export function ReportsPage() {
   const [searchParams, setSearchParams] = useSearchParams()
   const [state, dispatch] = useReducer(reportsReducer, searchParams, initStateFromParams)
-  const { activeTab, loading, error, search, teams, tiers, versions, dateFrom, dateTo, statuses, tags, availableTags, totalsData, overridesData, issuesData } = state
+  const { activeTab, loading, error, search, teams, tiers, versions, dateFrom, dateTo, statuses, labels, excludeLabels, totalsData, overridesData, issuesData } = state
 
   // ─── URL → state sync (external navigation / shared links) ─────
   // Only dispatch when URL actually differs from current state — no flags, no races.
@@ -521,7 +523,8 @@ export function ReportsPage() {
       || nextState.dateFrom !== dateFrom || nextState.dateTo !== dateTo
       || !setsEqual(nextState.teams, teams) || !setsEqual(nextState.tiers, tiers)
       || !setsEqual(nextState.versions, versions) || !setsEqual(nextState.statuses, statuses)
-      || !setsEqual(nextState.tags, tags)
+      || JSON.stringify(nextState.labels) !== JSON.stringify(labels)
+      || JSON.stringify(nextState.excludeLabels) !== JSON.stringify(excludeLabels)
 
     if (differs) {
       dispatch({ type: 'SYNC_FROM_URL', params: searchParams })
@@ -538,14 +541,15 @@ export function ReportsPage() {
     if (dateFrom) params.set('from', dateFrom)
     if (dateTo) params.set('to', dateTo)
     for (const s of statuses) params.append('status', s)
-    for (const t of tags) params.append('tag', t)
+    for (const l of labels) params.append('label', l)
+    for (const l of excludeLabels) params.append('exclude_label', l)
     setSearchParams(params, { replace: true })
-  }, [activeTab, teams, tiers, versions, dateFrom, dateTo, statuses, tags, setSearchParams])
+  }, [activeTab, teams, tiers, versions, dateFrom, dateTo, statuses, labels, excludeLabels, setSearchParams])
 
   const { options: metadataOptions } = useMetadataOptions()
   const fetchSeqRef = useRef(0)
 
-  const hasMetadataFilters = teams.size > 0 || tiers.size > 0 || versions.size > 0 || statuses.size > 0 || tags.size > 0
+  const hasMetadataFilters = teams.size > 0 || tiers.size > 0 || versions.size > 0 || statuses.size > 0 || labels.length > 0 || excludeLabels.length > 0
 
   // Build query params shared by all endpoints
   const queryString = useMemo(() => {
@@ -560,10 +564,10 @@ export function ReportsPage() {
     if (dateTo) params.set('to', dateTo)
     const statusVal = [...statuses].join(',')
     if (statusVal) params.set('status', statusVal)
-    const tagsVal = [...tags].join(',')
+    const tagsVal = labels.join(',')
     if (tagsVal) params.set('tags', tagsVal)
     return params.toString()
-  }, [teams, tiers, versions, dateFrom, dateTo, statuses, tags])
+  }, [teams, tiers, versions, dateFrom, dateTo, statuses, labels])
 
   const fetchReport = useCallback(async () => {
     const seq = ++fetchSeqRef.current
@@ -598,16 +602,6 @@ export function ReportsPage() {
   useEffect(() => {
     fetchReport()
   }, [fetchReport])
-
-  useEffect(() => {
-    api.get<Array<{ tags?: string[] }>>('/api/dashboard').then((jobs) => {
-      const tagSet = new Set<string>()
-      for (const job of jobs) {
-        for (const t of job.tags ?? []) tagSet.add(t)
-      }
-      dispatch({ type: 'SET_AVAILABLE_TAGS', tags: [...tagSet].sort() })
-    }).catch(() => {})
-  }, [])
 
   return (
     <div className="flex gap-4">
@@ -661,18 +655,16 @@ export function ReportsPage() {
             to={dateTo}
             onChange={(from, to) => dispatch({ type: 'SET_DATE_RANGE', from, to })}
           />
-          {availableTags.length > 0 && (
-            <MultiSelectFilter
-              label="All tags"
-              options={availableTags}
-              selected={tags}
-              onToggle={(v) => dispatch({ type: 'TOGGLE_TAG', value: v })}
-              onClear={() => dispatch({ type: 'CLEAR_TAGS' })}
-              className="w-full sm:w-40"
-            />
-          )}
           <MetadataClearButton hasFilters={hasMetadataFilters} onClearAll={() => dispatch({ type: 'CLEAR_ALL_META' })} />
         </div>
+
+        {/* Tag chips — same pattern as Dashboard */}
+        <MetadataLabelChips
+          allLabels={metadataOptions.allLabels}
+          labels={labels}
+          excludeLabels={excludeLabels}
+          onLabelToggle={(label, action) => dispatch({ type: 'TOGGLE_LABEL', label, action })}
+        />
 
         {/* Report content */}
         {error && (
