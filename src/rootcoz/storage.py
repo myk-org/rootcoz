@@ -4404,21 +4404,21 @@ def _build_metadata_join(
 
 def _build_tags_filter(
     tags: list[str] | None,
-    job_id_col: str,
+    job_name_col: str,
     conditions: list[str],
     params: list,
 ) -> None:
     """Append tag-filtering conditions in-place.
 
-    Tags are stored in ``result_json`` → ``$.tags`` as a JSON array.
+    Tags are stored in ``job_metadata.labels`` as a JSON array.
     Uses ``json_each`` to match any of the requested tags (OR semantics).
     """
     if not tags:
         return
     placeholders = ", ".join("?" for _ in tags)
     conditions.append(
-        f"""{job_id_col} IN (
-            SELECT r_tags.job_id FROM results r_tags, json_each(r_tags.result_json, '$.tags') jt
+        f"""{job_name_col} IN (
+            SELECT jm_tags.job_name FROM job_metadata jm_tags, json_each(jm_tags.labels) jt
             WHERE jt.value IN ({placeholders})
         )"""
     )
@@ -4427,7 +4427,7 @@ def _build_tags_filter(
 
 def _build_exclude_tags_filter(
     exclude_tags: list[str] | None,
-    job_id_col: str,
+    job_name_col: str,
     conditions: list[str],
     params: list,
 ) -> None:
@@ -4439,8 +4439,8 @@ def _build_exclude_tags_filter(
         return
     placeholders = ", ".join("?" for _ in exclude_tags)
     conditions.append(
-        f"""{job_id_col} NOT IN (
-            SELECT r_tags.job_id FROM results r_tags, json_each(r_tags.result_json, '$.tags') jt
+        f"""{job_name_col} NOT IN (
+            SELECT jm_tags.job_name FROM job_metadata jm_tags, json_each(jm_tags.labels) jt
             WHERE jt.value IN ({placeholders})
         )"""
     )
@@ -4472,8 +4472,8 @@ async def get_report_totals(
     meta_join = _build_metadata_join(
         team, tier, version, "r_data.job_name", conditions, params
     )
-    _build_tags_filter(tags, "r.job_id", conditions, params)
-    _build_exclude_tags_filter(exclude_tags, "r.job_id", conditions, params)
+    _build_tags_filter(tags, "r_data.job_name", conditions, params)
+    _build_exclude_tags_filter(exclude_tags, "r_data.job_name", conditions, params)
 
     effective_status = status if status else ["completed"]
     status_placeholders = ", ".join("?" for _ in effective_status)
@@ -4566,8 +4566,8 @@ async def get_report_classification_overrides(
     meta_join = _build_metadata_join(
         team, tier, version, "tc.job_name", conditions, params
     )
-    _build_tags_filter(tags, "tc.job_id", conditions, params)
-    _build_exclude_tags_filter(exclude_tags, "tc.job_id", conditions, params)
+    _build_tags_filter(tags, "tc.job_name", conditions, params)
+    _build_exclude_tags_filter(exclude_tags, "tc.job_name", conditions, params)
 
     status_join = ""
     if status:
@@ -4673,8 +4673,8 @@ async def get_report_issues_created(
     meta_join = _build_metadata_join(
         team, tier, version, "r_data.job_name", conditions, params
     )
-    _build_tags_filter(tags, "c.job_id", conditions, params)
-    _build_exclude_tags_filter(exclude_tags, "c.job_id", conditions, params)
+    _build_tags_filter(tags, "r_data.job_name", conditions, params)
+    _build_exclude_tags_filter(exclude_tags, "r_data.job_name", conditions, params)
 
     status_join = ""
     if status:
@@ -4683,8 +4683,10 @@ async def get_report_issues_created(
         conditions.append(f"r_status.status IN ({placeholders})")
         params.extend(status)
 
-    # Use JOIN when metadata filters narrow results, LEFT JOIN otherwise
-    join_type = "JOIN" if (team or tier or version) else "LEFT JOIN"
+    # Use JOIN when metadata/tag filters narrow results, LEFT JOIN otherwise
+    join_type = (
+        "JOIN" if (team or tier or version or tags or exclude_tags) else "LEFT JOIN"
+    )
     where = " AND ".join(conditions)
 
     async with _connect_db() as db:

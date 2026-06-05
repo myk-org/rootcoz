@@ -85,6 +85,9 @@ async def populated_db(setup_test_db: Path):
             username="creator",
         )
 
+        # Insert job metadata with labels for tag filtering
+        await storage.set_job_metadata("tagged-job", labels=["nightly", "smoke"])
+
         # Insert a failed result with tags
         failed_result_data = {
             "job_name": "tagged-job",
