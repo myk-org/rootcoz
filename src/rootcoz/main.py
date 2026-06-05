@@ -7600,6 +7600,11 @@ async def api_dashboard_filtered(
 # --- Reports endpoints ---
 
 
+def _parse_csv_list(value: str) -> list[str] | None:
+    """Parse comma-separated string into list, or None if empty."""
+    return [v.strip() for v in value.split(",") if v.strip()] if value else None
+
+
 @app.get("/api/reports/totals")
 async def reports_totals(
     request: Request,
@@ -7616,15 +7621,9 @@ async def reports_totals(
 ) -> dict:
     """Aggregate totals: total jobs, failures, reviewed, with per-job detail list. Admin only."""
     _require_admin(request)
-    tag_list = [t.strip() for t in tags.split(",") if t.strip()] if tags else None
-    exclude_tag_list = (
-        [t.strip() for t in exclude_tags.split(",") if t.strip()]
-        if exclude_tags
-        else None
-    )
-    status_list = (
-        [s.strip() for s in status.split(",") if s.strip()] if status else None
-    )
+    tag_list = _parse_csv_list(tags)
+    exclude_tag_list = _parse_csv_list(exclude_tags)
+    status_list = _parse_csv_list(status)
     logger.debug(
         "GET /api/reports/totals: team=%r, tier=%r, version=%r, from=%r, to=%r, status=%r, tags=%r, exclude_tags=%r",
         team,
@@ -7666,15 +7665,9 @@ async def reports_classification_overrides(
 ) -> dict:
     """Classification overrides grouped by from→to transition. Admin only."""
     _require_admin(request)
-    tag_list = [t.strip() for t in tags.split(",") if t.strip()] if tags else None
-    exclude_tag_list = (
-        [t.strip() for t in exclude_tags.split(",") if t.strip()]
-        if exclude_tags
-        else None
-    )
-    status_list = (
-        [s.strip() for s in status.split(",") if s.strip()] if status else None
-    )
+    tag_list = _parse_csv_list(tags)
+    exclude_tag_list = _parse_csv_list(exclude_tags)
+    status_list = _parse_csv_list(status)
     logger.debug(
         "GET /api/reports/classification-overrides: team=%r, tier=%r, version=%r, from=%r, to=%r, status=%r, tags=%r, exclude_tags=%r",
         team,
@@ -7716,15 +7709,9 @@ async def reports_issues_created(
 ) -> dict:
     """GitHub/Jira issues created from analysis results. Admin only."""
     _require_admin(request)
-    tag_list = [t.strip() for t in tags.split(",") if t.strip()] if tags else None
-    exclude_tag_list = (
-        [t.strip() for t in exclude_tags.split(",") if t.strip()]
-        if exclude_tags
-        else None
-    )
-    status_list = (
-        [s.strip() for s in status.split(",") if s.strip()] if status else None
-    )
+    tag_list = _parse_csv_list(tags)
+    exclude_tag_list = _parse_csv_list(exclude_tags)
+    status_list = _parse_csv_list(status)
     logger.debug(
         "GET /api/reports/issues-created: team=%r, tier=%r, version=%r, from=%r, to=%r, status=%r, tags=%r, exclude_tags=%r",
         team,
