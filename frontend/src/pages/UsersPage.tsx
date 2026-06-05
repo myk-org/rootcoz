@@ -331,7 +331,28 @@ export function UsersPage() {
                   )}
                 </TableCell>
                 <TableCell>
-                  <RoleBadge role={user.role} />
+                  {user.username === 'admin' ? (
+                    <RoleBadge role={user.role} />
+                  ) : (
+                    <Select
+                      value={user.role}
+                      onValueChange={(newRole) => {
+                        if (newRole !== user.role) {
+                          setRoleChangeTarget({ username: user.username, currentRole: user.role, newRole })
+                        }
+                      }}
+                    >
+                      <SelectTrigger className="h-7 w-[96px] text-xs">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="viewer">viewer</SelectItem>
+                        <SelectItem value="reviewer">reviewer</SelectItem>
+                        <SelectItem value="operator">operator</SelectItem>
+                        <SelectItem value="admin">admin</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  )}
                 </TableCell>
                 <TableCell className="font-mono text-xs text-text-tertiary">
                   {formatTimestamp(user.created_at)}
@@ -396,25 +417,6 @@ export function UsersPage() {
                     </div>
                   ) : (
                     <div className="flex items-center justify-end gap-1">
-                      {/* Role select */}
-                      <Select
-                        value={user.role}
-                        onValueChange={(newRole) => {
-                          if (newRole !== user.role) {
-                            setRoleChangeTarget({ username: user.username, currentRole: user.role, newRole })
-                          }
-                        }}
-                      >
-                        <SelectTrigger className="h-7 w-[96px] text-xs">
-                          <SelectValue />
-                        </SelectTrigger>
-                        <SelectContent>
-                          <SelectItem value="viewer">viewer</SelectItem>
-                          <SelectItem value="reviewer">reviewer</SelectItem>
-                          <SelectItem value="operator">operator</SelectItem>
-                          <SelectItem value="admin">admin</SelectItem>
-                        </SelectContent>
-                      </Select>
                       {/* Rotate key — only for admins (regular users have no API key) */}
                       <TooltipProvider delayDuration={200}>
                         <Tooltip>
