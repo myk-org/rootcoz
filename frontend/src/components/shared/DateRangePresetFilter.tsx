@@ -11,11 +11,11 @@ interface Preset {
 }
 
 const PRESETS: Preset[] = [
-  { label: 'All time', days: 0 },
   { label: 'Last 7 days', days: 7 },
   { label: 'Last 14 days', days: 14 },
   { label: 'Last 30 days', days: 30 },
   { label: 'Last year', days: 365 },
+  { label: 'All time', days: 0 },
 ]
 
 function toDateString(d: Date): string {
@@ -59,7 +59,7 @@ export function DateRangePresetFilter({ from, to, onChange }: DateRangePresetFil
 
   /** Determine active preset (if any). */
   const activePreset = useMemo(() => {
-    if (!from && !to) return PRESETS[0] // All time
+    if (!from && !to) return PRESETS.find(p => p.days === 0) ?? null
     const today = todayString()
     if (to && to !== today) return null // Custom end date
     for (const p of PRESETS) {
@@ -93,7 +93,7 @@ export function DateRangePresetFilter({ from, to, onChange }: DateRangePresetFil
         <Button
           variant="outline"
           size="sm"
-          className="h-9 gap-1.5 text-xs font-medium"
+          className="h-9 gap-1.5 text-xs font-medium rounded-full border-border-default bg-surface-elevated hover:bg-surface-hover px-4"
           aria-label="Date range filter"
         >
           <Calendar className="h-3.5 w-3.5 text-text-tertiary" />

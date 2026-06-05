@@ -14,6 +14,7 @@ import { ClassificationBadge } from '@/components/shared/ClassificationBadge'
 import { MultiSelectFilter } from '@/components/shared/MultiSelectFilter'
 import { Pagination } from '@/components/shared/Pagination'
 import { ExpandCollapseButtons } from '@/components/shared/ExpandCollapseButtons'
+import { SearchInput } from '@/components/shared/SearchInput'
 import { BarChart3, ArrowRightLeft, Bug, ChevronDown, ChevronRight, ExternalLink, PanelLeftClose, PanelLeft } from 'lucide-react'
 
 // ─── Types ──────────────────────────────────────────────────────────
@@ -92,6 +93,7 @@ interface ReportsState {
   activeTab: ReportTab
   loading: boolean
   error: string | null
+  search: string
   teams: Set<string>
   tiers: Set<string>
   versions: Set<string>
@@ -115,6 +117,7 @@ type ReportsAction =
   | { type: 'FETCH_TOTALS'; data: TotalsData }
   | { type: 'FETCH_OVERRIDES'; data: OverridesData }
   | { type: 'FETCH_ISSUES'; data: IssuesData }
+  | { type: 'SET_SEARCH'; value: string }
   | { type: 'TOGGLE_META'; field: 'teams' | 'tiers' | 'versions'; value: string }
   | { type: 'CLEAR_META'; field: 'teams' | 'tiers' | 'versions' }
   | { type: 'CLEAR_ALL_META' }
@@ -131,6 +134,7 @@ const INITIAL_STATE: ReportsState = {
   activeTab: 'totals',
   loading: false,
   error: null,
+  search: '',
   teams: new Set(),
   tiers: new Set(),
   versions: new Set(),
@@ -178,6 +182,8 @@ function reportsReducer(state: ReportsState, action: ReportsAction): ReportsStat
   switch (action.type) {
     case 'SET_TAB':
       return { ...state, activeTab: action.tab }
+    case 'SET_SEARCH':
+      return { ...state, search: action.value }
     case 'SYNC_FROM_URL':
       return { ...initStateFromParams(action.params), availableTags: state.availableTags, sidebarCollapsed: state.sidebarCollapsed, sidebarWidth: state.sidebarWidth }
     case 'FETCH_START':
@@ -217,11 +223,16 @@ function reportsReducer(state: ReportsState, action: ReportsAction): ReportsStat
 
 // ─── Report Content Components ──────────────────────────────────────
 
-function TotalsReport({ data }: { data: TotalsData }) {
+function TotalsReport({ data, search }: { data: TotalsData; search: string }) {
   const [expanded, setExpanded] = useState(false)
   const [page, setPage] = useReducer((_: number, p: number) => p, 1)
-  const totalPages = Math.max(1, Math.ceil(data.jobs.length / PAGE_SIZE))
-  const pageJobs = data.jobs.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE)
+  const q = search.toLowerCase()
+  const filteredJobs = useMemo(() => q
+    ? data.jobs.filter(j => j.job_name.toLowerCase().includes(q))
+    : data.jobs,
+  [data.jobs, q])
+  const totalPages = Math.max(1, Math.ceil(filteredJobs.length / PAGE_SIZE))
+  const pageJobs = filteredJobs.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE)
 
   return (
     <div className="space-y-4">
@@ -240,7 +251,7 @@ function TotalsReport({ data }: { data: TotalsData }) {
                 className="flex items-center gap-1.5 text-sm font-medium text-text-secondary hover:text-text-primary transition-colors"
               >
                 {expanded ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
-                Job Details ({data.jobs.length})
+                Job Details ({filteredJobs.length})
               </button>
             </CollapsibleTrigger>
             <ExpandCollapseButtons
@@ -287,7 +298,7 @@ function TotalsReport({ data }: { data: TotalsData }) {
   )
 }
 
-function OverridesReport({ data }: { data: OverridesData }) {
+function OverridesReport({ data, search }: { data: OverridesData; search: string }) {
   const [expandedGroups, setExpandedGroups] = useState<Set<string>>(new Set())
   const [pageByGroup, setPageByGroup] = useState<Record<string, number>>({})
 
@@ -300,16 +311,34 @@ function OverridesReport({ data }: { data: OverridesData }) {
     })
   }, [])
 
-  const allGroupKeys = useMemo(() => data.groups.map(g => `${g.from} → ${g.to}`), [data.groups])
+  /** When searching, derive groups from filtered details so counts match. */
+  const filteredGroups = useMemo(() => {
+    if (!q) return data.groups
+    const counts: Record<string, { from: string; to: string; count: number }> = {}
+    for (const d of filteredDetails) {
+      const key = `${d.from_classification} → ${d.to_classification}`
+      if (!counts[key]) counts[key] = { from: d.from_classification, to: d.to_classification, count: 0 }
+      counts[key].count++
+    }
+    return Object.values(counts)
+  }, [data.groups, filteredDetails, q])
+
+  const allGroupKeys = useMemo(() => filteredGroups.map(g => `${g.from} → ${g.to}`), [filteredGroups])
+
+  const q = search.toLowerCase()
+  const filteredDetails = useMemo(() => q
+    ? data.details.filter(d => d.test_name.toLowerCase().includes(q) || d.job_name.toLowerCase().includes(q))
+    : data.details,
+  [data.details, q])
 
   const detailsByGroup = useMemo(() => {
     const map: Record<string, typeof data.details> = {}
-    for (const d of data.details) {
+    for (const d of filteredDetails) {
       const key = `${d.from_classification} → ${d.to_classification}`
       ;(map[key] ??= []).push(d)
     }
     return map
-  }, [data.details])
+  }, [filteredDetails])
 
   return (
     <div className="space-y-4">
@@ -319,13 +348,13 @@ function OverridesReport({ data }: { data: OverridesData }) {
         </p>
       </div>
 
-      {data.groups.length > 0 && (
+      {filteredGroups.length > 0 && (
         <div className="space-y-2">
           <ExpandCollapseButtons
             onExpandAll={() => setExpandedGroups(new Set(allGroupKeys))}
             onCollapseAll={() => setExpandedGroups(new Set())}
           />
-          {data.groups.map((g) => {
+          {filteredGroups.map((g) => {
             const key = `${g.from} → ${g.to}`
             const isExpanded = expandedGroups.has(key)
             const groupDetails = isExpanded ? (detailsByGroup[key] ?? []) : []
@@ -389,17 +418,22 @@ function OverridesReport({ data }: { data: OverridesData }) {
         </div>
       )}
 
-      {data.groups.length === 0 && (
+      {filteredGroups.length === 0 && (
         <p className="text-sm text-text-tertiary py-8 text-center">No classification overrides found.</p>
       )}
     </div>
   )
 }
 
-function IssuesReport({ data }: { data: IssuesData }) {
+function IssuesReport({ data, search }: { data: IssuesData; search: string }) {
   const [page, setPage] = useReducer((_: number, p: number) => p, 1)
-  const totalPages = Math.max(1, Math.ceil(data.issues.length / PAGE_SIZE))
-  const pageIssues = data.issues.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE)
+  const q = search.toLowerCase()
+  const filteredIssues = useMemo(() => q
+    ? data.issues.filter(i => i.test_name.toLowerCase().includes(q) || i.job_name.toLowerCase().includes(q) || i.title.toLowerCase().includes(q))
+    : data.issues,
+  [data.issues, q])
+  const totalPages = Math.max(1, Math.ceil(filteredIssues.length / PAGE_SIZE))
+  const pageIssues = filteredIssues.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE)
 
   return (
     <div className="space-y-4">
@@ -486,7 +520,7 @@ function StatCard({ label, value, tone }: { label: string; value: number; tone?:
 export function ReportsPage() {
   const [searchParams, setSearchParams] = useSearchParams()
   const [state, dispatch] = useReducer(reportsReducer, searchParams, initStateFromParams)
-  const { activeTab, loading, error, teams, tiers, versions, dateFrom, dateTo, statuses, tags, availableTags, totalsData, overridesData, issuesData, sidebarCollapsed, sidebarWidth } = state
+  const { activeTab, loading, error, search, teams, tiers, versions, dateFrom, dateTo, statuses, tags, availableTags, totalsData, overridesData, issuesData, sidebarCollapsed, sidebarWidth } = state
   const [isResizing, setIsResizing] = useState(false)
   const sidebarRef = useRef<HTMLElement>(null)
   const SIDEBAR_MIN = 120
@@ -622,37 +656,40 @@ export function ReportsPage() {
       <nav
         ref={sidebarRef}
         className={cn(
-          'shrink-0 space-y-1',
+          'shrink-0 flex flex-col',
           !isResizing && 'transition-[width] duration-200',
         )}
         style={{ width: sidebarCollapsed ? SIDEBAR_COLLAPSED_WIDTH : sidebarWidth }}
       >
+        <div className="space-y-1">
+          {TABS.map(({ key, label, icon: Icon }) => (
+            <Button
+              key={key}
+              variant="ghost"
+              onClick={() => dispatch({ type: 'SET_TAB', tab: key })}
+              className={cn(
+                'w-full gap-2 text-sm',
+                sidebarCollapsed ? 'justify-center px-0' : 'justify-start',
+                activeTab === key
+                  ? 'bg-surface-elevated text-text-primary'
+                  : 'text-text-secondary hover:bg-surface-hover hover:text-text-primary',
+              )}
+              title={sidebarCollapsed ? label : undefined}
+            >
+              <Icon className="h-4 w-4 shrink-0" />
+              {!sidebarCollapsed && <span className="truncate">{label}</span>}
+            </Button>
+          ))}
+        </div>
+        <div className="flex-1" />
         <button
           type="button"
           onClick={() => dispatch({ type: 'TOGGLE_SIDEBAR' })}
-          className="mb-2 flex items-center justify-center rounded-md p-1.5 text-text-tertiary hover:bg-surface-hover hover:text-text-secondary transition-colors w-full"
+          className="mt-2 flex items-center justify-center rounded-md p-1.5 text-text-tertiary hover:bg-surface-hover hover:text-text-secondary transition-colors w-full"
           aria-label={sidebarCollapsed ? 'Expand sidebar' : 'Collapse sidebar'}
         >
           {sidebarCollapsed ? <PanelLeft className="h-4 w-4" /> : <PanelLeftClose className="h-4 w-4" />}
         </button>
-        {TABS.map(({ key, label, icon: Icon }) => (
-          <Button
-            key={key}
-            variant="ghost"
-            onClick={() => dispatch({ type: 'SET_TAB', tab: key })}
-            className={cn(
-              'w-full gap-2 text-sm',
-              sidebarCollapsed ? 'justify-center px-0' : 'justify-start',
-              activeTab === key
-                ? 'bg-surface-elevated text-text-primary'
-                : 'text-text-secondary hover:bg-surface-hover hover:text-text-primary',
-            )}
-            title={sidebarCollapsed ? label : undefined}
-          >
-            <Icon className="h-4 w-4 shrink-0" />
-            {!sidebarCollapsed && <span className="truncate">{label}</span>}
-          </Button>
-        ))}
       </nav>
 
       {/* Resize handle */}
@@ -672,8 +709,9 @@ export function ReportsPage() {
 
       {/* Main content: filters + report */}
       <div className="flex-1 min-w-0 pl-2 space-y-6">
-        {/* Filters — matching Dashboard order: Metadata → Status → DateRange → Tags */}
+        {/* Filters — matching Dashboard order: Search → Metadata → Status → DateRange → Tags */}
         <div className="flex flex-wrap gap-3 items-center">
+          <SearchInput value={search} onChange={(v) => dispatch({ type: 'SET_SEARCH', value: v })} placeholder="Filter reports..." className="w-full sm:w-64" />
           <MetadataDropdowns
             options={metadataOptions}
             teams={teams}
@@ -725,9 +763,9 @@ export function ReportsPage() {
           </div>
         ) : (
           <>
-            {activeTab === 'totals' && totalsData && <TotalsReport data={totalsData} />}
-            {activeTab === 'overrides' && overridesData && <OverridesReport data={overridesData} />}
-            {activeTab === 'issues' && issuesData && <IssuesReport data={issuesData} />}
+            {activeTab === 'totals' && totalsData && <TotalsReport data={totalsData} search={search} />}
+            {activeTab === 'overrides' && overridesData && <OverridesReport data={overridesData} search={search} />}
+            {activeTab === 'issues' && issuesData && <IssuesReport data={issuesData} search={search} />}
           </>
         )}
       </div>
