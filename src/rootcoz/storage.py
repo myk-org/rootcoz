@@ -2986,10 +2986,14 @@ async def change_user_role(username: str, new_role: str) -> tuple[str, str]:
 
 
 async def list_users() -> list[dict]:
-    """List all users (without key hashes)."""
+    """List all users (without key hashes).
+
+    Excludes the reserved 'admin' username (bootstrap superuser
+    authenticated via ADMIN_KEY, not a real managed user).
+    """
     async with _connect_db() as db:
         cursor = await db.execute(
-            "SELECT id, username, role, status, created_at, last_seen FROM users ORDER BY created_at DESC"
+            "SELECT id, username, role, status, created_at, last_seen FROM users WHERE username != 'admin' ORDER BY created_at DESC"
         )
         return [dict(row) for row in await cursor.fetchall()]
 

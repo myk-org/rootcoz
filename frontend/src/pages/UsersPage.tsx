@@ -27,6 +27,7 @@ import { Copy, Check, RefreshCw, Trash2, UserPlus, Shield, CheckCircle, XCircle 
 import { Select, SelectTrigger, SelectValue, SelectContent, SelectItem } from '@/components/ui/select'
 import { formatTimestamp, formatRelativeTime } from '@/lib/utils'
 import type { AdminUser, CreateUserResponse, RotateKeyResponse, ChangeRoleResponse, UserRole } from '@/types'
+import { useAuth } from '@/lib/auth'
 
 function CopyableKey({ label, value }: { label: string; value: string }) {
   const { isCopied, copy } = useClipboard()
@@ -53,6 +54,7 @@ function CopyableKey({ label, value }: { label: string; value: string }) {
 }
 
 export function UsersPage() {
+  const { username: currentUser } = useAuth()
   const [users, setUsers] = useState<AdminUser[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
@@ -88,7 +90,7 @@ export function UsersPage() {
   const fetchUsers = useCallback(async () => {
     try {
       const data = await api.get<{ users: AdminUser[] }>('/api/admin/users')
-      setUsers(data.users)
+      setUsers(data.users.filter((u: AdminUser) => u.username !== 'admin'))
       setError(null)
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load users')
@@ -331,7 +333,7 @@ export function UsersPage() {
                   )}
                 </TableCell>
                 <TableCell>
-                  {user.username === 'admin' ? (
+                  {user.username === 'admin' || user.username === currentUser ? (
                     <RoleBadge role={user.role} />
                   ) : (
                     <Select
@@ -398,59 +400,64 @@ export function UsersPage() {
                           </TooltipTrigger>
                           <TooltipContent>Reject</TooltipContent>
                         </Tooltip>
-                        <Tooltip>
-                          <TooltipTrigger asChild>
-                            <Button
-                              type="button"
-                              variant="ghost"
-                              size="icon"
-                              aria-label={`Delete ${user.username}`}
-                              className="h-7 w-7"
-                              onClick={() => setDeleteTarget(user.username)}
-                            >
-                              <Trash2 className="h-3.5 w-3.5 text-text-tertiary hover:text-signal-red" />
-                            </Button>
-                          </TooltipTrigger>
-                          <TooltipContent>Delete user</TooltipContent>
-                        </Tooltip>
+                        {user.username !== currentUser && (
+                          <Tooltip>
+                            <TooltipTrigger asChild>
+                              <Button
+                                type="button"
+                                variant="ghost"
+                                size="icon"
+                                aria-label={`Delete ${user.username}`}
+                                className="h-7 w-7"
+                                onClick={() => setDeleteTarget(user.username)}
+                              >
+                                <Trash2 className="h-3.5 w-3.5 text-text-tertiary hover:text-signal-red" />
+                              </Button>
+                            </TooltipTrigger>
+                            <TooltipContent>Delete user</TooltipContent>
+                          </Tooltip>
+                        )}
                       </TooltipProvider>
                     </div>
                   ) : (
                     <div className="flex items-center justify-end gap-1">
-                      {/* Rotate key — only for admins (regular users have no API key) */}
                       <TooltipProvider delayDuration={200}>
-                        <Tooltip>
-                          <TooltipTrigger asChild>
-                            <Button
-                              type="button"
-                              variant="ghost"
-                              size="icon"
-                              aria-label={`Rotate key for ${user.username}`}
-                              className={`h-7 w-7${user.role !== 'admin' ? ' invisible' : ''}`}
-                              disabled={user.role !== 'admin'}
-                              onClick={() => setRotateTarget(user.username)}
-                            >
-                              <RefreshCw className="h-3.5 w-3.5 text-text-tertiary hover:text-signal-blue" />
-                            </Button>
-                          </TooltipTrigger>
-                          <TooltipContent>Rotate API key</TooltipContent>
-                        </Tooltip>
+                        {/* Rotate key — only for admins (regular users have no API key) */}
+                        {user.username !== currentUser && user.role === 'admin' && (
+                          <Tooltip>
+                            <TooltipTrigger asChild>
+                              <Button
+                                type="button"
+                                variant="ghost"
+                                size="icon"
+                                aria-label={`Rotate key for ${user.username}`}
+                                className="h-7 w-7"
+                                onClick={() => setRotateTarget(user.username)}
+                              >
+                                <RefreshCw className="h-3.5 w-3.5 text-text-tertiary hover:text-signal-blue" />
+                              </Button>
+                            </TooltipTrigger>
+                            <TooltipContent>Rotate API key</TooltipContent>
+                          </Tooltip>
+                        )}
                         {/* Delete */}
-                        <Tooltip>
-                          <TooltipTrigger asChild>
-                            <Button
-                              type="button"
-                              variant="ghost"
-                              size="icon"
-                              aria-label={`Delete ${user.username}`}
-                              className="h-7 w-7"
-                              onClick={() => setDeleteTarget(user.username)}
-                            >
-                              <Trash2 className="h-3.5 w-3.5 text-text-tertiary hover:text-signal-red" />
-                            </Button>
-                          </TooltipTrigger>
-                          <TooltipContent>Delete user</TooltipContent>
-                        </Tooltip>
+                        {user.username !== currentUser && (
+                          <Tooltip>
+                            <TooltipTrigger asChild>
+                              <Button
+                                type="button"
+                                variant="ghost"
+                                size="icon"
+                                aria-label={`Delete ${user.username}`}
+                                className="h-7 w-7"
+                                onClick={() => setDeleteTarget(user.username)}
+                              >
+                                <Trash2 className="h-3.5 w-3.5 text-text-tertiary hover:text-signal-red" />
+                              </Button>
+                            </TooltipTrigger>
+                            <TooltipContent>Delete user</TooltipContent>
+                          </Tooltip>
+                        )}
                       </TooltipProvider>
                     </div>
                   )}
@@ -490,7 +497,7 @@ export function UsersPage() {
                   id="new-username"
                   value={newUsername}
                   onChange={(e) => { setNewUsername(e.target.value); setCreateError(null) }}
-                  placeholder="e.g. admin"
+                  placeholder="e.g. john.doe"
                   autoFocus
                   className="font-mono"
                 />
@@ -603,7 +610,7 @@ export function UsersPage() {
                 <Button
                   onClick={handleChangeRole}
                   disabled={changingRole}
-                  variant={roleChangeTarget?.newRole === 'reviewer' ? 'destructive' : 'default'}
+                  variant={roleChangeTarget?.newRole === 'viewer' || roleChangeTarget?.newRole === 'reviewer' ? 'destructive' : 'default'}
                 >
                   {changingRole ? 'Changing...' : 'Change Role'}
                 </Button>
