@@ -15,7 +15,7 @@ import { MultiSelectFilter } from '@/components/shared/MultiSelectFilter'
 import { Pagination } from '@/components/shared/Pagination'
 import { ExpandCollapseButtons } from '@/components/shared/ExpandCollapseButtons'
 import { SearchInput } from '@/components/shared/SearchInput'
-import { BarChart3, ArrowRightLeft, Bug, ChevronDown, ChevronRight, ExternalLink, PanelLeftClose, PanelLeft } from 'lucide-react'
+import { BarChart3, ArrowRightLeft, Bug, ChevronDown, ChevronRight, ExternalLink } from 'lucide-react'
 
 // ─── Types ──────────────────────────────────────────────────────────
 
@@ -105,8 +105,6 @@ interface ReportsState {
   totalsData: TotalsData | null
   overridesData: OverridesData | null
   issuesData: IssuesData | null
-  sidebarCollapsed: boolean
-  sidebarWidth: number
 }
 
 type ReportsAction =
@@ -122,8 +120,6 @@ type ReportsAction =
   | { type: 'CLEAR_META'; field: 'teams' | 'tiers' | 'versions' }
   | { type: 'CLEAR_ALL_META' }
   | { type: 'SET_DATE_RANGE'; from: string; to: string }
-  | { type: 'TOGGLE_SIDEBAR' }
-  | { type: 'SET_SIDEBAR_WIDTH'; width: number }
   | { type: 'TOGGLE_STATUS'; value: string }
   | { type: 'CLEAR_STATUSES' }
   | { type: 'TOGGLE_TAG'; value: string }
@@ -146,8 +142,6 @@ const INITIAL_STATE: ReportsState = {
   totalsData: null,
   overridesData: null,
   issuesData: null,
-  sidebarCollapsed: false,
-  sidebarWidth: 240,
 }
 
 function initStateFromParams(sp: URLSearchParams): ReportsState {
@@ -185,7 +179,7 @@ function reportsReducer(state: ReportsState, action: ReportsAction): ReportsStat
     case 'SET_SEARCH':
       return { ...state, search: action.value }
     case 'SYNC_FROM_URL':
-      return { ...initStateFromParams(action.params), availableTags: state.availableTags, sidebarCollapsed: state.sidebarCollapsed, sidebarWidth: state.sidebarWidth }
+      return { ...initStateFromParams(action.params), availableTags: state.availableTags }
     case 'FETCH_START':
       return { ...state, loading: true, error: null }
     case 'FETCH_ERROR':
@@ -204,10 +198,6 @@ function reportsReducer(state: ReportsState, action: ReportsAction): ReportsStat
       return { ...state, teams: new Set(), tiers: new Set(), versions: new Set(), statuses: new Set<string>(), tags: new Set<string>() }
     case 'SET_DATE_RANGE':
       return { ...state, dateFrom: action.from, dateTo: action.to }
-    case 'TOGGLE_SIDEBAR':
-      return { ...state, sidebarCollapsed: !state.sidebarCollapsed }
-    case 'SET_SIDEBAR_WIDTH':
-      return { ...state, sidebarWidth: action.width }
     case 'TOGGLE_STATUS':
       return { ...state, statuses: toggleInSet(state.statuses, action.value) }
     case 'CLEAR_STATUSES':
@@ -311,20 +301,6 @@ function OverridesReport({ data, search }: { data: OverridesData; search: string
     })
   }, [])
 
-  /** When searching, derive groups from filtered details so counts match. */
-  const filteredGroups = useMemo(() => {
-    if (!q) return data.groups
-    const counts: Record<string, { from: string; to: string; count: number }> = {}
-    for (const d of filteredDetails) {
-      const key = `${d.from_classification} → ${d.to_classification}`
-      if (!counts[key]) counts[key] = { from: d.from_classification, to: d.to_classification, count: 0 }
-      counts[key].count++
-    }
-    return Object.values(counts)
-  }, [data.groups, filteredDetails, q])
-
-  const allGroupKeys = useMemo(() => filteredGroups.map(g => `${g.from} → ${g.to}`), [filteredGroups])
-
   const q = search.toLowerCase()
   const filteredDetails = useMemo(() => q
     ? data.details.filter(d => d.test_name.toLowerCase().includes(q) || d.job_name.toLowerCase().includes(q))
@@ -339,6 +315,20 @@ function OverridesReport({ data, search }: { data: OverridesData; search: string
     }
     return map
   }, [filteredDetails])
+
+  /** When searching, derive groups from filtered details so counts match. */
+  const filteredGroups = useMemo(() => {
+    if (!q) return data.groups
+    const counts: Record<string, { from: string; to: string; count: number }> = {}
+    for (const d of filteredDetails) {
+      const key = `${d.from_classification} → ${d.to_classification}`
+      if (!counts[key]) counts[key] = { from: d.from_classification, to: d.to_classification, count: 0 }
+      counts[key].count++
+    }
+    return Object.values(counts)
+  }, [data.groups, filteredDetails, q])
+
+  const allGroupKeys = useMemo(() => filteredGroups.map(g => `${g.from} → ${g.to}`), [filteredGroups])
 
   return (
     <div className="space-y-4">
@@ -520,12 +510,7 @@ function StatCard({ label, value, tone }: { label: string; value: number; tone?:
 export function ReportsPage() {
   const [searchParams, setSearchParams] = useSearchParams()
   const [state, dispatch] = useReducer(reportsReducer, searchParams, initStateFromParams)
-  const { activeTab, loading, error, search, teams, tiers, versions, dateFrom, dateTo, statuses, tags, availableTags, totalsData, overridesData, issuesData, sidebarCollapsed, sidebarWidth } = state
-  const [isResizing, setIsResizing] = useState(false)
-  const sidebarRef = useRef<HTMLElement>(null)
-  const SIDEBAR_MIN = 120
-  const SIDEBAR_MAX = 400
-  const SIDEBAR_COLLAPSED_WIDTH = 40
+  const { activeTab, loading, error, search, teams, tiers, versions, dateFrom, dateTo, statuses, tags, availableTags, totalsData, overridesData, issuesData } = state
 
   // ─── URL → state sync (external navigation / shared links) ─────
   // Only dispatch when URL actually differs from current state — no flags, no races.
@@ -556,32 +541,6 @@ export function ReportsPage() {
     for (const t of tags) params.append('tag', t)
     setSearchParams(params, { replace: true })
   }, [activeTab, teams, tiers, versions, dateFrom, dateTo, statuses, tags, setSearchParams])
-
-  // Resize lifecycle: attach/detach listeners via useEffect
-  useEffect(() => {
-    if (!isResizing || !sidebarRef.current) return
-    const sidebarLeft = sidebarRef.current.getBoundingClientRect().left
-
-    function onMouseMove(e: MouseEvent) {
-      const newWidth = Math.min(SIDEBAR_MAX, Math.max(SIDEBAR_MIN, e.clientX - sidebarLeft))
-      dispatch({ type: 'SET_SIDEBAR_WIDTH', width: newWidth })
-    }
-    function onMouseUp() {
-      setIsResizing(false)
-    }
-
-    document.body.style.cursor = 'col-resize'
-    document.body.style.userSelect = 'none'
-    document.addEventListener('mousemove', onMouseMove)
-    document.addEventListener('mouseup', onMouseUp)
-
-    return () => {
-      document.body.style.cursor = ''
-      document.body.style.userSelect = ''
-      document.removeEventListener('mousemove', onMouseMove)
-      document.removeEventListener('mouseup', onMouseUp)
-    }
-  }, [isResizing])
 
   const { options: metadataOptions } = useMetadataOptions()
   const fetchSeqRef = useRef(0)
@@ -651,64 +610,29 @@ export function ReportsPage() {
   }, [])
 
   return (
-    <div className="flex">
+    <div className="flex gap-4">
       {/* Sidebar */}
-      <nav
-        ref={sidebarRef}
-        className={cn(
-          'shrink-0 flex flex-col',
-          !isResizing && 'transition-[width] duration-200',
-        )}
-        style={{ width: sidebarCollapsed ? SIDEBAR_COLLAPSED_WIDTH : sidebarWidth }}
-      >
-        <div className="space-y-1">
-          {TABS.map(({ key, label, icon: Icon }) => (
-            <Button
-              key={key}
-              variant="ghost"
-              onClick={() => dispatch({ type: 'SET_TAB', tab: key })}
-              className={cn(
-                'w-full gap-2 text-sm',
-                sidebarCollapsed ? 'justify-center px-0' : 'justify-start',
-                activeTab === key
-                  ? 'bg-surface-elevated text-text-primary'
-                  : 'text-text-secondary hover:bg-surface-hover hover:text-text-primary',
-              )}
-              title={sidebarCollapsed ? label : undefined}
-            >
-              <Icon className="h-4 w-4 shrink-0" />
-              {!sidebarCollapsed && <span className="truncate">{label}</span>}
-            </Button>
-          ))}
-        </div>
-        <div className="flex-1" />
-        <button
-          type="button"
-          onClick={() => dispatch({ type: 'TOGGLE_SIDEBAR' })}
-          className="mt-2 flex items-center justify-center rounded-md p-1.5 text-text-tertiary hover:bg-surface-hover hover:text-text-secondary transition-colors w-full"
-          aria-label={sidebarCollapsed ? 'Expand sidebar' : 'Collapse sidebar'}
-        >
-          {sidebarCollapsed ? <PanelLeft className="h-4 w-4" /> : <PanelLeftClose className="h-4 w-4" />}
-        </button>
+      <nav className="w-56 shrink-0 space-y-1">
+        {TABS.map(({ key, label, icon: Icon }) => (
+          <Button
+            key={key}
+            variant="ghost"
+            onClick={() => dispatch({ type: 'SET_TAB', tab: key })}
+            className={cn(
+              'w-full justify-start gap-2 text-sm',
+              activeTab === key
+                ? 'bg-surface-elevated text-text-primary'
+                : 'text-text-secondary hover:bg-surface-hover hover:text-text-primary',
+            )}
+          >
+            <Icon className="h-4 w-4 shrink-0" />
+            <span className="truncate">{label}</span>
+          </Button>
+        ))}
       </nav>
 
-      {/* Resize handle */}
-      {!sidebarCollapsed && (
-        <div
-          role="separator"
-          aria-orientation="vertical"
-          className="w-1.5 shrink-0 cursor-col-resize group flex items-center justify-center"
-          onMouseDown={(e) => {
-            e.preventDefault()
-            setIsResizing(true)
-          }}
-        >
-          <div className="w-0.5 h-8 rounded-full bg-border-default group-hover:bg-text-tertiary transition-colors" />
-        </div>
-      )}
-
       {/* Main content: filters + report */}
-      <div className="flex-1 min-w-0 pl-2 space-y-6">
+      <div className="flex-1 min-w-0 space-y-6">
         {/* Filters — matching Dashboard order: Search → Metadata → Status → DateRange → Tags */}
         <div className="flex flex-wrap gap-3 items-center">
           <SearchInput value={search} onChange={(v) => dispatch({ type: 'SET_SEARCH', value: v })} placeholder="Filter reports..." className="w-full sm:w-64" />
