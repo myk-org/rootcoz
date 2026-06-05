@@ -4574,6 +4574,7 @@ async def get_report_classification_overrides(
                 AND fh.child_build_number = tc.child_build_number
             WHERE {where}
               AND tc.visible = 1
+              AND fh.classification != tc.classification
               AND EXISTS (
                   SELECT 1 FROM failure_reviews fr
                   WHERE fr.job_id = tc.job_id AND fr.test_name = tc.test_name

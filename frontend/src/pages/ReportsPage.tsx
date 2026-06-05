@@ -217,7 +217,7 @@ function reportsReducer(state: ReportsState, action: ReportsAction): ReportsStat
 // ─── Report Content Components ──────────────────────────────────────
 
 function TotalsReport({ data, search }: { data: TotalsData; search: string }) {
-  const [expanded, setExpanded] = useState(false)
+  const [expanded, setExpanded] = useState(true)
   const [page, setPage] = useReducer((_: number, p: number) => p, 1)
   const q = search.toLowerCase()
   const filteredJobs = useMemo(() => q
@@ -335,10 +335,8 @@ function OverridesReport({ data, search }: { data: OverridesData; search: string
 
   return (
     <div className="space-y-4">
-      <div className="rounded-lg border border-border-muted bg-surface-card p-4">
-        <p className="text-sm text-text-secondary">
-          Total overrides: <span className="font-mono font-medium text-text-primary">{data.total}</span>
-        </p>
+      <div className="grid grid-cols-1 gap-4">
+        <StatCard label="Total Overrides" value={data.total} />
       </div>
 
       {filteredGroups.length > 0 && (
@@ -567,6 +565,7 @@ export function ReportsPage() {
     if (statusVal) params.set('status', statusVal)
     const tagsVal = labels.join(',')
     if (tagsVal) params.set('tags', tagsVal)
+    // Note: excludeLabels handled client-side — reports API doesn't support tag exclusion
     return params.toString()
   }, [teams, tiers, versions, dateFrom, dateTo, statuses, labels])
 
