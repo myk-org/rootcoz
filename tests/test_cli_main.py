@@ -3296,13 +3296,15 @@ class TestAdminUsersCreateCommand:
         assert "Save this API key" in result.output
         mock_client.admin_create_user.assert_called_once_with("newadmin", role="admin")
 
-    def test_admin_users_create_default_role(self, mock_client):
-        """Create without --role defaults to reviewer, no API key shown."""
+    def test_admin_users_create_reviewer(self, mock_client):
+        """Create with --role reviewer, no API key shown."""
         mock_client.admin_create_user.return_value = {
             "username": "newuser",
             "role": "reviewer",
         }
-        result = runner.invoke(app, ["admin", "users", "create", "newuser"])
+        result = runner.invoke(
+            app, ["admin", "users", "create", "newuser", "--role", "reviewer"]
+        )
         assert result.exit_code == 0
         assert "Created reviewer user: newuser" in result.output
         assert "Save this API key" not in result.output
@@ -3310,13 +3312,29 @@ class TestAdminUsersCreateCommand:
             "newuser", role="reviewer"
         )
 
+    def test_admin_users_create_invalid_role(self, mock_client):
+        """Create with invalid --role exits with error."""
+        result = runner.invoke(
+            app, ["admin", "users", "create", "newuser", "--role", "superuser"]
+        )
+        assert result.exit_code == 1
+        mock_client.admin_create_user.assert_not_called()
+
+    def test_admin_users_create_missing_role(self, mock_client):
+        """Create without --role exits with error (required)."""
+        result = runner.invoke(app, ["admin", "users", "create", "newuser"])
+        assert result.exit_code != 0
+        mock_client.admin_create_user.assert_not_called()
+
     def test_admin_users_create_json(self, mock_client):
         mock_client.admin_create_user.return_value = {
             "username": "newadmin",
             "api_key": "not-a-real-key",  # pragma: allowlist secret
             "role": "admin",
         }
-        result = runner.invoke(app, ["--json", "admin", "users", "create", "newadmin"])
+        result = runner.invoke(
+            app, ["--json", "admin", "users", "create", "newadmin", "--role", "admin"]
+        )
         assert result.exit_code == 0
         parsed = json.loads(result.output)
         assert parsed["username"] == "newadmin"
@@ -3326,7 +3344,9 @@ class TestAdminUsersCreateCommand:
         mock_client.admin_create_user.side_effect = RootCozError(
             status_code=403, detail="Admin access required"
         )
-        result = runner.invoke(app, ["admin", "users", "create", "newadmin"])
+        result = runner.invoke(
+            app, ["admin", "users", "create", "newadmin", "--role", "admin"]
+        )
         assert result.exit_code == 1
 
 

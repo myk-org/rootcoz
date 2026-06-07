@@ -144,7 +144,7 @@ class RootCozClient:
         """List all users. GET /api/admin/users"""
         return self._request("GET", "/api/admin/users")
 
-    def admin_create_user(self, username: str, role: str = "reviewer") -> dict:
+    def admin_create_user(self, username: str, role: str) -> dict:
         """Create a user with the specified role. POST /api/admin/users/create"""
         return self._request(
             "POST",

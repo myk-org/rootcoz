@@ -1490,7 +1490,7 @@ class TestRootCozClientAdminUsers:
         assert result["username"] == "newadmin"
         assert "api_key" in result
 
-    def test_admin_create_user_default_role(self):
+    def test_admin_create_user_reviewer(self):
         def handler(request):
             body = json.loads(request.content)
             assert body["role"] == "reviewer"
@@ -1500,7 +1500,7 @@ class TestRootCozClientAdminUsers:
             )
 
         client = _make_client(handler)
-        result = client.admin_create_user("newuser")
+        result = client.admin_create_user("newuser", role="reviewer")
         assert result["role"] == "reviewer"
 
     def test_admin_delete_user(self):
@@ -1557,7 +1557,7 @@ class TestRootCozClientAdminUsers:
             )
         )
         with pytest.raises(RootCozError) as exc_info:
-            client.admin_create_user("newadmin")
+            client.admin_create_user("newadmin", role="admin")
         assert exc_info.value.status_code == 403
 
 

@@ -2240,11 +2240,18 @@ def admin_users_list(
 def admin_users_create(
     username: str = typer.Argument(..., help="Username for the new user."),
     role: str = typer.Option(
-        "reviewer", "--role", help="Role: viewer, reviewer, operator, or admin."
+        ..., "--role", help="Role: viewer, reviewer, operator, or admin."
     ),
     json_output: bool = _JSON_OPTION,
 ):
     """Create a new user with the specified role. Admin users receive an API key."""
+    valid_roles = {"viewer", "reviewer", "operator", "admin"}
+    if role not in valid_roles:
+        typer.echo(
+            f"Error: role must be one of: {', '.join(sorted(valid_roles))}",
+            err=True,
+        )
+        raise typer.Exit(1)
     data = _run_client_command(
         json_output,
         lambda c: c.admin_create_user(username, role=role),
