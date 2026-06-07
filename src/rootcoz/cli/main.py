@@ -2238,20 +2238,23 @@ def admin_users_list(
 
 @admin_users_app.command("create")
 def admin_users_create(
-    username: str = typer.Argument(..., help="Username for the new admin user."),
+    username: str = typer.Argument(..., help="Username for the new user."),
+    role: str = typer.Option(
+        "reviewer", "--role", help="Role: viewer, reviewer, operator, or admin."
+    ),
     json_output: bool = _JSON_OPTION,
 ):
-    """Create a new admin user. The API key is shown once \u2014 save it."""
+    """Create a new user with the specified role. Admin users receive an API key."""
     data = _run_client_command(
         json_output,
-        lambda c: c.admin_create_user(username),
+        lambda c: c.admin_create_user(username, role=role),
         emit_output=False,
     )
-    api_key = data.get("api_key", "")
-    _require_api_key(api_key, "User creation")
     if not _state.get("json", False):
-        typer.echo(f"Created admin user: {data.get('username', username)}")
-        _echo_api_key_warning(api_key)
+        typer.echo(f"Created {role} user: {data.get('username', username)}")
+        api_key = data.get("api_key", "")
+        if api_key:
+            _echo_api_key_warning(api_key)
 
 
 @admin_users_app.command("delete")

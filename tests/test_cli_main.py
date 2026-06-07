@@ -3287,12 +3287,28 @@ class TestAdminUsersCreateCommand:
             "api_key": "not-a-real-key",  # pragma: allowlist secret
             "role": "admin",
         }
-        result = runner.invoke(app, ["admin", "users", "create", "newadmin"])
+        result = runner.invoke(
+            app, ["admin", "users", "create", "newadmin", "--role", "admin"]
+        )
         assert result.exit_code == 0
         assert "Created admin user: newadmin" in result.output
         assert "not-a-real-key" in result.output
         assert "Save this API key" in result.output
-        mock_client.admin_create_user.assert_called_once_with("newadmin")
+        mock_client.admin_create_user.assert_called_once_with("newadmin", role="admin")
+
+    def test_admin_users_create_default_role(self, mock_client):
+        """Create without --role defaults to reviewer, no API key shown."""
+        mock_client.admin_create_user.return_value = {
+            "username": "newuser",
+            "role": "reviewer",
+        }
+        result = runner.invoke(app, ["admin", "users", "create", "newuser"])
+        assert result.exit_code == 0
+        assert "Created reviewer user: newuser" in result.output
+        assert "Save this API key" not in result.output
+        mock_client.admin_create_user.assert_called_once_with(
+            "newuser", role="reviewer"
+        )
 
     def test_admin_users_create_json(self, mock_client):
         mock_client.admin_create_user.return_value = {

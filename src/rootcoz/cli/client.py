@@ -144,12 +144,12 @@ class RootCozClient:
         """List all users. GET /api/admin/users"""
         return self._request("GET", "/api/admin/users")
 
-    def admin_create_user(self, username: str) -> dict:
-        """Create an admin user. POST /api/admin/users"""
+    def admin_create_user(self, username: str, role: str = "reviewer") -> dict:
+        """Create a user with the specified role. POST /api/admin/users/create"""
         return self._request(
             "POST",
-            "/api/admin/users",
-            json={"username": username},
+            "/api/admin/users/create",
+            json={"username": username, "role": role},
         )
 
     def admin_delete_user(self, username: str) -> dict:
