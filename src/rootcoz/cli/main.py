@@ -10,6 +10,7 @@ import typer
 import yaml
 
 from rootcoz.cli.client import RootCozClient, RootCozError
+from rootcoz.storage import VALID_ROLES
 from rootcoz.cli.config import (
     CONFIG_FILE,
     ServerConfig,
@@ -2244,11 +2245,10 @@ def admin_users_create(
     ),
     json_output: bool = _JSON_OPTION,
 ):
-    """Create a new user with the specified role. Admin users receive an API key."""
-    valid_roles = {"viewer", "reviewer", "operator", "admin"}
-    if role not in valid_roles:
+    """Create a new user with the specified role. The API key is shown once \u2014 save it."""
+    if role not in VALID_ROLES:
         typer.echo(
-            f"Error: role must be one of: {', '.join(sorted(valid_roles))}",
+            f"Error: role must be one of: {', '.join(sorted(VALID_ROLES))}",
             err=True,
         )
         raise typer.Exit(1)
