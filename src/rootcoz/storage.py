@@ -4460,6 +4460,53 @@ async def get_report_totals(
     }
 
 
+async def _count_reviewed_tests(
+    db: aiosqlite.Connection,
+    *,
+    team: str = "",
+    tier: str = "",
+    version: str = "",
+    date_from: str = "",
+    date_to: str = "",
+    status: list[str] | None = None,
+    tags: list[str] | None = None,
+    exclude_tags: list[str] | None = None,
+) -> int:
+    """Count reviewed tests with the given filters."""
+    conditions: list[str] = []
+    params: list = []
+    _build_date_filter("fr.updated_at", date_from, date_to, conditions, params)
+    needs_rdata = bool(team or tier or version or tags or exclude_tags)
+    rdata_join = (
+        f"JOIN ({_RESULT_DATA_SUBQUERY}) fr_rdata ON fr_rdata.job_id = fr.job_id"
+        if needs_rdata
+        else ""
+    )
+    meta_join = _build_metadata_join(
+        team, tier, version, "fr_rdata.job_name", conditions, params
+    )
+    _build_tags_filter(tags, "fr_rdata.job_name", conditions, params)
+    _build_exclude_tags_filter(exclude_tags, "fr_rdata.job_name", conditions, params)
+    status_join = ""
+    if status:
+        status_join = " JOIN results r_rstatus ON r_rstatus.job_id = fr.job_id"
+        placeholders = ", ".join("?" for _ in status)
+        conditions.append(f"r_rstatus.status IN ({placeholders})")
+        params.extend(status)
+    where = (" AND " + " AND ".join(conditions)) if conditions else ""
+    cursor = await db.execute(
+        f"""
+        SELECT COUNT(*) AS cnt FROM failure_reviews fr
+        {rdata_join}
+        {meta_join}
+        {status_join}
+        WHERE fr.reviewed = 1{where}
+        """,
+        params,
+    )
+    return (await cursor.fetchone())["cnt"]
+
+
 async def get_report_classification_overrides(
     *,
     team: str = "",
@@ -4531,51 +4578,17 @@ async def get_report_classification_overrides(
         rows = await cursor.fetchall()
 
         # Count total reviewed tests (same filters minus override-specific ones)
-        reviewed_conditions: list[str] = []
-        reviewed_params: list = []
-        _build_date_filter(
-            "fr.updated_at", date_from, date_to, reviewed_conditions, reviewed_params
+        total_reviewed = await _count_reviewed_tests(
+            db,
+            team=team,
+            tier=tier,
+            version=version,
+            date_from=date_from,
+            date_to=date_to,
+            status=status,
+            tags=tags,
+            exclude_tags=exclude_tags,
         )
-        reviewed_meta_join = _build_metadata_join(
-            team,
-            tier,
-            version,
-            "fr_rdata.job_name",
-            reviewed_conditions,
-            reviewed_params,
-        )
-        _build_tags_filter(
-            tags, "fr_rdata.job_name", reviewed_conditions, reviewed_params
-        )
-        _build_exclude_tags_filter(
-            exclude_tags, "fr_rdata.job_name", reviewed_conditions, reviewed_params
-        )
-        reviewed_status_join = ""
-        if status:
-            reviewed_status_join = (
-                " JOIN results r_rstatus ON r_rstatus.job_id = fr.job_id"
-            )
-            r_placeholders = ", ".join("?" for _ in status)
-            reviewed_conditions.append(f"r_rstatus.status IN ({r_placeholders})")
-            reviewed_params.extend(status)
-        needs_rdata = bool(team or tier or version or tags or exclude_tags)
-        rdata_join = (
-            f"JOIN ({_RESULT_DATA_SUBQUERY}) fr_rdata ON fr_rdata.job_id = fr.job_id"
-            if needs_rdata
-            else ""
-        )
-        reviewed_where = (
-            (" AND " + " AND ".join(reviewed_conditions)) if reviewed_conditions else ""
-        )
-        reviewed_sql = f"""
-            SELECT COUNT(*) AS cnt FROM failure_reviews fr
-            {rdata_join}
-            {reviewed_meta_join}
-            {reviewed_status_join}
-            WHERE fr.reviewed = 1{reviewed_where}
-        """
-        r_cursor = await db.execute(reviewed_sql, reviewed_params)
-        total_reviewed = (await r_cursor.fetchone())["cnt"]
 
     # Group by from->to
     groups: dict[str, dict] = {}
@@ -4603,7 +4616,8 @@ async def get_report_classification_overrides(
     # Apply pagination to the detail list (groups/total are always full)
     paginated = details[offset : offset + limit] if limit > 0 else details
 
-    ai_correct = total_reviewed - len(details)
+    unique_overridden = len({d["test_name"] for d in details})
+    ai_correct = max(total_reviewed - unique_overridden, 0)
     ai_accuracy_pct = (
         round((ai_correct / total_reviewed) * 100, 1) if total_reviewed > 0 else 0
     )
@@ -4611,7 +4625,7 @@ async def get_report_classification_overrides(
     return {
         "total": len(details),
         "total_reviewed": total_reviewed,
-        "ai_correct": max(ai_correct, 0),
+        "ai_correct": ai_correct,
         "ai_accuracy_pct": ai_accuracy_pct,
         "groups": list(groups.values()),
         "details": paginated,
