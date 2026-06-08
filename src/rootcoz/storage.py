@@ -4622,7 +4622,7 @@ async def get_report_classification_overrides(
     # Apply pagination to the detail list (groups/total are always full)
     paginated = details[offset : offset + limit] if limit > 0 else details
 
-    unique_overridden = len({d["test_name"] for d in details})
+    unique_overridden = len({(d["job_id"], d["test_name"]) for d in details})
     ai_correct = max(total_reviewed - unique_overridden, 0)
     ai_accuracy_pct = (
         round((ai_correct / total_reviewed) * 100, 1) if total_reviewed > 0 else 0
