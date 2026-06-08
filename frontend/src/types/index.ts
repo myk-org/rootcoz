@@ -167,6 +167,8 @@ export interface AnalysisResult {
 
 // -- Dashboard ------------------------------------------------------
 
+export type UserRole = 'viewer' | 'reviewer' | 'operator' | 'admin'
+
 export interface DashboardJob {
   job_id: string
   jenkins_url: string | null
@@ -183,6 +185,7 @@ export interface DashboardJob {
   summary?: string
   error?: string
   tags?: string[]
+  submitted_by?: string
 }
 
 // -- Comments & Reviews ---------------------------------------------

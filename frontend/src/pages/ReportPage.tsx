@@ -28,6 +28,7 @@ import { OriginJobBanner } from '@/components/shared/OriginJobBanner'
 import { originJobLabel } from '@/lib/originJobLabel'
 import { reviewKey } from './report/ReportContext'
 import type { ChildJobAnalysis } from '@/types'
+import { useAuth } from '@/lib/auth'
 
 
 
@@ -72,6 +73,8 @@ function ReportContent() {
   const state = useReportState()
   const dispatch = useReportDispatch()
   const refreshEnrichments = useRefreshEnrichments()
+  const { role } = useAuth()
+  const isViewer = role === 'viewer'
 
   // Capture hash fragment on mount and listen for changes (child-job deep linking)
   const [activeHash, setActiveHash] = useState(() => window.location.hash.replace(/^#/, ''))
@@ -461,13 +464,15 @@ function ReportContent() {
             {state.reportportalAvailable && (result.child_job_analyses ?? []).length === 0 && (
               <ReportPortalButton jobId={result.job_id} jobName={result.job_name ?? result.job_id} buildNumber={result.build_number} hasFailures={(result.failures ?? []).length > 0} />
             )}
-            <Button variant="ghost" size="sm" className="gap-1.5 text-xs" asChild>
-              <Link to={`/chat/${jobId}`}>
-                <MessageCircle className="h-3.5 w-3.5" />
-                Chat
-              </Link>
-            </Button>
-            {result.request_params && (
+            {!isViewer && (
+              <Button variant="ghost" size="sm" className="gap-1.5 text-xs" asChild>
+                <Link to={`/chat/${jobId}`}>
+                  <MessageCircle className="h-3.5 w-3.5" />
+                  Chat
+                </Link>
+              </Button>
+            )}
+            {!isViewer && result.request_params && (
               <Button
                 variant="ghost"
                 size="sm"

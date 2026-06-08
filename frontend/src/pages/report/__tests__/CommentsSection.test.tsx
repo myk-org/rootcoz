@@ -15,6 +15,10 @@ vi.mock('@/lib/cookies', () => ({
   getUsername: () => mockUsername,
 }))
 
+vi.mock('@/lib/auth', () => ({
+  useAuth: () => ({ role: 'reviewer', isAdmin: false, username: mockUsername }),
+}))
+
 const mockDelete = vi.fn()
 const mockPost = vi.fn()
 const mockGet = vi.fn()

@@ -27,7 +27,7 @@ def _create_user_sync(temp_db_path, username: str) -> dict:
             rows = (await (await db.execute("SELECT changes()")).fetchone())[0]
             if rows == 0:
                 await db.execute(
-                    "INSERT INTO users (username, api_key_hash, role) VALUES (?, ?, 'user')",
+                    "INSERT INTO users (username, api_key_hash, role) VALUES (?, ?, 'operator')",
                     (username, key_hash),
                 )
             await db.commit()
@@ -322,7 +322,7 @@ class TestRestrictedAccess:
                 rows = (await (await db.execute("SELECT changes()")).fetchone())[0]
                 if rows == 0:
                     await db.execute(
-                        "INSERT INTO users (username, api_key_hash, role) VALUES ('alice', ?, 'user')",
+                        "INSERT INTO users (username, api_key_hash, role) VALUES ('alice', ?, 'operator')",
                         (key_hash,),
                     )
                 await db.commit()
@@ -357,7 +357,7 @@ class TestRestrictedAccess:
                 rows = (await (await db.execute("SELECT changes()")).fetchone())[0]
                 if rows == 0:
                     await db.execute(
-                        "INSERT INTO users (username, api_key_hash, role) VALUES ('charlie', ?, 'user')",
+                        "INSERT INTO users (username, api_key_hash, role) VALUES ('charlie', ?, 'operator')",
                         (key_hash,),
                     )
                 await db.commit()

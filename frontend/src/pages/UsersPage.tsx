@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import { api, ApiError } from '@/lib/api'
 import { useClipboard } from '@/lib/useClipboard'
+import { RoleBadge } from '@/components/shared/RoleBadge'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import {
@@ -25,7 +26,8 @@ import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/comp
 import { Copy, Check, RefreshCw, Trash2, UserPlus, Shield, CheckCircle, XCircle } from 'lucide-react'
 import { Select, SelectTrigger, SelectValue, SelectContent, SelectItem } from '@/components/ui/select'
 import { formatTimestamp, formatRelativeTime } from '@/lib/utils'
-import type { AdminUser, CreateUserResponse, RotateKeyResponse, ChangeRoleResponse } from '@/types'
+import type { AdminUser, CreateUserResponse, RotateKeyResponse, ChangeRoleResponse, UserRole } from '@/types'
+import { useAuth } from '@/lib/auth'
 
 function CopyableKey({ label, value }: { label: string; value: string }) {
   const { isCopied, copy } = useClipboard()
@@ -52,6 +54,7 @@ function CopyableKey({ label, value }: { label: string; value: string }) {
 }
 
 export function UsersPage() {
+  const { username: currentUser } = useAuth()
   const [users, setUsers] = useState<AdminUser[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
@@ -59,7 +62,7 @@ export function UsersPage() {
   // Create dialog
   const [createOpen, setCreateOpen] = useState(false)
   const [newUsername, setNewUsername] = useState('')
-  const [newUserRole, setNewUserRole] = useState<'user' | 'admin'>('user')
+  const [newUserRole, setNewUserRole] = useState<UserRole>('reviewer')
   const [creating, setCreating] = useState(false)
   const [createError, setCreateError] = useState<string | null>(null)
   const [createdUser, setCreatedUser] = useState<CreateUserResponse | null>(null)
@@ -87,7 +90,7 @@ export function UsersPage() {
   const fetchUsers = useCallback(async () => {
     try {
       const data = await api.get<{ users: AdminUser[] }>('/api/admin/users')
-      setUsers(data.users)
+      setUsers(data.users.filter((u: AdminUser) => u.username !== 'admin'))
       setError(null)
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load users')
@@ -164,7 +167,7 @@ export function UsersPage() {
   function closeCreateDialog() {
     setCreateOpen(false)
     setNewUsername('')
-    setNewUserRole('user')
+    setNewUserRole('reviewer')
     setCreateError(null)
     setCreatedUser(null)
   }
@@ -309,7 +312,7 @@ export function UsersPage() {
                     {user.role === 'admin' ? (
                       <Shield className="h-3.5 w-3.5 text-signal-amber" />
                     ) : (
-                      <span className="h-2 w-2 rounded-full bg-signal-green" />
+                      <span className={`h-2 w-2 rounded-full ${user.role === 'operator' ? 'bg-signal-blue' : 'bg-signal-green'}`} />
                     )}
                     {user.username}
                   </span>
@@ -330,14 +333,27 @@ export function UsersPage() {
                   )}
                 </TableCell>
                 <TableCell>
-                  {user.role === 'admin' ? (
-                    <span className="inline-flex items-center rounded-full bg-signal-amber/10 px-2 py-0.5 text-xs font-medium text-signal-amber">
-                      admin
-                    </span>
+                  {user.username === 'admin' || user.username === currentUser ? (
+                    <RoleBadge role={user.role} />
                   ) : (
-                    <span className="inline-flex items-center rounded-full bg-surface-elevated px-2 py-0.5 text-xs font-medium text-text-secondary">
-                      user
-                    </span>
+                    <Select
+                      value={user.role}
+                      onValueChange={(newRole) => {
+                        if (newRole !== user.role) {
+                          setRoleChangeTarget({ username: user.username, currentRole: user.role, newRole })
+                        }
+                      }}
+                    >
+                      <SelectTrigger className="h-7 w-[96px] text-xs">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="viewer">viewer</SelectItem>
+                        <SelectItem value="reviewer">reviewer</SelectItem>
+                        <SelectItem value="operator">operator</SelectItem>
+                        <SelectItem value="admin">admin</SelectItem>
+                      </SelectContent>
+                    </Select>
                   )}
                 </TableCell>
                 <TableCell className="font-mono text-xs text-text-tertiary">
@@ -384,76 +400,64 @@ export function UsersPage() {
                           </TooltipTrigger>
                           <TooltipContent>Reject</TooltipContent>
                         </Tooltip>
-                        <Tooltip>
-                          <TooltipTrigger asChild>
-                            <Button
-                              type="button"
-                              variant="ghost"
-                              size="icon"
-                              aria-label={`Delete ${user.username}`}
-                              className="h-7 w-7"
-                              onClick={() => setDeleteTarget(user.username)}
-                            >
-                              <Trash2 className="h-3.5 w-3.5 text-text-tertiary hover:text-signal-red" />
-                            </Button>
-                          </TooltipTrigger>
-                          <TooltipContent>Delete user</TooltipContent>
-                        </Tooltip>
+                        {user.username !== currentUser && (
+                          <Tooltip>
+                            <TooltipTrigger asChild>
+                              <Button
+                                type="button"
+                                variant="ghost"
+                                size="icon"
+                                aria-label={`Delete ${user.username}`}
+                                className="h-7 w-7"
+                                onClick={() => setDeleteTarget(user.username)}
+                              >
+                                <Trash2 className="h-3.5 w-3.5 text-text-tertiary hover:text-signal-red" />
+                              </Button>
+                            </TooltipTrigger>
+                            <TooltipContent>Delete user</TooltipContent>
+                          </Tooltip>
+                        )}
                       </TooltipProvider>
                     </div>
                   ) : (
                     <div className="flex items-center justify-end gap-1">
-                      {/* Role select */}
-                      <Select
-                        value={user.role}
-                        onValueChange={(newRole) => {
-                          if (newRole !== user.role) {
-                            setRoleChangeTarget({ username: user.username, currentRole: user.role, newRole })
-                          }
-                        }}
-                      >
-                        <SelectTrigger className="h-7 w-[80px] text-xs">
-                          <SelectValue />
-                        </SelectTrigger>
-                        <SelectContent>
-                          <SelectItem value="user">user</SelectItem>
-                          <SelectItem value="admin">admin</SelectItem>
-                        </SelectContent>
-                      </Select>
-                      {/* Rotate key — only for admins (regular users have no API key) */}
                       <TooltipProvider delayDuration={200}>
-                        <Tooltip>
-                          <TooltipTrigger asChild>
-                            <Button
-                              type="button"
-                              variant="ghost"
-                              size="icon"
-                              aria-label={`Rotate key for ${user.username}`}
-                              className={`h-7 w-7${user.role !== 'admin' ? ' invisible' : ''}`}
-                              disabled={user.role !== 'admin'}
-                              onClick={() => setRotateTarget(user.username)}
-                            >
-                              <RefreshCw className="h-3.5 w-3.5 text-text-tertiary hover:text-signal-blue" />
-                            </Button>
-                          </TooltipTrigger>
-                          <TooltipContent>Rotate API key</TooltipContent>
-                        </Tooltip>
+                        {/* Rotate key — only for admins (regular users have no API key) */}
+                        {user.username !== currentUser && user.role === 'admin' && (
+                          <Tooltip>
+                            <TooltipTrigger asChild>
+                              <Button
+                                type="button"
+                                variant="ghost"
+                                size="icon"
+                                aria-label={`Rotate key for ${user.username}`}
+                                className="h-7 w-7"
+                                onClick={() => setRotateTarget(user.username)}
+                              >
+                                <RefreshCw className="h-3.5 w-3.5 text-text-tertiary hover:text-signal-blue" />
+                              </Button>
+                            </TooltipTrigger>
+                            <TooltipContent>Rotate API key</TooltipContent>
+                          </Tooltip>
+                        )}
                         {/* Delete */}
-                        <Tooltip>
-                          <TooltipTrigger asChild>
-                            <Button
-                              type="button"
-                              variant="ghost"
-                              size="icon"
-                              aria-label={`Delete ${user.username}`}
-                              className="h-7 w-7"
-                              onClick={() => setDeleteTarget(user.username)}
-                            >
-                              <Trash2 className="h-3.5 w-3.5 text-text-tertiary hover:text-signal-red" />
-                            </Button>
-                          </TooltipTrigger>
-                          <TooltipContent>Delete user</TooltipContent>
-                        </Tooltip>
+                        {user.username !== currentUser && (
+                          <Tooltip>
+                            <TooltipTrigger asChild>
+                              <Button
+                                type="button"
+                                variant="ghost"
+                                size="icon"
+                                aria-label={`Delete ${user.username}`}
+                                className="h-7 w-7"
+                                onClick={() => setDeleteTarget(user.username)}
+                              >
+                                <Trash2 className="h-3.5 w-3.5 text-text-tertiary hover:text-signal-red" />
+                              </Button>
+                            </TooltipTrigger>
+                            <TooltipContent>Delete user</TooltipContent>
+                          </Tooltip>
+                        )}
                       </TooltipProvider>
                     </div>
                   )}
@@ -476,7 +480,7 @@ export function UsersPage() {
           {createdUser ? (
             <div className="space-y-4 py-2">
               <p className="text-sm text-text-secondary">
-                {newUserRole === 'admin' ? 'Admin user' : 'User'}{' '}
+                {newUserRole.charAt(0).toUpperCase() + newUserRole.slice(1)}{' '}
                 <span className="font-mono font-medium text-text-primary">{createdUser.username}</span> created successfully.
               </p>
               {createdUser.api_key && (
@@ -493,7 +497,7 @@ export function UsersPage() {
                   id="new-username"
                   value={newUsername}
                   onChange={(e) => { setNewUsername(e.target.value); setCreateError(null) }}
-                  placeholder="e.g. admin"
+                  placeholder="e.g. john.doe"
                   autoFocus
                   className="font-mono"
                 />
@@ -503,12 +507,14 @@ export function UsersPage() {
               </div>
               <div className="space-y-1.5">
                 <label className="block text-xs font-medium text-text-secondary">Role</label>
-                <Select value={newUserRole} onValueChange={(v) => setNewUserRole(v as 'user' | 'admin')}>
+                <Select value={newUserRole} onValueChange={(v) => setNewUserRole(v as UserRole)}>
                   <SelectTrigger className="h-10">
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
-                    <SelectItem value="user">User</SelectItem>
+                    <SelectItem value="viewer">Viewer</SelectItem>
+                    <SelectItem value="reviewer">Reviewer</SelectItem>
+                    <SelectItem value="operator">Operator</SelectItem>
                     <SelectItem value="admin">Admin</SelectItem>
                   </SelectContent>
                 </Select>
@@ -574,18 +580,14 @@ export function UsersPage() {
         <DialogContent>
           <DialogHeader>
             <DialogTitle>
-              {roleChangeTarget?.newRole === 'admin' ? 'Promote to Admin' : 'Demote to User'}
+              Change Role to {roleChangeTarget?.newRole}
             </DialogTitle>
             <DialogDescription>
               {roleChangeResult
-                ? (roleChangeResult.role === 'admin'
-                    ? (roleChangeResult.api_key
-                        ? `${roleChangeResult.username} is now an admin. Save the API key below.`
-                        : `${roleChangeResult.username} is now an admin.`)
-                    : `${roleChangeResult.username} has been demoted to regular user.`)
-                : (roleChangeTarget?.newRole === 'admin'
-                    ? `Promote "${roleChangeTarget?.username}" to admin?`
-                    : `Demote "${roleChangeTarget?.username}" to regular user?`)
+                ? (roleChangeResult.api_key
+                    ? `${roleChangeResult.username} is now ${roleChangeResult.role}. Save the API key below.`
+                    : `${roleChangeResult.username} is now ${roleChangeResult.role}.`)
+                : `Change "${roleChangeTarget?.username}" from ${roleChangeTarget?.currentRole} to ${roleChangeTarget?.newRole}?`
               }
             </DialogDescription>
           </DialogHeader>
@@ -608,12 +610,9 @@ export function UsersPage() {
                 <Button
                   onClick={handleChangeRole}
                   disabled={changingRole}
-                  variant={roleChangeTarget?.newRole === 'user' ? 'destructive' : 'default'}
+                  variant={roleChangeTarget?.newRole === 'viewer' || roleChangeTarget?.newRole === 'reviewer' ? 'destructive' : 'default'}
                 >
-                  {changingRole
-                    ? 'Changing...'
-                    : (roleChangeTarget?.newRole === 'admin' ? 'Promote' : 'Demote')
-                  }
+                  {changingRole ? 'Changing...' : 'Change Role'}
                 </Button>
               </>
             )}

@@ -26,6 +26,7 @@ import { ReAnalyzeDialog } from './ReAnalyzeDialog'
 import { useReviewSuggestion } from './useReviewSuggestion'
 import { ConfirmDialog } from '@/components/shared/ConfirmDialog'
 import { UuidCopyButton } from '@/components/shared/UuidCopyButton'
+import { useAuth } from '@/lib/auth'
 import { ChevronDown, ChevronRight, Bug, MessageSquare, CheckCircle2, Copy, Check, RotateCw } from 'lucide-react'
 
 function PreviousAnalysisEntry({ prev, index, repoUrls }: {
@@ -182,6 +183,8 @@ export function FailureCard({ group, jobId, childJobName, childBuildNumber, inde
   const scopedChildBuildNumber = childBuildNumber ?? 0
   const { githubIssuesEnabled, jiraIssuesEnabled, serverJiraProjectKey, comments, reviews, aiModels, result, classifications } = useReportState()
   const dispatch = useReportDispatch()
+  const { role } = useAuth()
+  const isViewer = role === 'viewer'
   const expandKey = `rootcoz-expand-${jobId}-${scopedChildJobName}-${scopedChildBuildNumber}-${group.id}`
   const [expanded, setExpanded] = useSessionState<boolean>(expandKey, false)
   const cardRef = useRef<HTMLDivElement>(null)
@@ -663,10 +666,12 @@ export function FailureCard({ group, jobId, childJobName, childBuildNumber, inde
                   Include links
                 </label>
               )}
-              <Button variant="outline" size="sm" onClick={() => setReAnalyzeOpen(true)} disabled={rep.reanalysis_status === 'running'}>
-                <RotateCw className={`h-3.5 w-3.5 mr-1${rep.reanalysis_status === 'running' ? ' animate-spin' : ''}`} />
-                Re-analyze
-              </Button>
+              {!isViewer && (
+                <Button variant="outline" size="sm" onClick={() => setReAnalyzeOpen(true)} disabled={rep.reanalysis_status === 'running'}>
+                  <RotateCw className={`h-3.5 w-3.5 mr-1${rep.reanalysis_status === 'running' ? ' animate-spin' : ''}`} />
+                  Re-analyze
+                </Button>
+              )}
               <IssueButton
                 disabled={!githubIssuesEnabled}
                 tooltip={!githubIssuesEnabled ? 'GitHub issues are disabled on this server' : undefined}

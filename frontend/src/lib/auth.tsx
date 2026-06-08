@@ -30,15 +30,15 @@ async function syncTokensFromServer(forUsername: string) {
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [username, setUsernameState] = useState(getUsername())
   const [isAdmin, setIsAdminState] = useState(getIsAdmin())
-  const [role, setRoleState] = useState('user')
+  const [role, setRoleState] = useState('reviewer')
   const [loading, setLoading] = useState(true)
   const [authenticated, setAuthenticated] = useState(false)
 
   function clearPrivileges() {
     setIsAdminState(false)
-    setRoleState('user')
+    setRoleState('reviewer')
     setIsAdmin(false)
-    setRole('user')
+    setRole('reviewer')
     setAuthenticated(false)
   }
 

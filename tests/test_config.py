@@ -651,3 +651,38 @@ class TestMaxConcurrentAiCalls:
         with patch.dict(os.environ, env, clear=True):
             settings = Settings(_env_file=None)
             assert settings.max_concurrent_ai_calls == 1
+
+
+class TestDefaultUserRole:
+    """Tests for DEFAULT_USER_ROLE validation."""
+
+    def test_default_is_reviewer(self) -> None:
+        env = _build_env()
+        with patch.dict(os.environ, env, clear=True):
+            settings = Settings(_env_file=None)
+            assert settings.default_user_role == "reviewer"
+
+    def test_operator_allowed(self) -> None:
+        env = _build_env(DEFAULT_USER_ROLE="operator")
+        with patch.dict(os.environ, env, clear=True):
+            settings = Settings(_env_file=None)
+            assert settings.default_user_role == "operator"
+
+    def test_viewer_allowed(self) -> None:
+        env = _build_env(DEFAULT_USER_ROLE="viewer")
+        with patch.dict(os.environ, env, clear=True):
+            settings = Settings(_env_file=None)
+            assert settings.default_user_role == "viewer"
+
+    def test_admin_rejected(self) -> None:
+        """DEFAULT_USER_ROLE=admin is rejected to prevent privilege escalation."""
+        env = _build_env(DEFAULT_USER_ROLE="admin")
+        with patch.dict(os.environ, env, clear=True):
+            with pytest.raises(Exception, match="DEFAULT_USER_ROLE"):
+                Settings(_env_file=None)
+
+    def test_invalid_value_rejected(self) -> None:
+        env = _build_env(DEFAULT_USER_ROLE="superuser")
+        with patch.dict(os.environ, env, clear=True):
+            with pytest.raises(Exception, match="DEFAULT_USER_ROLE"):
+                Settings(_env_file=None)

@@ -10,6 +10,7 @@ import typer
 import yaml
 
 from rootcoz.cli.client import RootCozClient, RootCozError
+from rootcoz.storage import VALID_ROLES
 from rootcoz.cli.config import (
     CONFIG_FILE,
     ServerConfig,
@@ -110,6 +111,15 @@ def _handle_error(err: RootCozError) -> None:
         if "allow list" in detail:
             typer.echo(
                 "Hint: Your user is not on the server's allow list. Contact an administrator.",
+                err=True,
+            )
+        elif (
+            "operator" in detail
+            or "reviewer" in detail
+            or "authentication required" in detail
+        ):
+            typer.echo(
+                "Hint: This action requires a higher role. Contact an administrator to upgrade your role.",
                 err=True,
             )
         else:
@@ -2229,20 +2239,29 @@ def admin_users_list(
 
 @admin_users_app.command("create")
 def admin_users_create(
-    username: str = typer.Argument(..., help="Username for the new admin user."),
+    username: str = typer.Argument(..., help="Username for the new user."),
+    role: str = typer.Option(
+        ..., "--role", help="Role: viewer, reviewer, operator, or admin."
+    ),
     json_output: bool = _JSON_OPTION,
 ):
-    """Create a new admin user. The API key is shown once \u2014 save it."""
+    """Create a new user with the specified role. The API key is shown once \u2014 save it."""
+    if role not in VALID_ROLES:
+        typer.echo(
+            f"Error: role must be one of: {', '.join(sorted(VALID_ROLES))}",
+            err=True,
+        )
+        raise typer.Exit(1)
     data = _run_client_command(
         json_output,
-        lambda c: c.admin_create_user(username),
+        lambda c: c.admin_create_user(username, role=role),
         emit_output=False,
     )
-    api_key = data.get("api_key", "")
-    _require_api_key(api_key, "User creation")
     if not _state.get("json", False):
-        typer.echo(f"Created admin user: {data.get('username', username)}")
-        _echo_api_key_warning(api_key)
+        typer.echo(f"Created {role} user: {data.get('username', username)}")
+        api_key = data.get("api_key", "")
+        if api_key:
+            _echo_api_key_warning(api_key)
 
 
 @admin_users_app.command("delete")
@@ -2290,7 +2309,9 @@ def admin_users_rotate_key(
 @admin_users_app.command("change-role")
 def admin_users_change_role(
     username: str = typer.Argument(..., help="Username to change role for."),
-    role: str = typer.Argument(..., help="New role: 'admin' or 'user'."),
+    role: str = typer.Argument(
+        ..., help="New role: 'viewer', 'reviewer', 'operator', or 'admin'."
+    ),
     json_output: bool = _JSON_OPTION,
 ):
     """Change a user's role. Promoting to admin generates an API key."""

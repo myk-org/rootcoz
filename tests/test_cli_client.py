@@ -1472,9 +1472,10 @@ class TestRootCozClientAdminUsers:
     def test_admin_create_user(self):
         def handler(request):
             assert request.method == "POST"
-            assert request.url.path == "/api/admin/users"
+            assert request.url.path == "/api/admin/users/create"
             body = json.loads(request.content)
             assert body["username"] == "newadmin"
+            assert body["role"] == "admin"
             return httpx.Response(
                 200,
                 json={
@@ -1485,9 +1486,22 @@ class TestRootCozClientAdminUsers:
             )
 
         client = _make_client(handler)
-        result = client.admin_create_user("newadmin")
+        result = client.admin_create_user("newadmin", role="admin")
         assert result["username"] == "newadmin"
         assert "api_key" in result
+
+    def test_admin_create_user_reviewer(self):
+        def handler(request):
+            body = json.loads(request.content)
+            assert body["role"] == "reviewer"
+            return httpx.Response(
+                200,
+                json={"username": "newuser", "role": "reviewer"},
+            )
+
+        client = _make_client(handler)
+        result = client.admin_create_user("newuser", role="reviewer")
+        assert result["role"] == "reviewer"
 
     def test_admin_delete_user(self):
         def handler(request):
@@ -1543,7 +1557,7 @@ class TestRootCozClientAdminUsers:
             )
         )
         with pytest.raises(RootCozError) as exc_info:
-            client.admin_create_user("newadmin")
+            client.admin_create_user("newadmin", role="admin")
         assert exc_info.value.status_code == 403
 
 

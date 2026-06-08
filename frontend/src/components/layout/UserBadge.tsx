@@ -1,10 +1,11 @@
 import { useNavigate } from 'react-router-dom'
 import { useAuth } from '@/lib/auth'
+import { RoleBadge } from '@/components/shared/RoleBadge'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
 import { LogOut, Settings, Shield } from 'lucide-react'
 
 export function UserBadge() {
-  const { username, isAdmin, logout } = useAuth()
+  const { username, role, logout } = useAuth()
   const navigate = useNavigate()
   if (!username) return null
 
@@ -15,17 +16,13 @@ export function UserBadge() {
 
   return (
     <div className="flex items-center gap-2 rounded-full bg-surface-elevated px-3 py-1 text-sm text-text-secondary">
-      {isAdmin ? (
+      {role === 'admin' ? (
         <Shield className="h-3 w-3 text-signal-amber" />
       ) : (
-        <div className="h-2 w-2 rounded-full bg-signal-green" />
+        <div className={`h-2 w-2 rounded-full ${role === 'operator' ? 'bg-signal-blue' : 'bg-signal-green'}`} />
       )}
       <span className="font-mono text-xs">{username}</span>
-      {isAdmin && (
-        <span className="rounded bg-signal-amber/10 px-1 py-px text-[10px] font-medium text-signal-amber">
-          Admin
-        </span>
-      )}
+      <RoleBadge role={role} />
       <TooltipProvider delayDuration={200}>
         <Tooltip>
           <TooltipTrigger asChild>

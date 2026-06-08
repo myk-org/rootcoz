@@ -3,6 +3,7 @@ import { api } from '@/lib/api'
 import { formatTimestamp } from '@/lib/utils'
 import { isCommentInScope } from '@/lib/grouping'
 import { getUsername } from '@/lib/cookies'
+import { useAuth } from '@/lib/auth'
 import { useReportState, useReportDispatch, useRefreshEnrichments } from './ReportContext'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
@@ -82,6 +83,8 @@ export function CommentsSection({ jobId, testNames, childJobName, childBuildNumb
   const { comments, enrichments } = useReportState()
   const dispatch = useReportDispatch()
   const refreshEnrichments = useRefreshEnrichments()
+  const { role } = useAuth()
+  const isViewer = role === 'viewer'
   const [text, setText] = useState('')
   const [submitting, setSubmitting] = useState(false)
   const [submitError, setSubmitError] = useState<string | null>(null)
@@ -227,7 +230,7 @@ export function CommentsSection({ jobId, testNames, childJobName, childBuildNumb
                     />
                   </p>
                 </div>
-                {username && c.username === username && (
+                {!isViewer && username && c.username === username && (
                   <Tooltip>
                     <TooltipTrigger asChild>
                       <button
@@ -250,24 +253,26 @@ export function CommentsSection({ jobId, testNames, childJobName, childBuildNumb
         </TooltipProvider>
       )}
 
-      <div className="space-y-1">
-        <div className="flex gap-2">
-          <MentionTextarea
-            value={text}
-            onChange={setText}
-            onSubmit={handleSubmit}
-            placeholder="Add a comment..."
-          />
-          <Button size="sm" onClick={handleSubmit} disabled={!text.trim() || submitting} className="shrink-0">
-            Post
-          </Button>
+      {!isViewer && (
+        <div className="space-y-1">
+          <div className="flex gap-2">
+            <MentionTextarea
+              value={text}
+              onChange={setText}
+              onSubmit={handleSubmit}
+              placeholder="Add a comment..."
+            />
+            <Button size="sm" onClick={handleSubmit} disabled={!text.trim() || submitting} className="shrink-0">
+              Post
+            </Button>
+          </div>
+          {submitError && (
+            <span role="alert" className="text-signal-red text-xs">
+              {submitError}
+            </span>
+          )}
         </div>
-        {submitError && (
-          <span role="alert" className="text-signal-red text-xs">
-            {submitError}
-          </span>
-        )}
-      </div>
+      )}
 
       <ConfirmDialog
         open={deleteTarget !== null}
