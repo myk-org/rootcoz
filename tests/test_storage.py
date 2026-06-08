@@ -634,9 +634,9 @@ class TestSetTestClassification:
     async def test_child_job_with_zero_build_number_succeeds(
         self, setup_test_db: Path
     ) -> None:
-        """Regression: job_name + child_build_number=0 must not raise and must mirror to history."""
+        """job_name + child_build_number=0 must not raise; failure_history stays unchanged."""
         with patch.object(storage, "DB_PATH", setup_test_db):
-            # Seed a failure_history row that the wildcard mirror should update
+            # Seed a failure_history row
             async with aiosqlite.connect(setup_test_db) as db:
                 await db.execute(
                     """INSERT INTO failure_history
@@ -665,7 +665,7 @@ class TestSetTestClassification:
             )
             assert classification_id > 0
 
-            # Verify the wildcard mirror updated the matching failure_history row
+            # failure_history.classification must NOT be updated (no mirroring)
             async with aiosqlite.connect(setup_test_db) as db:
                 cursor = await db.execute(
                     "SELECT classification FROM failure_history "
@@ -674,7 +674,9 @@ class TestSetTestClassification:
                 )
                 row = await cursor.fetchone()
                 assert row is not None, "failure_history row should exist"
-                assert row[0] == "FLAKY"
+                assert row[0] == "CODE ISSUE", (
+                    "failure_history must retain original AI classification"
+                )
 
     async def test_defaults_only_classification_succeeds(
         self, setup_test_db: Path

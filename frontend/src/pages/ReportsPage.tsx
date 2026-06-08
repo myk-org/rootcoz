@@ -37,6 +37,9 @@ interface TotalsData {
 
 interface OverridesData {
   total: number
+  total_reviewed: number
+  ai_correct: number
+  ai_accuracy_pct: number
   groups: Array<{ from: string; to: string; count: number }>
   details: Array<{
     test_name: string
@@ -373,8 +376,16 @@ function OverridesReport({ data, search, expandedGroups, onToggleGroup, onExpand
 
   return (
     <div className="space-y-4">
-      <div className="grid grid-cols-1 gap-4">
-        <StatCard label="Total Overrides" value={data.total} />
+      <div className="grid grid-cols-4 gap-4">
+        <StatCard label="Total Reviewed" value={data.total_reviewed} />
+        <StatCard label="AI Correct" value={data.ai_correct} tone="text-signal-green" />
+        <StatCard label="Total Overrides" value={data.total} tone="text-signal-orange" />
+        <StatCard
+          label="AI Accuracy"
+          value={data.ai_accuracy_pct}
+          suffix="%"
+          tone={data.ai_accuracy_pct >= 80 ? 'text-signal-green' : data.ai_accuracy_pct >= 60 ? 'text-signal-orange' : 'text-signal-red'}
+        />
       </div>
 
       {filteredGroups.length > 0 && (
@@ -536,11 +547,11 @@ function IssuesReport({ data, search }: { data: IssuesData; search: string }) {
   )
 }
 
-function StatCard({ label, value, tone }: { label: string; value: number; tone?: string }) {
+function StatCard({ label, value, suffix, tone }: { label: string; value: number; suffix?: string; tone?: string }) {
   return (
     <div className="rounded-lg border border-border-muted bg-surface-card p-4 text-center">
       <p className="text-sm font-medium text-text-secondary">{label}</p>
-      <p className={cn('mt-1 text-2xl font-bold font-mono', tone || 'text-text-primary')}>{value}</p>
+      <p className={cn('mt-1 text-2xl font-bold font-mono', tone || 'text-text-primary')}>{value}{suffix}</p>
     </div>
   )
 }

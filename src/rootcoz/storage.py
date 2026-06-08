@@ -613,9 +613,7 @@ def _validate_child_identifier_pairing(
     Valid combinations (structural):
     - Both empty  (``""``, ``0``) -- top-level (no child context).
     - Name set, build ``0``       -- accepted; callers decide the semantics
-      (e.g. ``_mirror_classification_to_failure_history`` treats this as a wildcard
-      targeting all builds of that child job, while ``add_comment`` and
-      ``set_reviewed`` store it literally).
+      (e.g. ``add_comment`` and ``set_reviewed`` store it literally).
     - Both set    (name, N>0)     -- specific child build.
 
     Invalid:
@@ -2106,36 +2104,6 @@ async def get_parent_job_name_for_test(test_name: str, job_id: str = "") -> str:
         return row[0] if row else ""
 
 
-async def _mirror_classification_to_failure_history(
-    db: aiosqlite.Connection,
-    *,
-    classification: str,
-    test_name: str,
-    job_name: str,
-    child_build_number: int,
-    job_id: str,
-) -> None:
-    """Mirror a classification into the failure_history table.
-
-    When child_build_number is 0 and job_name is set, it acts as a wildcard:
-    all builds (child_build_number > 0) for that job_name are updated.
-    Otherwise, only the exact (test_name, job_name, child_build_number, job_id)
-    row is updated.
-    """
-    if child_build_number == 0 and job_name:
-        await db.execute(
-            "UPDATE failure_history SET classification = ? "
-            "WHERE test_name = ? AND child_job_name = ? AND child_build_number > 0 AND job_id = ?",
-            [classification, test_name, job_name, job_id],
-        )
-    else:
-        await db.execute(
-            "UPDATE failure_history SET classification = ? "
-            "WHERE test_name = ? AND child_job_name = ? AND child_build_number = ? AND job_id = ?",
-            [classification, test_name, job_name, child_build_number, job_id],
-        )
-
-
 async def set_test_classification(
     test_name: str,
     classification: str,
@@ -2192,22 +2160,6 @@ async def set_test_classification(
                 visible,
             ),
         )
-
-        # Mirror classification into failure_history so that filters on
-        # failure_history.classification (used by get_all_failures, get_test_history)
-        # reflect manual/AI reclassifications from test_classifications.
-        # Only mirror when visible=1 to prevent hidden AI classifications from
-        # leaking into failure_history before analysis completes.
-        # When visible=0, make_classifications_visible() handles the mirror.
-        if visible:
-            await _mirror_classification_to_failure_history(
-                db,
-                classification=classification,
-                test_name=test_name,
-                job_name=job_name,
-                child_build_number=child_build_number,
-                job_id=job_id,
-            )
 
         await db.commit()
         return cursor.lastrowid
@@ -2283,51 +2235,18 @@ async def get_test_classifications(
 async def make_classifications_visible(job_id: str) -> None:
     """Make all classifications for a job visible after analysis completes.
 
-    Also mirrors classifications into failure_history. The mirror is deferred
-    from set_test_classification (which creates rows with visible=0 during
-    analysis) to here so that failure_history doesn't leak hidden AI labels.
+    failure_history.classification is NOT updated — it always retains the
+    original AI classification.  The effective classification is resolved
+    at query time via test_classifications.
     """
     async with _connect_db() as db:
-        # Fetch hidden classifications before flipping so we can mirror them.
-        # ORDER BY created_at DESC ensures latest-wins when deduplicating
-        # by (test_name, job_name, child_build_number) below.
-        cursor = await db.execute(
-            "SELECT tc.id, test_name, job_name, child_build_number, classification "
-            "FROM test_classifications tc WHERE job_id = ? AND visible = 0 "
-            "ORDER BY tc.created_at DESC, tc.id DESC",
-            (job_id,),
-        )
-        all_rows = await cursor.fetchall()
-
-        # Deduplicate: keep only the latest classification per key
-        # (latest-wins, since we ordered by created_at DESC).
-        seen: set[tuple[str, str, int]] = set()
-        rows = []
-        for row in all_rows:
-            key = (row["test_name"], row["job_name"], row["child_build_number"])
-            if key not in seen:
-                seen.add(key)
-                rows.append(row)
-
-        await db.execute(
+        result = await db.execute(
             "UPDATE test_classifications SET visible = 1 WHERE job_id = ? AND visible = 0",
             (job_id,),
         )
-
-        # Mirror each newly-visible classification into failure_history
-        for row in rows:
-            await _mirror_classification_to_failure_history(
-                db,
-                classification=row["classification"],
-                test_name=row["test_name"],
-                job_name=row["job_name"],
-                child_build_number=row["child_build_number"],
-                job_id=job_id,
-            )
-
         await db.commit()
     logger.debug(
-        f"make_classifications_visible: job_id={job_id}, mirrored={len(rows)} classifications"
+        f"make_classifications_visible: job_id={job_id}, revealed={result.rowcount} classifications"
     )
 
 
@@ -4600,6 +4519,7 @@ async def get_report_classification_overrides(
                 AND fh.child_build_number = tc.child_build_number
             WHERE {where}
               AND tc.visible = 1
+              AND fh.classification != tc.classification
               AND EXISTS (
                   SELECT 1 FROM failure_reviews fr
                   WHERE fr.job_id = tc.job_id AND fr.test_name = tc.test_name
@@ -4609,6 +4529,53 @@ async def get_report_classification_overrides(
         """
         cursor = await db.execute(sql, params)
         rows = await cursor.fetchall()
+
+        # Count total reviewed tests (same filters minus override-specific ones)
+        reviewed_conditions: list[str] = []
+        reviewed_params: list = []
+        _build_date_filter(
+            "fr.updated_at", date_from, date_to, reviewed_conditions, reviewed_params
+        )
+        reviewed_meta_join = _build_metadata_join(
+            team,
+            tier,
+            version,
+            "fr_rdata.job_name",
+            reviewed_conditions,
+            reviewed_params,
+        )
+        _build_tags_filter(
+            tags, "fr_rdata.job_name", reviewed_conditions, reviewed_params
+        )
+        _build_exclude_tags_filter(
+            exclude_tags, "fr_rdata.job_name", reviewed_conditions, reviewed_params
+        )
+        reviewed_status_join = ""
+        if status:
+            reviewed_status_join = (
+                " JOIN results r_rstatus ON r_rstatus.job_id = fr.job_id"
+            )
+            r_placeholders = ", ".join("?" for _ in status)
+            reviewed_conditions.append(f"r_rstatus.status IN ({r_placeholders})")
+            reviewed_params.extend(status)
+        needs_rdata = bool(team or tier or version or tags or exclude_tags)
+        rdata_join = (
+            f"JOIN ({_RESULT_DATA_SUBQUERY}) fr_rdata ON fr_rdata.job_id = fr.job_id"
+            if needs_rdata
+            else ""
+        )
+        reviewed_where = (
+            (" AND " + " AND ".join(reviewed_conditions)) if reviewed_conditions else ""
+        )
+        reviewed_sql = f"""
+            SELECT COUNT(*) AS cnt FROM failure_reviews fr
+            {rdata_join}
+            {reviewed_meta_join}
+            {reviewed_status_join}
+            WHERE fr.reviewed = 1{reviewed_where}
+        """
+        r_cursor = await db.execute(reviewed_sql, reviewed_params)
+        total_reviewed = (await r_cursor.fetchone())["cnt"]
 
     # Group by from->to
     groups: dict[str, dict] = {}
@@ -4636,8 +4603,16 @@ async def get_report_classification_overrides(
     # Apply pagination to the detail list (groups/total are always full)
     paginated = details[offset : offset + limit] if limit > 0 else details
 
+    ai_correct = total_reviewed - len(details)
+    ai_accuracy_pct = (
+        round((ai_correct / total_reviewed) * 100, 1) if total_reviewed > 0 else 0
+    )
+
     return {
         "total": len(details),
+        "total_reviewed": total_reviewed,
+        "ai_correct": max(ai_correct, 0),
+        "ai_accuracy_pct": ai_accuracy_pct,
         "groups": list(groups.values()),
         "details": paginated,
     }

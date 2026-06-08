@@ -203,8 +203,42 @@ class TestReportOverrides:
             assert len(result["groups"]) >= 1
             detail = result["details"][0]
             assert detail["test_name"] == "test_foo"
+            assert detail["from_classification"] == "CODE ISSUE"
             assert detail["to_classification"] == "PRODUCT BUG"
             assert detail["overridden_by"] == "reviewer"
+
+    @pytest.mark.asyncio
+    async def test_ai_accuracy(self, populated_db: Path):
+        with patch.object(storage, "DB_PATH", populated_db):
+            result = await storage.get_report_classification_overrides()
+            # 1 reviewed test, 1 override → ai_correct = 0
+            assert "total_reviewed" in result
+            assert result["total_reviewed"] >= 1
+            assert "ai_correct" in result
+            assert "ai_accuracy_pct" in result
+            assert result["ai_accuracy_pct"] >= 0
+            assert result["ai_accuracy_pct"] <= 100
+
+    @pytest.mark.asyncio
+    async def test_same_classification_excluded(self, populated_db: Path):
+        """Overrides where AI classification == user classification are excluded."""
+        with patch.object(storage, "DB_PATH", populated_db):
+            # Add a same→same classification (user confirms AI's choice)
+            async with storage._connect_db() as conn:
+                await conn.execute(
+                    """INSERT INTO test_classifications
+                       (test_name, job_name, classification, created_by, job_id, visible)
+                       VALUES (?, ?, ?, ?, ?, ?)""",
+                    ("test_foo", "test-job", "CODE ISSUE", "confirmer", "job-1", 1),
+                )
+                await conn.commit()
+            result = await storage.get_report_classification_overrides()
+            # Only the real override (CODE ISSUE → PRODUCT BUG) should appear,
+            # not the same→same (CODE ISSUE → CODE ISSUE)
+            for detail in result["details"]:
+                assert detail["from_classification"] != detail["to_classification"], (
+                    f"Same→same override should be excluded: {detail['from_classification']} → {detail['to_classification']}"
+                )
 
     @pytest.mark.asyncio
     async def test_date_filter_excludes(self, populated_db: Path):
