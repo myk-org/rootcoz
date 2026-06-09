@@ -640,7 +640,7 @@ async def _migrate_restore_ai_classifications() -> None:
 
         if not needs_restore:
             await db.execute(
-                "INSERT INTO _migrations_applied (key) VALUES (?)",
+                "INSERT OR IGNORE INTO _migrations_applied (key) VALUES (?)",
                 (migration_key,),
             )
             await db.commit()
@@ -667,7 +667,7 @@ async def _migrate_restore_ai_classifications() -> None:
 
     async with _connect_db() as db:
         await db.execute(
-            "INSERT INTO _migrations_applied (key) VALUES (?)",
+            "INSERT OR IGNORE INTO _migrations_applied (key) VALUES (?)",
             (migration_key,),
         )
         await db.commit()
