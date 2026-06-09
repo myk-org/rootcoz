@@ -600,6 +600,74 @@ async def init_db() -> None:
     #  3. The expected data volume (hundreds to low-thousands of results) completes
     #     in under a second on typical hardware.
     await backfill_failure_history()
+    await _migrate_restore_ai_classifications()
+
+
+async def _migrate_restore_ai_classifications() -> None:
+    """One-time migration: restore original AI classifications in failure_history.
+
+    Historical mirroring code overwrote failure_history.classification with
+    user overrides.  This migration detects affected rows (where
+    fh.classification matches a user override in test_classifications but
+    differs from the original AI value in result_json) and re-populates
+    from result_json to restore the original AI values.
+
+    Tracked via ``_migrations_applied`` table to ensure it runs only once.
+    """
+    migration_key = "restore_ai_classifications_v1"
+    async with _connect_db() as db:
+        await db.execute(
+            "CREATE TABLE IF NOT EXISTS _migrations_applied "
+            "(key TEXT PRIMARY KEY, applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)"
+        )
+        cursor = await db.execute(
+            "SELECT 1 FROM _migrations_applied WHERE key = ?", (migration_key,)
+        )
+        if await cursor.fetchone():
+            return  # Already applied
+
+        cursor = await db.execute(
+            "SELECT COUNT(*) FROM failure_history fh "
+            "JOIN test_classifications tc "
+            "  ON tc.job_id = fh.job_id AND tc.test_name = fh.test_name "
+            "WHERE fh.classification = tc.classification AND tc.created_by != ''"
+        )
+        needs_restore = (await cursor.fetchone())[0] > 0
+
+        if not needs_restore:
+            await db.execute(
+                "INSERT INTO _migrations_applied (key) VALUES (?)",
+                (migration_key,),
+            )
+            await db.commit()
+            return
+
+    logger.info(
+        "Migration: restoring original AI classifications in failure_history..."
+    )
+    async with _connect_db() as db:
+        cursor = await db.execute(
+            "SELECT job_id, result_json, created_at FROM results "
+            "WHERE status = 'completed' AND result_json IS NOT NULL"
+        )
+        rows = await cursor.fetchall()
+
+    restored = 0
+    for row in rows:
+        result_data = parse_result_json(row["result_json"], job_id=row["job_id"])
+        if result_data:
+            await populate_failure_history(
+                row["job_id"], result_data, analyzed_at=row["created_at"]
+            )
+            restored += 1
+
+    async with _connect_db() as db:
+        await db.execute(
+            "INSERT INTO _migrations_applied (key) VALUES (?)",
+            (migration_key,),
+        )
+        await db.commit()
+    logger.info("Migration: restored AI classifications for %d jobs", restored)
 
 
 def _validate_child_identifier_pairing(
