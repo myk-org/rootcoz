@@ -665,13 +665,16 @@ async def _migrate_restore_ai_classifications() -> None:
             )
             restored += 1
 
-    async with _connect_db() as db:
-        await db.execute(
-            "INSERT OR IGNORE INTO _migrations_applied (key) VALUES (?)",
-            (migration_key,),
-        )
-        await db.commit()
-    logger.info("Migration: restored AI classifications for %d jobs", restored)
+    if restored > 0:
+        async with _connect_db() as db:
+            await db.execute(
+                "INSERT OR IGNORE INTO _migrations_applied (key) VALUES (?)",
+                (migration_key,),
+            )
+            await db.commit()
+        logger.info("Migration: restored AI classifications for %d jobs", restored)
+    else:
+        logger.warning("Migration: no jobs could be restored (all parse failures)")
 
 
 def _validate_child_identifier_pairing(
