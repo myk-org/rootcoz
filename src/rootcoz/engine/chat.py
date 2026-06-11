@@ -282,10 +282,13 @@ async def setup_jenkins_workspace(
     # 2. Write console-output.txt (full log — AI uses grep/read to find what it needs)
     if console_output is not None:
         try:
-            console_file.write_text(console_output)
-            logger.info(
-                "Chat: wrote console-output.txt (%d chars)", len(console_output)
+            content = (
+                console_output
+                if console_output
+                else "No console output available for this build."
             )
+            console_file.write_text(content)
+            logger.info("Chat: wrote console-output.txt (%d chars)", len(content))
             wrote_any = True
         except OSError:
             logger.warning("Chat: failed to write console-output.txt", exc_info=True)
