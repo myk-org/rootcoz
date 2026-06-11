@@ -280,7 +280,7 @@ async def setup_jenkins_workspace(
                 build_info = r
 
     # 2. Write console-output.txt (full log — AI uses grep/read to find what it needs)
-    if console_output:
+    if console_output is not None:
         try:
             console_file.write_text(console_output)
             logger.info(
