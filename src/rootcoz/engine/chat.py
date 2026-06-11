@@ -206,7 +206,7 @@ async def setup_jenkins_workspace(
     """Populate the chat workspace with Jenkins build context.
 
     Connects to Jenkins using stored credentials and writes:
-    - ``console-output.txt`` \u2014 relevant console lines (same extraction as analysis)
+    - ``console-output.txt`` \u2014 full Jenkins console output
     - ``build-info.json`` \u2014 structured build metadata (result, params, timing)
     - ``build-artifacts/`` \u2014 symlink to downloaded artifacts directory
 
@@ -793,7 +793,7 @@ def build_system_prompt(
     if jenkins_data_available:
         repos_note += (
             "\n\nJenkins build data is available in your working directory:"
-            "\n- `console-output.txt` \u2014 relevant Jenkins console output lines"
+            "\n- `console-output.txt` \u2014 full Jenkins console output"
             "\n- `build-info.json` \u2014 build result, parameters, timing, and duration"
             "\n- `build-artifacts/` \u2014 downloaded build artifacts (logs, test outputs)"
             "\nUse the `read` tool to examine these files when relevant to the user's question."
