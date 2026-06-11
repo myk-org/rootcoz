@@ -181,6 +181,24 @@ async def clone_chat_repos(
     return cloned_any
 
 
+_SENSITIVE_PARAM_PATTERNS = frozenset(
+    {"password", "token", "secret", "key", "credential", "auth"}
+)
+
+
+def _extract_build_params(build_info: dict) -> list[dict]:
+    """Extract build parameters from Jenkins build info, filtering sensitive values."""
+    params: list[dict] = []
+    for action in build_info.get("actions", []):
+        if action and action.get("_class", "").endswith("ParametersAction"):
+            for param in action.get("parameters", []):
+                name = param.get("name", "")
+                if any(p in name.lower() for p in _SENSITIVE_PARAM_PATTERNS):
+                    continue
+                params.append({"name": name, "value": param.get("value", "")})
+    return params
+
+
 async def setup_jenkins_workspace(
     workspace: Path,
     request_params: dict,
@@ -224,70 +242,77 @@ async def setup_jenkins_workspace(
         return False
 
     wrote_any = False
-
-    # 1. Console output
     console_file = workspace / "console-output.txt"
-    if not console_file.exists():
-        try:
-            from rootcoz.sources.jenkins_source import (
-                extract_relevant_console_lines,
-            )
-
-            console_output = await asyncio.to_thread(
-                client.get_build_console, job_name, build_number
-            )
-            console_context = extract_relevant_console_lines(console_output)
-            if console_context:
-                console_file.write_text(console_context)
-                logger.info(
-                    "Chat: wrote console-output.txt (%d lines)",
-                    len(console_context.splitlines()),
-                )
-                wrote_any = True
-        except Exception:
-            logger.warning("Chat: failed to fetch console output", exc_info=True)
-
-    # 2. Build info
     build_info_file = workspace / "build-info.json"
+    need_console = not console_file.exists()
+    need_build_info = not build_info_file.exists()
+
+    # 1. Fetch console output and build info in parallel
+    console_output: str | None = None
     build_info: dict = {}
-    if not build_info_file.exists():
-        try:
-            build_info = await asyncio.to_thread(
-                client.get_build_info_safe, job_name, build_number
+    if need_console or need_build_info:
+        tasks: list = []
+        if need_console:
+            tasks.append(
+                asyncio.to_thread(client.get_build_console, job_name, build_number)
             )
-            # Extract useful fields (avoid writing raw Jenkins API response)
-            import json as _json
+        if need_build_info:
+            tasks.append(
+                asyncio.to_thread(client.get_build_info_safe, job_name, build_number)
+            )
+        results = await asyncio.gather(*tasks, return_exceptions=True)
 
-            build_params = []
-            for action in build_info.get("actions", []):
-                if action and action.get("_class", "").endswith("ParametersAction"):
-                    for param in action.get("parameters", []):
-                        build_params.append(
-                            {
-                                "name": param.get("name", ""),
-                                "value": param.get("value", ""),
-                            }
-                        )
-            info_data = {
-                "job_name": job_name,
-                "build_number": build_number,
-                "result": build_info.get("result"),
-                "building": build_info.get("building", False),
-                "duration_ms": build_info.get("duration", 0),
-                "estimated_duration_ms": build_info.get("estimatedDuration", 0),
-                "timestamp": build_info.get("timestamp", 0),
-                "url": build_info.get("url", ""),
-                "display_name": build_info.get("displayName", ""),
-                "description": build_info.get("description", ""),
-                "parameters": build_params,
-            }
-            build_info_file.write_text(_json.dumps(info_data, indent=2))
-            logger.info("Chat: wrote build-info.json")
+        idx = 0
+        if need_console:
+            r = results[idx]
+            if isinstance(r, BaseException):
+                logger.warning("Chat: failed to fetch console output: %s", r)
+            else:
+                console_output = r
+            idx += 1
+        if need_build_info:
+            r = results[idx]
+            if isinstance(r, BaseException):
+                logger.warning("Chat: failed to fetch build info: %s", r)
+            else:
+                build_info = r
+
+    # 2. Write console-output.txt
+    if console_output is not None:
+        from rootcoz.engine.core import extract_relevant_console_lines
+
+        console_context = extract_relevant_console_lines(console_output)
+        if console_context:
+            console_file.write_text(console_context)
+            logger.info(
+                "Chat: wrote console-output.txt (%d lines)",
+                len(console_context.splitlines()),
+            )
             wrote_any = True
-        except Exception:
-            logger.warning("Chat: failed to fetch build info", exc_info=True)
 
-    # 3. Build artifacts
+    # 3. Write build-info.json
+    if build_info and need_build_info:
+        import json as _json
+
+        build_params = _extract_build_params(build_info)
+        info_data = {
+            "job_name": job_name,
+            "build_number": build_number,
+            "result": build_info.get("result"),
+            "building": build_info.get("building", False),
+            "duration_ms": build_info.get("duration", 0),
+            "estimated_duration_ms": build_info.get("estimatedDuration", 0),
+            "timestamp": build_info.get("timestamp", 0),
+            "url": build_info.get("url", ""),
+            "display_name": build_info.get("displayName", ""),
+            "description": build_info.get("description", ""),
+            "parameters": build_params,
+        }
+        build_info_file.write_text(_json.dumps(info_data, indent=2))
+        logger.info("Chat: wrote build-info.json")
+        wrote_any = True
+
+    # 4. Build artifacts
     artifacts_link = workspace / "build-artifacts"
     if not artifacts_link.exists() and request_params.get("get_job_artifacts"):
         # Reuse build_info if already fetched, otherwise fetch it
@@ -383,6 +408,10 @@ def build_chat_custom_tools(
                         "type": "string",
                         "description": "Full test name",
                     },
+                    "job_name": {
+                        "type": "string",
+                        "description": "Optional: filter history by job name",
+                    },
                 },
                 "required": ["test_name"],
             },
@@ -390,6 +419,7 @@ def build_chat_custom_tools(
                 "method": "GET",
                 "url": f"{server_url}/history/test/{{test_name}}",
                 "headers": auth_headers,
+                "query_params": {"job_name": "{job_name}"},
             },
         }
     )
@@ -600,6 +630,25 @@ def build_admin_custom_tools(
     ]
 
 
+def _safe_remove_symlink(link: Path) -> None:
+    """Remove a symlink and its target directory if safe.
+
+    Only deletes the target when it resolves to a path under ``/tmp/``
+    to prevent accidental deletion of system directories if the
+    symlink was manipulated.
+    """
+    target = link.resolve()
+    link.unlink(missing_ok=True)
+    if target.exists() and target.is_dir():
+        if target.is_relative_to(Path("/tmp").resolve()):
+            shutil.rmtree(target, ignore_errors=True)
+        else:
+            logger.warning(
+                "Chat cleanup: refusing to delete symlink target outside /tmp/: %s",
+                target,
+            )
+
+
 def cleanup_chat_repos(job_id: str, username: str = "") -> None:
     """Delete cloned repos and artifacts from chat workspace but keep session files."""
     workspace = get_chat_workspace(job_id, username)
@@ -610,12 +659,8 @@ def cleanup_chat_repos(job_id: str, username: str = "") -> None:
     for item in workspace.iterdir():
         if item.name.startswith("."):
             continue  # Keep .claude/, .cursor/ etc (session data)
-        # Resolve symlinks (e.g. build-artifacts/) to clean up the target too
         if item.is_symlink():
-            target = item.resolve()
-            item.unlink(missing_ok=True)
-            if target.exists() and target.is_dir():
-                shutil.rmtree(target, ignore_errors=True)
+            _safe_remove_symlink(item)
         elif item.is_dir():
             shutil.rmtree(item, ignore_errors=True)
         else:
@@ -635,10 +680,7 @@ def cleanup_chat_workspace(job_id: str, username: str = "") -> None:
     # by shutil.rmtree (which removes the symlink, not its target).
     for item in workspace.iterdir():
         if item.is_symlink():
-            target = item.resolve()
-            item.unlink(missing_ok=True)
-            if target.exists() and target.is_dir():
-                shutil.rmtree(target, ignore_errors=True)
+            _safe_remove_symlink(item)
 
     shutil.rmtree(workspace, ignore_errors=True)
     logger.info(f"Deleted chat workspace for job {job_id}")

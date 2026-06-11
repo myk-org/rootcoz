@@ -8,6 +8,7 @@ import pytest
 
 from rootcoz import storage
 from rootcoz.engine.chat import (
+    _extract_build_params,
     build_chat_custom_tools,
     build_chat_prompt,
     build_system_prompt,
@@ -96,8 +97,10 @@ class TestBuildChatCustomTools:
         )
         tool = next(t for t in tools if t["name"] == "get_failure_history")
         assert "test_name" in tool["parameters"]["properties"]
+        assert "job_name" in tool["parameters"]["properties"]
         assert tool["parameters"]["required"] == ["test_name"]
         assert "{test_name}" in tool["http"]["url"]
+        assert tool["http"]["query_params"]["job_name"] == "{job_name}"
         assert tool["http"]["method"] == "GET"
 
     def test_classification_history_tool(self):
@@ -482,6 +485,56 @@ class TestBuildChatPrompt:
 
 
 # ---------------------------------------------------------------------------
+# _extract_build_params tests
+# ---------------------------------------------------------------------------
+
+
+class TestExtractBuildParams:
+    """Tests for _extract_build_params sensitive filtering."""
+
+    def test_extracts_normal_params(self):
+        build_info = {
+            "actions": [
+                {
+                    "_class": "hudson.model.ParametersAction",
+                    "parameters": [
+                        {"name": "BRANCH", "value": "main"},
+                        {"name": "ENV", "value": "staging"},
+                    ],
+                }
+            ]
+        }
+        params = _extract_build_params(build_info)
+        assert params == [
+            {"name": "BRANCH", "value": "main"},
+            {"name": "ENV", "value": "staging"},
+        ]
+
+    def test_filters_sensitive_params(self):
+        build_info = {
+            "actions": [
+                {
+                    "_class": "hudson.model.ParametersAction",
+                    "parameters": [
+                        {"name": "BRANCH", "value": "main"},
+                        {"name": "API_TOKEN", "value": "secret123"},
+                        {"name": "DB_PASSWORD", "value": "pass456"},
+                        {"name": "SECRET_KEY", "value": "key789"},
+                        {"name": "AWS_CREDENTIAL", "value": "cred"},
+                        {"name": "AUTH_HEADER", "value": "bearer xyz"},
+                    ],
+                }
+            ]
+        }
+        params = _extract_build_params(build_info)
+        assert params == [{"name": "BRANCH", "value": "main"}]
+
+    def test_no_actions(self):
+        assert _extract_build_params({}) == []
+        assert _extract_build_params({"actions": []}) == []
+
+
+# ---------------------------------------------------------------------------
 # setup_jenkins_workspace tests
 # ---------------------------------------------------------------------------
 
@@ -554,7 +607,11 @@ class TestSetupJenkinsWorkspace:
                 "actions": [
                     {
                         "_class": "hudson.model.ParametersAction",
-                        "parameters": [{"name": "BRANCH", "value": "main"}],
+                        "parameters": [
+                            {"name": "BRANCH", "value": "main"},
+                            {"name": "API_TOKEN", "value": "secret123"},
+                            {"name": "DB_PASSWORD", "value": "pass456"},
+                        ],
                     }
                 ],
                 "artifacts": [],
@@ -568,6 +625,7 @@ class TestSetupJenkinsWorkspace:
 
         info = json.loads((workspace / "build-info.json").read_text())
         assert info["result"] == "FAILURE"
+        # Sensitive params (TOKEN, PASSWORD) should be filtered out
         assert info["parameters"] == [{"name": "BRANCH", "value": "main"}]
 
     @pytest.mark.asyncio
@@ -641,6 +699,21 @@ class TestChatCleanup:
 
         assert not workspace.exists()
         assert not external_target.exists()
+
+    def test_safe_remove_symlink_validates_tmp(self, tmp_path):
+        """_safe_remove_symlink only deletes targets under /tmp/."""
+        from rootcoz.engine.chat import _safe_remove_symlink
+
+        # Target under /tmp/ — should be deleted
+        target = tmp_path / "artifact_dir"
+        target.mkdir()
+        (target / "file.txt").write_text("data")
+        link = tmp_path / "link"
+        link.symlink_to(target)
+
+        _safe_remove_symlink(link)
+        assert not link.exists()
+        assert not target.exists()  # under /tmp/ → deleted
 
 
 # ---------------------------------------------------------------------------

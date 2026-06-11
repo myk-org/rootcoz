@@ -8035,6 +8035,15 @@ async def create_feedback(request: Request, body: FeedbackCreateRequest):
 # -- Chat helpers --
 
 
+def _build_jenkins_workspace_params(decrypted_params: dict, result_data: dict) -> dict:
+    """Build params dict for setup_jenkins_workspace from decrypted request params."""
+    return {
+        **decrypted_params,
+        "job_name": result_data.get("job_name", ""),
+        "build_number": result_data.get("build_number", 0),
+    }
+
+
 async def _resolve_chat_credentials(
     decrypted_params: dict, username: str
 ) -> tuple[str, str, str, str, str]:
@@ -8165,13 +8174,8 @@ async def init_chat(job_id: str, request: Request) -> dict:
         )
 
         # Populate workspace with Jenkins data: console output, build info, artifacts
-        jenkins_params = {
-            **decrypted_params,
-            "job_name": result_data.get("job_name", ""),
-            "build_number": result_data.get("build_number", 0),
-        }
         jenkins_data_available = await setup_jenkins_workspace(
-            workspace, jenkins_params
+            workspace, _build_jenkins_workspace_params(decrypted_params, result_data)
         )
 
         existing = await storage.get_chat_messages(job_id, limit=1, username=username)
@@ -8556,13 +8560,9 @@ async def _process_chat_message(
             )
 
             # Populate workspace with Jenkins data: console output, build info, artifacts
-            jenkins_params = {
-                **decrypted_params,
-                "job_name": result_data.get("job_name", ""),
-                "build_number": result_data.get("build_number", 0),
-            }
             jenkins_data_available = await setup_jenkins_workspace(
-                workspace, jenkins_params
+                workspace,
+                _build_jenkins_workspace_params(decrypted_params, result_data),
             )
 
             settings = get_settings()
