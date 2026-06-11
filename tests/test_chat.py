@@ -11,6 +11,7 @@ from rootcoz.engine.chat import (
     build_chat_custom_tools,
     build_chat_prompt,
     build_system_prompt,
+    build_welcome_message,
 )
 
 _TEST_ADMIN_KEY = "test-admin-key-16chars"  # pragma: allowlist secret
@@ -379,6 +380,67 @@ class TestBuildSystemPrompt:
             custom_tools=tools,
         )
         assert "Unavailable Tools" not in prompt
+
+
+# ---------------------------------------------------------------------------
+# build_welcome_message tests
+# ---------------------------------------------------------------------------
+
+
+class TestBuildWelcomeMessage:
+    """Tests for build_welcome_message."""
+
+    def test_basic_message(self):
+        msg = build_welcome_message(job_name="test-job", build_number=42)
+        assert "test-job" in msg
+        assert "#42" in msg
+        assert "Job analysis results" in msg
+        assert "Job comments" in msg
+        assert "Failure history" in msg
+        assert "Classification history" in msg
+        # Not available by default
+        assert "Jira" not in msg
+        assert "GitHub" not in msg
+        assert "repository" not in msg.lower()
+
+    def test_repos_available(self):
+        msg = build_welcome_message(job_name="j", build_number=1, repos_available=True)
+        assert "repository" in msg.lower()
+
+    def test_jenkins_data(self):
+        msg = build_welcome_message(
+            job_name="j",
+            build_number=1,
+            jenkins_data_available=True,
+        )
+        assert "Build artifacts" in msg
+        assert "console output" in msg.lower()
+        assert "build info" in msg.lower()
+
+    def test_jira_available(self):
+        msg = build_welcome_message(job_name="j", build_number=1, jira_available=True)
+        assert "Jira" in msg
+
+    def test_github_available(self):
+        msg = build_welcome_message(job_name="j", build_number=1, github_available=True)
+        assert "GitHub" in msg
+
+    def test_all_resources(self):
+        msg = build_welcome_message(
+            job_name="pipeline",
+            build_number=99,
+            repos_available=True,
+            jenkins_data_available=True,
+            jira_available=True,
+            github_available=True,
+        )
+        assert "pipeline" in msg
+        assert "#99" in msg
+        assert "repository" in msg.lower()
+        assert "Build artifacts" in msg
+        assert "Jira" in msg
+        assert "GitHub" in msg
+        assert "console output" in msg.lower()
 
 
 # ---------------------------------------------------------------------------

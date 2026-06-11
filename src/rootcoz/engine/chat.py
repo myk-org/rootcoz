@@ -684,6 +684,42 @@ def _build_unavailable_section(custom_tools: list[dict]) -> str:
     return "\n\n## Unavailable Tools\n" + "\n".join(lines)
 
 
+def build_welcome_message(
+    *,
+    job_name: str,
+    build_number: int,
+    repos_available: bool = False,
+    jenkins_data_available: bool = False,
+    jira_available: bool = False,
+    github_available: bool = False,
+) -> str:
+    """Build a dynamic welcome message listing available resources."""
+    resources = [
+        "📊 Job analysis results (failures, classifications, AI analysis)",
+        "💬 Job comments and discussion",
+    ]
+    if repos_available:
+        resources.append("📁 Test repository and source code")
+    if jenkins_data_available:
+        resources.append("🔧 Build artifacts (logs, test output, cluster data)")
+        resources.append("🖥️ Jenkins console output")
+        resources.append("⚙️ Jenkins build info (status, params, timing)")
+    resources.append("🔍 Failure history — check if this test failed before")
+    resources.append("📋 Classification history — see who changed classifications")
+    if jira_available:
+        resources.append("🐛 Jira issue search")
+    if github_available:
+        resources.append("🐙 GitHub issues search")
+
+    return (
+        f"👋 Welcome! I'm here to help you understand and discuss the analysis results "
+        f"for **{job_name} #{build_number}**.\n\n"
+        f"**Resources available in this chat:**\n"
+        + "\n".join(f"- {r}" for r in resources)
+        + "\n\nAsk me anything about this analysis!"
+    )
+
+
 _COMMON_RULES = """- Do NOT modify any data — read-only access only
 - Do NOT run arbitrary curl commands — use the provided tools"""
 

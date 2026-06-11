@@ -8113,6 +8113,7 @@ async def init_chat(job_id: str, request: Request) -> dict:
         clone_chat_repos,
         setup_jenkins_workspace,
         build_chat_custom_tools,
+        build_welcome_message,
         init_chat_session,
     )
 
@@ -8220,6 +8221,23 @@ async def init_chat(job_id: str, request: Request) -> dict:
                     session_id=session_id,
                     status="completed",
                 )
+
+            # Insert welcome message as first visible assistant message
+            welcome_text = build_welcome_message(
+                job_name=result_data.get("job_name", "unknown"),
+                build_number=result_data.get("build_number", 0),
+                repos_available=repos_available,
+                jenkins_data_available=jenkins_data_available,
+                jira_available=bool(jira_url and jira_token),
+                github_available=bool(github_token and github_repo),
+            )
+            await storage.add_chat_message(
+                job_id=job_id,
+                role="assistant",
+                content=welcome_text,
+                username=username,
+                status="completed",
+            )
 
     logger.info(
         "Chat init for job %s: workspace=%s, repos=%s, session=%s",
