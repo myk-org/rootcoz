@@ -277,18 +277,14 @@ async def setup_jenkins_workspace(
             else:
                 build_info = r
 
-    # 2. Write console-output.txt
-    if console_output is not None:
-        from rootcoz.engine.core import extract_relevant_console_lines
-
-        console_context = extract_relevant_console_lines(console_output)
-        if console_context:
-            console_file.write_text(console_context)
-            logger.info(
-                "Chat: wrote console-output.txt (%d lines)",
-                len(console_context.splitlines()),
-            )
-            wrote_any = True
+    # 2. Write console-output.txt (full log — AI uses grep/read to find what it needs)
+    if console_output:
+        console_file.write_text(console_output)
+        logger.info(
+            "Chat: wrote console-output.txt (%d lines)",
+            len(console_output.splitlines()),
+        )
+        wrote_any = True
 
     # 3. Write build-info.json
     if build_info and need_build_info:
