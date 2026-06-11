@@ -281,34 +281,39 @@ async def setup_jenkins_workspace(
 
     # 2. Write console-output.txt (full log — AI uses grep/read to find what it needs)
     if console_output:
-        console_file.write_text(console_output)
-        logger.info(
-            "Chat: wrote console-output.txt (%d lines)",
-            len(console_output.splitlines()),
-        )
-        wrote_any = True
+        try:
+            console_file.write_text(console_output)
+            logger.info(
+                "Chat: wrote console-output.txt (%d chars)", len(console_output)
+            )
+            wrote_any = True
+        except OSError:
+            logger.warning("Chat: failed to write console-output.txt", exc_info=True)
 
     # 3. Write build-info.json
     if build_info and need_build_info:
-        import json as _json
+        try:
+            import json as _json
 
-        build_params = _extract_build_params(build_info)
-        info_data = {
-            "job_name": job_name,
-            "build_number": build_number,
-            "result": build_info.get("result"),
-            "building": build_info.get("building", False),
-            "duration_ms": build_info.get("duration", 0),
-            "estimated_duration_ms": build_info.get("estimatedDuration", 0),
-            "timestamp": build_info.get("timestamp", 0),
-            "url": build_info.get("url", ""),
-            "display_name": build_info.get("displayName", ""),
-            "description": build_info.get("description", ""),
-            "parameters": build_params,
-        }
-        build_info_file.write_text(_json.dumps(info_data, indent=2))
-        logger.info("Chat: wrote build-info.json")
-        wrote_any = True
+            build_params = _extract_build_params(build_info)
+            info_data = {
+                "job_name": job_name,
+                "build_number": build_number,
+                "result": build_info.get("result"),
+                "building": build_info.get("building", False),
+                "duration_ms": build_info.get("duration", 0),
+                "estimated_duration_ms": build_info.get("estimatedDuration", 0),
+                "timestamp": build_info.get("timestamp", 0),
+                "url": build_info.get("url", ""),
+                "display_name": build_info.get("displayName", ""),
+                "description": build_info.get("description", ""),
+                "parameters": build_params,
+            }
+            build_info_file.write_text(_json.dumps(info_data, indent=2))
+            logger.info("Chat: wrote build-info.json")
+            wrote_any = True
+        except OSError:
+            logger.warning("Chat: failed to write build-info.json", exc_info=True)
 
     # 4. Build artifacts
     artifacts_link = workspace / "build-artifacts"
