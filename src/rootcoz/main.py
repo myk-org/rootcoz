@@ -8111,6 +8111,7 @@ async def init_chat(job_id: str, request: Request) -> dict:
     from rootcoz.engine.chat import (
         ensure_chat_workspace,
         clone_chat_repos,
+        setup_jenkins_workspace,
         build_chat_custom_tools,
         init_chat_session,
     )
@@ -8162,6 +8163,16 @@ async def init_chat(job_id: str, request: Request) -> dict:
             workspace, decrypted_params, user_repo_token=github_token
         )
 
+        # Populate workspace with Jenkins data: console output, build info, artifacts
+        jenkins_params = {
+            **decrypted_params,
+            "job_name": result_data.get("job_name", ""),
+            "build_number": result_data.get("build_number", 0),
+        }
+        jenkins_data_available = await setup_jenkins_workspace(
+            workspace, jenkins_params
+        )
+
         existing = await storage.get_chat_messages(job_id, limit=1, username=username)
         if not existing:
             # Build HTTP-backed custom tools for the sidecar session.
@@ -8196,6 +8207,7 @@ async def init_chat(job_id: str, request: Request) -> dict:
                 repo_path=workspace,
                 custom_tools=custom_tools,
                 repos_available=repos_available,
+                jenkins_data_available=jenkins_data_available,
             )
             if session_id:
                 await storage.add_chat_message(
@@ -8228,6 +8240,7 @@ async def init_chat(job_id: str, request: Request) -> dict:
         "ready": True,
         "repos_cloned": repos_available,
         "repo_names": repo_names,
+        "jenkins_data_available": jenkins_data_available,
         "job_name": result_data.get("job_name", ""),
         "build_number": result_data.get("build_number", 0),
         "session_id": session_id or "",
@@ -8439,6 +8452,7 @@ async def _process_chat_message(
         chat_with_ai,
         ensure_chat_workspace,
         clone_chat_repos,
+        setup_jenkins_workspace,
         build_chat_custom_tools,
     )
 
@@ -8523,6 +8537,16 @@ async def _process_chat_message(
                 workspace, decrypted_params, user_repo_token=github_token
             )
 
+            # Populate workspace with Jenkins data: console output, build info, artifacts
+            jenkins_params = {
+                **decrypted_params,
+                "job_name": result_data.get("job_name", ""),
+                "build_number": result_data.get("build_number", 0),
+            }
+            jenkins_data_available = await setup_jenkins_workspace(
+                workspace, jenkins_params
+            )
+
             settings = get_settings()
 
             server_url = _build_internal_server_url()
@@ -8574,6 +8598,7 @@ async def _process_chat_message(
                 session_id=last_session_id,
                 custom_tools=custom_tools,
                 repos_available=repos_available,
+                jenkins_data_available=jenkins_data_available,
             )
 
             # Check if aborted during AI call

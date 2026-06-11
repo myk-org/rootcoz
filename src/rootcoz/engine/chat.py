@@ -181,6 +181,152 @@ async def clone_chat_repos(
     return cloned_any
 
 
+async def setup_jenkins_workspace(
+    workspace: Path,
+    request_params: dict,
+) -> bool:
+    """Populate the chat workspace with Jenkins build context.
+
+    Connects to Jenkins using stored credentials and writes:
+    - ``console-output.txt`` \u2014 relevant console lines (same extraction as analysis)
+    - ``build-info.json`` \u2014 structured build metadata (result, params, timing)
+    - ``build-artifacts/`` \u2014 symlink to downloaded artifacts directory
+
+    Skips silently if this is not a Jenkins job or credentials are missing.
+    Each resource is fetched independently \u2014 a failure in one does not
+    prevent the others.
+
+    Returns True if any Jenkins data was written to the workspace.
+    """
+    jenkins_url = request_params.get("jenkins_url", "")
+    jenkins_user = request_params.get("jenkins_user", "")
+    jenkins_password = request_params.get("jenkins_password", "")
+    if not jenkins_url or not jenkins_user or not jenkins_password:
+        return False
+
+    job_name = request_params.get("job_name", "")
+    build_number = request_params.get("build_number", 0)
+    if not job_name or not build_number:
+        return False
+
+    from rootcoz.jenkins import JenkinsClient
+
+    try:
+        client = JenkinsClient(
+            url=jenkins_url,
+            username=jenkins_user,
+            password=jenkins_password,
+            ssl_verify=request_params.get("jenkins_ssl_verify", True),
+            timeout=request_params.get("jenkins_timeout", 30),
+        )
+    except Exception:
+        logger.warning("Chat: failed to create Jenkins client", exc_info=True)
+        return False
+
+    wrote_any = False
+
+    # 1. Console output
+    console_file = workspace / "console-output.txt"
+    if not console_file.exists():
+        try:
+            from rootcoz.sources.jenkins_source import (
+                extract_relevant_console_lines,
+            )
+
+            console_output = await asyncio.to_thread(
+                client.get_build_console, job_name, build_number
+            )
+            console_context = extract_relevant_console_lines(console_output)
+            if console_context:
+                console_file.write_text(console_context)
+                logger.info(
+                    "Chat: wrote console-output.txt (%d lines)",
+                    len(console_context.splitlines()),
+                )
+                wrote_any = True
+        except Exception:
+            logger.warning("Chat: failed to fetch console output", exc_info=True)
+
+    # 2. Build info
+    build_info_file = workspace / "build-info.json"
+    build_info: dict = {}
+    if not build_info_file.exists():
+        try:
+            build_info = await asyncio.to_thread(
+                client.get_build_info_safe, job_name, build_number
+            )
+            # Extract useful fields (avoid writing raw Jenkins API response)
+            import json as _json
+
+            build_params = []
+            for action in build_info.get("actions", []):
+                if action and action.get("_class", "").endswith("ParametersAction"):
+                    for param in action.get("parameters", []):
+                        build_params.append(
+                            {
+                                "name": param.get("name", ""),
+                                "value": param.get("value", ""),
+                            }
+                        )
+            info_data = {
+                "job_name": job_name,
+                "build_number": build_number,
+                "result": build_info.get("result"),
+                "building": build_info.get("building", False),
+                "duration_ms": build_info.get("duration", 0),
+                "estimated_duration_ms": build_info.get("estimatedDuration", 0),
+                "timestamp": build_info.get("timestamp", 0),
+                "url": build_info.get("url", ""),
+                "display_name": build_info.get("displayName", ""),
+                "description": build_info.get("description", ""),
+                "parameters": build_params,
+            }
+            build_info_file.write_text(_json.dumps(info_data, indent=2))
+            logger.info("Chat: wrote build-info.json")
+            wrote_any = True
+        except Exception:
+            logger.warning("Chat: failed to fetch build info", exc_info=True)
+
+    # 3. Build artifacts
+    artifacts_link = workspace / "build-artifacts"
+    if not artifacts_link.exists() and request_params.get("get_job_artifacts"):
+        # Reuse build_info if already fetched, otherwise fetch it
+        if not build_info:
+            try:
+                build_info = await asyncio.to_thread(
+                    client.get_build_info_safe, job_name, build_number
+                )
+            except Exception:
+                logger.warning(
+                    "Chat: failed to fetch build info for artifacts", exc_info=True
+                )
+
+        artifact_list = build_info.get("artifacts", [])
+        build_url_from_info = build_info.get("url", "").rstrip("/")
+        if artifact_list and build_url_from_info:
+            from rootcoz.jenkins_artifacts import process_build_artifacts
+
+            max_size_mb = request_params.get("jenkins_artifacts_max_size_mb", 500)
+            try:
+                _, artifacts_dir = await asyncio.to_thread(
+                    process_build_artifacts,
+                    client.session,
+                    build_url_from_info,
+                    artifact_list,
+                    max_size_mb,
+                )
+                if artifacts_dir:
+                    artifacts_link.symlink_to(artifacts_dir)
+                    logger.info(
+                        "Chat: artifacts downloaded and linked in %s", workspace
+                    )
+                    wrote_any = True
+            except Exception:
+                logger.warning("Chat: failed to download artifacts", exc_info=True)
+
+    return wrote_any
+
+
 def build_chat_custom_tools(
     *,
     server_url: str,
@@ -222,6 +368,55 @@ def build_chat_custom_tools(
                 "method": "GET",
                 "url": f"{server_url}/results/{job_id}/comments",
                 "headers": auth_headers,
+            },
+        }
+    )
+
+    tools.append(
+        {
+            "name": "get_failure_history",
+            "description": "Get pass/fail history for a specific test — total runs, failure rate, classifications, recent occurrences",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "test_name": {
+                        "type": "string",
+                        "description": "Full test name",
+                    },
+                },
+                "required": ["test_name"],
+            },
+            "http": {
+                "method": "GET",
+                "url": f"{server_url}/history/test/{{test_name}}",
+                "headers": auth_headers,
+            },
+        }
+    )
+
+    tools.append(
+        {
+            "name": "get_classification_history",
+            "description": "Get classification history for a test — who changed it, when, from what to what",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "test_name": {
+                        "type": "string",
+                        "description": "Full test name",
+                    },
+                    "job_id": {
+                        "type": "string",
+                        "description": "Optional: filter by specific job ID",
+                    },
+                },
+                "required": ["test_name"],
+            },
+            "http": {
+                "method": "GET",
+                "url": f"{server_url}/history/classifications",
+                "headers": auth_headers,
+                "query_params": {"test_name": "{test_name}", "job_id": "{job_id}"},
             },
         }
     )
@@ -406,7 +601,7 @@ def build_admin_custom_tools(
 
 
 def cleanup_chat_repos(job_id: str, username: str = "") -> None:
-    """Delete cloned repos from chat workspace but keep session files."""
+    """Delete cloned repos and artifacts from chat workspace but keep session files."""
     workspace = get_chat_workspace(job_id, username)
     if not workspace.exists():
         return
@@ -415,7 +610,13 @@ def cleanup_chat_repos(job_id: str, username: str = "") -> None:
     for item in workspace.iterdir():
         if item.name.startswith("."):
             continue  # Keep .claude/, .cursor/ etc (session data)
-        if item.is_dir():
+        # Resolve symlinks (e.g. build-artifacts/) to clean up the target too
+        if item.is_symlink():
+            target = item.resolve()
+            item.unlink(missing_ok=True)
+            if target.exists() and target.is_dir():
+                shutil.rmtree(target, ignore_errors=True)
+        elif item.is_dir():
             shutil.rmtree(item, ignore_errors=True)
         else:
             item.unlink(missing_ok=True)
@@ -426,9 +627,21 @@ def cleanup_chat_repos(job_id: str, username: str = "") -> None:
 def cleanup_chat_workspace(job_id: str, username: str = "") -> None:
     """Delete the entire chat workspace including sessions."""
     workspace = get_chat_workspace(job_id, username)
-    if workspace.exists():
-        shutil.rmtree(workspace, ignore_errors=True)
-        logger.info(f"Deleted chat workspace for job {job_id}")
+    if not workspace.exists():
+        return
+
+    # Resolve symlinks before removing workspace tree — symlinked
+    # artifact dirs live outside the workspace and won't be cleaned
+    # by shutil.rmtree (which removes the symlink, not its target).
+    for item in workspace.iterdir():
+        if item.is_symlink():
+            target = item.resolve()
+            item.unlink(missing_ok=True)
+            if target.exists() and target.is_dir():
+                shutil.rmtree(target, ignore_errors=True)
+
+    shutil.rmtree(workspace, ignore_errors=True)
+    logger.info(f"Deleted chat workspace for job {job_id}")
 
 
 # -- Shared prompt building helpers --
@@ -481,6 +694,7 @@ def build_system_prompt(
     job_id: str,
     custom_tools: list[dict],
     repos_available: bool = False,
+    jenkins_data_available: bool = False,
 ) -> str:
     """Build a system prompt that scopes the AI to a specific analyzed job."""
     tools_section = _build_tools_section(custom_tools)
@@ -491,6 +705,14 @@ def build_system_prompt(
         repos_note = (
             "\n\nSource repositories are cloned in your working directory. "
             "You can explore test and product code directly."
+        )
+    if jenkins_data_available:
+        repos_note += (
+            "\n\nJenkins build data is available in your working directory:"
+            "\n- `console-output.txt` \u2014 relevant Jenkins console output lines"
+            "\n- `build-info.json` \u2014 build result, parameters, timing, and duration"
+            "\n- `build-artifacts/` \u2014 downloaded build artifacts (logs, test outputs)"
+            "\nUse the `read` tool to examine these files when relevant to the user's question."
         )
 
     return f"""You are a CI/CD failure analysis expert. You are helping a user understand the analysis results for job **{job_name} #{build_number}** (job ID: {job_id}).
@@ -628,6 +850,7 @@ async def init_chat_session(
     repo_path: Path | None = None,
     custom_tools: list[dict] | None = None,
     repos_available: bool = False,
+    jenkins_data_available: bool = False,
 ) -> str | None:
     """Initialize a chat session via the sidecar. Returns session_id or None."""
     system_prompt = build_system_prompt(
@@ -636,6 +859,7 @@ async def init_chat_session(
         job_id=job_id,
         custom_tools=custom_tools or [],
         repos_available=repos_available,
+        jenkins_data_available=jenkins_data_available,
     )
     return await _create_chat_session(
         system_prompt=system_prompt,
@@ -769,6 +993,7 @@ async def chat_with_ai(
     session_id: str | None = None,
     custom_tools: list[dict] | None = None,
     repos_available: bool = False,
+    jenkins_data_available: bool = False,
 ) -> tuple[bool, str, str | None]:
     """Send a chat message and get an AI response via the sidecar."""
 
@@ -779,6 +1004,7 @@ async def chat_with_ai(
             job_id=job_id,
             custom_tools=custom_tools or [],
             repos_available=repos_available,
+            jenkins_data_available=jenkins_data_available,
         )
 
     return await _chat_with_ai_impl(
