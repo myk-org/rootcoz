@@ -266,14 +266,16 @@ async def setup_jenkins_workspace(
         if need_console:
             r = results[idx]
             if isinstance(r, BaseException):
-                logger.warning("Chat: failed to fetch console output: %s", r)
+                logger.warning(
+                    "Chat: failed to fetch console output: %s", r, exc_info=r
+                )
             else:
                 console_output = r
             idx += 1
         if need_build_info:
             r = results[idx]
             if isinstance(r, BaseException):
-                logger.warning("Chat: failed to fetch build info: %s", r)
+                logger.warning("Chat: failed to fetch build info: %s", r, exc_info=r)
             else:
                 build_info = r
 
