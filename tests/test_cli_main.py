@@ -4369,6 +4369,7 @@ class TestReportsCommands:
             date_to="",
             status="",
             tags=None,
+            exclude_tags=None,
         )
 
     def test_reports_totals_with_status_and_tags(self, mock_client):
@@ -4392,6 +4393,31 @@ class TestReportsCommands:
             date_to="",
             status="completed",
             tags=["nightly", "smoke"],
+            exclude_tags=None,
+        )
+
+    def test_reports_totals_with_exclude_tags(self, mock_client):
+        mock_client.report_totals.return_value = {
+            "total_jobs": 1,
+            "total_failures": 0,
+            "total_reviewed": 0,
+            "total_details": 1,
+            "jobs": [],
+        }
+        result = runner.invoke(
+            app,
+            ["reports", "totals", "--tags", "nightly", "--exclude-tags", "flaky,wip"],
+        )
+        assert result.exit_code == 0
+        mock_client.report_totals.assert_called_once_with(
+            team="",
+            tier="",
+            version="",
+            date_from="",
+            date_to="",
+            status="",
+            tags=["nightly"],
+            exclude_tags=["flaky", "wip"],
         )
 
     def test_reports_overrides(self, mock_client):

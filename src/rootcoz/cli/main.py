@@ -3170,6 +3170,9 @@ _REPORT_FROM_OPTION = typer.Option("", "--from", help="From date (YYYY-MM-DD).")
 _REPORT_TO_OPTION = typer.Option("", "--to", help="To date (YYYY-MM-DD).")
 _REPORT_STATUS_OPTION = typer.Option("", "--status", help="Filter by job status.")
 _REPORT_TAGS_OPTION = typer.Option("", "--tags", help="Comma-separated tags filter.")
+_REPORT_EXCLUDE_TAGS_OPTION = typer.Option(
+    "", "--exclude-tags", help="Comma-separated tags to exclude."
+)
 
 
 @reports_app.command("totals")
@@ -3181,11 +3184,17 @@ def reports_totals(
     date_to: str = _REPORT_TO_OPTION,
     status: str = _REPORT_STATUS_OPTION,
     tags: str = _REPORT_TAGS_OPTION,
+    exclude_tags: str = _REPORT_EXCLUDE_TAGS_OPTION,
     json_output: bool = _JSON_OPTION,
 ):
     """Show aggregate totals: jobs, failures, reviewed."""
     _set_json(json_output)
     tag_list = [t.strip() for t in tags.split(",") if t.strip()] if tags else None
+    exclude_tag_list = (
+        [t.strip() for t in exclude_tags.split(",") if t.strip()]
+        if exclude_tags
+        else None
+    )
     client = _get_client()
     try:
         data = client.report_totals(
@@ -3196,6 +3205,7 @@ def reports_totals(
             date_to=date_to,
             status=status,
             tags=tag_list,
+            exclude_tags=exclude_tag_list,
         )
     except RootCozError as err:
         _handle_error(err)
@@ -3237,11 +3247,17 @@ def reports_overrides(
     date_to: str = _REPORT_TO_OPTION,
     status: str = _REPORT_STATUS_OPTION,
     tags: str = _REPORT_TAGS_OPTION,
+    exclude_tags: str = _REPORT_EXCLUDE_TAGS_OPTION,
     json_output: bool = _JSON_OPTION,
 ):
     """Show classification overrides grouped by from->to."""
     _set_json(json_output)
     tag_list = [t.strip() for t in tags.split(",") if t.strip()] if tags else None
+    exclude_tag_list = (
+        [t.strip() for t in exclude_tags.split(",") if t.strip()]
+        if exclude_tags
+        else None
+    )
     client = _get_client()
     try:
         data = client.report_classification_overrides(
@@ -3252,6 +3268,7 @@ def reports_overrides(
             date_to=date_to,
             status=status,
             tags=tag_list,
+            exclude_tags=exclude_tag_list,
         )
     except RootCozError as err:
         _handle_error(err)
@@ -3293,11 +3310,17 @@ def reports_issues(
     date_to: str = _REPORT_TO_OPTION,
     status: str = _REPORT_STATUS_OPTION,
     tags: str = _REPORT_TAGS_OPTION,
+    exclude_tags: str = _REPORT_EXCLUDE_TAGS_OPTION,
     json_output: bool = _JSON_OPTION,
 ):
     """Show GitHub/Jira issues created from analyses."""
     _set_json(json_output)
     tag_list = [t.strip() for t in tags.split(",") if t.strip()] if tags else None
+    exclude_tag_list = (
+        [t.strip() for t in exclude_tags.split(",") if t.strip()]
+        if exclude_tags
+        else None
+    )
     client = _get_client()
     try:
         data = client.report_issues_created(
@@ -3308,6 +3331,7 @@ def reports_issues(
             date_to=date_to,
             status=status,
             tags=tag_list,
+            exclude_tags=exclude_tag_list,
         )
     except RootCozError as err:
         _handle_error(err)

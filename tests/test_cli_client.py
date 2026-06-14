@@ -2281,6 +2281,17 @@ class TestReports:
             "tags": "nightly,smoke",
         }
 
+    def test_build_report_params_with_exclude_tags(self):
+        client = _make_client(lambda r: httpx.Response(200, json={}))
+        params = client._build_report_params(
+            tags=["nightly"],
+            exclude_tags=["flaky", "wip"],
+        )
+        assert params == {
+            "tags": "nightly",
+            "exclude_tags": "flaky,wip",
+        }
+
     def test_report_totals_with_status_and_tags(self):
         def handler(request):
             url = str(request.url)
