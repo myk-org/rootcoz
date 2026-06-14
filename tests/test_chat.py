@@ -8,9 +8,11 @@ import pytest
 
 from rootcoz import storage
 from rootcoz.engine.chat import (
+    _extract_build_params,
     build_chat_custom_tools,
     build_chat_prompt,
     build_system_prompt,
+    build_welcome_message,
 )
 
 _TEST_ADMIN_KEY = "test-admin-key-16chars"  # pragma: allowlist secret
@@ -81,9 +83,38 @@ class TestBuildChatCustomTools:
         names = [t["name"] for t in tools]
         assert "get_job_result" in names
         assert "get_job_comments" in names
+        assert "get_failure_history" in names
+        assert "get_classification_history" in names
         # No jira/github without credentials
         assert "search_jira" not in names
         assert "search_github_issues" not in names
+
+    def test_failure_history_tool(self):
+        tools = build_chat_custom_tools(
+            server_url="http://localhost:8000",
+            auth_token="tok",
+            job_id="j1",
+        )
+        tool = next(t for t in tools if t["name"] == "get_failure_history")
+        assert "test_name" in tool["parameters"]["properties"]
+        assert "job_name" in tool["parameters"]["properties"]
+        assert tool["parameters"]["required"] == ["test_name"]
+        assert "{test_name}" in tool["http"]["url"]
+        assert tool["http"]["query_params"]["job_name"] == "{job_name}"
+        assert tool["http"]["method"] == "GET"
+
+    def test_classification_history_tool(self):
+        tools = build_chat_custom_tools(
+            server_url="http://localhost:8000",
+            auth_token="tok",
+            job_id="j1",
+        )
+        tool = next(t for t in tools if t["name"] == "get_classification_history")
+        assert "test_name" in tool["parameters"]["properties"]
+        assert "job_id" in tool["parameters"]["properties"]
+        assert tool["parameters"]["required"] == ["test_name"]
+        assert tool["http"]["query_params"]["test_name"] == "{test_name}"
+        assert tool["http"]["query_params"]["job_id"] == "{job_id}"
 
     def test_jira_tools(self):
         tools = build_chat_custom_tools(
@@ -145,7 +176,7 @@ class TestBuildChatCustomTools:
             github_repo="org/repo",
         )
         names = [t["name"] for t in tools]
-        assert len(names) == 6  # 2 base + 2 jira + 2 github
+        assert len(names) == 8  # 4 base + 2 jira + 2 github
 
     def test_no_jira_without_token(self):
         tools = build_chat_custom_tools(
@@ -263,6 +294,32 @@ class TestBuildSystemPrompt:
         )
         assert "Source repositories are cloned" not in prompt
 
+    def test_jenkins_data_available_note(self):
+        tools = self._make_tools()
+        prompt = build_system_prompt(
+            job_name="j",
+            build_number=1,
+            job_id="j1",
+            custom_tools=tools,
+            jenkins_data_available=True,
+        )
+        assert "console-output.txt" in prompt
+        assert "build-info.json" in prompt
+        assert "build-artifacts/" in prompt
+
+    def test_jenkins_data_not_available(self):
+        tools = self._make_tools()
+        prompt = build_system_prompt(
+            job_name="j",
+            build_number=1,
+            job_id="j1",
+            custom_tools=tools,
+            jenkins_data_available=False,
+        )
+        assert "console-output.txt" not in prompt
+        assert "build-info.json" not in prompt
+        assert "build-artifacts/" not in prompt
+
     def test_only_base_tools(self):
         tools = self._make_tools()
         prompt = build_system_prompt(
@@ -329,6 +386,67 @@ class TestBuildSystemPrompt:
 
 
 # ---------------------------------------------------------------------------
+# build_welcome_message tests
+# ---------------------------------------------------------------------------
+
+
+class TestBuildWelcomeMessage:
+    """Tests for build_welcome_message."""
+
+    def test_basic_message(self):
+        msg = build_welcome_message(job_name="test-job", build_number=42)
+        assert "test-job" in msg
+        assert "#42" in msg
+        assert "Job analysis results" in msg
+        assert "Job comments" in msg
+        assert "Failure history" in msg
+        assert "Classification history" in msg
+        # Not available by default
+        assert "Jira" not in msg
+        assert "GitHub" not in msg
+        assert "repository" not in msg.lower()
+
+    def test_repos_available(self):
+        msg = build_welcome_message(job_name="j", build_number=1, repos_available=True)
+        assert "repository" in msg.lower()
+
+    def test_jenkins_data(self):
+        msg = build_welcome_message(
+            job_name="j",
+            build_number=1,
+            jenkins_data_available=True,
+        )
+        assert "Build artifacts" in msg
+        assert "console output" in msg.lower()
+        assert "build info" in msg.lower()
+
+    def test_jira_available(self):
+        msg = build_welcome_message(job_name="j", build_number=1, jira_available=True)
+        assert "Jira" in msg
+
+    def test_github_available(self):
+        msg = build_welcome_message(job_name="j", build_number=1, github_available=True)
+        assert "GitHub" in msg
+
+    def test_all_resources(self):
+        msg = build_welcome_message(
+            job_name="pipeline",
+            build_number=99,
+            repos_available=True,
+            jenkins_data_available=True,
+            jira_available=True,
+            github_available=True,
+        )
+        assert "pipeline" in msg
+        assert "#99" in msg
+        assert "repository" in msg.lower()
+        assert "Build artifacts" in msg
+        assert "Jira" in msg
+        assert "GitHub" in msg
+        assert "console output" in msg.lower()
+
+
+# ---------------------------------------------------------------------------
 # build_chat_prompt tests
 # ---------------------------------------------------------------------------
 
@@ -364,6 +482,238 @@ class TestBuildChatPrompt:
         assert prompt.index("second") < prompt.index("third")
         assert prompt.index("third") < prompt.index("fourth")
         assert prompt.index("fourth") < prompt.index("fifth")
+
+
+# ---------------------------------------------------------------------------
+# _extract_build_params tests
+# ---------------------------------------------------------------------------
+
+
+class TestExtractBuildParams:
+    """Tests for _extract_build_params sensitive filtering."""
+
+    def test_extracts_normal_params(self):
+        build_info = {
+            "actions": [
+                {
+                    "_class": "hudson.model.ParametersAction",
+                    "parameters": [
+                        {"name": "BRANCH", "value": "main"},
+                        {"name": "ENV", "value": "staging"},
+                    ],
+                }
+            ]
+        }
+        params = _extract_build_params(build_info)
+        assert params == [
+            {"name": "BRANCH", "value": "main"},
+            {"name": "ENV", "value": "staging"},
+        ]
+
+    def test_filters_sensitive_params(self):
+        build_info = {
+            "actions": [
+                {
+                    "_class": "hudson.model.ParametersAction",
+                    "parameters": [
+                        {"name": "BRANCH", "value": "main"},
+                        {"name": "API_TOKEN", "value": "secret123"},
+                        {"name": "DB_PASSWORD", "value": "pass456"},
+                        {"name": "SECRET_KEY", "value": "key789"},
+                        {"name": "AWS_CREDENTIAL", "value": "cred"},
+                        {"name": "AUTH_HEADER", "value": "bearer xyz"},
+                    ],
+                }
+            ]
+        }
+        params = _extract_build_params(build_info)
+        assert params == [{"name": "BRANCH", "value": "main"}]
+
+    def test_no_actions(self):
+        assert _extract_build_params({}) == []
+        assert _extract_build_params({"actions": []}) == []
+
+
+# ---------------------------------------------------------------------------
+# setup_jenkins_workspace tests
+# ---------------------------------------------------------------------------
+
+
+class TestSetupJenkinsWorkspace:
+    """Tests for setup_jenkins_workspace."""
+
+    @pytest.mark.asyncio
+    async def test_skips_without_jenkins_credentials(self, tmp_path):
+        from rootcoz.engine.chat import setup_jenkins_workspace
+
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        params = {
+            "jenkins_url": "https://jenkins.example.com",
+            # Missing jenkins_user and jenkins_password
+        }
+        result = await setup_jenkins_workspace(workspace, params)
+        assert result is False
+
+    @pytest.mark.asyncio
+    async def test_skips_without_job_name(self, tmp_path):
+        from rootcoz.engine.chat import setup_jenkins_workspace
+
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        params = {
+            "jenkins_url": "https://jenkins.example.com",
+            "jenkins_user": "user",
+            "jenkins_password": "pass",  # pragma: allowlist secret
+            # Missing job_name and build_number
+        }
+        result = await setup_jenkins_workspace(workspace, params)
+        assert result is False
+
+    @pytest.mark.asyncio
+    async def test_skips_non_jenkins_job(self, tmp_path):
+        from rootcoz.engine.chat import setup_jenkins_workspace
+
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        result = await setup_jenkins_workspace(workspace, {})
+        assert result is False
+
+    @pytest.mark.asyncio
+    async def test_writes_console_and_build_info(self, tmp_path):
+        from rootcoz.engine.chat import setup_jenkins_workspace
+
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        params = {
+            "jenkins_url": "https://jenkins.example.com",
+            "jenkins_user": "user",
+            "jenkins_password": "pass",  # pragma: allowlist secret
+            "job_name": "test-pipeline",
+            "build_number": 42,
+        }
+        with patch("rootcoz.jenkins.JenkinsClient") as MockClient:
+            mock = MockClient.return_value
+            mock.get_build_console.return_value = "line1\nERROR: boom\nline3"
+            mock.get_build_info_safe.return_value = {
+                "result": "FAILURE",
+                "building": False,
+                "duration": 120000,
+                "estimatedDuration": 100000,
+                "timestamp": 1700000000000,
+                "url": "https://jenkins.example.com/job/test/42/",
+                "displayName": "#42",
+                "description": "",
+                "actions": [
+                    {
+                        "_class": "hudson.model.ParametersAction",
+                        "parameters": [
+                            {"name": "BRANCH", "value": "main"},
+                            {"name": "API_TOKEN", "value": "secret123"},
+                            {"name": "DB_PASSWORD", "value": "pass456"},
+                        ],
+                    }
+                ],
+                "artifacts": [],
+            }
+            result = await setup_jenkins_workspace(workspace, params)
+
+        assert result is True
+        assert (workspace / "console-output.txt").exists()
+        assert (workspace / "build-info.json").exists()
+        import json
+
+        info = json.loads((workspace / "build-info.json").read_text())
+        assert info["result"] == "FAILURE"
+        # Sensitive params (TOKEN, PASSWORD) should be filtered out
+        assert info["parameters"] == [{"name": "BRANCH", "value": "main"}]
+
+    @pytest.mark.asyncio
+    async def test_skips_existing_files(self, tmp_path):
+        from rootcoz.engine.chat import setup_jenkins_workspace
+
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        # Pre-create files
+        (workspace / "console-output.txt").write_text("existing")
+        (workspace / "build-info.json").write_text("{}")
+        params = {
+            "jenkins_url": "https://jenkins.example.com",
+            "jenkins_user": "user",
+            "jenkins_password": "pass",  # pragma: allowlist secret
+            "job_name": "test-pipeline",
+            "build_number": 42,
+        }
+        with patch("rootcoz.jenkins.JenkinsClient") as MockClient:
+            mock = MockClient.return_value
+            await setup_jenkins_workspace(workspace, params)
+            # Should not call Jenkins since files exist
+            mock.get_build_console.assert_not_called()
+            mock.get_build_info_safe.assert_not_called()
+        # Files still have original content
+        assert (workspace / "console-output.txt").read_text() == "existing"
+
+
+# ---------------------------------------------------------------------------
+# cleanup tests
+# ---------------------------------------------------------------------------
+
+
+class TestChatCleanup:
+    """Tests for cleanup_chat_repos symlink handling."""
+
+    def test_cleanup_repos_resolves_symlinks(self, tmp_path):
+        from rootcoz.engine.chat import cleanup_chat_repos
+
+        # Create a fake workspace with a symlink
+        job_id = "test-cleanup-job"
+        with patch("rootcoz.engine.chat.get_chat_workspace", return_value=tmp_path):
+            # Create a target dir and a symlink
+            target = tmp_path / "_artifact_target"
+            target.mkdir()
+            (target / "somefile.txt").write_text("data")
+            link = tmp_path / "build-artifacts"
+            link.symlink_to(target)
+
+            cleanup_chat_repos(job_id)
+
+            # Both the symlink and its target should be cleaned
+            assert not link.exists()
+            assert not target.exists()
+
+    def test_cleanup_workspace_resolves_symlinks(self, tmp_path):
+        from rootcoz.engine.chat import cleanup_chat_workspace
+
+        # Create target dir outside workspace
+        external_target = tmp_path / "external_artifacts"
+        external_target.mkdir()
+        (external_target / "log.txt").write_text("data")
+
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        link = workspace / "build-artifacts"
+        link.symlink_to(external_target)
+
+        with patch("rootcoz.engine.chat.get_chat_workspace", return_value=workspace):
+            cleanup_chat_workspace("test-job")
+
+        assert not workspace.exists()
+        assert not external_target.exists()
+
+    def test_safe_remove_symlink_validates_tmp(self, tmp_path):
+        """_safe_remove_symlink only deletes targets under /tmp/."""
+        from rootcoz.engine.chat import _safe_remove_symlink
+
+        # Target under /tmp/ — should be deleted
+        target = tmp_path / "artifact_dir"
+        target.mkdir()
+        (target / "file.txt").write_text("data")
+        link = tmp_path / "link"
+        link.symlink_to(target)
+
+        _safe_remove_symlink(link)
+        assert not link.exists()
+        assert not target.exists()  # under /tmp/ → deleted
 
 
 # ---------------------------------------------------------------------------
