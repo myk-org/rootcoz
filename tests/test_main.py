@@ -5528,13 +5528,13 @@ class TestSubmitterAutoTag:
         assert _ensure_submitter_tag(["nightly", "bob"], "bob") == ["nightly", "bob"]
 
     def test_ensure_submitter_tag_case_insensitive_dedup(self) -> None:
-        """_ensure_submitter_tag replaces mixed-case with normalized lowercase."""
+        """_ensure_submitter_tag leaves list unchanged when match exists."""
         from rootcoz.main import _ensure_submitter_tag
 
-        assert _ensure_submitter_tag(["Admin"], "admin") == ["admin"]
+        assert _ensure_submitter_tag(["Admin"], "admin") == ["Admin"]
         assert _ensure_submitter_tag(["ALICE", "nightly"], "alice") == [
+            "ALICE",
             "nightly",
-            "alice",
         ]
 
     def test_ensure_submitter_tag_empty_username(self) -> None:
