@@ -7631,16 +7631,14 @@ async def api_dashboard_filtered(
 # --- Reports endpoints ---
 
 
-def _parse_csv_list(
-    value: str, *, max_items: int = 50, max_length: int = 2000
-) -> list[str] | None:
+def _parse_csv_list(value: str, *, max_length: int = 2000) -> list[str] | None:
     """Parse comma-separated string into deduplicated list, or None if empty."""
     if not value:
         return None
     # Cap input length to prevent expensive split on huge strings
     truncated = value[:max_length]
     items = list(dict.fromkeys(v.strip() for v in truncated.split(",") if v.strip()))
-    return items[:max_items] if items else None
+    return items if items else None
 
 
 def _parse_report_metadata(
