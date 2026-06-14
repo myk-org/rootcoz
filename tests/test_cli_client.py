@@ -2133,6 +2133,31 @@ class TestRootCozClientAdminChat:
         result = client.abort_admin_chat()
         assert result["aborted"] is True
 
+    def test_download_admin_chat_artifact(self):
+        html_content = b"<html><body>Report</body></html>"
+
+        def handler(request):
+            assert request.method == "GET"
+            assert "/api/admin-chat/artifacts/" in str(request.url)
+            return httpx.Response(
+                200,
+                content=html_content,
+                headers={"Content-Type": "text/html"},
+            )
+
+        client = _make_client(handler)
+        result = client.download_admin_chat_artifact("test-uuid")
+        assert result == html_content
+
+    def test_download_admin_chat_artifact_not_found(self):
+        def handler(request):
+            return httpx.Response(404, json={"detail": "Artifact not found"})
+
+        client = _make_client(handler)
+        with pytest.raises(RootCozError) as exc_info:
+            client.download_admin_chat_artifact("missing-uuid")
+        assert exc_info.value.status_code == 404
+
 
 class TestReports:
     def test_report_totals(self):

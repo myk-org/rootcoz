@@ -4189,6 +4189,64 @@ class TestAdminChatCommands:
         assert result.exit_code == 1
         assert "403" in result.output or "admin" in result.output.lower()
 
+    def test_admin_chat_download_artifact(self, mock_client, tmp_path):
+        mock_client.download_admin_chat_artifact.return_value = b"<html>report</html>"
+        out_file = tmp_path / "report.html"
+        result = runner.invoke(
+            app,
+            [
+                "admin-chat",
+                "download-artifact",
+                "abc-123",
+                "--output",
+                str(out_file),
+            ],
+        )
+        assert result.exit_code == 0
+        assert "Downloaded" in result.output
+        assert out_file.read_bytes() == b"<html>report</html>"
+        mock_client.download_admin_chat_artifact.assert_called_once_with("abc-123")
+
+    def test_admin_chat_download_artifact_default_filename(
+        self, mock_client, tmp_path, monkeypatch
+    ):
+        mock_client.download_admin_chat_artifact.return_value = b"<html>report</html>"
+        monkeypatch.chdir(tmp_path)
+        result = runner.invoke(
+            app,
+            ["admin-chat", "download-artifact", "abcdef12-3456-7890-abcd-ef1234567890"],
+        )
+        assert result.exit_code == 0
+        expected_file = tmp_path / "report-abcdef12.html"
+        assert expected_file.exists()
+        assert expected_file.read_bytes() == b"<html>report</html>"
+
+    def test_admin_chat_download_artifact_json(self, mock_client, tmp_path):
+        mock_client.download_admin_chat_artifact.return_value = b"<html>report</html>"
+        out_file = tmp_path / "report.html"
+        result = runner.invoke(
+            app,
+            [
+                "--json",
+                "admin-chat",
+                "download-artifact",
+                "abc-123",
+                "--output",
+                str(out_file),
+            ],
+        )
+        assert result.exit_code == 0
+        parsed = json.loads(result.output)
+        assert parsed["path"] == str(out_file)
+        assert parsed["size"] == len(b"<html>report</html>")
+
+    def test_admin_chat_download_artifact_error(self, mock_client):
+        mock_client.download_admin_chat_artifact.side_effect = RootCozError(
+            status_code=404, detail="Artifact not found"
+        )
+        result = runner.invoke(app, ["admin-chat", "download-artifact", "missing-uuid"])
+        assert result.exit_code == 1
+
 
 class TestReportsCommands:
     def test_reports_totals(self, mock_client):

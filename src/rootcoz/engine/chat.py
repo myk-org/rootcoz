@@ -714,6 +714,39 @@ def build_admin_custom_tools(
                 "query_params": True,
             },
         },
+        {
+            "name": "save_report",
+            "description": (
+                "Save a generated HTML report as a downloadable file. "
+                "Use this after generating a self-contained HTML report. "
+                "Returns a download URL that you should share with the user."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "html_content": {
+                        "type": "string",
+                        "description": "Complete self-contained HTML with inline CSS",
+                    },
+                    "filename": {
+                        "type": "string",
+                        "description": (
+                            "Descriptive filename, e.g. failure-report-2026-06-14.html"
+                        ),
+                    },
+                },
+                "required": ["html_content", "filename"],
+            },
+            "http": {
+                "method": "POST",
+                "url": f"{server_url}/api/admin-chat/artifacts",
+                "headers": {**auth_headers, "Content-Type": "application/json"},
+                "body_template": {
+                    "html_content": "{html_content}",
+                    "filename": "{filename}",
+                },
+            },
+        },
     ]
 
 
@@ -934,6 +967,22 @@ You have structured tools — call them directly:
 **WORKFLOW:** For analytics questions (totals, overrides, issues), use the pre-built report tools first — they're faster and more accurate. Use `db_schema` + `db_query` only for questions the report tools can't answer.
 
 **SENSITIVE DATA:** Some columns contain encrypted values (tokens, passwords). Never output raw encrypted field values.{unavailable_section}
+
+## Report Generation
+When the user asks for a "report", "generate a report", "export", or similar:
+1. Use the analytics tools (`get_report_totals`, `get_classification_overrides`, `get_issues_created`, `db_query`) to gather the requested data
+2. Generate a **self-contained HTML report** with:
+   - `<!DOCTYPE html>` document with all CSS inline in a `<style>` tag (NO external stylesheets or scripts)
+   - A header section with report title and generation date
+   - Summary cards showing key metrics (totals, percentages, counts)
+   - Styled data tables with alternating row colors
+   - Color-coded status/classification badges
+   - Professional, clean design using a neutral color palette
+   - Responsive layout that works in any browser
+3. Save the HTML via the `save_report` tool with a descriptive filename (e.g., `failure-report-2026-06-14.html`)
+4. Share the download link with the user in your response
+
+The HTML MUST be completely self-contained — no external CSS, JS, fonts, or CDN links. Everything inline.
 
 ## Rules — STRICT
 - You MUST only discuss server data and CI/CD analytics

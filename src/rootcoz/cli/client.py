@@ -1068,6 +1068,34 @@ class RootCozClient:
         """Signal user left admin chat page. POST /api/admin/chat/close"""
         return self._request("POST", "/api/admin/chat/close")
 
+    def download_admin_chat_artifact(self, artifact_id: str) -> bytes:
+        """Download an admin chat artifact. GET /api/admin-chat/artifacts/{id}
+
+        Returns the raw HTML content as bytes.
+        """
+        path = f"/api/admin-chat/artifacts/{artifact_id}"
+        try:
+            response = self._client.request("GET", path)
+        except httpx.TimeoutException as exc:
+            raise RootCozError(
+                status_code=0, detail=f"Request timed out: {exc}"
+            ) from exc
+        except httpx.RequestError as exc:
+            raise RootCozError(
+                status_code=0,
+                detail=f"Cannot connect to {self.server_url}: {exc}",
+            ) from exc
+
+        if response.status_code != 200:
+            detail = ""
+            try:
+                body = response.json()
+                detail = body.get("detail", str(body))
+            except (ValueError, KeyError):
+                detail = response.text
+            raise RootCozError(status_code=response.status_code, detail=detail)
+        return response.content
+
     # -- Reports ----------------------------------------------------------
 
     def _build_report_params(

@@ -3101,6 +3101,32 @@ def admin_chat_clear(
         typer.echo(f"Cleared {data.get('deleted', 0)} messages.")
 
 
+@admin_chat_app.command("download-artifact")
+def admin_chat_download_artifact(
+    artifact_id: str = typer.Argument(help="Artifact UUID to download."),
+    output: str = typer.Option(
+        "", "--output", "-o", help="Output file path. Defaults to report-<id>.html."
+    ),
+    json_output: bool = _JSON_OPTION,
+) -> None:
+    """Download an admin chat report artifact."""
+    _set_json(json_output)
+    client = _get_client()
+    try:
+        content = client.download_admin_chat_artifact(artifact_id)
+    except RootCozError as err:
+        _handle_error(err)
+
+    out_path = Path(output) if output else Path(f"report-{artifact_id[:8]}.html")
+    out_path.write_bytes(content)
+    if _state.get("json", False):
+        print_output(
+            {"path": str(out_path), "size": len(content)}, columns=[], as_json=True
+        )
+    else:
+        typer.echo(f"Downloaded to {out_path} ({len(content)} bytes)")
+
+
 # -- Reports ------------------------------------------------------------------
 
 _REPORT_TEAM_OPTION = typer.Option("", "--team", help="Filter by team.")
