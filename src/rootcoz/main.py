@@ -2554,7 +2554,7 @@ def _ensure_submitter_tag(tags: list[str] | None, username: str) -> list[str]:
     """Return *tags* with *username* included (lowercased, deduplicated)."""
     result = list(tags) if tags else []
     normalized = username.strip().lower()
-    if normalized and normalized not in result:
+    if normalized and normalized not in [t.lower() for t in result]:
         result.append(normalized)
     return result
 

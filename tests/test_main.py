@@ -5527,6 +5527,16 @@ class TestSubmitterAutoTag:
         assert _ensure_submitter_tag(["alice"], "Alice") == ["alice"]
         assert _ensure_submitter_tag(["nightly", "bob"], "bob") == ["nightly", "bob"]
 
+    def test_ensure_submitter_tag_case_insensitive_dedup(self) -> None:
+        """_ensure_submitter_tag deduplicates case-insensitively against existing tags."""
+        from rootcoz.main import _ensure_submitter_tag
+
+        assert _ensure_submitter_tag(["Admin"], "admin") == ["Admin"]
+        assert _ensure_submitter_tag(["ALICE", "nightly"], "alice") == [
+            "ALICE",
+            "nightly",
+        ]
+
     def test_ensure_submitter_tag_empty_username(self) -> None:
         """_ensure_submitter_tag skips blank usernames."""
         from rootcoz.main import _ensure_submitter_tag
@@ -5596,3 +5606,24 @@ class TestSubmitterAutoTag:
             job_id = response.json()["job_id"]
             result = test_client.get(f"/results/{job_id}").json()["result"]
             assert "admin" in result["tags"]
+
+    def test_jenkins_analysis_no_duplicate_submitter_tag(self, test_client) -> None:
+        """POST /analyze type=jenkins doesn't duplicate when tags already has the username."""
+        with patch("rootcoz.main.process_analysis_with_id"):
+            response = test_client.post(
+                "/analyze",
+                json={
+                    "type": "jenkins",
+                    "job_name": "test-job",
+                    "build_number": 1,
+                    "tags": ["Admin"],
+                    "ai_provider": "claude",
+                    "ai_model": "test-model",
+                },
+            )
+            assert response.status_code == 202
+            job_id = response.json()["job_id"]
+            result = test_client.get(f"/results/{job_id}").json()["result"]
+            # "admin" tag already present (as "Admin" normalized to "admin")
+            # — no duplicate should be added
+            assert result["tags"].count("admin") == 1
