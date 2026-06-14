@@ -588,6 +588,23 @@ def build_chat_custom_tools(
     return tools
 
 
+_REPORT_FILTER_PARAMS = {
+    "team": {"type": "string", "description": "Filter by team"},
+    "tier": {"type": "string", "description": "Filter by tier"},
+    "version": {"type": "string", "description": "Filter by version"},
+    "from": {"type": "string", "description": "From date (YYYY-MM-DD)"},
+    "to": {"type": "string", "description": "To date (YYYY-MM-DD)"},
+    "status": {
+        "type": "string",
+        "description": "Filter by status (comma-separated)",
+    },
+    "tags": {
+        "type": "string",
+        "description": "Filter by tags (comma-separated)",
+    },
+}
+
+
 def build_admin_custom_tools(
     *,
     server_url: str,
@@ -631,6 +648,59 @@ def build_admin_custom_tools(
                 "url": f"{server_url}/api/admin/db/query",
                 "headers": {**auth_headers, "Content-Type": "application/json"},
                 "body_template": {"sql": "{sql}"},
+            },
+        },
+        {
+            "name": "get_report_totals",
+            "description": (
+                "Get aggregate analytics: total jobs analyzed, total failures, "
+                "total reviewed. Filter by team, tier, version, date range, "
+                "status, tags."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {**_REPORT_FILTER_PARAMS},
+            },
+            "http": {
+                "method": "GET",
+                "url": f"{server_url}/api/reports/totals",
+                "headers": auth_headers,
+                "query_params": True,
+            },
+        },
+        {
+            "name": "get_classification_overrides",
+            "description": (
+                "Get classification overrides — where users changed the AI's "
+                "classification. Grouped by from→to transition. Includes AI "
+                "accuracy percentage."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {**_REPORT_FILTER_PARAMS},
+            },
+            "http": {
+                "method": "GET",
+                "url": f"{server_url}/api/reports/classification-overrides",
+                "headers": auth_headers,
+                "query_params": True,
+            },
+        },
+        {
+            "name": "get_issues_created",
+            "description": (
+                "Get GitHub issues and Jira tickets created from RootCoz "
+                "analyses. Separate GitHub and Jira totals."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {**_REPORT_FILTER_PARAMS},
+            },
+            "http": {
+                "method": "GET",
+                "url": f"{server_url}/api/reports/issues-created",
+                "headers": auth_headers,
+                "query_params": True,
             },
         },
     ]
@@ -836,6 +906,7 @@ def build_admin_system_prompt(
 - Provide cross-job analytics (failure counts, classification distributions)
 - Show user activity and review statistics
 - Help identify recurring failures and patterns
+- Provide pre-built analytics reports (totals, classification overrides, issues created)
 - Query server configuration and settings
 
 ## Scope — STRICT

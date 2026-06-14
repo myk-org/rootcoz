@@ -9,6 +9,8 @@ import pytest
 from rootcoz import storage
 from rootcoz.engine.chat import (
     _extract_build_params,
+    build_admin_custom_tools,
+    build_admin_system_prompt,
     build_chat_custom_tools,
     build_chat_prompt,
     build_system_prompt,
@@ -217,6 +219,107 @@ class TestBuildChatCustomTools:
         assert "my-job-42" in result_tool["http"]["url"]
         comments_tool = next(t for t in tools if t["name"] == "get_job_comments")
         assert "my-job-42" in comments_tool["http"]["url"]
+
+
+class TestBuildAdminCustomTools:
+    """Tests for build_admin_custom_tools."""
+
+    def test_returns_five_tools(self):
+        tools = build_admin_custom_tools(
+            server_url="http://localhost:8000",
+            auth_token="test-token",
+        )
+        assert len(tools) == 5
+        names = [t["name"] for t in tools]
+        assert names == [
+            "db_schema",
+            "db_query",
+            "get_report_totals",
+            "get_classification_overrides",
+            "get_issues_created",
+        ]
+
+    def test_report_tool_urls(self):
+        tools = build_admin_custom_tools(
+            server_url="http://localhost:8000",
+            auth_token="test-token",
+        )
+        tools_by_name = {t["name"]: t for t in tools}
+        assert (
+            tools_by_name["get_report_totals"]["http"]["url"]
+            == "http://localhost:8000/api/reports/totals"
+        )
+        assert (
+            tools_by_name["get_classification_overrides"]["http"]["url"]
+            == "http://localhost:8000/api/reports/classification-overrides"
+        )
+        assert (
+            tools_by_name["get_issues_created"]["http"]["url"]
+            == "http://localhost:8000/api/reports/issues-created"
+        )
+
+    def test_report_tools_use_get_with_query_params(self):
+        tools = build_admin_custom_tools(
+            server_url="http://localhost:8000",
+            auth_token="test-token",
+        )
+        report_tools = [
+            t
+            for t in tools
+            if t["name"].startswith("get_report") or t["name"] == "get_issues_created"
+        ]
+        for tool in report_tools:
+            assert tool["http"]["method"] == "GET"
+            assert tool["http"]["query_params"] is True
+
+    def test_report_tools_have_filter_params(self):
+        tools = build_admin_custom_tools(
+            server_url="http://localhost:8000",
+            auth_token="test-token",
+        )
+        expected_params = {"team", "tier", "version", "from", "to", "status", "tags"}
+        report_tools = [
+            t
+            for t in tools
+            if t["name"].startswith("get_") and t["name"] != "db_schema"
+        ]
+        # Exclude db_query which has sql param
+        report_tools = [t for t in report_tools if t["name"] != "db_query"]
+        for tool in report_tools:
+            actual_params = set(tool["parameters"]["properties"].keys())
+            assert actual_params == expected_params, f"{tool['name']} params mismatch"
+
+    def test_auth_headers(self):
+        tools = build_admin_custom_tools(
+            server_url="http://localhost:8000",
+            auth_token="my-secret-token",
+        )
+        for tool in tools:
+            assert tool["http"]["headers"]["Authorization"] == "Bearer my-secret-token"
+
+
+class TestBuildAdminSystemPrompt:
+    """Tests for build_admin_system_prompt."""
+
+    def test_includes_analytics_reports_bullet(self):
+        tools = build_admin_custom_tools(
+            server_url="http://localhost:8000",
+            auth_token="test-token",
+        )
+        prompt = build_admin_system_prompt(tools)
+        assert "pre-built analytics reports" in prompt
+        assert "totals" in prompt
+        assert "classification overrides" in prompt
+        assert "issues created" in prompt
+
+    def test_lists_all_tool_names(self):
+        tools = build_admin_custom_tools(
+            server_url="http://localhost:8000",
+            auth_token="test-token",
+        )
+        prompt = build_admin_system_prompt(tools)
+        for tool in tools:
+            assert tool["name"] in prompt
 
 
 class TestBuildSystemPrompt:
