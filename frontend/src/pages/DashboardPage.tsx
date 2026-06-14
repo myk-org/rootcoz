@@ -48,7 +48,7 @@ const STATUS_FILTER_OPTIONS = ['completed', 'running', 'waiting', 'pending', 'fa
 const ANALYSIS_STATUS_OPTIONS = ['all', 'analyzed', 'not_analyzed'] as const
 type AnalysisStatusFilter = typeof ANALYSIS_STATUS_OPTIONS[number]
 const ANALYSIS_STATUS_LABELS: Record<AnalysisStatusFilter, string> = {
-  all: 'All analyses',
+  all: 'All',
   analyzed: 'Analyzed',
   not_analyzed: 'Not analyzed',
 }
