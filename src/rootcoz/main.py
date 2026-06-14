@@ -9248,7 +9248,7 @@ async def save_admin_chat_artifact(
             artifact_path.write_text, body.html_content, encoding="utf-8"
         )
     except OSError as exc:
-        logger.error("Failed to save artifact: %s", exc)
+        logger.error("Failed to save artifact: %s", exc, exc_info=True)
         raise HTTPException(status_code=500, detail="Failed to save artifact")
 
     logger.info(
@@ -9291,7 +9291,7 @@ async def get_admin_chat_artifact(
     try:
         content = await asyncio.to_thread(artifact_path.read_text, encoding="utf-8")
     except (OSError, UnicodeDecodeError) as exc:
-        logger.error("Failed to read artifact %s: %s", artifact_id, exc)
+        logger.error("Failed to read artifact %s: %s", artifact_id, exc, exc_info=True)
         raise HTTPException(status_code=500, detail="Failed to read artifact")
 
     download_filename = f"report-{artifact_id[:8]}.html"
