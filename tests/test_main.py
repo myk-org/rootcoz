@@ -5551,6 +5551,14 @@ class TestSubmitterAutoTag:
         assert _ensure_submitter_tag([], "re-analyze") == []
         assert _ensure_submitter_tag(["nightly"], "Re-Analyze") == ["nightly"]
 
+    def test_strip_old_submitter_tag_preserves_system_tags(self) -> None:
+        """_strip_old_submitter_tag skips stripping when old submitter matches a system tag."""
+        from rootcoz.main import _strip_old_submitter_tag
+
+        tags = ["re-analyze", "nightly"]
+        result_data = {"request_params": {"submitted_by": "re-analyze"}}
+        assert _strip_old_submitter_tag(tags, result_data) == ["re-analyze", "nightly"]
+
     def test_raw_analysis_auto_tags_submitter(self, test_client) -> None:
         """POST /analyze type=raw auto-adds the submitter username to tags."""
         data, _ = _post_analyze_queued(
@@ -5731,3 +5739,42 @@ class TestSubmitterAutoTag:
         assert "custom" in updated_tags
         assert "admin" in updated_tags  # submitter preserved
         assert "re-analyze" not in updated_tags  # system tag filtered out
+
+    @pytest.mark.asyncio
+    async def test_reanalyze_replaces_old_submitter_tag(self, test_client) -> None:
+        """Re-analyze by user B replaces user A's submitter tag with B's."""
+        from rootcoz import storage
+
+        # Create a completed job originally submitted by "alice"
+        result_data = {
+            "summary": "1 failure",
+            "job_name": "test-job",
+            "build_number": 1,
+            "failures": [],
+            "tags": ["alice", "nightly"],
+            "request_params": encrypt_sensitive_fields(
+                {
+                    "job_name": "test-job",
+                    "build_number": 1,
+                    "ai_provider": "claude",
+                    "ai_model": "opus",
+                    "jenkins_url": "https://jenkins.example.com",
+                    "jenkins_user": "testuser",
+                    "jenkins_password": "testpw",  # pragma: allowlist secret
+                    "submitted_by": "alice",
+                }
+            ),
+        }
+        await storage.save_result(
+            "job-alice", "http://jenkins/job/test-job/1/", "completed", result_data
+        )
+        # Re-analyze as "admin" (the test_client user)
+        with patch("rootcoz.main.process_analysis_with_id"):
+            response = test_client.post("/re-analyze/job-alice", json={})
+        assert response.status_code == 202
+        new_job_id = response.json()["job_id"]
+        new_result = test_client.get(f"/results/{new_job_id}").json()["result"]
+        assert "admin" in new_result["tags"]  # new submitter
+        assert "alice" not in new_result["tags"]  # old submitter removed
+        assert "nightly" in new_result["tags"]  # non-submitter tag preserved
+        assert "re-analyze" in new_result["tags"]  # system tag preserved

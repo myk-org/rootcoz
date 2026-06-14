@@ -2564,6 +2564,17 @@ def _ensure_submitter_tag(tags: list[str] | None, username: str) -> list[str]:
     return result
 
 
+def _strip_old_submitter_tag(tags: list[str], result_data: dict) -> list[str]:
+    """Remove the old submitter's username tag so re-analyze adds only the new one."""
+    old_submitter = (result_data.get("request_params") or {}).get("submitted_by", "")
+    if not old_submitter:
+        return tags
+    old_normalized = old_submitter.strip().lower()
+    if old_normalized in _SYSTEM_TAGS:
+        return tags
+    return [t for t in tags if not (isinstance(t, str) and t.lower() == old_normalized)]
+
+
 async def _enqueue_file_raw_analysis(
     body: "UnifiedAnalyzeRequest",
     merged: "Settings",
@@ -3308,6 +3319,8 @@ async def re_analyze(
         existing_tags = list(result_data.get("tags", []))
         if "re-analyze" not in existing_tags:
             existing_tags.append("re-analyze")
+        # Remove old submitter tag — enqueue will add the current submitter
+        existing_tags = _strip_old_submitter_tag(existing_tags, result_data)
         if "tags" in body.model_fields_set:
             for t in getattr(body, "tags", None) or []:
                 if t not in existing_tags:
@@ -3355,6 +3368,8 @@ async def re_analyze(
     existing_tags = list(result_data.get("tags", []))
     if "re-analyze" not in existing_tags:
         existing_tags.append("re-analyze")
+    # Remove old submitter tag — enqueue will add the current submitter
+    existing_tags = _strip_old_submitter_tag(existing_tags, result_data)
     # Merge with any user-supplied tags from the override body
     if "tags" in body.model_fields_set:
         for t in original_body.tags or []:
