@@ -5517,6 +5517,13 @@ async def update_tags(
         if st == "re-analyze" and st not in tags:
             tags.append(st)
 
+    # Preserve the submitter username tag
+    submitted_by = (result_data.get("request_params") or {}).get("submitted_by", "")
+    if submitted_by:
+        submitter_tag = submitted_by.strip().lower()
+        if submitter_tag and submitter_tag not in tags:
+            tags.append(submitter_tag)
+
     await patch_result_json(job_id, lambda d: d.update({"tags": tags}))
     notify_dashboard_changed()
     return {"job_id": job_id, "tags": tags}

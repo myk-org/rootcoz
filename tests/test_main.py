@@ -5627,3 +5627,32 @@ class TestSubmitterAutoTag:
             # "admin" tag already present (as "Admin" normalized to "admin")
             # — no duplicate should be added
             assert result["tags"].count("admin") == 1
+
+    def test_submitter_tag_preserved_on_tag_update(self, test_client) -> None:
+        """PUT /results/{job_id}/tags cannot remove the submitter username tag."""
+        data, _ = _post_analyze_queued(
+            test_client,
+            {
+                "type": "raw",
+                "failures": [
+                    {
+                        "test_name": "test_x",
+                        "error_message": "fail",
+                        "stack_trace": "trace",
+                    }
+                ],
+                "tags": ["nightly"],
+                "ai_provider": "claude",
+                "ai_model": "test-model",
+            },
+        )
+        job_id = data["job_id"]
+        # Try to remove all tags — submitter tag must be preserved
+        response = test_client.put(
+            f"/results/{job_id}/tags",
+            json={"tags": ["custom-only"]},
+        )
+        assert response.status_code == 200
+        updated_tags = response.json()["tags"]
+        assert "admin" in updated_tags
+        assert "custom-only" in updated_tags
