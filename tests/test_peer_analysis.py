@@ -2716,3 +2716,496 @@ class TestAnalyzeWithPeers:
         # Round 2 calls: session_id from round 1 is passed per peer
         assert captured_calls[2] == (4, "session-peer-0")
         assert captured_calls[3] == (5, "session-peer-1")
+
+
+# ===========================================================================
+# _peer_consensus_fallback tests
+# ===========================================================================
+
+
+class TestPeerConsensusFallback:
+    def test_returns_none_for_empty_rounds(self) -> None:
+        """No rounds at all -> None."""
+        from rootcoz.peer_analysis import _peer_consensus_fallback
+
+        assert _peer_consensus_fallback([]) is None
+
+    def test_returns_none_when_all_peers_failed(self) -> None:
+        """All peers have agrees_with_orchestrator=None -> None."""
+        from rootcoz.models import PeerRound
+        from rootcoz.peer_analysis import _peer_consensus_fallback
+
+        rounds = [
+            PeerRound(
+                round=1,
+                ai_provider="gemini",
+                ai_model="pro",
+                role="peer",
+                classification="",
+                details="failed",
+                agrees_with_orchestrator=None,
+            ),
+        ]
+        assert _peer_consensus_fallback(rounds) is None
+
+    def test_majority_consensus_adopted(self) -> None:
+        """2 out of 3 peers agree -> majority classification returned."""
+        from rootcoz.models import PeerRound
+        from rootcoz.peer_analysis import _peer_consensus_fallback
+
+        rounds = [
+            PeerRound(
+                round=1,
+                ai_provider="gemini",
+                ai_model="pro",
+                role="peer",
+                classification="PRODUCT BUG",
+                details="bug",
+                agrees_with_orchestrator=False,
+            ),
+            PeerRound(
+                round=1,
+                ai_provider="claude",
+                ai_model="sonnet",
+                role="peer",
+                classification="PRODUCT BUG",
+                details="bug",
+                agrees_with_orchestrator=False,
+            ),
+            PeerRound(
+                round=1,
+                ai_provider="cursor",
+                ai_model="fast",
+                role="peer",
+                classification="CODE ISSUE",
+                details="code",
+                agrees_with_orchestrator=True,
+            ),
+        ]
+        result = _peer_consensus_fallback(rounds)
+        assert result is not None
+        cls, note = result
+        assert cls == "PRODUCT BUG"
+        assert "peer consensus" in note.lower()
+        assert "2/3" in note
+
+    def test_no_majority_picks_most_frequent(self) -> None:
+        """No majority (all different) -> picks most frequent (first in Counter)."""
+        from rootcoz.models import PeerRound
+        from rootcoz.peer_analysis import _peer_consensus_fallback
+
+        rounds = [
+            PeerRound(
+                round=1,
+                ai_provider="gemini",
+                ai_model="pro",
+                role="peer",
+                classification="PRODUCT BUG",
+                details="bug",
+                agrees_with_orchestrator=False,
+            ),
+            PeerRound(
+                round=1,
+                ai_provider="claude",
+                ai_model="sonnet",
+                role="peer",
+                classification="CODE ISSUE",
+                details="code",
+                agrees_with_orchestrator=False,
+            ),
+        ]
+        result = _peer_consensus_fallback(rounds)
+        assert result is not None
+        cls, note = result
+        assert cls in ("PRODUCT BUG", "CODE ISSUE")
+        assert "no peer majority" in note.lower()
+        assert "1/2" in note
+
+    def test_skips_orchestrator_entries(self) -> None:
+        """Orchestrator entries are ignored; only peer entries count."""
+        from rootcoz.models import PeerRound
+        from rootcoz.peer_analysis import _peer_consensus_fallback
+
+        rounds = [
+            PeerRound(
+                round=1,
+                ai_provider="claude",
+                ai_model="opus",
+                role="orchestrator",
+                classification="CODE ISSUE",
+                details="orchestrator",
+                agrees_with_orchestrator=True,
+            ),
+            PeerRound(
+                round=1,
+                ai_provider="gemini",
+                ai_model="pro",
+                role="peer",
+                classification="PRODUCT BUG",
+                details="bug",
+                agrees_with_orchestrator=False,
+            ),
+        ]
+        result = _peer_consensus_fallback(rounds)
+        assert result is not None
+        cls, _ = result
+        assert cls == "PRODUCT BUG"
+
+    def test_uses_round_with_most_valid_peers(self) -> None:
+        """Prefers the round with the most valid peers, not just the latest."""
+        from rootcoz.models import PeerRound
+        from rootcoz.peer_analysis import _peer_consensus_fallback
+
+        rounds = [
+            # Round 1: 2 valid peers agree on PRODUCT BUG
+            PeerRound(
+                round=1,
+                ai_provider="gemini",
+                ai_model="pro",
+                role="peer",
+                classification="PRODUCT BUG",
+                details="bug",
+                agrees_with_orchestrator=False,
+            ),
+            PeerRound(
+                round=1,
+                ai_provider="claude",
+                ai_model="sonnet",
+                role="peer",
+                classification="PRODUCT BUG",
+                details="bug",
+                agrees_with_orchestrator=False,
+            ),
+            # Round 2: only 1 survivor says CODE ISSUE
+            PeerRound(
+                round=2,
+                ai_provider="gemini",
+                ai_model="pro",
+                role="peer",
+                classification="CODE ISSUE",
+                details="new",
+                agrees_with_orchestrator=False,
+            ),
+            PeerRound(
+                round=2,
+                ai_provider="claude",
+                ai_model="sonnet",
+                role="peer",
+                classification="",
+                details="failed",
+                agrees_with_orchestrator=None,
+            ),
+        ]
+        result = _peer_consensus_fallback(rounds)
+        assert result is not None
+        cls, _ = result
+        # Round 1 has 2 valid peers vs round 2's 1, so round 1 wins
+        assert cls == "PRODUCT BUG"
+
+    def test_equal_valid_peers_prefers_later_round(self) -> None:
+        """When rounds have equal valid peers, the later round wins."""
+        from rootcoz.models import PeerRound
+        from rootcoz.peer_analysis import _peer_consensus_fallback
+
+        rounds = [
+            # Round 1: 1 valid peer says PRODUCT BUG
+            PeerRound(
+                round=1,
+                ai_provider="gemini",
+                ai_model="pro",
+                role="peer",
+                classification="PRODUCT BUG",
+                details="old",
+                agrees_with_orchestrator=False,
+            ),
+            # Round 2: 1 valid peer says CODE ISSUE
+            PeerRound(
+                round=2,
+                ai_provider="gemini",
+                ai_model="pro",
+                role="peer",
+                classification="CODE ISSUE",
+                details="new",
+                agrees_with_orchestrator=False,
+            ),
+        ]
+        result = _peer_consensus_fallback(rounds)
+        assert result is not None
+        cls, _ = result
+        # Equal count — later round (2) wins because of >= comparison
+        assert cls == "CODE ISSUE"
+
+    def test_skips_invalid_classifications(self) -> None:
+        """Peers with invalid classifications (agrees_with_orchestrator=None) are skipped."""
+        from rootcoz.models import PeerRound
+        from rootcoz.peer_analysis import _peer_consensus_fallback
+
+        rounds = [
+            PeerRound(
+                round=1,
+                ai_provider="gemini",
+                ai_model="pro",
+                role="peer",
+                classification="UNKNOWN",
+                details="invalid",
+                agrees_with_orchestrator=None,
+            ),
+            PeerRound(
+                round=1,
+                ai_provider="claude",
+                ai_model="sonnet",
+                role="peer",
+                classification="CODE ISSUE",
+                details="valid",
+                agrees_with_orchestrator=True,
+            ),
+        ]
+        result = _peer_consensus_fallback(rounds)
+        assert result is not None
+        cls, _ = result
+        assert cls == "CODE ISSUE"
+
+
+# ===========================================================================
+# Integration tests: orchestrator empty classification fallback
+# ===========================================================================
+
+
+class TestOrchestratorEmptyFallback:
+    @pytest.mark.asyncio
+    async def test_peer_consensus_adopted_when_orchestrator_empty(self) -> None:
+        """When orchestrator returns empty classification, peer majority is adopted."""
+        from unittest.mock import AsyncMock
+
+        from rootcoz.models import AnalysisDetail
+        from rootcoz.peer_analysis import analyze_failure_group_with_peers
+
+        # Orchestrator returns empty classification
+        mock_orchestrator = AsyncMock(
+            return_value=(
+                AnalysisDetail(classification="", details="Could not determine"),
+                "sig123",
+            )
+        )
+
+        # Both peers agree on PRODUCT BUG
+        peer_response = _make_peer_json_response(
+            agrees=False,
+            classification="PRODUCT BUG",
+            reasoning="This is a product bug",
+        )
+
+        async def mock_peer_call(
+            prompt,
+            *,
+            cwd=None,
+            ai_provider="",
+            ai_model="",
+            ai_call_timeout=None,
+            session_id=None,
+        ):
+            return AIResult(success=True, text=peer_response)
+
+        with (
+            patch(
+                "rootcoz.peer_analysis.run_single_ai_analysis",
+                mock_orchestrator,
+            ),
+            _patch_peer_ai_calls(mock_peer_call),
+        ):
+            results = await analyze_failure_group_with_peers(
+                failures=[_make_failure()],
+                console_context="console output",
+                repo_path=None,
+                main_ai_provider="claude",
+                main_ai_model="claude-sonnet-4-20250514",
+                peer_ai_configs=_peer_configs(),
+                max_rounds=1,
+            )
+
+        assert len(results) == 1
+        analysis = results[0].analysis
+        assert analysis.classification == "PRODUCT BUG"
+        assert "FALLBACK" in analysis.details
+        assert "peer consensus" in analysis.details.lower()
+
+    @pytest.mark.asyncio
+    async def test_highest_confidence_picked_no_consensus(self) -> None:
+        """When orchestrator empty and no peer majority, most frequent classification adopted."""
+        from unittest.mock import AsyncMock
+
+        from rootcoz.models import AnalysisDetail
+        from rootcoz.peer_analysis import analyze_failure_group_with_peers
+
+        # Orchestrator returns empty classification
+        mock_orchestrator = AsyncMock(
+            return_value=(
+                AnalysisDetail(classification="", details="Could not determine"),
+                "sig123",
+            )
+        )
+
+        call_count = 0
+
+        async def mock_peer_call(
+            prompt,
+            *,
+            cwd=None,
+            ai_provider="",
+            ai_model="",
+            ai_call_timeout=None,
+            session_id=None,
+        ):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                return AIResult(
+                    success=True,
+                    text=_make_peer_json_response(
+                        agrees=False,
+                        classification="PRODUCT BUG",
+                        reasoning="product bug",
+                    ),
+                )
+            return AIResult(
+                success=True,
+                text=_make_peer_json_response(
+                    agrees=False,
+                    classification="CODE ISSUE",
+                    reasoning="code issue",
+                ),
+            )
+
+        with (
+            patch(
+                "rootcoz.peer_analysis.run_single_ai_analysis",
+                mock_orchestrator,
+            ),
+            _patch_peer_ai_calls(mock_peer_call),
+        ):
+            results = await analyze_failure_group_with_peers(
+                failures=[_make_failure()],
+                console_context="console output",
+                repo_path=None,
+                main_ai_provider="claude",
+                main_ai_model="claude-sonnet-4-20250514",
+                peer_ai_configs=_peer_configs(),
+                max_rounds=1,
+            )
+
+        assert len(results) == 1
+        analysis = results[0].analysis
+        # Should have picked one of the valid classifications
+        assert analysis.classification in ("PRODUCT BUG", "CODE ISSUE")
+        assert "FALLBACK" in analysis.details
+        assert "no peer majority" in analysis.details.lower()
+
+    @pytest.mark.asyncio
+    async def test_error_when_no_valid_peer_classifications(self) -> None:
+        """When orchestrator empty and all peers failed, explicit error in details."""
+        from unittest.mock import AsyncMock
+
+        from rootcoz.models import AnalysisDetail
+        from rootcoz.peer_analysis import analyze_failure_group_with_peers
+
+        # Orchestrator returns empty classification
+        mock_orchestrator = AsyncMock(
+            return_value=(
+                AnalysisDetail(classification="", details="Could not determine"),
+                "sig123",
+            )
+        )
+
+        # All peers fail
+        async def mock_peer_call(
+            prompt,
+            *,
+            cwd=None,
+            ai_provider="",
+            ai_model="",
+            ai_call_timeout=None,
+            session_id=None,
+        ):
+            return AIResult(success=False, text="CLI error")
+
+        with (
+            patch(
+                "rootcoz.peer_analysis.run_single_ai_analysis",
+                mock_orchestrator,
+            ),
+            _patch_peer_ai_calls(mock_peer_call),
+        ):
+            results = await analyze_failure_group_with_peers(
+                failures=[_make_failure()],
+                console_context="console output",
+                repo_path=None,
+                main_ai_provider="claude",
+                main_ai_model="claude-sonnet-4-20250514",
+                peer_ai_configs=_peer_configs(),
+                max_rounds=1,
+            )
+
+        assert len(results) == 1
+        analysis = results[0].analysis
+        # Classification remains empty
+        assert analysis.classification == ""
+        assert "ERROR" in analysis.details
+        assert "no valid peer classifications" in analysis.details.lower()
+
+    @pytest.mark.asyncio
+    async def test_fallback_preserves_existing_details(self) -> None:
+        """Fallback note is appended to existing details, not replacing them."""
+        from unittest.mock import AsyncMock
+
+        from rootcoz.models import AnalysisDetail
+        from rootcoz.peer_analysis import analyze_failure_group_with_peers
+
+        mock_orchestrator = AsyncMock(
+            return_value=(
+                AnalysisDetail(
+                    classification="",
+                    details="Some initial analysis details here",
+                ),
+                "sig123",
+            )
+        )
+
+        peer_response = _make_peer_json_response(
+            agrees=False,
+            classification="INFRASTRUCTURE",
+            reasoning="infra issue",
+        )
+
+        async def mock_peer_call(
+            prompt,
+            *,
+            cwd=None,
+            ai_provider="",
+            ai_model="",
+            ai_call_timeout=None,
+            session_id=None,
+        ):
+            return AIResult(success=True, text=peer_response)
+
+        with (
+            patch(
+                "rootcoz.peer_analysis.run_single_ai_analysis",
+                mock_orchestrator,
+            ),
+            _patch_peer_ai_calls(mock_peer_call),
+        ):
+            results = await analyze_failure_group_with_peers(
+                failures=[_make_failure()],
+                console_context="console output",
+                repo_path=None,
+                main_ai_provider="claude",
+                main_ai_model="claude-sonnet-4-20250514",
+                peer_ai_configs=_peer_configs(),
+                max_rounds=1,
+            )
+
+        analysis = results[0].analysis
+        assert analysis.classification == "INFRASTRUCTURE"
+        # Both original details and fallback note should be present
+        assert "Some initial analysis details here" in analysis.details
+        assert "FALLBACK" in analysis.details
