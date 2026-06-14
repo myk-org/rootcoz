@@ -3113,11 +3113,16 @@ def admin_chat_save_artifact(
     json_output: bool = _JSON_OPTION,
 ) -> None:
     """Save an HTML file as an admin chat report artifact."""
-    if not html_file.exists():
+    if not html_file.is_file():
         typer.echo(f"Error: File not found: {html_file}", err=True)
         raise typer.Exit(1)
 
-    html_content = html_file.read_text(encoding="utf-8")
+    try:
+        html_content = html_file.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        _handle_error(
+            RootCozError(status_code=0, detail=f"Cannot read {html_file}: {exc}")
+        )
     artifact_filename = filename or html_file.name
 
     data = _run_client_command(

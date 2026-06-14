@@ -4234,6 +4234,11 @@ class TestAdminChatCommands:
         assert result.exit_code == 1
         assert "not found" in result.output.lower()
 
+    def test_admin_chat_save_artifact_rejects_directory(self, mock_client, tmp_path):
+        result = runner.invoke(app, ["admin-chat", "save-artifact", str(tmp_path)])
+        assert result.exit_code == 1
+        assert "not found" in result.output.lower()
+
     def test_admin_chat_save_artifact_json(self, mock_client, tmp_path):
         mock_client.save_admin_chat_artifact.return_value = {
             "artifact_id": "abc-123",
