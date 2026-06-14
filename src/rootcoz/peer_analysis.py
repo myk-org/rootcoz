@@ -117,9 +117,10 @@ def _peer_consensus_fallback(
 ) -> tuple[str, str] | None:
     """Attempt fallback classification from peer votes when orchestrator is empty.
 
-    Examines peer entries starting from the final round.  Returns the
-    majority classification if one exists, otherwise the most common
-    (plurality).
+    Examines peer entries and selects the round with the most valid
+    peer votes.  Returns the majority classification if one exists,
+    otherwise the most common (plurality).  ``PeerRound`` carries no
+    confidence score, so frequency is the best available signal.
 
     Args:
         all_rounds: All peer round entries from the debate.
@@ -133,9 +134,10 @@ def _peer_consensus_fallback(
 
     last_round_num = max(r.round for r in all_rounds)
 
-    # Walk backwards through rounds to find the latest one with valid peers
+    # Pick the round with the most valid peers so a partial late round
+    # (e.g. 1 survivor) doesn't shadow a fully-populated earlier round.
     valid_peers: list[PeerRound] = []
-    for round_num in range(last_round_num, 0, -1):
+    for round_num in range(1, last_round_num + 1):
         candidates = [
             r
             for r in all_rounds
@@ -144,9 +146,8 @@ def _peer_consensus_fallback(
             and r.agrees_with_orchestrator is not None
             and _coerce_supported_classification(r.classification)
         ]
-        if candidates:
+        if len(candidates) >= len(valid_peers):
             valid_peers = candidates
-            break
 
     if not valid_peers:
         return None
