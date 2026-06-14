@@ -163,7 +163,7 @@ AI chat sessions MUST use restricted tool sets — **never give bash access**.
 - **Never**: `bash`, `exec`, `write`, `edit` — the AI must not execute arbitrary commands or modify files
 - Custom tools define exactly which API endpoints the AI can call — nothing else is reachable
 - Per-job chat tools: `get_job_result`, `get_job_comments`, `search_jira`, `get_jira_issue`, `search_github_issues`, `get_github_issue` (conditional on user credentials)
-- Admin chat tools: `db_schema`, `db_query` (read-only SQL against the database), `get_report_totals`, `get_classification_overrides`, `get_issues_created` (pre-built analytics reports), `save_report` (save HTML report as downloadable artifact)
+- Admin chat tools: `db_schema`, `db_query` (read-only SQL against the database), `get_report_totals`, `get_classification_overrides`, `get_issues_created` (pre-built analytics reports), `save_report` (generate downloadable HTML report)
 
 ### CLI Parity
 
