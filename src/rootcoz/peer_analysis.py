@@ -7,6 +7,7 @@ Loop until all agree or max rounds hit. No one has veto power — it's a convers
 import json
 import os
 import re
+from collections import Counter
 from collections.abc import Coroutine
 from pathlib import Path
 from typing import Any, Literal, TypedDict, cast, get_args
@@ -109,6 +110,73 @@ def _coerce_supported_classification(value: str) -> str:
     """
     normalized = _normalize_classification(value)
     return normalized if normalized in _VALID_CLASSIFICATIONS else ""
+
+
+def _peer_consensus_fallback(
+    all_rounds: list[PeerRound],
+) -> tuple[str, str] | None:
+    """Attempt fallback classification from peer votes when orchestrator is empty.
+
+    Examines peer entries starting from the final round.  Returns the
+    majority classification if one exists, otherwise the most common
+    (plurality).
+
+    Args:
+        all_rounds: All peer round entries from the debate.
+
+    Returns:
+        ``(classification, fallback_note)`` when valid peer classifications
+        exist, or ``None`` when no usable peer data is available.
+    """
+    if not all_rounds:
+        return None
+
+    last_round_num = max(r.round for r in all_rounds)
+
+    # Walk backwards through rounds to find the latest one with valid peers
+    valid_peers: list[PeerRound] = []
+    for round_num in range(last_round_num, 0, -1):
+        candidates = [
+            r
+            for r in all_rounds
+            if r.round == round_num
+            and r.role == "peer"
+            and r.agrees_with_orchestrator is not None
+            and _coerce_supported_classification(r.classification)
+        ]
+        if candidates:
+            valid_peers = candidates
+            break
+
+    if not valid_peers:
+        return None
+
+    counts: Counter[str] = Counter(
+        _coerce_supported_classification(r.classification) for r in valid_peers
+    )
+    most_common_cls, top_count = counts.most_common(1)[0]
+    total = len(valid_peers)
+
+    peers_desc = ", ".join(
+        f"{r.ai_provider}/{r.ai_model}"
+        for r in valid_peers
+        if _coerce_supported_classification(r.classification) == most_common_cls
+    )
+
+    if top_count > total / 2:
+        return (
+            most_common_cls,
+            f"Orchestrator returned empty classification. "
+            f"Adopted peer consensus ({top_count}/{total} peers): {peers_desc}.",
+        )
+
+    # No majority — adopt the most frequent classification
+    return (
+        most_common_cls,
+        f"Orchestrator returned empty classification. No peer majority — "
+        f"adopted most frequent classification from: {peers_desc} "
+        f"({top_count}/{total} peers).",
+    )
 
 
 def _check_consensus(
@@ -821,6 +889,39 @@ async def analyze_failure_group_with_peers(
                         f"Revision round {round_num} failed; keeping prior analysis"
                     )
                     parsed_analysis = previous_analysis
+
+        # Fallback: when orchestrator classification is empty, try peer consensus
+        if not parsed_analysis.classification:
+            fallback = _peer_consensus_fallback(all_rounds)
+            if fallback:
+                fallback_cls, fallback_note = fallback
+                logger.warning(
+                    "Orchestrator classification empty; falling back to peer consensus: %s",
+                    fallback_cls,
+                )
+                existing_details = parsed_analysis.details or ""
+                separator = "\n\n" if existing_details else ""
+                parsed_analysis = parsed_analysis.model_copy(
+                    update={
+                        "classification": fallback_cls,
+                        "details": f"{existing_details}{separator}\u26a0\ufe0f FALLBACK: {fallback_note}",
+                    }
+                )
+            else:
+                logger.error(
+                    "Orchestrator classification empty and no valid peer classifications available"
+                )
+                existing_details = parsed_analysis.details or ""
+                separator = "\n\n" if existing_details else ""
+                parsed_analysis = parsed_analysis.model_copy(
+                    update={
+                        "details": (
+                            f"{existing_details}{separator}"
+                            "\u26a0\ufe0f ERROR: Orchestrator returned empty classification "
+                            "and no valid peer classifications were available for fallback."
+                        ),
+                    }
+                )
 
         # Build PeerDebate trail
         peer_debate = PeerDebate(
