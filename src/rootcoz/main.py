@@ -7652,14 +7652,17 @@ async def reports_totals(
 ) -> dict:
     """Aggregate totals: total jobs, failures, reviewed, with per-job detail list. Admin only."""
     _require_admin(request)
+    team_list = _parse_csv_list(team)
+    tier_list = _parse_csv_list(tier)
+    version_list = _parse_csv_list(version)
     tag_list = _parse_csv_list(tags)
     exclude_tag_list = _parse_csv_list(exclude_tags)
     status_list = _parse_csv_list(status)
     logger.debug(
         "GET /api/reports/totals: team=%r, tier=%r, version=%r, from=%r, to=%r, status=%r, tags=%r, exclude_tags=%r",
-        team,
-        tier,
-        version,
+        team_list,
+        tier_list,
+        version_list,
         date_from,
         date_to,
         status_list,
@@ -7667,9 +7670,9 @@ async def reports_totals(
         exclude_tag_list,
     )
     return await storage.get_report_totals(
-        team=team,
-        tier=tier,
-        version=version,
+        team=team_list,
+        tier=tier_list,
+        version=version_list,
         date_from=date_from,
         date_to=date_to,
         status=status_list,
@@ -7696,14 +7699,17 @@ async def reports_classification_overrides(
 ) -> dict:
     """Classification overrides grouped by from→to transition. Admin only."""
     _require_admin(request)
+    team_list = _parse_csv_list(team)
+    tier_list = _parse_csv_list(tier)
+    version_list = _parse_csv_list(version)
     tag_list = _parse_csv_list(tags)
     exclude_tag_list = _parse_csv_list(exclude_tags)
     status_list = _parse_csv_list(status)
     logger.debug(
         "GET /api/reports/classification-overrides: team=%r, tier=%r, version=%r, from=%r, to=%r, status=%r, tags=%r, exclude_tags=%r",
-        team,
-        tier,
-        version,
+        team_list,
+        tier_list,
+        version_list,
         date_from,
         date_to,
         status_list,
@@ -7711,9 +7717,9 @@ async def reports_classification_overrides(
         exclude_tag_list,
     )
     return await storage.get_report_classification_overrides(
-        team=team,
-        tier=tier,
-        version=version,
+        team=team_list,
+        tier=tier_list,
+        version=version_list,
         date_from=date_from,
         date_to=date_to,
         status=status_list,
@@ -7740,14 +7746,17 @@ async def reports_issues_created(
 ) -> dict:
     """GitHub/Jira issues created from analysis results. Admin only."""
     _require_admin(request)
+    team_list = _parse_csv_list(team)
+    tier_list = _parse_csv_list(tier)
+    version_list = _parse_csv_list(version)
     tag_list = _parse_csv_list(tags)
     exclude_tag_list = _parse_csv_list(exclude_tags)
     status_list = _parse_csv_list(status)
     logger.debug(
         "GET /api/reports/issues-created: team=%r, tier=%r, version=%r, from=%r, to=%r, status=%r, tags=%r, exclude_tags=%r",
-        team,
-        tier,
-        version,
+        team_list,
+        tier_list,
+        version_list,
         date_from,
         date_to,
         status_list,
@@ -7755,9 +7764,9 @@ async def reports_issues_created(
         exclude_tag_list,
     )
     return await storage.get_report_issues_created(
-        team=team,
-        tier=tier,
-        version=version,
+        team=team_list,
+        tier=tier_list,
+        version=version_list,
         date_from=date_from,
         date_to=date_to,
         status=status_list,

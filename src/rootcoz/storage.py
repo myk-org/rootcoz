@@ -634,6 +634,7 @@ async def _migrate_restore_ai_classifications() -> None:
             "SELECT COUNT(*) FROM failure_history fh "
             "JOIN test_classifications tc "
             "  ON tc.job_id = fh.job_id AND tc.test_name = fh.test_name "
+            "  AND fh.child_build_number = tc.child_build_number "
             "WHERE fh.classification = tc.classification AND tc.created_by != ''"
         )
         needs_restore = (await cursor.fetchone())[0] > 0
@@ -4370,9 +4371,9 @@ def _build_date_filter(
 
 
 def _build_metadata_join(
-    team: str,
-    tier: str,
-    version: str,
+    team: list[str] | None,
+    tier: list[str] | None,
+    version: list[str] | None,
     job_name_col: str,
     conditions: list[str],
     params: list,
@@ -4387,14 +4388,17 @@ def _build_metadata_join(
         return ""
     join_sql = f" JOIN job_metadata jm ON jm.job_name = {job_name_col}"
     if team:
-        conditions.append("jm.team = ?")
-        params.append(team)
+        placeholders = ", ".join("?" for _ in team)
+        conditions.append(f"jm.team IN ({placeholders})")
+        params.extend(team)
     if tier:
-        conditions.append("jm.tier = ?")
-        params.append(tier)
+        placeholders = ", ".join("?" for _ in tier)
+        conditions.append(f"jm.tier IN ({placeholders})")
+        params.extend(tier)
     if version:
-        conditions.append("jm.version = ?")
-        params.append(version)
+        placeholders = ", ".join("?" for _ in version)
+        conditions.append(f"jm.version IN ({placeholders})")
+        params.extend(version)
     return join_sql
 
 
@@ -4445,9 +4449,9 @@ def _build_exclude_tags_filter(
 
 async def get_report_totals(
     *,
-    team: str = "",
-    tier: str = "",
-    version: str = "",
+    team: list[str] | None = None,
+    tier: list[str] | None = None,
+    version: list[str] | None = None,
     date_from: str = "",
     date_to: str = "",
     status: list[str] | None = None,
@@ -4540,9 +4544,9 @@ async def get_report_totals(
 async def _count_reviewed_tests(
     db: aiosqlite.Connection,
     *,
-    team: str = "",
-    tier: str = "",
-    version: str = "",
+    team: list[str] | None = None,
+    tier: list[str] | None = None,
+    version: list[str] | None = None,
     date_from: str = "",
     date_to: str = "",
     status: list[str] | None = None,
@@ -4586,9 +4590,9 @@ async def _count_reviewed_tests(
 
 async def get_report_classification_overrides(
     *,
-    team: str = "",
-    tier: str = "",
-    version: str = "",
+    team: list[str] | None = None,
+    tier: list[str] | None = None,
+    version: list[str] | None = None,
     date_from: str = "",
     date_to: str = "",
     status: list[str] | None = None,
@@ -4711,9 +4715,9 @@ async def get_report_classification_overrides(
 
 async def get_report_issues_created(
     *,
-    team: str = "",
-    tier: str = "",
-    version: str = "",
+    team: list[str] | None = None,
+    tier: list[str] | None = None,
+    version: list[str] | None = None,
     date_from: str = "",
     date_to: str = "",
     status: list[str] | None = None,

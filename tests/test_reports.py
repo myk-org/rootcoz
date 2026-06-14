@@ -362,7 +362,7 @@ class TestDateFilterHelper:
         conditions: list[str] = []
         params: list = []
         result = storage._build_metadata_join(
-            "", "", "", "t.job_name", conditions, params
+            None, None, None, "t.job_name", conditions, params
         )
         assert result == ""
         assert conditions == []
@@ -371,11 +371,23 @@ class TestDateFilterHelper:
         conditions: list[str] = []
         params: list = []
         result = storage._build_metadata_join(
-            "teamA", "1", "", "t.job_name", conditions, params
+            ["teamA"], ["1"], None, "t.job_name", conditions, params
         )
         assert "JOIN" in result
         assert len(conditions) == 2
         assert params == ["teamA", "1"]
+
+    def test_build_metadata_join_multi_value(self):
+        conditions: list[str] = []
+        params: list = []
+        result = storage._build_metadata_join(
+            ["storage", "core"], ["1", "2"], None, "t.job_name", conditions, params
+        )
+        assert "JOIN" in result
+        assert len(conditions) == 2
+        assert "IN" in conditions[0]
+        assert "IN" in conditions[1]
+        assert params == ["storage", "core", "1", "2"]
 
 
 class TestReportPagination:
