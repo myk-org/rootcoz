@@ -5656,3 +5656,42 @@ class TestSubmitterAutoTag:
         updated_tags = response.json()["tags"]
         assert "admin" in updated_tags
         assert "custom-only" in updated_tags
+
+    @pytest.mark.anyio
+    async def test_all_system_tags_preserved_on_update(self, test_client) -> None:
+        """PUT /results/{job_id}/tags preserves both re-analyze and submitter tags."""
+        # Create a job first
+        data, _ = _post_analyze_queued(
+            test_client,
+            {
+                "type": "raw",
+                "failures": [
+                    {
+                        "test_name": "test_x",
+                        "error_message": "fail",
+                        "stack_trace": "trace",
+                    }
+                ],
+                "ai_provider": "claude",
+                "ai_model": "test-model",
+            },
+        )
+        job_id = data["job_id"]
+
+        # Inject re-analyze into stored tags (normally added by re-analyze flow)
+        from rootcoz.storage import patch_result_json
+
+        await patch_result_json(
+            job_id, lambda d: d.update({"tags": ["admin", "re-analyze", "nightly"]})
+        )
+
+        # Try to replace all tags with only "new-tag"
+        response = test_client.put(
+            f"/results/{job_id}/tags",
+            json={"tags": ["new-tag"]},
+        )
+        assert response.status_code == 200
+        updated_tags = response.json()["tags"]
+        assert "new-tag" in updated_tags
+        assert "re-analyze" in updated_tags
+        assert "admin" in updated_tags

@@ -5491,6 +5491,7 @@ async def update_tags(
 ) -> dict:
     """Update tags on an existing result. System tags (re-analyze) cannot be removed."""
     _check_allow_list(request)
+    _require_operator(request)
     body = await _read_json_object(request)
     raw_tags = body.get("tags")
     if not isinstance(raw_tags, list) or not all(isinstance(t, str) for t in raw_tags):
@@ -5513,16 +5514,19 @@ async def update_tags(
     old_tags = result_data.get("tags", [])
 
     # Preserve system tags that user tried to remove
-    for st in old_tags:
-        if st == "re-analyze" and st not in tags:
-            tags.append(st)
-
-    # Preserve the submitter username tag
     submitted_by = (result_data.get("request_params") or {}).get("submitted_by", "")
-    if submitted_by:
-        submitter_tag = submitted_by.strip().lower()
-        if submitter_tag and submitter_tag not in tags:
-            tags.append(submitter_tag)
+    submitter_tag = submitted_by.strip().lower() if submitted_by else ""
+
+    system_tags = {"re-analyze"}
+    if submitter_tag:
+        system_tags.add(submitter_tag)
+
+    for st in old_tags:
+        normalized_st = st.strip().lower()
+        if normalized_st in system_tags and normalized_st not in [
+            t.lower() for t in tags
+        ]:
+            tags.append(normalized_st)
 
     await patch_result_json(job_id, lambda d: d.update({"tags": tags}))
     notify_dashboard_changed()
