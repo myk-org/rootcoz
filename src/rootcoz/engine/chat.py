@@ -604,8 +604,8 @@ _REPORT_FILTER_PARAMS = {
     },
     "limit": {
         "type": "integer",
-        "description": "Max detail rows (0-1000, default: all)",
-        "minimum": 0,
+        "description": "Max detail rows to return (1-1000). Omit for all rows.",
+        "minimum": 1,
         "maximum": 1000,
     },
     "offset": {
