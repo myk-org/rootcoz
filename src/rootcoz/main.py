@@ -2557,7 +2557,7 @@ def _ensure_submitter_tag(tags: list[str] | None, username: str) -> list[str]:
     if not normalized:
         return result
     # Remove any existing tag that matches case-insensitively, then add normalized
-    result = [t for t in result if t.lower() != normalized]
+    result = [t for t in result if isinstance(t, str) and t.lower() != normalized]
     result.append(normalized)
     return result
 
@@ -5489,7 +5489,7 @@ async def update_tags(
     request: Request,
     _: None = Depends(_bind_job_id),
 ) -> dict:
-    """Update tags on an existing result. System tags (re-analyze) cannot be removed."""
+    """Update tags on an existing result. System tags (re-analyze, submitter username) cannot be removed."""
     _check_allow_list(request)
     _require_operator(request)
     body = await _read_json_object(request)
@@ -5513,20 +5513,14 @@ async def update_tags(
     result_data = stored["result"]
     old_tags = result_data.get("tags", [])
 
-    # Preserve system tags that user tried to remove
+    # Preserve system tags
+    # re-analyze tag
+    if "re-analyze" in [str(t).lower() for t in old_tags] and "re-analyze" not in tags:
+        tags.append("re-analyze")
+    # Submitter tag
     submitted_by = (result_data.get("request_params") or {}).get("submitted_by", "")
-    submitter_tag = submitted_by.strip().lower() if submitted_by else ""
-
-    system_tags = {"re-analyze"}
-    if submitter_tag:
-        system_tags.add(submitter_tag)
-
-    for st in old_tags:
-        normalized_st = st.strip().lower()
-        if normalized_st in system_tags and normalized_st not in [
-            t.lower() for t in tags
-        ]:
-            tags.append(normalized_st)
+    if submitted_by:
+        tags = _ensure_submitter_tag(tags, submitted_by)
 
     await patch_result_json(job_id, lambda d: d.update({"tags": tags}))
     notify_dashboard_changed()
