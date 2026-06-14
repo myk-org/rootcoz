@@ -2851,13 +2851,64 @@ class TestPeerConsensusFallback:
         cls, _ = result
         assert cls == "PRODUCT BUG"
 
-    def test_uses_latest_round_peers(self) -> None:
-        """When multiple rounds exist, uses the last round with valid peers."""
+    def test_uses_round_with_most_valid_peers(self) -> None:
+        """Prefers the round with the most valid peers, not just the latest."""
         from rootcoz.models import PeerRound
         from rootcoz.peer_analysis import _peer_consensus_fallback
 
         rounds = [
-            # Round 1: peer says PRODUCT BUG
+            # Round 1: 2 valid peers agree on PRODUCT BUG
+            PeerRound(
+                round=1,
+                ai_provider="gemini",
+                ai_model="pro",
+                role="peer",
+                classification="PRODUCT BUG",
+                details="bug",
+                agrees_with_orchestrator=False,
+            ),
+            PeerRound(
+                round=1,
+                ai_provider="claude",
+                ai_model="sonnet",
+                role="peer",
+                classification="PRODUCT BUG",
+                details="bug",
+                agrees_with_orchestrator=False,
+            ),
+            # Round 2: only 1 survivor says CODE ISSUE
+            PeerRound(
+                round=2,
+                ai_provider="gemini",
+                ai_model="pro",
+                role="peer",
+                classification="CODE ISSUE",
+                details="new",
+                agrees_with_orchestrator=False,
+            ),
+            PeerRound(
+                round=2,
+                ai_provider="claude",
+                ai_model="sonnet",
+                role="peer",
+                classification="",
+                details="failed",
+                agrees_with_orchestrator=None,
+            ),
+        ]
+        result = _peer_consensus_fallback(rounds)
+        assert result is not None
+        cls, _ = result
+        # Round 1 has 2 valid peers vs round 2's 1, so round 1 wins
+        assert cls == "PRODUCT BUG"
+
+    def test_equal_valid_peers_prefers_later_round(self) -> None:
+        """When rounds have equal valid peers, the later round wins."""
+        from rootcoz.models import PeerRound
+        from rootcoz.peer_analysis import _peer_consensus_fallback
+
+        rounds = [
+            # Round 1: 1 valid peer says PRODUCT BUG
             PeerRound(
                 round=1,
                 ai_provider="gemini",
@@ -2867,7 +2918,7 @@ class TestPeerConsensusFallback:
                 details="old",
                 agrees_with_orchestrator=False,
             ),
-            # Round 2: peer says CODE ISSUE
+            # Round 2: 1 valid peer says CODE ISSUE
             PeerRound(
                 round=2,
                 ai_provider="gemini",
@@ -2881,6 +2932,7 @@ class TestPeerConsensusFallback:
         result = _peer_consensus_fallback(rounds)
         assert result is not None
         cls, _ = result
+        # Equal count — later round (2) wins because of >= comparison
         assert cls == "CODE ISSUE"
 
     def test_skips_invalid_classifications(self) -> None:
