@@ -3101,6 +3101,35 @@ def admin_chat_clear(
         typer.echo(f"Cleared {data.get('deleted', 0)} messages.")
 
 
+@admin_chat_app.command("save-artifact")
+def admin_chat_save_artifact(
+    html_file: Path = typer.Argument(help="Path to the HTML file to upload."),
+    filename: str = typer.Option(
+        "",
+        "--filename",
+        "-f",
+        help="Artifact filename. Defaults to the input file name.",
+    ),
+    json_output: bool = _JSON_OPTION,
+) -> None:
+    """Save an HTML file as an admin chat report artifact."""
+    if not html_file.exists():
+        typer.echo(f"Error: File not found: {html_file}", err=True)
+        raise typer.Exit(1)
+
+    html_content = html_file.read_text(encoding="utf-8")
+    artifact_filename = filename or html_file.name
+
+    data = _run_client_command(
+        json_output,
+        lambda c: c.save_admin_chat_artifact(html_content, artifact_filename),
+        emit_output=False,
+    )
+    if not _state.get("json", False):
+        typer.echo(f"Artifact saved: {data.get('download_url', '')}")
+        typer.echo(f"Filename: {data.get('filename', '')}")
+
+
 @admin_chat_app.command("download-artifact")
 def admin_chat_download_artifact(
     artifact_id: str = typer.Argument(help="Artifact UUID to download."),

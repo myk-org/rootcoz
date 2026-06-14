@@ -9202,12 +9202,19 @@ def _cleanup_admin_artifacts(username: str) -> None:
 
     artifacts_dir = _get_admin_artifacts_dir(username)
     if artifacts_dir.exists():
-        shutil.rmtree(artifacts_dir, ignore_errors=True)
-        logger.info("Admin chat: cleaned up artifacts for %s", username)
+        try:
+            shutil.rmtree(artifacts_dir)
+            logger.info("Admin chat: cleaned up artifacts for %s", username)
+        except OSError:
+            logger.warning(
+                "Admin chat: failed to clean up artifacts for %s",
+                username,
+                exc_info=True,
+            )
 
 
 class SaveArtifactRequest(BaseModel):
-    html_content: str = Field(..., min_length=1)
+    html_content: str = Field(..., min_length=1, max_length=5_000_000)
     filename: str = Field(..., min_length=1, max_length=255)
 
 
@@ -9236,7 +9243,7 @@ async def save_admin_chat_artifact(
     artifacts_dir.chmod(0o700)
 
     artifact_path = artifacts_dir / f"{artifact_id}.html"
-    artifact_path.write_text(body.html_content)
+    artifact_path.write_text(body.html_content, encoding="utf-8")
     logger.info(
         "Admin chat: saved artifact %s (%d chars) for %s",
         artifact_id,
@@ -9274,7 +9281,7 @@ async def get_admin_chat_artifact(
     if not artifact_path.exists():
         raise HTTPException(status_code=404, detail="Artifact not found")
 
-    content = artifact_path.read_text()
+    content = artifact_path.read_text(encoding="utf-8")
     download_filename = f"report-{artifact_id[:8]}.html"
 
     return Response(

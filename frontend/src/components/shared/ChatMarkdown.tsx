@@ -26,7 +26,7 @@ export function ChatMarkdown({ content }: ChatMarkdownProps) {
             if (!href || !isSafeHref(href)) {
               return <span>{children}</span>
             }
-            if (href.includes(ARTIFACT_URL_PATTERN)) {
+            if (href.startsWith(ARTIFACT_URL_PATTERN)) {
               return (
                 <a
                   href={href}

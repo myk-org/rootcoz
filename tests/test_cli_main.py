@@ -4189,6 +4189,66 @@ class TestAdminChatCommands:
         assert result.exit_code == 1
         assert "403" in result.output or "admin" in result.output.lower()
 
+    def test_admin_chat_save_artifact(self, mock_client, tmp_path):
+        mock_client.save_admin_chat_artifact.return_value = {
+            "artifact_id": "abc-123",
+            "download_url": "/api/admin-chat/artifacts/abc-123",
+            "filename": "report.html",
+        }
+        html_file = tmp_path / "report.html"
+        html_file.write_text("<html>report</html>", encoding="utf-8")
+        result = runner.invoke(app, ["admin-chat", "save-artifact", str(html_file)])
+        assert result.exit_code == 0
+        assert "/api/admin-chat/artifacts/abc-123" in result.output
+        mock_client.save_admin_chat_artifact.assert_called_once_with(
+            "<html>report</html>", "report.html"
+        )
+
+    def test_admin_chat_save_artifact_custom_filename(self, mock_client, tmp_path):
+        mock_client.save_admin_chat_artifact.return_value = {
+            "artifact_id": "abc-123",
+            "download_url": "/api/admin-chat/artifacts/abc-123",
+            "filename": "custom-name.html",
+        }
+        html_file = tmp_path / "report.html"
+        html_file.write_text("<html>report</html>", encoding="utf-8")
+        result = runner.invoke(
+            app,
+            [
+                "admin-chat",
+                "save-artifact",
+                str(html_file),
+                "--filename",
+                "custom-name.html",
+            ],
+        )
+        assert result.exit_code == 0
+        mock_client.save_admin_chat_artifact.assert_called_once_with(
+            "<html>report</html>", "custom-name.html"
+        )
+
+    def test_admin_chat_save_artifact_file_not_found(self, mock_client, tmp_path):
+        result = runner.invoke(
+            app, ["admin-chat", "save-artifact", str(tmp_path / "nonexistent.html")]
+        )
+        assert result.exit_code == 1
+        assert "not found" in result.output.lower()
+
+    def test_admin_chat_save_artifact_json(self, mock_client, tmp_path):
+        mock_client.save_admin_chat_artifact.return_value = {
+            "artifact_id": "abc-123",
+            "download_url": "/api/admin-chat/artifacts/abc-123",
+            "filename": "report.html",
+        }
+        html_file = tmp_path / "report.html"
+        html_file.write_text("<html>report</html>", encoding="utf-8")
+        result = runner.invoke(
+            app, ["--json", "admin-chat", "save-artifact", str(html_file)]
+        )
+        assert result.exit_code == 0
+        parsed = json.loads(result.output)
+        assert parsed["artifact_id"] == "abc-123"
+
     def test_admin_chat_download_artifact(self, mock_client, tmp_path):
         mock_client.download_admin_chat_artifact.return_value = b"<html>report</html>"
         out_file = tmp_path / "report.html"

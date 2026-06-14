@@ -1068,6 +1068,14 @@ class RootCozClient:
         """Signal user left admin chat page. POST /api/admin/chat/close"""
         return self._request("POST", "/api/admin/chat/close")
 
+    def save_admin_chat_artifact(self, html_content: str, filename: str) -> dict:
+        """Save an HTML report artifact. POST /api/admin-chat/artifacts"""
+        return self._request(
+            "POST",
+            "/api/admin-chat/artifacts",
+            json={"html_content": html_content, "filename": filename},
+        )
+
     def download_admin_chat_artifact(self, artifact_id: str) -> bytes:
         """Download an admin chat artifact. GET /api/admin-chat/artifacts/{id}
 

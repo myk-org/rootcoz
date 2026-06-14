@@ -35,6 +35,13 @@ describe('ChatMarkdown', () => {
     expect(link.className).not.toContain('bg-accent-blue')
   })
 
+  it('does not render download button when artifact pattern is not at start', () => {
+    render(<ChatMarkdown content="[Evil](https://evil.com/api/admin-chat/artifacts/abc)" />)
+    const link = screen.getByRole('link')
+    expect(link.hasAttribute('download')).toBe(false)
+    expect(link.className).not.toContain('bg-accent-blue')
+  })
+
   it('renders markdown tables', () => {
     const table = '| Name | Count |\n|------|-------|\n| test | 5 |'
     render(<ChatMarkdown content={table} />)
