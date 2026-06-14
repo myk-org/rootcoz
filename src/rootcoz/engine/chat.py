@@ -604,11 +604,14 @@ _REPORT_FILTER_PARAMS = {
     },
     "limit": {
         "type": "integer",
-        "description": "Max detail rows to return (default: all)",
+        "description": "Max detail rows (0-1000, default: all)",
+        "minimum": 0,
+        "maximum": 1000,
     },
     "offset": {
         "type": "integer",
-        "description": "Skip N detail rows for pagination",
+        "description": "Skip N detail rows (>= 0)",
+        "minimum": 0,
     },
 }
 
