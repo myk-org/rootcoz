@@ -3120,9 +3120,9 @@ def admin_chat_save_artifact(
     try:
         html_content = html_file.read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError) as exc:
-        _handle_error(
-            RootCozError(status_code=0, detail=f"Cannot read {html_file}: {exc}")
-        )
+        typer.echo(f"Error: Cannot read {html_file}: {exc}", err=True)
+        raise typer.Exit(1) from None
+
     artifact_filename = filename or html_file.name
 
     data = _run_client_command(

@@ -9243,9 +9243,14 @@ async def save_admin_chat_artifact(
     artifacts_dir.chmod(0o700)
 
     artifact_path = artifacts_dir / f"{artifact_id}.html"
-    await asyncio.to_thread(
-        artifact_path.write_text, body.html_content, encoding="utf-8"
-    )
+    try:
+        await asyncio.to_thread(
+            artifact_path.write_text, body.html_content, encoding="utf-8"
+        )
+    except OSError as exc:
+        logger.error("Failed to save artifact: %s", exc)
+        raise HTTPException(status_code=500, detail="Failed to save artifact")
+
     logger.info(
         "Admin chat: saved artifact %s (%d chars) for %s",
         artifact_id,
@@ -9283,7 +9288,12 @@ async def get_admin_chat_artifact(
     if not artifact_path.exists():
         raise HTTPException(status_code=404, detail="Artifact not found")
 
-    content = await asyncio.to_thread(artifact_path.read_text, encoding="utf-8")
+    try:
+        content = await asyncio.to_thread(artifact_path.read_text, encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        logger.error("Failed to read artifact %s: %s", artifact_id, exc)
+        raise HTTPException(status_code=500, detail="Failed to read artifact")
+
     download_filename = f"report-{artifact_id[:8]}.html"
 
     return Response(
