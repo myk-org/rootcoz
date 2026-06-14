@@ -2550,6 +2550,15 @@ def _stamp_reanalysis_metadata(
             request_params["reanalyzed_from_job_name"] = reanalyzed_from_job_name
 
 
+def _ensure_submitter_tag(tags: list[str] | None, username: str) -> list[str]:
+    """Return *tags* with *username* included (lowercased, deduplicated)."""
+    result = list(tags) if tags else []
+    normalized = username.strip().lower()
+    if normalized and normalized not in result:
+        result.append(normalized)
+    return result
+
+
 async def _enqueue_file_raw_analysis(
     body: "UnifiedAnalyzeRequest",
     merged: "Settings",
@@ -2646,8 +2655,7 @@ async def _enqueue_file_raw_analysis(
         reanalyzed_from_job_name,
     )
     effective_tags = tags if tags is not None else (body.tags or None)
-    if effective_tags:
-        initial_result["tags"] = effective_tags
+    initial_result["tags"] = _ensure_submitter_tag(effective_tags, username)
     await save_result(job_id, "", "pending", initial_result)
     notify_active_count_changed()
     notify_dashboard_changed()
@@ -2789,8 +2797,7 @@ async def _enqueue_analysis_job(
         reanalyzed_from_job_id,
         reanalyzed_from_job_name,
     )
-    if body.tags:
-        initial_result["tags"] = body.tags
+    initial_result["tags"] = _ensure_submitter_tag(body.tags, username)
     can_resume_wait = merged.wait_for_completion and bool(merged.jenkins_url)
     await save_result(
         job_id,

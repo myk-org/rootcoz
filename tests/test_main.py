@@ -5507,3 +5507,92 @@ class TestAdminSettingsEndpoints:
             headers={"Authorization": ""},
         )
         assert response.status_code in (401, 403)
+
+
+class TestSubmitterAutoTag:
+    """Tests for auto-tagging analyses with the submitter username."""
+
+    def test_ensure_submitter_tag_adds_username(self) -> None:
+        """_ensure_submitter_tag appends the lowercased username."""
+        from rootcoz.main import _ensure_submitter_tag
+
+        assert _ensure_submitter_tag(None, "Alice") == ["alice"]
+        assert _ensure_submitter_tag([], "Bob") == ["bob"]
+        assert _ensure_submitter_tag(["nightly"], "Carol") == ["nightly", "carol"]
+
+    def test_ensure_submitter_tag_no_duplicate(self) -> None:
+        """_ensure_submitter_tag does not duplicate an existing username tag."""
+        from rootcoz.main import _ensure_submitter_tag
+
+        assert _ensure_submitter_tag(["alice"], "Alice") == ["alice"]
+        assert _ensure_submitter_tag(["nightly", "bob"], "bob") == ["nightly", "bob"]
+
+    def test_ensure_submitter_tag_empty_username(self) -> None:
+        """_ensure_submitter_tag skips blank usernames."""
+        from rootcoz.main import _ensure_submitter_tag
+
+        assert _ensure_submitter_tag(["nightly"], "") == ["nightly"]
+        assert _ensure_submitter_tag(None, "  ") == []
+
+    def test_raw_analysis_auto_tags_submitter(self, test_client) -> None:
+        """POST /analyze type=raw auto-adds the submitter username to tags."""
+        data, _ = _post_analyze_queued(
+            test_client,
+            {
+                "type": "raw",
+                "failures": [
+                    {
+                        "test_name": "test_x",
+                        "error_message": "fail",
+                        "stack_trace": "trace",
+                    }
+                ],
+                "ai_provider": "claude",
+                "ai_model": "test-model",
+            },
+        )
+        job_id = data["job_id"]
+        result = test_client.get(f"/results/{job_id}").json()["result"]
+        assert "admin" in result["tags"]
+
+    def test_raw_analysis_preserves_user_tags(self, test_client) -> None:
+        """POST /analyze type=raw keeps user-supplied tags alongside the submitter."""
+        data, _ = _post_analyze_queued(
+            test_client,
+            {
+                "type": "raw",
+                "failures": [
+                    {
+                        "test_name": "test_x",
+                        "error_message": "fail",
+                        "stack_trace": "trace",
+                    }
+                ],
+                "tags": ["nightly", "regression"],
+                "ai_provider": "claude",
+                "ai_model": "test-model",
+            },
+        )
+        job_id = data["job_id"]
+        result = test_client.get(f"/results/{job_id}").json()["result"]
+        assert "nightly" in result["tags"]
+        assert "regression" in result["tags"]
+        assert "admin" in result["tags"]
+
+    def test_jenkins_analysis_auto_tags_submitter(self, test_client) -> None:
+        """POST /analyze type=jenkins auto-adds the submitter username to tags."""
+        with patch("rootcoz.main.process_analysis_with_id"):
+            response = test_client.post(
+                "/analyze",
+                json={
+                    "type": "jenkins",
+                    "job_name": "test-job",
+                    "build_number": 1,
+                    "ai_provider": "claude",
+                    "ai_model": "test-model",
+                },
+            )
+            assert response.status_code == 202
+            job_id = response.json()["job_id"]
+            result = test_client.get(f"/results/{job_id}").json()["result"]
+            assert "admin" in result["tags"]
