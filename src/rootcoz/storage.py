@@ -634,7 +634,7 @@ async def _migrate_restore_ai_classifications() -> None:
             "SELECT COUNT(*) FROM failure_history fh "
             "JOIN test_classifications tc "
             "  ON tc.job_id = fh.job_id AND tc.test_name = fh.test_name "
-            "  AND fh.child_build_number = tc.child_build_number "
+            "  AND (tc.child_build_number = 0 OR fh.child_build_number = tc.child_build_number) "
             "WHERE fh.classification = tc.classification AND tc.created_by != ''"
         )
         needs_restore = (await cursor.fetchone())[0] > 0
