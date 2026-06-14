@@ -7632,12 +7632,17 @@ async def api_dashboard_filtered(
 
 
 def _parse_csv_list(value: str, *, max_length: int = 2000) -> list[str] | None:
-    """Parse comma-separated string into deduplicated list, or None if empty."""
+    """Parse comma-separated string into deduplicated list, or None if empty.
+
+    Raises ValueError if input exceeds max_length.
+    """
     if not value:
         return None
-    # Cap input length to prevent expensive split on huge strings
-    truncated = value[:max_length]
-    items = list(dict.fromkeys(v.strip() for v in truncated.split(",") if v.strip()))
+    if len(value) > max_length:
+        raise ValueError(
+            f"Filter value too long ({len(value)} chars, max {max_length})"
+        )
+    items = list(dict.fromkeys(v.strip() for v in value.split(",") if v.strip()))
     return items if items else None
 
 
@@ -7645,7 +7650,10 @@ def _parse_report_metadata(
     team: str, tier: str, version: str
 ) -> tuple[list[str] | None, list[str] | None, list[str] | None]:
     """Parse CSV metadata filters for report endpoints."""
-    return _parse_csv_list(team), _parse_csv_list(tier), _parse_csv_list(version)
+    try:
+        return _parse_csv_list(team), _parse_csv_list(tier), _parse_csv_list(version)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
 
 
 @app.get("/api/reports/totals")
