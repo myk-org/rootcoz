@@ -4658,6 +4658,16 @@ async def get_report_classification_overrides(
         cursor = await db.execute(sql, params)
         rows = await cursor.fetchall()
 
+        # Keep only the latest override per (job_id, test_name)
+        seen_keys: set[tuple[str, str]] = set()
+        latest_rows = []
+        for row in rows:
+            dedup_key = (row["job_id"], row["test_name"])
+            if dedup_key not in seen_keys:
+                seen_keys.add(dedup_key)
+                latest_rows.append(row)
+        rows = latest_rows
+
         # Count total reviewed tests (same filters minus override-specific ones)
         total_reviewed = await _count_reviewed_tests(
             db,

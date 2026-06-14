@@ -241,6 +241,31 @@ class TestReportOverrides:
                 )
 
     @pytest.mark.asyncio
+    async def test_multiple_overrides_keeps_latest(self, populated_db: Path):
+        """When multiple overrides exist for the same test, only the latest appears."""
+        with patch.object(storage, "DB_PATH", populated_db):
+            # populated_db already has CODE ISSUE → PRODUCT BUG for test_foo.
+            # Add a second override: PRODUCT BUG → CODE ISSUE (effectively reverting).
+            async with storage._connect_db() as conn:
+                await conn.execute(
+                    """INSERT INTO test_classifications
+                       (test_name, job_name, classification, created_by, job_id, visible, created_at)
+                       VALUES (?, ?, ?, ?, ?, ?, datetime('now', '+1 minute'))""",
+                    ("test_foo", "test-job", "INFRASTRUCTURE", "reviewer2", "job-1", 1),
+                )
+                await conn.commit()
+            result = await storage.get_report_classification_overrides()
+            # Only the latest override (→ INFRASTRUCTURE) should appear for test_foo
+            test_foo_details = [
+                d for d in result["details"] if d["test_name"] == "test_foo"
+            ]
+            assert len(test_foo_details) == 1, (
+                f"Expected 1 override for test_foo, got {len(test_foo_details)}"
+            )
+            assert test_foo_details[0]["to_classification"] == "INFRASTRUCTURE"
+            assert test_foo_details[0]["overridden_by"] == "reviewer2"
+
+    @pytest.mark.asyncio
     async def test_date_filter_excludes(self, populated_db: Path):
         with patch.object(storage, "DB_PATH", populated_db):
             result = await storage.get_report_classification_overrides(
