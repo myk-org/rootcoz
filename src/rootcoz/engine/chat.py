@@ -602,6 +602,14 @@ _REPORT_FILTER_PARAMS = {
         "type": "string",
         "description": "Filter by tags (comma-separated)",
     },
+    "limit": {
+        "type": "integer",
+        "description": "Max detail rows to return (default: all)",
+    },
+    "offset": {
+        "type": "integer",
+        "description": "Skip N detail rows for pagination",
+    },
 }
 
 
@@ -920,7 +928,7 @@ def build_admin_system_prompt(
 You have structured tools — call them directly:
 {tools_section}
 
-**WORKFLOW:** First call `db_schema` to understand the database structure, then write targeted SQL queries with `db_query`.
+**WORKFLOW:** For analytics questions (totals, overrides, issues), use the pre-built report tools first — they're faster and more accurate. Use `db_schema` + `db_query` only for questions the report tools can't answer.
 
 **SENSITIVE DATA:** Some columns contain encrypted values (tokens, passwords). Never output raw encrypted field values.{unavailable_section}
 

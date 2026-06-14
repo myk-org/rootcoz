@@ -277,7 +277,17 @@ class TestBuildAdminCustomTools:
             server_url="http://localhost:8000",
             auth_token="test-token",
         )
-        expected_params = {"team", "tier", "version", "from", "to", "status", "tags"}
+        expected_params = {
+            "team",
+            "tier",
+            "version",
+            "from",
+            "to",
+            "status",
+            "tags",
+            "limit",
+            "offset",
+        }
         report_tools = [
             t
             for t in tools
