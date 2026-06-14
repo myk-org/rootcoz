@@ -121,6 +121,7 @@ from rootcoz.models import (
     SetReviewedRequest,
     UnifiedAnalyzeRequest,
     UnsubscribeRequest,
+    _SYSTEM_TAGS,
 )
 from rootcoz.monitoring import (
     build_health_response,
@@ -2554,7 +2555,7 @@ def _ensure_submitter_tag(tags: list[str] | None, username: str) -> list[str]:
     """Return *tags* with *username* included (lowercased, deduplicated)."""
     result = list(tags) if tags else []
     normalized = username.strip().lower()
-    if not normalized:
+    if not normalized or normalized in _SYSTEM_TAGS:
         return result
     # If any existing tag matches case-insensitively, keep list as-is
     if any(isinstance(t, str) and t.lower() == normalized for t in result):
@@ -5502,7 +5503,7 @@ async def update_tags(
     tags: list[str] = []
     for t in raw_tags:
         normalized = t.strip().lower()
-        if normalized and normalized not in seen:
+        if normalized and normalized not in seen and normalized not in _SYSTEM_TAGS:
             seen.add(normalized)
             tags.append(normalized)
 

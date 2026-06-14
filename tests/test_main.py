@@ -5544,6 +5544,13 @@ class TestSubmitterAutoTag:
         assert _ensure_submitter_tag(["nightly"], "") == ["nightly"]
         assert _ensure_submitter_tag(None, "  ") == []
 
+    def test_ensure_submitter_tag_skips_system_tag_username(self) -> None:
+        """_ensure_submitter_tag does not add usernames that match system tags."""
+        from rootcoz.main import _ensure_submitter_tag
+
+        assert _ensure_submitter_tag([], "re-analyze") == []
+        assert _ensure_submitter_tag(["nightly"], "Re-Analyze") == ["nightly"]
+
     def test_raw_analysis_auto_tags_submitter(self, test_client) -> None:
         """POST /analyze type=raw auto-adds the submitter username to tags."""
         data, _ = _post_analyze_queued(
@@ -5695,3 +5702,32 @@ class TestSubmitterAutoTag:
         assert "new-tag" in updated_tags
         assert "re-analyze" in updated_tags
         assert "admin" in updated_tags
+
+    def test_user_cannot_add_system_tags_via_update(self, test_client) -> None:
+        """PUT /results/{job_id}/tags filters out system tags from user input."""
+        data, _ = _post_analyze_queued(
+            test_client,
+            {
+                "type": "raw",
+                "failures": [
+                    {
+                        "test_name": "test_x",
+                        "error_message": "fail",
+                        "stack_trace": "trace",
+                    }
+                ],
+                "ai_provider": "claude",
+                "ai_model": "test-model",
+            },
+        )
+        job_id = data["job_id"]
+        # Try to add re-analyze via tag update
+        response = test_client.put(
+            f"/results/{job_id}/tags",
+            json={"tags": ["re-analyze", "custom"]},
+        )
+        assert response.status_code == 200
+        updated_tags = response.json()["tags"]
+        assert "custom" in updated_tags
+        assert "admin" in updated_tags  # submitter preserved
+        assert "re-analyze" not in updated_tags  # system tag filtered out

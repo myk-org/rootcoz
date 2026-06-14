@@ -101,6 +101,12 @@ class TestUserRegistration:
         assert resp.status_code == 400
         assert "reserved" in resp.json()["detail"].lower()
 
+    def test_register_system_tag_username_forbidden(self, client):
+        """Usernames matching system tags (e.g. 're-analyze') are rejected."""
+        resp = client.post("/api/auth/register", json={"username": "re-analyze"})
+        assert resp.status_code == 400
+        assert "system tag" in resp.json()["detail"].lower()
+
     def test_register_invalid_username(self, client):
         resp = client.post("/api/auth/register", json={"username": "a"})
         assert resp.status_code == 400
@@ -618,6 +624,17 @@ class TestStorageUserHasKey:
     def test_nonexistent_user(self, _init_db, temp_db_path):
         async def run():
             assert await storage.user_has_key("ghost") is False
+
+        with patch.object(storage, "DB_PATH", temp_db_path):
+            asyncio.run(run())
+
+    def test_track_user_skips_system_tag_username(self, _init_db, temp_db_path):
+        """track_user with a system tag name (e.g. 're-analyze') is a no-op."""
+
+        async def run():
+            await storage.track_user("re-analyze")
+            # No user should be created
+            assert await storage.user_has_key("re-analyze") is False
 
         with patch.object(storage, "DB_PATH", temp_db_path):
             asyncio.run(run())

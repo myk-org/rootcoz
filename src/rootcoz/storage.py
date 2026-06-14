@@ -28,6 +28,7 @@ from rootcoz.metadata_rules import match_job_metadata
 from rootcoz.models import (
     HistoryClassificationLiteral,
     OverrideClassificationLiteral,
+    _SYSTEM_TAGS,
 )
 
 logger = get_logger(name=__name__, level=os.environ.get("LOG_LEVEL", "INFO"))
@@ -116,6 +117,9 @@ def _validate_username(username: str) -> None:
     """Validate username format and reserved names."""
     if username.lower() == "admin":
         msg = "Username 'admin' is reserved"
+        raise ValueError(msg)
+    if username.lower() in _SYSTEM_TAGS:
+        msg = f"Username '{username}' conflicts with a reserved system tag"
         raise ValueError(msg)
     if not re.match(r"^[a-zA-Z0-9][a-zA-Z0-9._-]{1,49}$", username):
         msg = f"Invalid username: '{username}'. Must be 2-50 alphanumeric characters, dots, hyphens, underscores."
@@ -3005,6 +3009,8 @@ async def track_user(username: str) -> None:
     New users are assigned the DEFAULT_USER_ROLE from settings.
     """
     if username.lower() == "admin":
+        return
+    if username.strip().lower() in _SYSTEM_TAGS:
         return
     # Skip invalid usernames (e.g. from malformed cookies)
     if not re.match(r"^[a-zA-Z0-9][a-zA-Z0-9._-]{1,49}$", username):
