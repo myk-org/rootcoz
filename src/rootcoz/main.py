@@ -7613,6 +7613,26 @@ async def api_dashboard_filtered(
 # --- Reports endpoints ---
 
 
+def _parse_csv_list(value: str, *, max_length: int = 2000) -> list[str] | None:
+    """Parse comma-separated string into deduplicated list, or None if empty."""
+    if not value:
+        return None
+    if len(value) > max_length:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Filter value too long ({len(value)} chars, max {max_length})",
+        )
+    items = list(dict.fromkeys(v.strip() for v in value.split(",") if v.strip()))
+    return items if items else None
+
+
+def _parse_report_metadata(
+    team: str, tier: str, version: str
+) -> tuple[list[str] | None, list[str] | None, list[str] | None]:
+    """Parse CSV metadata filters for report endpoints."""
+    return _parse_csv_list(team), _parse_csv_list(tier), _parse_csv_list(version)
+
+
 @app.get("/api/reports/totals")
 async def reports_totals(
     request: Request,
@@ -7623,33 +7643,36 @@ async def reports_totals(
     date_to: str = Query(default="", alias="to"),
     status: str = Query(default=""),
     tags: str = Query(default=""),
+    exclude_tags: str = Query(default=""),
     limit: int = Query(default=0, ge=0, le=1000),
     offset: int = Query(default=0, ge=0),
 ) -> dict:
     """Aggregate totals: total jobs, failures, reviewed, with per-job detail list. Admin only."""
     _require_admin(request)
-    tag_list = [t.strip() for t in tags.split(",") if t.strip()] if tags else None
-    status_list = (
-        [s.strip() for s in status.split(",") if s.strip()] if status else None
-    )
+    team_list, tier_list, version_list = _parse_report_metadata(team, tier, version)
+    tag_list = _parse_csv_list(tags)
+    exclude_tag_list = _parse_csv_list(exclude_tags)
+    status_list = _parse_csv_list(status)
     logger.debug(
-        "GET /api/reports/totals: team=%r, tier=%r, version=%r, from=%r, to=%r, status=%r, tags=%r",
-        team,
-        tier,
-        version,
+        "GET /api/reports/totals: team=%r, tier=%r, version=%r, from=%r, to=%r, status=%r, tags=%r, exclude_tags=%r",
+        team_list,
+        tier_list,
+        version_list,
         date_from,
         date_to,
         status_list,
         tag_list,
+        exclude_tag_list,
     )
     return await storage.get_report_totals(
-        team=team,
-        tier=tier,
-        version=version,
+        team=team_list,
+        tier=tier_list,
+        version=version_list,
         date_from=date_from,
         date_to=date_to,
         status=status_list,
         tags=tag_list,
+        exclude_tags=exclude_tag_list,
         limit=limit,
         offset=offset,
     )
@@ -7665,33 +7688,36 @@ async def reports_classification_overrides(
     date_to: str = Query(default="", alias="to"),
     status: str = Query(default=""),
     tags: str = Query(default=""),
+    exclude_tags: str = Query(default=""),
     limit: int = Query(default=0, ge=0, le=1000),
     offset: int = Query(default=0, ge=0),
 ) -> dict:
     """Classification overrides grouped by from→to transition. Admin only."""
     _require_admin(request)
-    tag_list = [t.strip() for t in tags.split(",") if t.strip()] if tags else None
-    status_list = (
-        [s.strip() for s in status.split(",") if s.strip()] if status else None
-    )
+    team_list, tier_list, version_list = _parse_report_metadata(team, tier, version)
+    tag_list = _parse_csv_list(tags)
+    exclude_tag_list = _parse_csv_list(exclude_tags)
+    status_list = _parse_csv_list(status)
     logger.debug(
-        "GET /api/reports/classification-overrides: team=%r, tier=%r, version=%r, from=%r, to=%r, status=%r, tags=%r",
-        team,
-        tier,
-        version,
+        "GET /api/reports/classification-overrides: team=%r, tier=%r, version=%r, from=%r, to=%r, status=%r, tags=%r, exclude_tags=%r",
+        team_list,
+        tier_list,
+        version_list,
         date_from,
         date_to,
         status_list,
         tag_list,
+        exclude_tag_list,
     )
     return await storage.get_report_classification_overrides(
-        team=team,
-        tier=tier,
-        version=version,
+        team=team_list,
+        tier=tier_list,
+        version=version_list,
         date_from=date_from,
         date_to=date_to,
         status=status_list,
         tags=tag_list,
+        exclude_tags=exclude_tag_list,
         limit=limit,
         offset=offset,
     )
@@ -7707,33 +7733,36 @@ async def reports_issues_created(
     date_to: str = Query(default="", alias="to"),
     status: str = Query(default=""),
     tags: str = Query(default=""),
+    exclude_tags: str = Query(default=""),
     limit: int = Query(default=0, ge=0, le=1000),
     offset: int = Query(default=0, ge=0),
 ) -> dict:
     """GitHub/Jira issues created from analysis results. Admin only."""
     _require_admin(request)
-    tag_list = [t.strip() for t in tags.split(",") if t.strip()] if tags else None
-    status_list = (
-        [s.strip() for s in status.split(",") if s.strip()] if status else None
-    )
+    team_list, tier_list, version_list = _parse_report_metadata(team, tier, version)
+    tag_list = _parse_csv_list(tags)
+    exclude_tag_list = _parse_csv_list(exclude_tags)
+    status_list = _parse_csv_list(status)
     logger.debug(
-        "GET /api/reports/issues-created: team=%r, tier=%r, version=%r, from=%r, to=%r, status=%r, tags=%r",
-        team,
-        tier,
-        version,
+        "GET /api/reports/issues-created: team=%r, tier=%r, version=%r, from=%r, to=%r, status=%r, tags=%r, exclude_tags=%r",
+        team_list,
+        tier_list,
+        version_list,
         date_from,
         date_to,
         status_list,
         tag_list,
+        exclude_tag_list,
     )
     return await storage.get_report_issues_created(
-        team=team,
-        tier=tier,
-        version=version,
+        team=team_list,
+        tier=tier_list,
+        version=version_list,
         date_from=date_from,
         date_to=date_to,
         status=status_list,
         tags=tag_list,
+        exclude_tags=exclude_tag_list,
         limit=limit,
         offset=offset,
     )

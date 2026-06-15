@@ -767,6 +767,78 @@ async def init_db() -> None:
     #  3. The expected data volume (hundreds to low-thousands of results) completes
     #     in under a second on typical hardware.
     await backfill_failure_history()
+    await _migrate_restore_ai_classifications()
+
+
+async def _migrate_restore_ai_classifications() -> None:
+    """One-time migration: restore original AI classifications in failure_history.
+
+    Historical mirroring code overwrote failure_history.classification with
+    user overrides.  This migration detects affected rows (where
+    fh.classification matches a user override in test_classifications but
+    differs from the original AI value in result_json) and re-populates
+    from result_json to restore the original AI values.
+
+    Tracked via ``_migrations_applied`` table to ensure it runs only once.
+    """
+    migration_key = "restore_ai_classifications_v1"
+    async with _connect_db() as db:
+        await db.execute(
+            "CREATE TABLE IF NOT EXISTS _migrations_applied "
+            "(key TEXT PRIMARY KEY, applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)"
+        )
+        cursor = await db.execute(
+            "SELECT 1 FROM _migrations_applied WHERE key = ?", (migration_key,)
+        )
+        if await cursor.fetchone():
+            return  # Already applied
+
+        cursor = await db.execute(
+            "SELECT COUNT(*) FROM failure_history fh "
+            "JOIN test_classifications tc "
+            "  ON tc.job_id = fh.job_id AND tc.test_name = fh.test_name "
+            "  AND (tc.child_build_number = 0 OR fh.child_build_number = tc.child_build_number) "
+            "WHERE fh.classification = tc.classification AND tc.created_by != ''"
+        )
+        needs_restore = (await cursor.fetchone())[0] > 0
+
+        if not needs_restore:
+            await db.execute(
+                "INSERT OR IGNORE INTO _migrations_applied (key) VALUES (?)",
+                (migration_key,),
+            )
+            await db.commit()
+            return
+
+    logger.info(
+        "Migration: restoring original AI classifications in failure_history..."
+    )
+    async with _connect_db() as db:
+        cursor = await db.execute(
+            "SELECT job_id, result_json, created_at FROM results "
+            "WHERE status = 'completed' AND result_json IS NOT NULL"
+        )
+        rows = await cursor.fetchall()
+
+    restored = 0
+    for row in rows:
+        result_data = parse_result_json(row["result_json"], job_id=row["job_id"])
+        if result_data:
+            await populate_failure_history(
+                row["job_id"], result_data, analyzed_at=row["created_at"]
+            )
+            restored += 1
+
+    if restored > 0:
+        async with _connect_db() as db:
+            await db.execute(
+                "INSERT OR IGNORE INTO _migrations_applied (key) VALUES (?)",
+                (migration_key,),
+            )
+            await db.commit()
+        logger.info("Migration: restored AI classifications for %d jobs", restored)
+    else:
+        logger.warning("Migration: no jobs could be restored (all parse failures)")
 
 
 def _validate_child_identifier_pairing(
@@ -780,9 +852,7 @@ def _validate_child_identifier_pairing(
     Valid combinations (structural):
     - Both empty  (``""``, ``0``) -- top-level (no child context).
     - Name set, build ``0``       -- accepted; callers decide the semantics
-      (e.g. ``_mirror_classification_to_failure_history`` treats this as a wildcard
-      targeting all builds of that child job, while ``add_comment`` and
-      ``set_reviewed`` store it literally).
+      (e.g. ``add_comment`` and ``set_reviewed`` store it literally).
     - Both set    (name, N>0)     -- specific child build.
 
     Invalid:
@@ -1698,6 +1768,27 @@ async def backfill_failure_history() -> None:
     logger.info(f"Backfill complete: processed {backfilled}/{len(rows)} results")
 
 
+# SQL subquery for resolving effective classification.
+# LEFT JOINs with the latest visible test_classification override per
+# (job_id, test_name, child_build_number). Use COALESCE(tc_latest.classification,
+# fh.classification) to get the effective classification.
+_TC_LATEST_JOIN = """
+    LEFT JOIN (
+        SELECT job_id, test_name, job_name, child_build_number, classification,
+               ROW_NUMBER() OVER (
+                   PARTITION BY job_id, test_name, job_name, child_build_number
+                   ORDER BY created_at DESC, id DESC
+               ) AS rn
+        FROM test_classifications
+        WHERE visible = 1
+    ) tc_latest ON tc_latest.job_id = fh.job_id
+        AND tc_latest.test_name = fh.test_name
+        AND tc_latest.job_name = fh.child_job_name
+        AND tc_latest.child_build_number = fh.child_build_number
+        AND tc_latest.rn = 1
+"""
+
+
 async def _get_failure_stats(
     db: aiosqlite.Connection,
     job_filter: str,
@@ -1716,7 +1807,7 @@ async def _get_failure_stats(
     # child jobs within the same build, and counting rows would inflate
     # the failure count relative to total_runs (which counts builds).
     cursor = await db.execute(
-        f"SELECT COUNT(DISTINCT job_id) FROM failure_history WHERE test_name = ?{job_filter}",
+        f"SELECT COUNT(DISTINCT fh.job_id) FROM failure_history fh WHERE fh.test_name = ?{job_filter}",
         params,
     )
     failures = (await cursor.fetchone())[0]
@@ -1726,18 +1817,20 @@ async def _get_failure_stats(
 
     # First and last seen
     cursor = await db.execute(
-        f"SELECT MIN(analyzed_at), MAX(analyzed_at) FROM failure_history WHERE test_name = ?{job_filter}",
+        f"SELECT MIN(fh.analyzed_at), MAX(fh.analyzed_at) FROM failure_history fh WHERE fh.test_name = ?{job_filter}",
         params,
     )
     row = await cursor.fetchone()
     first_seen = row[0]
     last_seen = row[1]
 
-    # Last classification (most recent failure)
+    # Last effective classification (most recent failure, with user override)
     cursor = await db.execute(
-        f"SELECT classification FROM failure_history"
-        f" WHERE test_name = ?{job_filter}"
-        f" ORDER BY analyzed_at DESC, id DESC LIMIT 1",
+        f"SELECT COALESCE(tc_latest.classification, fh.classification)"
+        f" FROM failure_history fh"
+        f" {_TC_LATEST_JOIN}"
+        f" WHERE fh.test_name = ?{job_filter}"
+        f" ORDER BY fh.analyzed_at DESC, fh.id DESC LIMIT 1",
         params,
     )
     last_classification = (await cursor.fetchone())[0] or ""
@@ -1750,7 +1843,10 @@ async def _get_classification_breakdown(
     job_filter: str,
     params: list,
 ) -> dict[str, int]:
-    """Return a dict mapping classification labels to their counts.
+    """Return a dict mapping effective classification labels to their counts.
+
+    Uses the latest user override from test_classifications if available,
+    otherwise falls back to the AI classification in failure_history.
 
     Args:
         db: Open aiosqlite connection with row_factory set.
@@ -1759,7 +1855,11 @@ async def _get_classification_breakdown(
                 (first element is always test_name).
     """
     cursor = await db.execute(
-        f"SELECT classification, COUNT(*) FROM failure_history WHERE test_name = ?{job_filter} GROUP BY classification",
+        f"SELECT COALESCE(tc_latest.classification, fh.classification) AS eff_class, COUNT(*)"
+        f" FROM failure_history fh"
+        f" {_TC_LATEST_JOIN}"
+        f" WHERE fh.test_name = ?{job_filter}"
+        f" GROUP BY eff_class",
         params,
     )
     classifications: dict[str, int] = {}
@@ -1824,14 +1924,14 @@ async def get_test_history(
         f"get_test_history: test_name={test_name}, limit={limit}, job_name={job_name}"
     )
     async with _connect_db() as db:
-        # Build optional job_name filter
+        # Build optional job_name filter (fh-prefixed for JOINed queries)
         job_filter = ""
         params: list = [test_name]
         if job_name:
-            job_filter = " AND job_name = ?"
+            job_filter = " AND fh.job_name = ?"
             params.append(job_name)
         if exclude_job_id:
-            job_filter += " AND job_id != ?"
+            job_filter += " AND fh.job_id != ?"
             params.append(exclude_job_id)
 
         failures, first_seen, last_seen, last_classification = await _get_failure_stats(
@@ -1859,10 +1959,14 @@ async def get_test_history(
 
         # Recent runs (failures only, since we only track failures)
         cursor = await db.execute(
-            f"""SELECT job_id, job_name, build_number, error_message, error_signature,
-                       classification, child_job_name, child_build_number, analyzed_at
-                FROM failure_history WHERE test_name = ?{job_filter}
-                ORDER BY analyzed_at DESC, id DESC LIMIT ?""",
+            f"""SELECT fh.job_id, fh.job_name, fh.build_number, fh.error_message,
+                       fh.error_signature,
+                       COALESCE(tc_latest.classification, fh.classification) AS classification,
+                       fh.child_job_name, fh.child_build_number, fh.analyzed_at
+                FROM failure_history fh
+                {_TC_LATEST_JOIN}
+                WHERE fh.test_name = ?{job_filter}
+                ORDER BY fh.analyzed_at DESC, fh.id DESC LIMIT ?""",
             [*params, limit],
         )
         recent_runs = [dict(row) for row in await cursor.fetchall()]
@@ -1874,7 +1978,7 @@ async def get_test_history(
         # streak (an intervening pass would not be detected).
         # Adding pass tracking is deferred to a future enhancement.
         cursor = await db.execute(
-            f"SELECT COUNT(*) FROM failure_history WHERE test_name = ?{job_filter}",
+            f"SELECT COUNT(*) FROM failure_history fh WHERE fh.test_name = ?{job_filter}",
             params,
         )
         consecutive_failures = (await cursor.fetchone())[0]
@@ -2273,36 +2377,6 @@ async def get_parent_job_name_for_test(test_name: str, job_id: str = "") -> str:
         return row[0] if row else ""
 
 
-async def _mirror_classification_to_failure_history(
-    db: aiosqlite.Connection,
-    *,
-    classification: str,
-    test_name: str,
-    job_name: str,
-    child_build_number: int,
-    job_id: str,
-) -> None:
-    """Mirror a classification into the failure_history table.
-
-    When child_build_number is 0 and job_name is set, it acts as a wildcard:
-    all builds (child_build_number > 0) for that job_name are updated.
-    Otherwise, only the exact (test_name, job_name, child_build_number, job_id)
-    row is updated.
-    """
-    if child_build_number == 0 and job_name:
-        await db.execute(
-            "UPDATE failure_history SET classification = ? "
-            "WHERE test_name = ? AND child_job_name = ? AND child_build_number > 0 AND job_id = ?",
-            [classification, test_name, job_name, job_id],
-        )
-    else:
-        await db.execute(
-            "UPDATE failure_history SET classification = ? "
-            "WHERE test_name = ? AND child_job_name = ? AND child_build_number = ? AND job_id = ?",
-            [classification, test_name, job_name, child_build_number, job_id],
-        )
-
-
 async def set_test_classification(
     test_name: str,
     classification: str,
@@ -2359,22 +2433,6 @@ async def set_test_classification(
                 visible,
             ),
         )
-
-        # Mirror classification into failure_history so that filters on
-        # failure_history.classification (used by get_all_failures, get_test_history)
-        # reflect manual/AI reclassifications from test_classifications.
-        # Only mirror when visible=1 to prevent hidden AI classifications from
-        # leaking into failure_history before analysis completes.
-        # When visible=0, make_classifications_visible() handles the mirror.
-        if visible:
-            await _mirror_classification_to_failure_history(
-                db,
-                classification=classification,
-                test_name=test_name,
-                job_name=job_name,
-                child_build_number=child_build_number,
-                job_id=job_id,
-            )
 
         await db.commit()
         return cursor.lastrowid
@@ -2450,51 +2508,18 @@ async def get_test_classifications(
 async def make_classifications_visible(job_id: str) -> None:
     """Make all classifications for a job visible after analysis completes.
 
-    Also mirrors classifications into failure_history. The mirror is deferred
-    from set_test_classification (which creates rows with visible=0 during
-    analysis) to here so that failure_history doesn't leak hidden AI labels.
+    failure_history.classification is NOT updated — it always retains the
+    original AI classification.  The effective classification is resolved
+    at query time via test_classifications.
     """
     async with _connect_db() as db:
-        # Fetch hidden classifications before flipping so we can mirror them.
-        # ORDER BY created_at DESC ensures latest-wins when deduplicating
-        # by (test_name, job_name, child_build_number) below.
-        cursor = await db.execute(
-            "SELECT tc.id, test_name, job_name, child_build_number, classification "
-            "FROM test_classifications tc WHERE job_id = ? AND visible = 0 "
-            "ORDER BY tc.created_at DESC, tc.id DESC",
-            (job_id,),
-        )
-        all_rows = await cursor.fetchall()
-
-        # Deduplicate: keep only the latest classification per key
-        # (latest-wins, since we ordered by created_at DESC).
-        seen: set[tuple[str, str, int]] = set()
-        rows = []
-        for row in all_rows:
-            key = (row["test_name"], row["job_name"], row["child_build_number"])
-            if key not in seen:
-                seen.add(key)
-                rows.append(row)
-
-        await db.execute(
+        result = await db.execute(
             "UPDATE test_classifications SET visible = 1 WHERE job_id = ? AND visible = 0",
             (job_id,),
         )
-
-        # Mirror each newly-visible classification into failure_history
-        for row in rows:
-            await _mirror_classification_to_failure_history(
-                db,
-                classification=row["classification"],
-                test_name=row["test_name"],
-                job_name=row["job_name"],
-                child_build_number=row["child_build_number"],
-                job_id=job_id,
-            )
-
         await db.commit()
     logger.debug(
-        f"make_classifications_visible: job_id={job_id}, mirrored={len(rows)} classifications"
+        f"make_classifications_visible: job_id={job_id}, revealed={result.rowcount} classifications"
     )
 
 
@@ -2535,33 +2560,37 @@ async def get_all_failures(
 
     if search:
         conditions.append(
-            "(test_name LIKE ? OR error_message LIKE ? OR job_name LIKE ?)"
+            "(fh.test_name LIKE ? OR fh.error_message LIKE ? OR fh.job_name LIKE ?)"
         )
         params.extend([f"%{search}%", f"%{search}%", f"%{search}%"])
     if job_name:
-        conditions.append("job_name = ?")
+        conditions.append("fh.job_name = ?")
         params.append(job_name)
     if classification:
-        conditions.append("classification = ?")
+        conditions.append("COALESCE(tc_latest.classification, fh.classification) = ?")
         params.append(classification)
 
-    _build_date_filter("analyzed_at", date_from, date_to, conditions, params)
+    _build_date_filter("fh.analyzed_at", date_from, date_to, conditions, params)
 
     where = " AND ".join(conditions) if conditions else "1=1"
 
     async with _connect_db() as db:
         # Get total count
         cursor = await db.execute(
-            f"SELECT COUNT(*) FROM failure_history WHERE {where}",
+            f"SELECT COUNT(*) FROM failure_history fh {_TC_LATEST_JOIN} WHERE {where}",
             params,
         )
         total = (await cursor.fetchone())[0]
 
         # Get paginated results
         cursor = await db.execute(
-            f"SELECT id, job_id, job_name, build_number, test_name, error_message, "
-            f"error_signature, classification, child_job_name, child_build_number, analyzed_at "
-            f"FROM failure_history WHERE {where} ORDER BY analyzed_at DESC, id DESC LIMIT ? OFFSET ?",
+            f"SELECT fh.id, fh.job_id, fh.job_name, fh.build_number, fh.test_name, "
+            f"fh.error_message, fh.error_signature, "
+            f"COALESCE(tc_latest.classification, fh.classification) AS classification, "
+            f"fh.child_job_name, fh.child_build_number, fh.analyzed_at "
+            f"FROM failure_history fh"
+            f" {_TC_LATEST_JOIN}"
+            f" WHERE {where} ORDER BY fh.analyzed_at DESC, fh.id DESC LIMIT ? OFFSET ?",
             [*params, limit, offset],
         )
         rows = await cursor.fetchall()
@@ -4556,9 +4585,9 @@ def _build_date_filter(
 
 
 def _build_metadata_join(
-    team: str,
-    tier: str,
-    version: str,
+    team: list[str] | None,
+    tier: list[str] | None,
+    version: list[str] | None,
     job_name_col: str,
     conditions: list[str],
     params: list,
@@ -4573,49 +4602,75 @@ def _build_metadata_join(
         return ""
     join_sql = f" JOIN job_metadata jm ON jm.job_name = {job_name_col}"
     if team:
-        conditions.append("jm.team = ?")
-        params.append(team)
+        placeholders = ", ".join("?" for _ in team)
+        conditions.append(f"jm.team IN ({placeholders})")
+        params.extend(team)
     if tier:
-        conditions.append("jm.tier = ?")
-        params.append(tier)
+        placeholders = ", ".join("?" for _ in tier)
+        conditions.append(f"jm.tier IN ({placeholders})")
+        params.extend(tier)
     if version:
-        conditions.append("jm.version = ?")
-        params.append(version)
+        placeholders = ", ".join("?" for _ in version)
+        conditions.append(f"jm.version IN ({placeholders})")
+        params.extend(version)
     return join_sql
 
 
 def _build_tags_filter(
     tags: list[str] | None,
-    job_id_col: str,
+    job_name_col: str,
     conditions: list[str],
     params: list,
 ) -> None:
     """Append tag-filtering conditions in-place.
 
-    Tags are stored in ``result_json`` → ``$.tags`` as a JSON array.
+    Tags are stored in ``job_metadata.labels`` as a JSON array.
     Uses ``json_each`` to match any of the requested tags (OR semantics).
     """
     if not tags:
         return
     placeholders = ", ".join("?" for _ in tags)
     conditions.append(
-        f"""{job_id_col} IN (
-            SELECT r_tags.job_id FROM results r_tags, json_each(r_tags.result_json, '$.tags') jt
+        f"""{job_name_col} IN (
+            SELECT jm_tags.job_name FROM job_metadata jm_tags, json_each(jm_tags.labels) jt
             WHERE jt.value IN ({placeholders})
         )"""
     )
     params.extend(tags)
 
 
+def _build_exclude_tags_filter(
+    exclude_tags: list[str] | None,
+    job_name_col: str,
+    conditions: list[str],
+    params: list,
+) -> None:
+    """Append tag-exclusion conditions in-place.
+
+    Excludes jobs that have ANY of the specified tags (NOT IN semantics).
+    """
+    if not exclude_tags:
+        return
+    placeholders = ", ".join("?" for _ in exclude_tags)
+    conditions.append(
+        f"""{job_name_col} NOT IN (
+            SELECT jm_tags.job_name FROM job_metadata jm_tags, json_each(jm_tags.labels) jt
+            WHERE jt.value IN ({placeholders})
+        )"""
+    )
+    params.extend(exclude_tags)
+
+
 async def get_report_totals(
     *,
-    team: str = "",
-    tier: str = "",
-    version: str = "",
+    team: list[str] | None = None,
+    tier: list[str] | None = None,
+    version: list[str] | None = None,
     date_from: str = "",
     date_to: str = "",
     status: list[str] | None = None,
     tags: list[str] | None = None,
+    exclude_tags: list[str] | None = None,
     limit: int = 0,
     offset: int = 0,
 ) -> dict:
@@ -4631,7 +4686,8 @@ async def get_report_totals(
     meta_join = _build_metadata_join(
         team, tier, version, "r_data.job_name", conditions, params
     )
-    _build_tags_filter(tags, "r.job_id", conditions, params)
+    _build_tags_filter(tags, "r_data.job_name", conditions, params)
+    _build_exclude_tags_filter(exclude_tags, "r_data.job_name", conditions, params)
 
     effective_status = status if status else ["completed"]
     status_placeholders = ", ".join("?" for _ in effective_status)
@@ -4699,15 +4755,63 @@ async def get_report_totals(
     }
 
 
-async def get_report_classification_overrides(
+async def _count_reviewed_tests(
+    db: aiosqlite.Connection,
     *,
-    team: str = "",
-    tier: str = "",
-    version: str = "",
+    team: list[str] | None = None,
+    tier: list[str] | None = None,
+    version: list[str] | None = None,
     date_from: str = "",
     date_to: str = "",
     status: list[str] | None = None,
     tags: list[str] | None = None,
+    exclude_tags: list[str] | None = None,
+) -> int:
+    """Count reviewed tests with the given filters."""
+    conditions: list[str] = []
+    params: list = []
+    _build_date_filter("fr.updated_at", date_from, date_to, conditions, params)
+    needs_rdata = bool(team or tier or version or tags or exclude_tags)
+    rdata_join = (
+        f"JOIN ({_RESULT_DATA_SUBQUERY}) fr_rdata ON fr_rdata.job_id = fr.job_id"
+        if needs_rdata
+        else ""
+    )
+    meta_join = _build_metadata_join(
+        team, tier, version, "fr_rdata.job_name", conditions, params
+    )
+    _build_tags_filter(tags, "fr_rdata.job_name", conditions, params)
+    _build_exclude_tags_filter(exclude_tags, "fr_rdata.job_name", conditions, params)
+    status_join = ""
+    if status:
+        status_join = " JOIN results r_rstatus ON r_rstatus.job_id = fr.job_id"
+        placeholders = ", ".join("?" for _ in status)
+        conditions.append(f"r_rstatus.status IN ({placeholders})")
+        params.extend(status)
+    where = (" AND " + " AND ".join(conditions)) if conditions else ""
+    cursor = await db.execute(
+        f"""
+        SELECT COUNT(*) AS cnt FROM failure_reviews fr
+        {rdata_join}
+        {meta_join}
+        {status_join}
+        WHERE fr.reviewed = 1{where}
+        """,
+        params,
+    )
+    return (await cursor.fetchone())["cnt"]
+
+
+async def get_report_classification_overrides(
+    *,
+    team: list[str] | None = None,
+    tier: list[str] | None = None,
+    version: list[str] | None = None,
+    date_from: str = "",
+    date_to: str = "",
+    status: list[str] | None = None,
+    tags: list[str] | None = None,
+    exclude_tags: list[str] | None = None,
     limit: int = 0,
     offset: int = 0,
 ) -> dict:
@@ -4723,7 +4827,8 @@ async def get_report_classification_overrides(
     meta_join = _build_metadata_join(
         team, tier, version, "tc.job_name", conditions, params
     )
-    _build_tags_filter(tags, "tc.job_id", conditions, params)
+    _build_tags_filter(tags, "tc.job_name", conditions, params)
+    _build_exclude_tags_filter(exclude_tags, "tc.job_name", conditions, params)
 
     status_join = ""
     if status:
@@ -4756,6 +4861,7 @@ async def get_report_classification_overrides(
                 AND fh.child_build_number = tc.child_build_number
             WHERE {where}
               AND tc.visible = 1
+              AND fh.classification != tc.classification
               AND EXISTS (
                   SELECT 1 FROM failure_reviews fr
                   WHERE fr.job_id = tc.job_id AND fr.test_name = tc.test_name
@@ -4765,6 +4871,29 @@ async def get_report_classification_overrides(
         """
         cursor = await db.execute(sql, params)
         rows = await cursor.fetchall()
+
+        # Keep only the latest override per (job_id, test_name)
+        seen_keys: set[tuple[str, str]] = set()
+        latest_rows = []
+        for row in rows:
+            dedup_key = (row["job_id"], row["test_name"])
+            if dedup_key not in seen_keys:
+                seen_keys.add(dedup_key)
+                latest_rows.append(row)
+        rows = latest_rows
+
+        # Count total reviewed tests (same filters minus override-specific ones)
+        total_reviewed = await _count_reviewed_tests(
+            db,
+            team=team,
+            tier=tier,
+            version=version,
+            date_from=date_from,
+            date_to=date_to,
+            status=status,
+            tags=tags,
+            exclude_tags=exclude_tags,
+        )
 
     # Group by from->to
     groups: dict[str, dict] = {}
@@ -4792,8 +4921,17 @@ async def get_report_classification_overrides(
     # Apply pagination to the detail list (groups/total are always full)
     paginated = details[offset : offset + limit] if limit > 0 else details
 
+    unique_overridden = len({(d["job_id"], d["test_name"]) for d in details})
+    ai_correct = max(total_reviewed - unique_overridden, 0)
+    ai_accuracy_pct = (
+        round((ai_correct / total_reviewed) * 100, 1) if total_reviewed > 0 else 0
+    )
+
     return {
         "total": len(details),
+        "total_reviewed": total_reviewed,
+        "ai_correct": ai_correct,
+        "ai_accuracy_pct": ai_accuracy_pct,
         "groups": list(groups.values()),
         "details": paginated,
     }
@@ -4801,13 +4939,14 @@ async def get_report_classification_overrides(
 
 async def get_report_issues_created(
     *,
-    team: str = "",
-    tier: str = "",
-    version: str = "",
+    team: list[str] | None = None,
+    tier: list[str] | None = None,
+    version: list[str] | None = None,
     date_from: str = "",
     date_to: str = "",
     status: list[str] | None = None,
     tags: list[str] | None = None,
+    exclude_tags: list[str] | None = None,
     limit: int = 0,
     offset: int = 0,
 ) -> dict:
@@ -4827,7 +4966,8 @@ async def get_report_issues_created(
     meta_join = _build_metadata_join(
         team, tier, version, "r_data.job_name", conditions, params
     )
-    _build_tags_filter(tags, "c.job_id", conditions, params)
+    _build_tags_filter(tags, "r_data.job_name", conditions, params)
+    _build_exclude_tags_filter(exclude_tags, "r_data.job_name", conditions, params)
 
     status_join = ""
     if status:
@@ -4836,8 +4976,10 @@ async def get_report_issues_created(
         conditions.append(f"r_status.status IN ({placeholders})")
         params.extend(status)
 
-    # Use JOIN when metadata filters narrow results, LEFT JOIN otherwise
-    join_type = "JOIN" if (team or tier or version) else "LEFT JOIN"
+    # Use JOIN when metadata/tag filters narrow results, LEFT JOIN otherwise
+    join_type = (
+        "JOIN" if (team or tier or version or tags or exclude_tags) else "LEFT JOIN"
+    )
     where = " AND ".join(conditions)
 
     async with _connect_db() as db:

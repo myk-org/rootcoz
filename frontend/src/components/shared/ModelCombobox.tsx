@@ -119,7 +119,7 @@ export function ModelCombobox({
         <input
           ref={inputRef}
           type="text"
-          className="flex h-9 w-full rounded-full border border-white/10 bg-white/5 px-4 pr-8 py-1 text-sm text-text-primary transition-colors placeholder:text-text-tertiary hover:bg-white/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-border-accent focus-visible:ring-offset-1 disabled:cursor-not-allowed disabled:opacity-50"
+          className="flex h-9 w-full rounded-full border border-border-default bg-surface-elevated px-4 pr-8 py-1 text-sm text-text-primary transition-colors placeholder:text-text-tertiary hover:bg-surface-hover focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-border-accent focus-visible:ring-offset-1 disabled:cursor-not-allowed disabled:opacity-50"
           placeholder={placeholder}
           value={value}
           onChange={(e) => {
@@ -169,7 +169,7 @@ export function ModelCombobox({
           ref={listRef}
           role="listbox"
           id={listboxId}
-          className="absolute z-50 mt-1 max-h-56 w-max overflow-auto rounded-xl border border-white/10 bg-surface-card shadow-lg backdrop-blur-sm animate-fade-in"
+          className="absolute z-50 mt-1 max-h-56 w-max overflow-auto rounded-xl border border-border-default bg-surface-card shadow-lg backdrop-blur-sm animate-fade-in"
         >
           {filtered.map((model, i) => (
             <li

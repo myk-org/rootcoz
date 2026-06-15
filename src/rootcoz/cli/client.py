@@ -1115,6 +1115,7 @@ class RootCozClient:
         date_to: str = "",
         status: str = "",
         tags: list[str] | None = None,
+        exclude_tags: list[str] | None = None,
         limit: int = 0,
         offset: int = 0,
     ) -> dict:
@@ -1134,6 +1135,8 @@ class RootCozClient:
             params["status"] = status
         if tags:
             params["tags"] = ",".join(tags)
+        if exclude_tags:
+            params["exclude_tags"] = ",".join(exclude_tags)
         if limit > 0:
             params["limit"] = limit
         if offset > 0:
@@ -1149,12 +1152,22 @@ class RootCozClient:
         date_to: str = "",
         status: str = "",
         tags: list[str] | None = None,
+        exclude_tags: list[str] | None = None,
         limit: int = 0,
         offset: int = 0,
     ) -> dict:
         """GET /api/reports/totals"""
         params = self._build_report_params(
-            team, tier, version, date_from, date_to, status, tags, limit, offset
+            team,
+            tier,
+            version,
+            date_from,
+            date_to,
+            status,
+            tags,
+            exclude_tags,
+            limit,
+            offset,
         )
         return self._request("GET", "/api/reports/totals", params=params)
 
@@ -1167,12 +1180,22 @@ class RootCozClient:
         date_to: str = "",
         status: str = "",
         tags: list[str] | None = None,
+        exclude_tags: list[str] | None = None,
         limit: int = 0,
         offset: int = 0,
     ) -> dict:
         """GET /api/reports/classification-overrides"""
         params = self._build_report_params(
-            team, tier, version, date_from, date_to, status, tags, limit, offset
+            team,
+            tier,
+            version,
+            date_from,
+            date_to,
+            status,
+            tags,
+            exclude_tags,
+            limit,
+            offset,
         )
         return self._request(
             "GET", "/api/reports/classification-overrides", params=params
@@ -1187,11 +1210,21 @@ class RootCozClient:
         date_to: str = "",
         status: str = "",
         tags: list[str] | None = None,
+        exclude_tags: list[str] | None = None,
         limit: int = 0,
         offset: int = 0,
     ) -> dict:
         """GET /api/reports/issues-created"""
         params = self._build_report_params(
-            team, tier, version, date_from, date_to, status, tags, limit, offset
+            team,
+            tier,
+            version,
+            date_from,
+            date_to,
+            status,
+            tags,
+            exclude_tags,
+            limit,
+            offset,
         )
         return self._request("GET", "/api/reports/issues-created", params=params)

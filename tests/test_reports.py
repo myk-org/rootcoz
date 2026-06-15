@@ -85,6 +85,9 @@ async def populated_db(setup_test_db: Path):
             username="creator",
         )
 
+        # Insert job metadata with labels for tag filtering
+        await storage.set_job_metadata("tagged-job", labels=["nightly", "smoke"])
+
         # Insert a failed result with tags
         failed_result_data = {
             "job_name": "tagged-job",
@@ -200,8 +203,67 @@ class TestReportOverrides:
             assert len(result["groups"]) >= 1
             detail = result["details"][0]
             assert detail["test_name"] == "test_foo"
+            assert detail["from_classification"] == "CODE ISSUE"
             assert detail["to_classification"] == "PRODUCT BUG"
             assert detail["overridden_by"] == "reviewer"
+
+    @pytest.mark.asyncio
+    async def test_ai_accuracy(self, populated_db: Path):
+        with patch.object(storage, "DB_PATH", populated_db):
+            result = await storage.get_report_classification_overrides()
+            # 1 reviewed test, 1 override → ai_correct = 0
+            assert "total_reviewed" in result
+            assert result["total_reviewed"] >= 1
+            assert "ai_correct" in result
+            assert "ai_accuracy_pct" in result
+            assert result["ai_accuracy_pct"] >= 0
+            assert result["ai_accuracy_pct"] <= 100
+
+    @pytest.mark.asyncio
+    async def test_same_classification_excluded(self, populated_db: Path):
+        """Overrides where AI classification == user classification are excluded."""
+        with patch.object(storage, "DB_PATH", populated_db):
+            # Add a same→same classification (user confirms AI's choice)
+            async with storage._connect_db() as conn:
+                await conn.execute(
+                    """INSERT INTO test_classifications
+                       (test_name, job_name, classification, created_by, job_id, visible)
+                       VALUES (?, ?, ?, ?, ?, ?)""",
+                    ("test_foo", "test-job", "CODE ISSUE", "confirmer", "job-1", 1),
+                )
+                await conn.commit()
+            result = await storage.get_report_classification_overrides()
+            # Only the real override (CODE ISSUE → PRODUCT BUG) should appear,
+            # not the same→same (CODE ISSUE → CODE ISSUE)
+            for detail in result["details"]:
+                assert detail["from_classification"] != detail["to_classification"], (
+                    f"Same→same override should be excluded: {detail['from_classification']} → {detail['to_classification']}"
+                )
+
+    @pytest.mark.asyncio
+    async def test_multiple_overrides_keeps_latest(self, populated_db: Path):
+        """When multiple overrides exist for the same test, only the latest appears."""
+        with patch.object(storage, "DB_PATH", populated_db):
+            # populated_db already has CODE ISSUE → PRODUCT BUG for test_foo.
+            # Add a second override: PRODUCT BUG → CODE ISSUE (effectively reverting).
+            async with storage._connect_db() as conn:
+                await conn.execute(
+                    """INSERT INTO test_classifications
+                       (test_name, job_name, classification, created_by, job_id, visible, created_at)
+                       VALUES (?, ?, ?, ?, ?, ?, datetime('now', '+1 minute'))""",
+                    ("test_foo", "test-job", "INFRASTRUCTURE", "reviewer2", "job-1", 1),
+                )
+                await conn.commit()
+            result = await storage.get_report_classification_overrides()
+            # Only the latest override (→ INFRASTRUCTURE) should appear for test_foo
+            test_foo_details = [
+                d for d in result["details"] if d["test_name"] == "test_foo"
+            ]
+            assert len(test_foo_details) == 1, (
+                f"Expected 1 override for test_foo, got {len(test_foo_details)}"
+            )
+            assert test_foo_details[0]["to_classification"] == "INFRASTRUCTURE"
+            assert test_foo_details[0]["overridden_by"] == "reviewer2"
 
     @pytest.mark.asyncio
     async def test_date_filter_excludes(self, populated_db: Path):
@@ -325,7 +387,7 @@ class TestDateFilterHelper:
         conditions: list[str] = []
         params: list = []
         result = storage._build_metadata_join(
-            "", "", "", "t.job_name", conditions, params
+            None, None, None, "t.job_name", conditions, params
         )
         assert result == ""
         assert conditions == []
@@ -334,11 +396,23 @@ class TestDateFilterHelper:
         conditions: list[str] = []
         params: list = []
         result = storage._build_metadata_join(
-            "teamA", "1", "", "t.job_name", conditions, params
+            ["teamA"], ["1"], None, "t.job_name", conditions, params
         )
         assert "JOIN" in result
         assert len(conditions) == 2
         assert params == ["teamA", "1"]
+
+    def test_build_metadata_join_multi_value(self):
+        conditions: list[str] = []
+        params: list = []
+        result = storage._build_metadata_join(
+            ["storage", "core"], ["1", "2"], None, "t.job_name", conditions, params
+        )
+        assert "JOIN" in result
+        assert len(conditions) == 2
+        assert "IN" in conditions[0]
+        assert "IN" in conditions[1]
+        assert params == ["storage", "core", "1", "2"]
 
 
 class TestReportPagination:
@@ -400,3 +474,54 @@ class TestHistoryDateFilter:
             # With future date filter — should find nothing
             result = await storage.get_all_failures(date_from="2099-01-01")
             assert result["total"] == 0
+
+
+class TestEffectiveClassification:
+    @pytest.mark.asyncio
+    async def test_get_all_failures_uses_effective_classification(
+        self, setup_test_db: Path
+    ):
+        """Classification filter uses effective (user override), not AI original."""
+        with patch.object(storage, "DB_PATH", setup_test_db):
+            # Insert a failure_history row with AI classification
+            async with storage._connect_db() as conn:
+                await conn.execute(
+                    """INSERT INTO failure_history
+                       (job_id, job_name, build_number, test_name,
+                        error_message, error_signature, classification,
+                        child_job_name, child_build_number)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (
+                        "job-eff",
+                        "test-job",
+                        1,
+                        "test_eff",
+                        "AssertionError",
+                        "sig-eff",
+                        "CODE ISSUE",
+                        "",
+                        0,
+                    ),
+                )
+                # Insert a user override to FLAKY
+                # (job_name='' for top-level, matching fh.child_job_name='')
+                await conn.execute(
+                    """INSERT INTO test_classifications
+                       (test_name, job_name, classification, created_by, job_id,
+                        child_build_number, visible)
+                       VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                    ("test_eff", "", "FLAKY", "user1", "job-eff", 0, 1),
+                )
+                await conn.commit()
+
+            # Filtering by the user override should find the row
+            result = await storage.get_all_failures(classification="FLAKY")
+            assert result["total"] >= 1
+            assert any(f["test_name"] == "test_eff" for f in result["failures"])
+
+            # Filtering by the AI original should NOT find the row
+            result = await storage.get_all_failures(classification="CODE ISSUE")
+            test_eff_rows = [
+                f for f in result["failures"] if f["test_name"] == "test_eff"
+            ]
+            assert len(test_eff_rows) == 0
