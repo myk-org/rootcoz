@@ -169,9 +169,27 @@ JSON_RESPONSE_SCHEMA = (
     "CRITICAL: Your response must be ONLY a valid JSON object. No text before or after. No markdown code blocks. No"
     " explanation.\n"
     "\n"
+    "TWO-AXIS CLASSIFICATION SYSTEM:\n"
+    "Every failure must be classified along TWO independent axes:\n"
+    "\n"
+    'Axis 1 — "classification" (Root Cause — what is broken):\n'
+    '  - "CODE ISSUE" — test code is wrong\n'
+    '  - "PRODUCT BUG" — product under test has a defect\n'
+    '  - "INFRASTRUCTURE" — environment/cluster/resource problem\n'
+    "\n"
+    'Axis 2 — "pattern" (how the failure manifests — set to "NEW" for initial analysis;\n'
+    "  history analysis may refine it later):\n"
+    '  - "NEW" — first occurrence\n'
+    '  - "REGRESSION" — was passing, recently started failing\n'
+    '  - "FLAKY" — sometimes passes, sometimes fails\n'
+    '  - "INTERMITTENT" — fails under specific conditions\n'
+    '  - "KNOWN_BUG" — matches a known reported bug\n'
+    '  - "PERSISTENT" — consistently failing across many runs\n'
+    "\n"
     "If CODE ISSUE:\n"
     "{\n"
     '  "classification": "CODE ISSUE",\n'
+    '  "pattern": "NEW",\n'
     '  "affected_tests": ["test_name_1", "test_name_2"],\n'
     '  "details": "Your detailed analysis of what caused this failure. Use paragraph breaks (double newlines) to'
     " separate sections: root cause identification, evidence from logs/code, and impact assessment. Do NOT write one"
@@ -204,6 +222,7 @@ JSON_RESPONSE_SCHEMA = (
     "If PRODUCT BUG:\n"
     "{\n"
     '  "classification": "PRODUCT BUG",\n'
+    '  "pattern": "NEW",\n'
     '  "affected_tests": ["test_name_1", "test_name_2"],\n'
     '  "details": "Your detailed analysis of what caused this failure. Use paragraph breaks (double newlines) to'
     " separate sections: root cause identification, evidence from logs/code, and impact assessment. Do NOT write one"
@@ -234,6 +253,7 @@ JSON_RESPONSE_SCHEMA = (
     "If INFRASTRUCTURE:\n"
     "{\n"
     '  "classification": "INFRASTRUCTURE",\n'
+    '  "pattern": "NEW",\n'
     '  "affected_tests": ["test_name_1", "test_name_2"],\n'
     '  "details": "Your detailed analysis of the infrastructure/environment issue. Use paragraph breaks (double'
     " newlines) to separate sections: root cause identification, evidence from logs, and impact assessment. Do NOT"
@@ -469,6 +489,10 @@ def recover_from_details(result: AnalysisDetail) -> AnalysisDetail:
 
     classification = class_match.group(1)
 
+    # Extract pattern (second axis)
+    pattern_match = re.search(r'"pattern"\s*:\s*"([^"]+)"', details)
+    pattern = pattern_match.group(1) if pattern_match else ""
+
     # Extract affected_tests
     affected_tests: list[str] = []
     tests_match = re.search(r'"affected_tests"\s*:\s*\[([^\]]*)\]', details)
@@ -553,6 +577,7 @@ def recover_from_details(result: AnalysisDetail) -> AnalysisDetail:
     )
     return AnalysisDetail(
         classification=classification,
+        pattern=pattern,
         affected_tests=affected_tests,
         details=analysis_text,
         artifacts_evidence=(

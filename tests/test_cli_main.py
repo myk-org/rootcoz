@@ -1825,6 +1825,48 @@ class TestOverrideClassificationCommand:
         assert parsed["classification"] == "CODE ISSUE"
 
 
+class TestOverridePatternCommand:
+    def test_override(self, mock_client):
+        mock_client.override_pattern.return_value = {
+            "status": "ok",
+            "pattern": "REGRESSION",
+        }
+        result = runner.invoke(
+            app,
+            [
+                "override-pattern",
+                "job-1",
+                "--test",
+                "tests.TestA.test_one",
+                "--pattern",
+                "REGRESSION",
+            ],
+        )
+        assert result.exit_code == 0
+        assert "REGRESSION" in result.output
+
+    def test_override_json_mode(self, mock_client):
+        mock_client.override_pattern.return_value = {
+            "status": "ok",
+            "pattern": "FLAKY",
+        }
+        result = runner.invoke(
+            app,
+            [
+                "--json",
+                "override-pattern",
+                "job-1",
+                "--test",
+                "tests.TestA.test_one",
+                "--pattern",
+                "FLAKY",
+            ],
+        )
+        assert result.exit_code == 0
+        parsed = json.loads(result.output)
+        assert parsed["pattern"] == "FLAKY"
+
+
 class TestStatusJsonFull:
     def test_status_json_returns_full_response(self, mock_client):
         """status --json should return full API response, not trimmed."""

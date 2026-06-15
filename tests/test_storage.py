@@ -693,9 +693,9 @@ class TestSetTestClassification:
     async def test_invalid_classification_raises_value_error(
         self, setup_test_db: Path
     ) -> None:
-        """Invalid classification raises ValueError."""
+        """Invalid pattern classification raises ValueError."""
         with patch.object(storage, "DB_PATH", setup_test_db):
-            with pytest.raises(ValueError, match="Invalid classification"):
+            with pytest.raises(ValueError, match="Invalid pattern classification"):
                 await storage.set_test_classification(
                     test_name="tests.TestA.test_one",
                     classification="INVALID",
@@ -1010,21 +1010,21 @@ class TestGetHistoryClassification:
             cls = await storage.get_history_classification("job-missing", "test_x")
             assert cls == ""
 
-    async def test_returns_infrastructure_from_test_classifications(
+    async def test_returns_persistent_from_test_classifications(
         self, setup_test_db: Path
     ) -> None:
-        """Returns INFRASTRUCTURE from visible test_classifications entries."""
+        """Returns PERSISTENT from visible test_classifications entries."""
         with patch.object(storage, "DB_PATH", setup_test_db):
             await storage.set_test_classification(
                 test_name="tests.TestA.test_infra",
-                classification="INFRASTRUCTURE",
+                classification="PERSISTENT",
                 job_id="job-infra-1",
                 visible=1,
             )
             cls = await storage.get_history_classification(
                 "job-infra-1", "tests.TestA.test_infra"
             )
-            assert cls == "INFRASTRUCTURE"
+            assert cls == "PERSISTENT"
 
     async def test_returns_flaky_from_test_classifications(
         self, setup_test_db: Path
@@ -1068,20 +1068,21 @@ class TestGetHistoryClassification:
             assert cls == ""
 
     async def test_falls_back_to_failure_history(self, setup_test_db: Path) -> None:
-        """Falls back to failure_history classification when no test_classifications entry."""
+        """Falls back to failure_history pattern when no test_classifications entry."""
         with patch.object(storage, "DB_PATH", setup_test_db):
             async with aiosqlite.connect(setup_test_db) as db:
                 await db.execute(
                     """INSERT INTO failure_history
                        (job_id, job_name, build_number, test_name, classification,
-                        error_message, analyzed_at)
-                       VALUES (?, ?, ?, ?, ?, ?, datetime('now'))""",
+                        pattern, error_message, analyzed_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'))""",
                     (
                         "job-fh",
                         "my-job",
                         1,
                         "tests.TestA.test_fh",
                         "INFRASTRUCTURE",
+                        "PERSISTENT",
                         "err",
                     ),
                 )
@@ -1089,7 +1090,7 @@ class TestGetHistoryClassification:
             cls = await storage.get_history_classification(
                 "job-fh", "tests.TestA.test_fh"
             )
-            assert cls == "INFRASTRUCTURE"
+            assert cls == "PERSISTENT"
 
     async def test_prefers_test_classifications_over_failure_history(
         self, setup_test_db: Path
@@ -1130,7 +1131,7 @@ class TestGetHistoryClassification:
         with patch.object(storage, "DB_PATH", setup_test_db):
             await storage.set_test_classification(
                 test_name="tests.TestA.test_hidden",
-                classification="INFRASTRUCTURE",
+                classification="PERSISTENT",
                 job_id="job-hidden",
                 visible=0,
             )
@@ -1144,7 +1145,7 @@ class TestGetHistoryClassification:
         with patch.object(storage, "DB_PATH", setup_test_db):
             await storage.set_test_classification(
                 test_name="tests.TestA.test_child",
-                classification="INFRASTRUCTURE",
+                classification="PERSISTENT",
                 job_id="job-child",
                 job_name="child-job-1",
                 child_build_number=5,
@@ -1159,14 +1160,14 @@ class TestGetHistoryClassification:
                 child_build_number=6,
                 visible=1,
             )
-            # Should return INFRASTRUCTURE for child-job-1
+            # Should return PERSISTENT for child-job-1
             cls = await storage.get_history_classification(
                 "job-child",
                 "tests.TestA.test_child",
                 child_job_name="child-job-1",
                 child_build_number=5,
             )
-            assert cls == "INFRASTRUCTURE"
+            assert cls == "PERSISTENT"
             # Should return REGRESSION for child-job-2
             cls2 = await storage.get_history_classification(
                 "job-child",

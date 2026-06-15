@@ -61,6 +61,16 @@ type ReportAction =
         childBuildNumber?: number
       }
     }
+  | {
+      type: 'OVERRIDE_PATTERN'
+      payload: {
+        testName: string
+        testNames?: string[]
+        pattern: string
+        childJobName?: string
+        childBuildNumber?: number
+      }
+    }
 
 const initialState: ReportState = {
   result: null,
@@ -187,6 +197,36 @@ function reportReducer(state: ReportState, action: ReportAction): ReportState {
           child_job_analyses: patchChildren(state.result.child_job_analyses),
         },
         classifications: { ...state.classifications, ...classificationEntries },
+      }
+    }
+    case 'OVERRIDE_PATTERN': {
+      if (!state.result) return state
+      const { testName: pTestName, testNames: pExplicitNames, pattern, childJobName: pChildJobName, childBuildNumber: pChildBuildNumber } = action.payload
+      const pNormalizedChildBuildNumber = pChildJobName ? (pChildBuildNumber ?? 0) : pChildBuildNumber
+      const pNames = pExplicitNames ?? [pTestName]
+      const pNameSet = new Set(pNames)
+      const patchPatternFailures = (fs: typeof state.result.failures) =>
+        (fs ?? []).map((f) =>
+          pNameSet.has(f.test_name) ? { ...f, analysis: { ...f.analysis, pattern } } : f,
+        )
+      const pIsWildcard = pNormalizedChildBuildNumber === 0
+      const pIsChildMatch = (c: { job_name: string; build_number: number }) =>
+        !!pChildJobName && c.job_name === pChildJobName && (pIsWildcard || c.build_number === pNormalizedChildBuildNumber)
+      const patchPatternChildren = (
+        cs: typeof state.result.child_job_analyses,
+      ): typeof state.result.child_job_analyses =>
+        (cs ?? []).map((c) =>
+          pIsChildMatch(c)
+            ? { ...c, failures: patchPatternFailures(c.failures), failed_children: patchPatternChildren(c.failed_children) }
+            : { ...c, failed_children: patchPatternChildren(c.failed_children) },
+        )
+      return {
+        ...state,
+        result: {
+          ...state.result,
+          failures: pChildJobName ? state.result.failures : patchPatternFailures(state.result.failures),
+          child_job_analyses: patchPatternChildren(state.result.child_job_analyses),
+        },
       }
     }
     default:

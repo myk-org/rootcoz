@@ -390,7 +390,11 @@ class AnalysisDetail(BaseModel):
     """Structured AI analysis broken into sections."""
 
     classification: str = Field(
-        default="", description="CODE ISSUE, PRODUCT BUG, or INFRASTRUCTURE (override)"
+        default="", description="Root cause: CODE ISSUE, PRODUCT BUG, or INFRASTRUCTURE"
+    )
+    pattern: str = Field(
+        default="",
+        description="Failure pattern: NEW, REGRESSION, FLAKY, INTERMITTENT, KNOWN_BUG, or PERSISTENT",
     )
     affected_tests: list[str] = Field(
         default_factory=list, description="List of affected test names"
@@ -431,6 +435,7 @@ class PeerRound(BaseModel):
     ai_model: str
     role: Literal["orchestrator", "peer"]
     classification: str
+    pattern: str = ""
     details: str
     agrees_with_orchestrator: bool | None = (
         None  # None = failed/excluded from consensus
@@ -788,16 +793,28 @@ class CreateIssueRequest(_ChildJobFieldsValidator, _TrackerCredentialsMixin):
 
 
 OverrideClassificationLiteral = Literal["CODE ISSUE", "PRODUCT BUG", "INFRASTRUCTURE"]
+PatternLiteral = Literal[
+    "NEW", "REGRESSION", "FLAKY", "INTERMITTENT", "KNOWN_BUG", "PERSISTENT"
+]
+# Legacy alias — kept for backward compatibility with existing data.
+# New code should use PatternLiteral instead.
 HistoryClassificationLiteral = Literal[
     "FLAKY", "REGRESSION", "INFRASTRUCTURE", "KNOWN_BUG", "INTERMITTENT"
 ]
 
 
 class OverrideClassificationRequest(_ChildJobFieldsValidator):
-    """Request body for overriding a failure's classification."""
+    """Request body for overriding a failure's classification (root cause axis)."""
 
     test_name: str
     classification: OverrideClassificationLiteral
+
+
+class OverridePatternRequest(_ChildJobFieldsValidator):
+    """Request body for overriding a failure's pattern axis."""
+
+    test_name: str
+    pattern: PatternLiteral
 
 
 class SimilarIssue(BaseModel):
@@ -835,10 +852,15 @@ class CreateIssueResponse(BaseModel):
 
 
 class ClassifyTestRequest(BaseModel):
-    """Request body for classifying a test (e.g., FLAKY, REGRESSION)."""
+    """Request body for classifying a test pattern (e.g., FLAKY, REGRESSION).
+
+    Despite the field name ``classification``, the value is actually a pattern
+    label.  The name is kept for backward compatibility with existing API
+    consumers (AI history analysis, CLI ``classify`` command).
+    """
 
     test_name: str
-    classification: HistoryClassificationLiteral
+    classification: PatternLiteral
     reason: str = ""
     job_name: str = ""
     references: str = ""

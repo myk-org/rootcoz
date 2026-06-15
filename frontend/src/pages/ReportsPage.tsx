@@ -48,6 +48,7 @@ interface OverridesData {
     build_number: number
     from_classification: string
     to_classification: string
+    override_axis?: 'classification' | 'pattern'
     overridden_by: string
     overridden_at: string
   }>
@@ -423,6 +424,7 @@ function OverridesReport({ data, search, expandedGroups, onToggleGroup, onExpand
                         <TableHeader>
                           <TableRow className="bg-surface-elevated/40 hover:bg-surface-elevated/40">
                             <TableHead>Test</TableHead>
+                            <TableHead>Axis</TableHead>
                             <TableHead>Job</TableHead>
                             <TableHead>By</TableHead>
                             <TableHead className="text-right">Date</TableHead>
@@ -432,6 +434,16 @@ function OverridesReport({ data, search, expandedGroups, onToggleGroup, onExpand
                           {groupPageDetails.map((d, i) => (
                             <TableRow key={`${d.job_id}-${d.test_name}-${i}`} className={i % 2 === 0 ? 'bg-surface-card' : 'bg-surface-elevated/40'}>
                               <TableCell className="font-mono text-xs max-w-[300px] truncate">{d.test_name}</TableCell>
+                              <TableCell>
+                                <span className={cn(
+                                  'inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-medium',
+                                  d.override_axis === 'pattern'
+                                    ? 'bg-purple-500/10 text-purple-400'
+                                    : 'bg-signal-blue/10 text-signal-blue',
+                                )}>
+                                  {d.override_axis === 'pattern' ? 'Pattern' : 'Root Cause'}
+                                </span>
+                              </TableCell>
                               <TableCell>
                                 <Link to={`/results/${d.job_id}?highlight=${encodeURIComponent(d.test_name)}`} className="text-xs text-text-link hover:underline">
                                   {d.job_name}

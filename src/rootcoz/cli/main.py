@@ -2113,6 +2113,40 @@ def override_classification_cmd(
         typer.echo(f"Classification overridden to: {data.get('classification', '')}")
 
 
+@app.command("override-pattern")
+def override_pattern_cmd(
+    job_id: str = typer.Argument(help="Job ID."),
+    test_name: str = typer.Option(..., "--test", "-t", help="Test name."),
+    pattern: str = typer.Option(
+        ...,
+        "--pattern",
+        "-p",
+        help="NEW, REGRESSION, FLAKY, INTERMITTENT, KNOWN_BUG, or PERSISTENT.",
+    ),
+    child_job_name: str = typer.Option("", "--child-job"),
+    child_build_number: int = typer.Option(0, "--child-build"),
+    json_output: bool = _JSON_OPTION,
+):
+    """Override the pattern of a failure."""
+    _set_json(json_output)
+    try:
+        client = _get_client()
+        data = client.override_pattern(
+            job_id=job_id,
+            test_name=test_name,
+            pattern=pattern.upper(),
+            child_job_name=child_job_name,
+            child_build_number=child_build_number,
+        )
+    except RootCozError as err:
+        _handle_error(err)
+
+    if _state.get("json", False):
+        print_output(data, columns=[], as_json=True)
+    else:
+        typer.echo(f"Pattern overridden to: {data.get('pattern', '')}")
+
+
 @app.command("analyze-comment-intent")
 def analyze_comment_intent_cmd(
     comment: str = typer.Argument(help="Comment text to analyze."),
