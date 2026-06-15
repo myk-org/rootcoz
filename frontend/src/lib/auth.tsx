@@ -5,6 +5,8 @@ import { getUsername, setUsername, getIsAdmin, setIsAdmin, setRole, clearTokens,
 interface AuthState {
   username: string
   isAdmin: boolean
+  /** True when the user has operator or admin role. */
+  isOperator: boolean
   role: string
   loading: boolean
   authenticated: boolean
@@ -107,7 +109,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, [])
 
   return (
-    <AuthContext.Provider value={{ username, isAdmin, role, loading, authenticated, login, logout, refreshAuth }}>
+    <AuthContext.Provider value={{ username, isAdmin, isOperator: role === 'operator' || role === 'admin', role, loading, authenticated, login, logout, refreshAuth }}>
       {children}
     </AuthContext.Provider>
   )

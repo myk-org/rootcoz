@@ -27,8 +27,8 @@ const BASE_NAV_LINKS = [
 
 export function NavBar() {
   const location = useLocation()
-  const { isAdmin, role, username } = useAuth()
-  const canSubmitAnalysis = role === 'operator' || role === 'admin'
+  const { isAdmin, isOperator, role, username } = useAuth()
+  const canSubmitAnalysis = isOperator
   const [unreadCount, setUnreadCount] = useState(0)
   const [activeCount, setActiveCount] = useState(0)
   const [pendingCount, setPendingCount] = useState(0)

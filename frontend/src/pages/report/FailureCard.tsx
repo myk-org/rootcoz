@@ -183,7 +183,7 @@ export function FailureCard({ group, jobId, childJobName, childBuildNumber, inde
   const scopedChildBuildNumber = childBuildNumber ?? 0
   const { githubIssuesEnabled, jiraIssuesEnabled, serverJiraProjectKey, comments, reviews, aiModels, result, classifications } = useReportState()
   const dispatch = useReportDispatch()
-  const { role } = useAuth()
+  const { role, isOperator } = useAuth()
   const isViewer = role === 'viewer'
   const expandKey = `rootcoz-expand-${jobId}-${scopedChildJobName}-${scopedChildBuildNumber}-${group.id}`
   const [expanded, setExpanded] = useSessionState<boolean>(expandKey, false)
@@ -666,7 +666,7 @@ export function FailureCard({ group, jobId, childJobName, childBuildNumber, inde
                   Include links
                 </label>
               )}
-              {!isViewer && (
+              {isOperator && (
                 <Button variant="outline" size="sm" onClick={() => setReAnalyzeOpen(true)} disabled={rep.reanalysis_status === 'running'}>
                   <RotateCw className={`h-3.5 w-3.5 mr-1${rep.reanalysis_status === 'running' ? ' animate-spin' : ''}`} />
                   Re-analyze

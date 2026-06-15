@@ -114,8 +114,8 @@ src/rootcoz/
   - All API endpoints require authentication except public paths (`/register`, `/health`, `/api/health`, `/api/auth/register`, `/api/auth/login`, `/api/auth/needs-key`, `/api/releases/latest`, `/metrics`). `/api/releases/latest` is intentionally public — it only proxies GitHub release metadata (version, changelog) with no sensitive data.
   - CORS preflight (OPTIONS) requests bypass authentication on all endpoints.
   - **Viewers** can: view jobs/results only. Cannot chat, comment, re-analyze, or modify anything.
-  - **Reviewers** can: everything viewers can, plus chat about jobs, comment on jobs, re-analyze existing jobs, register, login, rotate their own API key, manage their own tracker tokens.
-  - **Operators** can: everything reviewers can, plus submit NEW analyses (`POST /analyze`), delete their own jobs.
+  - **Reviewers** can: everything viewers can, plus chat about jobs, comment on jobs, register, login, rotate their own API key, manage their own tracker tokens.
+  - **Operators** can: everything reviewers can, plus submit NEW analyses (`POST /analyze`), re-analyze any job, delete their own jobs.
   - **Admins** can: everything operators can, plus delete any job, rotate any user's key (`POST /api/admin/users/{username}/rotate-key`), create/delete users, change user roles, access admin-only endpoints (`/api/admin/*`).
 - **Real-time updates**: Server-Sent Events (SSE) push real-time updates to the frontend. A polling fallback activates after sending a chat message if the SSE connection is dead, and cancels once SSE delivers an event. Backend broadcasts via per-connection `asyncio.Event` objects. Available SSE streams:
   - `/api/navbar/stream` — navbar badge counts (active analyses, unread mentions)

@@ -260,7 +260,7 @@ export function StatusPage() {
   const msg = statusMessages[displayStatus] ?? statusMessages.running
   const statusBadgeLabel = displayStatus.replace(/_/g, ' ').toUpperCase()
 
-  const { isAdmin, username, role } = useAuth()
+  const { isAdmin, username, role, isOperator } = useAuth()
   const isViewer = role === 'viewer'
   const submitter = data?.result?.request_params?.submitted_by ?? ''
   const canAbort = isAdmin || (!!username && username === submitter)
@@ -291,7 +291,7 @@ export function StatusPage() {
                 </Badge>
               )}
               <div className="ml-auto flex items-center gap-3">
-                {!isViewer && data.result.request_params && (
+                {isOperator && data.result.request_params && (
                   <Button
                     variant="ghost"
                     size="sm"

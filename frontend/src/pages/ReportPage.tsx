@@ -73,7 +73,7 @@ function ReportContent() {
   const state = useReportState()
   const dispatch = useReportDispatch()
   const refreshEnrichments = useRefreshEnrichments()
-  const { role } = useAuth()
+  const { role, isOperator } = useAuth()
   const isViewer = role === 'viewer'
 
   // Capture hash fragment on mount and listen for changes (child-job deep linking)
@@ -472,7 +472,7 @@ function ReportContent() {
                 </Link>
               </Button>
             )}
-            {!isViewer && result.request_params && (
+            {isOperator && result.request_params && (
               <Button
                 variant="ghost"
                 size="sm"
