@@ -517,21 +517,7 @@ class TestGenerateFeedbackPreview:
 
 
 class TestCreateFeedbackFromPreview:
-    @pytest.fixture
-    def settings(self):
-        env = {
-            "JENKINS_URL": "https://jenkins.example.com",
-            "JENKINS_USER": "user",
-            "JENKINS_PASSWORD": "pass",  # pragma: allowlist secret
-            "GITHUB_TOKEN": _TEST_GITHUB_TOKEN,
-        }
-        with patch.dict(os.environ, env, clear=True):
-            get_settings.cache_clear()
-            s = get_settings()
-            get_settings.cache_clear()
-            return s
-
-    async def test_creates_issue_with_labels(self, settings):
+    async def test_creates_issue_with_labels(self):
         with patch("rootcoz.feedback.create_github_issue") as mock_create:
             mock_create.return_value = {
                 "url": "https://github.com/myk-org/rootcoz/issues/42",
@@ -542,7 +528,7 @@ class TestCreateFeedbackFromPreview:
                 title="Dashboard crash on load",
                 body="## Bug\n\nDetails...",
                 labels=["bug"],
-                settings=settings,
+                github_token=_TEST_GITHUB_TOKEN,
             )
 
         assert isinstance(result, FeedbackResponse)
@@ -555,7 +541,7 @@ class TestCreateFeedbackFromPreview:
         assert call_kwargs["repo_url"] == "https://github.com/myk-org/rootcoz"
         assert call_kwargs["labels"] == ["bug"]
 
-    async def test_uses_correct_repo_url(self, settings):
+    async def test_uses_correct_repo_url(self):
         with patch("rootcoz.feedback.create_github_issue") as mock_create:
             mock_create.return_value = {
                 "url": "https://github.com/x/y/issues/1",
@@ -566,7 +552,7 @@ class TestCreateFeedbackFromPreview:
                 title="Title",
                 body="Body",
                 labels=["enhancement"],
-                settings=settings,
+                github_token=_TEST_GITHUB_TOKEN,
             )
 
         mock_create.assert_called_once()
@@ -574,6 +560,15 @@ class TestCreateFeedbackFromPreview:
             mock_create.call_args.kwargs["repo_url"]
             == "https://github.com/myk-org/rootcoz"
         )
+
+    async def test_empty_github_token_raises_value_error(self):
+        with pytest.raises(ValueError, match="GitHub token is required"):
+            await create_feedback_from_preview(
+                title="Title",
+                body="Body",
+                labels=["bug"],
+                github_token="",
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -625,7 +620,9 @@ class TestCreateFeedbackIssue:
                 "number": 42,
                 "title": "Dashboard crash on load",
             }
-            result = await create_feedback_issue(req, settings)
+            result = await create_feedback_issue(
+                req, settings, github_token=_TEST_GITHUB_TOKEN
+            )
 
         assert isinstance(result, FeedbackResponse)
         assert result.issue_number == 42
@@ -652,7 +649,9 @@ class TestCreateFeedbackIssue:
                 "number": 99,
                 "title": "Add dark mode support",
             }
-            result = await create_feedback_issue(req, settings)
+            result = await create_feedback_issue(
+                req, settings, github_token=_TEST_GITHUB_TOKEN
+            )
 
         assert result.issue_number == 99
         self._assert_create_issue_kwargs(mock_create, expected_labels=["enhancement"])
@@ -671,7 +670,7 @@ class TestCreateFeedbackIssue:
                 "number": 1,
                 "title": "Title",
             }
-            await create_feedback_issue(req, settings)
+            await create_feedback_issue(req, settings, github_token=_TEST_GITHUB_TOKEN)
 
         self._assert_create_issue_kwargs(mock_create)
 
@@ -748,16 +747,18 @@ class TestFeedbackEndpoint:
 
     # -- Preview endpoint tests -----------------------------------------------
 
-    def test_preview_missing_github_token_returns_503(self, _init_db, temp_db_path):
+    def test_preview_works_without_server_github_token(self, _init_db, temp_db_path):
+        """Preview does not need a GitHub token (AI-only formatting)."""
         for client in self._make_client(temp_db_path, github_token=""):
-            resp = client.post(
-                "/api/feedback/preview",
-                json={
-                    "description": "Something broke",
-                },
-            )
-            assert resp.status_code == 503
-            assert "disabled" in resp.json()["detail"]
+            with patch("rootcoz.feedback.format_feedback_with_ai") as mock_format:
+                mock_format.return_value = ("Test title", "Test body", ["bug"])
+                resp = client.post(
+                    "/api/feedback/preview",
+                    json={
+                        "description": "Something broke",
+                    },
+                )
+            assert resp.status_code == 200
 
     def test_preview_missing_ai_provider_returns_503(self, _init_db, temp_db_path):
         for client in self._make_client(
@@ -813,22 +814,32 @@ class TestFeedbackEndpoint:
 
     # -- Create endpoint tests ------------------------------------------------
 
-    def test_create_missing_github_token_returns_503(self, _init_db, temp_db_path):
-        for client in self._make_client(temp_db_path, github_token=""):
-            resp = client.post(
-                "/api/feedback/create",
-                json={
-                    "title": "Test title",
-                    "body": "Test body",
-                    "labels": ["bug"],
-                },
-            )
-            assert resp.status_code == 503
-            assert "disabled" in resp.json()["detail"]
+    def test_create_without_user_github_token_returns_400(self, _init_db, temp_db_path):
+        """User without a stored GitHub token gets 400 on create."""
+        for client in self._make_client(temp_db_path):
+            with patch.object(storage, "get_user_tokens", return_value={}):
+                resp = client.post(
+                    "/api/feedback/create",
+                    json={
+                        "title": "Test title",
+                        "body": "Test body",
+                        "labels": ["bug"],
+                    },
+                )
+            assert resp.status_code == 400
+            assert "GitHub token is required" in resp.json()["detail"]
+            assert "Profile Settings" in resp.json()["detail"]
 
     def test_create_successful(self, _init_db, temp_db_path):
-        for client in self._make_client(temp_db_path, github_token=_TEST_GITHUB_TOKEN):
-            with patch("rootcoz.feedback.create_github_issue") as mock_create:
+        for client in self._make_client(temp_db_path):
+            with (
+                patch.object(
+                    storage,
+                    "get_user_tokens",
+                    return_value={"github_token": _TEST_GITHUB_TOKEN},
+                ),
+                patch("rootcoz.feedback.create_github_issue") as mock_create,
+            ):
                 mock_create.return_value = {
                     "url": "https://github.com/myk-org/rootcoz/issues/10",
                     "number": 10,
@@ -849,8 +860,15 @@ class TestFeedbackEndpoint:
             assert "issues/10" in data["issue_url"]
 
     def test_create_with_empty_labels(self, _init_db, temp_db_path):
-        for client in self._make_client(temp_db_path, github_token=_TEST_GITHUB_TOKEN):
-            with patch("rootcoz.feedback.create_github_issue") as mock_create:
+        for client in self._make_client(temp_db_path):
+            with (
+                patch.object(
+                    storage,
+                    "get_user_tokens",
+                    return_value={"github_token": _TEST_GITHUB_TOKEN},
+                ),
+                patch("rootcoz.feedback.create_github_issue") as mock_create,
+            ):
                 mock_create.return_value = {
                     "url": "https://github.com/myk-org/rootcoz/issues/11",
                     "number": 11,
@@ -878,12 +896,15 @@ class TestFeedbackEndpoint:
             assert "feedback_enabled" in data
             assert data["feedback_enabled"] is True
 
-    def test_capabilities_feedback_disabled_without_token(self, _init_db, temp_db_path):
+    def test_capabilities_feedback_enabled_without_server_token(
+        self, _init_db, temp_db_path
+    ):
+        """feedback_enabled is True even without server GITHUB_TOKEN (user tokens used)."""
         for client in self._make_client(temp_db_path, github_token=""):
             resp = client.get("/api/capabilities")
             assert resp.status_code == 200
             data = resp.json()
-            assert data["feedback_enabled"] is False
+            assert data["feedback_enabled"] is True
 
     def test_feedback_disabled_when_enable_github_issues_false(
         self, _init_db, temp_db_path

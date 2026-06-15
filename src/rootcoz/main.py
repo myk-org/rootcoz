@@ -4541,10 +4541,10 @@ async def preview_github_issue(
     )
 
     # Duplicate detection (best-effort: failures must not break preview)
+    # Uses only user-provided token — no server token fallback.
+    # If no user token, skip duplicate detection (preview still works).
     tests_repo_url = _resolve_github_repo_url(settings)
-    github_token = (body.github_token or "").strip() or (
-        settings.github_token.get_secret_value() if settings.github_token else ""
-    )
+    github_token = (body.github_token or "").strip()
     similar: list[dict] = []
     if tests_repo_url and github_token:
         try:
@@ -4620,12 +4620,19 @@ async def preview_jira_bug(
     )
 
     # Duplicate detection (best-effort: failures must not break preview)
+    # Uses only user-provided token — no server token fallback.
+    # If no user token, skip duplicate detection (preview still works).
     similar: list[dict] = []
-    effective_jira_settings = _build_effective_jira_settings(
-        settings, body.jira_token, body.jira_email, body.jira_project_key
-    )
+    user_jira_token = (body.jira_token or "").strip()
+    if user_jira_token:
+        effective_jira_settings = _build_effective_jira_settings(
+            settings, body.jira_token, body.jira_email, body.jira_project_key
+        )
+    else:
+        effective_jira_settings = None
     if (
-        _has_jira_credentials(effective_jira_settings)
+        effective_jira_settings
+        and _has_jira_credentials(effective_jira_settings)
         and effective_jira_settings.jira_url
         and effective_jira_settings.jira_project_key
     ):
@@ -4844,16 +4851,11 @@ async def create_github_issue_endpoint(
             status_code=403,
             detail="GitHub issue creation is disabled on this server",
         )
-    github_token = (body.github_token or "").strip() or (
-        settings.github_token.get_secret_value() if settings.github_token else ""
-    )
+    github_token = (body.github_token or "").strip()
     if not github_token:
         raise HTTPException(
             status_code=400,
-            detail=(
-                "GitHub token is required. Provide a token in your"
-                " profile settings or configure GITHUB_TOKEN on the server."
-            ),
+            detail=("GitHub token is required. Set up your token in Profile Settings."),
         )
 
     _failure, _result_data, _matched_child = await _load_effective_failure(
@@ -4943,6 +4945,14 @@ async def create_jira_bug_endpoint(
             detail="Jira URL is not configured on the server",
         )
 
+    # User must provide their own Jira token — fail fast before DB work
+    user_jira_token = (body.jira_token or "").strip()
+    if not user_jira_token:
+        raise HTTPException(
+            status_code=400,
+            detail=("Jira token is required. Set up your token in Profile Settings."),
+        )
+
     _failure, _result_data, _matched_child = await _load_effective_failure(
         job_id, body.test_name, body.child_job_name, body.child_build_number
     )
@@ -4962,15 +4972,6 @@ async def create_jira_bug_endpoint(
                 detail=(
                     "Jira project key is required. Provide it in the"
                     " request or configure JIRA_PROJECT_KEY on the server."
-                ),
-            )
-        if not _has_jira_credentials(effective_jira_settings):
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    "Jira token is required. Provide a token in your"
-                    " profile settings or configure Jira credentials"
-                    " on the server."
                 ),
             )
         result = await create_jira_bug(
@@ -8036,7 +8037,7 @@ async def create_feedback(request: Request, body: FeedbackCreateRequest):
     """Create a GitHub issue from a previewed feedback.
 
     Takes a title, body, and labels (typically from the preview endpoint)
-    and creates the GitHub issue.
+    and creates the GitHub issue using the authenticated user's GitHub token.
     """
     _check_allow_list(request)
     settings = get_settings()
@@ -8044,12 +8045,22 @@ async def create_feedback(request: Request, body: FeedbackCreateRequest):
         raise HTTPException(
             status_code=503, detail="Feedback submission is disabled on this server"
         )
+
+    username = request.state.username
+    user_tokens = await storage.get_user_tokens(username)
+    github_token = user_tokens.get("github_token", "")
+    if not github_token:
+        raise HTTPException(
+            status_code=400,
+            detail="GitHub token is required. Set up your token in Profile Settings.",
+        )
+
     try:
         return await create_feedback_from_preview(
             title=body.title,
             body=body.body,
             labels=body.labels,
-            settings=settings,
+            github_token=github_token,
         )
     except httpx.HTTPStatusError as exc:
         if exc.response.status_code in (401, 403):

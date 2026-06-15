@@ -449,14 +449,14 @@ class Settings(BaseSettings):
     def feedback_enabled(self) -> bool:
         """Check if feedback submission is enabled.
 
-        Requires ENABLE_GITHUB_ISSUES to not be explicitly False and
-        GITHUB_TOKEN to be configured. Unlike github_issues_enabled,
-        does not require TESTS_REPO_URL since feedback issues go to
-        the hardcoded project repo.
+        Requires ENABLE_GITHUB_ISSUES to not be explicitly False.
+        Unlike github_issues_enabled, does not require TESTS_REPO_URL
+        or a server-level GITHUB_TOKEN since feedback uses user-scoped
+        tokens and issues go to the hardcoded project repo.
         """
         if self.enable_github_issues is False:
             return False
-        return bool(self.github_token and self.github_token.get_secret_value())
+        return True
 
     @property
     def web_push_enabled(self) -> bool:

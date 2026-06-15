@@ -327,7 +327,7 @@ def _derive_fallback_labels(request: FeedbackRequest) -> list[str]:
 
 
 async def create_feedback_from_preview(
-    title: str, body: str, labels: list[str], settings: Settings
+    title: str, body: str, labels: list[str], github_token: str
 ) -> FeedbackResponse:
     """Create a GitHub issue from a previously previewed feedback.
 
@@ -335,18 +335,22 @@ async def create_feedback_from_preview(
         title: Issue title (from preview).
         body: Issue body (from preview).
         labels: Issue labels (from preview).
-        settings: Application settings (must have github_token configured).
+        github_token: User's GitHub token for authentication.
 
     Returns:
         FeedbackResponse with the created issue details.
+
+    Raises:
+        ValueError: If github_token is empty.
     """
+    if not github_token:
+        raise ValueError(
+            "GitHub token is required. Set up your token in Profile Settings."
+        )
+
     title = scrub_sensitive_data(title)
     body = scrub_sensitive_data(body)
     labels = [lbl for lbl in labels if lbl in _ALLOWED_LABELS]
-
-    github_token = (
-        settings.github_token.get_secret_value() if settings.github_token else ""
-    )
 
     result = await create_github_issue(
         title=title,
@@ -364,7 +368,7 @@ async def create_feedback_from_preview(
 
 
 async def create_feedback_issue(
-    request: FeedbackRequest, settings: Settings
+    request: FeedbackRequest, settings: Settings, github_token: str = ""
 ) -> FeedbackResponse:
     """Orchestrate feedback submission: scrub, format with AI, create GitHub issue.
 
@@ -374,7 +378,8 @@ async def create_feedback_issue(
 
     Args:
         request: User feedback submission.
-        settings: Application settings (must have github_token configured).
+        settings: Application settings.
+        github_token: User's GitHub token for authentication.
 
     Returns:
         FeedbackResponse with the created issue details.
@@ -384,5 +389,5 @@ async def create_feedback_issue(
         title=preview.title,
         body=preview.body,
         labels=preview.labels,
-        settings=settings,
+        github_token=github_token,
     )

@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { api } from '@/lib/api'
+import { api, ApiError } from '@/lib/api'
 import {
   Dialog,
   DialogContent,
@@ -12,7 +12,6 @@ import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Textarea } from '@/components/ui/textarea'
 import { Badge } from '@/components/ui/badge'
-import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { Select, SelectTrigger, SelectValue, SelectContent, SelectItem } from '@/components/ui/select'
 import { LoadingSpinner } from '@/components/shared/LoadingSpinner'
 import { CheckCircle2, ExternalLink, AlertTriangle } from 'lucide-react'
@@ -22,6 +21,18 @@ import { useReportDispatch, useRefreshEnrichments } from './ReportContext'
 
 type BugTarget = 'github' | 'jira'
 type Phase = 'idle' | 'loading-prompt' | 'prompt' | 'loading' | 'preview' | 'creating' | 'success' | 'error'
+
+/** Extract a user-friendly credential error message from a 400 API response. */
+function _extractCredentialError(err: unknown, target: BugTarget): string | null {
+  if (err instanceof ApiError && err.status === 400) {
+    const detail = (err.body as { detail?: string })?.detail ?? ''
+    if (detail.toLowerCase().includes('token is required')) {
+      const label = target === 'github' ? 'GitHub' : 'Jira'
+      return `${label} token is required. Please set up your credentials in Profile Settings.`
+    }
+  }
+  return null
+}
 
 interface BugCreationDialogProps {
   open: boolean
@@ -174,7 +185,7 @@ export function BugCreationDialog({
         setPhase('preview')
       })
       .catch((err) => {
-        setErrorMsg(err instanceof Error ? err.message : 'Preview failed')
+        setErrorMsg(_extractCredentialError(err, target) ?? (err instanceof Error ? err.message : 'Preview failed'))
         setPhase('error')
       })
   }
@@ -202,7 +213,7 @@ export function BugCreationDialog({
       // Also refresh enrichments for the link badges
       refreshEnrichments(jobId)
     } catch (err) {
-      setErrorMsg(err instanceof Error ? err.message : 'Creation failed')
+      setErrorMsg(_extractCredentialError(err, target) ?? (err instanceof Error ? err.message : 'Creation failed'))
       setPhase('error')
     }
   }
@@ -489,34 +500,36 @@ export function BugCreationDialog({
         {phase === 'error' && (
           <div className="flex flex-col items-center gap-4 py-8">
             <p className="text-sm text-signal-red">{errorMsg}</p>
-            {errorMsg.toLowerCase().includes('token') && errorMsg.toLowerCase().includes('invalid') && (
-              <p className="text-xs text-text-tertiary">You can update your tokens in <a href="/settings" target="_blank" rel="noopener noreferrer" className="text-text-link hover:underline">settings</a>.</p>
+            {errorMsg.toLowerCase().includes('token') && (
+              <p className="text-xs text-text-tertiary">You can update your tokens in <a href="/settings" target="_blank" rel="noopener noreferrer" className="text-text-link hover:underline">Profile Settings</a>.</p>
             )}
+          </div>
+        )}
+
+        {phase === 'preview' && !hasToken && (
+          <div className="rounded-lg border border-signal-orange/30 bg-signal-orange/10 p-4 flex items-start gap-3">
+            <AlertTriangle className="h-5 w-5 text-signal-orange shrink-0 mt-0.5" />
+            <div className="flex flex-col gap-1">
+              <p className="text-sm font-medium text-text-primary">
+                {target === 'github' ? 'GitHub' : 'Jira'} token required
+              </p>
+              <p className="text-xs text-text-secondary">
+                Set up your {target === 'github' ? 'GitHub' : 'Jira'} token in Profile Settings to create issues.
+              </p>
+              <a href="/settings" target="_blank" rel="noopener noreferrer"
+                 className="text-xs text-text-link hover:underline mt-1 inline-flex items-center gap-1">
+                Open Profile Settings →
+              </a>
+            </div>
           </div>
         )}
 
         <DialogFooter className="flex-col items-stretch gap-2 sm:flex-row sm:items-center sm:justify-between">
           {phase === 'preview' && (
-            <>
-              {!hasToken && (
-                <p className="text-xs text-text-tertiary">Add a {target === 'github' ? 'GitHub' : 'Jira'} token in <a href="/settings" target="_blank" rel="noopener noreferrer" className="text-text-link hover:underline">settings</a> to create directly.</p>
-              )}
-              <div className="flex gap-2 sm:ml-auto">
-                <Button variant="outline" onClick={() => handleCancel()}>Cancel</Button>
-                {!hasToken ? (
-                  <Tooltip>
-                    <TooltipTrigger asChild>
-                      <span tabIndex={0}>
-                        <Button onClick={handleCreate} disabled={!title.trim() || !hasToken || (target === 'jira' && jiraIssueType === '__custom__' && !customIssueType.trim())}>Create {label}</Button>
-                      </span>
-                    </TooltipTrigger>
-                    <TooltipContent>Add a {target === 'github' ? 'GitHub' : 'Jira'} token to create issues</TooltipContent>
-                  </Tooltip>
-                ) : (
-                  <Button onClick={handleCreate} disabled={!title.trim() || (target === 'jira' && jiraIssueType === '__custom__' && !customIssueType.trim())}>Create {label}</Button>
-                )}
-              </div>
-            </>
+            <div className="flex gap-2 sm:ml-auto">
+              <Button variant="outline" onClick={() => handleCancel()}>Cancel</Button>
+              <Button onClick={handleCreate} disabled={!title.trim() || !hasToken || (target === 'jira' && jiraIssueType === '__custom__' && !customIssueType.trim())}>Create {label}</Button>
+            </div>
           )}
           {phase === 'prompt' && (
             <div className="flex gap-2 sm:ml-auto">
