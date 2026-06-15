@@ -117,8 +117,8 @@ function getJobDisplayName(job: DashboardJob | null | undefined): string {
 
 export function DashboardPage() {
   const navigate = useNavigate()
-  const { isAdmin, role, username } = useAuth()
-  const canDelete = role === 'operator' || role === 'admin'
+  const { isAdmin, isOperator, role, username } = useAuth()
+  const canDelete = isOperator
   const [jobs, setJobs] = useState<DashboardJobWithMetadata[]>([])
   const [loading, setLoading] = useState(true)
   const [search, setSearch] = useState('')

@@ -1426,6 +1426,52 @@ class TestRBACRoles:
         )
         assert resp.status_code == 403
 
+    def test_reviewer_cannot_reanalyze(self, client):
+        """Reviewers cannot re-analyze jobs — requires operator role."""
+        admin_cookies = _admin_login(client)
+        _, rev_cookies = _create_user_with_role(
+            client, "rev_noreanalyze", "reviewer", admin_cookies
+        )
+        resp = client.post(
+            "/re-analyze/fake-job-id",
+            json={"type": "file"},
+            cookies=rev_cookies,
+        )
+        assert resp.status_code == 403
+        assert "operator" in resp.json()["detail"].lower()
+
+    def test_operator_can_reanalyze_others_job(self, client):
+        """Operators can re-analyze jobs submitted by other users."""
+        admin_cookies = _admin_login(client)
+        _, op1_cookies = _create_user_with_role(
+            client, "op_submitter", "operator", admin_cookies
+        )
+        _, op2_cookies = _create_user_with_role(
+            client, "op_reanalyzer", "operator", admin_cookies
+        )
+        # op1 submits a job
+        submit_resp = client.post(
+            "/analyze",
+            json={
+                "type": "file",
+                "raw_xml": "<testsuites><testsuite><testcase name='t1'><failure>err</failure></testcase></testsuite></testsuites>",
+                "ai_provider": "gemini",
+                "ai_model": "test-model",
+            },
+            cookies=op1_cookies,
+        )
+        assert submit_resp.status_code == 202
+        job_id = submit_resp.json()["job_id"]
+        _wait_for_analysis(client, job_id, op1_cookies)
+        # op2 re-analyzes op1's job
+        reanalyze_resp = client.post(
+            f"/re-analyze/{job_id}",
+            json={},
+            cookies=op2_cookies,
+        )
+        assert reanalyze_resp.status_code == 202
+        assert "job_id" in reanalyze_resp.json()
+
     def test_viewer_cannot_submit_analysis(self, client):
         """Viewers cannot submit new analyses."""
         _, viewer_cookies = _create_user_with_role(client, "viewer_nosubmit", "viewer")

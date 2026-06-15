@@ -779,18 +779,6 @@ def _is_encrypted_value(value: Any) -> bool:
     return isinstance(value, str) and value.startswith("enc:")
 
 
-def _check_reanalyze_authorization(request: Request, params: dict) -> None:
-    """Check that requester is original submitter or admin."""
-    original_submitter = params.get("submitted_by", "")
-    requesting_user = getattr(request.state, "username", "")
-    is_admin = getattr(request.state, "is_admin", False)
-    if not is_admin and requesting_user != original_submitter:
-        raise HTTPException(
-            status_code=403,
-            detail="Only the original submitter or an admin can re-analyze this job",
-        )
-
-
 def _validate_decrypted_sensitive_fields(decrypted_params: dict) -> None:
     """Fail fast if any sensitive field is still encrypted (key changed / corrupt)."""
     for key in SENSITIVE_KEYS:
@@ -3236,7 +3224,7 @@ async def re_analyze(
     fresh job_id.
     """
     _check_allow_list(request)
-    _require_reviewer(request)
+    _require_operator(request)
     base_url = _extract_base_url()
 
     # Load the original result (with sensitive fields for credential reuse)
@@ -3251,14 +3239,11 @@ async def re_analyze(
         result_data.get("display_name") or result_data.get("job_name") or job_id
     )
 
-    # Authorization: only the original submitter or an admin may re-analyze
     if "request_params" not in result_data:
         raise HTTPException(
             status_code=400,
             detail="Original analysis has no stored request_params; cannot re-analyze",
         )
-
-    _check_reanalyze_authorization(request, result_data["request_params"])
 
     # Detect analysis type from stored params
     params = result_data.get("request_params", {})
@@ -3631,7 +3616,7 @@ async def re_analyze_failure(
     overrides; defaults come from the parent job's request_params.
     """
     _check_allow_list(request)
-    _require_reviewer(request)
+    _require_operator(request)
 
     # Parse optional body
     body_data: dict = {}
@@ -3672,9 +3657,6 @@ async def re_analyze_failure(
             status_code=400,
             detail="Original analysis has no stored request_params; cannot re-analyze",
         )
-
-    # Authorization: only the original submitter or an admin may re-analyze
-    _check_reanalyze_authorization(request, params)
 
     # Decrypt parent settings
     try:
