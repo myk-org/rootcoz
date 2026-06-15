@@ -638,3 +638,157 @@ class TestStorageUserHasKey:
 
         with patch.object(storage, "DB_PATH", temp_db_path):
             asyncio.run(run())
+
+
+class TestCaseInsensitiveUsernames:
+    """Tests for case-insensitive username uniqueness (issue #125)."""
+
+    def test_register_normalizes_mixed_case(self, client):
+        """Registration with mixed-case username normalizes to lowercase."""
+        resp = client.post("/api/auth/register", json={"username": "Alice"})
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["username"] == "alice"
+
+    def test_track_user_normalizes_mixed_case(self, _init_db, temp_db_path):
+        """track_user with mixed-case normalizes to lowercase."""
+
+        async def run():
+            await storage.track_user("BobSmith")
+            user = await storage.get_user_by_username("bobsmith")
+            assert user is not None
+            assert user["username"] == "bobsmith"
+
+        with patch.object(storage, "DB_PATH", temp_db_path):
+            asyncio.run(run())
+
+    def test_duplicate_case_variant_prevented(self, client):
+        """Registering case-variant of existing username is rejected."""
+        resp = client.post("/api/auth/register", json={"username": "charlie"})
+        assert resp.status_code == 200
+        resp2 = client.post("/api/auth/register", json={"username": "Charlie"})
+        assert resp2.status_code == 400
+        assert "already has" in resp2.json()["detail"].lower()
+
+    def test_create_admin_user_normalizes(self, _init_db, temp_db_path):
+        """create_admin_user normalizes username to lowercase."""
+
+        async def run():
+            username, _key = await storage.create_admin_user("DaveAdmin")
+            assert username == "daveadmin"
+            user = await storage.get_user_by_username("daveadmin")
+            assert user is not None
+            assert user["role"] == "admin"
+
+        with patch.object(storage, "DB_PATH", temp_db_path):
+            asyncio.run(run())
+
+    def test_login_with_mixed_case_username(self, client):
+        """Login with mixed-case username matches stored lowercase user."""
+        resp = client.post("/api/auth/register", json={"username": "logintest"})
+        assert resp.status_code == 200
+        api_key = resp.json()["api_key"]
+        # Login with different casing
+        resp2 = client.post(
+            "/api/auth/login",
+            json={"username": "LoginTest", "api_key": api_key},
+        )
+        assert resp2.status_code == 200
+        assert resp2.json()["username"] == "logintest"
+
+    def test_get_user_by_username_case_insensitive(self, _init_db, temp_db_path):
+        """get_user_by_username normalizes input so lookup is case-insensitive."""
+
+        async def run():
+            await storage.track_user("eve")
+            user = await storage.get_user_by_username("Eve")
+            assert user is not None
+            assert user["username"] == "eve"
+
+        with patch.object(storage, "DB_PATH", temp_db_path):
+            asyncio.run(run())
+
+    def test_migration_merges_case_variant_duplicates(self, temp_db_path):
+        """Startup migration merges existing case-variant usernames."""
+
+        async def run():
+            # Pre-populate DB with case-variant users bypassing normalization.
+            async with storage._connect_db() as db:
+                await db.execute(
+                    "CREATE TABLE IF NOT EXISTS users ("
+                    "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+                    "username TEXT UNIQUE NOT NULL, "
+                    "api_key_hash TEXT UNIQUE, "
+                    "role TEXT NOT NULL DEFAULT 'reviewer', "
+                    "status TEXT NOT NULL DEFAULT 'active', "
+                    "created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, "
+                    "last_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP)"
+                )
+                # Insert case variants: Frank (operator, earlier) and FRANK (admin, later)
+                await db.execute(
+                    "INSERT INTO users (username, role, created_at) "
+                    "VALUES ('Frank', 'operator', '2024-01-01 00:00:00')"
+                )
+                await db.execute(
+                    "INSERT INTO users (username, role, created_at) "
+                    "VALUES ('FRANK', 'admin', '2024-06-01 00:00:00')"
+                )
+                await db.commit()
+
+            # Run init_db which triggers the migration
+            await storage.init_db()
+
+            # Verify: one user 'frank' with admin role (highest privilege)
+            async with storage._connect_db() as db:
+                cursor = await db.execute(
+                    "SELECT username, role FROM users WHERE lower(username) = 'frank'"
+                )
+                rows = [dict(r) for r in await cursor.fetchall()]
+                assert len(rows) == 1
+                assert rows[0]["username"] == "frank"
+                assert rows[0]["role"] == "admin"
+
+        with patch.object(storage, "DB_PATH", temp_db_path):
+            asyncio.run(run())
+
+    def test_migration_preserves_api_key_from_duplicate(self, temp_db_path):
+        """Migration preserves API key when survivor has none but duplicate does."""
+
+        async def run():
+            async with storage._connect_db() as db:
+                await db.execute(
+                    "CREATE TABLE IF NOT EXISTS users ("
+                    "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+                    "username TEXT UNIQUE NOT NULL, "
+                    "api_key_hash TEXT UNIQUE, "
+                    "role TEXT NOT NULL DEFAULT 'reviewer', "
+                    "status TEXT NOT NULL DEFAULT 'active', "
+                    "created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, "
+                    "last_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP)"
+                )
+                # Earlier user has no key, later duplicate has a key
+                await db.execute(
+                    "INSERT INTO users (username, role, api_key_hash, created_at) "
+                    "VALUES ('Grace', 'reviewer', NULL, '2024-01-01 00:00:00')"
+                )
+                await db.execute(
+                    "INSERT INTO users (username, role, api_key_hash, created_at) "
+                    "VALUES ('GRACE', 'reviewer', 'hash_from_dup', '2024-06-01 00:00:00')"  # pragma: allowlist secret
+                )
+                await db.commit()
+
+            await storage.init_db()
+
+            async with storage._connect_db() as db:
+                cursor = await db.execute(
+                    "SELECT username, api_key_hash FROM users "
+                    "WHERE lower(username) = 'grace'"
+                )
+                rows = [dict(r) for r in await cursor.fetchall()]
+                assert len(rows) == 1
+                assert rows[0]["username"] == "grace"
+                expected = "hash_from_dup"  # pragma: allowlist secret
+                assert rows[0]["api_key_hash"] == expected
+
+        with patch.object(storage, "DB_PATH", temp_db_path):
+            asyncio.run(run())

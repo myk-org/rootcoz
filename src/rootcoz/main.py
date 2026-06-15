@@ -1454,7 +1454,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
         # present, auto-identify the user and redirect /login → /
         proxy_username = ""
         if settings.trust_proxy_headers:
-            proxy_username = request.headers.get("x-forwarded-user", "").strip()
+            proxy_username = request.headers.get("x-forwarded-user", "").strip().lower()
 
         if path.startswith("/login"):
             if proxy_username and proxy_username.lower() != "admin":
@@ -1566,8 +1566,8 @@ class AuthMiddleware(BaseHTTPMiddleware):
 
         # 4. Fall back to rootcoz_username cookie (regular users)
         if not username:
-            cookie_username = _read_cookie(request, "rootcoz_username")
-            if cookie_username.lower() == "admin":
+            cookie_username = _read_cookie(request, "rootcoz_username").strip().lower()
+            if cookie_username == "admin":
                 # Reserved username — only valid via session/bearer auth
                 cookie_username = ""
             username = cookie_username
@@ -6570,7 +6570,7 @@ async def login(request: Request) -> JSONResponse:
     """Authenticate admin with username + API key. Returns session cookie."""
     body = await _read_json_object(request)
 
-    username = str(body.get("username", ""))
+    username = str(body.get("username", "")).strip().lower()
     api_key = str(body.get("api_key", ""))
 
     if not username or not api_key:
@@ -6745,7 +6745,7 @@ async def register_user(request: Request) -> JSONResponse:
     raw_username = body.get("username", "")
     if not isinstance(raw_username, str):
         raise HTTPException(status_code=400, detail="Username must be a string")
-    username = raw_username.strip()
+    username = raw_username.strip().lower()
     if not username:
         raise HTTPException(status_code=400, detail="Username is required")
 
@@ -6997,7 +6997,7 @@ async def admin_create_user_endpoint(request: Request) -> JSONResponse:
     username = body.get("username", "")
     if not isinstance(username, str):
         raise HTTPException(status_code=400, detail="Username must be a string")
-    username = username.strip()
+    username = username.strip().lower()
     if not username:
         raise HTTPException(status_code=400, detail="Username is required")
 
