@@ -113,12 +113,26 @@ def generate_api_key() -> str:
 VALID_ROLES: frozenset[str] = frozenset({"viewer", "reviewer", "operator", "admin"})
 
 
+def _normalize_username(username: str) -> str:
+    """Normalize a username to lowercase for case-insensitive uniqueness.
+
+    All entry points (registration, tracking, admin creation) must call this
+    before storing or looking up usernames.
+    """
+    return username.strip().lower()
+
+
 def _validate_username(username: str) -> None:
-    """Validate username format and reserved names."""
-    if username.lower() == "admin":
+    """Validate username format and reserved names.
+
+    Normalizes to lowercase before checking, so callers that forget to
+    call ``_normalize_username`` are still safe.
+    """
+    username = _normalize_username(username)
+    if username == "admin":
         msg = "Username 'admin' is reserved"
         raise ValueError(msg)
-    if username.lower() in _SYSTEM_TAGS:
+    if username in _SYSTEM_TAGS:
         msg = f"Username '{username}' conflicts with a reserved system tag"
         raise ValueError(msg)
     if not re.match(r"^[a-zA-Z0-9][a-zA-Z0-9._-]{1,49}$", username):
@@ -179,6 +193,117 @@ async def _migrate_add_column(
         logger.info(f"Migration: added {column} column to {table}")
     else:
         logger.debug(f"Migration: {table} already has {column} column")
+
+
+_ROLE_PRIORITY = {"viewer": 0, "reviewer": 1, "operator": 2, "admin": 3}
+
+# Tables that store a ``username`` column which must be lowercased during
+# the case-insensitive migration.  ``test_classifications`` uses
+# ``created_by`` instead.
+_USERNAME_TABLES = (
+    "comments",
+    "failure_reviews",
+    "sessions",
+    "push_subscriptions",
+    "mention_reads",
+    "chat_messages",
+)
+
+# Tables that use a differently-named column for the username.
+_USERNAME_COLUMN_OVERRIDES = {
+    "test_classifications": "created_by",
+    "server_settings": "updated_by",
+    "server_settings_history": "changed_by",
+}
+
+
+async def _migrate_lowercase_usernames(db: aiosqlite.Connection) -> None:
+    """Lowercase all usernames and merge case-variant duplicates.
+
+    Idempotent — the unique index ``idx_users_username_lower`` acts as the
+    migration guard.  If it already exists, this function is a no-op.
+
+    Merge strategy for duplicate case-variants:
+    * Keep the row with the earliest ``created_at``.
+    * Upgrade the surviving row's role to the highest privilege among
+      the duplicates (admin > operator > reviewer > viewer).
+    * Re-point all related rows in other tables to the surviving username.
+    """
+    # Guard: skip if the unique index already exists.
+    cursor = await db.execute(
+        "SELECT 1 FROM sqlite_master "
+        "WHERE type='index' AND name='idx_users_username_lower'"
+    )
+    if await cursor.fetchone():
+        logger.debug("Migration: idx_users_username_lower already exists, skipping")
+        return
+
+    logger.info("Migration: lowercasing usernames and merging case-variant duplicates")
+
+    # 1. Find case-variant duplicate groups.
+    cursor = await db.execute(
+        "SELECT lower(username) AS lname, COUNT(*) AS cnt "
+        "FROM users GROUP BY lower(username) HAVING cnt > 1"
+    )
+    duplicate_groups = await cursor.fetchall()
+
+    for group in duplicate_groups:
+        lname = group["lname"]
+        cursor = await db.execute(
+            "SELECT id, username, role, created_at FROM users "
+            "WHERE lower(username) = ? ORDER BY created_at ASC",
+            (lname,),
+        )
+        variants = [dict(row) for row in await cursor.fetchall()]
+        # Survivor = earliest created_at (first in ORDER BY).
+        survivor = variants[0]
+        # Highest-privilege role across all variants.
+        best_role = max(
+            (v["role"] for v in variants),
+            key=lambda r: _ROLE_PRIORITY.get(r, 0),
+        )
+        if best_role != survivor["role"]:
+            await db.execute(
+                "UPDATE users SET role = ? WHERE id = ?",
+                (best_role, survivor["id"]),
+            )
+        # Re-point related tables from each duplicate to the survivor.
+        for dup in variants[1:]:
+            old_name = dup["username"]
+            for table in _USERNAME_TABLES:
+                await db.execute(
+                    f"UPDATE {table} SET username = ? WHERE username = ?",
+                    (lname, old_name),
+                )
+            for table, col in _USERNAME_COLUMN_OVERRIDES.items():
+                await db.execute(
+                    f"UPDATE {table} SET {col} = ? WHERE {col} = ?",
+                    (lname, old_name),
+                )
+            # Delete the duplicate user row.
+            await db.execute("DELETE FROM users WHERE id = ?", (dup["id"],))
+        # Rename the survivor to lowercase.
+        if survivor["username"] != lname:
+            await db.execute(
+                "UPDATE users SET username = ? WHERE id = ?",
+                (lname, survivor["id"]),
+            )
+
+    # 2. Lowercase all remaining (non-duplicate) usernames.
+    await db.execute("UPDATE users SET username = lower(username)")
+
+    # 3. Lowercase username columns in related tables.
+    for table in _USERNAME_TABLES:
+        await db.execute(f"UPDATE {table} SET username = lower(username)")
+    for table, col in _USERNAME_COLUMN_OVERRIDES.items():
+        await db.execute(f"UPDATE {table} SET {col} = lower({col})")
+
+    # 4. Create the case-insensitive unique index.
+    await db.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_users_username_lower "
+        "ON users(lower(username))"
+    )
+    logger.info("Migration: case-insensitive username migration complete")
 
 
 async def init_db() -> None:
@@ -594,6 +719,13 @@ async def init_db() -> None:
             "CREATE INDEX IF NOT EXISTS idx_chat_messages_job_user_status "
             "ON chat_messages (job_id, username, status)"
         )
+
+        # Migration: case-insensitive username uniqueness.
+        # Lowercase all existing usernames, merge case-variant duplicates
+        # (keep earliest created_at, upgrade to highest-privilege role),
+        # and add a unique index on lower(username).
+        await _migrate_lowercase_usernames(db)
+
         await db.commit()
 
     # Backfill failure_history from existing results (runs once when table is empty).
@@ -2853,6 +2985,7 @@ async def mark_stale_results_failed() -> tuple[list[dict], list[dict]]:
 async def create_admin_user(username: str) -> tuple[str, str]:
     """Create an admin user and return (username, raw_api_key).
     Raises ValueError if username is invalid or taken."""
+    username = _normalize_username(username)
     _validate_username(username)
     raw_key = generate_api_key()
     key_hash = hash_api_key(raw_key)
@@ -2885,6 +3018,7 @@ async def get_user_by_key(api_key: str) -> dict | None:
 
 async def get_user_by_username(username: str) -> dict | None:
     """Look up a user by username."""
+    username = _normalize_username(username)
     async with _connect_db() as db:
         cursor = await db.execute(
             "SELECT id, username, role, created_at, last_seen FROM users WHERE username = ?",
@@ -2896,6 +3030,7 @@ async def get_user_by_username(username: str) -> dict | None:
 
 async def delete_user(username: str) -> bool:
     """Delete a user and their sessions. Returns True if deleted."""
+    username = _normalize_username(username)
     async with _connect_db() as db:
         cursor = await db.execute(
             "DELETE FROM users WHERE username = ?",
@@ -2925,10 +3060,11 @@ async def change_user_role(username: str, new_role: str) -> tuple[str, str]:
     Raises:
         ValueError: If username not found, role is invalid, or already has the role.
     """
+    username = _normalize_username(username)
     if new_role not in VALID_ROLES:
         msg = f"Invalid role: '{new_role}'. Must be one of: {', '.join(sorted(VALID_ROLES))}."
         raise ValueError(msg)
-    if username.lower() == "admin":
+    if username == "admin":
         msg = "Cannot change role of reserved 'admin' user"
         raise ValueError(msg)
     async with _connect_db() as db:
@@ -3008,9 +3144,10 @@ async def track_user(username: str) -> None:
     Skips the reserved 'admin' username (bootstrap superuser).
     New users are assigned the DEFAULT_USER_ROLE from settings.
     """
-    if username.lower() == "admin":
+    username = _normalize_username(username)
+    if username == "admin":
         return
-    if username.strip().lower() in _SYSTEM_TAGS:
+    if username in _SYSTEM_TAGS:
         return
     # Skip invalid usernames (e.g. from malformed cookies)
     if not re.match(r"^[a-zA-Z0-9][a-zA-Z0-9._-]{1,49}$", username):
@@ -3114,6 +3251,7 @@ async def create_user(
     Uses BEGIN IMMEDIATE to prevent TOCTOU races between the
     existence check and the INSERT.
     """
+    username = _normalize_username(username)
     _validate_username(username)
     _validate_user_status(status)
 
@@ -3176,6 +3314,7 @@ async def register_user_with_status(
 
     Raises ValueError if username is invalid, status is invalid, or already exists.
     """
+    username = _normalize_username(username)
     _validate_username(username)
     _validate_user_status(status)
     from rootcoz.config import get_settings
@@ -3201,6 +3340,7 @@ async def set_user_status(username: str, status: str) -> bool:
 
     Returns True if the user was found and updated, False otherwise.
     """
+    username = _normalize_username(username)
     _validate_user_status(status)
     async with _connect_db() as db:
         cursor = await db.execute(
@@ -3213,6 +3353,7 @@ async def set_user_status(username: str, status: str) -> bool:
 
 async def get_user_status(username: str) -> str | None:
     """Get user status. Returns None if user not found."""
+    username = _normalize_username(username)
     async with _connect_db() as db:
         cursor = await db.execute(
             "SELECT status FROM users WHERE username = ?",
@@ -3239,6 +3380,7 @@ async def rotate_user_key(username: str) -> str:
 
     Raises ValueError if user not found or is an admin user.
     """
+    username = _normalize_username(username)
     raw_key = generate_api_key()
     key_hash = hash_api_key(raw_key)
     async with _connect_db() as db:
@@ -3261,6 +3403,7 @@ async def rotate_own_key(username: str) -> str:
     Works for both regular users and admin users.
     Raises ValueError if user not found.
     """
+    username = _normalize_username(username)
     raw_key = generate_api_key()
     key_hash = hash_api_key(raw_key)
     async with _connect_db() as db:
@@ -3279,6 +3422,7 @@ async def rotate_own_key(username: str) -> str:
 
 async def user_has_key(username: str) -> bool:
     """Check if a user has an API key set."""
+    username = _normalize_username(username)
     async with _connect_db() as db:
         cursor = await db.execute(
             "SELECT api_key_hash FROM users WHERE username = ?",
@@ -3290,6 +3434,7 @@ async def user_has_key(username: str) -> bool:
 
 async def rotate_admin_key(username: str, custom_key: str | None = None) -> str:
     """Generate or set a new API key for an admin user. Returns the raw new key."""
+    username = _normalize_username(username)
     if custom_key:
         validate_api_key(custom_key)
         raw_key = custom_key
