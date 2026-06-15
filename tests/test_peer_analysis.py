@@ -2789,8 +2789,8 @@ class TestPeerConsensusFallback:
         assert "peer consensus" in note.lower()
         assert "2/3" in note
 
-    def test_no_majority_picks_most_frequent(self) -> None:
-        """No majority (all different) -> picks most frequent (first in Counter)."""
+    def test_no_majority_picks_alphabetically_first(self) -> None:
+        """No majority (tied) -> picks alphabetically first for determinism."""
         from rootcoz.models import PeerRound
         from rootcoz.peer_analysis import _peer_consensus_fallback
 
@@ -2817,7 +2817,8 @@ class TestPeerConsensusFallback:
         result = _peer_consensus_fallback(rounds)
         assert result is not None
         cls, note = result
-        assert cls in ("PRODUCT BUG", "CODE ISSUE")
+        # Alphabetical tie-break: CODE ISSUE < PRODUCT BUG
+        assert cls == "CODE ISSUE"
         assert "no peer majority" in note.lower()
         assert "1/2" in note
 
@@ -2964,6 +2965,38 @@ class TestPeerConsensusFallback:
         assert result is not None
         cls, _ = result
         assert cls == "CODE ISSUE"
+
+    def test_tie_break_is_alphabetical(self) -> None:
+        """When multiple classifications tie, the alphabetically first wins."""
+        from rootcoz.models import PeerRound
+        from rootcoz.peer_analysis import _peer_consensus_fallback
+
+        rounds = [
+            PeerRound(
+                round=1,
+                ai_provider="gemini",
+                ai_model="pro",
+                role="peer",
+                classification="PRODUCT BUG",
+                details="bug",
+                agrees_with_orchestrator=False,
+            ),
+            PeerRound(
+                round=1,
+                ai_provider="claude",
+                ai_model="sonnet",
+                role="peer",
+                classification="CODE ISSUE",
+                details="code",
+                agrees_with_orchestrator=False,
+            ),
+        ]
+        result = _peer_consensus_fallback(rounds)
+        assert result is not None
+        cls, note = result
+        # Alphabetically: CODE ISSUE < PRODUCT BUG
+        assert cls == "CODE ISSUE"
+        assert "no peer majority" in note.lower()
 
 
 # ===========================================================================
@@ -3209,3 +3242,182 @@ class TestOrchestratorEmptyFallback:
         # Both original details and fallback note should be present
         assert "Some initial analysis details here" in analysis.details
         assert "FALLBACK" in analysis.details
+
+    @pytest.mark.asyncio
+    async def test_fallback_clears_incompatible_code_fix(self) -> None:
+        """Fallback to PRODUCT BUG clears stale code_fix from orchestrator."""
+        from unittest.mock import AsyncMock
+
+        from rootcoz.models import AnalysisDetail
+        from rootcoz.peer_analysis import analyze_failure_group_with_peers
+
+        # Orchestrator returns empty classification but has a code_fix
+        mock_orchestrator = AsyncMock(
+            return_value=(
+                AnalysisDetail(
+                    classification="",
+                    details="Could not determine",
+                    code_fix={
+                        "file": "src/Test.java",
+                        "line": "10",
+                        "change": "fix assertion",
+                    },
+                ),
+                "sig123",
+            )
+        )
+
+        peer_response = _make_peer_json_response(
+            agrees=False,
+            classification="PRODUCT BUG",
+            reasoning="This is a product bug",
+        )
+
+        async def mock_peer_call(
+            prompt,
+            *,
+            cwd=None,
+            ai_provider="",
+            ai_model="",
+            ai_call_timeout=None,
+            session_id=None,
+        ):
+            return AIResult(success=True, text=peer_response)
+
+        with (
+            patch("rootcoz.peer_analysis.run_single_ai_analysis", mock_orchestrator),
+            _patch_peer_ai_calls(mock_peer_call),
+        ):
+            results = await analyze_failure_group_with_peers(
+                failures=[_make_failure()],
+                console_context="console output",
+                repo_path=None,
+                main_ai_provider="claude",
+                main_ai_model="claude-sonnet-4-20250514",
+                peer_ai_configs=_peer_configs(),
+                max_rounds=1,
+            )
+
+        analysis = results[0].analysis
+        assert analysis.classification == "PRODUCT BUG"
+        # code_fix must be cleared — incompatible with PRODUCT BUG
+        assert not analysis.code_fix
+
+    @pytest.mark.asyncio
+    async def test_fallback_clears_incompatible_product_bug_report(self) -> None:
+        """Fallback to CODE ISSUE clears stale product_bug_report from orchestrator."""
+        from unittest.mock import AsyncMock
+
+        from rootcoz.models import AnalysisDetail
+        from rootcoz.peer_analysis import analyze_failure_group_with_peers
+
+        mock_orchestrator = AsyncMock(
+            return_value=(
+                AnalysisDetail(
+                    classification="",
+                    details="Could not determine",
+                    product_bug_report={
+                        "component": "auth",
+                        "summary": "login fails",
+                        "steps_to_reproduce": "1. login",
+                    },
+                ),
+                "sig123",
+            )
+        )
+
+        peer_response = _make_peer_json_response(
+            agrees=False,
+            classification="CODE ISSUE",
+            reasoning="This is a code issue",
+        )
+
+        async def mock_peer_call(
+            prompt,
+            *,
+            cwd=None,
+            ai_provider="",
+            ai_model="",
+            ai_call_timeout=None,
+            session_id=None,
+        ):
+            return AIResult(success=True, text=peer_response)
+
+        with (
+            patch("rootcoz.peer_analysis.run_single_ai_analysis", mock_orchestrator),
+            _patch_peer_ai_calls(mock_peer_call),
+        ):
+            results = await analyze_failure_group_with_peers(
+                failures=[_make_failure()],
+                console_context="console output",
+                repo_path=None,
+                main_ai_provider="claude",
+                main_ai_model="claude-sonnet-4-20250514",
+                peer_ai_configs=_peer_configs(),
+                max_rounds=1,
+            )
+
+        analysis = results[0].analysis
+        assert analysis.classification == "CODE ISSUE"
+        # product_bug_report must be cleared — incompatible with CODE ISSUE
+        assert not analysis.product_bug_report
+
+    @pytest.mark.asyncio
+    async def test_fallback_keeps_code_fix_when_code_issue(self) -> None:
+        """Fallback to CODE ISSUE preserves code_fix (compatible)."""
+        from unittest.mock import AsyncMock
+
+        from rootcoz.models import AnalysisDetail
+        from rootcoz.peer_analysis import analyze_failure_group_with_peers
+
+        mock_orchestrator = AsyncMock(
+            return_value=(
+                AnalysisDetail(
+                    classification="",
+                    details="Could not determine",
+                    code_fix={
+                        "file": "src/Test.java",
+                        "line": "10",
+                        "change": "fix assertion",
+                    },
+                ),
+                "sig123",
+            )
+        )
+
+        peer_response = _make_peer_json_response(
+            agrees=False,
+            classification="CODE ISSUE",
+            reasoning="This is a code issue",
+        )
+
+        async def mock_peer_call(
+            prompt,
+            *,
+            cwd=None,
+            ai_provider="",
+            ai_model="",
+            ai_call_timeout=None,
+            session_id=None,
+        ):
+            return AIResult(success=True, text=peer_response)
+
+        with (
+            patch("rootcoz.peer_analysis.run_single_ai_analysis", mock_orchestrator),
+            _patch_peer_ai_calls(mock_peer_call),
+        ):
+            results = await analyze_failure_group_with_peers(
+                failures=[_make_failure()],
+                console_context="console output",
+                repo_path=None,
+                main_ai_provider="claude",
+                main_ai_model="claude-sonnet-4-20250514",
+                peer_ai_configs=_peer_configs(),
+                max_rounds=1,
+            )
+
+        analysis = results[0].analysis
+        assert analysis.classification == "CODE ISSUE"
+        # code_fix should be preserved — compatible with CODE ISSUE
+        assert analysis.code_fix is not None and analysis.code_fix is not False
+        assert analysis.code_fix.file == "src/Test.java"

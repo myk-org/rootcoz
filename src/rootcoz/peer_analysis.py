@@ -158,6 +158,12 @@ def _peer_consensus_fallback(
     most_common_cls, top_count = counts.most_common(1)[0]
     total = len(valid_peers)
 
+    # Deterministic tie-break: when multiple classifications share the
+    # top count, pick alphabetically so results are reproducible.
+    tied = sorted(cls for cls, cnt in counts.items() if cnt == top_count)
+    if len(tied) > 1:
+        most_common_cls = tied[0]
+
     peers_desc = ", ".join(
         f"{r.ai_provider}/{r.ai_model}"
         for r in valid_peers
@@ -902,12 +908,16 @@ async def analyze_failure_group_with_peers(
                 )
                 existing_details = parsed_analysis.details or ""
                 separator = "\n\n" if existing_details else ""
-                parsed_analysis = parsed_analysis.model_copy(
-                    update={
-                        "classification": fallback_cls,
-                        "details": f"{existing_details}{separator}\u26a0\ufe0f FALLBACK: {fallback_note}",
-                    }
-                )
+                update: dict = {
+                    "classification": fallback_cls,
+                    "details": f"{existing_details}{separator}\u26a0\ufe0f FALLBACK: {fallback_note}",
+                }
+                # Clear subtype fields incompatible with the fallback classification
+                if fallback_cls != "CODE ISSUE":
+                    update["code_fix"] = None
+                if fallback_cls != "PRODUCT BUG":
+                    update["product_bug_report"] = None
+                parsed_analysis = parsed_analysis.model_copy(update=update)
             else:
                 logger.error(
                     "Orchestrator classification empty and no valid peer classifications available"
