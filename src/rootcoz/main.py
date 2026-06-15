@@ -6570,7 +6570,7 @@ async def login(request: Request) -> JSONResponse:
     """Authenticate admin with username + API key. Returns session cookie."""
     body = await _read_json_object(request)
 
-    username = str(body.get("username", ""))
+    username = str(body.get("username", "")).strip().lower()
     api_key = str(body.get("api_key", ""))
 
     if not username or not api_key:
@@ -6997,7 +6997,7 @@ async def admin_create_user_endpoint(request: Request) -> JSONResponse:
     username = body.get("username", "")
     if not isinstance(username, str):
         raise HTTPException(status_code=400, detail="Username must be a string")
-    username = username.strip()
+    username = username.strip().lower()
     if not username:
         raise HTTPException(status_code=400, detail="Username is required")
 

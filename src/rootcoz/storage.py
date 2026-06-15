@@ -250,7 +250,7 @@ async def _migrate_lowercase_usernames(db: aiosqlite.Connection) -> None:
     for group in duplicate_groups:
         lname = group["lname"]
         cursor = await db.execute(
-            "SELECT id, username, role, created_at FROM users "
+            "SELECT id, username, role, api_key_hash, created_at FROM users "
             "WHERE lower(username) = ? ORDER BY created_at ASC",
             (lname,),
         )
@@ -262,14 +262,42 @@ async def _migrate_lowercase_usernames(db: aiosqlite.Connection) -> None:
             (v["role"] for v in variants),
             key=lambda r: _ROLE_PRIORITY.get(r, 0),
         )
+        updates: list[str] = []
+        params: list = []
         if best_role != survivor["role"]:
+            updates.append("role = ?")
+            params.append(best_role)
+        # Preserve API key: if survivor has no key, adopt the first
+        # available key from any duplicate so no one is locked out.
+        # Clear the donor's hash first to avoid UNIQUE constraint violation.
+        if not survivor["api_key_hash"]:
+            for v in variants[1:]:
+                if v["api_key_hash"]:
+                    updates.append("api_key_hash = ?")
+                    params.append(v["api_key_hash"])
+                    await db.execute(
+                        "UPDATE users SET api_key_hash = NULL WHERE id = ?",
+                        (v["id"],),
+                    )
+                    break
+        if updates:
+            params.append(survivor["id"])
             await db.execute(
-                "UPDATE users SET role = ? WHERE id = ?",
-                (best_role, survivor["id"]),
+                f"UPDATE users SET {', '.join(updates)} WHERE id = ?",
+                params,
             )
         # Re-point related tables from each duplicate to the survivor.
         for dup in variants[1:]:
             old_name = dup["username"]
+            # mention_reads has UNIQUE(username, comment_id) — delete
+            # rows that would collide with the survivor before re-pointing.
+            await db.execute(
+                "DELETE FROM mention_reads WHERE username = ? "
+                "AND comment_id IN ("
+                "  SELECT comment_id FROM mention_reads WHERE username = ?"
+                ")",
+                (old_name, lname),
+            )
             for table in _USERNAME_TABLES:
                 await db.execute(
                     f"UPDATE {table} SET username = ? WHERE username = ?",
