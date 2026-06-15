@@ -127,10 +127,10 @@ export function DashboardPage() {
   const [perPage, setPerPage] = useState(20)
   const [searchParams, setSearchParams] = useSearchParams()
 
+  const statusParam = searchParams.getAll('status').sort().join(',')
   const selectedStatuses = useMemo(() => {
-    const raw = searchParams.getAll('status')
-    return new Set(raw)
-  }, [searchParams])
+    return new Set(statusParam ? statusParam.split(',') : [])
+  }, [statusParam])
 
   const setSelectedStatuses = useCallback((statuses: Set<string>) => {
     setSearchParams((prev) => {
@@ -173,11 +173,16 @@ export function DashboardPage() {
   }, [setSearchParams])
 
   // Metadata filter state — persisted in URL query params (multi-select)
-  const metaTeams = useMemo(() => new Set(searchParams.getAll('team')), [searchParams])
-  const metaTiers = useMemo(() => new Set(searchParams.getAll('tier')), [searchParams])
-  const metaVersions = useMemo(() => new Set(searchParams.getAll('version')), [searchParams])
-  const metaLabels = useMemo(() => searchParams.getAll('label'), [searchParams])
-  const metaExcludeLabels = useMemo(() => searchParams.getAll('exclude_label'), [searchParams])
+  const teamParam = searchParams.getAll('team').sort().join(',')
+  const tierParam = searchParams.getAll('tier').sort().join(',')
+  const versionParam = searchParams.getAll('version').sort().join(',')
+  const labelParam = searchParams.getAll('label').sort().join(',')
+  const excludeLabelParam = searchParams.getAll('exclude_label').sort().join(',')
+  const metaTeams = useMemo(() => new Set(teamParam ? teamParam.split(',') : []), [teamParam])
+  const metaTiers = useMemo(() => new Set(tierParam ? tierParam.split(',') : []), [tierParam])
+  const metaVersions = useMemo(() => new Set(versionParam ? versionParam.split(',') : []), [versionParam])
+  const metaLabels = useMemo(() => labelParam ? labelParam.split(',') : [], [labelParam])
+  const metaExcludeLabels = useMemo(() => excludeLabelParam ? excludeLabelParam.split(',') : [], [excludeLabelParam])
 
   const toggleMetaParam = useCallback((key: string, value: string) => {
     setSearchParams((prev) => {
