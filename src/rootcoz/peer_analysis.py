@@ -277,6 +277,7 @@ def _build_peer_review_prompt(
     custom_prompt: str,
     resources_section: str,
     other_peer_responses: list[PeerResponseSummary] | None = None,
+    other_groups_summary: str = "",
 ) -> str:
     """Build the prompt for a peer to review the orchestrator's analysis.
 
@@ -291,6 +292,8 @@ def _build_peer_review_prompt(
         other_peer_responses: Previous round responses from other peers
             (excluding the current peer), typed as ``PeerResponseSummary``.
             None or empty list means no prior peer input (round 1).
+        other_groups_summary: Summary of other failure groups in the same job
+            for cross-reference context.
 
     Returns:
         Formatted peer review prompt string.
@@ -317,7 +320,7 @@ def _build_peer_review_prompt(
     return f"""IMPORTANT: This is an AI-only conversation. Do NOT be agreeable or sycophantic. \
 Critically evaluate the analysis below and provide your honest, independent assessment. \
 Challenge any conclusions you disagree with.
-
+{other_groups_summary}
 FAILURE SUMMARY:
 {failure_summary}
 
@@ -337,6 +340,7 @@ def _build_revision_prompt(
     peer_feedback: str,
     custom_prompt: str,
     resources_section: str,
+    other_groups_summary: str = "",
 ) -> str:
     """Build a prompt for the main AI to revise its analysis based on peer feedback.
 
@@ -346,6 +350,8 @@ def _build_revision_prompt(
         peer_feedback: Collected feedback from all peers.
         custom_prompt: Additional user instructions.
         resources_section: Available resources for the AI.
+        other_groups_summary: Summary of other failure groups in the same job
+            for cross-reference context.
 
     Returns:
         Formatted revision prompt string.
@@ -357,7 +363,7 @@ def _build_revision_prompt(
     return f"""IMPORTANT: This is an AI-only conversation. Do NOT be agreeable or sycophantic. \
 You are revising your analysis based on peer feedback. Consider the feedback carefully, \
 but only change your assessment if the arguments are convincing.
-
+{other_groups_summary}
 FAILURE SUMMARY:
 {failure_summary}
 
@@ -369,6 +375,11 @@ PEER FEEDBACK:
 
 Revise your analysis considering the peer feedback above. You may keep your original \
 classification if you believe the peers are wrong — justify your reasoning.
+
+TIMELINE RULE: All timestamps you cite in your analysis MUST be in \
+chronological order. If event A happens at 15:35:56 and event B happens \
+at 15:36:58, then A happened BEFORE B. Verify your timeline is \
+consistent before responding.
 {custom_section}{resources_section}
 {JSON_RESPONSE_SCHEMA}
 """
@@ -417,6 +428,7 @@ async def analyze_failure_group_with_peers(
     additional_repos: dict[str, Path] | None = None,
     max_concurrent_ai_calls: int = 3,
     auth_header: str = "",
+    other_groups_summary: str = "",
 ) -> list[FailureAnalysis]:
     """Analyze a failure group using multi-AI peer consensus.
 
@@ -446,6 +458,8 @@ async def analyze_failure_group_with_peers(
         additional_repos: Extra cloned repositories for AI context.
         max_concurrent_ai_calls: Maximum concurrent AI calls for
             peer analysis parallelism (default: 3).
+        other_groups_summary: Summary of other failure groups in the same job
+            for cross-reference context. Built by ``build_other_groups_summary()``.
 
     Returns:
         List of FailureAnalysis objects, one per failure in the group.
@@ -468,6 +482,7 @@ async def analyze_failure_group_with_peers(
         job_id=job_id,
         additional_repos=additional_repos,
         auth_header=auth_header,
+        other_groups_summary=other_groups_summary,
     )
 
     # Validate orchestrator classification before feeding into consensus
@@ -572,6 +587,7 @@ async def analyze_failure_group_with_peers(
                     custom_prompt=custom_prompt,
                     resources_section=resources_section,
                     other_peer_responses=other_responses if other_responses else None,
+                    other_groups_summary=other_groups_summary,
                 )
 
             async def _call_peer(
@@ -800,6 +816,7 @@ async def analyze_failure_group_with_peers(
                     peer_feedback=peer_feedback,
                     custom_prompt=custom_prompt,
                     resources_section=resources_section,
+                    other_groups_summary=other_groups_summary,
                 )
 
                 previous_analysis = parsed_analysis

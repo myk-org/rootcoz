@@ -13,6 +13,7 @@ from rootcoz.config import Settings, get_settings
 from rootcoz.engine.core import (
     JSON_RESPONSE_SCHEMA,
     analyze_failure_group,
+    build_other_groups_summary,
     build_resources_section,
     clone_additional_repos,
     parse_json_response,
@@ -301,6 +302,195 @@ class TestRunSingleAiAnalysis:
         assert call_kwargs["ai_provider"] == "claude"
         assert call_kwargs["ai_model"] == "opus"
         assert call_kwargs["auth_header"] == "Bearer test-token"
+
+
+class TestBuildOtherGroupsSummary:
+    """Tests for build_other_groups_summary cross-reference context builder."""
+
+    def test_single_group_returns_empty(self) -> None:
+        """When only one group exists, no cross-reference is needed."""
+        failure = FailedTest(test_name="test_a", error_message="err")
+        groups = {"sig1": [failure]}
+        assert build_other_groups_summary(groups, "sig1") == ""
+
+    def test_multiple_groups_returns_summary(self) -> None:
+        """Multiple groups produce a formatted summary with other groups' info."""
+        f1 = FailedTest(test_name="test_a", error_message="timeout waiting")
+        f2 = FailedTest(test_name="test_b", error_message="connection refused")
+        groups = {"sig1": [f1], "sig2": [f2]}
+
+        result = build_other_groups_summary(groups, "sig1")
+        assert "OTHER FAILURE GROUPS" in result
+        assert "test_b" in result
+        assert "connection refused" in result
+        # Current group's tests should NOT appear in the summary
+        assert "test_a" not in result
+
+    def test_shows_current_group_position(self) -> None:
+        """Summary includes 'You are analyzing group M of N'."""
+        f1 = FailedTest(test_name="test_a", error_message="err1")
+        f2 = FailedTest(test_name="test_b", error_message="err2")
+        f3 = FailedTest(test_name="test_c", error_message="err3")
+        groups = {"sig1": [f1], "sig2": [f2], "sig3": [f3]}
+
+        result = build_other_groups_summary(groups, "sig2")
+        assert "You are analyzing group 2 of 3." in result
+
+    def test_truncates_long_error_messages(self) -> None:
+        """Error previews longer than 150 chars are truncated."""
+        f1 = FailedTest(test_name="test_a", error_message="short")
+        f2 = FailedTest(test_name="test_b", error_message="x" * 200)
+        groups = {"sig1": [f1], "sig2": [f2]}
+
+        result = build_other_groups_summary(groups, "sig1")
+        assert "..." in result
+        # Should not contain the full 200-char message
+        assert "x" * 200 not in result
+
+    def test_multiple_tests_in_group(self) -> None:
+        """Groups with multiple tests show all test names."""
+        f1 = FailedTest(test_name="test_a", error_message="err")
+        f2a = FailedTest(test_name="test_b", error_message="same err")
+        f2b = FailedTest(test_name="test_c", error_message="same err")
+        groups = {"sig1": [f1], "sig2": [f2a, f2b]}
+
+        result = build_other_groups_summary(groups, "sig1")
+        assert "test_b" in result
+        assert "test_c" in result
+
+    def test_includes_isolation_instructions(self) -> None:
+        """Summary includes instructions to avoid cross-contamination."""
+        f1 = FailedTest(test_name="test_a", error_message="err1")
+        f2 = FailedTest(test_name="test_b", error_message="err2")
+        groups = {"sig1": [f1], "sig2": [f2]}
+
+        result = build_other_groups_summary(groups, "sig1")
+        assert "Do NOT reference" in result
+        assert "Focus ONLY" in result
+
+
+class TestRunSingleAiAnalysisGroupContext:
+    """Tests for cross-reference and timeline context in AI prompt."""
+
+    @pytest.mark.asyncio
+    async def test_other_groups_summary_in_prompt(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """other_groups_summary is included in the AI prompt."""
+        captured_prompt = {}
+
+        async def mock_ai(prompt, **kwargs):
+            captured_prompt["text"] = prompt
+            return AIResult(
+                success=True,
+                text=json.dumps(
+                    {
+                        "classification": "CODE ISSUE",
+                        "affected_tests": ["test_a"],
+                        "details": "broken",
+                    }
+                ),
+            )
+
+        monkeypatch.setattr("rootcoz.engine.core.call_ai_once", mock_ai)
+
+        failure = FailedTest(
+            test_name="test_a", error_message="err", stack_trace="trace"
+        )
+        summary = "\n\n=== OTHER FAILURE GROUPS ===\nYou are analyzing group 1 of 2.\n"
+        await run_single_ai_analysis(
+            failures=[failure],
+            console_context="",
+            repo_path=None,
+            ai_provider="claude",
+            ai_model="opus",
+            ai_call_timeout=None,
+            custom_prompt="",
+            artifacts_context="",
+            server_url="",
+            job_id="",
+            other_groups_summary=summary,
+        )
+        assert "OTHER FAILURE GROUPS" in captured_prompt["text"]
+        assert "group 1 of 2" in captured_prompt["text"]
+
+    @pytest.mark.asyncio
+    async def test_timeline_rule_in_prompt(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Timeline consistency rule is always included in the AI prompt."""
+        captured_prompt = {}
+
+        async def mock_ai(prompt, **kwargs):
+            captured_prompt["text"] = prompt
+            return AIResult(
+                success=True,
+                text=json.dumps(
+                    {
+                        "classification": "INFRASTRUCTURE",
+                        "affected_tests": ["test_x"],
+                        "details": "node down",
+                    }
+                ),
+            )
+
+        monkeypatch.setattr("rootcoz.engine.core.call_ai_once", mock_ai)
+
+        failure = FailedTest(
+            test_name="test_x", error_message="err", stack_trace="trace"
+        )
+        await run_single_ai_analysis(
+            failures=[failure],
+            console_context="",
+            repo_path=None,
+            ai_provider="claude",
+            ai_model="opus",
+            ai_call_timeout=None,
+            custom_prompt="",
+            artifacts_context="",
+            server_url="",
+            job_id="",
+        )
+        assert "TIMELINE RULE" in captured_prompt["text"]
+        assert "chronological order" in captured_prompt["text"]
+
+    @pytest.mark.asyncio
+    async def test_no_summary_when_empty(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Empty other_groups_summary does not add cross-reference block."""
+        captured_prompt = {}
+
+        async def mock_ai(prompt, **kwargs):
+            captured_prompt["text"] = prompt
+            return AIResult(
+                success=True,
+                text=json.dumps(
+                    {
+                        "classification": "CODE ISSUE",
+                        "affected_tests": ["test_a"],
+                        "details": "broken",
+                    }
+                ),
+            )
+
+        monkeypatch.setattr("rootcoz.engine.core.call_ai_once", mock_ai)
+
+        failure = FailedTest(
+            test_name="test_a", error_message="err", stack_trace="trace"
+        )
+        await run_single_ai_analysis(
+            failures=[failure],
+            console_context="",
+            repo_path=None,
+            ai_provider="claude",
+            ai_model="opus",
+            ai_call_timeout=None,
+            custom_prompt="",
+            artifacts_context="",
+            server_url="",
+            job_id="",
+            other_groups_summary="",
+        )
+        assert "OTHER FAILURE GROUPS" not in captured_prompt["text"]
 
 
 class TestAnalyzeFailureGroupPeerDelegation:
