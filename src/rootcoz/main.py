@@ -121,6 +121,7 @@ from rootcoz.models import (
     SetReviewedRequest,
     UnifiedAnalyzeRequest,
     UnsubscribeRequest,
+    _SYSTEM_TAGS,
 )
 from rootcoz.monitoring import (
     build_health_response,
@@ -2550,6 +2551,30 @@ def _stamp_reanalysis_metadata(
             request_params["reanalyzed_from_job_name"] = reanalyzed_from_job_name
 
 
+def _ensure_submitter_tag(tags: list[str] | None, username: str) -> list[str]:
+    """Return *tags* with *username* included (lowercased, deduplicated)."""
+    result = list(tags) if tags else []
+    normalized = username.strip().lower()
+    if not normalized or normalized in _SYSTEM_TAGS:
+        return result
+    # If any existing tag matches case-insensitively, keep list as-is
+    if any(isinstance(t, str) and t.lower() == normalized for t in result):
+        return result
+    result.append(normalized)
+    return result
+
+
+def _strip_old_submitter_tag(tags: list[str], result_data: dict) -> list[str]:
+    """Remove the old submitter's username tag so re-analyze adds only the new one."""
+    old_submitter = (result_data.get("request_params") or {}).get("submitted_by", "")
+    if not old_submitter:
+        return tags
+    old_normalized = old_submitter.strip().lower()
+    if old_normalized in _SYSTEM_TAGS:
+        return tags
+    return [t for t in tags if not (isinstance(t, str) and t.lower() == old_normalized)]
+
+
 async def _enqueue_file_raw_analysis(
     body: "UnifiedAnalyzeRequest",
     merged: "Settings",
@@ -2646,8 +2671,7 @@ async def _enqueue_file_raw_analysis(
         reanalyzed_from_job_name,
     )
     effective_tags = tags if tags is not None else (body.tags or None)
-    if effective_tags:
-        initial_result["tags"] = effective_tags
+    initial_result["tags"] = _ensure_submitter_tag(effective_tags, username)
     await save_result(job_id, "", "pending", initial_result)
     notify_active_count_changed()
     notify_dashboard_changed()
@@ -2789,8 +2813,7 @@ async def _enqueue_analysis_job(
         reanalyzed_from_job_id,
         reanalyzed_from_job_name,
     )
-    if body.tags:
-        initial_result["tags"] = body.tags
+    initial_result["tags"] = _ensure_submitter_tag(body.tags, username)
     can_resume_wait = merged.wait_for_completion and bool(merged.jenkins_url)
     await save_result(
         job_id,
@@ -3296,6 +3319,8 @@ async def re_analyze(
         existing_tags = list(result_data.get("tags", []))
         if "re-analyze" not in existing_tags:
             existing_tags.append("re-analyze")
+        # Remove old submitter tag — enqueue will add the current submitter
+        existing_tags = _strip_old_submitter_tag(existing_tags, result_data)
         if "tags" in body.model_fields_set:
             for t in getattr(body, "tags", None) or []:
                 if t not in existing_tags:
@@ -3343,6 +3368,8 @@ async def re_analyze(
     existing_tags = list(result_data.get("tags", []))
     if "re-analyze" not in existing_tags:
         existing_tags.append("re-analyze")
+    # Remove old submitter tag — enqueue will add the current submitter
+    existing_tags = _strip_old_submitter_tag(existing_tags, result_data)
     # Merge with any user-supplied tags from the override body
     if "tags" in body.model_fields_set:
         for t in original_body.tags or []:
@@ -5479,7 +5506,7 @@ async def update_tags(
     request: Request,
     _: None = Depends(_bind_job_id),
 ) -> dict:
-    """Update tags on an existing result. System tags (re-analyze) cannot be removed."""
+    """Update tags on an existing result. System tags (re-analyze, submitter username) cannot be removed."""
     _check_allow_list(request)
     body = await _read_json_object(request)
     raw_tags = body.get("tags")
@@ -5491,7 +5518,7 @@ async def update_tags(
     tags: list[str] = []
     for t in raw_tags:
         normalized = t.strip().lower()
-        if normalized and normalized not in seen:
+        if normalized and normalized not in seen and normalized not in _SYSTEM_TAGS:
             seen.add(normalized)
             tags.append(normalized)
 
@@ -5502,10 +5529,14 @@ async def update_tags(
     result_data = stored["result"]
     old_tags = result_data.get("tags", [])
 
-    # Preserve system tags that user tried to remove
-    for st in old_tags:
-        if st == "re-analyze" and st not in tags:
-            tags.append(st)
+    # Preserve system tags
+    # re-analyze tag
+    if "re-analyze" in [str(t).lower() for t in old_tags] and "re-analyze" not in tags:
+        tags.append("re-analyze")
+    # Submitter tag
+    submitted_by = (result_data.get("request_params") or {}).get("submitted_by", "")
+    if submitted_by:
+        tags = _ensure_submitter_tag(tags, submitted_by)
 
     await patch_result_json(job_id, lambda d: d.update({"tags": tags}))
     notify_dashboard_changed()
