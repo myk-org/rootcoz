@@ -474,3 +474,36 @@ class TestHistoryDateFilter:
             # With future date filter — should find nothing
             result = await storage.get_all_failures(date_from="2099-01-01")
             assert result["total"] == 0
+
+
+class TestEffectiveClassification:
+    @pytest.mark.asyncio
+    async def test_get_all_failures_uses_effective_classification(
+        self, populated_db: Path
+    ):
+        """Classification filter uses effective (user override), not AI original."""
+        with patch.object(storage, "DB_PATH", populated_db):
+            # populated_db has failure_history for test_foo with classification="CODE ISSUE"
+            # and a test_classification override to "PRODUCT BUG".
+            # Add a new override to "FLAKY".
+            async with storage._connect_db() as conn:
+                await conn.execute(
+                    """INSERT INTO test_classifications
+                       (test_name, job_name, classification, created_by, job_id,
+                        child_build_number, visible, created_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now', '+2 minutes'))""",
+                    ("test_foo", "test-job", "FLAKY", "user1", "job-1", 0, 1),
+                )
+                await conn.commit()
+
+            # Filtering by the user override should find the row
+            result = await storage.get_all_failures(classification="FLAKY")
+            assert result["total"] >= 1
+            assert any(f["test_name"] == "test_foo" for f in result["failures"])
+
+            # Filtering by the AI original should NOT find the row
+            result = await storage.get_all_failures(classification="CODE ISSUE")
+            test_foo_rows = [
+                f for f in result["failures"] if f["test_name"] == "test_foo"
+            ]
+            assert len(test_foo_rows) == 0

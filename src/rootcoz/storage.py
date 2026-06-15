@@ -1605,6 +1605,26 @@ async def backfill_failure_history() -> None:
     logger.info(f"Backfill complete: processed {backfilled}/{len(rows)} results")
 
 
+# SQL subquery for resolving effective classification.
+# LEFT JOINs with the latest visible test_classification override per
+# (job_id, test_name, child_build_number). Use COALESCE(tc_latest.classification,
+# fh.classification) to get the effective classification.
+_TC_LATEST_JOIN = """
+    LEFT JOIN (
+        SELECT job_id, test_name, child_build_number, classification,
+               ROW_NUMBER() OVER (
+                   PARTITION BY job_id, test_name, child_build_number
+                   ORDER BY created_at DESC, id DESC
+               ) AS rn
+        FROM test_classifications
+        WHERE visible = 1
+    ) tc_latest ON tc_latest.job_id = fh.job_id
+        AND tc_latest.test_name = fh.test_name
+        AND tc_latest.child_build_number = fh.child_build_number
+        AND tc_latest.rn = 1
+"""
+
+
 async def _get_failure_stats(
     db: aiosqlite.Connection,
     job_filter: str,
@@ -1623,7 +1643,7 @@ async def _get_failure_stats(
     # child jobs within the same build, and counting rows would inflate
     # the failure count relative to total_runs (which counts builds).
     cursor = await db.execute(
-        f"SELECT COUNT(DISTINCT job_id) FROM failure_history WHERE test_name = ?{job_filter}",
+        f"SELECT COUNT(DISTINCT fh.job_id) FROM failure_history fh WHERE fh.test_name = ?{job_filter}",
         params,
     )
     failures = (await cursor.fetchone())[0]
@@ -1633,18 +1653,20 @@ async def _get_failure_stats(
 
     # First and last seen
     cursor = await db.execute(
-        f"SELECT MIN(analyzed_at), MAX(analyzed_at) FROM failure_history WHERE test_name = ?{job_filter}",
+        f"SELECT MIN(fh.analyzed_at), MAX(fh.analyzed_at) FROM failure_history fh WHERE fh.test_name = ?{job_filter}",
         params,
     )
     row = await cursor.fetchone()
     first_seen = row[0]
     last_seen = row[1]
 
-    # Last classification (most recent failure)
+    # Last effective classification (most recent failure, with user override)
     cursor = await db.execute(
-        f"SELECT classification FROM failure_history"
-        f" WHERE test_name = ?{job_filter}"
-        f" ORDER BY analyzed_at DESC, id DESC LIMIT 1",
+        f"SELECT COALESCE(tc_latest.classification, fh.classification)"
+        f" FROM failure_history fh"
+        f" {_TC_LATEST_JOIN}"
+        f" WHERE fh.test_name = ?{job_filter}"
+        f" ORDER BY fh.analyzed_at DESC, fh.id DESC LIMIT 1",
         params,
     )
     last_classification = (await cursor.fetchone())[0] or ""
@@ -1657,7 +1679,10 @@ async def _get_classification_breakdown(
     job_filter: str,
     params: list,
 ) -> dict[str, int]:
-    """Return a dict mapping classification labels to their counts.
+    """Return a dict mapping effective classification labels to their counts.
+
+    Uses the latest user override from test_classifications if available,
+    otherwise falls back to the AI classification in failure_history.
 
     Args:
         db: Open aiosqlite connection with row_factory set.
@@ -1666,7 +1691,11 @@ async def _get_classification_breakdown(
                 (first element is always test_name).
     """
     cursor = await db.execute(
-        f"SELECT classification, COUNT(*) FROM failure_history WHERE test_name = ?{job_filter} GROUP BY classification",
+        f"SELECT COALESCE(tc_latest.classification, fh.classification) AS eff_class, COUNT(*)"
+        f" FROM failure_history fh"
+        f" {_TC_LATEST_JOIN}"
+        f" WHERE fh.test_name = ?{job_filter}"
+        f" GROUP BY eff_class",
         params,
     )
     classifications: dict[str, int] = {}
@@ -1731,14 +1760,14 @@ async def get_test_history(
         f"get_test_history: test_name={test_name}, limit={limit}, job_name={job_name}"
     )
     async with _connect_db() as db:
-        # Build optional job_name filter
+        # Build optional job_name filter (fh-prefixed for JOINed queries)
         job_filter = ""
         params: list = [test_name]
         if job_name:
-            job_filter = " AND job_name = ?"
+            job_filter = " AND fh.job_name = ?"
             params.append(job_name)
         if exclude_job_id:
-            job_filter += " AND job_id != ?"
+            job_filter += " AND fh.job_id != ?"
             params.append(exclude_job_id)
 
         failures, first_seen, last_seen, last_classification = await _get_failure_stats(
@@ -1766,10 +1795,14 @@ async def get_test_history(
 
         # Recent runs (failures only, since we only track failures)
         cursor = await db.execute(
-            f"""SELECT job_id, job_name, build_number, error_message, error_signature,
-                       classification, child_job_name, child_build_number, analyzed_at
-                FROM failure_history WHERE test_name = ?{job_filter}
-                ORDER BY analyzed_at DESC, id DESC LIMIT ?""",
+            f"""SELECT fh.job_id, fh.job_name, fh.build_number, fh.error_message,
+                       fh.error_signature,
+                       COALESCE(tc_latest.classification, fh.classification) AS classification,
+                       fh.child_job_name, fh.child_build_number, fh.analyzed_at
+                FROM failure_history fh
+                {_TC_LATEST_JOIN}
+                WHERE fh.test_name = ?{job_filter}
+                ORDER BY fh.analyzed_at DESC, fh.id DESC LIMIT ?""",
             [*params, limit],
         )
         recent_runs = [dict(row) for row in await cursor.fetchall()]
@@ -1781,7 +1814,7 @@ async def get_test_history(
         # streak (an intervening pass would not be detected).
         # Adding pass tracking is deferred to a future enhancement.
         cursor = await db.execute(
-            f"SELECT COUNT(*) FROM failure_history WHERE test_name = ?{job_filter}",
+            f"SELECT COUNT(*) FROM failure_history fh WHERE fh.test_name = ?{job_filter}",
             params,
         )
         consecutive_failures = (await cursor.fetchone())[0]
@@ -2363,33 +2396,37 @@ async def get_all_failures(
 
     if search:
         conditions.append(
-            "(test_name LIKE ? OR error_message LIKE ? OR job_name LIKE ?)"
+            "(fh.test_name LIKE ? OR fh.error_message LIKE ? OR fh.job_name LIKE ?)"
         )
         params.extend([f"%{search}%", f"%{search}%", f"%{search}%"])
     if job_name:
-        conditions.append("job_name = ?")
+        conditions.append("fh.job_name = ?")
         params.append(job_name)
     if classification:
-        conditions.append("classification = ?")
+        conditions.append("COALESCE(tc_latest.classification, fh.classification) = ?")
         params.append(classification)
 
-    _build_date_filter("analyzed_at", date_from, date_to, conditions, params)
+    _build_date_filter("fh.analyzed_at", date_from, date_to, conditions, params)
 
     where = " AND ".join(conditions) if conditions else "1=1"
 
     async with _connect_db() as db:
         # Get total count
         cursor = await db.execute(
-            f"SELECT COUNT(*) FROM failure_history WHERE {where}",
+            f"SELECT COUNT(*) FROM failure_history fh {_TC_LATEST_JOIN} WHERE {where}",
             params,
         )
         total = (await cursor.fetchone())[0]
 
         # Get paginated results
         cursor = await db.execute(
-            f"SELECT id, job_id, job_name, build_number, test_name, error_message, "
-            f"error_signature, classification, child_job_name, child_build_number, analyzed_at "
-            f"FROM failure_history WHERE {where} ORDER BY analyzed_at DESC, id DESC LIMIT ? OFFSET ?",
+            f"SELECT fh.id, fh.job_id, fh.job_name, fh.build_number, fh.test_name, "
+            f"fh.error_message, fh.error_signature, "
+            f"COALESCE(tc_latest.classification, fh.classification) AS classification, "
+            f"fh.child_job_name, fh.child_build_number, fh.analyzed_at "
+            f"FROM failure_history fh"
+            f" {_TC_LATEST_JOIN}"
+            f" WHERE {where} ORDER BY fh.analyzed_at DESC, fh.id DESC LIMIT ? OFFSET ?",
             [*params, limit, offset],
         )
         rows = await cursor.fetchall()
