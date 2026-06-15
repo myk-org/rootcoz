@@ -9185,6 +9185,126 @@ async def _process_admin_chat_message(
             # Do NOT revoke auth_header — it's embedded in custom tool HTTP headers
 
 
+# -- Admin chat artifact helpers --
+
+_ADMIN_ARTIFACTS_BASE = Path("/tmp/rootcoz-admin-artifacts")
+
+
+def _get_admin_artifacts_dir(username: str) -> Path:
+    """Get the artifacts directory for an admin user."""
+    safe_user = username.replace("/", "_").replace("..", "_").replace("\\", "_")
+    return _ADMIN_ARTIFACTS_BASE / safe_user
+
+
+def _cleanup_admin_artifacts(username: str) -> None:
+    """Delete all artifacts for an admin user."""
+    import shutil
+
+    artifacts_dir = _get_admin_artifacts_dir(username)
+    if artifacts_dir.exists():
+        try:
+            shutil.rmtree(artifacts_dir)
+            logger.info("Admin chat: cleaned up artifacts for %s", username)
+        except OSError:
+            logger.warning(
+                "Admin chat: failed to clean up artifacts for %s",
+                username,
+                exc_info=True,
+            )
+
+
+class SaveArtifactRequest(BaseModel):
+    html_content: str = Field(..., min_length=1, max_length=5_000_000)
+    filename: str = Field(..., min_length=1, max_length=255)
+
+
+@app.post("/api/admin-chat/artifacts")
+async def save_admin_chat_artifact(
+    body: SaveArtifactRequest,
+    request: Request,
+) -> dict:
+    """Save an HTML report artifact from admin chat. Returns a download URL."""
+    _require_admin(request)
+    username = request.state.username
+
+    # Sanitize filename — strip path separators, keep only the basename
+    safe_filename = (
+        body.filename.replace("/", "_").replace("\\", "_").replace("..", "_").strip()
+    )
+    if not safe_filename:
+        raise HTTPException(status_code=422, detail="Invalid filename")
+    # Ensure .html extension
+    if not safe_filename.endswith(".html"):
+        safe_filename += ".html"
+
+    artifact_id = str(uuid.uuid4())
+    artifacts_dir = _get_admin_artifacts_dir(username)
+    artifacts_dir.mkdir(parents=True, exist_ok=True)
+    artifacts_dir.chmod(0o700)
+
+    artifact_path = artifacts_dir / f"{artifact_id}.html"
+    try:
+        await asyncio.to_thread(
+            artifact_path.write_text, body.html_content, encoding="utf-8"
+        )
+    except OSError as exc:
+        logger.error("Failed to save artifact: %s", exc, exc_info=True)
+        raise HTTPException(status_code=500, detail="Failed to save artifact")
+
+    logger.info(
+        "Admin chat: saved artifact %s (%d chars) for %s",
+        artifact_id,
+        len(body.html_content),
+        username,
+    )
+
+    return {
+        "artifact_id": artifact_id,
+        "download_url": f"/api/admin-chat/artifacts/{artifact_id}",
+        "filename": safe_filename,
+    }
+
+
+@app.get("/api/admin-chat/artifacts/{artifact_id}")
+async def get_admin_chat_artifact(
+    artifact_id: str,
+    request: Request,
+) -> Response:
+    """Download an admin chat HTML report artifact."""
+    _require_admin(request)
+    username = request.state.username
+
+    # Validate artifact_id is a valid UUID to prevent path traversal
+    try:
+        uuid.UUID(artifact_id)
+    except ValueError:
+        raise HTTPException(status_code=404, detail="Artifact not found")
+
+    artifacts_dir = _get_admin_artifacts_dir(username)
+    artifact_path = (artifacts_dir / f"{artifact_id}.html").resolve()
+    # Belt-and-suspenders: ensure resolved path stays under the artifacts dir
+    if not artifact_path.is_relative_to(artifacts_dir.resolve()):
+        raise HTTPException(status_code=404, detail="Artifact not found")
+    if not artifact_path.exists():
+        raise HTTPException(status_code=404, detail="Artifact not found")
+
+    try:
+        content = await asyncio.to_thread(artifact_path.read_text, encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        logger.error("Failed to read artifact %s: %s", artifact_id, exc, exc_info=True)
+        raise HTTPException(status_code=500, detail="Failed to read artifact")
+
+    download_filename = f"report-{artifact_id[:8]}.html"
+
+    return Response(
+        content=content,
+        media_type="text/html",
+        headers={
+            "Content-Disposition": f'attachment; filename="{download_filename}"',
+        },
+    )
+
+
 @app.delete("/api/admin/chat")
 async def clear_admin_chat_history(request: Request) -> dict:
     """Clear admin chat messages for the current user."""
@@ -9206,6 +9326,7 @@ async def clear_admin_chat_history(request: Request) -> dict:
                 exc_info=True,
             )
 
+    _cleanup_admin_artifacts(username)
     _cleanup_chat_state(f"{ADMIN_CHAT_JOB_ID}:{username}")
     logger.info("Admin chat: cleared %d messages for user %s", count, username)
     return {"deleted": count}

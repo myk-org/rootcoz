@@ -3101,6 +3101,66 @@ def admin_chat_clear(
         typer.echo(f"Cleared {data.get('deleted', 0)} messages.")
 
 
+@admin_chat_app.command("save-artifact")
+def admin_chat_save_artifact(
+    html_file: Path = typer.Argument(help="Path to the HTML file to upload."),
+    filename: str = typer.Option(
+        "",
+        "--filename",
+        "-f",
+        help="Artifact filename. Defaults to the input file name.",
+    ),
+    json_output: bool = _JSON_OPTION,
+) -> None:
+    """Save an HTML file as an admin chat report artifact."""
+    if not html_file.is_file():
+        typer.echo(f"Error: File not found: {html_file}", err=True)
+        raise typer.Exit(1)
+
+    try:
+        html_content = html_file.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        typer.echo(f"Error: Cannot read {html_file}: {exc}", err=True)
+        raise typer.Exit(1) from None
+
+    artifact_filename = filename or html_file.name
+
+    data = _run_client_command(
+        json_output,
+        lambda c: c.save_admin_chat_artifact(html_content, artifact_filename),
+        emit_output=False,
+    )
+    if not _state.get("json", False):
+        typer.echo(f"Artifact saved: {data.get('download_url', '')}")
+        typer.echo(f"Filename: {data.get('filename', '')}")
+
+
+@admin_chat_app.command("download-artifact")
+def admin_chat_download_artifact(
+    artifact_id: str = typer.Argument(help="Artifact UUID to download."),
+    output: str = typer.Option(
+        "", "--output", "-o", help="Output file path. Defaults to report-<id>.html."
+    ),
+    json_output: bool = _JSON_OPTION,
+) -> None:
+    """Download an admin chat report artifact."""
+    _set_json(json_output)
+    client = _get_client()
+    try:
+        content = client.download_admin_chat_artifact(artifact_id)
+    except RootCozError as err:
+        _handle_error(err)
+
+    out_path = Path(output) if output else Path(f"report-{artifact_id[:8]}.html")
+    out_path.write_bytes(content)
+    if _state.get("json", False):
+        print_output(
+            {"path": str(out_path), "size": len(content)}, columns=[], as_json=True
+        )
+    else:
+        typer.echo(f"Downloaded to {out_path} ({len(content)} bytes)")
+
+
 # -- Reports ------------------------------------------------------------------
 
 _REPORT_TEAM_OPTION = typer.Option("", "--team", help="Filter by team.")

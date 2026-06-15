@@ -224,12 +224,12 @@ class TestBuildChatCustomTools:
 class TestBuildAdminCustomTools:
     """Tests for build_admin_custom_tools."""
 
-    def test_returns_five_tools(self):
+    def test_returns_six_tools(self):
         tools = build_admin_custom_tools(
             server_url="http://localhost:8000",
             auth_token="test-token",
         )
-        assert len(tools) == 5
+        assert len(tools) == 6
         names = [t["name"] for t in tools]
         assert names == [
             "db_schema",
@@ -237,6 +237,7 @@ class TestBuildAdminCustomTools:
             "get_report_totals",
             "get_classification_overrides",
             "get_issues_created",
+            "save_report",
         ]
 
     def test_report_tool_urls(self):
@@ -307,6 +308,28 @@ class TestBuildAdminCustomTools:
         for tool in tools:
             assert tool["http"]["headers"]["Authorization"] == "Bearer my-secret-token"
 
+    def test_save_report_tool_config(self):
+        tools = build_admin_custom_tools(
+            server_url="http://localhost:8000",
+            auth_token="test-token",
+        )
+        save_report = next(t for t in tools if t["name"] == "save_report")
+        assert save_report["http"]["method"] == "POST"
+        assert (
+            save_report["http"]["url"]
+            == "http://localhost:8000/api/admin-chat/artifacts"
+        )
+        assert "html_content" in save_report["parameters"]["properties"]
+        assert "filename" in save_report["parameters"]["properties"]
+        assert save_report["parameters"]["required"] == [
+            "html_content",
+            "filename",
+        ]
+        assert save_report["http"]["body_template"] == {
+            "html_content": "{html_content}",
+            "filename": "{filename}",
+        }
+
 
 class TestBuildAdminSystemPrompt:
     """Tests for build_admin_system_prompt."""
@@ -330,6 +353,17 @@ class TestBuildAdminSystemPrompt:
         prompt = build_admin_system_prompt(tools)
         for tool in tools:
             assert tool["name"] in prompt
+
+    def test_includes_report_generation_instructions(self):
+        tools = build_admin_custom_tools(
+            server_url="http://localhost:8000",
+            auth_token="test-token",
+        )
+        prompt = build_admin_system_prompt(tools)
+        assert "Report Generation" in prompt
+        assert "save_report" in prompt
+        assert "self-contained HTML" in prompt
+        assert "CSS inline" in prompt
 
 
 class TestBuildSystemPrompt:
@@ -1142,3 +1176,113 @@ class TestChatEndpoints:
         data = response.json()
         assert len(data["messages"]) == 2
         assert data["total"] == 6
+
+
+class TestAdminChatArtifactEndpoints:
+    """Tests for admin chat artifact save/download endpoints."""
+
+    def test_save_artifact(self, test_client):
+        response = test_client.post(
+            "/api/admin-chat/artifacts",
+            json={
+                "html_content": "<html><body>Report</body></html>",
+                "filename": "test-report.html",
+            },
+        )
+        assert response.status_code == 200
+        data = response.json()
+        assert "artifact_id" in data
+        assert "download_url" in data
+        assert data["filename"] == "test-report.html"
+        assert data["download_url"].startswith("/api/admin-chat/artifacts/")
+
+    def test_save_artifact_adds_html_extension(self, test_client):
+        response = test_client.post(
+            "/api/admin-chat/artifacts",
+            json={
+                "html_content": "<html><body>Report</body></html>",
+                "filename": "my-report",
+            },
+        )
+        assert response.status_code == 200
+        assert response.json()["filename"] == "my-report.html"
+
+    def test_save_artifact_sanitizes_filename(self, test_client):
+        response = test_client.post(
+            "/api/admin-chat/artifacts",
+            json={
+                "html_content": "<html>test</html>",
+                "filename": "../../etc/passwd",
+            },
+        )
+        assert response.status_code == 200
+        # Path separators replaced, no traversal
+        filename = response.json()["filename"]
+        assert "/" not in filename
+        assert ".." not in filename
+
+    def test_save_artifact_empty_content_rejected(self, test_client):
+        response = test_client.post(
+            "/api/admin-chat/artifacts",
+            json={"html_content": "", "filename": "report.html"},
+        )
+        assert response.status_code == 422
+
+    def test_save_artifact_missing_filename_rejected(self, test_client):
+        response = test_client.post(
+            "/api/admin-chat/artifacts",
+            json={"html_content": "<html>test</html>"},
+        )
+        assert response.status_code == 422
+
+    def test_download_artifact(self, test_client):
+        # Save first
+        save_resp = test_client.post(
+            "/api/admin-chat/artifacts",
+            json={
+                "html_content": "<html><body>My Report</body></html>",
+                "filename": "download-test.html",
+            },
+        )
+        download_url = save_resp.json()["download_url"]
+
+        # Download
+        response = test_client.get(download_url)
+        assert response.status_code == 200
+        assert "<html><body>My Report</body></html>" in response.text
+        assert "attachment" in response.headers.get("content-disposition", "")
+        assert response.headers.get("content-type") == "text/html; charset=utf-8"
+
+    def test_download_artifact_not_found(self, test_client):
+        response = test_client.get(
+            "/api/admin-chat/artifacts/00000000-0000-0000-0000-000000000000"
+        )
+        assert response.status_code == 404
+
+    def test_download_artifact_invalid_id(self, test_client):
+        response = test_client.get("/api/admin-chat/artifacts/not-a-uuid")
+        assert response.status_code == 404
+
+    def test_download_artifact_path_traversal_blocked(self, test_client):
+        response = test_client.get("/api/admin-chat/artifacts/../../etc/passwd")
+        assert response.status_code == 404
+
+    def test_artifact_cleanup_on_clear(self, test_client):
+        # Save an artifact
+        save_resp = test_client.post(
+            "/api/admin-chat/artifacts",
+            json={
+                "html_content": "<html>cleanup test</html>",
+                "filename": "cleanup.html",
+            },
+        )
+        download_url = save_resp.json()["download_url"]
+
+        # Verify it exists
+        assert test_client.get(download_url).status_code == 200
+
+        # Clear admin chat — should also clean up artifacts
+        test_client.delete("/api/admin/chat")
+
+        # Artifact should be gone
+        assert test_client.get(download_url).status_code == 404

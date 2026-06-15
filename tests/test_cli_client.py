@@ -2133,6 +2133,52 @@ class TestRootCozClientAdminChat:
         result = client.abort_admin_chat()
         assert result["aborted"] is True
 
+    def test_save_admin_chat_artifact(self):
+        def handler(request):
+            assert request.method == "POST"
+            assert "/api/admin-chat/artifacts" in str(request.url)
+            body = json.loads(request.content)
+            assert body["html_content"] == "<html>report</html>"
+            assert body["filename"] == "report.html"
+            return httpx.Response(
+                200,
+                json={
+                    "artifact_id": "abc-123",
+                    "download_url": "/api/admin-chat/artifacts/abc-123",
+                    "filename": "report.html",
+                },
+            )
+
+        client = _make_client(handler)
+        result = client.save_admin_chat_artifact("<html>report</html>", "report.html")
+        assert result["artifact_id"] == "abc-123"
+        assert result["download_url"] == "/api/admin-chat/artifacts/abc-123"
+
+    def test_download_admin_chat_artifact(self):
+        html_content = b"<html><body>Report</body></html>"
+
+        def handler(request):
+            assert request.method == "GET"
+            assert "/api/admin-chat/artifacts/" in str(request.url)
+            return httpx.Response(
+                200,
+                content=html_content,
+                headers={"Content-Type": "text/html"},
+            )
+
+        client = _make_client(handler)
+        result = client.download_admin_chat_artifact("test-uuid")
+        assert result == html_content
+
+    def test_download_admin_chat_artifact_not_found(self):
+        def handler(request):
+            return httpx.Response(404, json={"detail": "Artifact not found"})
+
+        client = _make_client(handler)
+        with pytest.raises(RootCozError) as exc_info:
+            client.download_admin_chat_artifact("missing-uuid")
+        assert exc_info.value.status_code == 404
+
 
 class TestReports:
     def test_report_totals(self):

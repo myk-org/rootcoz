@@ -1,10 +1,13 @@
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { isSafeHref } from '@/lib/autoLink'
+import { Download } from 'lucide-react'
 
 interface ChatMarkdownProps {
   content: string
 }
+
+const ARTIFACT_URL_PATTERN = '/api/admin-chat/artifacts/'
 
 export function ChatMarkdown({ content }: ChatMarkdownProps) {
   return (
@@ -22,6 +25,20 @@ export function ChatMarkdown({ content }: ChatMarkdownProps) {
           a: ({ href, children }) => {
             if (!href || !isSafeHref(href)) {
               return <span>{children}</span>
+            }
+            if (href.startsWith(ARTIFACT_URL_PATTERN)) {
+              return (
+                <a
+                  href={href}
+                  download
+                  className="no-underline inline-flex items-center gap-2 px-3 py-1.5 rounded-md
+                    bg-accent-blue/15 text-accent-blue hover:bg-accent-blue/25
+                    text-xs font-medium transition-colors"
+                >
+                  <Download className="h-3.5 w-3.5" />
+                  {children}
+                </a>
+              )
             }
             return (
               <a href={href} target="_blank" rel="noopener noreferrer">
