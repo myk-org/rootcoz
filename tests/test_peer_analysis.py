@@ -3317,9 +3317,10 @@ class TestOrchestratorEmptyFallback:
                     classification="",
                     details="Could not determine",
                     product_bug_report={
+                        "title": "login fails",
+                        "severity": "high",
                         "component": "auth",
-                        "summary": "login fails",
-                        "steps_to_reproduce": "1. login",
+                        "description": "Login page returns 500",
                     },
                 ),
                 "sig123",
