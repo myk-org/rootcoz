@@ -1611,15 +1611,16 @@ async def backfill_failure_history() -> None:
 # fh.classification) to get the effective classification.
 _TC_LATEST_JOIN = """
     LEFT JOIN (
-        SELECT job_id, test_name, child_build_number, classification,
+        SELECT job_id, test_name, job_name, child_build_number, classification,
                ROW_NUMBER() OVER (
-                   PARTITION BY job_id, test_name, child_build_number
+                   PARTITION BY job_id, test_name, job_name, child_build_number
                    ORDER BY created_at DESC, id DESC
                ) AS rn
         FROM test_classifications
         WHERE visible = 1
     ) tc_latest ON tc_latest.job_id = fh.job_id
         AND tc_latest.test_name = fh.test_name
+        AND tc_latest.job_name = fh.child_job_name
         AND tc_latest.child_build_number = fh.child_build_number
         AND tc_latest.rn = 1
 """

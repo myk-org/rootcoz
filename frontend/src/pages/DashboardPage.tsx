@@ -37,7 +37,7 @@ import { ConfirmDialog } from '@/components/shared/ConfirmDialog'
 import { SortableHeader } from '@/components/shared/SortableHeader'
 import { DateRangePresetFilter } from '@/components/shared/DateRangePresetFilter'
 import { useTableSort } from '@/lib/useTableSort'
-import { Trash2, MessageSquare, CheckCircle2, GitFork, AlertTriangle, Github, List, ListTree, ChevronRight, Filter } from 'lucide-react'
+import { Trash2, MessageSquare, CheckCircle2, GitFork, AlertTriangle, Github, List, ListTree, ChevronRight, Filter, User } from 'lucide-react'
 import { useAuth } from '@/lib/auth'
 import { useMetadataOptions, MetadataDropdowns, MetadataLabelChips, MetadataClearButton } from '@/components/shared/MetadataFilterBar'
 import { MetadataBadges } from '@/components/shared/MetadataBadges'
@@ -840,28 +840,36 @@ export function DashboardPage() {
 
                     {/* Created */}
                     <TableCell className="text-right">
-                      <Tooltip>
-                        <TooltipTrigger asChild>
-                          <span className="font-mono text-xs text-text-tertiary">{relativeTime(job.created_at)}</span>
-                        </TooltipTrigger>
-                        <TooltipContent>
-                          <span>Created: {formatTimestamp(job.created_at)}</span>
-                          {(() => {
-                            const startTime = job.analysis_started_at || job.created_at
-                            const start = startTime ? parseApiTimestamp(startTime) : null
-                            const end = job.completed_at ? parseApiTimestamp(job.completed_at) : null
-                            const duration = start && end && !Number.isNaN(start.getTime()) && !Number.isNaN(end.getTime())
-                              ? formatDuration(start, end)
-                              : null
-                            return duration ? (
-                              <>
-                                <br />
-                                <span>Analysis took: {duration}</span>
-                              </>
-                            ) : null
-                          })()}
-                        </TooltipContent>
-                      </Tooltip>
+                      <div className="flex flex-col items-end gap-0.5">
+                        <Tooltip>
+                          <TooltipTrigger asChild>
+                            <span className="font-mono text-xs text-text-tertiary">{relativeTime(job.created_at)}</span>
+                          </TooltipTrigger>
+                          <TooltipContent>
+                            <span>Created: {formatTimestamp(job.created_at)}</span>
+                            {(() => {
+                              const startTime = job.analysis_started_at || job.created_at
+                              const start = startTime ? parseApiTimestamp(startTime) : null
+                              const end = job.completed_at ? parseApiTimestamp(job.completed_at) : null
+                              const duration = start && end && !Number.isNaN(start.getTime()) && !Number.isNaN(end.getTime())
+                                ? formatDuration(start, end)
+                                : null
+                              return duration ? (
+                                <>
+                                  <br />
+                                  <span>Analysis took: {duration}</span>
+                                </>
+                              ) : null
+                            })()}
+                          </TooltipContent>
+                        </Tooltip>
+                        {job.submitted_by && (
+                          <span className="inline-flex items-center gap-1 text-[10px] text-text-tertiary">
+                            <User className="h-2.5 w-2.5" />
+                            {job.submitted_by}
+                          </span>
+                        )}
+                      </div>
                     </TableCell>
 
                     {/* Delete */}
@@ -1037,28 +1045,36 @@ export function DashboardPage() {
                                 tooltipText={`${job.child_job_count ?? 0} child ${job.child_job_count === 1 ? 'job' : 'jobs'}`}
                               />
                               <TableCell className="text-right">
-                                <Tooltip>
-                                  <TooltipTrigger asChild>
-                                    <span className="font-mono text-xs text-text-tertiary">{relativeTime(job.created_at)}</span>
-                                  </TooltipTrigger>
-                                  <TooltipContent>
-                                    <span>Created: {formatTimestamp(job.created_at)}</span>
-                                    {(() => {
-                                      const startTime = job.analysis_started_at || job.created_at
-                                      const start = startTime ? parseApiTimestamp(startTime) : null
-                                      const end = job.completed_at ? parseApiTimestamp(job.completed_at) : null
-                                      const duration = start && end && !Number.isNaN(start.getTime()) && !Number.isNaN(end.getTime())
-                                        ? formatDuration(start, end)
-                                        : null
-                                      return duration ? (
-                                        <>
-                                          <br />
-                                          <span>Analysis took: {duration}</span>
-                                        </>
-                                      ) : null
-                                    })()}
-                                  </TooltipContent>
-                                </Tooltip>
+                                <div className="flex flex-col items-end gap-0.5">
+                                  <Tooltip>
+                                    <TooltipTrigger asChild>
+                                      <span className="font-mono text-xs text-text-tertiary">{relativeTime(job.created_at)}</span>
+                                    </TooltipTrigger>
+                                    <TooltipContent>
+                                      <span>Created: {formatTimestamp(job.created_at)}</span>
+                                      {(() => {
+                                        const startTime = job.analysis_started_at || job.created_at
+                                        const start = startTime ? parseApiTimestamp(startTime) : null
+                                        const end = job.completed_at ? parseApiTimestamp(job.completed_at) : null
+                                        const duration = start && end && !Number.isNaN(start.getTime()) && !Number.isNaN(end.getTime())
+                                          ? formatDuration(start, end)
+                                          : null
+                                        return duration ? (
+                                          <>
+                                            <br />
+                                            <span>Analysis took: {duration}</span>
+                                          </>
+                                        ) : null
+                                      })()}
+                                    </TooltipContent>
+                                  </Tooltip>
+                                  {job.submitted_by && (
+                                    <span className="inline-flex items-center gap-1 text-[10px] text-text-tertiary">
+                                      <User className="h-2.5 w-2.5" />
+                                      {job.submitted_by}
+                                    </span>
+                                  )}
+                                </div>
                               </TableCell>
                               {canDelete && (
                                 <TableCell>
