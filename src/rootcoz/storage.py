@@ -291,13 +291,16 @@ async def _migrate_lowercase_usernames(db: aiosqlite.Connection) -> None:
             old_name = dup["username"]
             # mention_reads has UNIQUE(username, comment_id) — delete
             # rows that would collide with the survivor before re-pointing.
-            await db.execute(
-                "DELETE FROM mention_reads WHERE username = ? "
-                "AND comment_id IN ("
-                "  SELECT comment_id FROM mention_reads WHERE username = ?"
-                ")",
-                (old_name, lname),
-            )
+            # Skip when old_name == lname: the subquery would match the
+            # survivor's own rows and wipe them out.
+            if old_name != lname:
+                await db.execute(
+                    "DELETE FROM mention_reads WHERE username = ? "
+                    "AND comment_id IN ("
+                    "  SELECT comment_id FROM mention_reads WHERE username = ?"
+                    ")",
+                    (old_name, lname),
+                )
             for table in _USERNAME_TABLES:
                 await db.execute(
                     f"UPDATE {table} SET username = ? WHERE username = ?",
