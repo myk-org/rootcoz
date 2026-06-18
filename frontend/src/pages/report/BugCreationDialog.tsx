@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { api, ApiError } from '@/lib/api'
+import { api, extractApiDetail } from '@/lib/api'
 import {
   Dialog,
   DialogContent,
@@ -14,6 +14,7 @@ import { Textarea } from '@/components/ui/textarea'
 import { Badge } from '@/components/ui/badge'
 import { Select, SelectTrigger, SelectValue, SelectContent, SelectItem } from '@/components/ui/select'
 import { LoadingSpinner } from '@/components/shared/LoadingSpinner'
+import { TokenRequiredBanner } from '@/components/shared/TokenRequiredBanner'
 import { CheckCircle2, ExternalLink, AlertTriangle } from 'lucide-react'
 import type { PreviewIssueResponse, CreateIssueResponse, SimilarIssue, CommentsAndReviews } from '@/types'
 import { getGithubToken, getJiraToken, getJiraEmail } from '@/lib/cookies'
@@ -22,17 +23,7 @@ import { useReportDispatch, useRefreshEnrichments } from './ReportContext'
 type BugTarget = 'github' | 'jira'
 type Phase = 'idle' | 'loading-prompt' | 'prompt' | 'loading' | 'preview' | 'creating' | 'success' | 'error'
 
-/** Extract a user-friendly credential error message from a 400 API response. */
-function _extractCredentialError(err: unknown, target: BugTarget): string | null {
-  if (err instanceof ApiError && err.status === 400) {
-    const detail = (err.body as { detail?: string })?.detail ?? ''
-    if (detail.toLowerCase().includes('token is required')) {
-      const label = target === 'github' ? 'GitHub' : 'Jira'
-      return `${label} token is required. Please set up your credentials in Profile Settings.`
-    }
-  }
-  return null
-}
+
 
 interface BugCreationDialogProps {
   open: boolean
@@ -185,7 +176,7 @@ export function BugCreationDialog({
         setPhase('preview')
       })
       .catch((err) => {
-        setErrorMsg(_extractCredentialError(err, target) ?? (err instanceof Error ? err.message : 'Preview failed'))
+        setErrorMsg(extractApiDetail(err) ?? (err instanceof Error ? err.message : 'Preview failed'))
         setPhase('error')
       })
   }
@@ -213,7 +204,7 @@ export function BugCreationDialog({
       // Also refresh enrichments for the link badges
       refreshEnrichments(jobId)
     } catch (err) {
-      setErrorMsg(_extractCredentialError(err, target) ?? (err instanceof Error ? err.message : 'Creation failed'))
+      setErrorMsg(extractApiDetail(err) ?? (err instanceof Error ? err.message : 'Creation failed'))
       setPhase('error')
     }
   }
@@ -507,21 +498,7 @@ export function BugCreationDialog({
         )}
 
         {phase === 'preview' && !hasToken && (
-          <div className="rounded-lg border border-signal-orange/30 bg-signal-orange/10 p-4 flex items-start gap-3">
-            <AlertTriangle className="h-5 w-5 text-signal-orange shrink-0 mt-0.5" />
-            <div className="flex flex-col gap-1">
-              <p className="text-sm font-medium text-text-primary">
-                {target === 'github' ? 'GitHub' : 'Jira'} token required
-              </p>
-              <p className="text-xs text-text-secondary">
-                Set up your {target === 'github' ? 'GitHub' : 'Jira'} token in Profile Settings to create issues.
-              </p>
-              <a href="/settings" target="_blank" rel="noopener noreferrer"
-                 className="text-xs text-text-link hover:underline mt-1 inline-flex items-center gap-1">
-                Open Profile Settings →
-              </a>
-            </div>
-          </div>
+          <TokenRequiredBanner provider={target === 'github' ? 'GitHub' : 'Jira'} />
         )}
 
         <DialogFooter className="flex-col items-stretch gap-2 sm:flex-row sm:items-center sm:justify-between">

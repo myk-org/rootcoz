@@ -343,6 +343,7 @@ async def create_feedback_from_preview(
     Raises:
         ValueError: If github_token is empty.
     """
+    github_token = github_token.strip()
     if not github_token:
         raise ValueError(
             "GitHub token is required. Set up your token in Profile Settings."

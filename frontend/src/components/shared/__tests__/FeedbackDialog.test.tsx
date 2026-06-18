@@ -4,13 +4,8 @@ import userEvent from '@testing-library/user-event'
 import { FeedbackDialog } from '../FeedbackDialog'
 
 // Mock the api module
-vi.mock('@/lib/api', () => ({
-  api: {
-    post: vi.fn(),
-    get: vi.fn(),
-  },
-  getRecentFailedCalls: vi.fn(() => []),
-  ApiError: class extends Error {
+vi.mock('@/lib/api', () => {
+  class _ApiError extends Error {
     status: number
     statusText: string
     body: unknown
@@ -20,8 +15,23 @@ vi.mock('@/lib/api', () => ({
       this.statusText = statusText
       this.body = body
     }
-  },
-}))
+  }
+  return {
+    api: {
+      post: vi.fn(),
+      get: vi.fn(),
+    },
+    getRecentFailedCalls: vi.fn(() => []),
+    ApiError: _ApiError,
+    extractApiDetail: (err: unknown): string | null => {
+      if (err instanceof _ApiError) {
+        const detail = (err.body as { detail?: string })?.detail
+        if (detail) return detail
+      }
+      return null
+    },
+  }
+})
 
 // Mock errorCapture
 vi.mock('@/lib/errorCapture', () => ({
@@ -333,8 +343,8 @@ describe('FeedbackDialog', () => {
       body: 'AI body',
       labels: ['bug'],
     })
-    const { ApiError: MockApiError } = await import('@/lib/api')
-    mockPost.mockRejectedValueOnce(new MockApiError(400, 'Bad Request', { detail: 'GitHub token is required. Set up your token in Profile Settings.' }))
+    const { ApiError } = await import('@/lib/api')
+    mockPost.mockRejectedValueOnce(new ApiError(400, 'Bad Request', { detail: 'GitHub token is required. Set up your token in Profile Settings.' }))
 
     const user = userEvent.setup()
     render(<FeedbackDialog open={true} onOpenChange={onOpenChange} />)

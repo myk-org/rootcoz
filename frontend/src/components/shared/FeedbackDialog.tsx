@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect } from 'react'
-import { api, ApiError } from '@/lib/api'
+import { api, extractApiDetail } from '@/lib/api'
 import { getRecentFailedCalls } from '@/lib/api'
 import { getRecentErrors } from '@/lib/errorCapture'
 import { getGithubToken } from '@/lib/cookies'
@@ -15,7 +15,8 @@ import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Textarea } from '@/components/ui/textarea'
 import { LoadingSpinner } from '@/components/shared/LoadingSpinner'
-import { CheckCircle2, ExternalLink, AlertTriangle } from 'lucide-react'
+import { TokenRequiredBanner } from '@/components/shared/TokenRequiredBanner'
+import { CheckCircle2, ExternalLink } from 'lucide-react'
 import type {
   FeedbackRequest,
   FeedbackPreviewResponse,
@@ -43,6 +44,8 @@ export function FeedbackDialog({ open, onOpenChange }: FeedbackDialogProps) {
   const [previewTitle, setPreviewTitle] = useState('')
   const [previewBody, setPreviewBody] = useState('')
   const [previewLabels, setPreviewLabels] = useState<string[]>([])
+  // getGithubToken() reads from auth context loaded via /api/user/tokens on login,
+  // which mirrors the backend's storage.get_user_tokens() used in the create endpoint.
   const hasGithubToken = !!getGithubToken()
 
   // Track dialog open/close to guard async setState
@@ -137,12 +140,7 @@ export function FeedbackDialog({ open, onOpenChange }: FeedbackDialogProps) {
       setPhase('success')
     } catch (err) {
       if (gen !== generationRef.current) return
-      if (err instanceof ApiError && err.status === 400) {
-        const detail = (err.body as { detail?: string })?.detail ?? err.message
-        setErrorMsg(detail)
-      } else {
-        setErrorMsg(err instanceof Error ? err.message : 'Failed to create issue')
-      }
+      setErrorMsg(extractApiDetail(err) ?? (err instanceof Error ? err.message : 'Failed to create issue'))
       setErrorSource('create')
       setPhase('error')
     }
@@ -309,14 +307,7 @@ export function FeedbackDialog({ open, onOpenChange }: FeedbackDialogProps) {
         )}
 
         {phase === 'preview' && !hasGithubToken && (
-          <div className="rounded-lg border border-signal-orange/30 bg-signal-orange/10 p-4 flex items-start gap-3">
-            <AlertTriangle className="h-5 w-5 text-signal-orange shrink-0 mt-0.5" />
-            <div className="flex flex-col gap-1">
-              <p className="text-sm font-medium text-text-primary">GitHub token required</p>
-              <p className="text-xs text-text-secondary">Set up your GitHub token in Profile Settings to submit feedback.</p>
-              <a href="/settings" target="_blank" rel="noopener noreferrer" className="text-xs text-text-link hover:underline mt-1 inline-flex items-center gap-1">Open Profile Settings →</a>
-            </div>
-          </div>
+          <TokenRequiredBanner provider="GitHub" action="submit feedback" />
         )}
 
         <DialogFooter className="flex-col items-stretch gap-2 sm:flex-row sm:items-center sm:justify-end">
