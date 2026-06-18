@@ -67,7 +67,9 @@ async def populated_db(setup_test_db: Path):
             )
             await conn.commit()
 
-        # Insert a test_classification override
+        # Insert a test_classification override.
+        # job_name='' for top-level (non-pipeline) analyses, matching
+        # fh.child_job_name default of ''.
         async with storage._connect_db() as conn:
             await conn.execute(
                 """INSERT INTO test_classifications
@@ -76,7 +78,7 @@ async def populated_db(setup_test_db: Path):
                    VALUES (?, ?, ?, ?, ?, ?, ?)""",
                 (
                     "test_foo",
-                    "test-job",
+                    "",
                     "PRODUCT BUG",
                     "CODE ISSUE",
                     "reviewer",
@@ -241,7 +243,7 @@ class TestReportOverrides:
                        VALUES (?, ?, ?, ?, ?, ?, ?)""",
                     (
                         "test_foo",
-                        "test-job",
+                        "",
                         "CODE ISSUE",
                         "CODE ISSUE",
                         "confirmer",
@@ -272,7 +274,7 @@ class TestReportOverrides:
                        VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now', '+1 minute'))""",
                     (
                         "test_foo",
-                        "test-job",
+                        "",
                         "INFRASTRUCTURE",
                         "PRODUCT BUG",
                         "reviewer2",

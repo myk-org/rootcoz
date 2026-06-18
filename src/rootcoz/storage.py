@@ -5212,6 +5212,7 @@ async def get_report_classification_overrides(
             JOIN failure_history fh
                 ON fh.job_id = tc.job_id
                 AND fh.test_name = tc.test_name
+                AND fh.child_job_name = tc.job_name
                 AND fh.child_build_number = tc.child_build_number
             WHERE {where}
               AND tc.visible = 1
@@ -5251,6 +5252,7 @@ async def get_report_classification_overrides(
             JOIN failure_history fh
                 ON fh.job_id = tc.job_id
                 AND fh.test_name = tc.test_name
+                AND fh.child_job_name = tc.job_name
                 AND fh.child_build_number = tc.child_build_number
             WHERE {where}
               AND tc.visible = 1

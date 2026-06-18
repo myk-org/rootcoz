@@ -23,7 +23,7 @@ interface ClassificationBadgeProps {
 }
 
 export function ClassificationBadge({ classification, className }: ClassificationBadgeProps) {
-  const style = (classification in BADGE_STYLES)
+  const style = Object.hasOwn(BADGE_STYLES, classification)
     ? BADGE_STYLES[classification as BadgeLabel]
     : { variant: 'outline' as const, label: classification }
   return (

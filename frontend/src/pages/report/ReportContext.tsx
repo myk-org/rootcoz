@@ -1,7 +1,7 @@
 import { createContext, useContext, useReducer, useRef, useCallback, type Dispatch, type ReactNode } from 'react'
 import { api } from '@/lib/api'
 import { reviewKey } from '@/lib/reviewKey'
-import type { AnalysisResult, Comment, ReviewState, CommentsAndReviews, CommentEnrichment, AiModel } from '@/types'
+import type { AnalysisResult, ChildJobAnalysis, FailureAnalysis, Comment, ReviewState, CommentsAndReviews, CommentEnrichment, AiModel } from '@/types'
 
 interface ReportState {
   result: AnalysisResult | null
@@ -96,6 +96,36 @@ const initialState: ReportState = {
   originJobName: '',
 }
 
+/**
+ * Shared traversal helper for applying an override (classification or pattern)
+ * to matching failures in the result tree.
+ */
+function applyOverrideToResult(
+  result: AnalysisResult,
+  payload: { names: string[]; childJobName?: string; childBuildNumber?: number },
+  patchFn: (f: FailureAnalysis) => FailureAnalysis,
+): AnalysisResult {
+  const { names, childJobName, childBuildNumber } = payload
+  const nameSet = new Set(names)
+  const normalizedChildBuildNumber = childJobName ? (childBuildNumber ?? 0) : childBuildNumber
+  const isWildcard = normalizedChildBuildNumber === 0
+  const isChildMatch = (c: { job_name: string; build_number: number }) =>
+    !!childJobName && c.job_name === childJobName && (isWildcard || c.build_number === normalizedChildBuildNumber)
+  const patchFailures = (fs: FailureAnalysis[]) =>
+    (fs ?? []).map((f) => nameSet.has(f.test_name) ? patchFn(f) : f)
+  const patchChildren = (cs: ChildJobAnalysis[]): ChildJobAnalysis[] =>
+    (cs ?? []).map((c) =>
+      isChildMatch(c)
+        ? { ...c, failures: patchFailures(c.failures), failed_children: patchChildren(c.failed_children) }
+        : { ...c, failed_children: patchChildren(c.failed_children) },
+    )
+  return {
+    ...result,
+    failures: childJobName ? result.failures : patchFailures(result.failures),
+    child_job_analyses: patchChildren(result.child_job_analyses),
+  }
+}
+
 function reportReducer(state: ReportState, action: ReportAction): ReportState {
   switch (action.type) {
     case 'SET_RESULT':
@@ -137,39 +167,27 @@ function reportReducer(state: ReportState, action: ReportAction): ReportState {
     case 'OVERRIDE_CLASSIFICATION': {
       if (!state.result) return state
       const { testName, testNames: explicitNames, classification, childJobName, childBuildNumber } = action.payload
-      // Normalize: undefined childBuildNumber with a childJobName means wildcard (0),
-      // matching the API normalization in ClassificationSelect (child_build_number ?? 0).
-      const normalizedChildBuildNumber = childJobName ? (childBuildNumber ?? 0) : childBuildNumber
       const names = explicitNames ?? [testName]
-      const nameSet = new Set(names)
       // Determine which classification-specific fields to clear based on the new classification
       const clearFields: Partial<Record<'code_fix' | 'product_bug_report', undefined>> =
         classification === 'CODE ISSUE' ? { product_bug_report: undefined }
         : classification === 'PRODUCT BUG' ? { code_fix: undefined }
         : classification === 'INFRASTRUCTURE' ? { code_fix: undefined, product_bug_report: undefined }
         : {}
-      const patchFailures = (fs: typeof state.result.failures) =>
-        (fs ?? []).map((f) =>
-          nameSet.has(f.test_name) ? { ...f, analysis: { ...f.analysis, classification, ...clearFields } } : f,
-        )
+      const patchFn = (f: FailureAnalysis): FailureAnalysis => ({
+        ...f, analysis: { ...f.analysis, classification, ...clearFields },
+      })
+      const updatedResult = applyOverrideToResult(
+        state.result, { names, childJobName, childBuildNumber }, patchFn,
+      )
+      // Materialize classification entries for review state tracking
+      const normalizedChildBuildNumber = childJobName ? (childBuildNumber ?? 0) : childBuildNumber
       const isWildcard = normalizedChildBuildNumber === 0
-      /** Check whether a child node matches the target job name with wildcard/exact build semantics. */
-      const isChildMatch = (c: { job_name: string; build_number: number }) =>
-        !!childJobName && c.job_name === childJobName && (isWildcard || c.build_number === normalizedChildBuildNumber)
-      const patchChildren = (
-        cs: typeof state.result.child_job_analyses,
-      ): typeof state.result.child_job_analyses =>
-        (cs ?? []).map((c) =>
-          isChildMatch(c)
-            ? { ...c, failures: patchFailures(c.failures), failed_children: patchChildren(c.failed_children) }
-            : { ...c, failed_children: patchChildren(c.failed_children) },
-        )
-      // When childBuildNumber === 0 (wildcard), materialize classification
-      // entries for every matching child build so the review state reflects
-      // each concrete build rather than only the wildcard key.
       const classificationEntries: Record<string, string> = {}
       if (isWildcard && childJobName) {
-        const walkChildren = (cs: typeof state.result.child_job_analyses) => {
+        const isChildMatch = (c: { job_name: string; build_number: number }) =>
+          c.job_name === childJobName
+        const walkChildren = (cs: ChildJobAnalysis[]) => {
           for (const c of cs ?? []) {
             if (isChildMatch(c)) {
               for (const name of names) {
@@ -180,7 +198,6 @@ function reportReducer(state: ReportState, action: ReportAction): ReportState {
           }
         }
         walkChildren(state.result.child_job_analyses)
-        // Also store the wildcard key itself for lookup consistency
         for (const name of names) {
           classificationEntries[reviewKey(name, childJobName, 0)] = classification
         }
@@ -191,43 +208,21 @@ function reportReducer(state: ReportState, action: ReportAction): ReportState {
       }
       return {
         ...state,
-        result: {
-          ...state.result,
-          failures: childJobName ? state.result.failures : patchFailures(state.result.failures),
-          child_job_analyses: patchChildren(state.result.child_job_analyses),
-        },
+        result: updatedResult,
         classifications: { ...state.classifications, ...classificationEntries },
       }
     }
     case 'OVERRIDE_PATTERN': {
       if (!state.result) return state
       const { testName: pTestName, testNames: pExplicitNames, pattern, childJobName: pChildJobName, childBuildNumber: pChildBuildNumber } = action.payload
-      const pNormalizedChildBuildNumber = pChildJobName ? (pChildBuildNumber ?? 0) : pChildBuildNumber
       const pNames = pExplicitNames ?? [pTestName]
-      const pNameSet = new Set(pNames)
-      const patchPatternFailures = (fs: typeof state.result.failures) =>
-        (fs ?? []).map((f) =>
-          pNameSet.has(f.test_name) ? { ...f, analysis: { ...f.analysis, pattern } } : f,
-        )
-      const pIsWildcard = pNormalizedChildBuildNumber === 0
-      const pIsChildMatch = (c: { job_name: string; build_number: number }) =>
-        !!pChildJobName && c.job_name === pChildJobName && (pIsWildcard || c.build_number === pNormalizedChildBuildNumber)
-      const patchPatternChildren = (
-        cs: typeof state.result.child_job_analyses,
-      ): typeof state.result.child_job_analyses =>
-        (cs ?? []).map((c) =>
-          pIsChildMatch(c)
-            ? { ...c, failures: patchPatternFailures(c.failures), failed_children: patchPatternChildren(c.failed_children) }
-            : { ...c, failed_children: patchPatternChildren(c.failed_children) },
-        )
-      return {
-        ...state,
-        result: {
-          ...state.result,
-          failures: pChildJobName ? state.result.failures : patchPatternFailures(state.result.failures),
-          child_job_analyses: patchPatternChildren(state.result.child_job_analyses),
-        },
-      }
+      const patchFn = (f: FailureAnalysis): FailureAnalysis => ({
+        ...f, analysis: { ...f.analysis, pattern },
+      })
+      const updatedResult = applyOverrideToResult(
+        state.result, { names: pNames, childJobName: pChildJobName, childBuildNumber: pChildBuildNumber }, patchFn,
+      )
+      return { ...state, result: updatedResult }
     }
     default:
       return state
