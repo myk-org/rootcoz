@@ -1024,6 +1024,25 @@ def _validate_child_identifier_pairing(
         raise ValueError("child_job_name is required when child_build_number is set")
 
 
+def _child_scope_sql(child_job_name: str, child_build_number: int) -> tuple[str, list]:
+    """Return a SQL WHERE-clause suffix and params for child-job scoping.
+
+    Three modes:
+    - ``child_job_name`` + ``child_build_number > 0`` → specific child build.
+    - ``child_job_name`` + ``child_build_number == 0`` → wildcard (name only).
+    - No ``child_job_name`` → top-level rows (empty name, build 0).
+    """
+    if child_job_name and child_build_number > 0:
+        return " AND child_job_name = ? AND child_build_number = ?", [
+            child_job_name,
+            child_build_number,
+        ]
+    if child_job_name:
+        # Wildcard: match by name only, any build number
+        return " AND child_job_name = ?", [child_job_name]
+    return " AND child_job_name = '' AND child_build_number = 0", []
+
+
 async def add_comment(
     job_id: str,
     test_name: str,
@@ -2862,10 +2881,7 @@ async def override_classification(
         f"classification={classification}, username={username}"
     )
     _validate_child_identifier_pairing(child_job_name, child_build_number)
-    if child_job_name and child_build_number == 0:
-        raise ValueError(
-            "override_classification requires child_build_number when child_job_name is set"
-        )
+    child_sql, child_params = _child_scope_sql(child_job_name, child_build_number)
     async with _connect_db() as db:
         # Look up the error_signature for this test so we can update
         # ALL tests in the same group (same signature, same job).
@@ -2875,13 +2891,8 @@ async def override_classification(
             "SELECT error_signature FROM failure_history "
             "WHERE job_id = ? AND test_name = ?"
         )
-        sig_params: list = [job_id, test_name]
-        if child_job_name:
-            sig_query += " AND child_job_name = ? AND child_build_number = ?"
-            sig_params.extend([child_job_name, child_build_number])
-        else:
-            sig_query += " AND child_job_name = '' AND child_build_number = 0"
-        sig_query += " LIMIT 1"
+        sig_params: list = [job_id, test_name, *child_params]
+        sig_query += child_sql + " LIMIT 1"
 
         cursor = await db.execute(sig_query, sig_params)
         row = await cursor.fetchone()
@@ -2893,82 +2904,36 @@ async def override_classification(
             "SELECT classification FROM failure_history "
             "WHERE job_id = ? AND test_name = ?"
         )
-        orig_cls_params: list = [job_id, test_name]
-        if child_job_name:
-            orig_cls_query += " AND child_job_name = ? AND child_build_number = ?"
-            orig_cls_params.extend([child_job_name, child_build_number])
-        else:
-            orig_cls_query += " AND child_job_name = '' AND child_build_number = 0"
-        orig_cls_query += " LIMIT 1"
+        orig_cls_params: list = [job_id, test_name, *child_params]
+        orig_cls_query += child_sql + " LIMIT 1"
         orig_cursor = await db.execute(orig_cls_query, orig_cls_params)
         orig_row = await orig_cursor.fetchone()
         original_classification = orig_row[0] if orig_row and orig_row[0] else ""
 
         if error_signature:
             # Update ALL tests sharing the same error_signature in this job
-            if child_job_name:
-                await db.execute(
-                    """UPDATE failure_history
-                       SET classification = ?
-                       WHERE job_id = ? AND error_signature = ?
-                       AND child_job_name = ? AND child_build_number = ?""",
-                    (
-                        classification,
-                        job_id,
-                        error_signature,
-                        child_job_name,
-                        child_build_number,
-                    ),
-                )
-            else:
-                await db.execute(
-                    """UPDATE failure_history
-                       SET classification = ?
-                       WHERE job_id = ? AND error_signature = ?
-                       AND child_job_name = '' AND child_build_number = 0""",
-                    (classification, job_id, error_signature),
-                )
+            await db.execute(
+                f"""UPDATE failure_history
+                   SET classification = ?
+                   WHERE job_id = ? AND error_signature = ?{child_sql}""",
+                (classification, job_id, error_signature, *child_params),
+            )
         else:
             # No signature -- fall back to exact test_name match
-            if child_job_name:
-                await db.execute(
-                    """UPDATE failure_history
-                       SET classification = ?
-                       WHERE job_id = ? AND test_name = ?
-                       AND child_job_name = ? AND child_build_number = ?""",
-                    (
-                        classification,
-                        job_id,
-                        test_name,
-                        child_job_name,
-                        child_build_number,
-                    ),
-                )
-            else:
-                await db.execute(
-                    """UPDATE failure_history
-                       SET classification = ?
-                       WHERE job_id = ? AND test_name = ?
-                       AND child_job_name = '' AND child_build_number = 0""",
-                    (classification, job_id, test_name),
-                )
+            await db.execute(
+                f"""UPDATE failure_history
+                   SET classification = ?
+                   WHERE job_id = ? AND test_name = ?{child_sql}""",
+                (classification, job_id, test_name, *child_params),
+            )
 
         # Find all test_names in this signature group
         if error_signature:
-            if child_job_name:
-                group_cursor = await db.execute(
-                    "SELECT DISTINCT test_name FROM failure_history "
-                    "WHERE job_id = ? AND error_signature = ? "
-                    "AND child_job_name = ? AND child_build_number = ?",
-                    (job_id, error_signature, child_job_name, child_build_number),
-                )
-            else:
-                group_cursor = await db.execute(
-                    "SELECT DISTINCT test_name FROM failure_history "
-                    "WHERE job_id = ? AND error_signature = ? "
-                    "AND child_job_name = '' AND child_build_number = 0",
-                    (job_id, error_signature),
-                )
+            group_cursor = await db.execute(
+                "SELECT DISTINCT test_name FROM failure_history "
+                f"WHERE job_id = ? AND error_signature = ?{child_sql}",
+                (job_id, error_signature, *child_params),
+            )
             group_tests = [row[0] for row in await group_cursor.fetchall()]
         else:
             group_tests = [test_name]
@@ -3034,22 +2999,14 @@ async def override_pattern(
         f"pattern={pattern}, username={username}"
     )
     _validate_child_identifier_pairing(child_job_name, child_build_number)
-    if child_job_name and child_build_number == 0:
-        raise ValueError(
-            "override_pattern requires child_build_number when child_job_name is set"
-        )
+    child_sql, child_params = _child_scope_sql(child_job_name, child_build_number)
     async with _connect_db() as db:
         sig_query = (
             "SELECT error_signature FROM failure_history "
             "WHERE job_id = ? AND test_name = ?"
         )
-        sig_params: list = [job_id, test_name]
-        if child_job_name:
-            sig_query += " AND child_job_name = ? AND child_build_number = ?"
-            sig_params.extend([child_job_name, child_build_number])
-        else:
-            sig_query += " AND child_job_name = '' AND child_build_number = 0"
-        sig_query += " LIMIT 1"
+        sig_params: list = [job_id, test_name, *child_params]
+        sig_query += child_sql + " LIMIT 1"
 
         cursor = await db.execute(sig_query, sig_params)
         row = await cursor.fetchone()
@@ -3060,75 +3017,35 @@ async def override_pattern(
         orig_pat_query = (
             "SELECT pattern FROM failure_history WHERE job_id = ? AND test_name = ?"
         )
-        orig_pat_params: list = [job_id, test_name]
-        if child_job_name:
-            orig_pat_query += " AND child_job_name = ? AND child_build_number = ?"
-            orig_pat_params.extend([child_job_name, child_build_number])
-        else:
-            orig_pat_query += " AND child_job_name = '' AND child_build_number = 0"
-        orig_pat_query += " LIMIT 1"
+        orig_pat_params: list = [job_id, test_name, *child_params]
+        orig_pat_query += child_sql + " LIMIT 1"
         orig_cursor = await db.execute(orig_pat_query, orig_pat_params)
         orig_row = await orig_cursor.fetchone()
         original_pattern = orig_row[0] if orig_row and orig_row[0] else ""
 
         # Update pattern column in failure_history
         if error_signature:
-            if child_job_name:
-                await db.execute(
-                    """UPDATE failure_history
-                       SET pattern = ?
-                       WHERE job_id = ? AND error_signature = ?
-                       AND child_job_name = ? AND child_build_number = ?""",
-                    (
-                        pattern,
-                        job_id,
-                        error_signature,
-                        child_job_name,
-                        child_build_number,
-                    ),
-                )
-            else:
-                await db.execute(
-                    """UPDATE failure_history
-                       SET pattern = ?
-                       WHERE job_id = ? AND error_signature = ?
-                       AND child_job_name = '' AND child_build_number = 0""",
-                    (pattern, job_id, error_signature),
-                )
+            await db.execute(
+                f"""UPDATE failure_history
+                   SET pattern = ?
+                   WHERE job_id = ? AND error_signature = ?{child_sql}""",
+                (pattern, job_id, error_signature, *child_params),
+            )
         else:
-            if child_job_name:
-                await db.execute(
-                    """UPDATE failure_history
-                       SET pattern = ?
-                       WHERE job_id = ? AND test_name = ?
-                       AND child_job_name = ? AND child_build_number = ?""",
-                    (pattern, job_id, test_name, child_job_name, child_build_number),
-                )
-            else:
-                await db.execute(
-                    """UPDATE failure_history
-                       SET pattern = ?
-                       WHERE job_id = ? AND test_name = ?
-                       AND child_job_name = '' AND child_build_number = 0""",
-                    (pattern, job_id, test_name),
-                )
+            await db.execute(
+                f"""UPDATE failure_history
+                   SET pattern = ?
+                   WHERE job_id = ? AND test_name = ?{child_sql}""",
+                (pattern, job_id, test_name, *child_params),
+            )
 
         # Find all test_names in this signature group
         if error_signature:
-            if child_job_name:
-                group_cursor = await db.execute(
-                    "SELECT DISTINCT test_name FROM failure_history "
-                    "WHERE job_id = ? AND error_signature = ? "
-                    "AND child_job_name = ? AND child_build_number = ?",
-                    (job_id, error_signature, child_job_name, child_build_number),
-                )
-            else:
-                group_cursor = await db.execute(
-                    "SELECT DISTINCT test_name FROM failure_history "
-                    "WHERE job_id = ? AND error_signature = ? "
-                    "AND child_job_name = '' AND child_build_number = 0",
-                    (job_id, error_signature),
-                )
+            group_cursor = await db.execute(
+                "SELECT DISTINCT test_name FROM failure_history "
+                f"WHERE job_id = ? AND error_signature = ?{child_sql}",
+                (job_id, error_signature, *child_params),
+            )
             group_tests = [row[0] for row in await group_cursor.fetchall()]
         else:
             group_tests = [test_name]
