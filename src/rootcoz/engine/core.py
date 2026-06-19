@@ -12,7 +12,6 @@ import importlib
 import json
 import os
 import re
-from itertools import islice
 from collections.abc import Callable
 from pathlib import Path
 
@@ -888,9 +887,6 @@ def build_resources_section(
     return ""
 
 
-MAX_GROUPS_IN_SUMMARY = 10
-
-
 def write_other_groups_file(
     all_groups: dict[str, list[FailedTest]],
     current_signature: str,
@@ -925,21 +921,14 @@ def write_other_groups_file(
     if not other_groups:
         return None
 
-    # Cap to prevent file bloat on large jobs
-    groups_to_show = dict(islice(other_groups.items(), MAX_GROUPS_IN_SUMMARY))
-    omitted = len(other_groups) - len(groups_to_show)
-
     lines: list[str] = []
-    for sig, group in groups_to_show.items():
+    for sig, group in other_groups.items():
         global_pos = pos_by_sig[sig]
         test_names = [f.test_name for f in group]
         error_preview = group[0].error_message
         lines.append(
             f'- Group {global_pos}/{total}: tests {test_names} \u2014 error: "{error_preview}"'
         )
-
-    if omitted > 0:
-        lines.append(f"- ... and {omitted} more group(s) not listed")
 
     position_text = (
         f"You are analyzing group {current_position} of {total}."

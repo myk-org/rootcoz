@@ -13,7 +13,6 @@ from pi_sidecar_client import AIResult
 from rootcoz.config import Settings, get_settings
 from rootcoz.engine.core import (
     JSON_RESPONSE_SCHEMA,
-    MAX_GROUPS_IN_SUMMARY,
     analyze_failure_group,
     build_resources_section,
     clone_additional_repos,
@@ -367,12 +366,12 @@ class TestWriteOtherGroupsFile:
         assert "test_b" in content
         assert "test_c" in content
 
-    def test_caps_groups_in_summary(self, tmp_path: Path) -> None:
-        """Only MAX_GROUPS_IN_SUMMARY groups are listed; rest are noted as omitted."""
+    def test_shows_all_groups(self, tmp_path: Path) -> None:
+        """All other groups are listed in the file without capping."""
         groups: dict[str, list[FailedTest]] = {
             "current": [FailedTest(test_name="test_current", error_message="err")],
         }
-        num_other = MAX_GROUPS_IN_SUMMARY + 5
+        num_other = 15
         for i in range(num_other):
             groups[f"sig_{i}"] = [
                 FailedTest(test_name=f"test_{i}", error_message=f"err_{i}")
@@ -381,11 +380,10 @@ class TestWriteOtherGroupsFile:
         filepath = write_other_groups_file(groups, "current", tmp_path)
         assert filepath is not None
         content = filepath.read_text()
-        # First 10 other groups shown (global positions 2-11)
-        assert "Group 11/" in content
-        # 11th other group (global position 12) should NOT appear
-        assert "Group 12/" not in content
-        assert "and 5 more group(s) not listed" in content
+        # All 15 other groups shown (global positions 2-16)
+        for i in range(num_other):
+            assert f"test_{i}" in content
+        assert "Group 16/" in content
 
     def test_shows_all_test_names_in_group(self, tmp_path: Path) -> None:
         """All test names are included without truncation."""

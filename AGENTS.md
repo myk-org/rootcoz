@@ -156,7 +156,7 @@ The `docs/` directory is **auto-generated** by [docsfy](https://github.com/myk-o
 - Pre-query the database and stuff results into the prompt
 - Summarize or filter data before the AI sees it
 - Make decisions about what data the AI needs — let the AI decide
-- Truncate or slice data before giving it to the AI
+- Truncate, cap, or slice data before giving it to the AI — in prompts OR in workspace files
 
 **File-based data pattern:**
 ```python
@@ -171,9 +171,6 @@ prompt = f"Here is the data: {content}"
 
 **Exceptions — when embedding in the prompt IS allowed:**
 - **Content formatting** (e.g., `bug_creation.py`): When the AI is formatting already-analyzed data into structured text (issue titles, bodies), not performing new analysis. The input is fully known and the output is a template — no exploration needed.
-
-Cross-reference data (other failure groups, etc.) MUST be written to workspace files,
-not embedded in the prompt. The prompt tells the AI the file exists and that reading it is MANDATORY.
 
 ### AI Chat Tool Restriction (MANDATORY)
 
