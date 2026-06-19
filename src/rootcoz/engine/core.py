@@ -887,6 +887,10 @@ def build_resources_section(
     return ""
 
 
+MAX_GROUPS_IN_SUMMARY = 10
+MAX_TESTS_PER_GROUP = 5
+
+
 def build_other_groups_summary(
     all_groups: dict[str, list[FailedTest]],
     current_signature: str,
@@ -912,20 +916,28 @@ def build_other_groups_summary(
     current_position = (
         sigs.index(current_signature) + 1 if current_signature in sigs else 0
     )
+    other_groups = {
+        sig: group for sig, group in all_groups.items() if sig != current_signature
+    }
+    if not other_groups:
+        return ""
+
+    # Cap to prevent prompt bloat on large jobs
+    groups_to_show = dict(list(other_groups.items())[:MAX_GROUPS_IN_SUMMARY])
+    omitted = len(other_groups) - len(groups_to_show)
+
     lines: list[str] = []
-    other_idx = 0
-    for sig, group in all_groups.items():
-        if sig == current_signature:
-            continue
-        other_idx += 1
-        test_names = [f.test_name for f in group]
-        # Truncate error message for brevity
+    for other_idx, (sig, group) in enumerate(groups_to_show.items(), start=1):
+        test_names = [f.test_name for f in group[:MAX_TESTS_PER_GROUP]]
+        if len(group) > MAX_TESTS_PER_GROUP:
+            test_names.append(f"... and {len(group) - MAX_TESTS_PER_GROUP} more")
         error_preview = group[0].error_message
-        if len(error_preview) > 150:
-            error_preview = error_preview[:150] + "..."
         lines.append(
             f'- Group {other_idx}: tests {test_names} — error: "{error_preview}"'
         )
+
+    if omitted > 0:
+        lines.append(f"- ... and {omitted} more group(s) not listed")
 
     position_text = (
         f"You are analyzing group {current_position} of {total}."

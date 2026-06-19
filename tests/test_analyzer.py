@@ -12,6 +12,8 @@ from pi_sidecar_client import AIResult
 from rootcoz.config import Settings, get_settings
 from rootcoz.engine.core import (
     JSON_RESPONSE_SCHEMA,
+    MAX_GROUPS_IN_SUMMARY,
+    MAX_TESTS_PER_GROUP,
     analyze_failure_group,
     build_other_groups_summary,
     build_resources_section,
@@ -336,16 +338,15 @@ class TestBuildOtherGroupsSummary:
         result = build_other_groups_summary(groups, "sig2")
         assert "You are analyzing group 2 of 3." in result
 
-    def test_truncates_long_error_messages(self) -> None:
-        """Error previews longer than 150 chars are truncated."""
+    def test_preserves_full_error_messages(self) -> None:
+        """Error previews include the full message without truncation."""
         f1 = FailedTest(test_name="test_a", error_message="short")
-        f2 = FailedTest(test_name="test_b", error_message="x" * 200)
+        long_msg = "x" * 200
+        f2 = FailedTest(test_name="test_b", error_message=long_msg)
         groups = {"sig1": [f1], "sig2": [f2]}
 
         result = build_other_groups_summary(groups, "sig1")
-        assert "..." in result
-        # Should not contain the full 200-char message
-        assert "x" * 200 not in result
+        assert long_msg in result
 
     def test_multiple_tests_in_group(self) -> None:
         """Groups with multiple tests show all test names."""
@@ -357,6 +358,37 @@ class TestBuildOtherGroupsSummary:
         result = build_other_groups_summary(groups, "sig1")
         assert "test_b" in result
         assert "test_c" in result
+
+    def test_caps_groups_in_summary(self) -> None:
+        """Only MAX_GROUPS_IN_SUMMARY groups are listed; rest are noted as omitted."""
+        groups: dict[str, list[FailedTest]] = {
+            "current": [FailedTest(test_name="test_current", error_message="err")],
+        }
+        num_other = MAX_GROUPS_IN_SUMMARY + 5
+        for i in range(num_other):
+            groups[f"sig_{i}"] = [
+                FailedTest(test_name=f"test_{i}", error_message=f"err_{i}")
+            ]
+
+        result = build_other_groups_summary(groups, "current")
+        assert f"Group {MAX_GROUPS_IN_SUMMARY}" in result
+        assert f"Group {MAX_GROUPS_IN_SUMMARY + 1}" not in result
+        assert "and 5 more group(s) not listed" in result
+
+    def test_caps_test_names_per_group(self) -> None:
+        """Only MAX_TESTS_PER_GROUP test names are listed per group."""
+        current = [FailedTest(test_name="test_current", error_message="err")]
+        many_tests = [
+            FailedTest(test_name=f"test_{i}", error_message="same")
+            for i in range(MAX_TESTS_PER_GROUP + 3)
+        ]
+        groups = {"sig1": current, "sig2": many_tests}
+
+        result = build_other_groups_summary(groups, "sig1")
+        for i in range(MAX_TESTS_PER_GROUP):
+            assert f"test_{i}" in result
+        assert f"test_{MAX_TESTS_PER_GROUP}" not in result
+        assert "and 3 more" in result
 
     def test_includes_isolation_instructions(self) -> None:
         """Summary includes instructions to avoid cross-contamination."""
