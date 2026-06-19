@@ -1024,40 +1024,32 @@ def _validate_child_identifier_pairing(
         raise ValueError("child_job_name is required when child_build_number is set")
 
 
-def _child_scope_sql(child_job_name: str, child_build_number: int) -> tuple[str, list]:
+def _child_scope_sql(
+    child_job_name: str,
+    child_build_number: int,
+    name_column: str = "child_job_name",
+    build_column: str = "child_build_number",
+) -> tuple[str, list]:
     """Return a SQL WHERE-clause suffix and params for child-job scoping.
 
     Three modes:
     - ``child_job_name`` + ``child_build_number > 0`` → specific child build.
     - ``child_job_name`` + ``child_build_number == 0`` → wildcard (name only).
     - No ``child_job_name`` → top-level rows (empty name, build 0).
+
+    Use *name_column* / *build_column* to target different tables
+    (e.g. ``job_name`` in ``test_classifications`` vs
+    ``child_job_name`` in ``failure_history``).
     """
     if child_job_name and child_build_number > 0:
-        return " AND child_job_name = ? AND child_build_number = ?", [
+        return f" AND {name_column} = ? AND {build_column} = ?", [
             child_job_name,
             child_build_number,
         ]
     if child_job_name:
         # Wildcard: match by name only, any build number
-        return " AND child_job_name = ?", [child_job_name]
-    return " AND child_job_name = '' AND child_build_number = 0", []
-
-
-def _tc_scope_sql(child_job_name: str, child_build_number: int) -> tuple[str, list]:
-    """Return a SQL WHERE-clause suffix for child scoping in test_classifications.
-
-    Same three-way logic as :func:`_child_scope_sql` but uses the
-    ``job_name`` column (test_classifications) instead of
-    ``child_job_name`` (failure_history).
-    """
-    if child_job_name and child_build_number > 0:
-        return " AND job_name = ? AND child_build_number = ?", [
-            child_job_name,
-            child_build_number,
-        ]
-    if child_job_name:
-        return " AND job_name = ?", [child_job_name]
-    return " AND job_name = '' AND child_build_number = 0", []
+        return f" AND {name_column} = ?", [child_job_name]
+    return f" AND {name_column} = '' AND {build_column} = 0", []
 
 
 async def add_comment(
@@ -3117,7 +3109,9 @@ async def get_history_classification(
         or ``""`` if no pattern classification exists.
     """
     child_sql, child_params = _child_scope_sql(child_job_name, child_build_number)
-    tc_sql, tc_params = _tc_scope_sql(child_job_name, child_build_number)
+    tc_sql, tc_params = _child_scope_sql(
+        child_job_name, child_build_number, name_column="job_name"
+    )
 
     async with _connect_db() as db:
         # 1. Prefer visible entry from test_classifications (pattern column).
@@ -3173,7 +3167,9 @@ async def get_effective_classification(
         ``"PRODUCT BUG"``), or ``""`` if no row exists in either table.
     """
     child_sql, child_params = _child_scope_sql(child_job_name, child_build_number)
-    tc_sql, tc_params = _tc_scope_sql(child_job_name, child_build_number)
+    tc_sql, tc_params = _child_scope_sql(
+        child_job_name, child_build_number, name_column="job_name"
+    )
 
     async with _connect_db() as db:
         # 1. Prefer visible override from test_classifications
