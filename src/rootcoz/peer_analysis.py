@@ -28,6 +28,7 @@ from rootcoz.engine.core import (
     parse_json_response,
     run_single_ai_analysis,
     safe_update_progress,
+    write_other_groups_file,
 )
 from rootcoz.models import (
     AiConfigEntry,
@@ -278,7 +279,7 @@ def _build_peer_review_prompt(
     custom_prompt: str,
     resources_section: str,
     other_peer_responses: list[PeerResponseSummary] | None = None,
-    other_groups_summary: str = "",
+    other_groups_file: Path | None = None,
 ) -> str:
     """Build the prompt for a peer to review the orchestrator's analysis.
 
@@ -293,8 +294,8 @@ def _build_peer_review_prompt(
         other_peer_responses: Previous round responses from other peers
             (excluding the current peer), typed as ``PeerResponseSummary``.
             None or empty list means no prior peer input (round 1).
-        other_groups_summary: Summary of other failure groups in the same job
-            for cross-reference context.
+        other_groups_file: Path to file containing other failure groups
+            cross-reference data. AI is instructed to read it.
 
     Returns:
         Formatted peer review prompt string.
@@ -318,10 +319,19 @@ def _build_peer_review_prompt(
             + "\n\nConsider their perspectives but form your own independent opinion.\n"
         )
 
+    other_groups_instruction = ""
+    if other_groups_file:
+        other_groups_instruction = (
+            f"\n\u26a0\ufe0f  MANDATORY: Read the file {other_groups_file} BEFORE making any analysis.\n"
+            "It contains information about other failure groups in this job.\n"
+            "Do NOT reference events, timestamps, or conclusions from other test groups.\n"
+            "Focus ONLY on the tests assigned to you.\n"
+        )
+
     return f"""IMPORTANT: This is an AI-only conversation. Do NOT be agreeable or sycophantic. \
 Critically evaluate the analysis below and provide your honest, independent assessment. \
 Challenge any conclusions you disagree with.
-{other_groups_summary}
+{other_groups_instruction}
 FAILURE SUMMARY:
 {failure_summary}
 
@@ -341,7 +351,7 @@ def _build_revision_prompt(
     peer_feedback: str,
     custom_prompt: str,
     resources_section: str,
-    other_groups_summary: str = "",
+    other_groups_file: Path | None = None,
 ) -> str:
     """Build a prompt for the main AI to revise its analysis based on peer feedback.
 
@@ -351,8 +361,8 @@ def _build_revision_prompt(
         peer_feedback: Collected feedback from all peers.
         custom_prompt: Additional user instructions.
         resources_section: Available resources for the AI.
-        other_groups_summary: Summary of other failure groups in the same job
-            for cross-reference context.
+        other_groups_file: Path to file containing other failure groups
+            cross-reference data. AI is instructed to read it.
 
     Returns:
         Formatted revision prompt string.
@@ -361,10 +371,19 @@ def _build_revision_prompt(
         f"\n\nADDITIONAL INSTRUCTIONS:\n{custom_prompt}\n" if custom_prompt else ""
     )
 
+    other_groups_instruction = ""
+    if other_groups_file:
+        other_groups_instruction = (
+            f"\n\u26a0\ufe0f  MANDATORY: Read the file {other_groups_file} BEFORE making any analysis.\n"
+            "It contains information about other failure groups in this job.\n"
+            "Do NOT reference events, timestamps, or conclusions from other test groups.\n"
+            "Focus ONLY on the tests assigned to you.\n"
+        )
+
     return f"""IMPORTANT: This is an AI-only conversation. Do NOT be agreeable or sycophantic. \
 You are revising your analysis based on peer feedback. Consider the feedback carefully, \
 but only change your assessment if the arguments are convincing.
-{other_groups_summary}
+{other_groups_instruction}
 FAILURE SUMMARY:
 {failure_summary}
 
@@ -425,7 +444,7 @@ async def analyze_failure_group_with_peers(
     additional_repos: dict[str, Path] | None = None,
     max_concurrent_ai_calls: int = 3,
     auth_header: str = "",
-    other_groups_summary: str = "",
+    all_groups: dict[str, list[FailedTest]] | None = None,
 ) -> list[FailureAnalysis]:
     """Analyze a failure group using multi-AI peer consensus.
 
@@ -455,8 +474,8 @@ async def analyze_failure_group_with_peers(
         additional_repos: Extra cloned repositories for AI context.
         max_concurrent_ai_calls: Maximum concurrent AI calls for
             peer analysis parallelism (default: 3).
-        other_groups_summary: Summary of other failure groups in the same job
-            for cross-reference context. Built by ``build_other_groups_summary()``.
+        all_groups: All failure groups keyed by error signature. When provided,
+            cross-reference data is written to a workspace file for the AI to read.
 
     Returns:
         List of FailureAnalysis objects, one per failure in the group.
@@ -479,8 +498,21 @@ async def analyze_failure_group_with_peers(
         job_id=job_id,
         additional_repos=additional_repos,
         auth_header=auth_header,
-        other_groups_summary=other_groups_summary,
+        all_groups=all_groups,
     )
+
+    # Compute other_groups_file path for peer/revision prompts
+    # (the file was already written by run_single_ai_analysis above)
+    other_groups_file: Path | None = None
+    if all_groups and len(all_groups) > 1:
+        workspace_dir = repo_path
+        if workspace_dir is None:
+            import tempfile
+
+            workspace_dir = Path(tempfile.mkdtemp(prefix="rootcoz-console-"))
+        other_groups_file = write_other_groups_file(
+            all_groups, error_signature, workspace_dir
+        )
 
     # Validate orchestrator classification before feeding into consensus
     normalized_main = _coerce_supported_classification(parsed_analysis.classification)
@@ -584,7 +616,7 @@ async def analyze_failure_group_with_peers(
                     custom_prompt=custom_prompt,
                     resources_section=resources_section,
                     other_peer_responses=other_responses if other_responses else None,
-                    other_groups_summary=other_groups_summary,
+                    other_groups_file=other_groups_file,
                 )
 
             async def _call_peer(
@@ -813,7 +845,7 @@ async def analyze_failure_group_with_peers(
                     peer_feedback=peer_feedback,
                     custom_prompt=custom_prompt,
                     resources_section=resources_section,
-                    other_groups_summary=other_groups_summary,
+                    other_groups_file=other_groups_file,
                 )
 
                 previous_analysis = parsed_analysis

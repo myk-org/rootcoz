@@ -172,6 +172,9 @@ prompt = f"Here is the data: {content}"
 **Exceptions — when embedding in the prompt IS allowed:**
 - **Content formatting** (e.g., `bug_creation.py`): When the AI is formatting already-analyzed data into structured text (issue titles, bodies), not performing new analysis. The input is fully known and the output is a template — no exploration needed.
 
+Cross-reference data (other failure groups, etc.) MUST be written to workspace files,
+not embedded in the prompt. The prompt tells the AI the file exists and that reading it is MANDATORY.
+
 ### AI Chat Tool Restriction (MANDATORY)
 
 AI chat sessions MUST use restricted tool sets — **never give bash access**.

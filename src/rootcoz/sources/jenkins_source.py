@@ -27,7 +27,6 @@ from simple_logger.logger import get_logger
 from rootcoz.config import Settings, parse_repo_ref
 from rootcoz.engine.core import (
     analyze_failure_group,
-    build_other_groups_summary,
     clone_additional_repos,
     derive_error_details,
     extract_relevant_console_lines,
@@ -638,11 +637,6 @@ async def _analyze_grouped_failures(
         f"Grouped {len(test_failures)} failures into {unique_errors} unique error types"
     )
 
-    # Pre-compute cross-reference summaries once (avoids O(n²) recomputation)
-    group_summaries = {
-        sig: build_other_groups_summary(failure_groups, sig) for sig in failure_groups
-    }
-
     # Build tasks for each unique failure group
     total_groups = len(failure_groups)
     tasks: list[Coroutine[Any, Any, Any]] = []
@@ -673,7 +667,7 @@ async def _analyze_grouped_failures(
                 additional_repos=additional_repos,
                 max_concurrent_ai_calls=max_concurrent_ai_calls,
                 auth_header=auth_header,
-                other_groups_summary=group_summaries[_sig],
+                all_groups=failure_groups,
             )
         )
     group_results = await run_parallel_with_limit(

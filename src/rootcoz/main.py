@@ -76,7 +76,6 @@ from rootcoz.encryption import (
 from rootcoz.engine.core import (
     JOB_INSIGHT_ISSUE_PROMPT_FILENAME,
     analyze_failure_group,
-    build_other_groups_summary,
     clone_additional_repos,
     extract_json_dict,
     get_failure_signature,
@@ -2962,11 +2961,6 @@ async def _process_file_raw_analysis(
             f"Starting AI analysis for {len(groups)} failure groups (provider={ai_provider}, model={ai_model})"
         )
 
-        # Pre-compute cross-reference summaries once (avoids O(n²) recomputation)
-        group_summaries = {
-            sig: build_other_groups_summary(groups, sig) for sig in groups
-        }
-
         # Analyze each group in parallel
         coroutines: list[Coroutine[Any, Any, Any]] = [
             analyze_failure_group(
@@ -2984,7 +2978,7 @@ async def _process_file_raw_analysis(
                 additional_repos=cloned_repos or None,
                 max_concurrent_ai_calls=merged.max_concurrent_ai_calls,
                 auth_header=auth_header,
-                other_groups_summary=group_summaries[sig],
+                all_groups=groups,
             )
             for sig, group_failures in groups.items()
         ]

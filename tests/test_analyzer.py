@@ -2,6 +2,7 @@
 
 import inspect
 import json
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import jenkins
@@ -15,13 +16,13 @@ from rootcoz.engine.core import (
     MAX_GROUPS_IN_SUMMARY,
     MAX_TESTS_PER_GROUP,
     analyze_failure_group,
-    build_other_groups_summary,
     build_resources_section,
     clone_additional_repos,
     parse_json_response,
     recover_from_details,
     resolve_additional_repos,
     run_single_ai_analysis,
+    write_other_groups_file,
 )
 from rootcoz.models import (
     AdditionalRepo,
@@ -306,60 +307,68 @@ class TestRunSingleAiAnalysis:
         assert call_kwargs["auth_header"] == "Bearer test-token"
 
 
-class TestBuildOtherGroupsSummary:
-    """Tests for build_other_groups_summary cross-reference context builder."""
+class TestWriteOtherGroupsFile:
+    """Tests for write_other_groups_file cross-reference file writer."""
 
-    def test_single_group_returns_empty(self) -> None:
-        """When only one group exists, no cross-reference is needed."""
+    def test_single_group_returns_none(self, tmp_path: Path) -> None:
+        """When only one group exists, no file is needed."""
         failure = FailedTest(test_name="test_a", error_message="err")
         groups = {"sig1": [failure]}
-        assert build_other_groups_summary(groups, "sig1") == ""
+        assert write_other_groups_file(groups, "sig1", tmp_path) is None
 
-    def test_multiple_groups_returns_summary(self) -> None:
-        """Multiple groups produce a formatted summary with other groups' info."""
+    def test_multiple_groups_writes_file(self, tmp_path: Path) -> None:
+        """Multiple groups produce a file with other groups' info."""
         f1 = FailedTest(test_name="test_a", error_message="timeout waiting")
         f2 = FailedTest(test_name="test_b", error_message="connection refused")
         groups = {"sig1": [f1], "sig2": [f2]}
 
-        result = build_other_groups_summary(groups, "sig1")
-        assert "OTHER FAILURE GROUPS" in result
-        assert "test_b" in result
-        assert "connection refused" in result
-        # Current group's tests should NOT appear in the summary
-        assert "test_a" not in result
+        filepath = write_other_groups_file(groups, "sig1", tmp_path)
+        assert filepath is not None
+        assert filepath.exists()
+        content = filepath.read_text()
+        assert "OTHER FAILURE GROUPS" in content
+        assert "test_b" in content
+        assert "connection refused" in content
+        # Current group's tests should NOT appear in the file
+        assert "test_a" not in content
 
-    def test_shows_current_group_position(self) -> None:
-        """Summary includes 'You are analyzing group M of N'."""
+    def test_shows_current_group_position(self, tmp_path: Path) -> None:
+        """File includes 'You are analyzing group M of N'."""
         f1 = FailedTest(test_name="test_a", error_message="err1")
         f2 = FailedTest(test_name="test_b", error_message="err2")
         f3 = FailedTest(test_name="test_c", error_message="err3")
         groups = {"sig1": [f1], "sig2": [f2], "sig3": [f3]}
 
-        result = build_other_groups_summary(groups, "sig2")
-        assert "You are analyzing group 2 of 3." in result
+        filepath = write_other_groups_file(groups, "sig2", tmp_path)
+        assert filepath is not None
+        content = filepath.read_text()
+        assert "You are analyzing group 2 of 3." in content
 
-    def test_preserves_full_error_messages(self) -> None:
+    def test_preserves_full_error_messages(self, tmp_path: Path) -> None:
         """Error previews include the full message without truncation."""
         f1 = FailedTest(test_name="test_a", error_message="short")
         long_msg = "x" * 200
         f2 = FailedTest(test_name="test_b", error_message=long_msg)
         groups = {"sig1": [f1], "sig2": [f2]}
 
-        result = build_other_groups_summary(groups, "sig1")
-        assert long_msg in result
+        filepath = write_other_groups_file(groups, "sig1", tmp_path)
+        assert filepath is not None
+        assert long_msg in filepath.read_text()
 
-    def test_multiple_tests_in_group(self) -> None:
+    def test_multiple_tests_in_group(self, tmp_path: Path) -> None:
         """Groups with multiple tests show all test names."""
         f1 = FailedTest(test_name="test_a", error_message="err")
         f2a = FailedTest(test_name="test_b", error_message="same err")
         f2b = FailedTest(test_name="test_c", error_message="same err")
         groups = {"sig1": [f1], "sig2": [f2a, f2b]}
 
-        result = build_other_groups_summary(groups, "sig1")
-        assert "test_b" in result
-        assert "test_c" in result
+        filepath = write_other_groups_file(groups, "sig1", tmp_path)
+        assert filepath is not None
+        content = filepath.read_text()
+        assert "test_b" in content
+        assert "test_c" in content
 
-    def test_caps_groups_in_summary(self) -> None:
+    def test_caps_groups_in_summary(self, tmp_path: Path) -> None:
         """Only MAX_GROUPS_IN_SUMMARY groups are listed; rest are noted as omitted."""
         groups: dict[str, list[FailedTest]] = {
             "current": [FailedTest(test_name="test_current", error_message="err")],
@@ -370,12 +379,14 @@ class TestBuildOtherGroupsSummary:
                 FailedTest(test_name=f"test_{i}", error_message=f"err_{i}")
             ]
 
-        result = build_other_groups_summary(groups, "current")
-        assert f"Group {MAX_GROUPS_IN_SUMMARY}" in result
-        assert f"Group {MAX_GROUPS_IN_SUMMARY + 1}" not in result
-        assert "and 5 more group(s) not listed" in result
+        filepath = write_other_groups_file(groups, "current", tmp_path)
+        assert filepath is not None
+        content = filepath.read_text()
+        assert f"Group {MAX_GROUPS_IN_SUMMARY}" in content
+        assert f"Group {MAX_GROUPS_IN_SUMMARY + 1}" not in content
+        assert "and 5 more group(s) not listed" in content
 
-    def test_caps_test_names_per_group(self) -> None:
+    def test_caps_test_names_per_group(self, tmp_path: Path) -> None:
         """Only MAX_TESTS_PER_GROUP test names are listed per group."""
         current = [FailedTest(test_name="test_current", error_message="err")]
         many_tests = [
@@ -384,31 +395,45 @@ class TestBuildOtherGroupsSummary:
         ]
         groups = {"sig1": current, "sig2": many_tests}
 
-        result = build_other_groups_summary(groups, "sig1")
+        filepath = write_other_groups_file(groups, "sig1", tmp_path)
+        assert filepath is not None
+        content = filepath.read_text()
         for i in range(MAX_TESTS_PER_GROUP):
-            assert f"test_{i}" in result
-        assert f"test_{MAX_TESTS_PER_GROUP}" not in result
-        assert "and 3 more" in result
+            assert f"test_{i}" in content
+        assert f"test_{MAX_TESTS_PER_GROUP}" not in content
+        assert "and 3 more" in content
 
-    def test_includes_isolation_instructions(self) -> None:
-        """Summary includes instructions to avoid cross-contamination."""
+    def test_includes_isolation_instructions(self, tmp_path: Path) -> None:
+        """File includes instructions to avoid cross-contamination."""
         f1 = FailedTest(test_name="test_a", error_message="err1")
         f2 = FailedTest(test_name="test_b", error_message="err2")
         groups = {"sig1": [f1], "sig2": [f2]}
 
-        result = build_other_groups_summary(groups, "sig1")
-        assert "Do NOT reference" in result
-        assert "Focus ONLY" in result
+        filepath = write_other_groups_file(groups, "sig1", tmp_path)
+        assert filepath is not None
+        content = filepath.read_text()
+        assert "Do NOT reference" in content
+        assert "Focus ONLY" in content
+
+    def test_writes_to_expected_filename(self, tmp_path: Path) -> None:
+        """File is written as 'other-failure-groups.txt'."""
+        f1 = FailedTest(test_name="test_a", error_message="err1")
+        f2 = FailedTest(test_name="test_b", error_message="err2")
+        groups = {"sig1": [f1], "sig2": [f2]}
+
+        filepath = write_other_groups_file(groups, "sig1", tmp_path)
+        assert filepath is not None
+        assert filepath.name == "other-failure-groups.txt"
 
 
 class TestRunSingleAiAnalysisGroupContext:
     """Tests for cross-reference and timeline context in AI prompt."""
 
     @pytest.mark.asyncio
-    async def test_other_groups_summary_in_prompt(
-        self, monkeypatch: pytest.MonkeyPatch
+    async def test_other_groups_file_referenced_in_prompt(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
-        """other_groups_summary is included in the AI prompt."""
+        """When all_groups has multiple groups, prompt references the file."""
         captured_prompt = {}
 
         async def mock_ai(prompt, **kwargs):
@@ -426,14 +451,15 @@ class TestRunSingleAiAnalysisGroupContext:
 
         monkeypatch.setattr("rootcoz.engine.core.call_ai_once", mock_ai)
 
-        failure = FailedTest(
-            test_name="test_a", error_message="err", stack_trace="trace"
+        f1 = FailedTest(test_name="test_a", error_message="err", stack_trace="trace")
+        f2 = FailedTest(
+            test_name="test_b", error_message="other err", stack_trace="trace2"
         )
-        summary = "\n\n=== OTHER FAILURE GROUPS ===\nYou are analyzing group 1 of 2.\n"
+        groups = {"sig1": [f1], "sig2": [f2]}
         await run_single_ai_analysis(
-            failures=[failure],
+            failures=[f1],
             console_context="",
-            repo_path=None,
+            repo_path=tmp_path,
             ai_provider="claude",
             ai_model="opus",
             ai_call_timeout=None,
@@ -441,10 +467,14 @@ class TestRunSingleAiAnalysisGroupContext:
             artifacts_context="",
             server_url="",
             job_id="",
-            other_groups_summary=summary,
+            all_groups=groups,
         )
-        assert "OTHER FAILURE GROUPS" in captured_prompt["text"]
-        assert "group 1 of 2" in captured_prompt["text"]
+        assert "MANDATORY" in captured_prompt["text"]
+        assert "other-failure-groups.txt" in captured_prompt["text"]
+        # The file should exist in the workspace
+        groups_file = tmp_path / "other-failure-groups.txt"
+        assert groups_file.exists()
+        assert "test_b" in groups_file.read_text()
 
     @pytest.mark.asyncio
     async def test_timeline_rule_in_prompt(
@@ -487,8 +517,10 @@ class TestRunSingleAiAnalysisGroupContext:
         assert "chronological order" in captured_prompt["text"]
 
     @pytest.mark.asyncio
-    async def test_no_summary_when_empty(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """Empty other_groups_summary does not add cross-reference block."""
+    async def test_no_file_when_single_group(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Single group does not create cross-reference file or add instruction."""
         captured_prompt = {}
 
         async def mock_ai(prompt, **kwargs):
@@ -520,9 +552,8 @@ class TestRunSingleAiAnalysisGroupContext:
             artifacts_context="",
             server_url="",
             job_id="",
-            other_groups_summary="",
         )
-        assert "OTHER FAILURE GROUPS" not in captured_prompt["text"]
+        assert "other-failure-groups" not in captured_prompt["text"]
 
 
 class TestAnalyzeFailureGroupPeerDelegation:
