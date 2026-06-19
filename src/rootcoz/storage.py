@@ -2880,6 +2880,7 @@ async def _override_failure_field(
     """
     _validate_child_identifier_pairing(child_job_name, child_build_number)
     child_sql, child_params = _child_scope_sql(child_job_name, child_build_number)
+    is_wildcard = bool(child_job_name and child_build_number == 0)
     async with _connect_db() as db:
         # Look up error_signature so we can update all grouped failures.
         sig_query = (
@@ -2893,15 +2894,29 @@ async def _override_failure_field(
         row = await cursor.fetchone()
         error_signature = row[0] if row and row[0] else ""
 
-        # Read the current value BEFORE updating for original_* tracking.
-        orig_query = (
-            f"SELECT {field} FROM failure_history WHERE job_id = ? AND test_name = ?"
-        )
-        orig_params: list = [job_id, test_name, *child_params]
-        orig_query += child_sql + " ORDER BY analyzed_at DESC LIMIT 1"
-        orig_cursor = await db.execute(orig_query, orig_params)
-        orig_row = await orig_cursor.fetchone()
-        original_value = orig_row[0] if orig_row and orig_row[0] else ""
+        # Collect all test_names in the signature group BEFORE
+        # the UPDATE so we can read per-test original values.
+        if error_signature:
+            group_cursor = await db.execute(
+                "SELECT DISTINCT test_name FROM failure_history "
+                f"WHERE job_id = ? AND error_signature = ?{child_sql}",
+                (job_id, error_signature, *child_params),
+            )
+            group_tests = [r[0] for r in await group_cursor.fetchall()]
+        else:
+            group_tests = [test_name]
+
+        # Read original values per-test BEFORE the UPDATE mutates them.
+        orig_values: dict[str, str] = {}
+        for t in group_tests:
+            orig_cursor = await db.execute(
+                f"SELECT {field} FROM failure_history "
+                f"WHERE job_id = ? AND test_name = ?{child_sql}"
+                " ORDER BY analyzed_at DESC LIMIT 1",
+                [job_id, t, *child_params],
+            )
+            orig_row = await orig_cursor.fetchone()
+            orig_values[t] = orig_row[0] if orig_row and orig_row[0] else ""
 
         # UPDATE failure_history rows.
         if error_signature:
@@ -2919,46 +2934,60 @@ async def _override_failure_field(
                 (value, job_id, test_name, *child_params),
             )
 
-        # Collect all test_names in the signature group.
-        if error_signature:
-            group_cursor = await db.execute(
-                "SELECT DISTINCT test_name FROM failure_history "
-                f"WHERE job_id = ? AND error_signature = ?{child_sql}",
-                (job_id, error_signature, *child_params),
+        # Resolve build numbers for test_classifications INSERT.
+        # Wildcard overrides must fan out to each actual build number
+        # so reports JOINs on exact child_build_number still match.
+        if is_wildcard and error_signature:
+            builds_cursor = await db.execute(
+                "SELECT DISTINCT child_build_number FROM failure_history "
+                "WHERE job_id = ? AND error_signature = ? AND child_job_name = ?",
+                (job_id, error_signature, child_job_name),
             )
-            group_tests = [row[0] for row in await group_cursor.fetchall()]
+            build_numbers = [r[0] for r in await builds_cursor.fetchall()]
+        elif is_wildcard:
+            builds_cursor = await db.execute(
+                "SELECT DISTINCT child_build_number FROM failure_history "
+                "WHERE job_id = ? AND test_name = ? AND child_job_name = ?",
+                (job_id, test_name, child_job_name),
+            )
+            build_numbers = [r[0] for r in await builds_cursor.fetchall()]
         else:
-            group_tests = [test_name]
+            build_numbers = [child_build_number]
 
         # Build classification-specific or pattern-specific INSERT columns.
         if field == "classification":
             extra_cols = "classification, original_classification"
             extra_vals = "?, ?"
-            extra_params: tuple = (value, original_value)
             reason = "User override"
         else:
             extra_cols = "classification, pattern, original_pattern"
             extra_vals = "?, ?, ?"
-            extra_params = ("", value, original_value)
             reason = "User pattern override"
 
         for t in group_tests:
-            await db.execute(
-                f"INSERT INTO test_classifications "
-                f"(test_name, job_name, parent_job_name, job_id, {extra_cols}, "
-                f"reason, created_by, visible, child_build_number) "
-                f"VALUES (?, ?, ?, ?, {extra_vals}, ?, ?, 1, ?)",
-                (
-                    t,
-                    child_job_name,
-                    parent_job_name,
-                    job_id,
-                    *extra_params,
-                    reason,
-                    username,
-                    child_build_number,
-                ),
-            )
+            original = orig_values[t]
+            if field == "classification":
+                extra_params: tuple = (value, original)
+            else:
+                extra_params = ("", value, original)
+
+            for build_num in build_numbers:
+                await db.execute(
+                    f"INSERT INTO test_classifications "
+                    f"(test_name, job_name, parent_job_name, job_id, {extra_cols}, "
+                    f"reason, created_by, visible, child_build_number) "
+                    f"VALUES (?, ?, ?, ?, {extra_vals}, ?, ?, 1, ?)",
+                    (
+                        t,
+                        child_job_name,
+                        parent_job_name,
+                        job_id,
+                        *extra_params,
+                        reason,
+                        username,
+                        build_num,
+                    ),
+                )
 
         await db.commit()
     return group_tests
