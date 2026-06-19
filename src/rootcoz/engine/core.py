@@ -12,6 +12,7 @@ import importlib
 import json
 import os
 import re
+from itertools import islice
 from collections.abc import Callable
 from pathlib import Path
 
@@ -888,7 +889,6 @@ def build_resources_section(
 
 
 MAX_GROUPS_IN_SUMMARY = 10
-MAX_TESTS_PER_GROUP = 5
 
 
 def write_other_groups_file(
@@ -918,24 +918,24 @@ def write_other_groups_file(
     current_position = (
         sigs.index(current_signature) + 1 if current_signature in sigs else 0
     )
+    pos_by_sig = {sig: idx + 1 for idx, sig in enumerate(sigs)}
     other_groups = {
         sig: group for sig, group in all_groups.items() if sig != current_signature
     }
     if not other_groups:
         return None
 
-    # Cap to prevent prompt bloat on large jobs
-    groups_to_show = dict(list(other_groups.items())[:MAX_GROUPS_IN_SUMMARY])
+    # Cap to prevent file bloat on large jobs
+    groups_to_show = dict(islice(other_groups.items(), MAX_GROUPS_IN_SUMMARY))
     omitted = len(other_groups) - len(groups_to_show)
 
     lines: list[str] = []
-    for other_idx, (sig, group) in enumerate(groups_to_show.items(), start=1):
-        test_names = [f.test_name for f in group[:MAX_TESTS_PER_GROUP]]
-        if len(group) > MAX_TESTS_PER_GROUP:
-            test_names.append(f"... and {len(group) - MAX_TESTS_PER_GROUP} more")
+    for sig, group in groups_to_show.items():
+        global_pos = pos_by_sig[sig]
+        test_names = [f.test_name for f in group]
         error_preview = group[0].error_message
         lines.append(
-            f'- Group {other_idx}: tests {test_names} \u2014 error: "{error_preview}"'
+            f'- Group {global_pos}/{total}: tests {test_names} \u2014 error: "{error_preview}"'
         )
 
     if omitted > 0:

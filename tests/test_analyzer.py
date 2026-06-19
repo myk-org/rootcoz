@@ -14,7 +14,6 @@ from rootcoz.config import Settings, get_settings
 from rootcoz.engine.core import (
     JSON_RESPONSE_SCHEMA,
     MAX_GROUPS_IN_SUMMARY,
-    MAX_TESTS_PER_GROUP,
     analyze_failure_group,
     build_resources_section,
     clone_additional_repos,
@@ -382,26 +381,25 @@ class TestWriteOtherGroupsFile:
         filepath = write_other_groups_file(groups, "current", tmp_path)
         assert filepath is not None
         content = filepath.read_text()
-        assert f"Group {MAX_GROUPS_IN_SUMMARY}" in content
-        assert f"Group {MAX_GROUPS_IN_SUMMARY + 1}" not in content
+        # First 10 other groups shown (global positions 2-11)
+        assert "Group 11/" in content
+        # 11th other group (global position 12) should NOT appear
+        assert "Group 12/" not in content
         assert "and 5 more group(s) not listed" in content
 
-    def test_caps_test_names_per_group(self, tmp_path: Path) -> None:
-        """Only MAX_TESTS_PER_GROUP test names are listed per group."""
+    def test_shows_all_test_names_in_group(self, tmp_path: Path) -> None:
+        """All test names are included without truncation."""
         current = [FailedTest(test_name="test_current", error_message="err")]
         many_tests = [
-            FailedTest(test_name=f"test_{i}", error_message="same")
-            for i in range(MAX_TESTS_PER_GROUP + 3)
+            FailedTest(test_name=f"test_{i}", error_message="same") for i in range(8)
         ]
         groups = {"sig1": current, "sig2": many_tests}
 
         filepath = write_other_groups_file(groups, "sig1", tmp_path)
         assert filepath is not None
         content = filepath.read_text()
-        for i in range(MAX_TESTS_PER_GROUP):
+        for i in range(8):
             assert f"test_{i}" in content
-        assert f"test_{MAX_TESTS_PER_GROUP}" not in content
-        assert "and 3 more" in content
 
     def test_includes_isolation_instructions(self, tmp_path: Path) -> None:
         """File includes instructions to avoid cross-contamination."""
