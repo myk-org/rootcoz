@@ -289,13 +289,12 @@ async def _generate_issue_content_via_ai(
     return None
 
 
-# NOTE: The content generation functions below intentionally pass failure data
-# directly into the AI prompt. This is NOT the same as the analysis pipeline
-# where the AI should be given tools to explore data autonomously (per
-# CLAUDE.md "AI Tool Access"). Here the AI is generating formatted text from
-# *already-analyzed* data, not performing new analysis. The input is fully
-# known and the output is a structured document -- tool access would add
-# latency and complexity with no benefit.
+# NOTE: The content generation functions below pass failure data directly into
+# the AI prompt. This is an explicit exception to the AGENTS.md "AI Tool Access"
+# rule (see "Exceptions" in that section). Here the AI is formatting
+# already-analyzed data into structured text (issue titles, bodies), not
+# performing new analysis. The input is fully known and the output is a
+# formatted document — file-based access would add latency with no benefit.
 async def generate_github_issue_content(
     failure: FailureAnalysis,
     report_url: str = "",

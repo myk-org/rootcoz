@@ -140,19 +140,37 @@ Every new environment variable added to `Settings` in `config.py` **MUST** also 
 
 The `docs/` directory is **auto-generated** by [docsfy](https://github.com/myk-org/docsfy). **NEVER edit files in `docs/` manually** — all changes will be overwritten. To update documentation, modify source code and regenerate with docsfy, or edit `AGENTS.md` / `README.md` for project-level docs.
 
-### AI Tool Access (IMPORTANT)
+### AI Tool Access (MANDATORY)
 
-Never pre-feed data to the AI in the prompt. Give the AI tools (API endpoints, scripts, commands) and let it decide what data it needs.
+**NEVER embed data in the AI prompt.** All data the AI needs MUST be written to files in the job workspace. The prompt only tells the AI which files exist, what they contain, and that reading them is MANDATORY.
 
 **DO:**
+- Write data to files in the job workspace (e.g., `console-output.txt`, `other-failure-groups.txt`)
+- Tell the AI in the prompt: "MANDATORY: Read file X before analyzing. It contains Y."
 - Expose API endpoints the AI can curl
 - Provide skill files documenting available tools
 - Let the AI query, explore, and interpret data on its own
 
 **DON'T:**
+- Embed data directly in the prompt (console output, cross-reference summaries, etc.)
 - Pre-query the database and stuff results into the prompt
 - Summarize or filter data before the AI sees it
 - Make decisions about what data the AI needs — let the AI decide
+- Truncate or slice data before giving it to the AI
+
+**File-based data pattern:**
+```python
+# CORRECT — write to file, tell AI to read it
+filepath = workspace / "other-failure-groups.txt"
+filepath.write_text(content)
+prompt = f"MANDATORY: Read {filepath} before analyzing."
+
+# WRONG — embed in prompt
+prompt = f"Here is the data: {content}"
+```
+
+**Exceptions — when embedding in the prompt IS allowed:**
+- **Content formatting** (e.g., `bug_creation.py`): When the AI is formatting already-analyzed data into structured text (issue titles, bodies), not performing new analysis. The input is fully known and the output is a template — no exploration needed.
 
 ### AI Chat Tool Restriction (MANDATORY)
 
