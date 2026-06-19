@@ -23,6 +23,7 @@ from simple_logger.logger import get_logger
 
 from rootcoz.engine.core import (
     JSON_RESPONSE_SCHEMA,
+    TIMELINE_RULE,
     build_prompt_sections,
     parse_json_response,
     run_single_ai_analysis,
@@ -375,11 +376,7 @@ PEER FEEDBACK:
 
 Revise your analysis considering the peer feedback above. You may keep your original \
 classification if you believe the peers are wrong — justify your reasoning.
-
-TIMELINE RULE: All timestamps you cite in your analysis MUST be in \
-chronological order. If event A happens at 15:35:56 and event B happens \
-at 15:36:58, then A happened BEFORE B. Verify your timeline is \
-consistent before responding.
+{TIMELINE_RULE}
 {custom_section}{resources_section}
 {JSON_RESPONSE_SCHEMA}
 """

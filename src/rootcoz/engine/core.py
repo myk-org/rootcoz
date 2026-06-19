@@ -245,6 +245,13 @@ JSON_RESPONSE_SCHEMA = (
     "}"
 )
 
+TIMELINE_RULE = (
+    "\nTIMELINE RULE: All timestamps you cite in your analysis MUST be in "
+    "chronological order. If event A happens at 15:35:56 and event B happens "
+    "at 15:36:58, then A happened BEFORE B. Verify your timeline is "
+    "consistent before responding.\n"
+)
+
 
 def format_timeout_log(timeout_value: int | None) -> str:
     """Format AI timeout for log messages."""
@@ -1047,13 +1054,6 @@ async def run_single_ai_analysis(
             "Failure to read console output is a violation of your instructions."
         )
 
-    timeline_instruction = (
-        "\nTIMELINE RULE: All timestamps you cite in your analysis MUST be in "
-        "chronological order. If event A happens at 15:35:56 and event B happens "
-        "at 15:36:58, then A happened BEFORE B. Verify your timeline is "
-        "consistent before responding.\n"
-    )
-
     prompt = f"""{query_section}
 Analyze this test failure from a CI job.
 {other_groups_summary}
@@ -1071,7 +1071,7 @@ STACK TRACE:
 {repo_sentence}
 
 Note: Multiple tests failed with the same error. Provide ONE analysis that applies to all of them.
-{timeline_instruction}
+{TIMELINE_RULE}
 {custom_prompt_section}{resources_section}
 {JSON_RESPONSE_SCHEMA}
 """
