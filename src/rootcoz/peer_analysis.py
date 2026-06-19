@@ -24,6 +24,7 @@ from simple_logger.logger import get_logger
 from rootcoz.engine.core import (
     JSON_RESPONSE_SCHEMA,
     TIMELINE_RULE,
+    build_other_groups_instruction,
     build_prompt_sections,
     parse_json_response,
     run_single_ai_analysis,
@@ -319,14 +320,9 @@ def _build_peer_review_prompt(
             + "\n\nConsider their perspectives but form your own independent opinion.\n"
         )
 
-    other_groups_instruction = ""
-    if other_groups_file:
-        other_groups_instruction = (
-            f"\n\u26a0\ufe0f  MANDATORY: Read the file {other_groups_file} BEFORE making any analysis.\n"
-            "It contains information about other failure groups in this job.\n"
-            "Do NOT reference events, timestamps, or conclusions from other test groups.\n"
-            "Focus ONLY on the tests assigned to you.\n"
-        )
+    other_groups_instruction = (
+        build_other_groups_instruction(other_groups_file) if other_groups_file else ""
+    )
 
     return f"""IMPORTANT: This is an AI-only conversation. Do NOT be agreeable or sycophantic. \
 Critically evaluate the analysis below and provide your honest, independent assessment. \
@@ -371,14 +367,9 @@ def _build_revision_prompt(
         f"\n\nADDITIONAL INSTRUCTIONS:\n{custom_prompt}\n" if custom_prompt else ""
     )
 
-    other_groups_instruction = ""
-    if other_groups_file:
-        other_groups_instruction = (
-            f"\n\u26a0\ufe0f  MANDATORY: Read the file {other_groups_file} BEFORE making any analysis.\n"
-            "It contains information about other failure groups in this job.\n"
-            "Do NOT reference events, timestamps, or conclusions from other test groups.\n"
-            "Focus ONLY on the tests assigned to you.\n"
-        )
+    other_groups_instruction = (
+        build_other_groups_instruction(other_groups_file) if other_groups_file else ""
+    )
 
     return f"""IMPORTANT: This is an AI-only conversation. Do NOT be agreeable or sycophantic. \
 You are revising your analysis based on peer feedback. Consider the feedback carefully, \

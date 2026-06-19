@@ -947,9 +947,33 @@ def write_other_groups_file(
         "and base your analysis only on events relevant to YOUR assigned tests.\n"
     )
 
-    filepath = workspace_dir / "other-failure-groups.txt"
-    filepath.write_text(content)
+    filepath = workspace_dir / f"other-failure-groups-{current_signature[:8]}.txt"
+    try:
+        filepath.write_text(content)
+    except OSError:
+        logger.warning(
+            "Failed to write cross-reference file %s; continuing without it",
+            filepath,
+        )
+        return None
     return filepath
+
+
+def build_other_groups_instruction(filepath: Path) -> str:
+    """Build the MANDATORY instruction telling the AI to read the cross-reference file.
+
+    Args:
+        filepath: Path to the other-failure-groups file.
+
+    Returns:
+        Formatted instruction string for inclusion in prompts.
+    """
+    return (
+        f"\n\n\u26a0\ufe0f  MANDATORY: Read the file {filepath} BEFORE making any analysis.\n"
+        "It contains information about other failure groups in this job.\n"
+        "Do NOT reference events, timestamps, or conclusions from other test groups.\n"
+        "Focus ONLY on the tests assigned to you.\n"
+    )
 
 
 async def run_single_ai_analysis(
@@ -1074,12 +1098,7 @@ async def run_single_ai_analysis(
             all_groups, error_signature, workspace_dir
         )
         if groups_file:
-            other_groups_section = (
-                f"\n\n\u26a0\ufe0f  MANDATORY: Read the file {groups_file} BEFORE making any analysis.\n"
-                "It contains information about other failure groups in this job.\n"
-                "Do NOT reference events, timestamps, or conclusions from other test groups.\n"
-                "Focus ONLY on the tests assigned to you.\n"
-            )
+            other_groups_section = build_other_groups_instruction(groups_file)
 
     prompt = f"""{query_section}
 Analyze this test failure from a CI job.

@@ -412,14 +412,25 @@ class TestWriteOtherGroupsFile:
         assert "Focus ONLY" in content
 
     def test_writes_to_expected_filename(self, tmp_path: Path) -> None:
-        """File is written as 'other-failure-groups.txt'."""
+        """File uses signature prefix for uniqueness."""
         f1 = FailedTest(test_name="test_a", error_message="err1")
         f2 = FailedTest(test_name="test_b", error_message="err2")
         groups = {"sig1": [f1], "sig2": [f2]}
 
         filepath = write_other_groups_file(groups, "sig1", tmp_path)
         assert filepath is not None
-        assert filepath.name == "other-failure-groups.txt"
+        assert filepath.name == f"other-failure-groups-{('sig1')[:8]}.txt"
+
+    def test_returns_none_on_write_error(self, tmp_path: Path) -> None:
+        """Returns None when file write fails (e.g., read-only dir)."""
+        f1 = FailedTest(test_name="test_a", error_message="err1")
+        f2 = FailedTest(test_name="test_b", error_message="err2")
+        groups = {"sig1": [f1], "sig2": [f2]}
+
+        # Point to a non-existent directory
+        bad_dir = tmp_path / "nonexistent" / "deep"
+        result = write_other_groups_file(groups, "sig1", bad_dir)
+        assert result is None
 
 
 class TestRunSingleAiAnalysisGroupContext:
@@ -466,11 +477,11 @@ class TestRunSingleAiAnalysisGroupContext:
             all_groups=groups,
         )
         assert "MANDATORY" in captured_prompt["text"]
-        assert "other-failure-groups.txt" in captured_prompt["text"]
+        assert "other-failure-groups-" in captured_prompt["text"]
         # The file should exist in the workspace
-        groups_file = tmp_path / "other-failure-groups.txt"
-        assert groups_file.exists()
-        assert "test_b" in groups_file.read_text()
+        groups_files = list(tmp_path.glob("other-failure-groups-*.txt"))
+        assert len(groups_files) == 1
+        assert "test_b" in groups_files[0].read_text()
 
     @pytest.mark.asyncio
     async def test_timeline_rule_in_prompt(
