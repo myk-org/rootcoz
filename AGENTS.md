@@ -169,6 +169,9 @@ prompt = f"MANDATORY: Read {filepath} before analyzing."
 prompt = f"Here is the data: {content}"
 ```
 
+**Exceptions — when embedding in the prompt IS allowed:**
+- **Content formatting** (e.g., `bug_creation.py`): When the AI is formatting already-analyzed data into structured text (issue titles, bodies), not performing new analysis. The input is fully known and the output is a template — no exploration needed.
+
 ### AI Chat Tool Restriction (MANDATORY)
 
 AI chat sessions MUST use restricted tool sets — **never give bash access**.
