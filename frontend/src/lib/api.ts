@@ -108,8 +108,8 @@ export function isExpectedTokenSyncError(err: unknown): boolean {
 /** Extract the `detail` string from an ApiError's body, if present. */
 export function extractApiDetail(err: unknown): string | null {
   if (err instanceof ApiError) {
-    const detail = (err.body as { detail?: string })?.detail
-    if (detail) return detail
+    const detail = (err.body as { detail?: unknown })?.detail
+    if (typeof detail === 'string') return detail
   }
   return null
 }
