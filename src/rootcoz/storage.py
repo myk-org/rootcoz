@@ -2848,6 +2848,122 @@ async def delete_jobs_bulk(job_ids: list[str]) -> dict:
     return {"deleted": deleted, "failed": failed, "total": len(unique_ids)}
 
 
+async def _override_failure_field(
+    job_id: str,
+    test_name: str,
+    field: str,
+    value: str,
+    child_job_name: str,
+    child_build_number: int,
+    username: str,
+    parent_job_name: str,
+) -> list[str]:
+    """Shared logic for overriding classification or pattern in failure_history.
+
+    1. Look up the error_signature for the test (scoped by child context).
+    2. Read the current value of *field* before mutating (for original_* tracking).
+    3. UPDATE all failure_history rows sharing the same signature.
+    4. INSERT a test_classifications row for every test in the group.
+
+    Args:
+        job_id: The analysis job ID.
+        test_name: Fully qualified test name (representative test from the group).
+        field: Column to override — ``"classification"`` or ``"pattern"``.
+        value: New value to set.
+        child_job_name: Child job name (for pipeline analyses).
+        child_build_number: Child build number (0 = wildcard by name).
+        username: User who made the override.
+        parent_job_name: Parent pipeline job name.
+
+    Returns:
+        List of all test names in the affected signature group.
+    """
+    _validate_child_identifier_pairing(child_job_name, child_build_number)
+    child_sql, child_params = _child_scope_sql(child_job_name, child_build_number)
+    async with _connect_db() as db:
+        # Look up error_signature so we can update all grouped failures.
+        sig_query = (
+            "SELECT error_signature FROM failure_history "
+            "WHERE job_id = ? AND test_name = ?"
+        )
+        sig_params: list = [job_id, test_name, *child_params]
+        sig_query += child_sql + " ORDER BY analyzed_at DESC LIMIT 1"
+
+        cursor = await db.execute(sig_query, sig_params)
+        row = await cursor.fetchone()
+        error_signature = row[0] if row and row[0] else ""
+
+        # Read the current value BEFORE updating for original_* tracking.
+        orig_query = (
+            f"SELECT {field} FROM failure_history WHERE job_id = ? AND test_name = ?"
+        )
+        orig_params: list = [job_id, test_name, *child_params]
+        orig_query += child_sql + " ORDER BY analyzed_at DESC LIMIT 1"
+        orig_cursor = await db.execute(orig_query, orig_params)
+        orig_row = await orig_cursor.fetchone()
+        original_value = orig_row[0] if orig_row and orig_row[0] else ""
+
+        # UPDATE failure_history rows.
+        if error_signature:
+            await db.execute(
+                f"""UPDATE failure_history
+                   SET {field} = ?
+                   WHERE job_id = ? AND error_signature = ?{child_sql}""",
+                (value, job_id, error_signature, *child_params),
+            )
+        else:
+            await db.execute(
+                f"""UPDATE failure_history
+                   SET {field} = ?
+                   WHERE job_id = ? AND test_name = ?{child_sql}""",
+                (value, job_id, test_name, *child_params),
+            )
+
+        # Collect all test_names in the signature group.
+        if error_signature:
+            group_cursor = await db.execute(
+                "SELECT DISTINCT test_name FROM failure_history "
+                f"WHERE job_id = ? AND error_signature = ?{child_sql}",
+                (job_id, error_signature, *child_params),
+            )
+            group_tests = [row[0] for row in await group_cursor.fetchall()]
+        else:
+            group_tests = [test_name]
+
+        # Build classification-specific or pattern-specific INSERT columns.
+        if field == "classification":
+            extra_cols = "classification, original_classification"
+            extra_vals = "?, ?"
+            extra_params: tuple = (value, original_value)
+            reason = "User override"
+        else:
+            extra_cols = "classification, pattern, original_pattern"
+            extra_vals = "?, ?, ?"
+            extra_params = ("", value, original_value)
+            reason = "User pattern override"
+
+        for t in group_tests:
+            await db.execute(
+                f"INSERT INTO test_classifications "
+                f"(test_name, job_name, parent_job_name, job_id, {extra_cols}, "
+                f"reason, created_by, visible, child_build_number) "
+                f"VALUES (?, ?, ?, ?, {extra_vals}, ?, ?, 1, ?)",
+                (
+                    t,
+                    child_job_name,
+                    parent_job_name,
+                    job_id,
+                    *extra_params,
+                    reason,
+                    username,
+                    child_build_number,
+                ),
+            )
+
+        await db.commit()
+    return group_tests
+
+
 async def override_classification(
     job_id: str,
     test_name: str,
@@ -2864,15 +2980,6 @@ async def override_classification(
     Also inserts a test_classifications entry so the AI can learn from
     human overrides.
 
-    Args:
-        job_id: The analysis job ID.
-        test_name: Fully qualified test name (representative test from the group).
-        classification: New classification ("CODE ISSUE" or "PRODUCT BUG").
-        child_job_name: Child job name (for pipeline analyses).
-        child_build_number: Child build number.
-        username: User who made the override.
-        parent_job_name: Parent pipeline job name (for test_classifications).
-
     Returns:
         List of all test names in the affected signature group.
     """
@@ -2880,86 +2987,16 @@ async def override_classification(
         f"override_classification: job_id={job_id}, test_name={test_name}, "
         f"classification={classification}, username={username}"
     )
-    _validate_child_identifier_pairing(child_job_name, child_build_number)
-    child_sql, child_params = _child_scope_sql(child_job_name, child_build_number)
-    async with _connect_db() as db:
-        # Look up the error_signature for this test so we can update
-        # ALL tests in the same group (same signature, same job).
-        # Scope by child context when provided so that identically-named
-        # tests in different child jobs resolve the correct signature.
-        sig_query = (
-            "SELECT error_signature FROM failure_history "
-            "WHERE job_id = ? AND test_name = ?"
-        )
-        sig_params: list = [job_id, test_name, *child_params]
-        sig_query += child_sql + " LIMIT 1"
-
-        cursor = await db.execute(sig_query, sig_params)
-        row = await cursor.fetchone()
-        error_signature = row[0] if row and row[0] else ""
-
-        # Read the current classification BEFORE updating so we can
-        # store it as original_classification in test_classifications.
-        orig_cls_query = (
-            "SELECT classification FROM failure_history "
-            "WHERE job_id = ? AND test_name = ?"
-        )
-        orig_cls_params: list = [job_id, test_name, *child_params]
-        orig_cls_query += child_sql + " LIMIT 1"
-        orig_cursor = await db.execute(orig_cls_query, orig_cls_params)
-        orig_row = await orig_cursor.fetchone()
-        original_classification = orig_row[0] if orig_row and orig_row[0] else ""
-
-        if error_signature:
-            # Update ALL tests sharing the same error_signature in this job
-            await db.execute(
-                f"""UPDATE failure_history
-                   SET classification = ?
-                   WHERE job_id = ? AND error_signature = ?{child_sql}""",
-                (classification, job_id, error_signature, *child_params),
-            )
-        else:
-            # No signature -- fall back to exact test_name match
-            await db.execute(
-                f"""UPDATE failure_history
-                   SET classification = ?
-                   WHERE job_id = ? AND test_name = ?{child_sql}""",
-                (classification, job_id, test_name, *child_params),
-            )
-
-        # Find all test_names in this signature group
-        if error_signature:
-            group_cursor = await db.execute(
-                "SELECT DISTINCT test_name FROM failure_history "
-                f"WHERE job_id = ? AND error_signature = ?{child_sql}",
-                (job_id, error_signature, *child_params),
-            )
-            group_tests = [row[0] for row in await group_cursor.fetchall()]
-        else:
-            group_tests = [test_name]
-
-        # Persist override for ALL tests in the group
-        for t in group_tests:
-            await db.execute(
-                "INSERT INTO test_classifications "
-                "(test_name, job_name, parent_job_name, job_id, classification, "
-                "original_classification, "
-                "reason, created_by, visible, child_build_number) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?)",
-                (
-                    t,
-                    child_job_name,
-                    parent_job_name,
-                    job_id,
-                    classification,
-                    original_classification,
-                    "User override",
-                    username,
-                    child_build_number,
-                ),
-            )
-
-        await db.commit()
+    group_tests = await _override_failure_field(
+        job_id=job_id,
+        test_name=test_name,
+        field="classification",
+        value=classification,
+        child_job_name=child_job_name,
+        child_build_number=child_build_number,
+        username=username,
+        parent_job_name=parent_job_name,
+    )
     logger.info(
         f"Classification overridden: job_id={job_id}, test_name={test_name}, "
         f"classification={classification}, by={username or 'unknown'}"
@@ -2982,15 +3019,6 @@ async def override_pattern(
     (within the same job) so that grouped failures stay in sync.
     Also inserts a test_classifications entry for tracking.
 
-    Args:
-        job_id: The analysis job ID.
-        test_name: Fully qualified test name.
-        pattern: New pattern (NEW, REGRESSION, FLAKY, etc.).
-        child_job_name: Child job name (for pipeline analyses).
-        child_build_number: Child build number.
-        username: User who made the override.
-        parent_job_name: Parent pipeline job name.
-
     Returns:
         List of all test names in the affected signature group.
     """
@@ -2998,81 +3026,16 @@ async def override_pattern(
         f"override_pattern: job_id={job_id}, test_name={test_name}, "
         f"pattern={pattern}, username={username}"
     )
-    _validate_child_identifier_pairing(child_job_name, child_build_number)
-    child_sql, child_params = _child_scope_sql(child_job_name, child_build_number)
-    async with _connect_db() as db:
-        sig_query = (
-            "SELECT error_signature FROM failure_history "
-            "WHERE job_id = ? AND test_name = ?"
-        )
-        sig_params: list = [job_id, test_name, *child_params]
-        sig_query += child_sql + " LIMIT 1"
-
-        cursor = await db.execute(sig_query, sig_params)
-        row = await cursor.fetchone()
-        error_signature = row[0] if row and row[0] else ""
-
-        # Read the current pattern BEFORE updating so we can
-        # store it as original_pattern in test_classifications.
-        orig_pat_query = (
-            "SELECT pattern FROM failure_history WHERE job_id = ? AND test_name = ?"
-        )
-        orig_pat_params: list = [job_id, test_name, *child_params]
-        orig_pat_query += child_sql + " LIMIT 1"
-        orig_cursor = await db.execute(orig_pat_query, orig_pat_params)
-        orig_row = await orig_cursor.fetchone()
-        original_pattern = orig_row[0] if orig_row and orig_row[0] else ""
-
-        # Update pattern column in failure_history
-        if error_signature:
-            await db.execute(
-                f"""UPDATE failure_history
-                   SET pattern = ?
-                   WHERE job_id = ? AND error_signature = ?{child_sql}""",
-                (pattern, job_id, error_signature, *child_params),
-            )
-        else:
-            await db.execute(
-                f"""UPDATE failure_history
-                   SET pattern = ?
-                   WHERE job_id = ? AND test_name = ?{child_sql}""",
-                (pattern, job_id, test_name, *child_params),
-            )
-
-        # Find all test_names in this signature group
-        if error_signature:
-            group_cursor = await db.execute(
-                "SELECT DISTINCT test_name FROM failure_history "
-                f"WHERE job_id = ? AND error_signature = ?{child_sql}",
-                (job_id, error_signature, *child_params),
-            )
-            group_tests = [row[0] for row in await group_cursor.fetchall()]
-        else:
-            group_tests = [test_name]
-
-        # Persist override for ALL tests in the group
-        for t in group_tests:
-            await db.execute(
-                "INSERT INTO test_classifications "
-                "(test_name, job_name, parent_job_name, job_id, classification, "
-                "pattern, original_pattern, "
-                "reason, created_by, visible, child_build_number) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)",
-                (
-                    t,
-                    child_job_name,
-                    parent_job_name,
-                    job_id,
-                    "",  # classification column empty for pattern-only override
-                    pattern,
-                    original_pattern,
-                    "User pattern override",
-                    username,
-                    child_build_number,
-                ),
-            )
-
-        await db.commit()
+    group_tests = await _override_failure_field(
+        job_id=job_id,
+        test_name=test_name,
+        field="pattern",
+        value=pattern,
+        child_job_name=child_job_name,
+        child_build_number=child_build_number,
+        username=username,
+        parent_job_name=parent_job_name,
+    )
     logger.info(
         f"Pattern overridden: job_id={job_id}, test_name={test_name}, "
         f"pattern={pattern}, by={username or 'unknown'}"
