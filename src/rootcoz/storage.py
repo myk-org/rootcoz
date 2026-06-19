@@ -1043,6 +1043,23 @@ def _child_scope_sql(child_job_name: str, child_build_number: int) -> tuple[str,
     return " AND child_job_name = '' AND child_build_number = 0", []
 
 
+def _tc_scope_sql(child_job_name: str, child_build_number: int) -> tuple[str, list]:
+    """Return a SQL WHERE-clause suffix for child scoping in test_classifications.
+
+    Same three-way logic as :func:`_child_scope_sql` but uses the
+    ``job_name`` column (test_classifications) instead of
+    ``child_job_name`` (failure_history).
+    """
+    if child_job_name and child_build_number > 0:
+        return " AND job_name = ? AND child_build_number = ?", [
+            child_job_name,
+            child_build_number,
+        ]
+    if child_job_name:
+        return " AND job_name = ?", [child_job_name]
+    return " AND job_name = '' AND child_build_number = 0", []
+
+
 async def add_comment(
     job_id: str,
     test_name: str,
@@ -3099,19 +3116,20 @@ async def get_history_classification(
         The pattern string (e.g. ``"REGRESSION"``),
         or ``""`` if no pattern classification exists.
     """
-    _child_job_name = child_job_name or ""
-    _child_build_number = child_build_number or 0
+    child_sql, child_params = _child_scope_sql(child_job_name, child_build_number)
+    tc_sql, tc_params = _tc_scope_sql(child_job_name, child_build_number)
 
     async with _connect_db() as db:
-        # 1. Prefer visible entry from test_classifications (pattern column)
+        # 1. Prefer visible entry from test_classifications (pattern column).
         override_row = await (
             await db.execute(
                 "SELECT pattern FROM test_classifications"
-                " WHERE test_name = ? AND job_id = ? AND job_name = ?"
-                " AND child_build_number = ? AND visible = 1"
+                " WHERE test_name = ? AND job_id = ?"
+                f"{tc_sql}"
+                " AND visible = 1"
                 f" AND pattern IN {_PATTERN_CLASSIFICATIONS_SQL}"
                 " ORDER BY id DESC LIMIT 1",
-                [test_name, job_id, _child_job_name, _child_build_number],
+                [test_name, job_id, *tc_params],
             )
         ).fetchone()
         if override_row and override_row[0]:
@@ -3123,13 +3141,8 @@ async def get_history_classification(
             " WHERE job_id = ? AND test_name = ?"
             f" AND pattern IN {_PATTERN_CLASSIFICATIONS_SQL}"
         )
-        fh_params: list = [job_id, test_name]
-        if child_job_name:
-            fh_query += " AND child_job_name = ? AND child_build_number = ?"
-            fh_params.extend([child_job_name, child_build_number])
-        else:
-            fh_query += " AND child_job_name = '' AND child_build_number = 0"
-        fh_query += " ORDER BY analyzed_at DESC, id DESC LIMIT 1"
+        fh_params: list = [job_id, test_name, *child_params]
+        fh_query += child_sql + " ORDER BY analyzed_at DESC, id DESC LIMIT 1"
 
         fh_row = await (await db.execute(fh_query, fh_params)).fetchone()
         return fh_row[0] if fh_row and fh_row[0] else ""
@@ -3159,19 +3172,20 @@ async def get_effective_classification(
         The classification string (``"CODE ISSUE"`` or
         ``"PRODUCT BUG"``), or ``""`` if no row exists in either table.
     """
-    _child_job_name = child_job_name or ""
-    _child_build_number = child_build_number or 0
+    child_sql, child_params = _child_scope_sql(child_job_name, child_build_number)
+    tc_sql, tc_params = _tc_scope_sql(child_job_name, child_build_number)
 
     async with _connect_db() as db:
         # 1. Prefer visible override from test_classifications
         override_row = await (
             await db.execute(
                 "SELECT classification FROM test_classifications"
-                " WHERE test_name = ? AND job_id = ? AND job_name = ?"
-                " AND child_build_number = ? AND visible = 1"
+                " WHERE test_name = ? AND job_id = ?"
+                f"{tc_sql}"
+                " AND visible = 1"
                 f" AND classification IN {_PRIMARY_CLASSIFICATIONS_SQL}"
                 " ORDER BY id DESC LIMIT 1",
-                [test_name, job_id, _child_job_name, _child_build_number],
+                [test_name, job_id, *tc_params],
             )
         ).fetchone()
         if override_row and override_row[0]:
@@ -3184,13 +3198,8 @@ async def get_effective_classification(
             " WHERE job_id = ? AND test_name = ?"
             f" AND classification IN {_PRIMARY_CLASSIFICATIONS_SQL}"
         )
-        fh_params: list = [job_id, test_name]
-        if child_job_name:
-            fh_query += " AND child_job_name = ? AND child_build_number = ?"
-            fh_params.extend([child_job_name, child_build_number])
-        else:
-            fh_query += " AND child_job_name = '' AND child_build_number = 0"
-        fh_query += " ORDER BY analyzed_at DESC, id DESC LIMIT 1"
+        fh_params: list = [job_id, test_name, *child_params]
+        fh_query += child_sql + " ORDER BY analyzed_at DESC, id DESC LIMIT 1"
 
         fh_row = await (await db.execute(fh_query, fh_params)).fetchone()
         return fh_row[0] if fh_row and fh_row[0] else ""

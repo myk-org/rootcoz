@@ -473,8 +473,11 @@ def recover_from_details(result: AnalysisDetail) -> AnalysisDetail:
         clean_details = re.sub(
             r"\*\*Classification:\s*[A-Z][A-Z _]+?\*\*\s*", "", details
         ).strip()
+        # Try to recover pattern from markdown too
+        md_pat = re.search(r"\*\*Pattern:\s*([A-Z][A-Z _]+?)\*\*", details)
         return AnalysisDetail(
             classification=classification,
+            pattern=md_pat.group(1).strip() if md_pat else "NEW",
             affected_tests=result.affected_tests,
             details=clean_details or details,
             artifacts_evidence=result.artifacts_evidence,
@@ -491,7 +494,7 @@ def recover_from_details(result: AnalysisDetail) -> AnalysisDetail:
 
     # Extract pattern (second axis)
     pattern_match = re.search(r'"pattern"\s*:\s*"([^"]+)"', details)
-    pattern = pattern_match.group(1) if pattern_match else ""
+    pattern = pattern_match.group(1) if pattern_match else "NEW"
 
     # Extract affected_tests
     affected_tests: list[str] = []
