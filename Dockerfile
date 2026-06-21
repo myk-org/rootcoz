@@ -65,17 +65,17 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # google-auth-library/gaxios/node-fetch@2 (https://github.com/nodejs/node/issues/63989)
 # TODO: unpin once nodejs/node#63989 is resolved and a fixed 22.x release lands in NodeSource
 ARG NODEJS_DEB_VERSION=22.22.3-1nodesource1
-RUN bash -o pipefail -c ' \
-    set -e \
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+RUN set -e \
+    && NODESOURCE_FPR=6F71F525282841EEDAF851B42F59B5F99B1BE0B4 \
     && export GNUPGHOME="$(mktemp -d)" \
     && curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key -o /tmp/nodesource.key \
-    && gpg --show-keys --with-colons /tmp/nodesource.key | grep -qF "6F71F525282841EEDAF851B42F59B5F99B1BE0B4" \
+    && gpg --show-keys --with-colons /tmp/nodesource.key | grep -qF "$NODESOURCE_FPR" \
     && gpg --no-default-keyring --keyring /tmp/nodesource-tmp.gpg --import /tmp/nodesource.key \
-    && gpg --no-default-keyring --keyring /tmp/nodesource-tmp.gpg --export "6F71F525282841EEDAF851B42F59B5F99B1BE0B4" > /tmp/nodesource-export.gpg \
+    && gpg --no-default-keyring --keyring /tmp/nodesource-tmp.gpg --export "$NODESOURCE_FPR" > /tmp/nodesource-export.gpg \
     && gpg --dearmor -o /usr/share/keyrings/nodesource.gpg /tmp/nodesource-export.gpg \
     && rm -f /tmp/nodesource.key /tmp/nodesource-tmp.gpg /tmp/nodesource-tmp.gpg~ /tmp/nodesource-export.gpg \
     && rm -rf "$GNUPGHOME" \
-    ' \
     && echo "deb [signed-by=/usr/share/keyrings/nodesource.gpg] https://deb.nodesource.com/node_22.x nodistro main" \
         > /etc/apt/sources.list.d/nodesource.list \
     && apt-get update \
@@ -83,6 +83,7 @@ RUN bash -o pipefail -c ' \
     && rm -f /etc/apt/sources.list.d/nodesource.list /usr/share/keyrings/nodesource.gpg \
     && rm -rf /var/lib/apt/lists/* \
     && node --version && npm --version
+SHELL ["/bin/sh", "-c"]
 
 # Create non-root user, data directory, and set permissions
 # OpenShift runs containers as a random UID in the root group (GID 0)
