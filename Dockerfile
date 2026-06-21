@@ -61,9 +61,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     gnupg \
     && rm -rf /var/lib/apt/lists/*
 
-# Install Node.js 22 from NodeSource (no Docker Hub dependency)
+# Pinned to 22.22.3 — Node 22.23.0+ has a keep-alive regression that breaks
+# google-auth-library/gaxios/node-fetch@2 (https://github.com/nodejs/node/issues/63989)
+# TODO: unpin once nodejs/node#63989 is resolved and a fixed 22.x release lands in NodeSource
 RUN bash -o pipefail -c "curl -fsSL https://deb.nodesource.com/setup_22.x | bash -" \
-    && apt-get install -y --no-install-recommends nodejs \
+    && apt-get install -y --no-install-recommends nodejs=22.22.3-1nodesource1 \
     && rm -rf /var/lib/apt/lists/* \
     && node --version && npm --version
 
