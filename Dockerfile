@@ -68,8 +68,10 @@ ARG NODEJS_DEB_VERSION=22.22.3-1nodesource1
 ARG NODESOURCE_KEY_FPR=6F71F525282841EEDAF851B42F59B5F99B1BE0B4
 RUN curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key -o /tmp/nodesource.key \
     && gpg --show-keys --with-colons /tmp/nodesource.key | grep -qF "${NODESOURCE_KEY_FPR}" \
-    && gpg --dearmor -o /usr/share/keyrings/nodesource.gpg /tmp/nodesource.key \
-    && rm /tmp/nodesource.key \
+    && gpg --no-default-keyring --keyring /tmp/nodesource-tmp.gpg --import /tmp/nodesource.key \
+    && gpg --no-default-keyring --keyring /tmp/nodesource-tmp.gpg --export "${NODESOURCE_KEY_FPR}" \
+        | gpg --dearmor -o /usr/share/keyrings/nodesource.gpg \
+    && rm -f /tmp/nodesource.key /tmp/nodesource-tmp.gpg /tmp/nodesource-tmp.gpg~ \
     && echo "deb [signed-by=/usr/share/keyrings/nodesource.gpg] https://deb.nodesource.com/node_22.x nodistro main" \
         > /etc/apt/sources.list.d/nodesource.list \
     && apt-get update \
