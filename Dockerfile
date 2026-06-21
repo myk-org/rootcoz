@@ -64,8 +64,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Pinned to 22.22.3 — Node 22.23.0+ has a keep-alive regression that breaks
 # google-auth-library/gaxios/node-fetch@2 (https://github.com/nodejs/node/issues/63989)
 # TODO: unpin once nodejs/node#63989 is resolved and a fixed 22.x release lands in NodeSource
-RUN bash -o pipefail -c "curl -fsSL https://deb.nodesource.com/setup_22.x | bash -" \
-    && apt-get install -y --no-install-recommends nodejs=22.22.3-1nodesource1 \
+ARG NODEJS_DEB_VERSION=22.22.3-1nodesource1
+RUN curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key \
+        | gpg --dearmor -o /usr/share/keyrings/nodesource.gpg \
+    && echo "deb [signed-by=/usr/share/keyrings/nodesource.gpg] https://deb.nodesource.com/node_22.x nodistro main" \
+        > /etc/apt/sources.list.d/nodesource.list \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends nodejs=${NODEJS_DEB_VERSION} \
     && rm -rf /var/lib/apt/lists/* \
     && node --version && npm --version
 
