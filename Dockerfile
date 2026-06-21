@@ -68,6 +68,7 @@ ARG NODEJS_DEB_VERSION=22.22.3-1nodesource1
 ARG NODESOURCE_KEY_FPR=6F71F525282841EEDAF851B42F59B5F99B1BE0B4
 RUN bash -o pipefail -c ' \
     set -e \
+    && [ -n "${NODESOURCE_KEY_FPR}" ] || { echo "ERROR: NODESOURCE_KEY_FPR must not be empty"; exit 1; } \
     && export GNUPGHOME="$(mktemp -d)" \
     && curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key -o /tmp/nodesource.key \
     && gpg --show-keys --with-colons /tmp/nodesource.key | grep -qF "${NODESOURCE_KEY_FPR}" \
