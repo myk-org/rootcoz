@@ -70,7 +70,7 @@ RUN set -e \
     && NODESOURCE_FPR=6F71F525282841EEDAF851B42F59B5F99B1BE0B4 \
     && export GNUPGHOME="$(mktemp -d)" \
     && curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key -o /tmp/nodesource.key \
-    && gpg --show-keys --with-colons /tmp/nodesource.key | grep -qF "$NODESOURCE_FPR" \
+    && gpg --show-keys --with-colons /tmp/nodesource.key | awk -F: '$1=="fpr"{print $10}' | grep -qx "$NODESOURCE_FPR" \
     && gpg --no-default-keyring --keyring /tmp/nodesource-tmp.gpg --import /tmp/nodesource.key \
     && gpg --no-default-keyring --keyring /tmp/nodesource-tmp.gpg --export "$NODESOURCE_FPR" > /tmp/nodesource-export.gpg \
     && gpg --dearmor -o /usr/share/keyrings/nodesource.gpg /tmp/nodesource-export.gpg \
