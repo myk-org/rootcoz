@@ -10,6 +10,8 @@ useDefault = true
 paths = [
     # Auto-generated docs contain placeholder API keys that trigger false positives
     '''docs/.*''',
+    # storage.py migration_key variables trigger generic-api-key false positives
+    '''src/rootcoz/storage\.py''',
     '''\.secrets\.baseline''',
     '''tests/test_config\.py''',
     '''tests/test_main\.py''',
