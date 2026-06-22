@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { api } from '@/lib/api'
+import { api, extractApiDetail } from '@/lib/api'
 import {
   Dialog,
   DialogContent,
@@ -12,9 +12,9 @@ import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Textarea } from '@/components/ui/textarea'
 import { Badge } from '@/components/ui/badge'
-import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { Select, SelectTrigger, SelectValue, SelectContent, SelectItem } from '@/components/ui/select'
 import { LoadingSpinner } from '@/components/shared/LoadingSpinner'
+import { TokenRequiredBanner } from '@/components/shared/TokenRequiredBanner'
 import { CheckCircle2, ExternalLink, AlertTriangle } from 'lucide-react'
 import type { PreviewIssueResponse, CreateIssueResponse, SimilarIssue, CommentsAndReviews } from '@/types'
 import { getGithubToken, getJiraToken, getJiraEmail } from '@/lib/cookies'
@@ -22,6 +22,8 @@ import { useReportDispatch, useRefreshEnrichments } from './ReportContext'
 
 type BugTarget = 'github' | 'jira'
 type Phase = 'idle' | 'loading-prompt' | 'prompt' | 'loading' | 'preview' | 'creating' | 'success' | 'error'
+
+
 
 interface BugCreationDialogProps {
   open: boolean
@@ -174,7 +176,7 @@ export function BugCreationDialog({
         setPhase('preview')
       })
       .catch((err) => {
-        setErrorMsg(err instanceof Error ? err.message : 'Preview failed')
+        setErrorMsg(extractApiDetail(err) ?? (err instanceof Error ? err.message : 'Preview failed'))
         setPhase('error')
       })
   }
@@ -202,7 +204,7 @@ export function BugCreationDialog({
       // Also refresh enrichments for the link badges
       refreshEnrichments(jobId)
     } catch (err) {
-      setErrorMsg(err instanceof Error ? err.message : 'Creation failed')
+      setErrorMsg(extractApiDetail(err) ?? (err instanceof Error ? err.message : 'Creation failed'))
       setPhase('error')
     }
   }
@@ -489,34 +491,22 @@ export function BugCreationDialog({
         {phase === 'error' && (
           <div className="flex flex-col items-center gap-4 py-8">
             <p className="text-sm text-signal-red">{errorMsg}</p>
-            {errorMsg.toLowerCase().includes('token') && errorMsg.toLowerCase().includes('invalid') && (
-              <p className="text-xs text-text-tertiary">You can update your tokens in <a href="/settings" target="_blank" rel="noopener noreferrer" className="text-text-link hover:underline">settings</a>.</p>
+            {errorMsg.toLowerCase().includes('token') && (
+              <p className="text-xs text-text-tertiary">You can update your tokens in <a href="/settings" target="_blank" rel="noopener noreferrer" className="text-text-link hover:underline">Profile Settings</a>.</p>
             )}
           </div>
         )}
 
+        {phase === 'preview' && !hasToken && (
+          <TokenRequiredBanner provider={target === 'github' ? 'GitHub' : 'Jira'} />
+        )}
+
         <DialogFooter className="flex-col items-stretch gap-2 sm:flex-row sm:items-center sm:justify-between">
           {phase === 'preview' && (
-            <>
-              {!hasToken && (
-                <p className="text-xs text-text-tertiary">Add a {target === 'github' ? 'GitHub' : 'Jira'} token in <a href="/settings" target="_blank" rel="noopener noreferrer" className="text-text-link hover:underline">settings</a> to create directly.</p>
-              )}
-              <div className="flex gap-2 sm:ml-auto">
-                <Button variant="outline" onClick={() => handleCancel()}>Cancel</Button>
-                {!hasToken ? (
-                  <Tooltip>
-                    <TooltipTrigger asChild>
-                      <span tabIndex={0}>
-                        <Button onClick={handleCreate} disabled={!title.trim() || !hasToken || (target === 'jira' && jiraIssueType === '__custom__' && !customIssueType.trim())}>Create {label}</Button>
-                      </span>
-                    </TooltipTrigger>
-                    <TooltipContent>Add a {target === 'github' ? 'GitHub' : 'Jira'} token to create issues</TooltipContent>
-                  </Tooltip>
-                ) : (
-                  <Button onClick={handleCreate} disabled={!title.trim() || (target === 'jira' && jiraIssueType === '__custom__' && !customIssueType.trim())}>Create {label}</Button>
-                )}
-              </div>
-            </>
+            <div className="flex gap-2 sm:ml-auto">
+              <Button variant="outline" onClick={() => handleCancel()}>Cancel</Button>
+              <Button onClick={handleCreate} disabled={!title.trim() || !hasToken || (target === 'jira' && jiraIssueType === '__custom__' && !customIssueType.trim())}>Create {label}</Button>
+            </div>
           )}
           {phase === 'prompt' && (
             <div className="flex gap-2 sm:ml-auto">

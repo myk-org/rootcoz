@@ -1,7 +1,8 @@
 import { useState, useRef, useEffect } from 'react'
-import { api } from '@/lib/api'
+import { api, extractApiDetail } from '@/lib/api'
 import { getRecentFailedCalls } from '@/lib/api'
 import { getRecentErrors } from '@/lib/errorCapture'
+import { getGithubToken } from '@/lib/cookies'
 import {
   Dialog,
   DialogContent,
@@ -14,6 +15,7 @@ import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Textarea } from '@/components/ui/textarea'
 import { LoadingSpinner } from '@/components/shared/LoadingSpinner'
+import { TokenRequiredBanner } from '@/components/shared/TokenRequiredBanner'
 import { CheckCircle2, ExternalLink } from 'lucide-react'
 import type {
   FeedbackRequest,
@@ -42,6 +44,9 @@ export function FeedbackDialog({ open, onOpenChange }: FeedbackDialogProps) {
   const [previewTitle, setPreviewTitle] = useState('')
   const [previewBody, setPreviewBody] = useState('')
   const [previewLabels, setPreviewLabels] = useState<string[]>([])
+  // getGithubToken() reads from auth context loaded via /api/user/tokens on login,
+  // which mirrors the backend's storage.get_user_tokens() used in the create endpoint.
+  const hasGithubToken = !!getGithubToken()
 
   // Track dialog open/close to guard async setState
   useEffect(() => {
@@ -135,7 +140,7 @@ export function FeedbackDialog({ open, onOpenChange }: FeedbackDialogProps) {
       setPhase('success')
     } catch (err) {
       if (gen !== generationRef.current) return
-      setErrorMsg(err instanceof Error ? err.message : 'Failed to create issue')
+      setErrorMsg(extractApiDetail(err) ?? (err instanceof Error ? err.message : 'Failed to create issue'))
       setErrorSource('create')
       setPhase('error')
     }
@@ -295,7 +300,14 @@ export function FeedbackDialog({ open, onOpenChange }: FeedbackDialogProps) {
         {phase === 'error' && (
           <div className="flex flex-col items-center gap-4 py-8">
             <p className="text-sm text-signal-red">{errorMsg}</p>
+            {errorMsg.toLowerCase().includes('token') && (
+              <p className="text-xs text-text-tertiary">You can update your tokens in <a href="/settings" target="_blank" rel="noopener noreferrer" className="text-text-link hover:underline">Profile Settings</a>.</p>
+            )}
           </div>
+        )}
+
+        {phase === 'preview' && !hasGithubToken && (
+          <TokenRequiredBanner provider="GitHub" action="submit feedback" />
         )}
 
         <DialogFooter className="flex-col items-stretch gap-2 sm:flex-row sm:items-center sm:justify-end">
@@ -311,7 +323,7 @@ export function FeedbackDialog({ open, onOpenChange }: FeedbackDialogProps) {
               <Button variant="outline" onClick={() => handleClose(false)}>Cancel</Button>
               <Button
                 onClick={handleCreate}
-                disabled={!previewTitle.trim() || !previewBody.trim()}
+                disabled={!previewTitle.trim() || !previewBody.trim() || !hasGithubToken}
               >Create Issue</Button>
             </div>
           )}

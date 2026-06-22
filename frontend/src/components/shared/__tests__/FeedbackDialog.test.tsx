@@ -4,13 +4,8 @@ import userEvent from '@testing-library/user-event'
 import { FeedbackDialog } from '../FeedbackDialog'
 
 // Mock the api module
-vi.mock('@/lib/api', () => ({
-  api: {
-    post: vi.fn(),
-    get: vi.fn(),
-  },
-  getRecentFailedCalls: vi.fn(() => []),
-  ApiError: class extends Error {
+vi.mock('@/lib/api', () => {
+  class _ApiError extends Error {
     status: number
     statusText: string
     body: unknown
@@ -20,12 +15,33 @@ vi.mock('@/lib/api', () => ({
       this.statusText = statusText
       this.body = body
     }
-  },
-}))
+  }
+  return {
+    api: {
+      post: vi.fn(),
+      get: vi.fn(),
+    },
+    getRecentFailedCalls: vi.fn(() => []),
+    ApiError: _ApiError,
+    extractApiDetail: (err: unknown): string | null => {
+      if (err instanceof _ApiError) {
+        const detail = (err.body as { detail?: string })?.detail
+        if (detail) return detail
+      }
+      return null
+    },
+  }
+})
 
 // Mock errorCapture
 vi.mock('@/lib/errorCapture', () => ({
   getRecentErrors: vi.fn(() => ['error1', 'error2']),
+}))
+
+// Mock cookies
+const mockGetGithubToken = vi.fn(() => 'ghp_test_token')
+vi.mock('@/lib/cookies', () => ({
+  getGithubToken: (...args: unknown[]) => mockGetGithubToken(...args),
 }))
 
 import { api, getRecentFailedCalls } from '@/lib/api'
@@ -299,5 +315,45 @@ describe('FeedbackDialog', () => {
     await waitFor(() =>
       expect(screen.getByText(/AI is not configured on this server/)).toBeInTheDocument()
     )
+  })
+
+  it('shows warning banner and disables Create Issue when no GitHub token', async () => {
+    mockGetGithubToken.mockReturnValue('')
+    mockPost.mockResolvedValue({
+      title: 'AI title',
+      body: 'AI body',
+      labels: ['bug'],
+    })
+    const user = userEvent.setup()
+    render(<FeedbackDialog open={true} onOpenChange={onOpenChange} />)
+    await user.type(screen.getByLabelText('Description'), 'Some feedback')
+    await user.click(screen.getByRole('button', { name: /preview/i }))
+
+    await waitFor(() => expect(screen.getByLabelText('Title')).toBeInTheDocument())
+    expect(screen.getByText('GitHub token required')).toBeInTheDocument()
+    expect(screen.getByText(/Set up your GitHub token in Profile Settings/)).toBeInTheDocument()
+    expect(screen.getByText('Open Profile Settings →')).toHaveAttribute('href', '/settings')
+    expect(screen.getByRole('button', { name: /create issue/i })).toBeDisabled()
+    mockGetGithubToken.mockReturnValue('ghp_test_token')
+  })
+
+  it('shows token hint in error when create fails with token error', async () => {
+    mockPost.mockResolvedValueOnce({
+      title: 'AI title',
+      body: 'AI body',
+      labels: ['bug'],
+    })
+    const { ApiError } = await import('@/lib/api')
+    mockPost.mockRejectedValueOnce(new ApiError(400, 'Bad Request', { detail: 'GitHub token is required. Set up your token in Profile Settings.' }))
+
+    const user = userEvent.setup()
+    render(<FeedbackDialog open={true} onOpenChange={onOpenChange} />)
+    await user.type(screen.getByLabelText('Description'), 'Some feedback')
+    await user.click(screen.getByRole('button', { name: /preview/i }))
+    await waitFor(() => expect(screen.getByLabelText('Title')).toBeInTheDocument())
+    await user.click(screen.getByRole('button', { name: /create issue/i }))
+
+    await waitFor(() => expect(screen.getByText(/GitHub token is required/)).toBeInTheDocument())
+    expect(screen.getByText(/You can update your tokens/)).toBeInTheDocument()
   })
 })

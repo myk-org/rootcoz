@@ -2005,6 +2005,7 @@ class TestPreviewJiraBug:
                                 "test_name": "test_network",
                                 "ai_provider": "claude",
                                 "ai_model": "opus",
+                                "jira_token": "user_jira_token",
                             },
                         )
 
@@ -2126,6 +2127,7 @@ class TestCreateGithubIssue:
                         "test_name": "test_login_success",
                         "title": "Bug: login fails",
                         "body": "## Details\nLogin returns 500",
+                        "github_token": "ghp_user_token",
                     },
                     headers={"Authorization": f"Bearer {user_key}"},
                 )
@@ -2218,6 +2220,7 @@ class TestCreateJiraBug:
                         "test_name": "test_login_success",
                         "title": "DNS timeout",
                         "body": "DNS resolution fails",
+                        "jira_token": "user_jira_token",
                     },
                     headers={"Authorization": f"Bearer {user_key}"},
                 )
@@ -2274,6 +2277,253 @@ class TestCreateJiraBug:
                 get_settings.cache_clear()
         assert response.status_code == 403
         assert "disabled" in response.json()["detail"].lower()
+
+
+class TestIssueCreationRequiresUserCredentials:
+    """Issue creation endpoints must require user-provided tokens.
+
+    Server tokens must NOT be used as a fallback for user-initiated
+    issue creation.  Only the analysis pipeline may use server tokens.
+    """
+
+    _RESULT_DATA: dict = {
+        "status": "completed",
+        "summary": "",
+        "failures": [
+            {
+                "test_name": "test_cred",
+                "error": "err",
+                "analysis": {"classification": "CODE ISSUE"},
+            }
+        ],
+    }
+
+    # -- GitHub create -------------------------------------------------------
+
+    @pytest.mark.asyncio
+    async def test_github_create_without_user_token_returns_400(self, test_client):
+        """Creating a GitHub issue without user token must return 400."""
+        await storage.save_result(
+            "job-gh-no-tok", "http://j", "completed", self._RESULT_DATA
+        )
+        with _with_github_issue_config():
+            response = test_client.post(
+                "/results/job-gh-no-tok/create-github-issue",
+                json={
+                    "test_name": "test_cred",
+                    "title": "Bug",
+                    "body": "Details",
+                    # No github_token
+                },
+            )
+        assert response.status_code == 400
+        detail = response.json()["detail"]
+        assert "token is required" in detail.lower()
+        assert "Profile Settings" in detail
+
+    @pytest.mark.asyncio
+    async def test_github_create_ignores_server_token(self, test_client):
+        """Server GITHUB_TOKEN must not be used for issue creation."""
+        await storage.save_result(
+            "job-gh-srv-tok", "http://j", "completed", self._RESULT_DATA
+        )
+        # Server has a token configured but user provides none
+        with _with_github_issue_config():
+            response = test_client.post(
+                "/results/job-gh-srv-tok/create-github-issue",
+                json={
+                    "test_name": "test_cred",
+                    "title": "Bug",
+                    "body": "Details",
+                    "github_token": "",
+                },
+            )
+        assert response.status_code == 400
+        assert "token is required" in response.json()["detail"].lower()
+
+    @pytest.mark.asyncio
+    async def test_github_create_with_user_token_succeeds(self, test_client):
+        """GitHub issue creation works when user provides their own token."""
+        await storage.save_result(
+            "job-gh-usr-tok", "http://j", "completed", self._RESULT_DATA
+        )
+        with patch("rootcoz.main.create_github_issue") as mock_create:
+            mock_create.return_value = {
+                "url": "https://github.com/org/repo/issues/1",
+                "number": 1,
+            }
+            with _with_github_issue_config():
+                response = test_client.post(
+                    "/results/job-gh-usr-tok/create-github-issue",
+                    json={
+                        "test_name": "test_cred",
+                        "title": "Bug",
+                        "body": "Details",
+                        "github_token": "ghp_user_provided",
+                    },
+                )
+        assert response.status_code == 201
+        # Verify the user token was passed, not the server token
+        call_kwargs = mock_create.call_args[1]
+        assert call_kwargs["github_token"] == "ghp_user_provided"
+
+    # -- Jira create ---------------------------------------------------------
+
+    @pytest.mark.asyncio
+    async def test_jira_create_without_user_token_returns_400(self, test_client):
+        """Creating a Jira bug without user token must return 400."""
+        await storage.save_result(
+            "job-jira-no-tok", "http://j", "completed", self._RESULT_DATA
+        )
+        with _enable_feature("jira_enabled"):
+            response = test_client.post(
+                "/results/job-jira-no-tok/create-jira-bug",
+                json={
+                    "test_name": "test_cred",
+                    "title": "Bug",
+                    "body": "Details",
+                    # No jira_token
+                },
+            )
+        assert response.status_code == 400
+        detail = response.json()["detail"]
+        assert "token is required" in detail.lower()
+        assert "Profile Settings" in detail
+
+    @pytest.mark.asyncio
+    async def test_jira_create_ignores_server_token(self, test_client):
+        """Server JIRA_API_TOKEN must not be used for issue creation."""
+        await storage.save_result(
+            "job-jira-srv-tok", "http://j", "completed", self._RESULT_DATA
+        )
+        with _enable_feature("jira_enabled"):
+            response = test_client.post(
+                "/results/job-jira-srv-tok/create-jira-bug",
+                json={
+                    "test_name": "test_cred",
+                    "title": "Bug",
+                    "body": "Details",
+                    "jira_token": "",
+                },
+            )
+        assert response.status_code == 400
+        assert "token is required" in response.json()["detail"].lower()
+
+    @pytest.mark.asyncio
+    async def test_jira_create_with_user_token_succeeds(self, test_client):
+        """Jira bug creation works when user provides their own token."""
+        await storage.save_result(
+            "job-jira-usr-tok", "http://j", "completed", self._RESULT_DATA
+        )
+        with patch("rootcoz.main.create_jira_bug") as mock_create:
+            mock_create.return_value = {
+                "key": "PROJ-1",
+                "url": "https://jira.example.com/browse/PROJ-1",
+            }
+            with _enable_feature("jira_enabled"):
+                response = test_client.post(
+                    "/results/job-jira-usr-tok/create-jira-bug",
+                    json={
+                        "test_name": "test_cred",
+                        "title": "Bug",
+                        "body": "Details",
+                        "jira_token": "user_jira_pat",
+                    },
+                )
+        assert response.status_code == 201
+
+    # -- GitHub preview ------------------------------------------------------
+
+    @pytest.mark.asyncio
+    async def test_github_preview_without_token_skips_duplicates(self, test_client):
+        """Preview without user token should succeed but skip duplicate detection."""
+        await storage.save_result(
+            "job-gh-prev-no-tok", "http://j", "completed", self._RESULT_DATA
+        )
+        with (
+            patch("rootcoz.main.generate_github_issue_content") as mock_gen,
+            patch("rootcoz.main.search_github_duplicates") as mock_dup,
+            _enable_feature("github_issues_enabled"),
+        ):
+            mock_gen.return_value = {"title": "Bug", "body": "Body"}
+            mock_dup.return_value = [
+                {"url": "https://github.com/org/repo/issues/1", "title": "dup"}
+            ]
+            response = test_client.post(
+                "/results/job-gh-prev-no-tok/preview-github-issue",
+                json={
+                    "test_name": "test_cred",
+                    # No github_token
+                },
+            )
+        assert response.status_code == 200
+        data = response.json()
+        assert data["title"] == "Bug"
+        # Duplicate search should NOT have been called (no user token)
+        mock_dup.assert_not_called()
+        assert data["similar_issues"] == []
+
+    @pytest.mark.asyncio
+    async def test_github_preview_with_token_includes_duplicates(self, test_client):
+        """Preview with user token should include duplicate detection."""
+        await storage.save_result(
+            "job-gh-prev-tok", "http://j", "completed", self._RESULT_DATA
+        )
+        with (
+            patch("rootcoz.main.generate_github_issue_content") as mock_gen,
+            patch("rootcoz.main.search_github_duplicates") as mock_dup,
+            _enable_feature("github_issues_enabled"),
+        ):
+            mock_gen.return_value = {"title": "Bug", "body": "Body"}
+            mock_dup.return_value = [
+                {"url": "https://github.com/org/repo/issues/1", "title": "dup"}
+            ]
+            response = test_client.post(
+                "/results/job-gh-prev-tok/preview-github-issue",
+                json={
+                    "test_name": "test_cred",
+                    "github_token": "ghp_user_token",
+                },
+            )
+        assert response.status_code == 200
+        data = response.json()
+        assert len(data["similar_issues"]) == 1
+        mock_dup.assert_called_once()
+
+    # -- Jira preview --------------------------------------------------------
+
+    @pytest.mark.asyncio
+    async def test_jira_preview_without_token_skips_duplicates(self, test_client):
+        """Preview without user Jira token should succeed but skip duplicates."""
+        await storage.save_result(
+            "job-jira-prev-no-tok", "http://j", "completed", self._RESULT_DATA
+        )
+        with (
+            patch("rootcoz.main.generate_jira_bug_content") as mock_gen,
+            patch("rootcoz.main.search_jira_duplicates") as mock_dup,
+            _enable_feature("jira_enabled"),
+        ):
+            mock_gen.return_value = {"title": "Bug", "body": "Body"}
+            mock_dup.return_value = [
+                {
+                    "key": "PROJ-1",
+                    "url": "https://jira.example.com/browse/PROJ-1",
+                    "title": "dup",
+                }
+            ]
+            response = test_client.post(
+                "/results/job-jira-prev-no-tok/preview-jira-bug",
+                json={
+                    "test_name": "test_cred",
+                    # No jira_token
+                },
+            )
+        assert response.status_code == 200
+        data = response.json()
+        assert data["title"] == "Bug"
+        # Duplicate search should NOT have been called (no user token)
+        mock_dup.assert_not_called()
+        assert data["similar_issues"] == []
 
 
 class TestOverrideClassification:
@@ -2472,7 +2722,7 @@ class TestBugCreationIntegration:
             )
             assert preview_resp.status_code == 200
 
-            # Create (need settings with TESTS_REPO_URL and GITHUB_TOKEN)
+            # Create (need settings with TESTS_REPO_URL)
             with _with_github_issue_config():
                 create_resp = test_client.post(
                     "/results/job-integ-gh/create-github-issue",
@@ -2480,6 +2730,7 @@ class TestBugCreationIntegration:
                         "test_name": "test_login_success",
                         "title": "Bug title",
                         "body": "Bug body",
+                        "github_token": "ghp_user_token",
                     },
                 )
             assert create_resp.status_code == 201
@@ -2561,6 +2812,7 @@ class TestCreateGithubIssueApiErrors:
                         "test_name": "test_foo",
                         "title": "Bug",
                         "body": "Details",
+                        "github_token": "ghp_user_token",
                     },
                 )
         assert response.status_code == 502
@@ -2597,6 +2849,7 @@ class TestCreateGithubIssueApiErrors:
                         "test_name": "test_foo",
                         "title": "Bug",
                         "body": "Details",
+                        "github_token": "ghp_user_token",
                     },
                 )
         assert response.status_code == 502
@@ -2638,6 +2891,7 @@ class TestCreateJiraBugApiErrors:
                         "test_name": "test_foo",
                         "title": "Bug",
                         "body": "Details",
+                        "jira_token": "user_jira_token",
                     },
                 )
         assert response.status_code == 502
@@ -2674,6 +2928,7 @@ class TestCreateJiraBugApiErrors:
                         "test_name": "test_foo",
                         "title": "Bug",
                         "body": "Details",
+                        "jira_token": "user_jira_token",
                     },
                 )
         assert response.status_code == 502
