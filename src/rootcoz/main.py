@@ -1977,6 +1977,10 @@ def _merge_settings(body: BaseAnalysisRequest, settings: Settings) -> Settings:
     return settings
 
 
+# Truncation length for error signatures in log messages (SHA-256 prefix for readability)
+_SIG_PREVIEW_LEN = 12
+
+
 async def _apply_auto_review(
     job_id: str,
     test_name: str,
@@ -2026,16 +2030,76 @@ async def _apply_auto_review(
             test_name,
             child_job_name,
             child_build_number,
-            error_sig[:12],
+            error_sig[:_SIG_PREVIEW_LEN],
             prev_job_id,
         )
     else:
         logger.info(
             "Auto-reviewed %s: identical signature %s found in previous analysis %s",
             test_name,
-            error_sig[:12],
+            error_sig[:_SIG_PREVIEW_LEN],
             prev_job_id,
         )
+
+
+async def _match_and_auto_review_failures(
+    job_id: str,
+    job_name: str,
+    failures: list[dict],
+    child_job_name: str = "",
+    child_build_number: int = 0,
+) -> tuple[int, int]:
+    """Check failures against previous analyses and auto-review matches.
+
+    For each failure, looks up the same test_name in the same job_name from a
+    previous analysis. If the error_signature matches exactly, applies
+    auto-review.
+
+    Args:
+        job_id: Current analysis job ID.
+        job_name: Jenkins job name.
+        failures: List of failure dicts to check.
+        child_job_name: Child job name (empty for top-level failures).
+        child_build_number: Child build number (0 for top-level failures).
+
+    Returns:
+        Tuple of (auto_reviewed_count, total_failure_count).
+    """
+    reviewed = 0
+    total = 0
+
+    for failure in failures:
+        total += 1
+        test_name = failure.get("test_name", "")
+        error_sig = failure.get("error_signature", "")
+        if not test_name or not error_sig:
+            continue
+
+        previous = await storage.find_matching_previous_analysis(
+            job_name,
+            test_name,
+            job_id,
+            child_job_name=child_job_name,
+        )
+        if previous is None:
+            continue
+        if previous["error_signature"] != error_sig:
+            continue
+
+        prev_job_id = previous["job_id"]
+        prev_build = previous["build_number"]
+        await _apply_auto_review(
+            job_id,
+            test_name,
+            error_sig,
+            prev_job_id,
+            prev_build,
+            child_job_name=child_job_name,
+            child_build_number=child_build_number,
+        )
+        reviewed += 1
+
+    return reviewed, total
 
 
 async def _auto_review_matching_failures(
@@ -2066,31 +2130,16 @@ async def _auto_review_matching_failures(
     total_failures = 0
 
     # Process top-level failures
-    for failure in result_data.get("failures", []):
-        total_failures += 1
-        test_name = failure.get("test_name", "")
-        error_sig = failure.get("error_signature", "")
-        if not test_name or not error_sig:
-            continue
+    reviewed, total = await _match_and_auto_review_failures(
+        job_id, job_name, result_data.get("failures", [])
+    )
+    auto_reviewed_count += reviewed
+    total_failures += total
 
-        previous = await storage.find_matching_previous_analysis(
-            job_name, test_name, job_id
-        )
-        if previous is None:
-            continue
-        if previous["error_signature"] != error_sig:
-            continue
-
-        # Signature matches — auto-review
-        prev_job_id = previous["job_id"]
-        prev_build = previous["build_number"]
-        await _apply_auto_review(job_id, test_name, error_sig, prev_job_id, prev_build)
-        auto_reviewed_count += 1
-
-    # Process child job failures
+    # Process child job failures (recursive)
     for child in result_data.get("child_job_analyses", []):
         child_reviewed, child_total = await _auto_review_child_failures(
-            job_id, job_name, child, settings
+            job_id, job_name, child
         )
         auto_reviewed_count += child_reviewed
         total_failures += child_total
@@ -2129,50 +2178,27 @@ async def _auto_review_child_failures(
     job_id: str,
     job_name: str,
     child: dict,
-    settings: Settings,
 ) -> tuple[int, int]:
     """Auto-review failures within a child job analysis.
 
     Returns:
         Tuple of (auto_reviewed_count, total_failure_count).
     """
-    reviewed = 0
-    total = 0
     child_job_name = child.get("job_name", "")
     child_build_number = child.get("build_number", 0)
 
-    for failure in child.get("failures", []):
-        total += 1
-        test_name = failure.get("test_name", "")
-        error_sig = failure.get("error_signature", "")
-        if not test_name or not error_sig:
-            continue
-
-        previous = await storage.find_matching_previous_analysis(
-            job_name, test_name, job_id
-        )
-        if previous is None:
-            continue
-        if previous["error_signature"] != error_sig:
-            continue
-
-        prev_job_id = previous["job_id"]
-        prev_build = previous["build_number"]
-        await _apply_auto_review(
-            job_id,
-            test_name,
-            error_sig,
-            prev_job_id,
-            prev_build,
-            child_job_name=child_job_name,
-            child_build_number=child_build_number,
-        )
-        reviewed += 1
+    reviewed, total = await _match_and_auto_review_failures(
+        job_id,
+        job_name,
+        child.get("failures", []),
+        child_job_name=child_job_name,
+        child_build_number=child_build_number,
+    )
 
     # Recurse into nested failed_children
     for nested_child in child.get("failed_children", []):
         nested_reviewed, nested_total = await _auto_review_child_failures(
-            job_id, job_name, nested_child, settings
+            job_id, job_name, nested_child
         )
         reviewed += nested_reviewed
         total += nested_total

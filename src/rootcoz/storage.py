@@ -1002,17 +1002,17 @@ async def _migrate_backfill_pattern_axis() -> None:
 
 
 async def _migrate_recompute_normalized_signatures() -> None:
-    """One-time migration marker for normalized error signatures.
+    """One-time migration: clear failure_history so backfill recomputes signatures.
 
     The get_failure_signature() function now normalizes text (strips
     timestamps, UUIDs, pod names, build numbers) before hashing.
-    The original stack_trace is not preserved in failure_history, so
-    existing signatures cannot be recomputed. Instead, signatures are
-    naturally updated as jobs are re-analyzed. Auto-review only matches
-    between jobs analyzed with the same normalization logic.
+    Old failure_history rows have pre-normalization signatures that
+    won't match new ones, breaking auto-review matching.
 
-    This migration clears old failure_history rows so the backfill
-    repopulates them from stored result JSON with new signatures.
+    This migration deletes all existing failure_history rows. The
+    backfill_failure_history() function (called after migrations)
+    re-populates them from stored result JSON, which triggers
+    get_failure_signature() with the new normalization logic.
     """
     migration_key = "recompute_normalized_signatures_v1"
     async with _connect_db() as db:
@@ -1023,11 +1023,12 @@ async def _migrate_recompute_normalized_signatures() -> None:
             return
 
     logger.info(
-        "Migration: marking normalized signatures migration as applied. "
-        "Existing failure_history signatures will be updated on next re-analysis."
+        "Migration: clearing failure_history for signature recomputation. "
+        "Rows will be repopulated by backfill with normalized signatures."
     )
 
     async with _connect_db() as db:
+        await db.execute("DELETE FROM failure_history")
         await db.execute(
             "INSERT OR IGNORE INTO _migrations_applied (key) VALUES (?)",
             (migration_key,),
@@ -1885,18 +1886,27 @@ def _extract_child_failures_for_history(
 
 
 async def find_matching_previous_analysis(
-    job_name: str, test_name: str, current_job_id: str
+    job_name: str,
+    test_name: str,
+    current_job_id: str,
+    child_job_name: str = "",
 ) -> dict | None:
     """Find the most recent previous analysis of the same test in the same job.
 
     Searches failure_history for a row with the same job_name and test_name
-    from a different (previous) job_id. Returns the most recent match
-    ordered by analyzed_at descending.
+    from a different (previous) job_id. When child_job_name is provided,
+    results are scoped to the same child job context to avoid cross-child
+    matches for tests with the same name.
+
+    Returns the most recent match ordered by analyzed_at descending,
+    with id as tiebreaker for deterministic results.
 
     Args:
         job_name: Jenkins job name to match.
         test_name: Fully qualified test name to match.
         current_job_id: Current job ID to exclude from results.
+        child_job_name: Child job name to scope the search (empty for
+            top-level failures).
 
     Returns:
         Dict with previous failure_history row data if found, None otherwise.
@@ -1909,8 +1919,9 @@ async def find_matching_previous_analysis(
             "pattern, analyzed_at "
             "FROM failure_history "
             "WHERE job_name = ? AND test_name = ? AND job_id != ? "
-            "ORDER BY analyzed_at DESC LIMIT 1",
-            (job_name, test_name, current_job_id),
+            "AND child_job_name = ? "
+            "ORDER BY analyzed_at DESC, id DESC LIMIT 1",
+            (job_name, test_name, current_job_id, child_job_name),
         )
         row = await cursor.fetchone()
         if row is None:
