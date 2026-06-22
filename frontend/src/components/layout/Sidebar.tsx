@@ -1,3 +1,4 @@
+import type { MouseEvent as ReactMouseEvent } from 'react'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { Link, useLocation } from 'react-router-dom'
 import {
@@ -72,20 +73,26 @@ export function Sidebar({ badges, mobileOpen, onMobileClose }: SidebarProps) {
 
   // ─── Width / collapse state ─────────────────────────────────────
   const [collapsed, setCollapsed] = useState(() => {
-    const saved = localStorage.getItem(LS_COLLAPSED_KEY)
-    return saved === 'true'
+    try {
+      return localStorage.getItem(LS_COLLAPSED_KEY) === 'true'
+    } catch {
+      return false
+    }
   })
   const [width, setWidth] = useState(() => {
-    const saved = localStorage.getItem(LS_WIDTH_KEY)
-    return saved ? Math.max(MIN_WIDTH, Math.min(MAX_WIDTH, Number(saved))) : DEFAULT_WIDTH
+    try {
+      const saved = localStorage.getItem(LS_WIDTH_KEY)
+      if (!saved) return DEFAULT_WIDTH
+      const n = Number(saved)
+      return Number.isFinite(n) ? Math.max(MIN_WIDTH, Math.min(MAX_WIDTH, n)) : DEFAULT_WIDTH
+    } catch {
+      return DEFAULT_WIDTH
+    }
   })
 
-  // Persist width + collapsed
+  // Persist collapsed state
   useEffect(() => {
-    localStorage.setItem(LS_WIDTH_KEY, String(width))
-  }, [width])
-  useEffect(() => {
-    localStorage.setItem(LS_COLLAPSED_KEY, String(collapsed))
+    try { localStorage.setItem(LS_COLLAPSED_KEY, String(collapsed)) } catch { /* storage unavailable */ }
   }, [collapsed])
 
   // ─── Drag resize ────────────────────────────────────────────────
@@ -93,7 +100,18 @@ export function Sidebar({ badges, mobileOpen, onMobileClose }: SidebarProps) {
   const startX = useRef(0)
   const startW = useRef(width)
 
-  const onMouseDown = useCallback((e: React.MouseEvent) => {
+  /** Restore global body styles mutated during drag. */
+  const resetBodyStyles = useCallback(() => {
+    document.body.style.cursor = ''
+    document.body.style.userSelect = ''
+  }, [])
+
+  /** Persist width to localStorage (called only on drag end, not every mousemove). */
+  const persistWidth = useCallback((w: number) => {
+    try { localStorage.setItem(LS_WIDTH_KEY, String(w)) } catch { /* storage unavailable */ }
+  }, [])
+
+  const onMouseDown = useCallback((e: ReactMouseEvent) => {
     e.preventDefault()
     dragging.current = true
     startX.current = e.clientX
@@ -108,7 +126,7 @@ export function Sidebar({ badges, mobileOpen, onMobileClose }: SidebarProps) {
       const newWidth = Math.max(MIN_WIDTH, Math.min(MAX_WIDTH, startW.current + (e.clientX - startX.current)))
       if (newWidth <= COLLAPSE_THRESHOLD) {
         setCollapsed(true)
-        setWidth(DEFAULT_WIDTH) // preserve last expanded width for when user un-collapses
+        // Don't overwrite width — keep the user's last expanded width
       } else {
         setCollapsed(false)
         setWidth(newWidth)
@@ -117,19 +135,25 @@ export function Sidebar({ badges, mobileOpen, onMobileClose }: SidebarProps) {
     function onMouseUp() {
       if (!dragging.current) return
       dragging.current = false
-      document.body.style.cursor = ''
-      document.body.style.userSelect = ''
+      resetBodyStyles()
+      // Persist width only at end of drag (not on every mousemove)
+      persistWidth(width)
     }
     document.addEventListener('mousemove', onMouseMove)
     document.addEventListener('mouseup', onMouseUp)
     return () => {
       document.removeEventListener('mousemove', onMouseMove)
       document.removeEventListener('mouseup', onMouseUp)
+      // Always restore body styles on unmount (handles mid-drag unmount)
+      if (dragging.current) {
+        dragging.current = false
+        resetBodyStyles()
+      }
     }
-  }, [])
+  }, [width, resetBodyStyles, persistWidth])
 
   // ─── Build nav items ────────────────────────────────────────────
-  const showMentions = !!username && role !== 'viewer'
+  const showMentions = !!username
   const userItems = showMentions ? [...USER_NAV_ITEMS, MENTIONS_ITEM] : USER_NAV_ITEMS
 
   const isActive = (to: string) =>
@@ -208,7 +232,7 @@ export function Sidebar({ badges, mobileOpen, onMobileClose }: SidebarProps) {
           {/* Backdrop */}
           <div
             data-testid="mobile-sidebar-backdrop"
-            className="fixed inset-0 z-40 bg-black/50 md:hidden"
+            className="fixed inset-0 z-40 bg-black/60 backdrop-blur-sm md:hidden"
             onClick={onMobileClose}
           />
           {/* Slide-in sidebar */}

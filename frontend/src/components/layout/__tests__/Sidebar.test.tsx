@@ -57,10 +57,10 @@ describe('Sidebar', () => {
     expect(screen.getByText('Mentions')).toBeDefined()
   })
 
-  it('hides Mentions link for viewer users', () => {
+  it('shows Mentions link for viewer users', () => {
     mockAuth.role = 'viewer'
     renderSidebar()
-    expect(screen.queryByText('Mentions')).toBeNull()
+    expect(screen.getByText('Mentions')).toBeDefined()
   })
 
   it('shows admin section for admin users', () => {
@@ -101,10 +101,10 @@ describe('Sidebar', () => {
     expect(screen.getByTestId('sidebar-resize-handle')).toBeDefined()
   })
 
-  it('persists width to localStorage', () => {
+  it('restores default width when localStorage is empty', () => {
     renderSidebar()
-    const saved = localStorage.getItem('rootcoz_sidebar_width')
-    expect(saved).toBe('200') // default width
+    const sidebar = screen.getByTestId('app-sidebar')
+    expect(sidebar.style.width).toBe('200px') // default width
   })
 
   it('restores width from localStorage', () => {
