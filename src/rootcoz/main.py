@@ -7132,7 +7132,7 @@ async def register_user(request: Request) -> JSONResponse:
         raise HTTPException(status_code=400, detail="Username is required")
 
     # Block reserved username prefixes (e.g., rootcoz-ai)
-    if username.startswith("rootcoz"):
+    if username.lower().startswith("rootcoz"):
         raise HTTPException(
             status_code=400,
             detail="Usernames starting with 'rootcoz' are reserved for system use",
