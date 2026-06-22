@@ -7,6 +7,7 @@ from rootcoz.engine.core import (
     extract_relevant_console_lines,
     format_exception_with_type,
     get_failure_signature,
+    normalize_for_signature,
     resolve_additional_repos,
 )
 
@@ -19,5 +20,6 @@ __all__ = [
     "extract_relevant_console_lines",
     "format_exception_with_type",
     "get_failure_signature",
+    "normalize_for_signature",
     "resolve_additional_repos",
 ]
