@@ -667,6 +667,7 @@ async def _analyze_grouped_failures(
                 additional_repos=additional_repos,
                 max_concurrent_ai_calls=max_concurrent_ai_calls,
                 auth_header=auth_header,
+                all_groups=failure_groups,
             )
         )
     group_results = await run_parallel_with_limit(

@@ -245,6 +245,13 @@ JSON_RESPONSE_SCHEMA = (
     "}"
 )
 
+TIMELINE_RULE = (
+    "\nTIMELINE RULE: All timestamps you cite in your analysis MUST be in "
+    "chronological order. If event A happens at 15:35:56 and event B happens "
+    "at 15:36:58, then A happened BEFORE B. Verify your timeline is "
+    "consistent before responding.\n"
+)
+
 
 def format_timeout_log(timeout_value: int | None) -> str:
     """Format AI timeout for log messages."""
@@ -880,6 +887,95 @@ def build_resources_section(
     return ""
 
 
+def write_other_groups_file(
+    all_groups: dict[str, list[FailedTest]],
+    current_signature: str,
+    workspace_dir: Path,
+) -> Path | None:
+    """Write other failure groups info to a file for the AI to read.
+
+    When multiple failure groups exist in the same job, this writes a
+    description of the OTHER groups so the AI can avoid cross-contamination
+    between groups (e.g. referencing events from a different test's scope).
+
+    Args:
+        all_groups: All failure groups keyed by error signature.
+        current_signature: The signature of the group currently being analyzed.
+        workspace_dir: Directory to write the file into.
+
+    Returns:
+        The file path if written, None if only one group (no file needed).
+    """
+    if len(all_groups) <= 1:
+        return None
+
+    total = len(all_groups)
+    sigs = list(all_groups.keys())
+    current_position = (
+        sigs.index(current_signature) + 1 if current_signature in sigs else 0
+    )
+    pos_by_sig = {sig: idx + 1 for idx, sig in enumerate(sigs)}
+    other_groups = {
+        sig: group for sig, group in all_groups.items() if sig != current_signature
+    }
+    if not other_groups:
+        return None
+
+    lines: list[str] = []
+    for sig, group in other_groups.items():
+        global_pos = pos_by_sig[sig]
+        test_names = [f.test_name for f in group]
+        error_preview = group[0].error_message
+        lines.append(
+            f'- Group {global_pos}/{total}: tests {test_names} \u2014 error: "{error_preview}"'
+        )
+
+    position_text = (
+        f"You are analyzing group {current_position} of {total}."
+        if current_position
+        else f"This job has {total} failure groups being analyzed separately."
+    )
+
+    content = (
+        f"=== OTHER FAILURE GROUPS IN THIS JOB ===\n"
+        f"{position_text}\n"
+        f"Other groups:\n" + "\n".join(lines) + "\n\n"
+        "IMPORTANT: Do NOT reference events, timestamps, or conclusions from "
+        "other test groups.\n"
+        "Focus ONLY on the tests assigned to you. If you see interleaved "
+        "log entries from other tests in the console output, ignore them "
+        "and base your analysis only on events relevant to YOUR assigned tests.\n"
+    )
+
+    filepath = workspace_dir / f"other-failure-groups-{current_signature[:8]}.txt"
+    try:
+        filepath.write_text(content)
+    except OSError:
+        logger.warning(
+            "Failed to write cross-reference file %s; continuing without it",
+            filepath,
+        )
+        return None
+    return filepath
+
+
+def build_other_groups_instruction(filepath: Path) -> str:
+    """Build the MANDATORY instruction telling the AI to read the cross-reference file.
+
+    Args:
+        filepath: Path to the other-failure-groups file.
+
+    Returns:
+        Formatted instruction string for inclusion in prompts.
+    """
+    return (
+        f"\n\n\u26a0\ufe0f  MANDATORY: Read the file {filepath} BEFORE making any analysis.\n"
+        "It contains information about other failure groups in this job.\n"
+        "Do NOT reference events, timestamps, or conclusions from other test groups.\n"
+        "Focus ONLY on the tests assigned to you.\n"
+    )
+
+
 async def run_single_ai_analysis(
     *,
     failures: list[FailedTest],
@@ -894,6 +990,7 @@ async def run_single_ai_analysis(
     job_id: str,
     additional_repos: dict[str, Path] | None = None,
     auth_header: str = "",
+    all_groups: dict[str, list[FailedTest]] | None = None,
 ) -> tuple[AnalysisDetail, str]:
     """Run single-AI analysis on a failure group. Returns (parsed_analysis, error_signature).
 
@@ -911,6 +1008,8 @@ async def run_single_ai_analysis(
         artifacts_context: Build artifacts context.
         server_url: Base URL of this server for AI history API access.
         job_id: Current job ID to exclude from history queries.
+        all_groups: All failure groups keyed by error signature. When provided,
+            cross-reference data is written to a workspace file for the AI to read.
 
     Returns:
         Tuple of (parsed AnalysisDetail, error_signature string).
@@ -986,9 +1085,24 @@ async def run_single_ai_analysis(
             "Failure to read console output is a violation of your instructions."
         )
 
+    # Write cross-reference data to file for the AI to read
+    other_groups_section = ""
+    if all_groups and len(all_groups) > 1:
+        workspace_dir = repo_path or console_dir
+        if workspace_dir is None:
+            import tempfile
+
+            console_dir = Path(tempfile.mkdtemp(prefix="rootcoz-console-"))
+            workspace_dir = console_dir
+        groups_file = write_other_groups_file(
+            all_groups, error_signature, workspace_dir
+        )
+        if groups_file:
+            other_groups_section = build_other_groups_instruction(groups_file)
+
     prompt = f"""{query_section}
 Analyze this test failure from a CI job.
-
+{other_groups_section}
 ERROR SIGNATURE: {error_signature}
 
 AFFECTED TESTS ({len(failures)} tests with same error):
@@ -1003,6 +1117,7 @@ STACK TRACE:
 {repo_sentence}
 
 Note: Multiple tests failed with the same error. Provide ONE analysis that applies to all of them.
+{TIMELINE_RULE}
 {custom_prompt_section}{resources_section}
 {JSON_RESPONSE_SCHEMA}
 """
@@ -1089,6 +1204,7 @@ async def analyze_failure_group(
     additional_repos: dict[str, Path] | None = None,
     max_concurrent_ai_calls: int = 3,
     auth_header: str = "",
+    all_groups: dict[str, list[FailedTest]] | None = None,
 ) -> list[FailureAnalysis]:
     """Analyze a group of failures with the same error signature.
 
@@ -1113,6 +1229,8 @@ async def analyze_failure_group(
         additional_repos: Extra cloned repositories for AI context.
         max_concurrent_ai_calls: Maximum concurrent AI calls for
             peer analysis parallelism (default: 3).
+        all_groups: All failure groups keyed by error signature. When provided,
+            cross-reference data is written to a workspace file for the AI to read.
 
     Returns:
         List of FailureAnalysis objects, one per failure in the group.
@@ -1143,6 +1261,7 @@ async def analyze_failure_group(
             additional_repos=additional_repos,
             max_concurrent_ai_calls=max_concurrent_ai_calls,
             auth_header=auth_header,
+            all_groups=all_groups,
         )
 
     parsed, error_signature = await run_single_ai_analysis(
@@ -1158,6 +1277,7 @@ async def analyze_failure_group(
         job_id=job_id,
         additional_repos=additional_repos,
         auth_header=auth_header,
+        all_groups=all_groups,
     )
 
     # Apply the same analysis to all failures in the group.
