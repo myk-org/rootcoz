@@ -18,7 +18,7 @@ export function Header({ mobileOpen, onMobileToggle }: HeaderProps) {
   const { isOperator } = useAuth()
   const canSubmitAnalysis = isOperator
   const [feedbackOpen, setFeedbackOpen] = useState(false)
-  const [feedbackAvailable, setFeedbackAvailable] = useState(true) // optimistic default
+  const [feedbackAvailable, setFeedbackAvailable] = useState(false) // fail closed until confirmed
 
   useEffect(() => {
     let cancelled = false

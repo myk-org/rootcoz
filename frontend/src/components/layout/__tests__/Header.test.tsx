@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { render, screen } from '@testing-library/react'
+import { render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { MemoryRouter } from 'react-router-dom'
 import { Header } from '../Header'
@@ -102,16 +102,17 @@ describe('Header', () => {
   it('disables Feedback button when server does not support it', async () => {
     mockApiGet.mockResolvedValueOnce({ feedback_enabled: false })
     renderHeader()
-    // Wait for the capability fetch to resolve
-    const btn = await screen.findByText('Feedback')
-    expect(btn.closest('button')?.disabled).toBe(true)
+    const btn = screen.getByText('Feedback').closest('button')!
+    // Button starts disabled (fail-closed default) and stays disabled after fetch
+    await waitFor(() => expect(btn.disabled).toBe(true))
   })
 
   it('enables Feedback button when server supports it', async () => {
     mockApiGet.mockResolvedValueOnce({ feedback_enabled: true })
     renderHeader()
-    const btn = await screen.findByText('Feedback')
-    expect(btn.closest('button')?.disabled).toBe(false)
+    const btn = screen.getByText('Feedback').closest('button')!
+    // Button starts disabled, then enabled after capabilities confirm support
+    await waitFor(() => expect(btn.disabled).toBe(false))
   })
 
   it('renders mobile menu toggle button', () => {
