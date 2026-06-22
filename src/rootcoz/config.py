@@ -324,6 +324,9 @@ class Settings(BaseSettings):
     vapid_private_key: str = Field(default="", repr=False)
     vapid_claim_email: str = ""
 
+    # Auto-review: mark failures with identical signatures from previous analyses
+    enable_auto_review: bool = False
+
     # Metadata rules file path (optional, server-only)
     metadata_rules_file: str = Field(
         default="",

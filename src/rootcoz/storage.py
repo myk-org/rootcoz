@@ -806,6 +806,7 @@ async def init_db() -> None:
     await backfill_failure_history()
     await _migrate_restore_ai_classifications()
     await _migrate_backfill_pattern_axis()
+    await _migrate_recompute_normalized_signatures()
 
 
 async def _migrate_restore_ai_classifications() -> None:
@@ -998,6 +999,40 @@ async def _migrate_backfill_pattern_axis() -> None:
         )
         await db.commit()
     logger.info("Migration: pattern axis backfill complete")
+
+
+async def _migrate_recompute_normalized_signatures() -> None:
+    """One-time migration marker for normalized error signatures.
+
+    The get_failure_signature() function now normalizes text (strips
+    timestamps, UUIDs, pod names, build numbers) before hashing.
+    The original stack_trace is not preserved in failure_history, so
+    existing signatures cannot be recomputed. Instead, signatures are
+    naturally updated as jobs are re-analyzed. Auto-review only matches
+    between jobs analyzed with the same normalization logic.
+
+    This migration clears old failure_history rows so the backfill
+    repopulates them from stored result JSON with new signatures.
+    """
+    migration_key = "recompute_normalized_signatures_v1"
+    async with _connect_db() as db:
+        cursor = await db.execute(
+            "SELECT 1 FROM _migrations_applied WHERE key = ?", (migration_key,)
+        )
+        if await cursor.fetchone():
+            return
+
+    logger.info(
+        "Migration: marking normalized signatures migration as applied. "
+        "Existing failure_history signatures will be updated on next re-analysis."
+    )
+
+    async with _connect_db() as db:
+        await db.execute(
+            "INSERT OR IGNORE INTO _migrations_applied (key) VALUES (?)",
+            (migration_key,),
+        )
+        await db.commit()
 
 
 def _validate_child_identifier_pairing(
@@ -1847,6 +1882,40 @@ def _extract_child_failures_for_history(
         _extract_child_failures_for_history(
             nested, job_id, job_name, build_number, rows, analyzed_at=analyzed_at
         )
+
+
+async def find_matching_previous_analysis(
+    job_name: str, test_name: str, current_job_id: str
+) -> dict | None:
+    """Find the most recent previous analysis of the same test in the same job.
+
+    Searches failure_history for a row with the same job_name and test_name
+    from a different (previous) job_id. Returns the most recent match
+    ordered by analyzed_at descending.
+
+    Args:
+        job_name: Jenkins job name to match.
+        test_name: Fully qualified test name to match.
+        current_job_id: Current job ID to exclude from results.
+
+    Returns:
+        Dict with previous failure_history row data if found, None otherwise.
+        Includes keys: job_id, build_number, error_signature, classification,
+        pattern, analyzed_at.
+    """
+    async with _connect_db() as db:
+        cursor = await db.execute(
+            "SELECT job_id, build_number, error_signature, classification, "
+            "pattern, analyzed_at "
+            "FROM failure_history "
+            "WHERE job_name = ? AND test_name = ? AND job_id != ? "
+            "ORDER BY analyzed_at DESC LIMIT 1",
+            (job_name, test_name, current_job_id),
+        )
+        row = await cursor.fetchone()
+        if row is None:
+            return None
+        return dict(row)
 
 
 async def populate_failure_history(

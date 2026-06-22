@@ -216,6 +216,7 @@ _SETTINGS_CATEGORIES: dict[str, list[str]] = {
         "peer_ai_configs",
         "peer_analysis_max_rounds",
         "force_analysis",
+        "enable_auto_review",
     ],
     "Jira": [
         "jira_url",
@@ -1916,6 +1917,7 @@ def _merge_settings(body: BaseAnalysisRequest, settings: Settings) -> Settings:
         "enable_jira",
         "jenkins_artifacts_max_size_mb",
         "get_job_artifacts",
+        "enable_auto_review",
     ]
     for field in direct_fields:
         value = getattr(body, field, None)
@@ -1973,6 +1975,209 @@ def _merge_settings(body: BaseAnalysisRequest, settings: Settings) -> Settings:
         merged_data = settings.model_dump(mode="python") | overrides
         return Settings.model_validate(merged_data)
     return settings
+
+
+async def _apply_auto_review(
+    job_id: str,
+    test_name: str,
+    error_sig: str,
+    prev_job_id: str,
+    prev_build: int,
+    child_job_name: str = "",
+    child_build_number: int = 0,
+) -> None:
+    """Apply auto-review to a single failure: mark reviewed, add comment, log.
+
+    Args:
+        job_id: Current analysis job ID.
+        test_name: Name of the test being auto-reviewed.
+        error_sig: Error signature that matched.
+        prev_job_id: Job ID of the previous matching analysis.
+        prev_build: Build number of the previous matching analysis.
+        child_job_name: Child job name (empty for top-level failures).
+        child_build_number: Child build number (0 for top-level failures).
+    """
+    comment = (
+        f"Auto-reviewed: identical failure signature found in previous "
+        f"analysis `{prev_job_id}` (build #{prev_build})"
+    )
+    await storage.set_reviewed(
+        job_id,
+        test_name,
+        reviewed=True,
+        child_job_name=child_job_name,
+        child_build_number=child_build_number,
+        username="rootcoz-ai",
+    )
+    await storage.add_comment(
+        job_id,
+        test_name,
+        comment=comment,
+        child_job_name=child_job_name,
+        child_build_number=child_build_number,
+        error_signature=error_sig,
+        username="rootcoz-ai",
+    )
+
+    if child_job_name:
+        logger.info(
+            "Auto-reviewed %s (child %s#%d): identical signature %s found in "
+            "previous analysis %s",
+            test_name,
+            child_job_name,
+            child_build_number,
+            error_sig[:12],
+            prev_job_id,
+        )
+    else:
+        logger.info(
+            "Auto-reviewed %s: identical signature %s found in previous analysis %s",
+            test_name,
+            error_sig[:12],
+            prev_job_id,
+        )
+
+
+async def _auto_review_matching_failures(
+    job_id: str,
+    job_name: str,
+    build_number: int,
+    result_data: dict,
+    settings: Settings,
+) -> None:
+    """Auto-review failures with identical signatures from previous analyses.
+
+    For each failure in the result, looks up the same test_name in the same
+    job_name from a previous analysis. If the error_signature matches exactly,
+    marks the failure as reviewed with username='rootcoz-ai' and adds an
+    explanatory comment.
+
+    If all failures end up reviewed, triggers Report Portal push when
+    ENABLE_REPORTPORTAL is enabled and configured.
+
+    Args:
+        job_id: Current analysis job ID.
+        job_name: Jenkins job name.
+        build_number: Build number being analyzed.
+        result_data: Stored result dict containing failures.
+        settings: Application settings.
+    """
+    auto_reviewed_count = 0
+    total_failures = 0
+
+    # Process top-level failures
+    for failure in result_data.get("failures", []):
+        total_failures += 1
+        test_name = failure.get("test_name", "")
+        error_sig = failure.get("error_signature", "")
+        if not test_name or not error_sig:
+            continue
+
+        previous = await storage.find_matching_previous_analysis(
+            job_name, test_name, job_id
+        )
+        if previous is None:
+            continue
+        if previous["error_signature"] != error_sig:
+            continue
+
+        # Signature matches — auto-review
+        prev_job_id = previous["job_id"]
+        prev_build = previous["build_number"]
+        await _apply_auto_review(job_id, test_name, error_sig, prev_job_id, prev_build)
+        auto_reviewed_count += 1
+
+    # Process child job failures
+    for child in result_data.get("child_job_analyses", []):
+        child_reviewed, child_total = await _auto_review_child_failures(
+            job_id, job_name, child, settings
+        )
+        auto_reviewed_count += child_reviewed
+        total_failures += child_total
+
+    if auto_reviewed_count > 0:
+        logger.info(
+            "Auto-reviewed %d/%d failures for job %s (build #%d)",
+            auto_reviewed_count,
+            total_failures,
+            job_name,
+            build_number,
+        )
+        notify_job_status_changed(job_id)
+
+        # Check if ALL failures are now reviewed → auto-push to Report Portal
+        if settings.reportportal_enabled and total_failures > 0:
+            reviews = await storage.get_reviews_for_job(job_id)
+            reviewed_count = sum(1 for r in reviews.values() if r.get("reviewed"))
+            if reviewed_count >= total_failures:
+                logger.info(
+                    "All failures auto-reviewed for job %s, pushing classifications "
+                    "to Report Portal",
+                    job_id,
+                )
+                try:
+                    await _execute_rp_push(job_id, result_data, settings)
+                except Exception:
+                    logger.warning(
+                        "Auto-push to Report Portal failed for job_id=%s",
+                        job_id,
+                        exc_info=True,
+                    )
+
+
+async def _auto_review_child_failures(
+    job_id: str,
+    job_name: str,
+    child: dict,
+    settings: Settings,
+) -> tuple[int, int]:
+    """Auto-review failures within a child job analysis.
+
+    Returns:
+        Tuple of (auto_reviewed_count, total_failure_count).
+    """
+    reviewed = 0
+    total = 0
+    child_job_name = child.get("job_name", "")
+    child_build_number = child.get("build_number", 0)
+
+    for failure in child.get("failures", []):
+        total += 1
+        test_name = failure.get("test_name", "")
+        error_sig = failure.get("error_signature", "")
+        if not test_name or not error_sig:
+            continue
+
+        previous = await storage.find_matching_previous_analysis(
+            job_name, test_name, job_id
+        )
+        if previous is None:
+            continue
+        if previous["error_signature"] != error_sig:
+            continue
+
+        prev_job_id = previous["job_id"]
+        prev_build = previous["build_number"]
+        await _apply_auto_review(
+            job_id,
+            test_name,
+            error_sig,
+            prev_job_id,
+            prev_build,
+            child_job_name=child_job_name,
+            child_build_number=child_build_number,
+        )
+        reviewed += 1
+
+    # Recurse into nested failed_children
+    for nested_child in child.get("failed_children", []):
+        nested_reviewed, nested_total = await _auto_review_child_failures(
+            job_id, job_name, nested_child, settings
+        )
+        reviewed += nested_reviewed
+        total += nested_total
+
+    return reviewed, total
 
 
 def _collect_all_failures(
@@ -2381,6 +2586,23 @@ async def process_analysis_with_id(
                     job_id,
                     exc_info=True,
                 )
+
+            # Auto-review failures with matching signatures from previous analyses
+            if settings.enable_auto_review:
+                try:
+                    await _auto_review_matching_failures(
+                        job_id,
+                        body.job_name,
+                        body.build_number,
+                        result_data,
+                        settings,
+                    )
+                except Exception:
+                    logger.warning(
+                        "Auto-review failed for job_id=%s",
+                        job_id,
+                        exc_info=True,
+                    )
 
         # Auto-assign job metadata from name pattern rules
         await _auto_assign_metadata(body.job_name, settings.metadata_rules)
@@ -3102,6 +3324,23 @@ async def _process_file_raw_analysis(
                 job_id,
                 exc_info=True,
             )
+
+        # Auto-review failures with matching signatures from previous analyses
+        if merged.enable_auto_review:
+            try:
+                await _auto_review_matching_failures(
+                    job_id,
+                    display_name,
+                    result_data.get("build_number", 0),
+                    result_data,
+                    merged,
+                )
+            except Exception:
+                logger.warning(
+                    "Auto-review failed for job_id=%s",
+                    job_id,
+                    exc_info=True,
+                )
 
         # Auto-assign job metadata from name pattern rules
         await _auto_assign_metadata(display_name, merged.metadata_rules)
@@ -6865,6 +7104,13 @@ async def register_user(request: Request) -> JSONResponse:
     username = raw_username.strip().lower()
     if not username:
         raise HTTPException(status_code=400, detail="Username is required")
+
+    # Block reserved username prefixes (e.g., rootcoz-ai)
+    if username.startswith("rootcoz"):
+        raise HTTPException(
+            status_code=400,
+            detail="Usernames starting with 'rootcoz' are reserved for system use",
+        )
 
     settings = get_settings()
     allowed = settings.allowed_users_set
