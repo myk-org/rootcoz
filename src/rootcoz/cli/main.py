@@ -3289,6 +3289,7 @@ def reports_overrides(
     status: str = _REPORT_STATUS_OPTION,
     tags: str = _REPORT_TAGS_OPTION,
     exclude_tags: str = _REPORT_EXCLUDE_TAGS_OPTION,
+    review_status: str = _REPORT_REVIEW_STATUS_OPTION,
     json_output: bool = _JSON_OPTION,
 ):
     """Show classification overrides grouped by from->to."""
@@ -3310,6 +3311,7 @@ def reports_overrides(
             status=status,
             tags=tag_list,
             exclude_tags=exclude_tag_list,
+            review_status=review_status,
         )
     except RootCozError as err:
         _handle_error(err)
@@ -3352,6 +3354,7 @@ def reports_issues(
     status: str = _REPORT_STATUS_OPTION,
     tags: str = _REPORT_TAGS_OPTION,
     exclude_tags: str = _REPORT_EXCLUDE_TAGS_OPTION,
+    review_status: str = _REPORT_REVIEW_STATUS_OPTION,
     json_output: bool = _JSON_OPTION,
 ):
     """Show GitHub/Jira issues created from analyses."""
@@ -3373,6 +3376,7 @@ def reports_issues(
             status=status,
             tags=tag_list,
             exclude_tags=exclude_tag_list,
+            review_status=review_status,
         )
     except RootCozError as err:
         _handle_error(err)

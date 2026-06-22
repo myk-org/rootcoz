@@ -1132,6 +1132,7 @@ class RootCozClient:
         status: str = "",
         tags: list[str] | None = None,
         exclude_tags: list[str] | None = None,
+        review_status: str = "",
         limit: int = 0,
         offset: int = 0,
     ) -> dict:
@@ -1153,6 +1154,8 @@ class RootCozClient:
             params["tags"] = ",".join(tags)
         if exclude_tags:
             params["exclude_tags"] = ",".join(exclude_tags)
+        if review_status:
+            params["review_status"] = review_status
         if limit > 0:
             params["limit"] = limit
         if offset > 0:
@@ -1183,11 +1186,10 @@ class RootCozClient:
             status,
             tags,
             exclude_tags,
+            review_status,
             limit,
             offset,
         )
-        if review_status:
-            params["review_status"] = review_status
         return self._request("GET", "/api/reports/totals", params=params)
 
     def report_classification_overrides(
@@ -1200,6 +1202,7 @@ class RootCozClient:
         status: str = "",
         tags: list[str] | None = None,
         exclude_tags: list[str] | None = None,
+        review_status: str = "",
         limit: int = 0,
         offset: int = 0,
     ) -> dict:
@@ -1213,6 +1216,7 @@ class RootCozClient:
             status,
             tags,
             exclude_tags,
+            review_status,
             limit,
             offset,
         )
@@ -1230,6 +1234,7 @@ class RootCozClient:
         status: str = "",
         tags: list[str] | None = None,
         exclude_tags: list[str] | None = None,
+        review_status: str = "",
         limit: int = 0,
         offset: int = 0,
     ) -> dict:
@@ -1243,6 +1248,7 @@ class RootCozClient:
             status,
             tags,
             exclude_tags,
+            review_status,
             limit,
             offset,
         )
