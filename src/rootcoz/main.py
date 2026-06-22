@@ -7768,6 +7768,18 @@ def _parse_report_metadata(
     return _parse_csv_list(team), _parse_csv_list(tier), _parse_csv_list(version)
 
 
+_VALID_REVIEW_STATUSES = {"", "reviewed", "not_reviewed"}
+
+
+def _validate_review_status(review_status: str) -> None:
+    """Reject invalid review_status values with HTTP 400."""
+    if review_status not in _VALID_REVIEW_STATUSES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid review_status '{review_status}'. Must be 'reviewed', 'not_reviewed', or empty.",
+        )
+
+
 @app.get("/api/reports/totals")
 async def reports_totals(
     request: Request,
@@ -7785,6 +7797,7 @@ async def reports_totals(
 ) -> dict:
     """Aggregate totals: total jobs, failures, reviewed, with per-job detail list. Admin only."""
     _require_admin(request)
+    _validate_review_status(review_status)
     team_list, tier_list, version_list = _parse_report_metadata(team, tier, version)
     tag_list = _parse_csv_list(tags)
     exclude_tag_list = _parse_csv_list(exclude_tags)
@@ -7833,6 +7846,7 @@ async def reports_classification_overrides(
 ) -> dict:
     """Classification overrides grouped by from→to transition. Admin only."""
     _require_admin(request)
+    _validate_review_status(review_status)
     team_list, tier_list, version_list = _parse_report_metadata(team, tier, version)
     tag_list = _parse_csv_list(tags)
     exclude_tag_list = _parse_csv_list(exclude_tags)
@@ -7881,6 +7895,7 @@ async def reports_issues_created(
 ) -> dict:
     """GitHub/Jira issues created from analysis results. Admin only."""
     _require_admin(request)
+    _validate_review_status(review_status)
     team_list, tier_list, version_list = _parse_report_metadata(team, tier, version)
     tag_list = _parse_csv_list(tags)
     exclude_tag_list = _parse_csv_list(exclude_tags)
