@@ -96,33 +96,28 @@ export function Sidebar({ badges, mobileOpen, onMobileClose }: SidebarProps) {
   }, [collapsed])
 
   // ─── Drag resize ────────────────────────────────────────────────
-  const dragging = useRef(false)
+  const [isDragging, setIsDragging] = useState(false)
   const startX = useRef(0)
   const startW = useRef(width)
+  const widthRef = useRef(width)
 
-  /** Restore global body styles mutated during drag. */
-  const resetBodyStyles = useCallback(() => {
-    document.body.style.cursor = ''
-    document.body.style.userSelect = ''
-  }, [])
-
-  /** Persist width to localStorage (called only on drag end, not every mousemove). */
-  const persistWidth = useCallback((w: number) => {
-    try { localStorage.setItem(LS_WIDTH_KEY, String(w)) } catch { /* storage unavailable */ }
-  }, [])
+  // Keep widthRef in sync so mouseup can read the latest value without a dependency
+  useEffect(() => { widthRef.current = width }, [width])
 
   const onMouseDown = useCallback((e: ReactMouseEvent) => {
     e.preventDefault()
-    dragging.current = true
     startX.current = e.clientX
-    startW.current = collapsed ? MIN_WIDTH : width
+    startW.current = collapsed ? MIN_WIDTH : widthRef.current
     document.body.style.cursor = 'col-resize'
     document.body.style.userSelect = 'none'
-  }, [collapsed, width])
+    setIsDragging(true)
+  }, [collapsed])
 
+  // Attach listeners only while dragging — no churn, no idle listeners
   useEffect(() => {
+    if (!isDragging) return
+
     function onMouseMove(e: MouseEvent) {
-      if (!dragging.current) return
       const newWidth = Math.max(MIN_WIDTH, Math.min(MAX_WIDTH, startW.current + (e.clientX - startX.current)))
       if (newWidth <= COLLAPSE_THRESHOLD) {
         setCollapsed(true)
@@ -132,25 +127,25 @@ export function Sidebar({ badges, mobileOpen, onMobileClose }: SidebarProps) {
         setWidth(newWidth)
       }
     }
+
     function onMouseUp() {
-      if (!dragging.current) return
-      dragging.current = false
-      resetBodyStyles()
+      document.body.style.cursor = ''
+      document.body.style.userSelect = ''
       // Persist width only at end of drag (not on every mousemove)
-      persistWidth(width)
+      try { localStorage.setItem(LS_WIDTH_KEY, String(widthRef.current)) } catch { /* storage unavailable */ }
+      setIsDragging(false)
     }
+
     document.addEventListener('mousemove', onMouseMove)
     document.addEventListener('mouseup', onMouseUp)
     return () => {
       document.removeEventListener('mousemove', onMouseMove)
       document.removeEventListener('mouseup', onMouseUp)
-      // Always restore body styles on unmount (handles mid-drag unmount)
-      if (dragging.current) {
-        dragging.current = false
-        resetBodyStyles()
-      }
+      // Always restore body styles on cleanup (handles mid-drag unmount)
+      document.body.style.cursor = ''
+      document.body.style.userSelect = ''
     }
-  }, [width, resetBodyStyles, persistWidth])
+  }, [isDragging])
 
   // ─── Build nav items ────────────────────────────────────────────
   const showMentions = !!username
