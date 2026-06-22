@@ -20,6 +20,11 @@ vi.mock('@/lib/auth', () => ({
   useAuth: () => mockAuth,
 }))
 
+const mockApiGet = vi.fn().mockResolvedValue({ feedback_enabled: true })
+vi.mock('@/lib/api', () => ({
+  api: { get: (...args: unknown[]) => mockApiGet(...args) },
+}))
+
 // Mock UserBadge to avoid its internal routing/auth dependencies
 vi.mock('../UserBadge', () => ({
   UserBadge: () => <div data-testid="user-badge">UserBadge</div>,
@@ -92,6 +97,21 @@ describe('Header', () => {
   it('always renders the Feedback button', () => {
     renderHeader()
     expect(screen.getByText('Feedback')).toBeDefined()
+  })
+
+  it('disables Feedback button when server does not support it', async () => {
+    mockApiGet.mockResolvedValueOnce({ feedback_enabled: false })
+    renderHeader()
+    // Wait for the capability fetch to resolve
+    const btn = await screen.findByText('Feedback')
+    expect(btn.closest('button')?.disabled).toBe(true)
+  })
+
+  it('enables Feedback button when server supports it', async () => {
+    mockApiGet.mockResolvedValueOnce({ feedback_enabled: true })
+    renderHeader()
+    const btn = await screen.findByText('Feedback')
+    expect(btn.closest('button')?.disabled).toBe(false)
   })
 
   it('renders mobile menu toggle button', () => {
