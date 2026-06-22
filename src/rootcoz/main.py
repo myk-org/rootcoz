@@ -2978,8 +2978,9 @@ async def _process_file_raw_analysis(
                 additional_repos=cloned_repos or None,
                 max_concurrent_ai_calls=merged.max_concurrent_ai_calls,
                 auth_header=auth_header,
+                all_groups=groups,
             )
-            for group_failures in groups.values()
+            for sig, group_failures in groups.items()
         ]
 
         results = await run_parallel_with_limit(

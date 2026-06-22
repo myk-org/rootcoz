@@ -156,7 +156,7 @@ The `docs/` directory is **auto-generated** by [docsfy](https://github.com/myk-o
 - Pre-query the database and stuff results into the prompt
 - Summarize or filter data before the AI sees it
 - Make decisions about what data the AI needs — let the AI decide
-- Truncate or slice data before giving it to the AI
+- Truncate, cap, or slice data before giving it to the AI — in prompts OR in workspace files
 
 **File-based data pattern:**
 ```python
