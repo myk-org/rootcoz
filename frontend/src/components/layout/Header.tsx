@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { Link, useLocation } from 'react-router-dom'
 import { BookOpen, Menu, MessageSquarePlus, Plus, X } from 'lucide-react'
 import { UserBadge } from './UserBadge'
@@ -21,6 +21,7 @@ export function Header({ mobileOpen, onMobileToggle }: HeaderProps) {
   const [feedbackEnabled, setFeedbackEnabled] = useState(false)
 
   // Fetch server capabilities to check if feedback is enabled
+  const retryTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   useEffect(() => {
     let cancelled = false
     async function loadCapabilities(retry = true) {
@@ -29,7 +30,7 @@ export function Header({ mobileOpen, onMobileToggle }: HeaderProps) {
         if (!cancelled) setFeedbackEnabled(caps.feedback_enabled ?? false)
       } catch {
         if (!cancelled && retry) {
-          setTimeout(() => { if (!cancelled) void loadCapabilities(false) }, 5000)
+          retryTimer.current = setTimeout(() => { if (!cancelled) void loadCapabilities(false) }, 5000)
         } else if (!cancelled) {
           setFeedbackEnabled(false)
         }
@@ -38,6 +39,10 @@ export function Header({ mobileOpen, onMobileToggle }: HeaderProps) {
     void loadCapabilities()
     return () => {
       cancelled = true
+      if (retryTimer.current !== null) {
+        clearTimeout(retryTimer.current)
+        retryTimer.current = null
+      }
     }
   }, [])
 
