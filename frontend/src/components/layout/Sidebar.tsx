@@ -125,6 +125,7 @@ export function Sidebar({ badges, mobileOpen, onMobileClose }: SidebarProps) {
       } else {
         setCollapsed(false)
         setWidth(newWidth)
+        widthRef.current = newWidth
       }
     }
 
