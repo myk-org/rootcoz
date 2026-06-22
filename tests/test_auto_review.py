@@ -308,6 +308,104 @@ class TestFindMatchingPreviousAnalysis:
             assert result["job_id"] == "new-job"
             assert result["error_signature"] == "new-sig"
 
+    async def test_scopes_by_child_job_name(self, setup_test_db):
+        """Should only match within the same child_job_name context."""
+        with patch.object(storage, "DB_PATH", setup_test_db):
+            async with storage._connect_db() as db:
+                # Same test_name in two different child jobs
+                await db.execute(
+                    "INSERT INTO failure_history "
+                    "(job_id, job_name, build_number, test_name, error_message, "
+                    "error_signature, classification, pattern, "
+                    "child_job_name, child_build_number) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        "prev-job",
+                        "my-job",
+                        100,
+                        "test_a",
+                        "",
+                        "sig-child-A",
+                        "",
+                        "",
+                        "child-job-A",
+                        1,
+                    ),
+                )
+                await db.execute(
+                    "INSERT INTO failure_history "
+                    "(job_id, job_name, build_number, test_name, error_message, "
+                    "error_signature, classification, pattern, "
+                    "child_job_name, child_build_number) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        "prev-job",
+                        "my-job",
+                        100,
+                        "test_a",
+                        "",
+                        "sig-child-B",
+                        "",
+                        "",
+                        "child-job-B",
+                        2,
+                    ),
+                )
+                await db.commit()
+
+            # Query for child-job-A should return sig-child-A
+            result = await storage.find_matching_previous_analysis(
+                job_name="my-job",
+                test_name="test_a",
+                current_job_id="current-job",
+                child_job_name="child-job-A",
+            )
+            assert result is not None
+            assert result["error_signature"] == "sig-child-A"
+
+            # Query for child-job-B should return sig-child-B
+            result = await storage.find_matching_previous_analysis(
+                job_name="my-job",
+                test_name="test_a",
+                current_job_id="current-job",
+                child_job_name="child-job-B",
+            )
+            assert result is not None
+            assert result["error_signature"] == "sig-child-B"
+
+    async def test_top_level_does_not_match_child(self, setup_test_db):
+        """Top-level lookup (empty child_job_name) should not match child rows."""
+        with patch.object(storage, "DB_PATH", setup_test_db):
+            async with storage._connect_db() as db:
+                await db.execute(
+                    "INSERT INTO failure_history "
+                    "(job_id, job_name, build_number, test_name, error_message, "
+                    "error_signature, classification, pattern, "
+                    "child_job_name, child_build_number) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        "prev-job",
+                        "my-job",
+                        100,
+                        "test_a",
+                        "",
+                        "child-sig",
+                        "",
+                        "",
+                        "child-job-A",
+                        1,
+                    ),
+                )
+                await db.commit()
+
+            # Top-level query should not find child rows
+            result = await storage.find_matching_previous_analysis(
+                job_name="my-job",
+                test_name="test_a",
+                current_job_id="current-job",
+            )
+            assert result is None
+
 
 # ---------------------------------------------------------------------------
 # Username reservation
