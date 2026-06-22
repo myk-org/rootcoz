@@ -895,6 +895,22 @@ class RootCozClient:
             "PUT", f"/results/{job_id}/override-classification", json=payload
         )
 
+    def override_pattern(
+        self,
+        job_id: str,
+        test_name: str,
+        pattern: str,
+        child_job_name: str = "",
+        child_build_number: int = 0,
+    ) -> dict:
+        """Override pattern. PUT /results/{job_id}/override-pattern"""
+        payload = self._with_child_scope(
+            {"test_name": test_name, "pattern": pattern},
+            child_job_name,
+            child_build_number,
+        )
+        return self._request("PUT", f"/results/{job_id}/override-pattern", json=payload)
+
     # -- Job Metadata ---------------------------------------------------------
 
     def list_jobs_metadata(

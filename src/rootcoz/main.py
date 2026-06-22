@@ -114,6 +114,7 @@ from rootcoz.models import (
     FeedbackResponse,
     JobMetadataInput,
     OverrideClassificationRequest,
+    OverridePatternRequest,
     PreviewIssueRequest,
     PushSubscriptionRequest,
     ReAnalyzeFailureRequest,
@@ -5408,28 +5409,120 @@ async def _execute_rp_push(
         return push_result
 
 
-def _patch_failure_classification(
-    failures: list[dict], test_name: str, classification: str
+def _patch_failures(
+    failures: list[dict],
+    test_name: str,
+    field: str,
+    value: str,
+    *,
+    extra_patch: Callable[[dict], None] | None = None,
 ) -> None:
-    """Patch classification for matching failures in a list.
+    """Patch ``analysis[field] = value`` for matching failures in a list.
 
-    Also clears stale subtype fields:
-    - CODE ISSUE: clears product_bug_report
-    - PRODUCT BUG: clears code_fix
-    - INFRASTRUCTURE: clears both product_bug_report and code_fix
+    Uses ``setdefault`` so the analysis dict is created and attached to the
+    failure when the key is missing.
+
+    Args:
+        extra_patch: Optional callback for classification-specific cleanup
+            (clearing stale subtype fields like code_fix / product_bug_report).
     """
     for f in failures:
         if f.get("test_name") == test_name:
-            analysis = f.get("analysis", {})
+            analysis = f.setdefault("analysis", {})
             if isinstance(analysis, dict):
-                analysis["classification"] = classification
-                if classification == "CODE ISSUE":
-                    analysis.pop("product_bug_report", None)
-                elif classification == "PRODUCT BUG":
-                    analysis.pop("code_fix", None)
-                elif classification == "INFRASTRUCTURE":
-                    analysis.pop("product_bug_report", None)
-                    analysis.pop("code_fix", None)
+                analysis[field] = value
+                if extra_patch:
+                    extra_patch(analysis)
+
+
+def _classification_extra_patch(classification: str) -> Callable[[dict], None] | None:
+    """Return an extra_patch callback that clears stale subtype fields."""
+
+    def _patch(analysis: dict) -> None:
+        if classification == "CODE ISSUE":
+            analysis.pop("product_bug_report", None)
+        elif classification == "PRODUCT BUG":
+            analysis.pop("code_fix", None)
+        elif classification == "INFRASTRUCTURE":
+            analysis.pop("product_bug_report", None)
+            analysis.pop("code_fix", None)
+
+    return _patch
+
+
+def _apply_override_to_failures(
+    result_data: dict,
+    test_name: str,
+    field: str,
+    value: str,
+    child_job_name: str,
+    child_build_number: int,
+    *,
+    extra_patch: Callable[[dict], None] | None = None,
+) -> None:
+    """Mutate *result_data* to apply an override to matching failures.
+
+    Traverses top-level failures (when *child_job_name* is empty) or
+    child_job_analyses / nested failed_children recursively.
+    """
+    if child_job_name:
+        for child in result_data.get("child_job_analyses", []):
+            if _child_matches(child, child_job_name, child_build_number):
+                _patch_failures(
+                    child.get("failures", []),
+                    test_name,
+                    field,
+                    value,
+                    extra_patch=extra_patch,
+                )
+            _apply_override_to_children(
+                child.get("failed_children", []),
+                test_name,
+                field,
+                value,
+                child_job_name,
+                child_build_number,
+                extra_patch=extra_patch,
+            )
+    else:
+        _patch_failures(
+            result_data.get("failures", []),
+            test_name,
+            field,
+            value,
+            extra_patch=extra_patch,
+        )
+
+
+def _apply_override_to_children(
+    children: list[dict],
+    test_name: str,
+    field: str,
+    value: str,
+    child_job_name: str,
+    child_build_number: int,
+    *,
+    extra_patch: Callable[[dict], None] | None = None,
+) -> None:
+    """Recursively patch ``analysis[field]`` in nested children."""
+    for child in children:
+        if _child_matches(child, child_job_name, child_build_number):
+            _patch_failures(
+                child.get("failures", []),
+                test_name,
+                field,
+                value,
+                extra_patch=extra_patch,
+            )
+        _apply_override_to_children(
+            child.get("failed_children", []),
+            test_name,
+            field,
+            value,
+            child_job_name,
+            child_build_number,
+            extra_patch=extra_patch,
+        )
 
 
 def _apply_classification_override(
@@ -5440,48 +5533,33 @@ def _apply_classification_override(
     child_build_number: int,
 ) -> None:
     """Mutate result_data to apply a classification override to matching failures."""
-    if child_job_name:
-        # Override in child job failures
-        for child in result_data.get("child_job_analyses", []):
-            if _child_matches(child, child_job_name, child_build_number):
-                _patch_failure_classification(
-                    child.get("failures", []), test_name, classification
-                )
-            # Also check nested failed_children recursively
-            _patch_children(
-                child.get("failed_children", []),
-                test_name,
-                classification,
-                child_job_name,
-                child_build_number,
-            )
-    else:
-        # Override in top-level failures
-        _patch_failure_classification(
-            result_data.get("failures", []), test_name, classification
-        )
+    _apply_override_to_failures(
+        result_data,
+        test_name,
+        "classification",
+        classification,
+        child_job_name,
+        child_build_number,
+        extra_patch=_classification_extra_patch(classification),
+    )
 
 
-def _patch_children(
-    children: list[dict],
+def _apply_pattern_override(
+    result_data: dict,
     test_name: str,
-    classification: str,
+    pattern: str,
     child_job_name: str,
     child_build_number: int,
 ) -> None:
-    """Recursively patch classification in nested children."""
-    for child in children:
-        if _child_matches(child, child_job_name, child_build_number):
-            _patch_failure_classification(
-                child.get("failures", []), test_name, classification
-            )
-        _patch_children(
-            child.get("failed_children", []),
-            test_name,
-            classification,
-            child_job_name,
-            child_build_number,
-        )
+    """Mutate result_data to apply a pattern override to matching failures."""
+    _apply_override_to_failures(
+        result_data,
+        test_name,
+        "pattern",
+        pattern,
+        child_job_name,
+        child_build_number,
+    )
 
 
 @app.put("/results/{job_id}/tags")
@@ -5536,6 +5614,7 @@ async def override_classification_endpoint(
 ) -> dict:
     """Override the classification of a failure (CODE ISSUE, PRODUCT BUG, or INFRASTRUCTURE)."""
     _check_allow_list(request)
+    _require_reviewer(request)
     logger.debug(
         f"PUT /results/{job_id}/override-classification: test_name={body.test_name}, "
         f"classification={body.classification}"
@@ -5585,6 +5664,60 @@ async def override_classification_endpoint(
         )
 
     return {"status": "ok", "classification": body.classification}
+
+
+@app.put("/results/{job_id}/override-pattern")
+async def override_pattern_endpoint(
+    job_id: str,
+    body: OverridePatternRequest,
+    request: Request,
+    _: None = Depends(_bind_job_id),
+) -> dict:
+    """Override the pattern axis of a failure (NEW, REGRESSION, FLAKY, etc.)."""
+    _check_allow_list(request)
+    _require_reviewer(request)
+    logger.debug(
+        f"PUT /results/{job_id}/override-pattern: test_name={body.test_name}, "
+        f"pattern={body.pattern}"
+    )
+    await _validate_test_name_in_result(
+        job_id, body.test_name, body.child_job_name, body.child_build_number
+    )
+    username = request.state.username
+
+    parent_job_name = await storage.get_parent_job_name_for_test(
+        body.test_name, job_id=job_id
+    )
+
+    group_tests = await storage.override_pattern(
+        job_id=job_id,
+        test_name=body.test_name,
+        pattern=body.pattern,
+        child_job_name=body.child_job_name,
+        child_build_number=body.child_build_number,
+        username=username,
+        parent_job_name=parent_job_name,
+    )
+
+    def _patch_group(rd: dict) -> None:
+        for t in group_tests:
+            _apply_pattern_override(
+                rd,
+                t,
+                body.pattern,
+                body.child_job_name,
+                body.child_build_number,
+            )
+
+    try:
+        await patch_result_json(job_id, _patch_group)
+    except Exception:
+        logger.warning(
+            f"Failed to patch stored result_json after pattern override for job_id={job_id}",
+            exc_info=True,
+        )
+
+    return {"status": "ok", "pattern": body.pattern}
 
 
 @app.get("/results/{job_id}/review-status")

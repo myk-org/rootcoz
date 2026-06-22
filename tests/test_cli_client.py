@@ -398,6 +398,20 @@ class TestRootCozClientBugCreation:
         )
         assert result["classification"] == "PRODUCT BUG"
 
+    def test_override_pattern(self):
+        def handler(request):
+            assert request.method == "PUT"
+            assert "/override-pattern" in str(request.url)
+            return httpx.Response(200, json={"status": "ok", "pattern": "REGRESSION"})
+
+        client = _make_client(handler)
+        result = client.override_pattern(
+            job_id="job-1",
+            test_name="tests.TestA.test_one",
+            pattern="REGRESSION",
+        )
+        assert result["pattern"] == "REGRESSION"
+
     def test_preview_github_issue_with_child_job(self):
         def handler(request):
             body = json.loads(request.content)

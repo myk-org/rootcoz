@@ -77,6 +77,7 @@ export interface CodeFix {
 
 export interface AnalysisDetail {
   classification: string
+  pattern: string
   affected_tests: string[]
   details: string
   artifacts_evidence: string
@@ -90,6 +91,7 @@ export interface PeerRound {
   ai_model: string
   role: 'orchestrator' | 'peer'
   classification: string
+  pattern: string
   details: string
   agrees_with_orchestrator: boolean | null
 }

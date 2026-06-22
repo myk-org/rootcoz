@@ -21,6 +21,7 @@ import { PeerDebateSection } from './PeerDebateSection'
 import { ReviewToggle } from './ReviewToggle'
 import { CommentsSection } from './CommentsSection'
 import { ClassificationSelect } from './ClassificationSelect'
+import { PatternSelect } from './PatternSelect'
 import { BugCreationDialog } from './BugCreationDialog'
 import { ReAnalyzeDialog } from './ReAnalyzeDialog'
 import { useReviewSuggestion } from './useReviewSuggestion'
@@ -243,6 +244,7 @@ export function FailureCard({ group, jobId, childJobName, childBuildNumber, inde
 
   const repKey = scopedReviewKey(rep.test_name)
   const classification = classifications[repKey] ?? analysis.classification
+  const pattern = analysis.pattern || ''
   const borderColor = classification === 'PRODUCT BUG' ? 'border-l-signal-orange' : 'border-l-signal-blue'
   const showAiSelector = providers.length > 0 || models.length > 0
 
@@ -385,6 +387,12 @@ export function FailureCard({ group, jobId, childJobName, childBuildNumber, inde
               </Tooltip>
             )}
             <ClassificationBadge classification={classification} />
+            {pattern && (
+              <>
+                <span className="text-text-tertiary text-[10px]">·</span>
+                <ClassificationBadge classification={pattern} />
+              </>
+            )}
             {rep.reanalyzed_with && rep.reanalysis_status !== 'running' && (
               <Tooltip>
                 <TooltipTrigger asChild>
@@ -618,6 +626,14 @@ export function FailureCard({ group, jobId, childJobName, childBuildNumber, inde
                 testName={rep.test_name}
                 testNames={groupTestNames}
                 currentClassification={classification}
+                childJobName={scopedChildJobName}
+                childBuildNumber={scopedChildBuildNumber}
+              />
+              <PatternSelect
+                jobId={jobId}
+                testName={rep.test_name}
+                testNames={groupTestNames}
+                currentPattern={pattern}
                 childJobName={scopedChildJobName}
                 childBuildNumber={scopedChildBuildNumber}
               />

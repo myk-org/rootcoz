@@ -28,6 +28,7 @@ from rootcoz.metadata_rules import match_job_metadata
 from rootcoz.models import (
     HistoryClassificationLiteral,
     OverrideClassificationLiteral,
+    PatternLiteral,
     _SYSTEM_TAGS,
 )
 
@@ -50,14 +51,21 @@ async def _connect_db() -> AsyncIterator[aiosqlite.Connection]:
 # type so the SQL filter stays in sync with the model definition.
 PRIMARY_CLASSIFICATIONS: tuple[str, ...] = get_args(OverrideClassificationLiteral)
 
-# History classifications — derived from HistoryClassificationLiteral so the
-# write-side validation in set_test_classification stays in sync with the model.
+# Pattern classifications — the "how it manifests" axis (two-axis system).
+PATTERN_CLASSIFICATIONS: tuple[str, ...] = get_args(PatternLiteral)
+
+# Legacy history classifications — kept for backward compatibility with existing
+# data and the HistoryClassificationLiteral type.  New code should use
+# PATTERN_CLASSIFICATIONS.
 HISTORY_CLASSIFICATIONS: tuple[str, ...] = get_args(HistoryClassificationLiteral)
 _PRIMARY_CLASSIFICATIONS_SQL = (
     "(" + ", ".join(f"'{c}'" for c in PRIMARY_CLASSIFICATIONS) + ")"
 )
 _HISTORY_CLASSIFICATIONS_SQL = (
     "(" + ", ".join(f"'{c}'" for c in HISTORY_CLASSIFICATIONS) + ")"
+)
+_PATTERN_CLASSIFICATIONS_SQL = (
+    "(" + ", ".join(f"'{c}'" for c in PATTERN_CLASSIFICATIONS) + ")"
 )
 
 
@@ -510,6 +518,7 @@ async def init_db() -> None:
                 error_message TEXT NOT NULL DEFAULT '',
                 error_signature TEXT NOT NULL DEFAULT '',
                 classification TEXT NOT NULL DEFAULT '',
+                pattern TEXT NOT NULL DEFAULT '',
                 child_job_name TEXT NOT NULL DEFAULT '',
                 child_build_number INTEGER NOT NULL DEFAULT 0,
                 analyzed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
@@ -537,6 +546,34 @@ async def init_db() -> None:
         )
         await db.execute(
             "CREATE INDEX IF NOT EXISTS idx_fh_classification ON failure_history (classification)"
+        )
+
+        # Migration: add pattern column to failure_history (two-axis classification)
+        await _migrate_add_column(
+            db, "failure_history", "pattern", "TEXT NOT NULL DEFAULT ''"
+        )
+        await db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_fh_pattern ON failure_history (pattern)"
+        )
+
+        # Migration: add pattern column to test_classifications (two-axis classification)
+        await _migrate_add_column(
+            db, "test_classifications", "pattern", "TEXT NOT NULL DEFAULT ''"
+        )
+
+        # Migration: add original_classification and original_pattern columns
+        # These store the pre-override values so reports can show from→to correctly.
+        await _migrate_add_column(
+            db,
+            "test_classifications",
+            "original_classification",
+            "TEXT NOT NULL DEFAULT ''",
+        )
+        await _migrate_add_column(
+            db,
+            "test_classifications",
+            "original_pattern",
+            "TEXT NOT NULL DEFAULT ''",
         )
 
         await db.execute(
@@ -768,6 +805,7 @@ async def init_db() -> None:
     #     in under a second on typical hardware.
     await backfill_failure_history()
     await _migrate_restore_ai_classifications()
+    await _migrate_backfill_pattern_axis()
 
 
 async def _migrate_restore_ai_classifications() -> None:
@@ -841,6 +879,127 @@ async def _migrate_restore_ai_classifications() -> None:
         logger.warning("Migration: no jobs could be restored (all parse failures)")
 
 
+# Set of classification values that are actually pattern labels.
+# Used by the migration to move them from `classification` to `pattern`.
+_PATTERN_AS_CLASSIFICATION: frozenset[str] = frozenset(
+    {
+        "REGRESSION",
+        "FLAKY",
+        "KNOWN_BUG",
+        "INTERMITTENT",
+    }
+)
+
+
+async def _migrate_backfill_pattern_axis() -> None:
+    """One-time migration: backfill the ``pattern`` column.
+
+    Existing data falls into two categories:
+
+    1. **failure_history** rows where ``classification`` is actually a pattern
+       label (REGRESSION, FLAKY, KNOWN_BUG, INTERMITTENT) — these were written
+       by the old history-analysis system.  Move the value to ``pattern`` and
+       restore ``classification`` from ``result_json``.
+
+    2. **failure_history** rows where ``classification`` is a root cause label
+       (CODE ISSUE, PRODUCT BUG, INFRASTRUCTURE) — set ``pattern`` to ``NEW``.
+
+    3. **test_classifications** rows with pattern-like values — copy to
+       ``pattern`` column.
+
+    Tracked via ``_migrations_applied`` to ensure it runs only once.
+    """
+    migration_key = "backfill_pattern_axis_v1"
+    async with _connect_db() as db:
+        await db.execute(
+            "CREATE TABLE IF NOT EXISTS _migrations_applied "
+            "(key TEXT PRIMARY KEY, applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)"
+        )
+        cursor = await db.execute(
+            "SELECT 1 FROM _migrations_applied WHERE key = ?", (migration_key,)
+        )
+        if await cursor.fetchone():
+            return  # Already applied
+
+    logger.info("Migration: backfilling pattern axis in failure_history...")
+
+    # Step 1: Move pattern-like classifications to the pattern column.
+    # Then restore the original root cause from result_json.
+    pattern_placeholders = ", ".join(f"'{p}'" for p in _PATTERN_AS_CLASSIFICATION)
+
+    async with _connect_db() as db:
+        await db.execute(
+            f"UPDATE failure_history SET pattern = classification "
+            f"WHERE classification IN ({pattern_placeholders}) AND pattern = ''"
+        )
+        await db.commit()
+
+    # Step 2: Restore original root cause classification from result_json
+    # for rows where classification was a pattern label.
+    async with _connect_db() as db:
+        cursor = await db.execute(
+            "SELECT DISTINCT fh.job_id FROM failure_history fh "
+            f"WHERE fh.classification IN ({pattern_placeholders})"
+        )
+        affected_job_ids = [row[0] for row in await cursor.fetchall()]
+
+    for job_id in affected_job_ids:
+        async with _connect_db() as db:
+            cursor = await db.execute(
+                "SELECT result_json FROM results WHERE job_id = ?", (job_id,)
+            )
+            row = await cursor.fetchone()
+        if not row or not row[0]:
+            continue
+        result_data = parse_result_json(row[0], job_id=job_id)
+        if not result_data:
+            continue
+
+        # Build a lookup: test_name -> original AI classification
+        cls_map: dict[str, str] = {}
+        for f in result_data.get("failures", []):
+            analysis = f.get("analysis", {})
+            if isinstance(analysis, dict):
+                cls_map[f.get("test_name", "")] = analysis.get("classification", "")
+        for child in result_data.get("child_job_analyses", []):
+            for f in child.get("failures", []):
+                analysis = f.get("analysis", {})
+                if isinstance(analysis, dict):
+                    cls_map[f.get("test_name", "")] = analysis.get("classification", "")
+
+        async with _connect_db() as db:
+            for test_name, orig_cls in cls_map.items():
+                if orig_cls:
+                    await db.execute(
+                        f"UPDATE failure_history SET classification = ? "
+                        f"WHERE job_id = ? AND test_name = ? "
+                        f"AND classification IN ({pattern_placeholders})",
+                        (orig_cls, job_id, test_name),
+                    )
+            await db.commit()
+
+    async with _connect_db() as db:
+        # Step 3: Set pattern = 'NEW' for root-cause classifications
+        # that don't have a pattern yet
+        await db.execute(
+            "UPDATE failure_history SET pattern = 'NEW' "
+            "WHERE pattern = '' AND classification != ''"
+        )
+
+        # Step 4: Copy pattern-like values in test_classifications to pattern column
+        await db.execute(
+            f"UPDATE test_classifications SET pattern = classification "
+            f"WHERE classification IN ({pattern_placeholders}) AND pattern = ''"
+        )
+
+        await db.execute(
+            "INSERT OR IGNORE INTO _migrations_applied (key) VALUES (?)",
+            (migration_key,),
+        )
+        await db.commit()
+    logger.info("Migration: pattern axis backfill complete")
+
+
 def _validate_child_identifier_pairing(
     child_job_name: str, child_build_number: int
 ) -> None:
@@ -863,6 +1022,34 @@ def _validate_child_identifier_pairing(
         raise ValueError("child_build_number must not be negative")
     if not child_job_name and child_build_number > 0:
         raise ValueError("child_job_name is required when child_build_number is set")
+
+
+def _child_scope_sql(
+    child_job_name: str,
+    child_build_number: int,
+    name_column: str = "child_job_name",
+    build_column: str = "child_build_number",
+) -> tuple[str, list]:
+    """Return a SQL WHERE-clause suffix and params for child-job scoping.
+
+    Three modes:
+    - ``child_job_name`` + ``child_build_number > 0`` → specific child build.
+    - ``child_job_name`` + ``child_build_number == 0`` → wildcard (name only).
+    - No ``child_job_name`` → top-level rows (empty name, build 0).
+
+    Use *name_column* / *build_column* to target different tables
+    (e.g. ``job_name`` in ``test_classifications`` vs
+    ``child_job_name`` in ``failure_history``).
+    """
+    if child_job_name and child_build_number > 0:
+        return f" AND {name_column} = ? AND {build_column} = ?", [
+            child_job_name,
+            child_build_number,
+        ]
+    if child_job_name:
+        # Wildcard: match by name only, any build number
+        return f" AND {name_column} = ?", [child_job_name]
+    return f" AND {name_column} = '' AND {build_column} = 0", []
 
 
 async def add_comment(
@@ -1561,6 +1748,7 @@ def _failure_to_history_row(
     classification = (
         "" if isinstance(analysis, str) else analysis.get("classification", "")
     )
+    pattern = "" if isinstance(analysis, str) else analysis.get("pattern", "")
     return (
         job_id,
         job_name,
@@ -1569,6 +1757,7 @@ def _failure_to_history_row(
         failure.get("error", ""),
         failure.get("error_signature", ""),
         classification,
+        pattern,
         child_job_name,
         child_build_number,
         analyzed_at,
@@ -1702,8 +1891,9 @@ async def populate_failure_history(
                 """
                 INSERT INTO failure_history
                     (job_id, job_name, build_number, test_name, error_message,
-                     error_signature, classification, child_job_name, child_build_number, analyzed_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     error_signature, classification, pattern,
+                     child_job_name, child_build_number, analyzed_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 rows,
             )
@@ -1712,8 +1902,9 @@ async def populate_failure_history(
                 """
                 INSERT INTO failure_history
                     (job_id, job_name, build_number, test_name, error_message,
-                     error_signature, classification, child_job_name, child_build_number)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     error_signature, classification, pattern,
+                     child_job_name, child_build_number)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 # Strip the analyzed_at field (last element) when not backfilling
                 [row[:-1] for row in rows],
@@ -2390,19 +2581,24 @@ async def set_test_classification(
     child_build_number: int = 0,
     visible: int = 1,
 ) -> int:
-    """Set a classification for a test (e.g., FLAKY, REGRESSION).
+    """Set a pattern classification for a test (e.g., FLAKY, REGRESSION).
+
+    Despite the parameter name ``classification``, the value is actually
+    stored in the ``pattern`` column (two-axis system).  The parameter
+    name is kept for backward compatibility with the API contract.
 
     Can be set by the AI during analysis or by humans.
 
     Args:
+        classification: Pattern label (NEW, REGRESSION, FLAKY, etc.).
         job_id: Required — scopes the classification to a specific analysis job.
         visible: Whether the classification is immediately visible.
             Set to 0 during AI analysis; revealed after analysis completes.
     """
-    if classification not in HISTORY_CLASSIFICATIONS:
+    if classification not in PATTERN_CLASSIFICATIONS:
         raise ValueError(
-            f"Invalid classification: {classification}. "
-            f"Valid: {', '.join(sorted(HISTORY_CLASSIFICATIONS))}"
+            f"Invalid pattern classification: {classification}. "
+            f"Valid: {', '.join(sorted(PATTERN_CLASSIFICATIONS))}"
         )
     if visible not in (0, 1):
         raise ValueError(f"visible must be 0 or 1, got {visible}")
@@ -2417,14 +2613,15 @@ async def set_test_classification(
         cursor = await db.execute(
             "INSERT INTO test_classifications"
             " (test_name, job_name, parent_job_name, classification,"
-            " reason, references_info, created_by, job_id,"
+            " pattern, reason, references_info, created_by, job_id,"
             " child_build_number, visible) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 test_name,
                 job_name,
                 parent_job_name,
-                classification,
+                "",  # classification column empty — history analysis only sets pattern
+                classification,  # pattern column gets the pattern label
                 reason,
                 references,
                 created_by,
@@ -2660,6 +2857,151 @@ async def delete_jobs_bulk(job_ids: list[str]) -> dict:
     return {"deleted": deleted, "failed": failed, "total": len(unique_ids)}
 
 
+async def _override_failure_field(
+    job_id: str,
+    test_name: str,
+    field: str,
+    value: str,
+    child_job_name: str,
+    child_build_number: int,
+    username: str,
+    parent_job_name: str,
+) -> list[str]:
+    """Shared logic for overriding classification or pattern in failure_history.
+
+    1. Look up the error_signature for the test (scoped by child context).
+    2. Read the current value of *field* before mutating (for original_* tracking).
+    3. UPDATE all failure_history rows sharing the same signature.
+    4. INSERT a test_classifications row for every test in the group.
+
+    Args:
+        job_id: The analysis job ID.
+        test_name: Fully qualified test name (representative test from the group).
+        field: Column to override — ``"classification"`` or ``"pattern"``.
+        value: New value to set.
+        child_job_name: Child job name (for pipeline analyses).
+        child_build_number: Child build number (0 = wildcard by name).
+        username: User who made the override.
+        parent_job_name: Parent pipeline job name.
+
+    Returns:
+        List of all test names in the affected signature group.
+    """
+    _validate_child_identifier_pairing(child_job_name, child_build_number)
+    child_sql, child_params = _child_scope_sql(child_job_name, child_build_number)
+    is_wildcard = bool(child_job_name and child_build_number == 0)
+    async with _connect_db() as db:
+        # Look up error_signature so we can update all grouped failures.
+        sig_query = (
+            "SELECT error_signature FROM failure_history "
+            "WHERE job_id = ? AND test_name = ?"
+        )
+        sig_params: list = [job_id, test_name, *child_params]
+        sig_query += child_sql + " ORDER BY analyzed_at DESC LIMIT 1"
+
+        cursor = await db.execute(sig_query, sig_params)
+        row = await cursor.fetchone()
+        error_signature = row[0] if row and row[0] else ""
+
+        # Collect all test_names in the signature group BEFORE
+        # the UPDATE so we can read per-test original values.
+        if error_signature:
+            group_cursor = await db.execute(
+                "SELECT DISTINCT test_name FROM failure_history "
+                f"WHERE job_id = ? AND error_signature = ?{child_sql}",
+                (job_id, error_signature, *child_params),
+            )
+            group_tests = [r[0] for r in await group_cursor.fetchall()]
+        else:
+            group_tests = [test_name]
+
+        # Read original values per-test BEFORE the UPDATE mutates them.
+        orig_values: dict[str, str] = {}
+        for t in group_tests:
+            orig_cursor = await db.execute(
+                f"SELECT {field} FROM failure_history "
+                f"WHERE job_id = ? AND test_name = ?{child_sql}"
+                " ORDER BY analyzed_at DESC LIMIT 1",
+                [job_id, t, *child_params],
+            )
+            orig_row = await orig_cursor.fetchone()
+            orig_values[t] = orig_row[0] if orig_row and orig_row[0] else ""
+
+        # UPDATE failure_history rows.
+        if error_signature:
+            await db.execute(
+                f"""UPDATE failure_history
+                   SET {field} = ?
+                   WHERE job_id = ? AND error_signature = ?{child_sql}""",
+                (value, job_id, error_signature, *child_params),
+            )
+        else:
+            await db.execute(
+                f"""UPDATE failure_history
+                   SET {field} = ?
+                   WHERE job_id = ? AND test_name = ?{child_sql}""",
+                (value, job_id, test_name, *child_params),
+            )
+
+        # Resolve build numbers for test_classifications INSERT.
+        # Wildcard overrides must fan out to each actual build number
+        # so reports JOINs on exact child_build_number still match.
+        if is_wildcard and error_signature:
+            builds_cursor = await db.execute(
+                "SELECT DISTINCT child_build_number FROM failure_history "
+                "WHERE job_id = ? AND error_signature = ? AND child_job_name = ?",
+                (job_id, error_signature, child_job_name),
+            )
+            build_numbers = [r[0] for r in await builds_cursor.fetchall()]
+        elif is_wildcard:
+            builds_cursor = await db.execute(
+                "SELECT DISTINCT child_build_number FROM failure_history "
+                "WHERE job_id = ? AND test_name = ? AND child_job_name = ?",
+                (job_id, test_name, child_job_name),
+            )
+            build_numbers = [r[0] for r in await builds_cursor.fetchall()]
+        else:
+            build_numbers = [child_build_number]
+
+        # Build classification-specific or pattern-specific INSERT columns.
+        if field == "classification":
+            extra_cols = "classification, original_classification"
+            extra_vals = "?, ?"
+            reason = "User override"
+        else:
+            extra_cols = "classification, pattern, original_pattern"
+            extra_vals = "?, ?, ?"
+            reason = "User pattern override"
+
+        for t in group_tests:
+            original = orig_values[t]
+            if field == "classification":
+                extra_params: tuple = (value, original)
+            else:
+                extra_params = ("", value, original)
+
+            for build_num in build_numbers:
+                await db.execute(
+                    f"INSERT INTO test_classifications "
+                    f"(test_name, job_name, parent_job_name, job_id, {extra_cols}, "
+                    f"reason, created_by, visible, child_build_number) "
+                    f"VALUES (?, ?, ?, ?, {extra_vals}, ?, ?, 1, ?)",
+                    (
+                        t,
+                        child_job_name,
+                        parent_job_name,
+                        job_id,
+                        *extra_params,
+                        reason,
+                        username,
+                        build_num,
+                    ),
+                )
+
+        await db.commit()
+    return group_tests
+
+
 async def override_classification(
     job_id: str,
     test_name: str,
@@ -2676,15 +3018,6 @@ async def override_classification(
     Also inserts a test_classifications entry so the AI can learn from
     human overrides.
 
-    Args:
-        job_id: The analysis job ID.
-        test_name: Fully qualified test name (representative test from the group).
-        classification: New classification ("CODE ISSUE" or "PRODUCT BUG").
-        child_job_name: Child job name (for pipeline analyses).
-        child_build_number: Child build number.
-        username: User who made the override.
-        parent_job_name: Parent pipeline job name (for test_classifications).
-
     Returns:
         List of all test names in the affected signature group.
     """
@@ -2692,124 +3025,58 @@ async def override_classification(
         f"override_classification: job_id={job_id}, test_name={test_name}, "
         f"classification={classification}, username={username}"
     )
-    _validate_child_identifier_pairing(child_job_name, child_build_number)
-    if child_job_name and child_build_number == 0:
-        raise ValueError(
-            "override_classification requires child_build_number when child_job_name is set"
-        )
-    async with _connect_db() as db:
-        # Look up the error_signature for this test so we can update
-        # ALL tests in the same group (same signature, same job).
-        # Scope by child context when provided so that identically-named
-        # tests in different child jobs resolve the correct signature.
-        sig_query = (
-            "SELECT error_signature FROM failure_history "
-            "WHERE job_id = ? AND test_name = ?"
-        )
-        sig_params: list = [job_id, test_name]
-        if child_job_name:
-            sig_query += " AND child_job_name = ? AND child_build_number = ?"
-            sig_params.extend([child_job_name, child_build_number])
-        else:
-            sig_query += " AND child_job_name = '' AND child_build_number = 0"
-        sig_query += " LIMIT 1"
-
-        cursor = await db.execute(sig_query, sig_params)
-        row = await cursor.fetchone()
-        error_signature = row[0] if row and row[0] else ""
-
-        if error_signature:
-            # Update ALL tests sharing the same error_signature in this job
-            if child_job_name:
-                await db.execute(
-                    """UPDATE failure_history
-                       SET classification = ?
-                       WHERE job_id = ? AND error_signature = ?
-                       AND child_job_name = ? AND child_build_number = ?""",
-                    (
-                        classification,
-                        job_id,
-                        error_signature,
-                        child_job_name,
-                        child_build_number,
-                    ),
-                )
-            else:
-                await db.execute(
-                    """UPDATE failure_history
-                       SET classification = ?
-                       WHERE job_id = ? AND error_signature = ?
-                       AND child_job_name = '' AND child_build_number = 0""",
-                    (classification, job_id, error_signature),
-                )
-        else:
-            # No signature -- fall back to exact test_name match
-            if child_job_name:
-                await db.execute(
-                    """UPDATE failure_history
-                       SET classification = ?
-                       WHERE job_id = ? AND test_name = ?
-                       AND child_job_name = ? AND child_build_number = ?""",
-                    (
-                        classification,
-                        job_id,
-                        test_name,
-                        child_job_name,
-                        child_build_number,
-                    ),
-                )
-            else:
-                await db.execute(
-                    """UPDATE failure_history
-                       SET classification = ?
-                       WHERE job_id = ? AND test_name = ?
-                       AND child_job_name = '' AND child_build_number = 0""",
-                    (classification, job_id, test_name),
-                )
-
-        # Find all test_names in this signature group
-        if error_signature:
-            if child_job_name:
-                group_cursor = await db.execute(
-                    "SELECT DISTINCT test_name FROM failure_history "
-                    "WHERE job_id = ? AND error_signature = ? "
-                    "AND child_job_name = ? AND child_build_number = ?",
-                    (job_id, error_signature, child_job_name, child_build_number),
-                )
-            else:
-                group_cursor = await db.execute(
-                    "SELECT DISTINCT test_name FROM failure_history "
-                    "WHERE job_id = ? AND error_signature = ? "
-                    "AND child_job_name = '' AND child_build_number = 0",
-                    (job_id, error_signature),
-                )
-            group_tests = [row[0] for row in await group_cursor.fetchall()]
-        else:
-            group_tests = [test_name]
-
-        # Persist override for ALL tests in the group
-        for t in group_tests:
-            await db.execute(
-                "INSERT INTO test_classifications "
-                "(test_name, job_name, parent_job_name, job_id, classification, "
-                "reason, created_by, visible, child_build_number) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?)",
-                (
-                    t,
-                    child_job_name,
-                    parent_job_name,
-                    job_id,
-                    classification,
-                    "User override",
-                    username,
-                    child_build_number,
-                ),
-            )
-
-        await db.commit()
+    group_tests = await _override_failure_field(
+        job_id=job_id,
+        test_name=test_name,
+        field="classification",
+        value=classification,
+        child_job_name=child_job_name,
+        child_build_number=child_build_number,
+        username=username,
+        parent_job_name=parent_job_name,
+    )
     logger.info(
         f"Classification overridden: job_id={job_id}, test_name={test_name}, "
         f"classification={classification}, by={username or 'unknown'}"
+    )
+    return group_tests
+
+
+async def override_pattern(
+    job_id: str,
+    test_name: str,
+    pattern: str,
+    child_job_name: str = "",
+    child_build_number: int = 0,
+    username: str = "",
+    parent_job_name: str = "",
+) -> list[str]:
+    """Override the pattern axis of a failure in failure_history.
+
+    Updates ALL failure_history rows sharing the same error_signature
+    (within the same job) so that grouped failures stay in sync.
+    Also inserts a test_classifications entry for tracking.
+
+    Returns:
+        List of all test names in the affected signature group.
+    """
+    logger.debug(
+        f"override_pattern: job_id={job_id}, test_name={test_name}, "
+        f"pattern={pattern}, username={username}"
+    )
+    group_tests = await _override_failure_field(
+        job_id=job_id,
+        test_name=test_name,
+        field="pattern",
+        value=pattern,
+        child_job_name=child_job_name,
+        child_build_number=child_build_number,
+        username=username,
+        parent_job_name=parent_job_name,
+    )
+    logger.info(
+        f"Pattern overridden: job_id={job_id}, test_name={test_name}, "
+        f"pattern={pattern}, by={username or 'unknown'}"
     )
     return group_tests
 
@@ -2820,16 +3087,16 @@ async def get_history_classification(
     child_job_name: str = "",
     child_build_number: int = 0,
 ) -> str:
-    """Return the history-domain classification for a test.
+    """Return the pattern classification for a test.
 
-    History classifications are ``FLAKY``, ``REGRESSION``,
-    ``INFRASTRUCTURE``, ``KNOWN_BUG``, and ``INTERMITTENT``.
+    Pattern values: ``NEW``, ``REGRESSION``, ``FLAKY``,
+    ``INTERMITTENT``, ``KNOWN_BUG``, ``PERSISTENT``.
     Primary classifications (``CODE ISSUE`` / ``PRODUCT BUG``) are
     intentionally excluded — use :func:`get_effective_classification`
     for those.
 
-    Checks ``test_classifications`` first (visible entries only),
-    then falls back to ``failure_history``.
+    Checks ``test_classifications.pattern`` first (visible entries),
+    then falls back to ``failure_history.pattern``.
 
     Args:
         job_id: Analysis job identifier.
@@ -2838,40 +3105,38 @@ async def get_history_classification(
         child_build_number: Optional child build number for scoping.
 
     Returns:
-        The history classification string (e.g. ``"INFRASTRUCTURE"``),
-        or ``""`` if no history classification exists.
+        The pattern string (e.g. ``"REGRESSION"``),
+        or ``""`` if no pattern classification exists.
     """
-    _child_job_name = child_job_name or ""
-    _child_build_number = child_build_number or 0
+    child_sql, child_params = _child_scope_sql(child_job_name, child_build_number)
+    tc_sql, tc_params = _child_scope_sql(
+        child_job_name, child_build_number, name_column="job_name"
+    )
 
     async with _connect_db() as db:
-        # 1. Prefer visible entry from test_classifications
+        # 1. Prefer visible entry from test_classifications (pattern column).
         override_row = await (
             await db.execute(
-                "SELECT classification FROM test_classifications"
-                " WHERE test_name = ? AND job_id = ? AND job_name = ?"
-                " AND child_build_number = ? AND visible = 1"
-                f" AND classification IN {_HISTORY_CLASSIFICATIONS_SQL}"
+                "SELECT pattern FROM test_classifications"
+                " WHERE test_name = ? AND job_id = ?"
+                f"{tc_sql}"
+                " AND visible = 1"
+                f" AND pattern IN {_PATTERN_CLASSIFICATIONS_SQL}"
                 " ORDER BY id DESC LIMIT 1",
-                [test_name, job_id, _child_job_name, _child_build_number],
+                [test_name, job_id, *tc_params],
             )
         ).fetchone()
         if override_row and override_row[0]:
             return override_row[0]
 
-        # 2. Fall back to failure_history
+        # 2. Fall back to failure_history.pattern
         fh_query = (
-            "SELECT classification FROM failure_history"
+            "SELECT pattern FROM failure_history"
             " WHERE job_id = ? AND test_name = ?"
-            f" AND classification IN {_HISTORY_CLASSIFICATIONS_SQL}"
+            f" AND pattern IN {_PATTERN_CLASSIFICATIONS_SQL}"
         )
-        fh_params: list = [job_id, test_name]
-        if child_job_name:
-            fh_query += " AND child_job_name = ? AND child_build_number = ?"
-            fh_params.extend([child_job_name, child_build_number])
-        else:
-            fh_query += " AND child_job_name = '' AND child_build_number = 0"
-        fh_query += " ORDER BY analyzed_at DESC, id DESC LIMIT 1"
+        fh_params: list = [job_id, test_name, *child_params]
+        fh_query += child_sql + " ORDER BY analyzed_at DESC, id DESC LIMIT 1"
 
         fh_row = await (await db.execute(fh_query, fh_params)).fetchone()
         return fh_row[0] if fh_row and fh_row[0] else ""
@@ -2901,19 +3166,22 @@ async def get_effective_classification(
         The classification string (``"CODE ISSUE"`` or
         ``"PRODUCT BUG"``), or ``""`` if no row exists in either table.
     """
-    _child_job_name = child_job_name or ""
-    _child_build_number = child_build_number or 0
+    child_sql, child_params = _child_scope_sql(child_job_name, child_build_number)
+    tc_sql, tc_params = _child_scope_sql(
+        child_job_name, child_build_number, name_column="job_name"
+    )
 
     async with _connect_db() as db:
         # 1. Prefer visible override from test_classifications
         override_row = await (
             await db.execute(
                 "SELECT classification FROM test_classifications"
-                " WHERE test_name = ? AND job_id = ? AND job_name = ?"
-                " AND child_build_number = ? AND visible = 1"
+                " WHERE test_name = ? AND job_id = ?"
+                f"{tc_sql}"
+                " AND visible = 1"
                 f" AND classification IN {_PRIMARY_CLASSIFICATIONS_SQL}"
                 " ORDER BY id DESC LIMIT 1",
-                [test_name, job_id, _child_job_name, _child_build_number],
+                [test_name, job_id, *tc_params],
             )
         ).fetchone()
         if override_row and override_row[0]:
@@ -2926,13 +3194,8 @@ async def get_effective_classification(
             " WHERE job_id = ? AND test_name = ?"
             f" AND classification IN {_PRIMARY_CLASSIFICATIONS_SQL}"
         )
-        fh_params: list = [job_id, test_name]
-        if child_job_name:
-            fh_query += " AND child_job_name = ? AND child_build_number = ?"
-            fh_params.extend([child_job_name, child_build_number])
-        else:
-            fh_query += " AND child_job_name = '' AND child_build_number = 0"
-        fh_query += " ORDER BY analyzed_at DESC, id DESC LIMIT 1"
+        fh_params: list = [job_id, test_name, *child_params]
+        fh_query += child_sql + " ORDER BY analyzed_at DESC, id DESC LIMIT 1"
 
         fh_row = await (await db.execute(fh_query, fh_params)).fetchone()
         return fh_row[0] if fh_row and fh_row[0] else ""
@@ -4840,7 +5103,9 @@ async def get_report_classification_overrides(
     where = " AND ".join(conditions)
 
     async with _connect_db() as db:
-        sql = f"""
+        # Classification-axis overrides: original_classification stored at
+        # override time differs from the user's chosen classification.
+        cls_sql = f"""
             SELECT
                 tc.id,
                 tc.test_name,
@@ -4848,20 +5113,26 @@ async def get_report_classification_overrides(
                 tc.job_id,
                 tc.child_build_number,
                 tc.classification,
+                tc.pattern AS tc_pattern,
                 tc.created_by,
                 tc.created_at,
-                fh.classification AS original_classification,
-                fh.build_number
+                tc.original_classification,
+                tc.original_pattern,
+                fh.build_number,
+                'classification' AS override_axis
             FROM test_classifications tc
             {meta_join}
             {status_join}
             JOIN failure_history fh
                 ON fh.job_id = tc.job_id
                 AND fh.test_name = tc.test_name
+                AND fh.child_job_name = tc.job_name
                 AND fh.child_build_number = tc.child_build_number
             WHERE {where}
               AND tc.visible = 1
-              AND fh.classification != tc.classification
+              AND tc.classification != ''
+              AND tc.original_classification != ''
+              AND tc.original_classification != tc.classification
               AND EXISTS (
                   SELECT 1 FROM failure_reviews fr
                   WHERE fr.job_id = tc.job_id AND fr.test_name = tc.test_name
@@ -4869,14 +5140,56 @@ async def get_report_classification_overrides(
               )
             ORDER BY tc.created_at DESC
         """
-        cursor = await db.execute(sql, params)
-        rows = await cursor.fetchall()
+        cursor = await db.execute(cls_sql, params)
+        cls_rows = await cursor.fetchall()
 
-        # Keep only the latest override per (job_id, test_name)
-        seen_keys: set[tuple[str, str]] = set()
+        # Pattern-axis overrides: original_pattern stored at override time
+        # differs from the user's chosen pattern.
+        pat_sql = f"""
+            SELECT
+                tc.id,
+                tc.test_name,
+                tc.job_name,
+                tc.job_id,
+                tc.child_build_number,
+                tc.classification,
+                tc.pattern AS tc_pattern,
+                tc.created_by,
+                tc.created_at,
+                tc.original_classification,
+                tc.original_pattern,
+                fh.build_number,
+                'pattern' AS override_axis
+            FROM test_classifications tc
+            {meta_join}
+            {status_join}
+            JOIN failure_history fh
+                ON fh.job_id = tc.job_id
+                AND fh.test_name = tc.test_name
+                AND fh.child_job_name = tc.job_name
+                AND fh.child_build_number = tc.child_build_number
+            WHERE {where}
+              AND tc.visible = 1
+              AND tc.pattern != ''
+              AND tc.original_pattern != ''
+              AND tc.original_pattern != tc.pattern
+              AND EXISTS (
+                  SELECT 1 FROM failure_reviews fr
+                  WHERE fr.job_id = tc.job_id AND fr.test_name = tc.test_name
+                    AND fr.reviewed = 1
+              )
+            ORDER BY tc.created_at DESC
+        """
+        cursor = await db.execute(pat_sql, params)
+        pat_rows = await cursor.fetchall()
+
+        all_rows = list(cls_rows) + list(pat_rows)
+
+        # Keep only the latest override per (job_id, test_name, axis)
+        seen_keys: set[tuple[str, str, str]] = set()
         latest_rows = []
-        for row in rows:
-            dedup_key = (row["job_id"], row["test_name"])
+        for row in all_rows:
+            dedup_key = (row["job_id"], row["test_name"], row["override_axis"])
             if dedup_key not in seen_keys:
                 seen_keys.add(dedup_key)
                 latest_rows.append(row)
@@ -4899,8 +5212,13 @@ async def get_report_classification_overrides(
     groups: dict[str, dict] = {}
     details: list[dict] = []
     for row in rows:
-        orig = row["original_classification"] or "UNKNOWN"
-        override = row["classification"]
+        axis = row["override_axis"]
+        if axis == "pattern":
+            orig = row["original_pattern"] or "UNKNOWN"
+            override = row["tc_pattern"]
+        else:
+            orig = row["original_classification"] or "UNKNOWN"
+            override = row["classification"]
         key = f"{orig} → {override}"
         if key not in groups:
             groups[key] = {"from": orig, "to": override, "count": 0}
@@ -4913,6 +5231,7 @@ async def get_report_classification_overrides(
                 "build_number": row["build_number"],
                 "from_classification": orig,
                 "to_classification": override,
+                "override_axis": axis,
                 "overridden_by": row["created_by"],
                 "overridden_at": row["created_at"],
             }

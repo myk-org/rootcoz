@@ -67,13 +67,24 @@ async def populated_db(setup_test_db: Path):
             )
             await conn.commit()
 
-        # Insert a test_classification override
+        # Insert a test_classification override.
+        # job_name='' for top-level (non-pipeline) analyses, matching
+        # fh.child_job_name default of ''.
         async with storage._connect_db() as conn:
             await conn.execute(
                 """INSERT INTO test_classifications
-                   (test_name, job_name, classification, created_by, job_id, visible)
-                   VALUES (?, ?, ?, ?, ?, ?)""",
-                ("test_foo", "test-job", "PRODUCT BUG", "reviewer", "job-1", 1),
+                   (test_name, job_name, classification, original_classification,
+                    created_by, job_id, visible)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    "test_foo",
+                    "",
+                    "PRODUCT BUG",
+                    "CODE ISSUE",
+                    "reviewer",
+                    "job-1",
+                    1,
+                ),
             )
             await conn.commit()
 
@@ -227,9 +238,18 @@ class TestReportOverrides:
             async with storage._connect_db() as conn:
                 await conn.execute(
                     """INSERT INTO test_classifications
-                       (test_name, job_name, classification, created_by, job_id, visible)
-                       VALUES (?, ?, ?, ?, ?, ?)""",
-                    ("test_foo", "test-job", "CODE ISSUE", "confirmer", "job-1", 1),
+                       (test_name, job_name, classification, original_classification,
+                        created_by, job_id, visible)
+                       VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                    (
+                        "test_foo",
+                        "",
+                        "CODE ISSUE",
+                        "CODE ISSUE",
+                        "confirmer",
+                        "job-1",
+                        1,
+                    ),
                 )
                 await conn.commit()
             result = await storage.get_report_classification_overrides()
@@ -245,13 +265,22 @@ class TestReportOverrides:
         """When multiple overrides exist for the same test, only the latest appears."""
         with patch.object(storage, "DB_PATH", populated_db):
             # populated_db already has CODE ISSUE → PRODUCT BUG for test_foo.
-            # Add a second override: PRODUCT BUG → CODE ISSUE (effectively reverting).
+            # Add a second override: PRODUCT BUG → INFRASTRUCTURE.
             async with storage._connect_db() as conn:
                 await conn.execute(
                     """INSERT INTO test_classifications
-                       (test_name, job_name, classification, created_by, job_id, visible, created_at)
-                       VALUES (?, ?, ?, ?, ?, ?, datetime('now', '+1 minute'))""",
-                    ("test_foo", "test-job", "INFRASTRUCTURE", "reviewer2", "job-1", 1),
+                       (test_name, job_name, classification, original_classification,
+                        created_by, job_id, visible, created_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now', '+1 minute'))""",
+                    (
+                        "test_foo",
+                        "",
+                        "INFRASTRUCTURE",
+                        "PRODUCT BUG",
+                        "reviewer2",
+                        "job-1",
+                        1,
+                    ),
                 )
                 await conn.commit()
             result = await storage.get_report_classification_overrides()

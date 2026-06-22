@@ -1,14 +1,20 @@
 import { Badge } from '@/components/ui/badge'
-import type { Classification } from '@/constants/classifications'
+import type { BadgeLabel } from '@/constants/classifications'
 
-const CLASSIFICATION_STYLES: Record<Classification, { variant: 'default' | 'destructive' | 'success' | 'warning' | 'purple' | 'outline'; label: string }> = {
+type BadgeVariant = 'default' | 'destructive' | 'success' | 'warning' | 'purple' | 'outline'
+
+const BADGE_STYLES: Record<BadgeLabel, { variant: BadgeVariant; label: string }> = {
+  // Root cause axis
   'CODE ISSUE': { variant: 'default', label: 'CODE ISSUE' },
   'PRODUCT BUG': { variant: 'warning', label: 'PRODUCT BUG' },
-  'FLAKY': { variant: 'purple', label: 'FLAKY' },
-  'REGRESSION': { variant: 'destructive', label: 'REGRESSION' },
   'INFRASTRUCTURE': { variant: 'outline', label: 'INFRASTRUCTURE' },
-  'KNOWN_BUG': { variant: 'warning', label: 'KNOWN BUG' },
+  // Pattern axis
+  'NEW': { variant: 'success', label: 'NEW' },
+  'REGRESSION': { variant: 'destructive', label: 'REGRESSION' },
+  'FLAKY': { variant: 'purple', label: 'FLAKY' },
   'INTERMITTENT': { variant: 'purple', label: 'INTERMITTENT' },
+  'KNOWN_BUG': { variant: 'warning', label: 'KNOWN BUG' },
+  'PERSISTENT': { variant: 'destructive', label: 'PERSISTENT' },
 }
 
 interface ClassificationBadgeProps {
@@ -17,8 +23,8 @@ interface ClassificationBadgeProps {
 }
 
 export function ClassificationBadge({ classification, className }: ClassificationBadgeProps) {
-  const style = (classification in CLASSIFICATION_STYLES)
-    ? CLASSIFICATION_STYLES[classification as Classification]
+  const style = Object.hasOwn(BADGE_STYLES, classification)
+    ? BADGE_STYLES[classification as BadgeLabel]
     : { variant: 'outline' as const, label: classification }
   return (
     <Badge variant={style.variant} className={className}>

@@ -44,9 +44,11 @@ Understand the overall health of this job:
 curl -s "{server_url}/history/stats/{job_name}?exclude_job_id={job_id}" | python3 -m json.tool
 ```
 
-## Step 5: Classify EVERY Test (MANDATORY for EVERY test — NO EXCEPTIONS)
+## Step 5: Classify EVERY Test's Pattern (MANDATORY for EVERY test — NO EXCEPTIONS)
 
-After completing your analysis, you MUST call POST /history/classify for EVERY test you analyzed. This is NOT optional. Every test gets a classification.
+After completing your analysis, you MUST call POST /history/classify for EVERY test you analyzed. This is NOT optional. Every test gets a pattern classification.
+
+**IMPORTANT:** This step sets the **pattern** axis (how the failure manifests), NOT the root cause axis (classification). The root cause (CODE ISSUE / PRODUCT BUG / INFRASTRUCTURE) was already determined in the initial analysis. Do NOT change the root cause here — only determine the pattern.
 
 ```bash
 curl -s -X POST "{server_url}/history/classify" \
@@ -61,15 +63,16 @@ curl -s -X POST "{server_url}/history/classify" \
   }'
 ```
 
-### Valid Classifications
+### Valid Pattern Classifications
 
-| Classification | When to Use |
+| Pattern | When to Use |
 |---|---|
-| `FLAKY` | Test sometimes passes, sometimes fails. Inconsistent results across runs. |
+| `NEW` | First occurrence — no prior history of this failure. |
 | `REGRESSION` | Test was previously passing and recently started failing. This applies to BOTH code issues AND product bugs — a product bug can be a regression. |
-| `INFRASTRUCTURE` | Failure caused by infrastructure problems (cluster not deployed, network issues, resource limits), not by the test code or the product. |
-| `KNOWN_BUG` | Failure matches a known, already-reported bug. Reference the bug in the reason. |
+| `FLAKY` | Test sometimes passes, sometimes fails. Inconsistent results across runs. |
 | `INTERMITTENT` | Similar to flaky but with a known trigger (e.g., timing, resource contention). |
+| `KNOWN_BUG` | Failure matches a known, already-reported bug. Reference the bug in the reason. |
+| `PERSISTENT` | Consistently failing across many runs — not intermittent, not new. |
 
 ### KNOWN_BUG Restriction (STRICT)
 
@@ -82,31 +85,33 @@ You MUST NOT classify as KNOWN_BUG based on:
 - Pattern recognition from the error message alone
 - Similarity to other failures in the SAME job run
 
-If the history API returns no bug references, use REGRESSION, INFRASTRUCTURE, or INTERMITTENT instead.
+If the history API returns no bug references, use REGRESSION, PERSISTENT, or INTERMITTENT instead.
 
-### Classification Rules
+### Pattern Classification Rules
 
-1. You MUST classify EVERY test. No exceptions.
-2. A test can be BOTH a PRODUCT BUG and a REGRESSION — these are orthogonal:
-   - PRODUCT BUG / CODE ISSUE = the TYPE of issue (what's broken)
-   - FLAKY / REGRESSION / INFRASTRUCTURE / KNOWN_BUG = the PATTERN (how it manifests)
-3. If many tests fail because the core infrastructure wasn't deployed, classify ALL of them as INFRASTRUCTURE — not as individual regressions.
-4. Always include a clear `reason` explaining your classification.
-5. Always reference historical data in your reason (e.g., "This test failed in 8 of the last 10 runs" or "First failure, was passing in all prior builds").
+1. You MUST classify the pattern for EVERY test. No exceptions.
+2. The root cause (CODE ISSUE / PRODUCT BUG / INFRASTRUCTURE) was already determined — do NOT change it here. Only determine the pattern.
+3. A test can be BOTH a PRODUCT BUG and a REGRESSION — these are on two orthogonal axes:
+   - **Root cause** (classification): CODE ISSUE / PRODUCT BUG / INFRASTRUCTURE
+   - **Pattern**: NEW / REGRESSION / FLAKY / INTERMITTENT / KNOWN_BUG / PERSISTENT
+4. If many tests share the same infrastructure error, their pattern may still vary (NEW vs PERSISTENT vs REGRESSION).
+5. Always include a clear `reason` explaining your pattern classification.
+6. Always reference historical data in your reason (e.g., "This test failed in 8 of the last 10 runs" or "First failure, was passing in all prior builds").
 
 ### Evidence Requirements (MANDATORY)
 
-Every classification MUST include evidence in the `reason` field:
+Every pattern classification MUST include evidence in the `reason` field:
 
-| Classification | Required Evidence |
+| Pattern | Required Evidence |
 |---|---|
-| KNOWN_BUG | ONLY if the history API returned a matching Jira ticket key from historical comments, or a prior KNOWN_BUG classification with a Jira reference. Your own knowledge about product defects does NOT count. If /history/test/ and /history/classifications return no Jira tickets or bug references, you CANNOT use KNOWN_BUG. Use REGRESSION or INFRASTRUCTURE instead. |
+| NEW | First failure — no prior occurrences in /history/test/ |
+| KNOWN_BUG | ONLY if the history API returned a matching Jira ticket key from historical comments, or a prior KNOWN_BUG classification with a Jira reference. Your own knowledge about product defects does NOT count. If /history/test/ and /history/classifications return no Jira tickets or bug references, you CANNOT use KNOWN_BUG. Use REGRESSION or PERSISTENT instead. |
 | REGRESSION | The date/build when the test started failing, what was passing before, correlation with git commits if available |
 | FLAKY | Failure rate statistics, specific builds where it passed vs failed |
-| INFRASTRUCTURE | The infrastructure error (e.g., "cluster not deployed", "node not ready"), evidence that multiple unrelated tests failed with the same root cause |
 | INTERMITTENT | The trigger pattern, frequency, and conditions under which it occurs vs doesn't |
+| PERSISTENT | Consistently failing across many consecutive runs — cite consecutive_failures count from /history/test/ |
 
-A classification without evidence is INVALID. Always cite:
+A pattern classification without evidence is INVALID. Always cite:
 - Specific data from /history/test/ (failure rates, consecutive failures, dates)
 - Jira tickets or bug URLs from historical comments
 - Error signatures shared across tests (from /history/search)
@@ -117,7 +122,7 @@ A classification without evidence is INVALID. Always cite:
 - ALWAYS complete Steps 1-3 and Step 5 for EVERY test. Step 4 is required once per job (not per test). No shortcuts.
 - ALWAYS check history BEFORE classifying — don't classify blind.
 - ALWAYS call POST /history/classify — this is how your classification is recorded. Include `references` with Jira keys, URLs, or other evidence identifiers.
-- If many tests fail with the same infrastructure error (e.g., product not deployed), classify ALL as INFRASTRUCTURE.
+- If many tests fail with the same infrastructure error (e.g., product not deployed), their pattern is likely PERSISTENT (consistently failing).
 - Reference existing comments, bugs, and history in your analysis.
 - Your reason field should cite specific data from the history (failure rates, consecutive failures, first seen dates).
 
