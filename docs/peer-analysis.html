@@ -1,0 +1,547 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="light">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Using Multi-AI Peer Analysis - rootcoz</title>
+    <meta name="description" content="Automatically diagnose CI/CD test failures with AI and get actionable root cause analysis in seconds">
+    <link rel="stylesheet" href="assets/style.css">
+    <script>try{var t=localStorage.getItem('theme');if(t==='dark')document.documentElement.setAttribute('data-theme','dark')}catch(e){}</script>
+    <link rel="alternate" type="text/plain" title="LLM Documentation Index" href="llms.txt">
+    <link rel="alternate" type="text/plain" title="LLM Full Documentation" href="llms-full.txt">
+</head>
+<body>
+    <aside class="sidebar" id="sidebar">
+        <div class="sidebar-header">
+            <a href="index.html" class="sidebar-logo">rootcoz</a>
+            <p class="sidebar-tagline">Automatically diagnose CI/CD test failures with AI and get actionable root cause analysis in seconds</p>
+        </div>
+
+        <div class="sidebar-search">
+            <input type="text" id="search-input" placeholder="Search... (⌘K)" autocomplete="off" readonly>
+            <div id="search-results" class="search-results"></div>
+        </div>
+
+        <nav class="sidebar-nav">
+            
+            <div class="nav-group">
+                <h3 class="nav-group-title">Getting Started</h3>
+                <ul class="nav-group-pages">
+                    
+                    <li>
+                        <a href="quickstart.html"
+                           class="nav-link">
+                            Quickstart
+                        </a>
+                    </li>
+                    
+                    <li>
+                        <a href="cli-setup.html"
+                           class="nav-link">
+                            Setting Up the CLI
+                        </a>
+                    </li>
+                    
+                </ul>
+            </div>
+            
+            <div class="nav-group">
+                <h3 class="nav-group-title">User Guides</h3>
+                <ul class="nav-group-pages">
+                    
+                    <li>
+                        <a href="analyzing-failures.html"
+                           class="nav-link">
+                            Analyzing Test Failures
+                        </a>
+                    </li>
+                    
+                    <li>
+                        <a href="reviewing-results.html"
+                           class="nav-link">
+                            Reviewing Analysis Results
+                        </a>
+                    </li>
+                    
+                    <li>
+                        <a href="chatting-with-ai.html"
+                           class="nav-link">
+                            Chatting with AI About Failures
+                        </a>
+                    </li>
+                    
+                    <li>
+                        <a href="creating-issues.html"
+                           class="nav-link">
+                            Creating Bug Reports from Analysis
+                        </a>
+                    </li>
+                    
+                    <li>
+                        <a href="configuring-integrations.html"
+                           class="nav-link">
+                            Configuring Integrations
+                        </a>
+                    </li>
+                    
+                    <li>
+                        <a href="peer-analysis.html"
+                           class="nav-link active" aria-current="page">
+                            Using Multi-AI Peer Analysis
+                        </a>
+                    </li>
+                    
+                    <li>
+                        <a href="managing-users.html"
+                           class="nav-link">
+                            Managing Users and Roles
+                        </a>
+                    </li>
+                    
+                    <li>
+                        <a href="tracking-history.html"
+                           class="nav-link">
+                            Tracking Failure History and Reports
+                        </a>
+                    </li>
+                    
+                    <li>
+                        <a href="pytest-integration.html"
+                           class="nav-link">
+                            Integrating with pytest
+                        </a>
+                    </li>
+                    
+                </ul>
+            </div>
+            
+            <div class="nav-group">
+                <h3 class="nav-group-title">Recipes</h3>
+                <ul class="nav-group-pages">
+                    
+                    <li>
+                        <a href="deployment-recipes.html"
+                           class="nav-link">
+                            Deployment Recipes
+                        </a>
+                    </li>
+                    
+                    <li>
+                        <a href="cli-recipes.html"
+                           class="nav-link">
+                            CLI Recipes
+                        </a>
+                    </li>
+                    
+                </ul>
+            </div>
+            
+            <div class="nav-group">
+                <h3 class="nav-group-title">Reference</h3>
+                <ul class="nav-group-pages">
+                    
+                    <li>
+                        <a href="api-reference.html"
+                           class="nav-link">
+                            REST API Reference
+                        </a>
+                    </li>
+                    
+                    <li>
+                        <a href="cli-reference.html"
+                           class="nav-link">
+                            CLI Command Reference
+                        </a>
+                    </li>
+                    
+                    <li>
+                        <a href="environment-variables.html"
+                           class="nav-link">
+                            Environment Variables and Configuration
+                        </a>
+                    </li>
+                    
+                </ul>
+            </div>
+            
+        </nav>
+    </aside>
+
+    <div class="main-wrapper">
+        <header class="top-bar">
+            <div class="top-bar-left">
+                <button class="sidebar-toggle" id="sidebar-toggle" aria-label="Toggle sidebar" aria-expanded="false">
+                    <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
+                        <path d="M3 5h14M3 10h14M3 15h14" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+                    </svg>
+                </button>
+                <a href="index.html" class="top-bar-title">rootcoz</a>
+            </div>
+            <div class="top-bar-spacer"></div>
+            <div class="top-bar-right">
+                <button class="top-bar-search-btn" id="search-trigger" aria-label="Search">
+                    <kbd>&#8984;K</kbd> Search
+                </button>
+                <a href="https://github.com/myk-org/docsfy" target="_blank" rel="noopener" class="docsfy-badge" title="Generated with docsfy">
+                    ⚡ docs<span class="brand-accent">fy</span>
+                </a>
+                
+                <a href="https://github.com/myk-org/rootcoz.git" target="_blank" rel="noopener noreferrer" class="top-bar-github" id="github-link" data-repo-url="https://github.com/myk-org/rootcoz.git">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><path d="M12 0c-6.626 0-12 5.373-12 12 0 5.302 3.438 9.8 8.207 11.387.599.111.793-.261.793-.577v-2.234c-3.338.726-4.033-1.416-4.033-1.416-.546-1.387-1.333-1.756-1.333-1.756-1.089-.745.083-.729.083-.729 1.205.084 1.839 1.237 1.839 1.237 1.07 1.834 2.807 1.304 3.492.997.107-.775.418-1.305.762-1.604-2.665-.305-5.467-1.334-5.467-5.931 0-1.311.469-2.381 1.236-3.221-.124-.303-.535-1.524.117-3.176 0 0 1.008-.322 3.301 1.23.957-.266 1.983-.399 3.003-.404 1.02.005 2.047.138 3.006.404 2.291-1.552 3.297-1.23 3.297-1.23.653 1.653.242 2.874.118 3.176.77.84 1.235 1.911 1.235 3.221 0 4.609-2.807 5.624-5.479 5.921.43.372.823 1.102.823 2.222v3.293c0 .319.192.694.801.576 4.765-1.589 8.199-6.086 8.199-11.386 0-6.627-5.373-12-12-12z"/></svg>
+                    <span class="github-stars" id="github-stars" title="GitHub stars"></span>
+                </a>
+                
+                <button class="theme-toggle" id="theme-toggle" aria-label="Toggle theme">
+                    <svg class="icon-sun" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+                        <circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/>
+                    </svg>
+                    <svg class="icon-moon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+                        <path d="M21 12.79A9 9 0 1111.21 3 7 7 0 0021 12.79z"/>
+                    </svg>
+                </button>
+            </div>
+        </header>
+
+        <main class="content">
+            
+            <article class="article">
+                <div class="article-body">
+                    <!-- SECURITY: |safe is intentional. Content is AI-generated markdown
+                         converted to HTML server-side by the markdown library, not
+                         user-supplied input. XSS risk is minimal and accepted since
+                         the AI generates the content, not end users. -->
+                    <h1 id="using-multi-ai-peer-analysis">Using Multi-AI Peer Analysis</h1>
+<p>Improve failure classification accuracy by having multiple AI providers independently review each analysis and debate until they reach consensus. This is especially useful for ambiguous failures where a single AI might misclassify.</p>
+<h2 id="prerequisites">Prerequisites</h2>
+<ul>
+<li>A running rootcoz server with at least one AI provider configured (see <a href="quickstart.html">Quickstart</a>)</li>
+<li>Access to two or more AI providers (any combination of <code>claude</code>, <code>gemini</code>, and <code>cursor</code>)</li>
+<li><strong>Operator</strong> or <strong>admin</strong> role to submit analyses (see <a href="managing-users.html">Managing Users and Roles</a>)</li>
+</ul>
+<h2 id="quick-example">Quick Example</h2>
+<p>Add the <code>--peers</code> flag to any analysis command:</p>
+<div class="highlight"><pre><span></span><code>rootcoz<span class="w"> </span>analyze<span class="w"> </span>my-job<span class="w"> </span>--build-number<span class="w"> </span><span class="m">42</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--peers<span class="w"> </span><span class="s2">&quot;gemini:gemini-2.5-pro,cursor:gpt-5.4-xhigh&quot;</span>
+</code></pre></div>
+
+<p>This tells rootcoz to have Gemini and Cursor independently review the primary AI's analysis and debate until they agree on a classification.</p>
+<h2 id="how-peer-analysis-works">How Peer Analysis Works</h2>
+<p>Peer analysis adds a structured debate loop on top of the standard single-AI analysis:</p>
+<ol>
+<li><strong>Primary AI analyzes</strong> — The main AI provider (set via <code>--provider</code>/<code>--model</code> or server defaults) performs the initial failure analysis, identical to a standard single-AI run.</li>
+<li><strong>Peers review in parallel</strong> — Each peer AI receives the primary AI's classification and reasoning, then independently agrees or disagrees, providing its own classification and justification.</li>
+<li><strong>Consensus check</strong> — If all peers agree with the primary AI's classification, consensus is reached and the analysis is finalized.</li>
+<li><strong>Primary AI revises</strong> — If peers disagree, their feedback is sent back to the primary AI, which may revise its analysis. From round 2 onwards, each peer also sees the other peers' responses from the previous round.</li>
+<li><strong>Repeat or finalize</strong> — Steps 2–4 repeat until consensus is reached or the maximum number of rounds is exhausted.</li>
+</ol>
+<blockquote>
+<p><strong>Note:</strong> Peers are explicitly instructed to be critical and independent — not sycophantic. The prompts include anti-sycophancy framing to encourage genuine disagreement when warranted.</p>
+</blockquote>
+<h2 id="step-by-step-enabling-peer-analysis">Step-by-Step: Enabling Peer Analysis</h2>
+<h3 id="1-choose-your-peer-configuration">1. Choose Your Peer Configuration</h3>
+<p>Each peer is specified as a <code>provider:model</code> pair. Valid providers are <code>claude</code>, <code>gemini</code>, and <code>cursor</code>. Separate multiple peers with commas:</p>
+<div class="highlight"><pre><span></span><code>gemini:gemini-2.5-pro,cursor:gpt-5.4-xhigh
+claude:claude-sonnet-4-20250514,gemini:gemini-2.5-pro
+</code></pre></div>
+
+<blockquote>
+<p><strong>Tip:</strong> For best results, use peers from different providers. Diversity in AI models increases the chance of catching misclassifications.</p>
+</blockquote>
+<h3 id="2-run-an-analysis-with-peers">2. Run an Analysis with Peers</h3>
+<p><strong>Via CLI:</strong></p>
+<div class="highlight"><pre><span></span><code>rootcoz<span class="w"> </span>analyze<span class="w"> </span>my-job<span class="w"> </span>--build-number<span class="w"> </span><span class="m">42</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--provider<span class="w"> </span>claude<span class="w"> </span>--model<span class="w"> </span>claude-sonnet-4-20250514<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--peers<span class="w"> </span><span class="s2">&quot;gemini:gemini-2.5-pro,cursor:gpt-5.4-xhigh&quot;</span>
+</code></pre></div>
+
+<p><strong>Via environment variable (server-wide default):</strong></p>
+<div class="highlight"><pre><span></span><code><span class="nb">export</span><span class="w"> </span><span class="nv">PEER_AI_CONFIGS</span><span class="o">=</span><span class="s2">&quot;gemini:gemini-2.5-pro,cursor:gpt-5.4-xhigh&quot;</span>
+</code></pre></div>
+
+<p>When set as an environment variable, every analysis automatically uses peer review unless explicitly overridden per-request.</p>
+<h3 id="3-view-the-debate-results">3. View the Debate Results</h3>
+<p>After analysis completes, the report page shows a <strong>Peer Analysis</strong> section for each failure group:</p>
+<ul>
+<li><strong>Consensus / No Consensus</strong> badge — whether the AIs agreed</li>
+<li><strong>Rounds used</strong> — how many debate rounds occurred (e.g., "2 of 3 rounds")</li>
+<li><strong>Per-round timeline</strong> — expand to see each participant's classification, reasoning, and whether they agreed with the orchestrator</li>
+</ul>
+<p>A summary at the top of the report page shows consensus status across all failure groups and which AI models participated.</p>
+<p>See <a href="reviewing-results.html">Reviewing Analysis Results</a> for more on navigating the report page.</p>
+<h2 id="configuration-options">Configuration Options</h2>
+<h3 id="setting-peer-configs">Setting Peer Configs</h3>
+<p>Peers can be configured at three levels, with this priority order:</p>
+<table>
+<thead>
+<tr>
+<th>Level</th>
+<th>How to Set</th>
+<th>Scope</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Per-request</strong> (highest)</td>
+<td><code>--peers</code> CLI flag or <code>peer_ai_configs</code> in request body</td>
+<td>Single analysis</td>
+</tr>
+<tr>
+<td><strong>Config file</strong></td>
+<td><code>peers</code> field in <code>~/.config/rootcoz/config.toml</code></td>
+<td>All analyses for that server</td>
+</tr>
+<tr>
+<td><strong>Environment variable</strong> (lowest)</td>
+<td><code>PEER_AI_CONFIGS</code> on the server</td>
+<td>All analyses server-wide</td>
+</tr>
+</tbody>
+</table>
+<p><strong>CLI config file example</strong> (<code>~/.config/rootcoz/config.toml</code>):</p>
+<div class="highlight"><pre><span></span><code><span class="k">[servers.production]</span>
+<span class="n">url</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">&quot;https://rootcoz.example.com&quot;</span>
+<span class="n">peers</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">&quot;gemini:gemini-2.5-pro,cursor:gpt-5.4-xhigh&quot;</span>
+<span class="n">peer_analysis_max_rounds</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">5</span>
+</code></pre></div>
+
+<p>See <a href="cli-setup.html">Setting Up the CLI</a> for the full config file reference.</p>
+<h3 id="disabling-peers-for-a-single-request">Disabling Peers for a Single Request</h3>
+<p>When peers are configured server-wide but you want to skip peer review for one analysis:</p>
+<div class="highlight"><pre><span></span><code>rootcoz<span class="w"> </span>analyze<span class="w"> </span>my-job<span class="w"> </span>--build-number<span class="w"> </span><span class="m">42</span><span class="w"> </span>--peers<span class="w"> </span><span class="s2">&quot;&quot;</span>
+</code></pre></div>
+
+<p>Sending an empty peers value disables peer analysis for that request only.</p>
+<h3 id="controlling-debate-rounds">Controlling Debate Rounds</h3>
+<p>The <code>--peer-analysis-max-rounds</code> flag controls how many rounds of debate are allowed before the analysis is finalized:</p>
+<div class="highlight"><pre><span></span><code>rootcoz<span class="w"> </span>analyze<span class="w"> </span>my-job<span class="w"> </span>--build-number<span class="w"> </span><span class="m">42</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--peers<span class="w"> </span><span class="s2">&quot;gemini:gemini-2.5-pro&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--peer-analysis-max-rounds<span class="w"> </span><span class="m">5</span>
+</code></pre></div>
+
+<table>
+<thead>
+<tr>
+<th>Setting</th>
+<th>Default</th>
+<th>Range</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>--peer-analysis-max-rounds</code></td>
+<td>3</td>
+<td>1–10</td>
+<td>Maximum debate rounds before accepting the result</td>
+</tr>
+</tbody>
+</table>
+<p>The environment variable equivalent is <code>PEER_ANALYSIS_MAX_ROUNDS</code>.</p>
+<blockquote>
+<p><strong>Tip:</strong> More rounds give AIs more chances to reach consensus, but increase analysis time and token usage. For most cases, the default of 3 rounds is sufficient.</p>
+</blockquote>
+<h3 id="controlling-parallelism">Controlling Parallelism</h3>
+<p>Peer AI calls run in parallel by default. The <code>MAX_CONCURRENT_AI_CALLS</code> environment variable (default: 3) limits how many peer calls execute simultaneously. You can also override this per-request with <code>--max-concurrent-ai-calls</code>.</p>
+<h2 id="advanced-usage">Advanced Usage</h2>
+<h3 id="model-names-with-parameters">Model Names with Parameters</h3>
+<p>Some providers support model parameters in bracket syntax. Commas inside brackets are handled correctly:</p>
+<div class="highlight"><pre><span></span><code>rootcoz<span class="w"> </span>analyze<span class="w"> </span>my-job<span class="w"> </span>--build-number<span class="w"> </span><span class="m">42</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--peers<span class="w"> </span><span class="s2">&quot;cursor:gpt-5.4[context=272k,reasoning=medium],gemini:gemini-2.5-pro&quot;</span>
+</code></pre></div>
+
+<h3 id="classification-values-in-the-debate">Classification Values in the Debate</h3>
+<p>Peers classify failures using the same three categories as the primary AI:</p>
+<ul>
+<li><strong>CODE ISSUE</strong> — The test itself is broken</li>
+<li><strong>PRODUCT BUG</strong> — The product under test has a defect</li>
+<li><strong>INFRASTRUCTURE</strong> — Environment or infrastructure problem</li>
+</ul>
+<p>Agreement is determined by matching these classifications (case-insensitive). A peer that returns an invalid classification is excluded from consensus.</p>
+<h3 id="what-happens-when-consensus-fails">What Happens When Consensus Fails</h3>
+<p>When the maximum number of rounds is exhausted without consensus:</p>
+<ul>
+<li>The <strong>primary AI's latest analysis</strong> is used as the final result.</li>
+<li>The debate trail is preserved in the results so you can review each AI's reasoning.</li>
+<li>If the primary AI returned an empty classification, rootcoz falls back to <strong>peer consensus</strong> — adopting the classification that the majority of peers agreed on. If there's no majority, the most frequent classification is used.</li>
+</ul>
+<h3 id="fallback-behavior">Fallback Behavior</h3>
+<p>Peer analysis is designed to be resilient:</p>
+<ul>
+<li>If a peer AI call <strong>fails</strong> (timeout, error, unparseable response), that peer is excluded from the consensus check. The remaining peers continue.</li>
+<li>If <strong>all peers fail</strong> in a round, the primary AI's current analysis is used.</li>
+<li>If a <strong>revision round fails</strong>, the primary AI keeps its previous analysis and the debate continues.</li>
+<li>Peer failures never crash the overall analysis pipeline — you always get a result.</li>
+</ul>
+<h3 id="combining-with-other-features">Combining with Other Features</h3>
+<p>Peer analysis works with all analysis sources and features:</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># With JUnit XML source</span>
+rootcoz<span class="w"> </span>analyze<span class="w"> </span>--source<span class="w"> </span>file<span class="w"> </span>--file<span class="w"> </span>results.xml<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--peers<span class="w"> </span><span class="s2">&quot;gemini:gemini-2.5-pro,claude:claude-sonnet-4-20250514&quot;</span>
+
+<span class="c1"># With additional repos for context</span>
+rootcoz<span class="w"> </span>analyze<span class="w"> </span>my-job<span class="w"> </span>--build-number<span class="w"> </span><span class="m">42</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--peers<span class="w"> </span><span class="s2">&quot;gemini:gemini-2.5-pro&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--additional-repos<span class="w"> </span><span class="s2">&quot;product:https://github.com/org/product&quot;</span>
+
+<span class="c1"># With custom prompt</span>
+rootcoz<span class="w"> </span>analyze<span class="w"> </span>my-job<span class="w"> </span>--build-number<span class="w"> </span><span class="m">42</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--peers<span class="w"> </span><span class="s2">&quot;cursor:gpt-5.4-xhigh,gemini:gemini-2.5-pro&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--raw-prompt<span class="w"> </span><span class="s2">&quot;Focus on network-related failures&quot;</span>
+</code></pre></div>
+
+<p>See <a href="analyzing-failures.html">Analyzing Test Failures</a> for details on analysis sources and options.</p>
+<h3 id="re-analyzing-with-different-peers">Re-Analyzing with Different Peers</h3>
+<p>You can re-analyze a completed job with different peer configurations from the web UI or CLI. The new peer debate replaces the previous analysis for the re-analyzed failure groups.</p>
+<p>See <a href="reviewing-results.html">Reviewing Analysis Results</a> for how to trigger re-analysis.</p>
+<h2 id="troubleshooting">Troubleshooting</h2>
+<p><strong>"Unsupported provider" error when setting peers</strong>
+Valid providers are <code>claude</code>, <code>gemini</code>, and <code>cursor</code>. Check for typos in your <code>--peers</code> value.</p>
+<p><strong>Consensus never reached (always uses max rounds)</strong>
+This typically means the failure is genuinely ambiguous. Consider:</p>
+<ul>
+<li>Providing more context with <code>--additional-repos</code> or <code>--raw-prompt</code></li>
+<li>Reducing max rounds if you're comfortable with majority-vote fallback</li>
+<li>Reviewing the debate trail in the UI to understand each AI's reasoning</li>
+</ul>
+<p><strong>Peer analysis is slow</strong>
+Each round involves parallel AI calls plus a revision call. To speed things up:</p>
+<ul>
+<li>Reduce <code>--peer-analysis-max-rounds</code> (e.g., to 1 or 2)</li>
+<li>Use fewer peers</li>
+<li>Increase <code>MAX_CONCURRENT_AI_CALLS</code> if your providers support higher concurrency</li>
+</ul>
+<p><strong>Token usage is higher than expected</strong>
+Peer analysis multiplies token usage — each round includes one call per peer plus a potential revision call by the primary AI. Monitor token usage on the admin dashboard. See <a href="environment-variables.html">Environment Variables and Configuration</a> for token usage settings.</p>
+<h2 id="related-pages">Related Pages</h2>
+<ul>
+<li><a href="analyzing-failures.html">Analyzing Test Failures</a></li>
+<li><a href="reviewing-results.html">Reviewing Analysis Results</a></li>
+<li><a href="environment-variables.html">Environment Variables and Configuration</a></li>
+<li><a href="cli-reference.html">CLI Command Reference</a></li>
+<li><a href="configuring-integrations.html">Configuring Integrations</a></li>
+</ul>
+                </div>
+            </article>
+            <nav class="page-nav">
+                
+                <a href="configuring-integrations.html" class="page-nav-link page-nav-prev">
+                    <span class="page-nav-label">Previous</span>
+                    <span class="page-nav-title">Configuring Integrations</span>
+                </a>
+                
+                
+                <a href="managing-users.html" class="page-nav-link page-nav-next">
+                    <span class="page-nav-label">Next</span>
+                    <span class="page-nav-title">Managing Users and Roles</span>
+                </a>
+                
+            </nav>
+            
+            <aside class="toc-sidebar">
+                <div class="toc-container">
+                    <h3>On this page</h3>
+                    <div class="toc">
+<ul>
+<li><a href="#prerequisites">Prerequisites</a></li>
+<li><a href="#quick-example">Quick Example</a></li>
+<li><a href="#how-peer-analysis-works">How Peer Analysis Works</a></li>
+<li><a href="#step-by-step-enabling-peer-analysis">Step-by-Step: Enabling Peer Analysis</a><ul>
+<li><a href="#1-choose-your-peer-configuration">1. Choose Your Peer Configuration</a></li>
+<li><a href="#2-run-an-analysis-with-peers">2. Run an Analysis with Peers</a></li>
+<li><a href="#3-view-the-debate-results">3. View the Debate Results</a></li>
+</ul>
+</li>
+<li><a href="#configuration-options">Configuration Options</a><ul>
+<li><a href="#setting-peer-configs">Setting Peer Configs</a></li>
+<li><a href="#disabling-peers-for-a-single-request">Disabling Peers for a Single Request</a></li>
+<li><a href="#controlling-debate-rounds">Controlling Debate Rounds</a></li>
+<li><a href="#controlling-parallelism">Controlling Parallelism</a></li>
+</ul>
+</li>
+<li><a href="#advanced-usage">Advanced Usage</a><ul>
+<li><a href="#model-names-with-parameters">Model Names with Parameters</a></li>
+<li><a href="#classification-values-in-the-debate">Classification Values in the Debate</a></li>
+<li><a href="#what-happens-when-consensus-fails">What Happens When Consensus Fails</a></li>
+<li><a href="#fallback-behavior">Fallback Behavior</a></li>
+<li><a href="#combining-with-other-features">Combining with Other Features</a></li>
+<li><a href="#re-analyzing-with-different-peers">Re-Analyzing with Different Peers</a></li>
+</ul>
+</li>
+<li><a href="#troubleshooting">Troubleshooting</a></li>
+<li><a href="#related-pages">Related Pages</a></li>
+</ul>
+</div>
+
+                </div>
+            </aside>
+            
+
+        </main>
+
+        <footer class="page-footer">
+            
+            <span class="footer-version">Generated from version 4.2.0</span>
+            <span class="footer-sep">&middot;</span>
+            
+            Generated with <a href="https://github.com/myk-org/docsfy" target="_blank" rel="noopener">docs<span class="brand-accent">fy</span></a>
+            <span class="footer-sep">&middot;</span>
+            <span class="footer-llm">LLM-friendly: <a href="llms.txt">llms.txt</a> &middot; <a href="llms-full.txt">llms-full.txt</a></span>
+        </footer>
+    </div>
+
+    <div class="sidebar-overlay" id="sidebar-overlay"></div>
+
+    <script src="assets/theme.js"></script>
+    <script src="assets/search.js"></script>
+    <script src="assets/copy.js"></script>
+    <script src="assets/callouts.js"></script>
+    <script src="assets/scrollspy.js"></script>
+    <script src="assets/codelabels.js"></script>
+    <script src="assets/github.js"></script>
+    <script>
+(function() {
+    var toggle = document.getElementById('sidebar-toggle');
+    var sidebar = document.getElementById('sidebar');
+    var overlay = document.getElementById('sidebar-overlay');
+    if (toggle && sidebar) {
+        toggle.addEventListener('click', function() {
+            sidebar.classList.toggle('open');
+            if (overlay) overlay.classList.toggle('open');
+            var expanded = sidebar.classList.contains('open');
+            toggle.setAttribute('aria-expanded', expanded ? 'true' : 'false');
+        });
+    }
+    if (overlay) {
+        overlay.addEventListener('click', function() {
+            sidebar.classList.remove('open');
+            overlay.classList.remove('open');
+            if (toggle) toggle.setAttribute('aria-expanded', 'false');
+        });
+    }
+})();
+</script>
+<script>
+(function() {
+    var sidebar = document.querySelector('.sidebar-nav') || document.querySelector('.sidebar');
+    if (!sidebar) return;
+
+    // Restore scroll position
+    var saved = sessionStorage.getItem('sidebar-scroll');
+    if (saved) sidebar.scrollTop = parseInt(saved, 10);
+
+    // Save scroll position before navigating
+    sidebar.addEventListener('scroll', function() {
+        sessionStorage.setItem('sidebar-scroll', sidebar.scrollTop.toString());
+    });
+
+    // Also scroll active link into view if no saved position
+    if (!saved) {
+        var active = sidebar.querySelector('.nav-link.active');
+        if (active) {
+            active.scrollIntoView({ block: 'center', behavior: 'instant' });
+        }
+    }
+})();
+</script>
+</body>
+</html>
