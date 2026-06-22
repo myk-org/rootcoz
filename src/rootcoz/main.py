@@ -5614,6 +5614,7 @@ async def override_classification_endpoint(
 ) -> dict:
     """Override the classification of a failure (CODE ISSUE, PRODUCT BUG, or INFRASTRUCTURE)."""
     _check_allow_list(request)
+    _require_reviewer(request)
     logger.debug(
         f"PUT /results/{job_id}/override-classification: test_name={body.test_name}, "
         f"classification={body.classification}"
@@ -5674,6 +5675,7 @@ async def override_pattern_endpoint(
 ) -> dict:
     """Override the pattern axis of a failure (NEW, REGRESSION, FLAKY, etc.)."""
     _check_allow_list(request)
+    _require_reviewer(request)
     logger.debug(
         f"PUT /results/{job_id}/override-pattern: test_name={body.test_name}, "
         f"pattern={body.pattern}"
