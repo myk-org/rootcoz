@@ -1,11 +1,10 @@
-import { useState, useEffect, useRef } from 'react'
+import { useState } from 'react'
 import { Link, useLocation } from 'react-router-dom'
 import { BookOpen, Menu, MessageSquarePlus, Plus, X } from 'lucide-react'
 import { UserBadge } from './UserBadge'
 import { FeedbackDialog } from '@/components/shared/FeedbackDialog'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
 import { useAuth } from '@/lib/auth'
-import { api } from '@/lib/api'
 import { cn } from '@/lib/utils'
 
 interface HeaderProps {
@@ -18,33 +17,6 @@ export function Header({ mobileOpen, onMobileToggle }: HeaderProps) {
   const { isOperator } = useAuth()
   const canSubmitAnalysis = isOperator
   const [feedbackOpen, setFeedbackOpen] = useState(false)
-  const [feedbackEnabled, setFeedbackEnabled] = useState(false)
-
-  // Fetch server capabilities to check if feedback is enabled
-  const retryTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
-  useEffect(() => {
-    let cancelled = false
-    async function loadCapabilities(retry = true) {
-      try {
-        const caps = await api.get<{ feedback_enabled?: boolean }>('/api/capabilities')
-        if (!cancelled) setFeedbackEnabled(caps.feedback_enabled ?? false)
-      } catch {
-        if (!cancelled && retry) {
-          retryTimer.current = setTimeout(() => { if (!cancelled) void loadCapabilities(false) }, 5000)
-        } else if (!cancelled) {
-          setFeedbackEnabled(false)
-        }
-      }
-    }
-    void loadCapabilities()
-    return () => {
-      cancelled = true
-      if (retryTimer.current !== null) {
-        clearTimeout(retryTimer.current)
-        retryTimer.current = null
-      }
-    }
-  }, [])
 
   return (
     <header data-testid="app-header" className="sticky top-0 z-50 border-b border-border-default bg-surface-card/95 backdrop-blur-sm">
@@ -97,26 +69,22 @@ export function Header({ mobileOpen, onMobileToggle }: HeaderProps) {
               </TooltipTrigger>
               <TooltipContent>User Guide</TooltipContent>
             </Tooltip>
-            {feedbackEnabled && (
-              <Tooltip>
-                <TooltipTrigger asChild>
-                  <button
-                    type="button"
-                    onClick={() => setFeedbackOpen(true)}
-                    className="flex items-center gap-1.5 rounded-md px-2.5 py-1 text-xs font-medium text-text-tertiary transition-colors duration-150 hover:bg-surface-hover hover:text-text-secondary"
-                  >
-                    <MessageSquarePlus className="h-4 w-4 shrink-0" />
-                    Feedback
-                  </button>
-                </TooltipTrigger>
-                <TooltipContent>Send feedback</TooltipContent>
-              </Tooltip>
-            )}
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <button
+                  type="button"
+                  onClick={() => setFeedbackOpen(true)}
+                  className="flex items-center gap-1.5 rounded-md px-2.5 py-1 text-xs font-medium text-text-tertiary transition-colors duration-150 hover:bg-surface-hover hover:text-text-secondary"
+                >
+                  <MessageSquarePlus className="h-4 w-4 shrink-0" />
+                  Feedback
+                </button>
+              </TooltipTrigger>
+              <TooltipContent>Send feedback</TooltipContent>
+            </Tooltip>
           </TooltipProvider>
           <UserBadge />
-          {feedbackEnabled && (
-            <FeedbackDialog open={feedbackOpen} onOpenChange={setFeedbackOpen} />
-          )}
+          <FeedbackDialog open={feedbackOpen} onOpenChange={setFeedbackOpen} />
         </div>
       </div>
     </header>

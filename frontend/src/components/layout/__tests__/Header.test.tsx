@@ -20,13 +20,6 @@ vi.mock('@/lib/auth', () => ({
   useAuth: () => mockAuth,
 }))
 
-vi.mock('@/lib/api', () => ({
-  api: {
-    get: vi.fn().mockResolvedValue({ feedback_enabled: false }),
-    post: vi.fn(),
-  },
-}))
-
 // Mock UserBadge to avoid its internal routing/auth dependencies
 vi.mock('../UserBadge', () => ({
   UserBadge: () => <div data-testid="user-badge">UserBadge</div>,
@@ -94,6 +87,11 @@ describe('Header', () => {
     expect(screen.queryByText('Dashboard')).toBeNull()
     expect(screen.queryByText('History')).toBeNull()
     expect(screen.queryByText('Mentions')).toBeNull()
+  })
+
+  it('always renders the Feedback button', () => {
+    renderHeader()
+    expect(screen.getByText('Feedback')).toBeDefined()
   })
 
   it('renders mobile menu toggle button', () => {
