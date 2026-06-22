@@ -1,0 +1,4105 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="light">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CLI Command Reference - rootcoz</title>
+    <meta name="description" content="Automatically diagnose CI/CD test failures with AI and get actionable root cause analysis in seconds">
+    <link rel="stylesheet" href="assets/style.css">
+    <script>try{var t=localStorage.getItem('theme');if(t==='dark')document.documentElement.setAttribute('data-theme','dark')}catch(e){}</script>
+    <link rel="alternate" type="text/plain" title="LLM Documentation Index" href="llms.txt">
+    <link rel="alternate" type="text/plain" title="LLM Full Documentation" href="llms-full.txt">
+</head>
+<body>
+    <aside class="sidebar" id="sidebar">
+        <div class="sidebar-header">
+            <a href="index.html" class="sidebar-logo">rootcoz</a>
+            <p class="sidebar-tagline">Automatically diagnose CI/CD test failures with AI and get actionable root cause analysis in seconds</p>
+        </div>
+
+        <div class="sidebar-search">
+            <input type="text" id="search-input" placeholder="Search... (⌘K)" autocomplete="off" readonly>
+            <div id="search-results" class="search-results"></div>
+        </div>
+
+        <nav class="sidebar-nav">
+            
+            <div class="nav-group">
+                <h3 class="nav-group-title">Getting Started</h3>
+                <ul class="nav-group-pages">
+                    
+                    <li>
+                        <a href="quickstart.html"
+                           class="nav-link">
+                            Quickstart
+                        </a>
+                    </li>
+                    
+                    <li>
+                        <a href="cli-setup.html"
+                           class="nav-link">
+                            Setting Up the CLI
+                        </a>
+                    </li>
+                    
+                </ul>
+            </div>
+            
+            <div class="nav-group">
+                <h3 class="nav-group-title">User Guides</h3>
+                <ul class="nav-group-pages">
+                    
+                    <li>
+                        <a href="analyzing-failures.html"
+                           class="nav-link">
+                            Analyzing Test Failures
+                        </a>
+                    </li>
+                    
+                    <li>
+                        <a href="reviewing-results.html"
+                           class="nav-link">
+                            Reviewing Analysis Results
+                        </a>
+                    </li>
+                    
+                    <li>
+                        <a href="chatting-with-ai.html"
+                           class="nav-link">
+                            Chatting with AI About Failures
+                        </a>
+                    </li>
+                    
+                    <li>
+                        <a href="creating-issues.html"
+                           class="nav-link">
+                            Creating Bug Reports from Analysis
+                        </a>
+                    </li>
+                    
+                    <li>
+                        <a href="configuring-integrations.html"
+                           class="nav-link">
+                            Configuring Integrations
+                        </a>
+                    </li>
+                    
+                    <li>
+                        <a href="peer-analysis.html"
+                           class="nav-link">
+                            Using Multi-AI Peer Analysis
+                        </a>
+                    </li>
+                    
+                    <li>
+                        <a href="managing-users.html"
+                           class="nav-link">
+                            Managing Users and Roles
+                        </a>
+                    </li>
+                    
+                    <li>
+                        <a href="tracking-history.html"
+                           class="nav-link">
+                            Tracking Failure History and Reports
+                        </a>
+                    </li>
+                    
+                    <li>
+                        <a href="pytest-integration.html"
+                           class="nav-link">
+                            Integrating with pytest
+                        </a>
+                    </li>
+                    
+                </ul>
+            </div>
+            
+            <div class="nav-group">
+                <h3 class="nav-group-title">Recipes</h3>
+                <ul class="nav-group-pages">
+                    
+                    <li>
+                        <a href="deployment-recipes.html"
+                           class="nav-link">
+                            Deployment Recipes
+                        </a>
+                    </li>
+                    
+                    <li>
+                        <a href="cli-recipes.html"
+                           class="nav-link">
+                            CLI Recipes
+                        </a>
+                    </li>
+                    
+                </ul>
+            </div>
+            
+            <div class="nav-group">
+                <h3 class="nav-group-title">Reference</h3>
+                <ul class="nav-group-pages">
+                    
+                    <li>
+                        <a href="api-reference.html"
+                           class="nav-link">
+                            REST API Reference
+                        </a>
+                    </li>
+                    
+                    <li>
+                        <a href="cli-reference.html"
+                           class="nav-link active" aria-current="page">
+                            CLI Command Reference
+                        </a>
+                    </li>
+                    
+                    <li>
+                        <a href="environment-variables.html"
+                           class="nav-link">
+                            Environment Variables and Configuration
+                        </a>
+                    </li>
+                    
+                </ul>
+            </div>
+            
+        </nav>
+    </aside>
+
+    <div class="main-wrapper">
+        <header class="top-bar">
+            <div class="top-bar-left">
+                <button class="sidebar-toggle" id="sidebar-toggle" aria-label="Toggle sidebar" aria-expanded="false">
+                    <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
+                        <path d="M3 5h14M3 10h14M3 15h14" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+                    </svg>
+                </button>
+                <a href="index.html" class="top-bar-title">rootcoz</a>
+            </div>
+            <div class="top-bar-spacer"></div>
+            <div class="top-bar-right">
+                <button class="top-bar-search-btn" id="search-trigger" aria-label="Search">
+                    <kbd>&#8984;K</kbd> Search
+                </button>
+                <a href="https://github.com/myk-org/docsfy" target="_blank" rel="noopener" class="docsfy-badge" title="Generated with docsfy">
+                    ⚡ docs<span class="brand-accent">fy</span>
+                </a>
+                
+                <a href="https://github.com/myk-org/rootcoz.git" target="_blank" rel="noopener noreferrer" class="top-bar-github" id="github-link" data-repo-url="https://github.com/myk-org/rootcoz.git">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><path d="M12 0c-6.626 0-12 5.373-12 12 0 5.302 3.438 9.8 8.207 11.387.599.111.793-.261.793-.577v-2.234c-3.338.726-4.033-1.416-4.033-1.416-.546-1.387-1.333-1.756-1.333-1.756-1.089-.745.083-.729.083-.729 1.205.084 1.839 1.237 1.839 1.237 1.07 1.834 2.807 1.304 3.492.997.107-.775.418-1.305.762-1.604-2.665-.305-5.467-1.334-5.467-5.931 0-1.311.469-2.381 1.236-3.221-.124-.303-.535-1.524.117-3.176 0 0 1.008-.322 3.301 1.23.957-.266 1.983-.399 3.003-.404 1.02.005 2.047.138 3.006.404 2.291-1.552 3.297-1.23 3.297-1.23.653 1.653.242 2.874.118 3.176.77.84 1.235 1.911 1.235 3.221 0 4.609-2.807 5.624-5.479 5.921.43.372.823 1.102.823 2.222v3.293c0 .319.192.694.801.576 4.765-1.589 8.199-6.086 8.199-11.386 0-6.627-5.373-12-12-12z"/></svg>
+                    <span class="github-stars" id="github-stars" title="GitHub stars"></span>
+                </a>
+                
+                <button class="theme-toggle" id="theme-toggle" aria-label="Toggle theme">
+                    <svg class="icon-sun" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+                        <circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/>
+                    </svg>
+                    <svg class="icon-moon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+                        <path d="M21 12.79A9 9 0 1111.21 3 7 7 0 0021 12.79z"/>
+                    </svg>
+                </button>
+            </div>
+        </header>
+
+        <main class="content">
+            
+            <article class="article">
+                <div class="article-body">
+                    <!-- SECURITY: |safe is intentional. Content is AI-generated markdown
+                         converted to HTML server-side by the markdown library, not
+                         user-supplied input. XSS risk is minimal and accepted since
+                         the AI generates the content, not end users. -->
+                    <h1 id="cli-command-reference">CLI Command Reference</h1>
+<p>Complete reference for all <code>rootcoz</code> CLI commands and subcommands. For installation and initial setup, see <a href="cli-setup.html">Setting Up the CLI</a>. For copy-paste workflow examples, see <a href="cli-recipes.html">CLI Recipes</a>.</p>
+<h2 id="global-options">Global Options</h2>
+<p>These options apply to all commands and must appear <strong>before</strong> the subcommand.</p>
+<table>
+<thead>
+<tr>
+<th>Option</th>
+<th>Type</th>
+<th>Default</th>
+<th>Env Var</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>--server</code>, <code>-s</code></td>
+<td>string</td>
+<td><em>(from config)</em></td>
+<td><code>ROOTCOZ_SERVER</code></td>
+<td>Server name from config file or full URL</td>
+</tr>
+<tr>
+<td><code>--json</code></td>
+<td>flag</td>
+<td><code>false</code></td>
+<td>—</td>
+<td>Output as JSON instead of table</td>
+</tr>
+<tr>
+<td><code>--user</code></td>
+<td>string</td>
+<td><code>""</code></td>
+<td><code>ROOTCOZ_USERNAME</code></td>
+<td>Username for authenticated actions</td>
+</tr>
+<tr>
+<td><code>--api-key</code></td>
+<td>string</td>
+<td><code>""</code></td>
+<td><code>ROOTCOZ_API_KEY</code></td>
+<td>API key for Bearer token authentication</td>
+</tr>
+<tr>
+<td><code>--no-verify-ssl</code></td>
+<td>flag</td>
+<td><em>(from config)</em></td>
+<td><code>ROOTCOZ_NO_VERIFY_SSL</code></td>
+<td>Disable SSL certificate verification</td>
+</tr>
+<tr>
+<td><code>--verify-ssl</code></td>
+<td>flag</td>
+<td>—</td>
+<td>—</td>
+<td>Force SSL verification on (overrides config)</td>
+</tr>
+<tr>
+<td><code>--insecure</code></td>
+<td>flag</td>
+<td><code>false</code></td>
+<td>—</td>
+<td>Alias for <code>--no-verify-ssl</code></td>
+</tr>
+</tbody>
+</table>
+<blockquote>
+<p><strong>Note:</strong> <code>--verify-ssl</code> and <code>--insecure</code> are mutually exclusive.</p>
+</blockquote>
+<div class="highlight"><pre><span></span><code><span class="c1"># Use a named server from config</span>
+rootcoz<span class="w"> </span>-s<span class="w"> </span>production<span class="w"> </span>results<span class="w"> </span>list
+
+<span class="c1"># Use a direct URL</span>
+rootcoz<span class="w"> </span>-s<span class="w"> </span>https://rootcoz.example.com<span class="w"> </span>results<span class="w"> </span>list
+
+<span class="c1"># JSON output with API key</span>
+rootcoz<span class="w"> </span>--json<span class="w"> </span>--api-key<span class="w"> </span>sk-abc123<span class="w"> </span>results<span class="w"> </span>list
+</code></pre></div>
+
+<p>Server resolution priority (highest to lowest):</p>
+<ol>
+<li>CLI flags / environment variables</li>
+<li>Config file (<code>~/.config/rootcoz/config.toml</code>)</li>
+</ol>
+<hr />
+<h2 id="analyze">analyze</h2>
+<p>Submit an analysis job (Jenkins build or JUnit XML file). Requires <strong>operator</strong> role or higher.</p>
+<div class="highlight"><pre><span></span><code>rootcoz analyze [OPTIONS]
+</code></pre></div>
+
+<h3 id="source-options">Source Options</h3>
+<table>
+<thead>
+<tr>
+<th>Option</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>--source</code></td>
+<td>string</td>
+<td><code>jenkins</code></td>
+<td>Analysis source: <code>jenkins</code> or <code>file</code></td>
+</tr>
+<tr>
+<td><code>--job-name</code>, <code>-j</code></td>
+<td>string</td>
+<td>—</td>
+<td>Jenkins job name (required for <code>--source jenkins</code>)</td>
+</tr>
+<tr>
+<td><code>--build-number</code>, <code>-b</code></td>
+<td>int</td>
+<td>—</td>
+<td>Build number (required for <code>--source jenkins</code>)</td>
+</tr>
+<tr>
+<td><code>--file</code>, <code>-f</code></td>
+<td>string</td>
+<td>—</td>
+<td>Path to JUnit XML file (required for <code>--source file</code>)</td>
+</tr>
+<tr>
+<td><code>--name</code>, <code>-n</code></td>
+<td>string</td>
+<td><em>(job_name)</em></td>
+<td>Display name on the dashboard</td>
+</tr>
+<tr>
+<td><code>--tag</code></td>
+<td>string</td>
+<td><em>(repeatable)</em></td>
+<td>Tag for categorization (can be specified multiple times)</td>
+</tr>
+</tbody>
+</table>
+<h3 id="ai-options">AI Options</h3>
+<table>
+<thead>
+<tr>
+<th>Option</th>
+<th>Type</th>
+<th>Default</th>
+<th>Env Var</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>--provider</code></td>
+<td>string</td>
+<td><em>(server default)</em></td>
+<td>—</td>
+<td>AI provider (<code>claude</code>, <code>gemini</code>, <code>cursor</code>)</td>
+</tr>
+<tr>
+<td><code>--model</code></td>
+<td>string</td>
+<td><em>(server default)</em></td>
+<td>—</td>
+<td>AI model to use</td>
+</tr>
+<tr>
+<td><code>--ai-call-timeout</code></td>
+<td>int</td>
+<td><em>(server default)</em></td>
+<td>—</td>
+<td>AI call timeout in minutes</td>
+</tr>
+<tr>
+<td><code>--max-concurrent</code></td>
+<td>int</td>
+<td><code>0</code> (server default)</td>
+<td>—</td>
+<td>Max concurrent AI calls</td>
+</tr>
+<tr>
+<td><code>--raw-prompt</code></td>
+<td>string</td>
+<td><code>""</code></td>
+<td>—</td>
+<td>Additional AI instructions appended to prompt</td>
+</tr>
+<tr>
+<td><code>--issue-prompt</code></td>
+<td>string</td>
+<td><code>""</code></td>
+<td>—</td>
+<td>Custom issue generation prompt</td>
+</tr>
+</tbody>
+</table>
+<h3 id="peer-analysis-options">Peer Analysis Options</h3>
+<table>
+<thead>
+<tr>
+<th>Option</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>--peers</code></td>
+<td>string</td>
+<td><em>(config)</em></td>
+<td>Peer AI configs as <code>provider:model,provider:model</code></td>
+</tr>
+<tr>
+<td><code>--peer-analysis-max-rounds</code></td>
+<td>int</td>
+<td><code>3</code></td>
+<td>Maximum debate rounds (1–10)</td>
+</tr>
+</tbody>
+</table>
+<h3 id="jenkins-options">Jenkins Options</h3>
+<table>
+<thead>
+<tr>
+<th>Option</th>
+<th>Type</th>
+<th>Default</th>
+<th>Env Var</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>--jenkins-url</code></td>
+<td>string</td>
+<td><em>(config)</em></td>
+<td><code>JENKINS_URL</code></td>
+<td>Jenkins server URL</td>
+</tr>
+<tr>
+<td><code>--jenkins-user</code></td>
+<td>string</td>
+<td><em>(config)</em></td>
+<td><code>JENKINS_USER</code></td>
+<td>Jenkins username</td>
+</tr>
+<tr>
+<td><code>--jenkins-password</code></td>
+<td>string</td>
+<td><em>(config)</em></td>
+<td><code>JENKINS_PASSWORD</code></td>
+<td>Jenkins password or API token</td>
+</tr>
+<tr>
+<td><code>--jenkins-ssl-verify</code> / <code>--no-jenkins-ssl-verify</code></td>
+<td>bool</td>
+<td><em>(server default)</em></td>
+<td>—</td>
+<td>Jenkins SSL verification</td>
+</tr>
+<tr>
+<td><code>--jenkins-timeout</code></td>
+<td>int</td>
+<td><em>(server default)</em></td>
+<td>—</td>
+<td>Jenkins API timeout in seconds</td>
+</tr>
+<tr>
+<td><code>--jenkins-artifacts-max-size-mb</code></td>
+<td>int</td>
+<td><em>(server default)</em></td>
+<td>—</td>
+<td>Max artifacts size in MB</td>
+</tr>
+<tr>
+<td><code>--get-job-artifacts</code> / <code>--no-get-job-artifacts</code></td>
+<td>bool</td>
+<td><em>(server default)</em></td>
+<td>—</td>
+<td>Download build artifacts for AI context</td>
+</tr>
+<tr>
+<td><code>--wait</code> / <code>--no-wait</code></td>
+<td>bool</td>
+<td><em>(server default)</em></td>
+<td>—</td>
+<td>Wait for Jenkins job to complete</td>
+</tr>
+<tr>
+<td><code>--poll-interval</code></td>
+<td>int</td>
+<td><em>(server default)</em></td>
+<td>—</td>
+<td>Minutes between Jenkins polls</td>
+</tr>
+<tr>
+<td><code>--max-wait</code></td>
+<td>int</td>
+<td><em>(server default)</em></td>
+<td>—</td>
+<td>Max minutes to wait for completion</td>
+</tr>
+<tr>
+<td><code>--force</code> / <code>--no-force</code></td>
+<td>bool</td>
+<td><em>(server default)</em></td>
+<td>—</td>
+<td>Force analysis on successful builds</td>
+</tr>
+</tbody>
+</table>
+<h3 id="repository-options">Repository Options</h3>
+<table>
+<thead>
+<tr>
+<th>Option</th>
+<th>Type</th>
+<th>Default</th>
+<th>Env Var</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>--tests-repo-url</code></td>
+<td>string</td>
+<td><em>(config)</em></td>
+<td><code>TESTS_REPO_URL</code></td>
+<td>Tests repository URL</td>
+</tr>
+<tr>
+<td><code>--tests-repo-token</code></td>
+<td>string</td>
+<td><em>(config)</em></td>
+<td><code>TESTS_REPO_TOKEN</code></td>
+<td>Token for private test repos</td>
+</tr>
+<tr>
+<td><code>--additional-repos</code></td>
+<td>string</td>
+<td><em>(config)</em></td>
+<td>—</td>
+<td>Additional repos as <code>name:url,name:url</code></td>
+</tr>
+</tbody>
+</table>
+<h3 id="jira-options">Jira Options</h3>
+<table>
+<thead>
+<tr>
+<th>Option</th>
+<th>Type</th>
+<th>Default</th>
+<th>Env Var</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>--jira</code> / <code>--no-jira</code></td>
+<td>bool</td>
+<td><em>(server default)</em></td>
+<td>—</td>
+<td>Enable/disable Jira integration</td>
+</tr>
+<tr>
+<td><code>--jira-url</code></td>
+<td>string</td>
+<td><em>(config)</em></td>
+<td><code>JIRA_URL</code></td>
+<td>Jira instance URL</td>
+</tr>
+<tr>
+<td><code>--jira-email</code></td>
+<td>string</td>
+<td><em>(config)</em></td>
+<td><code>JIRA_EMAIL</code></td>
+<td>Jira Cloud email</td>
+</tr>
+<tr>
+<td><code>--jira-api-token</code></td>
+<td>string</td>
+<td><em>(config)</em></td>
+<td><code>JIRA_API_TOKEN</code></td>
+<td>Jira Cloud API token</td>
+</tr>
+<tr>
+<td><code>--jira-pat</code></td>
+<td>string</td>
+<td><em>(config)</em></td>
+<td><code>JIRA_PAT</code></td>
+<td>Jira Server/DC personal access token</td>
+</tr>
+<tr>
+<td><code>--jira-project-key</code></td>
+<td>string</td>
+<td><em>(config)</em></td>
+<td><code>JIRA_PROJECT_KEY</code></td>
+<td>Jira project key for searches</td>
+</tr>
+<tr>
+<td><code>--jira-ssl-verify</code> / <code>--no-jira-ssl-verify</code></td>
+<td>bool</td>
+<td><em>(server default)</em></td>
+<td>—</td>
+<td>Jira SSL verification</td>
+</tr>
+<tr>
+<td><code>--jira-max-results</code></td>
+<td>int</td>
+<td><em>(server default)</em></td>
+<td>—</td>
+<td>Max Jira search results</td>
+</tr>
+</tbody>
+</table>
+<h3 id="github-option">GitHub Option</h3>
+<table>
+<thead>
+<tr>
+<th>Option</th>
+<th>Type</th>
+<th>Default</th>
+<th>Env Var</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>--github-token</code></td>
+<td>string</td>
+<td><em>(config)</em></td>
+<td><code>GITHUB_TOKEN</code></td>
+<td>GitHub API token</td>
+</tr>
+</tbody>
+</table>
+<div class="highlight"><pre><span></span><code><span class="c1"># Analyze a Jenkins build</span>
+rootcoz<span class="w"> </span>analyze<span class="w"> </span>--source<span class="w"> </span>jenkins<span class="w"> </span>--job-name<span class="w"> </span>my-pipeline<span class="w"> </span>--build-number<span class="w"> </span><span class="m">42</span>
+
+<span class="c1"># Analyze a JUnit XML file</span>
+rootcoz<span class="w"> </span>analyze<span class="w"> </span>--source<span class="w"> </span>file<span class="w"> </span>--file<span class="w"> </span>results.xml<span class="w"> </span>--name<span class="w"> </span><span class="s2">&quot;nightly-run&quot;</span>
+
+<span class="c1"># Analyze with specific AI provider and peer review</span>
+rootcoz<span class="w"> </span>analyze<span class="w"> </span>-j<span class="w"> </span>my-pipeline<span class="w"> </span>-b<span class="w"> </span><span class="m">42</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--provider<span class="w"> </span>claude<span class="w"> </span>--model<span class="w"> </span>claude-sonnet-4-20250514<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--peers<span class="w"> </span><span class="s2">&quot;gemini:gemini-2.5-pro,cursor:gpt-5.4-xhigh&quot;</span>
+
+<span class="c1"># Analyze with tags and Jira enabled</span>
+rootcoz<span class="w"> </span>analyze<span class="w"> </span>-j<span class="w"> </span>my-pipeline<span class="w"> </span>-b<span class="w"> </span><span class="m">42</span><span class="w"> </span>--tag<span class="w"> </span>nightly<span class="w"> </span>--tag<span class="w"> </span>release<span class="w"> </span>--jira
+</code></pre></div>
+
+<hr />
+<h2 id="re-analyze">re-analyze</h2>
+<p>Re-analyze a previously analyzed job using the same settings. Requires <strong>operator</strong> role or higher.</p>
+<div class="highlight"><pre><span></span><code>rootcoz re-analyze JOB_ID [OPTIONS]
+</code></pre></div>
+
+<table>
+<thead>
+<tr>
+<th>Argument</th>
+<th>Type</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>JOB_ID</code></td>
+<td>string</td>
+<td>Job ID of the analysis to re-run</td>
+</tr>
+</tbody>
+</table>
+<div class="highlight"><pre><span></span><code>rootcoz<span class="w"> </span>re-analyze<span class="w"> </span>abc123-def456
+</code></pre></div>
+
+<hr />
+<h2 id="status">status</h2>
+<p>Check the current analysis status for a job.</p>
+<div class="highlight"><pre><span></span><code>rootcoz status JOB_ID [OPTIONS]
+</code></pre></div>
+
+<table>
+<thead>
+<tr>
+<th>Argument</th>
+<th>Type</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>JOB_ID</code></td>
+<td>string</td>
+<td>Job ID to check</td>
+</tr>
+</tbody>
+</table>
+<div class="highlight"><pre><span></span><code>rootcoz<span class="w"> </span>status<span class="w"> </span>abc123-def456
+</code></pre></div>
+
+<hr />
+<h2 id="abort">abort</h2>
+<p>Abort a running or waiting analysis. Requires <strong>operator</strong> role or higher.</p>
+<div class="highlight"><pre><span></span><code>rootcoz abort JOB_ID [OPTIONS]
+</code></pre></div>
+
+<table>
+<thead>
+<tr>
+<th>Argument</th>
+<th>Type</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>JOB_ID</code></td>
+<td>string</td>
+<td>Job ID to abort</td>
+</tr>
+</tbody>
+</table>
+<div class="highlight"><pre><span></span><code>rootcoz<span class="w"> </span>abort<span class="w"> </span>abc123-def456
+</code></pre></div>
+
+<hr />
+<h2 id="health">health</h2>
+<p>Check server health status.</p>
+<div class="highlight"><pre><span></span><code>rootcoz health [OPTIONS]
+</code></pre></div>
+
+<div class="highlight"><pre><span></span><code>rootcoz<span class="w"> </span>health
+<span class="c1"># Status: healthy</span>
+<span class="c1">#</span>
+<span class="c1"># Checks:</span>
+<span class="c1">#   database: healthy</span>
+<span class="c1">#   sidecar: healthy</span>
+<span class="c1">#</span>
+<span class="c1"># Error rate: 0.0% (0/150 in 300s window)</span>
+
+rootcoz<span class="w"> </span>health<span class="w"> </span>--json
+</code></pre></div>
+
+<hr />
+<h2 id="register">register</h2>
+<p>Register a new user and receive a one-time API key.</p>
+<div class="highlight"><pre><span></span><code>rootcoz register USERNAME [OPTIONS]
+</code></pre></div>
+
+<table>
+<thead>
+<tr>
+<th>Argument</th>
+<th>Type</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>USERNAME</code></td>
+<td>string</td>
+<td>Username to register</td>
+</tr>
+</tbody>
+</table>
+<blockquote>
+<p><strong>Warning:</strong> The API key is displayed only once at registration. Save it immediately.</p>
+</blockquote>
+<div class="highlight"><pre><span></span><code>rootcoz<span class="w"> </span>register<span class="w"> </span>myuser
+<span class="c1"># Registered: myuser</span>
+<span class="c1"># ⚠️  Save this API key — you won&#39;t see it again!</span>
+<span class="c1"># API Key: sk-abc123...</span>
+</code></pre></div>
+
+<hr />
+<h2 id="results">results</h2>
+<p>Manage analysis results. All subcommands require authentication.</p>
+<h3 id="results-list">results list</h3>
+<p>List recent analyzed jobs.</p>
+<div class="highlight"><pre><span></span><code>rootcoz results list [OPTIONS]
+</code></pre></div>
+
+<table>
+<thead>
+<tr>
+<th>Option</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>--limit</code>, <code>-l</code></td>
+<td>int</td>
+<td><code>50</code></td>
+<td>Max results to return</td>
+</tr>
+</tbody>
+</table>
+<div class="highlight"><pre><span></span><code>rootcoz<span class="w"> </span>results<span class="w"> </span>list<span class="w"> </span>--limit<span class="w"> </span><span class="m">10</span>
+</code></pre></div>
+
+<h3 id="results-dashboard">results dashboard</h3>
+<p>List analysis jobs with dashboard metadata (failure counts, review progress).</p>
+<div class="highlight"><pre><span></span><code>rootcoz results dashboard [OPTIONS]
+</code></pre></div>
+
+<table>
+<thead>
+<tr>
+<th>Option</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>--label</code>, <code>-l</code></td>
+<td>string</td>
+<td><em>(repeatable)</em></td>
+<td>Filter by label</td>
+</tr>
+<tr>
+<td><code>--exclude-tag</code></td>
+<td>string</td>
+<td><em>(repeatable)</em></td>
+<td>Exclude results with this tag</td>
+</tr>
+</tbody>
+</table>
+<div class="highlight"><pre><span></span><code>rootcoz<span class="w"> </span>results<span class="w"> </span>dashboard
+rootcoz<span class="w"> </span>results<span class="w"> </span>dashboard<span class="w"> </span>--label<span class="w"> </span>team:platform<span class="w"> </span>--exclude-tag<span class="w"> </span>experimental
+</code></pre></div>
+
+<h3 id="results-show">results show</h3>
+<p>Show the analysis result for a specific job.</p>
+<div class="highlight"><pre><span></span><code>rootcoz results show JOB_ID [OPTIONS]
+</code></pre></div>
+
+<table>
+<thead>
+<tr>
+<th>Argument</th>
+<th>Type</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>JOB_ID</code></td>
+<td>string</td>
+<td>Job ID to show</td>
+</tr>
+</tbody>
+</table>
+<table>
+<thead>
+<tr>
+<th>Option</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>--full</code>, <code>-f</code></td>
+<td>flag</td>
+<td><code>false</code></td>
+<td>Show complete JSON result</td>
+</tr>
+</tbody>
+</table>
+<div class="highlight"><pre><span></span><code>rootcoz<span class="w"> </span>results<span class="w"> </span>show<span class="w"> </span>abc123
+rootcoz<span class="w"> </span>results<span class="w"> </span>show<span class="w"> </span>abc123<span class="w"> </span>--full
+</code></pre></div>
+
+<h3 id="results-delete">results delete</h3>
+<p>Delete one or more jobs and all related data. Requires <strong>operator</strong> role (own jobs) or <strong>admin</strong> role (any job).</p>
+<div class="highlight"><pre><span></span><code>rootcoz results delete [JOB_IDS...] [OPTIONS]
+</code></pre></div>
+
+<table>
+<thead>
+<tr>
+<th>Argument</th>
+<th>Type</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>JOB_IDS</code></td>
+<td>string(s)</td>
+<td>One or more job IDs to delete</td>
+</tr>
+</tbody>
+</table>
+<table>
+<thead>
+<tr>
+<th>Option</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>--all</code></td>
+<td>flag</td>
+<td><code>false</code></td>
+<td>Delete all jobs</td>
+</tr>
+<tr>
+<td><code>--confirm</code></td>
+<td>flag</td>
+<td><code>false</code></td>
+<td>Confirm deletion (required with <code>--all</code>)</td>
+</tr>
+</tbody>
+</table>
+<blockquote>
+<p><strong>Warning:</strong> <code>--all</code> cannot be combined with explicit job IDs.</p>
+</blockquote>
+<div class="highlight"><pre><span></span><code>rootcoz<span class="w"> </span>results<span class="w"> </span>delete<span class="w"> </span>abc123
+rootcoz<span class="w"> </span>results<span class="w"> </span>delete<span class="w"> </span>abc123<span class="w"> </span>def456<span class="w"> </span>ghi789
+rootcoz<span class="w"> </span>results<span class="w"> </span>delete<span class="w"> </span>--all<span class="w"> </span>--confirm
+</code></pre></div>
+
+<h3 id="results-review-status">results review-status</h3>
+<p>Show review status for an analysis.</p>
+<div class="highlight"><pre><span></span><code>rootcoz results review-status JOB_ID [OPTIONS]
+</code></pre></div>
+
+<table>
+<thead>
+<tr>
+<th>Argument</th>
+<th>Type</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>JOB_ID</code></td>
+<td>string</td>
+<td>Job ID</td>
+</tr>
+</tbody>
+</table>
+<div class="highlight"><pre><span></span><code>rootcoz<span class="w"> </span>results<span class="w"> </span>review-status<span class="w"> </span>abc123
+</code></pre></div>
+
+<h3 id="results-set-reviewed">results set-reviewed</h3>
+<p>Set or clear the reviewed state for a test failure. Requires <strong>reviewer</strong> role or higher.</p>
+<div class="highlight"><pre><span></span><code>rootcoz results set-reviewed JOB_ID [OPTIONS]
+</code></pre></div>
+
+<table>
+<thead>
+<tr>
+<th>Argument</th>
+<th>Type</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>JOB_ID</code></td>
+<td>string</td>
+<td>Job ID</td>
+</tr>
+</tbody>
+</table>
+<table>
+<thead>
+<tr>
+<th>Option</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>--test</code>, <code>-t</code></td>
+<td>string</td>
+<td><em>(required)</em></td>
+<td>Fully qualified test name</td>
+</tr>
+<tr>
+<td><code>--reviewed</code> / <code>--not-reviewed</code></td>
+<td>bool</td>
+<td><em>(required)</em></td>
+<td>Mark as reviewed or not</td>
+</tr>
+<tr>
+<td><code>--child-job</code></td>
+<td>string</td>
+<td><code>""</code></td>
+<td>Child job name</td>
+</tr>
+<tr>
+<td><code>--child-build</code></td>
+<td>int</td>
+<td><code>0</code></td>
+<td>Child build number</td>
+</tr>
+</tbody>
+</table>
+<div class="highlight"><pre><span></span><code>rootcoz<span class="w"> </span>results<span class="w"> </span>set-reviewed<span class="w"> </span>abc123<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--test<span class="w"> </span>com.example.MyTest#testMethod<span class="w"> </span>--reviewed
+
+rootcoz<span class="w"> </span>results<span class="w"> </span>set-reviewed<span class="w"> </span>abc123<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--test<span class="w"> </span>com.example.MyTest#testMethod<span class="w"> </span>--not-reviewed
+</code></pre></div>
+
+<h3 id="results-enrich-comments">results enrich-comments</h3>
+<p>Enrich comments with live PR/ticket statuses.</p>
+<div class="highlight"><pre><span></span><code>rootcoz results enrich-comments JOB_ID [OPTIONS]
+</code></pre></div>
+
+<table>
+<thead>
+<tr>
+<th>Argument</th>
+<th>Type</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>JOB_ID</code></td>
+<td>string</td>
+<td>Job ID</td>
+</tr>
+</tbody>
+</table>
+<div class="highlight"><pre><span></span><code>rootcoz<span class="w"> </span>results<span class="w"> </span>enrich-comments<span class="w"> </span>abc123
+<span class="c1"># Enriched 3 comment(s).</span>
+</code></pre></div>
+
+<hr />
+<h2 id="history">history</h2>
+<p>Query failure history for tests and jobs.</p>
+<h3 id="history-test">history test</h3>
+<p>Show failure history for a specific test.</p>
+<div class="highlight"><pre><span></span><code>rootcoz history test TEST_NAME [OPTIONS]
+</code></pre></div>
+
+<table>
+<thead>
+<tr>
+<th>Argument</th>
+<th>Type</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>TEST_NAME</code></td>
+<td>string</td>
+<td>Fully qualified test name</td>
+</tr>
+</tbody>
+</table>
+<table>
+<thead>
+<tr>
+<th>Option</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>--limit</code>, <code>-l</code></td>
+<td>int</td>
+<td><code>20</code></td>
+<td>Max results</td>
+</tr>
+<tr>
+<td><code>--job-name</code>, <code>-j</code></td>
+<td>string</td>
+<td><code>""</code></td>
+<td>Filter by job name</td>
+</tr>
+<tr>
+<td><code>--exclude-job-id</code></td>
+<td>string</td>
+<td><code>""</code></td>
+<td>Exclude results from this job ID</td>
+</tr>
+</tbody>
+</table>
+<div class="highlight"><pre><span></span><code>rootcoz<span class="w"> </span><span class="nb">history</span><span class="w"> </span><span class="nb">test</span><span class="w"> </span>com.example.MyTest#testMethod<span class="w"> </span>--limit<span class="w"> </span><span class="m">10</span>
+rootcoz<span class="w"> </span><span class="nb">history</span><span class="w"> </span><span class="nb">test</span><span class="w"> </span>com.example.MyTest#testMethod<span class="w"> </span>--job-name<span class="w"> </span>my-pipeline
+</code></pre></div>
+
+<h3 id="history-search">history search</h3>
+<p>Find tests that failed with the same error signature.</p>
+<div class="highlight"><pre><span></span><code>rootcoz history search [OPTIONS]
+</code></pre></div>
+
+<table>
+<thead>
+<tr>
+<th>Option</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>--signature</code>, <code>-s</code></td>
+<td>string</td>
+<td><em>(required)</em></td>
+<td>Error signature hash (SHA-256)</td>
+</tr>
+<tr>
+<td><code>--exclude-job-id</code></td>
+<td>string</td>
+<td><code>""</code></td>
+<td>Exclude results from this job ID</td>
+</tr>
+</tbody>
+</table>
+<div class="highlight"><pre><span></span><code>rootcoz<span class="w"> </span><span class="nb">history</span><span class="w"> </span>search<span class="w"> </span>--signature<span class="w"> </span>a1b2c3d4e5f6...
+</code></pre></div>
+
+<h3 id="history-stats">history stats</h3>
+<p>Show aggregate statistics for a Jenkins job.</p>
+<div class="highlight"><pre><span></span><code>rootcoz history stats JOB_NAME [OPTIONS]
+</code></pre></div>
+
+<table>
+<thead>
+<tr>
+<th>Argument</th>
+<th>Type</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>JOB_NAME</code></td>
+<td>string</td>
+<td>Jenkins job name</td>
+</tr>
+</tbody>
+</table>
+<table>
+<thead>
+<tr>
+<th>Option</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>--exclude-job-id</code></td>
+<td>string</td>
+<td><code>""</code></td>
+<td>Exclude results from this job ID</td>
+</tr>
+</tbody>
+</table>
+<div class="highlight"><pre><span></span><code>rootcoz<span class="w"> </span><span class="nb">history</span><span class="w"> </span>stats<span class="w"> </span>my-pipeline
+<span class="c1"># Job: my-pipeline</span>
+<span class="c1"># Builds analyzed: 45</span>
+<span class="c1"># Builds with failures: 12</span>
+<span class="c1"># Failure rate: 26.7%</span>
+</code></pre></div>
+
+<h3 id="history-failures">history failures</h3>
+<p>List paginated failure history.</p>
+<div class="highlight"><pre><span></span><code>rootcoz history failures [OPTIONS]
+</code></pre></div>
+
+<table>
+<thead>
+<tr>
+<th>Option</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>--limit</code>, <code>-l</code></td>
+<td>int</td>
+<td><code>50</code></td>
+<td>Max results per page</td>
+</tr>
+<tr>
+<td><code>--offset</code>, <code>-o</code></td>
+<td>int</td>
+<td><code>0</code></td>
+<td>Pagination offset</td>
+</tr>
+<tr>
+<td><code>--search</code>, <code>-s</code></td>
+<td>string</td>
+<td><code>""</code></td>
+<td>Search test names</td>
+</tr>
+<tr>
+<td><code>--classification</code>, <code>-c</code></td>
+<td>string</td>
+<td><code>""</code></td>
+<td>Filter by classification</td>
+</tr>
+<tr>
+<td><code>--job-name</code>, <code>-j</code></td>
+<td>string</td>
+<td><code>""</code></td>
+<td>Filter by job name</td>
+</tr>
+</tbody>
+</table>
+<div class="highlight"><pre><span></span><code>rootcoz<span class="w"> </span><span class="nb">history</span><span class="w"> </span>failures<span class="w"> </span>--search<span class="w"> </span><span class="s2">&quot;MyTest&quot;</span><span class="w"> </span>--classification<span class="w"> </span><span class="s2">&quot;PRODUCT BUG&quot;</span>
+rootcoz<span class="w"> </span><span class="nb">history</span><span class="w"> </span>failures<span class="w"> </span>--limit<span class="w"> </span><span class="m">100</span><span class="w"> </span>--offset<span class="w"> </span><span class="m">50</span>
+</code></pre></div>
+
+<hr />
+<h2 id="classify">classify</h2>
+<p>Classify a test failure. Requires <strong>reviewer</strong> role or higher.</p>
+<div class="highlight"><pre><span></span><code>rootcoz classify TEST_NAME [OPTIONS]
+</code></pre></div>
+
+<table>
+<thead>
+<tr>
+<th>Argument</th>
+<th>Type</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>TEST_NAME</code></td>
+<td>string</td>
+<td>Fully qualified test name</td>
+</tr>
+</tbody>
+</table>
+<table>
+<thead>
+<tr>
+<th>Option</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>--type</code>, <code>-t</code></td>
+<td>string</td>
+<td><em>(required)</em></td>
+<td>Classification: <code>FLAKY</code>, <code>REGRESSION</code>, <code>INFRASTRUCTURE</code>, <code>KNOWN_BUG</code>, or <code>INTERMITTENT</code></td>
+</tr>
+<tr>
+<td><code>--job-id</code></td>
+<td>string</td>
+<td><em>(required)</em></td>
+<td>Job ID this classification applies to</td>
+</tr>
+<tr>
+<td><code>--reason</code>, <code>-r</code></td>
+<td>string</td>
+<td><code>""</code></td>
+<td>Reason for classification</td>
+</tr>
+<tr>
+<td><code>--job-name</code>, <code>-j</code></td>
+<td>string</td>
+<td><code>""</code></td>
+<td>Job name</td>
+</tr>
+<tr>
+<td><code>--references</code></td>
+<td>string</td>
+<td><code>""</code></td>
+<td>Bug URLs or ticket keys</td>
+</tr>
+<tr>
+<td><code>--child-job</code></td>
+<td>string</td>
+<td><code>""</code></td>
+<td>Child job name</td>
+</tr>
+<tr>
+<td><code>--child-build</code></td>
+<td>int</td>
+<td><code>0</code></td>
+<td>Child build number</td>
+</tr>
+</tbody>
+</table>
+<div class="highlight"><pre><span></span><code>rootcoz<span class="w"> </span>classify<span class="w"> </span>com.example.MyTest#testMethod<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--type<span class="w"> </span>KNOWN_BUG<span class="w"> </span>--job-id<span class="w"> </span>abc123<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--reason<span class="w"> </span><span class="s2">&quot;Tracked in JIRA-456&quot;</span><span class="w"> </span>--references<span class="w"> </span><span class="s2">&quot;JIRA-456&quot;</span>
+</code></pre></div>
+
+<hr />
+<h2 id="classifications">classifications</h2>
+<p>List test classifications.</p>
+<h3 id="classifications-list">classifications list</h3>
+<div class="highlight"><pre><span></span><code>rootcoz classifications list [OPTIONS]
+</code></pre></div>
+
+<table>
+<thead>
+<tr>
+<th>Option</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>--job-id</code></td>
+<td>string</td>
+<td><code>""</code></td>
+<td>Filter by job ID</td>
+</tr>
+<tr>
+<td><code>--test-name</code>, <code>-t</code></td>
+<td>string</td>
+<td><code>""</code></td>
+<td>Filter by test name</td>
+</tr>
+<tr>
+<td><code>--type</code>, <code>-c</code></td>
+<td>string</td>
+<td><code>""</code></td>
+<td>Filter by classification type</td>
+</tr>
+<tr>
+<td><code>--job-name</code>, <code>-j</code></td>
+<td>string</td>
+<td><code>""</code></td>
+<td>Filter by job name</td>
+</tr>
+<tr>
+<td><code>--parent-job-name</code></td>
+<td>string</td>
+<td><code>""</code></td>
+<td>Filter by parent job name</td>
+</tr>
+</tbody>
+</table>
+<div class="highlight"><pre><span></span><code>rootcoz<span class="w"> </span>classifications<span class="w"> </span>list<span class="w"> </span>--job-id<span class="w"> </span>abc123
+rootcoz<span class="w"> </span>classifications<span class="w"> </span>list<span class="w"> </span>--type<span class="w"> </span>FLAKY<span class="w"> </span>--job-name<span class="w"> </span>my-pipeline
+</code></pre></div>
+
+<hr />
+<h2 id="comments">comments</h2>
+<p>Manage comments on test failures. Requires <strong>reviewer</strong> role or higher.</p>
+<h3 id="comments-list">comments list</h3>
+<p>List comments for a job.</p>
+<div class="highlight"><pre><span></span><code>rootcoz comments list JOB_ID [OPTIONS]
+</code></pre></div>
+
+<table>
+<thead>
+<tr>
+<th>Argument</th>
+<th>Type</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>JOB_ID</code></td>
+<td>string</td>
+<td>Job ID</td>
+</tr>
+</tbody>
+</table>
+<div class="highlight"><pre><span></span><code>rootcoz<span class="w"> </span>comments<span class="w"> </span>list<span class="w"> </span>abc123
+</code></pre></div>
+
+<h3 id="comments-add">comments add</h3>
+<p>Add a comment to a test failure.</p>
+<div class="highlight"><pre><span></span><code>rootcoz comments add JOB_ID [OPTIONS]
+</code></pre></div>
+
+<table>
+<thead>
+<tr>
+<th>Argument</th>
+<th>Type</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>JOB_ID</code></td>
+<td>string</td>
+<td>Job ID</td>
+</tr>
+</tbody>
+</table>
+<table>
+<thead>
+<tr>
+<th>Option</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>--test</code>, <code>-t</code></td>
+<td>string</td>
+<td><em>(required)</em></td>
+<td>Test name to comment on</td>
+</tr>
+<tr>
+<td><code>--message</code>, <code>-m</code></td>
+<td>string</td>
+<td><em>(required)</em></td>
+<td>Comment text</td>
+</tr>
+<tr>
+<td><code>--child-job</code></td>
+<td>string</td>
+<td><code>""</code></td>
+<td>Child job name</td>
+</tr>
+<tr>
+<td><code>--child-build</code></td>
+<td>int</td>
+<td><code>0</code></td>
+<td>Child build number</td>
+</tr>
+</tbody>
+</table>
+<div class="highlight"><pre><span></span><code>rootcoz<span class="w"> </span>comments<span class="w"> </span>add<span class="w"> </span>abc123<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--test<span class="w"> </span>com.example.MyTest#testMethod<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--message<span class="w"> </span><span class="s2">&quot;Fixed in PR #123&quot;</span>
+</code></pre></div>
+
+<h3 id="comments-delete">comments delete</h3>
+<p>Delete a comment.</p>
+<div class="highlight"><pre><span></span><code>rootcoz comments delete JOB_ID COMMENT_ID [OPTIONS]
+</code></pre></div>
+
+<table>
+<thead>
+<tr>
+<th>Argument</th>
+<th>Type</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>JOB_ID</code></td>
+<td>string</td>
+<td>Job ID</td>
+</tr>
+<tr>
+<td><code>COMMENT_ID</code></td>
+<td>int</td>
+<td>Comment ID to delete</td>
+</tr>
+</tbody>
+</table>
+<div class="highlight"><pre><span></span><code>rootcoz<span class="w"> </span>comments<span class="w"> </span>delete<span class="w"> </span>abc123<span class="w"> </span><span class="m">42</span>
+</code></pre></div>
+
+<hr />
+<h2 id="failure">failure</h2>
+<p>Look up and re-analyze individual failures.</p>
+<h3 id="failure-show">failure show</h3>
+<p>Show a failure analysis by its UUID.</p>
+<div class="highlight"><pre><span></span><code>rootcoz failure show FAILURE_UUID [OPTIONS]
+</code></pre></div>
+
+<table>
+<thead>
+<tr>
+<th>Argument</th>
+<th>Type</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>FAILURE_UUID</code></td>
+<td>string</td>
+<td>UUID of the failure</td>
+</tr>
+</tbody>
+</table>
+<div class="highlight"><pre><span></span><code>rootcoz<span class="w"> </span>failure<span class="w"> </span>show<span class="w"> </span>550e8400-e29b-41d4-a716-446655440000
+</code></pre></div>
+
+<h3 id="failure-re-analyze">failure re-analyze</h3>
+<p>Re-analyze a single failure by its UUID. Requires <strong>operator</strong> role or higher.</p>
+<div class="highlight"><pre><span></span><code>rootcoz failure re-analyze FAILURE_UUID [OPTIONS]
+</code></pre></div>
+
+<table>
+<thead>
+<tr>
+<th>Argument</th>
+<th>Type</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>FAILURE_UUID</code></td>
+<td>string</td>
+<td>UUID of the failure to re-analyze</td>
+</tr>
+</tbody>
+</table>
+<div class="highlight"><pre><span></span><code>rootcoz<span class="w"> </span>failure<span class="w"> </span>re-analyze<span class="w"> </span>550e8400-e29b-41d4-a716-446655440000
+</code></pre></div>
+
+<hr />
+<h2 id="override-classification">override-classification</h2>
+<p>Override the AI-assigned classification of a failure. Requires <strong>reviewer</strong> role or higher.</p>
+<div class="highlight"><pre><span></span><code>rootcoz override-classification JOB_ID [OPTIONS]
+</code></pre></div>
+
+<table>
+<thead>
+<tr>
+<th>Argument</th>
+<th>Type</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>JOB_ID</code></td>
+<td>string</td>
+<td>Job ID</td>
+</tr>
+</tbody>
+</table>
+<table>
+<thead>
+<tr>
+<th>Option</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>--test</code>, <code>-t</code></td>
+<td>string</td>
+<td><em>(required)</em></td>
+<td>Test name</td>
+</tr>
+<tr>
+<td><code>--classification</code>, <code>-c</code></td>
+<td>string</td>
+<td><em>(required)</em></td>
+<td><code>CODE ISSUE</code>, <code>PRODUCT BUG</code>, or <code>INFRASTRUCTURE</code></td>
+</tr>
+<tr>
+<td><code>--child-job</code></td>
+<td>string</td>
+<td><code>""</code></td>
+<td>Child job name</td>
+</tr>
+<tr>
+<td><code>--child-build</code></td>
+<td>int</td>
+<td><code>0</code></td>
+<td>Child build number</td>
+</tr>
+</tbody>
+</table>
+<div class="highlight"><pre><span></span><code>rootcoz<span class="w"> </span>override-classification<span class="w"> </span>abc123<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--test<span class="w"> </span>com.example.MyTest#testMethod<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--classification<span class="w"> </span><span class="s2">&quot;PRODUCT BUG&quot;</span>
+</code></pre></div>
+
+<hr />
+<h2 id="override-pattern">override-pattern</h2>
+<p>Override the failure pattern of a test. Requires <strong>reviewer</strong> role or higher.</p>
+<div class="highlight"><pre><span></span><code>rootcoz override-pattern JOB_ID [OPTIONS]
+</code></pre></div>
+
+<table>
+<thead>
+<tr>
+<th>Argument</th>
+<th>Type</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>JOB_ID</code></td>
+<td>string</td>
+<td>Job ID</td>
+</tr>
+</tbody>
+</table>
+<table>
+<thead>
+<tr>
+<th>Option</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>--test</code>, <code>-t</code></td>
+<td>string</td>
+<td><em>(required)</em></td>
+<td>Test name</td>
+</tr>
+<tr>
+<td><code>--pattern</code>, <code>-p</code></td>
+<td>string</td>
+<td><em>(required)</em></td>
+<td><code>NEW</code>, <code>REGRESSION</code>, <code>FLAKY</code>, <code>INTERMITTENT</code>, <code>KNOWN_BUG</code>, or <code>PERSISTENT</code></td>
+</tr>
+<tr>
+<td><code>--child-job</code></td>
+<td>string</td>
+<td><code>""</code></td>
+<td>Child job name</td>
+</tr>
+<tr>
+<td><code>--child-build</code></td>
+<td>int</td>
+<td><code>0</code></td>
+<td>Child build number</td>
+</tr>
+</tbody>
+</table>
+<div class="highlight"><pre><span></span><code>rootcoz<span class="w"> </span>override-pattern<span class="w"> </span>abc123<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--test<span class="w"> </span>com.example.MyTest#testMethod<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--pattern<span class="w"> </span>FLAKY
+</code></pre></div>
+
+<hr />
+<h2 id="analyze-comment-intent">analyze-comment-intent</h2>
+<p>Analyze whether a comment suggests a failure has been reviewed or resolved.</p>
+<div class="highlight"><pre><span></span><code>rootcoz analyze-comment-intent COMMENT [OPTIONS]
+</code></pre></div>
+
+<table>
+<thead>
+<tr>
+<th>Argument</th>
+<th>Type</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>COMMENT</code></td>
+<td>string</td>
+<td>Comment text to analyze</td>
+</tr>
+</tbody>
+</table>
+<table>
+<thead>
+<tr>
+<th>Option</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>--job-id</code></td>
+<td>string</td>
+<td><code>""</code></td>
+<td>Job ID to resolve AI config from</td>
+</tr>
+<tr>
+<td><code>--ai-provider</code></td>
+<td>string</td>
+<td><code>""</code></td>
+<td>AI provider</td>
+</tr>
+<tr>
+<td><code>--ai-model</code></td>
+<td>string</td>
+<td><code>""</code></td>
+<td>AI model</td>
+</tr>
+</tbody>
+</table>
+<div class="highlight"><pre><span></span><code>rootcoz<span class="w"> </span>analyze-comment-intent<span class="w"> </span><span class="s2">&quot;Fixed in PR #456, merging now&quot;</span>
+<span class="c1"># Suggests reviewed: True</span>
+<span class="c1"># Reason: Comment indicates a fix has been implemented</span>
+</code></pre></div>
+
+<hr />
+<h2 id="chat">chat</h2>
+<p>Chat with AI about analyzed jobs. Requires <strong>reviewer</strong> role or higher.</p>
+<h3 id="chat-init">chat init</h3>
+<p>Initialize chat workspace and clone repos.</p>
+<div class="highlight"><pre><span></span><code>rootcoz chat init JOB_ID [OPTIONS]
+</code></pre></div>
+
+<table>
+<thead>
+<tr>
+<th>Argument</th>
+<th>Type</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>JOB_ID</code></td>
+<td>string</td>
+<td>Job ID to initialize chat for</td>
+</tr>
+</tbody>
+</table>
+<div class="highlight"><pre><span></span><code>rootcoz<span class="w"> </span>chat<span class="w"> </span>init<span class="w"> </span>abc123
+<span class="c1"># Ready: True</span>
+<span class="c1"># Repos: tests-repo, infra-repo</span>
+</code></pre></div>
+
+<h3 id="chat-send">chat send</h3>
+<p>Send a chat message and wait for the AI response. Polls for up to ~2 minutes.</p>
+<div class="highlight"><pre><span></span><code>rootcoz chat send JOB_ID MESSAGE [OPTIONS]
+</code></pre></div>
+
+<table>
+<thead>
+<tr>
+<th>Argument</th>
+<th>Type</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>JOB_ID</code></td>
+<td>string</td>
+<td>Job ID to chat about</td>
+</tr>
+<tr>
+<td><code>MESSAGE</code></td>
+<td>string</td>
+<td>Message to send</td>
+</tr>
+</tbody>
+</table>
+<table>
+<thead>
+<tr>
+<th>Option</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>--provider</code>, <code>-p</code></td>
+<td>string</td>
+<td><em>(server default)</em></td>
+<td>AI provider</td>
+</tr>
+<tr>
+<td><code>--model</code>, <code>-m</code></td>
+<td>string</td>
+<td><em>(server default)</em></td>
+<td>AI model</td>
+</tr>
+</tbody>
+</table>
+<div class="highlight"><pre><span></span><code>rootcoz<span class="w"> </span>chat<span class="w"> </span>send<span class="w"> </span>abc123<span class="w"> </span><span class="s2">&quot;Why does testLogin fail with timeout?&quot;</span>
+</code></pre></div>
+
+<h3 id="chat-history">chat history</h3>
+<p>Show chat history for an analyzed job.</p>
+<div class="highlight"><pre><span></span><code>rootcoz chat history JOB_ID [OPTIONS]
+</code></pre></div>
+
+<table>
+<thead>
+<tr>
+<th>Argument</th>
+<th>Type</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>JOB_ID</code></td>
+<td>string</td>
+<td>Job ID</td>
+</tr>
+</tbody>
+</table>
+<table>
+<thead>
+<tr>
+<th>Option</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>--limit</code>, <code>-l</code></td>
+<td>int</td>
+<td><code>200</code></td>
+<td>Maximum messages to return</td>
+</tr>
+</tbody>
+</table>
+<div class="highlight"><pre><span></span><code>rootcoz<span class="w"> </span>chat<span class="w"> </span><span class="nb">history</span><span class="w"> </span>abc123
+</code></pre></div>
+
+<h3 id="chat-abort">chat abort</h3>
+<p>Abort the currently processing chat message.</p>
+<div class="highlight"><pre><span></span><code>rootcoz chat abort JOB_ID [OPTIONS]
+</code></pre></div>
+
+<table>
+<thead>
+<tr>
+<th>Argument</th>
+<th>Type</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>JOB_ID</code></td>
+<td>string</td>
+<td>Job ID</td>
+</tr>
+</tbody>
+</table>
+<div class="highlight"><pre><span></span><code>rootcoz<span class="w"> </span>chat<span class="w"> </span>abort<span class="w"> </span>abc123
+</code></pre></div>
+
+<h3 id="chat-clear">chat clear</h3>
+<p>Clear all chat history for a job.</p>
+<div class="highlight"><pre><span></span><code>rootcoz chat clear JOB_ID [OPTIONS]
+</code></pre></div>
+
+<table>
+<thead>
+<tr>
+<th>Argument</th>
+<th>Type</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>JOB_ID</code></td>
+<td>string</td>
+<td>Job ID</td>
+</tr>
+</tbody>
+</table>
+<div class="highlight"><pre><span></span><code>rootcoz<span class="w"> </span>chat<span class="w"> </span>clear<span class="w"> </span>abc123
+<span class="c1"># Deleted 15 message(s) for job abc123.</span>
+</code></pre></div>
+
+<h3 id="chat-close">chat close</h3>
+<p>Signal that you left the chat page (frees server resources).</p>
+<div class="highlight"><pre><span></span><code>rootcoz chat close JOB_ID [OPTIONS]
+</code></pre></div>
+
+<table>
+<thead>
+<tr>
+<th>Argument</th>
+<th>Type</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>JOB_ID</code></td>
+<td>string</td>
+<td>Job ID</td>
+</tr>
+</tbody>
+</table>
+<div class="highlight"><pre><span></span><code>rootcoz<span class="w"> </span>chat<span class="w"> </span>close<span class="w"> </span>abc123
+</code></pre></div>
+
+<hr />
+<h2 id="metadata">metadata</h2>
+<p>Manage job metadata for filtering and reporting. See <a href="tracking-history.html">Tracking Failure History and Reports</a> for usage context.</p>
+<h3 id="metadata-list">metadata list</h3>
+<p>List job metadata with optional filters.</p>
+<div class="highlight"><pre><span></span><code>rootcoz metadata list [OPTIONS]
+</code></pre></div>
+
+<table>
+<thead>
+<tr>
+<th>Option</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>--team</code></td>
+<td>string</td>
+<td><code>""</code></td>
+<td>Filter by team</td>
+</tr>
+<tr>
+<td><code>--tier</code></td>
+<td>string</td>
+<td><code>""</code></td>
+<td>Filter by tier</td>
+</tr>
+<tr>
+<td><code>--version</code></td>
+<td>string</td>
+<td><code>""</code></td>
+<td>Filter by version</td>
+</tr>
+<tr>
+<td><code>--label</code>, <code>-l</code></td>
+<td>string</td>
+<td><em>(repeatable)</em></td>
+<td>Filter by label</td>
+</tr>
+</tbody>
+</table>
+<div class="highlight"><pre><span></span><code>rootcoz<span class="w"> </span>metadata<span class="w"> </span>list<span class="w"> </span>--team<span class="w"> </span>platform
+rootcoz<span class="w"> </span>metadata<span class="w"> </span>list<span class="w"> </span>--label<span class="w"> </span>env:staging<span class="w"> </span>--label<span class="w"> </span>product:core
+</code></pre></div>
+
+<h3 id="metadata-get">metadata get</h3>
+<p>Show metadata for a specific job.</p>
+<div class="highlight"><pre><span></span><code>rootcoz metadata get JOB_NAME [OPTIONS]
+</code></pre></div>
+
+<table>
+<thead>
+<tr>
+<th>Argument</th>
+<th>Type</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>JOB_NAME</code></td>
+<td>string</td>
+<td>Job name</td>
+</tr>
+</tbody>
+</table>
+<div class="highlight"><pre><span></span><code>rootcoz<span class="w"> </span>metadata<span class="w"> </span>get<span class="w"> </span>my-pipeline
+</code></pre></div>
+
+<h3 id="metadata-set">metadata set</h3>
+<p>Set or update metadata for a job.</p>
+<div class="highlight"><pre><span></span><code>rootcoz metadata set JOB_NAME [OPTIONS]
+</code></pre></div>
+
+<table>
+<thead>
+<tr>
+<th>Argument</th>
+<th>Type</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>JOB_NAME</code></td>
+<td>string</td>
+<td>Job name</td>
+</tr>
+</tbody>
+</table>
+<table>
+<thead>
+<tr>
+<th>Option</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>--team</code></td>
+<td>string</td>
+<td><code>""</code></td>
+<td>Team owning this job</td>
+</tr>
+<tr>
+<td><code>--tier</code></td>
+<td>string</td>
+<td><code>""</code></td>
+<td>Service tier</td>
+</tr>
+<tr>
+<td><code>--version</code></td>
+<td>string</td>
+<td><code>""</code></td>
+<td>Version label</td>
+</tr>
+<tr>
+<td><code>--label</code>, <code>-l</code></td>
+<td>string</td>
+<td><em>(repeatable)</em></td>
+<td>Label to set</td>
+</tr>
+</tbody>
+</table>
+<div class="highlight"><pre><span></span><code>rootcoz<span class="w"> </span>metadata<span class="w"> </span><span class="nb">set</span><span class="w"> </span>my-pipeline<span class="w"> </span>--team<span class="w"> </span>platform<span class="w"> </span>--tier<span class="w"> </span>tier1<span class="w"> </span>--label<span class="w"> </span>env:prod
+</code></pre></div>
+
+<h3 id="metadata-delete">metadata delete</h3>
+<p>Delete metadata for a job.</p>
+<div class="highlight"><pre><span></span><code>rootcoz metadata delete JOB_NAME [OPTIONS]
+</code></pre></div>
+
+<table>
+<thead>
+<tr>
+<th>Argument</th>
+<th>Type</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>JOB_NAME</code></td>
+<td>string</td>
+<td>Job name</td>
+</tr>
+</tbody>
+</table>
+<div class="highlight"><pre><span></span><code>rootcoz<span class="w"> </span>metadata<span class="w"> </span>delete<span class="w"> </span>my-pipeline
+</code></pre></div>
+
+<h3 id="metadata-import">metadata import</h3>
+<p>Bulk import metadata from a JSON or YAML file.</p>
+<div class="highlight"><pre><span></span><code>rootcoz metadata import FILE_PATH [OPTIONS]
+</code></pre></div>
+
+<table>
+<thead>
+<tr>
+<th>Argument</th>
+<th>Type</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>FILE_PATH</code></td>
+<td>string</td>
+<td>Path to JSON or YAML file</td>
+</tr>
+</tbody>
+</table>
+<p>The file must contain an array of objects with fields: <code>job_name</code>, <code>team</code>, <code>tier</code>, <code>version</code>, <code>labels</code>.</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># metadata.yaml</span>
+<span class="c1"># - job_name: pipeline-a</span>
+<span class="c1">#   team: platform</span>
+<span class="c1">#   tier: tier1</span>
+<span class="c1">#   labels: [&quot;env:prod&quot;]</span>
+<span class="c1"># - job_name: pipeline-b</span>
+<span class="c1">#   team: infra</span>
+<span class="c1">#   tier: tier2</span>
+
+rootcoz<span class="w"> </span>metadata<span class="w"> </span>import<span class="w"> </span>metadata.yaml
+<span class="c1"># Imported 2 metadata entries.</span>
+</code></pre></div>
+
+<h3 id="metadata-rules">metadata rules</h3>
+<p>List configured metadata rules for auto-assignment.</p>
+<div class="highlight"><pre><span></span><code>rootcoz metadata rules [OPTIONS]
+</code></pre></div>
+
+<div class="highlight"><pre><span></span><code>rootcoz<span class="w"> </span>metadata<span class="w"> </span>rules
+<span class="c1"># Rules file: /etc/rootcoz/metadata-rules.yaml</span>
+<span class="c1"># 3 rule(s):</span>
+<span class="c1">#   1. pattern=&#39;.*-nightly&#39;, team=&#39;platform&#39;, tier=&#39;tier1&#39;</span>
+<span class="c1">#   2. pattern=&#39;smoke-.*&#39;, team=&#39;qa&#39;</span>
+</code></pre></div>
+
+<h3 id="metadata-preview">metadata preview</h3>
+<p>Preview what metadata rules would assign to a job name.</p>
+<div class="highlight"><pre><span></span><code>rootcoz metadata preview JOB_NAME [OPTIONS]
+</code></pre></div>
+
+<table>
+<thead>
+<tr>
+<th>Argument</th>
+<th>Type</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>JOB_NAME</code></td>
+<td>string</td>
+<td>Job name to test rules against</td>
+</tr>
+</tbody>
+</table>
+<div class="highlight"><pre><span></span><code>rootcoz<span class="w"> </span>metadata<span class="w"> </span>preview<span class="w"> </span>my-nightly-pipeline
+<span class="c1"># Match for &#39;my-nightly-pipeline&#39;:</span>
+<span class="c1">#   team: platform</span>
+<span class="c1">#   tier: tier1</span>
+</code></pre></div>
+
+<hr />
+<h2 id="bug-creation-commands">Bug Creation Commands</h2>
+<p>For details on issue creation workflows, see <a href="creating-issues.html">Creating Bug Reports from Analysis</a>.</p>
+<h3 id="preview-issue">preview-issue</h3>
+<p>Preview AI-generated issue content (GitHub or Jira) before creating.</p>
+<div class="highlight"><pre><span></span><code>rootcoz preview-issue JOB_ID [OPTIONS]
+</code></pre></div>
+
+<table>
+<thead>
+<tr>
+<th>Argument</th>
+<th>Type</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>JOB_ID</code></td>
+<td>string</td>
+<td>Job ID</td>
+</tr>
+</tbody>
+</table>
+<table>
+<thead>
+<tr>
+<th>Option</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>--test</code>, <code>-t</code></td>
+<td>string</td>
+<td><em>(required)</em></td>
+<td>Test name</td>
+</tr>
+<tr>
+<td><code>--type</code></td>
+<td>string</td>
+<td><em>(required)</em></td>
+<td><code>github</code> or <code>jira</code></td>
+</tr>
+<tr>
+<td><code>--child-job</code></td>
+<td>string</td>
+<td><code>""</code></td>
+<td>Child job name</td>
+</tr>
+<tr>
+<td><code>--child-build</code></td>
+<td>int</td>
+<td><code>0</code></td>
+<td>Child build number</td>
+</tr>
+<tr>
+<td><code>--include-links</code></td>
+<td>flag</td>
+<td><code>false</code></td>
+<td>Include full URLs as clickable links</td>
+</tr>
+<tr>
+<td><code>--ai-provider</code></td>
+<td>string</td>
+<td><code>""</code></td>
+<td>AI provider for content generation</td>
+</tr>
+<tr>
+<td><code>--ai-model</code></td>
+<td>string</td>
+<td><code>""</code></td>
+<td>AI model for content generation</td>
+</tr>
+<tr>
+<td><code>--github-token</code></td>
+<td>string</td>
+<td><em>(config)</em></td>
+<td>GitHub PAT</td>
+</tr>
+<tr>
+<td><code>--github-repo-url</code></td>
+<td>string</td>
+<td><em>(config)</em></td>
+<td>GitHub repository URL</td>
+</tr>
+<tr>
+<td><code>--jira-token</code></td>
+<td>string</td>
+<td><em>(config)</em></td>
+<td>Jira token</td>
+</tr>
+<tr>
+<td><code>--jira-email</code></td>
+<td>string</td>
+<td><em>(config)</em></td>
+<td>Jira email for Cloud auth</td>
+</tr>
+<tr>
+<td><code>--jira-project-key</code></td>
+<td>string</td>
+<td><em>(config)</em></td>
+<td>Jira project key</td>
+</tr>
+<tr>
+<td><code>--jira-security-level</code></td>
+<td>string</td>
+<td><em>(config)</em></td>
+<td>Jira security level name</td>
+</tr>
+<tr>
+<td><code>--issue-prompt</code></td>
+<td>string</td>
+<td><code>""</code></td>
+<td>Additional AI instructions</td>
+</tr>
+</tbody>
+</table>
+<div class="highlight"><pre><span></span><code>rootcoz<span class="w"> </span>preview-issue<span class="w"> </span>abc123<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--test<span class="w"> </span>com.example.MyTest#testMethod<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--type<span class="w"> </span>github
+</code></pre></div>
+
+<h3 id="create-issue">create-issue</h3>
+<p>Create a GitHub issue or Jira bug from a failure analysis.</p>
+<div class="highlight"><pre><span></span><code>rootcoz create-issue JOB_ID [OPTIONS]
+</code></pre></div>
+
+<table>
+<thead>
+<tr>
+<th>Argument</th>
+<th>Type</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>JOB_ID</code></td>
+<td>string</td>
+<td>Job ID</td>
+</tr>
+</tbody>
+</table>
+<table>
+<thead>
+<tr>
+<th>Option</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>--test</code>, <code>-t</code></td>
+<td>string</td>
+<td><em>(required)</em></td>
+<td>Test name</td>
+</tr>
+<tr>
+<td><code>--type</code></td>
+<td>string</td>
+<td><em>(required)</em></td>
+<td><code>github</code> or <code>jira</code></td>
+</tr>
+<tr>
+<td><code>--title</code></td>
+<td>string</td>
+<td><em>(required)</em></td>
+<td>Issue title</td>
+</tr>
+<tr>
+<td><code>--body</code></td>
+<td>string</td>
+<td><em>(required)</em></td>
+<td>Issue body</td>
+</tr>
+<tr>
+<td><code>--child-job</code></td>
+<td>string</td>
+<td><code>""</code></td>
+<td>Child job name</td>
+</tr>
+<tr>
+<td><code>--child-build</code></td>
+<td>int</td>
+<td><code>0</code></td>
+<td>Child build number</td>
+</tr>
+<tr>
+<td><code>--github-token</code></td>
+<td>string</td>
+<td><em>(config)</em></td>
+<td>GitHub PAT</td>
+</tr>
+<tr>
+<td><code>--github-repo-url</code></td>
+<td>string</td>
+<td><em>(config)</em></td>
+<td>GitHub repository URL</td>
+</tr>
+<tr>
+<td><code>--jira-token</code></td>
+<td>string</td>
+<td><em>(config)</em></td>
+<td>Jira token</td>
+</tr>
+<tr>
+<td><code>--jira-email</code></td>
+<td>string</td>
+<td><em>(config)</em></td>
+<td>Jira email</td>
+</tr>
+<tr>
+<td><code>--jira-project-key</code></td>
+<td>string</td>
+<td><em>(config)</em></td>
+<td>Jira project key</td>
+</tr>
+<tr>
+<td><code>--jira-security-level</code></td>
+<td>string</td>
+<td><em>(config)</em></td>
+<td>Jira security level name</td>
+</tr>
+<tr>
+<td><code>--jira-issue-type</code></td>
+<td>string</td>
+<td><code>Bug</code></td>
+<td>Jira issue type (e.g. Bug, Story, Task)</td>
+</tr>
+</tbody>
+</table>
+<div class="highlight"><pre><span></span><code>rootcoz<span class="w"> </span>create-issue<span class="w"> </span>abc123<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--test<span class="w"> </span>com.example.MyTest#testMethod<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--type<span class="w"> </span>github<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--title<span class="w"> </span><span class="s2">&quot;testMethod fails with NullPointerException&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--body<span class="w"> </span><span class="s2">&quot;## Description\n\nTest fails intermittently...&quot;</span>
+</code></pre></div>
+
+<h3 id="get-issue-prompt">get-issue-prompt</h3>
+<p>Get the issue prompt from the test repo associated with a job.</p>
+<div class="highlight"><pre><span></span><code>rootcoz get-issue-prompt JOB_ID [OPTIONS]
+</code></pre></div>
+
+<table>
+<thead>
+<tr>
+<th>Argument</th>
+<th>Type</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>JOB_ID</code></td>
+<td>string</td>
+<td>Job ID</td>
+</tr>
+</tbody>
+</table>
+<div class="highlight"><pre><span></span><code>rootcoz<span class="w"> </span>get-issue-prompt<span class="w"> </span>abc123
+</code></pre></div>
+
+<hr />
+<h2 id="validate-token">validate-token</h2>
+<p>Validate a GitHub or Jira token. The token is prompted securely (hidden input).</p>
+<div class="highlight"><pre><span></span><code>rootcoz validate-token TOKEN_TYPE [OPTIONS]
+</code></pre></div>
+
+<table>
+<thead>
+<tr>
+<th>Argument</th>
+<th>Type</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>TOKEN_TYPE</code></td>
+<td>string</td>
+<td><code>github</code> or <code>jira</code></td>
+</tr>
+</tbody>
+</table>
+<table>
+<thead>
+<tr>
+<th>Option</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>--token</code></td>
+<td>string</td>
+<td><em>(prompted)</em></td>
+<td>Token value to validate</td>
+</tr>
+<tr>
+<td><code>--email</code></td>
+<td>string</td>
+<td><code>""</code></td>
+<td>Email for Jira Cloud auth</td>
+</tr>
+</tbody>
+</table>
+<div class="highlight"><pre><span></span><code>rootcoz<span class="w"> </span>validate-token<span class="w"> </span>github<span class="w"> </span>--token<span class="w"> </span>ghp_abc123
+<span class="c1"># ✓ Valid — Token has repo scope</span>
+
+rootcoz<span class="w"> </span>validate-token<span class="w"> </span>jira<span class="w"> </span>--token<span class="w"> </span>jira-token<span class="w"> </span>--email<span class="w"> </span>user@example.com
+<span class="c1"># ✗ Invalid — Authentication failed</span>
+</code></pre></div>
+
+<hr />
+<h2 id="push-reportportal">push-reportportal</h2>
+<p>Push rootcoz classifications into Report Portal test items. Requires Report Portal to be enabled on the server. See <a href="configuring-integrations.html">Configuring Integrations</a> for setup.</p>
+<div class="highlight"><pre><span></span><code>rootcoz push-reportportal JOB_ID [OPTIONS]
+</code></pre></div>
+
+<table>
+<thead>
+<tr>
+<th>Argument</th>
+<th>Type</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>JOB_ID</code></td>
+<td>string</td>
+<td>Job ID to push classifications for</td>
+</tr>
+</tbody>
+</table>
+<table>
+<thead>
+<tr>
+<th>Option</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>--child-job-name</code></td>
+<td>string</td>
+<td>—</td>
+<td>Child job name (for pipeline child push)</td>
+</tr>
+<tr>
+<td><code>--child-build-number</code></td>
+<td>int</td>
+<td>—</td>
+<td>Child build number</td>
+</tr>
+</tbody>
+</table>
+<blockquote>
+<p><strong>Tip:</strong> <code>push-rp</code> is a hidden alias for <code>push-reportportal</code>.</p>
+</blockquote>
+<div class="highlight"><pre><span></span><code>rootcoz<span class="w"> </span>push-reportportal<span class="w"> </span>abc123
+<span class="c1"># Pushed 12 classification(s) to Report Portal</span>
+<span class="c1"># Launch ID: 456</span>
+</code></pre></div>
+
+<hr />
+<h2 id="capabilities">capabilities</h2>
+<p>Show which post-analysis automation features the server supports.</p>
+<div class="highlight"><pre><span></span><code>rootcoz capabilities [OPTIONS]
+</code></pre></div>
+
+<div class="highlight"><pre><span></span><code>rootcoz<span class="w"> </span>capabilities<span class="w"> </span>--json
+<span class="c1"># {&quot;github_issues&quot;: true, &quot;jira_bugs&quot;: true, &quot;reportportal&quot;: false}</span>
+</code></pre></div>
+
+<hr />
+<h2 id="ai-models">ai-models</h2>
+<p>List available AI models by provider.</p>
+<div class="highlight"><pre><span></span><code>rootcoz ai-models [OPTIONS]
+</code></pre></div>
+
+<table>
+<thead>
+<tr>
+<th>Option</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>--provider</code>, <code>-p</code></td>
+<td>string</td>
+<td><em>(all)</em></td>
+<td>Filter by provider (<code>cursor</code>, <code>claude</code>, <code>gemini</code>)</td>
+</tr>
+</tbody>
+</table>
+<div class="highlight"><pre><span></span><code>rootcoz<span class="w"> </span>ai-models
+<span class="c1"># cursor (3 models):</span>
+<span class="c1"># MODEL ID              DISPLAY NAME</span>
+<span class="c1"># gpt-5.4-xhigh        GPT-5.4 XHigh</span>
+<span class="c1"># ...</span>
+
+rootcoz<span class="w"> </span>ai-models<span class="w"> </span>--provider<span class="w"> </span>claude
+</code></pre></div>
+
+<hr />
+<h2 id="jira-projects">jira-projects</h2>
+<p>List available Jira projects.</p>
+<div class="highlight"><pre><span></span><code>rootcoz jira-projects [OPTIONS]
+</code></pre></div>
+
+<table>
+<thead>
+<tr>
+<th>Option</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>--query</code></td>
+<td>string</td>
+<td><code>""</code></td>
+<td>Search query to filter projects</td>
+</tr>
+<tr>
+<td><code>--jira-token</code></td>
+<td>string</td>
+<td><em>(config)</em></td>
+<td>Jira token</td>
+</tr>
+<tr>
+<td><code>--jira-email</code></td>
+<td>string</td>
+<td><em>(config)</em></td>
+<td>Jira email</td>
+</tr>
+</tbody>
+</table>
+<div class="highlight"><pre><span></span><code>rootcoz<span class="w"> </span>jira-projects<span class="w"> </span>--query<span class="w"> </span><span class="s2">&quot;platform&quot;</span>
+</code></pre></div>
+
+<hr />
+<h2 id="jira-security-levels">jira-security-levels</h2>
+<p>List security levels for a Jira project.</p>
+<div class="highlight"><pre><span></span><code>rootcoz jira-security-levels PROJECT_KEY [OPTIONS]
+</code></pre></div>
+
+<table>
+<thead>
+<tr>
+<th>Argument</th>
+<th>Type</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>PROJECT_KEY</code></td>
+<td>string</td>
+<td>Jira project key</td>
+</tr>
+</tbody>
+</table>
+<table>
+<thead>
+<tr>
+<th>Option</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>--jira-token</code></td>
+<td>string</td>
+<td><em>(config)</em></td>
+<td>Jira token</td>
+</tr>
+<tr>
+<td><code>--jira-email</code></td>
+<td>string</td>
+<td><em>(config)</em></td>
+<td>Jira email</td>
+</tr>
+</tbody>
+</table>
+<div class="highlight"><pre><span></span><code>rootcoz<span class="w"> </span>jira-security-levels<span class="w"> </span>MYPROJ
+</code></pre></div>
+
+<hr />
+<h2 id="mentions">Mentions</h2>
+<h3 id="mentionable-users">mentionable-users</h3>
+<p>List users that can be @mentioned in comments.</p>
+<div class="highlight"><pre><span></span><code>rootcoz mentionable-users [OPTIONS]
+</code></pre></div>
+
+<div class="highlight"><pre><span></span><code>rootcoz<span class="w"> </span>mentionable-users
+<span class="c1"># alice</span>
+<span class="c1"># bob</span>
+<span class="c1"># charlie</span>
+</code></pre></div>
+
+<h3 id="mentions_1">mentions</h3>
+<p>List your @mentions across all reports.</p>
+<div class="highlight"><pre><span></span><code>rootcoz mentions [OPTIONS]
+</code></pre></div>
+
+<table>
+<thead>
+<tr>
+<th>Option</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>--limit</code>, <code>-l</code></td>
+<td>int</td>
+<td><code>50</code></td>
+<td>Max mentions to return</td>
+</tr>
+<tr>
+<td><code>--offset</code>, <code>-o</code></td>
+<td>int</td>
+<td><code>0</code></td>
+<td>Pagination offset</td>
+</tr>
+<tr>
+<td><code>--unread</code></td>
+<td>flag</td>
+<td><code>false</code></td>
+<td>Show only unread mentions</td>
+</tr>
+</tbody>
+</table>
+<div class="highlight"><pre><span></span><code>rootcoz<span class="w"> </span>mentions<span class="w"> </span>--unread
+</code></pre></div>
+
+<h3 id="mentions-mark-read">mentions-mark-read</h3>
+<p>Mark specific mentions as read.</p>
+<div class="highlight"><pre><span></span><code>rootcoz mentions-mark-read [OPTIONS]
+</code></pre></div>
+
+<table>
+<thead>
+<tr>
+<th>Option</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>--ids</code></td>
+<td>string</td>
+<td><em>(required)</em></td>
+<td>Comma-separated comment IDs</td>
+</tr>
+</tbody>
+</table>
+<div class="highlight"><pre><span></span><code>rootcoz<span class="w"> </span>mentions-mark-read<span class="w"> </span>--ids<span class="w"> </span><span class="s2">&quot;42,43,44&quot;</span>
+</code></pre></div>
+
+<h3 id="mentions-mark-all-read">mentions-mark-all-read</h3>
+<p>Mark all mentions as read.</p>
+<div class="highlight"><pre><span></span><code>rootcoz mentions-mark-all-read [OPTIONS]
+</code></pre></div>
+
+<div class="highlight"><pre><span></span><code>rootcoz<span class="w"> </span>mentions-mark-all-read
+</code></pre></div>
+
+<hr />
+<h2 id="reports">reports</h2>
+<p>Analytics reports. See <a href="tracking-history.html">Tracking Failure History and Reports</a> for usage context.</p>
+<p>All report subcommands share the same filter options:</p>
+<table>
+<thead>
+<tr>
+<th>Option</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>--team</code></td>
+<td>string</td>
+<td><code>""</code></td>
+<td>Filter by team</td>
+</tr>
+<tr>
+<td><code>--tier</code></td>
+<td>string</td>
+<td><code>""</code></td>
+<td>Filter by tier</td>
+</tr>
+<tr>
+<td><code>--version</code></td>
+<td>string</td>
+<td><code>""</code></td>
+<td>Filter by version</td>
+</tr>
+<tr>
+<td><code>--from</code></td>
+<td>string</td>
+<td><code>""</code></td>
+<td>From date (<code>YYYY-MM-DD</code>)</td>
+</tr>
+<tr>
+<td><code>--to</code></td>
+<td>string</td>
+<td><code>""</code></td>
+<td>To date (<code>YYYY-MM-DD</code>)</td>
+</tr>
+<tr>
+<td><code>--status</code></td>
+<td>string</td>
+<td><code>""</code></td>
+<td>Filter by job status</td>
+</tr>
+<tr>
+<td><code>--tags</code></td>
+<td>string</td>
+<td><code>""</code></td>
+<td>Comma-separated tags filter</td>
+</tr>
+<tr>
+<td><code>--exclude-tags</code></td>
+<td>string</td>
+<td><code>""</code></td>
+<td>Comma-separated tags to exclude</td>
+</tr>
+</tbody>
+</table>
+<h3 id="reports-totals">reports totals</h3>
+<p>Show aggregate totals: jobs, failures, reviewed.</p>
+<div class="highlight"><pre><span></span><code>rootcoz reports totals [OPTIONS]
+</code></pre></div>
+
+<div class="highlight"><pre><span></span><code>rootcoz<span class="w"> </span>reports<span class="w"> </span>totals<span class="w"> </span>--team<span class="w"> </span>platform<span class="w"> </span>--from<span class="w"> </span><span class="m">2026</span>-06-01
+<span class="c1"># Total jobs: 45  Failures: 120  Reviewed: 98</span>
+</code></pre></div>
+
+<h3 id="reports-overrides">reports overrides</h3>
+<p>Show classification overrides grouped by original→new classification.</p>
+<div class="highlight"><pre><span></span><code>rootcoz reports overrides [OPTIONS]
+</code></pre></div>
+
+<div class="highlight"><pre><span></span><code>rootcoz<span class="w"> </span>reports<span class="w"> </span>overrides<span class="w"> </span>--from<span class="w"> </span><span class="m">2026</span>-06-01
+<span class="c1"># Total overrides: 15</span>
+<span class="c1">#   CODE ISSUE → PRODUCT BUG: 8</span>
+<span class="c1">#   INFRASTRUCTURE → CODE ISSUE: 7</span>
+</code></pre></div>
+
+<h3 id="reports-issues">reports issues</h3>
+<p>Show GitHub/Jira issues created from analyses.</p>
+<div class="highlight"><pre><span></span><code>rootcoz reports issues [OPTIONS]
+</code></pre></div>
+
+<div class="highlight"><pre><span></span><code>rootcoz<span class="w"> </span>reports<span class="w"> </span>issues<span class="w"> </span>--team<span class="w"> </span>platform<span class="w"> </span>--from<span class="w"> </span><span class="m">2026</span>-06-01
+<span class="c1"># Total issues created: 12</span>
+</code></pre></div>
+
+<hr />
+<h2 id="auth">auth</h2>
+<p>Authentication commands. See <a href="managing-users.html">Managing Users and Roles</a> for role details.</p>
+<h3 id="auth-login">auth login</h3>
+<p>Validate credentials. This does <strong>not</strong> persist a session — use <code>api_key</code> in config or <code>--api-key</code> / <code>ROOTCOZ_API_KEY</code> for persistent auth.</p>
+<div class="highlight"><pre><span></span><code>rootcoz auth login [OPTIONS]
+</code></pre></div>
+
+<table>
+<thead>
+<tr>
+<th>Option</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>--username</code>, <code>-u</code></td>
+<td>string</td>
+<td><em>(required)</em></td>
+<td>Username</td>
+</tr>
+<tr>
+<td><code>--api-key</code>, <code>-k</code></td>
+<td>string</td>
+<td><em>(required)</em></td>
+<td>API key</td>
+</tr>
+</tbody>
+</table>
+<div class="highlight"><pre><span></span><code>rootcoz<span class="w"> </span>auth<span class="w"> </span>login<span class="w"> </span>-u<span class="w"> </span>myuser<span class="w"> </span>-k<span class="w"> </span>sk-abc123
+<span class="c1"># Logged in as myuser (role: reviewer, admin: False)</span>
+</code></pre></div>
+
+<h3 id="auth-rotate-key">auth rotate-key</h3>
+<p>Rotate your own API key. The new key is displayed once.</p>
+<div class="highlight"><pre><span></span><code>rootcoz auth rotate-key [OPTIONS]
+</code></pre></div>
+
+<blockquote>
+<p><strong>Warning:</strong> The new key replaces the old one immediately. Save it before closing the terminal.</p>
+</blockquote>
+<div class="highlight"><pre><span></span><code>rootcoz<span class="w"> </span>auth<span class="w"> </span>rotate-key
+<span class="c1"># Key rotated for: myuser</span>
+<span class="c1"># ⚠️  Save this API key — you won&#39;t see it again!</span>
+<span class="c1"># API Key: sk-newkey...</span>
+</code></pre></div>
+
+<h3 id="auth-whoami">auth whoami</h3>
+<p>Show current authenticated user info.</p>
+<div class="highlight"><pre><span></span><code>rootcoz auth whoami [OPTIONS]
+</code></pre></div>
+
+<div class="highlight"><pre><span></span><code>rootcoz<span class="w"> </span>auth<span class="w"> </span>whoami
+<span class="c1"># USERNAME  ROLE      IS ADMIN</span>
+<span class="c1"># myuser    reviewer  False</span>
+</code></pre></div>
+
+<h3 id="auth-logout">auth logout</h3>
+<p>Logout (clear session).</p>
+<div class="highlight"><pre><span></span><code>rootcoz auth logout [OPTIONS]
+</code></pre></div>
+
+<div class="highlight"><pre><span></span><code>rootcoz<span class="w"> </span>auth<span class="w"> </span><span class="nb">logout</span>
+</code></pre></div>
+
+<hr />
+<h2 id="admin">admin</h2>
+<p>Admin management commands. All admin commands require <strong>admin</strong> role. See <a href="managing-users.html">Managing Users and Roles</a> for role management details.</p>
+<h3 id="admin-users-list">admin users list</h3>
+<p>List all users (admin and regular).</p>
+<div class="highlight"><pre><span></span><code>rootcoz admin users list [OPTIONS]
+</code></pre></div>
+
+<div class="highlight"><pre><span></span><code>rootcoz<span class="w"> </span>admin<span class="w"> </span>users<span class="w"> </span>list
+</code></pre></div>
+
+<h3 id="admin-users-create">admin users create</h3>
+<p>Create a new user with the specified role.</p>
+<div class="highlight"><pre><span></span><code>rootcoz admin users create USERNAME [OPTIONS]
+</code></pre></div>
+
+<table>
+<thead>
+<tr>
+<th>Argument</th>
+<th>Type</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>USERNAME</code></td>
+<td>string</td>
+<td>Username for the new user</td>
+</tr>
+</tbody>
+</table>
+<table>
+<thead>
+<tr>
+<th>Option</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>--role</code></td>
+<td>string</td>
+<td><em>(required)</em></td>
+<td><code>viewer</code>, <code>reviewer</code>, <code>operator</code>, or <code>admin</code></td>
+</tr>
+</tbody>
+</table>
+<div class="highlight"><pre><span></span><code>rootcoz<span class="w"> </span>admin<span class="w"> </span>users<span class="w"> </span>create<span class="w"> </span>alice<span class="w"> </span>--role<span class="w"> </span>operator
+</code></pre></div>
+
+<h3 id="admin-users-delete">admin users delete</h3>
+<p>Delete a user.</p>
+<div class="highlight"><pre><span></span><code>rootcoz admin users delete USERNAME [OPTIONS]
+</code></pre></div>
+
+<table>
+<thead>
+<tr>
+<th>Argument</th>
+<th>Type</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>USERNAME</code></td>
+<td>string</td>
+<td>Username to delete</td>
+</tr>
+</tbody>
+</table>
+<table>
+<thead>
+<tr>
+<th>Option</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>--force</code>, <code>-f</code></td>
+<td>flag</td>
+<td><code>false</code></td>
+<td>Skip confirmation prompt</td>
+</tr>
+</tbody>
+</table>
+<div class="highlight"><pre><span></span><code>rootcoz<span class="w"> </span>admin<span class="w"> </span>users<span class="w"> </span>delete<span class="w"> </span>alice<span class="w"> </span>--force
+</code></pre></div>
+
+<h3 id="admin-users-rotate-key">admin users rotate-key</h3>
+<p>Rotate a user's API key.</p>
+<div class="highlight"><pre><span></span><code>rootcoz admin users rotate-key USERNAME [OPTIONS]
+</code></pre></div>
+
+<table>
+<thead>
+<tr>
+<th>Argument</th>
+<th>Type</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>USERNAME</code></td>
+<td>string</td>
+<td>Username to rotate key for</td>
+</tr>
+</tbody>
+</table>
+<div class="highlight"><pre><span></span><code>rootcoz<span class="w"> </span>admin<span class="w"> </span>users<span class="w"> </span>rotate-key<span class="w"> </span>alice
+</code></pre></div>
+
+<h3 id="admin-users-change-role">admin users change-role</h3>
+<p>Change a user's role. Promoting to admin generates an API key.</p>
+<div class="highlight"><pre><span></span><code>rootcoz admin users change-role USERNAME ROLE [OPTIONS]
+</code></pre></div>
+
+<table>
+<thead>
+<tr>
+<th>Argument</th>
+<th>Type</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>USERNAME</code></td>
+<td>string</td>
+<td>Username to change role for</td>
+</tr>
+<tr>
+<td><code>ROLE</code></td>
+<td>string</td>
+<td>New role: <code>viewer</code>, <code>reviewer</code>, <code>operator</code>, or <code>admin</code></td>
+</tr>
+</tbody>
+</table>
+<div class="highlight"><pre><span></span><code>rootcoz<span class="w"> </span>admin<span class="w"> </span>users<span class="w"> </span>change-role<span class="w"> </span>alice<span class="w"> </span>admin
+</code></pre></div>
+
+<h3 id="admin-users-pending">admin users pending</h3>
+<p>List users awaiting admin approval.</p>
+<div class="highlight"><pre><span></span><code>rootcoz admin users pending [OPTIONS]
+</code></pre></div>
+
+<div class="highlight"><pre><span></span><code>rootcoz<span class="w"> </span>admin<span class="w"> </span>users<span class="w"> </span>pending
+</code></pre></div>
+
+<h3 id="admin-users-approve">admin users approve</h3>
+<p>Approve a pending user registration.</p>
+<div class="highlight"><pre><span></span><code>rootcoz admin users approve USERNAME [OPTIONS]
+</code></pre></div>
+
+<table>
+<thead>
+<tr>
+<th>Argument</th>
+<th>Type</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>USERNAME</code></td>
+<td>string</td>
+<td>Username to approve</td>
+</tr>
+</tbody>
+</table>
+<div class="highlight"><pre><span></span><code>rootcoz<span class="w"> </span>admin<span class="w"> </span>users<span class="w"> </span>approve<span class="w"> </span>alice
+</code></pre></div>
+
+<h3 id="admin-users-reject">admin users reject</h3>
+<p>Reject a pending user registration.</p>
+<div class="highlight"><pre><span></span><code>rootcoz admin users reject USERNAME [OPTIONS]
+</code></pre></div>
+
+<table>
+<thead>
+<tr>
+<th>Argument</th>
+<th>Type</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>USERNAME</code></td>
+<td>string</td>
+<td>Username to reject</td>
+</tr>
+</tbody>
+</table>
+<div class="highlight"><pre><span></span><code>rootcoz<span class="w"> </span>admin<span class="w"> </span>users<span class="w"> </span>reject<span class="w"> </span>spammer
+</code></pre></div>
+
+<hr />
+<h2 id="admin-settings">admin settings</h2>
+<p>Manage server settings at runtime. See <a href="environment-variables.html">Environment Variables and Configuration</a> for the full list of settings.</p>
+<h3 id="admin-settings-list">admin settings list</h3>
+<p>List all server settings with current values and sources.</p>
+<div class="highlight"><pre><span></span><code>rootcoz admin settings list [OPTIONS]
+</code></pre></div>
+
+<table>
+<thead>
+<tr>
+<th>Option</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>--category</code>, <code>-c</code></td>
+<td>string</td>
+<td><em>(all)</em></td>
+<td>Filter by category</td>
+</tr>
+<tr>
+<td><code>--reveal</code></td>
+<td>flag</td>
+<td><code>false</code></td>
+<td>Show sensitive values (default: masked)</td>
+</tr>
+</tbody>
+</table>
+<div class="highlight"><pre><span></span><code>rootcoz<span class="w"> </span>admin<span class="w"> </span>settings<span class="w"> </span>list<span class="w"> </span>--category<span class="w"> </span>jenkins
+rootcoz<span class="w"> </span>admin<span class="w"> </span>settings<span class="w"> </span>list<span class="w"> </span>--reveal
+</code></pre></div>
+
+<h3 id="admin-settings-set">admin settings set</h3>
+<p>Set a server setting (persisted to DB, overrides env var).</p>
+<div class="highlight"><pre><span></span><code>rootcoz admin settings set KEY VALUE [OPTIONS]
+</code></pre></div>
+
+<table>
+<thead>
+<tr>
+<th>Argument</th>
+<th>Type</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>KEY</code></td>
+<td>string</td>
+<td>Setting key (e.g. <code>jenkins_url</code> or <code>JENKINS_URL</code>)</td>
+</tr>
+<tr>
+<td><code>VALUE</code></td>
+<td>string</td>
+<td>New value</td>
+</tr>
+</tbody>
+</table>
+<div class="highlight"><pre><span></span><code>rootcoz<span class="w"> </span>admin<span class="w"> </span>settings<span class="w"> </span><span class="nb">set</span><span class="w"> </span>jenkins_url<span class="w"> </span>https://jenkins.example.com
+</code></pre></div>
+
+<h3 id="admin-settings-reset">admin settings reset</h3>
+<p>Reset a server setting to its environment variable or default value (removes DB override).</p>
+<div class="highlight"><pre><span></span><code>rootcoz admin settings reset KEY [OPTIONS]
+</code></pre></div>
+
+<table>
+<thead>
+<tr>
+<th>Argument</th>
+<th>Type</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>KEY</code></td>
+<td>string</td>
+<td>Setting key to reset</td>
+</tr>
+</tbody>
+</table>
+<div class="highlight"><pre><span></span><code>rootcoz<span class="w"> </span>admin<span class="w"> </span>settings<span class="w"> </span>reset<span class="w"> </span>jenkins_url
+</code></pre></div>
+
+<h3 id="admin-settings-history">admin settings history</h3>
+<p>Show server settings change history.</p>
+<div class="highlight"><pre><span></span><code>rootcoz admin settings history [OPTIONS]
+</code></pre></div>
+
+<table>
+<thead>
+<tr>
+<th>Option</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>--key</code>, <code>-k</code></td>
+<td>string</td>
+<td><em>(all)</em></td>
+<td>Filter by setting key</td>
+</tr>
+<tr>
+<td><code>--limit</code>, <code>-l</code></td>
+<td>int</td>
+<td><code>50</code></td>
+<td>Max entries to return</td>
+</tr>
+</tbody>
+</table>
+<div class="highlight"><pre><span></span><code>rootcoz<span class="w"> </span>admin<span class="w"> </span>settings<span class="w"> </span><span class="nb">history</span><span class="w"> </span>--key<span class="w"> </span>jenkins_url<span class="w"> </span>--limit<span class="w"> </span><span class="m">10</span>
+</code></pre></div>
+
+<hr />
+<h2 id="admin-token-usage">admin token-usage</h2>
+<p>View AI token usage and costs. Admin only.</p>
+<div class="highlight"><pre><span></span><code>rootcoz admin token-usage [OPTIONS]
+</code></pre></div>
+
+<table>
+<thead>
+<tr>
+<th>Option</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>--period</code></td>
+<td>string</td>
+<td>—</td>
+<td><code>today</code>, <code>week</code>, <code>month</code>, or <code>all</code></td>
+</tr>
+<tr>
+<td><code>--start-date</code></td>
+<td>string</td>
+<td>—</td>
+<td>Start date (<code>YYYY-MM-DD</code>)</td>
+</tr>
+<tr>
+<td><code>--end-date</code></td>
+<td>string</td>
+<td>—</td>
+<td>End date (<code>YYYY-MM-DD</code>)</td>
+</tr>
+<tr>
+<td><code>--provider</code></td>
+<td>string</td>
+<td>—</td>
+<td>Filter by AI provider</td>
+</tr>
+<tr>
+<td><code>--model</code></td>
+<td>string</td>
+<td>—</td>
+<td>Filter by AI model</td>
+</tr>
+<tr>
+<td><code>--call-type</code></td>
+<td>string</td>
+<td>—</td>
+<td>Filter by call type</td>
+</tr>
+<tr>
+<td><code>--group-by</code></td>
+<td>string</td>
+<td>—</td>
+<td>Group by: <code>provider</code>, <code>model</code>, <code>call_type</code>, <code>day</code>, <code>week</code>, <code>month</code>, <code>job</code></td>
+</tr>
+<tr>
+<td><code>--job-id</code></td>
+<td>string</td>
+<td>—</td>
+<td>Get usage for a specific job</td>
+</tr>
+<tr>
+<td><code>--format</code></td>
+<td>string</td>
+<td><code>table</code></td>
+<td>Output format: <code>table</code>, <code>json</code>, or <code>csv</code></td>
+</tr>
+</tbody>
+</table>
+<p>When invoked with no options, shows a dashboard summary (today, this week, this month).</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># Dashboard summary</span>
+rootcoz<span class="w"> </span>admin<span class="w"> </span>token-usage
+
+<span class="c1"># Usage for this week, grouped by model</span>
+rootcoz<span class="w"> </span>admin<span class="w"> </span>token-usage<span class="w"> </span>--period<span class="w"> </span>week<span class="w"> </span>--group-by<span class="w"> </span>model
+
+<span class="c1"># CSV export for a date range</span>
+rootcoz<span class="w"> </span>admin<span class="w"> </span>token-usage<span class="w"> </span>--start-date<span class="w"> </span><span class="m">2026</span>-06-01<span class="w"> </span>--end-date<span class="w"> </span><span class="m">2026</span>-06-22<span class="w"> </span>--format<span class="w"> </span>csv
+
+<span class="c1"># Per-job token usage</span>
+rootcoz<span class="w"> </span>admin<span class="w"> </span>token-usage<span class="w"> </span>--job-id<span class="w"> </span>abc123
+</code></pre></div>
+
+<hr />
+<h2 id="admin-chat">admin-chat</h2>
+<p>Admin server-wide chat with AI. The admin chat has access to database queries and report generation tools. Requires <strong>admin</strong> role.</p>
+<h3 id="admin-chat-send">admin-chat send</h3>
+<p>Send a message to the admin server chat. Polls for up to ~2 minutes for the AI response.</p>
+<div class="highlight"><pre><span></span><code>rootcoz admin-chat send MESSAGE [OPTIONS]
+</code></pre></div>
+
+<table>
+<thead>
+<tr>
+<th>Argument</th>
+<th>Type</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>MESSAGE</code></td>
+<td>string</td>
+<td>Message to send</td>
+</tr>
+</tbody>
+</table>
+<table>
+<thead>
+<tr>
+<th>Option</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>--provider</code>, <code>-p</code></td>
+<td>string</td>
+<td><em>(server default)</em></td>
+<td>AI provider</td>
+</tr>
+<tr>
+<td><code>--model</code>, <code>-m</code></td>
+<td>string</td>
+<td><em>(server default)</em></td>
+<td>AI model</td>
+</tr>
+</tbody>
+</table>
+<div class="highlight"><pre><span></span><code>rootcoz<span class="w"> </span>admin-chat<span class="w"> </span>send<span class="w"> </span><span class="s2">&quot;What are the top 5 flakiest tests this month?&quot;</span>
+</code></pre></div>
+
+<h3 id="admin-chat-history">admin-chat history</h3>
+<p>Show admin chat history.</p>
+<div class="highlight"><pre><span></span><code>rootcoz admin-chat history [OPTIONS]
+</code></pre></div>
+
+<table>
+<thead>
+<tr>
+<th>Option</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>--limit</code>, <code>-l</code></td>
+<td>int</td>
+<td><code>200</code></td>
+<td>Maximum messages to return</td>
+</tr>
+</tbody>
+</table>
+<div class="highlight"><pre><span></span><code>rootcoz<span class="w"> </span>admin-chat<span class="w"> </span><span class="nb">history</span>
+</code></pre></div>
+
+<h3 id="admin-chat-clear">admin-chat clear</h3>
+<p>Clear admin chat history.</p>
+<div class="highlight"><pre><span></span><code>rootcoz admin-chat clear [OPTIONS]
+</code></pre></div>
+
+<div class="highlight"><pre><span></span><code>rootcoz<span class="w"> </span>admin-chat<span class="w"> </span>clear
+<span class="c1"># Cleared 24 messages.</span>
+</code></pre></div>
+
+<h3 id="admin-chat-save-artifact">admin-chat save-artifact</h3>
+<p>Save an HTML file as an admin chat report artifact.</p>
+<div class="highlight"><pre><span></span><code>rootcoz admin-chat save-artifact HTML_FILE [OPTIONS]
+</code></pre></div>
+
+<table>
+<thead>
+<tr>
+<th>Argument</th>
+<th>Type</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>HTML_FILE</code></td>
+<td>path</td>
+<td>Path to the HTML file to upload</td>
+</tr>
+</tbody>
+</table>
+<table>
+<thead>
+<tr>
+<th>Option</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>--filename</code>, <code>-f</code></td>
+<td>string</td>
+<td><em>(input file name)</em></td>
+<td>Artifact filename</td>
+</tr>
+</tbody>
+</table>
+<div class="highlight"><pre><span></span><code>rootcoz<span class="w"> </span>admin-chat<span class="w"> </span>save-artifact<span class="w"> </span>report.html<span class="w"> </span>--filename<span class="w"> </span><span class="s2">&quot;weekly-summary.html&quot;</span>
+</code></pre></div>
+
+<h3 id="admin-chat-download-artifact">admin-chat download-artifact</h3>
+<p>Download an admin chat report artifact.</p>
+<div class="highlight"><pre><span></span><code>rootcoz admin-chat download-artifact ARTIFACT_ID [OPTIONS]
+</code></pre></div>
+
+<table>
+<thead>
+<tr>
+<th>Argument</th>
+<th>Type</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>ARTIFACT_ID</code></td>
+<td>string</td>
+<td>Artifact UUID to download</td>
+</tr>
+</tbody>
+</table>
+<table>
+<thead>
+<tr>
+<th>Option</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>--output</code>, <code>-o</code></td>
+<td>string</td>
+<td><code>report-&lt;id&gt;.html</code></td>
+<td>Output file path</td>
+</tr>
+</tbody>
+</table>
+<div class="highlight"><pre><span></span><code>rootcoz<span class="w"> </span>admin-chat<span class="w"> </span>download-artifact<span class="w"> </span>a1b2c3d4<span class="w"> </span>-o<span class="w"> </span>summary.html
+<span class="c1"># Downloaded to summary.html (15234 bytes)</span>
+</code></pre></div>
+
+<hr />
+<h2 id="config">config</h2>
+<p>Manage rootcoz CLI configuration. Does not require a server connection.</p>
+<h3 id="config-show">config show</h3>
+<p>Show current configuration (default when running <code>rootcoz config</code> with no subcommand).</p>
+<div class="highlight"><pre><span></span><code>rootcoz config show
+</code></pre></div>
+
+<div class="highlight"><pre><span></span><code>rootcoz<span class="w"> </span>config<span class="w"> </span>show
+<span class="c1"># Config file: /home/user/.config/rootcoz/config.toml</span>
+<span class="c1"># Default server: dev</span>
+<span class="c1">#</span>
+<span class="c1"># Servers (2):</span>
+<span class="c1">#   dev *: http://localhost:8000 user=myuser</span>
+<span class="c1">#   prod: https://rootcoz.example.com (no-verify-ssl)</span>
+</code></pre></div>
+
+<h3 id="config-servers">config servers</h3>
+<p>List configured servers.</p>
+<div class="highlight"><pre><span></span><code>rootcoz config servers [OPTIONS]
+</code></pre></div>
+
+<div class="highlight"><pre><span></span><code>rootcoz<span class="w"> </span>config<span class="w"> </span>servers
+rootcoz<span class="w"> </span>config<span class="w"> </span>servers<span class="w"> </span>--json
+</code></pre></div>
+
+<h3 id="config-completion">config completion</h3>
+<p>Show shell completion setup instructions.</p>
+<div class="highlight"><pre><span></span><code>rootcoz config completion [SHELL]
+</code></pre></div>
+
+<table>
+<thead>
+<tr>
+<th>Argument</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>SHELL</code></td>
+<td>string</td>
+<td><code>zsh</code></td>
+<td>Shell type: <code>bash</code> or <code>zsh</code></td>
+</tr>
+</tbody>
+</table>
+<div class="highlight"><pre><span></span><code>rootcoz<span class="w"> </span>config<span class="w"> </span>completion<span class="w"> </span>zsh
+<span class="c1"># Add to ~/.zshrc:</span>
+<span class="c1"># if command -v rootcoz &amp;&gt; /dev/null; then</span>
+<span class="c1">#   eval &quot;$(rootcoz --show-completion zsh)&quot;</span>
+<span class="c1"># fi</span>
+</code></pre></div>
+
+<hr />
+<h2 id="configuration-file-reference">Configuration File Reference</h2>
+<p>The CLI reads configuration from <code>$XDG_CONFIG_HOME/rootcoz/config.toml</code> (defaults to <code>~/.config/rootcoz/config.toml</code>). See <a href="cli-setup.html">Setting Up the CLI</a> for setup instructions.</p>
+<h3 id="file-structure">File Structure</h3>
+<div class="highlight"><pre><span></span><code><span class="k">[default]</span>
+<span class="n">server</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">&quot;dev&quot;</span><span class="w">                    </span><span class="c1"># Default server name</span>
+
+<span class="k">[defaults]</span><span class="w">                         </span><span class="c1"># Shared settings for all servers</span>
+<span class="n">username</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">&quot;myuser&quot;</span>
+<span class="n">ai_provider</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">&quot;claude&quot;</span>
+
+<span class="k">[servers.dev]</span>
+<span class="n">url</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">&quot;http://localhost:8000&quot;</span>
+<span class="n">api_key</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">&quot;sk-abc123&quot;</span>
+
+<span class="k">[servers.prod]</span>
+<span class="n">url</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">&quot;https://rootcoz.example.com&quot;</span>
+<span class="n">no_verify_ssl</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="kc">true</span>
+<span class="n">username</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">&quot;produser&quot;</span>
+<span class="n">api_key</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">&quot;sk-prod456&quot;</span>
+</code></pre></div>
+
+<h3 id="per-server-config-fields">Per-Server Config Fields</h3>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>url</code></td>
+<td>string</td>
+<td><em>(required)</em></td>
+<td>Server URL</td>
+</tr>
+<tr>
+<td><code>username</code></td>
+<td>string</td>
+<td><code>""</code></td>
+<td>Username</td>
+</tr>
+<tr>
+<td><code>api_key</code></td>
+<td>string</td>
+<td><code>""</code></td>
+<td>API key for authentication</td>
+</tr>
+<tr>
+<td><code>no_verify_ssl</code></td>
+<td>bool</td>
+<td><code>false</code></td>
+<td>Disable SSL verification</td>
+</tr>
+<tr>
+<td><code>ai_provider</code></td>
+<td>string</td>
+<td><code>""</code></td>
+<td>Default AI provider</td>
+</tr>
+<tr>
+<td><code>ai_model</code></td>
+<td>string</td>
+<td><code>""</code></td>
+<td>Default AI model</td>
+</tr>
+<tr>
+<td><code>ai_call_timeout</code></td>
+<td>int</td>
+<td><code>0</code></td>
+<td>AI call timeout (0 = server default)</td>
+</tr>
+<tr>
+<td><code>max_concurrent_ai_calls</code></td>
+<td>int</td>
+<td><code>0</code></td>
+<td>Max concurrent AI calls (0 = server default)</td>
+</tr>
+<tr>
+<td><code>jenkins_url</code></td>
+<td>string</td>
+<td><code>""</code></td>
+<td>Jenkins server URL</td>
+</tr>
+<tr>
+<td><code>jenkins_user</code></td>
+<td>string</td>
+<td><code>""</code></td>
+<td>Jenkins username</td>
+</tr>
+<tr>
+<td><code>jenkins_password</code></td>
+<td>string</td>
+<td><code>""</code></td>
+<td>Jenkins password/token</td>
+</tr>
+<tr>
+<td><code>jenkins_ssl_verify</code></td>
+<td>bool</td>
+<td>—</td>
+<td>Jenkins SSL verification</td>
+</tr>
+<tr>
+<td><code>jenkins_timeout</code></td>
+<td>int</td>
+<td><code>0</code></td>
+<td>Jenkins API timeout (0 = server default)</td>
+</tr>
+<tr>
+<td><code>tests_repo_url</code></td>
+<td>string</td>
+<td><code>""</code></td>
+<td>Tests repository URL</td>
+</tr>
+<tr>
+<td><code>tests_repo_token</code></td>
+<td>string</td>
+<td><code>""</code></td>
+<td>Private test repo token</td>
+</tr>
+<tr>
+<td><code>jira_url</code></td>
+<td>string</td>
+<td><code>""</code></td>
+<td>Jira instance URL</td>
+</tr>
+<tr>
+<td><code>jira_email</code></td>
+<td>string</td>
+<td><code>""</code></td>
+<td>Jira Cloud email</td>
+</tr>
+<tr>
+<td><code>jira_api_token</code></td>
+<td>string</td>
+<td><code>""</code></td>
+<td>Jira Cloud API token</td>
+</tr>
+<tr>
+<td><code>jira_pat</code></td>
+<td>string</td>
+<td><code>""</code></td>
+<td>Jira Server/DC PAT</td>
+</tr>
+<tr>
+<td><code>jira_token</code></td>
+<td>string</td>
+<td><code>""</code></td>
+<td>Jira token (generic)</td>
+</tr>
+<tr>
+<td><code>jira_project_key</code></td>
+<td>string</td>
+<td><code>""</code></td>
+<td>Jira project key</td>
+</tr>
+<tr>
+<td><code>jira_security_level</code></td>
+<td>string</td>
+<td><code>""</code></td>
+<td>Jira security level name</td>
+</tr>
+<tr>
+<td><code>jira_ssl_verify</code></td>
+<td>bool</td>
+<td>—</td>
+<td>Jira SSL verification</td>
+</tr>
+<tr>
+<td><code>jira_max_results</code></td>
+<td>int</td>
+<td><code>0</code></td>
+<td>Max Jira search results (0 = server default)</td>
+</tr>
+<tr>
+<td><code>enable_jira</code></td>
+<td>bool</td>
+<td>—</td>
+<td>Enable/disable Jira integration</td>
+</tr>
+<tr>
+<td><code>github_token</code></td>
+<td>string</td>
+<td><code>""</code></td>
+<td>GitHub API token</td>
+</tr>
+<tr>
+<td><code>github_repo_url</code></td>
+<td>string</td>
+<td><code>""</code></td>
+<td>GitHub repository URL</td>
+</tr>
+<tr>
+<td><code>peers</code></td>
+<td>string</td>
+<td><code>""</code></td>
+<td>Peer configs: <code>provider:model,provider:model</code></td>
+</tr>
+<tr>
+<td><code>peer_analysis_max_rounds</code></td>
+<td>int</td>
+<td><code>0</code></td>
+<td>Max peer debate rounds (0 = server default)</td>
+</tr>
+<tr>
+<td><code>additional_repos</code></td>
+<td>string</td>
+<td><code>""</code></td>
+<td>Additional repos: <code>name:url,name:url</code></td>
+</tr>
+<tr>
+<td><code>wait_for_completion</code></td>
+<td>bool</td>
+<td>—</td>
+<td>Wait for Jenkins job completion</td>
+</tr>
+<tr>
+<td><code>poll_interval_minutes</code></td>
+<td>int</td>
+<td><code>0</code></td>
+<td>Jenkins poll interval (0 = server default)</td>
+</tr>
+<tr>
+<td><code>max_wait_minutes</code></td>
+<td>int</td>
+<td><code>0</code></td>
+<td>Max wait time (0 = server default)</td>
+</tr>
+<tr>
+<td><code>force</code></td>
+<td>bool</td>
+<td>—</td>
+<td>Force analysis on successful builds</td>
+</tr>
+</tbody>
+</table>
+<blockquote>
+<p><strong>Note:</strong> Fields in the <code>[defaults]</code> section apply to all servers unless overridden in a specific <code>[servers.&lt;name&gt;]</code> section. The <code>server</code> field is only valid in <code>[default]</code>, not in <code>[defaults]</code>.</p>
+</blockquote>
+<hr />
+<h2 id="output-formats">Output Formats</h2>
+<p>All commands support <code>--json</code> for machine-readable output. Without <code>--json</code>, output is displayed as aligned text tables.</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># Table output (default)</span>
+rootcoz<span class="w"> </span>results<span class="w"> </span>list
+<span class="c1"># JOB ID    STATUS     JENKINS URL                    CREATED</span>
+<span class="c1"># abc123    completed  https://jenkins.example.com/…  2026-06-22T10:30:00</span>
+
+<span class="c1"># JSON output</span>
+rootcoz<span class="w"> </span>results<span class="w"> </span>list<span class="w"> </span>--json
+<span class="c1"># [{&quot;job_id&quot;: &quot;abc123&quot;, &quot;status&quot;: &quot;completed&quot;, ...}]</span>
+</code></pre></div>
+
+<p>The <code>admin token-usage</code> command additionally supports <code>--format csv</code> for CSV export.</p>
+<hr />
+<h2 id="exit-codes">Exit Codes</h2>
+<table>
+<thead>
+<tr>
+<th>Code</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>0</code></td>
+<td>Success</td>
+</tr>
+<tr>
+<td><code>1</code></td>
+<td>Error (API error, validation failure, connection failure)</td>
+</tr>
+</tbody>
+</table>
+<p>On HTTP 401 errors, the CLI prints a hint about API key authentication. On HTTP 403 errors, it suggests contacting an administrator for role elevation.</p>
+<hr />
+<h2 id="role-requirements">Role Requirements</h2>
+<p>Commands require minimum roles as defined in the RBAC system. See <a href="managing-users.html">Managing Users and Roles</a> for full details.</p>
+<table>
+<thead>
+<tr>
+<th>Role</th>
+<th>Permitted Actions</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>viewer</strong></td>
+<td><code>results list</code>, <code>results show</code>, <code>results dashboard</code>, <code>status</code>, <code>health</code>, <code>history *</code>, <code>classifications list</code>, <code>comments list</code>, <code>config *</code></td>
+</tr>
+<tr>
+<td><strong>reviewer</strong></td>
+<td>All viewer actions, plus: <code>comments add/delete</code>, <code>classify</code>, <code>override-classification</code>, <code>override-pattern</code>, <code>results set-reviewed</code>, <code>chat *</code>, <code>mentions *</code></td>
+</tr>
+<tr>
+<td><strong>operator</strong></td>
+<td>All reviewer actions, plus: <code>analyze</code>, <code>re-analyze</code>, <code>abort</code>, <code>results delete</code> (own jobs), <code>failure re-analyze</code></td>
+</tr>
+<tr>
+<td><strong>admin</strong></td>
+<td>All operator actions, plus: <code>admin *</code>, <code>admin-chat *</code>, <code>results delete</code> (any job)</td>
+</tr>
+</tbody>
+</table>
+<h2 id="related-pages">Related Pages</h2>
+<ul>
+<li><a href="cli-setup.html">Setting Up the CLI</a></li>
+<li><a href="cli-recipes.html">CLI Recipes</a></li>
+<li><a href="api-reference.html">REST API Reference</a></li>
+<li><a href="analyzing-failures.html">Analyzing Test Failures</a></li>
+<li><a href="managing-users.html">Managing Users and Roles</a></li>
+</ul>
+                </div>
+            </article>
+            <nav class="page-nav">
+                
+                <a href="api-reference.html" class="page-nav-link page-nav-prev">
+                    <span class="page-nav-label">Previous</span>
+                    <span class="page-nav-title">REST API Reference</span>
+                </a>
+                
+                
+                <a href="environment-variables.html" class="page-nav-link page-nav-next">
+                    <span class="page-nav-label">Next</span>
+                    <span class="page-nav-title">Environment Variables and Configuration</span>
+                </a>
+                
+            </nav>
+            
+            <aside class="toc-sidebar">
+                <div class="toc-container">
+                    <h3>On this page</h3>
+                    <div class="toc">
+<ul>
+<li><a href="#global-options">Global Options</a></li>
+<li><a href="#analyze">analyze</a><ul>
+<li><a href="#source-options">Source Options</a></li>
+<li><a href="#ai-options">AI Options</a></li>
+<li><a href="#peer-analysis-options">Peer Analysis Options</a></li>
+<li><a href="#jenkins-options">Jenkins Options</a></li>
+<li><a href="#repository-options">Repository Options</a></li>
+<li><a href="#jira-options">Jira Options</a></li>
+<li><a href="#github-option">GitHub Option</a></li>
+</ul>
+</li>
+<li><a href="#re-analyze">re-analyze</a></li>
+<li><a href="#status">status</a></li>
+<li><a href="#abort">abort</a></li>
+<li><a href="#health">health</a></li>
+<li><a href="#register">register</a></li>
+<li><a href="#results">results</a><ul>
+<li><a href="#results-list">results list</a></li>
+<li><a href="#results-dashboard">results dashboard</a></li>
+<li><a href="#results-show">results show</a></li>
+<li><a href="#results-delete">results delete</a></li>
+<li><a href="#results-review-status">results review-status</a></li>
+<li><a href="#results-set-reviewed">results set-reviewed</a></li>
+<li><a href="#results-enrich-comments">results enrich-comments</a></li>
+</ul>
+</li>
+<li><a href="#history">history</a><ul>
+<li><a href="#history-test">history test</a></li>
+<li><a href="#history-search">history search</a></li>
+<li><a href="#history-stats">history stats</a></li>
+<li><a href="#history-failures">history failures</a></li>
+</ul>
+</li>
+<li><a href="#classify">classify</a></li>
+<li><a href="#classifications">classifications</a><ul>
+<li><a href="#classifications-list">classifications list</a></li>
+</ul>
+</li>
+<li><a href="#comments">comments</a><ul>
+<li><a href="#comments-list">comments list</a></li>
+<li><a href="#comments-add">comments add</a></li>
+<li><a href="#comments-delete">comments delete</a></li>
+</ul>
+</li>
+<li><a href="#failure">failure</a><ul>
+<li><a href="#failure-show">failure show</a></li>
+<li><a href="#failure-re-analyze">failure re-analyze</a></li>
+</ul>
+</li>
+<li><a href="#override-classification">override-classification</a></li>
+<li><a href="#override-pattern">override-pattern</a></li>
+<li><a href="#analyze-comment-intent">analyze-comment-intent</a></li>
+<li><a href="#chat">chat</a><ul>
+<li><a href="#chat-init">chat init</a></li>
+<li><a href="#chat-send">chat send</a></li>
+<li><a href="#chat-history">chat history</a></li>
+<li><a href="#chat-abort">chat abort</a></li>
+<li><a href="#chat-clear">chat clear</a></li>
+<li><a href="#chat-close">chat close</a></li>
+</ul>
+</li>
+<li><a href="#metadata">metadata</a><ul>
+<li><a href="#metadata-list">metadata list</a></li>
+<li><a href="#metadata-get">metadata get</a></li>
+<li><a href="#metadata-set">metadata set</a></li>
+<li><a href="#metadata-delete">metadata delete</a></li>
+<li><a href="#metadata-import">metadata import</a></li>
+<li><a href="#metadata-rules">metadata rules</a></li>
+<li><a href="#metadata-preview">metadata preview</a></li>
+</ul>
+</li>
+<li><a href="#bug-creation-commands">Bug Creation Commands</a><ul>
+<li><a href="#preview-issue">preview-issue</a></li>
+<li><a href="#create-issue">create-issue</a></li>
+<li><a href="#get-issue-prompt">get-issue-prompt</a></li>
+</ul>
+</li>
+<li><a href="#validate-token">validate-token</a></li>
+<li><a href="#push-reportportal">push-reportportal</a></li>
+<li><a href="#capabilities">capabilities</a></li>
+<li><a href="#ai-models">ai-models</a></li>
+<li><a href="#jira-projects">jira-projects</a></li>
+<li><a href="#jira-security-levels">jira-security-levels</a></li>
+<li><a href="#mentions">Mentions</a><ul>
+<li><a href="#mentionable-users">mentionable-users</a></li>
+<li><a href="#mentions_1">mentions</a></li>
+<li><a href="#mentions-mark-read">mentions-mark-read</a></li>
+<li><a href="#mentions-mark-all-read">mentions-mark-all-read</a></li>
+</ul>
+</li>
+<li><a href="#reports">reports</a><ul>
+<li><a href="#reports-totals">reports totals</a></li>
+<li><a href="#reports-overrides">reports overrides</a></li>
+<li><a href="#reports-issues">reports issues</a></li>
+</ul>
+</li>
+<li><a href="#auth">auth</a><ul>
+<li><a href="#auth-login">auth login</a></li>
+<li><a href="#auth-rotate-key">auth rotate-key</a></li>
+<li><a href="#auth-whoami">auth whoami</a></li>
+<li><a href="#auth-logout">auth logout</a></li>
+</ul>
+</li>
+<li><a href="#admin">admin</a><ul>
+<li><a href="#admin-users-list">admin users list</a></li>
+<li><a href="#admin-users-create">admin users create</a></li>
+<li><a href="#admin-users-delete">admin users delete</a></li>
+<li><a href="#admin-users-rotate-key">admin users rotate-key</a></li>
+<li><a href="#admin-users-change-role">admin users change-role</a></li>
+<li><a href="#admin-users-pending">admin users pending</a></li>
+<li><a href="#admin-users-approve">admin users approve</a></li>
+<li><a href="#admin-users-reject">admin users reject</a></li>
+</ul>
+</li>
+<li><a href="#admin-settings">admin settings</a><ul>
+<li><a href="#admin-settings-list">admin settings list</a></li>
+<li><a href="#admin-settings-set">admin settings set</a></li>
+<li><a href="#admin-settings-reset">admin settings reset</a></li>
+<li><a href="#admin-settings-history">admin settings history</a></li>
+</ul>
+</li>
+<li><a href="#admin-token-usage">admin token-usage</a></li>
+<li><a href="#admin-chat">admin-chat</a><ul>
+<li><a href="#admin-chat-send">admin-chat send</a></li>
+<li><a href="#admin-chat-history">admin-chat history</a></li>
+<li><a href="#admin-chat-clear">admin-chat clear</a></li>
+<li><a href="#admin-chat-save-artifact">admin-chat save-artifact</a></li>
+<li><a href="#admin-chat-download-artifact">admin-chat download-artifact</a></li>
+</ul>
+</li>
+<li><a href="#config">config</a><ul>
+<li><a href="#config-show">config show</a></li>
+<li><a href="#config-servers">config servers</a></li>
+<li><a href="#config-completion">config completion</a></li>
+</ul>
+</li>
+<li><a href="#configuration-file-reference">Configuration File Reference</a><ul>
+<li><a href="#file-structure">File Structure</a></li>
+<li><a href="#per-server-config-fields">Per-Server Config Fields</a></li>
+</ul>
+</li>
+<li><a href="#output-formats">Output Formats</a></li>
+<li><a href="#exit-codes">Exit Codes</a></li>
+<li><a href="#role-requirements">Role Requirements</a></li>
+<li><a href="#related-pages">Related Pages</a></li>
+</ul>
+</div>
+
+                </div>
+            </aside>
+            
+
+        </main>
+
+        <footer class="page-footer">
+            
+            <span class="footer-version">Generated from version 4.2.0</span>
+            <span class="footer-sep">&middot;</span>
+            
+            Generated with <a href="https://github.com/myk-org/docsfy" target="_blank" rel="noopener">docs<span class="brand-accent">fy</span></a>
+            <span class="footer-sep">&middot;</span>
+            <span class="footer-llm">LLM-friendly: <a href="llms.txt">llms.txt</a> &middot; <a href="llms-full.txt">llms-full.txt</a></span>
+        </footer>
+    </div>
+
+    <div class="sidebar-overlay" id="sidebar-overlay"></div>
+
+    <script src="assets/theme.js"></script>
+    <script src="assets/search.js"></script>
+    <script src="assets/copy.js"></script>
+    <script src="assets/callouts.js"></script>
+    <script src="assets/scrollspy.js"></script>
+    <script src="assets/codelabels.js"></script>
+    <script src="assets/github.js"></script>
+    <script>
+(function() {
+    var toggle = document.getElementById('sidebar-toggle');
+    var sidebar = document.getElementById('sidebar');
+    var overlay = document.getElementById('sidebar-overlay');
+    if (toggle && sidebar) {
+        toggle.addEventListener('click', function() {
+            sidebar.classList.toggle('open');
+            if (overlay) overlay.classList.toggle('open');
+            var expanded = sidebar.classList.contains('open');
+            toggle.setAttribute('aria-expanded', expanded ? 'true' : 'false');
+        });
+    }
+    if (overlay) {
+        overlay.addEventListener('click', function() {
+            sidebar.classList.remove('open');
+            overlay.classList.remove('open');
+            if (toggle) toggle.setAttribute('aria-expanded', 'false');
+        });
+    }
+})();
+</script>
+<script>
+(function() {
+    var sidebar = document.querySelector('.sidebar-nav') || document.querySelector('.sidebar');
+    if (!sidebar) return;
+
+    // Restore scroll position
+    var saved = sessionStorage.getItem('sidebar-scroll');
+    if (saved) sidebar.scrollTop = parseInt(saved, 10);
+
+    // Save scroll position before navigating
+    sidebar.addEventListener('scroll', function() {
+        sessionStorage.setItem('sidebar-scroll', sidebar.scrollTop.toString());
+    });
+
+    // Also scroll active link into view if no saved position
+    if (!saved) {
+        var active = sidebar.querySelector('.nav-link.active');
+        if (active) {
+            active.scrollIntoView({ block: 'center', behavior: 'instant' });
+        }
+    }
+})();
+</script>
+</body>
+</html>

@@ -8,6 +8,8 @@ useDefault = true
 [allowlist]
 # Allowlist test files that contain fake/mock credentials for unit tests
 paths = [
+    # Auto-generated docs contain placeholder API keys that trigger false positives
+    '''docs/.*''',
     '''\.secrets\.baseline''',
     '''tests/test_config\.py''',
     '''tests/test_main\.py''',
