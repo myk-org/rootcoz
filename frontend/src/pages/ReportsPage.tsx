@@ -16,6 +16,8 @@ import { MultiSelectFilter } from '@/components/shared/MultiSelectFilter'
 import { Pagination } from '@/components/shared/Pagination'
 import { ExpandCollapseButtons } from '@/components/shared/ExpandCollapseButtons'
 import { SearchInput } from '@/components/shared/SearchInput'
+import { ReviewStatusFilter } from '@/components/shared/ReviewStatusFilter'
+import { parseReviewStatus, type ReviewStatusFilter as ReviewStatusValue } from '@/lib/review-status'
 import { BarChart3, ArrowRightLeft, Bug, ChevronDown, ChevronRight, ExternalLink } from 'lucide-react'
 
 // ─── Types ──────────────────────────────────────────────────────────
@@ -105,6 +107,7 @@ interface ReportsState {
   dateFrom: string
   dateTo: string
   statuses: Set<string>
+  reviewStatus: ReviewStatusValue
   labels: string[]
   excludeLabels: string[]
   totalsData: TotalsData | null
@@ -130,6 +133,7 @@ type ReportsAction =
   | { type: 'TOGGLE_STATUS'; value: string }
   | { type: 'CLEAR_STATUSES' }
   | { type: 'TOGGLE_LABEL'; label: string; action: 'include' | 'exclude' | 'off' }
+  | { type: 'SET_REVIEW_STATUS'; value: ReviewStatusValue }
   | { type: 'TOGGLE_TOTALS_EXPANDED' }
   | { type: 'SET_TOTALS_EXPANDED'; value: boolean }
   | { type: 'TOGGLE_OVERRIDE_GROUP'; key: string }
@@ -147,6 +151,7 @@ const INITIAL_STATE: ReportsState = {
   dateFrom: '',
   dateTo: '',
   statuses: new Set(),
+  reviewStatus: 'all' as ReviewStatusValue,
   labels: [],
   excludeLabels: [],
   totalsData: null,
@@ -167,6 +172,7 @@ function initStateFromParams(sp: URLSearchParams): ReportsState {
     dateFrom: sp.get('from') ?? '',
     dateTo: sp.get('to') ?? '',
     statuses: new Set(sp.getAll('status')),
+    reviewStatus: parseReviewStatus(sp.get('review_status')),
     labels: sp.getAll('label'),
     excludeLabels: sp.getAll('exclude_label'),
     search: sp.get('search') ?? '',
@@ -216,7 +222,7 @@ function reportsReducer(state: ReportsState, action: ReportsAction): ReportsStat
     case 'CLEAR_META':
       return { ...state, [action.field]: new Set<string>() }
     case 'CLEAR_ALL_META':
-      return { ...state, teams: new Set(), tiers: new Set(), versions: new Set(), statuses: new Set<string>(), labels: [], excludeLabels: [] }
+      return { ...state, teams: new Set(), tiers: new Set(), versions: new Set(), statuses: new Set<string>(), reviewStatus: 'all' as ReviewStatusValue, labels: [], excludeLabels: [] }
     case 'SET_DATE_RANGE':
       return { ...state, dateFrom: action.from, dateTo: action.to }
     case 'TOGGLE_STATUS':
@@ -232,6 +238,8 @@ function reportsReducer(state: ReportsState, action: ReportsAction): ReportsStat
         excludeLabels: action.action === 'exclude' ? [...curExclude, action.label] : curExclude,
       }
     }
+    case 'SET_REVIEW_STATUS':
+      return { ...state, reviewStatus: action.value }
     case 'TOGGLE_TOTALS_EXPANDED':
       return { ...state, totalsExpanded: !state.totalsExpanded }
     case 'SET_TOTALS_EXPANDED':
@@ -573,7 +581,7 @@ function StatCard({ label, value, suffix, tone }: { label: string; value: number
 export function ReportsPage() {
   const [searchParams, setSearchParams] = useSearchParams()
   const [state, dispatch] = useReducer(reportsReducer, searchParams, initStateFromParams)
-  const { activeTab, loading, error, search, teams, tiers, versions, dateFrom, dateTo, statuses, labels, excludeLabels, totalsData, overridesData, issuesData, totalsExpanded, overridesExpandedGroups } = state
+  const { activeTab, loading, error, search, teams, tiers, versions, dateFrom, dateTo, statuses, reviewStatus, labels, excludeLabels, totalsData, overridesData, issuesData, totalsExpanded, overridesExpandedGroups } = state
 
   // ─── URL → state sync (external navigation / shared links) ─────
   // Only dispatch when URL actually differs from current state — no flags, no races.
@@ -584,6 +592,7 @@ export function ReportsPage() {
       || nextState.dateFrom !== dateFrom || nextState.dateTo !== dateTo
       || !setsEqual(nextState.teams, teams) || !setsEqual(nextState.tiers, tiers)
       || !setsEqual(nextState.versions, versions) || !setsEqual(nextState.statuses, statuses)
+      || nextState.reviewStatus !== reviewStatus
       || JSON.stringify(nextState.labels) !== JSON.stringify(labels)
       || JSON.stringify(nextState.excludeLabels) !== JSON.stringify(excludeLabels)
       || nextState.search !== search
@@ -603,16 +612,17 @@ export function ReportsPage() {
     if (dateFrom) params.set('from', dateFrom)
     if (dateTo) params.set('to', dateTo)
     for (const s of statuses) params.append('status', s)
+    if (reviewStatus !== 'all') params.set('review_status', reviewStatus)
     for (const l of labels) params.append('label', l)
     for (const l of excludeLabels) params.append('exclude_label', l)
     if (search) params.set('search', search)
     setSearchParams(params, { replace: true })
-  }, [activeTab, teams, tiers, versions, dateFrom, dateTo, statuses, labels, excludeLabels, search, setSearchParams])
+  }, [activeTab, teams, tiers, versions, dateFrom, dateTo, statuses, reviewStatus, labels, excludeLabels, search, setSearchParams])
 
   const { options: metadataOptions } = useMetadataOptions()
   const fetchSeqRef = useRef(0)
 
-  const hasMetadataFilters = teams.size > 0 || tiers.size > 0 || versions.size > 0 || statuses.size > 0 || labels.length > 0 || excludeLabels.length > 0
+  const hasMetadataFilters = teams.size > 0 || tiers.size > 0 || versions.size > 0 || statuses.size > 0 || reviewStatus !== 'all' || labels.length > 0 || excludeLabels.length > 0
 
   // Build query params shared by all endpoints
   const queryString = useMemo(() => {
@@ -631,8 +641,9 @@ export function ReportsPage() {
     if (tagsVal) params.set('tags', tagsVal)
     const excludeVal = excludeLabels.join(',')
     if (excludeVal) params.set('exclude_tags', excludeVal)
+    if (reviewStatus !== 'all') params.set('review_status', reviewStatus)
     return params.toString()
-  }, [teams, tiers, versions, dateFrom, dateTo, statuses, labels, excludeLabels])
+  }, [teams, tiers, versions, dateFrom, dateTo, statuses, labels, excludeLabels, reviewStatus])
 
   const fetchReport = useCallback(async () => {
     const seq = ++fetchSeqRef.current
@@ -716,6 +727,7 @@ export function ReportsPage() {
             onClear={() => dispatch({ type: 'CLEAR_STATUSES' })}
             className="w-full sm:w-40"
           />
+          <ReviewStatusFilter value={reviewStatus} onChange={(v) => dispatch({ type: 'SET_REVIEW_STATUS', value: v })} />
           <DateRangePresetFilter
             from={dateFrom}
             to={dateTo}

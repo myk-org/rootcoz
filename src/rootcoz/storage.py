@@ -4934,6 +4934,7 @@ async def get_report_totals(
     status: list[str] | None = None,
     tags: list[str] | None = None,
     exclude_tags: list[str] | None = None,
+    review_status: str = "",
     limit: int = 0,
     offset: int = 0,
 ) -> dict:
@@ -4983,6 +4984,12 @@ async def get_report_totals(
             WHERE r.status IN ({status_placeholders}){where}
             ORDER BY r.created_at DESC
         """
+
+        if review_status == "reviewed":
+            sql = f"SELECT * FROM ({sql}) sub WHERE sub.reviewed_count > 0"
+        elif review_status == "not_reviewed":
+            sql = f"SELECT * FROM ({sql}) sub WHERE sub.reviewed_count = 0"
+
         cursor = await db.execute(sql, status_params + params)
         rows = await cursor.fetchall()
 

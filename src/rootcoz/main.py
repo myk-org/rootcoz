@@ -7779,6 +7779,7 @@ async def reports_totals(
     status: str = Query(default=""),
     tags: str = Query(default=""),
     exclude_tags: str = Query(default=""),
+    review_status: str = Query(default=""),
     limit: int = Query(default=0, ge=0, le=1000),
     offset: int = Query(default=0, ge=0),
 ) -> dict:
@@ -7789,7 +7790,7 @@ async def reports_totals(
     exclude_tag_list = _parse_csv_list(exclude_tags)
     status_list = _parse_csv_list(status)
     logger.debug(
-        "GET /api/reports/totals: team=%r, tier=%r, version=%r, from=%r, to=%r, status=%r, tags=%r, exclude_tags=%r",
+        "GET /api/reports/totals: team=%r, tier=%r, version=%r, from=%r, to=%r, status=%r, tags=%r, exclude_tags=%r, review_status=%r",
         team_list,
         tier_list,
         version_list,
@@ -7798,6 +7799,7 @@ async def reports_totals(
         status_list,
         tag_list,
         exclude_tag_list,
+        review_status,
     )
     return await storage.get_report_totals(
         team=team_list,
@@ -7808,6 +7810,7 @@ async def reports_totals(
         status=status_list,
         tags=tag_list,
         exclude_tags=exclude_tag_list,
+        review_status=review_status,
         limit=limit,
         offset=offset,
     )

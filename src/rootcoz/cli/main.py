@@ -3207,6 +3207,11 @@ _REPORT_TAGS_OPTION = typer.Option("", "--tags", help="Comma-separated tags filt
 _REPORT_EXCLUDE_TAGS_OPTION = typer.Option(
     "", "--exclude-tags", help="Comma-separated tags to exclude."
 )
+_REPORT_REVIEW_STATUS_OPTION = typer.Option(
+    "",
+    "--review-status",
+    help="Filter by review status: 'reviewed' or 'not_reviewed'.",
+)
 
 
 @reports_app.command("totals")
@@ -3219,6 +3224,7 @@ def reports_totals(
     status: str = _REPORT_STATUS_OPTION,
     tags: str = _REPORT_TAGS_OPTION,
     exclude_tags: str = _REPORT_EXCLUDE_TAGS_OPTION,
+    review_status: str = _REPORT_REVIEW_STATUS_OPTION,
     json_output: bool = _JSON_OPTION,
 ):
     """Show aggregate totals: jobs, failures, reviewed."""
@@ -3240,6 +3246,7 @@ def reports_totals(
             status=status,
             tags=tag_list,
             exclude_tags=exclude_tag_list,
+            review_status=review_status,
         )
     except RootCozError as err:
         _handle_error(err)

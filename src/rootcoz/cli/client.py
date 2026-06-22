@@ -1169,6 +1169,7 @@ class RootCozClient:
         status: str = "",
         tags: list[str] | None = None,
         exclude_tags: list[str] | None = None,
+        review_status: str = "",
         limit: int = 0,
         offset: int = 0,
     ) -> dict:
@@ -1185,6 +1186,8 @@ class RootCozClient:
             limit,
             offset,
         )
+        if review_status:
+            params["review_status"] = review_status
         return self._request("GET", "/api/reports/totals", params=params)
 
     def report_classification_overrides(
