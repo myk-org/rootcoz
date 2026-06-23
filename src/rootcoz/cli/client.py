@@ -6,7 +6,7 @@ from typing import Any
 import httpx
 
 
-# Maximum response body preview length for error messages (log readability, not data truncation)
+# Approximate response body preview length for error messages (log readability, not data truncation)
 _ERROR_BODY_PREVIEW_LEN = 500
 
 
