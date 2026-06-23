@@ -1,5 +1,6 @@
 """HTTP client for the rootcoz REST API."""
 
+import re
 from typing import Any
 
 import httpx
@@ -109,10 +110,11 @@ class RootCozClient:
         try:
             return response.json()
         except ValueError:
-            body_preview = response.text[:200] if response.text else "(empty)"
+            body = response.text or "(empty)"
+            clean_body = re.sub(r"[\x00-\x1f\x7f]|\x1b\[[0-9;]*[a-zA-Z]", "", body)
             raise RootCozError(
                 status_code=response.status_code,
-                detail=f"Server returned non-JSON response (status {response.status_code}): {body_preview}",
+                detail=f"Server returned non-JSON response (status {response.status_code}): {clean_body}",
             )
 
     # -- Auth -----------------------------------------------------------------
