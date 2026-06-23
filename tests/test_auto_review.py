@@ -5,7 +5,6 @@ Tests cover:
 - find_matching_previous_analysis() storage query
 - Auto-review logic in the analysis flow
 - rootcoz-* username prefix blocked at registration
-- Config plumbing (ENABLE_AUTO_REVIEW setting, request field, CLI, config file)
 """
 
 import os
@@ -16,13 +15,12 @@ import pytest
 from starlette.testclient import TestClient
 
 from rootcoz import storage
-from rootcoz.cli.config import ServerConfig, _server_config_from_dict
 from rootcoz.config import Settings, get_settings
 from rootcoz.engine.core import (
     get_failure_signature,
     normalize_for_signature,
 )
-from rootcoz.models import BaseAnalysisRequest, FailedTest
+from rootcoz.models import FailedTest
 
 from tests.conftest import build_test_env
 
@@ -458,68 +456,6 @@ class TestReservedUsername:
 
 
 # ---------------------------------------------------------------------------
-# Config plumbing
-# ---------------------------------------------------------------------------
-class TestEnableAutoReviewConfig:
-    """Tests for ENABLE_AUTO_REVIEW configuration plumbing."""
-
-    def test_setting_defaults_to_false(self):
-        """ENABLE_AUTO_REVIEW should default to False."""
-        with patch.dict(os.environ, build_test_env(), clear=True):
-            get_settings.cache_clear()
-            s = Settings()
-            assert s.enable_auto_review is False
-            get_settings.cache_clear()
-
-    def test_setting_from_env(self):
-        """ENABLE_AUTO_REVIEW=true should set the setting to True."""
-        with patch.dict(
-            os.environ,
-            build_test_env(ENABLE_AUTO_REVIEW="true"),
-            clear=True,
-        ):
-            get_settings.cache_clear()
-            s = Settings()
-            assert s.enable_auto_review is True
-            get_settings.cache_clear()
-
-    def test_request_field_optional(self):
-        """enable_auto_review should be optional in BaseAnalysisRequest."""
-        req = BaseAnalysisRequest()
-        assert req.enable_auto_review is None
-
-    def test_request_field_set(self):
-        req = BaseAnalysisRequest(enable_auto_review=True)
-        assert req.enable_auto_review is True
-
-    def test_server_config_field(self):
-        """enable_auto_review should be available in ServerConfig."""
-        cfg = _server_config_from_dict(
-            {"url": "http://example.com", "enable_auto_review": True}
-        )
-        assert cfg.enable_auto_review is True
-
-    def test_server_config_default(self):
-        """enable_auto_review should default to None in ServerConfig."""
-        cfg = ServerConfig(url="http://example.com")
-        assert cfg.enable_auto_review is None
-
-    def test_merge_settings_overrides(self):
-        """_merge_settings should apply enable_auto_review from request."""
-        with patch.dict(os.environ, build_test_env(), clear=True):
-            get_settings.cache_clear()
-            from rootcoz.main import _merge_settings
-
-            settings = Settings()
-            assert settings.enable_auto_review is False
-
-            req = BaseAnalysisRequest(enable_auto_review=True)
-            merged = _merge_settings(req, settings)
-            assert merged.enable_auto_review is True
-            get_settings.cache_clear()
-
-
-# ---------------------------------------------------------------------------
 # Auto-review logic
 # ---------------------------------------------------------------------------
 class TestAutoReviewMatchingFailures:
@@ -569,12 +505,7 @@ class TestAutoReviewMatchingFailures:
                 ],
             }
 
-            settings = Settings(
-                **{
-                    k.lower(): v
-                    for k, v in build_test_env(ENABLE_AUTO_REVIEW="true").items()
-                }
-            )
+            settings = Settings(**{k.lower(): v for k, v in build_test_env().items()})
 
             from rootcoz.main import _auto_review_matching_failures
 
@@ -631,12 +562,7 @@ class TestAutoReviewMatchingFailures:
                 ],
             }
 
-            settings = Settings(
-                **{
-                    k.lower(): v
-                    for k, v in build_test_env(ENABLE_AUTO_REVIEW="true").items()
-                }
-            )
+            settings = Settings(**{k.lower(): v for k, v in build_test_env().items()})
 
             from rootcoz.main import _auto_review_matching_failures
 
@@ -663,12 +589,7 @@ class TestAutoReviewMatchingFailures:
                 ],
             }
 
-            settings = Settings(
-                **{
-                    k.lower(): v
-                    for k, v in build_test_env(ENABLE_AUTO_REVIEW="true").items()
-                }
-            )
+            settings = Settings(**{k.lower(): v for k, v in build_test_env().items()})
 
             from rootcoz.main import _auto_review_matching_failures
 
@@ -709,7 +630,6 @@ class TestAutoReviewMatchingFailures:
                 **{
                     k.lower(): v
                     for k, v in build_test_env(
-                        ENABLE_AUTO_REVIEW="true",
                         ENABLE_REPORTPORTAL="true",
                         REPORTPORTAL_URL="https://rp.example.com",
                         REPORTPORTAL_API_TOKEN="test-token",
@@ -754,12 +674,7 @@ class TestAutoReviewMatchingFailures:
                 ],
             }
 
-            settings = Settings(
-                **{
-                    k.lower(): v
-                    for k, v in build_test_env(ENABLE_AUTO_REVIEW="true").items()
-                }
-            )
+            settings = Settings(**{k.lower(): v for k, v in build_test_env().items()})
 
             from rootcoz.main import _auto_review_matching_failures
 
