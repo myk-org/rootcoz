@@ -5116,6 +5116,7 @@ async def _count_reviewed_tests(
     status: list[str] | None = None,
     tags: list[str] | None = None,
     exclude_tags: list[str] | None = None,
+    review_status: str = "",
 ) -> int:
     """Count reviewed tests with the given filters."""
     conditions: list[str] = []
@@ -5138,6 +5139,16 @@ async def _count_reviewed_tests(
         placeholders = ", ".join("?" for _ in status)
         conditions.append(f"r_rstatus.status IN ({placeholders})")
         params.extend(status)
+    if review_status == "reviewed":
+        conditions.append(
+            "EXISTS (SELECT 1 FROM failure_reviews fr_rs"
+            " WHERE fr_rs.job_id = fr.job_id AND fr_rs.reviewed = 1)"
+        )
+    elif review_status == "not_reviewed":
+        conditions.append(
+            "NOT EXISTS (SELECT 1 FROM failure_reviews fr_rs"
+            " WHERE fr_rs.job_id = fr.job_id AND fr_rs.reviewed = 1)"
+        )
     where = (" AND " + " AND ".join(conditions)) if conditions else ""
     cursor = await db.execute(
         f"""
@@ -5303,6 +5314,7 @@ async def get_report_classification_overrides(
             status=status,
             tags=tags,
             exclude_tags=exclude_tags,
+            review_status=review_status,
         )
 
     # Group by from->to
