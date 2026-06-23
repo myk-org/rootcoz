@@ -216,7 +216,6 @@ _SETTINGS_CATEGORIES: dict[str, list[str]] = {
         "peer_ai_configs",
         "peer_analysis_max_rounds",
         "force_analysis",
-        "enable_auto_review",
     ],
     "Jira": [
         "jira_url",
@@ -1917,7 +1916,6 @@ def _merge_settings(body: BaseAnalysisRequest, settings: Settings) -> Settings:
         "enable_jira",
         "jenkins_artifacts_max_size_mb",
         "get_job_artifacts",
-        "enable_auto_review",
     ]
     for field in direct_fields:
         value = getattr(body, field, None)
@@ -2614,21 +2612,20 @@ async def process_analysis_with_id(
                 )
 
             # Auto-review failures with matching signatures from previous analyses
-            if settings.enable_auto_review:
-                try:
-                    await _auto_review_matching_failures(
-                        job_id,
-                        body.job_name,
-                        body.build_number,
-                        result_data,
-                        settings,
-                    )
-                except Exception:
-                    logger.warning(
-                        "Auto-review failed for job_id=%s",
-                        job_id,
-                        exc_info=True,
-                    )
+            try:
+                await _auto_review_matching_failures(
+                    job_id,
+                    body.job_name,
+                    body.build_number,
+                    result_data,
+                    settings,
+                )
+            except Exception:
+                logger.warning(
+                    "Auto-review failed for job_id=%s",
+                    job_id,
+                    exc_info=True,
+                )
 
         # Auto-assign job metadata from name pattern rules
         await _auto_assign_metadata(body.job_name, settings.metadata_rules)
@@ -3352,21 +3349,20 @@ async def _process_file_raw_analysis(
             )
 
         # Auto-review failures with matching signatures from previous analyses
-        if merged.enable_auto_review:
-            try:
-                await _auto_review_matching_failures(
-                    job_id,
-                    display_name,
-                    result_data.get("build_number", 0),
-                    result_data,
-                    merged,
-                )
-            except Exception:
-                logger.warning(
-                    "Auto-review failed for job_id=%s",
-                    job_id,
-                    exc_info=True,
-                )
+        try:
+            await _auto_review_matching_failures(
+                job_id,
+                display_name,
+                result_data.get("build_number", 0),
+                result_data,
+                merged,
+            )
+        except Exception:
+            logger.warning(
+                "Auto-review failed for job_id=%s",
+                job_id,
+                exc_info=True,
+            )
 
         # Auto-assign job metadata from name pattern rules
         await _auto_assign_metadata(display_name, merged.metadata_rules)

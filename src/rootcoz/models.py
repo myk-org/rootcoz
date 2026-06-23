@@ -191,10 +191,6 @@ class BaseAnalysisRequest(BaseModel):
             "Omit to inherit the server default; send [] to disable."
         ),
     )
-    enable_auto_review: bool | None = Field(
-        default=None,
-        description="Enable auto-review of failures with identical signatures from previous analyses",
-    )
 
     @field_validator("tests_repo_token")
     @classmethod
