@@ -1,11 +1,10 @@
-import { useState, useEffect } from 'react'
+import { useState } from 'react'
 import { Link, useLocation } from 'react-router-dom'
 import { BookOpen, Menu, MessageSquarePlus, Plus, X } from 'lucide-react'
 import { UserBadge } from './UserBadge'
 import { FeedbackDialog } from '@/components/shared/FeedbackDialog'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
 import { useAuth } from '@/lib/auth'
-import { api } from '@/lib/api'
 import { cn } from '@/lib/utils'
 
 interface HeaderProps {
@@ -18,15 +17,6 @@ export function Header({ mobileOpen, onMobileToggle }: HeaderProps) {
   const { isOperator } = useAuth()
   const canSubmitAnalysis = isOperator
   const [feedbackOpen, setFeedbackOpen] = useState(false)
-  const [feedbackAvailable, setFeedbackAvailable] = useState(false) // fail closed until confirmed
-
-  useEffect(() => {
-    let cancelled = false
-    api.get<{ feedback_enabled?: boolean }>('/api/capabilities')
-      .then(caps => { if (!cancelled) setFeedbackAvailable(caps.feedback_enabled ?? false) })
-      .catch(() => { /* keep optimistic default */ })
-    return () => { cancelled = true }
-  }, [])
 
   return (
     <header data-testid="app-header" className="sticky top-0 z-50 border-b border-border-default bg-surface-card/95 backdrop-blur-sm">
@@ -83,22 +73,14 @@ export function Header({ mobileOpen, onMobileToggle }: HeaderProps) {
               <TooltipTrigger asChild>
                 <button
                   type="button"
-                  disabled={!feedbackAvailable}
-                  onClick={() => { if (feedbackAvailable) setFeedbackOpen(true) }}
-                  className={cn(
-                    'flex items-center gap-1.5 rounded-md px-2.5 py-1 text-xs font-medium transition-colors duration-150',
-                    feedbackAvailable
-                      ? 'text-text-tertiary hover:bg-surface-hover hover:text-text-secondary'
-                      : 'text-text-tertiary opacity-50 cursor-not-allowed',
-                  )}
+                  onClick={() => setFeedbackOpen(true)}
+                  className="flex items-center gap-1.5 rounded-md px-2.5 py-1 text-xs font-medium text-text-tertiary transition-colors duration-150 hover:bg-surface-hover hover:text-text-secondary"
                 >
                   <MessageSquarePlus className="h-4 w-4 shrink-0" />
                   Feedback
                 </button>
               </TooltipTrigger>
-              <TooltipContent>
-                {feedbackAvailable ? 'Send feedback' : 'Feedback is not available on this server'}
-              </TooltipContent>
+              <TooltipContent>Send feedback</TooltipContent>
             </Tooltip>
           </TooltipProvider>
           <UserBadge />
