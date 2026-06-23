@@ -796,6 +796,11 @@ async def init_db() -> None:
 
         await db.commit()
 
+    # Run signature recomputation migration BEFORE backfill so that:
+    # 1. Migration deletes old rows with pre-normalization signatures.
+    # 2. Backfill repopulates with new normalized signatures.
+    await _migrate_recompute_normalized_signatures()
+
     # Backfill failure_history from existing results (runs once when table is empty).
     # This runs synchronously in the lifespan hook, which means the server does not
     # accept requests until it finishes.  This is acceptable because:
@@ -806,7 +811,6 @@ async def init_db() -> None:
     await backfill_failure_history()
     await _migrate_restore_ai_classifications()
     await _migrate_backfill_pattern_axis()
-    await _migrate_recompute_normalized_signatures()
 
 
 async def _migrate_restore_ai_classifications() -> None:
@@ -1016,18 +1020,21 @@ async def _migrate_recompute_normalized_signatures() -> None:
     """
     migration_key = "recompute_normalized_signatures_v1"
     async with _connect_db() as db:
+        await db.execute(
+            "CREATE TABLE IF NOT EXISTS _migrations_applied "
+            "(key TEXT PRIMARY KEY, applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)"
+        )
         cursor = await db.execute(
             "SELECT 1 FROM _migrations_applied WHERE key = ?", (migration_key,)
         )
         if await cursor.fetchone():
             return
 
-    logger.info(
-        "Migration: clearing failure_history for signature recomputation. "
-        "Rows will be repopulated by backfill with normalized signatures."
-    )
+        logger.info(
+            "Migration: clearing failure_history for signature recomputation. "
+            "Rows will be repopulated by backfill with normalized signatures."
+        )
 
-    async with _connect_db() as db:
         await db.execute("DELETE FROM failure_history")
         await db.execute(
             "INSERT OR IGNORE INTO _migrations_applied (key) VALUES (?)",
