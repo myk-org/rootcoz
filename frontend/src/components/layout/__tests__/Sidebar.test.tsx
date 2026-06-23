@@ -57,10 +57,10 @@ describe('Sidebar', () => {
     expect(screen.getByText('Mentions')).toBeDefined()
   })
 
-  it('shows Mentions link for viewer users', () => {
+  it('hides Mentions link for viewer users', () => {
     mockAuth.role = 'viewer'
     renderSidebar()
-    expect(screen.getByText('Mentions')).toBeDefined()
+    expect(screen.queryByText('Mentions')).toBeNull()
   })
 
   it('shows admin section for admin users', () => {
