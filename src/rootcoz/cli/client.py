@@ -6,6 +6,10 @@ from typing import Any
 import httpx
 
 
+# Maximum response body preview length for error messages (log readability, not data truncation)
+_ERROR_BODY_PREVIEW_LEN = 500
+
+
 class RootCozError(Exception):
     """Error from the rootcoz API or connection failure."""
 
@@ -112,9 +116,12 @@ class RootCozClient:
         except ValueError:
             body = response.text or "(empty)"
             clean_body = re.sub(r"[\x00-\x1f\x7f]|\x1b\[[0-9;]*[a-zA-Z]", "", body)
+            body_preview = clean_body[:_ERROR_BODY_PREVIEW_LEN]
+            if len(clean_body) > _ERROR_BODY_PREVIEW_LEN:
+                body_preview += f"... ({len(clean_body)} chars total)"
             raise RootCozError(
                 status_code=response.status_code,
-                detail=f"Server returned non-JSON response (status {response.status_code}): {clean_body}",
+                detail=f"Server returned non-JSON response (status {response.status_code}): {body_preview}",
             )
 
     # -- Auth -----------------------------------------------------------------
