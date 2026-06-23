@@ -19,7 +19,7 @@ vi.mock('@/lib/auth', () => ({
 
 vi.mock('@/lib/api', () => ({
   api: {
-    get: vi.fn().mockResolvedValue({ feedback_enabled: false }),
+    get: vi.fn().mockResolvedValue({}),
     post: vi.fn(),
   },
 }))
