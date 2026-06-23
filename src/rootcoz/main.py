@@ -2587,20 +2587,7 @@ async def process_analysis_with_id(
         # Attach token usage summary before persisting
         await _attach_token_usage(job_id, result_data)
 
-        # Save to storage — do NOT persist base_url / result_url as they are
-        # request-derived and re-generated on every GET to avoid host-header
-        # injection from being stored.
-        await update_status(job_id, result.status, result_data)
-        notify_active_count_changed()
-        notify_dashboard_changed()
-        notify_job_status_changed(job_id)
-        notify_token_usage_changed()
-        logger.info(
-            f"Analysis completed for {body.job_name} #{body.build_number} "
-            f"(job_id: {job_id})"
-        )
-
-        # Populate failure history for completed analyses
+        # Populate failure history and auto-review BEFORE marking completed
         if result.status == "completed":
             try:
                 await populate_failure_history(job_id, result_data)
@@ -2622,10 +2609,25 @@ async def process_analysis_with_id(
                 )
             except Exception:
                 logger.warning(
-                    "Auto-review failed for job_id=%s",
+                    "Auto-review failed for job_id=%s, job_name=%s, build=%s",
                     job_id,
+                    body.job_name,
+                    body.build_number,
                     exc_info=True,
                 )
+
+        # Save to storage — do NOT persist base_url / result_url as they are
+        # request-derived and re-generated on every GET to avoid host-header
+        # injection from being stored.
+        await update_status(job_id, result.status, result_data)
+        notify_active_count_changed()
+        notify_dashboard_changed()
+        notify_job_status_changed(job_id)
+        notify_token_usage_changed()
+        logger.info(
+            f"Analysis completed for {body.job_name} #{body.build_number} "
+            f"(job_id: {job_id})"
+        )
 
         # Auto-assign job metadata from name pattern rules
         await _auto_assign_metadata(body.job_name, settings.metadata_rules)
@@ -3332,13 +3334,7 @@ async def _process_file_raw_analysis(
         # Attach token usage summary before persisting
         await _attach_token_usage(job_id, result_data)
 
-        await update_status(job_id, "completed", result_data)
-        notify_active_count_changed()
-        notify_dashboard_changed()
-        notify_job_status_changed(job_id)
-        notify_token_usage_changed()
-
-        # Populate failure history
+        # Populate failure history and auto-review BEFORE marking completed
         try:
             await populate_failure_history(job_id, result_data)
         except Exception:
@@ -3358,11 +3354,20 @@ async def _process_file_raw_analysis(
                 merged,
             )
         except Exception:
+            _build_number = result_data.get("build_number", 0)
             logger.warning(
-                "Auto-review failed for job_id=%s",
+                "Auto-review failed for job_id=%s, job_name=%s, build=%s",
                 job_id,
+                display_name,
+                _build_number,
                 exc_info=True,
             )
+
+        await update_status(job_id, "completed", result_data)
+        notify_active_count_changed()
+        notify_dashboard_changed()
+        notify_job_status_changed(job_id)
+        notify_token_usage_changed()
 
         # Auto-assign job metadata from name pattern rules
         await _auto_assign_metadata(display_name, merged.metadata_rules)
