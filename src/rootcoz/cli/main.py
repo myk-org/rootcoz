@@ -809,11 +809,6 @@ def analyze(
         "--force/--no-force",
         help="Force analysis even if the build succeeded.",
     ),
-    auto_review: bool | None = typer.Option(
-        None,
-        "--enable-auto-review/--disable-auto-review",
-        help="Auto-review failures with identical signatures from previous analyses.",
-    ),
     max_concurrent: int = typer.Option(
         0,
         "--max-concurrent",
@@ -937,8 +932,6 @@ def analyze(
             extras["wait_for_completion"] = cfg.wait_for_completion
         if cfg.force is not None:
             extras["force"] = cfg.force
-        if cfg.enable_auto_review is not None:
-            extras["enable_auto_review"] = cfg.enable_auto_review
 
     # CLI flags override config (highest priority).
     if provider:
@@ -992,7 +985,6 @@ def analyze(
         "get_job_artifacts": get_job_artifacts,
         "wait_for_completion": wait_for_completion,
         "force": force,
-        "enable_auto_review": auto_review,
     }
     for key, value in _bool_fields.items():
         if value is not None:
