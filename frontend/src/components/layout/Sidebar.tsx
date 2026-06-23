@@ -149,7 +149,7 @@ export function Sidebar({ badges, mobileOpen, onMobileClose }: SidebarProps) {
   }, [isDragging])
 
   // ─── Build nav items ────────────────────────────────────────────
-  const showMentions = !!username
+  const showMentions = !!username && role !== 'viewer'
   const userItems = showMentions ? [...USER_NAV_ITEMS, MENTIONS_ITEM] : USER_NAV_ITEMS
 
   const isActive = (to: string) =>
