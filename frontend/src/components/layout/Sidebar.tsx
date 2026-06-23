@@ -69,7 +69,7 @@ interface SidebarProps {
 
 export function Sidebar({ badges, mobileOpen, onMobileClose }: SidebarProps) {
   const location = useLocation()
-  const { isAdmin, role, username } = useAuth()
+  const { isAdmin, role, username, loading } = useAuth()
 
   // ─── Width / collapse state ─────────────────────────────────────
   const [collapsed, setCollapsed] = useState(() => {
@@ -149,7 +149,7 @@ export function Sidebar({ badges, mobileOpen, onMobileClose }: SidebarProps) {
   }, [isDragging])
 
   // ─── Build nav items ────────────────────────────────────────────
-  const showMentions = !!username && role !== 'viewer'
+  const showMentions = !!username && !loading && role !== 'viewer'
   const userItems = showMentions ? [...USER_NAV_ITEMS, MENTIONS_ITEM] : USER_NAV_ITEMS
 
   const isActive = (to: string) =>
