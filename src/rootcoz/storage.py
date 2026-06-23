@@ -4934,6 +4934,7 @@ async def get_report_totals(
     status: list[str] | None = None,
     tags: list[str] | None = None,
     exclude_tags: list[str] | None = None,
+    review_status: str = "",
     limit: int = 0,
     offset: int = 0,
 ) -> dict:
@@ -4983,6 +4984,12 @@ async def get_report_totals(
             WHERE r.status IN ({status_placeholders}){where}
             ORDER BY r.created_at DESC
         """
+
+        if review_status == "reviewed":
+            sql = f"SELECT * FROM ({sql}) sub WHERE sub.reviewed_count > 0 ORDER BY sub.created_at DESC, sub.job_id DESC"
+        elif review_status == "not_reviewed":
+            sql = f"SELECT * FROM ({sql}) sub WHERE sub.reviewed_count = 0 ORDER BY sub.created_at DESC, sub.job_id DESC"
+
         cursor = await db.execute(sql, status_params + params)
         rows = await cursor.fetchall()
 
@@ -5075,6 +5082,7 @@ async def get_report_classification_overrides(
     status: list[str] | None = None,
     tags: list[str] | None = None,
     exclude_tags: list[str] | None = None,
+    review_status: str = "",
     limit: int = 0,
     offset: int = 0,
 ) -> dict:
@@ -5099,6 +5107,15 @@ async def get_report_classification_overrides(
         placeholders = ", ".join("?" for _ in status)
         conditions.append(f"r_status.status IN ({placeholders})")
         params.extend(status)
+
+    if review_status == "reviewed":
+        conditions.append(
+            "EXISTS (SELECT 1 FROM failure_reviews fr_rs WHERE fr_rs.job_id = tc.job_id AND fr_rs.reviewed = 1)"
+        )
+    elif review_status == "not_reviewed":
+        conditions.append(
+            "NOT EXISTS (SELECT 1 FROM failure_reviews fr_rs WHERE fr_rs.job_id = tc.job_id AND fr_rs.reviewed = 1)"
+        )
 
     where = " AND ".join(conditions)
 
@@ -5266,6 +5283,7 @@ async def get_report_issues_created(
     status: list[str] | None = None,
     tags: list[str] | None = None,
     exclude_tags: list[str] | None = None,
+    review_status: str = "",
     limit: int = 0,
     offset: int = 0,
 ) -> dict:
@@ -5294,6 +5312,15 @@ async def get_report_issues_created(
         placeholders = ", ".join("?" for _ in status)
         conditions.append(f"r_status.status IN ({placeholders})")
         params.extend(status)
+
+    if review_status == "reviewed":
+        conditions.append(
+            "EXISTS (SELECT 1 FROM failure_reviews fr_rs WHERE fr_rs.job_id = c.job_id AND fr_rs.reviewed = 1)"
+        )
+    elif review_status == "not_reviewed":
+        conditions.append(
+            "NOT EXISTS (SELECT 1 FROM failure_reviews fr_rs WHERE fr_rs.job_id = c.job_id AND fr_rs.reviewed = 1)"
+        )
 
     # Use JOIN when metadata/tag filters narrow results, LEFT JOIN otherwise
     join_type = (

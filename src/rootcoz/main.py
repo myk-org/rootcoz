@@ -7768,6 +7768,18 @@ def _parse_report_metadata(
     return _parse_csv_list(team), _parse_csv_list(tier), _parse_csv_list(version)
 
 
+_VALID_REVIEW_STATUSES = {"", "reviewed", "not_reviewed"}
+
+
+def _validate_review_status(review_status: str) -> None:
+    """Reject invalid review_status values with HTTP 400."""
+    if review_status not in _VALID_REVIEW_STATUSES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid review_status '{review_status}'. Must be 'reviewed', 'not_reviewed', or empty.",
+        )
+
+
 @app.get("/api/reports/totals")
 async def reports_totals(
     request: Request,
@@ -7779,17 +7791,19 @@ async def reports_totals(
     status: str = Query(default=""),
     tags: str = Query(default=""),
     exclude_tags: str = Query(default=""),
+    review_status: str = Query(default=""),
     limit: int = Query(default=0, ge=0, le=1000),
     offset: int = Query(default=0, ge=0),
 ) -> dict:
     """Aggregate totals: total jobs, failures, reviewed, with per-job detail list. Admin only."""
     _require_admin(request)
+    _validate_review_status(review_status)
     team_list, tier_list, version_list = _parse_report_metadata(team, tier, version)
     tag_list = _parse_csv_list(tags)
     exclude_tag_list = _parse_csv_list(exclude_tags)
     status_list = _parse_csv_list(status)
     logger.debug(
-        "GET /api/reports/totals: team=%r, tier=%r, version=%r, from=%r, to=%r, status=%r, tags=%r, exclude_tags=%r",
+        "GET /api/reports/totals: team=%r, tier=%r, version=%r, from=%r, to=%r, status=%r, tags=%r, exclude_tags=%r, review_status=%r",
         team_list,
         tier_list,
         version_list,
@@ -7798,6 +7812,7 @@ async def reports_totals(
         status_list,
         tag_list,
         exclude_tag_list,
+        review_status,
     )
     return await storage.get_report_totals(
         team=team_list,
@@ -7808,6 +7823,7 @@ async def reports_totals(
         status=status_list,
         tags=tag_list,
         exclude_tags=exclude_tag_list,
+        review_status=review_status,
         limit=limit,
         offset=offset,
     )
@@ -7824,17 +7840,19 @@ async def reports_classification_overrides(
     status: str = Query(default=""),
     tags: str = Query(default=""),
     exclude_tags: str = Query(default=""),
+    review_status: str = Query(default=""),
     limit: int = Query(default=0, ge=0, le=1000),
     offset: int = Query(default=0, ge=0),
 ) -> dict:
     """Classification overrides grouped by from→to transition. Admin only."""
     _require_admin(request)
+    _validate_review_status(review_status)
     team_list, tier_list, version_list = _parse_report_metadata(team, tier, version)
     tag_list = _parse_csv_list(tags)
     exclude_tag_list = _parse_csv_list(exclude_tags)
     status_list = _parse_csv_list(status)
     logger.debug(
-        "GET /api/reports/classification-overrides: team=%r, tier=%r, version=%r, from=%r, to=%r, status=%r, tags=%r, exclude_tags=%r",
+        "GET /api/reports/classification-overrides: team=%r, tier=%r, version=%r, from=%r, to=%r, status=%r, tags=%r, exclude_tags=%r, review_status=%r",
         team_list,
         tier_list,
         version_list,
@@ -7843,6 +7861,7 @@ async def reports_classification_overrides(
         status_list,
         tag_list,
         exclude_tag_list,
+        review_status,
     )
     return await storage.get_report_classification_overrides(
         team=team_list,
@@ -7853,6 +7872,7 @@ async def reports_classification_overrides(
         status=status_list,
         tags=tag_list,
         exclude_tags=exclude_tag_list,
+        review_status=review_status,
         limit=limit,
         offset=offset,
     )
@@ -7869,17 +7889,19 @@ async def reports_issues_created(
     status: str = Query(default=""),
     tags: str = Query(default=""),
     exclude_tags: str = Query(default=""),
+    review_status: str = Query(default=""),
     limit: int = Query(default=0, ge=0, le=1000),
     offset: int = Query(default=0, ge=0),
 ) -> dict:
     """GitHub/Jira issues created from analysis results. Admin only."""
     _require_admin(request)
+    _validate_review_status(review_status)
     team_list, tier_list, version_list = _parse_report_metadata(team, tier, version)
     tag_list = _parse_csv_list(tags)
     exclude_tag_list = _parse_csv_list(exclude_tags)
     status_list = _parse_csv_list(status)
     logger.debug(
-        "GET /api/reports/issues-created: team=%r, tier=%r, version=%r, from=%r, to=%r, status=%r, tags=%r, exclude_tags=%r",
+        "GET /api/reports/issues-created: team=%r, tier=%r, version=%r, from=%r, to=%r, status=%r, tags=%r, exclude_tags=%r, review_status=%r",
         team_list,
         tier_list,
         version_list,
@@ -7888,6 +7910,7 @@ async def reports_issues_created(
         status_list,
         tag_list,
         exclude_tag_list,
+        review_status,
     )
     return await storage.get_report_issues_created(
         team=team_list,
@@ -7898,6 +7921,7 @@ async def reports_issues_created(
         status=status_list,
         tags=tag_list,
         exclude_tags=exclude_tag_list,
+        review_status=review_status,
         limit=limit,
         offset=offset,
     )

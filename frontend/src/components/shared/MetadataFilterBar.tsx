@@ -183,13 +183,13 @@ interface MetadataClearButtonProps {
   onClearAll: () => void
 }
 
-/** Renders a "Clear metadata" button when metadata filters are active. */
+/** Renders a "Clear filters" button when filters are active. */
 export function MetadataClearButton({ hasFilters, onClearAll }: MetadataClearButtonProps) {
   if (!hasFilters) return null
   return (
     <Button variant="ghost" size="sm" onClick={onClearAll} className="h-7 px-2 text-xs text-text-tertiary hover:text-text-secondary">
       <X className="h-3 w-3 mr-1" />
-      Clear metadata
+      Clear filters
     </Button>
   )
 }

@@ -367,7 +367,24 @@ def health(
     json_output: bool = _JSON_OPTION,
 ):
     """Check server health."""
-    data = _run_client_command(json_output, lambda c: c.health(), emit_output=False)
+    _set_json(json_output)
+    try:
+        data = _get_client().health()
+    except RootCozError as exc:
+        _handle_error(exc)
+    except Exception:
+        if _state.get("json", False):
+            print_output(
+                {"status": "unreachable", "detail": "Server is down or unreachable"},
+                columns=[],
+                as_json=True,
+            )
+        else:
+            typer.echo("Status: unreachable\n\nServer is down or unreachable.")
+        raise typer.Exit(code=1)
+    if _state.get("json", False):
+        print_output(data, columns=[], as_json=True)
+        return
     if not _state.get("json", False):
         status = data.get("status", "unknown")
         typer.echo(f"Status: {status}")
@@ -3207,6 +3224,11 @@ _REPORT_TAGS_OPTION = typer.Option("", "--tags", help="Comma-separated tags filt
 _REPORT_EXCLUDE_TAGS_OPTION = typer.Option(
     "", "--exclude-tags", help="Comma-separated tags to exclude."
 )
+_REPORT_REVIEW_STATUS_OPTION = typer.Option(
+    "",
+    "--review-status",
+    help="Filter by review status: 'reviewed' or 'not_reviewed'.",
+)
 
 
 @reports_app.command("totals")
@@ -3219,6 +3241,7 @@ def reports_totals(
     status: str = _REPORT_STATUS_OPTION,
     tags: str = _REPORT_TAGS_OPTION,
     exclude_tags: str = _REPORT_EXCLUDE_TAGS_OPTION,
+    review_status: str = _REPORT_REVIEW_STATUS_OPTION,
     json_output: bool = _JSON_OPTION,
 ):
     """Show aggregate totals: jobs, failures, reviewed."""
@@ -3240,6 +3263,7 @@ def reports_totals(
             status=status,
             tags=tag_list,
             exclude_tags=exclude_tag_list,
+            review_status=review_status,
         )
     except RootCozError as err:
         _handle_error(err)
@@ -3282,6 +3306,7 @@ def reports_overrides(
     status: str = _REPORT_STATUS_OPTION,
     tags: str = _REPORT_TAGS_OPTION,
     exclude_tags: str = _REPORT_EXCLUDE_TAGS_OPTION,
+    review_status: str = _REPORT_REVIEW_STATUS_OPTION,
     json_output: bool = _JSON_OPTION,
 ):
     """Show classification overrides grouped by from->to."""
@@ -3303,6 +3328,7 @@ def reports_overrides(
             status=status,
             tags=tag_list,
             exclude_tags=exclude_tag_list,
+            review_status=review_status,
         )
     except RootCozError as err:
         _handle_error(err)
@@ -3345,6 +3371,7 @@ def reports_issues(
     status: str = _REPORT_STATUS_OPTION,
     tags: str = _REPORT_TAGS_OPTION,
     exclude_tags: str = _REPORT_EXCLUDE_TAGS_OPTION,
+    review_status: str = _REPORT_REVIEW_STATUS_OPTION,
     json_output: bool = _JSON_OPTION,
 ):
     """Show GitHub/Jira issues created from analyses."""
@@ -3366,6 +3393,7 @@ def reports_issues(
             status=status,
             tags=tag_list,
             exclude_tags=exclude_tag_list,
+            review_status=review_status,
         )
     except RootCozError as err:
         _handle_error(err)

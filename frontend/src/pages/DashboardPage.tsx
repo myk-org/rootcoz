@@ -12,6 +12,8 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select'
+import { ReviewStatusFilter } from '@/components/shared/ReviewStatusFilter'
+import { parseReviewStatus, type ReviewStatusFilter as ReviewStatusValue } from '@/lib/review-status'
 import { MultiSelectFilter } from '@/components/shared/MultiSelectFilter'
 import {
   Table,
@@ -37,7 +39,7 @@ import { ConfirmDialog } from '@/components/shared/ConfirmDialog'
 import { SortableHeader } from '@/components/shared/SortableHeader'
 import { DateRangePresetFilter } from '@/components/shared/DateRangePresetFilter'
 import { useTableSort } from '@/lib/useTableSort'
-import { Trash2, MessageSquare, CheckCircle2, GitFork, AlertTriangle, Github, List, ListTree, ChevronRight, Filter, User } from 'lucide-react'
+import { Trash2, MessageSquare, CheckCircle2, GitFork, AlertTriangle, Github, List, ListTree, ChevronRight, User } from 'lucide-react'
 import { useAuth } from '@/lib/auth'
 import { useMetadataOptions, MetadataDropdowns, MetadataLabelChips, MetadataClearButton } from '@/components/shared/MetadataFilterBar'
 import { MetadataBadges } from '@/components/shared/MetadataBadges'
@@ -45,13 +47,6 @@ import { WhatsNewDialog } from '@/components/shared/WhatsNewDialog'
 import { ExpandCollapseButtons } from '@/components/shared/ExpandCollapseButtons'
 
 const STATUS_FILTER_OPTIONS = ['completed', 'running', 'waiting', 'pending', 'failed', 'timeout', 'aborted'] as const
-const ANALYSIS_STATUS_OPTIONS = ['all', 'analyzed', 'not_analyzed'] as const
-type AnalysisStatusFilter = typeof ANALYSIS_STATUS_OPTIONS[number]
-const ANALYSIS_STATUS_LABELS: Record<AnalysisStatusFilter, string> = {
-  all: 'All',
-  analyzed: 'Analyzed',
-  not_analyzed: 'Not analyzed',
-}
 const BULK_DELETE_LIMIT = 500
 
 const BULK_SELECT_CHECKBOX_CLASS =
@@ -158,16 +153,15 @@ export function DashboardPage() {
   const dateFrom = searchParams.get('date_from') ?? ''
   const dateTo = searchParams.get('date_to') ?? ''
 
-  const analysisStatus = useMemo<AnalysisStatusFilter>(() => {
-    const raw = searchParams.get('analysis_status')
-    return raw === 'analyzed' || raw === 'not_analyzed' ? raw : 'all'
+  const reviewStatus = useMemo<ReviewStatusValue>(() => {
+    return parseReviewStatus(searchParams.get('review_status'))
   }, [searchParams])
 
-  const setAnalysisStatus = useCallback((value: AnalysisStatusFilter) => {
+  const setReviewStatus = useCallback((value: ReviewStatusValue) => {
     setSearchParams((prev) => {
       const next = new URLSearchParams(prev)
-      if (value === 'all') next.delete('analysis_status')
-      else next.set('analysis_status', value)
+      if (value === 'all') next.delete('review_status')
+      else next.set('review_status', value)
       return next
     }, { replace: true })
   }, [setSearchParams])
@@ -233,10 +227,12 @@ export function DashboardPage() {
       next.delete('version')
       next.delete('label')
       next.delete('exclude_label')
+      next.delete('status')
+      next.delete('review_status')
       return next
     }, { replace: true })
   }, [setSearchParams])
-  const hasMetadataFilters = !!(metaTeams.size > 0 || metaTiers.size > 0 || metaVersions.size > 0 || metaLabels.length > 0 || metaExcludeLabels.length > 0)
+  const hasMetadataFilters = !!(metaTeams.size > 0 || metaTiers.size > 0 || metaVersions.size > 0 || metaLabels.length > 0 || metaExcludeLabels.length > 0 || selectedStatuses.size > 0 || reviewStatus !== 'all')
   const { options: metadataOptions } = useMetadataOptions()
   const setDateRange = useCallback((from: string, to: string) => {
     setSearchParams((prev) => {
@@ -328,7 +324,7 @@ export function DashboardPage() {
       eventSource.close()
     }
   }, [])
-  useEffect(() => { setPage(1) }, [search, selectedStatuses, analysisStatus, perPage, dateFrom, dateTo, metaTeams, metaTiers, metaVersions, metaLabels, metaExcludeLabels])
+  useEffect(() => { setPage(1) }, [search, selectedStatuses, reviewStatus, perPage, dateFrom, dateTo, metaTeams, metaTiers, metaVersions, metaLabels, metaExcludeLabels])
 
   const filtered = useMemo(() => {
     const fromBound = dateFrom ? utcStartOfDateInput(dateFrom) : null
@@ -347,14 +343,14 @@ export function DashboardPage() {
         if (toBound && jobDate > toBound) return false
       }
 
-      if (analysisStatus === 'analyzed' && j.status !== 'completed') return false
-      if (analysisStatus === 'not_analyzed' && j.status === 'completed') return false
+      if (reviewStatus === 'reviewed' && j.reviewed_count === 0) return false
+      if (reviewStatus === 'not_reviewed' && j.reviewed_count > 0) return false
 
       if (!search) return true
       const q = search.toLowerCase()
       return (j.job_name ?? '').toLowerCase().includes(q) || j.job_id.toLowerCase().includes(q)
     })
-  }, [jobs, search, selectedStatuses, analysisStatus, dateFrom, dateTo])
+  }, [jobs, search, selectedStatuses, reviewStatus, dateFrom, dateTo])
 
   const sorted = useMemo(() => {
     const copy = [...filtered]
@@ -548,19 +544,7 @@ export function DashboardPage() {
             onClear={() => setSelectedStatuses(new Set())}
             className="w-full sm:w-40"
           />
-          <Select value={analysisStatus} onValueChange={(v) => setAnalysisStatus(v as AnalysisStatusFilter)}>
-            <SelectTrigger aria-label="Analysis status filter" className="w-full sm:w-40">
-              <div className="flex items-center gap-1.5">
-                <Filter className="h-3.5 w-3.5 shrink-0 opacity-50" />
-                <SelectValue />
-              </div>
-            </SelectTrigger>
-            <SelectContent>
-              {ANALYSIS_STATUS_OPTIONS.map((opt) => (
-                <SelectItem key={opt} value={opt}>{ANALYSIS_STATUS_LABELS[opt]}</SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
+          <ReviewStatusFilter value={reviewStatus} onChange={setReviewStatus} />
           <DateRangePresetFilter from={dateFrom} to={dateTo} onChange={setDateRange} />
           <Select value={String(perPage)} onValueChange={(v) => setPerPage(Number(v))}>
             <SelectTrigger aria-label="Rows per page" className="w-full sm:w-20">
@@ -683,7 +667,7 @@ export function DashboardPage() {
         ) : (viewMode === 'flat' ? pageJobs.length === 0 : sorted.length === 0) && (!error || jobs.length > 0) ? (
           <div className="flex flex-col items-center justify-center rounded-lg border border-border-muted bg-surface-card py-16 text-center animate-fade-in">
             <p className="text-text-secondary">
-              {search || selectedStatuses.size > 0 || analysisStatus !== 'all' || dateFrom || dateTo || hasMetadataFilters
+              {search || selectedStatuses.size > 0 || reviewStatus !== 'all' || dateFrom || dateTo || hasMetadataFilters
                 ? 'No jobs match your filters.'
                 : 'No analysis runs yet.'}
             </p>

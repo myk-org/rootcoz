@@ -196,6 +196,49 @@ class TestReportTotals:
             )
             assert result["total_jobs"] == 0
 
+    @pytest.mark.asyncio
+    async def test_review_status_filter(self, populated_db: Path):
+        """review_status filters jobs by whether any test has been reviewed."""
+        with patch.object(storage, "DB_PATH", populated_db):
+            # 'reviewed' — only jobs with at least one reviewed test
+            result = await storage.get_report_totals(review_status="reviewed")
+            assert result["total_jobs"] == 1
+            assert result["jobs"][0]["job_name"] == "test-job"
+            assert result["jobs"][0]["reviewed_count"] > 0
+
+            # 'not_reviewed' — only jobs with zero reviewed tests
+            result = await storage.get_report_totals(
+                review_status="not_reviewed",
+                status=["completed", "failed"],
+            )
+            for job in result["jobs"]:
+                assert job["reviewed_count"] == 0
+
+            # empty/unknown — no filtering (all jobs)
+            result = await storage.get_report_totals(review_status="")
+            assert result["total_jobs"] == 1  # default status=completed
+
+    @pytest.mark.asyncio
+    async def test_review_status_with_multi_status(self, populated_db: Path):
+        """review_status works with multi-status filter."""
+        with patch.object(storage, "DB_PATH", populated_db):
+            # Both statuses, reviewed filter
+            result = await storage.get_report_totals(
+                status=["completed", "failed"],
+                review_status="reviewed",
+            )
+            assert result["total_jobs"] == 1
+            assert result["jobs"][0]["job_name"] == "test-job"
+
+            # Both statuses, not_reviewed filter
+            result = await storage.get_report_totals(
+                status=["completed", "failed"],
+                review_status="not_reviewed",
+            )
+            # job-2 (tagged-job) has no reviews
+            assert result["total_jobs"] == 1
+            assert result["jobs"][0]["job_name"] == "tagged-job"
+
 
 class TestReportOverrides:
     @pytest.mark.asyncio

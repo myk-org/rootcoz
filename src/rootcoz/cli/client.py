@@ -1,8 +1,13 @@
 """HTTP client for the rootcoz REST API."""
 
+import re
 from typing import Any
 
 import httpx
+
+
+# Approximate response body preview length for error messages (log readability, not data truncation)
+_ERROR_BODY_PREVIEW_LEN = 500
 
 
 class RootCozError(Exception):
@@ -106,7 +111,18 @@ class RootCozClient:
                 detail=detail,
             )
 
-        return response.json()
+        try:
+            return response.json()
+        except ValueError:
+            body = response.text or "(empty)"
+            clean_body = re.sub(r"[\x00-\x1f\x7f]|\x1b\[[0-9;]*[a-zA-Z]", "", body)
+            body_preview = clean_body[:_ERROR_BODY_PREVIEW_LEN]
+            if len(clean_body) > _ERROR_BODY_PREVIEW_LEN:
+                body_preview += f"... ({len(clean_body)} chars total)"
+            raise RootCozError(
+                status_code=response.status_code,
+                detail=f"Server returned non-JSON response (status {response.status_code}): {body_preview}",
+            )
 
     # -- Auth -----------------------------------------------------------------
 
@@ -1132,6 +1148,7 @@ class RootCozClient:
         status: str = "",
         tags: list[str] | None = None,
         exclude_tags: list[str] | None = None,
+        review_status: str = "",
         limit: int = 0,
         offset: int = 0,
     ) -> dict:
@@ -1153,6 +1170,8 @@ class RootCozClient:
             params["tags"] = ",".join(tags)
         if exclude_tags:
             params["exclude_tags"] = ",".join(exclude_tags)
+        if review_status:
+            params["review_status"] = review_status
         if limit > 0:
             params["limit"] = limit
         if offset > 0:
@@ -1169,6 +1188,7 @@ class RootCozClient:
         status: str = "",
         tags: list[str] | None = None,
         exclude_tags: list[str] | None = None,
+        review_status: str = "",
         limit: int = 0,
         offset: int = 0,
     ) -> dict:
@@ -1182,6 +1202,7 @@ class RootCozClient:
             status,
             tags,
             exclude_tags,
+            review_status,
             limit,
             offset,
         )
@@ -1197,6 +1218,7 @@ class RootCozClient:
         status: str = "",
         tags: list[str] | None = None,
         exclude_tags: list[str] | None = None,
+        review_status: str = "",
         limit: int = 0,
         offset: int = 0,
     ) -> dict:
@@ -1210,6 +1232,7 @@ class RootCozClient:
             status,
             tags,
             exclude_tags,
+            review_status,
             limit,
             offset,
         )
@@ -1227,6 +1250,7 @@ class RootCozClient:
         status: str = "",
         tags: list[str] | None = None,
         exclude_tags: list[str] | None = None,
+        review_status: str = "",
         limit: int = 0,
         offset: int = 0,
     ) -> dict:
@@ -1240,6 +1264,7 @@ class RootCozClient:
             status,
             tags,
             exclude_tags,
+            review_status,
             limit,
             offset,
         )

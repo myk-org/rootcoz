@@ -682,7 +682,14 @@ class TestErrorHandling:
         )
         result = runner.invoke(app, ["health"])
         assert result.exit_code != 0
-        assert "Connection" in result.output or "Error" in result.output
+        assert "Connection refused" in result.output
+
+    def test_health_unreachable(self, mock_client):
+        """Non-RootCozError exceptions show clean 'unreachable' status."""
+        mock_client.health.side_effect = ConnectionError("server down")
+        result = runner.invoke(app, ["health"])
+        assert result.exit_code != 0
+        assert "unreachable" in result.output
 
     def test_http_error(self, mock_client):
         mock_client.get_result.side_effect = RootCozError(
@@ -4412,6 +4419,7 @@ class TestReportsCommands:
             status="",
             tags=None,
             exclude_tags=None,
+            review_status="",
         )
 
     def test_reports_totals_with_status_and_tags(self, mock_client):
@@ -4436,6 +4444,7 @@ class TestReportsCommands:
             status="completed",
             tags=["nightly", "smoke"],
             exclude_tags=None,
+            review_status="",
         )
 
     def test_reports_totals_with_exclude_tags(self, mock_client):
@@ -4460,6 +4469,32 @@ class TestReportsCommands:
             status="",
             tags=["nightly"],
             exclude_tags=["flaky", "wip"],
+            review_status="",
+        )
+
+    def test_reports_totals_with_review_status(self, mock_client):
+        mock_client.report_totals.return_value = {
+            "total_jobs": 2,
+            "total_failures": 5,
+            "total_reviewed": 3,
+            "total_details": 2,
+            "jobs": [],
+        }
+        result = runner.invoke(
+            app,
+            ["reports", "totals", "--review-status", "reviewed"],
+        )
+        assert result.exit_code == 0
+        mock_client.report_totals.assert_called_once_with(
+            team="",
+            tier="",
+            version="",
+            date_from="",
+            date_to="",
+            status="",
+            tags=None,
+            exclude_tags=None,
+            review_status="reviewed",
         )
 
     def test_reports_overrides(self, mock_client):

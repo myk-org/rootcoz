@@ -2325,3 +2325,22 @@ class TestReports:
         client = _make_client(handler)
         result = client.report_totals(status="completed", tags=["nightly"])
         assert result["total_jobs"] == 1
+
+    def test_report_totals_with_review_status(self):
+        def handler(request):
+            url = str(request.url)
+            assert "review_status=reviewed" in url
+            return httpx.Response(
+                200,
+                json={
+                    "total_jobs": 2,
+                    "total_failures": 5,
+                    "total_reviewed": 3,
+                    "total_details": 2,
+                    "jobs": [],
+                },
+            )
+
+        client = _make_client(handler)
+        result = client.report_totals(review_status="reviewed")
+        assert result["total_jobs"] == 2
