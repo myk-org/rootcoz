@@ -367,7 +367,22 @@ def health(
     json_output: bool = _JSON_OPTION,
 ):
     """Check server health."""
-    data = _run_client_command(json_output, lambda c: c.health(), emit_output=False)
+    _set_json(json_output)
+    try:
+        data = _get_client().health()
+    except Exception:
+        if _state.get("json", False):
+            print_output(
+                {"status": "unreachable", "detail": "Server is down or unreachable"},
+                columns=[],
+                as_json=True,
+            )
+        else:
+            typer.echo("Status: unreachable\n\nServer is down or unreachable.")
+        raise typer.Exit(code=1)
+    if _state.get("json", False):
+        print_output(data, columns=[], as_json=True)
+        return
     if not _state.get("json", False):
         status = data.get("status", "unknown")
         typer.echo(f"Status: {status}")
