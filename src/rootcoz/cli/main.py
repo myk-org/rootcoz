@@ -370,6 +370,8 @@ def health(
     _set_json(json_output)
     try:
         data = _get_client().health()
+    except RootCozError as exc:
+        _handle_error(exc)
     except Exception:
         if _state.get("json", False):
             print_output(

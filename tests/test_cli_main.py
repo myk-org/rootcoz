@@ -682,6 +682,13 @@ class TestErrorHandling:
         )
         result = runner.invoke(app, ["health"])
         assert result.exit_code != 0
+        assert "Connection refused" in result.output
+
+    def test_health_unreachable(self, mock_client):
+        """Non-RootCozError exceptions show clean 'unreachable' status."""
+        mock_client.health.side_effect = ConnectionError("server down")
+        result = runner.invoke(app, ["health"])
+        assert result.exit_code != 0
         assert "unreachable" in result.output
 
     def test_http_error(self, mock_client):

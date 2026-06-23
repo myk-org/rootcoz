@@ -109,9 +109,10 @@ class RootCozClient:
         try:
             return response.json()
         except ValueError:
+            body_preview = response.text[:200] if response.text else "(empty)"
             raise RootCozError(
                 status_code=response.status_code,
-                detail=f"Server returned non-JSON response (status {response.status_code}). Server may be down or unreachable.",
+                detail=f"Server returned non-JSON response (status {response.status_code}): {body_preview}",
             )
 
     # -- Auth -----------------------------------------------------------------
