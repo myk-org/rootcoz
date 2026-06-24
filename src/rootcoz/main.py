@@ -7133,10 +7133,13 @@ async def register_user(request: Request) -> JSONResponse:
         raise HTTPException(status_code=400, detail="Username is required")
 
     # Block reserved username prefixes (e.g., rootcoz-ai)
-    if username.lower().startswith("rootcoz"):
-        raise HTTPException(
+    if username.startswith("rootcoz"):
+        return JSONResponse(
             status_code=400,
-            detail="Usernames starting with 'rootcoz' are reserved for system use",
+            content={
+                "detail": "Usernames starting with 'rootcoz' are reserved for system use"
+            },
+            headers={"Cache-Control": "no-store"},
         )
 
     settings = get_settings()
@@ -7390,6 +7393,13 @@ async def admin_create_user_endpoint(request: Request) -> JSONResponse:
     username = username.strip().lower()
     if not username:
         raise HTTPException(status_code=400, detail="Username is required")
+
+    # Block reserved username prefixes (e.g., rootcoz-ai)
+    if username.startswith("rootcoz"):
+        raise HTTPException(
+            status_code=400,
+            detail="Usernames starting with 'rootcoz' are reserved for system use",
+        )
 
     role = body.get("role", "reviewer")
     if role not in storage.VALID_ROLES:

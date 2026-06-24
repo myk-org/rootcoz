@@ -454,6 +454,46 @@ class TestReservedUsername:
         resp = client.post("/api/auth/register", json={"username": "normaluser"})
         assert resp.status_code == 200
 
+    def test_register_reserved_has_no_store_header(self, client):
+        """Reserved username rejection should include Cache-Control: no-store."""
+        resp = client.post("/api/auth/register", json={"username": "rootcoz-ai"})
+        assert resp.status_code == 400
+        assert resp.headers.get("cache-control") == "no-store"
+
+    def _admin_login(self, client):
+        """Login as admin and return session cookies."""
+        resp = client.post(
+            "/api/auth/login",
+            json={
+                "username": "admin",
+                "api_key": "test-admin-key-16chars",  # pragma: allowlist secret
+            },
+        )
+        assert resp.status_code == 200
+        return resp.cookies
+
+    def test_admin_blocks_rootcoz_prefix(self, client):
+        """Admin create user should also reject rootcoz-* usernames."""
+        cookies = self._admin_login(client)
+        resp = client.post(
+            "/api/admin/users/create",
+            json={"username": "rootcoz-ai", "role": "reviewer"},
+            cookies=cookies,
+        )
+        assert resp.status_code == 400
+        assert "reserved" in resp.json()["detail"].lower()
+
+    def test_admin_blocks_rootcoz_exact(self, client):
+        """Admin create user should reject 'rootcoz' exact username."""
+        cookies = self._admin_login(client)
+        resp = client.post(
+            "/api/admin/users/create",
+            json={"username": "rootcoz", "role": "operator"},
+            cookies=cookies,
+        )
+        assert resp.status_code == 400
+        assert "reserved" in resp.json()["detail"].lower()
+
 
 # ---------------------------------------------------------------------------
 # Auto-review logic
