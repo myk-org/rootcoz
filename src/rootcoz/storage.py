@@ -796,6 +796,11 @@ async def init_db() -> None:
 
         await db.commit()
 
+    # Run signature recomputation migration BEFORE backfill so that:
+    # 1. Migration deletes old rows with pre-normalization signatures.
+    # 2. Backfill repopulates with new normalized signatures.
+    await _migrate_recompute_normalized_signatures()
+
     # Backfill failure_history from existing results (runs once when table is empty).
     # This runs synchronously in the lifespan hook, which means the server does not
     # accept requests until it finishes.  This is acceptable because:
@@ -998,6 +1003,44 @@ async def _migrate_backfill_pattern_axis() -> None:
         )
         await db.commit()
     logger.info("Migration: pattern axis backfill complete")
+
+
+async def _migrate_recompute_normalized_signatures() -> None:
+    """One-time migration: clear failure_history so backfill recomputes signatures.
+
+    The get_failure_signature() function now normalizes text (strips
+    timestamps, UUIDs, pod names, build numbers) before hashing.
+    Old failure_history rows have pre-normalization signatures that
+    won't match new ones, breaking auto-review matching.
+
+    This migration deletes all existing failure_history rows. The
+    backfill_failure_history() function (called after migrations)
+    re-populates them from stored result JSON, which triggers
+    get_failure_signature() with the new normalization logic.
+    """
+    migration_key = "recompute_normalized_signatures_v1"
+    async with _connect_db() as db:
+        await db.execute(
+            "CREATE TABLE IF NOT EXISTS _migrations_applied "
+            "(key TEXT PRIMARY KEY, applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)"
+        )
+        cursor = await db.execute(
+            "SELECT 1 FROM _migrations_applied WHERE key = ?", (migration_key,)
+        )
+        if await cursor.fetchone():
+            return
+
+        logger.info(
+            "Migration: clearing failure_history for signature recomputation. "
+            "Rows will be repopulated by backfill with normalized signatures."
+        )
+
+        await db.execute("DELETE FROM failure_history")
+        await db.execute(
+            "INSERT OR IGNORE INTO _migrations_applied (key) VALUES (?)",
+            (migration_key,),
+        )
+        await db.commit()
 
 
 def _validate_child_identifier_pairing(
@@ -1847,6 +1890,50 @@ def _extract_child_failures_for_history(
         _extract_child_failures_for_history(
             nested, job_id, job_name, build_number, rows, analyzed_at=analyzed_at
         )
+
+
+async def find_matching_previous_analysis(
+    job_name: str,
+    test_name: str,
+    current_job_id: str,
+    child_job_name: str = "",
+) -> dict | None:
+    """Find the most recent previous analysis of the same test in the same job.
+
+    Searches failure_history for a row with the same job_name and test_name
+    from a different (previous) job_id. When child_job_name is provided,
+    results are scoped to the same child job context to avoid cross-child
+    matches for tests with the same name.
+
+    Returns the most recent match ordered by analyzed_at descending,
+    with id as tiebreaker for deterministic results.
+
+    Args:
+        job_name: Jenkins job name to match.
+        test_name: Fully qualified test name to match.
+        current_job_id: Current job ID to exclude from results.
+        child_job_name: Child job name to scope the search (empty for
+            top-level failures).
+
+    Returns:
+        Dict with previous failure_history row data if found, None otherwise.
+        Includes keys: job_id, build_number, error_signature, classification,
+        pattern, analyzed_at.
+    """
+    async with _connect_db() as db:
+        cursor = await db.execute(
+            "SELECT job_id, build_number, error_signature, classification, "
+            "pattern, analyzed_at "
+            "FROM failure_history "
+            "WHERE job_name = ? AND test_name = ? AND job_id != ? "
+            "AND child_job_name = ? "
+            "ORDER BY analyzed_at DESC, id DESC LIMIT 1",
+            (job_name, test_name, current_job_id, child_job_name),
+        )
+        row = await cursor.fetchone()
+        if row is None:
+            return None
+        return dict(row)
 
 
 async def populate_failure_history(
@@ -5036,6 +5123,7 @@ async def _count_reviewed_tests(
     status: list[str] | None = None,
     tags: list[str] | None = None,
     exclude_tags: list[str] | None = None,
+    review_status: str = "",
 ) -> int:
     """Count reviewed tests with the given filters."""
     conditions: list[str] = []
@@ -5058,6 +5146,16 @@ async def _count_reviewed_tests(
         placeholders = ", ".join("?" for _ in status)
         conditions.append(f"r_rstatus.status IN ({placeholders})")
         params.extend(status)
+    if review_status == "reviewed":
+        conditions.append(
+            "EXISTS (SELECT 1 FROM failure_reviews fr_rs"
+            " WHERE fr_rs.job_id = fr.job_id AND fr_rs.reviewed = 1)"
+        )
+    elif review_status == "not_reviewed":
+        conditions.append(
+            "NOT EXISTS (SELECT 1 FROM failure_reviews fr_rs"
+            " WHERE fr_rs.job_id = fr.job_id AND fr_rs.reviewed = 1)"
+        )
     where = (" AND " + " AND ".join(conditions)) if conditions else ""
     cursor = await db.execute(
         f"""
@@ -5223,6 +5321,7 @@ async def get_report_classification_overrides(
             status=status,
             tags=tags,
             exclude_tags=exclude_tags,
+            review_status=review_status,
         )
 
     # Group by from->to

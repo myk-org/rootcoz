@@ -20,3 +20,8 @@ paths = [
     '''tests/test_debug_request_logging\.py''',
     '''tests/test_feedback\.py''',
 ]
+# Migration idempotency keys are not secrets
+regexTarget = "line"
+regexes = [
+    '''migration_key\s*=\s*"[^"]+"''',
+]

@@ -302,11 +302,72 @@ def build_artifacts_section(artifacts_context: str) -> str:
     )
 
 
+# Pre-compiled patterns for signature normalization.
+# Strips run-specific data so the same underlying failure produces identical hashes.
+_NORMALIZE_PATTERNS: list[tuple[re.Pattern, str]] = [
+    # ISO timestamps: 2026-05-31T06:50:48.123Z, 2026-05-31T06:50:48+00:00
+    (
+        re.compile(
+            r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?"
+        ),
+        "<TIMESTAMP>",
+    ),
+    # Date-time with spaces: 2026-05-31 06:50:48 or May 31 2026 / 31 May 2026
+    (re.compile(r"\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}(?:\.\d+)?"), "<TIMESTAMP>"),
+    (
+        re.compile(
+            r"(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{1,2}\s+\d{4}"
+        ),
+        "<DATE>",
+    ),
+    (
+        re.compile(
+            r"\d{1,2}\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{4}"
+        ),
+        "<DATE>",
+    ),
+    # UUIDs: fd18d967-0f31-4c8d-ab74-b8cf463aa04f
+    (
+        re.compile(
+            r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
+        ),
+        "<UUID>",
+    ),
+    # Pod/resource names with random suffixes: virt-launcher-xyz-abc123, pod-name-7f8b9c
+    (re.compile(r"(?<=[a-zA-Z])-[0-9a-f]{5,10}\b"), "-<SUFFIX>"),
+    # Build numbers: #123, build/123, build-123, run/456
+    (re.compile(r"#\d+"), "#<BUILD>"),
+    (re.compile(r"(?:build|run)[/\-]\d+", re.IGNORECASE), "<BUILD_REF>"),
+    # Standalone date: 2026-05-31 (not already caught by timestamp patterns)
+    (re.compile(r"\b\d{4}-\d{2}-\d{2}\b"), "<DATE>"),
+]
+
+
+def normalize_for_signature(text: str) -> str:
+    """Strip run-specific data from text before signature hashing.
+
+    Removes timestamps, dates, UUIDs, pod name suffixes, and build
+    numbers so that the same underlying failure produces the same
+    hash across different runs.
+
+    Args:
+        text: Error message or stack trace text.
+
+    Returns:
+        Normalized text with run-specific data replaced by placeholders.
+    """
+    for pattern, replacement in _NORMALIZE_PATTERNS:
+        text = pattern.sub(replacement, text)
+    return text
+
+
 def get_failure_signature(failure: FailedTest) -> str:
     """Create a signature for grouping identical failures.
 
     Uses the full error message and stack trace to identify failures that
-    are essentially the same issue.
+    are essentially the same issue. Text is normalized to strip
+    run-specific data (timestamps, UUIDs, pod names, build numbers)
+    before hashing.
 
     Args:
         failure: The test failure to create a signature for.
@@ -314,8 +375,9 @@ def get_failure_signature(failure: FailedTest) -> str:
     Returns:
         SHA-256 hash string representing the failure signature.
     """
-    # Use error message and full stack trace for deduplication.
-    signature_text = f"{failure.error_message}|{failure.stack_trace}"
+    normalized_error = normalize_for_signature(failure.error_message)
+    normalized_trace = normalize_for_signature(failure.stack_trace)
+    signature_text = f"{normalized_error}|{normalized_trace}"
     return hashlib.sha256(signature_text.encode()).hexdigest()
 
 
