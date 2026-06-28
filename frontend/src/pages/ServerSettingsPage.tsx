@@ -438,13 +438,13 @@ export function ServerSettingsPage() {
   }
 
   async function handleSaveAiProvider(value: string) {
-    await saveSettingValue('ai_provider', value)
-    setAiProviderEditing(false)
+    const ok = await saveSettingValue('ai_provider', value)
+    if (ok) setAiProviderEditing(false)
   }
 
   async function handleSaveAiModel(value: string) {
-    await saveSettingValue('ai_model', value)
-    setAiModelEditing(false)
+    const ok = await saveSettingValue('ai_model', value)
+    if (ok) setAiModelEditing(false)
   }
 
   // ---- Additional repos structured editor ----
@@ -641,125 +641,58 @@ export function ServerSettingsPage() {
                     <CardContent className="px-4 pb-4 pt-0">
                       <div className="divide-y divide-border-default">
                         {settings.map((setting) => {
-                          // ---- AI_PROVIDER: dropdown selector ----
                           if (setting.key === 'ai_provider') {
                             return (
-                              <div key={setting.key} className="py-3 space-y-2">
-                                <div className="flex items-center gap-2">
-                                  <span className="font-mono text-xs font-semibold text-text-primary">{setting.env_var}</span>
-                                  <SourceBadge source={setting.source} />
-                                </div>
-                                {aiProviderEditing ? (
-                                  <div className="space-y-3">
-                                    <ProviderSelect
-                                      value={aiProviderValue}
-                                      onChange={setAiProviderValue}
-                                    />
-                                    <div className="flex items-center gap-2 pt-1">
-                                      <Button size="sm" onClick={() => handleSaveAiProvider(aiProviderValue)} disabled={state.saving} className="h-7 text-xs">
-                                        {state.saving ? <><Loader2 className="mr-1 h-3 w-3 animate-spin" />Saving</> : 'Save'}
-                                      </Button>
-                                      <Button size="sm" variant="outline" onClick={() => setAiProviderEditing(false)} className="h-7 text-xs">Cancel</Button>
-                                      {setting.source === 'db' && (
-                                        <Button size="sm" variant="ghost" onClick={() => handleReset(setting.key)} className="h-7 text-xs text-text-tertiary hover:text-signal-red">
-                                          <RotateCcw className="mr-1 h-3 w-3" /> Reset
-                                        </Button>
-                                      )}
-                                    </div>
-                                  </div>
-                                ) : (
-                                  <div>
-                                    {setting.value ? (
-                                      <span className="inline-flex items-center rounded-md bg-surface-elevated px-2 py-0.5 text-xs font-mono border border-border-default text-text-primary">
-                                        {setting.value}
-                                      </span>
-                                    ) : (
-                                      <span className="text-xs text-text-tertiary italic">Not configured (uses AI_PROVIDER env var)</span>
-                                    )}
-                                    <button type="button" onClick={() => { setAiProviderValue(setting.value || ''); setAiProviderEditing(true) }} className="mt-1.5 block text-xs text-text-link hover:text-signal-blue font-medium">
-                                      Configure provider
-                                    </button>
-                                  </div>
-                                )}
-                                <p className="text-xs text-text-tertiary">{setting.description}</p>
-                                {setting.source === 'db' && setting.updated_by && (
-                                  <p className="text-xs text-text-quaternary">Modified by {setting.updated_by}</p>
-                                )}
-                                {setting.source === 'db' && (
-                                  <HistoryToggle
-                                    settingKey={setting.key}
-                                    sensitive={setting.sensitive}
-                                    historyKey={state.historyKey}
-                                    history={state.history}
-                                    historyLoading={state.historyLoading}
-                                    onShowHistory={() => handleShowHistory(setting.key)}
-                                  />
-                                )}
-                              </div>
+                              <AiSettingRow
+                                key={setting.key}
+                                setting={setting}
+                                editing={aiProviderEditing}
+                                onStartEdit={(v) => { setAiProviderValue(v); setAiProviderEditing(true) }}
+                                onCancel={() => setAiProviderEditing(false)}
+                                onSave={() => handleSaveAiProvider(aiProviderValue)}
+                                onReset={() => handleReset(setting.key)}
+                                saving={state.saving}
+                                historyKey={state.historyKey}
+                                history={state.history}
+                                historyLoading={state.historyLoading}
+                                onShowHistory={() => handleShowHistory(setting.key)}
+                                configureLabel="Configure provider"
+                                notConfiguredLabel="Not configured (uses AI_PROVIDER env var)"
+                              >
+                                <ProviderSelect value={aiProviderValue} onChange={setAiProviderValue} />
+                              </AiSettingRow>
                             )
                           }
 
-                          // ---- AI_MODEL: combobox selector ----
                           if (setting.key === 'ai_model') {
                             return (
-                              <div key={setting.key} className="py-3 space-y-2">
-                                <div className="flex items-center gap-2">
-                                  <span className="font-mono text-xs font-semibold text-text-primary">{setting.env_var}</span>
-                                  <SourceBadge source={setting.source} />
-                                </div>
-                                {aiModelEditing ? (
-                                  <div className="space-y-3">
-                                    <ModelCombobox
-                                      value={aiModelValue}
-                                      onChange={setAiModelValue}
-                                      options={aiModels}
-                                      placeholder="Select model..."
-                                      className="max-w-md"
-                                    />
-                                    <div className="flex items-center gap-2 pt-1">
-                                      <Button size="sm" onClick={() => handleSaveAiModel(aiModelValue)} disabled={state.saving} className="h-7 text-xs">
-                                        {state.saving ? <><Loader2 className="mr-1 h-3 w-3 animate-spin" />Saving</> : 'Save'}
-                                      </Button>
-                                      <Button size="sm" variant="outline" onClick={() => setAiModelEditing(false)} className="h-7 text-xs">Cancel</Button>
-                                      {setting.source === 'db' && (
-                                        <Button size="sm" variant="ghost" onClick={() => handleReset(setting.key)} className="h-7 text-xs text-text-tertiary hover:text-signal-red">
-                                          <RotateCcw className="mr-1 h-3 w-3" /> Reset
-                                        </Button>
-                                      )}
-                                    </div>
-                                    {!effectiveAiProvider && (
-                                      <p className="text-xs text-signal-amber">Select a provider first to see available models</p>
-                                    )}
-                                  </div>
-                                ) : (
-                                  <div>
-                                    {setting.value ? (
-                                      <span className="inline-flex items-center rounded-md bg-surface-elevated px-2 py-0.5 text-xs font-mono border border-border-default text-text-primary truncate max-w-md">
-                                        {setting.value}
-                                      </span>
-                                    ) : (
-                                      <span className="text-xs text-text-tertiary italic">Not configured (uses AI_MODEL env var)</span>
-                                    )}
-                                    <button type="button" onClick={() => { setAiModelValue(setting.value || ''); setAiModelEditing(true) }} className="mt-1.5 block text-xs text-text-link hover:text-signal-blue font-medium">
-                                      Configure model
-                                    </button>
-                                  </div>
+                              <AiSettingRow
+                                key={setting.key}
+                                setting={setting}
+                                editing={aiModelEditing}
+                                onStartEdit={(v) => { setAiModelValue(v); setAiModelEditing(true) }}
+                                onCancel={() => setAiModelEditing(false)}
+                                onSave={() => handleSaveAiModel(aiModelValue)}
+                                onReset={() => handleReset(setting.key)}
+                                saving={state.saving}
+                                historyKey={state.historyKey}
+                                history={state.history}
+                                historyLoading={state.historyLoading}
+                                onShowHistory={() => handleShowHistory(setting.key)}
+                                configureLabel="Configure model"
+                                notConfiguredLabel="Not configured (uses AI_MODEL env var)"
+                              >
+                                <ModelCombobox
+                                  value={aiModelValue}
+                                  onChange={setAiModelValue}
+                                  options={aiModels}
+                                  placeholder="Select model..."
+                                  className="max-w-md"
+                                />
+                                {!effectiveAiProvider && (
+                                  <p className="text-xs text-signal-amber">Select a provider first to see available models</p>
                                 )}
-                                <p className="text-xs text-text-tertiary">{setting.description}</p>
-                                {setting.source === 'db' && setting.updated_by && (
-                                  <p className="text-xs text-text-quaternary">Modified by {setting.updated_by}</p>
-                                )}
-                                {setting.source === 'db' && (
-                                  <HistoryToggle
-                                    settingKey={setting.key}
-                                    sensitive={setting.sensitive}
-                                    historyKey={state.historyKey}
-                                    history={state.history}
-                                    historyLoading={state.historyLoading}
-                                    onShowHistory={() => handleShowHistory(setting.key)}
-                                  />
-                                )}
-                              </div>
+                              </AiSettingRow>
                             )
                           }
 
@@ -953,6 +886,96 @@ export function ServerSettingsPage() {
         )}
       </div>
     </TooltipProvider>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// AI Setting Row (shared by ai_provider and ai_model)
+// ---------------------------------------------------------------------------
+
+interface AiSettingRowProps {
+  setting: ServerSetting
+  editing: boolean
+  onStartEdit: (currentValue: string) => void
+  onCancel: () => void
+  onSave: () => void
+  onReset: () => void
+  saving: boolean
+  historyKey: string
+  history: HistoryEntry[]
+  historyLoading: boolean
+  onShowHistory: () => void
+  children: React.ReactNode  // The actual editor (ProviderSelect or ModelCombobox)
+  configureLabel: string  // e.g. "Configure provider" or "Configure model"
+  notConfiguredLabel: string  // e.g. "Not configured (uses AI_PROVIDER env var)"
+}
+
+function AiSettingRow({
+  setting,
+  editing,
+  onStartEdit,
+  onCancel,
+  onSave,
+  onReset,
+  saving,
+  historyKey,
+  history,
+  historyLoading,
+  onShowHistory,
+  children,
+  configureLabel,
+  notConfiguredLabel,
+}: AiSettingRowProps) {
+  return (
+    <div key={setting.key} className="py-3 space-y-2">
+      <div className="flex items-center gap-2">
+        <span className="font-mono text-xs font-semibold text-text-primary">{setting.env_var}</span>
+        <SourceBadge source={setting.source} />
+      </div>
+      {editing ? (
+        <div className="space-y-3">
+          {children}
+          <div className="flex items-center gap-2 pt-1">
+            <Button size="sm" onClick={onSave} disabled={saving} className="h-7 text-xs">
+              {saving ? <><Loader2 className="mr-1 h-3 w-3 animate-spin" />Saving</> : 'Save'}
+            </Button>
+            <Button size="sm" variant="outline" onClick={onCancel} className="h-7 text-xs">Cancel</Button>
+            {setting.source === 'db' && (
+              <Button size="sm" variant="ghost" onClick={onReset} className="h-7 text-xs text-text-tertiary hover:text-signal-red">
+                <RotateCcw className="mr-1 h-3 w-3" /> Reset
+              </Button>
+            )}
+          </div>
+        </div>
+      ) : (
+        <div>
+          {setting.value ? (
+            <span className="inline-flex items-center rounded-md bg-surface-elevated px-2 py-0.5 text-xs font-mono border border-border-default text-text-primary truncate max-w-md">
+              {setting.value}
+            </span>
+          ) : (
+            <span className="text-xs text-text-tertiary italic">{notConfiguredLabel}</span>
+          )}
+          <button type="button" onClick={() => onStartEdit(setting.value || '')} className="mt-1.5 block text-xs text-text-link hover:text-signal-blue font-medium">
+            {configureLabel}
+          </button>
+        </div>
+      )}
+      <p className="text-xs text-text-tertiary">{setting.description}</p>
+      {setting.source === 'db' && setting.updated_by && (
+        <p className="text-xs text-text-quaternary">Modified by {setting.updated_by}</p>
+      )}
+      {setting.source === 'db' && (
+        <HistoryToggle
+          settingKey={setting.key}
+          sensitive={setting.sensitive}
+          historyKey={historyKey}
+          history={history}
+          historyLoading={historyLoading}
+          onShowHistory={onShowHistory}
+        />
+      )}
+    </div>
   )
 }
 

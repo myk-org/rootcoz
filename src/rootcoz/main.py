@@ -1788,8 +1788,27 @@ async def root() -> HTMLResponse:
     return _serve_spa()
 
 
+def _ai_not_configured_message(request: Request | None, what: str) -> str:
+    """Build a role-aware error message when AI provider/model is not configured."""
+    is_admin = (
+        getattr(getattr(request, "state", None), "is_admin", False)
+        if request
+        else False
+    )
+    if is_admin:
+        return (
+            f"{what} is not configured. "
+            f"Go to Server Settings \u2192 AI to configure the default provider and model."
+        )
+    # For non-admin users, tell them to contact an admin
+    return (
+        f"{what} is not configured on this server. "
+        f"Please contact a server administrator to configure AI settings."
+    )
+
+
 def _resolve_ai_config_values(
-    ai_provider: str | None, ai_model: str | None
+    ai_provider: str | None, ai_model: str | None, *, request: Request | None = None
 ) -> tuple[str, str]:
     """Resolve and validate AI provider and model.
 
@@ -1814,11 +1833,7 @@ def _resolve_ai_config_values(
     if not provider:
         raise HTTPException(
             status_code=400,
-            detail=(
-                f"No AI provider configured. Set AI_PROVIDER env var or"
-                f" pass ai_provider in request body."
-                f" Valid providers: {', '.join(sorted(VALID_AI_PROVIDERS))}"
-            ),
+            detail=_ai_not_configured_message(request, "AI provider"),
         )
     if provider not in VALID_AI_PROVIDERS:
         raise HTTPException(
@@ -1831,14 +1846,16 @@ def _resolve_ai_config_values(
     if not model:
         raise HTTPException(
             status_code=400,
-            detail="No AI model configured. Set AI_MODEL env var or pass ai_model in request body.",
+            detail=_ai_not_configured_message(request, "AI model"),
         )
     return provider, model
 
 
-def _resolve_ai_config(body: BaseAnalysisRequest) -> tuple[str, str]:
+def _resolve_ai_config(
+    body: BaseAnalysisRequest, request: Request | None = None
+) -> tuple[str, str]:
     """Resolve AI config from an AnalyzeRequest."""
-    return _resolve_ai_config_values(body.ai_provider, body.ai_model)
+    return _resolve_ai_config_values(body.ai_provider, body.ai_model, request=request)
 
 
 def _resolve_peer_ai_configs(
@@ -2862,7 +2879,9 @@ async def _enqueue_file_raw_analysis(
     Returns:
         JSON-serialisable response dict with ``status``, ``job_id``, links.
     """
-    ai_provider, ai_model = _resolve_ai_config_values(body.ai_provider, body.ai_model)
+    ai_provider, ai_model = _resolve_ai_config_values(
+        body.ai_provider, body.ai_model, request=None
+    )
 
     # Resolve repos
     tests_repo_url_raw = (
@@ -3444,7 +3463,7 @@ async def analyze(
     base_url = _extract_base_url()
 
     # Validate AI config early
-    _resolve_ai_config(body)
+    _resolve_ai_config(body, request)
 
     # Resolve display name
     display_name: str = body.name or ""
@@ -3597,7 +3616,7 @@ async def re_analyze(
         unified_body.tags = existing_tags
 
         # Validate and merge settings
-        _resolve_ai_config(unified_body)
+        _resolve_ai_config(unified_body, request)
         merged = _merge_settings(unified_body, get_settings())
         resolved_peers = _validate_peer_configs(unified_body, merged)
 
@@ -3650,7 +3669,7 @@ async def re_analyze(
     merged = _merge_settings(original_body, original_settings)
 
     # Validate AI config and peers
-    _resolve_ai_config(original_body)
+    _resolve_ai_config(original_body, request)
     resolved_peers = _validate_peer_configs(original_body, merged)
 
     return await _enqueue_analysis_job(
@@ -3960,7 +3979,9 @@ async def re_analyze_failure(
         ai_provider = overrides.ai_provider
     if overrides.ai_model is not None:
         ai_model = overrides.ai_model
-    ai_provider, ai_model = _resolve_ai_config_values(ai_provider, ai_model)
+    ai_provider, ai_model = _resolve_ai_config_values(
+        ai_provider, ai_model, request=request
+    )
 
     ai_call_timeout = decrypted_params.get("ai_call_timeout")
     if overrides.ai_call_timeout is not None:
@@ -8423,7 +8444,9 @@ async def analyze_comment_intent(
             params = stored["result"].get("request_params", {})
             ai_provider = params.get("ai_provider", "")
             ai_model = params.get("ai_model", "")
-    ai_provider, ai_model = _resolve_ai_config_values(ai_provider, ai_model)
+    ai_provider, ai_model = _resolve_ai_config_values(
+        ai_provider, ai_model, request=request
+    )
 
     prompt = """You are analyzing a comment left on a test failure report.
 Does this comment imply the failure has been reviewed or resolved?
@@ -8502,16 +8525,9 @@ async def preview_feedback(request: Request, body: FeedbackRequest):
             status_code=503, detail="Feedback submission is disabled on this server"
         )
     try:
-        ai_provider, ai_model = _resolve_ai_config_values(None, None)
-    except HTTPException as exc:
-        raise HTTPException(
-            status_code=503,
-            detail=(
-                "AI provider not configured on this server. "
-                "Configure AI_PROVIDER and AI_MODEL environment variables "
-                "to enable AI-powered feedback."
-            ),
-        ) from exc
+        ai_provider, ai_model = _resolve_ai_config_values(None, None, request=request)
+    except HTTPException:
+        raise
     try:
         return await generate_feedback_preview(
             body, settings, ai_provider=ai_provider, ai_model=ai_model

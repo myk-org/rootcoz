@@ -5483,3 +5483,13 @@ async def get_report_issues_created(
         "jira_total": jira_total,
         "issues": paginated,
     }
+
+
+async def get_admin_usernames() -> list[str]:
+    """Return a list of admin usernames (excluding the bootstrap 'admin' user)."""
+    async with _connect_db() as db:
+        cursor = await db.execute(
+            "SELECT username FROM users WHERE role = 'admin' AND username != 'admin' ORDER BY username"
+        )
+        rows = await cursor.fetchall()
+        return [row[0] for row in rows]

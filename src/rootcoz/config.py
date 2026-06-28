@@ -374,10 +374,15 @@ class Settings(BaseSettings):
             "jenkins_user",
             "jenkins_password",
             "admin_wait_approve_msg",
+            "ai_provider",
+            "ai_model",
         ):
             value = getattr(self, field_name)
             if isinstance(value, str):
                 object.__setattr__(self, field_name, value.strip())
+        # Normalize ai_provider to lowercase (provider names are case-insensitive)
+        if self.ai_provider:
+            object.__setattr__(self, "ai_provider", self.ai_provider.lower())
         # Strip whitespace from secret fields; blank becomes None
         for field_name in (
             "github_token",
