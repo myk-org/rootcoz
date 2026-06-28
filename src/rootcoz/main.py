@@ -6649,9 +6649,7 @@ async def classify_test(request: Request, body: ClassifyTestRequest) -> dict:
             test_name=test_name,
         )
         user_classifications = [
-            c
-            for c in existing
-            if c.get("created_by") and c["created_by"] != "rootcoz-ai"
+            c for c in existing if c.get("created_by", "") != "rootcoz-ai"
         ]
         if user_classifications:
             logger.info(
