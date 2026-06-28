@@ -1999,10 +1999,18 @@ async def _apply_auto_review(
         child_job_name: Child job name (empty for top-level failures).
         child_build_number: Child build number (0 for top-level failures).
     """
-    comment = (
-        f"Auto-reviewed: identical failure signature found in previous "
-        f"analysis `{prev_job_id}` (build #{prev_build})"
-    )
+    base_url = _extract_base_url()
+    if base_url:
+        job_link = f"{base_url}/results/{prev_job_id}"
+        comment = (
+            f"Auto-reviewed: identical failure signature found in previous "
+            f"analysis {job_link} (build #{prev_build})"
+        )
+    else:
+        comment = (
+            f"Auto-reviewed: identical failure signature found in previous "
+            f"analysis `{prev_job_id}` (build #{prev_build})"
+        )
     await storage.set_reviewed(
         job_id,
         test_name,
@@ -6607,6 +6615,7 @@ async def get_job_stats_endpoint(
 async def classify_test(request: Request, body: ClassifyTestRequest) -> dict:
     """Classify a test as FLAKY, REGRESSION, etc. Used by AI and humans."""
     _check_allow_list(request)
+    _require_reviewer(request)
     logger.debug(
         f"POST /history/classify: test_name={body.test_name!r}, classification={body.classification!r}"
     )

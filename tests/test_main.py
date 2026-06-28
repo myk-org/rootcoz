@@ -3038,7 +3038,12 @@ class TestClassifyEndpoint:
         assert "bad value" in resp.json()["detail"]
 
     def test_ai_cannot_override_user_classification(self, test_client, monkeypatch):
-        """AI classification is blocked when a user has already classified the test."""
+        """AI classification is blocked when a user has already classified the test.
+
+        Verifies: (1) source="ai" triggers the guard when user classifications exist,
+        (2) the guard returns a non-error skip response, (3) normal users (no source="ai")
+        can still classify the same test.
+        """
 
         async def _fake_get_classifications(**kwargs):
             return [
@@ -3062,6 +3067,7 @@ class TestClassifyEndpoint:
             _fake_get_classifications,
         )
 
+        # AI caller (source="ai") should be blocked
         resp = test_client.post(
             "/history/classify",
             json={
@@ -3072,12 +3078,24 @@ class TestClassifyEndpoint:
                 "source": "ai",
             },
         )
-
         assert resp.status_code == 200
         data = resp.json()
         assert data["skipped"] is True
         assert data["id"] is None
         assert "User classification exists" in data["reason"]
+
+        # Normal user (no source field) should NOT be blocked
+        resp2 = test_client.post(
+            "/history/classify",
+            json={
+                "test_name": "test_user_override",
+                "classification": "REGRESSION",
+                "reason": "User reclassifies",
+                "job_id": "job-user-reclassify",
+            },
+        )
+        assert resp2.status_code == 201
+        assert resp2.json()["id"] is not None
 
 
 class TestWaitForJenkinsCompletion:
