@@ -655,7 +655,7 @@ export function ServerSettingsPage() {
                                 setting={setting}
                                 editing={aiProviderEditing}
                                 onStartEdit={(v) => { setAiProviderValue(v); setAiProviderEditing(true) }}
-                                onCancel={() => setAiProviderEditing(false)}
+                                onCancel={() => { setAiProviderEditing(false); setAiProviderValue(savedAiProvider) }}
                                 onSave={() => handleSaveAiProvider(aiProviderValue)}
                                 onReset={() => handleReset(setting.key)}
                                 saving={state.saving}
