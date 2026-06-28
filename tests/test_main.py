@@ -3037,6 +3037,48 @@ class TestClassifyEndpoint:
         assert resp.status_code == 400
         assert "bad value" in resp.json()["detail"]
 
+    def test_ai_cannot_override_user_classification(self, test_client, monkeypatch):
+        """AI classification is blocked when a user has already classified the test."""
+
+        async def _fake_get_classifications(**kwargs):
+            return [
+                {
+                    "id": 1,
+                    "test_name": "test_user_override",
+                    "job_name": "",
+                    "parent_job_name": "parent-job",
+                    "classification": "CODE ISSUE",
+                    "reason": "User override",
+                    "references_info": "",
+                    "created_by": "rnetser",
+                    "job_id": "job-user-cls",
+                    "child_build_number": 0,
+                    "created_at": "2025-01-01 00:00:00",
+                }
+            ]
+
+        monkeypatch.setattr(
+            "rootcoz.main.storage.get_test_classifications",
+            _fake_get_classifications,
+        )
+
+        resp = test_client.post(
+            "/history/classify",
+            json={
+                "test_name": "test_user_override",
+                "classification": "FLAKY",
+                "reason": "AI thinks this is flaky",
+                "job_id": "job-ai-reanalysis",
+                "source": "ai",
+            },
+        )
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["skipped"] is True
+        assert data["id"] is None
+        assert "User classification exists" in data["reason"]
+
 
 class TestWaitForJenkinsCompletion:
     """Tests for the wait_for_jenkins_completion function."""

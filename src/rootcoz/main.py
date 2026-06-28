@@ -6628,6 +6628,38 @@ async def classify_test(request: Request, body: ClassifyTestRequest) -> dict:
 
     created_by = request.state.username or "ai"
 
+    # Guard: AI cannot override user classifications.
+    # The AI authenticates with the submitting user's session token, so we
+    # cannot rely on empty username.  Instead, the AI prompt includes
+    # source="ai" in the request body to identify itself.
+    is_ai_caller = body.source == "ai"
+    if is_ai_caller:
+        existing = await storage.get_test_classifications(
+            test_name=test_name,
+        )
+        user_classifications = [
+            c for c in existing if c.get("created_by") and c["created_by"] != "ai"
+        ]
+        if user_classifications:
+            logger.info(
+                "POST /history/classify: AI classification blocked — user %s already classified test %r",
+                user_classifications[0]["created_by"],
+                test_name,
+            )
+            return JSONResponse(
+                content={
+                    "id": None,
+                    "skipped": True,
+                    "reason": "User classification exists",
+                },
+                status_code=200,
+            )
+
+    # When the AI identifies itself, always store created_by as "ai"
+    # so future guards can distinguish AI vs user classifications.
+    if is_ai_caller:
+        created_by = "ai"
+
     # Human classifications are visible immediately.
     # AI classifications become visible after analysis completes
     # and calls make_classifications_visible().
