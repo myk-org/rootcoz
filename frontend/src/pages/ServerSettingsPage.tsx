@@ -317,9 +317,10 @@ export function ServerSettingsPage() {
   const [aiModelEditing, setAiModelEditing] = useState(false)
   const [aiModelValue, setAiModelValue] = useState('')
   // For the model combobox, use the editing provider if editing, otherwise the saved setting value
+  const savedAiProvider = state.settings.find(s => s.key === 'ai_provider')?.value || ''
   const effectiveAiProvider = aiProviderEditing
     ? aiProviderValue
-    : (state.settings.find(s => s.key === 'ai_provider')?.value || '')
+    : (savedAiProvider || aiProviderValue)
   const aiModels = useProviderModels(effectiveAiProvider)
 
   // Additional repos structured editor state
@@ -439,7 +440,13 @@ export function ServerSettingsPage() {
 
   async function handleSaveAiProvider(value: string) {
     const ok = await saveSettingValue('ai_provider', value)
-    if (ok) setAiProviderEditing(false)
+    if (ok) {
+      setAiProviderEditing(false)
+      // Keep aiProviderValue in sync so effectiveAiProvider (and thus the
+      // model list) reflects the newly saved provider immediately, before
+      // fetchSettings() re-renders with the server-side state.
+      setAiProviderValue(value)
+    }
   }
 
   async function handleSaveAiModel(value: string) {

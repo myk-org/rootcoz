@@ -1828,7 +1828,7 @@ def _resolve_ai_config_values(
         HTTPException: If provider or model is not configured.
     """
     settings = get_settings()
-    provider = ai_provider or settings.ai_provider or AI_PROVIDER
+    provider = (ai_provider or settings.ai_provider or AI_PROVIDER).lower()
     model = ai_model or settings.ai_model or AI_MODEL
     if not provider:
         raise HTTPException(
