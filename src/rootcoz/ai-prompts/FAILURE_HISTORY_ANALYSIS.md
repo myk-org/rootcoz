@@ -40,11 +40,11 @@ If already classified, reference the existing classification and explain if your
 ### User Override Protection (STRICT — NEVER VIOLATE)
 
 When checking existing classifications, look at the `created_by` field:
-- If `created_by` is a **username** (not `"ai"`), this is a **user classification** — a deliberate human decision.
+- If `created_by` is a **username** (not `"rootcoz-ai"`), this is a **user classification** — a deliberate human decision.
 - **You MUST NOT override user classifications.** Do not call `POST /history/classify` for tests that have a user classification.
 - If you disagree with a user's classification, note your disagreement in the analysis details only — the user's classification stands.
 - If a user has classified a test, do NOT mark that test as reviewed — leave it for the user to review.
-- Only override classifications where `created_by` is `"ai"` (from a previous AI analysis).
+- Only override classifications where `created_by` is `"rootcoz-ai"` (from a previous AI analysis).
 
 ## Step 4: Check Job Statistics (MANDATORY — once per job)
 

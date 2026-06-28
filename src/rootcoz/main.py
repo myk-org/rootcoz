@@ -6635,23 +6635,23 @@ async def classify_test(request: Request, body: ClassifyTestRequest) -> dict:
             detail="KNOWN_BUG requires non-empty references (e.g., Jira tickets or historical bug URLs).",
         )
 
-    created_by = request.state.username or "ai"
+    created_by = request.state.username or "rootcoz-ai"
 
     # Guard: AI cannot override user classifications.
     # The AI authenticates with the submitting user's session token, so we
     # cannot rely on empty username.  Instead, the AI prompt includes
     # source="ai" in the request body to identify itself.
-    # Security note: source="ai" is client-supplied but spoofing it is
-    # harmless — it only blocks writes (protective guard) and sets
-    # created_by="ai" (self-sabotage, not privilege escalation).
-    # Auth middleware enforces authentication before this code runs.
+    # "rootcoz-ai" is a reserved system identity (blocked from registration)
+    # used consistently for all AI-originated actions (auto-review, classification).
     is_ai_caller = body.source == "ai"
     if is_ai_caller:
         existing = await storage.get_test_classifications(
             test_name=test_name,
         )
         user_classifications = [
-            c for c in existing if c.get("created_by") and c["created_by"] != "ai"
+            c
+            for c in existing
+            if c.get("created_by") and c["created_by"] != "rootcoz-ai"
         ]
         if user_classifications:
             logger.info(
@@ -6668,19 +6668,15 @@ async def classify_test(request: Request, body: ClassifyTestRequest) -> dict:
                 status_code=200,
             )
 
-    # When the AI identifies itself via source="ai", store created_by as "ai"
-    # so future guards can distinguish AI vs user classifications.
-    # Note: source="ai" is only honored for the guard check (protective —
-    # spoofing it only blocks writes, which is harmless) and for attribution.
-    # The endpoint is already protected by auth middleware; only authenticated
-    # users can reach this code.
+    # When the AI identifies itself, store created_by as "rootcoz-ai" —
+    # the reserved system identity that cannot be registered as a username.
     if is_ai_caller:
-        created_by = "ai"
+        created_by = "rootcoz-ai"
 
     # Human classifications are visible immediately.
     # AI classifications become visible after analysis completes
     # and calls make_classifications_visible().
-    visible = 0 if created_by == "ai" else 1
+    visible = 0 if created_by == "rootcoz-ai" else 1
 
     # Look up parent job name from failure_history, scoped to this job
     parent_job_name = await storage.get_parent_job_name_for_test(
