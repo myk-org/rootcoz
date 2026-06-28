@@ -211,6 +211,8 @@ _SETTINGS_CATEGORIES: dict[str, list[str]] = {
         "get_job_artifacts",
     ],
     "AI": [
+        "ai_provider",
+        "ai_model",
         "ai_call_timeout",
         "max_concurrent_ai_calls",
         "peer_ai_configs",
@@ -1789,7 +1791,12 @@ async def root() -> HTMLResponse:
 def _resolve_ai_config_values(
     ai_provider: str | None, ai_model: str | None
 ) -> tuple[str, str]:
-    """Resolve and validate AI provider and model from given values or env defaults.
+    """Resolve and validate AI provider and model.
+
+    Resolution order (first non-empty wins):
+    1. Per-request value (ai_provider/ai_model arguments)
+    2. Settings DB value (admin server settings page)
+    3. Environment variable (AI_PROVIDER/AI_MODEL)
 
     Args:
         ai_provider: Provider from request body (or None).
@@ -1801,8 +1808,9 @@ def _resolve_ai_config_values(
     Raises:
         HTTPException: If provider or model is not configured.
     """
-    provider = ai_provider or AI_PROVIDER
-    model = ai_model or AI_MODEL
+    settings = get_settings()
+    provider = ai_provider or settings.ai_provider or AI_PROVIDER
+    model = ai_model or settings.ai_model or AI_MODEL
     if not provider:
         raise HTTPException(
             status_code=400,

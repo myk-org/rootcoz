@@ -234,6 +234,11 @@ class Settings(BaseSettings):
     # Max concurrent AI calls
     max_concurrent_ai_calls: int = Field(default=3, gt=0)
 
+    # Default AI provider (server-level default, can be overridden per-request)
+    ai_provider: str = ""
+    # Default AI model (server-level default, can be overridden per-request)
+    ai_model: str = ""
+
     # Peer analysis configuration
     peer_ai_configs: str = ""  # "provider:model,provider:model" format
     peer_analysis_max_rounds: int = Field(default=3, ge=1, le=10)

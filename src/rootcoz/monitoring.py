@@ -228,8 +228,11 @@ async def check_jenkins(settings: Any) -> dict[str, str]:
 
 async def check_ai_provider() -> dict[str, str]:
     """Check that an AI provider is configured and sidecar is reachable."""
-    provider = os.getenv("AI_PROVIDER", "")
-    model = os.getenv("AI_MODEL", "")
+    from rootcoz.config import get_settings
+
+    settings = get_settings()
+    provider = settings.ai_provider or os.getenv("AI_PROVIDER", "")
+    model = settings.ai_model or os.getenv("AI_MODEL", "")
     config_issues = []
     error_issues = []
 
@@ -376,8 +379,11 @@ def validate_startup_config() -> StartupConfigResult:
     findings: list[_ConfigFinding] = []
 
     # AI provider (optional — can be passed per-request)
-    provider = os.getenv("AI_PROVIDER", "")
-    model = os.getenv("AI_MODEL", "")
+    from rootcoz.config import get_settings
+
+    settings = get_settings()
+    provider = settings.ai_provider or os.getenv("AI_PROVIDER", "")
+    model = settings.ai_model or os.getenv("AI_MODEL", "")
     if not provider:
         findings.append(
             _ConfigFinding(
