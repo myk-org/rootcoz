@@ -230,7 +230,7 @@ When `ENABLE_REPORTPORTAL=true`, users can push test classifications back to Rep
 
 ### Auto-Review
 
-After any completed analysis, failures with an identical error signature in a previous analysis of the same `job_name` (across any `job_id`) are auto-reviewed (marked reviewed by `rootcoz-ai`). The auto-review comment includes a clickable link to the previous job when `PUBLIC_BASE_URL` is set.
+After any completed analysis, each failure is checked against previous analyses of the same `job_name` for the same `test_name`. If the `error_signature` matches exactly, the failure is auto-reviewed (marked reviewed by `rootcoz-ai`). The auto-review comment includes a clickable link to the previous job when `PUBLIC_BASE_URL` is set.
 
 ### Feedback System
 
