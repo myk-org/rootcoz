@@ -3041,8 +3041,8 @@ class TestClassifyEndpoint:
         """AI classification is blocked when a user has already classified the test.
 
         Verifies: (1) source="ai" triggers the guard when user classifications exist,
-        (2) the guard returns a non-error skip response, (3) normal users (no source="ai")
-        can still classify the same test.
+        (2) the guard returns a non-error skip response, (3) authenticated requests
+        without source="ai" can still classify the same test.
         """
 
         async def _fake_get_classifications(**kwargs):
@@ -3084,7 +3084,7 @@ class TestClassifyEndpoint:
         assert data["id"] is None
         assert "User classification exists" in data["reason"]
 
-        # Normal user (no source field) should NOT be blocked
+        # Authenticated request without source="ai" should NOT be blocked
         resp2 = test_client.post(
             "/history/classify",
             json={
