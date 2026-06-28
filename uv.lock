@@ -727,13 +727,13 @@ wheels = [
 
 [[package]]
 name = "pi-sidecar-client"
-version = "1.1.2"
+version = "1.1.3"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "httpx" },
     { name = "python-simple-logger" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/3a/da/5db407800962c3831eaeda80f46cdebd5f037a146f0ea200524124de137d/pi_sidecar_client-1.1.2.tar.gz", hash = "sha256:3b1b6a3f8357d943e4da5183d4b18b0fc41e01a24263148e2f7cfd6d496dd22c", size = 12846, upload-time = "2026-06-28T09:16:54.483Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/dc/67/f639826ca2ec313c50bded3602bee140a9e98957f0356bba903495097cc6/pi_sidecar_client-1.1.3.tar.gz", hash = "sha256:e7e53e4aead8aa3e8540128b1171fa94da3170fa562580d7057334981bf412e3", size = 13715, upload-time = "2026-06-28T10:52:01.132Z" }
 
 [[package]]
 name = "pluggy"
@@ -1189,7 +1189,7 @@ requires-dist = [
     { name = "fastapi" },
     { name = "gitpython" },
     { name = "httpx" },
-    { name = "pi-sidecar-client", specifier = ">=1.1.2" },
+    { name = "pi-sidecar-client", specifier = ">=1.1.3" },
     { name = "pydantic-settings" },
     { name = "pytest", marker = "extra == 'tests'" },
     { name = "pytest-asyncio", marker = "extra == 'tests'" },

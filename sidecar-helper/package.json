@@ -8,7 +8,7 @@
     "build": "tsc"
   },
   "dependencies": {
-    "@myk-org/pi-sidecar": "^1.1.2"
+    "@myk-org/pi-sidecar": "^1.1.3"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
