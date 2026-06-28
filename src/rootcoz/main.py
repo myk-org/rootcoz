@@ -6632,6 +6632,10 @@ async def classify_test(request: Request, body: ClassifyTestRequest) -> dict:
     # The AI authenticates with the submitting user's session token, so we
     # cannot rely on empty username.  Instead, the AI prompt includes
     # source="ai" in the request body to identify itself.
+    # Security note: source="ai" is client-supplied but spoofing it is
+    # harmless — it only blocks writes (protective guard) and sets
+    # created_by="ai" (self-sabotage, not privilege escalation).
+    # Auth middleware enforces authentication before this code runs.
     is_ai_caller = body.source == "ai"
     if is_ai_caller:
         existing = await storage.get_test_classifications(
@@ -6655,8 +6659,12 @@ async def classify_test(request: Request, body: ClassifyTestRequest) -> dict:
                 status_code=200,
             )
 
-    # When the AI identifies itself, always store created_by as "ai"
+    # When the AI identifies itself via source="ai", store created_by as "ai"
     # so future guards can distinguish AI vs user classifications.
+    # Note: source="ai" is only honored for the guard check (protective —
+    # spoofing it only blocks writes, which is harmless) and for attribution.
+    # The endpoint is already protected by auth middleware; only authenticated
+    # users can reach this code.
     if is_ai_caller:
         created_by = "ai"
 
