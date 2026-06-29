@@ -2441,6 +2441,24 @@ async def _preflight_sidecar_check(
     return False
 
 
+async def _carry_forward_overrides(job_id: str, result_data: dict) -> None:
+    """Carry forward user classification overrides from previous jobs. Best-effort."""
+    try:
+        carried = await storage.carry_forward_user_overrides(job_id, result_data)
+        if carried:
+            logger.info(
+                "Carried forward %d user classification override(s) for job_id=%s",
+                carried,
+                job_id,
+            )
+    except Exception:
+        logger.warning(
+            "Failed to carry forward user overrides for job_id=%s",
+            job_id,
+            exc_info=True,
+        )
+
+
 async def process_analysis_with_id(
     job_id: str, body: AnalyzeRequest, settings: Settings, username: str = ""
 ) -> None:
@@ -2631,23 +2649,7 @@ async def process_analysis_with_id(
                     exc_info=True,
                 )
 
-            # Carry forward user classification overrides from previous jobs
-            try:
-                carried = await storage.carry_forward_user_overrides(
-                    job_id, result_data
-                )
-                if carried:
-                    logger.info(
-                        "Carried forward %d user classification override(s) for job_id=%s",
-                        carried,
-                        job_id,
-                    )
-            except Exception:
-                logger.warning(
-                    "Failed to carry forward user overrides for job_id=%s",
-                    job_id,
-                    exc_info=True,
-                )
+            await _carry_forward_overrides(job_id, result_data)
 
             # Auto-review failures with matching signatures from previous analyses
             try:
@@ -3397,21 +3399,7 @@ async def _process_file_raw_analysis(
                 exc_info=True,
             )
 
-        # Carry forward user classification overrides from previous jobs
-        try:
-            carried = await storage.carry_forward_user_overrides(job_id, result_data)
-            if carried:
-                logger.info(
-                    "Carried forward %d user classification override(s) for job_id=%s",
-                    carried,
-                    job_id,
-                )
-        except Exception:
-            logger.warning(
-                "Failed to carry forward user overrides for job_id=%s",
-                job_id,
-                exc_info=True,
-            )
+        await _carry_forward_overrides(job_id, result_data)
 
         # Auto-review failures with matching signatures from previous analyses
         try:

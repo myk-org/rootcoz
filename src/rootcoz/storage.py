@@ -2090,10 +2090,11 @@ async def carry_forward_user_overrides(job_id: str, result_data: dict) -> int:
                 "parent_job_name, child_build_number "
                 "FROM test_classifications "
                 "WHERE test_name = ? AND job_id != ? AND visible = 1 "
-                "AND created_by != 'rootcoz-ai' AND created_by != '' "
+                "AND created_by != 'rootcoz-ai' "
                 "AND classification != '' "
+                "AND parent_job_name = ? "
                 "ORDER BY created_at DESC, id DESC LIMIT 1",
-                (test_name, job_id),
+                (test_name, job_id, job_name),
             )
             row = await cursor.fetchone()
             if row is None:
@@ -2103,8 +2104,8 @@ async def carry_forward_user_overrides(job_id: str, result_data: dict) -> int:
             await db.execute(
                 "INSERT INTO test_classifications "
                 "(test_name, job_name, parent_job_name, job_id, classification, "
-                "reason, created_by, visible, child_build_number) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?)",
+                "reason, references_info, created_by, visible, child_build_number) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?)",
                 (
                     test_name,
                     child_job_name,
@@ -2112,7 +2113,8 @@ async def carry_forward_user_overrides(job_id: str, result_data: dict) -> int:
                     job_id,
                     row["classification"],
                     f"Carried forward from user override by {row['created_by']}",
-                    row["created_by"],  # Keep the original user as created_by
+                    row["references_info"] or "",
+                    row["created_by"] or "unknown",
                     child_build_number,
                 ),
             )
