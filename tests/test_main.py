@@ -5104,7 +5104,9 @@ class TestReAnalyzeFailure:
                     _failures = _stored.get("result", {}).get("failures", [])
                     if (
                         _failures
-                        and _failures[0].get("reanalysis_status") == "completed"
+                        and "reanalysis_status" not in _failures[0]
+                        and _failures[0].get("analysis", {}).get("classification")
+                        == "PRODUCT ISSUE"
                     ):
                         break
         assert response.status_code == 202
