@@ -2631,6 +2631,24 @@ async def process_analysis_with_id(
                     exc_info=True,
                 )
 
+            # Carry forward user classification overrides from previous jobs
+            try:
+                carried = await storage.carry_forward_user_overrides(
+                    job_id, result_data
+                )
+                if carried:
+                    logger.info(
+                        "Carried forward %d user classification override(s) for job_id=%s",
+                        carried,
+                        job_id,
+                    )
+            except Exception:
+                logger.warning(
+                    "Failed to carry forward user overrides for job_id=%s",
+                    job_id,
+                    exc_info=True,
+                )
+
             # Auto-review failures with matching signatures from previous analyses
             try:
                 await _auto_review_matching_failures(
@@ -3375,6 +3393,22 @@ async def _process_file_raw_analysis(
         except Exception:
             logger.warning(
                 "Failed to populate failure_history for job_id=%s",
+                job_id,
+                exc_info=True,
+            )
+
+        # Carry forward user classification overrides from previous jobs
+        try:
+            carried = await storage.carry_forward_user_overrides(job_id, result_data)
+            if carried:
+                logger.info(
+                    "Carried forward %d user classification override(s) for job_id=%s",
+                    carried,
+                    job_id,
+                )
+        except Exception:
+            logger.warning(
+                "Failed to carry forward user overrides for job_id=%s",
                 job_id,
                 exc_info=True,
             )
