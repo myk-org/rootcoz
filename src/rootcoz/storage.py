@@ -2112,7 +2112,7 @@ async def carry_forward_user_overrides(job_id: str, result_data: dict) -> int:
                     row["parent_job_name"] or job_name,
                     job_id,
                     row["classification"],
-                    f"Carried forward from user override by {row['created_by']}",
+                    f"Carried forward from user override{' by ' + row['created_by'] if row['created_by'] else ''}",
                     row["references_info"] or "",
                     row["created_by"] or "",
                     child_build_number,
@@ -2123,7 +2123,7 @@ async def carry_forward_user_overrides(job_id: str, result_data: dict) -> int:
                 "Carried forward user override for %s: %s (by %s) to job %s",
                 test_name,
                 row["classification"],
-                row["created_by"],
+                row["created_by"] or "<unattributed>",
                 job_id,
             )
 
