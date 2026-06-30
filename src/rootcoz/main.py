@@ -3706,6 +3706,49 @@ async def re_analyze(
     )
 
 
+async def _apply_effective_classifications(job_id: str, result_data: dict) -> None:
+    """Apply user classification overrides to failures in result_data.
+
+    Walks all failures (top-level and children) and replaces the AI's
+    raw classification with the effective classification from
+    test_classifications when a user override exists.
+    """
+
+    async def _apply_to_failures(
+        failures: list[dict],
+        child_job_name: str = "",
+        child_build_number: int = 0,
+    ) -> None:
+        for failure in failures:
+            test_name = failure.get("test_name", "")
+            if not test_name:
+                continue
+            effective = await get_effective_classification(
+                job_id,
+                test_name,
+                child_job_name=child_job_name,
+                child_build_number=child_build_number,
+            )
+            if effective and failure.get("analysis"):
+                current = failure["analysis"].get("classification", "")
+                if effective != current:
+                    failure["analysis"]["classification"] = effective
+                    failure["analysis"]["_original_classification"] = current
+
+    # Top-level failures
+    await _apply_to_failures(result_data.get("failures", []))
+
+    # Child job failures
+    for child in result_data.get("child_job_analyses", []):
+        child_job = child.get("job_name", "")
+        child_build = child.get("build_number", 0)
+        await _apply_to_failures(
+            child.get("failures", []),
+            child_job_name=child_job,
+            child_build_number=child_build,
+        )
+
+
 @app.get("/results/{job_id}", response_model=None)
 async def get_job_result(
     request: Request, job_id: str, response: Response, _: None = Depends(_bind_job_id)
@@ -3723,6 +3766,9 @@ async def get_job_result(
     result = await get_result(job_id)
     if not result:
         raise HTTPException(status_code=404, detail="Job not found")
+    # Apply user classification overrides so the UI shows effective classifications
+    if result.get("result"):
+        await _apply_effective_classifications(job_id, result["result"])
     _attach_result_links(result, _extract_base_url(), job_id)
     await _attach_origin_job_info(result)
     settings = get_settings()
