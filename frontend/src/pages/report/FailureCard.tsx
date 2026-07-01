@@ -395,6 +395,22 @@ export function FailureCard({ group, jobId, childJobName, childBuildNumber, inde
                 <ClassificationBadge classification={pattern} />
               </>
             )}
+            {trackedIn[rep.test_name] && trackedIn[rep.test_name].tracked_in_url ? (
+              <TrackedInBadge url={trackedIn[rep.test_name].tracked_in_url} type={trackedIn[rep.test_name].tracked_in_type} />
+            ) : !isViewer ? (
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <button
+                    onClick={(e) => { e.stopPropagation(); setTrackInOpen(true) }}
+                    className="flex items-center gap-1 rounded-md bg-surface-elevated px-2 py-1 text-[10px] font-mono text-text-tertiary hover:text-text-secondary hover:bg-surface-elevated/80 transition-colors"
+                  >
+                    <Link2 className="h-3 w-3" />
+                    Track
+                  </button>
+                </TooltipTrigger>
+                <TooltipContent>Link to an existing issue</TooltipContent>
+              </Tooltip>
+            ) : null}
             {rep.reanalyzed_with && rep.reanalysis_status !== 'running' && (
               <Tooltip>
                 <TooltipTrigger asChild>
@@ -436,9 +452,6 @@ export function FailureCard({ group, jobId, childJobName, childBuildNumber, inde
                 </TooltipTrigger>
                 <TooltipContent>{allReviewed ? 'All reviewed' : `Review all ${group.count} tests`}</TooltipContent>
               </Tooltip>
-            )}
-            {trackedIn[rep.test_name] && trackedIn[rep.test_name].tracked_in_url && (
-              <TrackedInBadge url={trackedIn[rep.test_name].tracked_in_url} type={trackedIn[rep.test_name].tracked_in_type} />
             )}
             {commentCount > 0 && (
               <span className="flex items-center gap-1 rounded-md bg-surface-elevated px-2 py-1 text-[10px] font-mono text-text-tertiary">
@@ -705,11 +718,7 @@ export function FailureCard({ group, jobId, childJobName, childBuildNumber, inde
                 label="Jira Ticket"
                 onClick={() => setBugTarget('jira')}
               />
-              {!isViewer && !trackedIn[rep.test_name]?.tracked_in_url && (
-                <Button variant="outline" size="sm" onClick={() => setTrackInOpen(true)}>
-                  <Link2 className="h-3.5 w-3.5 mr-1" /> Track In...
-                </Button>
-              )}
+
             </div>
 
             {/* Comments */}
