@@ -56,27 +56,34 @@ interface ChannelMessage {
 // ---------------------------------------------------------------------------
 
 const CHANNEL_NAME = 'rootcoz-sse-mux'
+const LOCK_NAME = 'rootcoz-sse-leader'
 const RECONNECT_DEBOUNCE_MS = 150
-const ELECTION_TIMEOUT_MS = 150
+const LEADER_HEARTBEAT_MS = 5_000
+const LEADER_TIMEOUT_MS = 12_000
 const MAX_RECONNECT_DELAY_MS = 30_000
 
 // ---------------------------------------------------------------------------
-// Manager implementation
+// Manager implementation (navigator.locks-based leader election)
 // ---------------------------------------------------------------------------
 
 function createSSEManager(): SSEManager & { destroy(): void } {
   const subscriptions = new Map<number, Subscription>()
   let destroyed = false
 
-  // ---- Leader election state ----
+  // ---- Leader state ----
   let isLeader = false
   let eventSource: EventSource | null = null
   let reconnectDebounceTimer: ReturnType<typeof setTimeout> | null = null
-  let electionTimer: ReturnType<typeof setTimeout> | null = null
   let reconnectBackoffTimer: ReturnType<typeof setTimeout> | null = null
   let reconnectDelay = 1000
   /** Currently active event listeners on the EventSource (for cleanup). */
   let activeListeners: Array<{ name: string; handler: (e: Event) => void }> = []
+  /** Leader heartbeat interval (leader sends heartbeat to followers). */
+  let heartbeatInterval: ReturnType<typeof setInterval> | null = null
+  /** Follower watchdog — detects stale leader via heartbeat timeout. */
+  let heartbeatWatchdog: ReturnType<typeof setTimeout> | null = null
+  /** Abort controller for the navigator.locks request — used to cancel on destroy. */
+  let lockAbort: AbortController | null = null
 
   // Cross-tab topic tracking: leader aggregates data from all tabs
   /** Bare topics per tab — used for building /api/stream?topics= */
@@ -115,9 +122,6 @@ function createSSEManager(): SSEManager & { destroy(): void } {
 
   /** Dispatch an incoming event to matching subscribers. */
   function dispatchEvent(fullEventName: string, data: string) {
-    // Event format: "topic:event-name" (e.g. "navbar:active-count")
-    // For topics with colons (e.g. "results:abc123"), the event is
-    // "results:abc123:status-changed" — split from the right.
     for (const sub of subscriptions.values()) {
       const prefix = sub.topic + ':'
       if (fullEventName.startsWith(prefix)) {
@@ -207,8 +211,18 @@ function createSSEManager(): SSEManager & { destroy(): void } {
     }
 
     eventSource.onerror = () => {
-      if (eventSource?.readyState === EventSource.CLOSED && !destroyed) {
+      // Close immediately and reconnect manually with backoff.
+      // This prevents the browser's built-in auto-reconnect from opening
+      // duplicate connections that exhaust the per-domain connection pool.
+      const es = eventSource
+      removeEventSourceListeners()
+      es?.close()
+      eventSource = null
+
+      if (!destroyed && isLeader) {
+        if (reconnectBackoffTimer) clearTimeout(reconnectBackoffTimer)
         reconnectBackoffTimer = setTimeout(() => {
+          reconnectBackoffTimer = null
           if (!destroyed && isLeader) connectEventSource()
         }, reconnectDelay)
         reconnectDelay = Math.min(reconnectDelay * 2, MAX_RECONNECT_DELAY_MS)
@@ -252,27 +266,98 @@ function createSSEManager(): SSEManager & { destroy(): void } {
     })
   }
 
+  // ---- Leader lifecycle ----
+
+  function startHeartbeat() {
+    if (heartbeatInterval) clearInterval(heartbeatInterval)
+    heartbeatInterval = setInterval(() => {
+      channel?.postMessage({ type: 'leader', tabId: TAB_ID })
+    }, LEADER_HEARTBEAT_MS)
+  }
+
+  function stopHeartbeat() {
+    if (heartbeatInterval) { clearInterval(heartbeatInterval); heartbeatInterval = null }
+  }
+
+  function resetWatchdog() {
+    if (heartbeatWatchdog) clearTimeout(heartbeatWatchdog)
+    heartbeatWatchdog = setTimeout(() => {
+      heartbeatWatchdog = null
+      // Leader seems dead — try to acquire the lock ourselves
+      if (!isLeader && !destroyed) {
+        requestLeaderLock()
+      }
+    }, LEADER_TIMEOUT_MS)
+  }
+
+  function stopWatchdog() {
+    if (heartbeatWatchdog) { clearTimeout(heartbeatWatchdog); heartbeatWatchdog = null }
+  }
+
+  function becomeLeader() {
+    if (destroyed || isLeader) return
+    isLeader = true
+    stopWatchdog()
+    channel?.postMessage({ type: 'leader', tabId: TAB_ID })
+    // Ask all tabs for their topics
+    channel?.postMessage({ type: 'topics-request' })
+    startHeartbeat()
+    // Connect with local topics first; remote topics will arrive soon
+    connectEventSource()
+  }
+
   function stepDown() {
     isLeader = false
+    stopHeartbeat()
     if (reconnectBackoffTimer) { clearTimeout(reconnectBackoffTimer); reconnectBackoffTimer = null }
     removeEventSourceListeners()
     eventSource?.close()
     eventSource = null
     tabTopics.clear()
     tabEventNames.clear()
+    // Start watching for leader heartbeats
+    resetWatchdog()
   }
 
-  function becomeLeader() {
-    if (destroyed || isLeader) return
-    isLeader = true
-    channel?.postMessage({ type: 'leader', tabId: TAB_ID })
-    // Ask all tabs for their topics
-    channel?.postMessage({ type: 'topics-request' })
-    // Connect with local topics first; remote topics will arrive soon
-    connectEventSource()
+  // ---- navigator.locks-based leader election ----
+
+  function requestLeaderLock() {
+    if (destroyed) return
+    // navigator.locks is available in all modern browsers
+    if (typeof navigator !== 'undefined' && navigator.locks) {
+      lockAbort = new AbortController()
+      navigator.locks.request(
+        LOCK_NAME,
+        { signal: lockAbort.signal },
+        () => {
+          // We acquired the lock — we are the leader
+          if (destroyed) return Promise.resolve()
+          becomeLeader()
+          // Return a promise that never resolves — we hold the lock until
+          // this tab closes or destroy() is called. When the tab closes,
+          // the browser auto-releases the lock, and the next waiting tab
+          // gets it — no beforeunload needed.
+          return new Promise<void>((resolve) => {
+            // Store resolve so destroy() can release the lock
+            lockReleaseResolve = resolve
+          })
+        },
+      ).catch(() => {
+        // AbortError when destroy() cancels, or NotSupportedError — ignore
+      })
+    } else {
+      // Fallback for environments without navigator.locks (e.g. older browsers):
+      // use the BroadcastChannel-based election
+      fallbackElection()
+    }
   }
 
-  function startElection() {
+  let lockReleaseResolve: (() => void) | null = null
+
+  /** BroadcastChannel-only election fallback (for environments without navigator.locks). */
+  let electionTimer: ReturnType<typeof setTimeout> | null = null
+
+  function fallbackElection() {
     if (destroyed) return
     if (electionTimer) { clearTimeout(electionTimer); electionTimer = null }
     channel?.postMessage({ type: 'who-is-leader' })
@@ -280,7 +365,7 @@ function createSSEManager(): SSEManager & { destroy(): void } {
     electionTimer = setTimeout(() => {
       electionTimer = null
       if (!destroyed) becomeLeader()
-    }, ELECTION_TIMEOUT_MS + jitter)
+    }, 150 + jitter)
   }
 
   // ---- Channel message handler ----
@@ -295,12 +380,14 @@ function createSSEManager(): SSEManager & { destroy(): void } {
 
         case 'leader': {
           const theirId = m.tabId ?? ''
+          // Cancel any pending fallback election
           if (electionTimer) { clearTimeout(electionTimer); electionTimer = null }
           if (isLeader && theirId && theirId < TAB_ID) {
             stepDown()
           }
           if (!isLeader) {
-            // Send our topics to the new leader
+            // Leader is alive — reset watchdog and send our topics
+            resetWatchdog()
             broadcastTopics()
           }
           break
@@ -336,7 +423,10 @@ function createSSEManager(): SSEManager & { destroy(): void } {
           break
 
         case 'leader-down':
-          if (!isLeader && !destroyed) startElection()
+          // Leader announced shutdown — the lock will be released and
+          // the next queued tab will acquire it automatically.
+          // Reset watchdog in case lock acquisition is slow.
+          if (!isLeader && !destroyed) resetWatchdog()
           break
       }
     }
@@ -350,13 +440,13 @@ function createSSEManager(): SSEManager & { destroy(): void } {
     } else {
       channel?.postMessage({ type: 'tab-down', tabId: TAB_ID })
     }
-    destroyed = true
+    // Lock auto-releases on tab close — no need to resolve here
   }
   window.addEventListener('beforeunload', handleBeforeUnload)
 
-  // Start election (or direct connect if no BroadcastChannel)
+  // Start leader election
   if (channel) {
-    startElection()
+    requestLeaderLock()
   }
 
   // ---- Public API ----
@@ -376,11 +466,17 @@ function createSSEManager(): SSEManager & { destroy(): void } {
     if (!destroyed && isLeader) channel?.postMessage({ type: 'leader-down' })
     if (!destroyed && !isLeader) channel?.postMessage({ type: 'tab-down', tabId: TAB_ID })
     destroyed = true
+    stopHeartbeat()
+    stopWatchdog()
     if (electionTimer) clearTimeout(electionTimer)
     if (reconnectDebounceTimer) clearTimeout(reconnectDebounceTimer)
     if (reconnectBackoffTimer) clearTimeout(reconnectBackoffTimer)
     removeEventSourceListeners()
     eventSource?.close()
+    // Release the lock if held
+    if (lockReleaseResolve) { lockReleaseResolve(); lockReleaseResolve = null }
+    // Abort any pending lock request
+    if (lockAbort) { lockAbort.abort(); lockAbort = null }
     channel?.close()
   }
 
