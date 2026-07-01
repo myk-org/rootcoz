@@ -5452,6 +5452,32 @@ async def create_jira_bug_endpoint(
     }
 
 
+async def _detect_tracker_type_via_http(url: str) -> str:
+    """Best-effort tracker type detection via HTTP HEAD request.
+
+    Follows redirects and checks final URL + response headers for
+    Jira/Atlassian indicators. Returns ``'jira'`` or ``''`` (never raises).
+    """
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "curl",
+            "-sI",
+            "-L",
+            "--max-time",
+            "5",
+            url,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=10)
+        headers = stdout.decode().lower()
+        if "atlassian" in headers or "jira" in headers:
+            return "jira"
+    except Exception:
+        pass
+    return ""
+
+
 @app.put("/results/{job_id}/tracked-in")
 async def set_tracked_in_endpoint(
     job_id: str,
@@ -5480,6 +5506,8 @@ async def set_tracked_in_endpoint(
             tracked_type = "github"
         elif "jira" in url_lower or "atlassian" in url_lower:
             tracked_type = "jira"
+        else:
+            tracked_type = await _detect_tracker_type_via_http(body.url)
 
     updated = await storage.set_tracked_in(
         job_id, body.test_name, body.url, tracked_type
