@@ -1,5 +1,6 @@
 """Pydantic request and response models."""
 
+import re
 from datetime import datetime
 from typing import Annotated, Literal
 from uuid import uuid4
@@ -607,8 +608,8 @@ class JobStatus(BaseModel):
 class UnifiedAnalyzeRequest(_JenkinsParamsMixin, _NameTagsMixin, BaseAnalysisRequest):
     """Unified request payload for all analysis types."""
 
-    type: Literal["jenkins", "file", "raw"] = Field(
-        description="Analysis type: jenkins (CI job), file (JUnit XML), or raw (failure list)"
+    type: Literal["jenkins", "file", "raw", "prow"] = Field(
+        description="Analysis type: jenkins (CI job), file (JUnit XML), raw (failure list), or prow (Prow CI job)"
     )
 
     # Jenkins-specific fields (required when type="jenkins", optional otherwise)
@@ -633,6 +634,91 @@ class UnifiedAnalyzeRequest(_JenkinsParamsMixin, _NameTagsMixin, BaseAnalysisReq
         description="Raw test failures to analyze (required for type=raw)",
     )
 
+    # Prow-specific fields (required when type="prow")
+    prow_job_name: str | None = Field(
+        default=None,
+        description="Prow job name (required for type=prow)",
+    )
+    build_id: str | None = Field(
+        default=None,
+        description="Prow build ID (required for type=prow)",
+    )
+    prow_url: str = Field(
+        default="",
+        description="Prow Deck URL (empty = use server default from Settings)",
+    )
+    gcs_bucket: str = Field(
+        default="",
+        description="GCS bucket name for Prow artifacts (empty = use server default from Settings)",
+    )
+    gcs_prefix: str = Field(
+        default="",
+        description=(
+            "GCS object prefix for the build (e.g. 'logs/job/build' or 'pr-logs/pull/org_repo/pr/job/build'). "
+            "When empty, defaults to 'logs/{prow_job_name}/{build_id}'."
+        ),
+    )
+
+    @field_validator("prow_job_name", mode="before")
+    @classmethod
+    def _validate_prow_job_name(cls, v: str | None) -> str | None:
+        if v is None:
+            return v
+        v = v.strip()
+        if not v:
+            raise ValueError("prow_job_name cannot be blank")
+        if not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9._-]*", v):
+            raise ValueError(
+                "prow_job_name must be alphanumeric with hyphens, dots, or underscores"
+            )
+        return v
+
+    @field_validator("build_id", mode="before")
+    @classmethod
+    def _validate_build_id(cls, v: str | None) -> str | None:
+        if v is None:
+            return v
+        v = v.strip()
+        if not v:
+            raise ValueError("build_id cannot be blank")
+        if not re.fullmatch(r"[0-9]+", v):
+            raise ValueError("build_id must be numeric")
+        return v
+
+    @field_validator("gcs_bucket", mode="before")
+    @classmethod
+    def _validate_gcs_bucket(cls, v: str) -> str:
+        v = v.strip()
+        if not v:
+            return v  # empty = use server default
+        if not re.fullmatch(r"[a-z0-9][a-z0-9._-]*", v):
+            raise ValueError(
+                "gcs_bucket must be lowercase alphanumeric with hyphens, dots, or underscores"
+            )
+        return v
+
+    @field_validator("gcs_prefix", mode="before")
+    @classmethod
+    def _validate_gcs_prefix(cls, v: str) -> str:
+        v = v.strip().rstrip("/")
+        if not v:
+            return v
+        if ".." in v:
+            raise ValueError("gcs_prefix must not contain '..'")
+        if not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9/_.-]*", v):
+            raise ValueError("gcs_prefix contains invalid characters")
+        return v
+
+    @field_validator("prow_url", mode="before")
+    @classmethod
+    def _validate_prow_url(cls, v: str) -> str:
+        v = v.strip()
+        if not v:
+            return v  # empty = use server default
+        if not v.startswith("https://"):
+            raise ValueError("prow_url must start with https://")
+        return v
+
     @model_validator(mode="after")
     def _validate_by_type(self) -> "UnifiedAnalyzeRequest":
         """Validate required fields based on analysis type."""
@@ -655,6 +741,11 @@ class UnifiedAnalyzeRequest(_JenkinsParamsMixin, _NameTagsMixin, BaseAnalysisReq
                 raise ValueError(
                     "raw_xml cannot be provided for type=raw (use type=file)"
                 )
+        elif self.type == "prow":
+            if not self.prow_job_name:
+                raise ValueError("prow_job_name is required for type=prow")
+            if not self.build_id:
+                raise ValueError("build_id is required for type=prow")
         return self
 
 

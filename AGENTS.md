@@ -92,6 +92,7 @@ src/rootcoz/
                             # wait_for_jenkins_completion, Jenkins helpers (handle_jenkins_exception, extract_*, etc.)
     file_source.py          # JUnit XML plugin: FileSource
     raw_source.py           # Raw failure list plugin: RawSource
+    prow_source.py          # Prow CI plugin: ProwSource (GCS artifacts)
   main.py                   # FastAPI app, unified POST /analyze endpoint, background tasks
   models.py                 # Pydantic request/response models
   config.py                 # Settings (env vars)
@@ -362,6 +363,11 @@ Exceptions (server-level only, no payload equivalent):
 - `VAPID_PRIVATE_KEY` — server-only VAPID private key for Web Push notifications; never expose via request payloads, CLI flags, or shared config files
 - `VAPID_PUBLIC_KEY` — server-only VAPID public key for Web Push notifications; auto-generated with `VAPID_PRIVATE_KEY` if not set
 - Security-sensitive credentials for preview/create-issue endpoints (`GITHUB_TOKEN`, `TESTS_REPO_URL`, Jira credentials, `REPORTPORTAL_URL`, `REPORTPORTAL_API_TOKEN`, `REPORTPORTAL_PROJECT`) — these use deployment config, not per-request overrides
+
+Request-only fields (per-build, no server-level default):
+- `gcs_prefix` — GCS path prefix, unique per Prow build (e.g. `pr-logs/pull/org_repo/pr/job/build_id`)
+- `raw_xml` — raw JUnit XML content for file source
+- `failures` — raw failure list for raw source
 
 ### Sensitive Data Handling
 

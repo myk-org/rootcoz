@@ -418,13 +418,13 @@ class TestBaseUrlDetection:
 def _post_analyze_queued(test_client, payload: dict) -> tuple[dict, AsyncMock]:
     """Post to /analyze, assert 202/queued, and return (response_data, mock).
 
-    Patches ``_process_file_raw_analysis`` with an ``AsyncMock``, sends the
+    Patches ``_process_non_jenkins_analysis`` with an ``AsyncMock``, sends the
     *payload* to ``POST /analyze``, asserts the response is 202 with
     ``status == "queued"``, and returns the parsed JSON **and** the mock so
     callers can inspect call args when needed.
     """
     with patch(
-        "rootcoz.main._process_file_raw_analysis", new_callable=AsyncMock
+        "rootcoz.main._process_non_jenkins_analysis", new_callable=AsyncMock
     ) as mock_process:
         response = test_client.post("/analyze", json=payload)
         assert response.status_code == 202
@@ -511,7 +511,7 @@ class TestAnalyzeFailuresEndpoint:
     def test_analyze_failures_handles_analysis_exception(self, test_client) -> None:
         """Test that when background task raises, job is still queued (202)."""
         with patch(
-            "rootcoz.main._process_file_raw_analysis",
+            "rootcoz.main._process_non_jenkins_analysis",
             new_callable=AsyncMock,
         ) as mock_process:
             mock_process.side_effect = RuntimeError("boom")
@@ -700,6 +700,115 @@ class TestAnalyzeFailuresRawXml:
                 "ai_model": "test-model",
             },
         )
+
+
+class TestAnalyzeProwEndpoint:
+    """Tests for the unified POST /analyze endpoint with type=prow."""
+
+    def test_prow_success(self, test_client) -> None:
+        """Test that valid prow request returns 202 (queued)."""
+        data, _mock = _post_analyze_queued(
+            test_client,
+            {
+                "type": "prow",
+                "prow_job_name": "periodic-ci-e2e-aws",
+                "build_id": "1234567890",
+                "prow_url": "https://prow.ci.openshift.org",
+                "gcs_bucket": "test-platform-results",
+                "ai_provider": "claude",
+                "ai_model": "test-model",
+            },
+        )
+        assert "job_id" in data
+        assert data["result_url"].startswith("/results/")
+
+    def test_prow_missing_prow_url(self, test_client) -> None:
+        """Test that missing prow_url returns 422 when no server default."""
+        response = test_client.post(
+            "/analyze",
+            json={
+                "type": "prow",
+                "prow_job_name": "my-job",
+                "build_id": "1",
+                "gcs_bucket": "some-bucket",
+                "ai_provider": "claude",
+                "ai_model": "test-model",
+            },
+        )
+        assert response.status_code == 422
+        assert "prow_url" in response.json()["detail"]
+
+    def test_prow_missing_gcs_bucket(self, test_client) -> None:
+        """Test that missing gcs_bucket returns 422 when no server default."""
+        response = test_client.post(
+            "/analyze",
+            json={
+                "type": "prow",
+                "prow_job_name": "my-job",
+                "build_id": "1",
+                "prow_url": "https://prow.ci.openshift.org",
+                "ai_provider": "claude",
+                "ai_model": "test-model",
+            },
+        )
+        assert response.status_code == 422
+        assert "gcs_bucket" in response.json()["detail"]
+
+    def test_prow_with_custom_url_and_bucket(self, test_client) -> None:
+        """Test that prow_url and gcs_bucket are accepted."""
+        data, _mock = _post_analyze_queued(
+            test_client,
+            {
+                "type": "prow",
+                "prow_job_name": "my-job",
+                "build_id": "42",
+                "prow_url": "https://prow.custom.org",
+                "gcs_bucket": "custom-bucket",
+                "ai_provider": "claude",
+                "ai_model": "test-model",
+            },
+        )
+        assert "job_id" in data
+
+    def test_prow_missing_job_name(self, test_client) -> None:
+        """Test that missing prow_job_name returns 422."""
+        response = test_client.post(
+            "/analyze",
+            json={
+                "type": "prow",
+                "build_id": "123",
+                "ai_provider": "claude",
+                "ai_model": "test-model",
+            },
+        )
+        assert response.status_code == 422
+
+    def test_prow_missing_build_id(self, test_client) -> None:
+        """Test that missing build_id returns 422."""
+        response = test_client.post(
+            "/analyze",
+            json={
+                "type": "prow",
+                "prow_job_name": "my-job",
+                "ai_provider": "claude",
+                "ai_model": "test-model",
+            },
+        )
+        assert response.status_code == 422
+
+    def test_prow_invalid_build_id(self, test_client) -> None:
+        """Test that non-numeric build_id returns 422."""
+        response = test_client.post(
+            "/analyze",
+            json={
+                "type": "prow",
+                "prow_job_name": "my-job",
+                "build_id": "not-a-number",
+                "ai_provider": "claude",
+                "ai_model": "test-model",
+            },
+        )
+        assert response.status_code == 422
 
 
 class TestResultsEndpoints:
@@ -5010,7 +5119,7 @@ class TestRequestParamsPreservation:
         self, test_client, temp_db_path: Path
     ) -> None:
         """POST /analyze with type=raw seeds request_params in pending state."""
-        with patch("rootcoz.main._process_file_raw_analysis", new_callable=AsyncMock):
+        with patch("rootcoz.main._process_non_jenkins_analysis", new_callable=AsyncMock):
             response = test_client.post(
                 "/analyze",
                 json={
@@ -5183,7 +5292,7 @@ class TestReAnalyzeEndpoint:
             "",
             result_data,
         )
-        with patch("rootcoz.main._process_file_raw_analysis"):
+        with patch("rootcoz.main._process_non_jenkins_analysis"):
             response = test_client.post("/re-analyze/file-origin", json={})
         assert response.status_code == 202
         new_job_id = response.json()["job_id"]

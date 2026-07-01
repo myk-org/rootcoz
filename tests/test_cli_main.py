@@ -2595,6 +2595,137 @@ class TestAnalyzePeerFlags:
             assert "must be between 1 and 10" in result.output
 
 
+class TestAnalyzeProwCommand:
+    """Tests for analyze --source prow."""
+
+    _PROW_BASE = ["analyze", "--source", "prow"]
+
+    def test_analyze_prow_basic(self, mock_client):
+        mock_client.analyze.return_value = {
+            "status": "queued",
+            "job_id": "prow-1",
+            "result_url": "/results/prow-1",
+        }
+        result = runner.invoke(
+            app,
+            [*self._PROW_BASE, "--job-name", "periodic-ci-e2e-aws", "--build-number", "1234567890"],
+        )
+        assert result.exit_code == 0
+        assert "prow-1" in result.output
+        mock_client.analyze.assert_called_once()
+        call_kwargs = mock_client.analyze.call_args[1]
+        assert call_kwargs["type"] == "prow"
+        assert call_kwargs["prow_job_name"] == "periodic-ci-e2e-aws"
+        assert call_kwargs["build_id"] == "1234567890"  # int converted to str
+
+    def test_analyze_prow_with_name(self, mock_client):
+        mock_client.analyze.return_value = {
+            "status": "queued",
+            "job_id": "prow-2",
+            "result_url": "/results/prow-2",
+        }
+        result = runner.invoke(
+            app,
+            [*self._PROW_BASE, "--job-name", "my-job", "--build-number", "42", "--name", "my-prow-analysis"],
+        )
+        assert result.exit_code == 0
+        call_kwargs = mock_client.analyze.call_args[1]
+        assert call_kwargs["name"] == "my-prow-analysis"
+
+    def test_analyze_prow_with_custom_url_and_bucket(self, mock_client):
+        mock_client.analyze.return_value = {
+            "status": "queued",
+            "job_id": "prow-3",
+            "result_url": "/results/prow-3",
+        }
+        result = runner.invoke(
+            app,
+            [
+                *self._PROW_BASE,
+                "--job-name", "my-job",
+                "--build-number", "42",
+                "--prow-url", "https://prow.custom.org",
+                "--gcs-bucket", "custom-bucket",
+            ],
+        )
+        assert result.exit_code == 0
+        call_kwargs = mock_client.analyze.call_args[1]
+        assert call_kwargs["prow_url"] == "https://prow.custom.org"
+        assert call_kwargs["gcs_bucket"] == "custom-bucket"
+
+    def test_analyze_prow_with_provider_and_model(self, mock_client):
+        mock_client.analyze.return_value = {
+            "status": "queued",
+            "job_id": "prow-4",
+            "result_url": "/results/prow-4",
+        }
+        result = runner.invoke(
+            app,
+            [
+                *self._PROW_BASE,
+                "--job-name", "my-job",
+                "--build-number", "42",
+                "--provider", "gemini",
+                "--model", "gemini-2.5-pro",
+            ],
+        )
+        assert result.exit_code == 0
+        call_kwargs = mock_client.analyze.call_args[1]
+        assert call_kwargs.get("ai_provider") == "gemini"
+        assert call_kwargs.get("ai_model") == "gemini-2.5-pro"
+
+    def test_analyze_prow_json_output(self, mock_client):
+        mock_client.analyze.return_value = {
+            "status": "queued",
+            "job_id": "prow-5",
+        }
+        result = runner.invoke(
+            app,
+            [*self._PROW_BASE, "--job-name", "my-job", "--build-number", "42", "--json"],
+        )
+        assert result.exit_code == 0
+        import json
+        output = json.loads(result.output)
+        assert output["job_id"] == "prow-5"
+
+    def test_analyze_prow_with_tags(self, mock_client):
+        mock_client.analyze.return_value = {
+            "status": "queued",
+            "job_id": "prow-6",
+            "result_url": "/results/prow-6",
+        }
+        result = runner.invoke(
+            app,
+            [
+                *self._PROW_BASE,
+                "--job-name", "my-job",
+                "--build-number", "42",
+                "--tag", "nightly",
+                "--tag", "regression",
+            ],
+        )
+        assert result.exit_code == 0
+        call_kwargs = mock_client.analyze.call_args[1]
+        assert "nightly" in call_kwargs.get("tags", [])
+        assert "regression" in call_kwargs.get("tags", [])
+
+    def test_analyze_prow_missing_job_name(self, mock_client):
+        result = runner.invoke(
+            app,
+            [*self._PROW_BASE, "--build-number", "42"],
+        )
+        assert result.exit_code == 1
+        assert "--job-name is required" in result.output
+
+    def test_analyze_prow_missing_build_number(self, mock_client):
+        result = runner.invoke(
+            app,
+            [*self._PROW_BASE, "--job-name", "my-job"],
+        )
+        assert result.exit_code == 1
+        assert "--build-number is required" in result.output
+
+
 class TestAnalyzeSourceFlag:
     """Tests for the unified analyze command with --source flag."""
 

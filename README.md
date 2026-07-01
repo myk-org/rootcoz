@@ -1,6 +1,6 @@
 # RootCoz
 
-AI-powered Jenkins failure analysis -- classifies test failures as code issues or product bugs.
+AI-powered CI failure analysis -- classifies test failures as code issues or product bugs. Supports Jenkins, Prow, and JUnit XML input.
 
 **[Documentation](https://myk-org.github.io/rootcoz/)** -- configuration, API reference, integrations, and more.
 
@@ -41,6 +41,14 @@ curl -X POST http://localhost:8000/analyze \
   -d '{"type": "jenkins", "job_name": "my-job", "build_number": 42, "max_concurrent_ai_calls": 2}'
 ```
 
+Prow analysis:
+
+```bash
+curl -X POST http://localhost:8000/analyze \
+  -H "Content-Type: application/json" \
+  -d '{"type": "prow", "prow_job_name": "periodic-ci-e2e-aws", "build_id": "1234567890", "prow_url": "https://prow.ci.openshift.org", "gcs_bucket": "test-platform-results"}'
+```
+
 ## Features
 
 - **AI-Powered Failure Analysis** — Classifies test failures as code issues or product bugs
@@ -57,6 +65,11 @@ export ROOTCOZ_SERVER=http://localhost:8000
 
 rootcoz health
 rootcoz analyze --job-name my-job --build-number 42
+rootcoz analyze --source prow \
+  --job-name periodic-ci-e2e-aws \
+  --build-number 1234567890 \
+  --prow-url https://prow.ci.openshift.org \
+  --gcs-bucket test-platform-results
 rootcoz results list
 rootcoz admin token-usage              # Summary dashboard
 rootcoz admin token-usage --group-by model  # Grouped breakdown

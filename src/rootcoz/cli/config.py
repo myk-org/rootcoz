@@ -61,6 +61,9 @@ class ServerConfig:
     max_wait_minutes: int = 0  # 0 means use server default
     # Force analysis on successful builds
     force: bool | None = None
+    # Prow
+    prow_url: str = ""
+    gcs_bucket: str = ""
     # Authentication
     api_key: str = ""  # API key for authentication (user or admin)
 
@@ -253,6 +256,9 @@ def _server_config_from_dict(data: dict) -> ServerConfig:
         max_wait_minutes=data.get("max_wait_minutes", 0),
         # Force analysis on successful builds
         force=data.get("force"),
+        # Prow
+        prow_url=data.get("prow_url", ""),
+        gcs_bucket=data.get("gcs_bucket", ""),
         # Admin authentication
         api_key=data.get("api_key", ""),
     )

@@ -2674,7 +2674,7 @@ class TestAnalyzeFailuresWorkspacePattern:
         """POST /analyze with type=raw and tests_repo_url dispatches to background task."""
 
         mock_process = AsyncMock()
-        monkeypatch.setattr("rootcoz.main._process_file_raw_analysis", mock_process)
+        monkeypatch.setattr("rootcoz.main._process_non_jenkins_analysis", mock_process)
         monkeypatch.setattr("rootcoz.main.save_result", AsyncMock())
         monkeypatch.setattr("rootcoz.main.notify_active_count_changed", MagicMock())
         monkeypatch.setattr("rootcoz.main.notify_dashboard_changed", MagicMock())
@@ -2799,7 +2799,7 @@ class TestWorkspaceAlwaysCreated:
         """POST /analyze with type=raw (no repos) dispatches background task."""
 
         mock_process = AsyncMock()
-        monkeypatch.setattr("rootcoz.main._process_file_raw_analysis", mock_process)
+        monkeypatch.setattr("rootcoz.main._process_non_jenkins_analysis", mock_process)
         monkeypatch.setattr("rootcoz.main.save_result", AsyncMock())
         monkeypatch.setattr("rootcoz.main.notify_active_count_changed", MagicMock())
         monkeypatch.setattr("rootcoz.main.notify_dashboard_changed", MagicMock())

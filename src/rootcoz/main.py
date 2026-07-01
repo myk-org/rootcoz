@@ -171,7 +171,7 @@ from rootcoz.rootcoz_repo_settings import (
     resolve_tests_repo_url,
     tests_repo_available,
 )
-from rootcoz.sources import CISource, FileSource, RawSource
+from rootcoz.sources import CISource, FileSource, ProwSource, RawSource
 from rootcoz.sources.jenkins_source import analyze_job, wait_for_jenkins_completion
 from rootcoz.storage import (
     AI_SYSTEM_USERNAME,
@@ -314,6 +314,10 @@ _SETTINGS_CATEGORIES: dict[str, list[str]] = {
         "admin_wait_approve_msg",
         "allowed_users",
         "default_user_role",
+    ],
+    "Prow": [
+        "prow_url",
+        "gcs_bucket",
     ],
     "Server": [
         "public_base_url",
@@ -2186,8 +2190,20 @@ def _merge_settings(body: BaseAnalysisRequest, settings: Settings) -> Settings:
         if "force" in body.model_fields_set:
             overrides["force_analysis"] = body.force
 
-    merged_data = settings.model_dump(mode="python") | overrides
-    return Settings.model_validate(merged_data)
+    # UnifiedAnalyzeRequest-specific fields (Prow overrides)
+    if isinstance(body, UnifiedAnalyzeRequest):
+        if "prow_url" in body.model_fields_set and body.prow_url:
+            overrides["prow_url"] = body.prow_url
+        if "gcs_bucket" in body.model_fields_set and body.gcs_bucket:
+            overrides["gcs_bucket"] = body.gcs_bucket
+        # force for file/raw/prow — AnalyzeRequest block above only covers Jenkins
+        if "force" in body.model_fields_set and body.force is not None:
+            overrides["force_analysis"] = body.force
+
+    if overrides:
+        merged_data = settings.model_dump(mode="python") | overrides
+        return Settings.model_validate(merged_data)
+    return settings
 
 
 # Truncation length for error signatures in log messages (SHA-256 prefix for readability)
@@ -3217,7 +3233,7 @@ def _strip_old_submitter_tag(tags: list[str], result_data: dict) -> list[str]:
     return [t for t in tags if not (isinstance(t, str) and t.lower() == old_normalized)]
 
 
-async def _enqueue_file_raw_analysis(
+async def _enqueue_non_jenkins_analysis(
     body: "UnifiedAnalyzeRequest",
     merged: "Settings",
     resolved_peers: list | None,
@@ -3243,7 +3259,7 @@ async def _enqueue_file_raw_analysis(
         merged: Merged settings.
         resolved_peers: Validated peer AI configs.
         display_name: Human-readable job name.
-        analysis_type: ``"file"`` or ``"raw"``.
+        analysis_type: ``"file"``, ``"raw"``, or ``"prow"``.
         base_url: Server base URL for result links.
         username: Authenticated user who submitted the request.
         tags: Optional pre-built tags list. When ``None``, uses ``body.tags``.
@@ -3270,6 +3286,8 @@ async def _enqueue_file_raw_analysis(
     _GENERIC_FALLBACK_NAMES = {
         "file-analysis",
         "raw-analysis",
+        "prow-analysis",
+        "prow-re-analysis",
         "file-re-analysis",
         "raw-re-analysis",
     }
@@ -3294,6 +3312,29 @@ async def _enqueue_file_raw_analysis(
 
     if analysis_type == "file":
         base_params["raw_xml"] = body.raw_xml
+    elif analysis_type == "prow":
+        if not merged.prow_url:
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    "prow_url is required \u2014 set PROW_URL env var, "
+                    "configure it in Server Settings, or pass prow_url in the request"
+                ),
+            )
+        if not merged.gcs_bucket:
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    "gcs_bucket is required \u2014 set GCS_BUCKET env var, "
+                    "configure it in Server Settings, or pass gcs_bucket in the request"
+                ),
+            )
+        base_params["prow_job_name"] = body.prow_job_name
+        base_params["build_id"] = body.build_id
+        base_params["prow_url"] = merged.prow_url
+        base_params["gcs_bucket"] = merged.gcs_bucket
+        base_params["gcs_prefix"] = body.gcs_prefix or ""
+        base_params["force"] = merged.force_analysis
     elif analysis_type == "raw":
         assert body.failures is not None
         base_params["failures"] = [f.model_dump() for f in body.failures]
@@ -3303,6 +3344,11 @@ async def _enqueue_file_raw_analysis(
         "display_name": display_name,
         "request_params": encrypt_sensitive_fields(base_params),
     }
+    # Persist real Prow identity for history matching and auto-review
+    if analysis_type == "prow" and body.prow_job_name:
+        initial_result["job_name"] = body.prow_job_name
+        if body.build_id and body.build_id.isdigit():
+            initial_result["build_number"] = int(body.build_id)
     initial_result["request_params"]["submitted_by"] = username
     _stamp_reanalysis_metadata(
         initial_result["request_params"],
@@ -3317,7 +3363,7 @@ async def _enqueue_file_raw_analysis(
 
     # Spawn background task
     task = asyncio.create_task(
-        _process_file_raw_analysis(
+        _process_non_jenkins_analysis(
             job_id=job_id,
             body=body,
             merged=merged,
@@ -3472,7 +3518,7 @@ async def _enqueue_analysis_job(
     return _attach_result_links(response, base_url, job_id)
 
 
-async def _process_file_raw_analysis(
+async def _process_non_jenkins_analysis(
     *,
     job_id: str,
     body: UnifiedAnalyzeRequest,
@@ -3489,15 +3535,24 @@ async def _process_file_raw_analysis(
     username: str = "",
     is_admin: bool = False,
 ) -> None:
-    """Background task for file/raw analysis."""
+    """Background task for file/raw/prow analysis."""
     job_id_var.set(job_id)
+
+    def _stamp_prow_identity(data: dict) -> None:
+        """Set job_name/build_number from prow identity for history matching."""
+        if body.type == "prow" and body.prow_job_name:
+            data["job_name"] = body.prow_job_name
+            if body.build_id and body.build_id.isdigit():
+                data["build_number"] = int(body.build_id)
 
     auth_header = ""
     repo_manager: RepositoryManager | None = None
+    # Use real job identity for metadata matching (display_name may have UUID suffix)
+    metadata_job_name = body.prow_job_name if body.type == "prow" and body.prow_job_name else display_name
 
     try:
         logger.info(
-            f"Starting file/raw analysis for job_id={job_id}, type={body.type}, display_name={display_name}"
+            f"Starting {body.type} analysis for job_id={job_id}, display_name={display_name}"
         )
 
         # Create source plugin
@@ -3505,6 +3560,18 @@ async def _process_file_raw_analysis(
         if body.type == "file":
             assert body.raw_xml is not None
             source = FileSource(raw_xml=body.raw_xml)
+        elif body.type == "prow":
+            assert body.prow_job_name is not None
+            assert body.build_id is not None
+            # prow_url/gcs_bucket validated in _enqueue_non_jenkins_analysis
+            source = ProwSource(
+                job_name=body.prow_job_name,
+                build_id=body.build_id,
+                gcs_bucket=merged.gcs_bucket,
+                prow_url=merged.prow_url,
+                gcs_prefix=body.gcs_prefix or "",
+                force=merged.force_analysis,
+            )
         else:
             assert body.failures is not None
             source = RawSource(failures=body.failures)
@@ -3514,6 +3581,10 @@ async def _process_file_raw_analysis(
         logger.debug(
             f"Source fetch complete: {len(source_result.failures)} failures, build_passed={source_result.build_passed}"
         )
+
+        # Persist build URL to DB column (available after source fetch)
+        if source_result.build_url:
+            await storage.update_jenkins_url(job_id, source_result.build_url)
 
         if source_result.build_passed:
             # No failures found (XML with no failures)
@@ -3525,6 +3596,9 @@ async def _process_file_raw_analysis(
             )
             result_data = analysis_result.model_dump(mode="json")
             result_data["job_name"] = display_name
+            _stamp_prow_identity(result_data)
+            if source_result.build_url:
+                result_data["jenkins_url"] = source_result.build_url
             await _preserve_request_params(job_id, result_data)
             logger.info(f"No failures found for job_id={job_id}, completing early")
             await update_status(job_id, "completed", result_data)
@@ -3533,16 +3607,32 @@ async def _process_file_raw_analysis(
             notify_job_status_changed(job_id)
 
             # Auto-assign job metadata from name pattern rules
-            await _auto_assign_metadata(display_name, merged.metadata_rules)
+            await _auto_assign_metadata(metadata_job_name, merged.metadata_rules)
 
             return
 
         test_failures = source_result.failures
+        console_context = source_result.console_context
 
         await update_status(job_id, "running")
         notify_active_count_changed()
         notify_dashboard_changed()
         notify_job_status_changed(job_id)
+
+        # Pre-flight: verify AI is reachable before spawning parallel tasks
+        _preflight_build_number: int | None = None
+        if body.type == "prow" and body.build_id and body.build_id.isdigit():
+            _preflight_build_number = int(body.build_id)
+        if not await _preflight_sidecar_check(
+            job_id,
+            ai_provider,
+            ai_model,
+            display_name,
+            job_name=body.prow_job_name or body.job_name or "",
+            build_number=_preflight_build_number,
+            jenkins_url=source_result.build_url or "",
+        ):
+            return
 
         auth_header = await _create_ai_auth_header(username)
 
@@ -3676,80 +3766,157 @@ async def _process_file_raw_analysis(
         custom_prompt = (body.raw_prompt or "").strip()
         server_url = _build_internal_server_url()
 
-        logger.info(
-            f"Starting AI analysis for {len(groups)} failure groups (provider={ai_provider}, model={ai_model})"
-        )
-
-        # Analyze each group in parallel
-        coroutines: list[Coroutine[Any, Any, Any]] = [
-            analyze_failure_group(
-                failures=group_failures,
-                console_context="",
-                repo_path=repo_path,
-                ai_provider=ai_provider,
-                ai_model=ai_model,
-                ai_call_timeout=merged.ai_call_timeout,
-                custom_prompt=custom_prompt,
-                server_url=server_url,
-                job_id=job_id,
-                peer_ai_configs=peer_ai_configs,
-                peer_analysis_max_rounds=merged.peer_analysis_max_rounds,
-                additional_repos=cloned_repos or None,
-                max_concurrent_ai_calls=merged.max_concurrent_ai_calls,
-                auth_header=auth_header,
-                all_groups=groups,
+        # Console-only analysis when no JUnit failures found but console
+        # context exists (e.g. Prow build with no JUnit artifacts)
+        if not test_failures and console_context:
+            synthetic_failure = FailedTest(
+                test_name=body.prow_job_name or body.job_name or display_name,
+                error_message=console_context,
             )
-            for sig, group_failures in groups.items()
-        ]
-
-        results = await run_parallel_with_limit(
-            coroutines, max_concurrency=merged.max_concurrent_ai_calls
-        )
-        logger.debug(
-            f"AI analysis complete: {len(results)} results from {len(groups)} groups"
-        )
-
-        all_analyses = []
-        failed_group_count = 0
-        for result in results:
-            if isinstance(result, Exception):
-                failed_group_count += 1
-                logger.error(
-                    f"Failed to analyze failure group: {result}", exc_info=result
+            try:
+                console_results = await analyze_failure_group(
+                    failures=[synthetic_failure],
+                    console_context=console_context,
+                    repo_path=repo_path,
+                    ai_provider=ai_provider,
+                    ai_model=ai_model,
+                    ai_call_timeout=merged.ai_call_timeout,
+                    custom_prompt=custom_prompt,
+                    server_url=server_url,
+                    job_id=job_id,
+                    peer_ai_configs=peer_ai_configs,
+                    peer_analysis_max_rounds=merged.peer_analysis_max_rounds,
+                    additional_repos=cloned_repos or None,
+                    max_concurrent_ai_calls=merged.max_concurrent_ai_calls,
+                    auth_header=auth_header,
+                    group_label="console",
                 )
-            else:
-                all_analyses.extend(result)
+                all_analyses = list(console_results)
+            except Exception as exc:
+                logger.error("Console-only analysis failed: %s", exc, exc_info=True)
+                fail_result = FailureAnalysisResult(
+                    job_id=job_id,
+                    status="failed",
+                    summary=make_user_friendly_error(exc),
+                    ai_provider=ai_provider,
+                    ai_model=ai_model,
+                )
+                fail_data = fail_result.model_dump(mode="json")
+                fail_data["error"] = fail_result.summary
+                fail_data["job_name"] = display_name
+                _stamp_prow_identity(fail_data)
+                if source_result.build_url:
+                    fail_data["jenkins_url"] = source_result.build_url
+                await _preserve_request_params(job_id, fail_data)
+                await _attach_token_usage(job_id, fail_data)
+                await update_status(job_id, "failed", fail_data)
+                notify_active_count_changed()
+                notify_dashboard_changed()
+                notify_job_status_changed(job_id)
+                notify_token_usage_changed()
+                return
 
-        unique_errors = len(groups)
-
-        # If every group failed, treat the entire job as failed rather than
-        # saving a misleading "completed" result with zero findings.
-        if not all_analyses and failed_group_count == len(results):
-            error_msg = (
-                f"All {failed_group_count} failure group(s) failed during analysis "
-                f"({len(test_failures)} test failures, {unique_errors} unique errors)"
-            )
-            logger.error(
-                f"File/raw analysis fully failed for job_id={job_id}: {error_msg}"
-            )
-            fail_result = FailureAnalysisResult(
+            # Skip to the enrichment + persistence section
+            unique_errors = 1
+            test_failures = [synthetic_failure]
+        elif not test_failures:
+            # No failures and no console context — nothing to analyze
+            analysis_result = FailureAnalysisResult(
                 job_id=job_id,
-                status="failed",
-                summary=make_user_friendly_error(error_msg),
-                ai_provider=ai_provider,
-                ai_model=ai_model,
+                status="completed",
+                summary="No test failures found and no console output to analyze.",
             )
-            fail_data = fail_result.model_dump(mode="json")
-            fail_data["error"] = fail_result.summary
-            fail_data["job_name"] = display_name
-            await _preserve_request_params(job_id, fail_data)
-            await _attach_token_usage(job_id, fail_data)
-            await update_status(job_id, "failed", fail_data)
+            result_data = analysis_result.model_dump(mode="json")
+            result_data["job_name"] = display_name
+            _stamp_prow_identity(result_data)
+            if source_result.build_url:
+                result_data["jenkins_url"] = source_result.build_url
+            await _preserve_request_params(job_id, result_data)
+            await update_status(job_id, "completed", result_data)
             notify_active_count_changed()
             notify_dashboard_changed()
             notify_job_status_changed(job_id)
-            notify_token_usage_changed()
+            await _auto_assign_metadata(metadata_job_name, merged.metadata_rules)
             return
+        else:
+            # Normal path: structured test failures
+            logger.info(
+                f"Starting AI analysis for {len(groups)} failure groups (provider={ai_provider}, model={ai_model})"
+            )
+
+            # Analyze each group in parallel
+            coroutines: list[Coroutine[Any, Any, Any]] = [
+                analyze_failure_group(
+                    failures=group_failures,
+                    console_context=console_context,
+                    repo_path=repo_path,
+                    ai_provider=ai_provider,
+                    ai_model=ai_model,
+                    ai_call_timeout=merged.ai_call_timeout,
+                    custom_prompt=custom_prompt,
+                    server_url=server_url,
+                    job_id=job_id,
+                    peer_ai_configs=peer_ai_configs,
+                    peer_analysis_max_rounds=merged.peer_analysis_max_rounds,
+                    additional_repos=cloned_repos or None,
+                    max_concurrent_ai_calls=merged.max_concurrent_ai_calls,
+                    auth_header=auth_header,
+                    all_groups=groups,
+                )
+                for sig, group_failures in groups.items()
+            ]
+
+            results = await run_parallel_with_limit(
+                coroutines, max_concurrency=merged.max_concurrent_ai_calls
+            )
+            logger.debug(
+                f"AI analysis complete: {len(results)} results from {len(groups)} groups"
+            )
+
+            all_analyses = []
+            failed_group_count = 0
+            for result in results:
+                if isinstance(result, Exception):
+                    failed_group_count += 1
+                    logger.error(
+                        f"Failed to analyze failure group: {result}", exc_info=result
+                    )
+                else:
+                    all_analyses.extend(result)
+
+            unique_errors = len(groups)
+
+            # If every group failed, treat the entire job as failed rather than
+            # saving a misleading "completed" result with zero findings.
+            if not all_analyses and failed_group_count == len(results):
+                error_msg = (
+                    f"All {failed_group_count} failure group(s) failed during analysis "
+                    f"({len(test_failures)} test failures, {unique_errors} unique errors)"
+                )
+                logger.error(
+                    f"Analysis fully failed for job_id={job_id}: {error_msg}"
+                )
+                fail_result = FailureAnalysisResult(
+                    job_id=job_id,
+                    status="failed",
+                    summary=make_user_friendly_error(error_msg),
+                    ai_provider=ai_provider,
+                    ai_model=ai_model,
+                )
+                fail_data = fail_result.model_dump(mode="json")
+                fail_data["error"] = fail_result.summary
+                fail_data["job_name"] = display_name
+                _stamp_prow_identity(fail_data)
+                if source_result.build_url:
+                    fail_data["jenkins_url"] = source_result.build_url
+                await _preserve_request_params(job_id, fail_data)
+                await _attach_token_usage(job_id, fail_data)
+                await update_status(job_id, "failed", fail_data)
+                notify_active_count_changed()
+                notify_dashboard_changed()
+                notify_job_status_changed(job_id)
+                notify_token_usage_changed()
+                return
 
         summary = (
             f"Analyzed {len(test_failures)} test failures "
@@ -3799,7 +3966,10 @@ async def _process_file_raw_analysis(
 
         result_data = analysis_result.model_dump(mode="json")
         result_data["job_name"] = display_name
-        logger.info(f"File/raw analysis completed for job_id={job_id}: {summary}")
+        _stamp_prow_identity(result_data)
+        if source_result.build_url:
+            result_data["jenkins_url"] = source_result.build_url
+        logger.info(f"Analysis completed for job_id={job_id}: {summary}")
         await _preserve_request_params(job_id, result_data)
 
         # Attach token usage summary before persisting
@@ -3823,7 +3993,7 @@ async def _process_file_raw_analysis(
         try:
             await _auto_review_matching_failures(
                 job_id,
-                display_name,
+                metadata_job_name,
                 result_data.get("build_number", 0),
                 result_data,
                 merged,
@@ -3833,7 +4003,7 @@ async def _process_file_raw_analysis(
             logger.warning(
                 "Auto-review failed for job_id=%s, job_name=%s, build=%s",
                 job_id,
-                display_name,
+                metadata_job_name,
                 _build_number,
                 exc_info=True,
             )
@@ -3845,17 +4015,17 @@ async def _process_file_raw_analysis(
         notify_token_usage_changed()
 
         # Auto-assign job metadata from name pattern rules
-        await _auto_assign_metadata(display_name, merged.metadata_rules)
+        await _auto_assign_metadata(metadata_job_name, merged.metadata_rules)
 
         # Reveal classifications created during analysis
         await storage.make_classifications_visible(job_id)
 
     except asyncio.CancelledError:
-        logger.info(f"File/raw analysis task cancelled for job_id={job_id}")
+        logger.info(f"Analysis task cancelled for job_id={job_id}")
         return
 
     except Exception as e:
-        logger.exception(f"File/raw analysis failed for job {job_id}")
+        logger.exception(f"Analysis failed for job {job_id}")
         user_error = make_user_friendly_error(e)
         fail_result = FailureAnalysisResult(
             job_id=job_id,
@@ -3867,6 +4037,7 @@ async def _process_file_raw_analysis(
         fail_data = fail_result.model_dump(mode="json")
         fail_data["error"] = fail_result.summary
         fail_data["job_name"] = display_name
+        _stamp_prow_identity(fail_data)
         await _preserve_request_params(job_id, fail_data)
 
         # Attach token usage even on failure
@@ -3910,6 +4081,8 @@ async def analyze(
     if not display_name:
         if body.type == "jenkins":
             display_name = body.job_name or "jenkins-analysis"
+        elif body.type == "prow":
+            display_name = body.prow_job_name or "prow-analysis"
         elif body.type == "file":
             display_name = "file-analysis"
         else:
@@ -3939,10 +4112,10 @@ async def analyze(
             is_admin=bool(request.state.is_admin),
         )
 
-    # File or Raw — enqueue as async background task
+    # File, Raw, or Prow — enqueue as async background task
     merged = _merge_settings(body, settings)
     resolved_peers = _validate_peer_configs(body, merged)
-    return await _enqueue_file_raw_analysis(
+    return await _enqueue_non_jenkins_analysis(
         body=body,
         merged=merged,
         resolved_peers=resolved_peers,
@@ -4001,8 +4174,8 @@ async def re_analyze(
         "analysis_type", "jenkins"
     )  # default to jenkins for backward compat
 
-    if analysis_type in ("file", "raw"):
-        # File/Raw re-analysis: rebuild a UnifiedAnalyzeRequest and re-submit
+    if analysis_type in ("file", "raw", "prow"):
+        # File/Raw/Prow re-analysis: rebuild a UnifiedAnalyzeRequest and re-submit
         try:
             decrypted_params = decrypt_sensitive_fields(dict(params))
         except Exception as exc:
@@ -4020,7 +4193,7 @@ async def re_analyze(
             "type": analysis_type,
         }
         # Only restore name if user explicitly provided one;
-        # leave unset so _enqueue_file_raw_analysis generates a fresh fallback.
+        # leave unset so _enqueue_non_jenkins_analysis generates a fresh fallback.
         stored_name = decrypted_params.get("original_name", "")
         if stored_name:
             unified_fields["name"] = stored_name
@@ -4033,6 +4206,17 @@ async def re_analyze(
                     detail="Original file analysis has no stored raw_xml; cannot re-analyze",
                 )
             unified_fields["raw_xml"] = stored_xml
+        elif analysis_type == "prow":
+            for prow_field in ("prow_job_name", "build_id", "prow_url", "gcs_bucket", "gcs_prefix"):
+                if prow_field in decrypted_params:
+                    unified_fields[prow_field] = decrypted_params[prow_field]
+            if "force" in decrypted_params:
+                unified_fields["force"] = decrypted_params["force"]
+            if not unified_fields.get("prow_job_name") or not unified_fields.get("build_id"):
+                raise HTTPException(
+                    status_code=400,
+                    detail="Original prow analysis has no stored prow_job_name/build_id; cannot re-analyze",
+                )
         else:
             stored_failures = decrypted_params.get("failures")
             if stored_failures is None:
@@ -4067,10 +4251,15 @@ async def re_analyze(
         merged = _merge_settings(unified_body, get_settings())
         resolved_peers = _validate_peer_configs(unified_body, merged)
 
-        # Resolve display name
-        display_name = unified_body.name or f"{analysis_type}-re-analysis"
+        # Resolve display name — prefer original name, then source-specific fallback
+        if unified_body.name:
+            display_name = unified_body.name
+        elif analysis_type == "prow" and unified_body.prow_job_name:
+            display_name = unified_body.prow_job_name
+        else:
+            display_name = f"{analysis_type}-re-analysis"
 
-        return await _enqueue_file_raw_analysis(
+        return await _enqueue_non_jenkins_analysis(
             body=unified_body,
             merged=merged,
             resolved_peers=resolved_peers,

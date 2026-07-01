@@ -271,6 +271,16 @@ class Settings(BaseSettings):
     # Artifact download toggle
     get_job_artifacts: bool = True
 
+    # Prow configuration (optional; can be provided per-request via API body)
+    prow_url: str = Field(
+        default="",
+        description="Default Prow Deck URL (e.g. https://prow.ci.openshift.org)",
+    )
+    gcs_bucket: str = Field(
+        default="",
+        description="Default GCS bucket for Prow artifacts (e.g. test-platform-results)",
+    )
+
     # Force analysis on successful builds
     force_analysis: bool = False
 

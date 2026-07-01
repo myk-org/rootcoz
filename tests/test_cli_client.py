@@ -1063,6 +1063,74 @@ class TestRootCozClientAnalyzeFile:
         client.analyze_file("<testsuites/>")
 
 
+class TestRootCozClientAnalyzeProw:
+    def test_analyze_prow_sends_correct_body(self):
+        def handler(request):
+            body = json.loads(request.content)
+            assert body["type"] == "prow"
+            assert body["prow_job_name"] == "periodic-ci-e2e-aws"
+            assert body["build_id"] == "1234567890"
+            assert body["ai_provider"] == "claude"
+            return httpx.Response(202, json={"status": "queued", "job_id": "p1"})
+
+        client = _make_client(handler)
+        result = client.analyze(
+            type="prow",
+            prow_job_name="periodic-ci-e2e-aws",
+            build_id="1234567890",
+            ai_provider="claude",
+        )
+        assert result["status"] == "queued"
+
+    def test_analyze_prow_with_name_and_tags(self):
+        def handler(request):
+            body = json.loads(request.content)
+            assert body["type"] == "prow"
+            assert body["name"] == "my-prow-analysis"
+            assert body["tags"] == ["nightly"]
+            return httpx.Response(202, json={"status": "queued", "job_id": "p2"})
+
+        client = _make_client(handler)
+        result = client.analyze(
+            type="prow",
+            prow_job_name="job",
+            build_id="123",
+            name="my-prow-analysis",
+            tags=["nightly"],
+        )
+        assert result["status"] == "queued"
+
+    def test_analyze_prow_with_custom_url_and_bucket(self):
+        def handler(request):
+            body = json.loads(request.content)
+            assert body["prow_url"] == "https://prow.custom.org"
+            assert body["gcs_bucket"] == "custom-bucket"
+            return httpx.Response(202, json={"status": "queued", "job_id": "p3"})
+
+        client = _make_client(handler)
+        result = client.analyze(
+            type="prow",
+            prow_job_name="job",
+            build_id="123",
+            prow_url="https://prow.custom.org",
+            gcs_bucket="custom-bucket",
+        )
+        assert result["status"] == "queued"
+
+    def test_analyze_prow_minimal_body(self):
+        def handler(request):
+            body = json.loads(request.content)
+            assert body == {
+                "type": "prow",
+                "prow_job_name": "my-job",
+                "build_id": "42",
+            }
+            return httpx.Response(202, json={"status": "queued", "job_id": "p4"})
+
+        client = _make_client(handler)
+        client.analyze(type="prow", prow_job_name="my-job", build_id="42")
+
+
 class TestRootCozClientAnalyzeAdditionalRepos:
     def test_analyze_passes_additional_repos(self):
         """additional_repos is forwarded in the request body."""

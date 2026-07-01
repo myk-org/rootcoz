@@ -1478,6 +1478,22 @@ async def update_status(
         await db.commit()
 
 
+async def update_jenkins_url(job_id: str, jenkins_url: str) -> None:
+    """Update the jenkins_url DB column for an existing result.
+
+    Used to persist the build URL after it becomes available (e.g. after
+    ProwSource.fetch() returns the Deck URL).
+    """
+    if not jenkins_url:
+        return
+    async with _connect_db() as db:
+        await db.execute(
+            "UPDATE results SET jenkins_url = ? WHERE job_id = ?",
+            (jenkins_url, job_id),
+        )
+        await db.commit()
+
+
 def _make_progress_phase_patcher(phase: str) -> Callable[[dict], None]:
     """Create a patch function that sets ``progress_phase`` and appends to ``progress_log``.
 
