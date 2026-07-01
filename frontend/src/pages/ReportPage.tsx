@@ -161,6 +161,11 @@ function ReportContent() {
 
         dispatch({ type: 'SET_RESULT', payload: { result: resultRes.result, createdAt: resultRes.created_at, completedAt: resultRes.completed_at ?? '', analysisStartedAt: resultRes.analysis_started_at ?? '', reanalyzedFromJobId: resultRes.reanalyzed_from_job_id, originJobName: resultRes.origin_job_name } })
 
+        // Tracked-in data (per-test_name → {tracked_in_url, tracked_in_type})
+        if (resultRes.tracked_in) {
+          dispatch({ type: 'SET_TRACKED_IN', payload: resultRes.tracked_in })
+        }
+
         // Use capabilities from the result response (job-scoped, avoids separate call)
         if (resultRes.capabilities) {
           dispatch({ type: 'SET_GITHUB_ISSUES_ENABLED', payload: resultRes.capabilities?.github_issues_enabled ?? false })
@@ -244,6 +249,9 @@ function ReportContent() {
         const resultRes = await api.get<ResultResponse>(`/results/${jobId}`)
         if (resultRes.result) {
           dispatch({ type: 'SET_RESULT', payload: { result: resultRes.result, createdAt: resultRes.created_at, completedAt: resultRes.completed_at ?? '', analysisStartedAt: resultRes.analysis_started_at ?? '', reanalyzedFromJobId: resultRes.reanalyzed_from_job_id, originJobName: resultRes.origin_job_name } })
+          if (resultRes.tracked_in) {
+            dispatch({ type: 'SET_TRACKED_IN', payload: resultRes.tracked_in })
+          }
         }
       } catch {
         // best-effort refresh

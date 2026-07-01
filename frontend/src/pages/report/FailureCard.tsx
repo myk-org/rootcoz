@@ -23,12 +23,13 @@ import { CommentsSection } from './CommentsSection'
 import { ClassificationSelect } from './ClassificationSelect'
 import { PatternSelect } from './PatternSelect'
 import { BugCreationDialog } from './BugCreationDialog'
+import { TrackedInBadge, TrackInDialog } from './TrackedInBadge'
 import { ReAnalyzeDialog } from './ReAnalyzeDialog'
 import { useReviewSuggestion } from './useReviewSuggestion'
 import { ConfirmDialog } from '@/components/shared/ConfirmDialog'
 import { UuidCopyButton } from '@/components/shared/UuidCopyButton'
 import { useAuth } from '@/lib/auth'
-import { ChevronDown, ChevronRight, Bug, MessageSquare, CheckCircle2, Copy, Check, RotateCw } from 'lucide-react'
+import { ChevronDown, ChevronRight, Bug, MessageSquare, CheckCircle2, Copy, Check, RotateCw, Link2 } from 'lucide-react'
 
 function PreviousAnalysisEntry({ prev, index, repoUrls }: {
   prev: PreviousAnalysis
@@ -182,7 +183,7 @@ interface FailureCardProps {
 export function FailureCard({ group, jobId, childJobName, childBuildNumber, index, activeHash }: FailureCardProps) {
   const scopedChildJobName = childJobName ?? ''
   const scopedChildBuildNumber = childBuildNumber ?? 0
-  const { githubIssuesEnabled, jiraIssuesEnabled, serverJiraProjectKey, comments, reviews, aiModels, result, classifications } = useReportState()
+  const { githubIssuesEnabled, jiraIssuesEnabled, serverJiraProjectKey, comments, reviews, aiModels, result, classifications, trackedIn } = useReportState()
   const dispatch = useReportDispatch()
   const { role, isOperator } = useAuth()
   const isViewer = role === 'viewer'
@@ -203,6 +204,7 @@ export function FailureCard({ group, jobId, childJobName, childBuildNumber, inde
     }
   }, [activeHash, group.id])
   const [bugTarget, setBugTarget] = useState<'github' | 'jira' | null>(null)
+  const [trackInOpen, setTrackInOpen] = useState(false)
   const [reviewingAll, setReviewingAll] = useState(false)
   const [reviewAllError, setReviewAllError] = useState<string | null>(null)
   const [selectedProvider, setSelectedProvider] = useState(result?.ai_provider ?? '')
@@ -434,6 +436,9 @@ export function FailureCard({ group, jobId, childJobName, childBuildNumber, inde
                 </TooltipTrigger>
                 <TooltipContent>{allReviewed ? 'All reviewed' : `Review all ${group.count} tests`}</TooltipContent>
               </Tooltip>
+            )}
+            {trackedIn[rep.test_name] && trackedIn[rep.test_name].tracked_in_url && (
+              <TrackedInBadge url={trackedIn[rep.test_name].tracked_in_url} type={trackedIn[rep.test_name].tracked_in_type} />
             )}
             {commentCount > 0 && (
               <span className="flex items-center gap-1 rounded-md bg-surface-elevated px-2 py-1 text-[10px] font-mono text-text-tertiary">
@@ -700,6 +705,11 @@ export function FailureCard({ group, jobId, childJobName, childBuildNumber, inde
                 label="Jira Ticket"
                 onClick={() => setBugTarget('jira')}
               />
+              {!isViewer && !trackedIn[rep.test_name]?.tracked_in_url && (
+                <Button variant="outline" size="sm" onClick={() => setTrackInOpen(true)}>
+                  <Link2 className="h-3.5 w-3.5 mr-1" /> Track In...
+                </Button>
+              )}
             </div>
 
             {/* Comments */}
@@ -727,9 +737,21 @@ export function FailureCard({ group, jobId, childJobName, childBuildNumber, inde
               ? repoUrls.map(({ name, url }) => ({ name, url }))
               : undefined
           }
-          onIssueCreated={(url) => void maybeSuggestBugReview(url)}
+          onIssueCreated={(url) => {
+            // Auto-set tracked-in in local state (backend already persisted it)
+            const trackedType = url.includes('github.com') ? 'github' : url.includes('jira') || url.includes('atlassian') ? 'jira' : ''
+            dispatch({ type: 'SET_TRACKED_IN_ENTRY', payload: { testName: rep.test_name, entry: { tracked_in_url: url, tracked_in_type: trackedType } } })
+            void maybeSuggestBugReview(url)
+          }}
         />
       )}
+
+      <TrackInDialog
+        open={trackInOpen}
+        onOpenChange={setTrackInOpen}
+        jobId={jobId}
+        testName={rep.test_name}
+      />
 
       <ConfirmDialog
         open={showBugReviewSuggestion}

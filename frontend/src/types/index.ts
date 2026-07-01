@@ -308,6 +308,11 @@ export interface AiModelsResponse {
 
 // -- Result wrapper (from GET /results/{jobId}) ---------------------
 
+export interface TrackedInEntry {
+  tracked_in_url: string
+  tracked_in_type: string
+}
+
 export interface ResultResponse {
   job_id: string
   jenkins_url: string | null
@@ -321,6 +326,8 @@ export interface ResultResponse {
   result_url: string | null
   reanalyzed_from_job_id?: string
   origin_job_name?: string
+  /** Per-test tracked-in data (test_name → {tracked_in_url, tracked_in_type}). */
+  tracked_in?: Record<string, TrackedInEntry>
   capabilities?: {
     github_issues_enabled: boolean
     jira_issues_enabled: boolean

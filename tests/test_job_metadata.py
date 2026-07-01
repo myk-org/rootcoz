@@ -315,7 +315,10 @@ class TestJobMetadataAPI:
     def test_dashboard_filtered_no_filters(self, api_client) -> None:
         resp = api_client.get("/api/dashboard/filtered")
         assert resp.status_code == 200
-        assert isinstance(resp.json(), list)
+        data = resp.json()
+        assert isinstance(data, dict)
+        assert "jobs" in data
+        assert "total" in data
 
     def test_dashboard_filtered_by_metadata(self, api_client, temp_db_path) -> None:
         """Verify dashboard filter returns only jobs matching metadata."""
@@ -346,9 +349,9 @@ class TestJobMetadataAPI:
         resp = api_client.get("/api/dashboard/filtered", params={"team": "alpha"})
         assert resp.status_code == 200
         data = resp.json()
-        assert len(data) == 1
-        assert data[0]["job_name"] == "alpha-job"
-        assert data[0]["metadata"]["team"] == "alpha"
+        assert len(data["jobs"]) == 1
+        assert data["jobs"][0]["job_name"] == "alpha-job"
+        assert data["jobs"][0]["metadata"]["team"] == "alpha"
 
     def test_partial_update_preserves_omitted_fields(self, api_client) -> None:
         """PUT with a subset of fields should not clear the others."""
@@ -409,7 +412,7 @@ class TestJobMetadataAPI:
         )
         assert resp.status_code == 200
         data = resp.json()
-        job_names = [d["job_name"] for d in data]
+        job_names = [d["job_name"] for d in data["jobs"]]
         assert "beta-job" in job_names
         assert "alpha-job" not in job_names
 
@@ -452,7 +455,7 @@ class TestJobMetadataAPI:
         )
         assert resp.status_code == 200
         data = resp.json()
-        job_names = [d["job_name"] for d in data]
+        job_names = [d["job_name"] for d in data["jobs"]]
         assert job_names == ["beta-job"]
 
     def test_dashboard_filtered_include_and_exclude_interaction(
@@ -502,7 +505,7 @@ class TestJobMetadataAPI:
         )
         assert resp.status_code == 200
         data = resp.json()
-        job_names = [d["job_name"] for d in data]
+        job_names = [d["job_name"] for d in data["jobs"]]
         assert job_names == ["beta-job"]
 
     def test_dashboard_filtered_exclude_no_match(
@@ -536,7 +539,7 @@ class TestJobMetadataAPI:
         )
         assert resp.status_code == 200
         data = resp.json()
-        job_names = [d["job_name"] for d in data]
+        job_names = [d["job_name"] for d in data["jobs"]]
         assert "alpha-job" in job_names
         assert "beta-job" in job_names
 

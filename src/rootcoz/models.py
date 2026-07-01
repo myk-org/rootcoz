@@ -851,6 +851,30 @@ class CreateIssueResponse(BaseModel):
     )
 
 
+class SetTrackedInRequest(BaseModel):
+    """Request body for setting/clearing the tracked-in URL on a failure."""
+
+    test_name: str = Field(description="Full test name")
+    url: str = Field(default="", description="Tracking issue URL (empty to clear)")
+    type: str = Field(
+        default="",
+        description="Tracker type: 'jira', 'github', or '' to clear",
+    )
+
+    @field_validator("type")
+    @classmethod
+    def validate_tracked_type(cls, v: str) -> str:
+        v = v.strip().lower()
+        if v and v not in ("jira", "github"):
+            raise ValueError("type must be 'jira', 'github', or empty")
+        return v
+
+    @field_validator("url")
+    @classmethod
+    def validate_url(cls, v: str) -> str:
+        return v.strip()
+
+
 class ClassifyTestRequest(BaseModel):
     """Request body for classifying a test pattern (e.g., FLAKY, REGRESSION).
 

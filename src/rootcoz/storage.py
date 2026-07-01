@@ -557,6 +557,14 @@ async def init_db() -> None:
             "CREATE INDEX IF NOT EXISTS idx_fh_pattern ON failure_history (pattern)"
         )
 
+        # Migration: add tracked_in columns to failure_history
+        await _migrate_add_column(
+            db, "failure_history", "tracked_in_url", "TEXT NOT NULL DEFAULT ''"
+        )
+        await _migrate_add_column(
+            db, "failure_history", "tracked_in_type", "TEXT NOT NULL DEFAULT ''"
+        )
+
         # Migration: add pattern column to test_classifications (two-axis classification)
         await _migrate_add_column(
             db, "test_classifications", "pattern", "TEXT NOT NULL DEFAULT ''"
@@ -2028,6 +2036,57 @@ async def populate_failure_history(
         )
 
 
+async def set_tracked_in(
+    job_id: str,
+    test_name: str,
+    url: str,
+    tracked_type: str,
+) -> int:
+    """Set or clear the tracked-in URL for a failure in failure_history.
+
+    Args:
+        job_id: Analysis job ID.
+        test_name: Full test name.
+        url: Tracking issue URL (empty string to clear).
+        tracked_type: Tracker type ('jira', 'github', or '' to clear).
+
+    Returns:
+        Number of rows updated.
+    """
+    async with _connect_db() as db:
+        cursor = await db.execute(
+            "UPDATE failure_history SET tracked_in_url = ?, tracked_in_type = ? "
+            "WHERE job_id = ? AND test_name = ?",
+            (url, tracked_type, job_id, test_name),
+        )
+        await db.commit()
+        return cursor.rowcount
+
+
+async def get_tracked_in_for_job(job_id: str) -> dict[str, dict]:
+    """Return tracked-in data for all failures in a job.
+
+    Returns:
+        Dict mapping test_name to {tracked_in_url, tracked_in_type}.
+        Only tests with a non-empty tracked_in_url are included.
+    """
+    async with _connect_db() as db:
+        cursor = await db.execute(
+            "SELECT test_name, tracked_in_url, tracked_in_type "
+            "FROM failure_history "
+            "WHERE job_id = ? AND tracked_in_url != ''",
+            (job_id,),
+        )
+        rows = await cursor.fetchall()
+        return {
+            row["test_name"]: {
+                "tracked_in_url": row["tracked_in_url"],
+                "tracked_in_type": row["tracked_in_type"],
+            }
+            for row in rows
+        }
+
+
 async def backfill_failure_history() -> None:
     """Backfill failure_history from existing completed results.
 
@@ -2353,7 +2412,8 @@ async def get_test_history(
             f"""SELECT fh.job_id, fh.job_name, fh.build_number, fh.error_message,
                        fh.error_signature,
                        COALESCE(tc_latest.classification, fh.classification) AS classification,
-                       fh.child_job_name, fh.child_build_number, fh.analyzed_at
+                       fh.child_job_name, fh.child_build_number, fh.analyzed_at,
+                       fh.tracked_in_url, fh.tracked_in_type
                 FROM failure_history fh
                 {_TC_LATEST_JOIN}
                 WHERE fh.test_name = ?{job_filter}
@@ -2661,8 +2721,59 @@ async def list_distinct_job_names() -> set[str]:
         return {row[0] for row in rows if row[0]}
 
 
+def _parse_dashboard_row(row) -> dict:
+    """Parse a single dashboard result row into a dict with summary data."""
+    entry: dict = {
+        "job_id": row["job_id"],
+        "jenkins_url": row["jenkins_url"],
+        "status": row["status"],
+        "created_at": row["created_at"],
+        "completed_at": row["completed_at"] if "completed_at" in row.keys() else None,
+        "analysis_started_at": row["analysis_started_at"]
+        if "analysis_started_at" in row.keys()
+        else None,
+        "error": row["error"] if "error" in row.keys() else "",
+        "reviewed_count": row["reviewed_count"],
+        "comment_count": row["comment_count"],
+    }
+    result_data = parse_result_json(row["result_json"], job_id=row["job_id"])
+    if result_data:
+        entry["job_name"] = result_data.get("job_name", "")
+        if "build_number" in result_data:
+            entry["build_number"] = result_data["build_number"]
+        entry["failure_count"] = count_all_failures(result_data)
+        child_jobs = result_data.get("child_job_analyses", [])
+        if child_jobs:
+            entry["child_job_count"] = len(child_jobs)
+        if result_data.get("summary"):
+            entry["summary"] = result_data["summary"]
+        if result_data.get("error"):
+            entry["error"] = result_data["error"]
+        raw_tags = result_data.get("tags")
+        if isinstance(raw_tags, list):
+            entry["tags"] = [str(t) for t in raw_tags if isinstance(t, str) and t]
+        # Expose submitted_by for ownership checks (delete permissions)
+        request_params = result_data.get("request_params") or {}
+        submitted_by = request_params.get("submitted_by", "")
+        if submitted_by:
+            entry["submitted_by"] = submitted_by
+    return entry
+
+
+_DASHBOARD_BASE_SQL = """
+    SELECT r.job_id, r.jenkins_url, r.status, r.result_json,
+        r.created_at, r.completed_at, r.analysis_started_at, r.error,
+        (SELECT COUNT(*) FROM failure_reviews fr
+         WHERE fr.job_id = r.job_id AND fr.reviewed = 1) AS reviewed_count,
+        (SELECT COUNT(*) FROM comments c
+         WHERE c.job_id = r.job_id) AS comment_count
+    FROM results r
+"""
+
+
 async def list_results_for_dashboard(
     limit: int = DEFAULT_DASHBOARD_LIMIT,
+    offset: int = 0,
 ) -> list[dict]:
     """List analysis results with summary data for dashboard display.
 
@@ -2672,6 +2783,7 @@ async def list_results_for_dashboard(
     Args:
         limit: Maximum number of results to return.  ``0`` means no limit —
             all rows are returned.  Defaults to :data:`DEFAULT_DASHBOARD_LIMIT`.
+        offset: Number of rows to skip (for pagination).
 
     Returns:
         List of result dictionaries enriched with summary data from result_json.
@@ -2680,64 +2792,114 @@ async def list_results_for_dashboard(
         raise ValueError("limit must be >= 0")
 
     async with _connect_db() as db:
-        sql = """
-            SELECT r.job_id, r.jenkins_url, r.status, r.result_json,
-                r.created_at, r.completed_at, r.analysis_started_at, r.error,
-                (SELECT COUNT(*) FROM failure_reviews fr
-                 WHERE fr.job_id = r.job_id AND fr.reviewed = 1) AS reviewed_count,
-                (SELECT COUNT(*) FROM comments c
-                 WHERE c.job_id = r.job_id) AS comment_count
-            FROM results r
-            ORDER BY r.created_at DESC
-        """
-        params: tuple = ()
+        sql = _DASHBOARD_BASE_SQL + " ORDER BY r.created_at DESC"
+        params: list = []
         if limit > 0:
             sql += " LIMIT ?"
-            params = (limit,)
+            params.append(limit)
+        if offset > 0:
+            sql += " OFFSET ?"
+            params.append(offset)
         cursor = await db.execute(sql, params)
         rows = await cursor.fetchall()
-        results = []
-        for row in rows:
-            entry: dict = {
-                "job_id": row["job_id"],
-                "jenkins_url": row["jenkins_url"],
-                "status": row["status"],
-                "created_at": row["created_at"],
-                "completed_at": row["completed_at"]
-                if "completed_at" in row.keys()
-                else None,
-                "analysis_started_at": row["analysis_started_at"]
-                if "analysis_started_at" in row.keys()
-                else None,
-                "error": row["error"] if "error" in row.keys() else "",
-                "reviewed_count": row["reviewed_count"],
-                "comment_count": row["comment_count"],
-            }
-            result_data = parse_result_json(row["result_json"], job_id=row["job_id"])
-            if result_data:
-                entry["job_name"] = result_data.get("job_name", "")
-                if "build_number" in result_data:
-                    entry["build_number"] = result_data["build_number"]
-                entry["failure_count"] = count_all_failures(result_data)
-                child_jobs = result_data.get("child_job_analyses", [])
-                if child_jobs:
-                    entry["child_job_count"] = len(child_jobs)
-                if result_data.get("summary"):
-                    entry["summary"] = result_data["summary"]
-                if result_data.get("error"):
-                    entry["error"] = result_data["error"]
-                raw_tags = result_data.get("tags")
-                if isinstance(raw_tags, list):
-                    entry["tags"] = [
-                        str(t) for t in raw_tags if isinstance(t, str) and t
-                    ]
-                # Expose submitted_by for ownership checks (delete permissions)
-                request_params = result_data.get("request_params") or {}
-                submitted_by = request_params.get("submitted_by", "")
-                if submitted_by:
-                    entry["submitted_by"] = submitted_by
-            results.append(entry)
-        return results
+        return [_parse_dashboard_row(row) for row in rows]
+
+
+async def list_results_for_dashboard_filtered(
+    *,
+    job_names: set[str] | None = None,
+    exclude_job_names: set[str] | None = None,
+    search: str = "",
+    status: list[str] | None = None,
+    date_from: str = "",
+    date_to: str = "",
+    limit: int = DEFAULT_DASHBOARD_LIMIT,
+    offset: int = 0,
+) -> dict:
+    """List dashboard results with filters applied in SQL before LIMIT.
+
+    Filters are pushed into the SQL query so the LIMIT applies to the
+    **filtered** set, not before filtering.
+
+    Args:
+        job_names: Include only these job names (from metadata filtering).
+        exclude_job_names: Exclude these job names (from metadata exclude labels).
+        search: Text search on job_name or job_id (case-insensitive).
+        status: Filter by status values.
+        date_from: ISO date string for start of range (inclusive).
+        date_to: ISO date string for end of range (inclusive, end-of-day).
+        limit: Max results. 0 = no limit.
+        offset: Rows to skip.
+
+    Returns:
+        Dict with 'jobs' (list of dashboard dicts) and 'total' (total matching count).
+    """
+    if limit < 0:
+        raise ValueError("limit must be >= 0")
+
+    conditions: list[str] = []
+    params: list = []
+
+    if search:
+        # Search job_name in result_json and job_id
+        conditions.append(
+            "(r.job_id LIKE ? OR json_extract(r.result_json, '$.job_name') LIKE ?)"
+        )
+        like_param = f"%{search}%"
+        params.extend([like_param, like_param])
+
+    if status:
+        placeholders = ", ".join("?" for _ in status)
+        conditions.append(f"r.status IN ({placeholders})")
+        params.extend(status)
+
+    if date_from:
+        conditions.append("r.created_at >= ?")
+        params.append(date_from)
+
+    if date_to:
+        conditions.append("r.created_at <= ?")
+        params.append(date_to)
+
+    if job_names is not None:
+        if not job_names:
+            # No matching job names from metadata — return empty
+            return {"jobs": [], "total": 0}
+        placeholders = ", ".join("?" for _ in job_names)
+        conditions.append(
+            f"json_extract(r.result_json, '$.job_name') IN ({placeholders})"
+        )
+        params.extend(sorted(job_names))
+
+    if exclude_job_names:
+        placeholders = ", ".join("?" for _ in exclude_job_names)
+        conditions.append(
+            f"(json_extract(r.result_json, '$.job_name') IS NULL OR "
+            f"json_extract(r.result_json, '$.job_name') NOT IN ({placeholders}))"
+        )
+        params.extend(sorted(exclude_job_names))
+
+    where = " WHERE " + " AND ".join(conditions) if conditions else ""
+
+    async with _connect_db() as db:
+        # Count total matching rows
+        count_sql = f"SELECT COUNT(*) FROM results r{where}"
+        cursor = await db.execute(count_sql, params)
+        total = (await cursor.fetchone())[0]
+
+        # Fetch paginated results
+        sql = _DASHBOARD_BASE_SQL + where + " ORDER BY r.created_at DESC"
+        fetch_params = list(params)
+        if limit > 0:
+            sql += " LIMIT ?"
+            fetch_params.append(limit)
+        if offset > 0:
+            sql += " OFFSET ?"
+            fetch_params.append(offset)
+
+        cursor = await db.execute(sql, fetch_params)
+        rows = await cursor.fetchall()
+        return {"jobs": [_parse_dashboard_row(row) for row in rows], "total": total}
 
 
 async def get_parent_job_name_for_test(test_name: str, job_id: str = "") -> str:

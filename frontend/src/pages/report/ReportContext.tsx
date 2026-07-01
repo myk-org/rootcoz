@@ -1,7 +1,7 @@
 import { createContext, useContext, useReducer, useRef, useCallback, type Dispatch, type ReactNode } from 'react'
 import { api } from '@/lib/api'
 import { reviewKey } from '@/lib/reviewKey'
-import type { AnalysisResult, ChildJobAnalysis, FailureAnalysis, Comment, ReviewState, CommentsAndReviews, CommentEnrichment, AiModel } from '@/types'
+import type { AnalysisResult, ChildJobAnalysis, FailureAnalysis, Comment, ReviewState, CommentsAndReviews, CommentEnrichment, AiModel, TrackedInEntry } from '@/types'
 
 interface ReportState {
   result: AnalysisResult | null
@@ -12,6 +12,8 @@ interface ReportState {
   reviews: Record<string, ReviewState>
   enrichments: Record<string, CommentEnrichment[]>
   classifications: Record<string, string>
+  /** Tracked-in data keyed by test_name. */
+  trackedIn: Record<string, TrackedInEntry>
   githubIssuesEnabled: boolean
   jiraIssuesEnabled: boolean
   reportportalAvailable: boolean
@@ -45,6 +47,8 @@ type ReportAction =
   | { type: 'SET_SERVER_JIRA_PROJECT_KEY'; payload: string }
   | { type: 'SET_AI_MODELS'; payload: Record<string, AiModel[]> }
   | { type: 'SET_ENRICHMENTS'; payload: Record<string, CommentEnrichment[]> }
+  | { type: 'SET_TRACKED_IN'; payload: Record<string, TrackedInEntry> }
+  | { type: 'SET_TRACKED_IN_ENTRY'; payload: { testName: string; entry: TrackedInEntry } }
   | { type: 'SET_CLASSIFICATIONS'; payload: Record<string, string> }
   | { type: 'SET_LOADING'; payload: boolean }
   | { type: 'SET_ERROR'; payload: string }
@@ -81,6 +85,7 @@ const initialState: ReportState = {
   reviews: {},
   enrichments: {},
   classifications: {},
+  trackedIn: {},
   githubIssuesEnabled: false,
   jiraIssuesEnabled: false,
   reportportalAvailable: false,
@@ -152,6 +157,10 @@ function reportReducer(state: ReportState, action: ReportAction): ReportState {
       return { ...state, aiModels: action.payload }
     case 'SET_ENRICHMENTS':
       return { ...state, enrichments: action.payload }
+    case 'SET_TRACKED_IN':
+      return { ...state, trackedIn: action.payload }
+    case 'SET_TRACKED_IN_ENTRY':
+      return { ...state, trackedIn: { ...state.trackedIn, [action.payload.testName]: action.payload.entry } }
     case 'SET_CLASSIFICATIONS':
       return { ...state, classifications: { ...action.payload, ...state.classifications } }
     case 'SET_LOADING':
