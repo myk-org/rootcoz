@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useParams, useNavigate, useLocation, Link } from 'react-router-dom'
+import { useSharedSSE } from '@/lib/useSharedSSE'
 import { api } from '@/lib/api'
 import { useClipboard } from '@/lib/useClipboard'
 import { parseApiTimestamp, isAnalysisTimeout, formatDuration, formatTimestamp } from '@/lib/utils'
@@ -220,33 +221,28 @@ function ReportContent() {
     }
   }, [state.commentDraftCount, jobId, fetchComments])
 
-  // SSE stream for real-time comment updates
-  useEffect(() => {
-    if (!jobId) return
+  // Shared SSE stream for real-time comment updates
+  const fetchCommentsRef = useRef(fetchComments)
+  fetchCommentsRef.current = fetchComments
 
-    const eventSource = new EventSource(`/api/results/${jobId}/comments/stream`)
-    eventSource.addEventListener('comments-changed', () => {
+  const commentsEvents = useMemo(() => ({
+    'comments-changed': () => {
       if (commentDraftCountRef.current === 0) {
-        fetchComments(jobId)
+        fetchCommentsRef.current(jobId!)
       } else {
         pendingCommentRefreshRef.current = true
       }
-    })
-    eventSource.onerror = () => {
-      console.debug('Comments SSE error')
-    }
+    },
+  }), [jobId])
 
-    return () => {
-      eventSource.close()
-    }
-  }, [jobId, fetchComments])
+  useSharedSSE({
+    url: jobId ? `/api/results/${jobId}/comments/stream` : null,
+    events: commentsEvents,
+  })
 
-  // SSE stream for real-time result updates (e.g., per-failure re-analysis completion)
-  useEffect(() => {
-    if (!jobId) return
-
-    const eventSource = new EventSource(`/api/results/${jobId}/stream`)
-    eventSource.addEventListener('status-changed', async () => {
+  // Shared SSE stream for real-time result updates (e.g., per-failure re-analysis completion)
+  const resultEvents = useMemo(() => ({
+    'status-changed': async () => {
       try {
         const resultRes = await api.get<ResultResponse>(`/results/${jobId}`)
         if (resultRes.result) {
@@ -255,15 +251,13 @@ function ReportContent() {
       } catch {
         // best-effort refresh
       }
-    })
-    eventSource.onerror = () => {
-      console.debug('Result SSE error')
-    }
+    },
+  }), [jobId])
 
-    return () => {
-      eventSource.close()
-    }
-  }, [jobId])
+  useSharedSSE({
+    url: jobId ? `/api/results/${jobId}/stream` : null,
+    events: resultEvents,
+  })
 
   // Preserve scroll position across F5 refreshes
   const scrollKey = `rootcoz-scroll-${jobId}`

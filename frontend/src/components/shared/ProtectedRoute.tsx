@@ -1,4 +1,4 @@
-import { Navigate } from 'react-router-dom'
+import { Navigate, useLocation } from 'react-router-dom'
 import { useAuth } from '@/lib/auth'
 
 interface Props {
@@ -10,12 +10,13 @@ interface Props {
 
 export function ProtectedRoute({ children, adminOnly, operatorOnly, reviewerOnly }: Props) {
   const { isAdmin, role, loading, authenticated } = useAuth()
+  const location = useLocation()
 
   // Wait for auth to resolve before any redirect
   if (loading) return null
 
   if (!authenticated) {
-    return <Navigate to="/login" replace />
+    return <Navigate to="/login" state={{ from: location }} replace />
   }
 
   if (adminOnly && !isAdmin) {

@@ -1,5 +1,5 @@
 import { useState, useEffect, type FormEvent } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { useNavigate, useLocation } from 'react-router-dom'
 import { useAuth } from '@/lib/auth'
 import { api, ApiError } from '@/lib/api'
 import { persistTokensToServer } from '@/lib/tokens'
@@ -49,7 +49,9 @@ function ApiKeyReveal({ apiKey, onAcknowledge }: { apiKey: string; onAcknowledge
 
 export function RegisterPage() {
   const navigate = useNavigate()
+  const location = useLocation()
   const { login, refreshAuth, authenticated, loading: authLoading } = useAuth()
+  const returnTo = (location.state as { from?: { pathname: string } } | null)?.from?.pathname || '/'
   const [mode, setMode] = useState<Mode>('login')
   const [username, setUsername] = useState('')
   const [apiKey, setApiKey] = useState('')
@@ -66,9 +68,9 @@ export function RegisterPage() {
 
   useEffect(() => {
     if (!authLoading && authenticated) {
-      navigate('/', { replace: true })
+      navigate(returnTo, { replace: true })
     }
-  }, [authLoading, authenticated, navigate])
+  }, [authLoading, authenticated, navigate, returnTo])
 
   async function handleRegister(e: FormEvent) {
     e.preventDefault()
@@ -129,7 +131,7 @@ export function RegisterPage() {
     setLoginCustomMessage('')
     try {
       await login(trimmed, apiKey.trim())
-      navigate('/', { replace: true })
+      navigate(returnTo, { replace: true })
     } catch (err) {
       if (err instanceof ApiError && (err.status === 401 || err.status === 403)) {
         const body = typeof err.body === 'object' && err.body !== null ? err.body as Record<string, unknown> : {}
@@ -162,7 +164,7 @@ export function RegisterPage() {
     } catch {
       // Session was set by registration — navigate even if refresh fails
     }
-    navigate('/', { replace: true })
+    navigate(returnTo, { replace: true })
   }
 
   function switchMode(next: 'login' | 'register') {

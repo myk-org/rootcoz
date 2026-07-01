@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
+import { useSharedSSE } from '@/lib/useSharedSSE'
 import { api, ApiError } from '@/lib/api'
 import { formatTimestamp, isAnalysisTimeout, INVALID_DATE_FALLBACK } from '@/lib/utils'
 import type { ResultResponse } from '@/types'
@@ -95,6 +96,8 @@ export function StatusPage() {
   const logEndRef = useRef<HTMLDivElement>(null)
   const logContainerRef = useRef<HTMLDivElement>(null)
 
+  const [sseUrl, setSseUrl] = useState<string | null>(null)
+
   useEffect(() => {
     if (!jobId) return
 
@@ -106,7 +109,6 @@ export function StatusPage() {
     setTerminalErrorKind(null)
     setReAnalyzeOpen(false)
     prevLogLenRef.current = 0
-
     async function fetchStatus() {
       if (inFlight || cancelled) {
         pendingRefresh = true
@@ -122,14 +124,17 @@ export function StatusPage() {
 
         if (res.status === 'completed') {
           navigate(`/results/${jobId}`, { replace: true })
+          setSseUrl(null) // disconnect SSE
           return 'terminal'
         } else if (res.status === 'failed') {
           setTerminalErrorKind('failed')
           setError(res.error || res.result?.error || 'Analysis failed')
+          setSseUrl(null)
           return 'terminal'
         } else if (res.status === 'aborted') {
           setTerminalErrorKind('aborted')
           setError(res.error || res.result?.error || 'Analysis was aborted')
+          setSseUrl(null)
           return 'terminal'
         }
       } catch (err) {
@@ -142,6 +147,7 @@ export function StatusPage() {
                 : 'Access denied. You are not authorized to view this job.'
             )
             setData(null)
+            setSseUrl(null)
             return 'terminal'
           } else {
             setTerminalErrorKind(null)
@@ -158,27 +164,33 @@ export function StatusPage() {
       return 'continue'
     }
 
+    statusFetchRef.current = fetchStatus
+
     // Initial fetch
     fetchStatus()
 
-    // SSE stream for real-time updates
-    const eventSource = new EventSource(`/api/results/${jobId}/stream`)
-    eventSource.addEventListener('status-changed', () => {
-      fetchStatus().then(result => {
-        if (result === 'terminal') {
-          eventSource.close()
-        }
-      })
-    })
-    eventSource.onerror = () => {
-      console.debug('Status SSE error')
-    }
+    // Enable SSE stream for real-time updates
+    setSseUrl(`/api/results/${jobId}/stream`)
 
     return () => {
       cancelled = true
-      eventSource.close()
+      setSseUrl(null)
     }
   }, [jobId, navigate])
+
+  // Ref-based fetch function accessible by SSE callback
+  const statusFetchRef = useRef<() => Promise<string | undefined>>(async () => undefined)
+
+  const statusEvents = useMemo(() => ({
+    'status-changed': () => {
+      statusFetchRef.current()
+    },
+  }), [])
+
+  useSharedSSE({
+    url: sseUrl,
+    events: statusEvents,
+  })
 
   const fetchStatus = async () => {
     if (!jobId) return

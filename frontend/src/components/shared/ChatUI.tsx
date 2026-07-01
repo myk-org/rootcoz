@@ -1,5 +1,6 @@
-import { useState, useEffect, useRef, useCallback, type FormEvent, type KeyboardEvent } from 'react'
+import { useState, useEffect, useRef, useCallback, useMemo, type FormEvent, type KeyboardEvent } from 'react'
 import { api } from '@/lib/api'
+import { useSharedSSE } from '@/lib/useSharedSSE'
 import { Button } from '@/components/ui/button'
 import { ProviderSelect } from '@/components/shared/ProviderSelect'
 import { ModelCombobox } from '@/components/shared/ModelCombobox'
@@ -76,7 +77,6 @@ export function ChatUI({
   const [initComplete, setInitComplete] = useState(false)
   const [initStepIndex, setInitStepIndex] = useState(0)
   const [initError, setInitError] = useState('')
-  const [sessionKey, setSessionKey] = useState(0)
 
   const [aiProvider, setAiProvider] = useState(defaultProvider)
   const [aiModel, setAiModel] = useState(defaultModel)
@@ -89,7 +89,6 @@ export function ChatUI({
   const inputRef = useRef<HTMLTextAreaElement>(null)
   const pollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const pollGenerationRef = useRef(0)
-  const sseReconnectCount = useRef(0)
 
   const hasPending = messages.some(m => m.status === 'pending')
 
@@ -203,49 +202,34 @@ export function ChatUI({
     }
   }, [apiBasePath])
 
-  // SSE: listen for chat message updates (AI responses)
-  useEffect(() => {
-    if (!initComplete) return  // Don't connect SSE until init is done
+  // Shared SSE: listen for chat message updates (AI responses)
+  const fetchMessagesRef = useRef(fetchMessages)
+  fetchMessagesRef.current = fetchMessages
+  const cancelPollRef = useRef(cancelPoll)
+  cancelPollRef.current = cancelPoll
 
-    let cancelled = false
-    const evtSource = new EventSource(`${apiBasePath}/stream`)
-
-    const syncMessages = () => fetchMessages()
-      .then(msgs => { if (!cancelled) setMessages(msgs) })
-      .catch((err) => { console.warn('[ChatUI] Failed to sync messages:', err instanceof Error ? err.message : 'unknown error') })
-
-    evtSource.addEventListener('chat-changed', () => {
+  const chatEvents = useMemo(() => ({
+    'chat-changed': () => {
       console.debug('[ChatUI] SSE chat-changed received, cancelling poll')
-      cancelPoll()  // SSE is alive, no need for polling fallback
-      syncMessages()
-    })
+      cancelPollRef.current()
+      fetchMessagesRef.current()
+        .then(msgs => setMessages(msgs))
+        .catch((err) => { console.warn('[ChatUI] Failed to sync messages:', err instanceof Error ? err.message : 'unknown error') })
+    },
+  }), [])
 
-    // SSE reconnected — fetch any messages missed while disconnected
-    evtSource.onopen = () => {
-      console.debug('[ChatUI] SSE connected')
-      sseReconnectCount.current = 0
-      syncMessages()
-    }
+  const chatSseOnOpen = useCallback(() => {
+    console.debug('[ChatUI] SSE connected')
+    fetchMessagesRef.current()
+      .then(msgs => setMessages(msgs))
+      .catch((err) => { console.warn('[ChatUI] Failed to sync messages:', err instanceof Error ? err.message : 'unknown error') })
+  }, [])
 
-    evtSource.onerror = () => {
-      console.warn(`[ChatUI] SSE error, readyState=${evtSource.readyState}`)
-      // readyState CLOSED (2) = browser gave up reconnecting — schedule a new connection with backoff
-      if (evtSource.readyState === EventSource.CLOSED) {
-        evtSource.close()
-        const delay = Math.min(1000 * 2 ** sseReconnectCount.current, 30000)
-        console.warn(`[ChatUI] SSE CLOSED — scheduling reconnect in ${delay}ms (attempt ${sseReconnectCount.current + 1})`)
-        sseReconnectCount.current++
-        setTimeout(() => { if (!cancelled) setSessionKey(k => k + 1) }, delay)
-      }
-      // readyState CONNECTING (0) = browser is auto-reconnecting — onopen will handle catch-up
-    }
-
-    return () => {
-      cancelled = true
-      evtSource.close()
-      cancelPoll()
-    }
-  }, [apiBasePath, fetchMessages, sessionKey, initComplete, cancelPoll])
+  useSharedSSE({
+    url: initComplete ? `${apiBasePath}/stream` : null,
+    events: chatEvents,
+    onOpen: chatSseOnOpen,
+  })
 
   // Auto-scroll
   useEffect(() => {
@@ -340,7 +324,6 @@ export function ChatUI({
       // Do NOT set initComplete — show error + retry on loading page
       return
     }
-    setSessionKey(k => k + 1)
     setInitComplete(true)
   }, [apiBasePath, fetchMessages, cancelPoll])
 
