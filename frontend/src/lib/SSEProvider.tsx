@@ -45,8 +45,10 @@ interface ChannelMessage {
   name?: string
   /** SSE event data string (for sse-event). */
   data?: string
-  /** Topics for this tab (for topics-update). */
+  /** Bare topics for this tab — for building ?topics= query (for topics-update). */
   topics?: string[]
+  /** Full event names (topic:eventName) for addEventListener registration (for topics-update). */
+  eventNames?: string[]
 }
 
 // ---------------------------------------------------------------------------
@@ -76,8 +78,11 @@ function createSSEManager(): SSEManager & { destroy(): void } {
   /** Currently active event listeners on the EventSource (for cleanup). */
   let activeListeners: Array<{ name: string; handler: (e: Event) => void }> = []
 
-  // Cross-tab topic tracking: leader aggregates topics from all tabs
+  // Cross-tab topic tracking: leader aggregates data from all tabs
+  /** Bare topics per tab — used for building /api/stream?topics= */
   const tabTopics = new Map<string, Set<string>>()
+  /** Full event names per tab — used for registering EventSource listeners */
+  const tabEventNames = new Map<string, Set<string>>()
 
   // ---- BroadcastChannel ----
   const hasBroadcast = typeof BroadcastChannel !== 'undefined'
@@ -94,7 +99,7 @@ function createSSEManager(): SSEManager & { destroy(): void } {
     return topics
   }
 
-  /** Compute the combined topic set (local + all remote tabs). */
+  /** Compute the combined bare topic set (local + all remote tabs) for the ?topics= query. */
   function getCombinedTopics(): string[] {
     const all = new Set<string>()
     // Local
@@ -165,54 +170,6 @@ function createSSEManager(): SSEManager & { destroy(): void } {
         listenerNames.add(`${sub.topic}:${eventName}`)
       }
     }
-    // Also add listeners for remote tab subscriptions (leader relays them)
-    if (isLeader) {
-      for (const topics of tabTopics.values()) {
-        // We don't know remote event names, but we need to listen broadly.
-        // The backend sends events only for subscribed topics, so we listen
-        // for any event and dispatch by prefix matching in the handler.
-      }
-    }
-
-    // Use a single generic message handler via onmessage won't work because
-    // EventSource only fires named event listeners. Instead we listen for
-    // each known event name. For remote tabs whose event names we don't know,
-    // the leader needs to handle this differently.
-    //
-    // Solution: We also register a catch-all by overriding the native
-    // EventSource behavior. Unfortunately EventSource doesn't support
-    // wildcard listeners. Instead, we'll register listeners for ALL known
-    // event names across local AND remote tabs.
-    //
-    // Since remote tabs send their topics but not event names, we need a
-    // simpler approach: listen for ALL events using the 'message' event
-    // (default unnamed events). But SSE named events DON'T fire 'message'.
-    //
-    // Best approach: register known local listeners, AND for remote topics
-    // we ask remote tabs for their event names via the topics-update message.
-    //
-    // Simplest correct approach: register listeners dynamically. For the
-    // leader, we listen for every {topic}:{event} combo from all tabs.
-    // But we only know local event names. Remote tabs broadcast their
-    // subscriptions via topics-update.
-    //
-    // PRACTICAL APPROACH: Since each tab knows its own event names, and
-    // EventSource listeners are per-connection, the leader registers
-    // listeners for ALL possible events. We achieve this by having remote
-    // tabs include event names in their topics-update. But to keep it
-    // simple, we use a different strategy:
-    //
-    // The backend sends events with the full prefixed name. We register
-    // listeners for locally known events. For events the leader doesn't
-    // know about (remote-only), we use a MutationObserver-like pattern.
-    //
-    // SIMPLEST: Register local listeners on the EventSource. For relaying
-    // to remote tabs, use `onmessage` which fires for unnamed events only —
-    // this won't work for named events.
-    //
-    // ACTUAL SIMPLEST: Remote tabs also share their full subscription info
-    // (topic + event names) so the leader can register all listeners.
-
     // Register listeners for locally known event names
     for (const fullName of listenerNames) {
       const handler = (e: Event) => {
@@ -227,9 +184,8 @@ function createSSEManager(): SSEManager & { destroy(): void } {
 
     // For the leader: also register listeners for remote tab event names
     if (isLeader) {
-      for (const [, remoteTopics] of tabTopics) {
-        // We store remote topics as Set<string> of "topic:eventName" pairs
-        for (const fullName of remoteTopics) {
+      for (const [, remoteNames] of tabEventNames) {
+        for (const fullName of remoteNames) {
           if (!listenerNames.has(fullName)) {
             listenerNames.add(fullName)
             const handler = (e: Event) => {
@@ -291,7 +247,8 @@ function createSSEManager(): SSEManager & { destroy(): void } {
     channel?.postMessage({
       type: 'topics-update',
       tabId: TAB_ID,
-      topics: getLocalEventNames(),
+      topics: [...getLocalTopics()],
+      eventNames: getLocalEventNames(),
     })
   }
 
@@ -302,6 +259,7 @@ function createSSEManager(): SSEManager & { destroy(): void } {
     eventSource?.close()
     eventSource = null
     tabTopics.clear()
+    tabEventNames.clear()
   }
 
   function becomeLeader() {
@@ -359,6 +317,7 @@ function createSSEManager(): SSEManager & { destroy(): void } {
         case 'topics-update':
           if (isLeader && m.tabId && m.tabId !== TAB_ID) {
             tabTopics.set(m.tabId, new Set(m.topics ?? []))
+            tabEventNames.set(m.tabId, new Set(m.eventNames ?? []))
             scheduleReconnect()
           }
           break
@@ -371,6 +330,7 @@ function createSSEManager(): SSEManager & { destroy(): void } {
         case 'tab-down':
           if (isLeader && m.tabId) {
             tabTopics.delete(m.tabId)
+            tabEventNames.delete(m.tabId)
             scheduleReconnect()
           }
           break

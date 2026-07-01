@@ -6486,6 +6486,8 @@ async def stream_multiplexed(
     """
     _check_allow_list(request)
     username = getattr(request.state, "username", "")
+    if not username:
+        raise HTTPException(status_code=401, detail="Authentication required")
     is_admin = getattr(request.state, "is_admin", False)
 
     topic_list = [t.strip() for t in topics.split(",") if t.strip()]
