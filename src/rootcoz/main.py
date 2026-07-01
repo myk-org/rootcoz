@@ -3709,44 +3709,67 @@ async def re_analyze(
 async def _apply_effective_classifications(job_id: str, result_data: dict) -> None:
     """Apply user classification overrides to failures in result_data.
 
-    Walks all failures (top-level and children) and replaces the AI's
-    raw classification with the effective classification from
-    test_classifications when a user override exists.
+    Batch-queries all overrides for the job, then walks all failures
+    (top-level, children, and nested failed_children) applying them.
+    Clears stale subtype fields consistent with _resolve_effective_failure.
     """
+    overrides = await storage.get_all_effective_classifications(job_id)
+    if not overrides:
+        return
 
-    async def _apply_to_failures(
-        failures: list[dict],
+    def _apply_override(
+        failure: dict, child_job_name: str, child_build_number: int
+    ) -> None:
+        if not isinstance(failure, dict):
+            return
+        test_name = failure.get("test_name", "")
+        if not test_name:
+            return
+        analysis = failure.get("analysis")
+        if not isinstance(analysis, dict):
+            return
+        key = (test_name, child_job_name, child_build_number)
+        effective = overrides.get(key)
+        if not effective:
+            return
+        current = analysis.get("classification", "")
+        if effective == current:
+            return
+        analysis["classification"] = effective
+        analysis["_original_classification"] = current
+        # Clear stale subtype fields (consistent with _resolve_effective_failure)
+        if effective == "CODE ISSUE":
+            analysis["product_bug_report"] = False
+        elif effective == "PRODUCT BUG":
+            analysis["code_fix"] = False
+        elif effective == "INFRASTRUCTURE":
+            analysis["code_fix"] = False
+            analysis["product_bug_report"] = False
+
+    def _walk_failures(
+        failures: list,
         child_job_name: str = "",
         child_build_number: int = 0,
     ) -> None:
         for failure in failures:
-            test_name = failure.get("test_name", "")
-            if not test_name:
-                continue
-            effective = await get_effective_classification(
-                job_id,
-                test_name,
-                child_job_name=child_job_name,
-                child_build_number=child_build_number,
-            )
-            if effective and failure.get("analysis"):
-                current = failure["analysis"].get("classification", "")
-                if effective != current:
-                    failure["analysis"]["classification"] = effective
-                    failure["analysis"]["_original_classification"] = current
+            if isinstance(failure, dict):
+                _apply_override(failure, child_job_name, child_build_number)
 
     # Top-level failures
-    await _apply_to_failures(result_data.get("failures", []))
+    _walk_failures(result_data.get("failures", []))
 
-    # Child job failures
-    for child in result_data.get("child_job_analyses", []):
-        child_job = child.get("job_name", "")
-        child_build = child.get("build_number", 0)
-        await _apply_to_failures(
-            child.get("failures", []),
-            child_job_name=child_job,
-            child_build_number=child_build,
-        )
+    # Child job failures (including nested failed_children)
+    def _walk_children(children: list) -> None:
+        for child in children:
+            if not isinstance(child, dict):
+                continue
+            child_job = child.get("job_name", "")
+            child_build = child.get("build_number", 0)
+            _walk_failures(child.get("failures", []), child_job, child_build)
+            # Recurse into nested failed_children
+            _walk_children(child.get("failed_children", []))
+
+    _walk_children(result_data.get("child_job_analyses", []))
 
 
 @app.get("/results/{job_id}", response_model=None)

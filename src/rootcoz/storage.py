@@ -3375,6 +3375,38 @@ async def get_effective_classification(
         return fh_row[0] if fh_row and fh_row[0] else ""
 
 
+async def get_all_effective_classifications(
+    job_id: str,
+) -> dict[tuple[str, str, int], str]:
+    """Return all effective classification overrides for a job.
+
+    Queries test_classifications once for all overrides in the given job,
+    avoiding N+1 queries when applying overrides to many failures.
+
+    Returns:
+        Dict mapping (test_name, child_job_name, child_build_number) to
+        the effective classification string.
+    """
+    async with _connect_db() as db:
+        cursor = await db.execute(
+            "SELECT test_name, job_name, child_build_number, classification "
+            "FROM test_classifications "
+            "WHERE job_id = ? AND visible = 1 "
+            f"AND classification IN {_PRIMARY_CLASSIFICATIONS_SQL} "
+            "ORDER BY created_at DESC, id DESC",
+            (job_id,),
+        )
+        rows = await cursor.fetchall()
+
+    # Keep only the latest override per (test_name, job_name, child_build_number)
+    result: dict[tuple[str, str, int], str] = {}
+    for row in rows:
+        key = (row["test_name"], row["job_name"], row["child_build_number"])
+        if key not in result:
+            result[key] = row["classification"]
+    return result
+
+
 async def mark_stale_results_failed() -> tuple[list[dict], list[dict]]:
     """Mark orphaned pending/running jobs as failed. Return waiting jobs for resumption.
 
