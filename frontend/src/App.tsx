@@ -1,6 +1,7 @@
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
 
 import { AuthProvider } from '@/lib/auth'
+import { SSEProvider } from '@/lib/SSEProvider'
 import { Layout } from '@/components/layout/Layout'
 import { ProtectedRoute } from '@/components/shared/ProtectedRoute'
 
@@ -25,6 +26,7 @@ export default function App() {
   return (
     <AuthProvider>
       <BrowserRouter basename="/">
+        <SSEProvider>
         <Routes>
           <Route path="/login" element={<RegisterPage />} />
           <Route path="/pending" element={<PendingApprovalPage />} />
@@ -46,6 +48,7 @@ export default function App() {
             <Route path="/admin/chat" element={<ProtectedRoute adminOnly><AdminChatPage /></ProtectedRoute>} />
           </Route>
         </Routes>
+        </SSEProvider>
       </BrowserRouter>
     </AuthProvider>
   )

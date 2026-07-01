@@ -4,7 +4,7 @@ import { Header } from './Header'
 import { Sidebar } from './Sidebar'
 import { useAuth } from '@/lib/auth'
 import { api } from '@/lib/api'
-import { useSharedSSE } from '@/lib/useSharedSSE'
+import { useSSE } from '@/lib/SSEProvider'
 
 export function Layout() {
   const { username, isAdmin } = useAuth()
@@ -19,8 +19,7 @@ export function Layout() {
     setMobileOpen(false)
   }, [location.pathname])
 
-  // Shared SSE stream for navbar badges — one tab owns the EventSource,
-  // other tabs receive events via BroadcastChannel (avoids browser connection limit)
+  // Multiplexed SSE stream for navbar badges — shared single connection
   const navbarEvents = useMemo(() => ({
     'active-count': (data: string) => {
       const count = parseInt(data, 10)
@@ -32,10 +31,7 @@ export function Layout() {
     },
   }), [])
 
-  useSharedSSE({
-    url: username ? '/api/navbar/stream' : null,
-    events: navbarEvents,
-  })
+  useSSE(username ? 'navbar' : null, navbarEvents)
 
   // Fetch pending user count for admin badge
   useEffect(() => {

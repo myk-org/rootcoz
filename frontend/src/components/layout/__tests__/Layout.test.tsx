@@ -28,16 +28,13 @@ vi.mock('../UserBadge', () => ({
   UserBadge: () => <div data-testid="user-badge">UserBadge</div>,
 }))
 
-// Mock EventSource for SSE streams
-class MockEventSource {
-  addEventListener = vi.fn()
-  close = vi.fn()
-  onerror: ((ev: Event) => void) | null = null
-}
+// Mock useSSE — no-op in tests (SSEProvider not mounted)
+vi.mock('@/lib/SSEProvider', () => ({
+  useSSE: vi.fn(),
+}))
 
 beforeEach(() => {
   localStorage.clear()
-  vi.stubGlobal('EventSource', MockEventSource)
 })
 
 function renderLayout(pathname = '/') {

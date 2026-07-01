@@ -1,7 +1,7 @@
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { useLatestRef } from '@/lib/useLatestRef'
-import { useSharedSSE } from '@/lib/useSharedSSE'
+import { useSSE } from '@/lib/SSEProvider'
 import { api } from '@/lib/api'
 import { formatCompactNumber, formatCost } from '@/lib/format'
 import { Input } from '@/components/ui/input'
@@ -307,7 +307,7 @@ export function TokenUsagePage() {
   useEffect(() => { fetchSummary() }, [fetchSummary])
   useEffect(() => { fetchBreakdown() }, [fetchBreakdown])
 
-  // Shared SSE connection (stable — doesn't depend on fetch callbacks)
+  // Multiplexed SSE connection (stable — doesn't depend on fetch callbacks)
   const tokenUsageEvents = useMemo(() => ({
     'usage-changed': () => {
       fetchSummaryRef.current()
@@ -315,10 +315,7 @@ export function TokenUsagePage() {
     },
   }), [])
 
-  useSharedSSE({
-    url: '/api/admin/token-usage/stream',
-    events: tokenUsageEvents,
-  })
+  useSSE('token-usage', tokenUsageEvents)
 
   const sorted = useMemo(() => {
     const copy = [...breakdown]

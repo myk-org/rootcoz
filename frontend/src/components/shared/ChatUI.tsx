@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useCallback, useMemo, type FormEvent, type KeyboardEvent } from 'react'
 import { api } from '@/lib/api'
-import { useSharedSSE } from '@/lib/useSharedSSE'
+import { useSSE } from '@/lib/SSEProvider'
 import { Button } from '@/components/ui/button'
 import { ProviderSelect } from '@/components/shared/ProviderSelect'
 import { ModelCombobox } from '@/components/shared/ModelCombobox'
@@ -36,6 +36,8 @@ export interface ChatMessage {
 interface ChatUIProps {
   /** API base path — e.g. '/api/chat/job123' or '/api/admin/chat' */
   apiBasePath: string
+  /** SSE topic for the multiplexed stream (e.g. 'chat:job123' or 'admin-chat') */
+  sseTopic: string
   /** Header content rendered above the chat */
   header: React.ReactNode
   /** Initial AI provider */
@@ -65,6 +67,7 @@ function StepIndicator({ label, done, active }: { label: string; done: boolean; 
 
 export function ChatUI({
   apiBasePath,
+  sseTopic,
   header,
   defaultProvider = 'claude',
   defaultModel = '',
@@ -202,7 +205,7 @@ export function ChatUI({
     }
   }, [apiBasePath])
 
-  // Shared SSE: listen for chat message updates (AI responses)
+  // Multiplexed SSE: listen for chat message updates (AI responses)
   const fetchMessagesRef = useRef(fetchMessages)
   fetchMessagesRef.current = fetchMessages
   const cancelPollRef = useRef(cancelPoll)
@@ -218,18 +221,14 @@ export function ChatUI({
     },
   }), [])
 
-  const chatSseOnOpen = useCallback(() => {
-    console.debug('[ChatUI] SSE connected')
+  const chatSseOnReconnect = useCallback(() => {
+    console.debug('[ChatUI] SSE reconnected')
     fetchMessagesRef.current()
       .then(msgs => setMessages(msgs))
       .catch((err) => { console.warn('[ChatUI] Failed to sync messages:', err instanceof Error ? err.message : 'unknown error') })
   }, [])
 
-  useSharedSSE({
-    url: initComplete ? `${apiBasePath}/stream` : null,
-    events: chatEvents,
-    onOpen: chatSseOnOpen,
-  })
+  useSSE(initComplete ? sseTopic : null, chatEvents, { onReconnect: chatSseOnReconnect })
 
   // Auto-scroll
   useEffect(() => {

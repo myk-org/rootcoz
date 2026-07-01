@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'react'
 import { api, ApiError } from '@/lib/api'
 import { useLatestRef } from '@/lib/useLatestRef'
-import { useSharedSSE } from '@/lib/useSharedSSE'
+import { useSSE } from '@/lib/SSEProvider'
 import { useAuth } from '@/lib/auth'
 import { Card, CardContent } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
@@ -355,17 +355,14 @@ export function ServerSettingsPage() {
     fetchSettings()
   }, [fetchSettings])
 
-  // ---- Shared SSE ----
+  // ---- Multiplexed SSE ----
   const settingsEvents = useMemo(() => ({
     'settings-changed': () => {
       fetchSettingsRef.current()
     },
   }), [])
 
-  useSharedSSE({
-    url: '/api/admin/settings/stream',
-    events: settingsEvents,
-  })
+  useSSE('settings', settingsEvents)
 
   // ---- Shared save helper ----
   async function saveSettingValue(key: string, value: string): Promise<boolean> {

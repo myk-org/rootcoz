@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useParams, useNavigate, useLocation, Link } from 'react-router-dom'
-import { useSharedSSE } from '@/lib/useSharedSSE'
+import { useSSE } from '@/lib/SSEProvider'
 import { api } from '@/lib/api'
 import { useClipboard } from '@/lib/useClipboard'
 import { parseApiTimestamp, isAnalysisTimeout, formatDuration, formatTimestamp } from '@/lib/utils'
@@ -221,7 +221,7 @@ function ReportContent() {
     }
   }, [state.commentDraftCount, jobId, fetchComments])
 
-  // Shared SSE stream for real-time comment updates
+  // Multiplexed SSE stream for real-time comment updates
   const fetchCommentsRef = useRef(fetchComments)
   fetchCommentsRef.current = fetchComments
 
@@ -235,12 +235,9 @@ function ReportContent() {
     },
   }), [jobId])
 
-  useSharedSSE({
-    url: jobId ? `/api/results/${jobId}/comments/stream` : null,
-    events: commentsEvents,
-  })
+  useSSE(jobId ? `comments:${jobId}` : null, commentsEvents)
 
-  // Shared SSE stream for real-time result updates (e.g., per-failure re-analysis completion)
+  // Multiplexed SSE stream for real-time result updates (e.g., per-failure re-analysis completion)
   const resultEvents = useMemo(() => ({
     'status-changed': async () => {
       try {
@@ -254,10 +251,7 @@ function ReportContent() {
     },
   }), [jobId])
 
-  useSharedSSE({
-    url: jobId ? `/api/results/${jobId}/stream` : null,
-    events: resultEvents,
-  })
+  useSSE(jobId ? `results:${jobId}` : null, resultEvents)
 
   // Preserve scroll position across F5 refreshes
   const scrollKey = `rootcoz-scroll-${jobId}`

@@ -1,0 +1,618 @@
+import { createContext, useContext, useEffect, useRef, type ReactNode } from 'react'
+import { useAuth } from '@/lib/auth'
+
+// ---------------------------------------------------------------------------
+// Types
+// ---------------------------------------------------------------------------
+
+/** Callback invoked when an SSE event arrives for a subscribed topic. */
+type EventHandler = (data: string) => void
+
+/** A subscription registered by a useSSE consumer. */
+interface Subscription {
+  id: number
+  topic: string
+  /** Map of event-name → handler. */
+  events: Record<string, EventHandler>
+  /** Called when the underlying EventSource reconnects (optional). */
+  onReconnect?: () => void
+}
+
+/** Internal manager that coordinates subscriptions, EventSource, and BroadcastChannel. */
+interface SSEManager {
+  subscribe(sub: Subscription): void
+  unsubscribe(id: number): void
+}
+
+// ---------------------------------------------------------------------------
+// BroadcastChannel protocol
+// ---------------------------------------------------------------------------
+
+const TAB_ID = `${Date.now()}-${Math.random().toString(36).slice(2)}`
+
+interface ChannelMessage {
+  type:
+    | 'who-is-leader'
+    | 'leader'
+    | 'leader-down'
+    | 'sse-event'
+    | 'sse-open'
+    | 'topics-update'
+    | 'topics-request'
+    | 'tab-down'
+  tabId?: string
+  /** Full SSE event name (for sse-event). */
+  name?: string
+  /** SSE event data string (for sse-event). */
+  data?: string
+  /** Topics for this tab (for topics-update). */
+  topics?: string[]
+}
+
+// ---------------------------------------------------------------------------
+// Constants
+// ---------------------------------------------------------------------------
+
+const CHANNEL_NAME = 'rootcoz-sse-mux'
+const RECONNECT_DEBOUNCE_MS = 150
+const ELECTION_TIMEOUT_MS = 150
+const MAX_RECONNECT_DELAY_MS = 30_000
+
+// ---------------------------------------------------------------------------
+// Manager implementation
+// ---------------------------------------------------------------------------
+
+function createSSEManager(): SSEManager & { destroy(): void } {
+  const subscriptions = new Map<number, Subscription>()
+  let destroyed = false
+
+  // ---- Leader election state ----
+  let isLeader = false
+  let eventSource: EventSource | null = null
+  let reconnectDebounceTimer: ReturnType<typeof setTimeout> | null = null
+  let electionTimer: ReturnType<typeof setTimeout> | null = null
+  let reconnectBackoffTimer: ReturnType<typeof setTimeout> | null = null
+  let reconnectDelay = 1000
+  /** Currently active event listeners on the EventSource (for cleanup). */
+  let activeListeners: Array<{ name: string; handler: (e: Event) => void }> = []
+
+  // Cross-tab topic tracking: leader aggregates topics from all tabs
+  const tabTopics = new Map<string, Set<string>>()
+
+  // ---- BroadcastChannel ----
+  const hasBroadcast = typeof BroadcastChannel !== 'undefined'
+  const channel = hasBroadcast ? new BroadcastChannel(CHANNEL_NAME) : null
+
+  // ---- Helpers ----
+
+  /** Compute the union of all local subscriptions' topics. */
+  function getLocalTopics(): Set<string> {
+    const topics = new Set<string>()
+    for (const sub of subscriptions.values()) {
+      topics.add(sub.topic)
+    }
+    return topics
+  }
+
+  /** Compute the combined topic set (local + all remote tabs). */
+  function getCombinedTopics(): string[] {
+    const all = new Set<string>()
+    // Local
+    for (const t of getLocalTopics()) all.add(t)
+    // Remote tabs (only relevant for leader)
+    if (isLeader) {
+      for (const topics of tabTopics.values()) {
+        for (const t of topics) all.add(t)
+      }
+    }
+    return [...all].sort()
+  }
+
+  /** Dispatch an incoming event to matching subscribers. */
+  function dispatchEvent(fullEventName: string, data: string) {
+    // Event format: "topic:event-name" (e.g. "navbar:active-count")
+    // For topics with colons (e.g. "results:abc123"), the event is
+    // "results:abc123:status-changed" — split from the right.
+    for (const sub of subscriptions.values()) {
+      const prefix = sub.topic + ':'
+      if (fullEventName.startsWith(prefix)) {
+        const eventName = fullEventName.slice(prefix.length)
+        sub.events[eventName]?.(data)
+      }
+    }
+  }
+
+  /** Notify all subscribers that the connection reconnected. */
+  function notifyReconnect() {
+    for (const sub of subscriptions.values()) {
+      sub.onReconnect?.()
+    }
+  }
+
+  // ---- EventSource management ----
+
+  function removeEventSourceListeners() {
+    if (!eventSource) return
+    for (const { name, handler } of activeListeners) {
+      eventSource.removeEventListener(name, handler)
+    }
+    activeListeners = []
+  }
+
+  function buildEventSourceUrl(topics: string[]): string {
+    if (topics.length === 0) return ''
+    return `/api/stream?topics=${encodeURIComponent(topics.join(','))}`
+  }
+
+  function connectEventSource() {
+    if (destroyed) return
+    const topics = getCombinedTopics()
+
+    // Close existing
+    removeEventSourceListeners()
+    eventSource?.close()
+    eventSource = null
+
+    if (topics.length === 0) return
+
+    const url = buildEventSourceUrl(topics)
+    eventSource = new EventSource(url)
+
+    // Build listeners for all subscribed topic:event combinations
+    const listenerNames = new Set<string>()
+    for (const sub of subscriptions.values()) {
+      for (const eventName of Object.keys(sub.events)) {
+        listenerNames.add(`${sub.topic}:${eventName}`)
+      }
+    }
+    // Also add listeners for remote tab subscriptions (leader relays them)
+    if (isLeader) {
+      for (const topics of tabTopics.values()) {
+        // We don't know remote event names, but we need to listen broadly.
+        // The backend sends events only for subscribed topics, so we listen
+        // for any event and dispatch by prefix matching in the handler.
+      }
+    }
+
+    // Use a single generic message handler via onmessage won't work because
+    // EventSource only fires named event listeners. Instead we listen for
+    // each known event name. For remote tabs whose event names we don't know,
+    // the leader needs to handle this differently.
+    //
+    // Solution: We also register a catch-all by overriding the native
+    // EventSource behavior. Unfortunately EventSource doesn't support
+    // wildcard listeners. Instead, we'll register listeners for ALL known
+    // event names across local AND remote tabs.
+    //
+    // Since remote tabs send their topics but not event names, we need a
+    // simpler approach: listen for ALL events using the 'message' event
+    // (default unnamed events). But SSE named events DON'T fire 'message'.
+    //
+    // Best approach: register known local listeners, AND for remote topics
+    // we ask remote tabs for their event names via the topics-update message.
+    //
+    // Simplest correct approach: register listeners dynamically. For the
+    // leader, we listen for every {topic}:{event} combo from all tabs.
+    // But we only know local event names. Remote tabs broadcast their
+    // subscriptions via topics-update.
+    //
+    // PRACTICAL APPROACH: Since each tab knows its own event names, and
+    // EventSource listeners are per-connection, the leader registers
+    // listeners for ALL possible events. We achieve this by having remote
+    // tabs include event names in their topics-update. But to keep it
+    // simple, we use a different strategy:
+    //
+    // The backend sends events with the full prefixed name. We register
+    // listeners for locally known events. For events the leader doesn't
+    // know about (remote-only), we use a MutationObserver-like pattern.
+    //
+    // SIMPLEST: Register local listeners on the EventSource. For relaying
+    // to remote tabs, use `onmessage` which fires for unnamed events only —
+    // this won't work for named events.
+    //
+    // ACTUAL SIMPLEST: Remote tabs also share their full subscription info
+    // (topic + event names) so the leader can register all listeners.
+
+    // Register listeners for locally known event names
+    for (const fullName of listenerNames) {
+      const handler = (e: Event) => {
+        const data = (e as MessageEvent).data as string
+        dispatchEvent(fullName, data)
+        // Relay to follower tabs
+        channel?.postMessage({ type: 'sse-event', name: fullName, data })
+      }
+      eventSource.addEventListener(fullName, handler)
+      activeListeners.push({ name: fullName, handler })
+    }
+
+    // For the leader: also register listeners for remote tab event names
+    if (isLeader) {
+      for (const [, remoteTopics] of tabTopics) {
+        // We store remote topics as Set<string> of "topic:eventName" pairs
+        for (const fullName of remoteTopics) {
+          if (!listenerNames.has(fullName)) {
+            listenerNames.add(fullName)
+            const handler = (e: Event) => {
+              const data = (e as MessageEvent).data as string
+              // Don't dispatch locally — this is a remote-only event
+              channel?.postMessage({ type: 'sse-event', name: fullName, data })
+            }
+            eventSource.addEventListener(fullName, handler)
+            activeListeners.push({ name: fullName, handler })
+          }
+        }
+      }
+    }
+
+    eventSource.onopen = () => {
+      reconnectDelay = 1000
+      notifyReconnect()
+      channel?.postMessage({ type: 'sse-open' })
+    }
+
+    eventSource.onerror = () => {
+      if (eventSource?.readyState === EventSource.CLOSED && !destroyed) {
+        reconnectBackoffTimer = setTimeout(() => {
+          if (!destroyed && isLeader) connectEventSource()
+        }, reconnectDelay)
+        reconnectDelay = Math.min(reconnectDelay * 2, MAX_RECONNECT_DELAY_MS)
+      }
+    }
+  }
+
+  /** Schedule a debounced reconnection. */
+  function scheduleReconnect() {
+    if (destroyed) return
+    if (reconnectDebounceTimer) clearTimeout(reconnectDebounceTimer)
+    reconnectDebounceTimer = setTimeout(() => {
+      reconnectDebounceTimer = null
+      if (isLeader) {
+        connectEventSource()
+      }
+      // Broadcast our topics to the leader
+      broadcastTopics()
+    }, RECONNECT_DEBOUNCE_MS)
+  }
+
+  // ---- Cross-tab communication ----
+
+  /** Get local full event names (topic:eventName) for broadcasting. */
+  function getLocalEventNames(): string[] {
+    const names: string[] = []
+    for (const sub of subscriptions.values()) {
+      for (const eventName of Object.keys(sub.events)) {
+        names.push(`${sub.topic}:${eventName}`)
+      }
+    }
+    return [...new Set(names)]
+  }
+
+  function broadcastTopics() {
+    channel?.postMessage({
+      type: 'topics-update',
+      tabId: TAB_ID,
+      topics: getLocalEventNames(),
+    })
+  }
+
+  function stepDown() {
+    isLeader = false
+    if (reconnectBackoffTimer) { clearTimeout(reconnectBackoffTimer); reconnectBackoffTimer = null }
+    removeEventSourceListeners()
+    eventSource?.close()
+    eventSource = null
+    tabTopics.clear()
+  }
+
+  function becomeLeader() {
+    if (destroyed || isLeader) return
+    isLeader = true
+    channel?.postMessage({ type: 'leader', tabId: TAB_ID })
+    // Ask all tabs for their topics
+    channel?.postMessage({ type: 'topics-request' })
+    // Connect with local topics first; remote topics will arrive soon
+    connectEventSource()
+  }
+
+  function startElection() {
+    if (destroyed) return
+    if (electionTimer) { clearTimeout(electionTimer); electionTimer = null }
+    channel?.postMessage({ type: 'who-is-leader' })
+    const jitter = Math.random() * 100
+    electionTimer = setTimeout(() => {
+      electionTimer = null
+      if (!destroyed) becomeLeader()
+    }, ELECTION_TIMEOUT_MS + jitter)
+  }
+
+  // ---- Channel message handler ----
+  if (channel) {
+    channel.onmessage = (msg: MessageEvent<ChannelMessage>) => {
+      const m = msg.data
+
+      switch (m.type) {
+        case 'who-is-leader':
+          if (isLeader) channel.postMessage({ type: 'leader', tabId: TAB_ID })
+          break
+
+        case 'leader': {
+          const theirId = m.tabId ?? ''
+          if (electionTimer) { clearTimeout(electionTimer); electionTimer = null }
+          if (isLeader && theirId && theirId < TAB_ID) {
+            stepDown()
+          }
+          if (!isLeader) {
+            // Send our topics to the new leader
+            broadcastTopics()
+          }
+          break
+        }
+
+        case 'sse-event':
+          if (!isLeader && m.name) dispatchEvent(m.name, m.data ?? '')
+          break
+
+        case 'sse-open':
+          if (!isLeader) notifyReconnect()
+          break
+
+        case 'topics-update':
+          if (isLeader && m.tabId && m.tabId !== TAB_ID) {
+            tabTopics.set(m.tabId, new Set(m.topics ?? []))
+            scheduleReconnect()
+          }
+          break
+
+        case 'topics-request':
+          // A new leader is asking for our topics
+          broadcastTopics()
+          break
+
+        case 'tab-down':
+          if (isLeader && m.tabId) {
+            tabTopics.delete(m.tabId)
+            scheduleReconnect()
+          }
+          break
+
+        case 'leader-down':
+          if (!isLeader && !destroyed) startElection()
+          break
+      }
+    }
+  }
+
+  // ---- beforeunload ----
+  function handleBeforeUnload() {
+    if (destroyed) return
+    if (isLeader) {
+      channel?.postMessage({ type: 'leader-down' })
+    } else {
+      channel?.postMessage({ type: 'tab-down', tabId: TAB_ID })
+    }
+    destroyed = true
+  }
+  window.addEventListener('beforeunload', handleBeforeUnload)
+
+  // Start election (or direct connect if no BroadcastChannel)
+  if (channel) {
+    startElection()
+  }
+
+  // ---- Public API ----
+
+  function subscribe(sub: Subscription) {
+    subscriptions.set(sub.id, sub)
+    scheduleReconnect()
+  }
+
+  function unsubscribe(id: number) {
+    subscriptions.delete(id)
+    scheduleReconnect()
+  }
+
+  function destroy() {
+    window.removeEventListener('beforeunload', handleBeforeUnload)
+    if (!destroyed && isLeader) channel?.postMessage({ type: 'leader-down' })
+    if (!destroyed && !isLeader) channel?.postMessage({ type: 'tab-down', tabId: TAB_ID })
+    destroyed = true
+    if (electionTimer) clearTimeout(electionTimer)
+    if (reconnectDebounceTimer) clearTimeout(reconnectDebounceTimer)
+    if (reconnectBackoffTimer) clearTimeout(reconnectBackoffTimer)
+    removeEventSourceListeners()
+    eventSource?.close()
+    channel?.close()
+  }
+
+  return { subscribe, unsubscribe, destroy }
+}
+
+// ---------------------------------------------------------------------------
+// Fallback manager (no BroadcastChannel — e.g., JSDOM tests)
+// ---------------------------------------------------------------------------
+
+function createFallbackManager(): SSEManager & { destroy(): void } {
+  const subscriptions = new Map<number, Subscription>()
+  let eventSource: EventSource | null = null
+  let activeListeners: Array<{ name: string; handler: (e: Event) => void }> = []
+  let debounceTimer: ReturnType<typeof setTimeout> | null = null
+  let destroyed = false
+
+  function connectEventSource() {
+    if (destroyed) return
+
+    // Cleanup old
+    for (const { name, handler } of activeListeners) {
+      eventSource?.removeEventListener(name, handler)
+    }
+    activeListeners = []
+    eventSource?.close()
+    eventSource = null
+
+    // Build topics
+    const topics = new Set<string>()
+    for (const sub of subscriptions.values()) topics.add(sub.topic)
+    if (topics.size === 0) return
+
+    const url = `/api/stream?topics=${encodeURIComponent([...topics].sort().join(','))}`
+    eventSource = new EventSource(url)
+
+    // Register listeners
+    const listenerNames = new Set<string>()
+    for (const sub of subscriptions.values()) {
+      for (const eventName of Object.keys(sub.events)) {
+        listenerNames.add(`${sub.topic}:${eventName}`)
+      }
+    }
+
+    for (const fullName of listenerNames) {
+      const handler = (e: Event) => {
+        const data = (e as MessageEvent).data as string
+        for (const sub of subscriptions.values()) {
+          const prefix = sub.topic + ':'
+          if (fullName.startsWith(prefix)) {
+            const eventName = fullName.slice(prefix.length)
+            sub.events[eventName]?.(data)
+          }
+        }
+      }
+      eventSource.addEventListener(fullName, handler)
+      activeListeners.push({ name: fullName, handler })
+    }
+
+    eventSource.onopen = () => {
+      for (const sub of subscriptions.values()) sub.onReconnect?.()
+    }
+    eventSource.onerror = () => { /* auto-reconnects */ }
+  }
+
+  function scheduleReconnect() {
+    if (destroyed) return
+    if (debounceTimer) clearTimeout(debounceTimer)
+    debounceTimer = setTimeout(() => {
+      debounceTimer = null
+      connectEventSource()
+    }, RECONNECT_DEBOUNCE_MS)
+  }
+
+  return {
+    subscribe(sub) {
+      subscriptions.set(sub.id, sub)
+      scheduleReconnect()
+    },
+    unsubscribe(id) {
+      subscriptions.delete(id)
+      scheduleReconnect()
+    },
+    destroy() {
+      destroyed = true
+      if (debounceTimer) clearTimeout(debounceTimer)
+      for (const { name, handler } of activeListeners) {
+        eventSource?.removeEventListener(name, handler)
+      }
+      eventSource?.close()
+    },
+  }
+}
+
+// ---------------------------------------------------------------------------
+// React context
+// ---------------------------------------------------------------------------
+
+const SSEContext = createContext<SSEManager | null>(null)
+
+let nextSubId = 1
+
+export function SSEProvider({ children }: { children: ReactNode }) {
+  const { authenticated } = useAuth()
+  const managerRef = useRef<(SSEManager & { destroy(): void }) | null>(null)
+
+  // Create manager once on mount, destroy on unmount
+  if (!managerRef.current) {
+    managerRef.current =
+      typeof BroadcastChannel !== 'undefined'
+        ? createSSEManager()
+        : createFallbackManager()
+  }
+
+  useEffect(() => {
+    return () => {
+      managerRef.current?.destroy()
+      managerRef.current = null
+    }
+  }, [])
+
+  // If not authenticated, don't provide the manager — no SSE connections
+  // will be made. The context value being null means useSSE is a no-op.
+  const value = authenticated ? managerRef.current : null
+
+  return <SSEContext.Provider value={value}>{children}</SSEContext.Provider>
+}
+
+// ---------------------------------------------------------------------------
+// useSSE hook
+// ---------------------------------------------------------------------------
+
+/**
+ * Subscribe to a multiplexed SSE topic.
+ *
+ * All `useSSE` hooks share a single EventSource connection via the
+ * `SSEProvider`. The provider aggregates subscribed topics and connects
+ * to `GET /api/stream?topics=...`. Events arrive prefixed with the topic
+ * (e.g., `navbar:active-count`) and are dispatched to the matching hook.
+ *
+ * @param topic  Topic to subscribe to (e.g., `'navbar'`, `'results:abc123'`).
+ *               Pass `null` to disable the subscription (conditional SSE).
+ * @param events Map of event-name → handler callback.
+ * @param options.onReconnect Called when the underlying EventSource reconnects.
+ *
+ * @example
+ * useSSE('navbar', {
+ *   'active-count': (data) => setActiveCount(parseInt(data, 10)),
+ *   'unread-count': (data) => setUnreadCount(parseInt(data, 10)),
+ * })
+ *
+ * @example
+ * // Conditional subscription — null topic means no connection
+ * useSSE(isActive ? `results:${jobId}` : null, {
+ *   'status-changed': () => refetch(),
+ * })
+ */
+export function useSSE(
+  topic: string | null,
+  events: Record<string, EventHandler>,
+  options?: { onReconnect?: () => void },
+): void {
+  const manager = useContext(SSEContext)
+  const eventsRef = useRef(events)
+  eventsRef.current = events
+  const onReconnectRef = useRef(options?.onReconnect)
+  onReconnectRef.current = options?.onReconnect
+
+  // Stable subscription ID per hook instance
+  const subIdRef = useRef(nextSubId++)
+
+  useEffect(() => {
+    if (!manager || !topic) return
+
+    const sub: Subscription = {
+      id: subIdRef.current,
+      topic,
+      // Wrap in getters so the manager always calls the latest callbacks
+      get events() {
+        return Object.fromEntries(
+          Object.keys(eventsRef.current).map((k) => [
+            k,
+            (data: string) => eventsRef.current[k]?.(data),
+          ]),
+        )
+      },
+      get onReconnect() {
+        return onReconnectRef.current
+      },
+    }
+
+    manager.subscribe(sub)
+    return () => manager.unsubscribe(sub.id)
+  }, [manager, topic])
+}
