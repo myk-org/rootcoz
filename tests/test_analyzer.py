@@ -1817,6 +1817,88 @@ class TestCopyRootcozPiResources:
         assert not (pi_dir / "agents").exists()
         assert not (pi_dir / "extensions").exists()
 
+    def test_symlinks_preserved(self, tmp_path) -> None:
+        """Test that symlinks are copied as-is, not dereferenced."""
+        from rootcoz.engine.core import copy_rootcoz_pi_resources
+
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        repo = workspace / "my-repo"
+        repo.mkdir()
+        rootcoz = repo / ".rootcoz"
+        rootcoz.mkdir()
+        skills = rootcoz / "skills"
+        skills.mkdir()
+        # Create a symlink inside .rootcoz/skills/
+        real_file = tmp_path / "outside-repo.txt"
+        real_file.write_text("secret")
+        (skills / "link.txt").symlink_to(real_file)
+
+        copy_rootcoz_pi_resources({"my-repo": repo}, workspace)
+
+        copied_link = workspace / ".pi" / "skills" / "link.txt"
+        assert copied_link.is_symlink()
+
+    def test_copytree_oserror_swallowed(self, tmp_path, monkeypatch) -> None:
+        """Test that OSError during copytree is logged and swallowed."""
+        from unittest.mock import patch
+
+        from rootcoz.engine.core import copy_rootcoz_pi_resources
+
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        repo = workspace / "my-repo"
+        repo.mkdir()
+        rootcoz = repo / ".rootcoz"
+        rootcoz.mkdir()
+        agents = rootcoz / "agents"
+        agents.mkdir()
+        (agents / "agent.md").write_text("agent")
+
+        with patch("rootcoz.engine.core.shutil.copytree", side_effect=OSError("fail")):
+            # Should not raise
+            copy_rootcoz_pi_resources({"my-repo": repo}, workspace)
+
+        # .pi/agents should NOT exist since copytree was mocked to fail
+        assert not (workspace / ".pi" / "agents").exists()
+
+    def test_overwrite_warning_logged(self, tmp_path) -> None:
+        """Test that overwriting files from multiple repos logs a warning."""
+        from unittest.mock import patch
+
+        from rootcoz.engine.core import copy_rootcoz_pi_resources
+
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+
+        # First repo with a skill
+        repo1 = workspace / "repo1"
+        repo1.mkdir()
+        rootcoz1 = repo1 / ".rootcoz" / "skills"
+        rootcoz1.mkdir(parents=True)
+        (rootcoz1 / "shared.md").write_text("from repo1")
+
+        # Second repo with the same skill file
+        repo2 = workspace / "repo2"
+        repo2.mkdir()
+        rootcoz2 = repo2 / ".rootcoz" / "skills"
+        rootcoz2.mkdir(parents=True)
+        (rootcoz2 / "shared.md").write_text("from repo2")
+
+        repos = {"repo1": repo1, "repo2": repo2}
+        with patch("rootcoz.engine.core.logger") as mock_logger:
+            copy_rootcoz_pi_resources(repos, workspace)
+
+        # Second repo should trigger an overwrite warning
+        warning_calls = [
+            call
+            for call in mock_logger.warning.call_args_list
+            if "overwrites existing file" in str(call)
+        ]
+        assert warning_calls, "Expected overwrite warning was not logged"
+        # The file should contain repo2's content (last writer wins)
+        assert (workspace / ".pi" / "skills" / "shared.md").read_text() == "from repo2"
+
 
 class TestAnalyzeJobWorkspacePattern:
     """Tests that analyze_job creates a workspace and clones test repo as subdirectory."""

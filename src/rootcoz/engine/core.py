@@ -167,6 +167,11 @@ def copy_rootcoz_pi_resources(cloned_repos: dict[str, Path], workspace: Path) ->
     ``<workspace>/.pi/`` so that pi's ``DefaultResourceLoader`` discovers
     project-provided agents, skills, and extensions.
 
+    Symlinks are preserved as-is (``symlinks=True``) to prevent a
+    malicious repo from using symlinks in ``.rootcoz/`` to exfiltrate
+    files outside the repository.  Failures are logged and swallowed
+    so a bad ``.rootcoz/`` tree never crashes the analysis.
+
     Args:
         cloned_repos: Mapping of repo name to cloned path.
         workspace: Root workspace directory.
@@ -178,13 +183,36 @@ def copy_rootcoz_pi_resources(cloned_repos: dict[str, Path], workspace: Path) ->
         pi_dir = workspace / ".pi"
         for subdir in _ROOTCOZ_PI_SUBDIRS:
             src = rootcoz_dir / subdir
-            if src.is_dir():
-                shutil.copytree(src, pi_dir / subdir, dirs_exist_ok=True)
+            if not src.is_dir():
+                continue
+            dest = pi_dir / subdir
+            # Warn about files that will be overwritten by a later repo
+            if dest.is_dir():
+                for item in src.rglob("*"):
+                    if item.is_file():
+                        relative = item.relative_to(src)
+                        existing = dest / relative
+                        if existing.exists():
+                            logger.warning(
+                                ".rootcoz/%s/%s from '%s' overwrites existing file",
+                                subdir,
+                                relative,
+                                repo_name,
+                            )
+            try:
+                shutil.copytree(src, dest, symlinks=True, dirs_exist_ok=True)
                 logger.info(
                     "Copied .rootcoz/%s/ from '%s' to workspace .pi/%s/",
                     subdir,
                     repo_name,
                     subdir,
+                )
+            except OSError:
+                logger.warning(
+                    "Failed to copy .rootcoz/%s/ from '%s'; continuing",
+                    subdir,
+                    repo_name,
+                    exc_info=True,
                 )
 
 

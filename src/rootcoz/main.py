@@ -8976,21 +8976,6 @@ async def create_feedback(request: Request, body: FeedbackCreateRequest):
 # -- Chat helpers --
 
 
-def _copy_chat_rootcoz_resources(workspace: Path) -> None:
-    """Copy .rootcoz/ pi resources from cloned repos in a chat workspace.
-
-    Scans workspace subdirectories (cloned repos) for ``.rootcoz/`` and
-    delegates to :func:`copy_rootcoz_pi_resources`.
-    """
-    cloned_repos = {
-        item.name: item
-        for item in workspace.iterdir()
-        if item.is_dir() and not item.name.startswith(".")
-    }
-    if cloned_repos:
-        copy_rootcoz_pi_resources(cloned_repos, workspace)
-
-
 def _build_jenkins_workspace_params(decrypted_params: dict, result_data: dict) -> dict:
     """Build params dict for setup_jenkins_workspace from decrypted request params."""
     return {
@@ -9128,10 +9113,6 @@ async def init_chat(job_id: str, request: Request) -> dict:
         repos_available = await clone_chat_repos(
             workspace, decrypted_params, user_repo_token=github_token
         )
-
-        # Copy .rootcoz/{agents,skills,extensions}/ to workspace .pi/
-        if repos_available:
-            _copy_chat_rootcoz_resources(workspace)
 
         # Populate workspace with Jenkins data: console output, build info, artifacts
         jenkins_data_available = await setup_jenkins_workspace(
@@ -9518,10 +9499,6 @@ async def _process_chat_message(
             repos_available = await clone_chat_repos(
                 workspace, decrypted_params, user_repo_token=github_token
             )
-
-            # Copy .rootcoz/{agents,skills,extensions}/ to workspace .pi/
-            if repos_available:
-                _copy_chat_rootcoz_resources(workspace)
 
             # Populate workspace with Jenkins data: console output, build info, artifacts
             jenkins_data_available = await setup_jenkins_workspace(

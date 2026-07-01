@@ -178,6 +178,18 @@ async def clone_chat_repos(
     except Exception:
         logger.warning("Chat repo cloning failed", exc_info=True)
 
+    # Copy .rootcoz/{agents,skills,extensions}/ to workspace .pi/
+    if cloned_any:
+        from rootcoz.engine.core import copy_rootcoz_pi_resources
+
+        cloned_repos = {
+            item.name: item
+            for item in workspace.iterdir()
+            if item.is_dir() and not item.name.startswith(".")
+        }
+        if cloned_repos:
+            copy_rootcoz_pi_resources(cloned_repos, workspace)
+
     return cloned_any
 
 
