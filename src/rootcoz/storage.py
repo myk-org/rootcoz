@@ -2849,16 +2849,32 @@ async def list_results_for_dashboard_filtered(
         params.extend([like_param, like_param])
 
     if status:
-        placeholders = ", ".join("?" for _ in status)
-        conditions.append(f"r.status IN ({placeholders})")
-        params.extend(status)
+        # 'timeout' is a virtual status derived from 'failed' + error/summary patterns.
+        # Translate it to a SQL predicate matching the frontend isAnalysisTimeout() logic.
+        real_statuses = [s for s in status if s != "timeout"]
+        has_timeout = "timeout" in status
+        status_parts: list[str] = []
+        if real_statuses:
+            placeholders = ", ".join("?" for _ in real_statuses)
+            status_parts.append(f"r.status IN ({placeholders})")
+            params.extend(real_statuses)
+        if has_timeout:
+            status_parts.append(
+                "(r.status = 'failed' AND ("
+                "lower(r.error) LIKE '%timed out%' OR "
+                "lower(r.error) LIKE '%timeout%' OR "
+                "lower(json_extract(r.result_json, '$.summary')) LIKE '%timed out%' OR "
+                "lower(json_extract(r.result_json, '$.summary')) LIKE '%timeout%'"
+                "))"
+            )
+        conditions.append(f"({' OR '.join(status_parts)})")
 
     if date_from:
-        conditions.append("r.created_at >= ?")
+        conditions.append("date(r.created_at) >= ?")
         params.append(date_from)
 
     if date_to:
-        conditions.append("r.created_at <= ?")
+        conditions.append("date(r.created_at) <= ?")
         params.append(date_to)
 
     if job_names is not None:

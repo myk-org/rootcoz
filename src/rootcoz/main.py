@@ -5463,6 +5463,7 @@ async def set_tracked_in_endpoint(
 
     Reviewers+ can set tracked-in links. Pass an empty URL to clear.
     """
+    _require_reviewer(request)
     _check_allow_list(request)
     logger.debug(
         f"PUT /results/{job_id}/tracked-in: test_name={body.test_name}, url={body.url}"

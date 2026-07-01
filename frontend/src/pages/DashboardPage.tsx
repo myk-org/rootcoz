@@ -119,7 +119,7 @@ export function DashboardPage() {
   const [loading, setLoading] = useState(true)
   const [search, setSearch] = useState('')
   const [debouncedSearch, setDebouncedSearch] = useState('')
-  const searchDebounceRef = useRef<ReturnType<typeof setTimeout>>(null)
+  const searchDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   // Debounce search input (300ms) to avoid excessive backend requests
   useEffect(() => {

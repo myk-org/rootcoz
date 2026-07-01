@@ -872,7 +872,16 @@ class SetTrackedInRequest(BaseModel):
     @field_validator("url")
     @classmethod
     def validate_url(cls, v: str) -> str:
-        return v.strip()
+        v = v.strip()
+        if v:
+            from urllib.parse import urlparse
+
+            parsed = urlparse(v)
+            if parsed.scheme not in ("http", "https", ""):
+                raise ValueError("URL must use http or https scheme")
+            if not parsed.scheme:
+                raise ValueError("URL must include http:// or https://")
+        return v
 
 
 class ClassifyTestRequest(BaseModel):

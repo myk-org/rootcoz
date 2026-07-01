@@ -12,6 +12,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from '@/components/ui/dialog'
+import { isSafeHref } from '@/lib/autoLink'
 import { useReportDispatch } from './ReportContext'
 import { ExternalLink, Link2 } from 'lucide-react'
 
@@ -40,20 +41,31 @@ interface TrackedInBadgeProps {
 
 export function TrackedInBadge({ url, type }: TrackedInBadgeProps) {
   const label = type === 'jira' ? 'Jira' : type === 'github' ? 'GitHub' : 'Tracked'
+  const safe = isSafeHref(url)
+  const badgeClass = "inline-flex items-center gap-1 rounded-md bg-accent-blue/10 px-2 py-0.5 text-[10px] font-medium text-accent-blue transition-colors"
+  const content = (
+    <>
+      <TrackerIcon type={type} />
+      {label}
+      {safe && <ExternalLink className="h-2.5 w-2.5" />}
+    </>
+  )
   return (
     <Tooltip>
       <TooltipTrigger asChild>
-        <a
-          href={url}
-          target="_blank"
-          rel="noopener noreferrer"
-          className="inline-flex items-center gap-1 rounded-md bg-accent-blue/10 px-2 py-0.5 text-[10px] font-medium text-accent-blue hover:bg-accent-blue/20 transition-colors"
-          onClick={(e) => e.stopPropagation()}
-        >
-          <TrackerIcon type={type} />
-          {label}
-          <ExternalLink className="h-2.5 w-2.5" />
-        </a>
+        {safe ? (
+          <a
+            href={url}
+            target="_blank"
+            rel="noopener noreferrer"
+            className={`${badgeClass} hover:bg-accent-blue/20`}
+            onClick={(e) => e.stopPropagation()}
+          >
+            {content}
+          </a>
+        ) : (
+          <span className={badgeClass}>{content}</span>
+        )}
       </TooltipTrigger>
       <TooltipContent className="max-w-sm break-all">{url}</TooltipContent>
     </Tooltip>
