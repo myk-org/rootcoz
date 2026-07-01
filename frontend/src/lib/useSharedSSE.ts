@@ -109,11 +109,19 @@ export function useSharedSSE({ url, events, onError, onOpen }: UseSharedSSEOptio
     const eventNames = Object.keys(eventsRef.current)
 
     let isLeader = false
+    let currentLeaderId: string | null = null
     let eventSource: EventSource | null = null
     let electionTimer: ReturnType<typeof setTimeout> | null = null
     let reconnectTimer: ReturnType<typeof setTimeout> | null = null
     let reconnectDelay = 1000
     let destroyed = false
+
+    function stepDown() {
+      isLeader = false
+      if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null }
+      eventSource?.close()
+      eventSource = null
+    }
 
     // ---- Leader: open EventSource and relay events ----
 
@@ -154,6 +162,7 @@ export function useSharedSSE({ url, events, onError, onOpen }: UseSharedSSEOptio
     function becomeLeader() {
       if (destroyed || isLeader) return
       isLeader = true
+      currentLeaderId = TAB_ID
       channel.postMessage({ type: 'leader', tabId: TAB_ID })
       createEventSource()
     }
@@ -162,6 +171,7 @@ export function useSharedSSE({ url, events, onError, onOpen }: UseSharedSSEOptio
 
     function startElection() {
       if (destroyed) return
+      if (electionTimer) { clearTimeout(electionTimer); electionTimer = null }
       channel.postMessage({ type: 'who-is-leader' })
       // Random jitter avoids ties when multiple tabs open simultaneously
       const jitter = Math.random() * 100
@@ -180,13 +190,23 @@ export function useSharedSSE({ url, events, onError, onOpen }: UseSharedSSEOptio
           if (isLeader) channel.postMessage({ type: 'leader', tabId: TAB_ID })
           break
 
-        case 'leader':
-          // Another tab is leader — cancel our election
+        case 'leader': {
+          const theirId = msg.data.tabId ?? ''
+          // Another tab claims leadership — cancel our pending election
           if (electionTimer) {
             clearTimeout(electionTimer)
             electionTimer = null
           }
+          // If we're already leader and they win deterministically
+          // (lexicographically smaller tabId), step down to avoid split-brain
+          if (isLeader && theirId && theirId < TAB_ID) {
+            stepDown()
+            currentLeaderId = theirId
+          } else if (!isLeader) {
+            currentLeaderId = theirId
+          }
           break
+        }
 
         case 'sse-event':
           if (!isLeader && name) eventsRef.current[name]?.(data ?? '')

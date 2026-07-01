@@ -51,7 +51,8 @@ export function RegisterPage() {
   const navigate = useNavigate()
   const location = useLocation()
   const { login, refreshAuth, authenticated, loading: authLoading } = useAuth()
-  const returnTo = (location.state as { from?: { pathname: string } } | null)?.from?.pathname || '/'
+  const from = (location.state as { from?: { pathname: string; search?: string; hash?: string } } | null)?.from
+  const returnTo = from ? `${from.pathname}${from.search || ''}${from.hash || ''}` : '/'
   const [mode, setMode] = useState<Mode>('login')
   const [username, setUsername] = useState('')
   const [apiKey, setApiKey] = useState('')

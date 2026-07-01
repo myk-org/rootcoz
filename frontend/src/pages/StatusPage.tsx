@@ -192,31 +192,11 @@ export function StatusPage() {
     events: statusEvents,
   })
 
-  const fetchStatus = async () => {
-    if (!jobId) return
-    try {
-      const res = await api.get<ResultResponse>(`/results/${jobId}`)
-      setData(res)
-      setError('')
-      if (res.status === 'completed') {
-        navigate(`/results/${jobId}`, { replace: true })
-      } else if (res.status === 'failed') {
-        setTerminalErrorKind('failed')
-        setError(res.error || res.result?.error || 'Analysis failed')
-      } else if (res.status === 'aborted') {
-        setTerminalErrorKind('aborted')
-        setError(res.error || res.result?.error || 'Analysis was aborted')
-      }
-    } catch {
-      // best-effort
-    }
-  }
-
   async function handleAbort() {
     setIsAborting(true)
     try {
       await api.post(`/results/${jobId}/abort`)
-      await fetchStatus()
+      await statusFetchRef.current()
     } catch (err) {
       console.error('Failed to abort analysis:', err)
       setError('Failed to abort analysis. Please try again.')
