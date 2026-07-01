@@ -2046,6 +2046,93 @@ async def backfill_failure_history() -> None:
     logger.info(f"Backfill complete: processed {backfilled}/{len(rows)} results")
 
 
+async def carry_forward_user_overrides(job_id: str, result_data: dict) -> int:
+    """Carry forward user classification overrides from previous jobs.
+
+    When a test was previously classified by a user (not rootcoz-ai),
+    copy that override to the new job so _TC_LATEST_JOIN resolves the
+    user's classification as the effective one.
+
+    Args:
+        job_id: The new analysis job ID.
+        result_data: Parsed result dictionary from result_json.
+
+    Returns:
+        Number of overrides carried forward.
+    """
+    job_name = result_data.get("job_name", "")
+    carried = 0
+
+    # Collect all test names from the new job (top-level + children)
+    test_names: list[
+        tuple[str, str, int]
+    ] = []  # (test_name, child_job_name, child_build_number)
+    for f in result_data.get("failures", []):
+        tn = f.get("test_name", "")
+        if tn:
+            test_names.append((tn, "", 0))
+    for child in result_data.get("child_job_analyses", []):
+        child_job = child.get("job_name", "")
+        child_build = child.get("build_number", 0)
+        for f in child.get("failures", []):
+            tn = f.get("test_name", "")
+            if tn:
+                test_names.append((tn, child_job, child_build))
+
+    if not test_names:
+        return 0
+
+    async with _connect_db() as db:
+        for test_name, child_job_name, child_build_number in test_names:
+            # Find the most recent user override for this test (from any previous job)
+            cursor = await db.execute(
+                "SELECT classification, reason, references_info, created_by, "
+                "parent_job_name, child_build_number "
+                "FROM test_classifications "
+                "WHERE test_name = ? AND job_id != ? AND visible = 1 "
+                "AND created_by != 'rootcoz-ai' "
+                "AND classification != '' "
+                "AND parent_job_name = ? "
+                "ORDER BY created_at DESC, id DESC LIMIT 1",
+                (test_name, job_id, job_name),
+            )
+            row = await cursor.fetchone()
+            if row is None:
+                continue
+
+            # Copy the user's override to the new job
+            await db.execute(
+                "INSERT INTO test_classifications "
+                "(test_name, job_name, parent_job_name, job_id, classification, "
+                "reason, references_info, created_by, visible, child_build_number) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?)",
+                (
+                    test_name,
+                    child_job_name,
+                    row["parent_job_name"] or job_name,
+                    job_id,
+                    row["classification"],
+                    f"Carried forward from user override{' by ' + row['created_by'] if row['created_by'] else ''}",
+                    row["references_info"] or "",
+                    row["created_by"] or "",
+                    child_build_number,
+                ),
+            )
+            carried += 1
+            logger.info(
+                "Carried forward user override for %s: %s (by %s) to job %s",
+                test_name,
+                row["classification"],
+                row["created_by"] or "<unattributed>",
+                job_id,
+            )
+
+        if carried:
+            await db.commit()
+
+    return carried
+
+
 # SQL subquery for resolving effective classification.
 # LEFT JOINs with the latest visible test_classification override per
 # (job_id, test_name, child_build_number). Use COALESCE(tc_latest.classification,
@@ -3286,6 +3373,38 @@ async def get_effective_classification(
 
         fh_row = await (await db.execute(fh_query, fh_params)).fetchone()
         return fh_row[0] if fh_row and fh_row[0] else ""
+
+
+async def get_all_effective_classifications(
+    job_id: str,
+) -> dict[tuple[str, str, int], str]:
+    """Return all effective classification overrides for a job.
+
+    Queries test_classifications once for all overrides in the given job,
+    avoiding N+1 queries when applying overrides to many failures.
+
+    Returns:
+        Dict mapping (test_name, child_job_name, child_build_number) to
+        the effective classification string.
+    """
+    async with _connect_db() as db:
+        cursor = await db.execute(
+            "SELECT test_name, job_name, child_build_number, classification "
+            "FROM test_classifications "
+            "WHERE job_id = ? AND visible = 1 "
+            f"AND classification IN {_PRIMARY_CLASSIFICATIONS_SQL} "
+            "ORDER BY created_at DESC, id DESC",
+            (job_id,),
+        )
+        rows = await cursor.fetchall()
+
+    # Keep only the latest override per (test_name, job_name, child_build_number)
+    result: dict[tuple[str, str, int], str] = {}
+    for row in rows:
+        key = (row["test_name"], row["job_name"], row["child_build_number"])
+        if key not in result:
+            result[key] = row["classification"]
+    return result
 
 
 async def mark_stale_results_failed() -> tuple[list[dict], list[dict]]:

@@ -194,12 +194,26 @@ Every new API endpoint MUST also be supported via the `rootcoz` CLI tool. When a
 - SSE streaming endpoints (`/api/navbar/stream`, `/api/dashboard/stream`, `/api/results/*/stream`, `/api/admin/token-usage/stream`, `/api/chat/*/stream`) — CLI is a one-shot tool, not a long-lived stream consumer. Equivalent GET endpoints remain available for CLI use.
 - SPA bootstrap helpers (`/api/auth/needs-key`) — browser-only identity probes with no CLI use case
 
+### AI Provider/Model Resolution
+
+AI provider and model are resolved in this order (first non-empty wins):
+1. Per-request value (`ai_provider`/`ai_model` in request body)
+2. Settings DB value (admin server settings page → AI category)
+3. Environment variable (`AI_PROVIDER`/`AI_MODEL`)
+
+When not configured, error messages are role-aware: admins are pointed to Server Settings → AI, users are told to contact an administrator.
+
+### AI System Identity
+
+`rootcoz-ai` is the reserved system identity for all AI-originated actions (auto-review, classification). It is blocked from user registration. The `POST /history/classify` endpoint uses `source="ai"` in the request body to identify AI callers, and stores `created_by = "rootcoz-ai"` for attribution. A backend guard prevents AI from overriding user classifications.
+
 ### Failure Deduplication
 
 When multiple tests fail with the same error:
-1. Failures are grouped by error signature (SHA-256 hash of error + stack trace)
+1. Failures are grouped by error signature (SHA-256 hash of normalized error + stack trace)
 2. Only one AI CLI call per unique error type
 3. Analysis is applied to all failures with matching signature
+4. Signatures are normalized before hashing (timestamps, UUIDs, pod name suffixes, build numbers stripped)
 
 ### Jira Integration (Optional)
 
@@ -213,6 +227,10 @@ When configured, searches Jira for existing bugs matching PRODUCT BUG failures:
 ### Report Portal Integration (Optional)
 
 When `ENABLE_REPORTPORTAL=true`, users can push test classifications back to Report Portal via the `push-reportportal` endpoint and CLI command.
+
+### Auto-Review
+
+After any completed analysis, each failure is checked against previous analyses of the same `job_name` for the same `test_name`. If the `error_signature` matches exactly, the failure is auto-reviewed (marked reviewed by `rootcoz-ai`). The auto-review comment includes a clickable link to the previous job when `PUBLIC_BASE_URL` is set.
 
 ### Feedback System
 

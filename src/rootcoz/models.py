@@ -866,6 +866,7 @@ class ClassifyTestRequest(BaseModel):
     references: str = ""
     job_id: str
     child_build_number: Annotated[int, Field(ge=0)] = 0
+    source: str = ""
 
     @field_validator("job_id")
     @classmethod

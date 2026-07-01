@@ -29,6 +29,9 @@ import {
 import { PeerConfigList } from '@/components/shared/PeerConfigList'
 import type { PeerConfigWithId } from '@/components/shared/PeerConfigList'
 import { usePeerModels } from '@/lib/usePeerModels'
+import { ProviderSelect } from '@/components/shared/ProviderSelect'
+import { ModelCombobox } from '@/components/shared/ModelCombobox'
+import { useProviderModels } from '@/hooks/useProviderModels'
 import { AdditionalReposList } from '@/components/shared/AdditionalReposList'
 import type { RepoWithId } from '@/components/shared/AdditionalReposList'
 
@@ -308,6 +311,18 @@ export function ServerSettingsPage() {
   const [peerEditing, setPeerEditing] = useState(false)
   const peerModels = usePeerModels(peerConfigs, peerEditing)
 
+  // AI default provider/model editing
+  const [aiProviderEditing, setAiProviderEditing] = useState(false)
+  const [aiProviderValue, setAiProviderValue] = useState('')
+  const [aiModelEditing, setAiModelEditing] = useState(false)
+  const [aiModelValue, setAiModelValue] = useState('')
+  // For the model combobox, use the editing provider if editing, otherwise the saved setting value
+  const savedAiProvider = state.settings.find(s => s.key === 'ai_provider')?.value || ''
+  const effectiveAiProvider = aiProviderEditing
+    ? aiProviderValue
+    : (savedAiProvider || aiProviderValue)
+  const aiModels = useProviderModels(effectiveAiProvider)
+
   // Additional repos structured editor state
   const [additionalRepos, setAdditionalRepos] = useState<RepoWithId[]>([])
   const [reposEditing, setReposEditing] = useState(false)
@@ -421,6 +436,22 @@ export function ServerSettingsPage() {
       dispatch({ type: 'SAVE_ERROR', error: msg })
       // Don't close — user can fix and retry
     }
+  }
+
+  async function handleSaveAiProvider(value: string) {
+    const ok = await saveSettingValue('ai_provider', value)
+    if (ok) {
+      setAiProviderEditing(false)
+      // Keep aiProviderValue in sync so effectiveAiProvider (and thus the
+      // model list) reflects the newly saved provider immediately, before
+      // fetchSettings() re-renders with the server-side state.
+      setAiProviderValue(value)
+    }
+  }
+
+  async function handleSaveAiModel(value: string) {
+    const ok = await saveSettingValue('ai_model', value)
+    if (ok) setAiModelEditing(false)
   }
 
   // ---- Additional repos structured editor ----
@@ -617,6 +648,61 @@ export function ServerSettingsPage() {
                     <CardContent className="px-4 pb-4 pt-0">
                       <div className="divide-y divide-border-default">
                         {settings.map((setting) => {
+                          if (setting.key === 'ai_provider') {
+                            return (
+                              <AiSettingRow
+                                key={setting.key}
+                                setting={setting}
+                                editing={aiProviderEditing}
+                                onStartEdit={(v) => { setAiProviderValue(v); setAiProviderEditing(true) }}
+                                onCancel={() => { setAiProviderEditing(false); setAiProviderValue(savedAiProvider) }}
+                                onSave={() => handleSaveAiProvider(aiProviderValue)}
+                                onReset={() => handleReset(setting.key)}
+                                saving={state.saving}
+                                historyKey={state.historyKey}
+                                history={state.history}
+                                historyLoading={state.historyLoading}
+                                onShowHistory={() => handleShowHistory(setting.key)}
+                                configureLabel="Configure provider"
+                                notConfiguredLabel="Not configured (uses AI_PROVIDER env var)"
+                              >
+                                <ProviderSelect value={aiProviderValue} onChange={setAiProviderValue} />
+                              </AiSettingRow>
+                            )
+                          }
+
+                          if (setting.key === 'ai_model') {
+                            return (
+                              <AiSettingRow
+                                key={setting.key}
+                                setting={setting}
+                                editing={aiModelEditing}
+                                onStartEdit={(v) => { setAiModelValue(v); setAiModelEditing(true) }}
+                                onCancel={() => setAiModelEditing(false)}
+                                onSave={() => handleSaveAiModel(aiModelValue)}
+                                onReset={() => handleReset(setting.key)}
+                                saving={state.saving}
+                                historyKey={state.historyKey}
+                                history={state.history}
+                                historyLoading={state.historyLoading}
+                                onShowHistory={() => handleShowHistory(setting.key)}
+                                configureLabel="Configure model"
+                                notConfiguredLabel="Not configured (uses AI_MODEL env var)"
+                              >
+                                <ModelCombobox
+                                  value={aiModelValue}
+                                  onChange={setAiModelValue}
+                                  options={aiModels}
+                                  placeholder="Select model..."
+                                  className="max-w-md"
+                                />
+                                {!effectiveAiProvider && (
+                                  <p className="text-xs text-signal-amber">Select a provider first to see available models</p>
+                                )}
+                              </AiSettingRow>
+                            )
+                          }
+
                           // ---- PEER_AI_CONFIGS: structured editor ----
                           if (setting.key === 'peer_ai_configs') {
                             return (
@@ -807,6 +893,96 @@ export function ServerSettingsPage() {
         )}
       </div>
     </TooltipProvider>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// AI Setting Row (shared by ai_provider and ai_model)
+// ---------------------------------------------------------------------------
+
+interface AiSettingRowProps {
+  setting: ServerSetting
+  editing: boolean
+  onStartEdit: (currentValue: string) => void
+  onCancel: () => void
+  onSave: () => void
+  onReset: () => void
+  saving: boolean
+  historyKey: string
+  history: HistoryEntry[]
+  historyLoading: boolean
+  onShowHistory: () => void
+  children: React.ReactNode  // The actual editor (ProviderSelect or ModelCombobox)
+  configureLabel: string  // e.g. "Configure provider" or "Configure model"
+  notConfiguredLabel: string  // e.g. "Not configured (uses AI_PROVIDER env var)"
+}
+
+function AiSettingRow({
+  setting,
+  editing,
+  onStartEdit,
+  onCancel,
+  onSave,
+  onReset,
+  saving,
+  historyKey,
+  history,
+  historyLoading,
+  onShowHistory,
+  children,
+  configureLabel,
+  notConfiguredLabel,
+}: AiSettingRowProps) {
+  return (
+    <div key={setting.key} className="py-3 space-y-2">
+      <div className="flex items-center gap-2">
+        <span className="font-mono text-xs font-semibold text-text-primary">{setting.env_var}</span>
+        <SourceBadge source={setting.source} />
+      </div>
+      {editing ? (
+        <div className="space-y-3">
+          {children}
+          <div className="flex items-center gap-2 pt-1">
+            <Button size="sm" onClick={onSave} disabled={saving} className="h-7 text-xs">
+              {saving ? <><Loader2 className="mr-1 h-3 w-3 animate-spin" />Saving</> : 'Save'}
+            </Button>
+            <Button size="sm" variant="outline" onClick={onCancel} className="h-7 text-xs">Cancel</Button>
+            {setting.source === 'db' && (
+              <Button size="sm" variant="ghost" onClick={onReset} className="h-7 text-xs text-text-tertiary hover:text-signal-red">
+                <RotateCcw className="mr-1 h-3 w-3" /> Reset
+              </Button>
+            )}
+          </div>
+        </div>
+      ) : (
+        <div>
+          {setting.value ? (
+            <span className="inline-flex items-center rounded-md bg-surface-elevated px-2 py-0.5 text-xs font-mono border border-border-default text-text-primary truncate max-w-md">
+              {setting.value}
+            </span>
+          ) : (
+            <span className="text-xs text-text-tertiary italic">{notConfiguredLabel}</span>
+          )}
+          <button type="button" onClick={() => onStartEdit(setting.value || '')} className="mt-1.5 block text-xs text-text-link hover:text-signal-blue font-medium">
+            {configureLabel}
+          </button>
+        </div>
+      )}
+      <p className="text-xs text-text-tertiary">{setting.description}</p>
+      {setting.source === 'db' && setting.updated_by && (
+        <p className="text-xs text-text-quaternary">Modified by {setting.updated_by}</p>
+      )}
+      {setting.source === 'db' && (
+        <HistoryToggle
+          settingKey={setting.key}
+          sensitive={setting.sensitive}
+          historyKey={historyKey}
+          history={history}
+          historyLoading={historyLoading}
+          onShowHistory={onShowHistory}
+        />
+      )}
+    </div>
   )
 }
 

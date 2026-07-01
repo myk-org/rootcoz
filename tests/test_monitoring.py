@@ -224,17 +224,29 @@ class TestHealthChecks:
         assert result["provider"] == "claude"
 
     async def test_check_ai_provider_missing(self):
+        from rootcoz.config import get_settings
+
         with self._env_without_ai():
-            with self._mock_sidecar():
-                result = await check_ai_provider()
+            get_settings.cache_clear()
+            try:
+                with self._mock_sidecar():
+                    result = await check_ai_provider()
+            finally:
+                get_settings.cache_clear()
         assert result["status"] == "not_configured"
         assert "AI_PROVIDER" in result["detail"]
         assert "AI_MODEL" in result["detail"]
 
     async def test_check_ai_provider_sidecar_unreachable_and_env_missing(self):
+        from rootcoz.config import get_settings
+
         with self._env_without_ai():
-            with self._mock_sidecar(side_effect=Exception("Connection refused")):
-                result = await check_ai_provider()
+            get_settings.cache_clear()
+            try:
+                with self._mock_sidecar(side_effect=Exception("Connection refused")):
+                    result = await check_ai_provider()
+            finally:
+                get_settings.cache_clear()
         assert result["status"] == "error"
         assert "AI_PROVIDER" in result["detail"]
         assert "AI_MODEL" in result["detail"]
@@ -355,10 +367,16 @@ class TestStartupConfigValidation:
         assert len(result.errors) == 0
 
     def test_missing_ai_provider(self):
+        from rootcoz.config import get_settings
+
         with patch.dict(os.environ, {}, clear=True):
             env = {k: v for k, v in os.environ.items() if k != "AI_PROVIDER"}
             with patch.dict(os.environ, env, clear=True):
-                result = validate_startup_config()
+                get_settings.cache_clear()
+                try:
+                    result = validate_startup_config()
+                finally:
+                    get_settings.cache_clear()
         assert any("AI_PROVIDER" in w for w in result.warnings)
 
     def test_missing_encryption_key(self):

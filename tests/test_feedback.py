@@ -773,8 +773,9 @@ class TestFeedbackEndpoint:
                     "description": "Something broke",
                 },
             )
-            assert resp.status_code == 503
-            assert "AI provider not configured" in resp.json()["detail"]
+            assert resp.status_code == 400
+            assert "AI provider" in resp.json()["detail"]
+            assert "not configured" in resp.json()["detail"]
 
     def test_preview_successful(self, _init_db, temp_db_path):
         for client in self._make_client(temp_db_path, github_token=_TEST_GITHUB_TOKEN):

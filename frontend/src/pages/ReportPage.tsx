@@ -413,8 +413,8 @@ function ReportContent() {
   return (
     <TooltipProvider delayDuration={200}>
     <div className="space-y-6 animate-fade-in">
-      {/* ---- Sticky header ---- */}
-      <div className="sticky top-14 z-40 -mx-4 bg-surface-page/95 backdrop-blur-sm px-4 py-3 border-b border-border-muted sm:-mx-6 sm:px-6 lg:-mx-8 lg:px-8">
+      {/* ---- Header ---- */}
+      <div className="-mx-4 px-4 py-3 border-b border-border-muted sm:-mx-6 sm:px-6 lg:-mx-8 lg:px-8">
         <div className="flex flex-wrap items-center gap-3">
           <h1 className="font-display text-lg font-bold text-text-primary truncate">
             {result.job_name || result.job_id}

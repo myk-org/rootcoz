@@ -211,6 +211,8 @@ _SETTINGS_CATEGORIES: dict[str, list[str]] = {
         "get_job_artifacts",
     ],
     "AI": [
+        "ai_provider",
+        "ai_model",
         "ai_call_timeout",
         "max_concurrent_ai_calls",
         "peer_ai_configs",
@@ -1786,10 +1788,34 @@ async def root() -> HTMLResponse:
     return _serve_spa()
 
 
+def _ai_not_configured_message(request: Request | None, what: str) -> str:
+    """Build a role-aware error message when AI provider/model is not configured."""
+    is_admin = (
+        getattr(getattr(request, "state", None), "is_admin", False)
+        if request
+        else False
+    )
+    if is_admin:
+        return (
+            f"{what} is not configured. "
+            f"Go to Server Settings \u2192 AI to configure the default provider and model."
+        )
+    # For non-admin users, tell them to contact an admin
+    return (
+        f"{what} is not configured on this server. "
+        f"Please contact a server administrator to configure AI settings."
+    )
+
+
 def _resolve_ai_config_values(
-    ai_provider: str | None, ai_model: str | None
+    ai_provider: str | None, ai_model: str | None, *, request: Request | None = None
 ) -> tuple[str, str]:
-    """Resolve and validate AI provider and model from given values or env defaults.
+    """Resolve and validate AI provider and model.
+
+    Resolution order (first non-empty wins):
+    1. Per-request value (ai_provider/ai_model arguments)
+    2. Settings DB value (admin server settings page)
+    3. Environment variable (AI_PROVIDER/AI_MODEL)
 
     Args:
         ai_provider: Provider from request body (or None).
@@ -1801,16 +1827,13 @@ def _resolve_ai_config_values(
     Raises:
         HTTPException: If provider or model is not configured.
     """
-    provider = ai_provider or AI_PROVIDER
-    model = ai_model or AI_MODEL
+    settings = get_settings()
+    provider = (ai_provider or settings.ai_provider or AI_PROVIDER).lower()
+    model = ai_model or settings.ai_model or AI_MODEL
     if not provider:
         raise HTTPException(
             status_code=400,
-            detail=(
-                f"No AI provider configured. Set AI_PROVIDER env var or"
-                f" pass ai_provider in request body."
-                f" Valid providers: {', '.join(sorted(VALID_AI_PROVIDERS))}"
-            ),
+            detail=_ai_not_configured_message(request, "AI provider"),
         )
     if provider not in VALID_AI_PROVIDERS:
         raise HTTPException(
@@ -1823,14 +1846,16 @@ def _resolve_ai_config_values(
     if not model:
         raise HTTPException(
             status_code=400,
-            detail="No AI model configured. Set AI_MODEL env var or pass ai_model in request body.",
+            detail=_ai_not_configured_message(request, "AI model"),
         )
     return provider, model
 
 
-def _resolve_ai_config(body: BaseAnalysisRequest) -> tuple[str, str]:
+def _resolve_ai_config(
+    body: BaseAnalysisRequest, request: Request | None = None
+) -> tuple[str, str]:
     """Resolve AI config from an AnalyzeRequest."""
-    return _resolve_ai_config_values(body.ai_provider, body.ai_model)
+    return _resolve_ai_config_values(body.ai_provider, body.ai_model, request=request)
 
 
 def _resolve_peer_ai_configs(
@@ -1999,10 +2024,18 @@ async def _apply_auto_review(
         child_job_name: Child job name (empty for top-level failures).
         child_build_number: Child build number (0 for top-level failures).
     """
-    comment = (
-        f"Auto-reviewed: identical failure signature found in previous "
-        f"analysis `{prev_job_id}` (build #{prev_build})"
-    )
+    base_url = _extract_base_url()
+    if base_url:
+        job_link = f"{base_url}/results/{prev_job_id}"
+        comment = (
+            f"Auto-reviewed: identical failure signature found in previous "
+            f"analysis {job_link} (build #{prev_build})"
+        )
+    else:
+        comment = (
+            f"Auto-reviewed: identical failure signature found in previous "
+            f"analysis `{prev_job_id}` (build #{prev_build})"
+        )
     await storage.set_reviewed(
         job_id,
         test_name,
@@ -2408,6 +2441,24 @@ async def _preflight_sidecar_check(
     return False
 
 
+async def _carry_forward_overrides(job_id: str, result_data: dict) -> None:
+    """Carry forward user classification overrides from previous jobs. Best-effort."""
+    try:
+        carried = await storage.carry_forward_user_overrides(job_id, result_data)
+        if carried:
+            logger.info(
+                "Carried forward %d user classification override(s) for job_id=%s",
+                carried,
+                job_id,
+            )
+    except Exception:
+        logger.warning(
+            "Failed to carry forward user overrides for job_id=%s",
+            job_id,
+            exc_info=True,
+        )
+
+
 async def process_analysis_with_id(
     job_id: str, body: AnalyzeRequest, settings: Settings, username: str = ""
 ) -> None:
@@ -2597,6 +2648,8 @@ async def process_analysis_with_id(
                     job_id,
                     exc_info=True,
                 )
+
+            await _carry_forward_overrides(job_id, result_data)
 
             # Auto-review failures with matching signatures from previous analyses
             try:
@@ -2846,7 +2899,9 @@ async def _enqueue_file_raw_analysis(
     Returns:
         JSON-serialisable response dict with ``status``, ``job_id``, links.
     """
-    ai_provider, ai_model = _resolve_ai_config_values(body.ai_provider, body.ai_model)
+    ai_provider, ai_model = _resolve_ai_config_values(
+        body.ai_provider, body.ai_model, request=None
+    )
 
     # Resolve repos
     tests_repo_url_raw = (
@@ -3344,6 +3399,8 @@ async def _process_file_raw_analysis(
                 exc_info=True,
             )
 
+        await _carry_forward_overrides(job_id, result_data)
+
         # Auto-review failures with matching signatures from previous analyses
         try:
             await _auto_review_matching_failures(
@@ -3428,7 +3485,7 @@ async def analyze(
     base_url = _extract_base_url()
 
     # Validate AI config early
-    _resolve_ai_config(body)
+    _resolve_ai_config(body, request)
 
     # Resolve display name
     display_name: str = body.name or ""
@@ -3581,7 +3638,7 @@ async def re_analyze(
         unified_body.tags = existing_tags
 
         # Validate and merge settings
-        _resolve_ai_config(unified_body)
+        _resolve_ai_config(unified_body, request)
         merged = _merge_settings(unified_body, get_settings())
         resolved_peers = _validate_peer_configs(unified_body, merged)
 
@@ -3634,7 +3691,7 @@ async def re_analyze(
     merged = _merge_settings(original_body, original_settings)
 
     # Validate AI config and peers
-    _resolve_ai_config(original_body)
+    _resolve_ai_config(original_body, request)
     resolved_peers = _validate_peer_configs(original_body, merged)
 
     return await _enqueue_analysis_job(
@@ -3647,6 +3704,72 @@ async def re_analyze(
         reanalyzed_from_job_id=job_id,
         reanalyzed_from_job_name=origin_job_display_name,
     )
+
+
+async def _apply_effective_classifications(job_id: str, result_data: dict) -> None:
+    """Apply user classification overrides to failures in result_data.
+
+    Batch-queries all overrides for the job, then walks all failures
+    (top-level, children, and nested failed_children) applying them.
+    Clears stale subtype fields consistent with _resolve_effective_failure.
+    """
+    overrides = await storage.get_all_effective_classifications(job_id)
+    if not overrides:
+        return
+
+    def _apply_override(
+        failure: dict, child_job_name: str, child_build_number: int
+    ) -> None:
+        if not isinstance(failure, dict):
+            return
+        test_name = failure.get("test_name", "")
+        if not test_name:
+            return
+        analysis = failure.get("analysis")
+        if not isinstance(analysis, dict):
+            return
+        key = (test_name, child_job_name, child_build_number)
+        effective = overrides.get(key)
+        if not effective:
+            return
+        current = analysis.get("classification", "")
+        if effective == current:
+            return
+        analysis["classification"] = effective
+        analysis["_original_classification"] = current
+        # Clear stale subtype fields (consistent with _resolve_effective_failure)
+        if effective == "CODE ISSUE":
+            analysis["product_bug_report"] = False
+        elif effective == "PRODUCT BUG":
+            analysis["code_fix"] = False
+        elif effective == "INFRASTRUCTURE":
+            analysis["code_fix"] = False
+            analysis["product_bug_report"] = False
+
+    def _walk_failures(
+        failures: list,
+        child_job_name: str = "",
+        child_build_number: int = 0,
+    ) -> None:
+        for failure in failures:
+            if isinstance(failure, dict):
+                _apply_override(failure, child_job_name, child_build_number)
+
+    # Top-level failures
+    _walk_failures(result_data.get("failures", []))
+
+    # Child job failures (including nested failed_children)
+    def _walk_children(children: list) -> None:
+        for child in children:
+            if not isinstance(child, dict):
+                continue
+            child_job = child.get("job_name", "")
+            child_build = child.get("build_number", 0)
+            _walk_failures(child.get("failures", []), child_job, child_build)
+            # Recurse into nested failed_children
+            _walk_children(child.get("failed_children", []))
+
+    _walk_children(result_data.get("child_job_analyses", []))
 
 
 @app.get("/results/{job_id}", response_model=None)
@@ -3666,6 +3789,9 @@ async def get_job_result(
     result = await get_result(job_id)
     if not result:
         raise HTTPException(status_code=404, detail="Job not found")
+    # Apply user classification overrides so the UI shows effective classifications
+    if result.get("result"):
+        await _apply_effective_classifications(job_id, result["result"])
     _attach_result_links(result, _extract_base_url(), job_id)
     await _attach_origin_job_info(result)
     settings = get_settings()
@@ -3944,7 +4070,9 @@ async def re_analyze_failure(
         ai_provider = overrides.ai_provider
     if overrides.ai_model is not None:
         ai_model = overrides.ai_model
-    ai_provider, ai_model = _resolve_ai_config_values(ai_provider, ai_model)
+    ai_provider, ai_model = _resolve_ai_config_values(
+        ai_provider, ai_model, request=request
+    )
 
     ai_call_timeout = decrypted_params.get("ai_call_timeout")
     if overrides.ai_call_timeout is not None:
@@ -6607,6 +6735,7 @@ async def get_job_stats_endpoint(
 async def classify_test(request: Request, body: ClassifyTestRequest) -> dict:
     """Classify a test as FLAKY, REGRESSION, etc. Used by AI and humans."""
     _check_allow_list(request)
+    _require_reviewer(request)
     logger.debug(
         f"POST /history/classify: test_name={body.test_name!r}, classification={body.classification!r}"
     )
@@ -6626,12 +6755,46 @@ async def classify_test(request: Request, body: ClassifyTestRequest) -> dict:
             detail="KNOWN_BUG requires non-empty references (e.g., Jira tickets or historical bug URLs).",
         )
 
-    created_by = request.state.username or "ai"
+    created_by = request.state.username or "rootcoz-ai"
+
+    # Guard: AI cannot override user classifications.
+    # The AI authenticates with the submitting user's session token, so we
+    # cannot rely on empty username.  Instead, the AI prompt includes
+    # source="ai" in the request body to identify itself.
+    # "rootcoz-ai" is a reserved system identity (blocked from registration)
+    # used consistently for all AI-originated actions (auto-review, classification).
+    is_ai_caller = body.source == "ai"
+    if is_ai_caller:
+        existing = await storage.get_test_classifications(
+            test_name=test_name,
+        )
+        user_classifications = [
+            c for c in existing if c.get("created_by", "") != "rootcoz-ai"
+        ]
+        if user_classifications:
+            logger.info(
+                "POST /history/classify: AI classification blocked — user %s already classified test %r",
+                user_classifications[0]["created_by"],
+                test_name,
+            )
+            return JSONResponse(
+                content={
+                    "id": None,
+                    "skipped": True,
+                    "reason": "User classification exists",
+                },
+                status_code=200,
+            )
+
+    # When the AI identifies itself, store created_by as "rootcoz-ai" —
+    # the reserved system identity that cannot be registered as a username.
+    if is_ai_caller:
+        created_by = "rootcoz-ai"
 
     # Human classifications are visible immediately.
     # AI classifications become visible after analysis completes
     # and calls make_classifications_visible().
-    visible = 0 if created_by == "ai" else 1
+    visible = 0 if created_by == "rootcoz-ai" else 1
 
     # Look up parent job name from failure_history, scoped to this job
     parent_job_name = await storage.get_parent_job_name_for_test(
@@ -8372,7 +8535,9 @@ async def analyze_comment_intent(
             params = stored["result"].get("request_params", {})
             ai_provider = params.get("ai_provider", "")
             ai_model = params.get("ai_model", "")
-    ai_provider, ai_model = _resolve_ai_config_values(ai_provider, ai_model)
+    ai_provider, ai_model = _resolve_ai_config_values(
+        ai_provider, ai_model, request=request
+    )
 
     prompt = """You are analyzing a comment left on a test failure report.
 Does this comment imply the failure has been reviewed or resolved?
@@ -8451,16 +8616,9 @@ async def preview_feedback(request: Request, body: FeedbackRequest):
             status_code=503, detail="Feedback submission is disabled on this server"
         )
     try:
-        ai_provider, ai_model = _resolve_ai_config_values(None, None)
-    except HTTPException as exc:
-        raise HTTPException(
-            status_code=503,
-            detail=(
-                "AI provider not configured on this server. "
-                "Configure AI_PROVIDER and AI_MODEL environment variables "
-                "to enable AI-powered feedback."
-            ),
-        ) from exc
+        ai_provider, ai_model = _resolve_ai_config_values(None, None, request=request)
+    except HTTPException:
+        raise
     try:
         return await generate_feedback_preview(
             body, settings, ai_provider=ai_provider, ai_model=ai_model

@@ -267,9 +267,9 @@ export function StatusPage() {
 
   return (
     <>
-      {/* Sticky header for failed jobs — matches report page layout */}
+      {/* Header for failed jobs — matches report page layout */}
       {(terminalErrorKind === 'failed' || terminalErrorKind === 'aborted') && data?.result && (
-        <div className="sticky top-14 z-40 w-full bg-surface-page/95 backdrop-blur-sm border-b border-border-muted">
+        <div className="w-full border-b border-border-muted">
           <div className="mx-auto max-w-[1400px] px-4 py-3 sm:px-6 lg:px-8">
             <div className="flex flex-wrap items-center gap-3">
               <h1 className="font-display text-lg font-bold text-text-primary truncate">

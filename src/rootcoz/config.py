@@ -234,6 +234,11 @@ class Settings(BaseSettings):
     # Max concurrent AI calls
     max_concurrent_ai_calls: int = Field(default=3, gt=0)
 
+    # Default AI provider (server-level default, can be overridden per-request)
+    ai_provider: str = ""
+    # Default AI model (server-level default, can be overridden per-request)
+    ai_model: str = ""
+
     # Peer analysis configuration
     peer_ai_configs: str = ""  # "provider:model,provider:model" format
     peer_analysis_max_rounds: int = Field(default=3, ge=1, le=10)
@@ -369,10 +374,15 @@ class Settings(BaseSettings):
             "jenkins_user",
             "jenkins_password",
             "admin_wait_approve_msg",
+            "ai_provider",
+            "ai_model",
         ):
             value = getattr(self, field_name)
             if isinstance(value, str):
                 object.__setattr__(self, field_name, value.strip())
+        # Normalize ai_provider to lowercase (provider names are case-insensitive)
+        if self.ai_provider:
+            object.__setattr__(self, "ai_provider", self.ai_provider.lower())
         # Strip whitespace from secret fields; blank becomes None
         for field_name in (
             "github_token",
