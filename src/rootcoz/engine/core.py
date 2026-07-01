@@ -12,6 +12,7 @@ import importlib
 import json
 import os
 import re
+import shutil
 from collections.abc import Callable
 from pathlib import Path
 
@@ -150,11 +151,41 @@ QUERY_MD_PATH = (
     Path(__file__).parent.parent / "ai-prompts" / "FAILURE_HISTORY_ANALYSIS.md"
 )
 
-JOB_INSIGHT_PROMPT_FILENAME = "JOB_INSIGHT_PROMPT.md"
-JOB_INSIGHT_ISSUE_PROMPT_FILENAME = "JOB_INSIGHT_ISSUE_PROMPT.md"
-JOB_INSIGHT_FAILURE_HISTORY_PROMPT_FILENAME = (
-    "JOB_INSIGHT_FAILURE_HISTORY_ANALYSIS_PROMPT.md"
-)
+ROOTCOZ_PROMPT_FILENAME = "ROOTCOZ_PROMPT.md"
+ROOTCOZ_ISSUE_PROMPT_FILENAME = "ROOTCOZ_ISSUE_PROMPT.md"
+ROOTCOZ_HISTORY_PROMPT_FILENAME = "ROOTCOZ_HISTORY_PROMPT.md"
+
+# Subdirectories under .rootcoz/ that are copied to workspace .pi/
+_ROOTCOZ_PI_SUBDIRS = ("agents", "skills", "extensions")
+
+
+def copy_rootcoz_pi_resources(cloned_repos: dict[str, Path], workspace: Path) -> None:
+    """Copy .rootcoz/{agents,skills,extensions}/ from cloned repos to workspace .pi/.
+
+    Scans each cloned repo for a ``.rootcoz/`` directory and copies
+    ``agents/``, ``skills/``, and ``extensions/`` subdirectories into
+    ``<workspace>/.pi/`` so that pi's ``DefaultResourceLoader`` discovers
+    project-provided agents, skills, and extensions.
+
+    Args:
+        cloned_repos: Mapping of repo name to cloned path.
+        workspace: Root workspace directory.
+    """
+    for repo_name, repo_path in cloned_repos.items():
+        rootcoz_dir = repo_path / ".rootcoz"
+        if not rootcoz_dir.is_dir():
+            continue
+        pi_dir = workspace / ".pi"
+        for subdir in _ROOTCOZ_PI_SUBDIRS:
+            src = rootcoz_dir / subdir
+            if src.is_dir():
+                shutil.copytree(src, pi_dir / subdir, dirs_exist_ok=True)
+                logger.info(
+                    "Copied .rootcoz/%s/ from '%s' to workspace .pi/%s/",
+                    subdir,
+                    repo_name,
+                    subdir,
+                )
 
 
 # Pattern for error detection in console output (word boundaries, case-insensitive)
@@ -878,7 +909,7 @@ def build_prompt_sections(
         # Scan cloned repos (not workspace root) for history prompt
         if additional_repos:
             for _name, _path in additional_repos.items():
-                repo_history_path = _path / JOB_INSIGHT_FAILURE_HISTORY_PROMPT_FILENAME
+                repo_history_path = _path / ".rootcoz" / ROOTCOZ_HISTORY_PROMPT_FILENAME
                 logger.debug(
                     f"Repo history analysis prompt exists at {_path}: {repo_history_path.exists()}"
                 )
@@ -958,12 +989,12 @@ def build_resources_section(
                     f"- Directory '{name}' at {path} — inspect files directly"
                 )
             # Check for project-specific instructions in each repo
-            job_insight_prompt = path / JOB_INSIGHT_PROMPT_FILENAME
-            if job_insight_prompt.exists():
+            rootcoz_prompt = path / ".rootcoz" / ROOTCOZ_PROMPT_FILENAME
+            if rootcoz_prompt.exists():
                 resources.append(
-                    f"- Project-specific analysis instructions at {job_insight_prompt} — read and follow them"
+                    f"- Project-specific analysis instructions at {rootcoz_prompt} — read and follow them"
                 )
-            repo_history_prompt = path / JOB_INSIGHT_FAILURE_HISTORY_PROMPT_FILENAME
+            repo_history_prompt = path / ".rootcoz" / ROOTCOZ_HISTORY_PROMPT_FILENAME
             if history_enabled and repo_history_prompt.exists():
                 resources.append(
                     f"- Project-specific history analysis instructions"

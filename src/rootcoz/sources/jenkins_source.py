@@ -28,6 +28,7 @@ from rootcoz.config import Settings, parse_repo_ref
 from rootcoz.engine.core import (
     analyze_failure_group,
     clone_additional_repos,
+    copy_rootcoz_pi_resources,
     derive_error_details,
     extract_relevant_console_lines,
     format_exception_with_type,
@@ -1062,6 +1063,10 @@ async def analyze_job(
                     repo_manager, additional_repos_list, repo_path
                 )
                 cloned_repos.update(additional_repos_cloned)
+
+            # Copy .rootcoz/{agents,skills,extensions}/ to workspace .pi/
+            if cloned_repos:
+                copy_rootcoz_pi_resources(cloned_repos, repo_path)
 
             # Pre-flight: verify AI sidecar is reachable before spawning parallel tasks
             preflight_available, preflight_msg = await check_sidecar_available()

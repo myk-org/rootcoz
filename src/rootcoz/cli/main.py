@@ -776,7 +776,7 @@ def analyze(
     issue_prompt: str = typer.Option(
         "",
         "--issue-prompt",
-        help="Custom issue generation prompt (overrides JOB_INSIGHT_ISSUE_PROMPT.md from test repo)",
+        help="Custom issue generation prompt (overrides .rootcoz/ROOTCOZ_ISSUE_PROMPT.md from test repo)",
     ),
     peers: str = typer.Option(
         "",

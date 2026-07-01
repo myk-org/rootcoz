@@ -1,9 +1,10 @@
 from rootcoz.engine.core import (
-    JOB_INSIGHT_FAILURE_HISTORY_PROMPT_FILENAME,
-    JOB_INSIGHT_ISSUE_PROMPT_FILENAME,
-    JOB_INSIGHT_PROMPT_FILENAME,
+    ROOTCOZ_HISTORY_PROMPT_FILENAME,
+    ROOTCOZ_ISSUE_PROMPT_FILENAME,
+    ROOTCOZ_PROMPT_FILENAME,
     analyze_failure_group,
     clone_additional_repos,
+    copy_rootcoz_pi_resources,
     extract_relevant_console_lines,
     format_exception_with_type,
     get_failure_signature,
@@ -12,11 +13,12 @@ from rootcoz.engine.core import (
 )
 
 __all__ = [
-    "JOB_INSIGHT_FAILURE_HISTORY_PROMPT_FILENAME",
-    "JOB_INSIGHT_ISSUE_PROMPT_FILENAME",
-    "JOB_INSIGHT_PROMPT_FILENAME",
+    "ROOTCOZ_HISTORY_PROMPT_FILENAME",
+    "ROOTCOZ_ISSUE_PROMPT_FILENAME",
+    "ROOTCOZ_PROMPT_FILENAME",
     "analyze_failure_group",
     "clone_additional_repos",
+    "copy_rootcoz_pi_resources",
     "extract_relevant_console_lines",
     "format_exception_with_type",
     "get_failure_signature",

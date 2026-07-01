@@ -160,11 +160,11 @@ class BaseAnalysisRequest(BaseModel):
     )
     raw_prompt: str | None = Field(
         default=None,
-        description="Raw prompt to append as additional AI instructions (overrides repo-level JOB_INSIGHT_PROMPT.md)",
+        description="Raw prompt to append as additional AI instructions (overrides repo-level .rootcoz/ROOTCOZ_PROMPT.md)",
     )
     issue_prompt: str | None = Field(
         default=None,
-        description="Custom issue generation prompt. Overrides JOB_INSIGHT_ISSUE_PROMPT.md from the test repo.",
+        description="Custom issue generation prompt. Overrides .rootcoz/ROOTCOZ_ISSUE_PROMPT.md from the test repo.",
     )
     github_token: str | None = Field(
         default=None,

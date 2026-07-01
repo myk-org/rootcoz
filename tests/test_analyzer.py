@@ -1701,19 +1701,21 @@ class TestBuildResourcesSectionAdditionalRepos:
         result = build_resources_section(workspace, additional_repos={})
         assert "Repository" not in result
 
-    def test_job_insight_prompt_in_repo(self, tmp_path) -> None:
-        """Test that JOB_INSIGHT_PROMPT.md in a cloned repo is advertised."""
+    def test_rootcoz_prompt_in_repo(self, tmp_path) -> None:
+        """Test that .rootcoz/ROOTCOZ_PROMPT.md in a cloned repo is advertised."""
         workspace = tmp_path / "workspace"
         workspace.mkdir()
 
         repo_path = tmp_path / "my-repo"
         repo_path.mkdir()
         (repo_path / ".git").mkdir()
-        (repo_path / "JOB_INSIGHT_PROMPT.md").write_text("custom instructions")
+        rootcoz_dir = repo_path / ".rootcoz"
+        rootcoz_dir.mkdir()
+        (rootcoz_dir / "ROOTCOZ_PROMPT.md").write_text("custom instructions")
 
         additional = {"my-repo": repo_path}
         result = build_resources_section(workspace, additional_repos=additional)
-        assert "JOB_INSIGHT_PROMPT.md" in result
+        assert "ROOTCOZ_PROMPT.md" in result
         assert "Project-specific analysis instructions" in result
 
     def test_history_prompt_in_repo(self, tmp_path) -> None:
@@ -1724,9 +1726,9 @@ class TestBuildResourcesSectionAdditionalRepos:
         repo_path = tmp_path / "my-repo"
         repo_path.mkdir()
         (repo_path / ".git").mkdir()
-        (repo_path / "JOB_INSIGHT_FAILURE_HISTORY_ANALYSIS_PROMPT.md").write_text(
-            "history instructions"
-        )
+        rootcoz_dir = repo_path / ".rootcoz"
+        rootcoz_dir.mkdir()
+        (rootcoz_dir / "ROOTCOZ_HISTORY_PROMPT.md").write_text("history instructions")
 
         additional = {"my-repo": repo_path}
         result = build_resources_section(
@@ -1742,15 +1744,78 @@ class TestBuildResourcesSectionAdditionalRepos:
         repo_path = tmp_path / "my-repo"
         repo_path.mkdir()
         (repo_path / ".git").mkdir()
-        (repo_path / "JOB_INSIGHT_FAILURE_HISTORY_ANALYSIS_PROMPT.md").write_text(
-            "history instructions"
-        )
+        rootcoz_dir = repo_path / ".rootcoz"
+        rootcoz_dir.mkdir()
+        (rootcoz_dir / "ROOTCOZ_HISTORY_PROMPT.md").write_text("history instructions")
 
         additional = {"my-repo": repo_path}
         result = build_resources_section(
             workspace, additional_repos=additional, history_enabled=False
         )
         assert "history analysis instructions" not in result
+
+
+class TestCopyRootcozPiResources:
+    """Tests for copy_rootcoz_pi_resources — copying .rootcoz/ subdirs to workspace .pi/."""
+
+    def test_copies_agents_skills_extensions(self, tmp_path) -> None:
+        """Test that agents, skills, and extensions are copied to .pi/."""
+        from rootcoz.engine.core import copy_rootcoz_pi_resources
+
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        repo = workspace / "my-repo"
+        repo.mkdir()
+        rootcoz = repo / ".rootcoz"
+        rootcoz.mkdir()
+
+        # Create all three subdirs with files
+        for subdir in ("agents", "skills", "extensions"):
+            d = rootcoz / subdir
+            d.mkdir()
+            (d / f"{subdir}-file.md").write_text(f"{subdir} content")
+
+        copy_rootcoz_pi_resources({"my-repo": repo}, workspace)
+
+        pi_dir = workspace / ".pi"
+        assert pi_dir.is_dir()
+        for subdir in ("agents", "skills", "extensions"):
+            assert (
+                pi_dir / subdir / f"{subdir}-file.md"
+            ).read_text() == f"{subdir} content"
+
+    def test_no_rootcoz_dir_is_noop(self, tmp_path) -> None:
+        """Test that repos without .rootcoz/ are silently skipped."""
+        from rootcoz.engine.core import copy_rootcoz_pi_resources
+
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        repo = workspace / "my-repo"
+        repo.mkdir()
+
+        copy_rootcoz_pi_resources({"my-repo": repo}, workspace)
+        assert not (workspace / ".pi").exists()
+
+    def test_partial_subdirs(self, tmp_path) -> None:
+        """Test that only existing subdirs are copied."""
+        from rootcoz.engine.core import copy_rootcoz_pi_resources
+
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        repo = workspace / "my-repo"
+        repo.mkdir()
+        rootcoz = repo / ".rootcoz"
+        rootcoz.mkdir()
+        skills = rootcoz / "skills"
+        skills.mkdir()
+        (skills / "my-skill.md").write_text("skill")
+
+        copy_rootcoz_pi_resources({"my-repo": repo}, workspace)
+
+        pi_dir = workspace / ".pi"
+        assert (pi_dir / "skills" / "my-skill.md").read_text() == "skill"
+        assert not (pi_dir / "agents").exists()
+        assert not (pi_dir / "extensions").exists()
 
 
 class TestAnalyzeJobWorkspacePattern:
