@@ -185,7 +185,7 @@ async def clone_chat_repos(
         cloned_repos = {
             item.name: item
             for item in workspace.iterdir()
-            if item.is_dir() and not item.name.startswith(".")
+            if item.is_dir() and not item.name.startswith(".") and not item.is_symlink()
         }
         if cloned_repos:
             copy_rootcoz_pi_resources(cloned_repos, workspace)

@@ -1839,7 +1839,7 @@ class TestCopyRootcozPiResources:
         copied_link = workspace / ".pi" / "skills" / "link.txt"
         assert copied_link.is_symlink()
 
-    def test_copytree_oserror_swallowed(self, tmp_path, monkeypatch) -> None:
+    def test_copytree_oserror_swallowed(self, tmp_path) -> None:
         """Test that OSError during copytree is logged and swallowed."""
         from unittest.mock import patch
 

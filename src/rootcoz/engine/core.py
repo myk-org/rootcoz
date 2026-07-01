@@ -186,20 +186,20 @@ def copy_rootcoz_pi_resources(cloned_repos: dict[str, Path], workspace: Path) ->
             if not src.is_dir():
                 continue
             dest = pi_dir / subdir
-            # Warn about files that will be overwritten by a later repo
-            if dest.is_dir():
-                for item in src.rglob("*"):
-                    if item.is_file():
-                        relative = item.relative_to(src)
-                        existing = dest / relative
-                        if existing.exists():
-                            logger.warning(
-                                ".rootcoz/%s/%s from '%s' overwrites existing file",
-                                subdir,
-                                relative,
-                                repo_name,
-                            )
             try:
+                # Warn about files that will be overwritten by a later repo
+                if dest.is_dir():
+                    for item in src.rglob("*"):
+                        if item.is_file():
+                            relative = item.relative_to(src)
+                            existing = dest / relative
+                            if existing.exists():
+                                logger.warning(
+                                    ".rootcoz/%s/%s from '%s' overwrites existing file",
+                                    subdir,
+                                    relative,
+                                    repo_name,
+                                )
                 shutil.copytree(src, dest, symlinks=True, dirs_exist_ok=True)
                 logger.info(
                     "Copied .rootcoz/%s/ from '%s' to workspace .pi/%s/",
