@@ -6787,7 +6787,11 @@ async def classify_test(request: Request, body: ClassifyTestRequest) -> dict:
     # Force created_by: AI callers are always attributed to AI_SYSTEM_USERNAME,
     # regardless of the authenticated session username.
     # Human callers use their session username.
-    created_by = AI_SYSTEM_USERNAME if is_ai_caller else (request.state.username or AI_SYSTEM_USERNAME)
+    created_by = (
+        AI_SYSTEM_USERNAME
+        if is_ai_caller
+        else (request.state.username or AI_SYSTEM_USERNAME)
+    )
 
     # Human classifications are visible immediately.
     # AI classifications become visible after analysis completes

@@ -1954,8 +1954,7 @@ async def find_matching_previous_analysis(
             "  AND fr.username != ? AND fr.username != ''"
             ") "
             "ORDER BY fh.analyzed_at DESC, fh.id DESC LIMIT 1",
-            (job_name, test_name, current_job_id, child_job_name,
-             AI_SYSTEM_USERNAME),
+            (job_name, test_name, current_job_id, child_job_name, AI_SYSTEM_USERNAME),
         )
         row = await cursor.fetchone()
         if row is None:

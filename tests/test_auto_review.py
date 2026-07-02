@@ -214,9 +214,7 @@ class TestFindMatchingPreviousAnalysis:
                         "KNOWN_BUG",
                     ),
                 )
-                await _insert_human_review(
-                    db, "prev-job", "test_module.test_something"
-                )
+                await _insert_human_review(db, "prev-job", "test_module.test_something")
                 await db.commit()
 
             result = await storage.find_matching_previous_analysis(
@@ -446,12 +444,18 @@ class TestFindMatchingPreviousAnalysis:
                     ),
                 )
                 await _insert_human_review(
-                    db, "prev-job", "test_a",
-                    child_job_name="child-job-A", child_build_number=1,
+                    db,
+                    "prev-job",
+                    "test_a",
+                    child_job_name="child-job-A",
+                    child_build_number=1,
                 )
                 await _insert_human_review(
-                    db, "prev-job", "test_a",
-                    child_job_name="child-job-B", child_build_number=2,
+                    db,
+                    "prev-job",
+                    "test_a",
+                    child_job_name="child-job-B",
+                    child_build_number=2,
                 )
                 await db.commit()
 
@@ -487,14 +491,25 @@ class TestFindMatchingPreviousAnalysis:
                     "child_job_name, child_build_number) "
                     "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (
-                        "prev-job", "my-job", 100, "test_a", "",
-                        "sig-child", "", "", "child-job-A", 5,
+                        "prev-job",
+                        "my-job",
+                        100,
+                        "test_a",
+                        "",
+                        "sig-child",
+                        "",
+                        "",
+                        "child-job-A",
+                        5,
                     ),
                 )
                 # Human review stored with child_build_number=0 (wildcard)
                 await _insert_human_review(
-                    db, "prev-job", "test_a",
-                    child_job_name="child-job-A", child_build_number=0,
+                    db,
+                    "prev-job",
+                    "test_a",
+                    child_job_name="child-job-A",
+                    child_build_number=0,
                 )
                 await db.commit()
 
