@@ -23,7 +23,7 @@ import { CommentsSection } from './CommentsSection'
 import { ClassificationSelect } from './ClassificationSelect'
 import { PatternSelect } from './PatternSelect'
 import { BugCreationDialog } from './BugCreationDialog'
-import { TrackedInBadge, TrackInDialog } from './TrackedInBadge'
+import { TrackedInBadge, TrackInDialog, detectTrackerType } from './TrackedInBadge'
 import { ReAnalyzeDialog } from './ReAnalyzeDialog'
 import { useReviewSuggestion } from './useReviewSuggestion'
 import { ConfirmDialog } from '@/components/shared/ConfirmDialog'
@@ -395,8 +395,8 @@ export function FailureCard({ group, jobId, childJobName, childBuildNumber, inde
                 <ClassificationBadge classification={pattern} />
               </>
             )}
-            {trackedIn[rep.test_name] && trackedIn[rep.test_name].tracked_in_url ? (
-              <TrackedInBadge url={trackedIn[rep.test_name].tracked_in_url} type={trackedIn[rep.test_name].tracked_in_type} />
+            {trackedIn[repKey]?.tracked_in_url ? (
+              <TrackedInBadge url={trackedIn[repKey].tracked_in_url} type={trackedIn[repKey].tracked_in_type} />
             ) : !isViewer ? (
               <Tooltip>
                 <TooltipTrigger asChild>
@@ -747,8 +747,7 @@ export function FailureCard({ group, jobId, childJobName, childBuildNumber, inde
           }
           onIssueCreated={(url) => {
             // Auto-set tracked-in in local state (backend already persisted it)
-            const trackedType = url.includes('github.com') ? 'github' : url.includes('jira') || url.includes('atlassian') ? 'jira' : ''
-            dispatch({ type: 'SET_TRACKED_IN_ENTRY', payload: { testName: rep.test_name, entry: { tracked_in_url: url, tracked_in_type: trackedType } } })
+            dispatch({ type: 'SET_TRACKED_IN_ENTRY', payload: { testName: repKey, entry: { tracked_in_url: url, tracked_in_type: detectTrackerType(url) } } })
             void maybeSuggestBugReview(url)
           }}
         />
@@ -759,6 +758,9 @@ export function FailureCard({ group, jobId, childJobName, childBuildNumber, inde
         onOpenChange={setTrackInOpen}
         jobId={jobId}
         testName={rep.test_name}
+        trackedInKey={repKey}
+        childJobName={scopedChildJobName}
+        childBuildNumber={scopedChildBuildNumber}
       />
 
       <ConfirmDialog

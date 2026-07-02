@@ -298,13 +298,25 @@ class RootCozClient:
         return self._request("GET", f"/results/{job_id}")
 
     def set_tracked_in(
-        self, job_id: str, test_name: str, url: str, tracked_type: str = ""
+        self,
+        job_id: str,
+        test_name: str,
+        url: str,
+        tracked_type: str = "",
+        *,
+        child_job_name: str = "",
+        child_build_number: int = 0,
     ) -> dict:
         """Set tracked-in URL for a failure. PUT /results/{job_id}/tracked-in"""
+        body: dict = {"test_name": test_name, "url": url, "type": tracked_type}
+        if child_job_name:
+            body["child_job_name"] = child_job_name
+        if child_build_number:
+            body["child_build_number"] = child_build_number
         return self._request(
             "PUT",
             f"/results/{job_id}/tracked-in",
-            json={"test_name": test_name, "url": url, "type": tracked_type},
+            json=body,
         )
 
     def get_tracked_in(self, job_id: str) -> dict:

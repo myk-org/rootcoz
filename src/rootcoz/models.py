@@ -851,7 +851,7 @@ class CreateIssueResponse(BaseModel):
     )
 
 
-class SetTrackedInRequest(BaseModel):
+class SetTrackedInRequest(_ChildJobFieldsValidator):
     """Request body for setting/clearing the tracked-in URL on a failure."""
 
     test_name: str = Field(description="Full test name")

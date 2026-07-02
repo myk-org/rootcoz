@@ -5452,29 +5452,17 @@ async def create_jira_bug_endpoint(
     }
 
 
-async def _detect_tracker_type_via_http(url: str) -> str:
-    """Best-effort tracker type detection via HTTP HEAD request.
+def _detect_tracker_type(url: str) -> str:
+    """Detect tracker type from URL string patterns.
 
-    Follows redirects and checks final URL + response headers for
-    Jira/Atlassian indicators. Returns ``'jira'`` or ``''`` (never raises).
+    Returns ``'github'``, ``'jira'``, or ``''`` when unrecognized.
+    String-only — no HTTP requests (SSRF-safe).
     """
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            "curl",
-            "-sI",
-            "-L",
-            "--max-time",
-            "5",
-            url,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=10)
-        headers = stdout.decode().lower()
-        if "atlassian" in headers or "jira" in headers:
-            return "jira"
-    except Exception:
-        pass
+    url_lower = url.lower()
+    if "github.com" in url_lower:
+        return "github"
+    if "jira" in url_lower or "atlassian" in url_lower:
+        return "jira"
     return ""
 
 
@@ -5491,9 +5479,7 @@ async def set_tracked_in_endpoint(
     """
     _require_reviewer(request)
     _check_allow_list(request)
-    logger.debug(
-        f"PUT /results/{job_id}/tracked-in: test_name={body.test_name}, url={body.url}"
-    )
+    logger.debug(f"PUT /results/{job_id}/tracked-in: test_name={body.test_name}")
     result = await get_result(job_id)
     if not result:
         raise HTTPException(status_code=404, detail="Job not found")
@@ -5501,16 +5487,15 @@ async def set_tracked_in_endpoint(
     # Auto-detect type from URL if not provided
     tracked_type = body.type
     if body.url and not tracked_type:
-        url_lower = body.url.lower()
-        if "github.com" in url_lower:
-            tracked_type = "github"
-        elif "jira" in url_lower or "atlassian" in url_lower:
-            tracked_type = "jira"
-        else:
-            tracked_type = await _detect_tracker_type_via_http(body.url)
+        tracked_type = _detect_tracker_type(body.url)
 
     updated = await storage.set_tracked_in(
-        job_id, body.test_name, body.url, tracked_type
+        job_id,
+        body.test_name,
+        body.url,
+        tracked_type,
+        child_job_name=body.child_job_name,
+        child_build_number=body.child_build_number,
     )
     if updated == 0:
         raise HTTPException(
@@ -5528,9 +5513,11 @@ async def set_tracked_in_endpoint(
 @app.get("/results/{job_id}/tracked-in")
 async def get_tracked_in_endpoint(
     job_id: str,
+    request: Request,
     _: None = Depends(_bind_job_id),
 ) -> dict:
     """Return tracked-in data for all failures in a job."""
+    _require_reviewer(request)
     result = await get_result(job_id)
     if not result:
         raise HTTPException(status_code=404, detail="Job not found")

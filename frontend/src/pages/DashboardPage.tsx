@@ -405,7 +405,9 @@ export function DashboardPage() {
   }
 
   // Server-side pagination: sorted is already the current page
-  const totalPages = Math.max(1, Math.ceil(totalJobs / perPage))
+  // When review filter is active (client-side), use filtered count instead of server total
+  const displayTotal = reviewStatus !== 'all' ? filtered.length : totalJobs
+  const totalPages = Math.max(1, Math.ceil(displayTotal / perPage))
   const safePage = Math.min(page, totalPages)
   const pageJobs = sorted
 
@@ -501,9 +503,9 @@ export function DashboardPage() {
     setDeleting(true)
     try {
       await api.delete(`/results/${deleteTarget.job_id}`)
-      fetchSeqRef.current += 1
-      setJobs((prev) => prev.filter((j) => j.job_id !== deleteTarget.job_id))
       setDeleteTarget(null)
+      // Refetch to update totals and pagination
+      fetchJobs()
     } catch (err) {
       console.error('Failed to delete job:', err)
     } finally {
@@ -620,7 +622,7 @@ export function DashboardPage() {
         {/* Summary row: count + View Issues */}
         <div className="flex items-center gap-3">
           <p className="text-sm text-text-tertiary">
-            {totalJobs} analysis {totalJobs === 1 ? 'run' : 'runs'}
+            {displayTotal} analysis {displayTotal === 1 ? 'run' : 'runs'}
           </p>
           <Tooltip>
             <TooltipTrigger asChild>

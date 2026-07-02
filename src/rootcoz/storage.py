@@ -2041,6 +2041,9 @@ async def set_tracked_in(
     test_name: str,
     url: str,
     tracked_type: str,
+    *,
+    child_job_name: str = "",
+    child_build_number: int = 0,
 ) -> int:
     """Set or clear the tracked-in URL for a failure in failure_history.
 
@@ -2049,37 +2052,61 @@ async def set_tracked_in(
         test_name: Full test name.
         url: Tracking issue URL (empty string to clear).
         tracked_type: Tracker type ('jira', 'github', or '' to clear).
+        child_job_name: Child job name (empty for top-level failures).
+        child_build_number: Child build number (0 for top-level/wildcard).
 
     Returns:
         Number of rows updated.
     """
+    sql = (
+        "UPDATE failure_history SET tracked_in_url = ?, tracked_in_type = ? "
+        "WHERE job_id = ? AND test_name = ?"
+    )
+    params: list = [url, tracked_type, job_id, test_name]
+    if child_job_name:
+        sql += " AND child_job_name = ?"
+        params.append(child_job_name)
+        if child_build_number > 0:
+            sql += " AND child_build_number = ?"
+            params.append(child_build_number)
     async with _connect_db() as db:
-        cursor = await db.execute(
-            "UPDATE failure_history SET tracked_in_url = ?, tracked_in_type = ? "
-            "WHERE job_id = ? AND test_name = ?",
-            (url, tracked_type, job_id, test_name),
-        )
+        cursor = await db.execute(sql, params)
         await db.commit()
         return cursor.rowcount
+
+
+def _tracked_in_key(
+    test_name: str, child_job_name: str, child_build_number: int
+) -> str:
+    """Build a lookup key for tracked-in data matching the frontend reviewKey format."""
+    if child_job_name:
+        return f"{child_job_name}#{child_build_number}::{test_name}"
+    return test_name
 
 
 async def get_tracked_in_for_job(job_id: str) -> dict[str, dict]:
     """Return tracked-in data for all failures in a job.
 
     Returns:
-        Dict mapping test_name to {tracked_in_url, tracked_in_type}.
-        Only tests with a non-empty tracked_in_url are included.
+        Dict keyed by composite key (matching reviewKey format) to
+        ``{tracked_in_url, tracked_in_type}``.
+        Only failures with a non-empty tracked_in_url are included.
     """
     async with _connect_db() as db:
         cursor = await db.execute(
-            "SELECT test_name, tracked_in_url, tracked_in_type "
+            "SELECT test_name, child_job_name, child_build_number, "
+            "tracked_in_url, tracked_in_type "
             "FROM failure_history "
             "WHERE job_id = ? AND tracked_in_url != ''",
             (job_id,),
         )
         rows = await cursor.fetchall()
         return {
-            row["test_name"]: {
+            _tracked_in_key(
+                row["test_name"],
+                row["child_job_name"],
+                row["child_build_number"],
+            ): {
                 "tracked_in_url": row["tracked_in_url"],
                 "tracked_in_type": row["tracked_in_type"],
             }
@@ -2797,6 +2824,9 @@ async def list_results_for_dashboard(
         if limit > 0:
             sql += " LIMIT ?"
             params.append(limit)
+        elif offset > 0:
+            # SQLite requires LIMIT before OFFSET; use -1 for unlimited
+            sql += " LIMIT -1"
         if offset > 0:
             sql += " OFFSET ?"
             params.append(offset)
@@ -2870,30 +2900,49 @@ async def list_results_for_dashboard_filtered(
         conditions.append(f"({' OR '.join(status_parts)})")
 
     if date_from:
-        conditions.append("date(r.created_at) >= ?")
-        params.append(date_from)
+        # Use timestamp bounds instead of date() to allow index usage
+        conditions.append("r.created_at >= ?")
+        params.append(f"{date_from}T00:00:00")
 
     if date_to:
-        conditions.append("date(r.created_at) <= ?")
-        params.append(date_to)
+        conditions.append("r.created_at <= ?")
+        params.append(f"{date_to}T23:59:59")
+
+    _MAX_IN_CLAUSE = 1000
 
     if job_names is not None:
         if not job_names:
             # No matching job names from metadata — return empty
             return {"jobs": [], "total": 0}
-        placeholders = ", ".join("?" for _ in job_names)
+        if len(job_names) > _MAX_IN_CLAUSE:
+            logger.warning(
+                "Dashboard filter: job_names set has %d entries (limit %d). "
+                "Results may be incomplete.",
+                len(job_names),
+                _MAX_IN_CLAUSE,
+            )
+        names_list = sorted(job_names)[:_MAX_IN_CLAUSE]
+        placeholders = ", ".join("?" for _ in names_list)
         conditions.append(
             f"json_extract(r.result_json, '$.job_name') IN ({placeholders})"
         )
-        params.extend(sorted(job_names))
+        params.extend(names_list)
 
     if exclude_job_names:
-        placeholders = ", ".join("?" for _ in exclude_job_names)
+        if len(exclude_job_names) > _MAX_IN_CLAUSE:
+            logger.warning(
+                "Dashboard filter: exclude_job_names set has %d entries (limit %d). "
+                "Some exclusions may be skipped.",
+                len(exclude_job_names),
+                _MAX_IN_CLAUSE,
+            )
+        exclude_list = sorted(exclude_job_names)[:_MAX_IN_CLAUSE]
+        placeholders = ", ".join("?" for _ in exclude_list)
         conditions.append(
             f"(json_extract(r.result_json, '$.job_name') IS NULL OR "
             f"json_extract(r.result_json, '$.job_name') NOT IN ({placeholders}))"
         )
-        params.extend(sorted(exclude_job_names))
+        params.extend(exclude_list)
 
     where = " WHERE " + " AND ".join(conditions) if conditions else ""
 
@@ -2909,6 +2958,9 @@ async def list_results_for_dashboard_filtered(
         if limit > 0:
             sql += " LIMIT ?"
             fetch_params.append(limit)
+        elif offset > 0:
+            # SQLite requires LIMIT before OFFSET; use -1 for unlimited
+            sql += " LIMIT -1"
         if offset > 0:
             sql += " OFFSET ?"
             fetch_params.append(offset)

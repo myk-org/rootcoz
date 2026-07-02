@@ -664,12 +664,21 @@ def set_tracked_in_cmd(
     tracked_type: str = typer.Option(
         "", "--type", help="Tracker type: jira, github, or auto-detect."
     ),
+    child_job_name: str = typer.Option("", "--child-job"),
+    child_build_number: int = typer.Option(0, "--child-build"),
     json_output: bool = _JSON_OPTION,
 ):
     """Set or clear the tracked-in URL for a test failure."""
     data = _run_client_command(
         json_output,
-        lambda c: c.set_tracked_in(job_id, test_name, url, tracked_type),
+        lambda c: c.set_tracked_in(
+            job_id,
+            test_name,
+            url,
+            tracked_type,
+            child_job_name=child_job_name,
+            child_build_number=child_build_number,
+        ),
         emit_output=False,
     )
     if not _state.get("json", False):

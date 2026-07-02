@@ -16,6 +16,14 @@ import { isSafeHref } from '@/lib/autoLink'
 import { useReportDispatch } from './ReportContext'
 import { ExternalLink, Link2 } from 'lucide-react'
 
+/** Detect tracker type from URL string patterns (no HTTP requests). */
+export function detectTrackerType(url: string): string {
+  const lower = url.toLowerCase()
+  if (lower.includes('github.com')) return 'github'
+  if (lower.includes('jira') || lower.includes('atlassian')) return 'jira'
+  return ''
+}
+
 function TrackerIcon({ type }: { type: string }) {
   if (type === 'github') {
     return (
@@ -77,20 +85,19 @@ interface TrackInDialogProps {
   onOpenChange: (open: boolean) => void
   jobId: string
   testName: string
+  /** Composite key (reviewKey format) for tracked-in state dispatch. */
+  trackedInKey: string
+  childJobName?: string
+  childBuildNumber?: number
 }
 
-export function TrackInDialog({ open, onOpenChange, jobId, testName }: TrackInDialogProps) {
+export function TrackInDialog({ open, onOpenChange, jobId, testName, trackedInKey, childJobName, childBuildNumber }: TrackInDialogProps) {
   const dispatch = useReportDispatch()
   const [url, setUrl] = useState('')
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState('')
 
-  function detectType(inputUrl: string): string {
-    const lower = inputUrl.toLowerCase()
-    if (lower.includes('github.com')) return 'github'
-    if (lower.includes('jira') || lower.includes('atlassian')) return 'jira'
-    return ''
-  }
+  const detectType = detectTrackerType
 
   async function handleSave() {
     if (!url.trim()) return
@@ -99,11 +106,11 @@ export function TrackInDialog({ open, onOpenChange, jobId, testName }: TrackInDi
     try {
       const res = await api.put<{ tracked_in_url: string; tracked_in_type: string }>(
         `/results/${jobId}/tracked-in`,
-        { test_name: testName, url: url.trim(), type: detectType(url) },
+        { test_name: testName, url: url.trim(), type: detectType(url), child_job_name: childJobName ?? '', child_build_number: childBuildNumber ?? 0 },
       )
       dispatch({
         type: 'SET_TRACKED_IN_ENTRY',
-        payload: { testName, entry: { tracked_in_url: res.tracked_in_url, tracked_in_type: res.tracked_in_type } },
+        payload: { testName: trackedInKey, entry: { tracked_in_url: res.tracked_in_url, tracked_in_type: res.tracked_in_type } },
       })
       onOpenChange(false)
       setUrl('')
@@ -130,7 +137,7 @@ export function TrackInDialog({ open, onOpenChange, jobId, testName }: TrackInDi
               onChange={(e) => setUrl(e.target.value)}
               placeholder="https://jira.example.com/browse/PROJ-123"
               className="text-sm"
-              onKeyDown={(e) => { if (e.key === 'Enter' && url.trim()) handleSave() }}
+              onKeyDown={(e) => { if (e.key === 'Enter' && url.trim() && !saving) handleSave() }}
             />
           </div>
           {url.trim() && (
