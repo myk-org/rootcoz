@@ -1,4 +1,4 @@
-import { createContext, useContext, useEffect, useRef, type ReactNode } from 'react'
+import { createContext, useContext, useEffect, useRef, useState, type ReactNode } from 'react'
 import { useAuth } from '@/lib/auth'
 
 // ---------------------------------------------------------------------------
@@ -581,32 +581,27 @@ let nextSubId = 1
 
 export function SSEProvider({ children }: { children: ReactNode }) {
   const { authenticated } = useAuth()
-  const managerRef = useRef<(SSEManager & { destroy(): void }) | null>(null)
+  const [manager, setManager] = useState<(SSEManager & { destroy(): void }) | null>(null)
 
   // Create/destroy manager based on authentication state.
   // When the user logs out, the manager is destroyed so a logged-out
   // leader tab doesn't keep sending heartbeats and failing /api/stream
   // calls with 401 — blocking other tabs from taking over.
+  // Uses useState (not useRef) so the context value triggers a rerender
+  // when the manager is created after login.
   useEffect(() => {
     if (authenticated) {
-      if (!managerRef.current) {
-        managerRef.current =
-          typeof BroadcastChannel !== 'undefined'
-            ? createSSEManager()
-            : createFallbackManager()
-      }
+      const m = typeof BroadcastChannel !== 'undefined'
+        ? createSSEManager()
+        : createFallbackManager()
+      setManager(m)
+      return () => { m.destroy() }
     } else {
-      managerRef.current?.destroy()
-      managerRef.current = null
-    }
-
-    return () => {
-      managerRef.current?.destroy()
-      managerRef.current = null
+      setManager(prev => { prev?.destroy(); return null })
     }
   }, [authenticated])
 
-  const value = authenticated ? managerRef.current : null
+  const value = authenticated ? manager : null
 
   return <SSEContext.Provider value={value}>{children}</SSEContext.Provider>
 }

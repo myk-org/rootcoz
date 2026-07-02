@@ -5,6 +5,7 @@ import json
 import logging
 import math
 import os
+import re
 import sqlite3
 import time as _time
 import urllib.parse
@@ -392,6 +393,10 @@ _token_usage_listeners: set[asyncio.Event] = set()
 
 # Per-job chat change notifications
 _chat_listeners: dict[str, set[asyncio.Event]] = {}
+
+# Regex for validating job IDs in multiplexed SSE topics — prevents
+# SSE header injection via control characters in the event prefix.
+_VALID_JOB_ID_RE = re.compile(r"^[a-zA-Z0-9_-]{1,64}$")
 
 
 def notify_dashboard_changed() -> None:
@@ -6519,7 +6524,7 @@ async def stream_multiplexed(
             registrations.append(("dashboard", ev, _dashboard_listeners, None, ""))
         elif topic.startswith("results:"):
             job_id = topic[len("results:") :]
-            if not job_id or len(job_id) > 64:
+            if not job_id or not _VALID_JOB_ID_RE.match(job_id):
                 continue
             ev = asyncio.Event()
             registrations.append(
@@ -6527,7 +6532,7 @@ async def stream_multiplexed(
             )
         elif topic.startswith("comments:"):
             job_id = topic[len("comments:") :]
-            if not job_id or len(job_id) > 64:
+            if not job_id or not _VALID_JOB_ID_RE.match(job_id):
                 continue
             ev = asyncio.Event()
             registrations.append(
@@ -6535,7 +6540,7 @@ async def stream_multiplexed(
             )
         elif topic.startswith("chat:"):
             job_id = topic[len("chat:") :]
-            if not job_id or len(job_id) > 64:
+            if not job_id or not _VALID_JOB_ID_RE.match(job_id):
                 continue
             listener_key = f"{job_id}:{username}" if username else job_id
             ev = asyncio.Event()
