@@ -193,8 +193,9 @@ async def _list_gcs_junit_files(
     junit_files: list[str] = []
     page_token: str | None = None
     api_url = f"https://storage.googleapis.com/storage/v1/b/{bucket}/o"
+    max_pages = 100
 
-    while True:
+    for _page in range(max_pages):
         params: dict[str, str] = {"prefix": prefix}
         if page_token:
             params["pageToken"] = page_token
@@ -224,6 +225,12 @@ async def _list_gcs_junit_files(
         page_token = data.get("nextPageToken")
         if not page_token:
             break
+    else:
+        logger.warning(
+            "GCS JUnit listing exceeded %d pages for %s, truncating",
+            max_pages,
+            prefix,
+        )
 
     return junit_files
 

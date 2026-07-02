@@ -1478,11 +1478,12 @@ async def update_status(
         await db.commit()
 
 
-async def update_jenkins_url(job_id: str, jenkins_url: str) -> None:
+async def update_build_url(job_id: str, jenkins_url: str) -> None:
     """Update the jenkins_url DB column for an existing result.
 
     Used to persist the build URL after it becomes available (e.g. after
-    ProwSource.fetch() returns the Deck URL).
+    ProwSource.fetch() returns the Deck URL).  The DB column is named
+    ``jenkins_url`` for historical reasons but stores any CI build URL.
     """
     if not jenkins_url:
         return
