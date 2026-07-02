@@ -213,8 +213,7 @@ async def _list_gcs_junit_files(
         try:
             data = resp.json()
         except ValueError as exc:
-            logger.warning("GCS list JSON parse failed for prefix %s: %s", prefix, exc)
-            break
+            raise GCSAccessError("junit-listing-parse", 0, api_url) from exc
 
         for item in data.get("items", []):
             name = item.get("name", "")
