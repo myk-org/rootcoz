@@ -475,6 +475,39 @@ class TestFindMatchingPreviousAnalysis:
             assert result is not None
             assert result["error_signature"] == "sig-child-B"
 
+    async def test_wildcard_child_build_number_matches(self, setup_test_db):
+        """A review with child_build_number=0 (wildcard) should match any child build."""
+        with patch.object(storage, "DB_PATH", setup_test_db):
+            async with storage._connect_db() as db:
+                # failure_history has a specific child build number
+                await db.execute(
+                    "INSERT INTO failure_history "
+                    "(job_id, job_name, build_number, test_name, error_message, "
+                    "error_signature, classification, pattern, "
+                    "child_job_name, child_build_number) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        "prev-job", "my-job", 100, "test_a", "",
+                        "sig-child", "", "", "child-job-A", 5,
+                    ),
+                )
+                # Human review stored with child_build_number=0 (wildcard)
+                await _insert_human_review(
+                    db, "prev-job", "test_a",
+                    child_job_name="child-job-A", child_build_number=0,
+                )
+                await db.commit()
+
+            # Wildcard review (build=0) should match failure_history (build=5)
+            result = await storage.find_matching_previous_analysis(
+                job_name="my-job",
+                test_name="test_a",
+                current_job_id="current-job",
+                child_job_name="child-job-A",
+            )
+            assert result is not None
+            assert result["error_signature"] == "sig-child"
+
     async def test_top_level_does_not_match_child(self, setup_test_db):
         """Top-level lookup (empty child_job_name) should not match child rows."""
         with patch.object(storage, "DB_PATH", setup_test_db):

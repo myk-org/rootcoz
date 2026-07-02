@@ -1934,6 +1934,9 @@ async def find_matching_previous_analysis(
         # human-validated reviews — not from other auto-reviews
         # (username = AI_SYSTEM_USERNAME) or legacy rows with blank
         # usernames (migrated before the username column existed).
+        # child_build_number matching: fr.child_build_number=0 acts as a
+        # wildcard (matches any fh.child_build_number), consistent with
+        # the API model where child_build_number=0 means "not specified".
         cursor = await db.execute(
             "SELECT fh.job_id, fh.build_number, fh.error_signature, "
             "fh.classification, fh.pattern, fh.analyzed_at "
@@ -1945,7 +1948,8 @@ async def find_matching_previous_analysis(
             "  WHERE fr.job_id = fh.job_id "
             "  AND fr.test_name = fh.test_name "
             "  AND fr.child_job_name = fh.child_job_name "
-            "  AND fr.child_build_number = fh.child_build_number "
+            "  AND (fr.child_build_number = fh.child_build_number "
+            "       OR fr.child_build_number = 0) "
             "  AND fr.reviewed = 1 "
             "  AND fr.username != ? AND fr.username != ''"
             ") "
