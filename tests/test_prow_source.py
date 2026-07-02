@@ -187,6 +187,38 @@ class TestFetchGcsText:
                     label="test", max_size=_MAX_SIZE_FINISHED,
                 )
 
+    async def test_oversized_build_log_raises(self):
+        """Build-log.txt exceeding _MAX_SIZE_BUILD_LOG raises GCSOversizeError."""
+        transport = httpx.MockTransport(
+            lambda req: httpx.Response(
+                200, text="x",
+                headers={"content-length": str(_MAX_SIZE_BUILD_LOG + 1)},
+            )
+        )
+        async with httpx.AsyncClient(transport=transport) as client:
+            with pytest.raises(GCSOversizeError) as exc_info:
+                await _fetch_gcs_text(
+                    client, "http://example.com/build-log.txt",
+                    label="build-log.txt", max_size=_MAX_SIZE_BUILD_LOG,
+                )
+        assert exc_info.value.max_size == _MAX_SIZE_BUILD_LOG
+
+    async def test_oversized_junit_xml_raises(self):
+        """JUnit XML exceeding _MAX_SIZE_JUNIT_XML raises GCSOversizeError."""
+        transport = httpx.MockTransport(
+            lambda req: httpx.Response(
+                200, text="x",
+                headers={"content-length": str(_MAX_SIZE_JUNIT_XML + 1)},
+            )
+        )
+        async with httpx.AsyncClient(transport=transport) as client:
+            with pytest.raises(GCSOversizeError) as exc_info:
+                await _fetch_gcs_text(
+                    client, "http://example.com/junit.xml",
+                    label="junit.xml", max_size=_MAX_SIZE_JUNIT_XML,
+                )
+        assert exc_info.value.max_size == _MAX_SIZE_JUNIT_XML
+
     async def test_content_length_non_numeric_ignored(self):
         """Non-numeric content-length header doesn't crash."""
         transport = httpx.MockTransport(
