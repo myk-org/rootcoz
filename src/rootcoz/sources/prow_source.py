@@ -94,6 +94,20 @@ class GCSAccessError(Exception):
         )
 
 
+class GCSOversizeError(GCSAccessError):
+    """GCS artifact exceeds the maximum allowed download size."""
+
+    def __init__(self, label: str, size: int, max_size: int, url: str) -> None:
+        self.size = size
+        self.max_size = max_size
+        super().__init__(label, 0, url)
+        # Override message from parent
+        Exception.__init__(
+            self,
+            f"GCS {label} too large ({size} bytes, max {max_size}): {url}",
+        )
+
+
 async def _fetch_gcs_text(
     client: httpx.AsyncClient,
     url: str,
@@ -115,6 +129,7 @@ async def _fetch_gcs_text(
 
     Raises:
         GCSAccessError: On non-404 HTTP errors (403, 500, etc.).
+        GCSOversizeError: When the response exceeds *max_size*.
     """
     try:
         resp = await client.get(url)
@@ -135,7 +150,10 @@ async def _fetch_gcs_text(
         logger.warning("GCS network error for %s: %s", label or url, exc)
         raise GCSAccessError(label or "file", 0, url) from exc
 
-    content_length = int(resp.headers.get("content-length", 0))
+    try:
+        content_length = int(resp.headers.get("content-length", 0))
+    except (ValueError, TypeError):
+        content_length = 0
     if content_length > max_size:
         logger.warning(
             "GCS %s too large (%d bytes, max %d): %s",
@@ -144,16 +162,17 @@ async def _fetch_gcs_text(
             max_size,
             url,
         )
-        return None
+        raise GCSOversizeError(label or "file", content_length, max_size, url)
     text = resp.text
     if len(text) > max_size:
         logger.warning(
-            "GCS %s truncated at %d bytes (max %d)",
+            "GCS %s too large (%d bytes, max %d): %s",
             label or "file",
             len(text),
             max_size,
+            url,
         )
-        return text[:max_size]
+        raise GCSOversizeError(label or "file", len(text), max_size, url)
     return text
 
 

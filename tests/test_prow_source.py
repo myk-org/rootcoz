@@ -12,6 +12,7 @@ from rootcoz.sources.prow_source import (
 
     GCS_BASE_URL,
     GCSAccessError,
+    GCSOversizeError,
     ProwSource,
     _MAX_SIZE_BUILD_LOG,
     _MAX_SIZE_FINISHED,
@@ -156,23 +157,47 @@ class TestFetchGcsText:
                 await _fetch_gcs_text(client, "http://example.com/forbidden.txt", label="test")
         assert exc_info.value.status_code == 403
 
-    async def test_oversized_content_length_returns_none(self):
+    async def test_oversized_content_length_raises(self):
+        """Content-length exceeding max_size raises GCSOversizeError."""
         transport = httpx.MockTransport(
-            lambda req: httpx.Response(200, text="x", headers={"content-length": "999999999"})
+            lambda req: httpx.Response(
+                200, text="x",
+                headers={"content-length": str(_MAX_SIZE_FINISHED + 1)},
+            )
         )
         async with httpx.AsyncClient(transport=transport) as client:
-            result = await _fetch_gcs_text(client, "http://example.com/big.txt", max_size=1000)
-        assert result is None
+            with pytest.raises(GCSOversizeError) as exc_info:
+                await _fetch_gcs_text(
+                    client, "http://example.com/big.txt",
+                    label="test", max_size=_MAX_SIZE_FINISHED,
+                )
+        assert exc_info.value.size == _MAX_SIZE_FINISHED + 1
+        assert exc_info.value.max_size == _MAX_SIZE_FINISHED
 
-    async def test_oversized_body_returns_none(self):
-        """Large response (content-length > max_size) returns None."""
-        big_text = "x" * 2000
+    async def test_oversized_body_raises(self):
+        """Body exceeding max_size raises GCSOversizeError."""
+        big_text = "x" * (_MAX_SIZE_FINISHED + 100)
         transport = httpx.MockTransport(
             lambda req: httpx.Response(200, text=big_text)
         )
         async with httpx.AsyncClient(transport=transport) as client:
-            result = await _fetch_gcs_text(client, "http://example.com/big.txt", max_size=1000)
-        assert result is None
+            with pytest.raises(GCSOversizeError):
+                await _fetch_gcs_text(
+                    client, "http://example.com/big.txt",
+                    label="test", max_size=_MAX_SIZE_FINISHED,
+                )
+
+    async def test_content_length_non_numeric_ignored(self):
+        """Non-numeric content-length header doesn't crash."""
+        transport = httpx.MockTransport(
+            lambda req: httpx.Response(
+                200, text="hello",
+                headers={"content-length": "unknown"},
+            )
+        )
+        async with httpx.AsyncClient(transport=transport) as client:
+            result = await _fetch_gcs_text(client, "http://example.com/file.txt")
+        assert result == "hello"
 
 
 # ---------------------------------------------------------------------------
