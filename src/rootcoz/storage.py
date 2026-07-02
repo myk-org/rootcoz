@@ -2920,20 +2920,11 @@ async def list_results_for_dashboard_filtered(
             "WHERE fr.job_id = r.job_id AND fr.reviewed = 1)"
         )
 
-    _MAX_IN_CLAUSE = 1000
-
     if job_names is not None:
         if not job_names:
             # No matching job names from metadata — return empty
             return {"jobs": [], "total": 0}
-        if len(job_names) > _MAX_IN_CLAUSE:
-            logger.warning(
-                "Dashboard filter: job_names set has %d entries (limit %d). "
-                "Results may be incomplete.",
-                len(job_names),
-                _MAX_IN_CLAUSE,
-            )
-        names_list = sorted(job_names)[:_MAX_IN_CLAUSE]
+        names_list = sorted(job_names)
         placeholders = ", ".join("?" for _ in names_list)
         conditions.append(
             f"json_extract(r.result_json, '$.job_name') IN ({placeholders})"
@@ -2941,14 +2932,7 @@ async def list_results_for_dashboard_filtered(
         params.extend(names_list)
 
     if exclude_job_names:
-        if len(exclude_job_names) > _MAX_IN_CLAUSE:
-            logger.warning(
-                "Dashboard filter: exclude_job_names set has %d entries (limit %d). "
-                "Some exclusions may be skipped.",
-                len(exclude_job_names),
-                _MAX_IN_CLAUSE,
-            )
-        exclude_list = sorted(exclude_job_names)[:_MAX_IN_CLAUSE]
+        exclude_list = sorted(exclude_job_names)
         placeholders = ", ".join("?" for _ in exclude_list)
         conditions.append(
             f"(json_extract(r.result_json, '$.job_name') IS NULL OR "

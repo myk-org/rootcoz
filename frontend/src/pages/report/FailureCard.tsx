@@ -23,7 +23,7 @@ import { CommentsSection } from './CommentsSection'
 import { ClassificationSelect } from './ClassificationSelect'
 import { PatternSelect } from './PatternSelect'
 import { BugCreationDialog } from './BugCreationDialog'
-import { TrackedInBadge, TrackInDialog, detectTrackerType } from './TrackedInBadge'
+import { TrackedInBadge, TrackInDialog } from './TrackedInBadge'
 import { ReAnalyzeDialog } from './ReAnalyzeDialog'
 import { useReviewSuggestion } from './useReviewSuggestion'
 import { ConfirmDialog } from '@/components/shared/ConfirmDialog'
@@ -747,7 +747,7 @@ export function FailureCard({ group, jobId, childJobName, childBuildNumber, inde
           }
           onIssueCreated={(url) => {
             // Auto-set tracked-in in local state (backend already persisted it)
-            dispatch({ type: 'SET_TRACKED_IN_ENTRY', payload: { testName: repKey, entry: { tracked_in_url: url, tracked_in_type: detectTrackerType(url) } } })
+            dispatch({ type: 'SET_TRACKED_IN_ENTRY', payload: { testName: repKey, entry: { tracked_in_url: url, tracked_in_type: bugTarget! } } })
             void maybeSuggestBugReview(url)
           }}
         />

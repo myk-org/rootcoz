@@ -8537,6 +8537,12 @@ async def api_dashboard_filtered(
     Filters are applied in SQL before LIMIT, so older jobs are reachable
     when filters match them. Returns ``{jobs, total}`` for pagination.
     """
+    if review_status not in ("all", "reviewed", "not_reviewed"):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid review_status '{review_status}'. Must be one of: all, not_reviewed, reviewed",
+        )
+
     team, tier, version, label, exclude_label = _unpack_metadata_filters(
         filters, "GET /api/dashboard/filtered"
     )

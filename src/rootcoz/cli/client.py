@@ -314,8 +314,8 @@ class RootCozClient:
         body: dict = {"test_name": test_name, "url": url, "type": tracked_type}
         if child_job_name:
             body["child_job_name"] = child_job_name
-        if child_build_number:
-            body["child_build_number"] = child_build_number
+            if child_build_number:
+                body["child_build_number"] = child_build_number
         return self._request(
             "PUT",
             f"/results/{job_id}/tracked-in",
