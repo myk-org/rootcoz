@@ -432,6 +432,8 @@ class Settings(BaseSettings):
             "admin_wait_approve_msg",
             "ai_provider",
             "ai_model",
+            "prow_url",
+            "gcs_bucket",
         ):
             value = getattr(self, field_name)
             if isinstance(value, str):

@@ -2616,7 +2616,7 @@ async def _preflight_sidecar_check(
     ai_provider: str,
     ai_model: str,
     display_name: str,
-    build_number: int | None = None,
+    build_number: int | str | None = None,
     jenkins_url: str = "",
     job_name: str = "",
     source_warnings: list[str] | None = None,
@@ -3351,7 +3351,7 @@ async def _enqueue_non_jenkins_analysis(
     if analysis_type == "prow" and body.prow_job_name:
         initial_result["job_name"] = body.prow_job_name
         if body.build_id and body.build_id.isdigit():
-            initial_result["build_number"] = int(body.build_id)
+            initial_result["build_number"] = body.build_id  # String — Prow IDs exceed JS MAX_SAFE_INTEGER
     initial_result["request_params"]["submitted_by"] = username
     _stamp_reanalysis_metadata(
         initial_result["request_params"],
@@ -3546,7 +3546,7 @@ async def _process_non_jenkins_analysis(
         if body.type == "prow" and body.prow_job_name:
             data["job_name"] = body.prow_job_name
             if body.build_id and body.build_id.isdigit():
-                data["build_number"] = int(body.build_id)
+                data["build_number"] = body.build_id  # String — Prow IDs exceed JS MAX_SAFE_INTEGER
 
     def _stamp_source_warnings(data: dict) -> None:
         """Attach source warnings (GCS errors, oversize artifacts) to result."""
@@ -3638,9 +3638,9 @@ async def _process_non_jenkins_analysis(
         notify_job_status_changed(job_id)
 
         # Pre-flight: verify AI is reachable before spawning parallel tasks
-        _preflight_build_number: int | None = None
+        _preflight_build_number: int | str | None = None
         if body.type == "prow" and body.build_id and body.build_id.isdigit():
-            _preflight_build_number = int(body.build_id)
+            _preflight_build_number = body.build_id  # String — Prow IDs exceed JS MAX_SAFE_INTEGER
         if not await _preflight_sidecar_check(
             job_id,
             ai_provider,
@@ -3837,6 +3837,26 @@ async def _process_non_jenkins_analysis(
             unique_errors = 1
             test_failures = [synthetic_failure]
         elif not test_failures:
+            if source_result.warnings and not console_context:
+                # All data sources errored — report as failed, not clean
+                analysis_result = FailureAnalysisResult(
+                    job_id=job_id,
+                    status="failed",
+                    summary=f"Could not fetch test data: {'; '.join(source_result.warnings)}",
+                    ai_provider=ai_provider,
+                    ai_model=ai_model,
+                )
+                result_data = analysis_result.model_dump(mode="json")
+                result_data["error"] = analysis_result.summary
+                result_data["job_name"] = display_name
+                _stamp_result_metadata(result_data)
+                await _preserve_request_params(job_id, result_data)
+                await update_status(job_id, "failed", result_data)
+                notify_active_count_changed()
+                notify_dashboard_changed()
+                notify_job_status_changed(job_id)
+                return
+
             # No failures and no console context — nothing to analyze
             analysis_result = FailureAnalysisResult(
                 job_id=job_id,

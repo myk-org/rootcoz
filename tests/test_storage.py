@@ -1354,3 +1354,27 @@ class TestRBACMigration:
                 await storage.change_user_role("badtest", "user")
             with pytest.raises(ValueError, match="Invalid role"):
                 await storage.change_user_role("badtest", "superuser")
+
+
+class TestUpdateBuildUrl:
+    """Tests for update_build_url()."""
+
+    async def test_url_persisted(self, setup_test_db: Path) -> None:
+        """Happy path: build URL is persisted and retrievable."""
+        with patch.object(storage, "DB_PATH", setup_test_db):
+            await storage.save_result("job-url", "", "pending", {})
+            await storage.update_build_url("job-url", "https://prow.example.com/view/job/42")
+            row = await storage.get_result("job-url")
+            assert row is not None
+            assert row["jenkins_url"] == "https://prow.example.com/view/job/42"
+
+    async def test_empty_string_noop(self, setup_test_db: Path) -> None:
+        """Empty string is a no-op — existing URL stays unchanged."""
+        with patch.object(storage, "DB_PATH", setup_test_db):
+            await storage.save_result(
+                "job-noop", "https://original.url/job/1", "pending", {}
+            )
+            await storage.update_build_url("job-noop", "")
+            row = await storage.get_result("job-noop")
+            assert row is not None
+            assert row["jenkins_url"] == "https://original.url/job/1"

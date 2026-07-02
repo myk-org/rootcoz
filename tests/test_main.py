@@ -810,6 +810,73 @@ class TestAnalyzeProwEndpoint:
         )
         assert response.status_code == 422
 
+    async def test_prow_gcs_errors_produce_failed_not_completed(
+        self, temp_db_path: Path
+    ) -> None:
+        """When all GCS fetches error, the result must be 'failed', not 'completed'."""
+        from rootcoz.main import _process_non_jenkins_analysis
+        from rootcoz.models import UnifiedAnalyzeRequest
+        from rootcoz.sources.base import CISourceResult
+
+        body = UnifiedAnalyzeRequest(
+            type="prow",
+            prow_job_name="my-prow-job",
+            build_id="99",
+            prow_url="https://prow.example.com",
+            gcs_bucket="test-bucket",
+            ai_provider="claude",
+            ai_model="test-model",
+        )
+        merged = Settings(
+            prow_url="https://prow.example.com",
+            gcs_bucket="test-bucket",
+        )
+        job_id = "prow-gcs-error-test"
+
+        gcs_error_result = CISourceResult(
+            failures=[],
+            console_context="",
+            build_passed=False,
+            build_url="https://prow.example.com/view/gs/test-bucket/logs/my-prow-job/99",
+            warnings=["GCS junit-listing returned 403: https://storage.googleapis.com/storage/v1/b/test-bucket/o"],
+        )
+
+        with (
+            patch.object(storage, "DB_PATH", temp_db_path),
+            patch(
+                "rootcoz.sources.prow_source.ProwSource.fetch",
+                new_callable=AsyncMock,
+                return_value=gcs_error_result,
+            ),
+            _patch_preflight(),
+        ):
+            await storage.init_db()
+            await storage.save_result(job_id, "", "pending", {})
+
+            await _process_non_jenkins_analysis(
+                job_id=job_id,
+                body=body,
+                merged=merged,
+                display_name="my-prow-job-99",
+                ai_provider="claude",
+                ai_model="test-model",
+                peer_ai_configs=None,
+                tests_repo_url="",
+                tests_repo_ref="",
+                resolved_tests_repo_token="",
+                additional_repos_list=[],
+                base_url="",
+            )
+
+            row = await storage.get_result(job_id)
+            assert row is not None
+            assert row["status"] == "failed"
+            import json
+
+            result = json.loads(row["result"]) if isinstance(row["result"], str) else row["result"]
+            assert "Could not fetch test data" in result.get("summary", "")
+            assert result.get("source_warnings")
+
 
 class TestResultsEndpoints:
     """Tests for the /results endpoints."""
