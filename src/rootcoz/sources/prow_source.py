@@ -28,6 +28,11 @@ GCS_BASE_URL = "https://storage.googleapis.com"
 # HTTP timeout for GCS requests (seconds)
 _HTTP_TIMEOUT = 60
 
+# Maximum download sizes per artifact type (bytes)
+_MAX_SIZE_FINISHED = 1_000_000  # 1 MB
+_MAX_SIZE_BUILD_LOG = 10_000_000  # 10 MB
+_MAX_SIZE_JUNIT_XML = 5_000_000  # 5 MB
+
 
 def _gcs_url(bucket: str, *path_parts: str) -> str:
     """Build an HTTPS URL for a GCS object.
@@ -77,18 +82,39 @@ def _parse_junit_failures(raw_xml: str) -> list[FailedTest]:
         return []
 
 
+class GCSAccessError(Exception):
+    """Non-404 HTTP error when accessing GCS (403, 500, etc.)."""
+
+    def __init__(self, label: str, status_code: int, url: str) -> None:
+        self.label = label
+        self.status_code = status_code
+        self.url = url
+        super().__init__(
+            f"GCS {label} returned {status_code}: {url}"
+        )
+
+
 async def _fetch_gcs_text(
-    client: httpx.AsyncClient, url: str, *, label: str = ""
+    client: httpx.AsyncClient,
+    url: str,
+    *,
+    label: str = "",
+    max_size: int = _MAX_SIZE_JUNIT_XML,
 ) -> str | None:
-    """Fetch a text file from GCS, returning None on 404.
+    """Fetch a text file from GCS.
 
     Args:
         client: httpx async client.
         url: Full URL to fetch.
         label: Human-readable label for log messages.
+        max_size: Maximum response size in bytes.  Responses exceeding
+            this are truncated and a warning is logged.
 
     Returns:
-        Response text on success, None on 404 or error.
+        Response text on success, ``None`` on 404.
+
+    Raises:
+        GCSAccessError: On non-404 HTTP errors (403, 500, etc.).
     """
     try:
         resp = await client.get(url)
@@ -96,13 +122,39 @@ async def _fetch_gcs_text(
             logger.debug("GCS %s not found: %s", label or "file", url)
             return None
         resp.raise_for_status()
-        return resp.text
     except httpx.HTTPStatusError as exc:
-        logger.warning("GCS fetch failed for %s (%s): %s", label or url, exc.response.status_code, exc)
-        return None
+        status = exc.response.status_code
+        if status == 404:
+            logger.debug("GCS %s not found: %s", label or "file", url)
+            return None
+        logger.warning(
+            "GCS %s access error (%d): %s", label or "file", status, url
+        )
+        raise GCSAccessError(label or "file", status, url) from exc
     except httpx.HTTPError as exc:
-        logger.warning("GCS fetch error for %s: %s", label or url, exc)
+        logger.warning("GCS network error for %s: %s", label or url, exc)
+        raise GCSAccessError(label or "file", 0, url) from exc
+
+    content_length = int(resp.headers.get("content-length", 0))
+    if content_length > max_size:
+        logger.warning(
+            "GCS %s too large (%d bytes, max %d): %s",
+            label or "file",
+            content_length,
+            max_size,
+            url,
+        )
         return None
+    text = resp.text
+    if len(text) > max_size:
+        logger.warning(
+            "GCS %s truncated at %d bytes (max %d)",
+            label or "file",
+            len(text),
+            max_size,
+        )
+        return text[:max_size]
+    return text
 
 
 async def _list_gcs_junit_files(
@@ -227,11 +279,19 @@ class ProwSource(CISource):
         Returns:
             Normalized CISourceResult.
         """
+        access_warnings: list[str] = []
+
         # ------------------------------------------------------------------
         # 1. Fetch finished.json to check build result
         # ------------------------------------------------------------------
         finished_url = _gcs_url(self.gcs_bucket, self._gcs_prefix, "finished.json")
-        finished_text = await _fetch_gcs_text(client, finished_url, label="finished.json")
+        try:
+            finished_text = await _fetch_gcs_text(
+                client, finished_url, label="finished.json", max_size=_MAX_SIZE_FINISHED
+            )
+        except GCSAccessError as exc:
+            access_warnings.append(str(exc))
+            finished_text = None
 
         if finished_text:
             try:
@@ -258,7 +318,7 @@ class ProwSource(CISource):
                 logger.warning("Failed to parse finished.json: %s", exc)
         else:
             logger.info(
-                "No finished.json found for %s/%s — job may still be running",
+                "No finished.json found for %s/%s \u2014 job may still be running",
                 self.job_name,
                 self.build_id,
             )
@@ -267,7 +327,13 @@ class ProwSource(CISource):
         # 2. Fetch build-log.txt for console context
         # ------------------------------------------------------------------
         build_log_url = _gcs_url(self.gcs_bucket, self._gcs_prefix, "build-log.txt")
-        build_log = await _fetch_gcs_text(client, build_log_url, label="build-log.txt")
+        try:
+            build_log = await _fetch_gcs_text(
+                client, build_log_url, label="build-log.txt", max_size=_MAX_SIZE_BUILD_LOG
+            )
+        except GCSAccessError as exc:
+            access_warnings.append(str(exc))
+            build_log = None
         console_context = extract_relevant_console_lines(build_log or "")
 
         # ------------------------------------------------------------------
@@ -288,7 +354,13 @@ class ProwSource(CISource):
         all_failures: list[FailedTest] = []
         for junit_path in junit_files:
             junit_url = _gcs_url(self.gcs_bucket, junit_path)
-            xml_content = await _fetch_gcs_text(client, junit_url, label=junit_path)
+            try:
+                xml_content = await _fetch_gcs_text(
+                    client, junit_url, label=junit_path, max_size=_MAX_SIZE_JUNIT_XML
+                )
+            except GCSAccessError as exc:
+                access_warnings.append(str(exc))
+                continue
             if xml_content:
                 failures = _parse_junit_failures(xml_content)
                 all_failures.extend(failures)
@@ -306,4 +378,5 @@ class ProwSource(CISource):
             failures=all_failures,
             console_context=console_context,
             build_url=self.build_url,
+            warnings=access_warnings,
         )

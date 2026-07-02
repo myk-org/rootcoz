@@ -11,7 +11,11 @@ from rootcoz.models import UnifiedAnalyzeRequest
 from rootcoz.sources.prow_source import (
 
     GCS_BASE_URL,
+    GCSAccessError,
     ProwSource,
+    _MAX_SIZE_BUILD_LOG,
+    _MAX_SIZE_FINISHED,
+    _MAX_SIZE_JUNIT_XML,
     _build_url,
     _fetch_gcs_text,
     _gcs_url,
@@ -134,12 +138,40 @@ class TestFetchGcsText:
             result = await _fetch_gcs_text(client, "http://example.com/missing.txt")
         assert result is None
 
-    async def test_500_returns_none(self):
+    async def test_500_raises_gcs_access_error(self):
         transport = httpx.MockTransport(
             lambda req: httpx.Response(500)
         )
         async with httpx.AsyncClient(transport=transport) as client:
-            result = await _fetch_gcs_text(client, "http://example.com/error.txt")
+            with pytest.raises(GCSAccessError) as exc_info:
+                await _fetch_gcs_text(client, "http://example.com/error.txt", label="test")
+        assert exc_info.value.status_code == 500
+
+    async def test_403_raises_gcs_access_error(self):
+        transport = httpx.MockTransport(
+            lambda req: httpx.Response(403)
+        )
+        async with httpx.AsyncClient(transport=transport) as client:
+            with pytest.raises(GCSAccessError) as exc_info:
+                await _fetch_gcs_text(client, "http://example.com/forbidden.txt", label="test")
+        assert exc_info.value.status_code == 403
+
+    async def test_oversized_content_length_returns_none(self):
+        transport = httpx.MockTransport(
+            lambda req: httpx.Response(200, text="x", headers={"content-length": "999999999"})
+        )
+        async with httpx.AsyncClient(transport=transport) as client:
+            result = await _fetch_gcs_text(client, "http://example.com/big.txt", max_size=1000)
+        assert result is None
+
+    async def test_oversized_body_returns_none(self):
+        """Large response (content-length > max_size) returns None."""
+        big_text = "x" * 2000
+        transport = httpx.MockTransport(
+            lambda req: httpx.Response(200, text=big_text)
+        )
+        async with httpx.AsyncClient(transport=transport) as client:
+            result = await _fetch_gcs_text(client, "http://example.com/big.txt", max_size=1000)
         assert result is None
 
 
@@ -334,6 +366,35 @@ class TestProwSourceFetch:
 
         assert result.failures == []
         assert not result.build_passed
+
+    async def test_fetch_gcs_errors_produce_warnings(self):
+        """Non-404 GCS errors are tracked as warnings."""
+
+        def error_handler(request: httpx.Request) -> httpx.Response:
+            url = str(request.url)
+            # JUnit listing returns empty
+            if "/storage/v1/b/" in url:
+                return httpx.Response(200, json={"items": []})
+            # finished.json returns 403
+            if "finished.json" in url:
+                return httpx.Response(403)
+            # build-log.txt returns 500
+            if "build-log.txt" in url:
+                return httpx.Response(500)
+            return httpx.Response(404)
+
+        transport = httpx.MockTransport(error_handler)
+        source = ProwSource(
+            job_name="my-job", build_id="42",
+            gcs_bucket=_TEST_GCS_BUCKET, prow_url=_TEST_PROW_URL,
+        )
+        async with httpx.AsyncClient(transport=transport) as client:
+            result = await source._fetch_with_client(client)
+
+        assert len(result.warnings) == 2
+        assert any("403" in w for w in result.warnings)
+        assert any("500" in w for w in result.warnings)
+        assert result.failures == []
 
     async def test_fetch_multiple_junit_files(self):
         handler = _make_gcs_handler(

@@ -39,6 +39,7 @@ class CISourceResult:
     build_passed: bool = False
     extract_path: Path | None = None
     child_job_infos: list[tuple[str, int]] = field(default_factory=list)
+    warnings: list[str] = field(default_factory=list)
 
 
 class CISource(ABC):
