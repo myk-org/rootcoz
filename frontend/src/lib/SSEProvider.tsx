@@ -597,7 +597,7 @@ export function SSEProvider({ children }: { children: ReactNode }) {
       setManager(m)
       return () => { m.destroy() }
     } else {
-      setManager(prev => { prev?.destroy(); return null })
+      setManager(null)
     }
   }, [authenticated])
 
