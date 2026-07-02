@@ -262,6 +262,7 @@ class RootCozClient:
         status: list[str] | None = None,
         date_from: str = "",
         date_to: str = "",
+        review_status: str = "all",
         limit: int = 500,
         offset: int = 0,
     ) -> dict:
@@ -283,6 +284,8 @@ class RootCozClient:
             params["date_from"] = date_from
         if date_to:
             params["date_to"] = date_to
+        if review_status != "all":
+            params["review_status"] = review_status
         if limit != 500:
             params["limit"] = limit
         if offset:

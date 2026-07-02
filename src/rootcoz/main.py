@@ -8526,6 +8526,9 @@ async def api_dashboard_filtered(
     status: Annotated[list[str] | None, Query()] = None,
     date_from: str = Query(default="", description="Start date (ISO)"),
     date_to: str = Query(default="", description="End date (ISO)"),
+    review_status: str = Query(
+        default="all", description="Filter: all, reviewed, not_reviewed"
+    ),
     limit: int = Query(default=500, ge=0, description="Max results (0 = no limit)"),
     offset: int = Query(default=0, ge=0, description="Rows to skip"),
 ) -> dict:
@@ -8572,6 +8575,7 @@ async def api_dashboard_filtered(
         status=status,
         date_from=date_from,
         date_to=date_to,
+        review_status=review_status,
         limit=limit,
         offset=offset,
     )

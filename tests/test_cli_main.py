@@ -438,7 +438,11 @@ class TestDashboardCommand:
         )
         assert result.exit_code == 0
         mock_client.dashboard_filtered.assert_called_once_with(
-            labels=None, exclude_labels=["nightly"], search="", limit=500
+            labels=None,
+            exclude_labels=["nightly"],
+            search="",
+            review_status="all",
+            limit=500,
         )
         assert "pr-check-job" in result.output
 
@@ -470,7 +474,11 @@ class TestDashboardCommand:
         )
         assert result.exit_code == 0
         mock_client.dashboard_filtered.assert_called_once_with(
-            labels=None, exclude_labels=["nightly", "smoke"], search="", limit=500
+            labels=None,
+            exclude_labels=["nightly", "smoke"],
+            search="",
+            review_status="all",
+            limit=500,
         )
         assert "unit-test-job" in result.output
 

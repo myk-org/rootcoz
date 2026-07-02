@@ -2843,6 +2843,7 @@ async def list_results_for_dashboard_filtered(
     status: list[str] | None = None,
     date_from: str = "",
     date_to: str = "",
+    review_status: str = "all",
     limit: int = DEFAULT_DASHBOARD_LIMIT,
     offset: int = 0,
 ) -> dict:
@@ -2907,6 +2908,17 @@ async def list_results_for_dashboard_filtered(
     if date_to:
         conditions.append("r.created_at <= ?")
         params.append(f"{date_to}T23:59:59")
+
+    if review_status == "reviewed":
+        conditions.append(
+            "(SELECT COUNT(*) FROM failure_reviews fr "
+            "WHERE fr.job_id = r.job_id AND fr.reviewed = 1) > 0"
+        )
+    elif review_status == "not_reviewed":
+        conditions.append(
+            "NOT EXISTS (SELECT 1 FROM failure_reviews fr "
+            "WHERE fr.job_id = r.job_id AND fr.reviewed = 1)"
+        )
 
     _MAX_IN_CLAUSE = 1000
 

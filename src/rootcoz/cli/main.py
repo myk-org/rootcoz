@@ -436,11 +436,16 @@ def dashboard(
     label: list[str] = _LABEL_FILTER_OPTION,
     exclude_tag: list[str] = _EXCLUDE_TAG_OPTION,
     search: str = typer.Option("", "--search", "-s", help="Search job name or ID."),
+    review_status: str = typer.Option(
+        "all", "--review-status", help="Filter: all, reviewed, not_reviewed."
+    ),
     limit: int = typer.Option(500, "--limit", help="Max results (0 = no limit)."),
     json_output: bool = _JSON_OPTION,
 ):
     """List analysis jobs with dashboard metadata (failure counts, review progress)."""
-    use_filtered = bool(label or exclude_tag or search or limit != 500)
+    use_filtered = bool(
+        label or exclude_tag or search or review_status != "all" or limit != 500
+    )
 
     def _fetch(c):
         if use_filtered:
@@ -448,6 +453,7 @@ def dashboard(
                 labels=label or None,
                 exclude_labels=exclude_tag or None,
                 search=search,
+                review_status=review_status,
                 limit=limit,
             )
             # dashboard_filtered returns {jobs, total}

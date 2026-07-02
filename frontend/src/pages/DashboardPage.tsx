@@ -299,6 +299,7 @@ export function DashboardPage() {
       for (const s of selectedStatuses) params.append('status', s)
       if (dateFrom) params.set('date_from', dateFrom)
       if (dateTo) params.set('date_to', dateTo)
+      if (reviewStatus !== 'all') params.set('review_status', reviewStatus)
       // Server-side pagination
       params.set('limit', String(perPage))
       params.set('offset', String((page - 1) * perPage))
@@ -319,7 +320,7 @@ export function DashboardPage() {
         setLoading(false)
       }
     }
-  }, [metaTeams, metaTiers, metaVersions, metaLabels, metaExcludeLabels, debouncedSearch, selectedStatuses, dateFrom, dateTo, perPage, page])
+  }, [metaTeams, metaTiers, metaVersions, metaLabels, metaExcludeLabels, debouncedSearch, selectedStatuses, dateFrom, dateTo, reviewStatus, perPage, page])
 
   const fetchJobsRef = useLatestRef(fetchJobs)
 
@@ -344,18 +345,8 @@ export function DashboardPage() {
     prevFiltersRef.current = filterKey
   }, [debouncedSearch, statusParam, reviewStatus, perPage, dateFrom, dateTo, teamParam, tierParam, versionParam, labelParam, excludeLabelParam])
 
-  // Client-side review status filter (not pushed to backend)
-  const filtered = useMemo(() => {
-    if (reviewStatus === 'all') return jobs
-    return jobs.filter((j) => {
-      if (reviewStatus === 'reviewed') return j.reviewed_count > 0
-      if (reviewStatus === 'not_reviewed') return j.reviewed_count === 0
-      return true
-    })
-  }, [jobs, reviewStatus])
-
   const sorted = useMemo(() => {
-    const copy = [...filtered]
+    const copy = [...jobs]
     const dir = sortDir === 'asc' ? 1 : -1
     copy.sort((a, b) => {
       let cmp = 0
@@ -377,7 +368,7 @@ export function DashboardPage() {
       return cmp * dir
     })
     return copy
-  }, [filtered, sortKey, sortDir])
+  }, [jobs, sortKey, sortDir])
 
   interface JobGroup {
     jobName: string
@@ -405,9 +396,7 @@ export function DashboardPage() {
   }
 
   // Server-side pagination: sorted is already the current page
-  // When review filter is active (client-side), use filtered count instead of server total
-  const displayTotal = reviewStatus !== 'all' ? filtered.length : totalJobs
-  const totalPages = Math.max(1, Math.ceil(displayTotal / perPage))
+  const totalPages = Math.max(1, Math.ceil(totalJobs / perPage))
   const safePage = Math.min(page, totalPages)
   const pageJobs = sorted
 
@@ -622,7 +611,7 @@ export function DashboardPage() {
         {/* Summary row: count + View Issues */}
         <div className="flex items-center gap-3">
           <p className="text-sm text-text-tertiary">
-            {displayTotal} analysis {displayTotal === 1 ? 'run' : 'runs'}
+            {totalJobs} analysis {totalJobs === 1 ? 'run' : 'runs'}
           </p>
           <Tooltip>
             <TooltipTrigger asChild>
