@@ -142,6 +142,7 @@ from rootcoz.request_resolution import resolve_tests_repo_token
 from rootcoz.sources import CISource, FileSource, RawSource
 from rootcoz.sources.jenkins_source import analyze_job, wait_for_jenkins_completion
 from rootcoz.storage import (
+    AI_SYSTEM_USERNAME,
     DB_PATH,
     get_effective_classification,
     get_history_classification,
@@ -2042,7 +2043,7 @@ async def _apply_auto_review(
         reviewed=True,
         child_job_name=child_job_name,
         child_build_number=child_build_number,
-        username="rootcoz-ai",
+        username=AI_SYSTEM_USERNAME,
     )
     await storage.add_comment(
         job_id,
@@ -2051,7 +2052,7 @@ async def _apply_auto_review(
         child_job_name=child_job_name,
         child_build_number=child_build_number,
         error_signature=error_sig,
-        username="rootcoz-ai",
+        username=AI_SYSTEM_USERNAME,
     )
 
     if child_job_name:
@@ -2144,7 +2145,7 @@ async def _auto_review_matching_failures(
 
     For each failure in the result, looks up the same test_name in the same
     job_name from a previous analysis. If the error_signature matches exactly,
-    marks the failure as reviewed with username='rootcoz-ai' and adds an
+    marks the failure as reviewed with username=AI_SYSTEM_USERNAME and adds an
     explanatory comment.
 
     If all failures end up reviewed, triggers Report Portal push when
@@ -6755,21 +6756,18 @@ async def classify_test(request: Request, body: ClassifyTestRequest) -> dict:
             detail="KNOWN_BUG requires non-empty references (e.g., Jira tickets or historical bug URLs).",
         )
 
-    created_by = request.state.username or "rootcoz-ai"
-
-    # Guard: AI cannot override user classifications.
-    # The AI authenticates with the submitting user's session token, so we
-    # cannot rely on empty username.  Instead, the AI prompt includes
-    # source="ai" in the request body to identify itself.
-    # "rootcoz-ai" is a reserved system identity (blocked from registration)
+    # Detect AI caller: the AI prompt includes source="ai" in the request body.
+    # AI_SYSTEM_USERNAME is a reserved system identity (blocked from registration)
     # used consistently for all AI-originated actions (auto-review, classification).
     is_ai_caller = body.source == "ai"
+
+    # Guard: AI cannot override user classifications.
     if is_ai_caller:
         existing = await storage.get_test_classifications(
             test_name=test_name,
         )
         user_classifications = [
-            c for c in existing if c.get("created_by", "") != "rootcoz-ai"
+            c for c in existing if c.get("created_by", "") != AI_SYSTEM_USERNAME
         ]
         if user_classifications:
             logger.info(
@@ -6786,15 +6784,20 @@ async def classify_test(request: Request, body: ClassifyTestRequest) -> dict:
                 status_code=200,
             )
 
-    # When the AI identifies itself, store created_by as "rootcoz-ai" —
-    # the reserved system identity that cannot be registered as a username.
-    if is_ai_caller:
-        created_by = "rootcoz-ai"
+    # Force created_by: AI callers are always attributed to AI_SYSTEM_USERNAME,
+    # regardless of the authenticated session username.
+    # Human callers must have an authenticated username — reject if missing
+    # to prevent misattribution as AI_SYSTEM_USERNAME.
+    if not is_ai_caller and not request.state.username:
+        raise HTTPException(
+            status_code=401, detail="Authentication required to classify tests"
+        )
+    created_by = AI_SYSTEM_USERNAME if is_ai_caller else request.state.username
 
     # Human classifications are visible immediately.
     # AI classifications become visible after analysis completes
     # and calls make_classifications_visible().
-    visible = 0 if created_by == "rootcoz-ai" else 1
+    visible = 0 if is_ai_caller else 1
 
     # Look up parent job name from failure_history, scoped to this job
     parent_job_name = await storage.get_parent_job_name_for_test(
