@@ -6756,15 +6756,12 @@ async def classify_test(request: Request, body: ClassifyTestRequest) -> dict:
             detail="KNOWN_BUG requires non-empty references (e.g., Jira tickets or historical bug URLs).",
         )
 
-    created_by = request.state.username or AI_SYSTEM_USERNAME
-
-    # Guard: AI cannot override user classifications.
-    # The AI authenticates with the submitting user's session token, so we
-    # cannot rely on empty username.  Instead, the AI prompt includes
-    # source="ai" in the request body to identify itself.
+    # Detect AI caller: the AI prompt includes source="ai" in the request body.
     # AI_SYSTEM_USERNAME is a reserved system identity (blocked from registration)
     # used consistently for all AI-originated actions (auto-review, classification).
     is_ai_caller = body.source == "ai"
+
+    # Guard: AI cannot override user classifications.
     if is_ai_caller:
         existing = await storage.get_test_classifications(
             test_name=test_name,
@@ -6787,15 +6784,15 @@ async def classify_test(request: Request, body: ClassifyTestRequest) -> dict:
                 status_code=200,
             )
 
-    # When the AI identifies itself, store created_by as AI_SYSTEM_USERNAME —
-    # the reserved system identity that cannot be registered as a username.
-    if is_ai_caller:
-        created_by = AI_SYSTEM_USERNAME
+    # Force created_by: AI callers are always attributed to AI_SYSTEM_USERNAME,
+    # regardless of the authenticated session username.
+    # Human callers use their session username.
+    created_by = AI_SYSTEM_USERNAME if is_ai_caller else (request.state.username or AI_SYSTEM_USERNAME)
 
     # Human classifications are visible immediately.
     # AI classifications become visible after analysis completes
     # and calls make_classifications_visible().
-    visible = 0 if created_by == AI_SYSTEM_USERNAME else 1
+    visible = 0 if is_ai_caller else 1
 
     # Look up parent job name from failure_history, scoped to this job
     parent_job_name = await storage.get_parent_job_name_for_test(
