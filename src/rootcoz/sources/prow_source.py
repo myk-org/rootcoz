@@ -163,17 +163,17 @@ async def _fetch_gcs_text(
             url,
         )
         raise GCSOversizeError(label or "file", content_length, max_size, url)
-    text = resp.text
-    if len(text) > max_size:
+    body_size = len(resp.content)
+    if body_size > max_size:
         logger.warning(
             "GCS %s too large (%d bytes, max %d): %s",
             label or "file",
-            len(text),
+            body_size,
             max_size,
             url,
         )
-        raise GCSOversizeError(label or "file", len(text), max_size, url)
-    return text
+        raise GCSOversizeError(label or "file", body_size, max_size, url)
+    return resp.text
 
 
 async def _list_gcs_junit_files(
