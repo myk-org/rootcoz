@@ -205,7 +205,7 @@ When not configured, error messages are role-aware: admins are pointed to Server
 
 ### AI System Identity
 
-`rootcoz-ai` is the reserved system identity for all AI-originated actions (auto-review, classification). It is blocked from user registration. The `POST /history/classify` endpoint uses `source="ai"` in the request body to identify AI callers, and stores `created_by = "rootcoz-ai"` for attribution. A backend guard prevents AI from overriding user classifications.
+`rootcoz-ai` is the reserved system identity for all AI-originated actions (auto-review, classification). The identity string is defined as `AI_SYSTEM_USERNAME` in `storage.py` — all code must use this constant instead of hardcoding the string. It is blocked from user registration. The `POST /history/classify` endpoint uses `source="ai"` in the request body to identify AI callers, and stores `created_by = "rootcoz-ai"` for attribution. A backend guard prevents AI from overriding user classifications.
 
 ### Failure Deduplication
 
@@ -230,7 +230,7 @@ When `ENABLE_REPORTPORTAL=true`, users can push test classifications back to Rep
 
 ### Auto-Review
 
-After any completed analysis, each failure is checked against previous analyses of the same `job_name` for the same `test_name`. If the `error_signature` matches exactly, the failure is auto-reviewed (marked reviewed by `rootcoz-ai`). The auto-review comment includes a clickable link to the previous job when `PUBLIC_BASE_URL` is set.
+After any completed analysis, each failure is checked against previous analyses of the same `job_name` for the same `test_name`. If the `error_signature` matches exactly **and the previous failure was reviewed by a human** (not auto-reviewed by `rootcoz-ai`), the failure is auto-reviewed (marked reviewed by `rootcoz-ai`). This human-review gate prevents auto-review chains from cascading indefinitely without human validation. The auto-review comment includes a clickable link to the previous job when `PUBLIC_BASE_URL` is set.
 
 ### Feedback System
 

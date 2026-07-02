@@ -87,6 +87,7 @@ SESSION_TTL_HOURS = _parse_session_ttl()
 SESSION_TTL_SECONDS = SESSION_TTL_HOURS * 3600
 MIN_KEY_LENGTH = 16
 VALID_USER_STATUSES = ("active", "pending", "rejected")
+AI_SYSTEM_USERNAME = "rootcoz-ai"
 
 
 def validate_api_key(key: str) -> None:
@@ -1898,12 +1899,18 @@ async def find_matching_previous_analysis(
     current_job_id: str,
     child_job_name: str = "",
 ) -> dict | None:
-    """Find the most recent previous analysis of the same test in the same job.
+    """Find the most recent human-reviewed previous analysis of the same test.
 
     Searches failure_history for a row with the same job_name and test_name
-    from a different (previous) job_id. When child_job_name is provided,
+    from a different (previous) job_id that has been reviewed by a human
+    (not auto-reviewed by rootcoz-ai). When child_job_name is provided,
     results are scoped to the same child job context to avoid cross-child
     matches for tests with the same name.
+
+    Only failures with a corresponding human review in failure_reviews
+    (reviewed=1, username != rootcoz-ai and not empty) are considered,
+    ensuring auto-review chains don't propagate without human validation.
+    Legacy review rows migrated with username='' are also excluded.
 
     Returns the most recent match ordered by analyzed_at descending,
     with id as tiebreaker for deterministic results.
@@ -1921,14 +1928,30 @@ async def find_matching_previous_analysis(
         pattern, analyzed_at.
     """
     async with _connect_db() as db:
+        # Find the most recent failure_history row for the same job+test
+        # (excluding the current job) that a HUMAN has reviewed.
+        # The EXISTS subquery ensures auto-review only chains from
+        # human-validated reviews — not from other auto-reviews
+        # (username = AI_SYSTEM_USERNAME) or legacy rows with blank
+        # usernames (migrated before the username column existed).
         cursor = await db.execute(
-            "SELECT job_id, build_number, error_signature, classification, "
-            "pattern, analyzed_at "
-            "FROM failure_history "
-            "WHERE job_name = ? AND test_name = ? AND job_id != ? "
-            "AND child_job_name = ? "
-            "ORDER BY analyzed_at DESC, id DESC LIMIT 1",
-            (job_name, test_name, current_job_id, child_job_name),
+            "SELECT fh.job_id, fh.build_number, fh.error_signature, "
+            "fh.classification, fh.pattern, fh.analyzed_at "
+            "FROM failure_history fh "
+            "WHERE fh.job_name = ? AND fh.test_name = ? AND fh.job_id != ? "
+            "AND fh.child_job_name = ? "
+            "AND EXISTS ("
+            "  SELECT 1 FROM failure_reviews fr "
+            "  WHERE fr.job_id = fh.job_id "
+            "  AND fr.test_name = fh.test_name "
+            "  AND fr.child_job_name = fh.child_job_name "
+            "  AND fr.child_build_number = fh.child_build_number "
+            "  AND fr.reviewed = 1 "
+            "  AND fr.username != ? AND fr.username != ''"
+            ") "
+            "ORDER BY fh.analyzed_at DESC, fh.id DESC LIMIT 1",
+            (job_name, test_name, current_job_id, child_job_name,
+             AI_SYSTEM_USERNAME),
         )
         row = await cursor.fetchone()
         if row is None:
@@ -2090,11 +2113,11 @@ async def carry_forward_user_overrides(job_id: str, result_data: dict) -> int:
                 "parent_job_name, child_build_number "
                 "FROM test_classifications "
                 "WHERE test_name = ? AND job_id != ? AND visible = 1 "
-                "AND created_by != 'rootcoz-ai' "
+                "AND created_by != ? "
                 "AND classification != '' "
                 "AND parent_job_name = ? "
                 "ORDER BY created_at DESC, id DESC LIMIT 1",
-                (test_name, job_id, job_name),
+                (test_name, job_id, AI_SYSTEM_USERNAME, job_name),
             )
             row = await cursor.fetchone()
             if row is None:

@@ -11,6 +11,7 @@ import os
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
+import aiosqlite
 import pytest
 from starlette.testclient import TestClient
 
@@ -21,8 +22,26 @@ from rootcoz.engine.core import (
     normalize_for_signature,
 )
 from rootcoz.models import FailedTest
+from rootcoz.storage import AI_SYSTEM_USERNAME
 
 from tests.conftest import build_test_env
+
+
+async def _insert_human_review(
+    db: aiosqlite.Connection,
+    job_id: str,
+    test_name: str,
+    child_job_name: str = "",
+    child_build_number: int = 0,
+    username: str = "human-reviewer",
+) -> None:
+    """Insert a human review record into failure_reviews."""
+    await db.execute(
+        "INSERT INTO failure_reviews "
+        "(job_id, test_name, child_job_name, child_build_number, reviewed, username) "
+        "VALUES (?, ?, ?, ?, 1, ?)",
+        (job_id, test_name, child_job_name, child_build_number, username),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -176,7 +195,7 @@ class TestFindMatchingPreviousAnalysis:
             yield temp_db_path
 
     async def test_finds_previous_matching_test(self, setup_test_db):
-        """Should find a previous analysis with the same test_name and job_name."""
+        """Should find a previous human-reviewed analysis."""
         with patch.object(storage, "DB_PATH", setup_test_db):
             async with storage._connect_db() as db:
                 await db.execute(
@@ -195,6 +214,9 @@ class TestFindMatchingPreviousAnalysis:
                         "KNOWN_BUG",
                     ),
                 )
+                await _insert_human_review(
+                    db, "prev-job", "test_module.test_something"
+                )
                 await db.commit()
 
             result = await storage.find_matching_previous_analysis(
@@ -207,6 +229,76 @@ class TestFindMatchingPreviousAnalysis:
             assert result["build_number"] == 100
             assert result["error_signature"] == "sig123"
 
+    async def test_skips_ai_only_reviewed(self, setup_test_db):
+        """Should NOT match a failure reviewed only by rootcoz-ai."""
+        with patch.object(storage, "DB_PATH", setup_test_db):
+            async with storage._connect_db() as db:
+                await db.execute(
+                    "INSERT INTO failure_history "
+                    "(job_id, job_name, build_number, test_name, error_message, "
+                    "error_signature, classification, pattern) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    ("prev-job", "my-job", 100, "test_a", "", "sig", "", ""),
+                )
+                await _insert_human_review(
+                    db, "prev-job", "test_a", username=AI_SYSTEM_USERNAME
+                )
+                await db.commit()
+
+            result = await storage.find_matching_previous_analysis(
+                job_name="my-job",
+                test_name="test_a",
+                current_job_id="current-job",
+            )
+            assert result is None
+
+    async def test_skips_unreviewed(self, setup_test_db):
+        """Should NOT match a failure that was never reviewed."""
+        with patch.object(storage, "DB_PATH", setup_test_db):
+            async with storage._connect_db() as db:
+                await db.execute(
+                    "INSERT INTO failure_history "
+                    "(job_id, job_name, build_number, test_name, error_message, "
+                    "error_signature, classification, pattern) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    ("prev-job", "my-job", 100, "test_a", "", "sig", "", ""),
+                )
+                # No review record at all
+                await db.commit()
+
+            result = await storage.find_matching_previous_analysis(
+                job_name="my-job",
+                test_name="test_a",
+                current_job_id="current-job",
+            )
+            assert result is None
+
+    async def test_skips_blank_username_review(self, setup_test_db):
+        """Should NOT match when the only review has a blank username (legacy migration)."""
+        with patch.object(storage, "DB_PATH", setup_test_db):
+            async with storage._connect_db() as db:
+                await db.execute(
+                    "INSERT INTO failure_history "
+                    "(job_id, job_name, build_number, test_name, error_message, "
+                    "error_signature, classification, pattern) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    ("prev-job", "my-job", 100, "test_a", "", "sig", "", ""),
+                )
+                await db.execute(
+                    "INSERT INTO failure_reviews "
+                    "(job_id, test_name, child_job_name, child_build_number, reviewed, username) "
+                    "VALUES (?, ?, ?, ?, 1, ?)",
+                    ("prev-job", "test_a", "", 0, ""),
+                )
+                await db.commit()
+
+            result = await storage.find_matching_previous_analysis(
+                job_name="my-job",
+                test_name="test_a",
+                current_job_id="current-job",
+            )
+            assert result is None
+
     async def test_excludes_current_job_id(self, setup_test_db):
         """Should not return the current job's own history."""
         with patch.object(storage, "DB_PATH", setup_test_db):
@@ -218,6 +310,7 @@ class TestFindMatchingPreviousAnalysis:
                     "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                     ("same-job", "my-job", 100, "test_a", "", "sig", "", ""),
                 )
+                await _insert_human_review(db, "same-job", "test_a")
                 await db.commit()
 
             result = await storage.find_matching_previous_analysis(
@@ -238,6 +331,7 @@ class TestFindMatchingPreviousAnalysis:
                     "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                     ("prev-job", "other-job", 100, "test_a", "", "sig", "", ""),
                 )
+                await _insert_human_review(db, "prev-job", "test_a")
                 await db.commit()
 
             result = await storage.find_matching_previous_analysis(
@@ -258,7 +352,7 @@ class TestFindMatchingPreviousAnalysis:
             assert result is None
 
     async def test_returns_most_recent(self, setup_test_db):
-        """Should return the most recent previous analysis."""
+        """Should return the most recent human-reviewed previous analysis."""
         with patch.object(storage, "DB_PATH", setup_test_db):
             async with storage._connect_db() as db:
                 await db.execute(
@@ -278,6 +372,7 @@ class TestFindMatchingPreviousAnalysis:
                         "2026-01-01 00:00:00",
                     ),
                 )
+                await _insert_human_review(db, "old-job", "test_a")
                 await db.execute(
                     "INSERT INTO failure_history "
                     "(job_id, job_name, build_number, test_name, error_message, "
@@ -295,6 +390,7 @@ class TestFindMatchingPreviousAnalysis:
                         "2026-06-01 00:00:00",
                     ),
                 )
+                await _insert_human_review(db, "new-job", "test_a")
                 await db.commit()
 
             result = await storage.find_matching_previous_analysis(
@@ -348,6 +444,14 @@ class TestFindMatchingPreviousAnalysis:
                         "child-job-B",
                         2,
                     ),
+                )
+                await _insert_human_review(
+                    db, "prev-job", "test_a",
+                    child_job_name="child-job-A", child_build_number=1,
+                )
+                await _insert_human_review(
+                    db, "prev-job", "test_a",
+                    child_job_name="child-job-B", child_build_number=2,
                 )
                 await db.commit()
 
@@ -510,7 +614,7 @@ class TestAutoReviewMatchingFailures:
     async def test_auto_reviews_matching_failure(self, setup_test_db):
         """Should auto-review a failure when previous analysis has matching signature."""
         with patch.object(storage, "DB_PATH", setup_test_db):
-            # Insert previous failure history
+            # Insert previous failure history with human review
             async with storage._connect_db() as db:
                 await db.execute(
                     "INSERT INTO failure_history "
@@ -528,6 +632,9 @@ class TestAutoReviewMatchingFailures:
                         "PERSISTENT",
                         "2026-01-01 00:00:00",
                     ),
+                )
+                await _insert_human_review(
+                    db, "prev-job", "test_module.TestClass.test_method"
                 )
                 await db.commit()
 
@@ -558,14 +665,14 @@ class TestAutoReviewMatchingFailures:
             assert "test_module.TestClass.test_method" in reviews
             review = reviews["test_module.TestClass.test_method"]
             assert review["reviewed"] is True
-            assert review["username"] == "rootcoz-ai"
+            assert review["username"] == AI_SYSTEM_USERNAME
 
             # Verify comment was added
             comments = await storage.get_comments_for_job("current-job")
             assert len(comments) == 1
             assert "Auto-reviewed" in comments[0]["comment"]
             assert "prev-job" in comments[0]["comment"]
-            assert comments[0]["username"] == "rootcoz-ai"
+            assert comments[0]["username"] == AI_SYSTEM_USERNAME
 
     async def test_skips_when_signature_differs(self, setup_test_db):
         """Should NOT auto-review when signatures don't match."""
@@ -587,6 +694,7 @@ class TestAutoReviewMatchingFailures:
                         "",
                     ),
                 )
+                await _insert_human_review(db, "prev-job", "test_a")
                 await db.commit()
 
             result_data = {
@@ -651,6 +759,7 @@ class TestAutoReviewMatchingFailures:
                     "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                     ("prev-job", "my-job", 100, "test_a", "", "sig-a", "", ""),
                 )
+                await _insert_human_review(db, "prev-job", "test_a")
                 await db.commit()
 
             result_data = {
@@ -699,6 +808,7 @@ class TestAutoReviewMatchingFailures:
                     "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                     ("prev-job", "my-job", 100, "test_a", "", "sig-a", "", ""),
                 )
+                await _insert_human_review(db, "prev-job", "test_a")
                 await db.commit()
 
             result_data = {
