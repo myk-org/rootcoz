@@ -6490,9 +6490,11 @@ async def stream_multiplexed(
         raise HTTPException(status_code=401, detail="Authentication required")
     is_admin = getattr(request.state, "is_admin", False)
 
-    topic_list = [t.strip() for t in topics.split(",") if t.strip()]
+    topic_list = list(dict.fromkeys(t.strip() for t in topics.split(",") if t.strip()))
     if not topic_list:
         raise HTTPException(status_code=400, detail="No topics specified")
+    if len(topic_list) > 50:
+        raise HTTPException(status_code=400, detail="Too many topics (max 50)")
 
     # Validate topics and build registration plan
     # Each entry: (event_prefix, asyncio.Event, listener_set_or_dict, key_or_none)
@@ -6517,7 +6519,7 @@ async def stream_multiplexed(
             registrations.append(("dashboard", ev, _dashboard_listeners, None, ""))
         elif topic.startswith("results:"):
             job_id = topic[len("results:") :]
-            if not job_id:
+            if not job_id or len(job_id) > 64:
                 continue
             ev = asyncio.Event()
             registrations.append(
@@ -6525,7 +6527,7 @@ async def stream_multiplexed(
             )
         elif topic.startswith("comments:"):
             job_id = topic[len("comments:") :]
-            if not job_id:
+            if not job_id or len(job_id) > 64:
                 continue
             ev = asyncio.Event()
             registrations.append(
@@ -6533,7 +6535,7 @@ async def stream_multiplexed(
             )
         elif topic.startswith("chat:"):
             job_id = topic[len("chat:") :]
-            if not job_id:
+            if not job_id or len(job_id) > 64:
                 continue
             listener_key = f"{job_id}:{username}" if username else job_id
             ev = asyncio.Event()
@@ -6549,9 +6551,7 @@ async def stream_multiplexed(
             if not is_admin:
                 continue
             ev = asyncio.Event()
-            registrations.append(("settings", ev, None, None, ""))
-            # settings uses a module-level set
-            _settings_listeners.add(ev)
+            registrations.append(("settings", ev, _settings_listeners, None, ""))
         elif topic == "admin-chat":
             if not is_admin:
                 continue
@@ -6706,11 +6706,6 @@ async def stream_multiplexed(
                             per_key_dict.pop(key, None)
                 elif global_set is not None:
                     global_set.discard(ev)
-
-            # Cleanup settings listeners (registered directly)
-            for _prefix, ev, _gs, _pkd, _k in registrations:
-                if _prefix == "settings":
-                    _settings_listeners.discard(ev)
 
             # Cleanup navbar events
             if active_event is not None:

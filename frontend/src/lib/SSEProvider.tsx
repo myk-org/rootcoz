@@ -583,23 +583,29 @@ export function SSEProvider({ children }: { children: ReactNode }) {
   const { authenticated } = useAuth()
   const managerRef = useRef<(SSEManager & { destroy(): void }) | null>(null)
 
-  // Create manager once on mount, destroy on unmount
-  if (!managerRef.current) {
-    managerRef.current =
-      typeof BroadcastChannel !== 'undefined'
-        ? createSSEManager()
-        : createFallbackManager()
-  }
-
+  // Create/destroy manager based on authentication state.
+  // When the user logs out, the manager is destroyed so a logged-out
+  // leader tab doesn't keep sending heartbeats and failing /api/stream
+  // calls with 401 — blocking other tabs from taking over.
   useEffect(() => {
+    if (authenticated) {
+      if (!managerRef.current) {
+        managerRef.current =
+          typeof BroadcastChannel !== 'undefined'
+            ? createSSEManager()
+            : createFallbackManager()
+      }
+    } else {
+      managerRef.current?.destroy()
+      managerRef.current = null
+    }
+
     return () => {
       managerRef.current?.destroy()
       managerRef.current = null
     }
-  }, [])
+  }, [authenticated])
 
-  // If not authenticated, don't provide the manager — no SSE connections
-  // will be made. The context value being null means useSSE is a no-op.
   const value = authenticated ? managerRef.current : null
 
   return <SSEContext.Provider value={value}>{children}</SSEContext.Provider>
