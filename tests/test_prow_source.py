@@ -19,6 +19,7 @@ from rootcoz.sources.prow_source import (
     _MAX_SIZE_JUNIT_XML,
     _build_url,
     _fetch_gcs_text,
+    _raise_if_oversize,
     _gcs_url,
     _list_gcs_junit_files,
     _parse_junit_failures,
@@ -120,6 +121,20 @@ class TestParseJunitFailures:
 # ---------------------------------------------------------------------------
 # _fetch_gcs_text
 # ---------------------------------------------------------------------------
+
+
+class TestRaiseIfOversize:
+    def test_below_threshold_no_raise(self):
+        _raise_if_oversize("test", 100, 200, "http://example.com")  # should not raise
+
+    def test_equal_threshold_no_raise(self):
+        _raise_if_oversize("test", 200, 200, "http://example.com")  # should not raise
+
+    def test_above_threshold_raises(self):
+        with pytest.raises(GCSOversizeError) as exc_info:
+            _raise_if_oversize("test", 201, 200, "http://example.com")
+        assert exc_info.value.size == 201
+        assert exc_info.value.max_size == 200
 
 
 class TestFetchGcsText:
@@ -298,15 +313,16 @@ class TestListGcsJunitFiles:
         assert len(files) == 2
         assert call_count == 2
 
-    async def test_api_error_returns_empty(self):
+    async def test_api_error_raises_gcs_access_error(self):
         transport = httpx.MockTransport(
             lambda req: httpx.Response(500)
         )
         async with httpx.AsyncClient(transport=transport) as client:
-            files = await _list_gcs_junit_files(
-                client, "test-bucket", "logs/job/123/artifacts/"
-            )
-        assert files == []
+            with pytest.raises(GCSAccessError) as exc_info:
+                await _list_gcs_junit_files(
+                    client, "test-bucket", "logs/job/123/artifacts/"
+                )
+        assert exc_info.value.status_code == 500
 
 
 # ---------------------------------------------------------------------------

@@ -2619,6 +2619,7 @@ async def _preflight_sidecar_check(
     build_number: int | None = None,
     jenkins_url: str = "",
     job_name: str = "",
+    source_warnings: list[str] | None = None,
 ) -> bool:
     """Check sidecar availability, fail the job if unreachable. Returns True if available."""
     available, msg = await check_sidecar_available()
@@ -2645,6 +2646,8 @@ async def _preflight_sidecar_check(
         fail_data["build_number"] = build_number
     if jenkins_url:
         fail_data["jenkins_url"] = jenkins_url
+    if source_warnings:
+        fail_data["source_warnings"] = source_warnings
     await _preserve_request_params(job_id, fail_data)
     await update_status(job_id, "failed", fail_data)
     notify_active_count_changed()
@@ -3545,8 +3548,14 @@ async def _process_non_jenkins_analysis(
             if body.build_id and body.build_id.isdigit():
                 data["build_number"] = int(body.build_id)
 
+    def _stamp_source_warnings(data: dict) -> None:
+        """Attach source warnings (GCS errors, oversize artifacts) to result."""
+        if source_result is not None and source_result.warnings:
+            data["source_warnings"] = source_result.warnings
+
     auth_header = ""
     repo_manager: RepositoryManager | None = None
+    source_result = None  # set after source.fetch(); used by _stamp_source_warnings
     # Use real job identity for metadata matching (display_name may have UUID suffix)
     metadata_job_name = body.prow_job_name if body.type == "prow" and body.prow_job_name else display_name
 
@@ -3582,6 +3591,10 @@ async def _process_non_jenkins_analysis(
             f"Source fetch complete: {len(source_result.failures)} failures, build_passed={source_result.build_passed}"
         )
 
+        # Log and track source warnings (e.g. GCS access errors, oversize artifacts)
+        for warning in source_result.warnings:
+            logger.warning("Source warning for job %s: %s", job_id, warning)
+
         # Persist build URL to DB column (available after source fetch)
         if source_result.build_url:
             await storage.update_jenkins_url(job_id, source_result.build_url)
@@ -3597,6 +3610,7 @@ async def _process_non_jenkins_analysis(
             result_data = analysis_result.model_dump(mode="json")
             result_data["job_name"] = display_name
             _stamp_prow_identity(result_data)
+            _stamp_source_warnings(result_data)
             if source_result.build_url:
                 result_data["jenkins_url"] = source_result.build_url
             await _preserve_request_params(job_id, result_data)
@@ -3631,6 +3645,7 @@ async def _process_non_jenkins_analysis(
             job_name=body.prow_job_name or body.job_name or "",
             build_number=_preflight_build_number,
             jenkins_url=source_result.build_url or "",
+            source_warnings=source_result.warnings or None,
         ):
             return
 
@@ -3805,6 +3820,7 @@ async def _process_non_jenkins_analysis(
                 fail_data["error"] = fail_result.summary
                 fail_data["job_name"] = display_name
                 _stamp_prow_identity(fail_data)
+                _stamp_source_warnings(fail_data)
                 if source_result.build_url:
                     fail_data["jenkins_url"] = source_result.build_url
                 await _preserve_request_params(job_id, fail_data)
@@ -3829,6 +3845,7 @@ async def _process_non_jenkins_analysis(
             result_data = analysis_result.model_dump(mode="json")
             result_data["job_name"] = display_name
             _stamp_prow_identity(result_data)
+            _stamp_source_warnings(result_data)
             if source_result.build_url:
                 result_data["jenkins_url"] = source_result.build_url
             await _preserve_request_params(job_id, result_data)
@@ -3907,6 +3924,7 @@ async def _process_non_jenkins_analysis(
                 fail_data["error"] = fail_result.summary
                 fail_data["job_name"] = display_name
                 _stamp_prow_identity(fail_data)
+                _stamp_source_warnings(fail_data)
                 if source_result.build_url:
                     fail_data["jenkins_url"] = source_result.build_url
                 await _preserve_request_params(job_id, fail_data)
@@ -3967,6 +3985,7 @@ async def _process_non_jenkins_analysis(
         result_data = analysis_result.model_dump(mode="json")
         result_data["job_name"] = display_name
         _stamp_prow_identity(result_data)
+        _stamp_source_warnings(result_data)
         if source_result.build_url:
             result_data["jenkins_url"] = source_result.build_url
         logger.info(f"Analysis completed for job_id={job_id}: {summary}")
@@ -4038,6 +4057,7 @@ async def _process_non_jenkins_analysis(
         fail_data["error"] = fail_result.summary
         fail_data["job_name"] = display_name
         _stamp_prow_identity(fail_data)
+        _stamp_source_warnings(fail_data)
         await _preserve_request_params(job_id, fail_data)
 
         # Attach token usage even on failure

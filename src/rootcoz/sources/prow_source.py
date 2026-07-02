@@ -85,7 +85,7 @@ def _parse_junit_failures(raw_xml: str) -> list[FailedTest]:
 class GCSAccessError(Exception):
     """Non-404 HTTP error when accessing GCS (403, 500, etc.)."""
 
-    def __init__(self, label: str, status_code: int, url: str) -> None:
+    def __init__(self, label: str, status_code: int | None, url: str) -> None:
         self.label = label
         self.status_code = status_code
         self.url = url
@@ -98,14 +98,24 @@ class GCSOversizeError(GCSAccessError):
     """GCS artifact exceeds the maximum allowed download size."""
 
     def __init__(self, label: str, size: int, max_size: int, url: str) -> None:
+        self.label = label
         self.size = size
         self.max_size = max_size
-        super().__init__(label, 0, url)
-        # Override message from parent
+        self.url = url
+        self.status_code = None  # Not an HTTP status error
         Exception.__init__(
             self,
             f"GCS {label} too large ({size} bytes, max {max_size}): {url}",
         )
+
+
+def _raise_if_oversize(label: str, size: int, max_size: int, url: str) -> None:
+    """Raise ``GCSOversizeError`` if *size* exceeds *max_size*."""
+    if size > max_size:
+        logger.warning(
+            "GCS %s too large (%d bytes, max %d): %s", label, size, max_size, url
+        )
+        raise GCSOversizeError(label, size, max_size, url)
 
 
 async def _fetch_gcs_text(
@@ -122,7 +132,7 @@ async def _fetch_gcs_text(
         url: Full URL to fetch.
         label: Human-readable label for log messages.
         max_size: Maximum response size in bytes.  Responses exceeding
-            this are truncated and a warning is logged.
+            this are rejected (``GCSOversizeError`` is raised).
 
     Returns:
         Response text on success, ``None`` on 404.
@@ -131,48 +141,34 @@ async def _fetch_gcs_text(
         GCSAccessError: On non-404 HTTP errors (403, 500, etc.).
         GCSOversizeError: When the response exceeds *max_size*.
     """
+    effective_label = label or "file"
+    # GCS always returns Content-Length, so the header check below is the
+    # primary defense against oversized responses.  The body-size check is
+    # a defense-in-depth fallback for the rare case where the header is
+    # missing or inaccurate.
     try:
         resp = await client.get(url)
         if resp.status_code == 404:
-            logger.debug("GCS %s not found: %s", label or "file", url)
+            logger.debug("GCS %s not found: %s", effective_label, url)
             return None
         resp.raise_for_status()
     except httpx.HTTPStatusError as exc:
-        status = exc.response.status_code
-        if status == 404:
-            logger.debug("GCS %s not found: %s", label or "file", url)
-            return None
         logger.warning(
-            "GCS %s access error (%d): %s", label or "file", status, url
+            "GCS %s access error (%d): %s", effective_label, exc.response.status_code, url
         )
-        raise GCSAccessError(label or "file", status, url) from exc
+        raise GCSAccessError(effective_label, exc.response.status_code, url) from exc
     except httpx.HTTPError as exc:
-        logger.warning("GCS network error for %s: %s", label or url, exc)
-        raise GCSAccessError(label or "file", 0, url) from exc
+        logger.warning("GCS network error for %s: %s", effective_label, exc)
+        raise GCSAccessError(effective_label, 0, url) from exc
 
     try:
         content_length = int(resp.headers.get("content-length", 0))
     except (ValueError, TypeError):
         content_length = 0
-    if content_length > max_size:
-        logger.warning(
-            "GCS %s too large (%d bytes, max %d): %s",
-            label or "file",
-            content_length,
-            max_size,
-            url,
-        )
-        raise GCSOversizeError(label or "file", content_length, max_size, url)
-    body_size = len(resp.content)
-    if body_size > max_size:
-        logger.warning(
-            "GCS %s too large (%d bytes, max %d): %s",
-            label or "file",
-            body_size,
-            max_size,
-            url,
-        )
-        raise GCSOversizeError(label or "file", body_size, max_size, url)
+    _raise_if_oversize(effective_label, content_length, max_size, url)
+    # Defense-in-depth: check actual body bytes when content-length is
+    # missing or lies.
+    _raise_if_oversize(effective_label, len(resp.content), max_size, url)
     return resp.text
 
 
@@ -206,9 +202,17 @@ async def _list_gcs_junit_files(
         try:
             resp = await client.get(api_url, params=params)
             resp.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            raise GCSAccessError(
+                "junit-listing", exc.response.status_code, api_url
+            ) from exc
+        except httpx.HTTPError as exc:
+            raise GCSAccessError("junit-listing", 0, api_url) from exc
+
+        try:
             data = resp.json()
-        except (httpx.HTTPError, ValueError) as exc:
-            logger.warning("GCS list failed for prefix %s: %s", prefix, exc)
+        except ValueError as exc:
+            logger.warning("GCS list JSON parse failed for prefix %s: %s", prefix, exc)
             break
 
         for item in data.get("items", []):
@@ -359,7 +363,11 @@ class ProwSource(CISource):
         # 3. List and fetch JUnit XML files from artifacts
         # ------------------------------------------------------------------
         artifacts_prefix = f"{self._gcs_prefix}/artifacts/"
-        junit_files = await _list_gcs_junit_files(client, self.gcs_bucket, artifacts_prefix)
+        try:
+            junit_files = await _list_gcs_junit_files(client, self.gcs_bucket, artifacts_prefix)
+        except GCSAccessError as exc:
+            access_warnings.append(str(exc))
+            junit_files = []
         logger.info(
             "Found %d JUnit XML file(s) for %s/%s",
             len(junit_files),
