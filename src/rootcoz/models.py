@@ -687,7 +687,11 @@ class UnifiedAnalyzeRequest(_JenkinsParamsMixin, _NameTagsMixin, BaseAnalysisReq
 
     @field_validator("gcs_bucket", mode="before")
     @classmethod
-    def _validate_gcs_bucket(cls, v: str) -> str:
+    def _validate_gcs_bucket(cls, v: object) -> str:
+        if v is None:
+            return ""
+        if not isinstance(v, str):
+            raise ValueError("gcs_bucket must be a string")
         v = v.strip()
         if not v:
             return v  # empty = use server default
@@ -699,7 +703,11 @@ class UnifiedAnalyzeRequest(_JenkinsParamsMixin, _NameTagsMixin, BaseAnalysisReq
 
     @field_validator("gcs_prefix", mode="before")
     @classmethod
-    def _validate_gcs_prefix(cls, v: str) -> str:
+    def _validate_gcs_prefix(cls, v: object) -> str:
+        if v is None:
+            return ""
+        if not isinstance(v, str):
+            raise ValueError("gcs_prefix must be a string")
         v = v.strip().rstrip("/")
         if not v:
             return v
@@ -711,7 +719,11 @@ class UnifiedAnalyzeRequest(_JenkinsParamsMixin, _NameTagsMixin, BaseAnalysisReq
 
     @field_validator("prow_url", mode="before")
     @classmethod
-    def _validate_prow_url(cls, v: str) -> str:
+    def _validate_prow_url(cls, v: object) -> str:
+        if v is None:
+            return ""
+        if not isinstance(v, str):
+            raise ValueError("prow_url must be a string")
         v = v.strip()
         if not v:
             return v  # empty = use server default
