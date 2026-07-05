@@ -157,7 +157,7 @@ Analyzed repositories can provide project-specific customization files under a `
 
 - **Prompt files**: `build_resources_section()` and `build_prompt_sections()` in `engine/core.py` scan `<repo>/.rootcoz/` for `ROOTCOZ_PROMPT.md` and `ROOTCOZ_HISTORY_PROMPT.md`. The issue prompt (`ROOTCOZ_ISSUE_PROMPT.md`) is fetched via the GitHub Contents API from `.rootcoz/` in `main.py`.
 - **Pi resources**: After cloning repos (analysis, re-analysis, and chat paths), `.rootcoz/{agents,skills,extensions}/` are copied into `<workspace>/.pi/` via `copy_rootcoz_pi_resources()` so pi's `DefaultResourceLoader` discovers them.
-- This is a **breaking change** — the old `JOB_INSIGHT_*.md` filenames in the repo root are no longer supported.
+- This is a **breaking change** — the previous legacy prompt filenames in the repo root are no longer supported. Only `.rootcoz/` is recognized.
 
 ### AI Tool Access (MANDATORY)
 

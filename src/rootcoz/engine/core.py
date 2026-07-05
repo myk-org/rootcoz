@@ -190,7 +190,7 @@ def copy_rootcoz_pi_resources(cloned_repos: dict[str, Path], workspace: Path) ->
                 # Warn about files that will be overwritten by a later repo
                 if dest.is_dir():
                     for item in src.rglob("*"):
-                        if item.is_file():
+                        if item.is_symlink() or item.is_file():
                             relative = item.relative_to(src)
                             existing = dest / relative
                             if existing.exists():
