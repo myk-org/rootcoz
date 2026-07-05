@@ -3236,6 +3236,14 @@ def _strip_old_submitter_tag(tags: list[str], result_data: dict) -> list[str]:
     return [t for t in tags if not (isinstance(t, str) and t.lower() == old_normalized)]
 
 
+def _apply_prow_identity(data: dict, body: "UnifiedAnalyzeRequest") -> None:
+    """Set job_name/build_number from Prow identity fields."""
+    if body.type == "prow" and body.prow_job_name:
+        data["job_name"] = body.prow_job_name
+        if body.build_id and body.build_id.isdigit():
+            data["build_number"] = body.build_id  # String — Prow IDs exceed JS MAX_SAFE_INTEGER
+
+
 async def _enqueue_non_jenkins_analysis(
     body: "UnifiedAnalyzeRequest",
     merged: "Settings",
@@ -3348,12 +3356,7 @@ async def _enqueue_non_jenkins_analysis(
         "request_params": encrypt_sensitive_fields(base_params),
     }
     # Persist real Prow identity for history matching and auto-review
-    if analysis_type == "prow" and body.prow_job_name:
-        initial_result["job_name"] = body.prow_job_name
-        if body.build_id and body.build_id.isdigit():
-            initial_result["build_number"] = (
-                body.build_id
-            )  # String — Prow IDs exceed JS MAX_SAFE_INTEGER
+    _apply_prow_identity(initial_result, body)
     initial_result["request_params"]["submitted_by"] = username
     _stamp_reanalysis_metadata(
         initial_result["request_params"],
@@ -3545,12 +3548,7 @@ async def _process_non_jenkins_analysis(
 
     def _stamp_prow_identity(data: dict) -> None:
         """Set job_name/build_number from prow identity for history matching."""
-        if body.type == "prow" and body.prow_job_name:
-            data["job_name"] = body.prow_job_name
-            if body.build_id and body.build_id.isdigit():
-                data["build_number"] = (
-                    body.build_id
-                )  # String — Prow IDs exceed JS MAX_SAFE_INTEGER
+        _apply_prow_identity(data, body)
 
     def _stamp_source_warnings(data: dict) -> None:
         """Attach source warnings (GCS errors, oversize artifacts) to result."""

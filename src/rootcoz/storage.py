@@ -1488,11 +1488,13 @@ async def update_build_url(job_id: str, build_url: str) -> None:
     if not build_url:
         return
     async with _connect_db() as db:
-        await db.execute(
+        cursor = await db.execute(
             "UPDATE results SET jenkins_url = ? WHERE job_id = ?",
             (build_url, job_id),
         )
         await db.commit()
+        if cursor.rowcount == 0:
+            logger.warning("update_build_url: no row found for job_id=%s", job_id)
 
 
 def _make_progress_phase_patcher(phase: str) -> Callable[[dict], None]:

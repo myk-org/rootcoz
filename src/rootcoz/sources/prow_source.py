@@ -177,6 +177,7 @@ async def _list_gcs_junit_files(
     client: httpx.AsyncClient,
     bucket: str,
     prefix: str,
+    warnings: list[str] | None = None,
 ) -> list[str]:
     """List JUnit XML files under a GCS prefix using the JSON API.
 
@@ -226,11 +227,10 @@ async def _list_gcs_junit_files(
         if not page_token:
             break
     else:
-        logger.warning(
-            "GCS JUnit listing exceeded %d pages for %s, truncating",
-            max_pages,
-            prefix,
-        )
+        msg = f"GCS JUnit listing exceeded {max_pages} pages for {prefix}, results truncated"
+        logger.warning(msg)
+        if warnings is not None:
+            warnings.append(msg)
 
     return junit_files
 
@@ -375,7 +375,7 @@ class ProwSource(CISource):
         artifacts_prefix = f"{self._gcs_prefix}/artifacts/"
         try:
             junit_files = await _list_gcs_junit_files(
-                client, self.gcs_bucket, artifacts_prefix
+                client, self.gcs_bucket, artifacts_prefix, warnings=access_warnings
             )
         except GCSAccessError as exc:
             access_warnings.append(str(exc))
