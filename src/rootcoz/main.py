@@ -5255,7 +5255,7 @@ async def _add_tracker_comment(
     # Auto-set tracked-in on the failure_history row
     if tracked_type and issue_url:
         try:
-            await storage.set_tracked_in(
+            updated = await storage.set_tracked_in(
                 job_id,
                 body.test_name,
                 issue_url,
@@ -5263,6 +5263,15 @@ async def _add_tracker_comment(
                 child_job_name=body.child_job_name,
                 child_build_number=body.child_build_number,
             )
+            if updated == 0:
+                logger.warning(
+                    "Tracked-in auto-set matched 0 rows for "
+                    "job_id=%s, test_name=%s, child=%s/%s",
+                    job_id,
+                    body.test_name,
+                    body.child_job_name,
+                    body.child_build_number,
+                )
         except Exception:
             logger.warning(
                 f"Failed to set tracked-in after {tracker_label} creation "
