@@ -191,20 +191,30 @@ def copy_rootcoz_pi_resources(cloned_repos: dict[str, Path], workspace: Path) ->
                 continue
             dest = pi_dir / subdir
             try:
-                # Warn about files that will be overwritten by a later repo
-                if dest.is_dir():
-                    for item in src.rglob("*"):
-                        if item.is_file() and not item.is_symlink():
-                            relative = item.relative_to(src)
-                            existing = dest / relative
-                            if existing.exists():
-                                logger.warning(
-                                    ".rootcoz/%s/%s from '%s' overwrites existing file",
-                                    subdir,
-                                    relative,
-                                    repo_name,
-                                )
-                shutil.copytree(src, dest, ignore=_ignore_symlinks, dirs_exist_ok=True)
+
+                def _copy_with_overwrite_warning(
+                    src_path: str,
+                    dst_path: str,
+                    *,
+                    follow_symlinks: bool = True,
+                ) -> None:
+                    """copy2 wrapper that warns when overwriting existing files."""
+                    if os.path.exists(dst_path):
+                        logger.warning(
+                            ".rootcoz/%s/%s from '%s' overwrites existing file",
+                            subdir,
+                            os.path.relpath(dst_path, str(dest)),
+                            repo_name,
+                        )
+                    shutil.copy2(src_path, dst_path, follow_symlinks=follow_symlinks)
+
+                shutil.copytree(
+                    src,
+                    dest,
+                    ignore=_ignore_symlinks,
+                    copy_function=_copy_with_overwrite_warning,
+                    dirs_exist_ok=True,
+                )
                 logger.info(
                     "Copied .rootcoz/%s/ from '%s' to workspace .pi/%s/",
                     subdir,
