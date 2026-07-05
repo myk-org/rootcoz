@@ -1387,9 +1387,7 @@ class TestUpdateBuildUrl:
             patch.object(storage, "DB_PATH", setup_test_db),
             patch.object(storage, "logger") as mock_logger,
         ):
-            await storage.update_build_url(
-                "nonexistent-id", "https://example.com"
-            )
+            await storage.update_build_url("nonexistent-id", "https://example.com")
         mock_logger.warning.assert_called_once()
         args = mock_logger.warning.call_args[0]
         assert "no row found" in args[0]

@@ -2342,7 +2342,7 @@ async def _match_and_auto_review_failures(
 async def _auto_review_matching_failures(
     job_id: str,
     job_name: str,
-    build_number: int,
+    build_number: int | str,
     result_data: dict,
     settings: Settings,
 ) -> None:
@@ -2386,7 +2386,7 @@ async def _auto_review_matching_failures(
 
     if auto_reviewed_count > 0:
         logger.info(
-            "Auto-reviewed %d/%d failures for job %s (build #%d)",
+            "Auto-reviewed %d/%d failures for job %s (build #%s)",
             auto_reviewed_count,
             total_failures,
             job_name,
@@ -3241,7 +3241,9 @@ def _apply_prow_identity(data: dict, body: "UnifiedAnalyzeRequest") -> None:
     if body.type == "prow" and body.prow_job_name:
         data["job_name"] = body.prow_job_name
         if body.build_id and body.build_id.isdigit():
-            data["build_number"] = body.build_id  # String — Prow IDs exceed JS MAX_SAFE_INTEGER
+            data["build_number"] = (
+                body.build_id
+            )  # String — Prow IDs exceed JS MAX_SAFE_INTEGER
 
 
 async def _enqueue_non_jenkins_analysis(

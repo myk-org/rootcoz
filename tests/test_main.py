@@ -751,9 +751,7 @@ class TestApplyProwIdentity:
         from rootcoz.main import _apply_prow_identity
 
         data: dict = {"job_name": "original"}
-        body = MagicMock(
-            type="file", prow_job_name="should-be-ignored", build_id="123"
-        )
+        body = MagicMock(type="file", prow_job_name="should-be-ignored", build_id="123")
         _apply_prow_identity(data, body)
         assert data["job_name"] == "original"  # unchanged
         assert "build_number" not in data
