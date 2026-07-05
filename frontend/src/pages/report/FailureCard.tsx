@@ -395,9 +395,6 @@ export function FailureCard({ group, jobId, childJobName, childBuildNumber, inde
                 <ClassificationBadge classification={pattern} />
               </>
             )}
-            {trackedIn[repKey]?.tracked_in_url && (
-              <TrackedInBadge url={trackedIn[repKey].tracked_in_url} type={trackedIn[repKey].tracked_in_type} />
-            )}
             {rep.reanalyzed_with && rep.reanalysis_status !== 'running' && (
               <Tooltip>
                 <TooltipTrigger asChild>

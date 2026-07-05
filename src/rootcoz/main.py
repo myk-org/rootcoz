@@ -5272,6 +5272,16 @@ async def _add_tracker_comment(
                     body.child_job_name,
                     body.child_build_number,
                 )
+            elif updated > 1:
+                logger.warning(
+                    "Tracked-in auto-set updated %d rows (expected 1) for "
+                    "job_id=%s, test_name=%s, child=%s/%s",
+                    updated,
+                    job_id,
+                    body.test_name,
+                    body.child_job_name,
+                    body.child_build_number,
+                )
         except Exception:
             logger.warning(
                 f"Failed to set tracked-in after {tracker_label} creation "
