@@ -24,7 +24,7 @@ export function detectTrackerType(url: string): string {
   return ''
 }
 
-function TrackerIcon({ type }: { type: string }) {
+export function TrackerIcon({ type }: { type: string }) {
   if (type === 'github') {
     return (
       <svg className="h-3 w-3" viewBox="0 0 16 16" fill="currentColor">
