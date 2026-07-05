@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'react'
 import { api, ApiError } from '@/lib/api'
 import { useLatestRef } from '@/lib/useLatestRef'
+import { useSSE } from '@/lib/SSEProvider'
 import { useAuth } from '@/lib/auth'
 import { Card, CardContent } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
@@ -354,17 +355,14 @@ export function ServerSettingsPage() {
     fetchSettings()
   }, [fetchSettings])
 
-  // ---- SSE ----
-  useEffect(() => {
-    const eventSource = new EventSource('/api/admin/settings/stream')
-    eventSource.addEventListener('settings-changed', () => {
+  // ---- Multiplexed SSE ----
+  const settingsEvents = useMemo(() => ({
+    'settings-changed': () => {
       fetchSettingsRef.current()
-    })
-    eventSource.onerror = () => {
-      console.debug('Server settings SSE error')
-    }
-    return () => eventSource.close()
-  }, [])
+    },
+  }), [])
+
+  useSSE('settings', settingsEvents)
 
   // ---- Shared save helper ----
   async function saveSettingValue(key: string, value: string): Promise<boolean> {

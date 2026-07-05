@@ -47,6 +47,7 @@ export function ChatPage() {
   return (
     <ChatUI
       apiBasePath={`/api/chat/${jobId}`}
+      sseTopic={`chat:${jobId}`}
       header={header}
       defaultProvider={jobInfo?.ai_provider || 'claude'}
       defaultModel={jobInfo?.ai_model || ''}

@@ -1,6 +1,7 @@
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { useLatestRef } from '@/lib/useLatestRef'
+import { useSSE } from '@/lib/SSEProvider'
 import { api } from '@/lib/api'
 import { formatCompactNumber, formatCost } from '@/lib/format'
 import { Input } from '@/components/ui/input'
@@ -306,21 +307,15 @@ export function TokenUsagePage() {
   useEffect(() => { fetchSummary() }, [fetchSummary])
   useEffect(() => { fetchBreakdown() }, [fetchBreakdown])
 
-  // SSE connection (stable — doesn't depend on fetch callbacks)
-  useEffect(() => {
-    const eventSource = new EventSource('/api/admin/token-usage/stream')
-    eventSource.addEventListener('usage-changed', () => {
+  // Multiplexed SSE connection (stable — doesn't depend on fetch callbacks)
+  const tokenUsageEvents = useMemo(() => ({
+    'usage-changed': () => {
       fetchSummaryRef.current()
       fetchBreakdownRef.current()
-    })
-    eventSource.onerror = () => {
-      console.debug('Token usage SSE error')
-    }
+    },
+  }), [])
 
-    return () => {
-      eventSource.close()
-    }
-  }, [])
+  useSSE('token-usage', tokenUsageEvents)
 
   const sorted = useMemo(() => {
     const copy = [...breakdown]

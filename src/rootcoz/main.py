@@ -5,6 +5,7 @@ import json
 import logging
 import math
 import os
+import re
 import sqlite3
 import time as _time
 import urllib.parse
@@ -392,6 +393,10 @@ _token_usage_listeners: set[asyncio.Event] = set()
 
 # Per-job chat change notifications
 _chat_listeners: dict[str, set[asyncio.Event]] = {}
+
+# Regex for validating job IDs in multiplexed SSE topics — prevents
+# SSE header injection via control characters in the event prefix.
+_VALID_JOB_ID_RE = re.compile(r"^[a-zA-Z0-9_-]{1,64}$")
 
 
 def notify_dashboard_changed() -> None:
@@ -6461,6 +6466,271 @@ async def stream_token_usage(request: Request) -> StreamingResponse:
     """SSE stream that notifies when token usage data changes."""
     _check_allow_list(request)
     return _make_sse_stream(request, _token_usage_listeners, "usage-changed")
+
+
+@app.get("/api/stream")
+async def stream_multiplexed(
+    request: Request,
+    topics: str = Query("", description="Comma-separated topic subscriptions"),
+) -> StreamingResponse:
+    """Multiplexed SSE endpoint — one connection for all event topics.
+
+    Accepts a comma-separated ``topics`` query parameter.  Each topic
+    registers the connection into the matching listener set so that a
+    single SSE connection can receive events from multiple sources.
+
+    Supported topics:
+
+    - ``navbar`` — active analysis count + unread mention count
+    - ``dashboard`` — job list changes
+    - ``results:{job_id}`` — per-job status changes
+    - ``comments:{job_id}`` — per-job comment changes
+    - ``chat:{job_id}`` — per-job chat message changes
+    - ``token-usage`` — token usage changes (admin only)
+    - ``settings`` — server settings changes (admin only)
+    """
+    _check_allow_list(request)
+    username = getattr(request.state, "username", "")
+    if not username:
+        raise HTTPException(status_code=401, detail="Authentication required")
+    is_admin = getattr(request.state, "is_admin", False)
+
+    topic_list = list(dict.fromkeys(t.strip() for t in topics.split(",") if t.strip()))
+    if not topic_list:
+        raise HTTPException(status_code=400, detail="No topics specified")
+    if len(topic_list) > 50:
+        raise HTTPException(status_code=400, detail="Too many topics (max 50)")
+
+    # Validate topics and build registration plan
+    # Each entry: (event_prefix, asyncio.Event, listener_set_or_dict, key_or_none)
+    registrations: list[
+        tuple[
+            str,
+            asyncio.Event,
+            set[asyncio.Event] | None,
+            dict[str, set[asyncio.Event]] | None,
+            str,
+        ]
+    ] = []
+    navbar_requested = False
+
+    for topic in topic_list:
+        if topic == "navbar":
+            navbar_requested = True
+            # navbar has custom handling (active + mention events)
+            continue
+        elif topic == "dashboard":
+            ev = asyncio.Event()
+            registrations.append(("dashboard", ev, _dashboard_listeners, None, ""))
+        elif topic.startswith("results:"):
+            job_id = topic[len("results:") :]
+            if not job_id or not _VALID_JOB_ID_RE.match(job_id):
+                continue
+            ev = asyncio.Event()
+            registrations.append(
+                (f"results:{job_id}", ev, None, _job_status_listeners, job_id)
+            )
+        elif topic.startswith("comments:"):
+            job_id = topic[len("comments:") :]
+            if not job_id or not _VALID_JOB_ID_RE.match(job_id):
+                continue
+            ev = asyncio.Event()
+            registrations.append(
+                (f"comments:{job_id}", ev, None, _comment_listeners, job_id)
+            )
+        elif topic.startswith("chat:"):
+            job_id = topic[len("chat:") :]
+            if not job_id or not _VALID_JOB_ID_RE.match(job_id):
+                continue
+            listener_key = f"{job_id}:{username}" if username else job_id
+            ev = asyncio.Event()
+            registrations.append(
+                (f"chat:{job_id}", ev, None, _chat_listeners, listener_key)
+            )
+        elif topic == "token-usage":
+            if not is_admin:
+                continue  # silently skip admin-only topics for non-admins
+            ev = asyncio.Event()
+            registrations.append(("token-usage", ev, _token_usage_listeners, None, ""))
+        elif topic == "settings":
+            if not is_admin:
+                continue
+            ev = asyncio.Event()
+            registrations.append(("settings", ev, _settings_listeners, None, ""))
+        elif topic == "admin-chat":
+            if not is_admin:
+                continue
+            listener_key = (
+                f"{ADMIN_CHAT_JOB_ID}:{username}" if username else ADMIN_CHAT_JOB_ID
+            )
+            ev = asyncio.Event()
+            registrations.append(
+                ("admin-chat", ev, None, _chat_listeners, listener_key)
+            )
+        # Unknown topics are silently ignored
+
+    if not registrations and not navbar_requested:
+        raise HTTPException(status_code=400, detail="No valid topics specified")
+
+    async def event_generator():
+        # Register all events in their listener sets
+        for _prefix, ev, global_set, per_key_dict, key in registrations:
+            if per_key_dict is not None:
+                per_key_dict.setdefault(key, set()).add(ev)
+            elif global_set is not None:
+                global_set.add(ev)
+
+        # Navbar events (special handling)
+        active_event: asyncio.Event | None = None
+        mention_event: asyncio.Event | None = None
+        last_active = -1
+        last_unread = -1
+
+        if navbar_requested:
+            active_event = asyncio.Event()
+            _active_count_listeners.add(active_event)
+            if username:
+                mention_event = asyncio.Event()
+                _mention_listeners.setdefault(username, set()).add(mention_event)
+
+        wait_tasks: list[asyncio.Task] = []
+
+        try:
+            # Send initial navbar data on connect
+            if navbar_requested:
+                try:
+                    active = await storage.count_active_analyses()
+                    last_active = active
+                    yield f"event: navbar:active-count\ndata: {active}\n\n"
+                except Exception:
+                    last_active = 0
+                    yield "event: navbar:active-count\ndata: 0\n\n"
+                if username:
+                    try:
+                        unread = await storage.get_unread_mention_count(username)
+                        last_unread = unread
+                        yield f"event: navbar:unread-count\ndata: {unread}\n\n"
+                    except Exception:
+                        last_unread = 0
+                        yield "event: navbar:unread-count\ndata: 0\n\n"
+
+            while True:
+                # Build wait list from all registered events
+                wait_tasks = []
+                all_events: list[tuple[str, asyncio.Event]] = []
+                for prefix, ev, _gs, _pkd, _k in registrations:
+                    all_events.append((prefix, ev))
+                if active_event is not None:
+                    all_events.append(("navbar:active", active_event))
+                if mention_event is not None:
+                    all_events.append(("navbar:mention", mention_event))
+
+                wait_tasks = [asyncio.create_task(ev.wait()) for _, ev in all_events]
+
+                try:
+                    done, pending = await asyncio.wait(
+                        wait_tasks,
+                        timeout=30,
+                        return_when=asyncio.FIRST_COMPLETED,
+                    )
+                    for task in pending:
+                        task.cancel()
+                    wait_tasks = []
+                except asyncio.CancelledError:
+                    for task in wait_tasks:
+                        task.cancel()
+                    wait_tasks = []
+                    break
+
+                if not done:
+                    yield ": keepalive\n\n"
+                    continue
+
+                if await request.is_disconnected():
+                    break
+
+                # Emit events for all fired topics
+                for prefix, ev in all_events:
+                    if not ev.is_set():
+                        continue
+                    ev.clear()
+
+                    if prefix == "navbar:active":
+                        try:
+                            active = await storage.count_active_analyses()
+                            if active != last_active:
+                                yield f"event: navbar:active-count\ndata: {active}\n\n"
+                                last_active = active
+                        except Exception:
+                            logger.debug(
+                                "Failed to fetch active count for multiplexed SSE",
+                                exc_info=True,
+                            )
+                    elif prefix == "navbar:mention":
+                        try:
+                            unread = await storage.get_unread_mention_count(username)
+                            if unread != last_unread:
+                                yield f"event: navbar:unread-count\ndata: {unread}\n\n"
+                                last_unread = unread
+                        except Exception:
+                            logger.debug(
+                                "Failed to fetch unread count for multiplexed SSE",
+                                exc_info=True,
+                            )
+                    else:
+                        # Simple notification topics — emit event with topic prefix
+                        event_map = {
+                            "dashboard": "dashboard-changed",
+                            "token-usage": "usage-changed",
+                            "settings": "settings-changed",
+                            "admin-chat": "chat-changed",
+                        }
+                        # For results:X, comments:X, chat:X — extract the base topic
+                        base = prefix.split(":")[0] if ":" in prefix else prefix
+                        if base == "results":
+                            event_name = "status-changed"
+                        elif base == "comments":
+                            event_name = "comments-changed"
+                        elif base == "chat":
+                            event_name = "chat-changed"
+                        else:
+                            event_name = event_map.get(prefix, "refresh")
+                        yield f"event: {prefix}:{event_name}\ndata: refresh\n\n"
+
+        finally:
+            for task in wait_tasks:
+                task.cancel()
+
+            # Cleanup all registrations
+            for _prefix, ev, global_set, per_key_dict, key in registrations:
+                if per_key_dict is not None:
+                    bucket = per_key_dict.get(key)
+                    if bucket is not None:
+                        bucket.discard(ev)
+                        if not bucket:
+                            per_key_dict.pop(key, None)
+                elif global_set is not None:
+                    global_set.discard(ev)
+
+            # Cleanup navbar events
+            if active_event is not None:
+                _active_count_listeners.discard(active_event)
+            if mention_event is not None and username:
+                listeners = _mention_listeners.get(username)
+                if listeners is not None:
+                    listeners.discard(mention_event)
+                    if not listeners:
+                        _mention_listeners.pop(username, None)
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 @app.get("/api/dashboard")

@@ -15,6 +15,7 @@ export function AdminChatPage() {
   return (
     <ChatUI
       apiBasePath="/api/admin/chat"
+      sseTopic="admin-chat"
       header={header}
       defaultProvider="claude"
       emptyMessage="Ask about server analytics"

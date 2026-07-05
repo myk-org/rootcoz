@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { useLatestRef } from '@/lib/useLatestRef'
+import { useSSE } from '@/lib/SSEProvider'
 import { Link, useNavigate, useSearchParams } from 'react-router-dom'
 import { api } from '@/lib/api'
 import { GITHUB_REPO_URL } from '@/lib/constants'
@@ -310,20 +311,12 @@ export function DashboardPage() {
     fetchJobs()
   }, [fetchJobs])
 
-  // SSE connection (stable — doesn't depend on fetchJobs)
-  useEffect(() => {
-    const eventSource = new EventSource('/api/dashboard/stream')
-    eventSource.addEventListener('dashboard-changed', () => {
-      fetchJobsRef.current()
-    })
-    eventSource.onerror = () => {
-      console.debug('Dashboard SSE error')
-    }
+  // Multiplexed SSE connection (stable — doesn't depend on fetchJobs)
+  const dashboardEvents = useMemo(() => ({
+    'dashboard-changed': () => { fetchJobsRef.current() },
+  }), [])
 
-    return () => {
-      eventSource.close()
-    }
-  }, [])
+  useSSE('dashboard', dashboardEvents)
   useEffect(() => { setPage(1) }, [search, selectedStatuses, reviewStatus, perPage, dateFrom, dateTo, metaTeams, metaTiers, metaVersions, metaLabels, metaExcludeLabels])
 
   const filtered = useMemo(() => {

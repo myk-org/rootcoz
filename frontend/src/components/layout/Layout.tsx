@@ -1,9 +1,10 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { Outlet, useLocation } from 'react-router-dom'
 import { Header } from './Header'
 import { Sidebar } from './Sidebar'
 import { useAuth } from '@/lib/auth'
 import { api } from '@/lib/api'
+import { useSSE } from '@/lib/SSEProvider'
 
 export function Layout() {
   const { username, isAdmin } = useAuth()
@@ -18,30 +19,19 @@ export function Layout() {
     setMobileOpen(false)
   }, [location.pathname])
 
-  // Unified SSE stream for navbar badges — server pushes both counts in real-time
-  useEffect(() => {
-    if (!username) return
-
-    const eventSource = new EventSource('/api/navbar/stream')
-
-    eventSource.addEventListener('active-count', (event) => {
-      const count = parseInt(event.data, 10)
+  // Multiplexed SSE stream for navbar badges — shared single connection
+  const navbarEvents = useMemo(() => ({
+    'active-count': (data: string) => {
+      const count = parseInt(data, 10)
       if (!isNaN(count)) setActiveCount(count)
-    })
-
-    eventSource.addEventListener('unread-count', (event) => {
-      const count = parseInt(event.data, 10)
+    },
+    'unread-count': (data: string) => {
+      const count = parseInt(data, 10)
       if (!isNaN(count)) setUnreadCount(count)
-    })
+    },
+  }), [])
 
-    eventSource.onerror = () => {
-      // EventSource auto-reconnects on error
-    }
-
-    return () => {
-      eventSource.close()
-    }
-  }, [username])
+  useSSE(username ? 'navbar' : null, navbarEvents)
 
   // Fetch pending user count for admin badge
   useEffect(() => {
