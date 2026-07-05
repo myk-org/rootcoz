@@ -623,6 +623,7 @@ export function FailureCard({ group, jobId, childJobName, childBuildNumber, inde
 
             {/* ACTIONS line: AI selector, Re-analyze, issue buttons, include links */}
             <div className="flex flex-wrap items-center gap-3 pt-2 border-t border-border-muted">
+              <span className="text-[10px] font-bold uppercase tracking-wider text-text-tertiary">Actions</span>
               {showAiSelector && (
                 <>
                   <span className="text-xs text-text-tertiary whitespace-nowrap">AI for issue generation:</span>
@@ -690,6 +691,7 @@ export function FailureCard({ group, jobId, childJobName, childBuildNumber, inde
 
             {/* CLASSIFY line: classification, pattern, track button */}
             <div className="flex flex-wrap items-center gap-3">
+              <span className="text-[10px] font-bold uppercase tracking-wider text-text-tertiary">Classify</span>
               <ClassificationSelect
                 jobId={jobId}
                 testName={rep.test_name}
