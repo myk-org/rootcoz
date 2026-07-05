@@ -333,6 +333,43 @@ class TestListGcsJunitFiles:
         assert exc_info.value.status_code == 500
 
 
+    async def test_pagination_truncation_appends_warning(self):
+        """When pagination exceeds max_pages, partial results returned with warning."""
+        call_count = 0
+
+        def handler(request: httpx.Request):
+            nonlocal call_count
+            call_count += 1
+            # Always return a nextPageToken to force infinite pagination
+            return httpx.Response(
+                200,
+                json={
+                    "items": [{"name": f"prefix/junit_p{call_count}.xml"}],
+                    "nextPageToken": f"token-{call_count}",
+                },
+            )
+
+        transport = httpx.MockTransport(handler)
+        warnings: list[str] = []
+        # Monkeypatch max_pages inside the function isn't easy, but 100 calls
+        # is the default. Instead, patch the module constant.
+        import rootcoz.sources.prow_source as prow_mod
+
+        original_max = 100
+        async with httpx.AsyncClient(transport=transport) as client:
+            # Patch the loop limit by replacing the function's local —
+            # can't patch a local, so just call with 100 pages and check.
+            # The function uses max_pages=100, so after 100 calls it truncates.
+            files = await _list_gcs_junit_files(
+                client, "bucket", "prefix/", warnings=warnings
+            )
+        assert call_count == original_max
+        assert len(files) == original_max  # one file per page
+        assert len(warnings) == 1
+        assert "exceeded" in warnings[0]
+        assert "truncated" in warnings[0]
+
+
 # ---------------------------------------------------------------------------
 # ProwSource.fetch()
 # ---------------------------------------------------------------------------

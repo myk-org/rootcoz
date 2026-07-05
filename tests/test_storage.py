@@ -1380,3 +1380,17 @@ class TestUpdateBuildUrl:
             row = await storage.get_result("job-noop")
             assert row is not None
             assert row["jenkins_url"] == "https://original.url/job/1"
+
+    async def test_nonexistent_job_logs_warning(self, setup_test_db: Path) -> None:
+        """Updating a nonexistent job_id logs a warning."""
+        with (
+            patch.object(storage, "DB_PATH", setup_test_db),
+            patch.object(storage, "logger") as mock_logger,
+        ):
+            await storage.update_build_url(
+                "nonexistent-id", "https://example.com"
+            )
+        mock_logger.warning.assert_called_once()
+        args = mock_logger.warning.call_args[0]
+        assert "no row found" in args[0]
+        assert "nonexistent-id" in args

@@ -702,6 +702,63 @@ class TestAnalyzeFailuresRawXml:
         )
 
 
+class TestApplyProwIdentity:
+    """Tests for the _apply_prow_identity helper."""
+
+    def _make_body(self, **overrides):
+        from rootcoz.models import UnifiedAnalyzeRequest
+
+        defaults = {
+            "type": "prow",
+            "prow_job_name": "my-prow-job",
+            "build_id": "1234567890123456789",
+            "ai_provider": "claude",
+            "ai_model": "test",
+        }
+        defaults.update(overrides)
+        return UnifiedAnalyzeRequest(**defaults)
+
+    def test_prow_with_valid_build_id(self):
+        from rootcoz.main import _apply_prow_identity
+
+        data: dict = {"job_name": "original"}
+        body = self._make_body()
+        _apply_prow_identity(data, body)
+        assert data["job_name"] == "my-prow-job"
+        assert data["build_number"] == "1234567890123456789"
+
+    def test_prow_with_non_numeric_build_id(self):
+        from rootcoz.main import _apply_prow_identity
+
+        data: dict = {"job_name": "original"}
+        body = MagicMock(
+            type="prow", prow_job_name="my-prow-job", build_id="abc-not-numeric"
+        )
+        _apply_prow_identity(data, body)
+        assert data["job_name"] == "my-prow-job"
+        assert "build_number" not in data
+
+    def test_prow_without_prow_job_name(self):
+        from rootcoz.main import _apply_prow_identity
+
+        data: dict = {"job_name": "original"}
+        body = MagicMock(type="prow", prow_job_name="", build_id="123")
+        _apply_prow_identity(data, body)
+        assert data["job_name"] == "original"  # unchanged
+        assert "build_number" not in data
+
+    def test_non_prow_type_no_mutation(self):
+        from rootcoz.main import _apply_prow_identity
+
+        data: dict = {"job_name": "original"}
+        body = MagicMock(
+            type="file", prow_job_name="should-be-ignored", build_id="123"
+        )
+        _apply_prow_identity(data, body)
+        assert data["job_name"] == "original"  # unchanged
+        assert "build_number" not in data
+
+
 class TestAnalyzeProwEndpoint:
     """Tests for the unified POST /analyze endpoint with type=prow."""
 

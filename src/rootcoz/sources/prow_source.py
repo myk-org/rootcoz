@@ -188,6 +188,8 @@ async def _list_gcs_junit_files(
         client: httpx async client.
         bucket: GCS bucket name.
         prefix: Object prefix to search under (e.g. ``logs/job/123/artifacts/``).
+        warnings: Optional list to append truncation warnings to when
+            pagination exceeds the safety limit.
 
     Returns:
         List of full object names (keys) for JUnit XML files.
