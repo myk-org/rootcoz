@@ -395,22 +395,9 @@ export function FailureCard({ group, jobId, childJobName, childBuildNumber, inde
                 <ClassificationBadge classification={pattern} />
               </>
             )}
-            {trackedIn[repKey]?.tracked_in_url ? (
+            {trackedIn[repKey]?.tracked_in_url && (
               <TrackedInBadge url={trackedIn[repKey].tracked_in_url} type={trackedIn[repKey].tracked_in_type} />
-            ) : !isViewer ? (
-              <Tooltip>
-                <TooltipTrigger asChild>
-                  <button
-                    onClick={(e) => { e.stopPropagation(); setTrackInOpen(true) }}
-                    className="flex items-center gap-1 rounded-md bg-surface-elevated px-2 py-1 text-[10px] font-mono text-text-tertiary hover:text-text-secondary hover:bg-surface-elevated/80 transition-colors"
-                  >
-                    <Link2 className="h-3 w-3" />
-                    Track
-                  </button>
-                </TooltipTrigger>
-                <TooltipContent>Link to an existing issue</TooltipContent>
-              </Tooltip>
-            ) : null}
+            )}
             {rep.reanalyzed_with && rep.reanalysis_status !== 'running' && (
               <Tooltip>
                 <TooltipTrigger asChild>
@@ -637,24 +624,8 @@ export function FailureCard({ group, jobId, childJobName, childBuildNumber, inde
             {/* Peer debate trail */}
             {rep.peer_debate && <PeerDebateSection debate={rep.peer_debate} repoUrls={repoUrls} />}
 
-            {/* Actions: classification + AI selector + bug creation */}
+            {/* ACTIONS line: AI selector, Re-analyze, issue buttons, include links */}
             <div className="flex flex-wrap items-center gap-3 pt-2 border-t border-border-muted">
-              <ClassificationSelect
-                jobId={jobId}
-                testName={rep.test_name}
-                testNames={groupTestNames}
-                currentClassification={classification}
-                childJobName={scopedChildJobName}
-                childBuildNumber={scopedChildBuildNumber}
-              />
-              <PatternSelect
-                jobId={jobId}
-                testName={rep.test_name}
-                testNames={groupTestNames}
-                currentPattern={pattern}
-                childJobName={scopedChildJobName}
-                childBuildNumber={scopedChildBuildNumber}
-              />
               {showAiSelector && (
                 <>
                   <span className="text-xs text-text-tertiary whitespace-nowrap">AI for issue generation:</span>
@@ -689,17 +660,6 @@ export function FailureCard({ group, jobId, childJobName, childBuildNumber, inde
                   </div>
                 </>
               )}
-              {(showAiSelector || githubIssuesEnabled || jiraIssuesEnabled) && (
-                <label className="flex items-center gap-1.5 text-xs text-text-secondary cursor-pointer">
-                  <input
-                    type="checkbox"
-                    checked={includeLinks}
-                    onChange={(e) => setIncludeLinks(e.target.checked)}
-                    className="rounded border-border-default"
-                  />
-                  Include links
-                </label>
-              )}
               {isOperator && (
                 <Button variant="outline" size="sm" onClick={() => setReAnalyzeOpen(true)} disabled={rep.reanalysis_status === 'running'}>
                   <RotateCw className={`h-3.5 w-3.5 mr-1${rep.reanalysis_status === 'running' ? ' animate-spin' : ''}`} />
@@ -718,7 +678,56 @@ export function FailureCard({ group, jobId, childJobName, childBuildNumber, inde
                 label="Jira Ticket"
                 onClick={() => setBugTarget('jira')}
               />
+              {(showAiSelector || githubIssuesEnabled || jiraIssuesEnabled) && (
+                <label className="flex items-center gap-1.5 text-xs text-text-secondary cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={includeLinks}
+                    onChange={(e) => setIncludeLinks(e.target.checked)}
+                    className="rounded border-border-default"
+                  />
+                  Include links
+                </label>
+              )}
             </div>
+
+            {/* CLASSIFY line: classification, pattern, track button */}
+            <div className="flex flex-wrap items-center gap-3">
+              <ClassificationSelect
+                jobId={jobId}
+                testName={rep.test_name}
+                testNames={groupTestNames}
+                currentClassification={classification}
+                childJobName={scopedChildJobName}
+                childBuildNumber={scopedChildBuildNumber}
+              />
+              <PatternSelect
+                jobId={jobId}
+                testName={rep.test_name}
+                testNames={groupTestNames}
+                currentPattern={pattern}
+                childJobName={scopedChildJobName}
+                childBuildNumber={scopedChildBuildNumber}
+              />
+              {!isViewer && !trackedIn[repKey]?.tracked_in_url && (
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <Button variant="outline" size="sm" onClick={() => setTrackInOpen(true)}>
+                      <Link2 className="h-3.5 w-3.5 mr-1" />
+                      Track
+                    </Button>
+                  </TooltipTrigger>
+                  <TooltipContent>Link to an existing issue</TooltipContent>
+                </Tooltip>
+              )}
+            </div>
+
+            {/* Tracked item links (only when tracked items exist) */}
+            {trackedIn[repKey]?.tracked_in_url && (
+              <div className="flex items-center gap-2 pl-2">
+                <TrackedInBadge url={trackedIn[repKey].tracked_in_url} type={trackedIn[repKey].tracked_in_type} />
+              </div>
+            )}
 
             {/* Comments */}
             <CommentsSection jobId={jobId} testNames={groupTestNames} childJobName={scopedChildJobName} childBuildNumber={scopedChildBuildNumber} />
