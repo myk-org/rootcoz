@@ -404,9 +404,12 @@ class RootCozClient:
         """
         body: dict = {**kwargs}
         body.setdefault("type", "jenkins")
-        if job_name and body["type"] == "jenkins":
+        if body["type"] == "jenkins":
+            if not job_name:
+                raise ValueError("job_name is required for Jenkins analysis")
+            if build_number <= 0:
+                raise ValueError("build_number must be positive for Jenkins analysis")
             body["job_name"] = job_name
-        if build_number and body["type"] == "jenkins":
             body["build_number"] = build_number
         if name:
             body["name"] = name

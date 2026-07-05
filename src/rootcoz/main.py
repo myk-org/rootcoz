@@ -3246,6 +3246,208 @@ def _apply_prow_identity(data: dict, body: "UnifiedAnalyzeRequest") -> None:
             )  # String — Prow IDs exceed JS MAX_SAFE_INTEGER
 
 
+def _format_prow_context(metadata: dict | None, build_url: str = "") -> str:
+    """Format Prow job metadata into a human-readable context file.
+
+    Written to the workspace as ``prow-context.txt`` so the AI knows
+    the job type, repository, and PR details.
+
+    Args:
+        metadata: Source metadata dict from ``CISourceResult.source_metadata``.
+        build_url: Prow Deck URL for the build.
+
+    Returns:
+        Formatted context string, or empty string if no useful data.
+    """
+    if not metadata:
+        return ""
+
+    lines = ["=== CI JOB CONTEXT ==="]
+
+    job_type = metadata.get("job_type", "")
+    if job_type:
+        type_label = {
+            "presubmit": "presubmit (PR check)",
+            "postsubmit": "postsubmit (post-merge)",
+            "periodic": "periodic (scheduled)",
+            "batch": "batch (merge queue)",
+        }.get(job_type, job_type)
+        lines.append(f"Type: {type_label}")
+
+    org = metadata.get("org", "")
+    repo = metadata.get("repo", "")
+    pr_number = metadata.get("pr_number")
+    additional_prs = metadata.get("additional_prs") or []
+    if pr_number is not None and org and repo:
+        if additional_prs:
+            # Batch job with multiple PRs — list all
+            all_prs = [f"{org}/{repo}#{pr_number}"]
+            for extra in additional_prs:
+                num = extra.get("number")
+                if num is not None:
+                    all_prs.append(f"{org}/{repo}#{num}")
+            lines.append(f"PRs: {', '.join(all_prs)}")
+        else:
+            lines.append(f"PR: {org}/{repo}#{pr_number}")
+    elif org and repo:
+        lines.append(f"Repository: {org}/{repo}")
+
+    pr_author = metadata.get("pr_author", "")
+    if pr_author:
+        if additional_prs:
+            authors = [pr_author]
+            for extra in additional_prs:
+                author = extra.get("author", "")
+                if author and author not in authors:
+                    authors.append(author)
+            lines.append(f"PR Authors: {', '.join(authors)}")
+        else:
+            lines.append(f"PR Author: {pr_author}")
+
+    base_ref = metadata.get("base_ref", "")
+    if base_ref:
+        lines.append(f"Base branch: {base_ref}")
+
+    state = metadata.get("state", "")
+    if state:
+        lines.append(f"Status: {state.upper()}")
+
+    if build_url:
+        lines.append(f"Build URL: {build_url}")
+
+    # Only return content if we have more than just the header
+    if len(lines) <= 1:
+        return ""
+
+    return "\n".join(lines) + "\n"
+
+
+# Strict pattern for GitHub org/repo names — prevents path traversal in API URLs.
+_GITHUB_NAME_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._-]*$")
+
+
+async def _fetch_pr_changes(
+    org: str,
+    repo: str,
+    pr_number: int,
+    github_token: str = "",
+    *,
+    _client: httpx.AsyncClient | None = None,
+) -> str | None:
+    """Fetch PR title, description, and diff from GitHub.
+
+    Returns formatted content for the AI workspace, or ``None`` on failure.
+    Public repos work without a token; private repos require one.
+
+    Args:
+        org: GitHub organisation (e.g. ``kubevirt``).
+        repo: Repository name.
+        pr_number: Pull request number.
+        github_token: Optional GitHub token for private repos.
+        _client: **Test-only** — injected ``httpx.AsyncClient``.
+    """
+    if not _GITHUB_NAME_RE.match(org) or not _GITHUB_NAME_RE.match(repo):
+        logger.warning("Invalid org/repo from prowjob metadata: %s/%s", org, repo)
+        return None
+
+    if not isinstance(pr_number, int) or pr_number <= 0:
+        logger.warning("Invalid PR number: %r", pr_number)
+        return None
+
+    headers: dict[str, str] = {"Accept": "application/json"}
+    if github_token:
+        headers["Authorization"] = f"token {github_token}"
+
+    pr_api = f"https://api.github.com/repos/{org}/{repo}/pulls/{pr_number}"
+    try:
+        client_ctx = (
+            contextlib.nullcontext(_client)
+            if _client
+            else httpx.AsyncClient(timeout=15)
+        )
+        async with client_ctx as client:
+            # Fetch PR metadata (title, body, changed files count)
+            pr_resp = await client.get(pr_api, headers=headers)
+            if pr_resp.status_code != 200:
+                logger.warning(
+                    "GitHub PR API returned %d for %s/%s#%d",
+                    pr_resp.status_code,
+                    org,
+                    repo,
+                    pr_number,
+                )
+                return None
+
+            pr_data = pr_resp.json()
+            title = pr_data.get("title", "")
+            body = (pr_data.get("body") or "").strip()
+            changed_files = pr_data.get("changed_files", 0)
+            additions = pr_data.get("additions", 0)
+            deletions = pr_data.get("deletions", 0)
+            html_url = pr_data.get("html_url", "")
+
+            # Fetch diff
+            diff_headers = {**headers, "Accept": "application/vnd.github.v3.diff"}
+            diff_resp = await client.get(pr_api, headers=diff_headers)
+            diff_text = ""
+            if diff_resp.status_code == 200:
+                diff_text = diff_resp.text
+
+    except httpx.RequestError:
+        logger.warning(
+            "Failed to fetch PR changes for %s/%s#%d",
+            org,
+            repo,
+            pr_number,
+            exc_info=True,
+        )
+        return None
+
+    lines = [
+        f"=== PR #{pr_number}: {title} ===",
+        f"URL: {html_url}",
+        f"Changed files: {changed_files} (+{additions} -{deletions})",
+    ]
+    if body:
+        lines.append(f"\n--- PR Description ---\n{body}")
+    if diff_text:
+        lines.append(f"\n--- PR Diff ---\n{diff_text}")
+
+    return "\n".join(lines) + "\n"
+
+
+def _write_workspace_context(
+    filepath: Path,
+    content: str,
+    instruction: str,
+    custom_prompt: str,
+    job_id: str,
+) -> str:
+    """Write a context file to the AI workspace and prepend a MANDATORY instruction.
+
+    Returns the updated ``custom_prompt`` with the instruction prepended,
+    or the original ``custom_prompt`` on write failure.
+    """
+    try:
+        filepath.write_text(content)
+        full_instruction = (
+            f"\n\nMANDATORY: Read {filepath} before analyzing. {instruction}"
+        )
+        return (
+            full_instruction + "\n" + custom_prompt
+            if custom_prompt
+            else full_instruction
+        )
+    except OSError:
+        logger.warning(
+            "Failed to write %s for job %s",
+            filepath.name,
+            job_id,
+            exc_info=True,
+        )
+        return custom_prompt
+
+
 async def _enqueue_non_jenkins_analysis(
     body: "UnifiedAnalyzeRequest",
     merged: "Settings",
@@ -3794,6 +3996,63 @@ async def _process_non_jenkins_analysis(
 
         custom_prompt = (body.raw_prompt or "").strip()
         server_url = _build_internal_server_url()
+
+        # Write Prow job context file for AI consumption
+        if source_result.source_metadata and repo_path:
+            prow_context = _format_prow_context(
+                source_result.source_metadata, source_result.build_url
+            )
+            if prow_context:
+                custom_prompt = _write_workspace_context(
+                    filepath=repo_path / "prow-context.txt",
+                    content=prow_context,
+                    instruction=(
+                        "It contains CI job context (job type, PR info, repo). "
+                        "Use this to determine if failures are likely related "
+                        "to PR changes or pre-existing."
+                    ),
+                    custom_prompt=custom_prompt,
+                    job_id=job_id,
+                )
+
+            # Fetch PR changes (diff + description) for presubmit/batch jobs
+            meta = source_result.source_metadata
+            pr_num = meta.get("pr_number")
+            pr_org = meta.get("org", "")
+            pr_repo = meta.get("repo", "")
+            if pr_num is not None and pr_org and pr_repo:
+                github_token = (
+                    merged.github_token.get_secret_value()
+                    if merged.github_token
+                    else ""
+                )
+                # Collect all PR numbers (primary + additional for batch jobs)
+                all_pr_nums = [pr_num]
+                for extra in meta.get("additional_prs") or []:
+                    num = extra.get("number")
+                    if num is not None:
+                        all_pr_nums.append(num)
+
+                pr_sections: list[str] = []
+                for num in all_pr_nums:
+                    content = await _fetch_pr_changes(
+                        pr_org, pr_repo, num, github_token
+                    )
+                    if content:
+                        pr_sections.append(content)
+
+                if pr_sections:
+                    custom_prompt = _write_workspace_context(
+                        filepath=repo_path / "pr-changes.diff",
+                        content="\n".join(pr_sections),
+                        instruction=(
+                            "It contains the PR code changes (diff), title, "
+                            "and description. Cross-reference test failures "
+                            "with the PR diff to determine if the PR caused them."
+                        ),
+                        custom_prompt=custom_prompt,
+                        job_id=job_id,
+                    )
 
         # Console-only analysis when no JUnit failures found but console
         # context exists (e.g. Prow build with no JUnit artifacts)

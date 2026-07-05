@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import os
 import re
+from dataclasses import asdict, dataclass
 
 import httpx
 from simple_logger.logger import get_logger
@@ -32,6 +33,99 @@ _HTTP_TIMEOUT = 60
 _MAX_SIZE_FINISHED = 1_000_000  # 1 MB
 _MAX_SIZE_BUILD_LOG = 10_000_000  # 10 MB
 _MAX_SIZE_JUNIT_XML = 5_000_000  # 5 MB
+
+# Maximum size for prowjob.json (bytes)
+_MAX_SIZE_PROWJOB = 2_000_000  # 2 MB
+
+
+@dataclass
+class ProwJobMetadata:
+    """Metadata extracted from ``prowjob.json``.
+
+    Prow uploads ``prowjob.json`` alongside build artifacts.  It contains
+    the full ProwJob spec including job type, repository refs, PR info,
+    and job status.
+    """
+
+    job_type: str = ""
+    """Job type: ``presubmit``, ``periodic``, ``postsubmit``, or ``batch``."""
+
+    org: str = ""
+    """Source repository organisation (e.g. ``kubevirt``)."""
+
+    repo: str = ""
+    """Source repository name (e.g. ``kubevirt``)."""
+
+    base_ref: str = ""
+    """Base branch (e.g. ``main``)."""
+
+    pr_number: int | None = None
+    """Pull request number (presubmit jobs only; first PR for batch)."""
+
+    pr_author: str = ""
+    """PR author login (presubmit jobs only; first PR for batch)."""
+
+    additional_prs: list[dict] | None = None
+    """Additional PRs for batch jobs: ``[{"number": N, "author": "..."}]``."""
+
+    state: str = ""
+    """Job result: ``success``, ``failure``, ``aborted``, ``error``."""
+
+
+def _parse_prowjob_json(raw: str) -> ProwJobMetadata | None:
+    """Parse ``prowjob.json`` content into ``ProwJobMetadata``.
+
+    Args:
+        raw: Raw JSON content of the prowjob.json file.
+
+    Returns:
+        Parsed metadata, or ``None`` if the JSON is unparseable.
+    """
+    try:
+        data = json.loads(raw)
+    except (ValueError, TypeError):
+        return None
+
+    if not isinstance(data, dict):
+        return None
+
+    meta = ProwJobMetadata()
+
+    # spec.type
+    spec = data.get("spec", {})
+    if not isinstance(spec, dict):
+        return None
+    meta.job_type = spec.get("type", "")
+
+    # spec.refs — repository info and PR details
+    refs = spec.get("refs") or {}
+    if isinstance(refs, dict):
+        meta.org = refs.get("org", "")
+        meta.repo = refs.get("repo", "")
+        meta.base_ref = refs.get("base_ref", "")
+
+        pulls = refs.get("pulls") or []
+        if isinstance(pulls, list) and pulls and isinstance(pulls[0], dict):
+            pr_num = pulls[0].get("number")
+            meta.pr_number = pr_num if isinstance(pr_num, int) else None
+            meta.pr_author = pulls[0].get("author", "")
+            # Preserve additional PRs for batch jobs
+            if len(pulls) > 1:
+                meta.additional_prs = [
+                    {
+                        "number": p.get("number"),
+                        "author": p.get("author", ""),
+                    }
+                    for p in pulls[1:]
+                    if isinstance(p, dict)
+                ]
+
+    # status.state
+    status = data.get("status", {})
+    if isinstance(status, dict):
+        meta.state = status.get("state", "")
+
+    return meta
 
 
 def _gcs_url(bucket: str, *path_parts: str) -> str:
@@ -246,7 +340,11 @@ class ProwSource(CISource):
     - ``artifacts/**/junit*.xml`` — JUnit test results
 
     The GCS path convention is:
-    ``gs://{bucket}/logs/{job_name}/{build_id}/``
+    - Periodic/postsubmit: ``gs://{bucket}/logs/{job_name}/{build_id}/``
+    - Presubmit (PR): ``gs://{bucket}/pr-logs/pull/{org}_{repo}/{pr}/{job_name}/{build_id}/``
+
+    For presubmit jobs, the path is auto-resolved via the Prow directory
+    pointer file at ``pr-logs/directory/{job_name}/{build_id}.txt``.
     """
 
     def __init__(
@@ -275,6 +373,9 @@ class ProwSource(CISource):
         self.gcs_bucket = gcs_bucket
         self.prow_url = prow_url
         self._custom_gcs_prefix = gcs_prefix
+        self._resolved_gcs_prefix: str | None = None
+        self._prowjob_metadata: ProwJobMetadata | None = None
+        self._resolution_warnings: list[str] = []
         self.force = force
 
     @property
@@ -284,10 +385,175 @@ class ProwSource(CISource):
 
     @property
     def _gcs_prefix(self) -> str:
-        """GCS object prefix for this build's artifacts."""
+        """GCS object prefix for this build's artifacts.
+
+        After ``_resolve_gcs_prefix()`` runs, this returns the
+        resolved prefix (which may differ from the default for PR jobs).
+        """
+        if self._resolved_gcs_prefix is not None:
+            return self._resolved_gcs_prefix
         if self._custom_gcs_prefix:
             return self._custom_gcs_prefix
         return f"logs/{self.job_name}/{self.build_id}"
+
+    async def _resolve_gcs_prefix(self, client: httpx.AsyncClient) -> str:
+        """Resolve the GCS prefix and fetch job metadata.
+
+        Resolution order:
+
+        1. If an explicit ``gcs_prefix`` was provided, use it and attempt
+           to fetch ``prowjob.json`` there for metadata.
+        2. Otherwise, try ``prowjob.json`` at the default ``logs/`` path.
+           If found, the path is confirmed (periodic/postsubmit) **and**
+           we get metadata in a single request.
+        3. If not found, check the Prow directory pointer file at
+           ``pr-logs/directory/{job}/{build_id}.txt``.  If it exists,
+           resolve the real path and fetch ``prowjob.json`` there.
+        4. Fall back to ``logs/{job}/{build_id}`` with no metadata.
+        """
+        if self._custom_gcs_prefix:
+            # Explicit prefix — just try to fetch metadata there
+            await self._fetch_prowjob_metadata(client, self._custom_gcs_prefix)
+            return self._custom_gcs_prefix
+
+        default = f"logs/{self.job_name}/{self.build_id}"
+
+        # Try prowjob.json at the default logs/ path — if found AND the
+        # job type is consistent with the logs/ path (periodic/postsubmit),
+        # confirm the path and use the metadata.  Presubmit/batch types at
+        # logs/ are contradictory — continue to pointer resolution.
+        if await self._fetch_prowjob_metadata(client, default):
+            jt = self._prowjob_metadata.job_type if self._prowjob_metadata else ""
+            if jt in ("periodic", "postsubmit"):
+                return default
+            # Metadata is empty, unknown, presubmit, or batch at logs/ —
+            # not authoritative for this path, continue to pointer resolution
+            logger.info(
+                "prowjob.json at default path has type=%s, "
+                "continuing to pointer resolution",
+                jt,
+            )
+            self._prowjob_metadata = None
+
+        # Default path didn't have prowjob.json — check the directory
+        # pointer file (standard for presubmit/batch jobs)
+        pointer_path = f"pr-logs/directory/{self.job_name}/{self.build_id}.txt"
+        pointer_url = _gcs_url(self.gcs_bucket, pointer_path)
+        try:
+            pointer_content = await _fetch_gcs_text(
+                client,
+                pointer_url,
+                label="directory-pointer",
+                max_size=_MAX_SIZE_FINISHED,
+            )
+        except GCSAccessError as exc:
+            # Non-404 errors (403, 500) are tracked as warnings so callers
+            # know prefix resolution was degraded, not silently swallowed.
+            if exc.status_code and exc.status_code != 404:
+                self._resolution_warnings.append(str(exc))
+            pointer_content = None
+
+        if not pointer_content:
+            return default
+
+        pointer_content = pointer_content.strip()
+        expected_prefix = f"gs://{self.gcs_bucket}/"
+        if not pointer_content.startswith(expected_prefix):
+            logger.warning(
+                "Directory pointer content does not match expected bucket "
+                "(expected gs://%s/..., got %s) — using default prefix",
+                self.gcs_bucket,
+                pointer_content,
+            )
+            return default
+
+        resolved = pointer_content[len(expected_prefix) :].rstrip("/")
+        # Validate: pointer content is from external GCS — reject
+        # suspicious values (newlines, control chars, excessive length,
+        # path traversal, or mismatched job/build)
+        if any(c in resolved for c in "\n\r\x00") or len(resolved) > 500:
+            logger.warning(
+                "Suspicious directory pointer content (len=%d), using default prefix",
+                len(resolved),
+            )
+            return default
+
+        if ".." in resolved:
+            logger.warning("Directory pointer contains path traversal: %s", resolved)
+            return default
+
+        if not resolved.startswith("pr-logs/"):
+            logger.warning(
+                "Directory pointer path is not under pr-logs/: %s "
+                "\u2014 using default prefix",
+                resolved,
+            )
+            return default
+
+        expected_suffix = f"/{self.job_name}/{self.build_id}"
+        if not resolved.endswith(expected_suffix):
+            logger.warning(
+                "Directory pointer path does not end with /%s/%s: %s "
+                "\u2014 using default prefix",
+                self.job_name,
+                self.build_id,
+                resolved,
+            )
+            return default
+
+        logger.info("Resolved GCS prefix via directory pointer: %s", resolved)
+
+        # Fetch metadata at the resolved path
+        await self._fetch_prowjob_metadata(client, resolved)
+
+        return resolved
+
+    async def _fetch_prowjob_metadata(
+        self, client: httpx.AsyncClient, prefix: str
+    ) -> bool:
+        """Fetch and parse ``prowjob.json`` at the given prefix.
+
+        Stores the result in ``self._prowjob_metadata``.  On failure,
+        ``self._prowjob_metadata`` remains ``None`` (non-fatal).
+
+        Returns:
+            ``True`` if prowjob.json was found and parsed, ``False`` otherwise.
+        """
+        prowjob_url = _gcs_url(self.gcs_bucket, prefix, "prowjob.json")
+        try:
+            prowjob_text = await _fetch_gcs_text(
+                client,
+                prowjob_url,
+                label="prowjob.json",
+                max_size=_MAX_SIZE_PROWJOB,
+            )
+        except GCSAccessError:
+            return False
+
+        if not prowjob_text:
+            return False
+
+        self._prowjob_metadata = _parse_prowjob_json(prowjob_text)
+        if self._prowjob_metadata:
+            logger.info(
+                "Parsed prowjob.json metadata: type=%s org=%s repo=%s pr=%s",
+                self._prowjob_metadata.job_type,
+                self._prowjob_metadata.org,
+                self._prowjob_metadata.repo,
+                self._prowjob_metadata.pr_number,
+            )
+            return True
+        return False
+
+    def _metadata_dict(self) -> dict:
+        """Return prowjob metadata as a dict for ``CISourceResult``."""
+        if not self._prowjob_metadata:
+            return {}
+        return {
+            k: v
+            for k, v in asdict(self._prowjob_metadata).items()
+            if v is not None and v != ""
+        }
 
     async def fetch(self) -> CISourceResult:
         """Fetch build data from GCS and return normalized result.
@@ -313,44 +579,62 @@ class ProwSource(CISource):
         """
         access_warnings: list[str] = []
 
-        # ------------------------------------------------------------------
-        # 1. Fetch finished.json to check build result
-        # ------------------------------------------------------------------
-        finished_url = _gcs_url(self.gcs_bucket, self._gcs_prefix, "finished.json")
-        try:
-            finished_text = await _fetch_gcs_text(
-                client, finished_url, label="finished.json", max_size=_MAX_SIZE_FINISHED
-            )
-        except GCSAccessError as exc:
-            access_warnings.append(str(exc))
-            finished_text = None
+        # Resolve GCS prefix (auto-detects PR jobs via directory pointer)
+        self._resolution_warnings = []
+        gcs_prefix = await self._resolve_gcs_prefix(client)
+        self._resolved_gcs_prefix = gcs_prefix
+        access_warnings.extend(self._resolution_warnings)
 
-        if finished_text:
-            try:
-                finished = json.loads(finished_text)
-                result = finished.get("result", "").upper()
-                if result == "SUCCESS" and not self.force:
-                    logger.info(
-                        "Prow job %s build %s passed, skipping analysis",
-                        self.job_name,
-                        self.build_id,
-                    )
-                    return CISourceResult(
-                        failures=[],
-                        build_passed=True,
-                        build_url=self.build_url,
-                    )
-                if result == "SUCCESS" and self.force:
-                    logger.info(
-                        "Prow job %s build %s passed but force=True, continuing",
-                        self.job_name,
-                        self.build_id,
-                    )
-            except (ValueError, KeyError) as exc:
-                logger.warning("Failed to parse finished.json: %s", exc)
+        # ------------------------------------------------------------------
+        # 1. Check build result — prefer prowjob.json metadata (already
+        #    fetched during prefix resolution), fall back to finished.json
+        # ------------------------------------------------------------------
+        build_state = ""
+        if self._prowjob_metadata and self._prowjob_metadata.state:
+            build_state = self._prowjob_metadata.state.upper()
         else:
+            # No prowjob.json metadata — fall back to finished.json
+            finished_url = _gcs_url(self.gcs_bucket, gcs_prefix, "finished.json")
+            try:
+                finished_text = await _fetch_gcs_text(
+                    client,
+                    finished_url,
+                    label="finished.json",
+                    max_size=_MAX_SIZE_FINISHED,
+                )
+            except GCSAccessError as exc:
+                access_warnings.append(str(exc))
+                finished_text = None
+
+            if finished_text:
+                try:
+                    finished = json.loads(finished_text)
+                    build_state = finished.get("result", "").upper()
+                except (ValueError, KeyError) as exc:
+                    logger.warning("Failed to parse finished.json: %s", exc)
+            else:
+                logger.info(
+                    "No finished.json found for %s/%s \u2014 job may still be running",
+                    self.job_name,
+                    self.build_id,
+                )
+
+        if build_state == "SUCCESS" and not self.force:
             logger.info(
-                "No finished.json found for %s/%s \u2014 job may still be running",
+                "Prow job %s build %s passed, skipping analysis",
+                self.job_name,
+                self.build_id,
+            )
+            return CISourceResult(
+                failures=[],
+                build_passed=True,
+                build_url=self.build_url,
+                source_metadata=self._metadata_dict(),
+                warnings=access_warnings,
+            )
+        if build_state == "SUCCESS" and self.force:
+            logger.info(
+                "Prow job %s build %s passed but force=True, continuing",
                 self.job_name,
                 self.build_id,
             )
@@ -358,7 +642,7 @@ class ProwSource(CISource):
         # ------------------------------------------------------------------
         # 2. Fetch build-log.txt for console context
         # ------------------------------------------------------------------
-        build_log_url = _gcs_url(self.gcs_bucket, self._gcs_prefix, "build-log.txt")
+        build_log_url = _gcs_url(self.gcs_bucket, gcs_prefix, "build-log.txt")
         try:
             build_log = await _fetch_gcs_text(
                 client,
@@ -374,7 +658,7 @@ class ProwSource(CISource):
         # ------------------------------------------------------------------
         # 3. List and fetch JUnit XML files from artifacts
         # ------------------------------------------------------------------
-        artifacts_prefix = f"{self._gcs_prefix}/artifacts/"
+        artifacts_prefix = f"{gcs_prefix}/artifacts/"
         try:
             junit_files = await _list_gcs_junit_files(
                 client, self.gcs_bucket, artifacts_prefix, warnings=access_warnings
@@ -420,4 +704,5 @@ class ProwSource(CISource):
             console_context=console_context,
             build_url=self.build_url,
             warnings=access_warnings,
+            source_metadata=self._metadata_dict(),
         )
