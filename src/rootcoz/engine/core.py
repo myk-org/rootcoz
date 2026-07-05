@@ -159,6 +159,11 @@ ROOTCOZ_HISTORY_PROMPT_FILENAME = "ROOTCOZ_HISTORY_PROMPT.md"
 _ROOTCOZ_PI_SUBDIRS = ("agents", "skills", "extensions")
 
 
+def _ignore_symlinks(directory: str, contents: list[str]) -> list[str]:
+    """Ignore symlinks during copytree to prevent escape attacks."""
+    return [c for c in contents if (Path(directory) / c).is_symlink()]
+
+
 def copy_rootcoz_pi_resources(cloned_repos: dict[str, Path], workspace: Path) -> None:
     """Copy .rootcoz/{agents,skills,extensions}/ from cloned repos to workspace .pi/.
 
@@ -167,10 +172,9 @@ def copy_rootcoz_pi_resources(cloned_repos: dict[str, Path], workspace: Path) ->
     ``<workspace>/.pi/`` so that pi's ``DefaultResourceLoader`` discovers
     project-provided agents, skills, and extensions.
 
-    Symlinks are preserved as-is (``symlinks=True``) to prevent a
-    malicious repo from using symlinks in ``.rootcoz/`` to exfiltrate
-    files outside the repository.  Failures are logged and swallowed
-    so a bad ``.rootcoz/`` tree never crashes the analysis.
+    Symlinks are skipped to prevent symlink escape attacks from
+    untrusted repositories.  Failures are logged and swallowed so a
+    bad ``.rootcoz/`` tree never crashes the analysis.
 
     Args:
         cloned_repos: Mapping of repo name to cloned path.
@@ -190,7 +194,7 @@ def copy_rootcoz_pi_resources(cloned_repos: dict[str, Path], workspace: Path) ->
                 # Warn about files that will be overwritten by a later repo
                 if dest.is_dir():
                     for item in src.rglob("*"):
-                        if item.is_symlink() or item.is_file():
+                        if item.is_file() and not item.is_symlink():
                             relative = item.relative_to(src)
                             existing = dest / relative
                             if existing.exists():
@@ -200,7 +204,7 @@ def copy_rootcoz_pi_resources(cloned_repos: dict[str, Path], workspace: Path) ->
                                     relative,
                                     repo_name,
                                 )
-                shutil.copytree(src, dest, symlinks=True, dirs_exist_ok=True)
+                shutil.copytree(src, dest, ignore=_ignore_symlinks, dirs_exist_ok=True)
                 logger.info(
                     "Copied .rootcoz/%s/ from '%s' to workspace .pi/%s/",
                     subdir,

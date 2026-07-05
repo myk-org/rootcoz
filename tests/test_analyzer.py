@@ -1817,8 +1817,8 @@ class TestCopyRootcozPiResources:
         assert not (pi_dir / "agents").exists()
         assert not (pi_dir / "extensions").exists()
 
-    def test_symlinks_preserved(self, tmp_path) -> None:
-        """Test that symlinks are copied as-is, not dereferenced."""
+    def test_symlinks_skipped(self, tmp_path) -> None:
+        """Test that symlinks are NOT copied to .pi/ (prevents escape attacks)."""
         from rootcoz.engine.core import copy_rootcoz_pi_resources
 
         workspace = tmp_path / "workspace"
@@ -1829,15 +1829,19 @@ class TestCopyRootcozPiResources:
         rootcoz.mkdir()
         skills = rootcoz / "skills"
         skills.mkdir()
-        # Create a symlink inside .rootcoz/skills/
+        # Create a regular file and a symlink inside .rootcoz/skills/
+        (skills / "real.md").write_text("real content")
         real_file = tmp_path / "outside-repo.txt"
         real_file.write_text("secret")
         (skills / "link.txt").symlink_to(real_file)
 
         copy_rootcoz_pi_resources({"my-repo": repo}, workspace)
 
-        copied_link = workspace / ".pi" / "skills" / "link.txt"
-        assert copied_link.is_symlink()
+        pi_skills = workspace / ".pi" / "skills"
+        # Regular file should be copied
+        assert (pi_skills / "real.md").read_text() == "real content"
+        # Symlink should NOT be copied
+        assert not (pi_skills / "link.txt").exists()
 
     def test_copytree_oserror_swallowed(self, tmp_path) -> None:
         """Test that OSError during copytree is logged and swallowed."""
