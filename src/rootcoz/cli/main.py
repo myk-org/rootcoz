@@ -668,7 +668,7 @@ def set_tracked_in_cmd(
         ..., "--url", "-u", help="Tracking issue URL (empty to clear)."
     ),
     tracked_type: str = typer.Option(
-        "", "--type", help="Tracker type: jira, github, or auto-detect."
+        "", "--type", help="Tracker type: jira, github, or omit to auto-detect."
     ),
     child_job_name: str = typer.Option("", "--child-job"),
     child_build_number: int = typer.Option(0, "--child-build"),

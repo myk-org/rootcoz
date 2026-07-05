@@ -5256,7 +5256,12 @@ async def _add_tracker_comment(
     if tracked_type and issue_url:
         try:
             await storage.set_tracked_in(
-                job_id, body.test_name, issue_url, tracked_type
+                job_id,
+                body.test_name,
+                issue_url,
+                tracked_type,
+                child_job_name=body.child_job_name,
+                child_build_number=body.child_build_number,
             )
         except Exception:
             logger.warning(
