@@ -838,7 +838,9 @@ class TestAnalyzeProwEndpoint:
             console_context="",
             build_passed=False,
             build_url="https://prow.example.com/view/gs/test-bucket/logs/my-prow-job/99",
-            warnings=["GCS junit-listing returned 403: https://storage.googleapis.com/storage/v1/b/test-bucket/o"],
+            warnings=[
+                "GCS junit-listing returned 403: https://storage.googleapis.com/storage/v1/b/test-bucket/o"
+            ],
         )
 
         with (
@@ -873,7 +875,11 @@ class TestAnalyzeProwEndpoint:
             assert row["status"] == "failed"
             import json
 
-            result = json.loads(row["result"]) if isinstance(row["result"], str) else row["result"]
+            result = (
+                json.loads(row["result"])
+                if isinstance(row["result"], str)
+                else row["result"]
+            )
             assert "Could not fetch test data" in result.get("summary", "")
             assert result.get("source_warnings")
 
@@ -5186,7 +5192,9 @@ class TestRequestParamsPreservation:
         self, test_client, temp_db_path: Path
     ) -> None:
         """POST /analyze with type=raw seeds request_params in pending state."""
-        with patch("rootcoz.main._process_non_jenkins_analysis", new_callable=AsyncMock):
+        with patch(
+            "rootcoz.main._process_non_jenkins_analysis", new_callable=AsyncMock
+        ):
             response = test_client.post(
                 "/analyze",
                 json={

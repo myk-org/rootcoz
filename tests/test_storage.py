@@ -1363,7 +1363,9 @@ class TestUpdateBuildUrl:
         """Happy path: build URL is persisted and retrievable."""
         with patch.object(storage, "DB_PATH", setup_test_db):
             await storage.save_result("job-url", "", "pending", {})
-            await storage.update_build_url("job-url", "https://prow.example.com/view/job/42")
+            await storage.update_build_url(
+                "job-url", "https://prow.example.com/view/job/42"
+            )
             row = await storage.get_result("job-url")
             assert row is not None
             assert row["jenkins_url"] == "https://prow.example.com/view/job/42"

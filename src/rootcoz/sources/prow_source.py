@@ -89,9 +89,7 @@ class GCSAccessError(Exception):
         self.label = label
         self.status_code = status_code
         self.url = url
-        super().__init__(
-            f"GCS {label} returned {status_code}: {url}"
-        )
+        super().__init__(f"GCS {label} returned {status_code}: {url}")
 
 
 class GCSOversizeError(GCSAccessError):
@@ -154,7 +152,10 @@ async def _fetch_gcs_text(
         resp.raise_for_status()
     except httpx.HTTPStatusError as exc:
         logger.warning(
-            "GCS %s access error (%d): %s", effective_label, exc.response.status_code, url
+            "GCS %s access error (%d): %s",
+            effective_label,
+            exc.response.status_code,
+            url,
         )
         raise GCSAccessError(effective_label, exc.response.status_code, url) from exc
     except httpx.HTTPError as exc:
@@ -358,7 +359,10 @@ class ProwSource(CISource):
         build_log_url = _gcs_url(self.gcs_bucket, self._gcs_prefix, "build-log.txt")
         try:
             build_log = await _fetch_gcs_text(
-                client, build_log_url, label="build-log.txt", max_size=_MAX_SIZE_BUILD_LOG
+                client,
+                build_log_url,
+                label="build-log.txt",
+                max_size=_MAX_SIZE_BUILD_LOG,
             )
         except GCSAccessError as exc:
             access_warnings.append(str(exc))
@@ -370,7 +374,9 @@ class ProwSource(CISource):
         # ------------------------------------------------------------------
         artifacts_prefix = f"{self._gcs_prefix}/artifacts/"
         try:
-            junit_files = await _list_gcs_junit_files(client, self.gcs_bucket, artifacts_prefix)
+            junit_files = await _list_gcs_junit_files(
+                client, self.gcs_bucket, artifacts_prefix
+            )
         except GCSAccessError as exc:
             access_warnings.append(str(exc))
             junit_files = []

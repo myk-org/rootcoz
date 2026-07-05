@@ -5,7 +5,7 @@ import json as json_mod
 import sys
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Any
 
 import typer
 import yaml
@@ -86,83 +86,165 @@ _TAG_OPTION = typer.Option([], "--tag", help="Tag for categorization (repeatable
 # ---------------------------------------------------------------------------
 # Shared analysis option types (used by analyze and future CI source backends)
 # ---------------------------------------------------------------------------
-_NameOpt = Annotated[str, typer.Option(
-    "--name", "-n",
-    help="Display name for this analysis on the dashboard.",
-)]
-_ProviderOpt = Annotated[str, typer.Option(
-    "--provider", help="AI provider (e.g. claude, gemini, cursor).",
-)]
+_NameOpt = Annotated[
+    str,
+    typer.Option(
+        "--name",
+        "-n",
+        help="Display name for this analysis on the dashboard.",
+    ),
+]
+_ProviderOpt = Annotated[
+    str,
+    typer.Option(
+        "--provider",
+        help="AI provider (e.g. claude, gemini, cursor).",
+    ),
+]
 _ModelOpt = Annotated[str, typer.Option("--model", help="AI model to use.")]
-_JiraToggleOpt = Annotated[bool | None, typer.Option(
-    "--jira/--no-jira", help="Enable/disable Jira integration.",
-)]
-_TestsRepoUrlOpt = Annotated[str, typer.Option(
-    "--tests-repo-url", envvar="TESTS_REPO_URL", help="Tests repository URL.",
-)]
-_TestsRepoTokenOpt = Annotated[str, typer.Option(
-    "--tests-repo-token", envvar="TESTS_REPO_TOKEN",
-    help="Token for cloning private tests repository.",
-)]
-_JiraUrlOpt = Annotated[str, typer.Option(
-    "--jira-url", envvar="JIRA_URL", help="Jira instance URL.",
-)]
-_JiraEmailOpt = Annotated[str, typer.Option(
-    "--jira-email", envvar="JIRA_EMAIL", help="Jira Cloud email.",
-)]
-_JiraApiTokenOpt = Annotated[str, typer.Option(
-    "--jira-api-token", envvar="JIRA_API_TOKEN", help="Jira Cloud API token.",
-)]
-_JiraPatOpt = Annotated[str, typer.Option(
-    "--jira-pat", envvar="JIRA_PAT",
-    help="Jira Server/DC personal access token.",
-)]
-_JiraProjectKeyOpt = Annotated[str, typer.Option(
-    "--jira-project-key", envvar="JIRA_PROJECT_KEY",
-    help="Jira project key to scope searches.",
-)]
-_JiraSslVerifyOpt = Annotated[bool | None, typer.Option(
-    "--jira-ssl-verify/--no-jira-ssl-verify",
-    help="Jira SSL certificate verification.",
-)]
-_JiraMaxResultsOpt = Annotated[int, typer.Option(
-    "--jira-max-results", help="Max Jira search results.",
-)]
-_GithubTokenOpt = Annotated[str, typer.Option(
-    "--github-token", envvar="GITHUB_TOKEN", help="GitHub API token.",
-)]
-_AiCallTimeoutOpt = Annotated[int, typer.Option(
-    "--ai-call-timeout", help="AI timeout in minutes.",
-)]
-_RawPromptOpt = Annotated[str, typer.Option(
-    "--raw-prompt", help="Raw prompt to append as additional AI instructions.",
-)]
-_IssuePromptOpt = Annotated[str, typer.Option(
-    "--issue-prompt",
-    help="Custom issue generation prompt (overrides JOB_INSIGHT_ISSUE_PROMPT.md from test repo)",
-)]
-_PeersOpt = Annotated[str, typer.Option(
-    "--peers",
-    help='Peer AI configs as "provider:model,provider:model" '
-         '(e.g. "cursor:gpt-5.4-xhigh,gemini:gemini-2.5-pro").',
-)]
-_PeerMaxRoundsOpt = Annotated[int | None, typer.Option(
-    "--peer-analysis-max-rounds",
-    help="Maximum debate rounds (1-10, default: 3).",
-)]
-_AdditionalReposOpt = Annotated[str, typer.Option(
-    "--additional-repos",
-    help='Additional repos for AI context as "name:url,name:url" '
-         '(e.g. "infra:https://github.com/org/infra,product:https://github.com/org/product").',
-)]
-_ForceOpt = Annotated[bool | None, typer.Option(
-    "--force/--no-force",
-    help="Force analysis even if the build succeeded.",
-)]
-_MaxConcurrentOpt = Annotated[int, typer.Option(
-    "--max-concurrent",
-    help="Max concurrent AI calls (0 = no CLI override; config or server default will be used).",
-)]
+_JiraToggleOpt = Annotated[
+    bool | None,
+    typer.Option(
+        "--jira/--no-jira",
+        help="Enable/disable Jira integration.",
+    ),
+]
+_TestsRepoUrlOpt = Annotated[
+    str,
+    typer.Option(
+        "--tests-repo-url",
+        envvar="TESTS_REPO_URL",
+        help="Tests repository URL.",
+    ),
+]
+_TestsRepoTokenOpt = Annotated[
+    str,
+    typer.Option(
+        "--tests-repo-token",
+        envvar="TESTS_REPO_TOKEN",
+        help="Token for cloning private tests repository.",
+    ),
+]
+_JiraUrlOpt = Annotated[
+    str,
+    typer.Option(
+        "--jira-url",
+        envvar="JIRA_URL",
+        help="Jira instance URL.",
+    ),
+]
+_JiraEmailOpt = Annotated[
+    str,
+    typer.Option(
+        "--jira-email",
+        envvar="JIRA_EMAIL",
+        help="Jira Cloud email.",
+    ),
+]
+_JiraApiTokenOpt = Annotated[
+    str,
+    typer.Option(
+        "--jira-api-token",
+        envvar="JIRA_API_TOKEN",
+        help="Jira Cloud API token.",
+    ),
+]
+_JiraPatOpt = Annotated[
+    str,
+    typer.Option(
+        "--jira-pat",
+        envvar="JIRA_PAT",
+        help="Jira Server/DC personal access token.",
+    ),
+]
+_JiraProjectKeyOpt = Annotated[
+    str,
+    typer.Option(
+        "--jira-project-key",
+        envvar="JIRA_PROJECT_KEY",
+        help="Jira project key to scope searches.",
+    ),
+]
+_JiraSslVerifyOpt = Annotated[
+    bool | None,
+    typer.Option(
+        "--jira-ssl-verify/--no-jira-ssl-verify",
+        help="Jira SSL certificate verification.",
+    ),
+]
+_JiraMaxResultsOpt = Annotated[
+    int | None,
+    typer.Option(
+        "--jira-max-results",
+        help="Max Jira search results.",
+    ),
+]
+_GithubTokenOpt = Annotated[
+    str,
+    typer.Option(
+        "--github-token",
+        envvar="GITHUB_TOKEN",
+        help="GitHub API token.",
+    ),
+]
+_AiCallTimeoutOpt = Annotated[
+    int | None,
+    typer.Option(
+        "--ai-call-timeout",
+        help="AI timeout in minutes.",
+    ),
+]
+_RawPromptOpt = Annotated[
+    str,
+    typer.Option(
+        "--raw-prompt",
+        help="Raw prompt to append as additional AI instructions.",
+    ),
+]
+_IssuePromptOpt = Annotated[
+    str,
+    typer.Option(
+        "--issue-prompt",
+        help="Custom issue generation prompt (overrides JOB_INSIGHT_ISSUE_PROMPT.md from test repo)",
+    ),
+]
+_PeersOpt = Annotated[
+    str,
+    typer.Option(
+        "--peers",
+        help='Peer AI configs as "provider:model,provider:model" '
+        '(e.g. "cursor:gpt-5.4-xhigh,gemini:gemini-2.5-pro").',
+    ),
+]
+_PeerMaxRoundsOpt = Annotated[
+    int | None,
+    typer.Option(
+        "--peer-analysis-max-rounds",
+        help="Maximum debate rounds (1-10, default: 3).",
+    ),
+]
+_AdditionalReposOpt = Annotated[
+    str,
+    typer.Option(
+        "--additional-repos",
+        help='Additional repos for AI context as "name:url,name:url" '
+        '(e.g. "infra:https://github.com/org/infra,product:https://github.com/org/product").',
+    ),
+]
+_ForceOpt = Annotated[
+    bool | None,
+    typer.Option(
+        "--force/--no-force",
+        help="Force analysis even if the build succeeded.",
+    ),
+]
+_MaxConcurrentOpt = Annotated[
+    int,
+    typer.Option(
+        "--max-concurrent",
+        help="Max concurrent AI calls (0 = no CLI override; config or server default will be used).",
+    ),
+]
 _LABEL_FILTER_OPTION = typer.Option(
     [], "--label", "-l", help="Filter by label (can repeat)."
 )
@@ -875,7 +957,7 @@ def enrich_comments_cmd(
 
 def _apply_common_config_defaults(
     cfg: ServerConfig | None,
-    extras: dict,
+    extras: dict[str, Any],
     *,
     include_jenkins: bool = False,
 ) -> None:
@@ -902,11 +984,13 @@ def _apply_common_config_defaults(
         "ai_model": cfg.ai_model,
     }
     if include_jenkins:
-        _cfg_str_fields.update({
-            "jenkins_url": cfg.jenkins_url,
-            "jenkins_user": cfg.jenkins_user,
-            "jenkins_password": cfg.jenkins_password,
-        })
+        _cfg_str_fields.update(
+            {
+                "jenkins_url": cfg.jenkins_url,
+                "jenkins_user": cfg.jenkins_user,
+                "jenkins_password": cfg.jenkins_password,
+            }
+        )
     for key, value in _cfg_str_fields.items():
         if value:
             extras[key] = value
@@ -923,27 +1007,31 @@ def _apply_common_config_defaults(
         "jira_max_results": ServerConfig.jira_max_results,
     }
     if include_jenkins:
-        _cfg_int_fields.update({
-            "jenkins_timeout": cfg.jenkins_timeout,
-            "poll_interval_minutes": cfg.poll_interval_minutes,
-            "max_wait_minutes": cfg.max_wait_minutes,
-        })
-        _cfg_int_defaults.update({
-            "jenkins_timeout": ServerConfig.jenkins_timeout,
-            "poll_interval_minutes": ServerConfig.poll_interval_minutes,
-            "max_wait_minutes": ServerConfig.max_wait_minutes,
-        })
-    for key, value in _cfg_int_fields.items():
-        if value == _cfg_int_defaults[key]:
+        _cfg_int_fields.update(
+            {
+                "jenkins_timeout": cfg.jenkins_timeout,
+                "poll_interval_minutes": cfg.poll_interval_minutes,
+                "max_wait_minutes": cfg.max_wait_minutes,
+            }
+        )
+        _cfg_int_defaults.update(
+            {
+                "jenkins_timeout": ServerConfig.jenkins_timeout,
+                "poll_interval_minutes": ServerConfig.poll_interval_minutes,
+                "max_wait_minutes": ServerConfig.max_wait_minutes,
+            }
+        )
+    for int_key, int_value in _cfg_int_fields.items():
+        if int_value == _cfg_int_defaults[int_key]:
             continue
-        if key == "max_wait_minutes":
-            if value < 0:
-                typer.echo(f"Error: config {key} must be non-negative.", err=True)
+        if int_key == "max_wait_minutes":
+            if int_value < 0:
+                typer.echo(f"Error: config {int_key} must be non-negative.", err=True)
                 raise typer.Exit(1)
-        elif value <= 0:
-            typer.echo(f"Error: config {key} must be greater than 0.", err=True)
+        elif int_value <= 0:
+            typer.echo(f"Error: config {int_key} must be greater than 0.", err=True)
             raise typer.Exit(1)
-        extras[key] = value
+        extras[int_key] = int_value
 
     # Boolean fields — forward when they differ from the dataclass default
     if cfg.enable_jira is not None:
@@ -960,7 +1048,7 @@ def _apply_common_config_defaults(
 
 
 def _apply_common_cli_overrides(
-    extras: dict,
+    extras: dict[str, Any],
     *,
     provider: str,
     model: str,
@@ -978,24 +1066,24 @@ def _apply_common_cli_overrides(
     if jira is not None:
         extras["enable_jira"] = jira
 
-    for key, value in str_fields.items():
-        if value:
-            extras[key] = value
+    for str_key, str_value in str_fields.items():
+        if str_value:
+            extras[str_key] = str_value
 
-    for key, value in int_fields.items():
-        if value is not None:
-            extras[key] = value
+    for int_key, int_value in int_fields.items():
+        if int_value is not None:
+            extras[int_key] = int_value
 
-    for key, value in bool_fields.items():
-        if value is not None:
-            extras[key] = value
+    for bool_key, bool_value in bool_fields.items():
+        if bool_value is not None:
+            extras[bool_key] = bool_value
 
     if max_concurrent > 0:
         extras["max_concurrent_ai_calls"] = max_concurrent
 
 
 def _apply_peer_and_repos(
-    extras: dict,
+    extras: dict[str, Any],
     *,
     peers: str,
     peer_analysis_max_rounds: int | None,
@@ -1026,9 +1114,8 @@ def _apply_peer_and_repos(
             raise typer.Exit(1) from None
         extras["peer_analysis_max_rounds"] = cfg.peer_analysis_max_rounds
 
-    additional_repos_raw = (
-        (additional_repos.strip() if additional_repos else "")
-        or (cfg.additional_repos if cfg else "")
+    additional_repos_raw = (additional_repos.strip() if additional_repos else "") or (
+        cfg.additional_repos if cfg else ""
     )
     if additional_repos_raw and additional_repos_raw.strip():
         try:
@@ -1112,7 +1199,7 @@ def analyze(
         "--jenkins-timeout",
         help="Jenkins API request timeout in seconds.",
     ),
-    jenkins_artifacts_max_size_mb: int = typer.Option(
+    jenkins_artifacts_max_size_mb: int | None = typer.Option(
         None,
         "--jenkins-artifacts-max-size-mb",
         help="Maximum Jenkins artifacts size in MB.",
@@ -1163,7 +1250,9 @@ def analyze(
 
     if source in ("jenkins", "prow"):
         if not job_name:
-            typer.echo(f"Error: --job-name is required when --source {source}.", err=True)
+            typer.echo(
+                f"Error: --job-name is required when --source {source}.", err=True
+            )
             raise typer.Exit(1)
         if build_number <= 0:
             typer.echo(
@@ -1187,7 +1276,9 @@ def analyze(
         _positive_int_fields["--build-number"] = build_number
     if source == "jenkins":
         _positive_int_fields["--poll-interval"] = poll_interval
-        _positive_int_fields["--jenkins-artifacts-max-size-mb"] = jenkins_artifacts_max_size_mb
+        _positive_int_fields["--jenkins-artifacts-max-size-mb"] = (
+            jenkins_artifacts_max_size_mb
+        )
         _positive_int_fields["--jenkins-timeout"] = jenkins_timeout
     for flag_name, flag_value in _positive_int_fields.items():
         if flag_value is not None and flag_value <= 0:
@@ -1201,7 +1292,7 @@ def analyze(
         raise typer.Exit(1)
 
     # Start from config defaults (lowest priority), then overlay CLI flags.
-    extras: dict = {}
+    extras: dict[str, Any] = {}
     cfg = _state.get("server_config")
     _apply_common_config_defaults(cfg, extras, include_jenkins=(source == "jenkins"))
 

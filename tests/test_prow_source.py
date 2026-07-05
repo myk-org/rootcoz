@@ -9,7 +9,6 @@ import pytest
 
 from rootcoz.models import UnifiedAnalyzeRequest
 from rootcoz.sources.prow_source import (
-
     GCS_BASE_URL,
     GCSAccessError,
     GCSOversizeError,
@@ -88,15 +87,20 @@ class TestBuildUrl:
         assert url == f"{_TEST_PROW_URL}/view/gs/{_TEST_GCS_BUCKET}/logs/my-job/123"
 
     def test_custom_prow_url_trailing_slash(self):
-        url = _build_url("https://prow.example.com/", _TEST_GCS_BUCKET, "logs/my-job/456")
-        assert url == f"https://prow.example.com/view/gs/{_TEST_GCS_BUCKET}/logs/my-job/456"
+        url = _build_url(
+            "https://prow.example.com/", _TEST_GCS_BUCKET, "logs/my-job/456"
+        )
+        assert (
+            url
+            == f"https://prow.example.com/view/gs/{_TEST_GCS_BUCKET}/logs/my-job/456"
+        )
 
     def test_custom_bucket(self):
         url = _build_url(_TEST_PROW_URL, "custom-bucket", "logs/my-job/123")
         assert url == f"{_TEST_PROW_URL}/view/gs/custom-bucket/logs/my-job/123"
 
     def test_pr_logs_prefix(self):
-        prefix = "pr-logs/pull/kubevirt_kubevirt/17598/pull-kubevirt-fuzz/2072319655766134784"
+        prefix = "pr-logs/pull/kubevirt_kubevirt/17598/pull-kubevirt-fuzz/2072319655766134784"  # pragma: allowlist secret
         url = _build_url(_TEST_PROW_URL, _TEST_GCS_BUCKET, prefix)
         assert url == f"{_TEST_PROW_URL}/view/gs/{_TEST_GCS_BUCKET}/{prefix}"
 
@@ -139,52 +143,51 @@ class TestRaiseIfOversize:
 
 class TestFetchGcsText:
     async def test_success(self):
-        transport = httpx.MockTransport(
-            lambda req: httpx.Response(200, text="hello")
-        )
+        transport = httpx.MockTransport(lambda req: httpx.Response(200, text="hello"))
         async with httpx.AsyncClient(transport=transport) as client:
             result = await _fetch_gcs_text(client, "http://example.com/file.txt")
         assert result == "hello"
 
     async def test_404_returns_none(self):
-        transport = httpx.MockTransport(
-            lambda req: httpx.Response(404)
-        )
+        transport = httpx.MockTransport(lambda req: httpx.Response(404))
         async with httpx.AsyncClient(transport=transport) as client:
             result = await _fetch_gcs_text(client, "http://example.com/missing.txt")
         assert result is None
 
     async def test_500_raises_gcs_access_error(self):
-        transport = httpx.MockTransport(
-            lambda req: httpx.Response(500)
-        )
+        transport = httpx.MockTransport(lambda req: httpx.Response(500))
         async with httpx.AsyncClient(transport=transport) as client:
             with pytest.raises(GCSAccessError) as exc_info:
-                await _fetch_gcs_text(client, "http://example.com/error.txt", label="test")
+                await _fetch_gcs_text(
+                    client, "http://example.com/error.txt", label="test"
+                )
         assert exc_info.value.status_code == 500
 
     async def test_403_raises_gcs_access_error(self):
-        transport = httpx.MockTransport(
-            lambda req: httpx.Response(403)
-        )
+        transport = httpx.MockTransport(lambda req: httpx.Response(403))
         async with httpx.AsyncClient(transport=transport) as client:
             with pytest.raises(GCSAccessError) as exc_info:
-                await _fetch_gcs_text(client, "http://example.com/forbidden.txt", label="test")
+                await _fetch_gcs_text(
+                    client, "http://example.com/forbidden.txt", label="test"
+                )
         assert exc_info.value.status_code == 403
 
     async def test_oversized_content_length_raises(self):
         """Content-length exceeding max_size raises GCSOversizeError."""
         transport = httpx.MockTransport(
             lambda req: httpx.Response(
-                200, text="x",
+                200,
+                text="x",
                 headers={"content-length": str(_MAX_SIZE_FINISHED + 1)},
             )
         )
         async with httpx.AsyncClient(transport=transport) as client:
             with pytest.raises(GCSOversizeError) as exc_info:
                 await _fetch_gcs_text(
-                    client, "http://example.com/big.txt",
-                    label="test", max_size=_MAX_SIZE_FINISHED,
+                    client,
+                    "http://example.com/big.txt",
+                    label="test",
+                    max_size=_MAX_SIZE_FINISHED,
                 )
         assert exc_info.value.size == _MAX_SIZE_FINISHED + 1
         assert exc_info.value.max_size == _MAX_SIZE_FINISHED
@@ -192,29 +195,32 @@ class TestFetchGcsText:
     async def test_oversized_body_raises(self):
         """Body exceeding max_size raises GCSOversizeError."""
         big_text = "x" * (_MAX_SIZE_FINISHED + 100)
-        transport = httpx.MockTransport(
-            lambda req: httpx.Response(200, text=big_text)
-        )
+        transport = httpx.MockTransport(lambda req: httpx.Response(200, text=big_text))
         async with httpx.AsyncClient(transport=transport) as client:
             with pytest.raises(GCSOversizeError):
                 await _fetch_gcs_text(
-                    client, "http://example.com/big.txt",
-                    label="test", max_size=_MAX_SIZE_FINISHED,
+                    client,
+                    "http://example.com/big.txt",
+                    label="test",
+                    max_size=_MAX_SIZE_FINISHED,
                 )
 
     async def test_oversized_build_log_raises(self):
         """Build-log.txt exceeding _MAX_SIZE_BUILD_LOG raises GCSOversizeError."""
         transport = httpx.MockTransport(
             lambda req: httpx.Response(
-                200, text="x",
+                200,
+                text="x",
                 headers={"content-length": str(_MAX_SIZE_BUILD_LOG + 1)},
             )
         )
         async with httpx.AsyncClient(transport=transport) as client:
             with pytest.raises(GCSOversizeError) as exc_info:
                 await _fetch_gcs_text(
-                    client, "http://example.com/build-log.txt",
-                    label="build-log.txt", max_size=_MAX_SIZE_BUILD_LOG,
+                    client,
+                    "http://example.com/build-log.txt",
+                    label="build-log.txt",
+                    max_size=_MAX_SIZE_BUILD_LOG,
                 )
         assert exc_info.value.max_size == _MAX_SIZE_BUILD_LOG
 
@@ -222,15 +228,18 @@ class TestFetchGcsText:
         """JUnit XML exceeding _MAX_SIZE_JUNIT_XML raises GCSOversizeError."""
         transport = httpx.MockTransport(
             lambda req: httpx.Response(
-                200, text="x",
+                200,
+                text="x",
                 headers={"content-length": str(_MAX_SIZE_JUNIT_XML + 1)},
             )
         )
         async with httpx.AsyncClient(transport=transport) as client:
             with pytest.raises(GCSOversizeError) as exc_info:
                 await _fetch_gcs_text(
-                    client, "http://example.com/junit.xml",
-                    label="junit.xml", max_size=_MAX_SIZE_JUNIT_XML,
+                    client,
+                    "http://example.com/junit.xml",
+                    label="junit.xml",
+                    max_size=_MAX_SIZE_JUNIT_XML,
                 )
         assert exc_info.value.max_size == _MAX_SIZE_JUNIT_XML
 
@@ -238,7 +247,8 @@ class TestFetchGcsText:
         """Non-numeric content-length header doesn't crash."""
         transport = httpx.MockTransport(
             lambda req: httpx.Response(
-                200, text="hello",
+                200,
+                text="hello",
                 headers={"content-length": "unknown"},
             )
         )
@@ -314,9 +324,7 @@ class TestListGcsJunitFiles:
         assert call_count == 2
 
     async def test_api_error_raises_gcs_access_error(self):
-        transport = httpx.MockTransport(
-            lambda req: httpx.Response(500)
-        )
+        transport = httpx.MockTransport(lambda req: httpx.Response(500))
         async with httpx.AsyncClient(transport=transport) as client:
             with pytest.raises(GCSAccessError) as exc_info:
                 await _list_gcs_junit_files(
@@ -381,18 +389,30 @@ class TestProwSourceFetch:
     async def test_fetch_extracts_failures(self):
         handler = _make_gcs_handler()
         transport = httpx.MockTransport(handler)
-        source = ProwSource(job_name="my-job", build_id="42", gcs_bucket=_TEST_GCS_BUCKET, prow_url=_TEST_PROW_URL)
+        source = ProwSource(
+            job_name="my-job",
+            build_id="42",
+            gcs_bucket=_TEST_GCS_BUCKET,
+            prow_url=_TEST_PROW_URL,
+        )
         async with httpx.AsyncClient(transport=transport) as client:
             result = await source._fetch_with_client(client)
 
         assert len(result.failures) == 2
         assert not result.build_passed
-        assert result.build_url == _build_url(_TEST_PROW_URL, _TEST_GCS_BUCKET, "logs/my-job/42")
+        assert result.build_url == _build_url(
+            _TEST_PROW_URL, _TEST_GCS_BUCKET, "logs/my-job/42"
+        )
 
     async def test_fetch_build_passed(self):
         handler = _make_gcs_handler(finished_json=FINISHED_JSON_SUCCESS)
         transport = httpx.MockTransport(handler)
-        source = ProwSource(job_name="my-job", build_id="42", gcs_bucket=_TEST_GCS_BUCKET, prow_url=_TEST_PROW_URL)
+        source = ProwSource(
+            job_name="my-job",
+            build_id="42",
+            gcs_bucket=_TEST_GCS_BUCKET,
+            prow_url=_TEST_PROW_URL,
+        )
         async with httpx.AsyncClient(transport=transport) as client:
             result = await source._fetch_with_client(client)
 
@@ -402,7 +422,13 @@ class TestProwSourceFetch:
     async def test_fetch_build_passed_force(self):
         handler = _make_gcs_handler(finished_json=FINISHED_JSON_SUCCESS)
         transport = httpx.MockTransport(handler)
-        source = ProwSource(job_name="my-job", build_id="42", gcs_bucket=_TEST_GCS_BUCKET, prow_url=_TEST_PROW_URL, force=True)
+        source = ProwSource(
+            job_name="my-job",
+            build_id="42",
+            gcs_bucket=_TEST_GCS_BUCKET,
+            prow_url=_TEST_PROW_URL,
+            force=True,
+        )
         async with httpx.AsyncClient(transport=transport) as client:
             result = await source._fetch_with_client(client)
 
@@ -413,7 +439,12 @@ class TestProwSourceFetch:
         """When finished.json is missing, analysis continues (job may be running)."""
         handler = _make_gcs_handler(finished_json=None)
         transport = httpx.MockTransport(handler)
-        source = ProwSource(job_name="my-job", build_id="42", gcs_bucket=_TEST_GCS_BUCKET, prow_url=_TEST_PROW_URL)
+        source = ProwSource(
+            job_name="my-job",
+            build_id="42",
+            gcs_bucket=_TEST_GCS_BUCKET,
+            prow_url=_TEST_PROW_URL,
+        )
         async with httpx.AsyncClient(transport=transport) as client:
             result = await source._fetch_with_client(client)
 
@@ -423,7 +454,12 @@ class TestProwSourceFetch:
     async def test_fetch_no_build_log(self):
         handler = _make_gcs_handler(build_log=None)
         transport = httpx.MockTransport(handler)
-        source = ProwSource(job_name="my-job", build_id="42", gcs_bucket=_TEST_GCS_BUCKET, prow_url=_TEST_PROW_URL)
+        source = ProwSource(
+            job_name="my-job",
+            build_id="42",
+            gcs_bucket=_TEST_GCS_BUCKET,
+            prow_url=_TEST_PROW_URL,
+        )
         async with httpx.AsyncClient(transport=transport) as client:
             result = await source._fetch_with_client(client)
 
@@ -433,7 +469,12 @@ class TestProwSourceFetch:
     async def test_fetch_no_junit_files(self):
         handler = _make_gcs_handler(junit_files=[])
         transport = httpx.MockTransport(handler)
-        source = ProwSource(job_name="my-job", build_id="42", gcs_bucket=_TEST_GCS_BUCKET, prow_url=_TEST_PROW_URL)
+        source = ProwSource(
+            job_name="my-job",
+            build_id="42",
+            gcs_bucket=_TEST_GCS_BUCKET,
+            prow_url=_TEST_PROW_URL,
+        )
         async with httpx.AsyncClient(transport=transport) as client:
             result = await source._fetch_with_client(client)
 
@@ -458,8 +499,10 @@ class TestProwSourceFetch:
 
         transport = httpx.MockTransport(error_handler)
         source = ProwSource(
-            job_name="my-job", build_id="42",
-            gcs_bucket=_TEST_GCS_BUCKET, prow_url=_TEST_PROW_URL,
+            job_name="my-job",
+            build_id="42",
+            gcs_bucket=_TEST_GCS_BUCKET,
+            prow_url=_TEST_PROW_URL,
         )
         async with httpx.AsyncClient(transport=transport) as client:
             result = await source._fetch_with_client(client)
@@ -477,7 +520,12 @@ class TestProwSourceFetch:
             ],
         )
         transport = httpx.MockTransport(handler)
-        source = ProwSource(job_name="my-job", build_id="42", gcs_bucket=_TEST_GCS_BUCKET, prow_url=_TEST_PROW_URL)
+        source = ProwSource(
+            job_name="my-job",
+            build_id="42",
+            gcs_bucket=_TEST_GCS_BUCKET,
+            prow_url=_TEST_PROW_URL,
+        )
         async with httpx.AsyncClient(transport=transport) as client:
             result = await source._fetch_with_client(client)
 
@@ -487,7 +535,12 @@ class TestProwSourceFetch:
     async def test_fetch_aborted_build(self):
         handler = _make_gcs_handler(finished_json=FINISHED_JSON_ABORTED)
         transport = httpx.MockTransport(handler)
-        source = ProwSource(job_name="my-job", build_id="42", gcs_bucket=_TEST_GCS_BUCKET, prow_url=_TEST_PROW_URL)
+        source = ProwSource(
+            job_name="my-job",
+            build_id="42",
+            gcs_bucket=_TEST_GCS_BUCKET,
+            prow_url=_TEST_PROW_URL,
+        )
         async with httpx.AsyncClient(transport=transport) as client:
             result = await source._fetch_with_client(client)
 
@@ -508,7 +561,10 @@ class TestProwSourceFetch:
 
         transport = httpx.MockTransport(handler)
         source = ProwSource(
-            job_name="my-job", build_id="42", gcs_bucket="custom-bucket", prow_url=_TEST_PROW_URL
+            job_name="my-job",
+            build_id="42",
+            gcs_bucket="custom-bucket",
+            prow_url=_TEST_PROW_URL,
         )
         async with httpx.AsyncClient(transport=transport) as client:
             await source._fetch_with_client(client)
@@ -564,7 +620,9 @@ class TestUnifiedAnalyzeRequestProw:
 
     def test_prow_job_name_rejects_path_traversal(self):
         with pytest.raises(ValueError, match="alphanumeric"):
-            UnifiedAnalyzeRequest(type="prow", prow_job_name="../etc/passwd", build_id="1")
+            UnifiedAnalyzeRequest(
+                type="prow", prow_job_name="../etc/passwd", build_id="1"
+            )
 
     def test_prow_job_name_rejects_slashes(self):
         with pytest.raises(ValueError, match="alphanumeric"):
@@ -584,67 +642,90 @@ class TestUnifiedAnalyzeRequestProw:
 
     def test_build_id_rejects_path_traversal(self):
         with pytest.raises(ValueError, match="numeric"):
-            UnifiedAnalyzeRequest(type="prow", prow_job_name="my-job", build_id="../123")
+            UnifiedAnalyzeRequest(
+                type="prow", prow_job_name="my-job", build_id="../123"
+            )
 
     def test_gcs_bucket_rejects_path_traversal(self):
         with pytest.raises(ValueError, match="lowercase alphanumeric"):
             UnifiedAnalyzeRequest(
-                type="prow", prow_job_name="my-job", build_id="1",
+                type="prow",
+                prow_job_name="my-job",
+                build_id="1",
                 gcs_bucket="../evil-bucket",
             )
 
     def test_gcs_bucket_rejects_uppercase(self):
         with pytest.raises(ValueError, match="lowercase alphanumeric"):
             UnifiedAnalyzeRequest(
-                type="prow", prow_job_name="my-job", build_id="1",
+                type="prow",
+                prow_job_name="my-job",
+                build_id="1",
                 gcs_bucket="MyBucket",
             )
 
     def test_prow_url_rejects_http(self):
         with pytest.raises(ValueError, match="https://"):
             UnifiedAnalyzeRequest(
-                type="prow", prow_job_name="my-job", build_id="1",
+                type="prow",
+                prow_job_name="my-job",
+                build_id="1",
                 prow_url="http://prow.example.com",
             )
 
     def test_prow_url_rejects_non_url(self):
         with pytest.raises(ValueError, match="https://"):
             UnifiedAnalyzeRequest(
-                type="prow", prow_job_name="my-job", build_id="1",
+                type="prow",
+                prow_job_name="my-job",
+                build_id="1",
                 prow_url="not-a-url",
             )
 
     def test_gcs_prefix_rejects_path_traversal(self):
         with pytest.raises(ValueError, match="must not contain"):
             UnifiedAnalyzeRequest(
-                type="prow", prow_job_name="my-job", build_id="1",
+                type="prow",
+                prow_job_name="my-job",
+                build_id="1",
                 gcs_prefix="../../other-bucket/sensitive-data",
             )
 
     def test_gcs_prefix_rejects_dotdot_in_middle(self):
         with pytest.raises(ValueError, match="must not contain"):
             UnifiedAnalyzeRequest(
-                type="prow", prow_job_name="my-job", build_id="1",
+                type="prow",
+                prow_job_name="my-job",
+                build_id="1",
                 gcs_prefix="logs/my-job/../../../etc/passwd",
             )
 
     def test_gcs_prefix_rejects_invalid_chars(self):
         with pytest.raises(ValueError, match="invalid characters"):
             UnifiedAnalyzeRequest(
-                type="prow", prow_job_name="my-job", build_id="1",
+                type="prow",
+                prow_job_name="my-job",
+                build_id="1",
                 gcs_prefix="logs/my job/with spaces",
             )
 
     def test_gcs_prefix_accepts_valid_pr_logs(self):
         req = UnifiedAnalyzeRequest(
-            type="prow", prow_job_name="my-job", build_id="1",
+            type="prow",
+            prow_job_name="my-job",
+            build_id="1",
             gcs_prefix="pr-logs/pull/kubevirt_kubevirt/17598/pull-kubevirt-fuzz/123",
         )
-        assert req.gcs_prefix == "pr-logs/pull/kubevirt_kubevirt/17598/pull-kubevirt-fuzz/123"
+        assert (
+            req.gcs_prefix
+            == "pr-logs/pull/kubevirt_kubevirt/17598/pull-kubevirt-fuzz/123"
+        )
 
     def test_gcs_prefix_accepts_valid_logs(self):
         req = UnifiedAnalyzeRequest(
-            type="prow", prow_job_name="my-job", build_id="1",
+            type="prow",
+            prow_job_name="my-job",
+            build_id="1",
             gcs_prefix="logs/periodic-ci-e2e/999",
         )
         assert req.gcs_prefix == "logs/periodic-ci-e2e/999"
@@ -652,12 +733,22 @@ class TestUnifiedAnalyzeRequestProw:
 
 class TestProwSourceProperties:
     def test_build_url(self):
-        source = ProwSource(job_name="test-job", build_id="999", gcs_bucket=_TEST_GCS_BUCKET, prow_url=_TEST_PROW_URL)
+        source = ProwSource(
+            job_name="test-job",
+            build_id="999",
+            gcs_bucket=_TEST_GCS_BUCKET,
+            prow_url=_TEST_PROW_URL,
+        )
         expected = f"{_TEST_PROW_URL}/view/gs/{_TEST_GCS_BUCKET}/logs/test-job/999"
         assert source.build_url == expected
 
     def test_gcs_prefix(self):
-        source = ProwSource(job_name="test-job", build_id="999", gcs_bucket=_TEST_GCS_BUCKET, prow_url=_TEST_PROW_URL)
+        source = ProwSource(
+            job_name="test-job",
+            build_id="999",
+            gcs_bucket=_TEST_GCS_BUCKET,
+            prow_url=_TEST_PROW_URL,
+        )
         assert source._gcs_prefix == "logs/test-job/999"
 
     def test_custom_gcs_prefix(self):
@@ -675,18 +766,30 @@ class TestProwSourceProperties:
 
     def test_empty_gcs_prefix_uses_default(self):
         source = ProwSource(
-            job_name="my-job", build_id="42",
-            gcs_bucket=_TEST_GCS_BUCKET, prow_url=_TEST_PROW_URL,
+            job_name="my-job",
+            build_id="42",
+            gcs_bucket=_TEST_GCS_BUCKET,
+            prow_url=_TEST_PROW_URL,
             gcs_prefix="",
         )
         assert source._gcs_prefix == "logs/my-job/42"
 
     def test_no_child_source(self):
         """ProwSource doesn't support child jobs."""
-        source = ProwSource(job_name="test-job", build_id="999", gcs_bucket=_TEST_GCS_BUCKET, prow_url=_TEST_PROW_URL)
+        source = ProwSource(
+            job_name="test-job",
+            build_id="999",
+            gcs_bucket=_TEST_GCS_BUCKET,
+            prow_url=_TEST_PROW_URL,
+        )
         assert source.create_child_source("child", 1) is None
 
     def test_cleanup_noop(self):
         """ProwSource cleanup is a no-op (no temp files)."""
-        source = ProwSource(job_name="test-job", build_id="999", gcs_bucket=_TEST_GCS_BUCKET, prow_url=_TEST_PROW_URL)
+        source = ProwSource(
+            job_name="test-job",
+            build_id="999",
+            gcs_bucket=_TEST_GCS_BUCKET,
+            prow_url=_TEST_PROW_URL,
+        )
         source.cleanup()  # should not raise
