@@ -76,7 +76,7 @@ function initFormState(p: AnalysisResult['request_params']) {
 export function ReAnalyzeDialog({ open, onOpenChange, result, jobId, failureUuid }: ReAnalyzeDialogProps) {
   const navigate = useNavigate()
   const params = result.request_params
-  const isProwJob = result.jenkins_url?.includes('/view/gs/') ?? false
+  const isProwJob = String(result.request_params?.analysis_type ?? '') === 'prow'
 
   const init = initFormState(params)
   const [aiProvider, setAiProvider] = useState(init.aiProvider)

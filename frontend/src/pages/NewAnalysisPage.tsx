@@ -162,7 +162,7 @@ export function NewAnalysisPage() {
     inputMode === 'jenkins'
       ? jobName.trim() !== '' && buildNumber !== '' && buildNumber > 0
       : inputMode === 'prow'
-      ? prowJobName.trim() !== '' && prowBuildId.trim() !== ''
+      ? prowJobName.trim() !== '' && /^[0-9]+$/.test(prowBuildId.trim())
       : rawXml.trim() !== ''
 
   const handleFileUpload = useCallback((file: File) => {
@@ -444,9 +444,11 @@ export function NewAnalysisPage() {
               <div className="space-y-1.5">
                 <FieldLabel>Build ID *</FieldLabel>
                 <Input
+                  inputMode="numeric"
+                  pattern="[0-9]*"
                   placeholder="2072664659076321280"
                   value={prowBuildId}
-                  onChange={(e) => setProwBuildId(e.target.value)}
+                  onChange={(e) => setProwBuildId(e.target.value.replace(/[^0-9]/g, ''))}
                   required
                 />
               </div>
