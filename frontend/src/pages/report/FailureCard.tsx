@@ -708,7 +708,7 @@ export function FailureCard({ group, jobId, childJobName, childBuildNumber, inde
                 childJobName={scopedChildJobName}
                 childBuildNumber={scopedChildBuildNumber}
               />
-              {!isViewer && !trackedIn[repKey]?.tracked_in_url && (
+              {!isViewer && (
                 <Tooltip>
                   <TooltipTrigger asChild>
                     <Button variant="outline" size="sm" onClick={() => setTrackInOpen(true)}>
