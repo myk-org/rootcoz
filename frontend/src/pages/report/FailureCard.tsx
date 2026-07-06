@@ -810,8 +810,12 @@ export function FailureCard({ group, jobId, childJobName, childBuildNumber, inde
               : undefined
           }
           onIssueCreated={(url) => {
-            // Auto-set tracked-in in local state (backend already persisted it)
-            dispatch({ type: 'SET_TRACKED_IN_ENTRY', payload: { testName: repKey, entry: { tracked_in_url: url, tracked_in_type: bugTarget!, tracked_in_by: username || '' } } })
+            // Optimistic update with id=0, then refetch for real ids
+            dispatch({ type: 'SET_TRACKED_IN_ENTRY', payload: { testName: repKey, entry: { id: 0, tracked_in_url: url, tracked_in_type: bugTarget!, tracked_in_by: username || '' } } })
+            // Refetch tracked-in to get real link ids for delete support
+            api.get<{ tracked_in: Record<string, Array<{ id: number; tracked_in_url: string; tracked_in_type: string; tracked_in_by: string }>> }>(`/results/${jobId}/tracked-in`)
+              .then((res) => dispatch({ type: 'SET_TRACKED_IN', payload: res.tracked_in ?? {} }))
+              .catch(() => {})
             void maybeSuggestBugReview(url)
           }}
         />

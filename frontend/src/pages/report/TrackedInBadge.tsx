@@ -116,13 +116,13 @@ export function TrackInDialog({ open, onOpenChange, jobId, testName, trackedInKe
     setSaving(true)
     setError('')
     try {
-      const res = await api.put<{ tracked_in_url: string; tracked_in_type: string; tracked_in_by: string }>(
+      const res = await api.put<{ id: number; tracked_in_url: string; tracked_in_type: string; tracked_in_by: string }>(
         `/results/${jobId}/tracked-in`,
         { test_name: testName, url: trimmed, type: detectType(url), child_job_name: childJobName ?? '', child_build_number: childBuildNumber ?? 0 },
       )
       dispatch({
         type: 'SET_TRACKED_IN_ENTRY',
-        payload: { testName: trackedInKey, entry: { tracked_in_url: res.tracked_in_url, tracked_in_type: res.tracked_in_type, tracked_in_by: res.tracked_in_by } },
+        payload: { testName: trackedInKey, entry: { id: res.id, tracked_in_url: res.tracked_in_url, tracked_in_type: res.tracked_in_type, tracked_in_by: res.tracked_in_by } },
       })
       onOpenChange(false)
       setUrl('')
