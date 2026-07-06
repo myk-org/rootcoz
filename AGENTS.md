@@ -140,6 +140,25 @@ Every new environment variable added to `Settings` in `config.py` **MUST** also 
 
 The `docs/` directory is **auto-generated** by [docsfy](https://github.com/myk-org/docsfy). **NEVER edit files in `docs/` manually** — all changes will be overwritten. To update documentation, modify source code and regenerate with docsfy, or edit `AGENTS.md` / `README.md` for project-level docs.
 
+### Project Customization (`.rootcoz/` folder)
+
+Analyzed repositories can provide project-specific customization files under a `.rootcoz/` directory:
+
+```text
+<analyzed-repo>/
+  .rootcoz/
+    ROOTCOZ_PROMPT.md              # Custom analysis instructions for the AI
+    ROOTCOZ_HISTORY_PROMPT.md      # Custom history analysis instructions
+    ROOTCOZ_ISSUE_PROMPT.md        # Custom issue generation prompt
+    agents/                        # Custom pi agents for this project
+    skills/                        # Custom pi skills for this project
+    extensions/                    # Custom pi extensions for this project
+```
+
+- **Prompt files**: `build_resources_section()` and `build_prompt_sections()` in `engine/core.py` scan `<repo>/.rootcoz/` for `ROOTCOZ_PROMPT.md` and `ROOTCOZ_HISTORY_PROMPT.md`. The issue prompt (`ROOTCOZ_ISSUE_PROMPT.md`) is fetched via the GitHub Contents API from `.rootcoz/` in `main.py`.
+- **Pi resources**: After cloning repos (analysis, re-analysis, and chat paths), `.rootcoz/{agents,skills,extensions}/` are copied into `<workspace>/.pi/` via `copy_rootcoz_pi_resources()` so pi's `DefaultResourceLoader` discovers them.
+- This is a **breaking change** — the previous legacy prompt filenames in the repo root are no longer supported. Only `.rootcoz/` is recognized.
+
 ### AI Tool Access (MANDATORY)
 
 **NEVER embed data in the AI prompt.** All data the AI needs MUST be written to files in the job workspace. The prompt only tells the AI which files exist, what they contain, and that reading them is MANDATORY.

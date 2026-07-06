@@ -142,4 +142,4 @@ A pattern classification without evidence is INVALID. Always cite:
 
 If a test repository is available as your working directory:
 - Run `git log --oneline -20` to check for recent commits that may have caused regressions
-- Check if a `JOB_INSIGHT_PROMPT.md` file exists in the repo root and follow its instructions
+- Check if a `.rootcoz/ROOTCOZ_PROMPT.md` file exists in the repo and follow its instructions

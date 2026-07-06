@@ -1701,19 +1701,21 @@ class TestBuildResourcesSectionAdditionalRepos:
         result = build_resources_section(workspace, additional_repos={})
         assert "Repository" not in result
 
-    def test_job_insight_prompt_in_repo(self, tmp_path) -> None:
-        """Test that JOB_INSIGHT_PROMPT.md in a cloned repo is advertised."""
+    def test_rootcoz_prompt_in_repo(self, tmp_path) -> None:
+        """Test that .rootcoz/ROOTCOZ_PROMPT.md in a cloned repo is advertised."""
         workspace = tmp_path / "workspace"
         workspace.mkdir()
 
         repo_path = tmp_path / "my-repo"
         repo_path.mkdir()
         (repo_path / ".git").mkdir()
-        (repo_path / "JOB_INSIGHT_PROMPT.md").write_text("custom instructions")
+        rootcoz_dir = repo_path / ".rootcoz"
+        rootcoz_dir.mkdir()
+        (rootcoz_dir / "ROOTCOZ_PROMPT.md").write_text("custom instructions")
 
         additional = {"my-repo": repo_path}
         result = build_resources_section(workspace, additional_repos=additional)
-        assert "JOB_INSIGHT_PROMPT.md" in result
+        assert "ROOTCOZ_PROMPT.md" in result
         assert "Project-specific analysis instructions" in result
 
     def test_history_prompt_in_repo(self, tmp_path) -> None:
@@ -1724,9 +1726,9 @@ class TestBuildResourcesSectionAdditionalRepos:
         repo_path = tmp_path / "my-repo"
         repo_path.mkdir()
         (repo_path / ".git").mkdir()
-        (repo_path / "JOB_INSIGHT_FAILURE_HISTORY_ANALYSIS_PROMPT.md").write_text(
-            "history instructions"
-        )
+        rootcoz_dir = repo_path / ".rootcoz"
+        rootcoz_dir.mkdir()
+        (rootcoz_dir / "ROOTCOZ_HISTORY_PROMPT.md").write_text("history instructions")
 
         additional = {"my-repo": repo_path}
         result = build_resources_section(
@@ -1742,15 +1744,164 @@ class TestBuildResourcesSectionAdditionalRepos:
         repo_path = tmp_path / "my-repo"
         repo_path.mkdir()
         (repo_path / ".git").mkdir()
-        (repo_path / "JOB_INSIGHT_FAILURE_HISTORY_ANALYSIS_PROMPT.md").write_text(
-            "history instructions"
-        )
+        rootcoz_dir = repo_path / ".rootcoz"
+        rootcoz_dir.mkdir()
+        (rootcoz_dir / "ROOTCOZ_HISTORY_PROMPT.md").write_text("history instructions")
 
         additional = {"my-repo": repo_path}
         result = build_resources_section(
             workspace, additional_repos=additional, history_enabled=False
         )
         assert "history analysis instructions" not in result
+
+
+class TestCopyRootcozPiResources:
+    """Tests for copy_rootcoz_pi_resources — copying .rootcoz/ subdirs to workspace .pi/."""
+
+    def test_copies_agents_skills_extensions(self, tmp_path) -> None:
+        """Test that agents, skills, and extensions are copied to .pi/."""
+        from rootcoz.engine.core import copy_rootcoz_pi_resources
+
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        repo = workspace / "my-repo"
+        repo.mkdir()
+        rootcoz = repo / ".rootcoz"
+        rootcoz.mkdir()
+
+        # Create all three subdirs with files
+        for subdir in ("agents", "skills", "extensions"):
+            d = rootcoz / subdir
+            d.mkdir()
+            (d / f"{subdir}-file.md").write_text(f"{subdir} content")
+
+        copy_rootcoz_pi_resources({"my-repo": repo}, workspace)
+
+        pi_dir = workspace / ".pi"
+        assert pi_dir.is_dir()
+        for subdir in ("agents", "skills", "extensions"):
+            assert (
+                pi_dir / subdir / f"{subdir}-file.md"
+            ).read_text() == f"{subdir} content"
+
+    def test_no_rootcoz_dir_is_noop(self, tmp_path) -> None:
+        """Test that repos without .rootcoz/ are silently skipped."""
+        from rootcoz.engine.core import copy_rootcoz_pi_resources
+
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        repo = workspace / "my-repo"
+        repo.mkdir()
+
+        copy_rootcoz_pi_resources({"my-repo": repo}, workspace)
+        assert not (workspace / ".pi").exists()
+
+    def test_partial_subdirs(self, tmp_path) -> None:
+        """Test that only existing subdirs are copied."""
+        from rootcoz.engine.core import copy_rootcoz_pi_resources
+
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        repo = workspace / "my-repo"
+        repo.mkdir()
+        rootcoz = repo / ".rootcoz"
+        rootcoz.mkdir()
+        skills = rootcoz / "skills"
+        skills.mkdir()
+        (skills / "my-skill.md").write_text("skill")
+
+        copy_rootcoz_pi_resources({"my-repo": repo}, workspace)
+
+        pi_dir = workspace / ".pi"
+        assert (pi_dir / "skills" / "my-skill.md").read_text() == "skill"
+        assert not (pi_dir / "agents").exists()
+        assert not (pi_dir / "extensions").exists()
+
+    def test_symlinks_skipped(self, tmp_path) -> None:
+        """Test that symlinks are NOT copied to .pi/ (prevents escape attacks)."""
+        from rootcoz.engine.core import copy_rootcoz_pi_resources
+
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        repo = workspace / "my-repo"
+        repo.mkdir()
+        rootcoz = repo / ".rootcoz"
+        rootcoz.mkdir()
+        skills = rootcoz / "skills"
+        skills.mkdir()
+        # Create a regular file and a symlink inside .rootcoz/skills/
+        (skills / "real.md").write_text("real content")
+        real_file = tmp_path / "outside-repo.txt"
+        real_file.write_text("secret")
+        (skills / "link.txt").symlink_to(real_file)
+
+        copy_rootcoz_pi_resources({"my-repo": repo}, workspace)
+
+        pi_skills = workspace / ".pi" / "skills"
+        # Regular file should be copied
+        assert (pi_skills / "real.md").read_text() == "real content"
+        # Symlink should NOT be copied
+        assert not (pi_skills / "link.txt").exists()
+
+    def test_copytree_oserror_swallowed(self, tmp_path) -> None:
+        """Test that OSError during copytree is logged and swallowed."""
+        from unittest.mock import patch
+
+        from rootcoz.engine.core import copy_rootcoz_pi_resources
+
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        repo = workspace / "my-repo"
+        repo.mkdir()
+        rootcoz = repo / ".rootcoz"
+        rootcoz.mkdir()
+        agents = rootcoz / "agents"
+        agents.mkdir()
+        (agents / "agent.md").write_text("agent")
+
+        with patch("rootcoz.engine.core.shutil.copytree", side_effect=OSError("fail")):
+            # Should not raise
+            copy_rootcoz_pi_resources({"my-repo": repo}, workspace)
+
+        # .pi/agents should NOT exist since copytree was mocked to fail
+        assert not (workspace / ".pi" / "agents").exists()
+
+    def test_overwrite_warning_logged(self, tmp_path) -> None:
+        """Test that overwriting files from multiple repos logs a warning."""
+        from unittest.mock import patch
+
+        from rootcoz.engine.core import copy_rootcoz_pi_resources
+
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+
+        # First repo with a skill
+        repo1 = workspace / "repo1"
+        repo1.mkdir()
+        rootcoz1 = repo1 / ".rootcoz" / "skills"
+        rootcoz1.mkdir(parents=True)
+        (rootcoz1 / "shared.md").write_text("from repo1")
+
+        # Second repo with the same skill file
+        repo2 = workspace / "repo2"
+        repo2.mkdir()
+        rootcoz2 = repo2 / ".rootcoz" / "skills"
+        rootcoz2.mkdir(parents=True)
+        (rootcoz2 / "shared.md").write_text("from repo2")
+
+        repos = {"repo1": repo1, "repo2": repo2}
+        with patch("rootcoz.engine.core.logger") as mock_logger:
+            copy_rootcoz_pi_resources(repos, workspace)
+
+        # Second repo should trigger an overwrite warning
+        warning_calls = [
+            call
+            for call in mock_logger.warning.call_args_list
+            if "overwrites existing file" in str(call)
+        ]
+        assert warning_calls, "Expected overwrite warning was not logged"
+        # The file should contain repo2's content (last writer wins)
+        assert (workspace / ".pi" / "skills" / "shared.md").read_text() == "from repo2"
 
 
 class TestAnalyzeJobWorkspacePattern:

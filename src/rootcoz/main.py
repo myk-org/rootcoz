@@ -75,9 +75,10 @@ from rootcoz.encryption import (
     encrypt_sensitive_fields,
 )
 from rootcoz.engine.core import (
-    JOB_INSIGHT_ISSUE_PROMPT_FILENAME,
+    ROOTCOZ_ISSUE_PROMPT_FILENAME,
     analyze_failure_group,
     clone_additional_repos,
+    copy_rootcoz_pi_resources,
     extract_json_dict,
     get_failure_signature,
     resolve_additional_repos,
@@ -3263,6 +3264,10 @@ async def _process_file_raw_analysis(
             )
             cloned_repos.update(additional_repos_cloned)
 
+        # Copy .rootcoz/{agents,skills,extensions}/ to workspace .pi/
+        if cloned_repos:
+            copy_rootcoz_pi_resources(cloned_repos, repo_path)
+
         custom_prompt = (body.raw_prompt or "").strip()
         server_url = _build_internal_server_url()
 
@@ -3875,6 +3880,10 @@ async def _reanalyze_failure_background(
                 repo_manager, additional_repos_list, repo_path
             )
             cloned_repos.update(additional_repos_cloned)
+
+        # Copy .rootcoz/{agents,skills,extensions}/ to workspace .pi/
+        if cloned_repos:
+            copy_rootcoz_pi_resources(cloned_repos, repo_path)
 
         # Build a FailedTest from the failure dict
         _ft_kwargs: dict = {
@@ -4800,7 +4809,7 @@ async def get_issue_prompt(
 
     Resolution order:
     1. Stored ``issue_prompt`` from analysis request params (if provided at submission time)
-    2. ``JOB_INSIGHT_ISSUE_PROMPT.md`` fetched from the test repo via GitHub Contents API
+    2. ``.rootcoz/ROOTCOZ_ISSUE_PROMPT.md`` fetched from the test repo via GitHub Contents API
 
     Returns ``{"prompt": ""}`` when no prompt is available.
     """
@@ -4838,7 +4847,7 @@ async def get_issue_prompt(
         )
         return {"prompt": ""}
 
-    api_url = f"https://api.github.com/repos/{owner}/{repo}/contents/{JOB_INSIGHT_ISSUE_PROMPT_FILENAME}"
+    api_url = f"https://api.github.com/repos/{owner}/{repo}/contents/.rootcoz/{ROOTCOZ_ISSUE_PROMPT_FILENAME}"
     if tests_repo_ref:
         api_url += f"?ref={tests_repo_ref}"
 
