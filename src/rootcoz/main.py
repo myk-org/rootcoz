@@ -5262,6 +5262,7 @@ async def _add_tracker_comment(
                 tracked_type,
                 child_job_name=body.child_job_name,
                 child_build_number=body.child_build_number,
+                tracked_by=username,
             )
             if updated == 0:
                 logger.warning(
@@ -5520,6 +5521,7 @@ async def set_tracked_in_endpoint(
         tracked_type,
         child_job_name=body.child_job_name,
         child_build_number=body.child_build_number,
+        tracked_by=request.state.username,
     )
     if updated == 0:
         raise HTTPException(

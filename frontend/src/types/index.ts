@@ -311,6 +311,7 @@ export interface AiModelsResponse {
 export interface TrackedInEntry {
   tracked_in_url: string
   tracked_in_type: string
+  tracked_in_by: string
 }
 
 export interface ResultResponse {

@@ -740,6 +740,9 @@ export function FailureCard({ group, jobId, childJobName, childBuildNumber, inde
                     {trackedIn[repKey].tracked_in_url.replace(/^https?:\/\//, '')}
                   </span>
                 )}
+                {trackedIn[repKey].tracked_in_by && (
+                  <span className="text-xs text-text-tertiary">by {trackedIn[repKey].tracked_in_by}</span>
+                )}
               </div>
             )}
 

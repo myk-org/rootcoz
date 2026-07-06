@@ -564,6 +564,9 @@ async def init_db() -> None:
         await _migrate_add_column(
             db, "failure_history", "tracked_in_type", "TEXT NOT NULL DEFAULT ''"
         )
+        await _migrate_add_column(
+            db, "failure_history", "tracked_in_by", "TEXT NOT NULL DEFAULT ''"
+        )
 
         # Migration: add pattern column to test_classifications (two-axis classification)
         await _migrate_add_column(
@@ -2044,6 +2047,7 @@ async def set_tracked_in(
     *,
     child_job_name: str = "",
     child_build_number: int = 0,
+    tracked_by: str = "",
 ) -> int:
     """Set or clear the tracked-in URL for a failure in failure_history.
 
@@ -2054,15 +2058,16 @@ async def set_tracked_in(
         tracked_type: Tracker type ('jira', 'github', or '' to clear).
         child_job_name: Child job name (empty for top-level failures).
         child_build_number: Child build number (0 for top-level/wildcard).
+        tracked_by: Username who set the tracked-in link.
 
     Returns:
         Number of rows updated.
     """
     sql = (
-        "UPDATE failure_history SET tracked_in_url = ?, tracked_in_type = ? "
+        "UPDATE failure_history SET tracked_in_url = ?, tracked_in_type = ?, tracked_in_by = ? "
         "WHERE job_id = ? AND test_name = ?"
     )
-    params: list = [url, tracked_type, job_id, test_name]
+    params: list = [url, tracked_type, tracked_by, job_id, test_name]
     if child_job_name:
         sql += " AND child_job_name = ?"
         params.append(child_job_name)
@@ -2095,7 +2100,7 @@ async def get_tracked_in_for_job(job_id: str) -> dict[str, dict]:
     async with _connect_db() as db:
         cursor = await db.execute(
             "SELECT test_name, child_job_name, child_build_number, "
-            "tracked_in_url, tracked_in_type "
+            "tracked_in_url, tracked_in_type, tracked_in_by "
             "FROM failure_history "
             "WHERE job_id = ? AND tracked_in_url != ''",
             (job_id,),
@@ -2109,6 +2114,7 @@ async def get_tracked_in_for_job(job_id: str) -> dict[str, dict]:
             ): {
                 "tracked_in_url": row["tracked_in_url"],
                 "tracked_in_type": row["tracked_in_type"],
+                "tracked_in_by": row["tracked_in_by"],
             }
             for row in rows
         }
