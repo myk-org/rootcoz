@@ -523,10 +523,13 @@ def results_show(
         tracked_in = data.get("tracked_in")
         if tracked_in:
             typer.echo("\nTracked In:")
-            for test_name, info in tracked_in.items():
-                typer.echo(
-                    f"  {test_name}: {info.get('tracked_in_url', '')} ({info.get('tracked_in_type', '')})"
-                )
+            for test_name, links in tracked_in.items():
+                for link in links:
+                    typer.echo(
+                        f"  {test_name}: {link.get('tracked_in_url', '')} "
+                        f"({link.get('tracked_in_type', '')}) "
+                        f"by {link.get('tracked_in_by', '')}"
+                    )
 
 
 @results_app.command("delete")

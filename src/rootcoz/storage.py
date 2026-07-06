@@ -2533,7 +2533,10 @@ async def get_test_history(
                        fh.error_signature,
                        COALESCE(tc_latest.classification, fh.classification) AS classification,
                        fh.child_job_name, fh.child_build_number, fh.analyzed_at,
-                       fh.tracked_in_url, fh.tracked_in_type
+                       (SELECT GROUP_CONCAT(til.url, ', ') FROM tracked_in_links til
+                        WHERE til.job_id = fh.job_id AND til.test_name = fh.test_name
+                        AND til.child_job_name = fh.child_job_name
+                        AND til.child_build_number = fh.child_build_number) AS tracked_urls
                 FROM failure_history fh
                 {_TC_LATEST_JOIN}
                 WHERE fh.test_name = ?{job_filter}
