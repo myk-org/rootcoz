@@ -5491,8 +5491,14 @@ async def set_tracked_in_endpoint(
         raise HTTPException(status_code=404, detail="Job not found")
 
     # Auto-detect type from URL if not provided
+    if not body.url:
+        raise HTTPException(
+            status_code=400,
+            detail="URL is required. Use DELETE to remove links.",
+        )
+
     tracked_type = body.type
-    if body.url and not tracked_type:
+    if not tracked_type:
         tracked_type = _detect_tracker_type(body.url)
 
     link_id = await storage.add_tracked_in_link(
