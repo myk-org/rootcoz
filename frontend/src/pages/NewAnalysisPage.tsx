@@ -31,11 +31,18 @@ export function NewAnalysisPage() {
   const navigate = useNavigate()
 
   // Input mode
-  const [inputMode, setInputMode] = useState<'jenkins' | 'paste' | 'upload'>('jenkins')
+  const [inputMode, setInputMode] = useState<'jenkins' | 'prow' | 'paste' | 'upload'>('jenkins')
 
   // Raw XML (paste / upload)
   const [rawXml, setRawXml] = useState('')
   const [uploadFileName, setUploadFileName] = useState('')
+
+  // Prow fields
+  const [prowJobName, setProwJobName] = useState('')
+  const [prowBuildId, setProwBuildId] = useState('')
+  const [prowUrl, setProwUrl] = useState('')
+  const [gcsBucket, setGcsBucket] = useState('')
+  const [gcsPrefix, setGcsPrefix] = useState('')
 
   // Jenkins fields
   const [jobName, setJobName] = useState('')
@@ -154,6 +161,8 @@ export function NewAnalysisPage() {
   const canSubmit =
     inputMode === 'jenkins'
       ? jobName.trim() !== '' && buildNumber !== '' && buildNumber > 0
+      : inputMode === 'prow'
+      ? prowJobName.trim() !== '' && prowBuildId.trim() !== ''
       : rawXml.trim() !== ''
 
   const handleFileUpload = useCallback((file: File) => {
@@ -227,6 +236,20 @@ export function NewAnalysisPage() {
         }
         const data = await api.post<{ job_id: string }>('/analyze', body)
         navigate(`/status/${data.job_id}`)
+      } else if (inputMode === 'prow') {
+        const body: Record<string, unknown> = {
+          ...commonFields,
+          type: 'prow',
+          prow_job_name: prowJobName.trim(),
+          build_id: prowBuildId.trim(),
+          ...(prowUrl && { prow_url: prowUrl }),
+          ...(gcsBucket && { gcs_bucket: gcsBucket }),
+          ...(gcsPrefix && { gcs_prefix: gcsPrefix }),
+          force,
+          ...(tags.length > 0 && { tags }),
+        }
+        const data = await api.post<{ job_id: string }>('/analyze', body)
+        navigate(`/status/${data.job_id}`)
       } else {
         const body: Record<string, unknown> = {
           ...commonFields,
@@ -261,6 +284,11 @@ export function NewAnalysisPage() {
     jenkinsUrl,
     jenkinsUser,
     jenkinsPassword,
+    prowJobName,
+    prowBuildId,
+    prowUrl,
+    gcsBucket,
+    gcsPrefix,
     enablePeers,
     peerConfigs,
     maxRounds,
@@ -282,7 +310,7 @@ export function NewAnalysisPage() {
       <div>
         <h1 className="font-display text-xl font-bold text-text-primary">New Analysis</h1>
         <p className="mt-0.5 text-sm text-text-tertiary">
-          Submit a Jenkins job for AI-powered failure analysis.
+          Submit a CI job for AI-powered failure analysis.
         </p>
       </div>
 
@@ -301,7 +329,7 @@ export function NewAnalysisPage() {
         <div className="space-y-1 p-6">
           {/* Input Mode Selector */}
           <div className="flex gap-2 pb-2">
-            {(['jenkins', 'paste', 'upload'] as const).map((mode) => (
+            {(['jenkins', 'prow', 'paste', 'upload'] as const).map((mode) => (
               <button
                 key={mode}
                 type="button"
@@ -312,7 +340,7 @@ export function NewAnalysisPage() {
                     : 'bg-surface-elevated text-text-secondary hover:text-text-primary'
                 }`}
               >
-                {mode === 'jenkins' ? 'Jenkins Job' : mode === 'paste' ? 'Paste XML' : 'Upload File'}
+                {mode === 'jenkins' ? 'Jenkins Job' : mode === 'prow' ? 'Prow Job' : mode === 'paste' ? 'Paste XML' : 'Upload File'}
               </button>
             ))}
           </div>
@@ -397,6 +425,61 @@ export function NewAnalysisPage() {
                 </div>
               </div>
             )}
+          </Section>
+          )}
+
+          {/* Prow Job */}
+          {inputMode === 'prow' && (
+          <Section title="Prow Job" dotColor="bg-signal-red" defaultOpen>
+            <div className="grid grid-cols-2 gap-3">
+              <div className="space-y-1.5">
+                <FieldLabel>Job Name *</FieldLabel>
+                <Input
+                  placeholder="pull-kubevirt-e2e-k8s-1.36-sig-operator"
+                  value={prowJobName}
+                  onChange={(e) => setProwJobName(e.target.value)}
+                  required
+                />
+              </div>
+              <div className="space-y-1.5">
+                <FieldLabel>Build ID *</FieldLabel>
+                <Input
+                  placeholder="2072664659076321280"
+                  value={prowBuildId}
+                  onChange={(e) => setProwBuildId(e.target.value)}
+                  required
+                />
+              </div>
+            </div>
+            <div className="grid grid-cols-2 gap-3">
+              <div className="space-y-1.5">
+                <FieldLabel>Prow URL</FieldLabel>
+                <Input
+                  placeholder="https://prow.ci.kubevirt.io (overrides server default)"
+                  value={prowUrl}
+                  onChange={(e) => setProwUrl(e.target.value)}
+                />
+              </div>
+              <div className="space-y-1.5">
+                <FieldLabel>GCS Bucket</FieldLabel>
+                <Input
+                  placeholder="kubevirt-prow (overrides server default)"
+                  value={gcsBucket}
+                  onChange={(e) => setGcsBucket(e.target.value)}
+                />
+              </div>
+            </div>
+            <div className="space-y-1.5">
+              <FieldLabel>GCS Prefix</FieldLabel>
+              <Input
+                placeholder="Auto-resolved (override: pr-logs/pull/org_repo/pr/job/build)"
+                value={gcsPrefix}
+                onChange={(e) => setGcsPrefix(e.target.value)}
+              />
+              <p className="text-[11px] text-text-tertiary">
+                Leave empty for auto-detection. Periodic jobs use logs/job/build, PR jobs are resolved via directory pointer files.
+              </p>
+            </div>
           </Section>
           )}
 
@@ -647,7 +730,7 @@ export function NewAnalysisPage() {
             </div>
           </Section>
 
-          {inputMode === 'jenkins' && (
+          {(inputMode === 'jenkins' || inputMode === 'prow') && (
           <>
           <hr className="border-border-muted" />
 
@@ -658,10 +741,13 @@ export function NewAnalysisPage() {
               <Toggle checked={force} onChange={setForce} label="Force analysis on successful builds" />
             </div>
             <p className="text-[11px] text-text-tertiary">
-              When enabled, analysis runs even if Jenkins reports the build as SUCCESS.
+              When enabled, analysis runs even if the CI system reports the build as SUCCESS.
             </p>
           </Section>
+          </>)}
 
+          {inputMode === 'jenkins' && (
+          <>
           <hr className="border-border-muted" />
 
           {/* Jenkins Artifacts */}
