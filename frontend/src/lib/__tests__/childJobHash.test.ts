@@ -116,8 +116,8 @@ describe('key consistency', () => {
       expect(key).toBe(`rootcoz-expand-${jobId}-${g.id}`)
       // Must NOT contain the old broken --0 scoped segment
       expect(key).not.toMatch(/--0-/)
-      // Must NOT contain consecutive dashes that indicate empty scope segments
-      expect(key).not.toMatch(/rootcoz-expand-[^-]+-{2}/)
+      // Must NOT contain consecutive dashes after jobId that indicate empty scope segments
+      expect(key).not.toContain(`rootcoz-expand-${jobId}--`)
     }
   })
 
