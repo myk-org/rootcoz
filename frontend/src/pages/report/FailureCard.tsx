@@ -185,7 +185,7 @@ export function FailureCard({ group, jobId, childJobName, childBuildNumber, inde
   const scopedChildBuildNumber = childBuildNumber ?? 0
   const { githubIssuesEnabled, jiraIssuesEnabled, serverJiraProjectKey, comments, reviews, aiModels, result, classifications, trackedIn } = useReportState()
   const dispatch = useReportDispatch()
-  const { role, isOperator } = useAuth()
+  const { role, isOperator, username } = useAuth()
   const isViewer = role === 'viewer'
   const expandKey = `rootcoz-expand-${jobId}-${scopedChildJobName}-${scopedChildBuildNumber}-${group.id}`
   const [expanded, setExpanded] = useSessionState<boolean>(expandKey, false)
@@ -773,7 +773,7 @@ export function FailureCard({ group, jobId, childJobName, childBuildNumber, inde
           }
           onIssueCreated={(url) => {
             // Auto-set tracked-in in local state (backend already persisted it)
-            dispatch({ type: 'SET_TRACKED_IN_ENTRY', payload: { testName: repKey, entry: { tracked_in_url: url, tracked_in_type: bugTarget! } } })
+            dispatch({ type: 'SET_TRACKED_IN_ENTRY', payload: { testName: repKey, entry: { tracked_in_url: url, tracked_in_type: bugTarget!, tracked_in_by: username || '' } } })
             void maybeSuggestBugReview(url)
           }}
         />

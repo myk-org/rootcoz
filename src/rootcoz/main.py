@@ -5533,6 +5533,7 @@ async def set_tracked_in_endpoint(
         "test_name": body.test_name,
         "tracked_in_url": body.url,
         "tracked_in_type": tracked_type,
+        "tracked_in_by": request.state.username,
     }
 
 
