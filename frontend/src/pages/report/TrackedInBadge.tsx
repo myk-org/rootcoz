@@ -86,13 +86,11 @@ interface TrackInDialogProps {
   onOpenChange: (open: boolean) => void
   jobId: string
   testName: string
-  /** Composite key (reviewKey format) for tracked-in state dispatch. */
-  trackedInKey: string
   childJobName?: string
   childBuildNumber?: number
 }
 
-export function TrackInDialog({ open, onOpenChange, jobId, testName, trackedInKey, childJobName, childBuildNumber }: TrackInDialogProps) {
+export function TrackInDialog({ open, onOpenChange, jobId, testName, childJobName, childBuildNumber }: TrackInDialogProps) {
   const dispatch = useReportDispatch()
   const [url, setUrl] = useState('')
   const [saving, setSaving] = useState(false)

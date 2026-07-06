@@ -819,7 +819,7 @@ export function FailureCard({ group, jobId, childJobName, childBuildNumber, inde
         onOpenChange={setTrackInOpen}
         jobId={jobId}
         testName={rep.test_name}
-        trackedInKey={repKey}
+
         childJobName={scopedChildJobName}
         childBuildNumber={scopedChildBuildNumber}
       />
