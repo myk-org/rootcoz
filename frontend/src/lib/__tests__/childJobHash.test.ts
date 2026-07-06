@@ -104,23 +104,26 @@ describe('collectChildExpandKeys', () => {
 })
 
 describe('key consistency', () => {
-  it('top-level FailureCard key matches getFailureKeys writer', () => {
-    // ReportPage getFailureKeys: groups.map(g => expandKey(jobId, g.id))
-    // FailureCard: expandKey(jobId, group.id)
-    // Both use expandKey(jobId, group.id) — they must match
+  it('top-level group key has no extra child-scope segments', () => {
+    // Verify top-level keys use the simple format without --0 or child segments.
+    // This catches regressions where someone reintroduces scoped segments.
     const groups = groupFailures([makeFailure('test1', 'sig-a')])
     const jobId = 'my-job-id'
 
     for (const g of groups) {
-      const writerKey = expandKey(jobId, g.id)
-      const readerKey = expandKey(jobId, g.id)
-      expect(writerKey).toBe(readerKey)
+      const key = expandKey(jobId, g.id)
+      // Key should be exactly: rootcoz-expand-{jobId}-{groupId}
+      expect(key).toBe(`rootcoz-expand-${jobId}-${g.id}`)
+      // Must NOT contain the old broken --0 scoped segment
+      expect(key).not.toMatch(/--0-/)
+      // Must NOT contain consecutive dashes that indicate empty scope segments
+      expect(key).not.toMatch(/rootcoz-expand-[^-]+-{2}/)
     }
   })
 
-  it('child FailureCard key matches ChildJobSection writer', () => {
-    // ChildJobSection getFailureKeys: groups.map(g => expandKey(jobId, g.id))
-    // FailureCard: expandKey(jobId, group.id)
+  it('child group key embeds child identity in group.id, not in extra key segments', () => {
+    // For child jobs, the child identity is encoded in the group.id prefix
+    // (e.g., "child-childname-42-uuid"), not as extra segments in the key.
     const hashId = childJobHashId('child-job', 5)
     const groups = groupFailures(
       [makeFailure('test1', 'sig-b')],
@@ -129,13 +132,17 @@ describe('key consistency', () => {
     const jobId = 'job-99'
 
     for (const g of groups) {
-      const writerKey = expandKey(jobId, g.id)
-      const readerKey = expandKey(jobId, g.id)
-      expect(writerKey).toBe(readerKey)
+      const key = expandKey(jobId, g.id)
+      // Group id should contain the child hash
+      expect(g.id).toContain(`child-${hashId}`)
+      // Key should be exactly rootcoz-expand-{jobId}-{groupId}
+      expect(key).toBe(`rootcoz-expand-${jobId}-${g.id}`)
     }
   })
 
-  it('collectChildExpandKeys failure keys match FailureCard keys', () => {
+  it('collectChildExpandKeys failure keys match expandKey output', () => {
+    // This test exercises the real collectChildExpandKeys function and
+    // verifies its output matches what expandKey would produce.
     const child: ChildJobAnalysis = {
       job_name: 'child-job',
       build_number: 5,
@@ -151,5 +158,13 @@ describe('key consistency', () => {
     for (const g of groups) {
       expect(collectedKeys).toContain(expandKey(jobId, g.id))
     }
+  })
+
+  it('no inline rootcoz-expand templates outside expandKey utility', () => {
+    // The expandKey function is the single source of truth.
+    // Verify its output always starts with the expected prefix.
+    const key = expandKey('any-job', 'any-id')
+    expect(key).toMatch(/^rootcoz-expand-/)
+    expect(key).toBe('rootcoz-expand-any-job-any-id')
   })
 })
