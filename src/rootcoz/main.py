@@ -644,6 +644,20 @@ def build_jenkins_url(base_url: str, job_name: str, build_number: int) -> str:
     return f"{base_url.rstrip('/')}/job/{job_path}/{build_number}/"
 
 
+_CONTROL_CHAR_RE = re.compile(r"[\x00-\x1f\x7f]")
+
+
+def _sanitize_for_log(value: str) -> str:
+    """Strip control characters to prevent log forging.
+
+    In trusted-proxy mode, ``request.state.username`` may originate from
+    ``X-Forwarded-User`` with minimal validation.  Stripping control
+    characters (newlines, carriage returns, etc.) prevents injection of
+    fake log lines.
+    """
+    return _CONTROL_CHAR_RE.sub("", value)
+
+
 def _extract_base_url() -> str:
     """Extract the external base URL for building public-facing links.
 
@@ -2208,8 +2222,9 @@ async def _auto_review_matching_failures(
             if reviewed_count >= total_failures:
                 logger.info(
                     "All failures auto-reviewed for job %s, pushing classifications "
-                    "to Report Portal",
+                    "to Report Portal (pushed_by=%s)",
                     job_id,
+                    AI_SYSTEM_USERNAME,
                 )
                 try:
                     await _execute_rp_push(
@@ -5595,7 +5610,10 @@ async def push_to_reportportal(
     """
     _check_allow_list(request)
     username = getattr(request.state, "username", "")
-    logger.info("RP push requested by '%s' for job %s", username, job_id)
+    # Sanitize control characters to prevent log forging (trusted-proxy
+    # mode populates username from X-Forwarded-User with minimal validation)
+    safe_username = _sanitize_for_log(username)
+    logger.info("RP push requested by '%s' for job %s", safe_username, job_id)
     if not settings.reportportal_enabled:
         raise HTTPException(
             status_code=400,

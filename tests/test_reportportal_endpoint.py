@@ -2260,3 +2260,64 @@ class TestPushedByForwarding:
         # Verify push_classifications received the pushed_by parameter
         push_call = mock_rp.push_classifications.call_args
         assert push_call.kwargs["pushed_by"] == "admin"
+
+    @patch("rootcoz.main.logger")
+    @patch("rootcoz.main.get_history_classification", new_callable=AsyncMock)
+    @patch("rootcoz.main.get_result")
+    @patch("rootcoz.main.ReportPortalClient")
+    def test_info_log_includes_username(
+        self, mock_rp_class, mock_get_result, mock_get_cls, mock_logger, _rp_enabled_env
+    ):
+        """INFO log for manual RP push includes the authenticated username."""
+        mock_get_cls.return_value = ""
+        mock_get_result.return_value = {
+            "status": "completed",
+            "result": {
+                "job_name": "my-job",
+                "build_number": 42,
+                "jenkins_url": "https://jenkins.example.com/job/my-job/42/",
+                "failures": [
+                    {
+                        "test_name": "test_a",
+                        "error": "err",
+                        "analysis": {
+                            "classification": "PRODUCT BUG",
+                            "details": "Bug found",
+                        },
+                    }
+                ],
+            },
+        }
+        mock_rp = MagicMock()
+        mock_rp.__enter__ = MagicMock(return_value=mock_rp)
+        mock_rp.__exit__ = MagicMock(return_value=False)
+        mock_rp.find_launch.return_value = 100
+        mock_rp.get_failed_items.return_value = [
+            {"id": 1, "name": "test_a", "status": "FAILED"}
+        ]
+        mock_rp.match_failures.return_value = [
+            ({"id": 1, "name": "test_a"}, MagicMock(test_name="test_a"))
+        ]
+        mock_rp.push_classifications.return_value = {
+            "pushed": 1,
+            "unmatched": [],
+            "errors": [],
+            "launch_id": 100,
+        }
+        mock_rp_class.return_value = mock_rp
+
+        from rootcoz.main import app
+
+        client = TestClient(
+            app,
+            raise_server_exceptions=False,
+            headers={"Authorization": "Bearer test-admin-key-16chars"},
+        )
+        client.post("/results/some-job-id/push-reportportal")
+        info_calls = [
+            c for c in mock_logger.info.call_args_list if "RP push requested" in str(c)
+        ]
+        assert info_calls, "Expected INFO log for RP push request"
+        rendered = str(info_calls[0])
+        assert "admin" in rendered, f"username missing from log: {rendered}"
+        assert "some-job-id" in rendered, f"job_id missing from log: {rendered}"
