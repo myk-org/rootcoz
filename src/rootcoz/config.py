@@ -334,8 +334,9 @@ class Settings(BaseSettings):
     enable_auto_review: bool = Field(
         default=True,
         description=(
-            "When enabled, failures matching a previous human-reviewed failure "
-            "with the same error signature are automatically marked reviewed."
+            "When enabled, failures with the same job_name, test_name, and "
+            "error_signature as a previous human-reviewed failure are "
+            "automatically marked reviewed by rootcoz-ai."
         ),
     )
 
