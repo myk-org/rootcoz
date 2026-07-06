@@ -13,7 +13,7 @@ import { FailureCard } from './report/FailureCard'
 import { ChildJobSection } from './report/ChildJobSection'
 import { PeerAnalysisSummary } from './report/PeerAnalysisSummary'
 import { AllReviewedPrompt } from './report/AllReviewedPrompt'
-import { collectChildExpandKeys } from '@/lib/childJobHash'
+import { collectChildExpandKeys, expandKey } from '@/lib/childJobHash'
 import { collectAllTestKeys, countAllFailures } from '@/lib/failureKeys'
 import { Badge } from '@/components/ui/badge'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
@@ -363,7 +363,7 @@ function ReportContent() {
 
   // Expand/collapse all for top-level failure cards
   const getFailureKeys = useCallback(
-    () => (result ? groups.map((g) => `rootcoz-expand-${result.job_id}-${g.id}`) : []),
+    () => (result ? groups.map((g) => expandKey(result.job_id, g.id)) : []),
     [groups, result],
   )
   const { remountKey: failureRemountKey, expandAll: expandAllFailures, collapseAll: collapseAllFailures } =

@@ -3,7 +3,7 @@ import type { ChildJobAnalysis } from '@/types'
 import { useSessionState } from '@/lib/useSessionState'
 import { groupFailures } from '@/lib/grouping'
 import { useExpandCollapseAll } from '@/lib/useExpandCollapseAll'
-import { childJobHashId } from '@/lib/childJobHash'
+import { childJobHashId, expandKey } from '@/lib/childJobHash'
 import { FailureCard } from './FailureCard'
 import { Badge } from '@/components/ui/badge'
 import { ExpandCollapseButtons } from '@/components/shared/ExpandCollapseButtons'
@@ -24,9 +24,9 @@ interface ChildJobSectionProps {
 export function ChildJobSection({ child, jobId, depth = 0, activeHash, parentHashId }: ChildJobSectionProps) {
   const state = useReportState()
   const hashId = childJobHashId(child.job_name, child.build_number, parentHashId)
-  const expandKey = `rootcoz-expand-${jobId}-${hashId}`
+  const sectionExpandKey = expandKey(jobId, hashId)
   const sectionRef = useRef<HTMLDivElement>(null)
-  const [expanded, setExpanded] = useSessionState<boolean>(expandKey, false)
+  const [expanded, setExpanded] = useSessionState<boolean>(sectionExpandKey, false)
 
   // Auto-expand and scroll when the URL hash targets this child job or any descendant
   useEffect(() => {
@@ -74,7 +74,7 @@ export function ChildJobSection({ child, jobId, depth = 0, activeHash, parentHas
 
   // Expand/collapse all failure cards within this child job
   const getFailureKeys = useCallback(
-    () => groups.map((g) => `rootcoz-expand-${jobId}-${g.id}`),
+    () => groups.map((g) => expandKey(jobId, g.id)),
     [groups, jobId],
   )
   const { remountKey: failureRemountKey, expandAll: expandAllFailures, collapseAll: collapseAllFailures } =
