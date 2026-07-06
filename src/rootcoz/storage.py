@@ -585,29 +585,36 @@ async def init_db() -> None:
         await db.execute(
             "CREATE INDEX IF NOT EXISTS idx_til_job ON tracked_in_links (job_id, test_name)"
         )
-
-        # Migration: copy existing tracked_in data from failure_history to new table
-        cursor = await db.execute(
-            "SELECT job_id, test_name, child_job_name, child_build_number, "
-            "tracked_in_url, tracked_in_type, tracked_in_by "
-            "FROM failure_history WHERE tracked_in_url != ''"
+        await db.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_til_unique "
+            "ON tracked_in_links (job_id, test_name, child_job_name, child_build_number, url)"
         )
-        migrate_rows = await cursor.fetchall()
-        for row in migrate_rows:
-            await db.execute(
-                "INSERT OR IGNORE INTO tracked_in_links "
-                "(job_id, test_name, child_job_name, child_build_number, url, type, created_by) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (
-                    row["job_id"],
-                    row["test_name"],
-                    row["child_job_name"],
-                    row["child_build_number"],
-                    row["tracked_in_url"],
-                    row["tracked_in_type"],
-                    row["tracked_in_by"],
-                ),
+
+        # Migration: copy existing tracked_in data from failure_history (runs once)
+        cursor = await db.execute("SELECT COUNT(*) FROM tracked_in_links")
+        til_count = (await cursor.fetchone())[0]
+        if til_count == 0:
+            cursor = await db.execute(
+                "SELECT job_id, test_name, child_job_name, child_build_number, "
+                "tracked_in_url, tracked_in_type, tracked_in_by "
+                "FROM failure_history WHERE tracked_in_url != ''"
             )
+            migrate_rows = await cursor.fetchall()
+            for row in migrate_rows:
+                await db.execute(
+                    "INSERT OR IGNORE INTO tracked_in_links "
+                    "(job_id, test_name, child_job_name, child_build_number, url, type, created_by) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        row["job_id"],
+                        row["test_name"],
+                        row["child_job_name"],
+                        row["child_build_number"],
+                        row["tracked_in_url"],
+                        row["tracked_in_type"],
+                        row["tracked_in_by"],
+                    ),
+                )
 
         # Migration: add pattern column to test_classifications (two-axis classification)
         await _migrate_add_column(
@@ -2102,11 +2109,13 @@ async def add_tracked_in_link(
         tracked_by: Username who added the link.
 
     Returns:
-        ID of the inserted row.
+        ID of the inserted row, or 0 if URL is empty.
     """
+    if not url:
+        return 0
     async with _connect_db() as db:
         cursor = await db.execute(
-            "INSERT INTO tracked_in_links "
+            "INSERT OR IGNORE INTO tracked_in_links "
             "(job_id, test_name, child_job_name, child_build_number, url, type, created_by) "
             "VALUES (?, ?, ?, ?, ?, ?, ?)",
             (
@@ -2121,6 +2130,20 @@ async def add_tracked_in_link(
         )
         await db.commit()
         return cursor.lastrowid or 0
+
+
+async def delete_tracked_in_link(link_id: int) -> int:
+    """Delete a tracked-in link by ID.
+
+    Returns:
+        Number of rows deleted (0 or 1).
+    """
+    async with _connect_db() as db:
+        cursor = await db.execute(
+            "DELETE FROM tracked_in_links WHERE id = ?", (link_id,)
+        )
+        await db.commit()
+        return cursor.rowcount
 
 
 def _tracked_in_key(

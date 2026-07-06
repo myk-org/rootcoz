@@ -326,6 +326,10 @@ class RootCozClient:
         """Get tracked-in data for a job. GET /results/{job_id}/tracked-in"""
         return self._request("GET", f"/results/{job_id}/tracked-in")
 
+    def delete_tracked_in(self, job_id: str, link_id: int) -> dict:
+        """Delete a tracked-in link. DELETE /results/{job_id}/tracked-in/{link_id}"""
+        return self._request("DELETE", f"/results/{job_id}/tracked-in/{link_id}")
+
     def delete_job(self, job_id: str) -> dict:
         """Delete a job and all related data. DELETE /results/{job_id}"""
         return self._request("DELETE", f"/results/{job_id}")

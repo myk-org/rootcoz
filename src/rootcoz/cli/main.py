@@ -696,6 +696,22 @@ def set_tracked_in_cmd(
             typer.echo("Tracked-in cleared.")
 
 
+@results_app.command("delete-tracked-in")
+def delete_tracked_in_cmd(
+    job_id: str = typer.Argument(help="Job ID."),
+    link_id: int = typer.Option(..., "--link-id", help="Tracked-in link ID to delete."),
+    json_output: bool = _JSON_OPTION,
+):
+    """Delete a tracked-in link by ID."""
+    data = _run_client_command(
+        json_output,
+        lambda c: c.delete_tracked_in(job_id, link_id),
+        emit_output=False,
+    )
+    if not _state.get("json", False):
+        typer.echo(f"Deleted tracked-in link {data.get('deleted_id', link_id)}.")
+
+
 @results_app.command("enrich-comments")
 def enrich_comments_cmd(
     job_id: str = typer.Argument(help="Job ID."),

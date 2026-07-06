@@ -5479,9 +5479,9 @@ async def set_tracked_in_endpoint(
     request: Request,
     _: None = Depends(_bind_job_id),
 ) -> dict:
-    """Set or clear the tracked-in URL for a failure.
+    """Add a tracked-in link for a failure.
 
-    Reviewers+ can set tracked-in links. Pass an empty URL to clear.
+    Reviewers+ can add tracked-in links. Use DELETE to remove.
     """
     _require_reviewer(request)
     _check_allow_list(request)
@@ -5527,6 +5527,21 @@ async def get_tracked_in_endpoint(
         raise HTTPException(status_code=404, detail="Job not found")
     tracked = await storage.get_tracked_in_for_job(job_id)
     return {"job_id": job_id, "tracked_in": tracked}
+
+
+@app.delete("/results/{job_id}/tracked-in/{link_id}")
+async def delete_tracked_in_endpoint(
+    job_id: str,
+    link_id: int,
+    request: Request,
+    _: None = Depends(_bind_job_id),
+) -> dict:
+    """Delete a tracked-in link by ID."""
+    _require_reviewer(request)
+    deleted = await storage.delete_tracked_in_link(link_id)
+    if deleted == 0:
+        raise HTTPException(status_code=404, detail="Link not found")
+    return {"status": "ok", "deleted_id": link_id}
 
 
 @app.post("/results/{job_id}/push-reportportal", response_model=ReportPortalPushResult)
