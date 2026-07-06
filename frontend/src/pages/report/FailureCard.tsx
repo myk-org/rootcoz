@@ -29,7 +29,7 @@ import { useReviewSuggestion } from './useReviewSuggestion'
 import { ConfirmDialog } from '@/components/shared/ConfirmDialog'
 import { UuidCopyButton } from '@/components/shared/UuidCopyButton'
 import { useAuth } from '@/lib/auth'
-import { ChevronDown, ChevronRight, Bug, MessageSquare, CheckCircle2, Copy, Check, RotateCw, Link2 } from 'lucide-react'
+import { ChevronDown, ChevronRight, Bug, MessageSquare, CheckCircle2, Copy, Check, RotateCw, Link2, X } from 'lucide-react'
 
 function PreviousAnalysisEntry({ prev, index, repoUrls }: {
   prev: PreviousAnalysis
@@ -185,7 +185,7 @@ export function FailureCard({ group, jobId, childJobName, childBuildNumber, inde
   const scopedChildBuildNumber = childBuildNumber ?? 0
   const { githubIssuesEnabled, jiraIssuesEnabled, serverJiraProjectKey, comments, reviews, aiModels, result, classifications, trackedIn } = useReportState()
   const dispatch = useReportDispatch()
-  const { role, isOperator, username } = useAuth()
+  const { role, isOperator, isAdmin, username } = useAuth()
   const isViewer = role === 'viewer'
   const expandKey = `rootcoz-expand-${jobId}-${scopedChildJobName}-${scopedChildBuildNumber}-${group.id}`
   const [expanded, setExpanded] = useSessionState<boolean>(expandKey, false)
@@ -724,8 +724,8 @@ export function FailureCard({ group, jobId, childJobName, childBuildNumber, inde
             {/* Tracked item links (indented below CLASSIFY) */}
             {trackedIn[repKey]?.length > 0 && (
               <div className="pl-16 space-y-1">
-                {trackedIn[repKey].map((link, idx) => (
-                  <div key={idx} className="flex items-center gap-1.5 text-xs">
+                {trackedIn[repKey].map((link) => (
+                  <div key={link.id} className="flex items-center gap-1.5 text-xs">
                     <TrackerIcon type={link.tracked_in_type} />
                     {isSafeHref(link.tracked_in_url) ? (
                       <a
@@ -740,6 +740,33 @@ export function FailureCard({ group, jobId, childJobName, childBuildNumber, inde
                       <span className="text-text-tertiary">{link.tracked_in_url.replace(/^https?:\/\//, '')}</span>
                     )}
                     {link.tracked_in_by && <span className="text-text-tertiary">by {link.tracked_in_by}</span>}
+                    {(isAdmin || link.tracked_in_by === username) && (
+                      <Tooltip>
+                        <TooltipTrigger asChild>
+                          <button
+                            type="button"
+                            className="text-text-tertiary hover:text-signal-red transition-colors"
+                            onClick={() => {
+                              api.delete(`/results/${jobId}/tracked-in/${link.id}`)
+                                .then(() => {
+                                  dispatch({
+                                    type: 'SET_TRACKED_IN',
+                                    payload: {
+                                      ...trackedIn,
+                                      [repKey]: trackedIn[repKey].filter((l) => l.id !== link.id),
+                                    },
+                                  })
+                                })
+                                .catch(() => {})
+                            }}
+                            aria-label="Remove tracked link"
+                          >
+                            <X className="h-3 w-3" />
+                          </button>
+                        </TooltipTrigger>
+                        <TooltipContent>Remove tracked link</TooltipContent>
+                      </Tooltip>
+                    )}
                   </div>
                 ))}
               </div>
