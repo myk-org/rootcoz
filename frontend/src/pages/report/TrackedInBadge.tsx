@@ -130,8 +130,10 @@ export function TrackInDialog({ open, onOpenChange, jobId, testName, trackedInKe
       const detail = extractApiDetail(err)
       if (detail?.includes('URL must use') || detail?.includes('URL must include')) {
         setError('Please enter a valid URL starting with http:// or https://')
+      } else if (detail?.includes('Authentication') || detail?.includes('Reviewer')) {
+        setError('You do not have permission to add tracked links.')
       } else {
-        setError(detail ?? (err instanceof Error ? err.message : 'Failed to add tracked link'))
+        setError('Failed to add tracked link. Please try again.')
       }
     } finally {
       setSaving(false)

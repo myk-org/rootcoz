@@ -4,7 +4,7 @@ import { useClipboard } from '@/lib/useClipboard'
 import type { GroupedFailure, PreviousAnalysis } from '@/types'
 import { buildFileUrl, buildRepoUrls, isSafeHref, matchRepo, type RepoUrl } from '@/lib/autoLink'
 import { isCommentInScope } from '@/lib/grouping'
-import { api } from '@/lib/api'
+import { api, extractApiDetail } from '@/lib/api'
 import { getUsername } from '@/lib/cookies'
 import { useSessionState } from '@/lib/useSessionState'
 import { unescapeCodeContent } from '@/lib/format'
@@ -205,6 +205,7 @@ export function FailureCard({ group, jobId, childJobName, childBuildNumber, inde
   }, [activeHash, group.id])
   const [bugTarget, setBugTarget] = useState<'github' | 'jira' | null>(null)
   const [trackInOpen, setTrackInOpen] = useState(false)
+  const [trackedLinkError, setTrackedLinkError] = useState<string | null>(null)
   const [reviewingAll, setReviewingAll] = useState(false)
   const [reviewAllError, setReviewAllError] = useState<string | null>(null)
   const [selectedProvider, setSelectedProvider] = useState(result?.ai_provider ?? '')
@@ -747,6 +748,7 @@ export function FailureCard({ group, jobId, childJobName, childBuildNumber, inde
                             type="button"
                             className="text-text-tertiary hover:text-signal-red transition-colors"
                             onClick={() => {
+                              setTrackedLinkError(null)
                               api.delete(`/results/${jobId}/tracked-in/${link.id}`)
                                 .then(() => {
                                   dispatch({
@@ -757,7 +759,14 @@ export function FailureCard({ group, jobId, childJobName, childBuildNumber, inde
                                     },
                                   })
                                 })
-                                .catch(() => {})
+                                .catch((err) => {
+                                  const detail = extractApiDetail(err)
+                                  if (detail?.includes('only delete your own')) {
+                                    setTrackedLinkError('You can only remove links you added.')
+                                  } else {
+                                    setTrackedLinkError('Failed to remove tracked link. Please try again.')
+                                  }
+                                })
                             }}
                             aria-label="Remove tracked link"
                           >
@@ -770,6 +779,9 @@ export function FailureCard({ group, jobId, childJobName, childBuildNumber, inde
                   </div>
                 ))}
               </div>
+            )}
+            {trackedLinkError && (
+              <p className="pl-16 text-xs text-signal-red">{trackedLinkError}</p>
             )}
 
             {/* Comments */}
