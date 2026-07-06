@@ -447,9 +447,10 @@ class ProwSource(CISource):
                 max_size=_MAX_SIZE_FINISHED,
             )
         except GCSAccessError as exc:
-            # Non-404 errors (403, 500) are tracked as warnings so callers
-            # know prefix resolution was degraded, not silently swallowed.
-            if exc.status_code and exc.status_code != 404:
+            # Non-404 errors (403, 500, network errors, oversize) are tracked
+            # as warnings so callers know resolution was degraded.
+            # 404 is expected (periodic/postsubmit jobs have no pointer file).
+            if exc.status_code != 404:
                 self._resolution_warnings.append(str(exc))
             pointer_content = None
 
@@ -609,7 +610,13 @@ class ProwSource(CISource):
             if finished_text:
                 try:
                     finished = json.loads(finished_text)
-                    build_state = finished.get("result", "").upper()
+                    if not isinstance(finished, dict):
+                        logger.warning(
+                            "finished.json is not a JSON object (got %s)",
+                            type(finished).__name__,
+                        )
+                    else:
+                        build_state = finished.get("result", "").upper()
                 except (ValueError, KeyError) as exc:
                     logger.warning("Failed to parse finished.json: %s", exc)
             else:

@@ -3356,7 +3356,7 @@ async def _fetch_pr_changes(
 
     headers: dict[str, str] = {"Accept": "application/json"}
     if github_token:
-        headers["Authorization"] = f"token {github_token}"
+        headers["Authorization"] = f"Bearer {github_token}"
 
     pr_api = f"https://api.github.com/repos/{org}/{repo}/pulls/{pr_number}"
     try:

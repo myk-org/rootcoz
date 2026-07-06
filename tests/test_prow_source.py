@@ -1570,7 +1570,7 @@ class TestFetchPrChanges:
             await _fetch_pr_changes(
                 "org", "repo", 1, github_token="ghp_secret", _client=client
             )
-        assert captured_headers.get("authorization") == "token ghp_secret"
+        assert captured_headers.get("authorization") == "Bearer ghp_secret"
 
     async def test_invalid_org_rejected(self):
         transport = httpx.MockTransport(lambda r: httpx.Response(200, json=_pr_json()))
