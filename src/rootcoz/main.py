@@ -4004,10 +4004,10 @@ async def _process_non_jenkins_analysis(
                 logger.info("Linked artifacts into workspace: %s", artifacts_link)
             except OSError as exc:
                 logger.warning(
-                    "Could not link artifacts into workspace: %s — "
-                    "AI will use absolute path instead",
+                    "Could not link artifacts into workspace: %s",
                     exc,
                 )
+                artifacts_context = ""
 
         custom_prompt = (body.raw_prompt or "").strip()
         server_url = _build_internal_server_url()
