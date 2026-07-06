@@ -5633,7 +5633,7 @@ async def push_to_reportportal(
             settings,
             child_job_name=child_job_name,
             child_build_number=child_build_number,
-            pushed_by=username,
+            pushed_by=safe_username,
         )
         return push_result
     except ValueError as exc:
