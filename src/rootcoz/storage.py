@@ -2119,7 +2119,7 @@ async def add_tracked_in_link(
             "(job_id, test_name, child_job_name, child_build_number, url, type, created_by) "
             "VALUES (?, ?, ?, ?, ?, ?, ?) "
             "ON CONFLICT (job_id, test_name, child_job_name, child_build_number, url) "
-            "DO UPDATE SET type = excluded.type",
+            "DO UPDATE SET type = CASE WHEN excluded.type != '' THEN excluded.type ELSE tracked_in_links.type END",
             (
                 job_id,
                 test_name,
