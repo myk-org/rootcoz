@@ -1,5 +1,6 @@
 import type { ChildJobAnalysis } from '@/types'
 import { groupFailures } from '@/lib/grouping'
+import { expandStateKey } from '@/lib/failureKeys'
 
 /**
  * Build a URL-safe hash fragment identifier for a child job.
@@ -28,7 +29,7 @@ export function collectChildExpandKeys(
     keys.push(`rootcoz-expand-${resultJobId}-${hashId}`)
     const childGroups = groupFailures(child.failures ?? [], `child-${hashId}`)
     for (const g of childGroups) {
-      keys.push(`rootcoz-expand-${resultJobId}-${g.id}`)
+      keys.push(expandStateKey(resultJobId, child.job_name, child.build_number, g.id))
     }
     keys.push(...collectChildExpandKeys(child.failed_children ?? [], resultJobId, hashId))
   }

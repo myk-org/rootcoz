@@ -40,3 +40,12 @@ export function countAllFailures(failures: { test_name: string }[], children: Ch
   })
   return count
 }
+
+export function expandStateKey(
+  jobId: string,
+  childJobName: string,
+  childBuildNumber: number,
+  groupId: string,
+): string {
+  return `rootcoz-expand-${jobId}-${childJobName}-${childBuildNumber}-${groupId}`
+}

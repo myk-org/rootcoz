@@ -10,6 +10,7 @@ import { useSessionState } from '@/lib/useSessionState'
 import { unescapeCodeContent } from '@/lib/format'
 import { formatRelativeTime } from '@/lib/utils'
 import { useReportState, useReportDispatch, reviewKey } from './ReportContext'
+import { expandStateKey } from '@/lib/failureKeys'
 import { Card, CardContent } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
 import { Tooltip, TooltipTrigger, TooltipContent } from '@/components/ui/tooltip'
@@ -186,7 +187,7 @@ export function FailureCard({ group, jobId, childJobName, childBuildNumber, inde
   const dispatch = useReportDispatch()
   const { role, isOperator } = useAuth()
   const isViewer = role === 'viewer'
-  const expandKey = `rootcoz-expand-${jobId}-${scopedChildJobName}-${scopedChildBuildNumber}-${group.id}`
+  const expandKey = expandStateKey(jobId, scopedChildJobName, scopedChildBuildNumber, group.id)
   const [expanded, setExpanded] = useSessionState<boolean>(expandKey, false)
   const cardRef = useRef<HTMLDivElement>(null)
   const expandedByHashRef = useRef(false)

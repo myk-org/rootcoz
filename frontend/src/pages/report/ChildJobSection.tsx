@@ -4,6 +4,7 @@ import { useSessionState } from '@/lib/useSessionState'
 import { groupFailures } from '@/lib/grouping'
 import { useExpandCollapseAll } from '@/lib/useExpandCollapseAll'
 import { childJobHashId } from '@/lib/childJobHash'
+import { expandStateKey } from '@/lib/failureKeys'
 import { FailureCard } from './FailureCard'
 import { Badge } from '@/components/ui/badge'
 import { ExpandCollapseButtons } from '@/components/shared/ExpandCollapseButtons'
@@ -74,8 +75,8 @@ export function ChildJobSection({ child, jobId, depth = 0, activeHash, parentHas
 
   // Expand/collapse all failure cards within this child job
   const getFailureKeys = useCallback(
-    () => groups.map((g) => `rootcoz-expand-${jobId}-${g.id}`),
-    [groups, jobId],
+    () => groups.map((g) => expandStateKey(jobId, child.job_name, child.build_number, g.id)),
+    [groups, jobId, child.job_name, child.build_number],
   )
   const { remountKey: failureRemountKey, expandAll: expandAllFailures, collapseAll: collapseAllFailures } =
     useExpandCollapseAll(getFailureKeys)
