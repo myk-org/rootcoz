@@ -2115,9 +2115,11 @@ async def add_tracked_in_link(
         return 0
     async with _connect_db() as db:
         cursor = await db.execute(
-            "INSERT OR IGNORE INTO tracked_in_links "
+            "INSERT INTO tracked_in_links "
             "(job_id, test_name, child_job_name, child_build_number, url, type, created_by) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            "VALUES (?, ?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT (job_id, test_name, child_job_name, child_build_number, url) "
+            "DO UPDATE SET type = excluded.type, created_by = excluded.created_by",
             (
                 job_id,
                 test_name,
@@ -2129,15 +2131,6 @@ async def add_tracked_in_link(
             ),
         )
         await db.commit()
-        if cursor.rowcount == 0:
-            # Duplicate — fetch existing id
-            cursor = await db.execute(
-                "SELECT id FROM tracked_in_links WHERE job_id = ? AND test_name = ? "
-                "AND child_job_name = ? AND child_build_number = ? AND url = ?",
-                (job_id, test_name, child_job_name, child_build_number, url),
-            )
-            row = await cursor.fetchone()
-            return row["id"] if row else 0
         return cursor.lastrowid or 0
 
 
