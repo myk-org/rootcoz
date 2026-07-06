@@ -336,7 +336,7 @@ class Settings(BaseSettings):
         description=(
             "When enabled, failures with the same job_name, test_name, and "
             "error_signature as a previous human-reviewed failure are "
-            "automatically marked reviewed by rootcoz-ai."
+            "automatically marked as reviewed."
         ),
     )
 
