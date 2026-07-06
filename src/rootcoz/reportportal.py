@@ -363,6 +363,8 @@ class ReportPortalClient:
         push_rootcoz_url: bool = True,
         push_tracker_links: bool = True,
         tracked_in_links: dict[str, list[dict]] | None = None,
+        pushed_by: str = "",
+        reviewed_by: dict[str, str] | None = None,
     ) -> dict:
         """Push rootcoz classifications into RP test items.
 
@@ -390,6 +392,12 @@ class ReportPortalClient:
                 tracked-in link dicts (each with ``tracked_in_url`` and
                 ``tracked_in_type`` keys). Merged with AI Jira matches
                 when ``push_tracker_links`` is ``True``.
+            pushed_by: Username of the user who triggered the push.
+                When non-empty, a "Pushed by <username>" line is
+                appended to the RP comment.
+            reviewed_by: Mapping of test name to reviewer username.
+                When the test has a reviewer, a "Reviewed by <username>"
+                line is appended to the RP comment.
 
         Returns:
             Dict with keys: ``pushed``, ``unmatched``, ``errors``, ``launch_id``.
@@ -453,9 +461,14 @@ class ReportPortalClient:
             }
 
             if push_rootcoz_url:
-                issue_payload["comment"] = (
-                    f"See AI failure analysis under: [rootcoz Failure Analysis]({report_url})"
-                )
+                reviewed_by = reviewed_by or {}
+                comment = f"See AI failure analysis under: [rootcoz Failure Analysis]({report_url})"
+                if pushed_by:
+                    comment += f"\nPushed by {pushed_by}"
+                reviewer = reviewed_by.get(failure.test_name, "")
+                if reviewer:
+                    comment += f"\nReviewed by {reviewer}"
+                issue_payload["comment"] = comment
 
             # Add Jira matches as external issues
             if push_tracker_links:

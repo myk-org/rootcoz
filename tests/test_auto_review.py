@@ -843,7 +843,10 @@ class TestAutoReviewMatchingFailures:
                 await _auto_review_matching_failures(
                     "current-job", "my-job", 101, result_data, settings
                 )
-                mock_push.assert_called_once_with("current-job", result_data, settings)
+
+                mock_push.assert_called_once_with(
+                    "current-job", result_data, settings, pushed_by=AI_SYSTEM_USERNAME
+                )
 
     async def test_no_push_when_reportportal_disabled(self, setup_test_db):
         """Should NOT push to RP when ENABLE_REPORTPORTAL is disabled."""

@@ -2212,7 +2212,9 @@ async def _auto_review_matching_failures(
                     job_id,
                 )
                 try:
-                    await _execute_rp_push(job_id, result_data, settings)
+                    await _execute_rp_push(
+                        job_id, result_data, settings, pushed_by=AI_SYSTEM_USERNAME
+                    )
                 except Exception:
                     logger.warning(
                         "Auto-push to Report Portal failed for job_id=%s",
@@ -5592,6 +5594,8 @@ async def push_to_reportportal(
     and updates each item's defect type and comment.
     """
     _check_allow_list(request)
+    username = getattr(request.state, "username", "")
+    logger.info("RP push requested by '%s' for job %s", username, job_id)
     if not settings.reportportal_enabled:
         raise HTTPException(
             status_code=400,
@@ -5611,6 +5615,7 @@ async def push_to_reportportal(
             settings,
             child_job_name=child_job_name,
             child_build_number=child_build_number,
+            pushed_by=username,
         )
         return push_result
     except ValueError as exc:
@@ -5721,6 +5726,7 @@ async def _execute_rp_push(
     *,
     child_job_name: str | None = None,
     child_build_number: int | None = None,
+    pushed_by: str = "",
 ) -> dict:
     """Shared logic for pushing classifications to Report Portal.
 
@@ -5733,6 +5739,7 @@ async def _execute_rp_push(
         settings: Application settings with Report Portal configuration.
         child_job_name: Optional child job name for scoping push to a child.
         child_build_number: Optional child build number (required with child_job_name).
+        pushed_by: Username of the user who triggered the push.
 
     Returns:
         Dict with keys: ``pushed``, ``unmatched``, ``errors``, ``launch_id``.
@@ -5992,6 +5999,8 @@ async def _execute_rp_push(
                 push_rootcoz_url=rp.push_rootcoz_url,
                 push_tracker_links=rp.push_tracker_links,
                 tracked_in_links=tracked_in_data,
+                pushed_by=pushed_by,
+                reviewed_by=reviewed_by,
             )
         except Exception as exc:
             user_msg, log_msg = _rp_error_message(

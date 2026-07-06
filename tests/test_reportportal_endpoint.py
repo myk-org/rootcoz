@@ -2199,3 +2199,64 @@ class TestRPPushChildValidation:
         )
         assert response.status_code == 400
         assert "child_job_name" in response.json()["detail"].lower()
+
+
+class TestPushedByForwarding:
+    """Verify pushed_by is threaded from endpoint to push_classifications."""
+
+    @patch("rootcoz.main.get_history_classification", new_callable=AsyncMock)
+    @patch("rootcoz.main.get_result")
+    @patch("rootcoz.main.ReportPortalClient")
+    def test_pushed_by_forwarded_from_endpoint(
+        self, mock_rp_class, mock_get_result, mock_get_cls, _rp_enabled_env
+    ):
+        """Username from request is forwarded as pushed_by to push_classifications."""
+        mock_get_cls.return_value = ""
+        mock_get_result.return_value = {
+            "status": "completed",
+            "result": {
+                "job_name": "my-job",
+                "build_number": 42,
+                "jenkins_url": "https://jenkins.example.com/job/my-job/42/",
+                "failures": [
+                    {
+                        "test_name": "test_a",
+                        "error": "err",
+                        "analysis": {
+                            "classification": "PRODUCT BUG",
+                            "details": "Bug found",
+                        },
+                    }
+                ],
+            },
+        }
+        mock_rp = MagicMock()
+        mock_rp.__enter__ = MagicMock(return_value=mock_rp)
+        mock_rp.__exit__ = MagicMock(return_value=False)
+        mock_rp.find_launch.return_value = 100
+        mock_rp.get_failed_items.return_value = [
+            {"id": 1, "name": "test_a", "status": "FAILED"}
+        ]
+        mock_rp.match_failures.return_value = [
+            ({"id": 1, "name": "test_a"}, MagicMock(test_name="test_a"))
+        ]
+        mock_rp.push_classifications.return_value = {
+            "pushed": 1,
+            "unmatched": [],
+            "errors": [],
+            "launch_id": 100,
+        }
+        mock_rp_class.return_value = mock_rp
+
+        from rootcoz.main import app
+
+        client = TestClient(
+            app,
+            raise_server_exceptions=False,
+            headers={"Authorization": "Bearer test-admin-key-16chars"},
+        )
+        response = client.post("/results/some-job-id/push-reportportal")
+        assert response.status_code == 200
+        # Verify push_classifications received the pushed_by parameter
+        push_call = mock_rp.push_classifications.call_args
+        assert push_call.kwargs["pushed_by"] == "admin"
