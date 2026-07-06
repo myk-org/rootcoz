@@ -162,7 +162,7 @@ export function NewAnalysisPage() {
     inputMode === 'jenkins'
       ? jobName.trim() !== '' && buildNumber !== '' && buildNumber > 0
       : inputMode === 'prow'
-      ? prowJobName.trim() !== '' && /^[0-9]+$/.test(prowBuildId.trim())
+      ? /^[a-zA-Z0-9][a-zA-Z0-9._-]*$/.test(prowJobName.trim()) && /^[0-9]+$/.test(prowBuildId.trim())
       : rawXml.trim() !== ''
 
   const handleFileUpload = useCallback((file: File) => {
