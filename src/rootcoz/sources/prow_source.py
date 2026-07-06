@@ -11,7 +11,11 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
+import uuid
+from collections.abc import Callable
 from dataclasses import asdict, dataclass
+from pathlib import Path
 
 import httpx
 from simple_logger.logger import get_logger
@@ -36,6 +40,15 @@ _MAX_SIZE_JUNIT_XML = 5_000_000  # 5 MB
 
 # Maximum size for prowjob.json (bytes)
 _MAX_SIZE_PROWJOB = 2_000_000  # 2 MB
+
+# Maximum total download size for non-JUnit artifacts (bytes)
+_MAX_SIZE_ARTIFACTS_TOTAL = 50_000_000  # 50 MB
+
+# Maximum size for a single non-JUnit artifact file (bytes)
+_MAX_SIZE_SINGLE_ARTIFACT = 10_000_000  # 10 MB
+
+# Base directory for artifact extraction
+_ARTIFACTS_BASE = Path("/tmp/prow-artifacts")
 
 
 @dataclass
@@ -210,24 +223,25 @@ def _raise_if_oversize(label: str, size: int, max_size: int, url: str) -> None:
         raise GCSOversizeError(label, size, max_size, url)
 
 
-async def _fetch_gcs_text(
+async def _fetch_gcs_response(
     client: httpx.AsyncClient,
     url: str,
     *,
     label: str = "",
     max_size: int = _MAX_SIZE_JUNIT_XML,
-) -> str | None:
-    """Fetch a text file from GCS.
+) -> httpx.Response | None:
+    """Fetch a GCS object and validate size limits.
+
+    Shared implementation for both text and binary GCS fetches.
 
     Args:
         client: httpx async client.
         url: Full URL to fetch.
         label: Human-readable label for log messages.
-        max_size: Maximum response size in bytes.  Responses exceeding
-            this are rejected (``GCSOversizeError`` is raised).
+        max_size: Maximum response size in bytes.
 
     Returns:
-        Response text on success, ``None`` on 404.
+        The validated ``httpx.Response`` on success, ``None`` on 404.
 
     Raises:
         GCSAccessError: On non-404 HTTP errors (403, 500, etc.).
@@ -264,7 +278,133 @@ async def _fetch_gcs_text(
     # Defense-in-depth: check actual body bytes when content-length is
     # missing or lies.
     _raise_if_oversize(effective_label, len(resp.content), max_size, url)
+    return resp
+
+
+async def _fetch_gcs_text(
+    client: httpx.AsyncClient,
+    url: str,
+    *,
+    label: str = "",
+    max_size: int = _MAX_SIZE_JUNIT_XML,
+) -> str | None:
+    """Fetch a text file from GCS.
+
+    Args:
+        client: httpx async client.
+        url: Full URL to fetch.
+        label: Human-readable label for log messages.
+        max_size: Maximum response size in bytes.  Responses exceeding
+            this are rejected (``GCSOversizeError`` is raised).
+
+    Returns:
+        Response text on success, ``None`` on 404.
+
+    Raises:
+        GCSAccessError: On non-404 HTTP errors (403, 500, etc.).
+        GCSOversizeError: When the response exceeds *max_size*.
+    """
+    resp = await _fetch_gcs_response(client, url, label=label, max_size=max_size)
+    if resp is None:
+        return None
     return resp.text
+
+
+async def _fetch_gcs_bytes(
+    client: httpx.AsyncClient,
+    url: str,
+    *,
+    label: str = "",
+    max_size: int = _MAX_SIZE_SINGLE_ARTIFACT,
+) -> bytes | None:
+    """Fetch raw bytes from GCS.
+
+    Args:
+        client: httpx async client.
+        url: Full URL to fetch.
+        label: Human-readable label for log messages.
+        max_size: Maximum response size in bytes.
+
+    Returns:
+        Response bytes on success, ``None`` on 404.
+
+    Raises:
+        GCSAccessError: On non-404 HTTP errors (403, 500, etc.).
+        GCSOversizeError: When the response exceeds *max_size*.
+    """
+    resp = await _fetch_gcs_response(client, url, label=label, max_size=max_size)
+    if resp is None:
+        return None
+    return resp.content
+
+
+async def _list_gcs_objects(
+    client: httpx.AsyncClient,
+    bucket: str,
+    prefix: str,
+    *,
+    filter_fn: Callable[[dict], bool] | None = None,
+    warnings: list[str] | None = None,
+) -> list[dict]:
+    """List GCS objects under a prefix, optionally filtered.
+
+    Args:
+        client: httpx async client.
+        bucket: GCS bucket name.
+        prefix: Object prefix to search under.
+        filter_fn: Optional predicate applied to each item dict from the
+            GCS JSON API.  When provided, only items where ``filter_fn(item)``
+            returns ``True`` are included.
+        warnings: Optional list to append truncation warnings to.
+
+    Returns:
+        List of GCS object dicts (keys: ``name``, ``size``, etc.).
+    """
+    matched: list[dict] = []
+    page_token: str | None = None
+    api_url = f"https://storage.googleapis.com/storage/v1/b/{bucket}/o"
+    max_pages = 100
+
+    for _page in range(max_pages):
+        params: dict[str, str] = {"prefix": prefix}
+        if page_token:
+            params["pageToken"] = page_token
+
+        try:
+            resp = await client.get(api_url, params=params)
+            resp.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            raise GCSAccessError(
+                "gcs-listing", exc.response.status_code, api_url
+            ) from exc
+        except httpx.HTTPError as exc:
+            raise GCSAccessError("gcs-listing", 0, api_url) from exc
+
+        try:
+            data = resp.json()
+        except ValueError as exc:
+            raise GCSAccessError("gcs-listing-parse", 0, api_url) from exc
+
+        for item in data.get("items", []):
+            if filter_fn is None or filter_fn(item):
+                matched.append(item)
+
+        page_token = data.get("nextPageToken")
+        if not page_token:
+            break
+    else:
+        msg = f"GCS listing exceeded {max_pages} pages for {prefix}, results truncated"
+        logger.warning(msg)
+        if warnings is not None:
+            warnings.append(msg)
+
+    return matched
+
+
+def _is_junit(item: dict) -> bool:
+    """Return ``True`` if the GCS object looks like a JUnit XML file."""
+    name = item.get("name", "")
+    return name.endswith(".xml") and bool(re.search(r"junit", name, re.IGNORECASE))
 
 
 async def _list_gcs_junit_files(
@@ -288,47 +428,159 @@ async def _list_gcs_junit_files(
     Returns:
         List of full object names (keys) for JUnit XML files.
     """
-    junit_files: list[str] = []
-    page_token: str | None = None
-    api_url = f"https://storage.googleapis.com/storage/v1/b/{bucket}/o"
-    max_pages = 100
+    items = await _list_gcs_objects(
+        client, bucket, prefix, filter_fn=_is_junit, warnings=warnings
+    )
+    return [item["name"] for item in items]
 
-    for _page in range(max_pages):
-        params: dict[str, str] = {"prefix": prefix}
-        if page_token:
-            params["pageToken"] = page_token
 
-        try:
-            resp = await client.get(api_url, params=params)
-            resp.raise_for_status()
-        except httpx.HTTPStatusError as exc:
-            raise GCSAccessError(
-                "junit-listing", exc.response.status_code, api_url
-            ) from exc
-        except httpx.HTTPError as exc:
-            raise GCSAccessError("junit-listing", 0, api_url) from exc
+async def _download_gcs_artifacts(
+    client: httpx.AsyncClient,
+    bucket: str,
+    artifact_objects: list[dict],
+    artifacts_prefix: str,
+    *,
+    max_total_bytes: int = _MAX_SIZE_ARTIFACTS_TOTAL,
+    max_single_bytes: int = _MAX_SIZE_SINGLE_ARTIFACT,
+    warnings: list[str] | None = None,
+) -> Path | None:
+    """Download non-JUnit artifacts from GCS to a local directory.
 
-        try:
-            data = resp.json()
-        except ValueError as exc:
-            raise GCSAccessError("junit-listing-parse", 0, api_url) from exc
+    Creates a temporary directory under ``_ARTIFACTS_BASE`` and downloads
+    each artifact file, preserving the directory structure relative to
+    the artifacts prefix.
 
-        for item in data.get("items", []):
-            name = item.get("name", "")
-            # Match files that look like JUnit XML results
-            if name.endswith(".xml") and re.search(r"junit", name, re.IGNORECASE):
-                junit_files.append(name)
+    Artifacts exceeding ``max_single_bytes`` are skipped with a warning.
+    Downloading stops when the total downloaded size exceeds ``max_total_bytes``.
 
-        page_token = data.get("nextPageToken")
-        if not page_token:
-            break
-    else:
-        msg = f"GCS JUnit listing exceeded {max_pages} pages for {prefix}, results truncated"
-        logger.warning(msg)
-        if warnings is not None:
-            warnings.append(msg)
+    Args:
+        client: httpx async client.
+        bucket: GCS bucket name.
+        artifact_objects: GCS object dicts (from ``_list_gcs_objects``).
+        artifacts_prefix: The GCS prefix used for listing (e.g.
+            ``logs/job/123/artifacts/``).  Used to compute relative paths
+            for local storage.
+        max_total_bytes: Maximum total download size.
+        max_single_bytes: Maximum size for a single file.
+        warnings: Optional list to append warnings to.
 
-    return junit_files
+    Returns:
+        Path to the artifacts directory, or ``None`` if nothing was downloaded.
+    """
+    if not artifact_objects:
+        return None
+
+    dest_dir = _ARTIFACTS_BASE / f"prow-{uuid.uuid4().hex}"
+    dest_dir.mkdir(parents=True, exist_ok=False)
+
+    total_downloaded = 0
+    files_downloaded = 0
+    dest_dir_resolved = dest_dir.resolve()
+
+    try:
+        for obj in artifact_objects:
+            obj_name = obj.get("name", "")
+            if not obj_name:
+                continue
+
+            # Compute relative path by stripping the artifacts prefix
+            if obj_name.startswith(artifacts_prefix):
+                rel_path = obj_name[len(artifacts_prefix) :]
+            else:
+                rel_path = obj_name
+
+            # Skip empty relative paths (the prefix directory itself)
+            if not rel_path or rel_path == "/":
+                continue
+
+            # Skip GCS directory marker objects
+            if rel_path.endswith("/"):
+                continue
+
+            # Path traversal / absolute path validation
+            if rel_path.startswith("/") or ".." in rel_path.split("/"):
+                logger.warning("Skipping artifact with unsafe path: %s", rel_path)
+                continue
+
+            target = (dest_dir / rel_path).resolve()
+            if not str(target).startswith(str(dest_dir_resolved) + os.sep):
+                logger.warning("Skipping artifact escaping artifact dir: %s", rel_path)
+                continue
+
+            # Check single-file size from GCS metadata
+            try:
+                obj_size = int(obj.get("size", 0))
+            except (ValueError, TypeError):
+                obj_size = 0
+
+            if obj_size > max_single_bytes:
+                msg = (
+                    f"Skipping artifact {rel_path}: size {obj_size} bytes "
+                    f"exceeds single-file limit ({max_single_bytes} bytes)"
+                )
+                logger.warning(msg)
+                if warnings is not None:
+                    warnings.append(msg)
+                continue
+
+            # Check total budget before downloading
+            if total_downloaded + obj_size > max_total_bytes:
+                msg = (
+                    f"Artifact download budget exhausted ({total_downloaded} bytes downloaded, "
+                    f"limit {max_total_bytes} bytes) \u2014 skipping remaining artifacts"
+                )
+                logger.warning(msg)
+                if warnings is not None:
+                    warnings.append(msg)
+                break
+
+            # Download
+            url = _gcs_url(bucket, obj_name)
+            try:
+                data = await _fetch_gcs_bytes(
+                    client, url, label=rel_path, max_size=max_single_bytes
+                )
+            except (GCSAccessError, GCSOversizeError) as exc:
+                logger.warning("Failed to download artifact %s: %s", rel_path, exc)
+                if warnings is not None:
+                    warnings.append(f"Failed to download artifact {rel_path}: {exc}")
+                continue
+
+            if data is None:
+                continue
+
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(data)
+            total_downloaded += len(data)
+            files_downloaded += 1
+
+            # Re-check budget after download (defense-in-depth for
+            # objects with missing/inaccurate GCS size metadata)
+            if total_downloaded >= max_total_bytes:
+                msg = (
+                    f"Artifact download budget reached after download "
+                    f"({total_downloaded} bytes, limit {max_total_bytes} bytes) "
+                    "\u2014 skipping remaining artifacts"
+                )
+                logger.warning(msg)
+                if warnings is not None:
+                    warnings.append(msg)
+                break
+    except Exception:
+        shutil.rmtree(dest_dir, ignore_errors=True)
+        raise
+
+    if files_downloaded == 0:
+        shutil.rmtree(dest_dir, ignore_errors=True)
+        return None
+
+    logger.info(
+        "Downloaded %d artifact(s) (%d bytes) to %s",
+        files_downloaded,
+        total_downloaded,
+        dest_dir,
+    )
+    return dest_dir
 
 
 class ProwSource(CISource):
@@ -338,6 +590,7 @@ class ProwSource(CISource):
     - ``build-log.txt`` — full build log
     - ``finished.json`` — build result and timestamps
     - ``artifacts/**/junit*.xml`` — JUnit test results
+    - Non-JUnit artifacts (pod logs, gather-extra dumps, etc.)
 
     The GCS path convention is:
     - Periodic/postsubmit: ``gs://{bucket}/logs/{job_name}/{build_id}/``
@@ -356,6 +609,7 @@ class ProwSource(CISource):
         prow_url: str,
         gcs_prefix: str = "",
         force: bool = False,
+        get_job_artifacts: bool = True,
     ) -> None:
         """Store config needed to fetch from Prow/GCS.
 
@@ -367,6 +621,8 @@ class ProwSource(CISource):
             gcs_prefix: GCS object prefix. When empty, defaults to ``logs/{job_name}/{build_id}``.
                 For PR jobs this is ``pr-logs/pull/{org}_{repo}/{pr}/{job_name}/{build_id}``.
             force: When True, analyze even if the build passed.
+            get_job_artifacts: When True, download non-JUnit build artifacts
+                for AI exploration.
         """
         self.job_name = job_name
         self.build_id = build_id
@@ -377,6 +633,8 @@ class ProwSource(CISource):
         self._prowjob_metadata: ProwJobMetadata | None = None
         self._resolution_warnings: list[str] = []
         self.force = force
+        self.get_job_artifacts = get_job_artifacts
+        self._extract_path: Path | None = None
 
     @property
     def build_url(self) -> str:
@@ -564,7 +822,8 @@ class ProwSource(CISource):
           2. Fetch ``build-log.txt`` for console context.
           3. List and fetch JUnit XML files from artifacts.
           4. Extract failures from JUnit XMLs.
-          5. Build and return ``CISourceResult``.
+          5. Download non-JUnit artifacts for AI exploration.
+          6. Build and return ``CISourceResult``.
         """
         async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT) as client:
             return await self._fetch_with_client(client)
@@ -663,19 +922,26 @@ class ProwSource(CISource):
         console_context = extract_relevant_console_lines(build_log or "")
 
         # ------------------------------------------------------------------
-        # 3. List and fetch JUnit XML files from artifacts
+        # 3. List all artifact files from GCS
         # ------------------------------------------------------------------
         artifacts_prefix = f"{gcs_prefix}/artifacts/"
         try:
-            junit_files = await _list_gcs_junit_files(
+            all_artifact_objects = await _list_gcs_objects(
                 client, self.gcs_bucket, artifacts_prefix, warnings=access_warnings
             )
         except GCSAccessError as exc:
             access_warnings.append(str(exc))
-            junit_files = []
+            all_artifact_objects = []
+
+        # Partition into JUnit XMLs and non-JUnit artifacts
+        junit_objects = [obj for obj in all_artifact_objects if _is_junit(obj)]
+        junit_files = [obj["name"] for obj in junit_objects]
+        non_junit_objects = [obj for obj in all_artifact_objects if not _is_junit(obj)]
+
         logger.info(
-            "Found %d JUnit XML file(s) for %s/%s",
+            "Found %d JUnit XML file(s) and %d other artifact(s) for %s/%s",
             len(junit_files),
+            len(non_junit_objects),
             self.job_name,
             self.build_id,
         )
@@ -704,12 +970,43 @@ class ProwSource(CISource):
         )
 
         # ------------------------------------------------------------------
-        # 5. Build and return CISourceResult
+        # 5. Download non-JUnit artifacts for AI exploration
+        # ------------------------------------------------------------------
+        extract_path: Path | None = None
+        artifacts_context = ""
+        if self.get_job_artifacts and non_junit_objects:
+            try:
+                extract_path = await _download_gcs_artifacts(
+                    client,
+                    self.gcs_bucket,
+                    non_junit_objects,
+                    artifacts_prefix,
+                    warnings=access_warnings,
+                )
+                if extract_path:
+                    artifacts_context = str(extract_path)
+                    self._extract_path = extract_path
+                    logger.info("Build artifacts available at %s", extract_path)
+            except Exception as exc:
+                logger.warning("Failed to download Prow artifacts: %s", exc)
+                access_warnings.append(f"Failed to download artifacts: {exc}")
+
+        # ------------------------------------------------------------------
+        # 6. Build and return CISourceResult
         # ------------------------------------------------------------------
         return CISourceResult(
             failures=all_failures,
             console_context=console_context,
+            artifacts_context=artifacts_context,
             build_url=self.build_url,
             warnings=access_warnings,
             source_metadata=self._metadata_dict(),
+            extract_path=extract_path,
         )
+
+    def cleanup(self) -> None:
+        """Remove temporary artifact directory."""
+        if self._extract_path and self._extract_path.exists():
+            shutil.rmtree(self._extract_path, ignore_errors=True)
+            logger.info("Cleaned up Prow artifacts: %s", self._extract_path)
+            self._extract_path = None

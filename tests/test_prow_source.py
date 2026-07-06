@@ -18,9 +18,13 @@ from rootcoz.sources.prow_source import (
     _MAX_SIZE_FINISHED,
     _MAX_SIZE_JUNIT_XML,
     _build_url,
+    _download_gcs_artifacts,
+    _fetch_gcs_bytes,
     _fetch_gcs_text,
     _gcs_url,
+    _is_junit,
     _list_gcs_junit_files,
+    _list_gcs_objects,
     _parse_junit_failures,
     _parse_prowjob_json,
     _raise_if_oversize,
@@ -1282,8 +1286,8 @@ class TestProwSourceProperties:
         )
         assert source.create_child_source("child", 1) is None
 
-    def test_cleanup_noop(self):
-        """ProwSource cleanup is a no-op (no temp files)."""
+    def test_cleanup_noop_when_no_artifacts(self):
+        """ProwSource cleanup is a no-op when no artifacts downloaded."""
         source = ProwSource(
             job_name="test-job",
             build_id="999",
@@ -1291,6 +1295,25 @@ class TestProwSourceProperties:
             prow_url=_TEST_PROW_URL,
         )
         source.cleanup()  # should not raise
+
+    def test_get_job_artifacts_default_true(self):
+        source = ProwSource(
+            job_name="test-job",
+            build_id="999",
+            gcs_bucket=_TEST_GCS_BUCKET,
+            prow_url=_TEST_PROW_URL,
+        )
+        assert source.get_job_artifacts is True
+
+    def test_get_job_artifacts_false(self):
+        source = ProwSource(
+            job_name="test-job",
+            build_id="999",
+            gcs_bucket=_TEST_GCS_BUCKET,
+            prow_url=_TEST_PROW_URL,
+            get_job_artifacts=False,
+        )
+        assert source.get_job_artifacts is False
 
 
 class TestParseProwjobJsonDefensive:
@@ -1486,6 +1509,544 @@ class TestRegressionEdgeCases:
 # ---------------------------------------------------------------------------
 # Tests for _fetch_pr_changes
 # ---------------------------------------------------------------------------
+
+
+# ---------------------------------------------------------------------------
+# _fetch_gcs_bytes
+# ---------------------------------------------------------------------------
+
+
+class TestFetchGcsBytes:
+    async def test_success(self):
+        transport = httpx.MockTransport(
+            lambda req: httpx.Response(200, content=b"\x00\x01\x02")
+        )
+        async with httpx.AsyncClient(transport=transport) as client:
+            result = await _fetch_gcs_bytes(client, "http://example.com/file.bin")
+        assert result == b"\x00\x01\x02"
+
+    async def test_404_returns_none(self):
+        transport = httpx.MockTransport(lambda req: httpx.Response(404))
+        async with httpx.AsyncClient(transport=transport) as client:
+            result = await _fetch_gcs_bytes(client, "http://example.com/missing.bin")
+        assert result is None
+
+    async def test_500_raises_gcs_access_error(self):
+        transport = httpx.MockTransport(lambda req: httpx.Response(500))
+        async with httpx.AsyncClient(transport=transport) as client:
+            with pytest.raises(GCSAccessError):
+                await _fetch_gcs_bytes(
+                    client, "http://example.com/error.bin", label="test"
+                )
+
+    async def test_oversized_raises(self):
+        transport = httpx.MockTransport(
+            lambda req: httpx.Response(
+                200, content=b"x", headers={"content-length": "999999999"}
+            )
+        )
+        async with httpx.AsyncClient(transport=transport) as client:
+            with pytest.raises(GCSOversizeError):
+                await _fetch_gcs_bytes(
+                    client,
+                    "http://example.com/big.bin",
+                    max_size=100,
+                )
+
+
+# ---------------------------------------------------------------------------
+# _list_gcs_objects
+# ---------------------------------------------------------------------------
+
+
+class TestListGcsObjects:
+    async def test_lists_all_objects(self):
+        response_data = {
+            "items": [
+                {"name": "prefix/file1.txt", "size": "100"},
+                {"name": "prefix/file2.log", "size": "200"},
+                {"name": "prefix/junit_results.xml", "size": "300"},
+            ]
+        }
+        transport = httpx.MockTransport(
+            lambda req: httpx.Response(200, json=response_data)
+        )
+        async with httpx.AsyncClient(transport=transport) as client:
+            items = await _list_gcs_objects(client, "bucket", "prefix/")
+        assert len(items) == 3
+
+    async def test_filter_fn_applied(self):
+        response_data = {
+            "items": [
+                {"name": "prefix/file1.txt", "size": "100"},
+                {"name": "prefix/file2.log", "size": "200"},
+            ]
+        }
+        transport = httpx.MockTransport(
+            lambda req: httpx.Response(200, json=response_data)
+        )
+        async with httpx.AsyncClient(transport=transport) as client:
+            items = await _list_gcs_objects(
+                client,
+                "bucket",
+                "prefix/",
+                filter_fn=lambda item: item["name"].endswith(".log"),
+            )
+        assert len(items) == 1
+        assert items[0]["name"] == "prefix/file2.log"
+
+    async def test_no_filter_returns_all(self):
+        response_data = {
+            "items": [
+                {"name": "a"},
+                {"name": "b"},
+                {"name": "c"},
+            ]
+        }
+        transport = httpx.MockTransport(
+            lambda req: httpx.Response(200, json=response_data)
+        )
+        async with httpx.AsyncClient(transport=transport) as client:
+            items = await _list_gcs_objects(client, "bucket", "prefix/")
+        assert len(items) == 3
+
+    async def test_pagination(self):
+        call_count = 0
+
+        def handler(request: httpx.Request):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                return httpx.Response(
+                    200,
+                    json={
+                        "items": [{"name": "p/a.txt"}],
+                        "nextPageToken": "tok2",
+                    },
+                )
+            return httpx.Response(200, json={"items": [{"name": "p/b.txt"}]})
+
+        transport = httpx.MockTransport(handler)
+        async with httpx.AsyncClient(transport=transport) as client:
+            items = await _list_gcs_objects(client, "bucket", "p/")
+        assert len(items) == 2
+        assert call_count == 2
+
+    async def test_api_error_raises(self):
+        transport = httpx.MockTransport(lambda req: httpx.Response(500))
+        async with httpx.AsyncClient(transport=transport) as client:
+            with pytest.raises(GCSAccessError):
+                await _list_gcs_objects(client, "bucket", "prefix/")
+
+    async def test_truncation_warning(self):
+        call_count = 0
+
+        def handler(request: httpx.Request):
+            nonlocal call_count
+            call_count += 1
+            return httpx.Response(
+                200,
+                json={
+                    "items": [{"name": f"p/f{call_count}.txt"}],
+                    "nextPageToken": f"tok-{call_count}",
+                },
+            )
+
+        transport = httpx.MockTransport(handler)
+        warnings: list[str] = []
+        async with httpx.AsyncClient(transport=transport) as client:
+            items = await _list_gcs_objects(client, "bucket", "p/", warnings=warnings)
+        assert call_count == 100
+        assert len(items) == 100
+        assert len(warnings) == 1
+        assert "exceeded" in warnings[0]
+
+
+# ---------------------------------------------------------------------------
+# _is_junit
+# ---------------------------------------------------------------------------
+
+
+class TestIsJunit:
+    def test_junit_xml(self):
+        assert _is_junit({"name": "path/junit_results.xml"}) is True
+
+    def test_non_junit_xml(self):
+        assert _is_junit({"name": "path/results.xml"}) is False
+
+    def test_junit_non_xml(self):
+        assert _is_junit({"name": "path/junit.log"}) is False
+
+    def test_case_insensitive(self):
+        assert _is_junit({"name": "path/JUNIT_output.xml"}) is True
+
+    def test_non_xml_log(self):
+        assert _is_junit({"name": "path/pod.log"}) is False
+
+
+# ---------------------------------------------------------------------------
+# _download_gcs_artifacts
+# ---------------------------------------------------------------------------
+
+
+class TestDownloadGcsArtifacts:
+    async def test_downloads_artifacts_preserving_structure(
+        self, tmp_path, monkeypatch
+    ):
+        monkeypatch.setattr("rootcoz.sources.prow_source._ARTIFACTS_BASE", tmp_path)
+
+        def handler(request: httpx.Request):
+            url = str(request.url)
+            if "pod.log" in url:
+                return httpx.Response(200, content=b"pod log content")
+            if "events.json" in url:
+                return httpx.Response(200, content=b'{"events": []}')
+            return httpx.Response(404)
+
+        transport = httpx.MockTransport(handler)
+        artifacts = [
+            {"name": "logs/job/1/artifacts/gather/pod.log", "size": "15"},
+            {"name": "logs/job/1/artifacts/e2e/events.json", "size": "14"},
+        ]
+        async with httpx.AsyncClient(transport=transport) as client:
+            result = await _download_gcs_artifacts(
+                client,
+                "bucket",
+                artifacts,
+                "logs/job/1/artifacts/",
+            )
+        assert result is not None
+        assert (result / "gather" / "pod.log").read_bytes() == b"pod log content"
+        assert (result / "e2e" / "events.json").read_bytes() == b'{"events": []}'
+
+    async def test_skips_oversize_single_file(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("rootcoz.sources.prow_source._ARTIFACTS_BASE", tmp_path)
+
+        transport = httpx.MockTransport(
+            lambda req: httpx.Response(200, content=b"small")
+        )
+        artifacts = [
+            {"name": "prefix/big.bin", "size": "999999999"},
+            {"name": "prefix/small.txt", "size": "5"},
+        ]
+        warnings: list[str] = []
+        async with httpx.AsyncClient(transport=transport) as client:
+            result = await _download_gcs_artifacts(
+                client,
+                "bucket",
+                artifacts,
+                "prefix/",
+                max_single_bytes=100,
+                warnings=warnings,
+            )
+        assert result is not None
+        assert not (result / "big.bin").exists()
+        assert (result / "small.txt").exists()
+        assert any("big.bin" in w for w in warnings)
+
+    async def test_stops_at_total_budget(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("rootcoz.sources.prow_source._ARTIFACTS_BASE", tmp_path)
+
+        transport = httpx.MockTransport(
+            lambda req: httpx.Response(200, content=b"x" * 60)
+        )
+        artifacts = [
+            {"name": "prefix/a.txt", "size": "60"},
+            {"name": "prefix/b.txt", "size": "60"},
+        ]
+        warnings: list[str] = []
+        async with httpx.AsyncClient(transport=transport) as client:
+            result = await _download_gcs_artifacts(
+                client,
+                "bucket",
+                artifacts,
+                "prefix/",
+                max_total_bytes=100,
+                warnings=warnings,
+            )
+        assert result is not None
+        assert (result / "a.txt").exists()
+        assert not (result / "b.txt").exists()
+        assert any("budget" in w.lower() for w in warnings)
+
+    async def test_returns_none_on_empty_list(self):
+        transport = httpx.MockTransport(lambda req: httpx.Response(404))
+        async with httpx.AsyncClient(transport=transport) as client:
+            result = await _download_gcs_artifacts(client, "bucket", [], "prefix/")
+        assert result is None
+
+    async def test_returns_none_when_all_404(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("rootcoz.sources.prow_source._ARTIFACTS_BASE", tmp_path)
+        transport = httpx.MockTransport(lambda req: httpx.Response(404))
+        artifacts = [{"name": "prefix/missing.txt", "size": "10"}]
+        async with httpx.AsyncClient(transport=transport) as client:
+            result = await _download_gcs_artifacts(
+                client, "bucket", artifacts, "prefix/"
+            )
+        assert result is None
+
+    async def test_rejects_path_traversal(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("rootcoz.sources.prow_source._ARTIFACTS_BASE", tmp_path)
+        transport = httpx.MockTransport(
+            lambda req: httpx.Response(200, content=b"evil")
+        )
+        artifacts = [
+            {"name": "prefix/../../../etc/passwd", "size": "4"},
+        ]
+        async with httpx.AsyncClient(transport=transport) as client:
+            result = await _download_gcs_artifacts(
+                client, "bucket", artifacts, "prefix/"
+            )
+        assert result is None  # nothing downloaded
+
+    async def test_rejects_absolute_path(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("rootcoz.sources.prow_source._ARTIFACTS_BASE", tmp_path)
+        transport = httpx.MockTransport(
+            lambda req: httpx.Response(200, content=b"evil")
+        )
+        artifacts = [
+            {"name": "/etc/passwd", "size": "4"},
+        ]
+        async with httpx.AsyncClient(transport=transport) as client:
+            result = await _download_gcs_artifacts(
+                client, "bucket", artifacts, "prefix/"
+            )
+        assert result is None
+
+    async def test_download_error_continues(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("rootcoz.sources.prow_source._ARTIFACTS_BASE", tmp_path)
+
+        def handler(request: httpx.Request):
+            if "fail.txt" in str(request.url):
+                return httpx.Response(500)
+            return httpx.Response(200, content=b"ok")
+
+        transport = httpx.MockTransport(handler)
+        artifacts = [
+            {"name": "prefix/fail.txt", "size": "2"},
+            {"name": "prefix/ok.txt", "size": "2"},
+        ]
+        warnings: list[str] = []
+        async with httpx.AsyncClient(transport=transport) as client:
+            result = await _download_gcs_artifacts(
+                client, "bucket", artifacts, "prefix/", warnings=warnings
+            )
+        assert result is not None
+        assert (result / "ok.txt").exists()
+        assert any("fail.txt" in w for w in warnings)
+
+
+# ---------------------------------------------------------------------------
+# ProwSource artifact integration
+# ---------------------------------------------------------------------------
+
+
+def _make_artifact_handler(
+    *,
+    finished_json: str = FINISHED_JSON_FAILURE,
+    build_log: str | None = BUILD_LOG,
+    junit_files: list[dict] | None = None,
+    all_artifacts: list[dict] | None = None,
+    junit_xml: str = JUNIT_XML_WITH_FAILURES,
+    artifact_content: bytes = b"artifact data",
+):
+    """Build a mock handler that supports artifact listing + download."""
+    if junit_files is None:
+        junit_files = [
+            {"name": "logs/my-job/42/artifacts/junit/junit_results.xml", "size": "500"}
+        ]
+    if all_artifacts is None:
+        all_artifacts = junit_files + [
+            {"name": "logs/my-job/42/artifacts/gather/pod.log", "size": "100"},
+            {"name": "logs/my-job/42/artifacts/e2e/events.json", "size": "200"},
+        ]
+
+    def handler(request: httpx.Request):
+        url = str(request.url)
+
+        if url.endswith("prowjob.json"):
+            return httpx.Response(404)
+        if "pr-logs/directory/" in url:
+            return httpx.Response(404)
+
+        if "/storage/v1/b/" in url:
+            # Single listing returns all artifacts (JUnit + non-JUnit)
+            return httpx.Response(200, json={"items": all_artifacts})
+
+        if url.endswith("finished.json"):
+            return httpx.Response(200, text=finished_json)
+        if url.endswith("build-log.txt"):
+            if build_log is None:
+                return httpx.Response(404)
+            return httpx.Response(200, text=build_log)
+        if url.endswith(".xml"):
+            return httpx.Response(200, text=junit_xml)
+
+        # Artifact file downloads
+        if "pod.log" in url or "events.json" in url:
+            return httpx.Response(200, content=artifact_content)
+
+        return httpx.Response(404)
+
+    return handler
+
+
+class TestProwSourceArtifacts:
+    """Tests for ProwSource artifact downloading integration."""
+
+    async def test_artifacts_downloaded_on_failure(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("rootcoz.sources.prow_source._ARTIFACTS_BASE", tmp_path)
+        handler = _make_artifact_handler()
+        transport = httpx.MockTransport(handler)
+        source = ProwSource(
+            job_name="my-job",
+            build_id="42",
+            gcs_bucket=_TEST_GCS_BUCKET,
+            prow_url=_TEST_PROW_URL,
+        )
+        async with httpx.AsyncClient(transport=transport) as client:
+            result = await source._fetch_with_client(client)
+
+        assert result.artifacts_context != ""
+        assert result.extract_path is not None
+        assert result.extract_path.exists()
+        assert len(result.failures) == 2
+
+    async def test_artifacts_not_downloaded_when_disabled(self):
+        handler = _make_artifact_handler()
+        transport = httpx.MockTransport(handler)
+        source = ProwSource(
+            job_name="my-job",
+            build_id="42",
+            gcs_bucket=_TEST_GCS_BUCKET,
+            prow_url=_TEST_PROW_URL,
+            get_job_artifacts=False,
+        )
+        async with httpx.AsyncClient(transport=transport) as client:
+            result = await source._fetch_with_client(client)
+
+        assert result.artifacts_context == ""
+        assert result.extract_path is None
+
+    async def test_artifacts_not_downloaded_on_success(self):
+        handler = _make_artifact_handler(finished_json=FINISHED_JSON_SUCCESS)
+        transport = httpx.MockTransport(handler)
+        source = ProwSource(
+            job_name="my-job",
+            build_id="42",
+            gcs_bucket=_TEST_GCS_BUCKET,
+            prow_url=_TEST_PROW_URL,
+        )
+        async with httpx.AsyncClient(transport=transport) as client:
+            result = await source._fetch_with_client(client)
+
+        assert result.build_passed is True
+        assert result.artifacts_context == ""
+        assert result.extract_path is None
+
+    async def test_cleanup_removes_artifacts(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("rootcoz.sources.prow_source._ARTIFACTS_BASE", tmp_path)
+        handler = _make_artifact_handler()
+        transport = httpx.MockTransport(handler)
+        source = ProwSource(
+            job_name="my-job",
+            build_id="42",
+            gcs_bucket=_TEST_GCS_BUCKET,
+            prow_url=_TEST_PROW_URL,
+        )
+        async with httpx.AsyncClient(transport=transport) as client:
+            result = await source._fetch_with_client(client)
+
+        assert result.extract_path is not None
+        extract_path = result.extract_path
+        assert extract_path.exists()
+
+        source.cleanup()
+        assert not extract_path.exists()
+        assert source._extract_path is None
+
+    async def test_cleanup_idempotent(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("rootcoz.sources.prow_source._ARTIFACTS_BASE", tmp_path)
+        handler = _make_artifact_handler()
+        transport = httpx.MockTransport(handler)
+        source = ProwSource(
+            job_name="my-job",
+            build_id="42",
+            gcs_bucket=_TEST_GCS_BUCKET,
+            prow_url=_TEST_PROW_URL,
+        )
+        async with httpx.AsyncClient(transport=transport) as client:
+            await source._fetch_with_client(client)
+
+        source.cleanup()
+        source.cleanup()  # second call should not raise
+
+    async def test_artifact_download_failure_produces_warning(
+        self, tmp_path, monkeypatch
+    ):
+        monkeypatch.setattr("rootcoz.sources.prow_source._ARTIFACTS_BASE", tmp_path)
+        artifact_prefix = "logs/my-job/42/artifacts/"
+
+        def handler(request: httpx.Request):
+            url = str(request.url)
+            if url.endswith("prowjob.json") or "pr-logs/directory/" in url:
+                return httpx.Response(404)
+            if "/storage/v1/b/" in url:
+                # Single listing returns artifacts that will fail to download
+                return httpx.Response(
+                    200,
+                    json={
+                        "items": [{"name": f"{artifact_prefix}fail.log", "size": "10"}]
+                    },
+                )
+            if url.endswith("finished.json"):
+                return httpx.Response(200, text=FINISHED_JSON_FAILURE)
+            if url.endswith("build-log.txt"):
+                return httpx.Response(404)
+            # All artifact downloads fail
+            return httpx.Response(500)
+
+        transport = httpx.MockTransport(handler)
+        source = ProwSource(
+            job_name="my-job",
+            build_id="42",
+            gcs_bucket=_TEST_GCS_BUCKET,
+            prow_url=_TEST_PROW_URL,
+        )
+        async with httpx.AsyncClient(transport=transport) as client:
+            result = await source._fetch_with_client(client)
+
+        # Artifact download failed but analysis should still complete
+        assert result.artifacts_context == ""
+        assert result.extract_path is None
+        assert any("fail.log" in w for w in result.warnings)
+
+    async def test_junit_files_excluded_from_artifacts(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("rootcoz.sources.prow_source._ARTIFACTS_BASE", tmp_path)
+        junit_name = "logs/my-job/42/artifacts/junit/junit_results.xml"
+        all_items = [
+            {"name": junit_name, "size": "500"},
+            {"name": "logs/my-job/42/artifacts/gather/pod.log", "size": "100"},
+        ]
+        handler = _make_artifact_handler(
+            junit_files=[{"name": junit_name, "size": "500"}],
+            all_artifacts=all_items,
+        )
+        transport = httpx.MockTransport(handler)
+        source = ProwSource(
+            job_name="my-job",
+            build_id="42",
+            gcs_bucket=_TEST_GCS_BUCKET,
+            prow_url=_TEST_PROW_URL,
+        )
+        async with httpx.AsyncClient(transport=transport) as client:
+            result = await source._fetch_with_client(client)
+
+        assert result.extract_path is not None
+        # JUnit XML should NOT be in the artifacts dir
+        assert not (result.extract_path / "junit" / "junit_results.xml").exists()
+        # Non-JUnit artifact should be there
+        assert (result.extract_path / "gather" / "pod.log").exists()
 
 
 def _pr_json(*, title="Fix bug", body="", changed_files=3, additions=10, deletions=2):

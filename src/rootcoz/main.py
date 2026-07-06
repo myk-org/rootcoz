@@ -3768,6 +3768,7 @@ async def _process_non_jenkins_analysis(
 
     auth_header = ""
     repo_manager: RepositoryManager | None = None
+    source: CISource | None = None  # set after source creation; used by cleanup
     source_result = None  # set after source.fetch(); used by _stamp_source_warnings
     # Use real job identity for metadata matching (display_name may have UUID suffix)
     metadata_job_name = (
@@ -3782,7 +3783,6 @@ async def _process_non_jenkins_analysis(
         )
 
         # Create source plugin
-        source: CISource
         if body.type == "file":
             assert body.raw_xml is not None
             source = FileSource(raw_xml=body.raw_xml)
@@ -3797,6 +3797,7 @@ async def _process_non_jenkins_analysis(
                 prow_url=merged.prow_url,
                 gcs_prefix=body.gcs_prefix or "",
                 force=merged.force_analysis,
+                get_job_artifacts=merged.get_job_artifacts,
             )
         else:
             assert body.failures is not None
@@ -3994,6 +3995,20 @@ async def _process_non_jenkins_analysis(
         if cloned_repos:
             copy_rootcoz_pi_resources(cloned_repos, repo_path)
 
+        # Make build artifacts accessible in the AI working directory
+        artifacts_context = source_result.artifacts_context
+        if source_result.extract_path:
+            artifacts_link = repo_path / "build-artifacts"
+            try:
+                artifacts_link.symlink_to(source_result.extract_path)
+                logger.info("Linked artifacts into workspace: %s", artifacts_link)
+            except OSError as exc:
+                logger.warning(
+                    "Could not link artifacts into workspace: %s — "
+                    "AI will use absolute path instead",
+                    exc,
+                )
+
         custom_prompt = (body.raw_prompt or "").strip()
         server_url = _build_internal_server_url()
 
@@ -4070,6 +4085,7 @@ async def _process_non_jenkins_analysis(
                     ai_model=ai_model,
                     ai_call_timeout=merged.ai_call_timeout,
                     custom_prompt=custom_prompt,
+                    artifacts_context=artifacts_context,
                     server_url=server_url,
                     job_id=job_id,
                     peer_ai_configs=peer_ai_configs,
@@ -4158,6 +4174,7 @@ async def _process_non_jenkins_analysis(
                     ai_model=ai_model,
                     ai_call_timeout=merged.ai_call_timeout,
                     custom_prompt=custom_prompt,
+                    artifacts_context=artifacts_context,
                     server_url=server_url,
                     job_id=job_id,
                     peer_ai_configs=peer_ai_configs,
@@ -4351,6 +4368,8 @@ async def _process_non_jenkins_analysis(
         logger.debug(f"Cleaning up workspace for job_id={job_id}")
         if repo_manager is not None:
             repo_manager.cleanup()
+        if source is not None:
+            source.cleanup()
         await _cleanup_ai_session(auth_header)
 
 
