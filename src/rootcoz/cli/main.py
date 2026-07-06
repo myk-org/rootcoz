@@ -435,19 +435,34 @@ _EXCLUDE_TAG_OPTION = typer.Option(
 def dashboard(
     label: list[str] = _LABEL_FILTER_OPTION,
     exclude_tag: list[str] = _EXCLUDE_TAG_OPTION,
+    search: str = typer.Option("", "--search", "-s", help="Search job name or ID."),
+    review_status: str = typer.Option(
+        "all", "--review-status", help="Filter: all, reviewed, not_reviewed."
+    ),
+    limit: int = typer.Option(500, "--limit", help="Max results (0 = no limit)."),
     json_output: bool = _JSON_OPTION,
 ):
     """List analysis jobs with dashboard metadata (failure counts, review progress)."""
-    use_filtered = bool(label or exclude_tag)
+    use_filtered = bool(
+        label or exclude_tag or search or review_status != "all" or limit != 500
+    )
+
+    def _fetch(c):
+        if use_filtered:
+            result = c.dashboard_filtered(
+                labels=label or None,
+                exclude_labels=exclude_tag or None,
+                search=search,
+                review_status=review_status,
+                limit=limit,
+            )
+            # dashboard_filtered returns {jobs, total}
+            return result.get("jobs", result) if isinstance(result, dict) else result
+        return c.dashboard(limit=limit)
+
     _run_client_command(
         json_output,
-        lambda c: (
-            c.dashboard_filtered(
-                labels=label or None, exclude_labels=exclude_tag or None
-            )
-            if use_filtered
-            else c.dashboard()
-        ),
+        _fetch,
         columns=[
             "job_id",
             "job_name",
@@ -504,6 +519,17 @@ def results_show(
             labels={"ai_provider": "AI PROVIDER", "created_at": "CREATED"},
             as_json=False,
         )
+        # Show tracked-in links if present
+        tracked_in = data.get("tracked_in")
+        if tracked_in:
+            typer.echo("\nTracked In:")
+            for test_name, links in tracked_in.items():
+                for link in links:
+                    typer.echo(
+                        f"  {test_name}: {link.get('tracked_in_url', '')} "
+                        f"({link.get('tracked_in_type', '')}) "
+                        f"by {link.get('tracked_in_by', '')}"
+                    )
 
 
 @results_app.command("delete")
@@ -635,6 +661,58 @@ def set_reviewed_cmd(
         if reviewer:
             msg += f" (by {reviewer})"
         typer.echo(msg)
+
+
+@results_app.command("set-tracked-in")
+def set_tracked_in_cmd(
+    job_id: str = typer.Argument(help="Job ID."),
+    test_name: str = typer.Option(..., "--test", "-t", help="Test name."),
+    url: str = typer.Option(
+        ..., "--url", "-u", help="Tracking issue URL (empty to clear)."
+    ),
+    tracked_type: str = typer.Option(
+        "", "--type", help="Tracker type: jira, github, or omit to auto-detect."
+    ),
+    child_job_name: str = typer.Option("", "--child-job"),
+    child_build_number: int = typer.Option(0, "--child-build"),
+    json_output: bool = _JSON_OPTION,
+):
+    """Set or clear the tracked-in URL for a test failure."""
+    data = _run_client_command(
+        json_output,
+        lambda c: c.set_tracked_in(
+            job_id,
+            test_name,
+            url,
+            tracked_type,
+            child_job_name=child_job_name,
+            child_build_number=child_build_number,
+        ),
+        emit_output=False,
+    )
+    if not _state.get("json", False):
+        if url:
+            typer.echo(
+                f"Tracked in: {data.get('tracked_in_url', url)} ({data.get('tracked_in_type', 'unknown')})"
+            )
+        else:
+            typer.echo("Tracked-in cleared.")
+
+
+@results_app.command("delete-tracked-in")
+def delete_tracked_in_cmd(
+    job_id: str = typer.Argument(help="Job ID."),
+    link_id: int = typer.Option(..., "--link-id", help="Tracked-in link ID to delete."),
+    json_output: bool = _JSON_OPTION,
+):
+    """Delete a tracked-in link by ID."""
+    data = _run_client_command(
+        json_output,
+        lambda c: c.delete_tracked_in(job_id, link_id),
+        emit_output=False,
+    )
+    if not _state.get("json", False):
+        typer.echo(f"Deleted tracked-in link {data.get('deleted_id', link_id)}.")
 
 
 @results_app.command("enrich-comments")

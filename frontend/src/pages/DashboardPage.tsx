@@ -32,7 +32,6 @@ import {
 } from '@/components/ui/tooltip'
 import { Skeleton } from '@/components/ui/skeleton'
 import { parseApiTimestamp, isAnalysisTimeout, formatDuration, formatTimestamp } from '@/lib/utils'
-import { utcStartOfDateInput, utcEndOfDateInput } from '@/lib/dateRange'
 import { StatusChip } from '@/components/shared/StatusChip'
 import { SearchInput } from '@/components/shared/SearchInput'
 import { Pagination } from '@/components/shared/Pagination'
@@ -116,8 +115,18 @@ export function DashboardPage() {
   const { isAdmin, isOperator, role, username } = useAuth()
   const canDelete = isOperator
   const [jobs, setJobs] = useState<DashboardJobWithMetadata[]>([])
+  const [totalJobs, setTotalJobs] = useState(0)
   const [loading, setLoading] = useState(true)
   const [search, setSearch] = useState('')
+  const [debouncedSearch, setDebouncedSearch] = useState('')
+  const searchDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  // Debounce search input (300ms) to avoid excessive backend requests
+  useEffect(() => {
+    if (searchDebounceRef.current) clearTimeout(searchDebounceRef.current)
+    searchDebounceRef.current = setTimeout(() => setDebouncedSearch(search), 300)
+    return () => { if (searchDebounceRef.current) clearTimeout(searchDebounceRef.current) }
+  }, [search])
   const { sortKey, sortDir, handleSort } = useTableSort('dash', 'created_at', 'desc', ['created_at'])
   const [page, setPage] = useState(1)
   const [perPage, setPerPage] = useState(20)
@@ -279,19 +288,28 @@ export function DashboardPage() {
   const fetchJobs = useCallback(async () => {
     const thisSeq = ++fetchSeqRef.current
     try {
-      let url = '/api/dashboard/filtered'
       const params = new URLSearchParams()
       for (const t of metaTeams) params.append('team', t)
       for (const t of metaTiers) params.append('tier', t)
       for (const v of metaVersions) params.append('version', v)
       for (const l of metaLabels) params.append('label', l)
       for (const l of metaExcludeLabels) params.append('exclude_label', l)
+      // Push search/status/date filters to backend (SQL-level filtering)
+      if (debouncedSearch) params.set('search', debouncedSearch)
+      for (const s of selectedStatuses) params.append('status', s)
+      if (dateFrom) params.set('date_from', dateFrom)
+      if (dateTo) params.set('date_to', dateTo)
+      if (reviewStatus !== 'all') params.set('review_status', reviewStatus)
+      // Server-side pagination
+      params.set('limit', String(perPage))
+      params.set('offset', String((page - 1) * perPage))
       const qs = params.toString()
-      if (qs) url += `?${qs}`
-      const data = await api.get<DashboardJobWithMetadata[]>(url)
+      const url = `/api/dashboard/filtered${qs ? `?${qs}` : ''}`
+      const data = await api.get<{ jobs: DashboardJobWithMetadata[]; total: number }>(url)
       if (thisSeq === fetchSeqRef.current) {
         setError(null)
-        setJobs(data)
+        setJobs(data.jobs)
+        setTotalJobs(data.total)
       }
     } catch (err) {
       if (thisSeq === fetchSeqRef.current) {
@@ -302,7 +320,7 @@ export function DashboardPage() {
         setLoading(false)
       }
     }
-  }, [metaTeams, metaTiers, metaVersions, metaLabels, metaExcludeLabels])
+  }, [metaTeams, metaTiers, metaVersions, metaLabels, metaExcludeLabels, debouncedSearch, selectedStatuses, dateFrom, dateTo, reviewStatus, perPage, page])
 
   const fetchJobsRef = useLatestRef(fetchJobs)
 
@@ -317,36 +335,18 @@ export function DashboardPage() {
   }), [])
 
   useSSE('dashboard', dashboardEvents)
-  useEffect(() => { setPage(1) }, [search, selectedStatuses, reviewStatus, perPage, dateFrom, dateTo, metaTeams, metaTiers, metaVersions, metaLabels, metaExcludeLabels])
-
-  const filtered = useMemo(() => {
-    const fromBound = dateFrom ? utcStartOfDateInput(dateFrom) : null
-    const toBound = dateTo ? utcEndOfDateInput(dateTo) : null
-
-    return jobs.filter((j) => {
-      if (selectedStatuses.size > 0) {
-        const displayStatus = isAnalysisTimeout(j.status, j.error, j.summary) ? 'timeout' : j.status
-        if (!selectedStatuses.has(displayStatus)) return false
-      }
-
-      if (fromBound || toBound) {
-        const jobDate = parseApiTimestamp(j.created_at)
-        if (Number.isNaN(jobDate.getTime())) return false
-        if (fromBound && jobDate < fromBound) return false
-        if (toBound && jobDate > toBound) return false
-      }
-
-      if (reviewStatus === 'reviewed' && j.reviewed_count === 0) return false
-      if (reviewStatus === 'not_reviewed' && j.reviewed_count > 0) return false
-
-      if (!search) return true
-      const q = search.toLowerCase()
-      return (j.job_name ?? '').toLowerCase().includes(q) || j.job_id.toLowerCase().includes(q)
-    })
-  }, [jobs, search, selectedStatuses, reviewStatus, dateFrom, dateTo])
+  // Reset page when filters change (but not when page itself changes)
+  const prevFiltersRef = useRef('')
+  useEffect(() => {
+    const filterKey = [debouncedSearch, statusParam, reviewStatus, perPage, dateFrom, dateTo, teamParam, tierParam, versionParam, labelParam, excludeLabelParam].join('|')
+    if (prevFiltersRef.current && prevFiltersRef.current !== filterKey) {
+      setPage(1)
+    }
+    prevFiltersRef.current = filterKey
+  }, [debouncedSearch, statusParam, reviewStatus, perPage, dateFrom, dateTo, teamParam, tierParam, versionParam, labelParam, excludeLabelParam])
 
   const sorted = useMemo(() => {
-    const copy = [...filtered]
+    const copy = [...jobs]
     const dir = sortDir === 'asc' ? 1 : -1
     copy.sort((a, b) => {
       let cmp = 0
@@ -368,7 +368,7 @@ export function DashboardPage() {
       return cmp * dir
     })
     return copy
-  }, [filtered, sortKey, sortDir])
+  }, [jobs, sortKey, sortDir])
 
   interface JobGroup {
     jobName: string
@@ -395,9 +395,10 @@ export function DashboardPage() {
     })
   }
 
-  const totalPages = Math.max(1, Math.ceil(sorted.length / perPage))
+  // Server-side pagination: sorted is already the current page
+  const totalPages = Math.max(1, Math.ceil(totalJobs / perPage))
   const safePage = Math.min(page, totalPages)
-  const pageJobs = sorted.slice((safePage - 1) * perPage, safePage * perPage)
+  const pageJobs = sorted
 
   const pageJobIds = useMemo(() => pageJobs.map(j => j.job_id), [pageJobs])
   const deletablePageJobIds = useMemo(() => pageJobs.filter(j => canDeleteJob(j)).map(j => j.job_id), [pageJobs, isAdmin, username, canDelete])
@@ -491,9 +492,9 @@ export function DashboardPage() {
     setDeleting(true)
     try {
       await api.delete(`/results/${deleteTarget.job_id}`)
-      fetchSeqRef.current += 1
-      setJobs((prev) => prev.filter((j) => j.job_id !== deleteTarget.job_id))
       setDeleteTarget(null)
+      // Refetch to update totals and pagination
+      fetchJobs()
     } catch (err) {
       console.error('Failed to delete job:', err)
     } finally {
@@ -610,7 +611,7 @@ export function DashboardPage() {
         {/* Summary row: count + View Issues */}
         <div className="flex items-center gap-3">
           <p className="text-sm text-text-tertiary">
-            {filtered.length} analysis {filtered.length === 1 ? 'run' : 'runs'}
+            {totalJobs} analysis {totalJobs === 1 ? 'run' : 'runs'}
           </p>
           <Tooltip>
             <TooltipTrigger asChild>

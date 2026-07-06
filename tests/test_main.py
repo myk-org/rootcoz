@@ -982,7 +982,7 @@ class TestApiDashboardEndpoint:
             mock_list.return_value = []
             response = test_client.get("/api/dashboard", headers=_ADMIN_AUTH_HEADERS)
             assert response.status_code == 200
-            mock_list.assert_called_once_with()
+            mock_list.assert_called_once_with(limit=500, offset=0)
 
     async def test_api_dashboard_includes_job_metadata(
         self, test_client, temp_db_path: Path
@@ -1063,7 +1063,8 @@ class TestApiDashboardFilteredExcludeLabel:
                 headers=_ADMIN_AUTH_HEADERS,
             )
         assert response.status_code == 200
-        names = {j["job_name"] for j in response.json()}
+        data = response.json()
+        names = {j["job_name"] for j in data["jobs"]}
         assert "job-a" not in names
         assert names == {"job-b", "job-c"}
 
@@ -1079,7 +1080,8 @@ class TestApiDashboardFilteredExcludeLabel:
                 headers=_ADMIN_AUTH_HEADERS,
             )
         assert response.status_code == 200
-        names = {j["job_name"] for j in response.json()}
+        data = response.json()
+        names = {j["job_name"] for j in data["jobs"]}
         # job-a has "red", job-b has "green", job-c has both → all excluded
         assert names == set()
 
@@ -1095,7 +1097,8 @@ class TestApiDashboardFilteredExcludeLabel:
                 headers=_ADMIN_AUTH_HEADERS,
             )
         assert response.status_code == 200
-        names = {j["job_name"] for j in response.json()}
+        data = response.json()
+        names = {j["job_name"] for j in data["jobs"]}
         # "blue" matches job-a and job-c; exclude "red" removes job-a
         assert names == {"job-c"}
 
@@ -1111,7 +1114,8 @@ class TestApiDashboardFilteredExcludeLabel:
                 headers=_ADMIN_AUTH_HEADERS,
             )
         assert response.status_code == 200
-        names = {j["job_name"] for j in response.json()}
+        data = response.json()
+        names = {j["job_name"] for j in data["jobs"]}
         assert names == {"job-a", "job-b", "job-c"}
 
 

@@ -243,9 +243,12 @@ class RootCozClient:
         """List recent analyzed jobs. GET /results?limit="""
         return self._request("GET", "/results", params={"limit": limit})
 
-    def dashboard(self) -> list[dict]:
+    def dashboard(self, limit: int = 500) -> list[dict]:
         """List analysis jobs with dashboard metadata. GET /api/dashboard"""
-        return self._request("GET", "/api/dashboard")
+        params: dict = {}
+        if limit != 500:
+            params["limit"] = limit
+        return self._request("GET", "/api/dashboard", params=params or None)
 
     def dashboard_filtered(
         self,
@@ -255,7 +258,14 @@ class RootCozClient:
         version: str = "",
         labels: list[str] | None = None,
         exclude_labels: list[str] | None = None,
-    ) -> list[dict]:
+        search: str = "",
+        status: list[str] | None = None,
+        date_from: str = "",
+        date_to: str = "",
+        review_status: str = "all",
+        limit: int = 500,
+        offset: int = 0,
+    ) -> dict:
         """List dashboard jobs filtered by metadata. GET /api/dashboard/filtered"""
         params: dict = {
             "team": team,
@@ -266,6 +276,20 @@ class RootCozClient:
             params["label"] = labels
         if exclude_labels:
             params["exclude_label"] = exclude_labels
+        if search:
+            params["search"] = search
+        if status:
+            params["status"] = status
+        if date_from:
+            params["date_from"] = date_from
+        if date_to:
+            params["date_to"] = date_to
+        if review_status != "all":
+            params["review_status"] = review_status
+        if limit != 500:
+            params["limit"] = limit
+        if offset:
+            params["offset"] = offset
         return self._request("GET", "/api/dashboard/filtered", params=params)
 
     def get_active_count(self) -> dict:
@@ -275,6 +299,36 @@ class RootCozClient:
     def get_result(self, job_id: str) -> dict:
         """Get a stored result by job_id. GET /results/{job_id}"""
         return self._request("GET", f"/results/{job_id}")
+
+    def set_tracked_in(
+        self,
+        job_id: str,
+        test_name: str,
+        url: str,
+        tracked_type: str = "",
+        *,
+        child_job_name: str = "",
+        child_build_number: int = 0,
+    ) -> dict:
+        """Set tracked-in URL for a failure. PUT /results/{job_id}/tracked-in"""
+        body: dict = {"test_name": test_name, "url": url, "type": tracked_type}
+        if child_job_name:
+            body["child_job_name"] = child_job_name
+            if child_build_number:
+                body["child_build_number"] = child_build_number
+        return self._request(
+            "PUT",
+            f"/results/{job_id}/tracked-in",
+            json=body,
+        )
+
+    def get_tracked_in(self, job_id: str) -> dict:
+        """Get tracked-in data for a job. GET /results/{job_id}/tracked-in"""
+        return self._request("GET", f"/results/{job_id}/tracked-in")
+
+    def delete_tracked_in(self, job_id: str, link_id: int) -> dict:
+        """Delete a tracked-in link. DELETE /results/{job_id}/tracked-in/{link_id}"""
+        return self._request("DELETE", f"/results/{job_id}/tracked-in/{link_id}")
 
     def delete_job(self, job_id: str) -> dict:
         """Delete a job and all related data. DELETE /results/{job_id}"""

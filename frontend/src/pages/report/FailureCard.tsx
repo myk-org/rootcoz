@@ -1,10 +1,10 @@
 import { useState, useEffect, useMemo, useRef, type ReactNode } from 'react'
 import { useLocation } from 'react-router-dom'
 import { useClipboard } from '@/lib/useClipboard'
-import type { GroupedFailure, PreviousAnalysis } from '@/types'
+import type { GroupedFailure, PreviousAnalysis, TrackedInEntry } from '@/types'
 import { buildFileUrl, buildRepoUrls, isSafeHref, matchRepo, type RepoUrl } from '@/lib/autoLink'
 import { isCommentInScope } from '@/lib/grouping'
-import { api } from '@/lib/api'
+import { api, extractApiDetail } from '@/lib/api'
 import { getUsername } from '@/lib/cookies'
 import { useSessionState } from '@/lib/useSessionState'
 import { unescapeCodeContent } from '@/lib/format'
@@ -23,12 +23,13 @@ import { CommentsSection } from './CommentsSection'
 import { ClassificationSelect } from './ClassificationSelect'
 import { PatternSelect } from './PatternSelect'
 import { BugCreationDialog } from './BugCreationDialog'
+import { TrackInDialog, TrackerIcon } from './TrackedInBadge'
 import { ReAnalyzeDialog } from './ReAnalyzeDialog'
 import { useReviewSuggestion } from './useReviewSuggestion'
 import { ConfirmDialog } from '@/components/shared/ConfirmDialog'
 import { UuidCopyButton } from '@/components/shared/UuidCopyButton'
 import { useAuth } from '@/lib/auth'
-import { ChevronDown, ChevronRight, Bug, MessageSquare, CheckCircle2, Copy, Check, RotateCw } from 'lucide-react'
+import { ChevronDown, ChevronRight, Bug, MessageSquare, CheckCircle2, Copy, Check, RotateCw, Link2, X } from 'lucide-react'
 
 function PreviousAnalysisEntry({ prev, index, repoUrls }: {
   prev: PreviousAnalysis
@@ -182,9 +183,9 @@ interface FailureCardProps {
 export function FailureCard({ group, jobId, childJobName, childBuildNumber, index, activeHash }: FailureCardProps) {
   const scopedChildJobName = childJobName ?? ''
   const scopedChildBuildNumber = childBuildNumber ?? 0
-  const { githubIssuesEnabled, jiraIssuesEnabled, serverJiraProjectKey, comments, reviews, aiModels, result, classifications } = useReportState()
+  const { githubIssuesEnabled, jiraIssuesEnabled, serverJiraProjectKey, comments, reviews, aiModels, result, classifications, trackedIn } = useReportState()
   const dispatch = useReportDispatch()
-  const { role, isOperator } = useAuth()
+  const { role, isOperator, isAdmin, username } = useAuth()
   const isViewer = role === 'viewer'
   const expandKey = `rootcoz-expand-${jobId}-${scopedChildJobName}-${scopedChildBuildNumber}-${group.id}`
   const [expanded, setExpanded] = useSessionState<boolean>(expandKey, false)
@@ -203,6 +204,8 @@ export function FailureCard({ group, jobId, childJobName, childBuildNumber, inde
     }
   }, [activeHash, group.id])
   const [bugTarget, setBugTarget] = useState<'github' | 'jira' | null>(null)
+  const [trackInOpen, setTrackInOpen] = useState(false)
+  const [trackedLinkError, setTrackedLinkError] = useState<string | null>(null)
   const [reviewingAll, setReviewingAll] = useState(false)
   const [reviewAllError, setReviewAllError] = useState<string | null>(null)
   const [selectedProvider, setSelectedProvider] = useState(result?.ai_provider ?? '')
@@ -619,24 +622,9 @@ export function FailureCard({ group, jobId, childJobName, childBuildNumber, inde
             {/* Peer debate trail */}
             {rep.peer_debate && <PeerDebateSection debate={rep.peer_debate} repoUrls={repoUrls} />}
 
-            {/* Actions: classification + AI selector + bug creation */}
+            {/* ACTIONS line: AI selector, Re-analyze, issue buttons, include links */}
             <div className="flex flex-wrap items-center gap-3 pt-2 border-t border-border-muted">
-              <ClassificationSelect
-                jobId={jobId}
-                testName={rep.test_name}
-                testNames={groupTestNames}
-                currentClassification={classification}
-                childJobName={scopedChildJobName}
-                childBuildNumber={scopedChildBuildNumber}
-              />
-              <PatternSelect
-                jobId={jobId}
-                testName={rep.test_name}
-                testNames={groupTestNames}
-                currentPattern={pattern}
-                childJobName={scopedChildJobName}
-                childBuildNumber={scopedChildBuildNumber}
-              />
+              <span className="text-[10px] font-bold uppercase tracking-wider text-text-tertiary">Actions</span>
               {showAiSelector && (
                 <>
                   <span className="text-xs text-text-tertiary whitespace-nowrap">AI for issue generation:</span>
@@ -671,17 +659,6 @@ export function FailureCard({ group, jobId, childJobName, childBuildNumber, inde
                   </div>
                 </>
               )}
-              {(showAiSelector || githubIssuesEnabled || jiraIssuesEnabled) && (
-                <label className="flex items-center gap-1.5 text-xs text-text-secondary cursor-pointer">
-                  <input
-                    type="checkbox"
-                    checked={includeLinks}
-                    onChange={(e) => setIncludeLinks(e.target.checked)}
-                    className="rounded border-border-default"
-                  />
-                  Include links
-                </label>
-              )}
               {isOperator && (
                 <Button variant="outline" size="sm" onClick={() => setReAnalyzeOpen(true)} disabled={rep.reanalysis_status === 'running'}>
                   <RotateCw className={`h-3.5 w-3.5 mr-1${rep.reanalysis_status === 'running' ? ' animate-spin' : ''}`} />
@@ -700,7 +677,107 @@ export function FailureCard({ group, jobId, childJobName, childBuildNumber, inde
                 label="Jira Ticket"
                 onClick={() => setBugTarget('jira')}
               />
+              {(showAiSelector || githubIssuesEnabled || jiraIssuesEnabled) && (
+                <label className="flex items-center gap-1.5 text-xs text-text-secondary cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={includeLinks}
+                    onChange={(e) => setIncludeLinks(e.target.checked)}
+                    className="rounded border-border-default"
+                  />
+                  Include links
+                </label>
+              )}
             </div>
+
+            {/* CLASSIFY line: classification, pattern, track button */}
+            <div className="flex flex-wrap items-center gap-3">
+              <span className="text-[10px] font-bold uppercase tracking-wider text-text-tertiary">Classify</span>
+              <ClassificationSelect
+                jobId={jobId}
+                testName={rep.test_name}
+                testNames={groupTestNames}
+                currentClassification={classification}
+                childJobName={scopedChildJobName}
+                childBuildNumber={scopedChildBuildNumber}
+              />
+              <PatternSelect
+                jobId={jobId}
+                testName={rep.test_name}
+                testNames={groupTestNames}
+                currentPattern={pattern}
+                childJobName={scopedChildJobName}
+                childBuildNumber={scopedChildBuildNumber}
+              />
+              {!isViewer && (
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <Button variant="outline" size="sm" onClick={() => setTrackInOpen(true)}>
+                      <Link2 className="h-3.5 w-3.5 mr-1" />
+                      Track
+                    </Button>
+                  </TooltipTrigger>
+                  <TooltipContent>Link to an existing issue</TooltipContent>
+                </Tooltip>
+              )}
+            </div>
+
+            {/* Tracked item links (indented below CLASSIFY) */}
+            {trackedIn[repKey]?.length > 0 && (
+              <div className="pl-16 space-y-1">
+                {trackedIn[repKey].map((link) => (
+                  <div key={link.id} className="flex items-center gap-1.5 text-xs">
+                    <TrackerIcon type={link.tracked_in_type} />
+                    {isSafeHref(link.tracked_in_url) ? (
+                      <a
+                        href={link.tracked_in_url}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="text-text-link hover:underline"
+                      >
+                        {link.tracked_in_url.replace(/^https?:\/\//, '')}
+                      </a>
+                    ) : (
+                      <span className="text-text-tertiary">{link.tracked_in_url.replace(/^https?:\/\//, '')}</span>
+                    )}
+                    {link.tracked_in_by && <span className="text-text-tertiary">by {link.tracked_in_by}</span>}
+                    {(isAdmin || link.tracked_in_by === username) && (
+                      <Tooltip>
+                        <TooltipTrigger asChild>
+                          <button
+                            type="button"
+                            className="text-text-tertiary hover:text-signal-red transition-colors"
+                            onClick={() => {
+                              setTrackedLinkError(null)
+                              api.delete(`/results/${jobId}/tracked-in/${link.id}`)
+                                .then(() => api.get<{ tracked_in: Record<string, TrackedInEntry[]> }>(`/results/${jobId}/tracked-in`))
+                                .then((res) => {
+                                  dispatch({ type: 'SET_TRACKED_IN', payload: res.tracked_in ?? {} })
+                                })
+                                .catch((err) => {
+                                  const detail = extractApiDetail(err)
+                                  if (detail?.includes('only delete your own')) {
+                                    setTrackedLinkError('You can only remove links you added.')
+                                  } else {
+                                    setTrackedLinkError('Failed to remove tracked link. Please try again.')
+                                  }
+                                })
+                            }}
+                            aria-label="Remove tracked link"
+                          >
+                            <X className="h-3 w-3" />
+                          </button>
+                        </TooltipTrigger>
+                        <TooltipContent>Remove tracked link</TooltipContent>
+                      </Tooltip>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
+            {trackedLinkError && (
+              <p className="pl-16 text-xs text-signal-red">{trackedLinkError}</p>
+            )}
 
             {/* Comments */}
             <CommentsSection jobId={jobId} testNames={groupTestNames} childJobName={scopedChildJobName} childBuildNumber={scopedChildBuildNumber} />
@@ -727,9 +804,25 @@ export function FailureCard({ group, jobId, childJobName, childBuildNumber, inde
               ? repoUrls.map(({ name, url }) => ({ name, url }))
               : undefined
           }
-          onIssueCreated={(url) => void maybeSuggestBugReview(url)}
+          onIssueCreated={(url) => {
+            // Refetch tracked-in to get real data from server
+            api.get<{ tracked_in: Record<string, TrackedInEntry[]> }>(`/results/${jobId}/tracked-in`)
+              .then((res) => dispatch({ type: 'SET_TRACKED_IN', payload: res.tracked_in ?? {} }))
+              .catch(() => {})
+            void maybeSuggestBugReview(url)
+          }}
         />
       )}
+
+      <TrackInDialog
+        open={trackInOpen}
+        onOpenChange={setTrackInOpen}
+        jobId={jobId}
+        testName={rep.test_name}
+
+        childJobName={scopedChildJobName}
+        childBuildNumber={scopedChildBuildNumber}
+      />
 
       <ConfirmDialog
         open={showBugReviewSuggestion}

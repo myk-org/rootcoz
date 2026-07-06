@@ -122,6 +122,7 @@ from rootcoz.models import (
     ReAnalyzeFailureRequest,
     ReportPortalPushResult,
     SetReviewedRequest,
+    SetTrackedInRequest,
     UnifiedAnalyzeRequest,
     UnsubscribeRequest,
     _SYSTEM_TAGS,
@@ -153,6 +154,7 @@ from rootcoz.storage import (
     list_results,
     list_distinct_job_names,
     list_results_for_dashboard,
+    list_results_for_dashboard_filtered,
     patch_result_json,
     populate_failure_history,
     save_result,
@@ -3805,6 +3807,8 @@ async def get_job_result(
         await _apply_effective_classifications(job_id, result["result"])
     _attach_result_links(result, _extract_base_url(), job_id)
     await _attach_origin_job_info(result)
+    # Attach tracked-in data per failure
+    result["tracked_in"] = await storage.get_tracked_in_for_job(job_id)
     settings = get_settings()
     result["capabilities"] = _build_capabilities(settings)
     if result.get("status") in IN_PROGRESS_STATUSES:
@@ -5199,8 +5203,13 @@ async def _add_tracker_comment(
     body: CreateIssueRequest,
     result: dict,
     username: str,
+    *,
+    tracked_type: str = "",
 ) -> int:
     """Best-effort auto-add a comment linking to the created tracker issue.
+
+    Also sets the tracked-in URL on the failure_history row when
+    *tracked_type* is provided (``"github"`` or ``"jira"``).
 
     Args:
         tracker_label: Human-readable tracker name (e.g. "GitHub Issue", "Jira Bug").
@@ -5208,6 +5217,7 @@ async def _add_tracker_comment(
         body: The create-issue request (carries test_name, child_job_name, etc.).
         result: The tracker API response (must contain ``url`` and optionally ``key``).
         username: Username from the request cookie.
+        tracked_type: Tracker type for failure_history (``"github"`` or ``"jira"``).
 
     Returns:
         The comment ID on success, or ``0`` on failure.
@@ -5241,6 +5251,26 @@ async def _add_tracker_comment(
             f"for job_id={job_id}, issue url={issue_url or '<missing>'}",
             exc_info=True,
         )
+
+    # Auto-add tracked-in link
+    if tracked_type and issue_url:
+        try:
+            await storage.add_tracked_in_link(
+                job_id,
+                body.test_name,
+                issue_url,
+                tracked_type,
+                child_job_name=body.child_job_name,
+                child_build_number=body.child_build_number,
+                tracked_by=username,
+            )
+        except Exception:
+            logger.warning(
+                f"Failed to set tracked-in after {tracker_label} creation "
+                f"for job_id={job_id}, test_name={body.test_name}",
+                exc_info=True,
+            )
+
     return comment_id
 
 
@@ -5321,7 +5351,7 @@ async def create_github_issue_endpoint(
     issue_url = _require_tracker_url(result, "GitHub")
 
     comment_id = await _add_tracker_comment(
-        "GitHub Issue", job_id, body, result, username
+        "GitHub Issue", job_id, body, result, username, tracked_type="github"
     )
 
     return {
@@ -5416,7 +5446,9 @@ async def create_jira_bug_endpoint(
 
     issue_url = _require_tracker_url(result, "Jira")
 
-    comment_id = await _add_tracker_comment("Jira Bug", job_id, body, result, username)
+    comment_id = await _add_tracker_comment(
+        "Jira Bug", job_id, body, result, username, tracked_type="jira"
+    )
 
     return {
         "url": issue_url,
@@ -5424,6 +5456,110 @@ async def create_jira_bug_endpoint(
         "title": body.title,
         "comment_id": comment_id,
     }
+
+
+def _detect_tracker_type(url: str) -> str:
+    """Detect tracker type from URL string patterns.
+
+    Returns ``'github'``, ``'jira'``, or ``''`` when unrecognized.
+    String-only — no HTTP requests (SSRF-safe).
+    """
+    url_lower = url.lower()
+    if "github.com" in url_lower:
+        return "github"
+    if "jira" in url_lower or "atlassian" in url_lower:
+        return "jira"
+    return ""
+
+
+@app.put("/results/{job_id}/tracked-in")
+async def set_tracked_in_endpoint(
+    job_id: str,
+    body: SetTrackedInRequest,
+    request: Request,
+    _: None = Depends(_bind_job_id),
+) -> dict:
+    """Add a tracked-in link for a failure.
+
+    Reviewers+ can add tracked-in links. Use DELETE to remove.
+    """
+    _require_reviewer(request)
+    _check_allow_list(request)
+    logger.debug(f"PUT /results/{job_id}/tracked-in: test_name={body.test_name}")
+    result = await get_result(job_id)
+    if not result:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    # Auto-detect type from URL if not provided
+    if not body.url:
+        raise HTTPException(
+            status_code=400,
+            detail="URL is required. Use DELETE to remove links.",
+        )
+
+    tracked_type = body.type
+    if not tracked_type:
+        tracked_type = _detect_tracker_type(body.url)
+
+    link_id = await storage.add_tracked_in_link(
+        job_id,
+        body.test_name,
+        body.url,
+        tracked_type,
+        child_job_name=body.child_job_name,
+        child_build_number=body.child_build_number,
+        tracked_by=request.state.username,
+    )
+    return {
+        "status": "ok",
+        "id": link_id,
+        "test_name": body.test_name,
+        "tracked_in_url": body.url,
+        "tracked_in_type": tracked_type,
+        "tracked_in_by": request.state.username,
+    }
+
+
+@app.get("/results/{job_id}/tracked-in")
+async def get_tracked_in_endpoint(
+    job_id: str,
+    request: Request,
+    _: None = Depends(_bind_job_id),
+) -> dict:
+    """Return tracked-in data for all failures in a job."""
+    _require_reviewer(request)
+    result = await get_result(job_id)
+    if not result:
+        raise HTTPException(status_code=404, detail="Job not found")
+    tracked = await storage.get_tracked_in_for_job(job_id)
+    return {"job_id": job_id, "tracked_in": tracked}
+
+
+@app.delete("/results/{job_id}/tracked-in/{link_id}")
+async def delete_tracked_in_endpoint(
+    job_id: str,
+    link_id: int,
+    request: Request,
+    _: None = Depends(_bind_job_id),
+) -> dict:
+    """Delete a tracked-in link by ID.
+
+    Creators can delete their own links. Admins can delete any link.
+    """
+    _require_reviewer(request)
+    _check_allow_list(request)
+    link = await storage.get_tracked_in_link(link_id)
+    if not link:
+        raise HTTPException(status_code=404, detail="Link not found")
+    if link.get("job_id") != job_id:
+        raise HTTPException(status_code=404, detail="Link not found")
+    if not request.state.is_admin and link["created_by"] != request.state.username:
+        raise HTTPException(
+            status_code=403,
+            detail="You can only delete your own tracked links",
+        )
+    await storage.delete_tracked_in_link(link_id)
+    return {"status": "ok", "deleted_id": link_id}
 
 
 @app.post("/results/{job_id}/push-reportportal", response_model=ReportPortalPushResult)
@@ -6743,9 +6879,12 @@ async def stream_multiplexed(
 
 
 @app.get("/api/dashboard")
-async def api_dashboard() -> list[dict]:
+async def api_dashboard(
+    limit: int = Query(default=500, ge=0, description="Max results (0 = no limit)"),
+    offset: int = Query(default=0, ge=0, description="Rows to skip"),
+) -> list[dict]:
     """Return dashboard job list as JSON for the React frontend."""
-    return await list_results_for_dashboard()
+    return await list_results_for_dashboard(limit=limit, offset=offset)
 
 
 @app.get("/api/capabilities")
@@ -8420,57 +8559,80 @@ async def preview_metadata_rules(body: dict) -> dict:
 @app.get("/api/dashboard/filtered")
 async def api_dashboard_filtered(
     filters: Annotated[dict, Depends(_metadata_filters)],
-) -> list[dict]:
+    search: str = Query(default="", description="Search job name or ID"),
+    status: Annotated[list[str] | None, Query()] = None,
+    date_from: str = Query(default="", description="Start date (ISO)"),
+    date_to: str = Query(default="", description="End date (ISO)"),
+    review_status: str = Query(
+        default="all", description="Filter: all, reviewed, not_reviewed"
+    ),
+    limit: int = Query(default=500, ge=0, description="Max results (0 = no limit)"),
+    offset: int = Query(default=0, ge=0, description="Rows to skip"),
+) -> dict:
     """Return dashboard job list filtered by metadata.
 
-    Joins dashboard results with job_metadata. When no filters are
-    provided, returns all jobs (same as /api/dashboard but with
-    metadata attached).
+    Filters are applied in SQL before LIMIT, so older jobs are reachable
+    when filters match them. Returns ``{jobs, total}`` for pagination.
     """
+    if review_status not in ("all", "reviewed", "not_reviewed"):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid review_status '{review_status}'. Must be one of: all, not_reviewed, reviewed",
+        )
+
     team, tier, version, label, exclude_label = _unpack_metadata_filters(
         filters, "GET /api/dashboard/filtered"
     )
-    jobs = await list_results_for_dashboard()
 
     has_include_filters = bool(team or tier or version or label)
+
+    # Resolve metadata filters to job name sets
+    job_names: set[str] | None = None
+    exclude_job_names: set[str] | None = None
 
     # Fetch all metadata once (unfiltered) — used for both include/exclude and display
     all_metadata_unfiltered = await storage.list_jobs_with_metadata()
     all_metadata_by_name = {m["job_name"]: m for m in all_metadata_unfiltered}
 
     if has_include_filters:
-        # Build filtered set for include matching
         filtered_metadata = await storage.list_jobs_with_metadata(
             team=team,
             tier=tier,
             version=version,
             labels=label if label else None,
         )
-        filtered_names = {m["job_name"] for m in filtered_metadata}
-        jobs = [j for j in jobs if j.get("job_name", "") in filtered_names]
+        job_names = {m["job_name"] for m in filtered_metadata}
 
     if exclude_label:
-        # Exclude jobs matching ANY excluded label (OR semantics)
         exclude_set = set(exclude_label)
-        excluded_names: set[str] = set()
+        exclude_job_names = set()
         for m in all_metadata_unfiltered:
             job_labels = set(m.get("labels") or [])
             if job_labels & exclude_set:
-                excluded_names.add(m["job_name"])
-        jobs = [j for j in jobs if j.get("job_name", "") not in excluded_names]
+                exclude_job_names.add(m["job_name"])
 
-    # Use unfiltered metadata for display attachment
-    metadata_by_name = all_metadata_by_name
+    result = await list_results_for_dashboard_filtered(
+        job_names=job_names,
+        exclude_job_names=exclude_job_names,
+        search=search,
+        status=status,
+        date_from=date_from,
+        date_to=date_to,
+        review_status=review_status,
+        limit=limit,
+        offset=offset,
+    )
+    jobs = result["jobs"]
 
     # Attach metadata to each job
     for job in jobs:
         jn = job.get("job_name", "")
-        if jn in metadata_by_name:
-            job["metadata"] = metadata_by_name[jn]
+        if jn in all_metadata_by_name:
+            job["metadata"] = all_metadata_by_name[jn]
         else:
             job["metadata"] = None
 
-    return jobs
+    return {"jobs": jobs, "total": result["total"]}
 
 
 # --- Reports endpoints ---

@@ -851,6 +851,39 @@ class CreateIssueResponse(BaseModel):
     )
 
 
+class SetTrackedInRequest(_ChildJobFieldsValidator):
+    """Request body for setting/clearing the tracked-in URL on a failure."""
+
+    test_name: str = Field(description="Full test name")
+    url: str = Field(default="", description="Tracking issue URL (empty to clear)")
+    type: str = Field(
+        default="",
+        description="Tracker type: 'jira', 'github', or '' to clear",
+    )
+
+    @field_validator("type")
+    @classmethod
+    def validate_tracked_type(cls, v: str) -> str:
+        v = v.strip().lower()
+        if v and v not in ("jira", "github"):
+            raise ValueError("type must be 'jira', 'github', or empty")
+        return v
+
+    @field_validator("url")
+    @classmethod
+    def validate_url(cls, v: str) -> str:
+        v = v.strip()
+        if v:
+            from urllib.parse import urlparse
+
+            parsed = urlparse(v)
+            if parsed.scheme not in ("http", "https", ""):
+                raise ValueError("URL must use http or https scheme")
+            if not parsed.scheme:
+                raise ValueError("URL must include http:// or https://")
+        return v
+
+
 class ClassifyTestRequest(BaseModel):
     """Request body for classifying a test pattern (e.g., FLAKY, REGRESSION).
 
