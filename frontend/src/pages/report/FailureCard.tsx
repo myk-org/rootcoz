@@ -4,6 +4,7 @@ import { useClipboard } from '@/lib/useClipboard'
 import type { GroupedFailure, PreviousAnalysis, TrackedInEntry } from '@/types'
 import { buildFileUrl, buildRepoUrls, isSafeHref, matchRepo, type RepoUrl } from '@/lib/autoLink'
 import { isCommentInScope } from '@/lib/grouping'
+import { expandKey } from '@/lib/childJobHash'
 import { api, extractApiDetail } from '@/lib/api'
 import { getUsername } from '@/lib/cookies'
 import { useSessionState } from '@/lib/useSessionState'
@@ -187,8 +188,8 @@ export function FailureCard({ group, jobId, childJobName, childBuildNumber, inde
   const dispatch = useReportDispatch()
   const { role, isOperator, isAdmin, username } = useAuth()
   const isViewer = role === 'viewer'
-  const expandKey = `rootcoz-expand-${jobId}-${scopedChildJobName}-${scopedChildBuildNumber}-${group.id}`
-  const [expanded, setExpanded] = useSessionState<boolean>(expandKey, false)
+  const cardExpandKey = expandKey(jobId, group.id)
+  const [expanded, setExpanded] = useSessionState<boolean>(cardExpandKey, false)
   const cardRef = useRef<HTMLDivElement>(null)
   const expandedByHashRef = useRef(false)
 

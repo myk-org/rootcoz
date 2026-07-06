@@ -2,6 +2,15 @@ import type { ChildJobAnalysis } from '@/types'
 import { groupFailures } from '@/lib/grouping'
 
 /**
+ * Build the canonical sessionStorage key for an expand/collapse toggle.
+ * This is the single source of truth — every component that reads or writes
+ * expand state MUST use this function so keys never drift apart.
+ */
+export function expandKey(jobId: string, id: string): string {
+  return `rootcoz-expand-${jobId}-${id}`
+}
+
+/**
  * Build a URL-safe hash fragment identifier for a child job.
  * When parentHashId is provided, it prefixes the id to prevent collisions
  * in recursive (nested) child job trees.
@@ -25,10 +34,10 @@ export function collectChildExpandKeys(
   const keys: string[] = []
   for (const child of children ?? []) {
     const hashId = childJobHashId(child.job_name, child.build_number, parentHashId)
-    keys.push(`rootcoz-expand-${resultJobId}-${hashId}`)
+    keys.push(expandKey(resultJobId, hashId))
     const childGroups = groupFailures(child.failures ?? [], `child-${hashId}`)
     for (const g of childGroups) {
-      keys.push(`rootcoz-expand-${resultJobId}-${g.id}`)
+      keys.push(expandKey(resultJobId, g.id))
     }
     keys.push(...collectChildExpandKeys(child.failed_children ?? [], resultJobId, hashId))
   }
