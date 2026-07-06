@@ -2313,11 +2313,17 @@ class TestPushedByForwarding:
             raise_server_exceptions=False,
             headers={"Authorization": "Bearer test-admin-key-16chars"},
         )
-        client.post("/results/some-job-id/push-reportportal")
+        response = client.post("/results/some-job-id/push-reportportal")
+        assert response.status_code == 200, f"Response: {response.text}"
+        # Verify INFO log was called with the expected format string and args
         info_calls = [
-            c for c in mock_logger.info.call_args_list if "RP push requested" in str(c)
+            c
+            for c in mock_logger.info.call_args_list
+            if c.args and "RP push requested" in c.args[0]
         ]
         assert info_calls, "Expected INFO log for RP push request"
-        rendered = str(info_calls[0])
-        assert "admin" in rendered, f"username missing from log: {rendered}"
-        assert "some-job-id" in rendered, f"job_id missing from log: {rendered}"
+        fmt, logged_username, logged_job_id = info_calls[0].args
+        assert logged_username == "admin", f"Expected 'admin', got '{logged_username}'"
+        assert logged_job_id == "some-job-id", (
+            f"Expected 'some-job-id', got '{logged_job_id}'"
+        )

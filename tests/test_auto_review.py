@@ -899,12 +899,19 @@ class TestAutoReviewMatchingFailures:
             info_calls = [
                 c
                 for c in mock_logger.info.call_args_list
-                if "auto-reviewed" in str(c).lower() and "Report Portal" in str(c)
+                if c.args
+                and "auto-reviewed" in c.args[0].lower()
+                and "Report Portal" in c.args[0]
             ]
             assert info_calls, "Expected INFO log for auto-push trigger"
-            rendered = str(info_calls[0])
-            assert AI_SYSTEM_USERNAME in rendered, (
-                f"AI_SYSTEM_USERNAME missing from auto-push log: {rendered}"
+            log_args = info_calls[0].args
+            # Format: "All failures auto-reviewed for job %s, pushing ... (pushed_by=%s)"
+            # args[0] = format string, args[1] = job_id, args[2] = AI_SYSTEM_USERNAME
+            assert log_args[1] == "current-job", (
+                f"Expected job_id 'current-job', got '{log_args[1]}'"
+            )
+            assert log_args[2] == AI_SYSTEM_USERNAME, (
+                f"Expected AI_SYSTEM_USERNAME, got '{log_args[2]}'"
             )
 
     async def test_no_push_when_reportportal_disabled(self, setup_test_db):
