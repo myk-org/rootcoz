@@ -5541,8 +5541,11 @@ async def delete_tracked_in_endpoint(
     Creators can delete their own links. Admins can delete any link.
     """
     _require_reviewer(request)
+    _check_allow_list(request)
     link = await storage.get_tracked_in_link(link_id)
     if not link:
+        raise HTTPException(status_code=404, detail="Link not found")
+    if link.get("job_id") != job_id:
         raise HTTPException(status_code=404, detail="Link not found")
     if not request.state.is_admin and link["created_by"] != request.state.username:
         raise HTTPException(

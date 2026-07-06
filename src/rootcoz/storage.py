@@ -2129,6 +2129,15 @@ async def add_tracked_in_link(
             ),
         )
         await db.commit()
+        if cursor.rowcount == 0:
+            # Duplicate — fetch existing id
+            cursor = await db.execute(
+                "SELECT id FROM tracked_in_links WHERE job_id = ? AND test_name = ? "
+                "AND child_job_name = ? AND child_build_number = ? AND url = ?",
+                (job_id, test_name, child_job_name, child_build_number, url),
+            )
+            row = await cursor.fetchone()
+            return row["id"] if row else 0
         return cursor.lastrowid or 0
 
 
