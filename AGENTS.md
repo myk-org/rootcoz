@@ -322,6 +322,7 @@ Exceptions (server-level only, no payload equivalent):
 - `DEBUG` — server reload toggle
 - `ENABLE_GITHUB_ISSUES` — server capability toggle for GitHub issue creation
 - `ENABLE_REPORTPORTAL` — server capability toggle for Report Portal integration
+- `ENABLE_AUTO_REVIEW` — server capability toggle for auto-review of matching failures; when disabled, failures are never automatically marked as reviewed
 - `ROOTCOZ_ENCRYPTION_KEY` — server-only secret for at-rest encryption AND HMAC secret for all API key hashes (admin and user); never expose via request payloads, CLI flags, or shared config files. **Rotating this key invalidates both encrypted data (tokens) and all stored API key hashes (admin and user)** — operators must re-issue all API keys after rotation. Stored sessions use plain SHA-256 hashing (no HMAC) and are NOT affected by key rotation.
 - `LOG_LEVEL` — server log verbosity
 - `PUBLIC_BASE_URL` — trusted server-only origin for building absolute links; never derive from request headers to prevent host-header injection

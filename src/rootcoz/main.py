@@ -264,6 +264,7 @@ _SETTINGS_CATEGORIES: dict[str, list[str]] = {
         "poll_interval_minutes",
         "max_wait_minutes",
         "metadata_rules_file",
+        "enable_auto_review",
     ],
     "Web Push": [
         "vapid_public_key",
@@ -2166,6 +2167,9 @@ async def _auto_review_matching_failures(
         result_data: Stored result dict containing failures.
         settings: Application settings.
     """
+    if not settings.enable_auto_review:
+        logger.debug("Auto-review disabled, skipping for job_id=%s", job_id)
+        return
     auto_reviewed_count = 0
     total_failures = 0
 
