@@ -2322,7 +2322,7 @@ class TestPushedByForwarding:
             if c.args and "RP push requested" in c.args[0]
         ]
         assert info_calls, "Expected INFO log for RP push request"
-        fmt, logged_username, logged_job_id = info_calls[0].args
+        _, logged_username, logged_job_id = info_calls[0].args
         assert logged_username == "admin", f"Expected 'admin', got '{logged_username}'"
         assert logged_job_id == "some-job-id", (
             f"Expected 'some-job-id', got '{logged_job_id}'"
