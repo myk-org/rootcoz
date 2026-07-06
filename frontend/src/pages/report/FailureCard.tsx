@@ -722,27 +722,26 @@ export function FailureCard({ group, jobId, childJobName, childBuildNumber, inde
             </div>
 
             {/* Tracked item links (indented below CLASSIFY) */}
-            {trackedIn[repKey]?.tracked_in_url && (
+            {trackedIn[repKey]?.length > 0 && (
               <div className="pl-16 space-y-1">
-                {isSafeHref(trackedIn[repKey].tracked_in_url) ? (
-                  <a
-                    href={trackedIn[repKey].tracked_in_url}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="flex items-center gap-1.5 text-xs text-text-link hover:underline"
-                  >
-                    <TrackerIcon type={trackedIn[repKey].tracked_in_type} />
-                    {trackedIn[repKey].tracked_in_url.replace(/^https?:\/\//, '')}
-                  </a>
-                ) : (
-                  <span className="flex items-center gap-1.5 text-xs text-text-tertiary">
-                    <TrackerIcon type={trackedIn[repKey].tracked_in_type} />
-                    {trackedIn[repKey].tracked_in_url.replace(/^https?:\/\//, '')}
-                  </span>
-                )}
-                {trackedIn[repKey].tracked_in_by && (
-                  <span className="text-xs text-text-tertiary">by {trackedIn[repKey].tracked_in_by}</span>
-                )}
+                {trackedIn[repKey].map((link, idx) => (
+                  <div key={idx} className="flex items-center gap-1.5 text-xs">
+                    <TrackerIcon type={link.tracked_in_type} />
+                    {isSafeHref(link.tracked_in_url) ? (
+                      <a
+                        href={link.tracked_in_url}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="text-text-link hover:underline"
+                      >
+                        {link.tracked_in_url.replace(/^https?:\/\//, '')}
+                      </a>
+                    ) : (
+                      <span className="text-text-tertiary">{link.tracked_in_url.replace(/^https?:\/\//, '')}</span>
+                    )}
+                    {link.tracked_in_by && <span className="text-text-tertiary">by {link.tracked_in_by}</span>}
+                  </div>
+                ))}
               </div>
             )}
 

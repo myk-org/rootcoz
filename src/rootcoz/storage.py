@@ -568,6 +568,47 @@ async def init_db() -> None:
             db, "failure_history", "tracked_in_by", "TEXT NOT NULL DEFAULT ''"
         )
 
+        # tracked_in_links: supports multiple tracked links per failure
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS tracked_in_links (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                job_id TEXT NOT NULL,
+                test_name TEXT NOT NULL,
+                child_job_name TEXT NOT NULL DEFAULT '',
+                child_build_number INTEGER NOT NULL DEFAULT 0,
+                url TEXT NOT NULL,
+                type TEXT NOT NULL DEFAULT '',
+                created_by TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL DEFAULT (datetime('now'))
+            )
+        """)
+        await db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_til_job ON tracked_in_links (job_id, test_name)"
+        )
+
+        # Migration: copy existing tracked_in data from failure_history to new table
+        cursor = await db.execute(
+            "SELECT job_id, test_name, child_job_name, child_build_number, "
+            "tracked_in_url, tracked_in_type, tracked_in_by "
+            "FROM failure_history WHERE tracked_in_url != ''"
+        )
+        migrate_rows = await cursor.fetchall()
+        for row in migrate_rows:
+            await db.execute(
+                "INSERT OR IGNORE INTO tracked_in_links "
+                "(job_id, test_name, child_job_name, child_build_number, url, type, created_by) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (
+                    row["job_id"],
+                    row["test_name"],
+                    row["child_job_name"],
+                    row["child_build_number"],
+                    row["tracked_in_url"],
+                    row["tracked_in_type"],
+                    row["tracked_in_by"],
+                ),
+            )
+
         # Migration: add pattern column to test_classifications (two-axis classification)
         await _migrate_add_column(
             db, "test_classifications", "pattern", "TEXT NOT NULL DEFAULT ''"
@@ -2039,7 +2080,7 @@ async def populate_failure_history(
         )
 
 
-async def set_tracked_in(
+async def add_tracked_in_link(
     job_id: str,
     test_name: str,
     url: str,
@@ -2049,35 +2090,37 @@ async def set_tracked_in(
     child_build_number: int = 0,
     tracked_by: str = "",
 ) -> int:
-    """Set or clear the tracked-in URL for a failure in failure_history.
+    """Add a tracked-in link for a failure.
 
     Args:
         job_id: Analysis job ID.
         test_name: Full test name.
-        url: Tracking issue URL (empty string to clear).
-        tracked_type: Tracker type ('jira', 'github', or '' to clear).
+        url: Tracking issue URL.
+        tracked_type: Tracker type ('jira', 'github', or '').
         child_job_name: Child job name (empty for top-level failures).
         child_build_number: Child build number (0 for top-level/wildcard).
-        tracked_by: Username who set the tracked-in link.
+        tracked_by: Username who added the link.
 
     Returns:
-        Number of rows updated.
+        ID of the inserted row.
     """
-    sql = (
-        "UPDATE failure_history SET tracked_in_url = ?, tracked_in_type = ?, tracked_in_by = ? "
-        "WHERE job_id = ? AND test_name = ?"
-    )
-    params: list = [url, tracked_type, tracked_by, job_id, test_name]
-    if child_job_name:
-        sql += " AND child_job_name = ?"
-        params.append(child_job_name)
-        if child_build_number > 0:
-            sql += " AND child_build_number = ?"
-            params.append(child_build_number)
     async with _connect_db() as db:
-        cursor = await db.execute(sql, params)
+        cursor = await db.execute(
+            "INSERT INTO tracked_in_links "
+            "(job_id, test_name, child_job_name, child_build_number, url, type, created_by) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (
+                job_id,
+                test_name,
+                child_job_name,
+                child_build_number,
+                url,
+                tracked_type,
+                tracked_by,
+            ),
+        )
         await db.commit()
-        return cursor.rowcount
+        return cursor.lastrowid or 0
 
 
 def _tracked_in_key(
@@ -2089,35 +2132,37 @@ def _tracked_in_key(
     return test_name
 
 
-async def get_tracked_in_for_job(job_id: str) -> dict[str, dict]:
-    """Return tracked-in data for all failures in a job.
+async def get_tracked_in_for_job(job_id: str) -> dict[str, list[dict]]:
+    """Return tracked-in links grouped by composite key.
 
     Returns:
         Dict keyed by composite key (matching reviewKey format) to
-        ``{tracked_in_url, tracked_in_type}``.
-        Only failures with a non-empty tracked_in_url are included.
+        list of ``{tracked_in_url, tracked_in_type, tracked_in_by}`` dicts.
     """
     async with _connect_db() as db:
         cursor = await db.execute(
             "SELECT test_name, child_job_name, child_build_number, "
-            "tracked_in_url, tracked_in_type, tracked_in_by "
-            "FROM failure_history "
-            "WHERE job_id = ? AND tracked_in_url != ''",
+            "url, type, created_by "
+            "FROM tracked_in_links "
+            "WHERE job_id = ? ORDER BY created_at",
             (job_id,),
         )
         rows = await cursor.fetchall()
-        return {
-            _tracked_in_key(
+        result: dict[str, list[dict]] = {}
+        for row in rows:
+            key = _tracked_in_key(
                 row["test_name"],
                 row["child_job_name"],
                 row["child_build_number"],
-            ): {
-                "tracked_in_url": row["tracked_in_url"],
-                "tracked_in_type": row["tracked_in_type"],
-                "tracked_in_by": row["tracked_in_by"],
-            }
-            for row in rows
-        }
+            )
+            result.setdefault(key, []).append(
+                {
+                    "tracked_in_url": row["url"],
+                    "tracked_in_type": row["type"],
+                    "tracked_in_by": row["created_by"],
+                }
+            )
+        return result
 
 
 async def backfill_failure_history() -> None:

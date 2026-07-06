@@ -5252,10 +5252,10 @@ async def _add_tracker_comment(
             exc_info=True,
         )
 
-    # Auto-set tracked-in on the failure_history row
+    # Auto-add tracked-in link
     if tracked_type and issue_url:
         try:
-            updated = await storage.set_tracked_in(
+            await storage.add_tracked_in_link(
                 job_id,
                 body.test_name,
                 issue_url,
@@ -5264,25 +5264,6 @@ async def _add_tracker_comment(
                 child_build_number=body.child_build_number,
                 tracked_by=username,
             )
-            if updated == 0:
-                logger.warning(
-                    "Tracked-in auto-set matched 0 rows for "
-                    "job_id=%s, test_name=%s, child=%s/%s",
-                    job_id,
-                    body.test_name,
-                    body.child_job_name,
-                    body.child_build_number,
-                )
-            elif updated > 1:
-                logger.warning(
-                    "Tracked-in auto-set updated %d rows (expected 1) for "
-                    "job_id=%s, test_name=%s, child=%s/%s",
-                    updated,
-                    job_id,
-                    body.test_name,
-                    body.child_job_name,
-                    body.child_build_number,
-                )
         except Exception:
             logger.warning(
                 f"Failed to set tracked-in after {tracker_label} creation "
@@ -5514,7 +5495,7 @@ async def set_tracked_in_endpoint(
     if body.url and not tracked_type:
         tracked_type = _detect_tracker_type(body.url)
 
-    updated = await storage.set_tracked_in(
+    link_id = await storage.add_tracked_in_link(
         job_id,
         body.test_name,
         body.url,
@@ -5523,13 +5504,9 @@ async def set_tracked_in_endpoint(
         child_build_number=body.child_build_number,
         tracked_by=request.state.username,
     )
-    if updated == 0:
-        raise HTTPException(
-            status_code=404,
-            detail=f"No failure found for test '{body.test_name}' in job {job_id}",
-        )
     return {
         "status": "ok",
+        "id": link_id,
         "test_name": body.test_name,
         "tracked_in_url": body.url,
         "tracked_in_type": tracked_type,

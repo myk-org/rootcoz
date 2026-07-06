@@ -100,13 +100,25 @@ export function TrackInDialog({ open, onOpenChange, jobId, testName, trackedInKe
   const detectType = detectTrackerType
 
   async function handleSave() {
-    if (!url.trim()) return
+    const trimmed = url.trim()
+    if (!trimmed) return
+    // Client-side URL validation
+    try {
+      const parsed = new URL(trimmed)
+      if (!['http:', 'https:'].includes(parsed.protocol)) {
+        setError('URL must start with http:// or https://')
+        return
+      }
+    } catch {
+      setError('Please enter a valid URL (e.g., https://github.com/org/repo/issues/123)')
+      return
+    }
     setSaving(true)
     setError('')
     try {
       const res = await api.put<{ tracked_in_url: string; tracked_in_type: string; tracked_in_by: string }>(
         `/results/${jobId}/tracked-in`,
-        { test_name: testName, url: url.trim(), type: detectType(url), child_job_name: childJobName ?? '', child_build_number: childBuildNumber ?? 0 },
+        { test_name: testName, url: trimmed, type: detectType(url), child_job_name: childJobName ?? '', child_build_number: childBuildNumber ?? 0 },
       )
       dispatch({
         type: 'SET_TRACKED_IN_ENTRY',
@@ -115,7 +127,12 @@ export function TrackInDialog({ open, onOpenChange, jobId, testName, trackedInKe
       onOpenChange(false)
       setUrl('')
     } catch (err) {
-      setError(extractApiDetail(err) ?? (err instanceof Error ? err.message : 'Failed to set tracked-in'))
+      const detail = extractApiDetail(err)
+      if (detail?.includes('URL must use') || detail?.includes('URL must include')) {
+        setError('Please enter a valid URL starting with http:// or https://')
+      } else {
+        setError(detail ?? (err instanceof Error ? err.message : 'Failed to add tracked link'))
+      }
     } finally {
       setSaving(false)
     }
