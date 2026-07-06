@@ -309,6 +309,7 @@ export interface AiModelsResponse {
 // -- Result wrapper (from GET /results/{jobId}) ---------------------
 
 export interface TrackedInEntry {
+  id: number
   tracked_in_url: string
   tracked_in_type: string
   tracked_in_by: string

@@ -5536,11 +5536,20 @@ async def delete_tracked_in_endpoint(
     request: Request,
     _: None = Depends(_bind_job_id),
 ) -> dict:
-    """Delete a tracked-in link by ID."""
+    """Delete a tracked-in link by ID.
+
+    Creators can delete their own links. Admins can delete any link.
+    """
     _require_reviewer(request)
-    deleted = await storage.delete_tracked_in_link(link_id)
-    if deleted == 0:
+    link = await storage.get_tracked_in_link(link_id)
+    if not link:
         raise HTTPException(status_code=404, detail="Link not found")
+    if not request.state.is_admin and link["created_by"] != request.state.username:
+        raise HTTPException(
+            status_code=403,
+            detail="You can only delete your own tracked links",
+        )
+    await storage.delete_tracked_in_link(link_id)
     return {"status": "ok", "deleted_id": link_id}
 
 

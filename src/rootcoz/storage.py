@@ -2132,6 +2132,21 @@ async def add_tracked_in_link(
         return cursor.lastrowid or 0
 
 
+async def get_tracked_in_link(link_id: int) -> dict | None:
+    """Fetch a single tracked-in link by ID.
+
+    Returns:
+        Link dict or None if not found.
+    """
+    async with _connect_db() as db:
+        cursor = await db.execute(
+            "SELECT id, job_id, created_by FROM tracked_in_links WHERE id = ?",
+            (link_id,),
+        )
+        row = await cursor.fetchone()
+        return dict(row) if row else None
+
+
 async def delete_tracked_in_link(link_id: int) -> int:
     """Delete a tracked-in link by ID.
 
@@ -2164,7 +2179,7 @@ async def get_tracked_in_for_job(job_id: str) -> dict[str, list[dict]]:
     """
     async with _connect_db() as db:
         cursor = await db.execute(
-            "SELECT test_name, child_job_name, child_build_number, "
+            "SELECT id, test_name, child_job_name, child_build_number, "
             "url, type, created_by "
             "FROM tracked_in_links "
             "WHERE job_id = ? ORDER BY created_at",
@@ -2180,6 +2195,7 @@ async def get_tracked_in_for_job(job_id: str) -> dict[str, list[dict]]:
             )
             result.setdefault(key, []).append(
                 {
+                    "id": row["id"],
                     "tracked_in_url": row["url"],
                     "tracked_in_type": row["type"],
                     "tracked_in_by": row["created_by"],
