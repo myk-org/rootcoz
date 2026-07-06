@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import { api, extractApiDetail } from '@/lib/api'
+import type { TrackedInEntry } from '@/types'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -116,14 +117,13 @@ export function TrackInDialog({ open, onOpenChange, jobId, testName, trackedInKe
     setSaving(true)
     setError('')
     try {
-      const res = await api.put<{ id: number; tracked_in_url: string; tracked_in_type: string; tracked_in_by: string }>(
+      await api.put(
         `/results/${jobId}/tracked-in`,
         { test_name: testName, url: trimmed, type: detectType(url), child_job_name: childJobName ?? '', child_build_number: childBuildNumber ?? 0 },
       )
-      dispatch({
-        type: 'SET_TRACKED_IN_ENTRY',
-        payload: { testName: trackedInKey, entry: { id: res.id, tracked_in_url: res.tracked_in_url, tracked_in_type: res.tracked_in_type, tracked_in_by: res.tracked_in_by } },
-      })
+      // Refetch to get consistent state with real ids
+      const tracked = await api.get<{ tracked_in: Record<string, TrackedInEntry[]> }>(`/results/${jobId}/tracked-in`)
+      dispatch({ type: 'SET_TRACKED_IN', payload: tracked.tracked_in ?? {} })
       onOpenChange(false)
       setUrl('')
     } catch (err) {

@@ -1,7 +1,7 @@
 import { useState, useEffect, useMemo, useRef, type ReactNode } from 'react'
 import { useLocation } from 'react-router-dom'
 import { useClipboard } from '@/lib/useClipboard'
-import type { GroupedFailure, PreviousAnalysis } from '@/types'
+import type { GroupedFailure, PreviousAnalysis, TrackedInEntry } from '@/types'
 import { buildFileUrl, buildRepoUrls, isSafeHref, matchRepo, type RepoUrl } from '@/lib/autoLink'
 import { isCommentInScope } from '@/lib/grouping'
 import { api, extractApiDetail } from '@/lib/api'
@@ -750,14 +750,9 @@ export function FailureCard({ group, jobId, childJobName, childBuildNumber, inde
                             onClick={() => {
                               setTrackedLinkError(null)
                               api.delete(`/results/${jobId}/tracked-in/${link.id}`)
-                                .then(() => {
-                                  dispatch({
-                                    type: 'SET_TRACKED_IN',
-                                    payload: {
-                                      ...trackedIn,
-                                      [repKey]: trackedIn[repKey].filter((l) => l.id !== link.id),
-                                    },
-                                  })
+                                .then(() => api.get<{ tracked_in: Record<string, TrackedInEntry[]> }>(`/results/${jobId}/tracked-in`))
+                                .then((res) => {
+                                  dispatch({ type: 'SET_TRACKED_IN', payload: res.tracked_in ?? {} })
                                 })
                                 .catch((err) => {
                                   const detail = extractApiDetail(err)
@@ -810,10 +805,8 @@ export function FailureCard({ group, jobId, childJobName, childBuildNumber, inde
               : undefined
           }
           onIssueCreated={(url) => {
-            // Optimistic update with id=0, then refetch for real ids
-            dispatch({ type: 'SET_TRACKED_IN_ENTRY', payload: { testName: repKey, entry: { id: 0, tracked_in_url: url, tracked_in_type: bugTarget!, tracked_in_by: username || '' } } })
-            // Refetch tracked-in to get real link ids for delete support
-            api.get<{ tracked_in: Record<string, Array<{ id: number; tracked_in_url: string; tracked_in_type: string; tracked_in_by: string }>> }>(`/results/${jobId}/tracked-in`)
+            // Refetch tracked-in to get real data from server
+            api.get<{ tracked_in: Record<string, TrackedInEntry[]> }>(`/results/${jobId}/tracked-in`)
               .then((res) => dispatch({ type: 'SET_TRACKED_IN', payload: res.tracked_in ?? {} }))
               .catch(() => {})
             void maybeSuggestBugReview(url)
