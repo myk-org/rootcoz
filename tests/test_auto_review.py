@@ -883,3 +883,46 @@ class TestAutoReviewMatchingFailures:
                     "current-job", "my-job", 101, result_data, settings
                 )
                 mock_push.assert_not_called()
+
+    async def test_skipped_when_enable_auto_review_false(self, setup_test_db):
+        """Should NOT auto-review when enable_auto_review is False."""
+        with patch.object(storage, "DB_PATH", setup_test_db):
+            # Insert a previous failure with human review so auto-review *would* trigger
+            async with storage._connect_db() as db:
+                await db.execute(
+                    "INSERT INTO failure_history "
+                    "(job_id, job_name, build_number, test_name, error_message, "
+                    "error_signature, classification, pattern) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    ("prev-job", "my-job", 100, "test_a", "", "sig-a", "", ""),
+                )
+                await _insert_human_review(db, "prev-job", "test_a")
+                await db.commit()
+
+            result_data = {
+                "job_name": "my-job",
+                "build_number": 101,
+                "failures": [
+                    {
+                        "test_name": "test_a",
+                        "error": "err",
+                        "error_signature": "sig-a",
+                        "analysis": {"classification": "INFRASTRUCTURE"},
+                    }
+                ],
+            }
+
+            env = build_test_env()
+            env["ENABLE_AUTO_REVIEW"] = "false"
+            settings = Settings(**{k.lower(): v for k, v in env.items()})
+            assert settings.enable_auto_review is False
+
+            from rootcoz.main import _auto_review_matching_failures
+
+            await _auto_review_matching_failures(
+                "current-job", "my-job", 101, result_data, settings
+            )
+
+            # No reviews should be written — auto-review was disabled
+            reviews = await storage.get_reviews_for_job("current-job")
+            assert len(reviews) == 0

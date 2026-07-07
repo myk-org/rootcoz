@@ -329,6 +329,17 @@ class Settings(BaseSettings):
     vapid_private_key: str = Field(default="", repr=False)
     vapid_claim_email: str = ""
 
+    # Auto-review: automatically mark failures as reviewed when they match
+    # a previous human-reviewed failure with the same error signature
+    enable_auto_review: bool = Field(
+        default=True,
+        description=(
+            "When enabled, failures with the same job_name, test_name, and "
+            "error_signature as a previous human-reviewed failure are "
+            "automatically marked as reviewed."
+        ),
+    )
+
     # Metadata rules file path (optional, server-only)
     metadata_rules_file: str = Field(
         default="",

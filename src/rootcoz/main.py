@@ -264,6 +264,7 @@ _SETTINGS_CATEGORIES: dict[str, list[str]] = {
         "poll_interval_minutes",
         "max_wait_minutes",
         "metadata_rules_file",
+        "enable_auto_review",  # runtime toggle, no restart required
     ],
     "Web Push": [
         "vapid_public_key",
@@ -2166,6 +2167,9 @@ async def _auto_review_matching_failures(
         result_data: Stored result dict containing failures.
         settings: Application settings.
     """
+    if not settings.enable_auto_review:
+        logger.debug("Auto-review disabled, skipping for job_id=%s", job_id)
+        return
     auto_reviewed_count = 0
     total_failures = 0
 
@@ -2660,7 +2664,9 @@ async def process_analysis_with_id(
 
             await _carry_forward_overrides(job_id, result_data)
 
-            # Auto-review failures with matching signatures from previous analyses
+            # Auto-review failures with matching signatures from previous analyses.
+            # enable_auto_review toggle is enforced inside the function (early return)
+            # to keep a single enforcement point and avoid DRY violation at call sites.
             try:
                 await _auto_review_matching_failures(
                     job_id,
@@ -3414,7 +3420,9 @@ async def _process_file_raw_analysis(
 
         await _carry_forward_overrides(job_id, result_data)
 
-        # Auto-review failures with matching signatures from previous analyses
+        # Auto-review failures with matching signatures from previous analyses.
+        # enable_auto_review toggle is enforced inside the function (early return)
+        # to keep a single enforcement point and avoid DRY violation at call sites.
         try:
             await _auto_review_matching_failures(
                 job_id,
