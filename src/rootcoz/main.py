@@ -6009,19 +6009,29 @@ async def _execute_rp_push(
             # Build the expected key prefix for child-scoped pushes so we
             # only pick up reviews from the matching child job, avoiding
             # collisions when different children share test names.
-            child_prefix = (
-                f"{child_job_name}#{child_build_number}::"
-                if child_job_name is not None
-                else None
-            )
+            # Build prefixes for child-scoped pushes: exact build match
+            # and wildcard (build_number=0 means name-only scope).
+            if child_job_name is not None:
+                child_prefixes = [f"{child_job_name}#{child_build_number}::"]
+                wildcard_prefix = f"{child_job_name}#0::"
+                if wildcard_prefix != child_prefixes[0]:
+                    child_prefixes.append(wildcard_prefix)
+            else:
+                child_prefixes = None
             for key, review_data in reviews.items():
                 if not (review_data.get("reviewed") and review_data.get("username")):
                     continue
-                if child_prefix is not None:
-                    # Child-scoped push: only accept matching composite keys
-                    if not key.startswith(child_prefix):
+                if child_prefixes is not None:
+                    # Child-scoped push: accept exact or wildcard prefix.
+                    # Prefer exact over wildcard (exact is checked first).
+                    matched_prefix = None
+                    for pfx in child_prefixes:
+                        if key.startswith(pfx):
+                            matched_prefix = pfx
+                            break
+                    if matched_prefix is None:
                         continue
-                    bare_name = key[len(child_prefix) :]
+                    bare_name = key[len(matched_prefix) :]
                 else:
                     # Top-level push: skip child-scoped composite keys
                     # (format: "child_name#build_num::test_name" where
@@ -6030,9 +6040,13 @@ async def _execute_rp_push(
                     if m:
                         continue
                     bare_name = key
-                reviewed_by[bare_name] = _sanitize_control_chars(
-                    review_data["username"]
-                )
+                # For child-scoped pushes, exact-build reviews take
+                # precedence over wildcard — only overwrite if the key
+                # is new (setdefault semantics).
+                if bare_name not in reviewed_by:
+                    reviewed_by[bare_name] = _sanitize_control_chars(
+                        review_data["username"]
+                    )
         except Exception:
             logger.debug("Failed to fetch reviews for job %s", job_id, exc_info=True)
 
