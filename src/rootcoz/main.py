@@ -5819,12 +5819,16 @@ async def _execute_rp_push(
         # Include the RP host in the log message (not user-facing) so
         # operators can identify which RP instance failed.
         # Strip any embedded credentials but keep host:port.
-        parsed_rp = urllib.parse.urlparse(rp.url) if rp.url else None
-        rp_host = (
-            f"{parsed_rp.hostname}:{parsed_rp.port}"
-            if parsed_rp and parsed_rp.port
-            else (parsed_rp.hostname if parsed_rp else "unknown")
-        )
+        # Use netloc with userinfo stripping — avoids ValueError from
+        # urlparse().port on malformed ports.
+        try:
+            rp_host = (
+                urllib.parse.urlparse(rp.url).netloc.rsplit("@", 1)[-1]
+                if rp.url
+                else "unknown"
+            )
+        except Exception:
+            rp_host = "unknown"
         log_msg = f"{log_msg}, reportportal_host='{rp_host}'"
         return _log_and_return_rp_error(user_msg, log_msg=log_msg)
 
