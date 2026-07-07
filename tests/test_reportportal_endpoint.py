@@ -1087,8 +1087,8 @@ class TestRPPushHTTPErrors:
         ]
         assert error_calls, "Expected ERROR log for constructor failure"
         # RP URL must appear in log (not in user-facing error)
-        assert "reportportal_url=" in str(error_calls[0]), (
-            "Log should include reportportal_url for operator debugging"
+        assert "reportportal_host=" in str(error_calls[0]), (
+            "Log should include reportportal_host for operator debugging"
         )
 
 

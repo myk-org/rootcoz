@@ -5816,9 +5816,11 @@ async def _execute_rp_push(
             exc,
             "connecting to Report Portal",
         )
-        # Include the RP URL in the log message (not user-facing) so
+        # Include the RP host in the log message (not user-facing) so
         # operators can identify which RP instance failed.
-        log_msg = f"{log_msg}, reportportal_url='{rp.url}'"
+        # Strip any embedded credentials from the URL.
+        rp_host = urllib.parse.urlparse(rp.url).hostname if rp.url else "unknown"
+        log_msg = f"{log_msg}, reportportal_host='{rp_host}'"
         return _log_and_return_rp_error(user_msg, log_msg=log_msg)
 
     with rp_client_ctx as rp_client:
