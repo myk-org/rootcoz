@@ -5954,34 +5954,15 @@ async def _execute_rp_push(
             if result:
                 history_classifications[name] = result
 
-        # Fetch user-tracked links for the job
+        # Fetch user-tracked links scoped to the push target
         tracked_in_data: dict[str, list[dict]] = {}
         if settings.rp_push_tracker_links:
             try:
-                all_tracked = await storage.get_tracked_in_for_job(job_id)
-                # Filter by push scope: child push includes only that child's
-                # links, parent push includes only top-level (non-child) links.
-                scope_prefix = (
-                    f"{child_job_name}#{child_build_number}::"
-                    if child_job_name
-                    else None
+                tracked_in_data = await storage.get_tracked_in_for_scope(
+                    job_id,
+                    child_job_name=child_job_name or "",
+                    child_build_number=child_build_number or 0,
                 )
-                for key, links in all_tracked.items():
-                    if scope_prefix:
-                        # Child push: only include keys for this specific child
-                        if not key.startswith(scope_prefix):
-                            continue
-                        test_name = key[len(scope_prefix) :]
-                    else:
-                        # Parent push: only include top-level (non-child) keys.
-                        # Composite keys use "child#build::test_name" format
-                        # (from _tracked_in_key in storage.py). Test names may
-                        # contain "::" (e.g. pytest), so match the composite
-                        # pattern precisely: *#<digits>::
-                        if re.match(r".+#\d+::", key):
-                            continue
-                        test_name = key
-                    tracked_in_data.setdefault(test_name, []).extend(links)
             except Exception:
                 logger.warning(
                     "Failed to fetch tracked-in links for RP push, job_id=%s",
