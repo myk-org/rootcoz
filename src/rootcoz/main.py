@@ -5954,6 +5954,23 @@ async def _execute_rp_push(
             if result:
                 history_classifications[name] = result
 
+        # Fetch user-tracked links for the job
+        tracked_in_data: dict[str, list[dict]] = {}
+        if settings.rp_push_tracker_links:
+            try:
+                all_tracked = await storage.get_tracked_in_for_job(job_id)
+                # Rekey by test_name (strip child_job_name prefix from composite keys)
+                for key, links in all_tracked.items():
+                    # Composite key format: "child#build::test_name" or just "test_name"
+                    test_name = key.split("::", 1)[-1] if "::" in key else key
+                    tracked_in_data.setdefault(test_name, []).extend(links)
+            except Exception:
+                logger.warning(
+                    "Failed to fetch tracked-in links for RP push, job_id=%s",
+                    job_id,
+                    exc_info=True,
+                )
+
         try:
             push_result = await asyncio.to_thread(
                 rp_client.push_classifications,
@@ -5963,6 +5980,7 @@ async def _execute_rp_push(
                 push_classifications=settings.rp_push_classifications,
                 push_rootcoz_url=settings.rp_push_rootcoz_url,
                 push_tracker_links=settings.rp_push_tracker_links,
+                tracked_in_links=tracked_in_data,
             )
         except Exception as exc:
             user_msg, log_msg = _rp_error_message(

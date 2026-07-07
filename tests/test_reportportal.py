@@ -923,6 +923,116 @@ class TestPushContentToggles(TestPushClassifications):
         assert "comment" not in payload["issue"]
         assert payload["issue"]["externalSystemIssues"][0]["ticketId"] == "PROJ-123"
 
+    def test_tracked_in_links_pushed_as_external_issues(self):
+        """User-tracked links are pushed as external system issues."""
+        client, mock_session = self._setup_push_client()
+        failure = self._make_failure("PRODUCT BUG")
+        matched = [({"id": 207, "name": "test_tracked", "launchId": 10}, failure)]
+
+        tracked = {
+            "test_example": [
+                {
+                    "tracked_in_url": "https://github.com/org/repo/pull/5141",
+                    "tracked_in_type": "github",
+                    "tracked_in_by": "user1",
+                },
+            ]
+        }
+
+        result = client.push_classifications(
+            matched,
+            "http://rootcoz.example.com/results/job-1",
+            tracked_in_links=tracked,
+        )
+        assert result["pushed"] == 1
+        payload = _extract_put_json(mock_session)
+        ext = payload["issue"]["externalSystemIssues"]
+        assert len(ext) == 1
+        assert ext[0]["url"] == "https://github.com/org/repo/pull/5141"
+        assert ext[0]["ticketId"] == "5141"
+
+    def test_tracked_in_links_merged_with_jira_matches(self):
+        """Tracked-in links and AI Jira matches are combined."""
+        client, mock_session = self._setup_push_client()
+        failure = self._make_failure_with_jira()
+        matched = [({"id": 208, "name": "test_merge", "launchId": 10}, failure)]
+
+        tracked = {
+            "test_example": [
+                {
+                    "tracked_in_url": "https://github.com/org/repo/pull/100",
+                    "tracked_in_type": "github",
+                    "tracked_in_by": "user1",
+                },
+            ]
+        }
+
+        result = client.push_classifications(
+            matched,
+            "http://rootcoz.example.com/results/job-1",
+            tracked_in_links=tracked,
+        )
+        assert result["pushed"] == 1
+        payload = _extract_put_json(mock_session)
+        ext = payload["issue"]["externalSystemIssues"]
+        assert len(ext) == 2
+        # First is the Jira match, second is the tracked-in link
+        urls = {e["url"] for e in ext}
+        assert "https://jira.example.com/browse/PROJ-123" in urls
+        assert "https://github.com/org/repo/pull/100" in urls
+
+    def test_tracked_in_links_deduplicated_with_jira_matches(self):
+        """Tracked-in link with same URL as Jira match is not duplicated."""
+        client, mock_session = self._setup_push_client()
+        failure = self._make_failure_with_jira()
+        matched = [({"id": 209, "name": "test_dedup", "launchId": 10}, failure)]
+
+        tracked = {
+            "test_example": [
+                {
+                    "tracked_in_url": "https://jira.example.com/browse/PROJ-123",
+                    "tracked_in_type": "jira",
+                    "tracked_in_by": "user1",
+                },
+            ]
+        }
+
+        result = client.push_classifications(
+            matched,
+            "http://rootcoz.example.com/results/job-1",
+            tracked_in_links=tracked,
+        )
+        assert result["pushed"] == 1
+        payload = _extract_put_json(mock_session)
+        ext = payload["issue"]["externalSystemIssues"]
+        assert len(ext) == 1  # Deduplicated
+
+    def test_tracked_in_links_skipped_when_toggle_disabled(self):
+        """Tracked-in links not pushed when push_tracker_links is disabled."""
+        client, mock_session = self._setup_push_client()
+        failure = self._make_failure("PRODUCT BUG")
+        matched = [({"id": 210, "name": "test_skip", "launchId": 10}, failure)]
+
+        tracked = {
+            "test_example": [
+                {
+                    "tracked_in_url": "https://github.com/org/repo/pull/5141",
+                    "tracked_in_type": "github",
+                    "tracked_in_by": "user1",
+                },
+            ]
+        }
+
+        result = client.push_classifications(
+            matched,
+            "http://rootcoz.example.com/results/job-1",
+            push_tracker_links=False,
+            tracked_in_links=tracked,
+        )
+        assert result["pushed"] == 1
+        payload = _extract_put_json(mock_session)
+        assert "externalSystemIssues" not in payload["issue"]
+
 
 # -- close tests --------------------------------------------------------------
 

@@ -333,6 +333,7 @@ class ReportPortalClient:
         push_classifications: bool = True,
         push_rootcoz_url: bool = True,
         push_tracker_links: bool = True,
+        tracked_in_links: dict[str, list[dict]] | None = None,
     ) -> dict:
         """Push rootcoz classifications into RP test items.
 
@@ -356,6 +357,10 @@ class ReportPortalClient:
                 with a link to the rootcoz report page.
             push_tracker_links: When ``True`` (default), attach Jira
                 matches as external system issues.
+            tracked_in_links: Optional mapping of test name to list of
+                tracked-in link dicts (each with ``tracked_in_url`` and
+                ``tracked_in_type`` keys). Merged with AI Jira matches
+                when ``push_tracker_links`` is ``True``.
 
         Returns:
             Dict with keys: ``pushed``, ``unmatched``, ``errors``, ``launch_id``.
@@ -439,6 +444,22 @@ class ReportPortalClient:
                                 "ticketId": jira_match.key,
                             }
                         )
+
+                # Add user-tracked links (from tracked_in_links table)
+                seen_urls = {ei["url"] for ei in external_issues}
+                if tracked_in_links:
+                    for link in tracked_in_links.get(failure.test_name, []):
+                        link_url = link.get("tracked_in_url", "")
+                        if link_url and link_url not in seen_urls:
+                            seen_urls.add(link_url)
+                            external_issues.append(
+                                {
+                                    "url": link_url,
+                                    "btsProject": "",
+                                    "btsUrl": link_url,
+                                    "ticketId": link_url.rstrip("/").rsplit("/", 1)[-1],
+                                }
+                            )
 
                 if external_issues:
                     issue_payload["externalSystemIssues"] = external_issues
