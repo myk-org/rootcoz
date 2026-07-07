@@ -2204,13 +2204,11 @@ class TestRPPushChildValidation:
 class TestPushedByForwarding:
     """Verify pushed_by is threaded from endpoint to push_classifications."""
 
-    @patch("rootcoz.main.get_history_classification", new_callable=AsyncMock)
-    @patch("rootcoz.main.get_result")
-    @patch("rootcoz.main.ReportPortalClient")
-    def test_pushed_by_forwarded_from_endpoint(
-        self, mock_rp_class, mock_get_result, mock_get_cls, _rp_enabled_env
-    ):
-        """Username from request is forwarded as pushed_by to push_classifications."""
+    @staticmethod
+    def _setup_mocks(mock_rp_class, mock_get_result, mock_get_cls):
+        """Configure shared mocks for RP push tests. Returns (mock_rp, client)."""
+        from rootcoz.main import app
+
         mock_get_cls.return_value = ""
         mock_get_result.return_value = {
             "status": "completed",
@@ -2248,12 +2246,22 @@ class TestPushedByForwarding:
         }
         mock_rp_class.return_value = mock_rp
 
-        from rootcoz.main import app
-
         client = TestClient(
             app,
             raise_server_exceptions=False,
             headers={"Authorization": "Bearer test-admin-key-16chars"},
+        )
+        return mock_rp, client
+
+    @patch("rootcoz.main.get_history_classification", new_callable=AsyncMock)
+    @patch("rootcoz.main.get_result")
+    @patch("rootcoz.main.ReportPortalClient")
+    def test_pushed_by_forwarded_from_endpoint(
+        self, mock_rp_class, mock_get_result, mock_get_cls, _rp_enabled_env
+    ):
+        """Username from request is forwarded as pushed_by to push_classifications."""
+        mock_rp, client = self._setup_mocks(
+            mock_rp_class, mock_get_result, mock_get_cls
         )
         response = client.post("/results/some-job-id/push-reportportal")
         assert response.status_code == 200
@@ -2269,50 +2277,7 @@ class TestPushedByForwarding:
         self, mock_rp_class, mock_get_result, mock_get_cls, mock_logger, _rp_enabled_env
     ):
         """INFO log for manual RP push includes the authenticated username."""
-        mock_get_cls.return_value = ""
-        mock_get_result.return_value = {
-            "status": "completed",
-            "result": {
-                "job_name": "my-job",
-                "build_number": 42,
-                "jenkins_url": "https://jenkins.example.com/job/my-job/42/",
-                "failures": [
-                    {
-                        "test_name": "test_a",
-                        "error": "err",
-                        "analysis": {
-                            "classification": "PRODUCT BUG",
-                            "details": "Bug found",
-                        },
-                    }
-                ],
-            },
-        }
-        mock_rp = MagicMock()
-        mock_rp.__enter__ = MagicMock(return_value=mock_rp)
-        mock_rp.__exit__ = MagicMock(return_value=False)
-        mock_rp.find_launch.return_value = 100
-        mock_rp.get_failed_items.return_value = [
-            {"id": 1, "name": "test_a", "status": "FAILED"}
-        ]
-        mock_rp.match_failures.return_value = [
-            ({"id": 1, "name": "test_a"}, MagicMock(test_name="test_a"))
-        ]
-        mock_rp.push_classifications.return_value = {
-            "pushed": 1,
-            "unmatched": [],
-            "errors": [],
-            "launch_id": 100,
-        }
-        mock_rp_class.return_value = mock_rp
-
-        from rootcoz.main import app
-
-        client = TestClient(
-            app,
-            raise_server_exceptions=False,
-            headers={"Authorization": "Bearer test-admin-key-16chars"},
-        )
+        _, client = self._setup_mocks(mock_rp_class, mock_get_result, mock_get_cls)
         response = client.post("/results/some-job-id/push-reportportal")
         assert response.status_code == 200, f"Response: {response.text}"
         # Verify INFO log was called with the expected format string and args

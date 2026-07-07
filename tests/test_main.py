@@ -6102,3 +6102,35 @@ class TestSubmitterAutoTag:
         assert "alice" not in new_result["tags"]  # old submitter removed
         assert "nightly" in new_result["tags"]  # non-submitter tag preserved
         assert "re-analyze" in new_result["tags"]  # system tag preserved
+
+
+class TestSanitizeControlChars:
+    """Tests for _sanitize_control_chars."""
+
+    @pytest.mark.parametrize(
+        "input_val, expected",
+        [
+            ("alice", "alice"),
+            ("", ""),
+            ("alice\nfake", "alicefake"),
+            ("bob\r\nINFO", "bobINFO"),
+            ("tab\there", "tabhere"),
+            ("null\x00here", "nullhere"),
+            ("del\x7fhere", "delhere"),
+            ("\x01\x02test\x1f", "test"),
+        ],
+        ids=[
+            "normal",
+            "empty",
+            "newline",
+            "crlf",
+            "tab",
+            "null_byte",
+            "del_char",
+            "mixed_control",
+        ],
+    )
+    def test_sanitize_control_chars(self, input_val: str, expected: str) -> None:
+        from rootcoz.main import _sanitize_control_chars
+
+        assert _sanitize_control_chars(input_val) == expected

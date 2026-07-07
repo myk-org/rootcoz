@@ -647,14 +647,8 @@ def build_jenkins_url(base_url: str, job_name: str, build_number: int) -> str:
 _CONTROL_CHAR_RE = re.compile(r"[\x00-\x1f\x7f]")
 
 
-def _sanitize_for_log(value: str) -> str:
-    """Strip control characters to prevent log forging.
-
-    In trusted-proxy mode, ``request.state.username`` may originate from
-    ``X-Forwarded-User`` with minimal validation.  Stripping control
-    characters (newlines, carriage returns, etc.) prevents injection of
-    fake log lines.
-    """
+def _sanitize_control_chars(value: str) -> str:
+    """Strip control characters from a string."""
     return _CONTROL_CHAR_RE.sub("", value)
 
 
@@ -5612,7 +5606,7 @@ async def push_to_reportportal(
     username = getattr(request.state, "username", "")
     # Sanitize control characters to prevent log forging (trusted-proxy
     # mode populates username from X-Forwarded-User with minimal validation)
-    safe_username = _sanitize_for_log(username)
+    safe_username = _sanitize_control_chars(username)
     logger.info("RP push requested by '%s' for job %s", safe_username, job_id)
     if not settings.reportportal_enabled:
         raise HTTPException(
