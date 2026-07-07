@@ -5823,7 +5823,7 @@ async def _execute_rp_push(
         # urlparse().port on malformed ports.
         try:
             rp_host = (
-                urllib.parse.urlparse(rp.url).netloc.rsplit("@", 1)[-1]
+                urllib.parse.urlparse(rp.url).netloc.rsplit("@", 1)[-1] or rp.url
                 if rp.url
                 else "unknown"
             )
