@@ -33,10 +33,10 @@ from rootcoz.engine.core import (
     extract_relevant_console_lines,
     format_exception_with_type,
     get_failure_signature,
-    link_artifacts_to_workspace,
     resolve_additional_repos,
     safe_update_progress,
 )
+from rootcoz.sources.base import link_artifacts_to_workspace
 from rootcoz.error_messages import ai_not_configured_message, make_user_friendly_error
 from rootcoz.jenkins import JenkinsClient
 from rootcoz.jenkins_artifacts import cleanup_extract_dir, process_build_artifacts

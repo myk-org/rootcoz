@@ -8,12 +8,15 @@ out of the pipeline logic.
 
 from __future__ import annotations
 
+import logging
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 from rootcoz.models import FailedTest
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -168,3 +171,28 @@ class CISource(ABC):
         implementation is a no-op.
         """
         return  # intentional no-op; subclasses override when needed
+
+
+def link_artifacts_to_workspace(
+    repo_path: Path, extract_path: Path, job_id: str
+) -> bool:
+    """Symlink downloaded artifacts into the AI workspace.
+
+    Creates a ``build-artifacts`` symlink inside *repo_path* pointing to
+    *extract_path* so the AI can explore artifacts via a stable relative path.
+
+    Returns:
+        ``True`` if the link was created successfully, ``False`` on failure.
+    """
+    link = repo_path / "build-artifacts"
+    try:
+        link.symlink_to(extract_path)
+        logger.info("Linked artifacts into workspace: %s (job %s)", link, job_id)
+        return True
+    except OSError:
+        logger.warning(
+            "Could not link artifacts into workspace for job %s",
+            job_id,
+            exc_info=True,
+        )
+        return False

@@ -95,7 +95,6 @@ from rootcoz.engine.core import (
     copy_rootcoz_pi_resources,
     extract_json_dict,
     get_failure_signature,
-    link_artifacts_to_workspace,
     resolve_additional_repos,
     safe_update_progress,
     set_progress_callback,
@@ -172,7 +171,14 @@ from rootcoz.rootcoz_repo_settings import (
     resolve_tests_repo_url,
     tests_repo_available,
 )
-from rootcoz.sources import CISource, FileSource, JenkinsSource, ProwSource, RawSource
+from rootcoz.sources import (
+    CISource,
+    FileSource,
+    JenkinsSource,
+    ProwSource,
+    RawSource,
+    link_artifacts_to_workspace,
+)
 from rootcoz.sources.prow_source import prow_identity
 from rootcoz.sources.jenkins_source import analyze_job, wait_for_jenkins_completion
 from rootcoz.storage import (

@@ -1019,31 +1019,6 @@ def _extract_json_from_code_blocks(text: str) -> dict | None:
     return None
 
 
-def link_artifacts_to_workspace(
-    repo_path: Path, extract_path: Path, job_id: str
-) -> bool:
-    """Symlink downloaded artifacts into the AI workspace.
-
-    Creates a ``build-artifacts`` symlink inside *repo_path* pointing to
-    *extract_path* so the AI can explore artifacts via a stable relative path.
-
-    Returns:
-        ``True`` if the link was created successfully, ``False`` on failure.
-    """
-    link = repo_path / "build-artifacts"
-    try:
-        link.symlink_to(extract_path)
-        logger.info("Linked artifacts into workspace: %s (job %s)", link, job_id)
-        return True
-    except OSError:
-        logger.warning(
-            "Could not link artifacts into workspace for job %s",
-            job_id,
-            exc_info=True,
-        )
-        return False
-
-
 def extract_relevant_console_lines(console_output: str) -> str:
     """Extract only error, failure, and warning lines from console output.
 
