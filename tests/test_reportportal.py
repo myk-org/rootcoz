@@ -821,6 +821,42 @@ class TestPushClassifications:
         comment = issues[0]["issue"]["comment"]
         assert "Pushed by" not in comment
 
+    def test_reviewed_by_included_in_comment(self):
+        """reviewed_by username appears in the RP comment."""
+        client, mock_session = self._setup_push_client()
+        failure = self._make_failure("CODE ISSUE", "Missing import")
+        failure.test_name = "test_a"
+        matched = [({"id": 1, "name": "test_a", "launchId": 10}, failure)]
+        result = client.push_classifications(
+            matched,
+            "https://rootcoz.example.com/results/j1",
+            pushed_by="alice",
+            reviewed_by={"test_a": "bob"},
+        )
+        assert result["pushed"] == 1
+        put_call = mock_session.put.call_args
+        issues = put_call[1]["json"]["issues"]
+        comment = issues[0]["issue"]["comment"]
+        assert "Pushed by alice" in comment
+        assert "Reviewed by bob" in comment
+
+    def test_reviewed_by_empty_omits_line(self):
+        """When reviewed_by has no entry for the test, no 'Reviewed by' line."""
+        client, mock_session = self._setup_push_client()
+        failure = self._make_failure("CODE ISSUE", "Missing import")
+        failure.test_name = "test_a"
+        matched = [({"id": 1, "name": "test_a", "launchId": 10}, failure)]
+        result = client.push_classifications(
+            matched,
+            "https://rootcoz.example.com/results/j1",
+            reviewed_by={},
+        )
+        assert result["pushed"] == 1
+        put_call = mock_session.put.call_args
+        issues = put_call[1]["json"]["issues"]
+        comment = issues[0]["issue"]["comment"]
+        assert "Reviewed by" not in comment
+
 
 # -- push content toggle tests ------------------------------------------------
 

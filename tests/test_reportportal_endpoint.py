@@ -7,6 +7,17 @@ import pytest
 from fastapi.testclient import TestClient
 
 
+@pytest.fixture(autouse=True)
+def _mock_storage_reviews():
+    """Auto-mock storage.get_reviews_for_job for all RP endpoint tests."""
+    with patch(
+        "rootcoz.main.storage.get_reviews_for_job",
+        new_callable=AsyncMock,
+        return_value={},
+    ):
+        yield
+
+
 @pytest.fixture
 def _rp_disabled_env():
     """Environment with RP disabled."""
@@ -2292,3 +2303,33 @@ class TestPushedByForwarding:
         assert logged_job_id == "some-job-id", (
             f"Expected 'some-job-id', got '{logged_job_id}'"
         )
+
+    @patch("rootcoz.main.storage.get_reviews_for_job", new_callable=AsyncMock)
+    @patch("rootcoz.main.get_history_classification", new_callable=AsyncMock)
+    @patch("rootcoz.main.get_result")
+    @patch("rootcoz.main.ReportPortalClient")
+    def test_reviewed_by_forwarded_from_endpoint(
+        self,
+        mock_rp_class,
+        mock_get_result,
+        mock_get_cls,
+        mock_get_reviews,
+        _rp_enabled_env,
+    ):
+        """Reviewer username from storage is forwarded as reviewed_by to push_classifications."""
+        mock_get_reviews.return_value = {
+            "test_a": {
+                "reviewed": True,
+                "username": "bob",
+                "updated_at": "2024-01-01T00:00:00Z",
+            },
+        }
+        mock_rp, client = self._setup_mocks(
+            mock_rp_class,
+            mock_get_result,
+            mock_get_cls,
+        )
+        response = client.post("/results/some-job-id/push-reportportal")
+        assert response.status_code == 200
+        push_call = mock_rp.push_classifications.call_args
+        assert push_call.kwargs["reviewed_by"] == {"test_a": "bob"}

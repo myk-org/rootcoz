@@ -6000,6 +6000,12 @@ async def _execute_rp_push(
                     job_id,
                     exc_info=True,
                 )
+        # Get reviewer usernames for matched failures
+        reviews = await storage.get_reviews_for_job(job_id)
+        reviewed_by: dict[str, str] = {}
+        for test_name, review_data in reviews.items():
+            if review_data.get("reviewed") and review_data.get("username"):
+                reviewed_by[test_name] = review_data["username"]
 
         try:
             push_result = await asyncio.to_thread(
