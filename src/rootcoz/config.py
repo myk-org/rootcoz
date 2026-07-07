@@ -308,6 +308,7 @@ class Settings(BaseSettings):
     github_token: SecretStr | None = None
 
     # Report Portal integration (optional)
+    # TODO: consolidate into ReportPortalConfig struct (issue #174 follow-up)
     reportportal_url: str | None = None
     reportportal_api_token: SecretStr | None = None
     reportportal_project: str | None = None
