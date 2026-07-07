@@ -323,6 +323,21 @@ class Settings(BaseSettings):
             " and REPORTPORTAL_PROJECT are configured."
         ),
     )
+    rp_push_classifications: bool = Field(
+        default=True,
+        description=(
+            "Include classification (defect type mapping) when pushing to Report Portal. "
+            "Maps rootcoz classifications to RP defect types (PRODUCT_BUG, AUTOMATION_BUG, SYSTEM_ISSUE)."
+        ),
+    )
+    rp_push_rootcoz_url: bool = Field(
+        default=True,
+        description="Include rootcoz analysis URL as a comment on Report Portal test items.",
+    )
+    rp_push_tracker_links: bool = Field(
+        default=True,
+        description="Include Jira/GitHub issue links as external system issues on Report Portal test items.",
+    )
 
     # Web Push (VAPID) configuration (optional, server-only)
     vapid_public_key: str = ""

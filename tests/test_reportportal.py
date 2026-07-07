@@ -458,6 +458,7 @@ class TestPushClassifications:
         "PRODUCT_BUG": "pb001",
         "AUTOMATION_BUG": "ab001",
         "SYSTEM_ISSUE": "si001",
+        "TO_INVESTIGATE": "ti001",
     }
 
     def _make_failure(self, classification="PRODUCT BUG", details="Analysis text"):
@@ -467,6 +468,18 @@ class TestPushClassifications:
         failure.analysis.details = details
         failure.analysis.product_bug_report = None
         failure.analysis.code_fix = None
+        failure.test_name = "test_example"
+        return failure
+
+    def _make_failure_with_jira(self):
+        """Create a failure with Jira matches for tracker link tests."""
+        failure = self._make_failure("PRODUCT BUG", "Bug text")
+        jira_match = MagicMock()
+        jira_match.url = "https://jira.example.com/browse/PROJ-123"
+        jira_match.key = "PROJ-123"
+        jira_match.summary = "Known bug"
+        failure.analysis.product_bug_report = MagicMock()
+        failure.analysis.product_bug_report.jira_matches = [jira_match]
         return failure
 
     def _setup_push_client(self, *, locators=None, put_side_effect=None):
@@ -778,6 +791,137 @@ class TestPushClassifications:
         assert error_calls, "Expected error log for generic exception"
         log_msg = str(error_calls[0])
         assert "connection refused" in log_msg
+
+
+# -- push content toggle tests ------------------------------------------------
+
+
+class TestPushContentToggles(TestPushClassifications):
+    """Test push_classifications() content toggle combinations."""
+
+    def test_all_toggles_enabled_includes_everything(self):
+        """Default behavior: classification, comment, and tracker links all present."""
+        client, mock_session = self._setup_push_client()
+        failure = self._make_failure_with_jira()
+        matched = [({"id": 200, "name": "test_all", "launchId": 10}, failure)]
+
+        result = client.push_classifications(
+            matched,
+            "http://rootcoz.example.com/results/job-1",
+            push_classifications=True,
+            push_rootcoz_url=True,
+            push_tracker_links=True,
+        )
+        assert result["pushed"] == 1
+        payload = _extract_put_json(mock_session)
+        assert payload["issue"]["issueType"] == "pb001"
+        assert "rootcoz Failure Analysis" in payload["issue"]["comment"]
+        assert "externalSystemIssues" in payload["issue"]
+        assert payload["issue"]["externalSystemIssues"][0]["ticketId"] == "PROJ-123"
+
+    def test_classifications_disabled_uses_to_investigate(self):
+        """When classifications disabled, issueType falls back to TO_INVESTIGATE."""
+        client, mock_session = self._setup_push_client()
+        failure = self._make_failure("PRODUCT BUG")
+        matched = [({"id": 201, "name": "test_no_cls", "launchId": 10}, failure)]
+
+        result = client.push_classifications(
+            matched,
+            "http://rootcoz.example.com/results/job-1",
+            push_classifications=False,
+        )
+        assert result["pushed"] == 1
+        payload = _extract_put_json(mock_session)
+        assert payload["issue"]["issueType"] == "ti001"
+
+    def test_classifications_disabled_skips_unmatched(self):
+        """When classifications disabled, unknown classifications don't go to unmatched."""
+        client, mock_session = self._setup_push_client()
+        failure = self._make_failure("SOMETHING UNKNOWN")
+        matched = [({"id": 202, "name": "test_unknown", "launchId": 10}, failure)]
+
+        result = client.push_classifications(
+            matched,
+            "http://rootcoz.example.com/results/job-1",
+            push_classifications=False,
+        )
+        assert result["pushed"] == 1
+        assert result["unmatched"] == []
+        payload = _extract_put_json(mock_session)
+        assert payload["issue"]["issueType"] == "ti001"
+
+    def test_rootcoz_url_disabled_no_comment(self):
+        """When rootcoz URL disabled, no comment in payload."""
+        client, mock_session = self._setup_push_client()
+        failure = self._make_failure("PRODUCT BUG")
+        matched = [({"id": 203, "name": "test_no_url", "launchId": 10}, failure)]
+
+        result = client.push_classifications(
+            matched,
+            "http://rootcoz.example.com/results/job-1",
+            push_rootcoz_url=False,
+        )
+        assert result["pushed"] == 1
+        payload = _extract_put_json(mock_session)
+        assert "comment" not in payload["issue"]
+        # Classification should still be there
+        assert payload["issue"]["issueType"] == "pb001"
+
+    def test_tracker_links_disabled_no_external_issues(self):
+        """When tracker links disabled, no externalSystemIssues even with Jira matches."""
+        client, mock_session = self._setup_push_client()
+        failure = self._make_failure_with_jira()
+        matched = [({"id": 204, "name": "test_no_links", "launchId": 10}, failure)]
+
+        result = client.push_classifications(
+            matched,
+            "http://rootcoz.example.com/results/job-1",
+            push_tracker_links=False,
+        )
+        assert result["pushed"] == 1
+        payload = _extract_put_json(mock_session)
+        assert "externalSystemIssues" not in payload["issue"]
+        # Classification and comment should still be there
+        assert payload["issue"]["issueType"] == "pb001"
+        assert "rootcoz Failure Analysis" in payload["issue"]["comment"]
+
+    def test_only_rootcoz_url_enabled(self):
+        """Only rootcoz URL — no classification mapping, no tracker links."""
+        client, mock_session = self._setup_push_client()
+        failure = self._make_failure_with_jira()
+        matched = [({"id": 205, "name": "test_url_only", "launchId": 10}, failure)]
+
+        result = client.push_classifications(
+            matched,
+            "http://rootcoz.example.com/results/job-1",
+            push_classifications=False,
+            push_rootcoz_url=True,
+            push_tracker_links=False,
+        )
+        assert result["pushed"] == 1
+        payload = _extract_put_json(mock_session)
+        assert payload["issue"]["issueType"] == "ti001"
+        assert "rootcoz Failure Analysis" in payload["issue"]["comment"]
+        assert "externalSystemIssues" not in payload["issue"]
+
+    def test_only_tracker_links_enabled(self):
+        """Only tracker links — no classification, no rootcoz URL."""
+        client, mock_session = self._setup_push_client()
+        failure = self._make_failure_with_jira()
+        matched = [({"id": 206, "name": "test_links_only", "launchId": 10}, failure)]
+
+        result = client.push_classifications(
+            matched,
+            "http://rootcoz.example.com/results/job-1",
+            push_classifications=False,
+            push_rootcoz_url=False,
+            push_tracker_links=True,
+        )
+        assert result["pushed"] == 1
+        payload = _extract_put_json(mock_session)
+        assert payload["issue"]["issueType"] == "ti001"
+        assert "comment" not in payload["issue"]
+        assert payload["issue"]["externalSystemIssues"][0]["ticketId"] == "PROJ-123"
 
 
 # -- close tests --------------------------------------------------------------

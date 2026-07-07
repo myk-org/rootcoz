@@ -329,6 +329,10 @@ class ReportPortalClient:
         matched_pairs: list[tuple[dict, FailureAnalysis]],
         report_url: str,
         history_classifications: dict[str, str] | None = None,
+        *,
+        push_classifications: bool = True,
+        push_rootcoz_url: bool = True,
+        push_tracker_links: bool = True,
     ) -> dict:
         """Push rootcoz classifications into RP test items.
 
@@ -337,11 +341,21 @@ class ReportPortalClient:
         - Comment with link to rootcoz report page
         - External system issues for Jira matches (if present)
 
+        Each component can be independently toggled:
+
         Args:
             matched_pairs: List of ``(rp_item, rcz_failure)`` tuples.
             report_url: URL to the rootcoz report page.
             history_classifications: Optional mapping of test name to
                 history classification (e.g. ``INFRASTRUCTURE``).
+            push_classifications: When ``True`` (default), map rootcoz
+                classifications to RP defect types. When ``False``, use
+                the RP ``TO_INVESTIGATE`` default so the original RP
+                classification is not overridden.
+            push_rootcoz_url: When ``True`` (default), include a comment
+                with a link to the rootcoz report page.
+            push_tracker_links: When ``True`` (default), attach Jira
+                matches as external system issues.
 
         Returns:
             Dict with keys: ``pushed``, ``unmatched``, ``errors``, ``launch_id``.
@@ -385,39 +399,49 @@ class ReportPortalClient:
             hist_cls = history.get(failure.test_name)
             locator = self._map_classification(ai_classification, hist_cls, locators)
 
-            if not locator:
-                unmatched.append(item_name)
-                continue
-
-            # Build comment
-            comment = f"See AI failure analysis under: [rootcoz Failure Analysis]({report_url})"
+            if push_classifications:
+                if not locator:
+                    unmatched.append(item_name)
+                    continue
+                issue_type = locator
+            else:
+                # RP API requires issueType; use TO_INVESTIGATE as neutral default
+                issue_type = (
+                    locators.get("TO_INVESTIGATE")
+                    or _DEFAULT_LOCATORS["TO_INVESTIGATE"]
+                )
 
             # Build issue update payload (RP API uses camelCase)
             issue_payload: dict = {
-                "issueType": locator,
-                "comment": comment,
+                "issueType": issue_type,
                 "autoAnalyzed": False,
                 "ignoreAnalyzer": True,
             }
 
-            # Add Jira matches as external issues
-            external_issues = []
-            pbr = failure.analysis.product_bug_report
-            if pbr and not isinstance(pbr, bool) and pbr.jira_matches:
-                for jira_match in pbr.jira_matches:
-                    external_issues.append(
-                        {
-                            "url": jira_match.url,
-                            "btsProject": jira_match.key.split("-")[0]
-                            if "-" in jira_match.key
-                            else "",
-                            "btsUrl": jira_match.url,
-                            "ticketId": jira_match.key,
-                        }
-                    )
+            if push_rootcoz_url:
+                issue_payload["comment"] = (
+                    f"See AI failure analysis under: [rootcoz Failure Analysis]({report_url})"
+                )
 
-            if external_issues:
-                issue_payload["externalSystemIssues"] = external_issues
+            # Add Jira matches as external issues
+            if push_tracker_links:
+                external_issues = []
+                pbr = failure.analysis.product_bug_report
+                if pbr and not isinstance(pbr, bool) and pbr.jira_matches:
+                    for jira_match in pbr.jira_matches:
+                        external_issues.append(
+                            {
+                                "url": jira_match.url,
+                                "btsProject": jira_match.key.split("-")[0]
+                                if "-" in jira_match.key
+                                else "",
+                                "btsUrl": jira_match.url,
+                                "ticketId": jira_match.key,
+                            }
+                        )
+
+                if external_issues:
+                    issue_payload["externalSystemIssues"] = external_issues
 
             bulk_issues.append({"testItemId": item_id, "issue": issue_payload})
 

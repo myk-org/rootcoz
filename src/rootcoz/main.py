@@ -247,6 +247,9 @@ _SETTINGS_CATEGORIES: dict[str, list[str]] = {
         "reportportal_project",
         "reportportal_verify_ssl",
         "enable_reportportal",
+        "rp_push_classifications",
+        "rp_push_rootcoz_url",
+        "rp_push_tracker_links",
     ],
     "Auth & Security": [
         "admin_key",
@@ -5773,6 +5776,19 @@ async def _execute_rp_push(
             "No failures to push to Report Portal.",
         )
 
+    # Validate at least one push content toggle is enabled
+    if not any(
+        (
+            settings.rp_push_classifications,
+            settings.rp_push_rootcoz_url,
+            settings.rp_push_tracker_links,
+        )
+    ):
+        return _rp_push_error_result(
+            "All Report Portal push content toggles are disabled. "
+            "Enable at least one of: rp_push_classifications, rp_push_rootcoz_url, rp_push_tracker_links.",
+        )
+
     # Called only when reportportal_enabled is True, which guarantees these
     # fields are set (see Settings.reportportal_enabled property).  Explicit
     # checks narrow the Optional types for mypy and survive python -O.
@@ -5944,6 +5960,9 @@ async def _execute_rp_push(
                 matched,
                 report_url,
                 history_classifications,
+                push_classifications=settings.rp_push_classifications,
+                push_rootcoz_url=settings.rp_push_rootcoz_url,
+                push_tracker_links=settings.rp_push_tracker_links,
             )
         except Exception as exc:
             user_msg, log_msg = _rp_error_message(
