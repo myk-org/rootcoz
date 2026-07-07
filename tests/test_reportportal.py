@@ -1150,3 +1150,24 @@ class TestExtractBtsFields:
         project, ticket = _extract_bts_fields("https://github.com/org/repo/pull/99/")
         assert project == "org/repo"
         assert ticket == "99"
+
+    def test_github_pr_deep_link_files(self):
+        project, ticket = _extract_bts_fields(
+            "https://github.com/org/repo/pull/5141/files"
+        )
+        assert project == "org/repo"
+        assert ticket == "5141"
+
+    def test_github_pr_deep_link_commits(self):
+        project, ticket = _extract_bts_fields(
+            "https://github.com/org/repo/pull/5141/commits"
+        )
+        assert project == "org/repo"
+        assert ticket == "5141"
+
+    def test_github_issue_with_comment_anchor(self):
+        project, ticket = _extract_bts_fields(
+            "https://github.com/org/repo/issues/42#issuecomment-12345"
+        )
+        assert project == "org/repo"
+        assert ticket == "42"

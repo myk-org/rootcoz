@@ -92,8 +92,10 @@ def _extract_bts_fields(url: str) -> tuple[str, str]:
     ticket_id = segments[-1] if segments else hostname
 
     if "github" in hostname and len(segments) >= 4:
-        # github.com/org/repo/issues/123 or github.com/org/repo/pull/123
-        return f"{segments[0]}/{segments[1]}", segments[-1]
+        # github.com/org/repo/issues/123 or github.com/org/repo/pull/123/files
+        # Use segments[3] (the number), not segments[-1] (may be 'files', 'commits')
+        if segments[2] in {"issues", "pull"}:
+            return f"{segments[0]}/{segments[1]}", segments[3]
 
     if "jira" in hostname or "atlassian" in hostname:
         # Jira: ticketId like PROJ-123, btsProject = PROJ
