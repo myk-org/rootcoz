@@ -5795,7 +5795,7 @@ async def _execute_rp_push(
     # checks narrow the Optional types for mypy and survive python -O.
     if rp.url is None:
         raise RuntimeError("reportportal_url is required when Report Portal is enabled")
-    if rp.api_token is None:
+    if rp.api_token is None or not rp.api_token.get_secret_value():
         raise RuntimeError(
             "reportportal_api_token is required when Report Portal is enabled"
         )
@@ -5807,7 +5807,7 @@ async def _execute_rp_push(
     try:
         rp_client_ctx = ReportPortalClient(
             url=rp.url,
-            token=rp.api_token,
+            token=rp.api_token.get_secret_value(),
             project=rp.project,
             verify_ssl=rp.verify_ssl,
         )

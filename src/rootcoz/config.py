@@ -175,26 +175,21 @@ def parse_repo_ref(raw: str) -> tuple[str, str]:
 
 
 class ReportPortalConfig(NamedTuple):
-    """Typed access to Report Portal settings."""
+    """Typed access to Report Portal settings.
+
+    ``api_token`` is kept as :class:`SecretStr` to preserve redaction
+    guarantees — callers must call ``.get_secret_value()`` at the point
+    of use (e.g. when constructing the RP client).
+    """
 
     url: str | None
-    api_token: str | None
+    api_token: SecretStr | None
     project: str | None
     verify_ssl: bool
     enabled: bool
     push_classifications: bool
     push_rootcoz_url: bool
     push_tracker_links: bool
-
-    def __repr__(self) -> str:
-        """Redact api_token to prevent accidental credential leaks."""
-        return (
-            f"ReportPortalConfig(url={self.url!r}, api_token='**********', "
-            f"project={self.project!r}, verify_ssl={self.verify_ssl!r}, "
-            f"enabled={self.enabled!r}, push_classifications={self.push_classifications!r}, "
-            f"push_rootcoz_url={self.push_rootcoz_url!r}, "
-            f"push_tracker_links={self.push_tracker_links!r})"
-        )
 
 
 class Settings(BaseSettings):
@@ -602,11 +597,7 @@ class Settings(BaseSettings):
         """Typed access to all Report Portal settings."""
         return ReportPortalConfig(
             url=self.reportportal_url,
-            api_token=(
-                self.reportportal_api_token.get_secret_value()
-                if self.reportportal_api_token
-                else None
-            ),
+            api_token=self.reportportal_api_token,
             project=self.reportportal_project,
             verify_ssl=self.reportportal_verify_ssl,
             enabled=self.reportportal_enabled,
