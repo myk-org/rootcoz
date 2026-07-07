@@ -5737,8 +5737,9 @@ async def _execute_rp_push(
     Returns:
         Dict with keys: ``pushed``, ``unmatched``, ``errors``, ``launch_id``.
     """
+    rp = settings.rp
     base_url = _extract_base_url()
-    if settings.rp_push_rootcoz_url and not base_url:
+    if rp.push_rootcoz_url and not base_url:
         raise ValueError(
             "PUBLIC_BASE_URL must be set to push rootcoz URL to Report Portal"
             " (relative URLs resolve against the RP domain)"
@@ -5779,9 +5780,9 @@ async def _execute_rp_push(
     # Validate at least one push content toggle is enabled
     if not any(
         (
-            settings.rp_push_classifications,
-            settings.rp_push_rootcoz_url,
-            settings.rp_push_tracker_links,
+            rp.push_classifications,
+            rp.push_rootcoz_url,
+            rp.push_tracker_links,
         )
     ):
         return _rp_push_error_result(
@@ -5792,23 +5793,23 @@ async def _execute_rp_push(
     # Called only when reportportal_enabled is True, which guarantees these
     # fields are set (see Settings.reportportal_enabled property).  Explicit
     # checks narrow the Optional types for mypy and survive python -O.
-    if settings.reportportal_url is None:
+    if rp.url is None:
         raise RuntimeError("reportportal_url is required when Report Portal is enabled")
-    if settings.reportportal_api_token is None:
+    if rp.api_token is None:
         raise RuntimeError(
             "reportportal_api_token is required when Report Portal is enabled"
         )
-    if settings.reportportal_project is None:
+    if rp.project is None:
         raise RuntimeError(
             "reportportal_project is required when Report Portal is enabled"
         )
 
     try:
         rp_client_ctx = ReportPortalClient(
-            url=settings.reportportal_url,
-            token=settings.reportportal_api_token.get_secret_value(),
-            project=settings.reportportal_project,
-            verify_ssl=settings.reportportal_verify_ssl,
+            url=rp.url,
+            token=rp.api_token,
+            project=rp.project,
+            verify_ssl=rp.verify_ssl,
         )
     except Exception as exc:
         user_msg, log_msg = _rp_error_message(
@@ -5817,7 +5818,7 @@ async def _execute_rp_push(
         )
         # Include the RP URL in the log message (not user-facing) so
         # operators can identify which RP instance failed.
-        log_msg = f"{log_msg}, reportportal_url='{settings.reportportal_url}'"
+        log_msg = f"{log_msg}, reportportal_url='{rp.url}'"
         return _log_and_return_rp_error(user_msg, log_msg=log_msg)
 
     with rp_client_ctx as rp_client:
@@ -5956,7 +5957,7 @@ async def _execute_rp_push(
 
         # Fetch user-tracked links scoped to the push target
         tracked_in_data: dict[str, list[dict]] = {}
-        if settings.rp_push_tracker_links:
+        if rp.push_tracker_links:
             try:
                 tracked_in_data = await storage.get_tracked_in_for_scope(
                     job_id,
@@ -5976,9 +5977,9 @@ async def _execute_rp_push(
                 matched,
                 report_url,
                 history_classifications,
-                push_classifications=settings.rp_push_classifications,
-                push_rootcoz_url=settings.rp_push_rootcoz_url,
-                push_tracker_links=settings.rp_push_tracker_links,
+                push_classifications=rp.push_classifications,
+                push_rootcoz_url=rp.push_rootcoz_url,
+                push_tracker_links=rp.push_tracker_links,
                 tracked_in_links=tracked_in_data,
             )
         except Exception as exc:

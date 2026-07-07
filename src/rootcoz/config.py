@@ -1,6 +1,7 @@
 """Configuration settings from environment variables."""
 
 import os
+from typing import NamedTuple
 from functools import lru_cache
 from urllib.parse import urlsplit, urlunsplit
 
@@ -173,6 +174,19 @@ def parse_repo_ref(raw: str) -> tuple[str, str]:
     return (raw, "")
 
 
+class ReportPortalConfig(NamedTuple):
+    """Typed access to Report Portal settings."""
+
+    url: str | None
+    api_token: str | None
+    project: str | None
+    verify_ssl: bool
+    enabled: bool
+    push_classifications: bool
+    push_rootcoz_url: bool
+    push_tracker_links: bool
+
+
 class Settings(BaseSettings):
     """Application settings loaded from environment variables."""
 
@@ -308,7 +322,7 @@ class Settings(BaseSettings):
     github_token: SecretStr | None = None
 
     # Report Portal integration (optional)
-    # TODO: consolidate into ReportPortalConfig struct (issue #174 follow-up)
+    # Flat fields for env var + settings UI compatibility; use `rp` property for typed access.
     reportportal_url: str | None = None
     reportportal_api_token: SecretStr | None = None
     reportportal_project: str | None = None
@@ -572,6 +586,24 @@ class Settings(BaseSettings):
                 )
             return False
         return True
+
+    @property
+    def rp(self) -> ReportPortalConfig:
+        """Typed access to all Report Portal settings."""
+        return ReportPortalConfig(
+            url=self.reportportal_url,
+            api_token=(
+                self.reportportal_api_token.get_secret_value()
+                if self.reportportal_api_token
+                else None
+            ),
+            project=self.reportportal_project,
+            verify_ssl=self.reportportal_verify_ssl,
+            enabled=self.reportportal_enabled,
+            push_classifications=self.rp_push_classifications,
+            push_rootcoz_url=self.rp_push_rootcoz_url,
+            push_tracker_links=self.rp_push_tracker_links,
+        )
 
 
 def resolve_jira_auth(settings: Settings) -> tuple[bool, str]:
