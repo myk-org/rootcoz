@@ -645,6 +645,8 @@ def build_jenkins_url(base_url: str, job_name: str, build_number: int) -> str:
 
 
 _CONTROL_CHAR_RE = re.compile(r"[\x00-\x1f\x7f]")
+# Matches composite review keys: "child_name#build_num::test_name"
+_CHILD_REVIEW_KEY_RE = re.compile(r".+#\d+::")
 
 
 def _sanitize_control_chars(value: str) -> str:
@@ -6001,11 +6003,41 @@ async def _execute_rp_push(
                     exc_info=True,
                 )
         # Get reviewer usernames for matched failures
-        reviews = await storage.get_reviews_for_job(job_id)
         reviewed_by: dict[str, str] = {}
-        for test_name, review_data in reviews.items():
-            if review_data.get("reviewed") and review_data.get("username"):
-                reviewed_by[test_name] = review_data["username"]
+        try:
+            reviews = await storage.get_reviews_for_job(job_id)
+            # Build the expected key prefix for child-scoped pushes so we
+            # only pick up reviews from the matching child job, avoiding
+            # collisions when different children share test names.
+            child_prefix = (
+                f"{child_job_name}#{child_build_number}::"
+                if child_job_name is not None
+                else None
+            )
+            for key, review_data in reviews.items():
+                if not (review_data.get("reviewed") and review_data.get("username")):
+                    continue
+                if child_prefix is not None:
+                    # Child-scoped push: only accept matching composite keys
+                    if not key.startswith(child_prefix):
+                        continue
+                    bare_name = key[len(child_prefix) :]
+                else:
+                    # Top-level push: skip child-scoped composite keys
+                    # (format: "child_name#build_num::test_name" where
+                    # build_num is numeric). Test names may contain "::".
+                    m = _CHILD_REVIEW_KEY_RE.match(key)
+                    if m:
+                        continue
+                    bare_name = key
+                reviewed_by[bare_name] = _sanitize_control_chars(
+                    review_data["username"]
+                )
+        except Exception:
+            logger.debug("Failed to fetch reviews for job %s", job_id, exc_info=True)
+
+        if reviewed_by:
+            logger.debug("RP push reviewed_by for job %s: %s", job_id, reviewed_by)
 
         try:
             push_result = await asyncio.to_thread(

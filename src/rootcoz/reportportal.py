@@ -418,6 +418,7 @@ class ReportPortalClient:
             locators = dict(_DEFAULT_LOCATORS)
 
         history = history_classifications or {}
+        reviewed_by = reviewed_by or {}
         unmatched: list[str] = []
         errors: list[str] = []
         launch_id: int | None = None
