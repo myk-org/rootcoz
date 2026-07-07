@@ -3840,20 +3840,30 @@ async def _process_non_jenkins_analysis(
         # Write source-specific workspace context files (e.g. Prow job
         # context, PR diffs).  Each CISource plugin produces its own
         # files via prepare_workspace(); main.py stays generic.
+        # Best-effort: workspace files are enrichment, not required.
         if source is not None and repo_path:
-            github_token = (
-                merged.github_token.get_secret_value() if merged.github_token else ""
-            )
-            workspace_files = await source.prepare_workspace(
-                repo_path=repo_path, github_token=github_token
-            )
-            for wf in workspace_files:
-                custom_prompt = _write_workspace_context(
-                    filepath=repo_path / wf.filename,
-                    content=wf.content,
-                    instruction=wf.instruction,
-                    custom_prompt=custom_prompt,
-                    job_id=job_id,
+            try:
+                github_token = (
+                    merged.github_token.get_secret_value()
+                    if merged.github_token
+                    else ""
+                )
+                workspace_files = await source.prepare_workspace(
+                    repo_path=repo_path, github_token=github_token
+                )
+                for wf in workspace_files:
+                    custom_prompt = _write_workspace_context(
+                        filepath=repo_path / wf.filename,
+                        content=wf.content,
+                        instruction=wf.instruction,
+                        custom_prompt=custom_prompt,
+                        job_id=job_id,
+                    )
+            except Exception:
+                logger.warning(
+                    "Failed to prepare workspace files for job %s",
+                    job_id,
+                    exc_info=True,
                 )
 
         # Console-only analysis when no JUnit failures found but console

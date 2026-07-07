@@ -1319,10 +1319,15 @@ class ProwSource(CISource):
         params: dict,
         settings=None,
         *,
-        child_job_name: str = "",
-        child_build_number: int = 0,
+        child_job_name: str = "",  # noqa: ARG003 — ABC parity, Prow has no child jobs
+        child_build_number: int = 0,  # noqa: ARG003
     ) -> ProwSource | None:
-        """Reconstruct a ProwSource from stored request params."""
+        """Reconstruct a ProwSource from stored request params.
+
+        ``child_job_name`` and ``child_build_number`` are accepted for
+        ABC signature parity with ``JenkinsSource`` but are unused —
+        Prow has no child-job concept.
+        """
         gcs_bucket = params.get("gcs_bucket", "")
         prow_job_name = params.get("prow_job_name", "")
         build_id = params.get("build_id", "")
