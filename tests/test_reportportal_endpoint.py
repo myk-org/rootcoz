@@ -2549,16 +2549,17 @@ class TestPushedByForwarding:
         mock_get_reviews,
         _rp_enabled_env,
     ):
-        """Exact build review takes precedence over wildcard."""
+        """Exact build review takes precedence over wildcard regardless of dict order."""
+        # Wildcard listed FIRST to verify order-independence
         mock_get_reviews.return_value = {
-            "child-job#42::test_a": {
-                "reviewed": True,
-                "username": "exact_reviewer",
-                "updated_at": "2024-01-01T00:00:00Z",
-            },
             "child-job#0::test_a": {
                 "reviewed": True,
                 "username": "wildcard_reviewer",
+                "updated_at": "2024-01-01T00:00:00Z",
+            },
+            "child-job#42::test_a": {
+                "reviewed": True,
+                "username": "exact_reviewer",
                 "updated_at": "2024-01-01T00:00:00Z",
             },
         }

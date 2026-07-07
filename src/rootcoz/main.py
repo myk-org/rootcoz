@@ -6009,44 +6009,42 @@ async def _execute_rp_push(
             # Build the expected key prefix for child-scoped pushes so we
             # only pick up reviews from the matching child job, avoiding
             # collisions when different children share test names.
-            # Build prefixes for child-scoped pushes: exact build match
-            # and wildcard (build_number=0 means name-only scope).
             if child_job_name is not None:
-                child_prefixes = [f"{child_job_name}#{child_build_number}::"]
+                exact_prefix = f"{child_job_name}#{child_build_number}::"
                 wildcard_prefix = f"{child_job_name}#0::"
-                if wildcard_prefix != child_prefixes[0]:
-                    child_prefixes.append(wildcard_prefix)
+                # Two passes: exact first, then wildcard fallback.
+                # This guarantees exact-build reviews win regardless
+                # of dict iteration order.
+                for pfx in (exact_prefix, wildcard_prefix):
+                    if pfx == exact_prefix and pfx == wildcard_prefix:
+                        # build_number is already 0 — single pass
+                        pass
+                    for key, review_data in reviews.items():
+                        if not (
+                            review_data.get("reviewed") and review_data.get("username")
+                        ):
+                            continue
+                        if not key.startswith(pfx):
+                            continue
+                        bare_name = key[len(pfx) :]
+                        if bare_name not in reviewed_by:
+                            reviewed_by[bare_name] = _sanitize_control_chars(
+                                review_data["username"]
+                            )
+                    if pfx == exact_prefix and pfx == wildcard_prefix:
+                        break  # already covered both in one pass
             else:
-                child_prefixes = None
-            for key, review_data in reviews.items():
-                if not (review_data.get("reviewed") and review_data.get("username")):
-                    continue
-                if child_prefixes is not None:
-                    # Child-scoped push: accept exact or wildcard prefix.
-                    # Prefer exact over wildcard (exact is checked first).
-                    matched_prefix = None
-                    for pfx in child_prefixes:
-                        if key.startswith(pfx):
-                            matched_prefix = pfx
-                            break
-                    if matched_prefix is None:
+                for key, review_data in reviews.items():
+                    if not (
+                        review_data.get("reviewed") and review_data.get("username")
+                    ):
                         continue
-                    bare_name = key[len(matched_prefix) :]
-                else:
                     # Top-level push: skip child-scoped composite keys
                     # (format: "child_name#build_num::test_name" where
                     # build_num is numeric). Test names may contain "::".
-                    m = _CHILD_REVIEW_KEY_RE.match(key)
-                    if m:
+                    if _CHILD_REVIEW_KEY_RE.match(key):
                         continue
-                    bare_name = key
-                # For child-scoped pushes, exact-build reviews take
-                # precedence over wildcard — only overwrite if the key
-                # is new (setdefault semantics).
-                if bare_name not in reviewed_by:
-                    reviewed_by[bare_name] = _sanitize_control_chars(
-                        review_data["username"]
-                    )
+                    reviewed_by[key] = _sanitize_control_chars(review_data["username"])
         except Exception:
             logger.debug("Failed to fetch reviews for job %s", job_id, exc_info=True)
 
