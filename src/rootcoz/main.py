@@ -6028,9 +6028,9 @@ async def _execute_rp_push(
                             continue
                         bare_name = key[len(pfx) :]
                         if bare_name not in reviewed_by:
-                            reviewed_by[bare_name] = _sanitize_control_chars(
-                                review_data["username"]
-                            )
+                            safe = _sanitize_control_chars(review_data["username"])
+                            if safe:
+                                reviewed_by[bare_name] = safe
                     if pfx == exact_prefix and pfx == wildcard_prefix:
                         break  # already covered both in one pass
             else:
@@ -6044,7 +6044,9 @@ async def _execute_rp_push(
                     # build_num is numeric). Test names may contain "::".
                     if _CHILD_REVIEW_KEY_RE.match(key):
                         continue
-                    reviewed_by[key] = _sanitize_control_chars(review_data["username"])
+                    safe = _sanitize_control_chars(review_data["username"])
+                    if safe:
+                        reviewed_by[key] = safe
         except Exception:
             logger.debug("Failed to fetch reviews for job %s", job_id, exc_info=True)
 
