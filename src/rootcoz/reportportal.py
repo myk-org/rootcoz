@@ -349,9 +349,9 @@ class ReportPortalClient:
             history_classifications: Optional mapping of test name to
                 history classification (e.g. ``INFRASTRUCTURE``).
             push_classifications: When ``True`` (default), map rootcoz
-                classifications to RP defect types. When ``False``, use
-                the RP ``TO_INVESTIGATE`` default so the original RP
-                classification is not overridden.
+                classifications to RP defect types. When ``False``,
+                set items to ``TO_INVESTIGATE`` instead of mapping
+                the rootcoz classification.
             push_rootcoz_url: When ``True`` (default), include a comment
                 with a link to the rootcoz report page.
             push_tracker_links: When ``True`` (default), attach Jira

@@ -5738,12 +5738,12 @@ async def _execute_rp_push(
         Dict with keys: ``pushed``, ``unmatched``, ``errors``, ``launch_id``.
     """
     base_url = _extract_base_url()
-    if not base_url:
+    if settings.rp_push_rootcoz_url and not base_url:
         raise ValueError(
-            "PUBLIC_BASE_URL must be set to push to Report Portal"
+            "PUBLIC_BASE_URL must be set to push rootcoz URL to Report Portal"
             " (relative URLs resolve against the RP domain)"
         )
-    report_url = f"{base_url}/results/{job_id}"
+    report_url = f"{base_url}/results/{job_id}" if base_url else ""
 
     # Scope to child job when requested
     if child_job_name is not None:
