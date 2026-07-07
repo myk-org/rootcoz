@@ -8,6 +8,7 @@ which is publicly accessible via HTTPS.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import re
@@ -22,7 +23,7 @@ from simple_logger.logger import get_logger
 
 from rootcoz.engine.core import extract_relevant_console_lines
 from rootcoz.models import FailedTest
-from rootcoz.sources.base import CISource, CISourceResult
+from rootcoz.sources.base import CISource, CISourceResult, WorkspaceFile
 from rootcoz.xml_enrichment import extract_test_failures
 
 logger = get_logger(name=__name__, level=os.environ.get("LOG_LEVEL", "INFO"))
@@ -38,6 +39,9 @@ _MAX_SIZE_FINISHED = 1_000_000  # 1 MB
 _MAX_SIZE_BUILD_LOG = 10_000_000  # 10 MB
 _MAX_SIZE_JUNIT_XML = 5_000_000  # 5 MB
 
+# Strict pattern for GitHub org/repo names — prevents path traversal in API URLs.
+_GITHUB_NAME_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._-]*$")
+
 # Maximum size for prowjob.json (bytes)
 _MAX_SIZE_PROWJOB = 2_000_000  # 2 MB
 
@@ -49,6 +53,23 @@ _MAX_SIZE_SINGLE_ARTIFACT = 10_000_000  # 10 MB
 
 # Base directory for artifact extraction
 _ARTIFACTS_BASE = Path("/tmp/prow-artifacts")
+
+
+def prow_identity(job_name: str, build_id: str) -> dict:
+    """Derive Prow identity fields for the result dict.
+
+    Shared by ``ProwSource._identity_dict`` (post-fetch) and the
+    ``_enqueue_non_jenkins_analysis`` pre-persistence path in ``main.py``.
+
+    Returns:
+        Dict with ``job_name`` and optionally ``build_number``.
+    """
+    identity: dict = {}
+    if job_name:
+        identity["job_name"] = job_name
+    if build_id and build_id.isdigit():
+        identity["build_number"] = build_id
+    return identity
 
 
 @dataclass
@@ -407,31 +428,16 @@ def _is_junit(item: dict) -> bool:
     return name.endswith(".xml") and bool(re.search(r"junit", name, re.IGNORECASE))
 
 
-async def _list_gcs_junit_files(
-    client: httpx.AsyncClient,
-    bucket: str,
-    prefix: str,
-    warnings: list[str] | None = None,
-) -> list[str]:
-    """List JUnit XML files under a GCS prefix using the JSON API.
-
-    Uses the GCS JSON API ``list`` endpoint to find all ``*.xml`` files
-    under the artifacts directory that look like JUnit results.
+def _filter_junit_files(objects: list[dict]) -> list[str]:
+    """Filter a list of GCS objects to just JUnit XML file names.
 
     Args:
-        client: httpx async client.
-        bucket: GCS bucket name.
-        prefix: Object prefix to search under (e.g. ``logs/job/123/artifacts/``).
-        warnings: Optional list to append truncation warnings to when
-            pagination exceeds the safety limit.
+        objects: GCS object dicts (from ``_list_gcs_objects``).
 
     Returns:
         List of full object names (keys) for JUnit XML files.
     """
-    items = await _list_gcs_objects(
-        client, bucket, prefix, filter_fn=_is_junit, warnings=warnings
-    )
-    return [item["name"] for item in items]
+    return [obj["name"] for obj in objects if _is_junit(obj)]
 
 
 async def _download_gcs_artifacts(
@@ -581,6 +587,168 @@ async def _download_gcs_artifacts(
         dest_dir,
     )
     return dest_dir
+
+
+def _format_prow_context(metadata: dict | None, build_url: str = "") -> str:
+    """Format Prow job metadata into a human-readable context file.
+
+    Written to the workspace as ``prow-context.txt`` so the AI knows
+    the job type, repository, and PR details.
+
+    Args:
+        metadata: Source metadata dict from ``CISourceResult.source_metadata``.
+        build_url: Prow Deck URL for the build.
+
+    Returns:
+        Formatted context string, or empty string if no useful data.
+    """
+    if not metadata:
+        return ""
+
+    lines = ["=== CI JOB CONTEXT ==="]
+
+    job_type = metadata.get("job_type", "")
+    if job_type:
+        type_label = {
+            "presubmit": "presubmit (PR check)",
+            "postsubmit": "postsubmit (post-merge)",
+            "periodic": "periodic (scheduled)",
+            "batch": "batch (merge queue)",
+        }.get(job_type, job_type)
+        lines.append(f"Type: {type_label}")
+
+    org = metadata.get("org", "")
+    repo = metadata.get("repo", "")
+    pr_number = metadata.get("pr_number")
+    additional_prs = metadata.get("additional_prs") or []
+    if pr_number is not None and org and repo:
+        if additional_prs:
+            all_prs = [f"{org}/{repo}#{pr_number}"]
+            for extra in additional_prs:
+                num = extra.get("number")
+                if num is not None:
+                    all_prs.append(f"{org}/{repo}#{num}")
+            lines.append(f"PRs: {', '.join(all_prs)}")
+        else:
+            lines.append(f"PR: {org}/{repo}#{pr_number}")
+    elif org and repo:
+        lines.append(f"Repository: {org}/{repo}")
+
+    pr_author = metadata.get("pr_author", "")
+    if pr_author:
+        if additional_prs:
+            authors = [pr_author]
+            for extra in additional_prs:
+                author = extra.get("author", "")
+                if author and author not in authors:
+                    authors.append(author)
+            lines.append(f"PR Authors: {', '.join(authors)}")
+        else:
+            lines.append(f"PR Author: {pr_author}")
+
+    base_ref = metadata.get("base_ref", "")
+    if base_ref:
+        lines.append(f"Base branch: {base_ref}")
+
+    state = metadata.get("state", "")
+    if state:
+        lines.append(f"Status: {state.upper()}")
+
+    if build_url:
+        lines.append(f"Build URL: {build_url}")
+
+    if len(lines) <= 1:
+        return ""
+
+    return "\n".join(lines) + "\n"
+
+
+async def _fetch_pr_changes(
+    org: str,
+    repo: str,
+    pr_number: int,
+    github_token: str = "",
+    *,
+    _client: httpx.AsyncClient | None = None,
+) -> str | None:
+    """Fetch PR title, description, and diff from GitHub.
+
+    Returns formatted content for the AI workspace, or ``None`` on failure.
+    Public repos work without a token; private repos require one.
+
+    Args:
+        org: GitHub organisation (e.g. ``kubevirt``).
+        repo: Repository name.
+        pr_number: Pull request number.
+        github_token: Optional GitHub token for private repos.
+        _client: **Test-only** — injected ``httpx.AsyncClient``.
+    """
+    if not _GITHUB_NAME_RE.match(org) or not _GITHUB_NAME_RE.match(repo):
+        logger.warning("Invalid org/repo from prowjob metadata: %s/%s", org, repo)
+        return None
+
+    if not isinstance(pr_number, int) or pr_number <= 0:
+        logger.warning("Invalid PR number: %r", pr_number)
+        return None
+
+    headers: dict[str, str] = {"Accept": "application/json"}
+    if github_token:
+        headers["Authorization"] = f"Bearer {github_token}"
+
+    pr_api = f"https://api.github.com/repos/{org}/{repo}/pulls/{pr_number}"
+    try:
+        client_ctx = (
+            contextlib.nullcontext(_client)
+            if _client
+            else httpx.AsyncClient(timeout=15)
+        )
+        async with client_ctx as client:
+            pr_resp = await client.get(pr_api, headers=headers)
+            if pr_resp.status_code != 200:
+                logger.warning(
+                    "GitHub PR API returned %d for %s/%s#%d",
+                    pr_resp.status_code,
+                    org,
+                    repo,
+                    pr_number,
+                )
+                return None
+
+            pr_data = pr_resp.json()
+            title = pr_data.get("title", "")
+            body = (pr_data.get("body") or "").strip()
+            changed_files = pr_data.get("changed_files", 0)
+            additions = pr_data.get("additions", 0)
+            deletions = pr_data.get("deletions", 0)
+            html_url = pr_data.get("html_url", "")
+
+            diff_headers = {**headers, "Accept": "application/vnd.github.v3.diff"}
+            diff_resp = await client.get(pr_api, headers=diff_headers)
+            diff_text = ""
+            if diff_resp.status_code == 200:
+                diff_text = diff_resp.text
+
+    except httpx.RequestError:
+        logger.warning(
+            "Failed to fetch PR changes for %s/%s#%d",
+            org,
+            repo,
+            pr_number,
+            exc_info=True,
+        )
+        return None
+
+    lines = [
+        f"=== PR #{pr_number}: {title} ===",
+        f"URL: {html_url}",
+        f"Changed files: {changed_files} (+{additions} -{deletions})",
+    ]
+    if body:
+        lines.append(f"\n--- PR Description ---\n{body}")
+    if diff_text:
+        lines.append(f"\n--- PR Diff ---\n{diff_text}")
+
+    return "\n".join(lines) + "\n"
 
 
 class ProwSource(CISource):
@@ -814,6 +982,71 @@ class ProwSource(CISource):
             if v is not None and v != ""
         }
 
+    def _identity_dict(self) -> dict:
+        """Return identity overrides for the result dict."""
+        return prow_identity(self.job_name, self.build_id)
+
+    async def prepare_workspace(
+        self,
+        repo_path: Path | None = None,
+        github_token: str = "",
+    ) -> list[WorkspaceFile]:
+        """Prepare Prow-specific workspace context files.
+
+        Produces:
+        - ``prow-context.txt``: CI job type, PR info, repo details.
+        - ``pr-changes.diff``: PR diff and description (presubmit/batch only).
+        """
+        files: list[WorkspaceFile] = []
+        metadata = self._metadata_dict()
+
+        # Prow job context
+        prow_context = _format_prow_context(metadata, self.build_url)
+        if prow_context:
+            files.append(
+                WorkspaceFile(
+                    filename="prow-context.txt",
+                    content=prow_context,
+                    instruction=(
+                        "It contains CI job context (job type, PR info, repo). "
+                        "Use this to determine if failures are likely related "
+                        "to PR changes or pre-existing."
+                    ),
+                )
+            )
+
+        # PR changes (diff + description) for presubmit/batch jobs
+        pr_num = metadata.get("pr_number")
+        pr_org = metadata.get("org", "")
+        pr_repo = metadata.get("repo", "")
+        if pr_num is not None and pr_org and pr_repo:
+            all_pr_nums = [pr_num]
+            for extra in metadata.get("additional_prs") or []:
+                num = extra.get("number")
+                if num is not None:
+                    all_pr_nums.append(num)
+
+            pr_sections: list[str] = []
+            for num in all_pr_nums:
+                content = await _fetch_pr_changes(pr_org, pr_repo, num, github_token)
+                if content:
+                    pr_sections.append(content)
+
+            if pr_sections:
+                files.append(
+                    WorkspaceFile(
+                        filename="pr-changes.diff",
+                        content="\n".join(pr_sections),
+                        instruction=(
+                            "It contains the PR code changes (diff), title, "
+                            "and description. Cross-reference test failures "
+                            "with the PR diff to determine if the PR caused them."
+                        ),
+                    )
+                )
+
+        return files
+
     async def fetch(self) -> CISourceResult:
         """Fetch build data from GCS and return normalized result.
 
@@ -825,7 +1058,9 @@ class ProwSource(CISource):
           5. Download non-JUnit artifacts for AI exploration.
           6. Build and return ``CISourceResult``.
         """
-        async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT) as client:
+        async with httpx.AsyncClient(
+            timeout=_HTTP_TIMEOUT, follow_redirects=True
+        ) as client:
             return await self._fetch_with_client(client)
 
     async def _fetch_with_client(self, client: httpx.AsyncClient) -> CISourceResult:
@@ -896,6 +1131,7 @@ class ProwSource(CISource):
                 build_passed=True,
                 build_url=self.build_url,
                 source_metadata=self._metadata_dict(),
+                identity=self._identity_dict(),
                 warnings=access_warnings,
             )
         if build_state == "SUCCESS" and self.force:
@@ -934,8 +1170,7 @@ class ProwSource(CISource):
             all_artifact_objects = []
 
         # Partition into JUnit XMLs and non-JUnit artifacts
-        junit_objects = [obj for obj in all_artifact_objects if _is_junit(obj)]
-        junit_files = [obj["name"] for obj in junit_objects]
+        junit_files = _filter_junit_files(all_artifact_objects)
         non_junit_objects = [obj for obj in all_artifact_objects if not _is_junit(obj)]
 
         logger.info(
@@ -1001,7 +1236,118 @@ class ProwSource(CISource):
             build_url=self.build_url,
             warnings=access_warnings,
             source_metadata=self._metadata_dict(),
+            identity=self._identity_dict(),
             extract_path=extract_path,
+        )
+
+    async def refetch_context(self) -> CISourceResult:
+        """Re-download console output and artifacts from Prow GCS.
+
+        Fetches only the build log and non-JUnit artifacts — skips
+        JUnit parsing, finished.json, and prowjob.json since they
+        are not needed for reanalysis context.
+        """
+        console_context = ""
+        artifacts_context = ""
+        extract_path: Path | None = None
+        warnings: list[str] = []
+
+        async with httpx.AsyncClient(
+            timeout=httpx.Timeout(60.0), follow_redirects=True
+        ) as client:
+            self._resolution_warnings = []
+            gcs_prefix = await self._resolve_gcs_prefix(client)
+            self._resolved_gcs_prefix = gcs_prefix
+            warnings.extend(self._resolution_warnings)
+
+            # 1. Fetch build-log.txt
+            build_log_url = _gcs_url(self.gcs_bucket, gcs_prefix, "build-log.txt")
+            try:
+                build_log = await _fetch_gcs_text(
+                    client,
+                    build_log_url,
+                    label="build-log.txt",
+                    max_size=_MAX_SIZE_BUILD_LOG,
+                )
+                if build_log:
+                    console_context = extract_relevant_console_lines(build_log)
+                    logger.info(
+                        "Refetched Prow build log (%d chars, %d relevant)",
+                        len(build_log),
+                        len(console_context),
+                    )
+            except GCSAccessError as exc:
+                warnings.append(str(exc))
+                logger.warning("Failed to refetch Prow build log: %s", exc)
+
+            # 2. Download non-JUnit artifacts
+            if self.get_job_artifacts:
+                artifacts_prefix = f"{gcs_prefix}/artifacts/"
+                try:
+                    all_objects = await _list_gcs_objects(
+                        client, self.gcs_bucket, artifacts_prefix, warnings=warnings
+                    )
+                    non_junit = [obj for obj in all_objects if not _is_junit(obj)]
+                    if non_junit:
+                        extract_path = await _download_gcs_artifacts(
+                            client,
+                            self.gcs_bucket,
+                            non_junit,
+                            artifacts_prefix,
+                            warnings=warnings,
+                        )
+                        if extract_path:
+                            self._extract_path = extract_path
+                            artifacts_context = str(extract_path)
+                            logger.info("Refetched Prow artifacts to %s", extract_path)
+                except Exception as exc:
+                    warnings.append(f"Failed to refetch Prow artifacts: {exc}")
+                    logger.warning("Failed to refetch Prow artifacts: %s", exc)
+
+        return CISourceResult(
+            failures=[],
+            console_context=console_context,
+            artifacts_context=artifacts_context,
+            build_url=self.build_url,
+            extract_path=extract_path,
+            warnings=warnings,
+        )
+
+    @classmethod
+    def from_stored_params(
+        cls,
+        params: dict,
+        settings=None,
+        *,
+        child_job_name: str = "",
+        child_build_number: int = 0,
+    ) -> ProwSource | None:
+        """Reconstruct a ProwSource from stored request params."""
+        gcs_bucket = params.get("gcs_bucket", "")
+        prow_job_name = params.get("prow_job_name", "")
+        build_id = params.get("build_id", "")
+        prow_url = params.get("prow_url", "")
+        if not prow_url and settings is not None:
+            prow_url = getattr(settings, "prow_url", "") or ""
+
+        if not gcs_bucket or not prow_job_name or not build_id:
+            logger.warning(
+                "Cannot reconstruct ProwSource: missing gcs_bucket/prow_job_name/build_id"
+            )
+            return None
+
+        get_job_artifacts = True
+        if settings is not None:
+            get_job_artifacts = getattr(settings, "get_job_artifacts", True)
+
+        return cls(
+            job_name=prow_job_name,
+            build_id=build_id,
+            gcs_bucket=gcs_bucket,
+            prow_url=prow_url or "",
+            gcs_prefix=params.get("gcs_prefix", ""),
+            force=True,  # reanalysis always forces
+            get_job_artifacts=get_job_artifacts,
         )
 
     def cleanup(self) -> None:

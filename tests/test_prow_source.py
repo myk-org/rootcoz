@@ -7,12 +7,13 @@ import json
 import httpx
 import pytest
 
-from rootcoz.main import _fetch_pr_changes, _format_prow_context
+from rootcoz.sources.prow_source import _fetch_pr_changes, _format_prow_context
 from rootcoz.models import UnifiedAnalyzeRequest
 from rootcoz.sources.prow_source import (
     GCS_BASE_URL,
     GCSAccessError,
     GCSOversizeError,
+    ProwJobMetadata,
     ProwSource,
     _MAX_SIZE_BUILD_LOG,
     _MAX_SIZE_FINISHED,
@@ -23,7 +24,7 @@ from rootcoz.sources.prow_source import (
     _fetch_gcs_text,
     _gcs_url,
     _is_junit,
-    _list_gcs_junit_files,
+    _filter_junit_files,
     _list_gcs_objects,
     _parse_junit_failures,
     _parse_prowjob_json,
@@ -352,12 +353,35 @@ class TestFetchGcsText:
 
 
 # ---------------------------------------------------------------------------
-# _list_gcs_junit_files
+# _filter_junit_files + _list_gcs_objects (JUnit filtering)
 # ---------------------------------------------------------------------------
 
 
-class TestListGcsJunitFiles:
-    async def test_lists_junit_files(self):
+class TestFilterJunitFiles:
+    def test_filters_junit_files(self):
+        objects = [
+            {"name": "logs/job/123/artifacts/junit/junit_results.xml"},
+            {"name": "logs/job/123/artifacts/other/data.json"},
+            {"name": "logs/job/123/artifacts/e2e/junit_operator_e2e.xml"},
+        ]
+        files = _filter_junit_files(objects)
+        assert len(files) == 2
+        assert "logs/job/123/artifacts/junit/junit_results.xml" in files
+        assert "logs/job/123/artifacts/e2e/junit_operator_e2e.xml" in files
+
+    def test_empty_list(self):
+        assert _filter_junit_files([]) == []
+
+    def test_no_junit_files(self):
+        objects = [
+            {"name": "logs/job/123/artifacts/other/data.json"},
+            {"name": "logs/job/123/artifacts/logs/output.log"},
+        ]
+        assert _filter_junit_files(objects) == []
+
+
+class TestListGcsObjectsJunitFiltering:
+    async def test_lists_and_filters_junit_files(self):
         response_data = {
             "items": [
                 {"name": "logs/job/123/artifacts/junit/junit_results.xml"},
@@ -369,9 +393,10 @@ class TestListGcsJunitFiles:
             lambda req: httpx.Response(200, json=response_data)
         )
         async with httpx.AsyncClient(transport=transport) as client:
-            files = await _list_gcs_junit_files(
+            all_objects = await _list_gcs_objects(
                 client, "test-bucket", "logs/job/123/artifacts/"
             )
+        files = _filter_junit_files(all_objects)
         assert len(files) == 2
         assert "logs/job/123/artifacts/junit/junit_results.xml" in files
         assert "logs/job/123/artifacts/e2e/junit_operator_e2e.xml" in files
@@ -381,10 +406,10 @@ class TestListGcsJunitFiles:
             lambda req: httpx.Response(200, json={"items": []})
         )
         async with httpx.AsyncClient(transport=transport) as client:
-            files = await _list_gcs_junit_files(
+            all_objects = await _list_gcs_objects(
                 client, "test-bucket", "logs/job/123/artifacts/"
             )
-        assert files == []
+        assert _filter_junit_files(all_objects) == []
 
     async def test_pagination(self):
         call_count = 0
@@ -413,7 +438,8 @@ class TestListGcsJunitFiles:
 
         transport = httpx.MockTransport(handler)
         async with httpx.AsyncClient(transport=transport) as client:
-            files = await _list_gcs_junit_files(client, "bucket", "prefix/")
+            all_objects = await _list_gcs_objects(client, "bucket", "prefix/")
+        files = _filter_junit_files(all_objects)
         assert len(files) == 2
         assert call_count == 2
 
@@ -421,7 +447,7 @@ class TestListGcsJunitFiles:
         transport = httpx.MockTransport(lambda req: httpx.Response(500))
         async with httpx.AsyncClient(transport=transport) as client:
             with pytest.raises(GCSAccessError) as exc_info:
-                await _list_gcs_junit_files(
+                await _list_gcs_objects(
                     client, "test-bucket", "logs/job/123/artifacts/"
                 )
         assert exc_info.value.status_code == 500
@@ -433,7 +459,6 @@ class TestListGcsJunitFiles:
         def handler(request: httpx.Request):
             nonlocal call_count
             call_count += 1
-            # Always return a nextPageToken to force infinite pagination
             return httpx.Response(
                 200,
                 json={
@@ -444,13 +469,14 @@ class TestListGcsJunitFiles:
 
         transport = httpx.MockTransport(handler)
         warnings: list[str] = []
-        # max_pages=100 is hardcoded in _list_gcs_junit_files
+        # max_pages=100 is hardcoded in _list_gcs_objects
         original_max = 100
         async with httpx.AsyncClient(transport=transport) as client:
-            files = await _list_gcs_junit_files(
+            all_objects = await _list_gcs_objects(
                 client, "bucket", "prefix/", warnings=warnings
             )
         assert call_count == original_max
+        files = _filter_junit_files(all_objects)
         assert len(files) == original_max  # one file per page
         assert len(warnings) == 1
         assert "exceeded" in warnings[0]
@@ -2158,3 +2184,158 @@ class TestFetchPrChanges:
                 "org", "repo", "../../evil", _client=client
             )
         assert result is None
+
+
+class TestProwPrepareWorkspace:
+    """Tests for ProwSource.prepare_workspace()."""
+
+    def _make_source(self, **kwargs):
+        defaults = {
+            "job_name": "periodic-kubevirt-e2e",
+            "build_id": "123456",
+            "gcs_bucket": "test-bucket",
+            "prow_url": "https://prow.example.com",
+        }
+        defaults.update(kwargs)
+        return ProwSource(**defaults)
+
+    @pytest.mark.asyncio
+    async def test_no_metadata_returns_empty(self):
+        """No prowjob metadata parsed → no workspace files."""
+        source = self._make_source()
+        # _prowjob_metadata is None (no fetch), so _metadata_dict() returns {}
+        files = await source.prepare_workspace()
+        assert files == []
+
+    @pytest.mark.asyncio
+    async def test_periodic_job_produces_context_only(self):
+        """Periodic job with metadata → prow-context.txt only, no PR diff."""
+        source = self._make_source()
+        source._prowjob_metadata = ProwJobMetadata(
+            job_type="periodic",
+            org="kubevirt",
+            repo="kubevirt",
+            base_ref="main",
+            state="success",
+        )
+        files = await source.prepare_workspace()
+        assert len(files) == 1
+        assert files[0].filename == "prow-context.txt"
+        assert "periodic" in files[0].content
+        assert "kubevirt" in files[0].content
+
+    @pytest.mark.asyncio
+    async def test_presubmit_job_produces_context_and_diff(self):
+        """Presubmit job with PR → prow-context.txt + pr-changes.diff."""
+        source = self._make_source()
+        source._prowjob_metadata = ProwJobMetadata(
+            job_type="presubmit",
+            org="kubevirt",
+            repo="kubevirt",
+            base_ref="main",
+            pr_number=42,
+            pr_author="dev",
+        )
+
+        pr_response = httpx.Response(
+            200,
+            json={
+                "title": "Fix bug",
+                "body": "Fixes #1",
+                "changed_files": 2,
+                "additions": 10,
+                "deletions": 3,
+                "html_url": "https://github.com/kubevirt/kubevirt/pull/42",
+            },
+        )
+        diff_response = httpx.Response(200, text="diff --git a/f b/f\n+added")
+        transport = httpx.MockTransport(
+            lambda req: (
+                diff_response
+                if "diff" in req.headers.get("accept", "")
+                else pr_response
+            )
+        )
+
+        async with httpx.AsyncClient(transport=transport) as client:
+            # Monkey-patch _fetch_pr_changes to use our client
+            import rootcoz.sources.prow_source as prow_mod
+
+            orig = prow_mod._fetch_pr_changes
+
+            async def patched_fetch(org, repo, pr_num, token="", **kw):
+                return await orig(org, repo, pr_num, token, _client=client)
+
+            prow_mod._fetch_pr_changes = patched_fetch
+            try:
+                files = await source.prepare_workspace()
+            finally:
+                prow_mod._fetch_pr_changes = orig
+
+        filenames = [f.filename for f in files]
+        assert "prow-context.txt" in filenames
+        assert "pr-changes.diff" in filenames
+        diff_file = next(f for f in files if f.filename == "pr-changes.diff")
+        assert "Fix bug" in diff_file.content
+
+    @pytest.mark.asyncio
+    async def test_batch_job_collects_multiple_prs(self):
+        """Batch job with multiple PRs → all diffs in one file."""
+        source = self._make_source()
+        source._prowjob_metadata = ProwJobMetadata(
+            job_type="batch",
+            org="kubevirt",
+            repo="kubevirt",
+            base_ref="main",
+            pr_number=10,
+            pr_author="dev1",
+            additional_prs=[{"number": 20, "author": "dev2"}],
+        )
+
+        call_log = []
+
+        import rootcoz.sources.prow_source as prow_mod
+
+        orig = prow_mod._fetch_pr_changes
+
+        async def mock_fetch(org, repo, pr_num, token="", **kw):
+            call_log.append(pr_num)
+            return f"=== PR #{pr_num}: title ===\ndiff content\n"
+
+        prow_mod._fetch_pr_changes = mock_fetch
+        try:
+            files = await source.prepare_workspace()
+        finally:
+            prow_mod._fetch_pr_changes = orig
+
+        assert call_log == [10, 20]
+        diff_file = next(f for f in files if f.filename == "pr-changes.diff")
+        assert "PR #10" in diff_file.content
+        assert "PR #20" in diff_file.content
+
+    @pytest.mark.asyncio
+    async def test_pr_fetch_failure_returns_context_only(self):
+        """PR diff fetch fails → still returns prow-context.txt."""
+        source = self._make_source()
+        source._prowjob_metadata = ProwJobMetadata(
+            job_type="presubmit",
+            org="kubevirt",
+            repo="kubevirt",
+            pr_number=99,
+        )
+
+        import rootcoz.sources.prow_source as prow_mod
+
+        orig = prow_mod._fetch_pr_changes
+
+        async def failing_fetch(*args, **kw):
+            return None
+
+        prow_mod._fetch_pr_changes = failing_fetch
+        try:
+            files = await source.prepare_workspace()
+        finally:
+            prow_mod._fetch_pr_changes = orig
+
+        assert len(files) == 1
+        assert files[0].filename == "prow-context.txt"

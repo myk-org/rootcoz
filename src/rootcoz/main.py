@@ -95,6 +95,7 @@ from rootcoz.engine.core import (
     copy_rootcoz_pi_resources,
     extract_json_dict,
     get_failure_signature,
+    link_artifacts_to_workspace,
     resolve_additional_repos,
     safe_update_progress,
     set_progress_callback,
@@ -171,7 +172,8 @@ from rootcoz.rootcoz_repo_settings import (
     resolve_tests_repo_url,
     tests_repo_available,
 )
-from rootcoz.sources import CISource, FileSource, ProwSource, RawSource
+from rootcoz.sources import CISource, FileSource, JenkinsSource, ProwSource, RawSource
+from rootcoz.sources.prow_source import prow_identity
 from rootcoz.sources.jenkins_source import analyze_job, wait_for_jenkins_completion
 from rootcoz.storage import (
     AI_SYSTEM_USERNAME,
@@ -3236,186 +3238,6 @@ def _strip_old_submitter_tag(tags: list[str], result_data: dict) -> list[str]:
     return [t for t in tags if not (isinstance(t, str) and t.lower() == old_normalized)]
 
 
-def _apply_prow_identity(data: dict, body: "UnifiedAnalyzeRequest") -> None:
-    """Set job_name/build_number from Prow identity fields."""
-    if body.type == "prow" and body.prow_job_name:
-        data["job_name"] = body.prow_job_name
-        if body.build_id and body.build_id.isdigit():
-            data["build_number"] = (
-                body.build_id
-            )  # String — Prow IDs exceed JS MAX_SAFE_INTEGER
-
-
-def _format_prow_context(metadata: dict | None, build_url: str = "") -> str:
-    """Format Prow job metadata into a human-readable context file.
-
-    Written to the workspace as ``prow-context.txt`` so the AI knows
-    the job type, repository, and PR details.
-
-    Args:
-        metadata: Source metadata dict from ``CISourceResult.source_metadata``.
-        build_url: Prow Deck URL for the build.
-
-    Returns:
-        Formatted context string, or empty string if no useful data.
-    """
-    if not metadata:
-        return ""
-
-    lines = ["=== CI JOB CONTEXT ==="]
-
-    job_type = metadata.get("job_type", "")
-    if job_type:
-        type_label = {
-            "presubmit": "presubmit (PR check)",
-            "postsubmit": "postsubmit (post-merge)",
-            "periodic": "periodic (scheduled)",
-            "batch": "batch (merge queue)",
-        }.get(job_type, job_type)
-        lines.append(f"Type: {type_label}")
-
-    org = metadata.get("org", "")
-    repo = metadata.get("repo", "")
-    pr_number = metadata.get("pr_number")
-    additional_prs = metadata.get("additional_prs") or []
-    if pr_number is not None and org and repo:
-        if additional_prs:
-            # Batch job with multiple PRs — list all
-            all_prs = [f"{org}/{repo}#{pr_number}"]
-            for extra in additional_prs:
-                num = extra.get("number")
-                if num is not None:
-                    all_prs.append(f"{org}/{repo}#{num}")
-            lines.append(f"PRs: {', '.join(all_prs)}")
-        else:
-            lines.append(f"PR: {org}/{repo}#{pr_number}")
-    elif org and repo:
-        lines.append(f"Repository: {org}/{repo}")
-
-    pr_author = metadata.get("pr_author", "")
-    if pr_author:
-        if additional_prs:
-            authors = [pr_author]
-            for extra in additional_prs:
-                author = extra.get("author", "")
-                if author and author not in authors:
-                    authors.append(author)
-            lines.append(f"PR Authors: {', '.join(authors)}")
-        else:
-            lines.append(f"PR Author: {pr_author}")
-
-    base_ref = metadata.get("base_ref", "")
-    if base_ref:
-        lines.append(f"Base branch: {base_ref}")
-
-    state = metadata.get("state", "")
-    if state:
-        lines.append(f"Status: {state.upper()}")
-
-    if build_url:
-        lines.append(f"Build URL: {build_url}")
-
-    # Only return content if we have more than just the header
-    if len(lines) <= 1:
-        return ""
-
-    return "\n".join(lines) + "\n"
-
-
-# Strict pattern for GitHub org/repo names — prevents path traversal in API URLs.
-_GITHUB_NAME_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._-]*$")
-
-
-async def _fetch_pr_changes(
-    org: str,
-    repo: str,
-    pr_number: int,
-    github_token: str = "",
-    *,
-    _client: httpx.AsyncClient | None = None,
-) -> str | None:
-    """Fetch PR title, description, and diff from GitHub.
-
-    Returns formatted content for the AI workspace, or ``None`` on failure.
-    Public repos work without a token; private repos require one.
-
-    Args:
-        org: GitHub organisation (e.g. ``kubevirt``).
-        repo: Repository name.
-        pr_number: Pull request number.
-        github_token: Optional GitHub token for private repos.
-        _client: **Test-only** — injected ``httpx.AsyncClient``.
-    """
-    if not _GITHUB_NAME_RE.match(org) or not _GITHUB_NAME_RE.match(repo):
-        logger.warning("Invalid org/repo from prowjob metadata: %s/%s", org, repo)
-        return None
-
-    if not isinstance(pr_number, int) or pr_number <= 0:
-        logger.warning("Invalid PR number: %r", pr_number)
-        return None
-
-    headers: dict[str, str] = {"Accept": "application/json"}
-    if github_token:
-        headers["Authorization"] = f"Bearer {github_token}"
-
-    pr_api = f"https://api.github.com/repos/{org}/{repo}/pulls/{pr_number}"
-    try:
-        client_ctx = (
-            contextlib.nullcontext(_client)
-            if _client
-            else httpx.AsyncClient(timeout=15)
-        )
-        async with client_ctx as client:
-            # Fetch PR metadata (title, body, changed files count)
-            pr_resp = await client.get(pr_api, headers=headers)
-            if pr_resp.status_code != 200:
-                logger.warning(
-                    "GitHub PR API returned %d for %s/%s#%d",
-                    pr_resp.status_code,
-                    org,
-                    repo,
-                    pr_number,
-                )
-                return None
-
-            pr_data = pr_resp.json()
-            title = pr_data.get("title", "")
-            body = (pr_data.get("body") or "").strip()
-            changed_files = pr_data.get("changed_files", 0)
-            additions = pr_data.get("additions", 0)
-            deletions = pr_data.get("deletions", 0)
-            html_url = pr_data.get("html_url", "")
-
-            # Fetch diff
-            diff_headers = {**headers, "Accept": "application/vnd.github.v3.diff"}
-            diff_resp = await client.get(pr_api, headers=diff_headers)
-            diff_text = ""
-            if diff_resp.status_code == 200:
-                diff_text = diff_resp.text
-
-    except httpx.RequestError:
-        logger.warning(
-            "Failed to fetch PR changes for %s/%s#%d",
-            org,
-            repo,
-            pr_number,
-            exc_info=True,
-        )
-        return None
-
-    lines = [
-        f"=== PR #{pr_number}: {title} ===",
-        f"URL: {html_url}",
-        f"Changed files: {changed_files} (+{additions} -{deletions})",
-    ]
-    if body:
-        lines.append(f"\n--- PR Description ---\n{body}")
-    if diff_text:
-        lines.append(f"\n--- PR Diff ---\n{diff_text}")
-
-    return "\n".join(lines) + "\n"
-
-
 def _write_workspace_context(
     filepath: Path,
     content: str,
@@ -3559,8 +3381,11 @@ async def _enqueue_non_jenkins_analysis(
         "display_name": display_name,
         "request_params": encrypt_sensitive_fields(base_params),
     }
-    # Persist real Prow identity for history matching and auto-review
-    _apply_prow_identity(initial_result, body)
+    # Persist real identity for history matching and auto-review
+    if body.type == "prow":
+        initial_result.update(
+            prow_identity(body.prow_job_name or "", body.build_id or "")
+        )
     initial_result["request_params"]["submitted_by"] = username
     _stamp_reanalysis_metadata(
         initial_result["request_params"],
@@ -3750,9 +3575,15 @@ async def _process_non_jenkins_analysis(
     """Background task for file/raw/prow analysis."""
     job_id_var.set(job_id)
 
-    def _stamp_prow_identity(data: dict) -> None:
-        """Set job_name/build_number from prow identity for history matching."""
-        _apply_prow_identity(data, body)
+    # Only these keys may be overridden by CISourceResult.identity.
+    _ALLOWED_IDENTITY_KEYS = {"job_name", "build_number"}
+
+    def _stamp_source_identity(data: dict) -> None:
+        """Apply source identity overrides (e.g. Prow job_name/build_number)."""
+        if source_result is not None and source_result.identity:
+            for key, value in source_result.identity.items():
+                if key in _ALLOWED_IDENTITY_KEYS:
+                    data[key] = value
 
     def _stamp_source_warnings(data: dict) -> None:
         """Attach source warnings (GCS errors, oversize artifacts) to result."""
@@ -3760,8 +3591,8 @@ async def _process_non_jenkins_analysis(
             data["source_warnings"] = source_result.warnings
 
     def _stamp_result_metadata(data: dict) -> None:
-        """Apply prow identity, source warnings, and build URL to result dict."""
-        _stamp_prow_identity(data)
+        """Apply source identity, warnings, and build URL to result dict."""
+        _stamp_source_identity(data)
         _stamp_source_warnings(data)
         if source_result is not None and source_result.build_url:
             data["jenkins_url"] = source_result.build_url
@@ -3998,76 +3829,32 @@ async def _process_non_jenkins_analysis(
         # Make build artifacts accessible in the AI working directory
         artifacts_context = source_result.artifacts_context
         if source_result.extract_path:
-            artifacts_link = repo_path / "build-artifacts"
-            try:
-                artifacts_link.symlink_to(source_result.extract_path)
-                logger.info("Linked artifacts into workspace: %s", artifacts_link)
-            except OSError as exc:
-                logger.warning(
-                    "Could not link artifacts into workspace: %s",
-                    exc,
-                )
+            if not link_artifacts_to_workspace(
+                repo_path, source_result.extract_path, job_id
+            ):
                 artifacts_context = ""
 
         custom_prompt = (body.raw_prompt or "").strip()
         server_url = _build_internal_server_url()
 
-        # Write Prow job context file for AI consumption
-        if source_result.source_metadata and repo_path:
-            prow_context = _format_prow_context(
-                source_result.source_metadata, source_result.build_url
+        # Write source-specific workspace context files (e.g. Prow job
+        # context, PR diffs).  Each CISource plugin produces its own
+        # files via prepare_workspace(); main.py stays generic.
+        if source is not None and repo_path:
+            github_token = (
+                merged.github_token.get_secret_value() if merged.github_token else ""
             )
-            if prow_context:
+            workspace_files = await source.prepare_workspace(
+                repo_path=repo_path, github_token=github_token
+            )
+            for wf in workspace_files:
                 custom_prompt = _write_workspace_context(
-                    filepath=repo_path / "prow-context.txt",
-                    content=prow_context,
-                    instruction=(
-                        "It contains CI job context (job type, PR info, repo). "
-                        "Use this to determine if failures are likely related "
-                        "to PR changes or pre-existing."
-                    ),
+                    filepath=repo_path / wf.filename,
+                    content=wf.content,
+                    instruction=wf.instruction,
                     custom_prompt=custom_prompt,
                     job_id=job_id,
                 )
-
-            # Fetch PR changes (diff + description) for presubmit/batch jobs
-            meta = source_result.source_metadata
-            pr_num = meta.get("pr_number")
-            pr_org = meta.get("org", "")
-            pr_repo = meta.get("repo", "")
-            if pr_num is not None and pr_org and pr_repo:
-                github_token = (
-                    merged.github_token.get_secret_value()
-                    if merged.github_token
-                    else ""
-                )
-                # Collect all PR numbers (primary + additional for batch jobs)
-                all_pr_nums = [pr_num]
-                for extra in meta.get("additional_prs") or []:
-                    num = extra.get("number")
-                    if num is not None:
-                        all_pr_nums.append(num)
-
-                pr_sections: list[str] = []
-                for num in all_pr_nums:
-                    content = await _fetch_pr_changes(
-                        pr_org, pr_repo, num, github_token
-                    )
-                    if content:
-                        pr_sections.append(content)
-
-                if pr_sections:
-                    custom_prompt = _write_workspace_context(
-                        filepath=repo_path / "pr-changes.diff",
-                        content="\n".join(pr_sections),
-                        instruction=(
-                            "It contains the PR code changes (diff), title, "
-                            "and description. Cross-reference test failures "
-                            "with the PR diff to determine if the PR caused them."
-                        ),
-                        custom_prompt=custom_prompt,
-                        job_id=job_id,
-                    )
 
         # Console-only analysis when no JUnit failures found but console
         # context exists (e.g. Prow build with no JUnit artifacts)
@@ -4785,6 +4572,48 @@ async def get_failure_by_uuid(failure_uuid: str) -> dict:
     return result
 
 
+_SOURCE_REGISTRY: dict[str, type[CISource]] = {
+    "prow": ProwSource,
+    "jenkins": JenkinsSource,
+}
+
+
+def _reconstruct_source(
+    analysis_type: str,
+    source_params: dict,
+    settings: Settings,
+    *,
+    child_job_name: str = "",
+    child_build_number: int = 0,
+) -> CISource | None:
+    """Reconstruct a CISource plugin from stored request params.
+
+    Used by per-failure reanalysis to recreate the original source so
+    it can refetch console output and artifacts.
+
+    Args:
+        analysis_type: Source type string (``"jenkins"``, ``"prow"``, etc.).
+        source_params: Decrypted ``request_params`` from the stored result.
+        settings: Server settings for connection info and artifact config.
+        child_job_name: For child job failures — overrides job name.
+        child_build_number: For child job failures — overrides build number.
+
+    Returns:
+        A ``CISource`` instance, or ``None`` if the source type has no
+        remote context to refetch (e.g. file, raw).
+    """
+    source_cls = _SOURCE_REGISTRY.get(analysis_type)
+    if source_cls is None:
+        return None
+
+    return source_cls.from_stored_params(
+        source_params,
+        settings,
+        child_job_name=child_job_name,
+        child_build_number=child_build_number,
+    )
+
+
 async def _reanalyze_failure_background(
     job_id: str,
     failure_uuid: str,
@@ -4801,6 +4630,11 @@ async def _reanalyze_failure_background(
     additional_repos_list: list | None,
     username: str,
     max_concurrent_ai_calls: int,
+    analysis_type: str = "",
+    source_params: dict | None = None,
+    settings: Settings | None = None,
+    child_job_name: str = "",
+    child_build_number: int = 0,
     *,
     is_admin: bool = False,
 ) -> None:
@@ -4808,6 +4642,7 @@ async def _reanalyze_failure_background(
     job_id_var.set(job_id)
     auth_header = ""
     repo_manager: RepositoryManager | None = None
+    source: CISource | None = None
 
     try:
         auth_header = await _create_ai_auth_header(username)
@@ -4912,6 +4747,69 @@ async def _reanalyze_failure_background(
         if cloned_repos:
             copy_rootcoz_pi_resources(cloned_repos, repo_path)
 
+        # Re-download console output and artifacts from the original CI source
+        console_context = ""
+        artifacts_context = ""
+        if source_params and analysis_type and settings:
+            try:
+                source = _reconstruct_source(
+                    analysis_type,
+                    source_params,
+                    settings,
+                    child_job_name=child_job_name,
+                    child_build_number=child_build_number,
+                )
+                if source is None:
+                    logger.warning(
+                        "Could not reconstruct %s source; "
+                        "proceeding without console/artifacts",
+                        analysis_type,
+                    )
+                else:
+                    ctx = await source.refetch_context()
+                    console_context = ctx.console_context
+                    artifacts_context = ctx.artifacts_context
+                    if ctx.extract_path:
+                        if not link_artifacts_to_workspace(
+                            repo_path, ctx.extract_path, job_id
+                        ):
+                            artifacts_context = ""
+                    for warning in ctx.warnings:
+                        logger.warning(
+                            "Refetch warning for job %s: %s", job_id, warning
+                        )
+            except Exception:
+                logger.warning(
+                    "Failed to refetch source context for reanalysis; "
+                    "proceeding without console/artifacts",
+                    exc_info=True,
+                )
+
+        # Write source workspace files (prow-context.txt, PR diffs, etc.)
+        if source is not None:
+            try:
+                github_token = (
+                    settings.github_token.get_secret_value()
+                    if settings and settings.github_token
+                    else ""
+                )
+                workspace_files = await source.prepare_workspace(
+                    repo_path=repo_path, github_token=github_token
+                )
+                for wf in workspace_files:
+                    raw_prompt = _write_workspace_context(
+                        filepath=repo_path / wf.filename,
+                        content=wf.content,
+                        instruction=wf.instruction,
+                        custom_prompt=raw_prompt,
+                        job_id=job_id,
+                    )
+            except Exception:
+                logger.warning(
+                    "Failed to prepare workspace files for reanalysis",
+                    exc_info=True,
+                )
+
         # Build a FailedTest from the failure dict
         _ft_kwargs: dict = {
             "test_name": failure_dict.get("test_name", ""),
@@ -4930,12 +4828,13 @@ async def _reanalyze_failure_background(
         # Analyze the single failure
         analyses = await analyze_failure_group(
             failures=[test_failure],
-            console_context="",
+            console_context=console_context,
             repo_path=repo_path,
             ai_provider=ai_provider,
             ai_model=ai_model,
             ai_call_timeout=ai_call_timeout,
             custom_prompt=raw_prompt,
+            artifacts_context=artifacts_context,
             server_url=server_url,
             job_id=job_id,
             peer_ai_configs=peer_ai_configs,
@@ -5038,6 +4937,12 @@ async def _reanalyze_failure_background(
                 repo_manager.cleanup()
             except Exception:
                 logger.warning("Failed to cleanup repos", exc_info=True)
+        # Clean up downloaded source artifacts
+        if source is not None:
+            try:
+                source.cleanup()
+            except Exception:
+                logger.warning("Failed to cleanup source artifacts", exc_info=True)
 
 
 @app.post(
@@ -5214,6 +5119,11 @@ async def re_analyze_failure(
             additional_repos_list=additional_repos_list,
             username=request.state.username,
             max_concurrent_ai_calls=max_concurrent_ai_calls,
+            analysis_type=decrypted_params.get("analysis_type", "jenkins"),
+            source_params=decrypted_params,
+            settings=get_settings(),
+            child_job_name=match.get("child_job_name", ""),
+            child_build_number=match.get("child_build_number", 0),
             is_admin=bool(request.state.is_admin),
         )
     )

@@ -702,59 +702,54 @@ class TestAnalyzeFailuresRawXml:
         )
 
 
-class TestApplyProwIdentity:
-    """Tests for the _apply_prow_identity helper."""
+class TestProwIdentityStamping:
+    """Tests for the shared prow_identity() helper and ProwSource._identity_dict().
 
-    def _make_body(self, **overrides):
-        from rootcoz.models import UnifiedAnalyzeRequest
+    prow_identity() is called from both _enqueue_non_jenkins_analysis
+    (pre-persistence) and ProwSource._identity_dict() (post-fetch).
+    """
 
-        defaults = {
-            "type": "prow",
-            "prow_job_name": "my-prow-job",
-            "build_id": "1234567890123456789",
-            "ai_provider": "claude",
-            "ai_model": "test",
+    def test_valid_job_and_build(self):
+        from rootcoz.sources.prow_source import prow_identity
+
+        result = prow_identity("my-prow-job", "1234567890123456789")
+        assert result == {
+            "job_name": "my-prow-job",
+            "build_number": "1234567890123456789",
         }
-        defaults.update(overrides)
-        return UnifiedAnalyzeRequest(**defaults)
 
-    def test_prow_with_valid_build_id(self):
-        from rootcoz.main import _apply_prow_identity
+    def test_non_numeric_build_id_excluded(self):
+        from rootcoz.sources.prow_source import prow_identity
 
-        data: dict = {"job_name": "original"}
-        body = self._make_body()
-        _apply_prow_identity(data, body)
-        assert data["job_name"] == "my-prow-job"
-        assert data["build_number"] == "1234567890123456789"
+        result = prow_identity("my-prow-job", "abc-not-numeric")
+        assert result == {"job_name": "my-prow-job"}
+        assert "build_number" not in result
 
-    def test_prow_with_non_numeric_build_id(self):
-        from rootcoz.main import _apply_prow_identity
+    def test_empty_build_id_excluded(self):
+        from rootcoz.sources.prow_source import prow_identity
 
-        data: dict = {"job_name": "original"}
-        body = MagicMock(
-            type="prow", prow_job_name="my-prow-job", build_id="abc-not-numeric"
+        result = prow_identity("my-prow-job", "")
+        assert result == {"job_name": "my-prow-job"}
+
+    def test_empty_job_name_excluded(self):
+        from rootcoz.sources.prow_source import prow_identity
+
+        result = prow_identity("", "123")
+        assert "job_name" not in result
+
+    def test_identity_dict_delegates_to_shared(self):
+        """ProwSource._identity_dict() uses the same shared helper."""
+        from rootcoz.sources.prow_source import ProwSource
+
+        source = ProwSource(
+            job_name="my-prow-job",
+            build_id="1234567890123456789",
+            gcs_bucket="test-bucket",
+            prow_url="https://prow.example.com",
         )
-        _apply_prow_identity(data, body)
-        assert data["job_name"] == "my-prow-job"
-        assert "build_number" not in data
-
-    def test_prow_without_prow_job_name(self):
-        from rootcoz.main import _apply_prow_identity
-
-        data: dict = {"job_name": "original"}
-        body = MagicMock(type="prow", prow_job_name="", build_id="123")
-        _apply_prow_identity(data, body)
-        assert data["job_name"] == "original"  # unchanged
-        assert "build_number" not in data
-
-    def test_non_prow_type_no_mutation(self):
-        from rootcoz.main import _apply_prow_identity
-
-        data: dict = {"job_name": "original"}
-        body = MagicMock(type="file", prow_job_name="should-be-ignored", build_id="123")
-        _apply_prow_identity(data, body)
-        assert data["job_name"] == "original"  # unchanged
-        assert "build_number" not in data
+        identity = source._identity_dict()
+        assert identity["job_name"] == "my-prow-job"
+        assert identity["build_number"] == "1234567890123456789"
 
 
 class TestAnalyzeProwEndpoint:

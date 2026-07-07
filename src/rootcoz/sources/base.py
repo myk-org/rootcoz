@@ -11,8 +11,25 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 from rootcoz.models import FailedTest
+
+
+@dataclass
+class WorkspaceFile:
+    """A file to write to the AI workspace for analysis context.
+
+    Attributes:
+        filename: Name of the file (e.g. ``prow-context.txt``).
+        content: Text content to write.
+        instruction: Instruction appended to the AI prompt explaining
+            what the file contains and why the AI must read it.
+    """
+
+    filename: str
+    content: str
+    instruction: str
 
 
 @dataclass
@@ -32,6 +49,7 @@ class CISourceResult:
             ``(job_name, build_number)`` tuples for recursive analysis.
         source_metadata: Optional metadata from the CI source plugin
             (e.g. Prow job type, PR number, repo info from prowjob.json).
+        identity: Override fields for the result dict (e.g. job_name, build_number for Prow).
     """
 
     failures: list[FailedTest]
@@ -43,6 +61,7 @@ class CISourceResult:
     child_job_infos: list[tuple[str, int]] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
     source_metadata: dict = field(default_factory=dict)
+    identity: dict = field(default_factory=dict)
 
 
 class CISource(ABC):
@@ -62,6 +81,26 @@ class CISource(ABC):
             and optional child-job metadata.
         """
 
+    async def prepare_workspace(
+        self,
+        repo_path: Path | None = None,
+        github_token: str = "",
+    ) -> list[WorkspaceFile]:
+        """Prepare workspace context files for AI analysis.
+
+        Called after ``fetch`` with the cloned repository path. Plugins
+        override this to produce files the AI should read before analysing
+        failures (e.g. CI job context, PR diffs).
+
+        Args:
+            repo_path: Path to the cloned test repository workspace.
+            github_token: Optional GitHub token for API calls (PR diffs).
+
+        Returns:
+            List of ``WorkspaceFile`` entries to write to the workspace.
+        """
+        return []
+
     def create_child_source(
         self, _job_name: str, _build_number: int
     ) -> CISource | None:
@@ -74,6 +113,51 @@ class CISource(ABC):
         Returns:
             A new ``CISource`` for the child job, or ``None`` if the source
             does not support child jobs.
+        """
+        return None
+
+    async def refetch_context(self) -> CISourceResult:
+        """Re-download console output and artifacts for reanalysis.
+
+        Called by per-failure reanalysis to provide the same evidence
+        the original analysis had.  Returns a ``CISourceResult`` with
+        at least ``console_context`` and ``artifacts_context`` populated;
+        other fields (``failures``, ``child_job_infos``) may be empty.
+
+        The caller is responsible for calling ``cleanup()`` when done.
+
+        The default implementation returns an empty result — suitable
+        for sources without remote console/artifact data (e.g. file, raw).
+        Subclasses that fetch from a CI system should override this.
+        """
+        return CISourceResult(failures=[])
+
+    @classmethod
+    def from_stored_params(
+        cls,
+        params: dict[str, Any],
+        settings: Any = None,
+        *,
+        child_job_name: str = "",
+        child_build_number: int = 0,
+    ) -> CISource | None:
+        """Reconstruct a source plugin from stored request params.
+
+        Used by per-failure reanalysis to recreate the source that
+        produced the original analysis, so it can refetch context.
+
+        Args:
+            params: Decrypted ``request_params`` from the stored result.
+            settings: Server ``Settings`` object (needed for Jenkins
+                connection info, artifact config, etc.).
+            child_job_name: For Jenkins child job failures — overrides
+                the job name from params.
+            child_build_number: For Jenkins child job failures — overrides
+                the build number from params.
+
+        Returns:
+            A ``CISource`` instance, or ``None`` if the source type
+            cannot be reconstructed (e.g. file/raw — no remote data).
         """
         return None
 

@@ -33,6 +33,7 @@ from rootcoz.engine.core import (
     extract_relevant_console_lines,
     format_exception_with_type,
     get_failure_signature,
+    link_artifacts_to_workspace,
     resolve_additional_repos,
     safe_update_progress,
 )
@@ -494,6 +495,100 @@ class JenkinsSource(CISource):
             build_number=build_number,
             settings=self.settings,
             force=self.force,
+        )
+
+    async def refetch_context(self) -> CISourceResult:
+        """Re-download console output and artifacts from Jenkins.
+
+        Fetches only the console output and build artifacts — skips
+        test report parsing and child job extraction since they are
+        not needed for per-failure reanalysis context.
+        """
+        console_context = ""
+        artifacts_context = ""
+        warnings: list[str] = []
+
+        # 1. Fetch console output
+        try:
+            console_output = await asyncio.to_thread(
+                self.client.get_build_console, self.job_name, self.build_number
+            )
+            if console_output:
+                console_context = extract_relevant_console_lines(console_output)
+                logger.info(
+                    "Refetched Jenkins console (%d chars, %d relevant)",
+                    len(console_output),
+                    len(console_context),
+                )
+        except Exception as exc:
+            warnings.append(f"Failed to refetch Jenkins console: {exc}")
+            logger.warning("Failed to refetch Jenkins console: %s", exc)
+
+        # 2. Download artifacts
+        if self.settings.get_job_artifacts:
+            try:
+                build_info = await asyncio.to_thread(
+                    self.client.get_build_info_safe,
+                    self.job_name,
+                    self.build_number,
+                )
+                artifacts = build_info.get("artifacts", [])
+                build_url = build_info.get("url", "").rstrip("/")
+                if artifacts and build_url:
+                    artifacts_context, extract_path = await asyncio.to_thread(
+                        process_build_artifacts,
+                        self.client.session,
+                        build_url,
+                        artifacts,
+                        self.settings.jenkins_artifacts_max_size_mb,
+                    )
+                    if extract_path:
+                        self._extract_path = extract_path
+                        logger.info("Refetched Jenkins artifacts to %s", extract_path)
+            except Exception as exc:
+                warnings.append(f"Failed to refetch Jenkins artifacts: {exc}")
+                logger.warning("Failed to refetch Jenkins artifacts: %s", exc)
+
+        return CISourceResult(
+            failures=[],
+            console_context=console_context,
+            artifacts_context=artifacts_context,
+            build_url=self.build_url,
+            extract_path=self._extract_path,
+            warnings=warnings,
+        )
+
+    @classmethod
+    def from_stored_params(
+        cls,
+        params: dict,
+        settings=None,
+        *,
+        child_job_name: str = "",
+        child_build_number: int = 0,
+    ) -> JenkinsSource | None:
+        """Reconstruct a JenkinsSource from stored request params."""
+        if settings is None or not settings.jenkins_url:
+            logger.warning(
+                "Cannot reconstruct JenkinsSource: no settings or jenkins_url"
+            )
+            return None
+
+        # For child job failures, use child job coordinates
+        job_name = child_job_name or params.get("job_name", "")
+        build_number = child_build_number or params.get("build_number", 0)
+
+        if not job_name or not build_number:
+            logger.warning(
+                "Cannot reconstruct JenkinsSource: missing job_name/build_number"
+            )
+            return None
+
+        return cls(
+            job_name=job_name,
+            build_number=int(build_number),
+            settings=settings,
+            force=True,  # reanalysis always forces
         )
 
     def cleanup(self) -> None:
@@ -1141,12 +1236,9 @@ async def analyze_job(
 
             # Make artifacts accessible in the AI working directory
             if source_result.extract_path:
-                artifacts_link = repo_path / "build-artifacts"
-                try:
-                    artifacts_link.symlink_to(source_result.extract_path)
-                    logger.info(f"Linked artifacts into workspace: {artifacts_link}")
-                except OSError as exc:
-                    logger.warning(f"Could not link artifacts into workspace: {exc}")
+                if not link_artifacts_to_workspace(
+                    repo_path, source_result.extract_path, job_id
+                ):
                     artifacts_context = ""
 
             # Clone additional repositories for AI context
