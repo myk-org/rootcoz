@@ -186,6 +186,16 @@ class ReportPortalConfig(NamedTuple):
     push_rootcoz_url: bool
     push_tracker_links: bool
 
+    def __repr__(self) -> str:
+        """Redact api_token to prevent accidental credential leaks."""
+        return (
+            f"ReportPortalConfig(url={self.url!r}, api_token='**********', "
+            f"project={self.project!r}, verify_ssl={self.verify_ssl!r}, "
+            f"enabled={self.enabled!r}, push_classifications={self.push_classifications!r}, "
+            f"push_rootcoz_url={self.push_rootcoz_url!r}, "
+            f"push_tracker_links={self.push_tracker_links!r})"
+        )
+
 
 class Settings(BaseSettings):
     """Application settings loaded from environment variables."""
