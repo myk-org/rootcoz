@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import os
 import threading
+import urllib.parse
 import warnings
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -446,18 +447,27 @@ class ReportPortalClient:
                         )
 
                 # Add user-tracked links (from tracked_in_links table)
-                seen_urls = {ei["url"] for ei in external_issues}
                 if tracked_in_links:
+                    seen_urls = {ei["url"] for ei in external_issues}
                     for link in tracked_in_links.get(failure.test_name, []):
                         link_url = link.get("tracked_in_url", "")
                         if link_url and link_url not in seen_urls:
                             seen_urls.add(link_url)
+                            # Extract ticket ID from URL path (strip query/fragment)
+                            parsed_path = urllib.parse.urlparse(link_url).path.rstrip(
+                                "/"
+                            )
+                            ticket_id = (
+                                parsed_path.rsplit("/", 1)[-1]
+                                if "/" in parsed_path
+                                else parsed_path
+                            )
                             external_issues.append(
                                 {
                                     "url": link_url,
                                     "btsProject": "",
                                     "btsUrl": link_url,
-                                    "ticketId": link_url.rstrip("/").rsplit("/", 1)[-1],
+                                    "ticketId": ticket_id,
                                 }
                             )
 
