@@ -6,7 +6,7 @@ import pytest
 import requests as _requests
 
 import rootcoz.reportportal as rp_module
-from rootcoz.reportportal import ReportPortalClient
+from rootcoz.reportportal import ReportPortalClient, _extract_bts_fields
 
 # -- Classification mapping tests -------------------------------------------
 
@@ -949,6 +949,7 @@ class TestPushContentToggles(TestPushClassifications):
         ext = payload["issue"]["externalSystemIssues"]
         assert len(ext) == 1
         assert ext[0]["url"] == "https://github.com/org/repo/pull/5141"
+        assert ext[0]["btsProject"] == "org/repo"
         assert ext[0]["ticketId"] == "5141"
 
     def test_tracked_in_links_merged_with_jira_matches(self):
@@ -1100,3 +1101,52 @@ class TestRPClientInitLock:
         mock_lock.acquire.assert_called_once_with(timeout=30)
         # Lock release should NOT be called since acquire failed
         mock_lock.release.assert_not_called()
+
+
+class TestExtractBtsFields:
+    """Test _extract_bts_fields URL parsing."""
+
+    def test_github_pr(self):
+        project, ticket = _extract_bts_fields(
+            "https://github.com/RedHatQE/openshift-virtualization-tests/pull/5141"
+        )
+        assert project == "RedHatQE/openshift-virtualization-tests"
+        assert ticket == "5141"
+
+    def test_github_issue(self):
+        project, ticket = _extract_bts_fields("https://github.com/org/repo/issues/42")
+        assert project == "org/repo"
+        assert ticket == "42"
+
+    def test_github_with_query(self):
+        project, ticket = _extract_bts_fields(
+            "https://github.com/org/repo/issues/42?tab=comments#note_5"
+        )
+        assert project == "org/repo"
+        assert ticket == "42"
+
+    def test_jira_browse(self):
+        project, ticket = _extract_bts_fields(
+            "https://jira.example.com/browse/PROJ-123"
+        )
+        assert project == "PROJ"
+        assert ticket == "PROJ-123"
+
+    def test_atlassian_jira(self):
+        project, ticket = _extract_bts_fields(
+            "https://mycompany.atlassian.net/browse/TEAM-456"
+        )
+        assert project == "TEAM"
+        assert ticket == "TEAM-456"
+
+    def test_bugzilla_fallback(self):
+        project, ticket = _extract_bts_fields(
+            "https://bugzilla.redhat.com/show_bug.cgi"
+        )
+        assert project == "bugzilla.redhat.com"
+        assert ticket == "show_bug.cgi"
+
+    def test_trailing_slash(self):
+        project, ticket = _extract_bts_fields("https://github.com/org/repo/pull/99/")
+        assert project == "org/repo"
+        assert ticket == "99"

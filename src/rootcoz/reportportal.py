@@ -78,6 +78,32 @@ _DEFAULT_LOCATORS: dict[str, str] = {
 }
 
 
+def _extract_bts_fields(url: str) -> tuple[str, str]:
+    """Extract btsProject and ticketId from a tracked-in URL.
+
+    - GitHub: btsProject = "org/repo", ticketId = issue/PR number
+    - Jira: btsProject = project key, ticketId = issue key
+    - Other: btsProject = hostname, ticketId = last path segment
+    """
+    parsed = urllib.parse.urlparse(url)
+    path = parsed.path.rstrip("/")
+    segments = [s for s in path.split("/") if s]
+    hostname = parsed.hostname or ""
+    ticket_id = segments[-1] if segments else hostname
+
+    if "github" in hostname and len(segments) >= 4:
+        # github.com/org/repo/issues/123 or github.com/org/repo/pull/123
+        return f"{segments[0]}/{segments[1]}", segments[-1]
+
+    if "jira" in hostname or "atlassian" in hostname:
+        # Jira: ticketId like PROJ-123, btsProject = PROJ
+        if "-" in ticket_id:
+            return ticket_id.split("-")[0], ticket_id
+
+    # Fallback: hostname as project, last segment as ticket
+    return hostname, ticket_id
+
+
 class ReportPortalClient:
     """Client for pushing rootcoz classifications into Report Portal.
 
@@ -453,19 +479,11 @@ class ReportPortalClient:
                         link_url = link.get("tracked_in_url", "")
                         if link_url and link_url not in seen_urls:
                             seen_urls.add(link_url)
-                            # Extract ticket ID from URL path (strip query/fragment)
-                            parsed_path = urllib.parse.urlparse(link_url).path.rstrip(
-                                "/"
-                            )
-                            ticket_id = (
-                                parsed_path.rsplit("/", 1)[-1]
-                                if "/" in parsed_path
-                                else parsed_path
-                            )
+                            bts_project, ticket_id = _extract_bts_fields(link_url)
                             external_issues.append(
                                 {
                                     "url": link_url,
-                                    "btsProject": "",
+                                    "btsProject": bts_project,
                                     "btsUrl": link_url,
                                     "ticketId": ticket_id,
                                 }
