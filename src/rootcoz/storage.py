@@ -2233,7 +2233,8 @@ async def get_tracked_in_for_scope(
                 "SELECT test_name, url, type, created_by "
                 "FROM tracked_in_links "
                 "WHERE job_id = ? AND child_job_name = ? "
-                "AND child_build_number = ? ORDER BY created_at",
+                "AND (child_build_number = ? OR child_build_number = 0) "
+                "ORDER BY created_at",
                 (job_id, child_job_name, child_build_number),
             )
         else:
