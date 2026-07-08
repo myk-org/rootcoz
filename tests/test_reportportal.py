@@ -6,7 +6,7 @@ import pytest
 import requests as _requests
 
 import rootcoz.reportportal as rp_module
-from rootcoz.reportportal import ReportPortalClient
+from rootcoz.reportportal import ReportPortalClient, _extract_bts_fields
 
 # -- Classification mapping tests -------------------------------------------
 
@@ -458,6 +458,7 @@ class TestPushClassifications:
         "PRODUCT_BUG": "pb001",
         "AUTOMATION_BUG": "ab001",
         "SYSTEM_ISSUE": "si001",
+        "TO_INVESTIGATE": "ti001",
     }
 
     def _make_failure(self, classification="PRODUCT BUG", details="Analysis text"):
@@ -467,6 +468,18 @@ class TestPushClassifications:
         failure.analysis.details = details
         failure.analysis.product_bug_report = None
         failure.analysis.code_fix = None
+        failure.test_name = "test_example"
+        return failure
+
+    def _make_failure_with_jira(self):
+        """Create a failure with Jira matches for tracker link tests."""
+        failure = self._make_failure("PRODUCT BUG", "Bug text")
+        jira_match = MagicMock()
+        jira_match.url = "https://jira.example.com/browse/PROJ-123"
+        jira_match.key = "PROJ-123"
+        jira_match.summary = "Known bug"
+        failure.analysis.product_bug_report = MagicMock()
+        failure.analysis.product_bug_report.jira_matches = [jira_match]
         return failure
 
     def _setup_push_client(self, *, locators=None, put_side_effect=None):
@@ -780,6 +793,248 @@ class TestPushClassifications:
         assert "connection refused" in log_msg
 
 
+# -- push content toggle tests ------------------------------------------------
+
+
+class TestPushContentToggles(TestPushClassifications):
+    """Test push_classifications() content toggle combinations."""
+
+    def test_all_toggles_enabled_includes_everything(self):
+        """Default behavior: classification, comment, and tracker links all present."""
+        client, mock_session = self._setup_push_client()
+        failure = self._make_failure_with_jira()
+        matched = [({"id": 200, "name": "test_all", "launchId": 10}, failure)]
+
+        result = client.push_classifications(
+            matched,
+            "http://rootcoz.example.com/results/job-1",
+            push_classifications=True,
+            push_rootcoz_url=True,
+            push_tracker_links=True,
+        )
+        assert result["pushed"] == 1
+        payload = _extract_put_json(mock_session)
+        assert payload["issue"]["issueType"] == "pb001"
+        assert "rootcoz Failure Analysis" in payload["issue"]["comment"]
+        assert "externalSystemIssues" in payload["issue"]
+        assert payload["issue"]["externalSystemIssues"][0]["ticketId"] == "PROJ-123"
+
+    def test_classifications_disabled_uses_to_investigate(self):
+        """When classifications disabled, issueType falls back to TO_INVESTIGATE."""
+        client, mock_session = self._setup_push_client()
+        failure = self._make_failure("PRODUCT BUG")
+        matched = [({"id": 201, "name": "test_no_cls", "launchId": 10}, failure)]
+
+        result = client.push_classifications(
+            matched,
+            "http://rootcoz.example.com/results/job-1",
+            push_classifications=False,
+        )
+        assert result["pushed"] == 1
+        payload = _extract_put_json(mock_session)
+        assert payload["issue"]["issueType"] == "ti001"
+
+    def test_classifications_disabled_skips_unmatched(self):
+        """When classifications disabled, unknown classifications don't go to unmatched."""
+        client, mock_session = self._setup_push_client()
+        failure = self._make_failure("SOMETHING UNKNOWN")
+        matched = [({"id": 202, "name": "test_unknown", "launchId": 10}, failure)]
+
+        result = client.push_classifications(
+            matched,
+            "http://rootcoz.example.com/results/job-1",
+            push_classifications=False,
+        )
+        assert result["pushed"] == 1
+        assert result["unmatched"] == []
+        payload = _extract_put_json(mock_session)
+        assert payload["issue"]["issueType"] == "ti001"
+
+    def test_rootcoz_url_disabled_no_comment(self):
+        """When rootcoz URL disabled, no comment in payload."""
+        client, mock_session = self._setup_push_client()
+        failure = self._make_failure("PRODUCT BUG")
+        matched = [({"id": 203, "name": "test_no_url", "launchId": 10}, failure)]
+
+        result = client.push_classifications(
+            matched,
+            "http://rootcoz.example.com/results/job-1",
+            push_rootcoz_url=False,
+        )
+        assert result["pushed"] == 1
+        payload = _extract_put_json(mock_session)
+        assert "comment" not in payload["issue"]
+        # Classification should still be there
+        assert payload["issue"]["issueType"] == "pb001"
+
+    def test_tracker_links_disabled_no_external_issues(self):
+        """When tracker links disabled, no externalSystemIssues even with Jira matches."""
+        client, mock_session = self._setup_push_client()
+        failure = self._make_failure_with_jira()
+        matched = [({"id": 204, "name": "test_no_links", "launchId": 10}, failure)]
+
+        result = client.push_classifications(
+            matched,
+            "http://rootcoz.example.com/results/job-1",
+            push_tracker_links=False,
+        )
+        assert result["pushed"] == 1
+        payload = _extract_put_json(mock_session)
+        assert "externalSystemIssues" not in payload["issue"]
+        # Classification and comment should still be there
+        assert payload["issue"]["issueType"] == "pb001"
+        assert "rootcoz Failure Analysis" in payload["issue"]["comment"]
+
+    def test_only_rootcoz_url_enabled(self):
+        """Only rootcoz URL — no classification mapping, no tracker links."""
+        client, mock_session = self._setup_push_client()
+        failure = self._make_failure_with_jira()
+        matched = [({"id": 205, "name": "test_url_only", "launchId": 10}, failure)]
+
+        result = client.push_classifications(
+            matched,
+            "http://rootcoz.example.com/results/job-1",
+            push_classifications=False,
+            push_rootcoz_url=True,
+            push_tracker_links=False,
+        )
+        assert result["pushed"] == 1
+        payload = _extract_put_json(mock_session)
+        assert payload["issue"]["issueType"] == "ti001"
+        assert "rootcoz Failure Analysis" in payload["issue"]["comment"]
+        assert "externalSystemIssues" not in payload["issue"]
+
+    def test_only_tracker_links_enabled(self):
+        """Only tracker links — no classification, no rootcoz URL."""
+        client, mock_session = self._setup_push_client()
+        failure = self._make_failure_with_jira()
+        matched = [({"id": 206, "name": "test_links_only", "launchId": 10}, failure)]
+
+        result = client.push_classifications(
+            matched,
+            "http://rootcoz.example.com/results/job-1",
+            push_classifications=False,
+            push_rootcoz_url=False,
+            push_tracker_links=True,
+        )
+        assert result["pushed"] == 1
+        payload = _extract_put_json(mock_session)
+        assert payload["issue"]["issueType"] == "ti001"
+        assert "comment" not in payload["issue"]
+        assert payload["issue"]["externalSystemIssues"][0]["ticketId"] == "PROJ-123"
+
+    def test_tracked_in_links_pushed_as_external_issues(self):
+        """User-tracked links are pushed as external system issues."""
+        client, mock_session = self._setup_push_client()
+        failure = self._make_failure("PRODUCT BUG")
+        matched = [({"id": 207, "name": "test_tracked", "launchId": 10}, failure)]
+
+        tracked = {
+            "test_example": [
+                {
+                    "tracked_in_url": "https://github.com/org/repo/pull/5141",
+                    "tracked_in_type": "github",
+                    "tracked_in_by": "user1",
+                },
+            ]
+        }
+
+        result = client.push_classifications(
+            matched,
+            "http://rootcoz.example.com/results/job-1",
+            tracked_in_links=tracked,
+        )
+        assert result["pushed"] == 1
+        payload = _extract_put_json(mock_session)
+        ext = payload["issue"]["externalSystemIssues"]
+        assert len(ext) == 1
+        assert ext[0]["url"] == "https://github.com/org/repo/pull/5141"
+        assert ext[0]["btsProject"] == "org/repo"
+        assert ext[0]["ticketId"] == "5141"
+
+    def test_tracked_in_links_merged_with_jira_matches(self):
+        """Tracked-in links and AI Jira matches are combined."""
+        client, mock_session = self._setup_push_client()
+        failure = self._make_failure_with_jira()
+        matched = [({"id": 208, "name": "test_merge", "launchId": 10}, failure)]
+
+        tracked = {
+            "test_example": [
+                {
+                    "tracked_in_url": "https://github.com/org/repo/pull/100",
+                    "tracked_in_type": "github",
+                    "tracked_in_by": "user1",
+                },
+            ]
+        }
+
+        result = client.push_classifications(
+            matched,
+            "http://rootcoz.example.com/results/job-1",
+            tracked_in_links=tracked,
+        )
+        assert result["pushed"] == 1
+        payload = _extract_put_json(mock_session)
+        ext = payload["issue"]["externalSystemIssues"]
+        assert len(ext) == 2
+        # First is the Jira match, second is the tracked-in link
+        urls = {e["url"] for e in ext}
+        assert "https://jira.example.com/browse/PROJ-123" in urls
+        assert "https://github.com/org/repo/pull/100" in urls
+
+    def test_tracked_in_links_deduplicated_with_jira_matches(self):
+        """Tracked-in link with same URL as Jira match is not duplicated."""
+        client, mock_session = self._setup_push_client()
+        failure = self._make_failure_with_jira()
+        matched = [({"id": 209, "name": "test_dedup", "launchId": 10}, failure)]
+
+        tracked = {
+            "test_example": [
+                {
+                    "tracked_in_url": "https://jira.example.com/browse/PROJ-123",
+                    "tracked_in_type": "jira",
+                    "tracked_in_by": "user1",
+                },
+            ]
+        }
+
+        result = client.push_classifications(
+            matched,
+            "http://rootcoz.example.com/results/job-1",
+            tracked_in_links=tracked,
+        )
+        assert result["pushed"] == 1
+        payload = _extract_put_json(mock_session)
+        ext = payload["issue"]["externalSystemIssues"]
+        assert len(ext) == 1  # Deduplicated
+
+    def test_tracked_in_links_skipped_when_toggle_disabled(self):
+        """Tracked-in links not pushed when push_tracker_links is disabled."""
+        client, mock_session = self._setup_push_client()
+        failure = self._make_failure("PRODUCT BUG")
+        matched = [({"id": 210, "name": "test_skip", "launchId": 10}, failure)]
+
+        tracked = {
+            "test_example": [
+                {
+                    "tracked_in_url": "https://github.com/org/repo/pull/5141",
+                    "tracked_in_type": "github",
+                    "tracked_in_by": "user1",
+                },
+            ]
+        }
+
+        result = client.push_classifications(
+            matched,
+            "http://rootcoz.example.com/results/job-1",
+            push_tracker_links=False,
+            tracked_in_links=tracked,
+        )
+        assert result["pushed"] == 1
+        payload = _extract_put_json(mock_session)
+        assert "externalSystemIssues" not in payload["issue"]
+
+
 # -- close tests --------------------------------------------------------------
 
 
@@ -846,3 +1101,73 @@ class TestRPClientInitLock:
         mock_lock.acquire.assert_called_once_with(timeout=30)
         # Lock release should NOT be called since acquire failed
         mock_lock.release.assert_not_called()
+
+
+class TestExtractBtsFields:
+    """Test _extract_bts_fields URL parsing."""
+
+    def test_github_pr(self):
+        project, ticket = _extract_bts_fields(
+            "https://github.com/RedHatQE/openshift-virtualization-tests/pull/5141"
+        )
+        assert project == "RedHatQE/openshift-virtualization-tests"
+        assert ticket == "5141"
+
+    def test_github_issue(self):
+        project, ticket = _extract_bts_fields("https://github.com/org/repo/issues/42")
+        assert project == "org/repo"
+        assert ticket == "42"
+
+    def test_github_with_query(self):
+        project, ticket = _extract_bts_fields(
+            "https://github.com/org/repo/issues/42?tab=comments#note_5"
+        )
+        assert project == "org/repo"
+        assert ticket == "42"
+
+    def test_jira_browse(self):
+        project, ticket = _extract_bts_fields(
+            "https://jira.example.com/browse/PROJ-123"
+        )
+        assert project == "PROJ"
+        assert ticket == "PROJ-123"
+
+    def test_atlassian_jira(self):
+        project, ticket = _extract_bts_fields(
+            "https://mycompany.atlassian.net/browse/TEAM-456"
+        )
+        assert project == "TEAM"
+        assert ticket == "TEAM-456"
+
+    def test_bugzilla_fallback(self):
+        project, ticket = _extract_bts_fields(
+            "https://bugzilla.redhat.com/show_bug.cgi"
+        )
+        assert project == "bugzilla.redhat.com"
+        assert ticket == "show_bug.cgi"
+
+    def test_trailing_slash(self):
+        project, ticket = _extract_bts_fields("https://github.com/org/repo/pull/99/")
+        assert project == "org/repo"
+        assert ticket == "99"
+
+    def test_github_pr_deep_link_files(self):
+        project, ticket = _extract_bts_fields(
+            "https://github.com/org/repo/pull/5141/files"
+        )
+        assert project == "org/repo"
+        assert ticket == "5141"
+
+    def test_github_pr_deep_link_commits(self):
+        project, ticket = _extract_bts_fields(
+            "https://github.com/org/repo/pull/5141/commits"
+        )
+        assert project == "org/repo"
+        assert ticket == "5141"
+
+    def test_github_issue_with_comment_anchor(self):
+        project, ticket = _extract_bts_fields(
+            "https://github.com/org/repo/issues/42#issuecomment-12345"
+        )
+        assert project == "org/repo"
+        assert ticket == "42"

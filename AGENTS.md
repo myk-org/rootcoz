@@ -322,6 +322,9 @@ Exceptions (server-level only, no payload equivalent):
 - `DEBUG` — server reload toggle
 - `ENABLE_GITHUB_ISSUES` — server capability toggle for GitHub issue creation
 - `ENABLE_REPORTPORTAL` — server capability toggle for Report Portal integration
+- `RP_PUSH_CLASSIFICATIONS` — server-only toggle for including classification (defect type mapping) in Report Portal pushes (default: True)
+- `RP_PUSH_ROOTCOZ_URL` — server-only toggle for including rootcoz analysis URL comment in Report Portal pushes (default: True)
+- `RP_PUSH_TRACKER_LINKS` — server-only toggle for including Jira/GitHub issue links as external system issues in Report Portal pushes (default: True)
 - `ENABLE_AUTO_REVIEW` — server capability toggle for auto-review of matching failures; when disabled, failures are never automatically marked as reviewed
 - `ROOTCOZ_ENCRYPTION_KEY` — server-only secret for at-rest encryption AND HMAC secret for all API key hashes (admin and user); never expose via request payloads, CLI flags, or shared config files. **Rotating this key invalidates both encrypted data (tokens) and all stored API key hashes (admin and user)** — operators must re-issue all API keys after rotation. Stored sessions use plain SHA-256 hashing (no HMAC) and are NOT affected by key rotation.
 - `LOG_LEVEL` — server log verbosity

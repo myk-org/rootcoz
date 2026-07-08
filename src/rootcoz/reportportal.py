@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import os
 import threading
+import urllib.parse
 import warnings
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -75,6 +76,34 @@ _DEFAULT_LOCATORS: dict[str, str] = {
     "SYSTEM_ISSUE": "si001",
     "TO_INVESTIGATE": "ti001",
 }
+
+
+def _extract_bts_fields(url: str) -> tuple[str, str]:
+    """Extract btsProject and ticketId from a tracked-in URL.
+
+    - GitHub: btsProject = "org/repo", ticketId = issue/PR number
+    - Jira: btsProject = project key, ticketId = issue key
+    - Other: btsProject = hostname, ticketId = last path segment
+    """
+    parsed = urllib.parse.urlparse(url)
+    path = parsed.path.rstrip("/")
+    segments = [s for s in path.split("/") if s]
+    hostname = parsed.hostname or ""
+    ticket_id = segments[-1] if segments else hostname
+
+    if "github" in hostname and len(segments) >= 4:
+        # github.com/org/repo/issues/123 or github.com/org/repo/pull/123/files
+        # Use segments[3] (the number), not segments[-1] (may be 'files', 'commits')
+        if segments[2] in {"issues", "pull"}:
+            return f"{segments[0]}/{segments[1]}", segments[3]
+
+    if "jira" in hostname or "atlassian" in hostname:
+        # Jira: ticketId like PROJ-123, btsProject = PROJ
+        if "-" in ticket_id:
+            return ticket_id.split("-")[0], ticket_id
+
+    # Fallback: hostname as project, last segment as ticket
+    return hostname, ticket_id
 
 
 class ReportPortalClient:
@@ -329,6 +358,11 @@ class ReportPortalClient:
         matched_pairs: list[tuple[dict, FailureAnalysis]],
         report_url: str,
         history_classifications: dict[str, str] | None = None,
+        *,
+        push_classifications: bool = True,
+        push_rootcoz_url: bool = True,
+        push_tracker_links: bool = True,
+        tracked_in_links: dict[str, list[dict]] | None = None,
     ) -> dict:
         """Push rootcoz classifications into RP test items.
 
@@ -337,11 +371,25 @@ class ReportPortalClient:
         - Comment with link to rootcoz report page
         - External system issues for Jira matches (if present)
 
+        Each component can be independently toggled:
+
         Args:
             matched_pairs: List of ``(rp_item, rcz_failure)`` tuples.
             report_url: URL to the rootcoz report page.
             history_classifications: Optional mapping of test name to
                 history classification (e.g. ``INFRASTRUCTURE``).
+            push_classifications: When ``True`` (default), map rootcoz
+                classifications to RP defect types. When ``False``,
+                set items to ``TO_INVESTIGATE`` instead of mapping
+                the rootcoz classification.
+            push_rootcoz_url: When ``True`` (default), include a comment
+                with a link to the rootcoz report page.
+            push_tracker_links: When ``True`` (default), attach Jira
+                matches as external system issues.
+            tracked_in_links: Optional mapping of test name to list of
+                tracked-in link dicts (each with ``tracked_in_url`` and
+                ``tracked_in_type`` keys). Merged with AI Jira matches
+                when ``push_tracker_links`` is ``True``.
 
         Returns:
             Dict with keys: ``pushed``, ``unmatched``, ``errors``, ``launch_id``.
@@ -385,39 +433,66 @@ class ReportPortalClient:
             hist_cls = history.get(failure.test_name)
             locator = self._map_classification(ai_classification, hist_cls, locators)
 
-            if not locator:
-                unmatched.append(item_name)
-                continue
-
-            # Build comment
-            comment = f"See AI failure analysis under: [rootcoz Failure Analysis]({report_url})"
+            if push_classifications:
+                if not locator:
+                    unmatched.append(item_name)
+                    continue
+                issue_type = locator
+            else:
+                # RP API requires issueType; use TO_INVESTIGATE as neutral default
+                issue_type = (
+                    locators.get("TO_INVESTIGATE")
+                    or _DEFAULT_LOCATORS["TO_INVESTIGATE"]
+                )
 
             # Build issue update payload (RP API uses camelCase)
             issue_payload: dict = {
-                "issueType": locator,
-                "comment": comment,
+                "issueType": issue_type,
                 "autoAnalyzed": False,
                 "ignoreAnalyzer": True,
             }
 
-            # Add Jira matches as external issues
-            external_issues = []
-            pbr = failure.analysis.product_bug_report
-            if pbr and not isinstance(pbr, bool) and pbr.jira_matches:
-                for jira_match in pbr.jira_matches:
-                    external_issues.append(
-                        {
-                            "url": jira_match.url,
-                            "btsProject": jira_match.key.split("-")[0]
-                            if "-" in jira_match.key
-                            else "",
-                            "btsUrl": jira_match.url,
-                            "ticketId": jira_match.key,
-                        }
-                    )
+            if push_rootcoz_url:
+                issue_payload["comment"] = (
+                    f"See AI failure analysis under: [rootcoz Failure Analysis]({report_url})"
+                )
 
-            if external_issues:
-                issue_payload["externalSystemIssues"] = external_issues
+            # Add Jira matches as external issues
+            if push_tracker_links:
+                external_issues = []
+                pbr = failure.analysis.product_bug_report
+                if pbr and not isinstance(pbr, bool) and pbr.jira_matches:
+                    for jira_match in pbr.jira_matches:
+                        external_issues.append(
+                            {
+                                "url": jira_match.url,
+                                "btsProject": jira_match.key.split("-")[0]
+                                if "-" in jira_match.key
+                                else "",
+                                "btsUrl": jira_match.url,
+                                "ticketId": jira_match.key,
+                            }
+                        )
+
+                # Add user-tracked links (from tracked_in_links table)
+                if tracked_in_links:
+                    seen_urls = {ei["url"] for ei in external_issues}
+                    for link in tracked_in_links.get(failure.test_name, []):
+                        link_url = link.get("tracked_in_url", "")
+                        if link_url and link_url not in seen_urls:
+                            seen_urls.add(link_url)
+                            bts_project, ticket_id = _extract_bts_fields(link_url)
+                            external_issues.append(
+                                {
+                                    "url": link_url,
+                                    "btsProject": bts_project,
+                                    "btsUrl": link_url,
+                                    "ticketId": ticket_id,
+                                }
+                            )
+
+                if external_issues:
+                    issue_payload["externalSystemIssues"] = external_issues
 
             bulk_issues.append({"testItemId": item_id, "issue": issue_payload})
 

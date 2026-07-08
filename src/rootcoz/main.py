@@ -247,6 +247,9 @@ _SETTINGS_CATEGORIES: dict[str, list[str]] = {
         "reportportal_project",
         "reportportal_verify_ssl",
         "enable_reportportal",
+        "rp_push_classifications",
+        "rp_push_rootcoz_url",
+        "rp_push_tracker_links",
     ],
     "Auth & Security": [
         "admin_key",
@@ -5734,13 +5737,14 @@ async def _execute_rp_push(
     Returns:
         Dict with keys: ``pushed``, ``unmatched``, ``errors``, ``launch_id``.
     """
+    rp = settings.rp
     base_url = _extract_base_url()
-    if not base_url:
+    if rp.push_rootcoz_url and not base_url:
         raise ValueError(
-            "PUBLIC_BASE_URL must be set to push to Report Portal"
+            "PUBLIC_BASE_URL must be set to push rootcoz URL to Report Portal"
             " (relative URLs resolve against the RP domain)"
         )
-    report_url = f"{base_url}/results/{job_id}"
+    report_url = f"{base_url}/results/{job_id}" if base_url else ""
 
     # Scope to child job when requested
     if child_job_name is not None:
@@ -5773,35 +5777,59 @@ async def _execute_rp_push(
             "No failures to push to Report Portal.",
         )
 
+    # Validate at least one push content toggle is enabled
+    if not any(
+        (
+            rp.push_classifications,
+            rp.push_rootcoz_url,
+            rp.push_tracker_links,
+        )
+    ):
+        return _rp_push_error_result(
+            "All Report Portal push content toggles are disabled. "
+            "Enable at least one of: rp_push_classifications, rp_push_rootcoz_url, rp_push_tracker_links.",
+        )
+
     # Called only when reportportal_enabled is True, which guarantees these
     # fields are set (see Settings.reportportal_enabled property).  Explicit
     # checks narrow the Optional types for mypy and survive python -O.
-    if settings.reportportal_url is None:
+    if rp.url is None:
         raise RuntimeError("reportportal_url is required when Report Portal is enabled")
-    if settings.reportportal_api_token is None:
+    if rp.api_token is None or not rp.api_token.get_secret_value():
         raise RuntimeError(
             "reportportal_api_token is required when Report Portal is enabled"
         )
-    if settings.reportportal_project is None:
+    if rp.project is None:
         raise RuntimeError(
             "reportportal_project is required when Report Portal is enabled"
         )
 
     try:
         rp_client_ctx = ReportPortalClient(
-            url=settings.reportportal_url,
-            token=settings.reportportal_api_token.get_secret_value(),
-            project=settings.reportportal_project,
-            verify_ssl=settings.reportportal_verify_ssl,
+            url=rp.url,
+            token=rp.api_token.get_secret_value(),
+            project=rp.project,
+            verify_ssl=rp.verify_ssl,
         )
     except Exception as exc:
         user_msg, log_msg = _rp_error_message(
             exc,
             "connecting to Report Portal",
         )
-        # Include the RP URL in the log message (not user-facing) so
+        # Include the RP host in the log message (not user-facing) so
         # operators can identify which RP instance failed.
-        log_msg = f"{log_msg}, reportportal_url='{settings.reportportal_url}'"
+        # Strip any embedded credentials but keep host:port.
+        # Use netloc with userinfo stripping — avoids ValueError from
+        # urlparse().port on malformed ports.
+        try:
+            rp_host = (
+                urllib.parse.urlparse(rp.url).netloc.rsplit("@", 1)[-1] or "unknown"
+                if rp.url
+                else "unknown"
+            )
+        except Exception:
+            rp_host = "unknown"
+        log_msg = f"{log_msg}, reportportal_host='{rp_host}'"
         return _log_and_return_rp_error(user_msg, log_msg=log_msg)
 
     with rp_client_ctx as rp_client:
@@ -5938,12 +5966,32 @@ async def _execute_rp_push(
             if result:
                 history_classifications[name] = result
 
+        # Fetch user-tracked links scoped to the push target
+        tracked_in_data: dict[str, list[dict]] = {}
+        if rp.push_tracker_links:
+            try:
+                tracked_in_data = await storage.get_tracked_in_for_scope(
+                    job_id,
+                    child_job_name=child_job_name or "",
+                    child_build_number=child_build_number or 0,
+                )
+            except Exception:
+                logger.warning(
+                    "Failed to fetch tracked-in links for RP push, job_id=%s",
+                    job_id,
+                    exc_info=True,
+                )
+
         try:
             push_result = await asyncio.to_thread(
                 rp_client.push_classifications,
                 matched,
                 report_url,
                 history_classifications,
+                push_classifications=rp.push_classifications,
+                push_rootcoz_url=rp.push_rootcoz_url,
+                push_tracker_links=rp.push_tracker_links,
+                tracked_in_links=tracked_in_data,
             )
         except Exception as exc:
             user_msg, log_msg = _rp_error_message(

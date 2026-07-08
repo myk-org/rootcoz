@@ -2207,6 +2207,57 @@ async def get_tracked_in_for_job(job_id: str) -> dict[str, list[dict]]:
         return result
 
 
+async def get_tracked_in_for_scope(
+    job_id: str,
+    child_job_name: str = "",
+    child_build_number: int = 0,
+) -> dict[str, list[dict]]:
+    """Return tracked-in links filtered to a specific push scope.
+
+    Unlike :func:`get_tracked_in_for_job` which returns all links grouped
+    by composite key, this function filters at the SQL level and keys
+    the result by bare ``test_name``.
+
+    Args:
+        job_id: Analysis job ID.
+        child_job_name: If set, return only links for this child job.
+            If empty, return only top-level (non-child) links.
+        child_build_number: Required when ``child_job_name`` is set.
+
+    Returns:
+        Dict keyed by test name to list of link dicts.
+    """
+    async with _connect_db() as db:
+        if child_job_name:
+            cursor = await db.execute(
+                "SELECT test_name, url, type, created_by "
+                "FROM tracked_in_links "
+                "WHERE job_id = ? AND child_job_name = ? "
+                "AND (child_build_number = ? OR child_build_number = 0) "
+                "ORDER BY created_at",
+                (job_id, child_job_name, child_build_number),
+            )
+        else:
+            cursor = await db.execute(
+                "SELECT test_name, url, type, created_by "
+                "FROM tracked_in_links "
+                "WHERE job_id = ? AND child_job_name = '' "
+                "ORDER BY created_at",
+                (job_id,),
+            )
+        rows = await cursor.fetchall()
+        result: dict[str, list[dict]] = {}
+        for row in rows:
+            result.setdefault(row["test_name"], []).append(
+                {
+                    "tracked_in_url": row["url"],
+                    "tracked_in_type": row["type"],
+                    "tracked_in_by": row["created_by"],
+                }
+            )
+        return result
+
+
 async def backfill_failure_history() -> None:
     """Backfill failure_history from existing completed results.
 

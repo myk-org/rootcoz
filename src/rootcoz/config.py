@@ -1,6 +1,7 @@
 """Configuration settings from environment variables."""
 
 import os
+from typing import NamedTuple
 from functools import lru_cache
 from urllib.parse import urlsplit, urlunsplit
 
@@ -173,6 +174,24 @@ def parse_repo_ref(raw: str) -> tuple[str, str]:
     return (raw, "")
 
 
+class ReportPortalConfig(NamedTuple):
+    """Typed access to Report Portal settings.
+
+    ``api_token`` is kept as :class:`SecretStr` to preserve redaction
+    guarantees — callers must call ``.get_secret_value()`` at the point
+    of use (e.g. when constructing the RP client).
+    """
+
+    url: str | None
+    api_token: SecretStr | None
+    project: str | None
+    verify_ssl: bool
+    enabled: bool
+    push_classifications: bool
+    push_rootcoz_url: bool
+    push_tracker_links: bool
+
+
 class Settings(BaseSettings):
     """Application settings loaded from environment variables."""
 
@@ -308,6 +327,7 @@ class Settings(BaseSettings):
     github_token: SecretStr | None = None
 
     # Report Portal integration (optional)
+    # Flat fields for env var + settings UI compatibility; use `rp` property for typed access.
     reportportal_url: str | None = None
     reportportal_api_token: SecretStr | None = None
     reportportal_project: str | None = None
@@ -322,6 +342,21 @@ class Settings(BaseSettings):
             " When None, enabled if REPORTPORTAL_URL, REPORTPORTAL_API_TOKEN,"
             " and REPORTPORTAL_PROJECT are configured."
         ),
+    )
+    rp_push_classifications: bool = Field(
+        default=True,
+        description=(
+            "Include classification (defect type mapping) when pushing to Report Portal. "
+            "Maps rootcoz classifications to RP defect types (PRODUCT_BUG, AUTOMATION_BUG, SYSTEM_ISSUE)."
+        ),
+    )
+    rp_push_rootcoz_url: bool = Field(
+        default=True,
+        description="Include rootcoz analysis URL as a comment on Report Portal test items.",
+    )
+    rp_push_tracker_links: bool = Field(
+        default=True,
+        description="Include Jira/GitHub issue links as external system issues on Report Portal test items.",
     )
 
     # Web Push (VAPID) configuration (optional, server-only)
@@ -556,6 +591,20 @@ class Settings(BaseSettings):
                 )
             return False
         return True
+
+    @property
+    def rp(self) -> ReportPortalConfig:
+        """Typed access to all Report Portal settings."""
+        return ReportPortalConfig(
+            url=self.reportportal_url,
+            api_token=self.reportportal_api_token,
+            project=self.reportportal_project,
+            verify_ssl=self.reportportal_verify_ssl,
+            enabled=self.reportportal_enabled,
+            push_classifications=self.rp_push_classifications,
+            push_rootcoz_url=self.rp_push_rootcoz_url,
+            push_tracker_links=self.rp_push_tracker_links,
+        )
 
 
 def resolve_jira_auth(settings: Settings) -> tuple[bool, str]:

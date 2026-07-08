@@ -28,22 +28,58 @@ def _rp_disabled_env():
         get_settings.cache_clear()
 
 
+_BASE_RP_ENABLED_ENV = {
+    "JENKINS_URL": "https://jenkins.example.com",
+    "JENKINS_USER": "testuser",
+    "JENKINS_PASSWORD": "testpassword",  # pragma: allowlist secret
+    "AI_PROVIDER": "claude",
+    "AI_MODEL": "test-model",
+    "REPORTPORTAL_URL": "http://rp.example.com",
+    "REPORTPORTAL_API_TOKEN": "rp-token",  # pragma: allowlist secret
+    "REPORTPORTAL_PROJECT": "my-project",
+    "PUBLIC_BASE_URL": "https://rootcoz.example.com",
+    "ADMIN_KEY": "test-admin-key-16chars",  # pragma: allowlist secret
+    "ROOTCOZ_ENCRYPTION_KEY": "test-encryption-key-for-hmac",  # pragma: allowlist secret
+    "REQUIRE_APPROVAL": "false",
+}
+
+
 @pytest.fixture
 def _rp_enabled_env():
     """Environment with RP enabled."""
+    with patch.dict(os.environ, _BASE_RP_ENABLED_ENV, clear=True):
+        from rootcoz.config import get_settings
+
+        get_settings.cache_clear()
+        yield
+        get_settings.cache_clear()
+
+
+@pytest.fixture
+def _rp_enabled_all_push_disabled_env():
+    """Environment with RP enabled but all push content toggles disabled."""
     env = {
-        "JENKINS_URL": "https://jenkins.example.com",
-        "JENKINS_USER": "testuser",
-        "JENKINS_PASSWORD": "testpassword",  # pragma: allowlist secret
-        "AI_PROVIDER": "claude",
-        "AI_MODEL": "test-model",
-        "REPORTPORTAL_URL": "http://rp.example.com",
-        "REPORTPORTAL_API_TOKEN": "rp-token",  # pragma: allowlist secret
-        "REPORTPORTAL_PROJECT": "my-project",
-        "PUBLIC_BASE_URL": "https://rootcoz.example.com",
-        "ADMIN_KEY": "test-admin-key-16chars",  # pragma: allowlist secret
-        "ROOTCOZ_ENCRYPTION_KEY": "test-encryption-key-for-hmac",  # pragma: allowlist secret
-        "REQUIRE_APPROVAL": "false",
+        **_BASE_RP_ENABLED_ENV,
+        "RP_PUSH_CLASSIFICATIONS": "false",
+        "RP_PUSH_ROOTCOZ_URL": "false",
+        "RP_PUSH_TRACKER_LINKS": "false",
+    }
+    with patch.dict(os.environ, env, clear=True):
+        from rootcoz.config import get_settings
+
+        get_settings.cache_clear()
+        yield
+        get_settings.cache_clear()
+
+
+@pytest.fixture
+def _rp_enabled_partial_push_env():
+    """Environment with RP enabled and partial push toggles."""
+    env = {
+        **_BASE_RP_ENABLED_ENV,
+        "RP_PUSH_CLASSIFICATIONS": "true",
+        "RP_PUSH_ROOTCOZ_URL": "false",
+        "RP_PUSH_TRACKER_LINKS": "true",
     }
     with patch.dict(os.environ, env, clear=True):
         from rootcoz.config import get_settings
@@ -1051,8 +1087,8 @@ class TestRPPushHTTPErrors:
         ]
         assert error_calls, "Expected ERROR log for constructor failure"
         # RP URL must appear in log (not in user-facing error)
-        assert "reportportal_url=" in str(error_calls[0]), (
-            "Log should include reportportal_url for operator debugging"
+        assert "reportportal_host=" in str(error_calls[0]), (
+            "Log should include reportportal_host for operator debugging"
         )
 
 
@@ -1254,6 +1290,335 @@ class TestRPPushDebugLogging:
             "Early guard for empty failures should not produce ERROR logs"
         )
         mock_rp_class.assert_not_called()
+
+
+class TestRPPushContentToggles:
+    """Verify push content toggles are validated and passed through."""
+
+    @patch("rootcoz.main.ReportPortalClient")
+    @patch("rootcoz.main.get_result")
+    def test_all_toggles_disabled_returns_error(
+        self, mock_get_result, mock_rp_class, _rp_enabled_all_push_disabled_env
+    ):
+        """When all 3 push toggles are disabled, return error without connecting to RP."""
+        mock_get_result.return_value = {
+            "result": {
+                "job_name": "my-job",
+                "jenkins_url": "https://jenkins.example.com/job/my-job/1/",
+                "failures": [
+                    {
+                        "test_name": "test_example",
+                        "error_message": "AssertionError",
+                        "analysis": {
+                            "classification": "PRODUCT BUG",
+                            "details": "text",
+                        },
+                    }
+                ],
+            }
+        }
+
+        from rootcoz.main import app
+
+        client = TestClient(app, raise_server_exceptions=False)
+        response = client.post(
+            "/results/test-job-id/push-reportportal",
+            headers={"Authorization": "Bearer test-admin-key-16chars"},
+        )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["pushed"] == 0
+        assert any(
+            "All Report Portal push content toggles are disabled" in e
+            for e in data["errors"]
+        )
+        # RP client should never be instantiated
+        mock_rp_class.assert_not_called()
+
+    @patch("rootcoz.main.get_history_classification", new_callable=AsyncMock)
+    @patch("rootcoz.main.ReportPortalClient")
+    @patch("rootcoz.main.get_result")
+    def test_toggles_passed_to_push_classifications(
+        self, mock_get_result, mock_rp_class, mock_get_cls, _rp_enabled_partial_push_env
+    ):
+        """Verify toggle values are forwarded to push_classifications()."""
+        mock_get_cls.return_value = ""
+        mock_get_result.return_value = {
+            "result": {
+                "job_name": "my-job",
+                "jenkins_url": "https://jenkins.example.com/job/my-job/1/",
+                "build_number": 1,
+                "failures": [
+                    {
+                        "test_name": "test_example",
+                        "error": "AssertionError",
+                        "analysis": {
+                            "classification": "PRODUCT BUG",
+                            "details": "text",
+                        },
+                    }
+                ],
+            }
+        }
+
+        # Setup RP client mock
+        mock_rp_instance = MagicMock()
+        mock_rp_class.return_value.__enter__ = MagicMock(return_value=mock_rp_instance)
+        mock_rp_class.return_value.__exit__ = MagicMock(return_value=False)
+        mock_rp_instance.find_launch.return_value = 42
+        mock_rp_instance.get_failed_items.return_value = [
+            {"id": 100, "name": "test_example", "launchId": 42}
+        ]
+        mock_rp_instance.match_failures.return_value = [
+            (
+                {"id": 100, "name": "test_example", "launchId": 42},
+                MagicMock(test_name="test_example"),
+            )
+        ]
+        mock_rp_instance.push_classifications.return_value = {
+            "pushed": 1,
+            "unmatched": [],
+            "errors": [],
+            "launch_id": 42,
+        }
+
+        from rootcoz.main import app
+
+        client = TestClient(app, raise_server_exceptions=False)
+        response = client.post(
+            "/results/test-job-id/push-reportportal",
+            headers={"Authorization": "Bearer test-admin-key-16chars"},
+        )
+
+        assert response.status_code == 200
+        # Verify push_classifications was called with the correct toggle values
+        mock_rp_instance.push_classifications.assert_called_once()
+        call_kwargs = mock_rp_instance.push_classifications.call_args
+        assert call_kwargs.kwargs["push_classifications"] is True
+        assert call_kwargs.kwargs["push_rootcoz_url"] is False
+        assert call_kwargs.kwargs["push_tracker_links"] is True
+
+    @patch("rootcoz.main.storage.get_tracked_in_for_scope", new_callable=AsyncMock)
+    @patch("rootcoz.main.get_history_classification", new_callable=AsyncMock)
+    @patch("rootcoz.main.ReportPortalClient")
+    @patch("rootcoz.main.get_result")
+    def test_tracked_in_links_passed_to_push_classifications(
+        self,
+        mock_get_result,
+        mock_rp_class,
+        mock_get_cls,
+        mock_get_scope,
+        _rp_enabled_partial_push_env,
+    ):
+        """Tracked-in links fetched from DB are forwarded to push_classifications."""
+        mock_get_cls.return_value = ""
+        mock_get_scope.return_value = {
+            "test_example": [
+                {
+                    "tracked_in_url": "https://github.com/org/repo/pull/42",
+                    "tracked_in_type": "github",
+                    "tracked_in_by": "user1",
+                }
+            ]
+        }
+        mock_get_result.return_value = {
+            "result": {
+                "job_name": "my-job",
+                "jenkins_url": "https://jenkins.example.com/job/my-job/1/",
+                "build_number": 1,
+                "failures": [
+                    {
+                        "test_name": "test_example",
+                        "error": "AssertionError",
+                        "analysis": {
+                            "classification": "PRODUCT BUG",
+                            "details": "text",
+                        },
+                    }
+                ],
+            }
+        }
+
+        mock_rp_instance = MagicMock()
+        mock_rp_class.return_value.__enter__ = MagicMock(return_value=mock_rp_instance)
+        mock_rp_class.return_value.__exit__ = MagicMock(return_value=False)
+        mock_rp_instance.find_launch.return_value = 42
+        mock_rp_instance.get_failed_items.return_value = [
+            {"id": 100, "name": "test_example", "launchId": 42}
+        ]
+        mock_rp_instance.match_failures.return_value = [
+            (
+                {"id": 100, "name": "test_example", "launchId": 42},
+                MagicMock(test_name="test_example"),
+            )
+        ]
+        mock_rp_instance.push_classifications.return_value = {
+            "pushed": 1,
+            "unmatched": [],
+            "errors": [],
+            "launch_id": 42,
+        }
+
+        from rootcoz.main import app
+
+        client = TestClient(app, raise_server_exceptions=False)
+        response = client.post(
+            "/results/test-job-id/push-reportportal",
+            headers={"Authorization": "Bearer test-admin-key-16chars"},
+        )
+
+        assert response.status_code == 200
+        # Verify scope query used parent scope (no child)
+        mock_get_scope.assert_called_once_with(
+            "test-job-id", child_job_name="", child_build_number=0
+        )
+        # Verify tracked_in_links forwarded to push_classifications
+        call_kwargs = mock_rp_instance.push_classifications.call_args
+        assert call_kwargs.kwargs["tracked_in_links"] == mock_get_scope.return_value
+
+    @patch("rootcoz.main.storage.get_tracked_in_for_scope", new_callable=AsyncMock)
+    @patch("rootcoz.main.get_history_classification", new_callable=AsyncMock)
+    @patch("rootcoz.main.ReportPortalClient")
+    @patch("rootcoz.main.get_result")
+    def test_tracked_in_scope_uses_child_params(
+        self,
+        mock_get_result,
+        mock_rp_class,
+        mock_get_cls,
+        mock_get_scope,
+        _rp_enabled_partial_push_env,
+    ):
+        """Child push passes child_job_name and child_build_number to scope query."""
+        mock_get_cls.return_value = ""
+        mock_get_scope.return_value = {}
+        mock_get_result.return_value = {
+            "result": {
+                "job_name": "parent-pipeline",
+                "jenkins_url": "https://jenkins.example.com/job/parent/1/",
+                "build_number": 1,
+                "failures": [],
+                "child_job_analyses": [
+                    {
+                        "job_name": "child-job",
+                        "build_number": 42,
+                        "jenkins_url": "https://jenkins.example.com/job/child-job/42/",
+                        "failures": [
+                            {
+                                "test_name": "test_child",
+                                "error": "err",
+                                "analysis": {
+                                    "classification": "PRODUCT BUG",
+                                    "details": "bug",
+                                },
+                            }
+                        ],
+                    }
+                ],
+            }
+        }
+
+        mock_rp_instance = MagicMock()
+        mock_rp_class.return_value.__enter__ = MagicMock(return_value=mock_rp_instance)
+        mock_rp_class.return_value.__exit__ = MagicMock(return_value=False)
+        mock_rp_instance.find_launch.return_value = 42
+        mock_rp_instance.get_failed_items.return_value = [
+            {"id": 200, "name": "test_child", "launchId": 42}
+        ]
+        mock_rp_instance.match_failures.return_value = [
+            (
+                {"id": 200, "name": "test_child", "launchId": 42},
+                MagicMock(test_name="test_child"),
+            )
+        ]
+        mock_rp_instance.push_classifications.return_value = {
+            "pushed": 1,
+            "unmatched": [],
+            "errors": [],
+            "launch_id": 42,
+        }
+
+        from rootcoz.main import app
+
+        client = TestClient(app, raise_server_exceptions=False)
+        response = client.post(
+            "/results/test-job-id/push-reportportal",
+            params={"child_job_name": "child-job", "child_build_number": 42},
+            headers={"Authorization": "Bearer test-admin-key-16chars"},
+        )
+
+        assert response.status_code == 200
+        # Verify scope query used child scope
+        mock_get_scope.assert_called_once_with(
+            "test-job-id", child_job_name="child-job", child_build_number=42
+        )
+
+    @patch("rootcoz.main.storage.get_tracked_in_for_scope", new_callable=AsyncMock)
+    @patch("rootcoz.main.get_history_classification", new_callable=AsyncMock)
+    @patch("rootcoz.main.ReportPortalClient")
+    @patch("rootcoz.main.get_result")
+    def test_tracked_in_fetch_failure_is_graceful(
+        self,
+        mock_get_result,
+        mock_rp_class,
+        mock_get_cls,
+        mock_get_scope,
+        _rp_enabled_partial_push_env,
+    ):
+        """Storage failure when fetching tracked links doesn't crash the push."""
+        mock_get_cls.return_value = ""
+        mock_get_scope.side_effect = Exception("DB error")
+        mock_get_result.return_value = {
+            "result": {
+                "job_name": "my-job",
+                "jenkins_url": "https://jenkins.example.com/job/my-job/1/",
+                "build_number": 1,
+                "failures": [
+                    {
+                        "test_name": "test_example",
+                        "error": "AssertionError",
+                        "analysis": {
+                            "classification": "PRODUCT BUG",
+                            "details": "text",
+                        },
+                    }
+                ],
+            }
+        }
+
+        mock_rp_instance = MagicMock()
+        mock_rp_class.return_value.__enter__ = MagicMock(return_value=mock_rp_instance)
+        mock_rp_class.return_value.__exit__ = MagicMock(return_value=False)
+        mock_rp_instance.find_launch.return_value = 42
+        mock_rp_instance.get_failed_items.return_value = [
+            {"id": 100, "name": "test_example", "launchId": 42}
+        ]
+        mock_rp_instance.match_failures.return_value = [
+            (
+                {"id": 100, "name": "test_example", "launchId": 42},
+                MagicMock(test_name="test_example"),
+            )
+        ]
+        mock_rp_instance.push_classifications.return_value = {
+            "pushed": 1,
+            "unmatched": [],
+            "errors": [],
+            "launch_id": 42,
+        }
+
+        from rootcoz.main import app
+
+        client = TestClient(app, raise_server_exceptions=False)
+        response = client.post(
+            "/results/test-job-id/push-reportportal",
+            headers={"Authorization": "Bearer test-admin-key-16chars"},
+        )
+
+        assert response.status_code == 200
+        assert response.json()["pushed"] == 1
+        # push_classifications still called with empty tracked data
+        call_kwargs = mock_rp_instance.push_classifications.call_args
+        assert call_kwargs.kwargs["tracked_in_links"] == {}
 
 
 class TestCapabilitiesEndpoint:
