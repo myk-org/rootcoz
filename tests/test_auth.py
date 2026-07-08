@@ -1515,6 +1515,57 @@ class TestRBACRoles:
         assert resp.status_code == 202
 
 
+def _get_cookie_samesite(response, cookie_name):
+    """Extract the SameSite value for a cookie from raw Set-Cookie headers."""
+    for header_value in response.headers.get_list("set-cookie"):
+        if header_value.startswith(f"{cookie_name}="):
+            for part in header_value.split(";"):
+                part = part.strip()
+                if part.lower().startswith("samesite="):
+                    return part.split("=", 1)[1].strip().lower()
+    return None
+
+
+class TestCookieSameSite:
+    """Verify all session cookies use SameSite=Lax (not Strict).
+
+    SameSite=Strict blocks cookies on cross-site top-level navigations
+    (e.g., clicking a rootcoz link from Slack), causing unexpected logouts.
+    """
+
+    def test_login_cookies_use_samesite_lax(self, client):
+        resp = client.post(
+            "/api/auth/login",
+            json={
+                "username": "admin",
+                "api_key": "test-admin-key-16chars",  # pragma: allowlist secret
+            },
+        )
+        assert resp.status_code == 200
+        assert _get_cookie_samesite(resp, "rootcoz_session") == "lax"
+        assert _get_cookie_samesite(resp, "rootcoz_username") == "lax"
+
+    def test_register_cookies_use_samesite_lax(self, client):
+        resp = client.post(
+            "/api/auth/register", json={"username": "samesite_test_user"}
+        )
+        assert resp.status_code == 200
+        assert _get_cookie_samesite(resp, "rootcoz_session") == "lax"
+        assert _get_cookie_samesite(resp, "rootcoz_username") == "lax"
+
+    def test_rotate_key_cookies_use_samesite_lax(self, client):
+        # Register a user, then rotate their key
+        resp = client.post(
+            "/api/auth/register", json={"username": "rotate_samesite_user"}
+        )
+        assert resp.status_code == 200
+        session = resp.cookies.get("rootcoz_session")
+
+        resp = client.post("/api/auth/rotate-key", cookies={"rootcoz_session": session})
+        assert resp.status_code == 200
+        assert _get_cookie_samesite(resp, "rootcoz_session") == "lax"
+
+
 def _wait_for_analysis(client, job_id, cookies, timeout=10):
     """Poll until analysis completes or times out."""
     import time

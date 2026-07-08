@@ -1666,7 +1666,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
                     "rootcoz_session",
                     request.state.renew_session_token,
                     httponly=True,
-                    samesite="strict",
+                    samesite="lax",
                     secure=settings.secure_cookies,
                     max_age=storage.SESSION_TTL_SECONDS,
                 )
@@ -1674,7 +1674,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
                 response.delete_cookie(
                     "jji_session",
                     httponly=True,
-                    samesite="strict",
+                    samesite="lax",
                     secure=settings.secure_cookies,
                 )
 
@@ -7737,7 +7737,7 @@ async def login(request: Request) -> JSONResponse:
         "rootcoz_session",
         session_token,
         httponly=True,
-        samesite="strict",
+        samesite="lax",
         secure=settings.secure_cookies,
         max_age=storage.SESSION_TTL_SECONDS,
     )
@@ -7745,7 +7745,7 @@ async def login(request: Request) -> JSONResponse:
     response.delete_cookie(
         "jji_session",
         httponly=True,
-        samesite="strict",
+        samesite="lax",
         secure=settings.secure_cookies,
     )
     # Also set rootcoz_username cookie for compatibility
@@ -7772,13 +7772,13 @@ async def logout(request: Request) -> JSONResponse:
     response.delete_cookie(
         "rootcoz_session",
         httponly=True,
-        samesite="strict",
+        samesite="lax",
         secure=settings.secure_cookies,
     )
     response.delete_cookie(
         "jji_session",
         httponly=True,
-        samesite="strict",
+        samesite="lax",
         secure=settings.secure_cookies,
     )
     return response
@@ -7836,7 +7836,7 @@ async def rotate_own_key_endpoint(request: Request) -> JSONResponse:
         "rootcoz_session",
         session_token,
         httponly=True,
-        samesite="strict",
+        samesite="lax",
         secure=settings.secure_cookies,
         max_age=storage.SESSION_TTL_SECONDS,
     )
@@ -7918,7 +7918,7 @@ async def register_user(request: Request) -> JSONResponse:
         "rootcoz_session",
         session_token,
         httponly=True,
-        samesite="strict",
+        samesite="lax",
         secure=settings.secure_cookies,
         max_age=storage.SESSION_TTL_SECONDS,
     )
@@ -7926,7 +7926,7 @@ async def register_user(request: Request) -> JSONResponse:
     response.delete_cookie(
         "jji_session",
         httponly=True,
-        samesite="strict",
+        samesite="lax",
         secure=settings.secure_cookies,
     )
     response.set_cookie(
