@@ -462,7 +462,6 @@ class ReportPortalClient:
             }
 
             if push_rootcoz_url:
-                reviewed_by = reviewed_by or {}
                 comment = f"See AI failure analysis under: [rootcoz Failure Analysis]({report_url})"
                 if pushed_by:
                     comment += f"\nPushed by {pushed_by}"

@@ -6134,3 +6134,37 @@ class TestSanitizeControlChars:
         from rootcoz.main import _sanitize_control_chars
 
         assert _sanitize_control_chars(input_val) == expected
+
+
+class TestIsChildReviewKey:
+    """Tests for _is_child_review_key."""
+
+    @pytest.mark.parametrize(
+        "key, expected",
+        [
+            ("child-job#42::test_a", True),
+            ("child-job#0::test_a", True),
+            ("my-job#999::TestClass::test_method", True),
+            ("test_a", False),
+            ("TestClass::test_method", False),
+            ("test_no_hash", False),
+            ("", False),
+            ("#42::test", False),  # empty child name
+            ("child#abc::test", False),  # non-numeric build
+        ],
+        ids=[
+            "child-scoped",
+            "wildcard",
+            "test-with-double-colon",
+            "simple-top-level",
+            "top-level-double-colon",
+            "no-hash",
+            "empty",
+            "empty-child-name",
+            "non-numeric-build",
+        ],
+    )
+    def test_is_child_review_key(self, key: str, expected: bool) -> None:
+        from rootcoz.main import _is_child_review_key
+
+        assert _is_child_review_key(key) == expected

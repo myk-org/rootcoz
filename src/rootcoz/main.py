@@ -645,13 +645,29 @@ def build_jenkins_url(base_url: str, job_name: str, build_number: int) -> str:
 
 
 _CONTROL_CHAR_RE = re.compile(r"[\x00-\x1f\x7f]")
-# Matches composite review keys: "child_name#build_num::test_name"
-_CHILD_REVIEW_KEY_RE = re.compile(r".+#\d+::")
 
 
 def _sanitize_control_chars(value: str) -> str:
     """Strip control characters from a string."""
     return _CONTROL_CHAR_RE.sub("", value)
+
+
+def _is_child_review_key(key: str) -> bool:
+    """Check if a review key is a child-scoped composite key.
+
+    Composite keys have the format ``child_name#build_num::test_name``
+    where the *first* ``::`` separates the ``child#build`` prefix from
+    the test name.  Uses delimiter-aware parsing instead of a greedy
+    regex to be explicit about the format.
+
+    Note: CI job names do not contain ``#`` in practice, so a key like
+    ``my-job#42::test`` is unambiguously child-scoped.
+    """
+    prefix, sep, _rest = key.partition("::")
+    if not sep:
+        return False
+    child, hash_char, build = prefix.rpartition("#")
+    return hash_char == "#" and bool(child) and build.isdigit()
 
 
 def _extract_base_url() -> str:
@@ -6042,7 +6058,7 @@ async def _execute_rp_push(
                     # Top-level push: skip child-scoped composite keys
                     # (format: "child_name#build_num::test_name" where
                     # build_num is numeric). Test names may contain "::".
-                    if _CHILD_REVIEW_KEY_RE.match(key):
+                    if _is_child_review_key(key):
                         continue
                     safe = _sanitize_control_chars(review_data["username"])
                     if safe:
