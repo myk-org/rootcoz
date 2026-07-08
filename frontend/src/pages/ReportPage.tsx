@@ -3,7 +3,7 @@ import { useParams, useNavigate, useLocation, Link } from 'react-router-dom'
 import { useSSE } from '@/lib/SSEProvider'
 import { api } from '@/lib/api'
 import { useClipboard } from '@/lib/useClipboard'
-import { parseApiTimestamp, isAnalysisTimeout, formatDuration, formatTimestamp } from '@/lib/utils'
+import { parseApiTimestamp, isAnalysisTimeout, formatDuration, formatTimestamp, ciSourceLabel } from '@/lib/utils'
 import { buildRepoUrls, type RepoUrl } from '@/lib/autoLink'
 import { groupFailures } from '@/lib/grouping'
 import { useExpandCollapseAll } from '@/lib/useExpandCollapseAll'
@@ -483,7 +483,7 @@ function ReportContent() {
                 rel="noopener noreferrer"
                 className="flex items-center gap-1 text-xs text-text-link hover:underline"
               >
-                Jenkins <ExternalLink className="h-3 w-3" />
+                {ciSourceLabel(result.request_params)} <ExternalLink className="h-3 w-3" />
               </a>
             )}
           </div>

@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
 import { useSSE } from '@/lib/SSEProvider'
 import { api, ApiError } from '@/lib/api'
-import { formatTimestamp, isAnalysisTimeout, INVALID_DATE_FALLBACK } from '@/lib/utils'
+import { formatTimestamp, isAnalysisTimeout, INVALID_DATE_FALLBACK, ciSourceLabel } from '@/lib/utils'
 import type { ResultResponse } from '@/types'
 import { Card, CardContent } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
@@ -298,7 +298,7 @@ export function StatusPage() {
                     rel="noopener noreferrer"
                     className="flex items-center gap-1 text-xs text-text-link hover:underline"
                   >
-                    Jenkins <ExternalLink className="h-3 w-3" />
+                    {ciSourceLabel(data.result?.request_params)} <ExternalLink className="h-3 w-3" />
                   </a>
                 )}
               </div>
