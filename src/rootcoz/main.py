@@ -644,6 +644,32 @@ def build_jenkins_url(base_url: str, job_name: str, build_number: int) -> str:
     return f"{base_url.rstrip('/')}/job/{job_path}/{build_number}/"
 
 
+_CONTROL_CHAR_RE = re.compile(r"[\x00-\x1f\x7f]")
+
+
+def _sanitize_control_chars(value: str) -> str:
+    """Strip control characters from a string."""
+    return _CONTROL_CHAR_RE.sub("", value)
+
+
+def _is_child_review_key(key: str) -> bool:
+    """Check if a review key is a child-scoped composite key.
+
+    Composite keys have the format ``child_name#build_num::test_name``
+    where the *first* ``::`` separates the ``child#build`` prefix from
+    the test name.  Uses delimiter-aware parsing instead of a greedy
+    regex to be explicit about the format.
+
+    Note: CI job names do not contain ``#`` in practice, so a key like
+    ``my-job#42::test`` is unambiguously child-scoped.
+    """
+    prefix, sep, _rest = key.partition("::")
+    if not sep:
+        return False
+    child, hash_char, build = prefix.rpartition("#")
+    return hash_char == "#" and bool(child) and build.isdigit()
+
+
 def _extract_base_url() -> str:
     """Extract the external base URL for building public-facing links.
 
@@ -2208,11 +2234,14 @@ async def _auto_review_matching_failures(
             if reviewed_count >= total_failures:
                 logger.info(
                     "All failures auto-reviewed for job %s, pushing classifications "
-                    "to Report Portal",
+                    "to Report Portal (pushed_by=%s)",
                     job_id,
+                    AI_SYSTEM_USERNAME,
                 )
                 try:
-                    await _execute_rp_push(job_id, result_data, settings)
+                    await _execute_rp_push(
+                        job_id, result_data, settings, pushed_by=AI_SYSTEM_USERNAME
+                    )
                 except Exception:
                     logger.warning(
                         "Auto-push to Report Portal failed for job_id=%s",
@@ -5592,6 +5621,11 @@ async def push_to_reportportal(
     and updates each item's defect type and comment.
     """
     _check_allow_list(request)
+    username = getattr(request.state, "username", "")
+    # Sanitize control characters to prevent log forging (trusted-proxy
+    # mode populates username from X-Forwarded-User with minimal validation)
+    safe_username = _sanitize_control_chars(username)
+    logger.info("RP push requested by '%s' for job %s", safe_username, job_id)
     if not settings.reportportal_enabled:
         raise HTTPException(
             status_code=400,
@@ -5611,6 +5645,7 @@ async def push_to_reportportal(
             settings,
             child_job_name=child_job_name,
             child_build_number=child_build_number,
+            pushed_by=safe_username,
         )
         return push_result
     except ValueError as exc:
@@ -5721,6 +5756,7 @@ async def _execute_rp_push(
     *,
     child_job_name: str | None = None,
     child_build_number: int | None = None,
+    pushed_by: str = "",
 ) -> dict:
     """Shared logic for pushing classifications to Report Portal.
 
@@ -5733,6 +5769,7 @@ async def _execute_rp_push(
         settings: Application settings with Report Portal configuration.
         child_job_name: Optional child job name for scoping push to a child.
         child_build_number: Optional child build number (required with child_job_name).
+        pushed_by: Username of the user who triggered the push.
 
     Returns:
         Dict with keys: ``pushed``, ``unmatched``, ``errors``, ``launch_id``.
@@ -5981,6 +6018,56 @@ async def _execute_rp_push(
                     job_id,
                     exc_info=True,
                 )
+        # Get reviewer usernames for matched failures
+        reviewed_by: dict[str, str] = {}
+        try:
+            reviews = await storage.get_reviews_for_job(job_id)
+            # Build the expected key prefix for child-scoped pushes so we
+            # only pick up reviews from the matching child job, avoiding
+            # collisions when different children share test names.
+            if child_job_name is not None:
+                exact_prefix = f"{child_job_name}#{child_build_number}::"
+                wildcard_prefix = f"{child_job_name}#0::"
+                # Two passes: exact first, then wildcard fallback.
+                # This guarantees exact-build reviews win regardless
+                # of dict iteration order.
+                for pfx in (exact_prefix, wildcard_prefix):
+                    if pfx == exact_prefix and pfx == wildcard_prefix:
+                        # build_number is already 0 — single pass
+                        pass
+                    for key, review_data in reviews.items():
+                        if not (
+                            review_data.get("reviewed") and review_data.get("username")
+                        ):
+                            continue
+                        if not key.startswith(pfx):
+                            continue
+                        bare_name = key[len(pfx) :]
+                        if bare_name not in reviewed_by:
+                            safe = _sanitize_control_chars(review_data["username"])
+                            if safe:
+                                reviewed_by[bare_name] = safe
+                    if pfx == exact_prefix and pfx == wildcard_prefix:
+                        break  # already covered both in one pass
+            else:
+                for key, review_data in reviews.items():
+                    if not (
+                        review_data.get("reviewed") and review_data.get("username")
+                    ):
+                        continue
+                    # Top-level push: skip child-scoped composite keys
+                    # (format: "child_name#build_num::test_name" where
+                    # build_num is numeric). Test names may contain "::".
+                    if _is_child_review_key(key):
+                        continue
+                    safe = _sanitize_control_chars(review_data["username"])
+                    if safe:
+                        reviewed_by[key] = safe
+        except Exception:
+            logger.debug("Failed to fetch reviews for job %s", job_id, exc_info=True)
+
+        if reviewed_by:
+            logger.debug("RP push reviewed_by for job %s: %s", job_id, reviewed_by)
 
         try:
             push_result = await asyncio.to_thread(
@@ -5992,6 +6079,8 @@ async def _execute_rp_push(
                 push_rootcoz_url=rp.push_rootcoz_url,
                 push_tracker_links=rp.push_tracker_links,
                 tracked_in_links=tracked_in_data,
+                pushed_by=pushed_by,
+                reviewed_by=reviewed_by,
             )
         except Exception as exc:
             user_msg, log_msg = _rp_error_message(

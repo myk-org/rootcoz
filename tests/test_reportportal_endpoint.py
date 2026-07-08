@@ -7,6 +7,17 @@ import pytest
 from fastapi.testclient import TestClient
 
 
+@pytest.fixture(autouse=True)
+def _mock_storage_reviews():
+    """Auto-mock storage.get_reviews_for_job for all RP endpoint tests."""
+    with patch(
+        "rootcoz.main.storage.get_reviews_for_job",
+        new_callable=AsyncMock,
+        return_value={},
+    ):
+        yield
+
+
 @pytest.fixture
 def _rp_disabled_env():
     """Environment with RP disabled."""
@@ -2199,3 +2210,417 @@ class TestRPPushChildValidation:
         )
         assert response.status_code == 400
         assert "child_job_name" in response.json()["detail"].lower()
+
+
+class TestPushedByForwarding:
+    """Verify pushed_by is threaded from endpoint to push_classifications."""
+
+    @staticmethod
+    def _setup_mocks(mock_rp_class, mock_get_result, mock_get_cls):
+        """Configure shared mocks for RP push tests. Returns (mock_rp, client)."""
+        from rootcoz.main import app
+
+        mock_get_cls.return_value = ""
+        mock_get_result.return_value = {
+            "status": "completed",
+            "result": {
+                "job_name": "my-job",
+                "build_number": 42,
+                "jenkins_url": "https://jenkins.example.com/job/my-job/42/",
+                "failures": [
+                    {
+                        "test_name": "test_a",
+                        "error": "err",
+                        "analysis": {
+                            "classification": "PRODUCT BUG",
+                            "details": "Bug found",
+                        },
+                    }
+                ],
+            },
+        }
+        mock_rp = MagicMock()
+        mock_rp.__enter__ = MagicMock(return_value=mock_rp)
+        mock_rp.__exit__ = MagicMock(return_value=False)
+        mock_rp.find_launch.return_value = 100
+        mock_rp.get_failed_items.return_value = [
+            {"id": 1, "name": "test_a", "status": "FAILED"}
+        ]
+        mock_rp.match_failures.return_value = [
+            ({"id": 1, "name": "test_a"}, MagicMock(test_name="test_a"))
+        ]
+        mock_rp.push_classifications.return_value = {
+            "pushed": 1,
+            "unmatched": [],
+            "errors": [],
+            "launch_id": 100,
+        }
+        mock_rp_class.return_value = mock_rp
+
+        client = TestClient(
+            app,
+            raise_server_exceptions=False,
+            headers={"Authorization": "Bearer test-admin-key-16chars"},
+        )
+        return mock_rp, client
+
+    @patch("rootcoz.main.get_history_classification", new_callable=AsyncMock)
+    @patch("rootcoz.main.get_result")
+    @patch("rootcoz.main.ReportPortalClient")
+    def test_pushed_by_forwarded_from_endpoint(
+        self, mock_rp_class, mock_get_result, mock_get_cls, _rp_enabled_env
+    ):
+        """Username from request is forwarded as pushed_by to push_classifications."""
+        mock_rp, client = self._setup_mocks(
+            mock_rp_class, mock_get_result, mock_get_cls
+        )
+        response = client.post("/results/some-job-id/push-reportportal")
+        assert response.status_code == 200
+        # Verify push_classifications received the pushed_by parameter
+        push_call = mock_rp.push_classifications.call_args
+        assert push_call.kwargs["pushed_by"] == "admin"
+
+    @patch("rootcoz.main.logger")
+    @patch("rootcoz.main.get_history_classification", new_callable=AsyncMock)
+    @patch("rootcoz.main.get_result")
+    @patch("rootcoz.main.ReportPortalClient")
+    def test_info_log_includes_username(
+        self, mock_rp_class, mock_get_result, mock_get_cls, mock_logger, _rp_enabled_env
+    ):
+        """INFO log for manual RP push includes the authenticated username."""
+        _, client = self._setup_mocks(mock_rp_class, mock_get_result, mock_get_cls)
+        response = client.post("/results/some-job-id/push-reportportal")
+        assert response.status_code == 200, f"Response: {response.text}"
+        # Verify INFO log was called with the expected format string and args
+        info_calls = [
+            c
+            for c in mock_logger.info.call_args_list
+            if c.args and "RP push requested" in c.args[0]
+        ]
+        assert info_calls, "Expected INFO log for RP push request"
+        _, logged_username, logged_job_id = info_calls[0].args
+        assert logged_username == "admin", f"Expected 'admin', got '{logged_username}'"
+        assert logged_job_id == "some-job-id", (
+            f"Expected 'some-job-id', got '{logged_job_id}'"
+        )
+
+    @patch("rootcoz.main.storage.get_reviews_for_job", new_callable=AsyncMock)
+    @patch("rootcoz.main.get_history_classification", new_callable=AsyncMock)
+    @patch("rootcoz.main.get_result")
+    @patch("rootcoz.main.ReportPortalClient")
+    def test_reviewed_by_forwarded_from_endpoint(
+        self,
+        mock_rp_class,
+        mock_get_result,
+        mock_get_cls,
+        mock_get_reviews,
+        _rp_enabled_env,
+    ):
+        """Reviewer username from storage is forwarded as reviewed_by to push_classifications."""
+        mock_get_reviews.return_value = {
+            "test_a": {
+                "reviewed": True,
+                "username": "bob",
+                "updated_at": "2024-01-01T00:00:00Z",
+            },
+        }
+        mock_rp, client = self._setup_mocks(
+            mock_rp_class,
+            mock_get_result,
+            mock_get_cls,
+        )
+        response = client.post("/results/some-job-id/push-reportportal")
+        assert response.status_code == 200
+        push_call = mock_rp.push_classifications.call_args
+        assert push_call.kwargs["reviewed_by"] == {"test_a": "bob"}
+
+    @patch("rootcoz.main.storage.get_reviews_for_job", new_callable=AsyncMock)
+    @patch("rootcoz.main.get_history_classification", new_callable=AsyncMock)
+    @patch("rootcoz.main.get_result")
+    @patch("rootcoz.main.ReportPortalClient")
+    def test_reviewed_by_preserves_test_names_with_colons(
+        self,
+        mock_rp_class,
+        mock_get_result,
+        mock_get_cls,
+        mock_get_reviews,
+        _rp_enabled_env,
+    ):
+        """Test names containing '::' are not mistaken for child-scoped keys."""
+        mock_get_reviews.return_value = {
+            "TestClass::test_method": {
+                "reviewed": True,
+                "username": "eve",
+                "updated_at": "2024-01-01T00:00:00Z",
+            },
+        }
+        mock_rp, client = self._setup_mocks(
+            mock_rp_class,
+            mock_get_result,
+            mock_get_cls,
+        )
+        # Override test_name in the result to match
+        mock_get_result.return_value["result"]["failures"][0]["test_name"] = (
+            "TestClass::test_method"
+        )
+        response = client.post("/results/some-job-id/push-reportportal")
+        assert response.status_code == 200
+        push_call = mock_rp.push_classifications.call_args
+        assert push_call.kwargs["reviewed_by"] == {"TestClass::test_method": "eve"}
+
+    @patch("rootcoz.main.storage.get_reviews_for_job", new_callable=AsyncMock)
+    @patch("rootcoz.main.get_history_classification", new_callable=AsyncMock)
+    @patch("rootcoz.main.get_result")
+    @patch("rootcoz.main.ReportPortalClient")
+    def test_reviewed_by_scopes_to_child_job(
+        self,
+        mock_rp_class,
+        mock_get_result,
+        mock_get_cls,
+        mock_get_reviews,
+        _rp_enabled_env,
+    ):
+        """Child-scoped push picks only reviews from that child, not others."""
+        mock_get_reviews.return_value = {
+            "child-job#42::test_a": {
+                "reviewed": True,
+                "username": "carol",
+                "updated_at": "2024-01-01T00:00:00Z",
+            },
+            "other-child#99::test_a": {
+                "reviewed": True,
+                "username": "dave",
+                "updated_at": "2024-01-01T00:00:00Z",
+            },
+        }
+        mock_get_cls.return_value = ""
+        mock_get_result.return_value = {
+            "status": "completed",
+            "result": {
+                "job_name": "parent",
+                "build_number": 1,
+                "jenkins_url": "https://jenkins.example.com/job/parent/1/",
+                "failures": [],
+                "child_job_analyses": [
+                    {
+                        "job_name": "child-job",
+                        "build_number": 42,
+                        "jenkins_url": "https://jenkins.example.com/job/child-job/42/",
+                        "failures": [
+                            {
+                                "test_name": "test_a",
+                                "error": "err",
+                                "analysis": {
+                                    "classification": "PRODUCT BUG",
+                                    "details": "Bug found",
+                                },
+                            }
+                        ],
+                        "failed_children": [],
+                    },
+                ],
+            },
+        }
+        mock_rp = MagicMock()
+        mock_rp.__enter__ = MagicMock(return_value=mock_rp)
+        mock_rp.__exit__ = MagicMock(return_value=False)
+        mock_rp.find_launch.return_value = 100
+        mock_rp.get_failed_items.return_value = [
+            {"id": 1, "name": "test_a", "status": "FAILED"}
+        ]
+        mock_rp.match_failures.return_value = [
+            ({"id": 1, "name": "test_a"}, MagicMock(test_name="test_a"))
+        ]
+        mock_rp.push_classifications.return_value = {
+            "pushed": 1,
+            "unmatched": [],
+            "errors": [],
+            "launch_id": 100,
+        }
+        mock_rp_class.return_value = mock_rp
+
+        from rootcoz.main import app
+
+        client = TestClient(
+            app,
+            raise_server_exceptions=False,
+            headers={"Authorization": "Bearer test-admin-key-16chars"},
+        )
+        response = client.post(
+            "/results/some-job-id/push-reportportal",
+            params={"child_job_name": "child-job", "child_build_number": 42},
+        )
+        assert response.status_code == 200
+        push_call = mock_rp.push_classifications.call_args
+        # Only carol (child-job#42) should match, not dave (other-child#99)
+        assert push_call.kwargs["reviewed_by"] == {"test_a": "carol"}
+
+    @patch("rootcoz.main.storage.get_reviews_for_job", new_callable=AsyncMock)
+    @patch("rootcoz.main.get_history_classification", new_callable=AsyncMock)
+    @patch("rootcoz.main.get_result")
+    @patch("rootcoz.main.ReportPortalClient")
+    def test_reviewed_by_accepts_wildcard_child_review(
+        self,
+        mock_rp_class,
+        mock_get_result,
+        mock_get_cls,
+        mock_get_reviews,
+        _rp_enabled_env,
+    ):
+        """Wildcard child reviews (build_number=0) are accepted for child pushes."""
+        mock_get_reviews.return_value = {
+            # Wildcard review (build_number=0 means name-only scope)
+            "child-job#0::test_a": {
+                "reviewed": True,
+                "username": "wildcard_reviewer",
+                "updated_at": "2024-01-01T00:00:00Z",
+            },
+        }
+        mock_get_cls.return_value = ""
+        mock_get_result.return_value = {
+            "status": "completed",
+            "result": {
+                "job_name": "parent",
+                "build_number": 1,
+                "jenkins_url": "https://jenkins.example.com/job/parent/1/",
+                "failures": [],
+                "child_job_analyses": [
+                    {
+                        "job_name": "child-job",
+                        "build_number": 42,
+                        "jenkins_url": "https://jenkins.example.com/job/child-job/42/",
+                        "failures": [
+                            {
+                                "test_name": "test_a",
+                                "error": "err",
+                                "analysis": {
+                                    "classification": "PRODUCT BUG",
+                                    "details": "Bug found",
+                                },
+                            }
+                        ],
+                        "failed_children": [],
+                    },
+                ],
+            },
+        }
+        mock_rp = MagicMock()
+        mock_rp.__enter__ = MagicMock(return_value=mock_rp)
+        mock_rp.__exit__ = MagicMock(return_value=False)
+        mock_rp.find_launch.return_value = 100
+        mock_rp.get_failed_items.return_value = [
+            {"id": 1, "name": "test_a", "status": "FAILED"}
+        ]
+        mock_rp.match_failures.return_value = [
+            ({"id": 1, "name": "test_a"}, MagicMock(test_name="test_a"))
+        ]
+        mock_rp.push_classifications.return_value = {
+            "pushed": 1,
+            "unmatched": [],
+            "errors": [],
+            "launch_id": 100,
+        }
+        mock_rp_class.return_value = mock_rp
+
+        from rootcoz.main import app
+
+        client = TestClient(
+            app,
+            raise_server_exceptions=False,
+            headers={"Authorization": "Bearer test-admin-key-16chars"},
+        )
+        response = client.post(
+            "/results/some-job-id/push-reportportal",
+            params={"child_job_name": "child-job", "child_build_number": 42},
+        )
+        assert response.status_code == 200
+        push_call = mock_rp.push_classifications.call_args
+        assert push_call.kwargs["reviewed_by"] == {"test_a": "wildcard_reviewer"}
+
+    @patch("rootcoz.main.storage.get_reviews_for_job", new_callable=AsyncMock)
+    @patch("rootcoz.main.get_history_classification", new_callable=AsyncMock)
+    @patch("rootcoz.main.get_result")
+    @patch("rootcoz.main.ReportPortalClient")
+    def test_reviewed_by_exact_overrides_wildcard(
+        self,
+        mock_rp_class,
+        mock_get_result,
+        mock_get_cls,
+        mock_get_reviews,
+        _rp_enabled_env,
+    ):
+        """Exact build review takes precedence over wildcard regardless of dict order."""
+        # Wildcard listed FIRST to verify order-independence
+        mock_get_reviews.return_value = {
+            "child-job#0::test_a": {
+                "reviewed": True,
+                "username": "wildcard_reviewer",
+                "updated_at": "2024-01-01T00:00:00Z",
+            },
+            "child-job#42::test_a": {
+                "reviewed": True,
+                "username": "exact_reviewer",
+                "updated_at": "2024-01-01T00:00:00Z",
+            },
+        }
+        mock_get_cls.return_value = ""
+        mock_get_result.return_value = {
+            "status": "completed",
+            "result": {
+                "job_name": "parent",
+                "build_number": 1,
+                "jenkins_url": "https://jenkins.example.com/job/parent/1/",
+                "failures": [],
+                "child_job_analyses": [
+                    {
+                        "job_name": "child-job",
+                        "build_number": 42,
+                        "jenkins_url": "https://jenkins.example.com/job/child-job/42/",
+                        "failures": [
+                            {
+                                "test_name": "test_a",
+                                "error": "err",
+                                "analysis": {
+                                    "classification": "PRODUCT BUG",
+                                    "details": "Bug found",
+                                },
+                            }
+                        ],
+                        "failed_children": [],
+                    },
+                ],
+            },
+        }
+        mock_rp = MagicMock()
+        mock_rp.__enter__ = MagicMock(return_value=mock_rp)
+        mock_rp.__exit__ = MagicMock(return_value=False)
+        mock_rp.find_launch.return_value = 100
+        mock_rp.get_failed_items.return_value = [
+            {"id": 1, "name": "test_a", "status": "FAILED"}
+        ]
+        mock_rp.match_failures.return_value = [
+            ({"id": 1, "name": "test_a"}, MagicMock(test_name="test_a"))
+        ]
+        mock_rp.push_classifications.return_value = {
+            "pushed": 1,
+            "unmatched": [],
+            "errors": [],
+            "launch_id": 100,
+        }
+        mock_rp_class.return_value = mock_rp
+
+        from rootcoz.main import app
+
+        client = TestClient(
+            app,
+            raise_server_exceptions=False,
+            headers={"Authorization": "Bearer test-admin-key-16chars"},
+        )
+        response = client.post(
+            "/results/some-job-id/push-reportportal",
+            params={"child_job_name": "child-job", "child_build_number": 42},
+        )
+        assert response.status_code == 200
+        push_call = mock_rp.push_classifications.call_args
+        # Exact (build 42) wins over wildcard (build 0)
+        assert push_call.kwargs["reviewed_by"] == {"test_a": "exact_reviewer"}

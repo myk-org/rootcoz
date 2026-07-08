@@ -6102,3 +6102,71 @@ class TestSubmitterAutoTag:
         assert "alice" not in new_result["tags"]  # old submitter removed
         assert "nightly" in new_result["tags"]  # non-submitter tag preserved
         assert "re-analyze" in new_result["tags"]  # system tag preserved
+
+
+class TestSanitizeControlChars:
+    """Tests for _sanitize_control_chars."""
+
+    @pytest.mark.parametrize(
+        "input_val, expected",
+        [
+            ("alice", "alice"),
+            ("", ""),
+            ("alice\nfake", "alicefake"),
+            ("bob\r\nINFO", "bobINFO"),
+            ("tab\there", "tabhere"),
+            ("null\x00here", "nullhere"),
+            ("del\x7fhere", "delhere"),
+            ("\x01\x02test\x1f", "test"),
+        ],
+        ids=[
+            "normal",
+            "empty",
+            "newline",
+            "crlf",
+            "tab",
+            "null_byte",
+            "del_char",
+            "mixed_control",
+        ],
+    )
+    def test_sanitize_control_chars(self, input_val: str, expected: str) -> None:
+        from rootcoz.main import _sanitize_control_chars
+
+        assert _sanitize_control_chars(input_val) == expected
+
+
+class TestIsChildReviewKey:
+    """Tests for _is_child_review_key."""
+
+    @pytest.mark.parametrize(
+        "key, expected",
+        [
+            ("child-job#42::test_a", True),
+            ("child-job#0::test_a", True),
+            ("my-job#999::TestClass::test_method", True),
+            ("test_a", False),
+            ("TestClass::test_method", False),
+            ("test_no_hash", False),
+            ("", False),
+            ("#42::test", False),  # empty child name
+            ("child#abc::test", False),  # non-numeric build
+            ("TestClass::suite#1::test_method", False),  # #digits:: after first ::
+        ],
+        ids=[
+            "child-scoped",
+            "wildcard",
+            "test-with-double-colon",
+            "simple-top-level",
+            "top-level-double-colon",
+            "no-hash",
+            "empty",
+            "empty-child-name",
+            "non-numeric-build",
+            "hash-digits-after-first-separator",
+        ],
+    )
+    def test_is_child_review_key(self, key: str, expected: bool) -> None:
+        from rootcoz.main import _is_child_review_key
+
+        assert _is_child_review_key(key) == expected

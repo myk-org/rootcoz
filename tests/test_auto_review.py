@@ -843,7 +843,76 @@ class TestAutoReviewMatchingFailures:
                 await _auto_review_matching_failures(
                     "current-job", "my-job", 101, result_data, settings
                 )
-                mock_push.assert_called_once_with("current-job", result_data, settings)
+
+                mock_push.assert_called_once_with(
+                    "current-job", result_data, settings, pushed_by=AI_SYSTEM_USERNAME
+                )
+
+    @patch("rootcoz.main.logger")
+    async def test_auto_push_log_includes_system_username(
+        self, mock_logger, setup_test_db
+    ):
+        """Auto-push INFO log includes AI_SYSTEM_USERNAME for traceability."""
+        with patch.object(storage, "DB_PATH", setup_test_db):
+            async with storage._connect_db() as db:
+                await db.execute(
+                    "INSERT INTO failure_history "
+                    "(job_id, job_name, build_number, test_name, error_message, "
+                    "error_signature, classification, pattern) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    ("prev-job", "my-job", 100, "test_a", "", "sig-a", "", ""),
+                )
+                await _insert_human_review(db, "prev-job", "test_a")
+                await db.commit()
+
+            result_data = {
+                "job_name": "my-job",
+                "build_number": 101,
+                "failures": [
+                    {
+                        "test_name": "test_a",
+                        "error": "err",
+                        "error_signature": "sig-a",
+                        "analysis": {
+                            "classification": "PRODUCT BUG",
+                            "details": "d",
+                        },
+                    }
+                ],
+            }
+            settings = Settings(
+                ai_provider="claude",
+                ai_model="test",
+                enable_reportportal=True,
+                reportportal_url="http://rp.example.com",
+                reportportal_api_token="rp-token",
+                reportportal_project="proj",
+            )
+
+            from rootcoz.main import _auto_review_matching_failures
+
+            with patch("rootcoz.main._execute_rp_push", new_callable=AsyncMock):
+                await _auto_review_matching_failures(
+                    "current-job", "my-job", 101, result_data, settings
+                )
+
+            info_calls = [
+                c
+                for c in mock_logger.info.call_args_list
+                if c.args
+                and "auto-reviewed" in c.args[0].lower()
+                and "Report Portal" in c.args[0]
+            ]
+            assert info_calls, "Expected INFO log for auto-push trigger"
+            log_args = info_calls[0].args
+            # Format: "All failures auto-reviewed for job %s, pushing ... (pushed_by=%s)"
+            # args[0] = format string, args[1] = job_id, args[2] = AI_SYSTEM_USERNAME
+            assert log_args[1] == "current-job", (
+                f"Expected job_id 'current-job', got '{log_args[1]}'"
+            )
+            assert log_args[2] == AI_SYSTEM_USERNAME, (
+                f"Expected AI_SYSTEM_USERNAME, got '{log_args[2]}'"
+            )
 
     async def test_no_push_when_reportportal_disabled(self, setup_test_db):
         """Should NOT push to RP when ENABLE_REPORTPORTAL is disabled."""
