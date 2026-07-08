@@ -6151,6 +6151,7 @@ class TestIsChildReviewKey:
             ("", False),
             ("#42::test", False),  # empty child name
             ("child#abc::test", False),  # non-numeric build
+            ("TestClass::suite#1::test_method", False),  # #digits:: after first ::
         ],
         ids=[
             "child-scoped",
@@ -6162,6 +6163,7 @@ class TestIsChildReviewKey:
             "empty",
             "empty-child-name",
             "non-numeric-build",
+            "hash-digits-after-first-separator",
         ],
     )
     def test_is_child_review_key(self, key: str, expected: bool) -> None:
