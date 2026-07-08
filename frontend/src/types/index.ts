@@ -462,3 +462,33 @@ export interface FeedbackCreateResponse {
   issue_number: number
   title: string
 }
+
+/** Non-sensitive server settings returned by GET /api/default-server-settings. */
+export interface DefaultServerSettings {
+  // AI configuration
+  ai_provider: string
+  ai_model: string
+  ai_call_timeout: number
+  // Source repositories
+  tests_repo_url: string
+  tests_repo_ref: string
+  additional_repos: { name: string; url: string; ref?: string }[]
+  // Peer analysis
+  peer_ai_configs: { ai_provider: string; ai_model: string }[]
+  peer_analysis_max_rounds: number
+  // Jira
+  enable_jira: boolean | null
+  jira_enabled: boolean
+  jira_url: string
+  jira_project_key: string
+  // Jenkins
+  jenkins_url: string
+  jenkins_ssl_verify: boolean
+  jenkins_timeout: number
+  jenkins_artifacts_max_size_mb: number
+  get_job_artifacts: boolean
+  force_analysis: boolean
+  wait_for_completion: boolean
+  poll_interval_minutes: number
+  max_wait_minutes: number
+}

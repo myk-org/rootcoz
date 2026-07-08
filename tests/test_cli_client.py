@@ -2344,3 +2344,41 @@ class TestReports:
         client = _make_client(handler)
         result = client.report_totals(review_status="reviewed")
         assert result["total_jobs"] == 2
+
+
+class TestDefaultServerSettings:
+    def test_get_default_server_settings(self):
+        def handler(request):
+            assert request.method == "GET"
+            assert request.url.path == "/api/default-server-settings"
+            return httpx.Response(
+                200,
+                json={
+                    "ai_provider": "gemini",
+                    "ai_model": "gemini-2.5-pro",
+                    "ai_call_timeout": 10,
+                    "tests_repo_url": "",
+                    "tests_repo_ref": "",
+                    "additional_repos": [],
+                    "peer_ai_configs": [],
+                    "peer_analysis_max_rounds": 3,
+                    "enable_jira": False,
+                    "jira_url": "",
+                    "jira_project_key": "",
+                    "force_analysis": False,
+                    "get_job_artifacts": True,
+                    "jenkins_artifacts_max_size_mb": 500,
+                    "wait_for_completion": True,
+                    "poll_interval_minutes": 2,
+                    "max_wait_minutes": 0,
+                    "jenkins_url": "",
+                    "jenkins_ssl_verify": True,
+                },
+            )
+
+        client = _make_client(handler)
+        result = client.get_default_server_settings()
+        assert result["ai_provider"] == "gemini"
+        assert result["ai_model"] == "gemini-2.5-pro"
+        assert result["enable_jira"] is False
+        assert result["peer_ai_configs"] == []

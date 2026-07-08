@@ -38,13 +38,7 @@ def _mock_settings(temp_db_path: Path):
 @pytest.fixture
 def client(_mock_settings, temp_db_path: Path):
     """Create a test client with mocked dependencies."""
-    from rootcoz import main as main_mod
-
-    with (
-        patch.object(storage, "DB_PATH", temp_db_path),
-        patch.object(main_mod, "AI_PROVIDER", "gemini"),
-        patch.object(main_mod, "AI_MODEL", "gemini-2.5-flash"),
-    ):
+    with patch.object(storage, "DB_PATH", temp_db_path):
         from starlette.testclient import TestClient
 
         from rootcoz.main import app
@@ -201,13 +195,7 @@ class TestAnalyzeCommentIntentJobFallback:
     @pytest.fixture
     def client_no_ai(self, _mock_settings_no_ai, temp_db_path: Path):
         """Test client without server-level AI config."""
-        from rootcoz import main as main_mod
-
-        with (
-            patch.object(storage, "DB_PATH", temp_db_path),
-            patch.object(main_mod, "AI_PROVIDER", ""),
-            patch.object(main_mod, "AI_MODEL", ""),
-        ):
+        with patch.object(storage, "DB_PATH", temp_db_path):
             from starlette.testclient import TestClient
 
             from rootcoz.main import app
@@ -312,8 +300,6 @@ class TestAnalyzeCommentIntentJobFallback:
         self, _mock_settings, temp_db_path: Path
     ) -> None:
         """Server-level env AI config takes precedence over job's stored config."""
-        from rootcoz import main as main_mod
-
         self._store_job_with_ai_config(
             temp_db_path, "job-789", "claude", "claude-sonnet-4-20250514"
         )
@@ -321,11 +307,8 @@ class TestAnalyzeCommentIntentJobFallback:
             success=True,
             text='{"suggests_reviewed": true, "reason": "Bug filed"}',
         )
-        with (
-            patch.object(storage, "DB_PATH", temp_db_path),
-            patch.object(main_mod, "AI_PROVIDER", "gemini"),
-            patch.object(main_mod, "AI_MODEL", "gemini-2.5-flash"),
-        ):
+        # _mock_settings has AI_PROVIDER=gemini, AI_MODEL=gemini-2.5-flash in env
+        with patch.object(storage, "DB_PATH", temp_db_path):
             from starlette.testclient import TestClient
 
             from rootcoz.main import app
@@ -344,6 +327,6 @@ class TestAnalyzeCommentIntentJobFallback:
 
         assert response.status_code == 200
         call_kwargs = mock_ai.call_args
-        # env vars are gemini/gemini-2.5-flash (from patched module constants)
+        # env vars are gemini/gemini-2.5-flash (from _mock_settings)
         assert call_kwargs.kwargs["ai_provider"] == "gemini"
         assert call_kwargs.kwargs["ai_model"] == "gemini-2.5-flash"

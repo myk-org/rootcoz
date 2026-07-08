@@ -8,7 +8,9 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 import pytest
+from fastapi.testclient import TestClient
 from pi_sidecar_client import AIResult
+from rootcoz import storage
 from rootcoz.ai_client import _setup_usage_recorder
 from rootcoz.cli.client import RootCozClient
 from rootcoz.config import Settings
@@ -107,6 +109,56 @@ def full_env_vars() -> Generator[dict[str, str], None, None]:
 def settings(mock_env_vars: dict[str, str]) -> Settings:
     """Create Settings instance with mocked environment."""
     return Settings()
+
+
+def make_app_client(temp_db_path: Path, env_overrides: dict[str, str] | None = None):
+    """Generator factory to create a FastAPI TestClient with patched env and DB.
+
+    Yields a ``TestClient`` instance with the given environment overrides
+    applied on top of sensible defaults (admin key, encryption key, secure
+    cookies off, approval off).  Clears the ``get_settings`` LRU cache on
+    entry and exit.
+
+    Usage in fixtures::
+
+        @pytest.fixture
+        def client(_init_db, temp_db_path):
+            yield from make_app_client(temp_db_path)
+    """
+    from rootcoz.config import clear_db_settings_cache
+
+    env: dict[str, str] = {
+        "PATH": os.environ.get("PATH", ""),
+        "HOME": os.environ.get("HOME", ""),
+        "ADMIN_KEY": "test-admin-key-16chars",  # pragma: allowlist secret
+        "ROOTCOZ_ENCRYPTION_KEY": "test-encryption-key-for-hmac",  # pragma: allowlist secret
+        "SECURE_COOKIES": "false",
+        "DB_PATH": str(temp_db_path),
+        "REQUIRE_APPROVAL": "false",
+    }
+    if env_overrides:
+        env.update(env_overrides)
+    with patch.dict(os.environ, env, clear=True):
+        clear_db_settings_cache()
+        with patch.object(storage, "DB_PATH", temp_db_path):
+            from rootcoz.main import app
+
+            with TestClient(app) as c:
+                yield c
+    clear_db_settings_cache()
+
+
+def admin_login(
+    client,
+    username: str = "admin",
+    api_key: str = "test-admin-key-16chars",  # pragma: allowlist secret
+):
+    """Login as admin and return session cookies."""
+    resp = client.post(
+        "/api/auth/login", json={"username": username, "api_key": api_key}
+    )
+    assert resp.status_code == 200
+    return resp.cookies
 
 
 @pytest.fixture
@@ -211,6 +263,16 @@ def mock_ai() -> Generator[MagicMock, None, None]:
             ),
         )
         yield mock
+
+
+@pytest.fixture(autouse=True)
+def _clear_db_settings_cache():
+    """Clear DB settings cache before each test to prevent state leakage."""
+    from rootcoz.config import clear_db_settings_cache
+
+    clear_db_settings_cache()
+    yield
+    clear_db_settings_cache()
 
 
 @pytest.fixture(autouse=True)

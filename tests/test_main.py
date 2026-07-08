@@ -141,14 +141,14 @@ def mock_settings(temp_db_path: Path):
         "REQUIRE_APPROVAL": "false",
     }
     with patch.dict(os.environ, env, clear=True):
-        # Clear the lru_cache to use fresh settings
-        from rootcoz.config import get_settings
+        # Clear the lru_cache and DB settings cache
+        from rootcoz.config import clear_db_settings_cache
 
-        get_settings.cache_clear()
+        clear_db_settings_cache()
         try:
             yield
         finally:
-            get_settings.cache_clear()
+            clear_db_settings_cache()
 
 
 _ADMIN_AUTH_HEADERS = {"Authorization": f"Bearer {_TEST_ADMIN_KEY}"}
@@ -225,22 +225,19 @@ class TestAnalyzeEndpoint:
 
     def test_analyze_accepts_tests_repo_url_with_ref(self, test_client) -> None:
         """Test that tests_repo_url with ':ref' suffix is accepted (no URL validation)."""
-        with (
-            patch("rootcoz.main.AI_PROVIDER", ""),
-            patch("rootcoz.main.AI_MODEL", ""),
-        ):
-            response = test_client.post(
-                "/analyze",
-                json={
-                    "type": "jenkins",
-                    "job_name": "test",
-                    "build_number": 123,
-                    "tests_repo_url": "https://github.com/org/repo:develop",
-                },
-            )
-            # 400 from missing AI config, not 422 from URL validation
-            assert response.status_code == 400
-            assert "AI provider" in response.json()["detail"]
+        # mock_settings has no AI_PROVIDER/AI_MODEL, so settings.ai_provider is empty
+        response = test_client.post(
+            "/analyze",
+            json={
+                "type": "jenkins",
+                "job_name": "test",
+                "build_number": 123,
+                "tests_repo_url": "https://github.com/org/repo:develop",
+            },
+        )
+        # 400 from missing AI config, not 422 from URL validation
+        assert response.status_code == 400
+        assert "AI provider" in response.json()["detail"]
 
     def test_analyze_missing_required_field(self, test_client) -> None:
         """Test that missing required field returns 422."""
@@ -255,21 +252,18 @@ class TestAnalyzeEndpoint:
 
     def test_analyze_missing_ai_provider_returns_400(self, test_client) -> None:
         """Test that missing AI provider returns 400 before queuing."""
-        with (
-            patch("rootcoz.main.AI_PROVIDER", ""),
-            patch("rootcoz.main.AI_MODEL", ""),
-        ):
-            response = test_client.post(
-                "/analyze",
-                json={
-                    "type": "jenkins",
-                    "job_name": "test",
-                    "build_number": 123,
-                    "ai_model": "test-model",
-                },
-            )
-            assert response.status_code == 400
-            assert "AI provider" in response.json()["detail"]
+        # mock_settings has no AI_PROVIDER/AI_MODEL, so settings.ai_provider is empty
+        response = test_client.post(
+            "/analyze",
+            json={
+                "type": "jenkins",
+                "job_name": "test",
+                "build_number": 123,
+                "ai_model": "test-model",
+            },
+        )
+        assert response.status_code == 400
+        assert "AI provider" in response.json()["detail"]
 
     def test_analyze_always_saves_request_params(self, test_client) -> None:
         """request_params is persisted even when wait_for_completion is False.
@@ -471,47 +465,41 @@ class TestAnalyzeFailuresEndpoint:
 
     def test_analyze_failures_missing_ai_provider(self, test_client) -> None:
         """Test that missing AI provider (no env var, no body param) returns 400."""
-        with (
-            patch("rootcoz.main.AI_PROVIDER", ""),
-            patch("rootcoz.main.AI_MODEL", ""),
-        ):
-            response = test_client.post(
-                "/analyze",
-                json={
-                    "type": "raw",
-                    "failures": [
-                        {
-                            "test_name": "test_foo",
-                            "error_message": "assert False",
-                        }
-                    ],
-                    "ai_model": "test-model",
-                },
-            )
-            assert response.status_code == 400
-            assert "AI provider" in response.json()["detail"]
+        # mock_settings has no AI_PROVIDER/AI_MODEL
+        response = test_client.post(
+            "/analyze",
+            json={
+                "type": "raw",
+                "failures": [
+                    {
+                        "test_name": "test_foo",
+                        "error_message": "assert False",
+                    }
+                ],
+                "ai_model": "test-model",
+            },
+        )
+        assert response.status_code == 400
+        assert "AI provider" in response.json()["detail"]
 
     def test_analyze_failures_missing_ai_model(self, test_client) -> None:
         """Test that missing AI model returns 400."""
-        with (
-            patch("rootcoz.main.AI_PROVIDER", ""),
-            patch("rootcoz.main.AI_MODEL", ""),
-        ):
-            response = test_client.post(
-                "/analyze",
-                json={
-                    "type": "raw",
-                    "failures": [
-                        {
-                            "test_name": "test_foo",
-                            "error_message": "assert False",
-                        }
-                    ],
-                    "ai_provider": "claude",
-                },
-            )
-            assert response.status_code == 400
-            assert "AI model" in response.json()["detail"]
+        # mock_settings has no AI_PROVIDER/AI_MODEL
+        response = test_client.post(
+            "/analyze",
+            json={
+                "type": "raw",
+                "failures": [
+                    {
+                        "test_name": "test_foo",
+                        "error_message": "assert False",
+                    }
+                ],
+                "ai_provider": "claude",
+            },
+        )
+        assert response.status_code == 400
+        assert "AI model" in response.json()["detail"]
 
     def test_analyze_failures_handles_analysis_exception(self, test_client) -> None:
         """Test that when background task raises, job is still queued (202)."""
@@ -5804,6 +5792,34 @@ class TestAdminSettingsEndpoints:
         settings = get_resp.json()
         ai_timeout = next(s for s in settings if s["key"] == "ai_call_timeout")
         assert ai_timeout["source"] != "db"
+
+    def test_has_env_var_flag_when_db_shadows_env(self, test_client) -> None:
+        """DB-overridden settings flag has_env_var when OS env var also exists."""
+        # JENKINS_URL is set as an OS env var in the mock_settings fixture.
+        # Set a DB override for the same setting.
+        test_client.put(
+            "/api/admin/settings",
+            json={"settings": {"jenkins_url": "https://other.jenkins.com"}},
+        )
+        get_resp = test_client.get("/api/admin/settings")
+        settings = get_resp.json()
+        jenkins_url = next(s for s in settings if s["key"] == "jenkins_url")
+        assert jenkins_url["source"] == "db"
+        # JENKINS_URL env var exists in the test environment, so has_env_var should be True
+        assert jenkins_url.get("has_env_var") is True
+
+    def test_no_has_env_var_when_only_db(self, test_client) -> None:
+        """DB-only settings (no OS env var) should not have has_env_var."""
+        # ai_call_timeout is unlikely to have an OS env var in test
+        test_client.put(
+            "/api/admin/settings",
+            json={"settings": {"ai_call_timeout": "25"}},
+        )
+        get_resp = test_client.get("/api/admin/settings")
+        settings = get_resp.json()
+        ai_timeout = next(s for s in settings if s["key"] == "ai_call_timeout")
+        assert ai_timeout["source"] == "db"
+        assert "has_env_var" not in ai_timeout
 
     def test_delete_unknown_key(self, test_client) -> None:
         """DELETE with unknown key returns 404."""

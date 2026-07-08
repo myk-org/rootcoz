@@ -649,11 +649,17 @@ def resolve_jira_auth(settings: Settings) -> tuple[bool, str]:
     return False, ""
 
 
-async def load_db_settings_into_env() -> None:
-    """Load server_settings DB overrides into os.environ.
+# In-memory cache for DB settings overrides.
+# Populated at startup by load_db_settings() and updated by admin settings endpoints.
+_db_settings_cache: dict[str, str] = {}
+
+
+async def load_db_settings() -> None:
+    """Load server_settings DB overrides into in-memory cache.
 
     Called once at startup before get_settings() is first invoked.
-    DB values take precedence over existing env vars.
+    DB values are NOT written to os.environ — the cache is merged
+    by get_settings() via model_copy().
     """
     try:
         # Late import to avoid circular dependency
@@ -664,25 +670,63 @@ async def load_db_settings_into_env() -> None:
         if not db_settings:
             return
 
-        count = 0
+        _db_settings_cache.clear()
         for key, entry in db_settings.items():
-            env_key = key.upper()
             value = entry["value"]
             # Decrypt if encrypted (sensitive values are stored encrypted)
             try:
                 value = decrypt_value(value)
             except Exception:
                 pass  # Not encrypted or decryption failed — use as-is
-            os.environ[env_key] = value
-            count += 1
+            _db_settings_cache[key] = value
 
-        if count:
-            logger.info("[startup] Loaded %d server setting(s) from DB into env", count)
+        if _db_settings_cache:
+            get_settings.cache_clear()
+            logger.info(
+                "[startup] Loaded %d server setting(s) from DB",
+                len(_db_settings_cache),
+            )
     except Exception:
         logger.warning("Failed to load server settings from DB", exc_info=True)
 
 
+def update_db_settings_cache(updates: dict[str, str]) -> None:
+    """Update in-memory cache when admin changes settings via the API."""
+    _db_settings_cache.update(updates)
+    get_settings.cache_clear()
+
+
+def remove_from_db_settings_cache(keys: list[str]) -> None:
+    """Remove keys from cache when admin deletes settings via the API."""
+    for key in keys:
+        _db_settings_cache.pop(key, None)
+    get_settings.cache_clear()
+
+
+def clear_db_settings_cache() -> None:
+    """Clear the entire DB settings cache. Used by tests for isolation."""
+    _db_settings_cache.clear()
+    get_settings.cache_clear()
+
+
 @lru_cache
 def get_settings() -> Settings:
-    """Get application settings instance."""
-    return Settings()
+    """Get merged settings: env vars (base) + DB overrides.
+
+    DB cache values are strings (same format as env vars).  Using
+    ``Settings(**merged_data)`` triggers full pydantic validation and
+    type coercion (str→int, str→bool, str→SecretStr, etc.).
+    """
+    base = Settings()
+    if not _db_settings_cache:
+        return base
+    merged_data = base.model_dump()
+    merged_data.update(_db_settings_cache)
+    try:
+        return Settings(**merged_data)
+    except Exception:
+        logger.warning(
+            "Failed to validate merged settings with DB overrides",
+            exc_info=True,
+        )
+        return base

@@ -1,4 +1,4 @@
-import { useState, useCallback, useRef } from 'react'
+import { useState, useCallback, useRef, useEffect } from 'react'
 import { useProviderModels } from '@/lib/useProviderModels'
 import { usePeerModels } from '@/lib/usePeerModels'
 import { useNavigate } from 'react-router-dom'
@@ -22,7 +22,8 @@ import { PeerConfigList } from '@/components/shared/PeerConfigList'
 import type { PeerConfigWithId } from '@/components/shared/PeerConfigList'
 import { AdditionalReposList } from '@/components/shared/AdditionalReposList'
 import type { RepoWithId } from '@/components/shared/AdditionalReposList'
-import { Send, Upload } from 'lucide-react'
+import { Send, Upload, Loader2 } from 'lucide-react'
+import type { DefaultServerSettings } from '@/types'
 
 export function NewAnalysisPage() {
   const navigate = useNavigate()
@@ -45,7 +46,7 @@ export function NewAnalysisPage() {
   const [maxWait, setMaxWait] = useState(0)
 
   // AI configuration
-  const [aiProvider, setAiProvider] = useState('claude')
+  const [aiProvider, setAiProvider] = useState('')
   const [aiModel, setAiModel] = useState('')
   const [aiCallTimeout, setAiCallTimeout] = useState<number | undefined>(undefined)
   const [rawPrompt, setRawPrompt] = useState('')
@@ -60,7 +61,8 @@ export function NewAnalysisPage() {
   const [additionalRepos, setAdditionalRepos] = useState<RepoWithId[]>([])
 
   // Jira integration
-  const [enableJira, setEnableJira] = useState(true)
+  const [enableJira, setEnableJira] = useState<boolean | null>(null)
+  const [jiraUserToggled, setJiraUserToggled] = useState(false)
   const [jiraUrl, setJiraUrl] = useState('')
   const [jiraProjectKey, setJiraProjectKey] = useState('')
 
@@ -72,6 +74,71 @@ export function NewAnalysisPage() {
   const [force, setForce] = useState(false)
   const [getArtifacts, setGetArtifacts] = useState(true)
   const [maxArtifactsSize, setMaxArtifactsSize] = useState<number | undefined>(undefined)
+  const [defaultsLoading, setDefaultsLoading] = useState(true)
+  const [defaultsError, setDefaultsError] = useState(false)
+
+  // Fetch server defaults on mount and pre-populate form fields
+  useEffect(() => {
+    let cancelled = false
+    let resolved = false
+    // Abort after 5s to prevent infinite spinner on slow/hung server
+    const timeoutId = setTimeout(() => {
+      if (!resolved && !cancelled) {
+        resolved = true
+        console.warn('Defaults fetch timed out after 5s')
+        setDefaultsError(true)
+        setDefaultsLoading(false)
+      }
+    }, 5000)
+    api.get<DefaultServerSettings>('/api/default-server-settings').then((defaults) => {
+      if (cancelled || resolved) return
+      if (defaults.ai_provider) setAiProvider(defaults.ai_provider)
+      if (defaults.ai_model) setAiModel(defaults.ai_model)
+      setAiCallTimeout(defaults.ai_call_timeout)
+      setTestsRepoUrl(defaults.tests_repo_url)
+      if (defaults.tests_repo_ref) setTestsRepoRef(defaults.tests_repo_ref)
+      if (defaults.additional_repos.length > 0) {
+        setAdditionalRepos(
+          defaults.additional_repos.map((r) => ({
+            id: crypto.randomUUID(),
+            name: r.name,
+            url: r.url,
+            ref: r.ref ?? '',
+          }))
+        )
+      }
+      if (defaults.peer_ai_configs.length > 0) {
+        setEnablePeers(true)
+        setPeerConfigs(
+          defaults.peer_ai_configs.map((p) => ({
+            id: crypto.randomUUID(),
+            ai_provider: p.ai_provider,
+            ai_model: p.ai_model,
+          }))
+        )
+      }
+      setMaxRounds(defaults.peer_analysis_max_rounds)
+      setEnableJira(defaults.jira_enabled)
+      setJiraUrl(defaults.jira_url)
+      setJiraProjectKey(defaults.jira_project_key)
+      setForce(defaults.force_analysis)
+      setGetArtifacts(defaults.get_job_artifacts)
+      setMaxArtifactsSize(defaults.jenkins_artifacts_max_size_mb)
+      setWaitForCompletion(defaults.wait_for_completion)
+      setPollInterval(defaults.poll_interval_minutes)
+      setMaxWait(defaults.max_wait_minutes)
+      if (defaults.jenkins_url) setJenkinsUrl(defaults.jenkins_url)
+    }).catch((err) => {
+      if (resolved) return
+      console.warn('Failed to load analysis defaults:', err)
+      if (!cancelled) setDefaultsError(true)
+    }).finally(() => {
+      resolved = true
+      clearTimeout(timeoutId)
+      if (!cancelled) setDefaultsLoading(false)
+    })
+    return () => { cancelled = true; clearTimeout(timeoutId) }
+  }, [])
 
   const fileInputRef = useRef<HTMLInputElement>(null)
 
@@ -114,24 +181,28 @@ export function NewAnalysisPage() {
     setError('')
     try {
       const commonFields: Record<string, unknown> = {
-        ai_provider: aiProvider,
+        // Always include user-entered fields
+        ...(aiProvider && { ai_provider: aiProvider }),
         ...(aiModel && { ai_model: aiModel }),
         ...(aiCallTimeout !== undefined && { ai_call_timeout: aiCallTimeout }),
         ...(rawPrompt && { raw_prompt: rawPrompt }),
-        enable_jira: enableJira,
+        ...(jiraUserToggled && { enable_jira: enableJira }),
         ...(jiraUrl && { jira_url: jiraUrl }),
         ...(jiraProjectKey && { jira_project_key: jiraProjectKey }),
         ...(testsRepoUrl && { tests_repo_url: testsRepoRef ? `${testsRepoUrl}:${testsRepoRef}` : testsRepoUrl }),
-        ...(enablePeers && peerConfigs.length > 0 && {
-          peer_ai_configs: peerConfigs.map(({ ai_provider, ai_model }) => ({ ai_provider, ai_model })),
-        }),
-        peer_analysis_max_rounds: maxRounds,
+        // Peers: send configs when enabled, send [] to explicitly disable
+        ...(enablePeers && peerConfigs.length > 0
+          ? { peer_ai_configs: peerConfigs.map(({ ai_provider, ai_model }) => ({ ai_provider, ai_model })) }
+          : !enablePeers ? { peer_ai_configs: [] } : {}
+        ),
+        // Additional repos: send [] when list is empty to explicitly clear
         ...(() => {
           const validRepos = additionalRepos
             .filter((r) => r.name.trim() && r.url.trim())
             .map((r) => ({ name: r.name.trim(), url: r.url.trim(), ...(r.ref.trim() && { ref: r.ref.trim() }) }))
-          return validRepos.length > 0 ? { additional_repos: validRepos } : {}
+          return { additional_repos: validRepos }
         })(),
+        peer_analysis_max_rounds: maxRounds,
       }
 
       if (inputMode === 'jenkins') {
@@ -140,14 +211,14 @@ export function NewAnalysisPage() {
           type: 'jenkins',
           job_name: jobName.trim(),
           build_number: buildNumber,
-          force,
           ...(tags.length > 0 && { tags }),
-          wait_for_completion: waitForCompletion,
-          poll_interval_minutes: pollInterval,
-          max_wait_minutes: maxWait,
           ...(jenkinsUrl && { jenkins_url: jenkinsUrl }),
           ...(jenkinsUser && { jenkins_user: jenkinsUser }),
           ...(jenkinsPassword && { jenkins_password: jenkinsPassword }),
+          force,
+          wait_for_completion: waitForCompletion,
+          poll_interval_minutes: pollInterval,
+          max_wait_minutes: maxWait,
           get_job_artifacts: getArtifacts,
           ...(maxArtifactsSize !== undefined && { jenkins_artifacts_max_size_mb: maxArtifactsSize }),
         }
@@ -194,6 +265,7 @@ export function NewAnalysisPage() {
     testsRepoRef,
     additionalRepos,
     enableJira,
+    jiraUserToggled,
     jiraUrl,
     jiraProjectKey,
     getArtifacts,
@@ -212,6 +284,17 @@ export function NewAnalysisPage() {
       </div>
 
       <div className="rounded-lg border border-border-default bg-surface-card">
+        {defaultsLoading ? (
+          <div className="flex items-center justify-center py-12">
+            <Loader2 className="h-6 w-6 animate-spin text-text-tertiary" />
+            <span className="ml-2 text-sm text-text-tertiary">Loading defaults...</span>
+          </div>
+        ) : (<>
+        {defaultsError && (
+          <div className="rounded-md border border-signal-amber/30 bg-signal-amber/10 p-3 m-6 mb-0">
+            <p className="text-xs text-signal-amber">⚠️ Could not load server defaults. Form shows local fallback values.</p>
+          </div>
+        )}
         <div className="space-y-1 p-6">
           {/* Input Mode Selector */}
           <div className="flex gap-2 pb-2">
@@ -384,9 +467,9 @@ export function NewAnalysisPage() {
             <div className="grid grid-cols-2 gap-3">
               <div className="space-y-1.5">
                 <FieldLabel>AI Provider</FieldLabel>
-                <Select value={aiProvider} onValueChange={setAiProvider}>
+                <Select value={aiProvider || undefined} onValueChange={setAiProvider}>
                   <SelectTrigger>
-                    <SelectValue />
+                    <SelectValue placeholder="Select provider..." />
                   </SelectTrigger>
                   <SelectContent>
                     <SelectItem value="claude">Claude</SelectItem>
@@ -484,7 +567,7 @@ export function NewAnalysisPage() {
           <Section title="Jira Integration" dotColor="bg-signal-orange">
             <div className="flex items-center justify-between">
               <span className="text-sm text-text-secondary">Enable Jira search</span>
-              <Toggle checked={enableJira} onChange={setEnableJira} label="Enable Jira search" />
+              <Toggle checked={enableJira ?? false} onChange={(v) => { setEnableJira(v); setJiraUserToggled(true) }} label="Enable Jira search" />
             </div>
             {!enableJira ? null : (
               <div className="grid grid-cols-2 gap-3">
@@ -607,6 +690,7 @@ export function NewAnalysisPage() {
             </Button>
           </div>
         </div>
+        </>)}
       </div>
     </div>
   )

@@ -72,6 +72,9 @@ _state: dict = {}
 # Shared option definition reused across leaf commands so --json works
 # both globally (before the subcommand) and per-command (after it).
 _JSON_OPTION = typer.Option(False, "--json", help="Output as JSON instead of table.")
+
+# Config subcommands that require a server connection (all others are local-only).
+_SERVER_CONFIG_SUBCOMMANDS = frozenset({"defaults"})
 _TAG_OPTION = typer.Option([], "--tag", help="Tag for categorization (repeatable).")
 _LABEL_FILTER_OPTION = typer.Option(
     [], "--label", "-l", help="Filter by label (can repeat)."
@@ -317,9 +320,28 @@ def main_callback(
     elif insecure:
         no_verify_ssl = True
 
-    # Config subcommands do not require a server connection.
+    # Local-only config subcommands do not require a server connection.
+    # 'defaults' needs a server to fetch analysis defaults from the API.
     if ctx.invoked_subcommand == "config":
-        return
+        # sys.argv parsing: strip flags AND their values by finding
+        # positional args (words not starting with '-' that don't follow a flag).
+        # NOTE: Keep this flag list in sync with main_callback value-bearing options.
+        positional = []
+        skip_next = False
+        for arg in sys.argv[1:]:
+            if skip_next:
+                skip_next = False
+                continue
+            if arg.startswith("-"):
+                # Flags like --server, --user take a value argument
+                if arg in ("--server", "-s", "--user", "--api-key"):
+                    skip_next = True
+                continue
+            positional.append(arg)
+        # positional is e.g. ["config", "defaults"] or ["config", "show"]
+        config_sub = positional[1] if len(positional) > 1 else None
+        if config_sub not in _SERVER_CONFIG_SUBCOMMANDS:
+            return
 
     server_url, username, no_verify_ssl, cfg = _resolve_server(
         server, username, no_verify_ssl
@@ -3589,3 +3611,33 @@ def config_servers(
             labels={"no_verify_ssl": "NO VERIFY SSL"},
             as_json=False,
         )
+
+
+@config_app.command("defaults")
+def config_defaults(
+    json_output: bool = _JSON_OPTION,
+):
+    """Show server default settings (non-sensitive)."""
+    data = _run_client_command(
+        json_output,
+        lambda c: c.get_default_server_settings(),
+        emit_output=False,
+    )
+    if _state.get("json", False) or data is None:
+        return
+    # Human-readable display
+    typer.echo("Server Analysis Defaults:")
+    for key, value in data.items():
+        if isinstance(value, list):
+            if not value:
+                typer.echo(f"  {key}: (none)")
+            else:
+                typer.echo(f"  {key}:")
+                for item in value:
+                    if isinstance(item, dict):
+                        parts = [f"{k}={v}" for k, v in item.items()]
+                        typer.echo(f"    - {', '.join(parts)}")
+                    else:
+                        typer.echo(f"    - {item}")
+        else:
+            typer.echo(f"  {key}: {value}")

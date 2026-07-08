@@ -729,21 +729,17 @@ class TestFeedbackEndpoint:
         if ai_model:
             env["AI_MODEL"] = ai_model
         with patch.dict(os.environ, env, clear=True):
-            get_settings.cache_clear()
-            import rootcoz.main as _main_mod
+            from rootcoz.config import clear_db_settings_cache
 
-            with (
-                patch.object(storage, "DB_PATH", temp_db_path),
-                patch.object(_main_mod, "AI_PROVIDER", ai_provider),
-                patch.object(_main_mod, "AI_MODEL", ai_model),
-            ):
+            clear_db_settings_cache()
+            with patch.object(storage, "DB_PATH", temp_db_path):
                 from rootcoz.main import app
 
                 with TestClient(
                     app, headers={"Authorization": "Bearer test-admin-key-16chars"}
                 ) as c:
                     yield c
-            get_settings.cache_clear()
+            clear_db_settings_cache()
 
     # -- Preview endpoint tests -----------------------------------------------
 
