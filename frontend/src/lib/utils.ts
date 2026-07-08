@@ -94,14 +94,15 @@ export function formatRelativeTime(ts: string | null | undefined): string {
   return `${Math.floor(months / 12)}y ago`
 }
 
-/** Return a human-readable CI source label based on analysis_type from request_params. */
+/** Return a human-readable CI source label based on analysis_type from request_params.
+ *  Backend defaults missing analysis_type to 'jenkins', so the fallback matches. */
 export function ciSourceLabel(requestParams?: { [key: string]: unknown }): string {
   const analysisType = requestParams?.analysis_type as string | undefined
   switch (analysisType) {
     case 'prow': return 'Prow'
-    case 'jenkins': return 'Jenkins'
     case 'file': return 'CI Build'
     case 'raw': return 'CI Build'
-    default: return 'CI Build'
+    case 'jenkins':
+    default: return 'Jenkins'
   }
 }
