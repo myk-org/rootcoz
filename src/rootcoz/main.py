@@ -3378,6 +3378,7 @@ async def _enqueue_non_jenkins_analysis(
         base_params["gcs_bucket"] = merged.gcs_bucket
         base_params["gcs_prefix"] = body.gcs_prefix or ""
         base_params["force"] = merged.force_analysis
+        base_params["get_job_artifacts"] = merged.get_job_artifacts
     elif analysis_type == "raw":
         assert body.failures is not None
         base_params["failures"] = [f.model_dump() for f in body.failures]

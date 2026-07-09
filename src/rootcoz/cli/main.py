@@ -1355,7 +1355,6 @@ def analyze(
             "jenkins_ssl_verify",
             "jenkins_timeout",
             "jenkins_artifacts_max_size_mb",
-            "get_job_artifacts",
             "wait_for_completion",
             "poll_interval_minutes",
             "max_wait_minutes",
@@ -1363,6 +1362,7 @@ def analyze(
             extras.pop(key, None)
     if source == "file":
         extras.pop("force", None)
+        extras.pop("get_job_artifacts", None)
     # Strip Prow-specific fields for non-Prow sources
     if source != "prow":
         for key in ("prow_url", "gcs_bucket", "gcs_prefix"):
