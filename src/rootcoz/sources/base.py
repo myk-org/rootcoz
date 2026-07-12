@@ -8,13 +8,17 @@ out of the pipeline logic.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from rootcoz.models import FailedTest
+from rootcoz.models import AdditionalRepo, FailedTest
+
+if TYPE_CHECKING:
+    from rootcoz.repository import RepositoryManager
 
 logger = logging.getLogger(__name__)
 
@@ -171,6 +175,251 @@ class CISource(ABC):
         implementation is a no-op.
         """
         return  # intentional no-op; subclasses override when needed
+
+
+@dataclass
+class WorkspaceSetupResult:
+    """Result of setting up an analysis workspace."""
+
+    repo_path: Path
+    cloned_repos: dict[str, Path] = field(default_factory=dict)
+    repo_context: str = ""
+
+
+async def setup_analysis_workspace(
+    repo_manager: "RepositoryManager",
+    *,
+    tests_repo_url: str = "",
+    tests_repo_ref: str = "",
+    tests_repo_token: str = "",
+    additional_repos: list[AdditionalRepo] | None = None,
+    extract_path: Path | None = None,
+    artifacts_context: str = "",
+    job_id: str = "",
+) -> tuple[WorkspaceSetupResult, str]:
+    """Create workspace, clone repos, copy resources, link artifacts.
+
+    Shared helper that eliminates workspace-setup duplication across
+    ``_process_non_jenkins_analysis``, ``_reanalyze_failure_background``,
+    and ``jenkins_source.analyze_job``.
+
+    Args:
+        repo_manager: Pre-created ``RepositoryManager`` (caller owns lifecycle).
+        tests_repo_url: URL of the test repository to clone.
+        tests_repo_ref: Git ref (branch/tag/SHA) to check out.
+        tests_repo_token: Token for authenticating to the test repo.
+        additional_repos: List of additional repo dicts to clone.
+        extract_path: Path to downloaded build artifacts to symlink.
+        artifacts_context: Text context describing artifacts; cleared
+            if artifact linking fails.
+        job_id: Job identifier for log messages.
+
+    Returns:
+        Tuple of ``(WorkspaceSetupResult, effective_artifacts_context)``.
+        ``artifacts_context`` may be cleared if artifact linking fails.
+    """
+    from rootcoz.engine.core import (
+        clone_additional_repos,
+        copy_rootcoz_pi_resources,
+    )
+    from rootcoz.repository import derive_test_repo_name, redact_url
+
+    repo_path = repo_manager.create_workspace()
+    cloned_repos: dict[str, Path] = {}
+    repo_context = ""
+
+    logger.debug("Workspace created at %s", repo_path)
+
+    if tests_repo_url:
+        logger.debug(
+            "Cloning test repo: %s (ref=%s)",
+            redact_url(str(tests_repo_url)),
+            tests_repo_ref,
+        )
+        try:
+            additional_repos_list = additional_repos or []
+            repo_name = derive_test_repo_name(
+                str(tests_repo_url), additional_repos_list
+            )
+            await asyncio.to_thread(
+                repo_manager.clone_into,
+                str(tests_repo_url),
+                repo_path / repo_name,
+                depth=50,
+                branch=tests_repo_ref,
+                token=tests_repo_token or None,
+            )
+            cloned_repos[repo_name] = repo_path / repo_name
+            logger.info("Test repo cloned successfully into %s/", repo_name)
+            repo_context = (
+                f"\nTest repository cloned from: "
+                f"{redact_url(str(tests_repo_url))} (at {repo_name}/)"
+            )
+        except Exception as exc:
+            logger.warning(
+                "Failed to clone test repository (%s)",
+                type(exc).__name__,
+                exc_info=True,
+            )
+            repo_context = "\nFailed to clone repository (details redacted)"
+
+    if additional_repos:
+        additional_repos_cloned, repo_path = await clone_additional_repos(
+            repo_manager, additional_repos, repo_path
+        )
+        cloned_repos.update(additional_repos_cloned)
+
+    if cloned_repos:
+        copy_rootcoz_pi_resources(cloned_repos, repo_path)
+
+    if extract_path:
+        if not link_artifacts_to_workspace(repo_path, extract_path, job_id):
+            artifacts_context = ""
+
+    result = WorkspaceSetupResult(
+        repo_path=repo_path,
+        cloned_repos=cloned_repos,
+        repo_context=repo_context,
+    )
+    return result, artifacts_context
+
+
+def append_repo_context(custom_prompt: str, repo_context: str) -> str:
+    """Append clone-status context to a custom prompt when present."""
+    if not repo_context:
+        return custom_prompt
+    if custom_prompt:
+        return f"{custom_prompt}{repo_context}"
+    return repo_context.lstrip("\n")
+
+
+def write_workspace_context_file(
+    filepath: Path,
+    content: str,
+    instruction: str,
+    custom_prompt: str,
+    job_id: str,
+) -> str:
+    """Write a context file to the AI workspace and prepend a MANDATORY instruction.
+
+    Returns the updated ``custom_prompt``, or the original on write failure.
+    """
+    try:
+        filepath.write_text(content)
+        full_instruction = (
+            f"\n\nMANDATORY: Read {filepath} before analyzing. {instruction}"
+        )
+        return (
+            full_instruction + "\n" + custom_prompt
+            if custom_prompt
+            else full_instruction
+        )
+    except OSError:
+        logger.warning(
+            "Failed to write %s for job %s",
+            filepath.name,
+            job_id,
+            exc_info=True,
+        )
+        return custom_prompt
+
+
+async def apply_source_workspace_files(
+    source: CISource,
+    repo_path: Path,
+    custom_prompt: str,
+    job_id: str,
+    *,
+    github_token: str = "",
+) -> str:
+    """Write plugin workspace files and update the analysis prompt."""
+    workspace_files = await source.prepare_workspace(
+        repo_path=repo_path, github_token=github_token
+    )
+    updated_prompt = custom_prompt
+    for workspace_file in workspace_files:
+        updated_prompt = write_workspace_context_file(
+            filepath=repo_path / workspace_file.filename,
+            content=workspace_file.content,
+            instruction=workspace_file.instruction,
+            custom_prompt=updated_prompt,
+            job_id=job_id,
+        )
+    return updated_prompt
+
+
+def link_refetched_artifacts(
+    repo_path: Path,
+    extract_path: Path | None,
+    artifacts_context: str,
+    job_id: str,
+) -> str:
+    """Link refetched artifacts into the workspace, clearing context on failure."""
+    if not extract_path:
+        return artifacts_context
+    if link_artifacts_to_workspace(repo_path, extract_path, job_id):
+        return artifacts_context
+    return ""
+
+
+async def run_console_only_analysis(
+    *,
+    test_name: str,
+    console_context: str,
+    artifacts_context: str,
+    repo_path: Path | None,
+    ai_provider: str,
+    ai_model: str,
+    ai_call_timeout: int | None,
+    custom_prompt: str,
+    server_url: str,
+    job_id: str,
+    additional_repos: dict[str, Path] | None,
+    auth_header: str,
+    call_type: str = "console",
+    extra_context: str = "",
+    peer_ai_configs: list | None = None,
+    peer_analysis_max_rounds: int = 3,
+    max_concurrent_ai_calls: int = 3,
+) -> tuple[bool, list, str]:
+    """Run console-only AI analysis when no structured test failures exist."""
+    from rootcoz.engine.core import analyze_failure_group
+    from rootcoz.models import FailedTest
+
+    full_context = console_context
+    if extra_context:
+        full_context = (
+            f"{console_context}\n{extra_context}" if console_context else extra_context
+        )
+
+    synthetic_failure = FailedTest(
+        test_name=test_name,
+        error_message=full_context or "Console-only analysis (no JUnit report)",
+    )
+
+    try:
+        results = await analyze_failure_group(
+            failures=[synthetic_failure],
+            console_context=console_context,
+            repo_path=repo_path,
+            ai_provider=ai_provider,
+            ai_model=ai_model,
+            ai_call_timeout=ai_call_timeout,
+            custom_prompt=custom_prompt,
+            artifacts_context=artifacts_context,
+            server_url=server_url,
+            job_id=job_id,
+            peer_ai_configs=peer_ai_configs,
+            peer_analysis_max_rounds=peer_analysis_max_rounds,
+            group_label=call_type,
+            additional_repos=additional_repos,
+            max_concurrent_ai_calls=max_concurrent_ai_calls,
+            auth_header=auth_header,
+        )
+        return True, results, ""
+    except Exception as exc:
+        logger.error("Console-only analysis failed: %s", exc, exc_info=True)
+        return False, [], str(exc)
 
 
 def link_artifacts_to_workspace(

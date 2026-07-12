@@ -4,6 +4,7 @@ import { useSessionState } from '@/lib/useSessionState'
 import { groupFailures } from '@/lib/grouping'
 import { useExpandCollapseAll } from '@/lib/useExpandCollapseAll'
 import { childJobHashId, expandKey } from '@/lib/childJobHash'
+import { resolveBuildUrl } from '@/lib/utils'
 import { FailureCard } from './FailureCard'
 import { Badge } from '@/components/ui/badge'
 import { ExpandCollapseButtons } from '@/components/shared/ExpandCollapseButtons'
@@ -80,6 +81,8 @@ export function ChildJobSection({ child, jobId, depth = 0, activeHash, parentHas
   const { remountKey: failureRemountKey, expandAll: expandAllFailures, collapseAll: collapseAllFailures } =
     useExpandCollapseAll(getFailureKeys)
 
+  const childBuildUrl = resolveBuildUrl(child)
+
   return (
     <div ref={sectionRef} id={hashId} className={depth > 0 ? 'ml-4 border-l-2 border-border-muted pl-4' : ''}>
       {/* Header */}
@@ -110,13 +113,13 @@ export function ChildJobSection({ child, jobId, depth = 0, activeHash, parentHas
             hasFailures={failures.length > 0}
           />
         )}
-        {child.jenkins_url && (
+        {childBuildUrl && (
           <a
-            href={child.jenkins_url}
+            href={childBuildUrl}
             target="_blank"
             rel="noopener noreferrer"
             className="shrink-0 text-text-tertiary hover:text-text-link"
-            aria-label={`Open Jenkins job ${child.job_name} #${child.build_number}`}
+            aria-label={`Open CI job ${child.job_name} #${child.build_number}`}
           >
             <ExternalLink className="h-3.5 w-3.5" />
           </a>

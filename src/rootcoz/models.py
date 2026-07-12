@@ -520,8 +520,13 @@ class ChildJobAnalysis(BaseModel):
     )
     job_name: str = Field(description="Name of the child job")
     build_number: int = Field(description="Build number of the child job")
-    jenkins_url: str | None = Field(
+    build_url: str | None = Field(
         default=None, description="URL of the child job build"
+    )
+    jenkins_url: str | None = Field(
+        default=None,
+        description="Deprecated alias for build_url",
+        json_schema_extra={"deprecated": True},
     )
     summary: str | None = Field(
         default=None, description="Summary of the child job failure analysis"
@@ -535,6 +540,14 @@ class ChildJobAnalysis(BaseModel):
     note: str | None = Field(
         default=None, description="Additional notes (e.g., max depth reached)"
     )
+
+    @model_validator(mode="after")
+    def _sync_build_url_aliases(self) -> "ChildJobAnalysis":
+        url = self.build_url or self.jenkins_url
+        if url:
+            self.build_url = url
+            self.jenkins_url = url
+        return self
 
 
 class TokenUsageEntry(BaseModel):
@@ -567,14 +580,19 @@ class TokenUsageSummary(BaseModel):
 
 
 class AnalysisResult(BaseModel):
-    """Complete analysis result for a Jenkins job."""
+    """Complete analysis result for a CI job."""
 
     job_id: str = Field(description="Unique identifier for the analysis job")
-    job_name: str = Field(default="", description="Jenkins job name")
-    build_number: int = Field(default=0, description="Jenkins build number")
+    job_name: str = Field(default="", description="CI job name")
+    build_number: int = Field(default=0, description="CI build number")
+    build_url: HttpUrl | None = Field(
+        default=None,
+        description="URL of the analyzed CI build",
+    )
     jenkins_url: HttpUrl | None = Field(
         default=None,
-        description="URL of the analyzed Jenkins job (None for non-Jenkins analysis)",
+        description="Deprecated alias for build_url",
+        json_schema_extra={"deprecated": True},
     )
     status: Literal[
         "pending", "waiting", "running", "completed", "failed", "aborted"
@@ -593,6 +611,14 @@ class AnalysisResult(BaseModel):
         default=None,
         description="Aggregated token usage across all AI calls in this analysis",
     )
+
+    @model_validator(mode="after")
+    def _sync_build_url_aliases(self) -> "AnalysisResult":
+        url = self.build_url or self.jenkins_url
+        if url:
+            self.build_url = url
+            self.jenkins_url = url
+        return self
 
 
 class JobStatus(BaseModel):

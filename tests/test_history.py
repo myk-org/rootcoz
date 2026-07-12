@@ -269,7 +269,7 @@ class TestBackfillFailureHistory:
             }
             async with aiosqlite.connect(setup_test_db) as db:
                 await db.execute(
-                    "INSERT INTO results (job_id, jenkins_url, status, result_json) VALUES (?, ?, ?, ?)",
+                    "INSERT INTO results (job_id, build_url, status, result_json) VALUES (?, ?, ?, ?)",
                     (
                         "backfill-1",
                         "https://jenkins.example.com/job/test/100/",
@@ -305,7 +305,7 @@ class TestBackfillFailureHistory:
                 )
                 # Insert a completed result whose job_id is already in failure_history
                 await db.execute(
-                    "INSERT INTO results (job_id, jenkins_url, status, result_json) VALUES (?, ?, ?, ?)",
+                    "INSERT INTO results (job_id, build_url, status, result_json) VALUES (?, ?, ?, ?)",
                     (
                         "existing-1",
                         "https://jenkins.example.com/job/test/100/",
@@ -351,7 +351,7 @@ class TestBackfillFailureHistory:
             }
             async with aiosqlite.connect(setup_test_db) as db:
                 await db.execute(
-                    "INSERT INTO results (job_id, jenkins_url, status, result_json) VALUES (?, ?, ?, ?)",
+                    "INSERT INTO results (job_id, build_url, status, result_json) VALUES (?, ?, ?, ?)",
                     (
                         "backfill-2",
                         "https://jenkins.example.com/job/test/200/",
@@ -389,7 +389,7 @@ class TestBackfillFailureHistory:
         with patch.object(storage, "DB_PATH", setup_test_db):
             async with aiosqlite.connect(setup_test_db) as db:
                 await db.execute(
-                    "INSERT INTO results (job_id, jenkins_url, status, result_json) VALUES (?, ?, ?, ?)",
+                    "INSERT INTO results (job_id, build_url, status, result_json) VALUES (?, ?, ?, ?)",
                     (
                         "pending-1",
                         "https://jenkins.example.com/job/test/1/",
@@ -398,7 +398,7 @@ class TestBackfillFailureHistory:
                     ),
                 )
                 await db.execute(
-                    "INSERT INTO results (job_id, jenkins_url, status, result_json) VALUES (?, ?, ?, ?)",
+                    "INSERT INTO results (job_id, build_url, status, result_json) VALUES (?, ?, ?, ?)",
                     (
                         "failed-1",
                         "https://jenkins.example.com/job/test/2/",
@@ -425,7 +425,7 @@ class TestGetTestHistory:
             # Insert results rows for pass inference
             for i in range(5):
                 await db.execute(
-                    "INSERT INTO results (job_id, jenkins_url, status, result_json) VALUES (?, ?, ?, ?)",
+                    "INSERT INTO results (job_id, build_url, status, result_json) VALUES (?, ?, ?, ?)",
                     (
                         f"job-{i}",
                         "https://jenkins.example.com/job/test/1/",
@@ -573,7 +573,7 @@ class TestGetJobStats:
                 # 3 builds, 2 with failures
                 for i in range(3):
                     await db.execute(
-                        "INSERT INTO results (job_id, jenkins_url, status, result_json) VALUES (?, ?, ?, ?)",
+                        "INSERT INTO results (job_id, build_url, status, result_json) VALUES (?, ?, ?, ?)",
                         (
                             f"stats-{i}",
                             "https://j.example.com/job/test/1/",

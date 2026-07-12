@@ -58,8 +58,8 @@ _ARTIFACTS_BASE = Path("/tmp/prow-artifacts")
 def prow_identity(job_name: str, build_id: str) -> dict:
     """Derive Prow identity fields for the result dict.
 
-    Shared by ``ProwSource._identity_dict`` (post-fetch) and the
-    ``_enqueue_non_jenkins_analysis`` pre-persistence path in ``main.py``.
+    Prefer ``ProwSource.identity_fields()`` or ``ProwSource.pre_persist_identity()``
+    from orchestration code instead of importing this helper directly.
 
     Returns:
         Dict with ``job_name`` and optionally ``build_number``.
@@ -426,18 +426,6 @@ def _is_junit(item: dict) -> bool:
     """Return ``True`` if the GCS object looks like a JUnit XML file."""
     name = item.get("name", "")
     return name.endswith(".xml") and bool(re.search(r"junit", name, re.IGNORECASE))
-
-
-def _filter_junit_files(objects: list[dict]) -> list[str]:
-    """Filter a list of GCS objects to just JUnit XML file names.
-
-    Args:
-        objects: GCS object dicts (from ``_list_gcs_objects``).
-
-    Returns:
-        List of full object names (keys) for JUnit XML files.
-    """
-    return [obj["name"] for obj in objects if _is_junit(obj)]
 
 
 async def _download_gcs_artifacts(
@@ -984,7 +972,97 @@ class ProwSource(CISource):
 
     def _identity_dict(self) -> dict:
         """Return identity overrides for the result dict."""
-        return prow_identity(self.job_name, self.build_id)
+        return self.identity_fields(self.job_name, self.build_id)
+
+    @staticmethod
+    def identity_fields(job_name: str, build_id: str) -> dict:
+        """Derive persisted identity fields for a Prow job."""
+        return prow_identity(job_name, build_id)
+
+    @classmethod
+    def pre_persist_identity(cls, job_name: str, build_id: str) -> dict:
+        """Identity fields to stamp before ``fetch()`` completes."""
+        return cls.identity_fields(job_name, build_id)
+
+    async def populate_chat_workspace(self, workspace: Path) -> bool:
+        """Write Prow build log, context files, and artifacts for chat."""
+        wrote_any = False
+        console_file = workspace / "console-output.txt"
+        artifacts_link = workspace / "build-artifacts"
+
+        async with httpx.AsyncClient(
+            timeout=httpx.Timeout(_HTTP_TIMEOUT), follow_redirects=True
+        ) as client:
+            self._resolution_warnings = []
+            gcs_prefix = await self._resolve_gcs_prefix(client)
+            self._resolved_gcs_prefix = gcs_prefix
+
+            if not console_file.exists():
+                build_log_url = _gcs_url(self.gcs_bucket, gcs_prefix, "build-log.txt")
+                try:
+                    build_log = await _fetch_gcs_text(
+                        client,
+                        build_log_url,
+                        label="build-log.txt",
+                        max_size=_MAX_SIZE_BUILD_LOG,
+                    )
+                    content = (
+                        build_log
+                        if build_log
+                        else "No console output available for this build."
+                    )
+                    console_file.write_text(content)
+                    logger.info(
+                        "Chat: wrote console-output.txt for Prow job (%d chars)",
+                        len(content),
+                    )
+                    wrote_any = True
+                except GCSAccessError as exc:
+                    logger.warning("Chat: failed to fetch Prow build log: %s", exc)
+
+            for workspace_file in await self.prepare_workspace(repo_path=workspace):
+                target = workspace / workspace_file.filename
+                if not target.exists():
+                    try:
+                        target.write_text(workspace_file.content)
+                        logger.info("Chat: wrote %s for Prow job", target.name)
+                        wrote_any = True
+                    except OSError:
+                        logger.warning(
+                            "Chat: failed to write %s", target.name, exc_info=True
+                        )
+
+            if self.get_job_artifacts and not artifacts_link.exists():
+                artifacts_prefix = f"{gcs_prefix}/artifacts/"
+                try:
+                    all_objects = await _list_gcs_objects(
+                        client,
+                        self.gcs_bucket,
+                        artifacts_prefix,
+                        warnings=self._resolution_warnings,
+                    )
+                    non_junit = [obj for obj in all_objects if not _is_junit(obj)]
+                    if non_junit:
+                        extract_path = await _download_gcs_artifacts(
+                            client,
+                            self.gcs_bucket,
+                            non_junit,
+                            artifacts_prefix,
+                            warnings=self._resolution_warnings,
+                        )
+                        if extract_path:
+                            self._extract_path = extract_path
+                            artifacts_link.symlink_to(extract_path)
+                            logger.info(
+                                "Chat: linked Prow artifacts into %s", workspace
+                            )
+                            wrote_any = True
+                except Exception:
+                    logger.warning(
+                        "Chat: failed to download Prow artifacts", exc_info=True
+                    )
+
+        return wrote_any
 
     async def prepare_workspace(
         self,
@@ -1170,7 +1248,7 @@ class ProwSource(CISource):
             all_artifact_objects = []
 
         # Partition into JUnit XMLs and non-JUnit artifacts
-        junit_files = _filter_junit_files(all_artifact_objects)
+        junit_files = [obj["name"] for obj in all_artifact_objects if _is_junit(obj)]
         non_junit_objects = [obj for obj in all_artifact_objects if not _is_junit(obj)]
 
         logger.info(

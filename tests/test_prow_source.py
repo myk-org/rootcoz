@@ -24,7 +24,6 @@ from rootcoz.sources.prow_source import (
     _fetch_gcs_text,
     _gcs_url,
     _is_junit,
-    _filter_junit_files,
     _list_gcs_objects,
     _parse_junit_failures,
     _parse_prowjob_json,
@@ -353,8 +352,13 @@ class TestFetchGcsText:
 
 
 # ---------------------------------------------------------------------------
-# _filter_junit_files + _list_gcs_objects (JUnit filtering)
+# _is_junit filtering + _list_gcs_objects (JUnit filtering)
 # ---------------------------------------------------------------------------
+
+
+def _filter_junit(objects: list[dict]) -> list[str]:
+    """Test-local helper: equivalent of the removed _filter_junit_files."""
+    return [obj["name"] for obj in objects if _is_junit(obj)]
 
 
 class TestFilterJunitFiles:
@@ -364,20 +368,20 @@ class TestFilterJunitFiles:
             {"name": "logs/job/123/artifacts/other/data.json"},
             {"name": "logs/job/123/artifacts/e2e/junit_operator_e2e.xml"},
         ]
-        files = _filter_junit_files(objects)
+        files = _filter_junit(objects)
         assert len(files) == 2
         assert "logs/job/123/artifacts/junit/junit_results.xml" in files
         assert "logs/job/123/artifacts/e2e/junit_operator_e2e.xml" in files
 
     def test_empty_list(self):
-        assert _filter_junit_files([]) == []
+        assert _filter_junit([]) == []
 
     def test_no_junit_files(self):
         objects = [
             {"name": "logs/job/123/artifacts/other/data.json"},
             {"name": "logs/job/123/artifacts/logs/output.log"},
         ]
-        assert _filter_junit_files(objects) == []
+        assert _filter_junit(objects) == []
 
 
 class TestListGcsObjectsJunitFiltering:
@@ -396,7 +400,7 @@ class TestListGcsObjectsJunitFiltering:
             all_objects = await _list_gcs_objects(
                 client, "test-bucket", "logs/job/123/artifacts/"
             )
-        files = _filter_junit_files(all_objects)
+        files = _filter_junit(all_objects)
         assert len(files) == 2
         assert "logs/job/123/artifacts/junit/junit_results.xml" in files
         assert "logs/job/123/artifacts/e2e/junit_operator_e2e.xml" in files
@@ -409,7 +413,7 @@ class TestListGcsObjectsJunitFiltering:
             all_objects = await _list_gcs_objects(
                 client, "test-bucket", "logs/job/123/artifacts/"
             )
-        assert _filter_junit_files(all_objects) == []
+        assert _filter_junit(all_objects) == []
 
     async def test_pagination(self):
         call_count = 0
@@ -439,7 +443,7 @@ class TestListGcsObjectsJunitFiltering:
         transport = httpx.MockTransport(handler)
         async with httpx.AsyncClient(transport=transport) as client:
             all_objects = await _list_gcs_objects(client, "bucket", "prefix/")
-        files = _filter_junit_files(all_objects)
+        files = _filter_junit(all_objects)
         assert len(files) == 2
         assert call_count == 2
 
@@ -476,7 +480,7 @@ class TestListGcsObjectsJunitFiltering:
                 client, "bucket", "prefix/", warnings=warnings
             )
         assert call_count == original_max
-        files = _filter_junit_files(all_objects)
+        files = _filter_junit(all_objects)
         assert len(files) == original_max  # one file per page
         assert len(warnings) == 1
         assert "exceeded" in warnings[0]

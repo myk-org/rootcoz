@@ -91,8 +91,6 @@ from rootcoz.encryption import (
 from rootcoz.engine.core import (
     ROOTCOZ_ISSUE_PROMPT_FILENAME,
     analyze_failure_group,
-    clone_additional_repos,
-    copy_rootcoz_pi_resources,
     extract_json_dict,
     get_failure_signature,
     resolve_additional_repos,
@@ -154,7 +152,6 @@ from rootcoz.notifications import send_mention_notifications
 from rootcoz.reportportal import AmbiguousLaunchError, ReportPortalClient
 from rootcoz.repository import (
     RepositoryManager,
-    derive_test_repo_name,
     redact_url,
 )
 from rootcoz.request_resolution import resolve_tests_repo_token
@@ -177,9 +174,12 @@ from rootcoz.sources import (
     JenkinsSource,
     ProwSource,
     RawSource,
-    link_artifacts_to_workspace,
+    append_repo_context,
+    apply_source_workspace_files,
+    link_refetched_artifacts,
+    run_console_only_analysis,
+    setup_analysis_workspace,
 )
-from rootcoz.sources.prow_source import prow_identity
 from rootcoz.sources.jenkins_source import analyze_job, wait_for_jenkins_completion
 from rootcoz.storage import (
     AI_SYSTEM_USERNAME,
@@ -195,6 +195,7 @@ from rootcoz.storage import (
     patch_result_json,
     populate_failure_history,
     save_result,
+    stamp_build_url,
     update_status,
 )
 from rootcoz.token_tracking import build_token_usage_summary
@@ -2653,7 +2654,7 @@ async def _preflight_sidecar_check(
     if build_number is not None:
         fail_data["build_number"] = build_number
     if jenkins_url:
-        fail_data["jenkins_url"] = jenkins_url
+        stamp_build_url(fail_data, jenkins_url)
     if source_warnings:
         fail_data["source_warnings"] = source_warnings
     await _preserve_request_params(job_id, fail_data)
@@ -3244,38 +3245,6 @@ def _strip_old_submitter_tag(tags: list[str], result_data: dict) -> list[str]:
     return [t for t in tags if not (isinstance(t, str) and t.lower() == old_normalized)]
 
 
-def _write_workspace_context(
-    filepath: Path,
-    content: str,
-    instruction: str,
-    custom_prompt: str,
-    job_id: str,
-) -> str:
-    """Write a context file to the AI workspace and prepend a MANDATORY instruction.
-
-    Returns the updated ``custom_prompt`` with the instruction prepended,
-    or the original ``custom_prompt`` on write failure.
-    """
-    try:
-        filepath.write_text(content)
-        full_instruction = (
-            f"\n\nMANDATORY: Read {filepath} before analyzing. {instruction}"
-        )
-        return (
-            full_instruction + "\n" + custom_prompt
-            if custom_prompt
-            else full_instruction
-        )
-    except OSError:
-        logger.warning(
-            "Failed to write %s for job %s",
-            filepath.name,
-            job_id,
-            exc_info=True,
-        )
-        return custom_prompt
-
-
 async def _enqueue_non_jenkins_analysis(
     body: "UnifiedAnalyzeRequest",
     merged: "Settings",
@@ -3391,7 +3360,9 @@ async def _enqueue_non_jenkins_analysis(
     # Persist real identity for history matching and auto-review
     if body.type == "prow":
         initial_result.update(
-            prow_identity(body.prow_job_name or "", body.build_id or "")
+            ProwSource.pre_persist_identity(
+                body.prow_job_name or "", body.build_id or ""
+            )
         )
     initial_result["request_params"]["submitted_by"] = username
     _stamp_reanalysis_metadata(
@@ -3602,7 +3573,7 @@ async def _process_non_jenkins_analysis(
         _stamp_source_identity(data)
         _stamp_source_warnings(data)
         if source_result is not None and source_result.build_url:
-            data["jenkins_url"] = source_result.build_url
+            stamp_build_url(data, source_result.build_url)
 
     auth_header = ""
     repo_manager: RepositoryManager | None = None
@@ -3730,11 +3701,20 @@ async def _process_non_jenkins_analysis(
         ):
             return
 
-        # Clone tests repo so .rootcoz/settings.json can overlay defaults
+        # Clone repos, copy resources, link artifacts
         repo_manager = RepositoryManager()
-        cloned_repos: dict[str, Path] = {}
-        repo_path = repo_manager.create_workspace()
-        logger.debug(f"Workspace created at {repo_path}")
+        ws_result, artifacts_context = await setup_analysis_workspace(
+            repo_manager,
+            tests_repo_url=str(tests_repo_url) if tests_repo_url else "",
+            tests_repo_ref=tests_repo_ref,
+            tests_repo_token=resolved_tests_repo_token or "",
+            additional_repos=additional_repos_list or None,
+            extract_path=source_result.extract_path,
+            artifacts_context=source_result.artifacts_context,
+            job_id=job_id,
+        )
+        repo_path = ws_result.repo_path
+        cloned_repos = ws_result.cloned_repos
 
         async def _fail_settings_overlay(error: str) -> None:
             fail_data = {
@@ -3841,13 +3821,12 @@ async def _process_non_jenkins_analysis(
             ):
                 artifacts_context = ""
 
-        custom_prompt = (body.raw_prompt or "").strip()
+        custom_prompt = append_repo_context(
+            (body.raw_prompt or "").strip(), ws_result.repo_context
+        )
         server_url = _build_internal_server_url()
 
-        # Write source-specific workspace context files (e.g. Prow job
-        # context, PR diffs).  Each CISource plugin produces its own
-        # files via prepare_workspace(); main.py stays generic.
-        # Best-effort: workspace files are enrichment, not required.
+        # Write source-specific workspace context files via the plugin hook.
         if source is not None and repo_path:
             try:
                 github_token = (
@@ -3855,17 +3834,13 @@ async def _process_non_jenkins_analysis(
                     if merged.github_token
                     else ""
                 )
-                workspace_files = await source.prepare_workspace(
-                    repo_path=repo_path, github_token=github_token
+                custom_prompt = await apply_source_workspace_files(
+                    source,
+                    repo_path,
+                    custom_prompt,
+                    job_id,
+                    github_token=github_token,
                 )
-                for wf in workspace_files:
-                    custom_prompt = _write_workspace_context(
-                        filepath=repo_path / wf.filename,
-                        content=wf.content,
-                        instruction=wf.instruction,
-                        custom_prompt=custom_prompt,
-                        job_id=job_id,
-                    )
             except Exception:
                 logger.warning(
                     "Failed to prepare workspace files for job %s",
@@ -3876,36 +3851,32 @@ async def _process_non_jenkins_analysis(
         # Console-only analysis when no JUnit failures found but console
         # context exists (e.g. Prow build with no JUnit artifacts)
         if not test_failures and console_context:
-            synthetic_failure = FailedTest(
+            success, console_results, error_text = await run_console_only_analysis(
                 test_name=body.prow_job_name or body.job_name or display_name,
-                error_message=console_context,
+                console_context=console_context,
+                artifacts_context=artifacts_context,
+                repo_path=repo_path,
+                ai_provider=ai_provider,
+                ai_model=ai_model,
+                ai_call_timeout=merged.ai_call_timeout,
+                custom_prompt=custom_prompt,
+                server_url=server_url,
+                job_id=job_id,
+                peer_ai_configs=peer_ai_configs,
+                peer_analysis_max_rounds=merged.peer_analysis_max_rounds,
+                additional_repos=cloned_repos or None,
+                max_concurrent_ai_calls=merged.max_concurrent_ai_calls,
+                auth_header=auth_header,
+                call_type="console",
             )
-            try:
-                console_results = await analyze_failure_group(
-                    failures=[synthetic_failure],
-                    console_context=console_context,
-                    repo_path=repo_path,
-                    ai_provider=ai_provider,
-                    ai_model=ai_model,
-                    ai_call_timeout=merged.ai_call_timeout,
-                    custom_prompt=custom_prompt,
-                    artifacts_context=artifacts_context,
-                    server_url=server_url,
-                    job_id=job_id,
-                    peer_ai_configs=peer_ai_configs,
-                    peer_analysis_max_rounds=merged.peer_analysis_max_rounds,
-                    additional_repos=cloned_repos or None,
-                    max_concurrent_ai_calls=merged.max_concurrent_ai_calls,
-                    auth_header=auth_header,
-                    group_label="console",
+            if not success:
+                logger.error(
+                    "Console-only analysis failed: %s", error_text, exc_info=True
                 )
-                all_analyses = list(console_results)
-            except Exception as exc:
-                logger.error("Console-only analysis failed: %s", exc, exc_info=True)
                 fail_result = FailureAnalysisResult(
                     job_id=job_id,
                     status="failed",
-                    summary=make_user_friendly_error(exc),
+                    summary=make_user_friendly_error(error_text),
                     ai_provider=ai_provider,
                     ai_model=ai_model,
                 )
@@ -3922,7 +3893,11 @@ async def _process_non_jenkins_analysis(
                 notify_token_usage_changed()
                 return
 
-            # Skip to the enrichment + persistence section
+            all_analyses = list(console_results)
+            synthetic_failure = FailedTest(
+                test_name=body.prow_job_name or body.job_name or display_name,
+                error_message=console_context,
+            )
             unique_errors = 1
             test_failures = [synthetic_failure]
         elif not test_failures:
@@ -4664,7 +4639,7 @@ async def _reanalyze_failure_background(
     try:
         auth_header = await _create_ai_auth_header(username)
 
-        # Clone repos if configured
+        # Clone repos if configured (no artifact linking here — done after refetch)
         repo_manager = RepositoryManager()
         cloned_repos: dict[str, Path] = {}
         repo_path = repo_manager.create_workspace()
@@ -4785,12 +4760,12 @@ async def _reanalyze_failure_background(
                 else:
                     ctx = await source.refetch_context()
                     console_context = ctx.console_context
-                    artifacts_context = ctx.artifacts_context
-                    if ctx.extract_path:
-                        if not link_artifacts_to_workspace(
-                            repo_path, ctx.extract_path, job_id
-                        ):
-                            artifacts_context = ""
+                    artifacts_context = link_refetched_artifacts(
+                        repo_path,
+                        ctx.extract_path,
+                        ctx.artifacts_context,
+                        job_id,
+                    )
                     for warning in ctx.warnings:
                         logger.warning(
                             "Refetch warning for job %s: %s", job_id, warning
@@ -4802,25 +4777,20 @@ async def _reanalyze_failure_background(
                     exc_info=True,
                 )
 
-        # Write source workspace files (prow-context.txt, PR diffs, etc.)
-        if source is not None:
+        if source is not None and repo_path:
             try:
                 github_token = (
                     settings.github_token.get_secret_value()
                     if settings and settings.github_token
                     else ""
                 )
-                workspace_files = await source.prepare_workspace(
-                    repo_path=repo_path, github_token=github_token
+                raw_prompt = await apply_source_workspace_files(
+                    source,
+                    repo_path,
+                    raw_prompt,
+                    job_id,
+                    github_token=github_token,
                 )
-                for wf in workspace_files:
-                    raw_prompt = _write_workspace_context(
-                        filepath=repo_path / wf.filename,
-                        content=wf.content,
-                        instruction=wf.instruction,
-                        custom_prompt=raw_prompt,
-                        job_id=job_id,
-                    )
             except Exception:
                 logger.warning(
                     "Failed to prepare workspace files for reanalysis",
@@ -10778,12 +10748,15 @@ async def create_feedback(request: Request, body: FeedbackCreateRequest):
 # -- Chat helpers --
 
 
-def _build_jenkins_workspace_params(decrypted_params: dict, result_data: dict) -> dict:
-    """Build params dict for setup_jenkins_workspace from decrypted request params."""
+def _build_ci_workspace_params(decrypted_params: dict, result_data: dict) -> dict:
+    """Build params dict for CI chat workspace setup from stored request params."""
     return {
         **decrypted_params,
         "job_name": result_data.get("job_name", ""),
         "build_number": result_data.get("build_number", 0),
+        "analysis_type": decrypted_params.get(
+            "analysis_type", result_data.get("analysis_type", "jenkins")
+        ),
     }
 
 
@@ -10863,7 +10836,7 @@ async def init_chat(job_id: str, request: Request) -> dict:
     from rootcoz.engine.chat import (
         ensure_chat_workspace,
         clone_chat_repos,
-        setup_jenkins_workspace,
+        setup_ci_build_workspace,
         build_chat_custom_tools,
         build_welcome_message,
         init_chat_session,
@@ -10921,9 +10894,9 @@ async def init_chat(job_id: str, request: Request) -> dict:
             workspace, decrypted_params, user_repo_token=github_token
         )
 
-        # Populate workspace with Jenkins data: console output, build info, artifacts
-        jenkins_data_available = await setup_jenkins_workspace(
-            workspace, _build_jenkins_workspace_params(decrypted_params, result_data)
+        # Populate workspace with CI build data: console output, metadata, artifacts
+        ci_build_data_available = await setup_ci_build_workspace(
+            workspace, _build_ci_workspace_params(decrypted_params, result_data)
         )
 
         existing = await storage.get_chat_messages(job_id, limit=1, username=username)
@@ -10960,7 +10933,7 @@ async def init_chat(job_id: str, request: Request) -> dict:
                 repo_path=workspace,
                 custom_tools=custom_tools,
                 repos_available=repos_available,
-                jenkins_data_available=jenkins_data_available,
+                ci_build_data_available=ci_build_data_available,
             )
             if session_id:
                 await storage.add_chat_message(
@@ -10979,7 +10952,7 @@ async def init_chat(job_id: str, request: Request) -> dict:
                 job_name=result_data.get("job_name", "unknown"),
                 build_number=result_data.get("build_number", 0),
                 repos_available=repos_available,
-                jenkins_data_available=jenkins_data_available,
+                ci_build_data_available=ci_build_data_available,
                 jira_available=bool(jira_url and jira_token),
                 github_available=bool(github_token and github_repo),
             )
@@ -11010,7 +10983,7 @@ async def init_chat(job_id: str, request: Request) -> dict:
         "ready": True,
         "repos_cloned": repos_available,
         "repo_names": repo_names,
-        "jenkins_data_available": jenkins_data_available,
+        "jenkins_data_available": ci_build_data_available,
         "job_name": result_data.get("job_name", ""),
         "build_number": result_data.get("build_number", 0),
         "session_id": session_id or "",
@@ -11276,7 +11249,7 @@ async def _process_chat_message(
         chat_with_ai,
         ensure_chat_workspace,
         clone_chat_repos,
-        setup_jenkins_workspace,
+        setup_ci_build_workspace,
         build_chat_custom_tools,
     )
 
@@ -11357,9 +11330,9 @@ async def _process_chat_message(
             )
 
             # Populate workspace with Jenkins data: console output, build info, artifacts
-            jenkins_data_available = await setup_jenkins_workspace(
+            ci_build_data_available = await setup_ci_build_workspace(
                 workspace,
-                _build_jenkins_workspace_params(decrypted_params, result_data),
+                _build_ci_workspace_params(decrypted_params, result_data),
             )
 
             settings = get_settings()
@@ -11413,7 +11386,7 @@ async def _process_chat_message(
                 session_id=last_session_id,
                 custom_tools=custom_tools,
                 repos_available=repos_available,
-                jenkins_data_available=jenkins_data_available,
+                ci_build_data_available=ci_build_data_available,
             )
 
             # Check if aborted during AI call

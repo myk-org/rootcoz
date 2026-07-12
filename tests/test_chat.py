@@ -635,7 +635,7 @@ class TestBuildWelcomeMessage:
         )
         assert "Build artifacts" in msg
         assert "console output" in msg.lower()
-        assert "build info" in msg.lower()
+        assert "build metadata" in msg.lower()
 
     def test_jira_available(self):
         msg = build_welcome_message(job_name="j", build_number=1, jira_available=True)

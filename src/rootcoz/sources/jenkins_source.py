@@ -27,8 +27,6 @@ from simple_logger.logger import get_logger
 from rootcoz.config import Settings, parse_repo_ref
 from rootcoz.engine.core import (
     analyze_failure_group,
-    clone_additional_repos,
-    copy_rootcoz_pi_resources,
     derive_error_details,
     extract_relevant_console_lines,
     format_exception_with_type,
@@ -57,7 +55,13 @@ from rootcoz.rootcoz_repo_settings import (
     resolve_tests_repo_url,
 )
 from rootcoz.request_resolution import resolve_tests_repo_token
-from rootcoz.sources.base import CISource, CISourceResult
+from rootcoz.sources.base import (
+    CISource,
+    CISourceResult,
+    append_repo_context,
+    run_console_only_analysis,
+    setup_analysis_workspace,
+)
 from rootcoz.utils import is_jenkins_connectivity_error
 
 logger = get_logger(name=__name__, level=os.environ.get("LOG_LEVEL", "INFO"))
@@ -801,74 +805,6 @@ async def _analyze_grouped_failures(
     return failures, unique_errors, failed_groups
 
 
-async def _run_console_only_analysis(
-    *,
-    job_name: str,
-    build_number: int,
-    console_context: str,
-    artifacts_context: str,
-    repo_path: Path | None,
-    ai_provider: str,
-    ai_model: str,
-    ai_call_timeout: int | None,
-    custom_prompt: str,
-    server_url: str,
-    job_id: str,
-    additional_repos: dict[str, Path] | None,
-    auth_header: str,
-    call_type: str,
-    extra_context: str = "",
-    peer_ai_configs: list | None = None,
-    peer_analysis_max_rounds: int = 3,
-    max_concurrent_ai_calls: int = 3,
-) -> tuple[bool, list[FailureAnalysis], str]:
-    """Run console-only AI analysis when no structured test failures exist.
-
-    Creates a synthetic FailedTest and delegates to analyze_failure_group,
-    which handles both single-AI and peer analysis paths.
-
-    Returns:
-        A tuple of (success, failures_list, error_text).  On failure
-        ``success`` is ``False`` and ``error_text`` contains the error message.
-    """
-    # Build a synthetic FailedTest so we can use the standard analysis path
-    # (including peer debate when configured)
-    full_context = console_context
-    if extra_context:
-        full_context = (
-            f"{console_context}\n{extra_context}" if console_context else extra_context
-        )
-
-    synthetic_failure = FailedTest(
-        test_name=f"{job_name}#{build_number}",
-        error_message=full_context or "Console-only analysis (no JUnit report)",
-    )
-
-    try:
-        results = await analyze_failure_group(
-            failures=[synthetic_failure],
-            console_context=console_context,
-            repo_path=repo_path,
-            ai_provider=ai_provider,
-            ai_model=ai_model,
-            ai_call_timeout=ai_call_timeout,
-            custom_prompt=custom_prompt,
-            artifacts_context=artifacts_context,
-            server_url=server_url,
-            job_id=job_id,
-            peer_ai_configs=peer_ai_configs,
-            peer_analysis_max_rounds=peer_analysis_max_rounds,
-            group_label=call_type,
-            additional_repos=additional_repos,
-            max_concurrent_ai_calls=max_concurrent_ai_calls,
-            auth_header=auth_header,
-        )
-        return True, results, ""
-    except Exception as exc:
-        logger.error("Console-only analysis failed: %s", exc, exc_info=True)
-        return False, [], str(exc)
-
-
 async def _analyze_child_job_inner(
     *,
     source: JenkinsSource,
@@ -999,9 +935,8 @@ async def _analyze_child_job_inner(
         )
 
     # No structured test failures - fall back to single AI analysis of console output
-    success, failures, error_text = await _run_console_only_analysis(
-        job_name=job_name,
-        build_number=build_number,
+    success, failures, error_text = await run_console_only_analysis(
+        test_name=f"{job_name}#{build_number}",
         console_context=console_context,
         artifacts_context=child_artifacts_context,
         repo_path=repo_path,
@@ -1116,7 +1051,6 @@ async def analyze_job(
         custom_prompt = ""
 
         # Use RepositoryManager context for entire analysis (child jobs and main job)
-        cloned_repos: dict[str, Path] = {}
         async with contextlib.AsyncExitStack() as stack:
             # Prefer pre-resolved additional repos from central settings.json merge.
             additional_repos_list = (
@@ -1125,9 +1059,26 @@ async def analyze_job(
                 else resolve_additional_repos(request, settings)
             )
 
+            # Parse ref out of URL before passing to helper
+            clean_tests_url, tests_ref = (
+                parse_repo_ref(str(tests_repo_url)) if tests_repo_url else ("", "")
+            )
+
             repo_manager = RepositoryManager()
             stack.enter_context(repo_manager)
-            repo_path = repo_manager.create_workspace()
+            ws_result, artifacts_context = await setup_analysis_workspace(
+                repo_manager,
+                tests_repo_url=clean_tests_url,
+                tests_repo_ref=tests_ref,
+                tests_repo_token=tests_repo_token or "",
+                additional_repos=additional_repos_list or None,
+                extract_path=source_result.extract_path,
+                artifacts_context=artifacts_context,
+                job_id=job_id,
+            )
+            repo_path = ws_result.repo_path
+            cloned_repos = ws_result.cloned_repos
+            repo_context = ws_result.repo_context
 
             tests_cloned_path: Path | None = None
             if tests_repo_url:
@@ -1232,7 +1183,9 @@ async def analyze_job(
                     failures=[],
                 )
 
-            custom_prompt = (request.raw_prompt or "").strip()
+            custom_prompt = append_repo_context(
+                (request.raw_prompt or "").strip(), repo_context
+            )
 
             # Make artifacts accessible in the AI working directory
             if source_result.extract_path:
@@ -1400,9 +1353,8 @@ async def analyze_job(
                     )
             else:
                 # No structured test failures - fall back to single AI analysis
-                success, failures, error_text = await _run_console_only_analysis(
-                    job_name=job_name,
-                    build_number=build_number,
+                success, failures, error_text = await run_console_only_analysis(
+                    test_name=f"{job_name}#{build_number}",
                     console_context=console_context,
                     artifacts_context=artifacts_context,
                     repo_path=repo_path,
@@ -1415,7 +1367,6 @@ async def analyze_job(
                     additional_repos=cloned_repos or None,
                     auth_header=auth_header,
                     call_type="main_console",
-                    extra_context=repo_context,
                     peer_ai_configs=peer_ai_configs,
                     peer_analysis_max_rounds=peer_analysis_max_rounds,
                     max_concurrent_ai_calls=settings.max_concurrent_ai_calls,

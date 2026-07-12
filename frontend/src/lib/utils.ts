@@ -106,3 +106,9 @@ export function ciSourceLabel(requestParams?: { [key: string]: unknown }): strin
     default: return 'Jenkins'
   }
 }
+
+/** Resolve CI build URL from API payload (prefers build_url, falls back to jenkins_url). */
+export function resolveBuildUrl(data?: { build_url?: string | null; jenkins_url?: string | null } | null): string | null {
+  if (!data) return null
+  return data.build_url ?? data.jenkins_url ?? null
+}

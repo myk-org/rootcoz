@@ -3,7 +3,7 @@ import { useParams, useNavigate, useLocation, Link } from 'react-router-dom'
 import { useSSE } from '@/lib/SSEProvider'
 import { api } from '@/lib/api'
 import { useClipboard } from '@/lib/useClipboard'
-import { parseApiTimestamp, isAnalysisTimeout, formatDuration, formatTimestamp, ciSourceLabel } from '@/lib/utils'
+import { parseApiTimestamp, isAnalysisTimeout, formatDuration, formatTimestamp, ciSourceLabel, resolveBuildUrl } from '@/lib/utils'
 import { buildRepoUrls, type RepoUrl } from '@/lib/autoLink'
 import { groupFailures } from '@/lib/grouping'
 import { useExpandCollapseAll } from '@/lib/useExpandCollapseAll'
@@ -402,6 +402,8 @@ function ReportContent() {
   // After early returns, result is guaranteed to be non-null
   if (!result) return null
 
+  const buildUrl = resolveBuildUrl(result)
+
   return (
     <TooltipProvider delayDuration={200}>
     <div className="space-y-6 animate-fade-in">
@@ -412,8 +414,8 @@ function ReportContent() {
             {result.job_name || result.job_id}
           </h1>
           {result.build_number > 0 && (
-            result.jenkins_url ? (
-              <a href={String(result.jenkins_url)} target="_blank" rel="noopener noreferrer" className="font-mono text-sm text-text-link hover:underline">
+            buildUrl ? (
+              <a href={buildUrl} target="_blank" rel="noopener noreferrer" className="font-mono text-sm text-text-link hover:underline">
                 #{result.build_number}
               </a>
             ) : (
@@ -476,9 +478,9 @@ function ReportContent() {
                 Re-Analyze
               </Button>
             )}
-            {result.jenkins_url && (
+            {buildUrl && (
               <a
-                href={String(result.jenkins_url)}
+                href={buildUrl}
                 target="_blank"
                 rel="noopener noreferrer"
                 className="flex items-center gap-1 text-xs text-text-link hover:underline"

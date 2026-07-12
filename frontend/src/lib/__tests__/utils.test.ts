@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { ciSourceLabel } from '../utils'
+import { ciSourceLabel, resolveBuildUrl } from '../utils'
 
 describe('ciSourceLabel', () => {
   it('returns "Prow" for prow analysis_type', () => {
@@ -32,5 +32,22 @@ describe('ciSourceLabel', () => {
 
   it('defaults to "Jenkins" for unknown analysis_type', () => {
     expect(ciSourceLabel({ analysis_type: 'unknown_ci' })).toBe('Jenkins')
+  })
+})
+
+describe('resolveBuildUrl', () => {
+  it('prefers build_url over jenkins_url', () => {
+    expect(resolveBuildUrl({ build_url: 'https://prow.example/build', jenkins_url: 'https://jenkins.example/job/1' }))
+      .toBe('https://prow.example/build')
+  })
+
+  it('falls back to jenkins_url', () => {
+    expect(resolveBuildUrl({ jenkins_url: 'https://jenkins.example/job/1' }))
+      .toBe('https://jenkins.example/job/1')
+  })
+
+  it('returns null when neither field is set', () => {
+    expect(resolveBuildUrl({})).toBeNull()
+    expect(resolveBuildUrl(null)).toBeNull()
   })
 })

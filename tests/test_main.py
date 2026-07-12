@@ -703,39 +703,42 @@ class TestAnalyzeFailuresRawXml:
 
 
 class TestProwIdentityStamping:
-    """Tests for the shared prow_identity() helper and ProwSource._identity_dict().
-
-    prow_identity() is called from both _enqueue_non_jenkins_analysis
-    (pre-persistence) and ProwSource._identity_dict() (post-fetch).
-    """
+    """Tests for ProwSource identity helpers."""
 
     def test_valid_job_and_build(self):
-        from rootcoz.sources.prow_source import prow_identity
+        from rootcoz.sources.prow_source import ProwSource
 
-        result = prow_identity("my-prow-job", "1234567890123456789")
+        result = ProwSource.identity_fields("my-prow-job", "1234567890123456789")
         assert result == {
             "job_name": "my-prow-job",
             "build_number": "1234567890123456789",
         }
 
     def test_non_numeric_build_id_excluded(self):
-        from rootcoz.sources.prow_source import prow_identity
+        from rootcoz.sources.prow_source import ProwSource
 
-        result = prow_identity("my-prow-job", "abc-not-numeric")
+        result = ProwSource.identity_fields("my-prow-job", "abc-not-numeric")
         assert result == {"job_name": "my-prow-job"}
         assert "build_number" not in result
 
     def test_empty_build_id_excluded(self):
-        from rootcoz.sources.prow_source import prow_identity
+        from rootcoz.sources.prow_source import ProwSource
 
-        result = prow_identity("my-prow-job", "")
+        result = ProwSource.identity_fields("my-prow-job", "")
         assert result == {"job_name": "my-prow-job"}
 
     def test_empty_job_name_excluded(self):
-        from rootcoz.sources.prow_source import prow_identity
+        from rootcoz.sources.prow_source import ProwSource
 
-        result = prow_identity("", "123")
+        result = ProwSource.identity_fields("", "123")
         assert "job_name" not in result
+
+    def test_pre_persist_identity_matches_identity_fields(self):
+        from rootcoz.sources.prow_source import ProwSource
+
+        assert ProwSource.pre_persist_identity(
+            "job", "42"
+        ) == ProwSource.identity_fields("job", "42")
 
     def test_identity_dict_delegates_to_shared(self):
         """ProwSource._identity_dict() uses the same shared helper."""
@@ -4261,7 +4264,7 @@ class TestLifespanResumesWaitingJobs:
         conn = sqlite3.connect(str(db_path))
         for job_id, jenkins_url, status, result_json in rows:
             conn.execute(
-                "INSERT INTO results (job_id, jenkins_url, status, result_json) VALUES (?, ?, ?, ?)",
+                "INSERT INTO results (job_id, build_url, status, result_json) VALUES (?, ?, ?, ?)",
                 (job_id, jenkins_url, status, result_json),
             )
         conn.commit()

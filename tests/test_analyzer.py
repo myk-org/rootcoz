@@ -1073,7 +1073,7 @@ class TestConsoleOnlyPeerAnalysis:
             ]
         )
         monkeypatch.setattr(
-            "rootcoz.sources.jenkins_source.analyze_failure_group",
+            "rootcoz.engine.core.analyze_failure_group",
             mock_afg,
         )
 
@@ -1117,7 +1117,7 @@ class TestConsoleOnlyPeerAnalysis:
             ]
         )
         monkeypatch.setattr(
-            "rootcoz.sources.jenkins_source.analyze_failure_group",
+            "rootcoz.engine.core.analyze_failure_group",
             mock_afg,
         )
 
@@ -1168,7 +1168,7 @@ class TestConsoleOnlyPeerAnalysis:
             ]
         )
         monkeypatch.setattr(
-            "rootcoz.sources.jenkins_source.analyze_failure_group",
+            "rootcoz.engine.core.analyze_failure_group",
             mock_afg,
         )
 
@@ -2433,7 +2433,7 @@ class TestAnalyzeJobWorkspacePattern:
             return {"infra": workspace_dir / "infra"}, path or workspace_dir
 
         monkeypatch.setattr(
-            "rootcoz.sources.jenkins_source.clone_additional_repos",
+            "rootcoz.engine.core.clone_additional_repos",
             mock_clone_additional,
         )
 
@@ -2522,7 +2522,7 @@ class TestAnalyzeJobWorkspacePattern:
             return {"infra": workspace_dir / "infra"}, path
 
         monkeypatch.setattr(
-            "rootcoz.sources.jenkins_source.clone_additional_repos",
+            "rootcoz.engine.core.clone_additional_repos",
             mock_clone_additional,
         )
 

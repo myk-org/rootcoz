@@ -337,7 +337,7 @@ class TestListResults:
             # Insert with explicit timestamps to ensure ordering
             async with aiosqlite.connect(setup_test_db) as db:
                 await db.execute(
-                    """INSERT INTO results (job_id, jenkins_url, status, created_at)
+                    """INSERT INTO results (job_id, build_url, status, created_at)
                        VALUES (?, ?, ?, ?)""",
                     (
                         "job-order-0",
@@ -347,7 +347,7 @@ class TestListResults:
                     ),
                 )
                 await db.execute(
-                    """INSERT INTO results (job_id, jenkins_url, status, created_at)
+                    """INSERT INTO results (job_id, build_url, status, created_at)
                        VALUES (?, ?, ?, ?)""",
                     (
                         "job-order-1",
@@ -357,7 +357,7 @@ class TestListResults:
                     ),
                 )
                 await db.execute(
-                    """INSERT INTO results (job_id, jenkins_url, status, created_at)
+                    """INSERT INTO results (job_id, build_url, status, created_at)
                        VALUES (?, ?, ?, ?)""",
                     (
                         "job-order-2",
@@ -862,7 +862,7 @@ class TestMarkStaleResultsFailed:
         with patch.object(storage, "DB_PATH", setup_test_db):
             async with aiosqlite.connect(setup_test_db) as db:
                 await db.execute(
-                    "INSERT INTO results (job_id, jenkins_url, status, result_json) "
+                    "INSERT INTO results (job_id, build_url, status, result_json) "
                     "VALUES (?, ?, ?, ?)",
                     ("w-bad-json", "http://j/7", "waiting", "{not-json"),
                 )

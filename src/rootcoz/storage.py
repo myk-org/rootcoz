@@ -346,6 +346,41 @@ async def _migrate_lowercase_usernames(db: aiosqlite.Connection) -> None:
     logger.info("Migration: case-insensitive username migration complete")
 
 
+async def _migrate_jenkins_url_to_build_url(db) -> None:
+    """Rename results.jenkins_url column to build_url (CI-agnostic naming)."""
+    cursor = await db.execute("PRAGMA table_info(results)")
+    columns = {row[1] for row in await cursor.fetchall()}
+    if "jenkins_url" in columns and "build_url" not in columns:
+        await db.execute("ALTER TABLE results RENAME COLUMN jenkins_url TO build_url")
+        logger.info("Migration: renamed results.jenkins_url to build_url")
+
+
+def _row_build_url(row) -> str:
+    """Read the build URL from a results table row."""
+    keys = row.keys()
+    if "build_url" in keys and row["build_url"]:
+        return row["build_url"]
+    if "jenkins_url" in keys and row["jenkins_url"]:
+        return row["jenkins_url"]
+    return ""
+
+
+def stamp_build_url(result: dict, build_url: str) -> None:
+    """Set canonical and legacy build URL fields on a result dict."""
+    if build_url:
+        result["build_url"] = build_url
+        result["jenkins_url"] = build_url
+
+
+def with_build_url_aliases(record: dict) -> dict:
+    """Ensure API records expose both build_url and jenkins_url."""
+    url = record.get("build_url") or record.get("jenkins_url") or ""
+    if url:
+        record["build_url"] = url
+        record["jenkins_url"] = url
+    return record
+
+
 async def init_db() -> None:
     """Initialize the database schema.
 
@@ -357,7 +392,7 @@ async def init_db() -> None:
         await db.execute("""
             CREATE TABLE IF NOT EXISTS results (
                 job_id TEXT PRIMARY KEY,
-                jenkins_url TEXT,
+                build_url TEXT,
                 status TEXT,
                 result_json TEXT,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -858,6 +893,8 @@ async def init_db() -> None:
         # (keep earliest created_at, upgrade to highest-privilege role),
         # and add a unique index on lower(username).
         await _migrate_lowercase_usernames(db)
+
+        await _migrate_jenkins_url_to_build_url(db)
 
         await db.commit()
 
@@ -1417,33 +1454,38 @@ def _build_status_update_clause(
 
 async def save_result(
     job_id: str,
-    jenkins_url: str,
-    status: str,
+    build_url: str = "",
+    status: str = "",
     result: dict | None = None,
+    *,
+    jenkins_url: str | None = None,
 ) -> None:
     """Save or update an analysis result.
 
     Args:
         job_id: Unique identifier for the analysis job.
-        jenkins_url: URL of the analyzed Jenkins build.
+        build_url: URL of the analyzed CI build.
         status: Current status of the analysis.
         result: Optional result data to store.
+        jenkins_url: Deprecated alias for ``build_url``.
     """
+    if jenkins_url is not None:
+        build_url = jenkins_url
     logger.debug(f"Saving result for job_id: {job_id} (status: {status})")
     result_json = json.dumps(result) if result is not None else None
     async with _connect_db() as db:
         # Insert the row if it doesn't exist yet (preserves created_at / analysis_started_at).
         await db.execute(
             """
-            INSERT OR IGNORE INTO results (job_id, jenkins_url, status, result_json)
+            INSERT OR IGNORE INTO results (job_id, build_url, status, result_json)
             VALUES (?, ?, ?, ?)
             """,
-            (job_id, jenkins_url, status, result_json),
+            (job_id, build_url, status, result_json),
         )
         # Update the row (handles both fresh inserts and existing rows).
         set_parts, params = _build_status_update_clause(status, result_json)
-        set_parts.insert(0, "jenkins_url = COALESCE(NULLIF(?, ''), jenkins_url)")
-        params.insert(0, jenkins_url)
+        set_parts.insert(0, "build_url = COALESCE(NULLIF(?, ''), build_url)")
+        params.insert(0, build_url)
         params.append(job_id)
         sql = f"UPDATE results SET {', '.join(set_parts)} WHERE job_id = ?"
         await db.execute(sql, params)
@@ -1479,17 +1521,12 @@ async def update_status(
 
 
 async def update_build_url(job_id: str, build_url: str) -> None:
-    """Update the jenkins_url DB column for an existing result.
-
-    Used to persist the build URL after it becomes available (e.g. after
-    ProwSource.fetch() returns the Deck URL).  The DB column is named
-    ``jenkins_url`` for historical reasons but stores any CI build URL.
-    """
+    """Update the build_url DB column for an existing result."""
     if not build_url:
         return
     async with _connect_db() as db:
         cursor = await db.execute(
-            "UPDATE results SET jenkins_url = ? WHERE job_id = ?",
+            "UPDATE results SET build_url = ? WHERE job_id = ?",
             (build_url, job_id),
         )
         await db.commit()
@@ -1678,20 +1715,22 @@ async def get_result(job_id: str, *, strip_sensitive: bool = True) -> dict | Non
                 await _backfill_failure_uuids(job_id, parsed)
             if parsed and strip_sensitive:
                 parsed = strip_sensitive_from_response(parsed)
-            return {
-                "job_id": row["job_id"],
-                "jenkins_url": row["jenkins_url"],
-                "status": row["status"],
-                "error": row["error"] if "error" in row.keys() else "",
-                "result": parsed,
-                "created_at": row["created_at"],
-                "completed_at": row["completed_at"]
-                if "completed_at" in row.keys()
-                else None,
-                "analysis_started_at": row["analysis_started_at"]
-                if "analysis_started_at" in row.keys()
-                else None,
-            }
+            return with_build_url_aliases(
+                {
+                    "job_id": row["job_id"],
+                    "build_url": _row_build_url(row),
+                    "status": row["status"],
+                    "error": row["error"] if "error" in row.keys() else "",
+                    "result": parsed,
+                    "created_at": row["created_at"],
+                    "completed_at": row["completed_at"]
+                    if "completed_at" in row.keys()
+                    else None,
+                    "analysis_started_at": row["analysis_started_at"]
+                    if "analysis_started_at" in row.keys()
+                    else None,
+                }
+            )
         logger.debug(f"get_result: job_id={job_id}, found=False")
         return None
 
@@ -1808,7 +1847,7 @@ async def list_results(limit: int = 50) -> list[dict]:
     async with _connect_db() as db:
         cursor = await db.execute(
             """
-            SELECT job_id, jenkins_url, status, created_at
+            SELECT job_id, build_url, status, created_at
             FROM results
             ORDER BY created_at DESC
             LIMIT ?
@@ -1816,7 +1855,7 @@ async def list_results(limit: int = 50) -> list[dict]:
             (limit,),
         )
         rows = await cursor.fetchall()
-        return [dict(row) for row in rows]
+        return [with_build_url_aliases(dict(row)) for row in rows]
 
 
 def count_all_failures(result_data: dict) -> int:
@@ -2923,7 +2962,7 @@ def _parse_dashboard_row(row) -> dict:
     """Parse a single dashboard result row into a dict with summary data."""
     entry: dict = {
         "job_id": row["job_id"],
-        "jenkins_url": row["jenkins_url"],
+        "build_url": _row_build_url(row),
         "status": row["status"],
         "created_at": row["created_at"],
         "completed_at": row["completed_at"] if "completed_at" in row.keys() else None,
@@ -2955,11 +2994,11 @@ def _parse_dashboard_row(row) -> dict:
         submitted_by = request_params.get("submitted_by", "")
         if submitted_by:
             entry["submitted_by"] = submitted_by
-    return entry
+    return with_build_url_aliases(entry)
 
 
 _DASHBOARD_BASE_SQL = """
-    SELECT r.job_id, r.jenkins_url, r.status, r.result_json,
+    SELECT r.job_id, r.build_url, r.status, r.result_json,
         r.created_at, r.completed_at, r.analysis_started_at, r.error,
         (SELECT COUNT(*) FROM failure_reviews fr
          WHERE fr.job_id = r.job_id AND fr.reviewed = 1) AS reviewed_count,

@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
 import { useSSE } from '@/lib/SSEProvider'
 import { api, ApiError } from '@/lib/api'
-import { formatTimestamp, isAnalysisTimeout, INVALID_DATE_FALLBACK, ciSourceLabel } from '@/lib/utils'
+import { formatTimestamp, isAnalysisTimeout, INVALID_DATE_FALLBACK, ciSourceLabel, resolveBuildUrl } from '@/lib/utils'
 import type { ResultResponse } from '@/types'
 import { Card, CardContent } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
@@ -253,6 +253,7 @@ export function StatusPage() {
   const isViewer = role === 'viewer'
   const submitter = data?.result?.request_params?.submitted_by ?? ''
   const canAbort = isAdmin || (!!username && username === submitter)
+  const buildUrl = resolveBuildUrl(data?.result) ?? resolveBuildUrl(data)
 
   return (
     <>
@@ -265,8 +266,8 @@ export function StatusPage() {
                 {data.result.job_name || jobId}
               </h1>
               {data.result.build_number > 0 && (
-                data.jenkins_url ? (
-                  <a href={String(data.jenkins_url)} target="_blank" rel="noopener noreferrer" className="font-mono text-sm text-text-link hover:underline">
+                buildUrl ? (
+                  <a href={buildUrl} target="_blank" rel="noopener noreferrer" className="font-mono text-sm text-text-link hover:underline">
                     #{data.result.build_number}
                   </a>
                 ) : (
@@ -291,9 +292,9 @@ export function StatusPage() {
                     Re-Analyze
                   </Button>
                 )}
-                {data.jenkins_url && (
+                {buildUrl && (
                   <a
-                    href={String(data.jenkins_url)}
+                    href={buildUrl}
                     target="_blank"
                     rel="noopener noreferrer"
                     className="flex items-center gap-1 text-xs text-text-link hover:underline"
@@ -432,8 +433,8 @@ export function StatusPage() {
                 <Row
                   label="BUILD"
                   value={
-                    data?.jenkins_url ? (
-                      <a href={String(data.jenkins_url)} target="_blank" rel="noopener noreferrer" className="text-text-link hover:underline font-mono">
+                    buildUrl ? (
+                      <a href={buildUrl} target="_blank" rel="noopener noreferrer" className="text-text-link hover:underline font-mono">
                         #{data.result.build_number}
                       </a>
                     ) : (
