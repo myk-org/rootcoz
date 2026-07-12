@@ -155,7 +155,7 @@ export interface ChildJobAnalysis {
 export interface AnalysisResult {
   job_id: string
   job_name: string
-  build_number: number
+  build_number: number | string
   build_id?: string
   build_url?: string | null
   jenkins_url: string | null
@@ -262,6 +262,7 @@ export interface FailureHistoryEntry {
   job_id: string
   job_name: string
   build_number: number
+  build_id?: string
   test_name: string
   error_message: string
   error_signature: string
@@ -284,6 +285,7 @@ export interface TestHistory {
     job_id: string
     job_name: string
     build_number: number
+    build_id?: string
     classification: string
     analyzed_at: string
     child_job_name: string

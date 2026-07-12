@@ -12,7 +12,7 @@ import {
   SelectValue,
 } from '@/components/ui/select'
 import { api } from '@/lib/api'
-import { toIntInRange } from '@/lib/utils'
+import { toIntInRange, PROW_JOB_NAME_RE, PROW_BUILD_ID_RE } from '@/lib/utils'
 import { Section } from '@/components/shared/Section'
 import { Toggle } from '@/components/shared/Toggle'
 import { FieldLabel } from '@/components/shared/FieldLabel'
@@ -164,7 +164,7 @@ export function NewAnalysisPage() {
     inputMode === 'jenkins'
       ? jobName.trim() !== '' && buildNumber !== '' && buildNumber > 0
       : inputMode === 'prow'
-      ? /^[a-zA-Z0-9][a-zA-Z0-9._-]*$/.test(prowJobName.trim()) && /^[0-9]+$/.test(prowBuildId.trim())
+      ? PROW_JOB_NAME_RE.test(prowJobName.trim()) && PROW_BUILD_ID_RE.test(prowBuildId.trim())
       : rawXml.trim() !== ''
 
   const handleFileUpload = useCallback((file: File) => {

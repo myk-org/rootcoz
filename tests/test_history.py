@@ -104,6 +104,38 @@ class TestPopulateFailureHistory:
                 assert row0["child_job_name"] == ""
                 assert row0["child_build_number"] == 0
 
+    async def test_populate_stores_prow_build_id(self, setup_test_db):
+        """Prow snowflake build IDs must be stored in failure_history.build_id."""
+        with patch.object(storage, "DB_PATH", setup_test_db):
+            prow_build_id = "2072319655766134784"
+            result_data = {
+                "job_name": "periodic-ci-e2e-aws",
+                "build_number": 0,
+                "build_id": prow_build_id,
+                "failures": [
+                    {
+                        "test_name": "tests.TestA.test_one",
+                        "error": "failed",
+                        "error_signature": "sig-prow",
+                        "analysis": {"classification": "CODE ISSUE"},
+                    },
+                ],
+                "child_job_analyses": [],
+            }
+            await storage.populate_failure_history("job-prow", result_data)
+
+            import aiosqlite
+
+            async with aiosqlite.connect(setup_test_db) as db:
+                db.row_factory = aiosqlite.Row
+                cursor = await db.execute(
+                    "SELECT build_id, build_number FROM failure_history WHERE job_id = ?",
+                    ("job-prow",),
+                )
+                row = dict(await cursor.fetchone())
+                assert row["build_id"] == prow_build_id
+                assert row["build_number"] == 0
+
     async def test_populate_from_child_job_analyses(self, setup_test_db):
         """Test populating from a result with child job failures."""
         with patch.object(storage, "DB_PATH", setup_test_db):

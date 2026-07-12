@@ -98,11 +98,25 @@ def validate_prow_job_name(value: object) -> str:
     name = value.strip()
     if not name:
         raise ValueError("prow_job_name cannot be blank")
-    if not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9._-]*", name):
+    if not PROW_JOB_NAME_PATTERN.fullmatch(name):
         raise ValueError(
             "prow_job_name must be alphanumeric with hyphens, dots, or underscores"
         )
     return name
+
+
+def validate_prow_build_id(value: object) -> str:
+    """Validate a Prow build ID (numeric string)."""
+    if value is None:
+        raise ValueError("build_id is required")
+    if not isinstance(value, str):
+        raise ValueError("build_id must be a string")
+    build_id = value.strip()
+    if not build_id:
+        raise ValueError("build_id cannot be blank")
+    if not PROW_BUILD_ID_PATTERN.fullmatch(build_id):
+        raise ValueError("build_id must be numeric")
+    return build_id
 
 
 PROW_JOB_NAME_PATTERN = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._-]*$")

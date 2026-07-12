@@ -45,13 +45,23 @@ curl -X POST http://localhost:8000/analyze \
   -d '{"type": "jenkins", "job_name": "my-job", "build_number": 42, "max_concurrent_ai_calls": 2}'
 ```
 
-Prow analysis:
+Prow analysis (requires a GCS bucket with public HTTPS read access for build artifacts):
 
 ```bash
 curl -X POST http://localhost:8000/analyze \
   -H "Content-Type: application/json" \
-  -d '{"type": "prow", "prow_job_name": "periodic-ci-e2e-aws", "build_id": "1234567890", "prow_url": "https://prow.ci.openshift.org", "gcs_bucket": "test-platform-results"}'
+  -d '{"type": "prow", "prow_job_name": "periodic-ci-e2e-aws", "build_id": "1234567890", "prow_url": "https://prow.ci.openshift.org", "gcs_bucket": "test-platform-results", "gcs_prefix": "logs/periodic-ci-e2e-aws/1234567890"}'
 ```
+
+Presubmit jobs can omit `gcs_prefix`; RootCoz resolves it from the Prow directory pointer.
+
+| Field | Env var | API / CLI | Config file |
+|-------|---------|-----------|-------------|
+| `prow_url` | `PROW_URL` | `--prow-url` | `[server] prow_url` |
+| `gcs_bucket` | `GCS_BUCKET` | `--gcs-bucket` | `[server] gcs_bucket` |
+| `gcs_prefix` | — | `--gcs-prefix` / payload | `[analyze] gcs_prefix` |
+| `prow_job_name` | — | `--job-name` (prow) | — |
+| `build_id` | — | `--build-number` (prow) | — |
 
 ## Features
 
@@ -73,7 +83,8 @@ rootcoz analyze --source prow \
   --job-name periodic-ci-e2e-aws \
   --build-number 1234567890 \
   --prow-url https://prow.ci.openshift.org \
-  --gcs-bucket test-platform-results
+  --gcs-bucket test-platform-results \
+  --gcs-prefix logs/periodic-ci-e2e-aws/1234567890
 rootcoz results list
 rootcoz admin token-usage              # Summary dashboard
 rootcoz admin token-usage --group-by model  # Grouped breakdown

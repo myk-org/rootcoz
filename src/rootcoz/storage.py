@@ -346,6 +346,42 @@ async def _migrate_lowercase_usernames(db: aiosqlite.Connection) -> None:
     logger.info("Migration: case-insensitive username migration complete")
 
 
+async def _migrate_failure_history_build_id(db: aiosqlite.Connection) -> None:
+    """Backfill failure_history.build_id from stored result JSON."""
+    cursor = await db.execute("PRAGMA table_info(failure_history)")
+    columns = {row[1] for row in await cursor.fetchall()}
+    if "build_id" not in columns:
+        return
+
+    cursor = await db.execute(
+        "SELECT COUNT(*) FROM failure_history WHERE build_id = '' OR build_id IS NULL"
+    )
+    missing = (await cursor.fetchone())[0]
+    if not missing:
+        return
+
+    logger.info(
+        "Migration: backfilling failure_history.build_id for %d row(s)", missing
+    )
+    await db.execute(
+        """
+        UPDATE failure_history
+        SET build_id = COALESCE(
+            NULLIF(json_extract(
+                (SELECT result_json FROM results WHERE results.job_id = failure_history.job_id),
+                '$.build_id'
+            ), ''),
+            NULLIF(json_extract(
+                (SELECT result_json FROM results WHERE results.job_id = failure_history.job_id),
+                '$.request_params.build_id'
+            ), ''),
+            ''
+        )
+        WHERE build_id = '' OR build_id IS NULL
+        """
+    )
+
+
 async def _migrate_jenkins_url_to_build_url(db) -> None:
     """Rename results.jenkins_url column to build_url (CI-agnostic naming)."""
     cursor = await db.execute("PRAGMA table_info(results)")
@@ -608,6 +644,11 @@ async def init_db() -> None:
         )
         await _migrate_add_column(
             db, "failure_history", "tracked_in_by", "TEXT NOT NULL DEFAULT ''"
+        )
+
+        # Migration: add build_id for Prow snowflake IDs (build_number is INTEGER)
+        await _migrate_add_column(
+            db, "failure_history", "build_id", "TEXT NOT NULL DEFAULT ''"
         )
 
         # tracked_in_links: supports multiple tracked links per failure
@@ -902,6 +943,7 @@ async def init_db() -> None:
         await _migrate_lowercase_usernames(db)
 
         await _migrate_jenkins_url_to_build_url(db)
+        await _migrate_failure_history_build_id(db)
 
         await db.commit()
 
@@ -1529,12 +1571,15 @@ async def update_status(
 
 async def update_build_url(job_id: str, build_url: str) -> None:
     """Update the build_url DB column for an existing result."""
-    if not build_url:
+    from rootcoz.prow_validation import sanitize_http_href
+
+    safe_url = sanitize_http_href(build_url)
+    if not safe_url:
         return
     async with _connect_db() as db:
         cursor = await db.execute(
             "UPDATE results SET build_url = ? WHERE job_id = ?",
-            (build_url, job_id),
+            (safe_url, job_id),
         )
         await db.commit()
         if cursor.rowcount == 0:
@@ -1902,11 +1947,32 @@ def _count_child_failures_recursive(child: dict) -> int:
     return count
 
 
+def _resolve_history_build_fields(result_data: dict) -> tuple[str, int]:
+    """Extract build_id and build_number for failure_history rows."""
+    build_id = str(result_data.get("build_id") or "")
+    request_params = result_data.get("request_params") or {}
+    if not build_id and isinstance(request_params, dict):
+        build_id = str(request_params.get("build_id") or "")
+
+    raw_bn = result_data.get("build_number", 0)
+    if isinstance(raw_bn, str):
+        if not build_id and raw_bn.isdigit():
+            build_id = raw_bn
+        build_number = int(raw_bn) if raw_bn.isdigit() else 0
+    else:
+        build_number = int(raw_bn or 0)
+        if not build_id and build_number > 0:
+            build_id = str(build_number)
+
+    return build_id, build_number
+
+
 def _failure_to_history_row(
     failure: dict,
     job_id: str,
     job_name: str,
     build_number: int,
+    build_id: str = "",
     child_job_name: str = "",
     child_build_number: int = 0,
     analyzed_at: str = "",
@@ -1926,6 +1992,7 @@ def _failure_to_history_row(
         job_id,
         job_name,
         build_number,
+        build_id,
         failure.get("test_name", ""),
         failure.get("error", ""),
         failure.get("error_signature", ""),
@@ -1942,6 +2009,7 @@ def _extract_failures_for_history(
     job_id: str,
     job_name: str,
     build_number: int,
+    build_id: str = "",
     analyzed_at: str = "",
 ) -> list[tuple]:
     """Extract all failures from result_data into flat tuples for insertion.
@@ -1960,7 +2028,7 @@ def _extract_failures_for_history(
 
     Returns:
         List of tuples ready for INSERT:
-        (job_id, job_name, build_number, test_name, error_message,
+        (job_id, job_name, build_number, build_id, test_name, error_message,
          error_signature, classification, child_job_name, child_build_number, analyzed_at)
     """
     rows: list[tuple] = []
@@ -1969,14 +2037,20 @@ def _extract_failures_for_history(
     for f in result_data.get("failures", []):
         rows.append(
             _failure_to_history_row(
-                f, job_id, job_name, build_number, analyzed_at=analyzed_at
+                f, job_id, job_name, build_number, build_id, analyzed_at=analyzed_at
             )
         )
 
     # Child job analyses (recursive)
     for child in result_data.get("child_job_analyses", []):
         _extract_child_failures_for_history(
-            child, job_id, job_name, build_number, rows, analyzed_at=analyzed_at
+            child,
+            job_id,
+            job_name,
+            build_number,
+            rows,
+            build_id,
+            analyzed_at=analyzed_at,
         )
 
     return rows
@@ -1988,6 +2062,7 @@ def _extract_child_failures_for_history(
     job_name: str,
     build_number: int,
     rows: list[tuple],
+    build_id: str = "",
     analyzed_at: str = "",
 ) -> None:
     """Recursively extract failures from a child job analysis dict.
@@ -2010,6 +2085,7 @@ def _extract_child_failures_for_history(
                 job_id,
                 job_name,
                 build_number,
+                build_id,
                 child_job,
                 child_build,
                 analyzed_at=analyzed_at,
@@ -2018,7 +2094,13 @@ def _extract_child_failures_for_history(
 
     for nested in child.get("failed_children", []):
         _extract_child_failures_for_history(
-            nested, job_id, job_name, build_number, rows, analyzed_at=analyzed_at
+            nested,
+            job_id,
+            job_name,
+            build_number,
+            rows,
+            build_id,
+            analyzed_at=analyzed_at,
         )
 
 
@@ -2109,10 +2191,10 @@ async def populate_failure_history(
     """
     logger.debug(f"populate_failure_history: job_id={job_id}")
     job_name = result_data.get("job_name", "")
-    build_number = result_data.get("build_number", 0)
+    build_id, build_number = _resolve_history_build_fields(result_data)
 
     rows = _extract_failures_for_history(
-        result_data, job_id, job_name, build_number, analyzed_at=analyzed_at
+        result_data, job_id, job_name, build_number, build_id, analyzed_at=analyzed_at
     )
     if not rows:
         logger.debug(
@@ -2132,10 +2214,10 @@ async def populate_failure_history(
             await db.executemany(
                 """
                 INSERT INTO failure_history
-                    (job_id, job_name, build_number, test_name, error_message,
+                    (job_id, job_name, build_number, build_id, test_name, error_message,
                      error_signature, classification, pattern,
                      child_job_name, child_build_number, analyzed_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 rows,
             )
@@ -2143,10 +2225,10 @@ async def populate_failure_history(
             await db.executemany(
                 """
                 INSERT INTO failure_history
-                    (job_id, job_name, build_number, test_name, error_message,
+                    (job_id, job_name, build_number, build_id, test_name, error_message,
                      error_signature, classification, pattern,
                      child_job_name, child_build_number)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 # Strip the analyzed_at field (last element) when not backfilling
                 [row[:-1] for row in rows],
@@ -2650,7 +2732,7 @@ async def get_test_history(
 
         # Recent runs (failures only, since we only track failures)
         cursor = await db.execute(
-            f"""SELECT fh.job_id, fh.job_name, fh.build_number, fh.error_message,
+            f"""SELECT fh.job_id, fh.job_name, fh.build_number, fh.build_id, fh.error_message,
                        fh.error_signature,
                        COALESCE(tc_latest.classification, fh.classification) AS classification,
                        fh.child_job_name, fh.child_build_number, fh.analyzed_at,
@@ -3426,7 +3508,7 @@ async def get_all_failures(
 
         # Get paginated results
         cursor = await db.execute(
-            f"SELECT fh.id, fh.job_id, fh.job_name, fh.build_number, fh.test_name, "
+            f"SELECT fh.id, fh.job_id, fh.job_name, fh.build_number, fh.build_id, fh.test_name, "
             f"fh.error_message, fh.error_signature, "
             f"COALESCE(tc_latest.classification, fh.classification) AS classification, "
             f"fh.child_job_name, fh.child_build_number, fh.analyzed_at "

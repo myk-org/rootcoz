@@ -365,7 +365,9 @@ Exceptions (server-level only, no payload equivalent):
 - Security-sensitive credentials for preview/create-issue endpoints (`GITHUB_TOKEN`, `TESTS_REPO_URL`, Jira credentials, `REPORTPORTAL_URL`, `REPORTPORTAL_API_TOKEN`, `REPORTPORTAL_PROJECT`) — these use deployment config, not per-request overrides
 
 Request-only fields (per-build, no server-level default):
-- `gcs_prefix` — GCS path prefix, unique per Prow build (e.g. `pr-logs/pull/org_repo/pr/job/build_id`)
+- `prow_job_name` — Prow job name for prow source analyses
+- `build_id` — Prow build ID (numeric string; may exceed JavaScript safe integer range)
+- `gcs_prefix` — GCS path prefix, unique per Prow build (e.g. `pr-logs/pull/org_repo/pr/job/build_id`). When empty, auto-resolves via prowjob.json or pr-logs/directory pointer.
 - `raw_xml` — raw JUnit XML content for file source
 - `failures` — raw failure list for raw source
 

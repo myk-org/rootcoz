@@ -8,6 +8,8 @@ from rootcoz.prow_validation import (
     sanitize_http_href,
     strip_url_userinfo,
     validate_gcs_prefix_suffix,
+    validate_prow_build_id,
+    validate_prow_job_name,
 )
 
 
@@ -66,6 +68,24 @@ class TestSanitizeHttpHref:
             sanitize_http_href("https://prow.example.com/view/gs/bucket/logs/job/1")
             == "https://prow.example.com/view/gs/bucket/logs/job/1"
         )
+
+
+class TestValidateProwJobName:
+    def test_valid_name(self):
+        assert validate_prow_job_name("periodic-ci-e2e-aws") == "periodic-ci-e2e-aws"
+
+    def test_rejects_invalid_chars(self):
+        with pytest.raises(ValueError, match="alphanumeric"):
+            validate_prow_job_name("job/name")
+
+
+class TestValidateProwBuildId:
+    def test_valid_id(self):
+        assert validate_prow_build_id("2072319655766134784") == "2072319655766134784"
+
+    def test_rejects_non_numeric(self):
+        with pytest.raises(ValueError, match="numeric"):
+            validate_prow_build_id("abc")
 
 
 class TestStripUrlUserinfo:

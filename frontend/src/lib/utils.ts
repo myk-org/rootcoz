@@ -107,6 +107,10 @@ export function ciSourceLabel(requestParams?: { [key: string]: unknown }): strin
   }
 }
 
+/** Prow job name and build ID validation (mirrors backend prow_validation.py). */
+export const PROW_JOB_NAME_RE = /^[a-zA-Z0-9][a-zA-Z0-9._-]*$/
+export const PROW_BUILD_ID_RE = /^[0-9]+$/
+
 /** Resolve CI build URL from API payload (prefers build_url, falls back to jenkins_url). */
 export function resolveBuildUrl(data?: { build_url?: string | null; jenkins_url?: string | null } | null): string | null {
   if (!data) return null

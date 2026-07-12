@@ -21,7 +21,6 @@ from pathlib import Path
 import httpx
 from simple_logger.logger import get_logger
 
-from rootcoz.engine.core import extract_relevant_console_lines
 from rootcoz.models import FailedTest
 from rootcoz.sources.base import CISource, CISourceResult, WorkspaceFile
 from rootcoz.xml_enrichment import extract_test_failures
@@ -47,6 +46,12 @@ _MAX_SIZE_PROWJOB = 2_000_000  # 2 MB
 
 # Maximum total download size for non-JUnit artifacts (bytes)
 _MAX_SIZE_ARTIFACTS_TOTAL = 50_000_000  # 50 MB
+
+# Maximum PR diff download size (bytes)
+_MAX_SIZE_PR_DIFF = 5_000_000  # 5 MB
+
+# Maximum additional PRs to fetch in batch jobs
+_MAX_ADDITIONAL_PRS = 20
 
 # Maximum size for a single non-JUnit artifact file (bytes)
 _MAX_SIZE_SINGLE_ARTIFACT = 10_000_000  # 10 MB
@@ -152,9 +157,15 @@ def _parse_prowjob_json(raw: str) -> ProwJobMetadata | None:
                         "number": p.get("number"),
                         "author": p.get("author", ""),
                     }
-                    for p in pulls[1:]
+                    for p in pulls[1 : 1 + _MAX_ADDITIONAL_PRS]
                     if isinstance(p, dict)
                 ]
+                if len(pulls) - 1 > _MAX_ADDITIONAL_PRS:
+                    logger.warning(
+                        "Batch job has %d additional PRs; only first %d will be fetched",
+                        len(pulls) - 1,
+                        _MAX_ADDITIONAL_PRS,
+                    )
 
     # status.state
     status = data.get("status", {})
@@ -713,6 +724,11 @@ async def _fetch_pr_changes(
             diff_text = ""
             if diff_resp.status_code == 200:
                 diff_text = diff_resp.text
+                if len(diff_text) > _MAX_SIZE_PR_DIFF:
+                    diff_text = (
+                        diff_text[:_MAX_SIZE_PR_DIFF]
+                        + f"\n\n... [PR diff truncated at {_MAX_SIZE_PR_DIFF} bytes] ..."
+                    )
 
     except httpx.RequestError:
         logger.warning(
@@ -1051,6 +1067,20 @@ class ProwSource(CISource):
         wrote_any = False
         console_file = workspace / "console-output.txt"
         artifacts_link = workspace / "build-artifacts"
+        prow_context_file = workspace / "prow-context.txt"
+        pr_changes_file = workspace / "pr-changes.diff"
+        metadata = self._metadata_dict()
+        pr_num = metadata.get("pr_number")
+        pr_org = metadata.get("org", "")
+        pr_repo = metadata.get("repo", "")
+        needs_pr_changes = pr_num is not None and pr_org and pr_repo
+        if (
+            console_file.exists()
+            and prow_context_file.exists()
+            and (not needs_pr_changes or pr_changes_file.exists())
+            and (not self.get_job_artifacts or artifacts_link.exists())
+        ):
+            return False
 
         async with httpx.AsyncClient(
             timeout=httpx.Timeout(_HTTP_TIMEOUT), follow_redirects=True
@@ -1144,7 +1174,7 @@ class ProwSource(CISource):
         pr_repo = metadata.get("repo", "")
         if pr_num is not None and pr_org and pr_repo:
             all_pr_nums = [pr_num]
-            for extra in metadata.get("additional_prs") or []:
+            for extra in (metadata.get("additional_prs") or [])[:_MAX_ADDITIONAL_PRS]:
                 num = extra.get("number")
                 if num is not None:
                     all_pr_nums.append(num)
@@ -1268,7 +1298,7 @@ class ProwSource(CISource):
         # 2. Fetch build-log.txt for console context
         # ------------------------------------------------------------------
         build_log = await self._fetch_build_log(client, gcs_prefix, access_warnings)
-        console_context = extract_relevant_console_lines(build_log or "")
+        console_context = build_log or ""
 
         # ------------------------------------------------------------------
         # 3. List all artifact files from GCS
@@ -1400,11 +1430,10 @@ class ProwSource(CISource):
             # 1. Fetch build-log.txt
             build_log = await self._fetch_build_log(client, gcs_prefix, warnings)
             if build_log:
-                console_context = extract_relevant_console_lines(build_log)
+                console_context = build_log
                 logger.info(
-                    "Refetched Prow build log (%d chars, %d relevant)",
+                    "Refetched Prow build log (%d chars)",
                     len(build_log),
-                    len(console_context),
                 )
 
             # 2. Download non-JUnit artifacts

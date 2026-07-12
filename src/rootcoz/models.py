@@ -1,6 +1,5 @@
 """Pydantic request and response models."""
 
-import re
 from datetime import datetime
 from typing import Annotated, Literal, TypeVar
 from uuid import uuid4
@@ -22,6 +21,7 @@ from rootcoz.prow_validation import (
     normalize_gcs_prefix,
     normalize_prow_url,
     validate_gcs_prefix_suffix,
+    validate_prow_build_id,
     validate_prow_job_name,
 )
 
@@ -708,7 +708,7 @@ class UnifiedAnalyzeRequest(_JenkinsParamsMixin, _NameTagsMixin, BaseAnalysisReq
         default="",
         description=(
             "GCS object prefix for the build (e.g. 'logs/job/build' or 'pr-logs/pull/org_repo/pr/job/build'). "
-            "When empty, defaults to 'logs/{prow_job_name}/{build_id}'."
+            "When empty, auto-resolves via prowjob.json or pr-logs/directory pointer."
         ),
     )
 
@@ -724,12 +724,7 @@ class UnifiedAnalyzeRequest(_JenkinsParamsMixin, _NameTagsMixin, BaseAnalysisReq
     def _validate_build_id(cls, v: str | None) -> str | None:
         if v is None:
             return v
-        v = v.strip()
-        if not v:
-            raise ValueError("build_id cannot be blank")
-        if not re.fullmatch(r"[0-9]+", v):
-            raise ValueError("build_id must be numeric")
-        return v
+        return validate_prow_build_id(v)
 
     @field_validator("gcs_bucket", mode="before")
     @classmethod

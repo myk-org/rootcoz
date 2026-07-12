@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import { useParams, Link } from 'react-router-dom'
 import { api } from '@/lib/api'
-import { parseApiTimestamp } from '@/lib/utils'
+import { parseApiTimestamp, resolveBuildDisplayId } from '@/lib/utils'
 import type { TestHistory } from '@/types'
 import { Card, CardContent } from '@/components/ui/card'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
@@ -77,11 +77,13 @@ export function TestHistoryPage() {
               </TableRow>
             </TableHeader>
             <TableBody>
-              {data.recent_runs.map((run, i) => (
+              {data.recent_runs.map((run, i) => {
+                const buildDisplayId = resolveBuildDisplayId(run)
+                return (
                 <TableRow key={`${run.job_id}-${i}`} className={i % 2 === 0 ? 'bg-surface-card' : 'bg-surface-elevated/40'}>
                   <TableCell>
                     <Link to={`/results/${run.job_id}`} className="text-text-link hover:underline font-display text-xs">
-                      {run.job_name} #{run.build_number}
+                      {run.job_name}{buildDisplayId ? ` #${buildDisplayId}` : ''}
                     </Link>
                   </TableCell>
                   <TableCell>
@@ -91,7 +93,7 @@ export function TestHistoryPage() {
                     {parseApiTimestamp(run.analyzed_at).toLocaleDateString()}
                   </TableCell>
                 </TableRow>
-              ))}
+              )})}
             </TableBody>
           </Table>
         </div>

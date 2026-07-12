@@ -21,12 +21,13 @@ import { useReportState } from './ReportContext'
 interface RPPushMetadataProps {
   project?: string
   jobName?: string
-  buildNumber?: number
+  buildNumber?: number | string
   launchId?: number
   className?: string
 }
 
 function RPPushMetadata({ project, jobName, buildNumber, launchId, className }: RPPushMetadataProps) {
+  const buildLabel = buildNumber != null && buildNumber !== '' ? String(buildNumber) : null
   return (
     <dl className={className}>
       {project && (
@@ -51,10 +52,10 @@ function RPPushMetadata({ project, jobName, buildNumber, launchId, className }: 
           </Tooltip>
         </>
       )}
-      {buildNumber != null && (
+      {buildLabel && (
         <>
           <dt className="font-medium">Build</dt>
-          <dd className="font-mono">#{buildNumber}</dd>
+          <dd className="font-mono">#{buildLabel}</dd>
         </>
       )}
       {launchId != null && (
@@ -70,7 +71,7 @@ function RPPushMetadata({ project, jobName, buildNumber, launchId, className }: 
 interface ReportPortalButtonProps {
   jobId: string
   jobName: string
-  buildNumber: number
+  buildNumber?: number | string
   childJobName?: string
   childBuildNumber?: number
   hasFailures: boolean

@@ -479,6 +479,19 @@ export function StatusPage() {
               )}
             </div>
 
+            {data?.result?.source_warnings && data.result.source_warnings.length > 0 && (
+              <div className="w-full rounded-lg border border-border-default bg-bg-secondary p-4 text-left">
+                <h3 className="text-xs font-display uppercase tracking-widest text-signal-orange mb-2">
+                  Source Warnings
+                </h3>
+                <ul className="list-disc pl-4 space-y-1 text-sm text-text-secondary">
+                  {data.result.source_warnings.map((warning) => (
+                    <li key={warning}>{warning}</li>
+                  ))}
+                </ul>
+              </div>
+            )}
+
             {/* Origin job reference for re-analyses */}
             {data?.reanalyzed_from_job_id && (
               <OriginJobBanner

@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import { api } from '@/lib/api'
-import { parseApiTimestamp } from '@/lib/utils'
+import { parseApiTimestamp, resolveBuildDisplayId } from '@/lib/utils'
 import type { FailureHistoryEntry } from '@/types'
 import { DateRangePresetFilter } from '@/components/shared/DateRangePresetFilter'
 import {
@@ -218,7 +218,9 @@ function FailureHistoryTab() {
             </TableRow>
           </TableHeader>
           <TableBody>
-            {sorted.map((entry, i) => (
+            {sorted.map((entry, i) => {
+              const buildDisplayId = resolveBuildDisplayId(entry)
+              return (
               <TableRow
                 key={entry.id}
                 className={`cursor-pointer animate-slide-up ${i % 2 === 0 ? 'bg-surface-card' : 'bg-surface-elevated/40'}`}
@@ -229,7 +231,7 @@ function FailureHistoryTab() {
                 onClick={() => navigate(`/results/${entry.job_id}`)}
                 tabIndex={0}
                 role="link"
-                aria-label={`Open results for ${entry.job_name} #${entry.build_number}`}
+                aria-label={`Open results for ${entry.job_name}${buildDisplayId ? ` #${buildDisplayId}` : ''}`}
                 onKeyDown={(e) => {
                   if (e.target !== e.currentTarget) return
                   if (e.key === 'Enter' || e.key === ' ') {
@@ -252,7 +254,7 @@ function FailureHistoryTab() {
                     {entry.job_name}
                   </span>
                   <span className="ml-1 font-mono text-[10px] text-text-tertiary">
-                    #{entry.build_number}
+                    {buildDisplayId ? `#${buildDisplayId}` : null}
                   </span>
                 </TableCell>
                 <TableCell>
@@ -264,7 +266,8 @@ function FailureHistoryTab() {
                   {parseApiTimestamp(entry.analyzed_at).toLocaleDateString()}
                 </TableCell>
               </TableRow>
-            ))}
+              )
+            })}
           </TableBody>
         </Table>
       )}
