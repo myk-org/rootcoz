@@ -314,6 +314,28 @@ def append_repo_context(custom_prompt: str, repo_context: str) -> str:
     return repo_context.lstrip("\n")
 
 
+def write_workspace_file_list(
+    workspace: Path,
+    files: list[WorkspaceFile],
+    *,
+    skip_existing: bool = False,
+    log_prefix: str = "",
+) -> bool:
+    """Write workspace context files; return True if any file was written."""
+    wrote_any = False
+    for workspace_file in files:
+        target = workspace / workspace_file.filename
+        if skip_existing and target.exists():
+            continue
+        try:
+            target.write_text(workspace_file.content)
+            logger.info("%sWrote %s", log_prefix, target.name)
+            wrote_any = True
+        except OSError:
+            logger.warning("Failed to write %s", target.name, exc_info=True)
+    return wrote_any
+
+
 def write_workspace_context_file(
     filepath: Path,
     content: str,
@@ -404,13 +426,18 @@ async def run_console_only_analysis(
     max_concurrent_ai_calls: int = 3,
 ) -> tuple[bool, list, str]:
     """Run console-only AI analysis when no structured test failures exist."""
-    from rootcoz.engine.core import analyze_failure_group
+    from rootcoz.engine.core import analyze_failure_group, get_failure_signature
     from rootcoz.models import FailedTest
 
     synthetic_failure = FailedTest(
         test_name=test_name,
+        error_message="Console-only analysis pending",
+    )
+    console_file_name = f"console-output-{get_failure_signature(synthetic_failure)}.txt"
+    synthetic_failure = FailedTest(
+        test_name=test_name,
         error_message=(
-            "Console-only analysis — read console-output.txt in the workspace "
+            f"Console-only analysis — read {console_file_name} in the workspace "
             "before analyzing."
         ),
     )

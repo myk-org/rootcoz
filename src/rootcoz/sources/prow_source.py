@@ -179,18 +179,14 @@ def _gcs_url(bucket: str, *path_parts: str) -> str:
 
 
 def _build_url(prow_url: str, bucket: str, gcs_prefix: str) -> str:
-    """Build the Prow Deck URL for a specific build.
+    """Build the Prow Deck URL for a specific build."""
+    from rootcoz.prow_validation import normalize_prow_url, sanitize_http_href
 
-    Args:
-        prow_url: Base Prow Deck URL.
-        bucket: GCS bucket name.
-        gcs_prefix: GCS object prefix (e.g. ``logs/job/build`` or
-            ``pr-logs/pull/org_repo/pr/job/build``).
-
-    Returns:
-        Full URL to the build on Prow Deck.
-    """
-    return f"{prow_url.rstrip('/')}/view/gs/{bucket}/{gcs_prefix}"
+    safe_prow = normalize_prow_url(prow_url) if prow_url else ""
+    if not safe_prow:
+        return ""
+    url = f"{safe_prow.rstrip('/')}/view/gs/{bucket}/{gcs_prefix}"
+    return sanitize_http_href(url)
 
 
 def _parse_junit_failures(raw_xml: str) -> list[FailedTest]:
@@ -895,19 +891,12 @@ class ProwSource(CISource):
         """
         if self._custom_gcs_prefix:
             prefix = self._custom_gcs_prefix.rstrip("/")
-            if ".." in prefix or any(c in prefix for c in "\n\r\x00"):
-                raise GCSAccessError(
-                    "gcs_prefix",
-                    400,
-                    prefix,
-                )
-            expected_suffix = f"/{self.job_name}/{self.build_id}"
-            if not prefix.endswith(expected_suffix):
-                raise GCSAccessError(
-                    "gcs_prefix",
-                    400,
-                    prefix,
-                )
+            from rootcoz.prow_validation import validate_gcs_prefix_suffix
+
+            try:
+                validate_gcs_prefix_suffix(prefix, self.job_name, self.build_id)
+            except ValueError as exc:
+                raise GCSAccessError("gcs_prefix", 400, prefix) from exc
             await self._fetch_prowjob_metadata(client, prefix)
             return prefix
 
@@ -1091,19 +1080,18 @@ class ProwSource(CISource):
                         "Chat: failed to write console-output.txt", exc_info=True
                     )
 
-            for workspace_file in await self.prepare_workspace(
+            workspace_files = await self.prepare_workspace(
                 repo_path=workspace, github_token=github_token
+            )
+            from rootcoz.sources.base import write_workspace_file_list
+
+            if write_workspace_file_list(
+                workspace,
+                workspace_files,
+                skip_existing=True,
+                log_prefix="Chat: ",
             ):
-                target = workspace / workspace_file.filename
-                if not target.exists():
-                    try:
-                        target.write_text(workspace_file.content)
-                        logger.info("Chat: wrote %s for Prow job", target.name)
-                        wrote_any = True
-                    except OSError:
-                        logger.warning(
-                            "Chat: failed to write %s", target.name, exc_info=True
-                        )
+                wrote_any = True
 
             if self.get_job_artifacts and not artifacts_link.exists():
                 try:
@@ -1471,6 +1459,27 @@ class ProwSource(CISource):
             )
             return None
 
+        from rootcoz.prow_validation import (
+            normalize_gcs_bucket,
+            normalize_gcs_prefix,
+            normalize_prow_url,
+            validate_gcs_prefix_suffix,
+        )
+
+        try:
+            prow_url = normalize_prow_url(prow_url) if prow_url else ""
+            gcs_bucket = normalize_gcs_bucket(gcs_bucket)
+            gcs_prefix = normalize_gcs_prefix(params.get("gcs_prefix", ""))
+            if gcs_prefix:
+                validate_gcs_prefix_suffix(gcs_prefix, prow_job_name, build_id)
+        except ValueError as exc:
+            logger.warning("Invalid stored Prow params: %s", exc)
+            return None
+
+        if not gcs_bucket:
+            logger.warning("Cannot reconstruct ProwSource: invalid gcs_bucket")
+            return None
+
         if "get_job_artifacts" in params:
             get_job_artifacts = bool(params["get_job_artifacts"])
         elif settings is not None:
@@ -1483,7 +1492,7 @@ class ProwSource(CISource):
             build_id=build_id,
             gcs_bucket=gcs_bucket,
             prow_url=prow_url or "",
-            gcs_prefix=params.get("gcs_prefix", ""),
+            gcs_prefix=gcs_prefix,
             force=True,  # reanalysis always forces
             get_job_artifacts=get_job_artifacts,
         )

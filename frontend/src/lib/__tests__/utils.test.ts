@@ -50,6 +50,12 @@ describe('resolveBuildUrl', () => {
     expect(resolveBuildUrl({})).toBeNull()
     expect(resolveBuildUrl(null)).toBeNull()
   })
+
+  it('strips credentials and rejects unsafe schemes', () => {
+    expect(resolveBuildUrl({ build_url: 'https://user:pass@prow.example.com/job' })) // pragma: allowlist secret
+      .toBe('https://prow.example.com/job')
+    expect(resolveBuildUrl({ build_url: 'javascript:alert(1)' })).toBeNull()
+  })
 })
 
 describe('resolveBuildDisplayId', () => {

@@ -64,6 +64,7 @@ class ServerConfig:
     # Prow
     prow_url: str = ""
     gcs_bucket: str = ""
+    gcs_prefix: str = ""
     # Authentication
     api_key: str = ""  # API key for authentication (user or admin)
 
@@ -259,6 +260,7 @@ def _server_config_from_dict(data: dict) -> ServerConfig:
         # Prow
         prow_url=data.get("prow_url", ""),
         gcs_bucket=data.get("gcs_bucket", ""),
+        gcs_prefix=data.get("gcs_prefix", ""),
         # Admin authentication
         api_key=data.get("api_key", ""),
     )

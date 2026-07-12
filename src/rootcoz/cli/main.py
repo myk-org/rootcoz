@@ -1392,8 +1392,9 @@ def analyze(
                 extras["prow_url"] = effective_prow_url
             if effective_gcs_bucket:
                 extras["gcs_bucket"] = effective_gcs_bucket
-            if gcs_prefix:
-                extras["gcs_prefix"] = gcs_prefix
+            effective_gcs_prefix = gcs_prefix or (cfg.gcs_prefix if cfg else "")
+            if effective_gcs_prefix:
+                extras["gcs_prefix"] = effective_gcs_prefix
             data = client.analyze(name=name, type="prow", **extras)
         else:
             try:

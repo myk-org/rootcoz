@@ -940,6 +940,96 @@ class TestAnalyzeProwEndpoint:
             assert "Could not fetch test data" in result.get("summary", "")
             assert result.get("source_warnings")
 
+    async def test_prow_build_passed_uses_prow_summary(
+        self, temp_db_path: Path
+    ) -> None:
+        """Successful Prow builds get a prow-specific early-exit summary."""
+        from rootcoz.main import _process_non_jenkins_analysis
+        from rootcoz.models import UnifiedAnalyzeRequest
+        from rootcoz.sources.base import CISourceResult
+
+        body = UnifiedAnalyzeRequest(
+            type="prow",
+            prow_job_name="my-prow-job",
+            build_id="99",
+            prow_url="https://prow.example.com",
+            gcs_bucket="test-bucket",
+            ai_provider="claude",
+            ai_model="test-model",
+        )
+        merged = Settings(
+            prow_url="https://prow.example.com",
+            gcs_bucket="test-bucket",
+        )
+        job_id = "prow-passed-test"
+
+        passed_result = CISourceResult(
+            failures=[],
+            build_passed=True,
+            build_url="https://prow.example.com/view/gs/test-bucket/logs/my-prow-job/99",
+            identity={
+                "job_name": "my-prow-job",
+                "build_id": "99",
+                "build_number": "99",
+            },
+            source_metadata={"job_type": "periodic"},
+        )
+
+        with (
+            patch.object(storage, "DB_PATH", temp_db_path),
+            patch(
+                "rootcoz.sources.prow_source.ProwSource.fetch",
+                new_callable=AsyncMock,
+                return_value=passed_result,
+            ),
+            patch(
+                "rootcoz.sources.prow_source.ProwSource.resolved_gcs_prefix",
+                new_callable=PropertyMock,
+                return_value="logs/my-prow-job/99",
+            ),
+            _patch_preflight(),
+        ):
+            await storage.init_db()
+            await storage.save_result(
+                job_id,
+                "",
+                "pending",
+                {
+                    "request_params": encrypt_sensitive_fields(
+                        {
+                            "analysis_type": "prow",
+                            "prow_job_name": "my-prow-job",
+                            "build_id": "99",
+                        }
+                    )
+                },
+            )
+
+            await _process_non_jenkins_analysis(
+                job_id=job_id,
+                body=body,
+                merged=merged,
+                display_name="my-prow-job-99",
+                ai_provider="claude",
+                ai_model="test-model",
+                peer_ai_configs=None,
+                tests_repo_url="",
+                tests_repo_ref="",
+                resolved_tests_repo_token="",
+                additional_repos_list=[],
+                base_url="",
+            )
+
+            row = await storage.get_result(job_id, strip_sensitive=False)
+            assert row is not None
+            assert row["status"] == "completed"
+            result = row["result"]
+            assert "Prow build passed" in result.get("summary", "")
+            assert result.get("build_id") == "99"
+            assert result.get("source_metadata", {}).get("job_type") == "periodic"
+            params = result["request_params"]
+            assert params["gcs_prefix"] == "logs/my-prow-job/99"
+
 
 class TestResultsEndpoints:
     """Tests for the /results endpoints."""
@@ -6425,6 +6515,27 @@ class TestAdminSettingsEndpoints:
             json={"settings": {}},
         )
         assert response.status_code == 400
+
+    def test_put_settings_invalid_prow_url(self, test_client) -> None:
+        """PUT rejects invalid prow_url values."""
+        response = test_client.put(
+            "/api/admin/settings",
+            json={"settings": {"prow_url": "http://prow.example.com"}},
+        )
+        assert response.status_code == 400
+        assert "https://" in response.json()["detail"]
+
+    def test_put_settings_prow_url_with_credentials_rejected(self, test_client) -> None:
+        response = test_client.put(
+            "/api/admin/settings",
+            json={
+                "settings": {
+                    "prow_url": "https://user:pass@prow.example.com",  # pragma: allowlist secret
+                }
+            },
+        )
+        assert response.status_code == 400
+        assert "credentials" in response.json()["detail"]
 
     def test_delete_setting_resets(self, test_client) -> None:
         """DELETE removes DB override."""

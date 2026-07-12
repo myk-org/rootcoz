@@ -519,4 +519,7 @@ export interface DefaultServerSettings {
   wait_for_completion: boolean
   poll_interval_minutes: number
   max_wait_minutes: number
+  // Prow
+  prow_url: string
+  gcs_bucket: string
 }

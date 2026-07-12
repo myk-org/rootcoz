@@ -110,7 +110,17 @@ export function ciSourceLabel(requestParams?: { [key: string]: unknown }): strin
 /** Resolve CI build URL from API payload (prefers build_url, falls back to jenkins_url). */
 export function resolveBuildUrl(data?: { build_url?: string | null; jenkins_url?: string | null } | null): string | null {
   if (!data) return null
-  return data.build_url ?? data.jenkins_url ?? null
+  const raw = data.build_url ?? data.jenkins_url ?? null
+  if (!raw) return null
+  try {
+    const url = new URL(raw)
+    if (url.protocol !== 'http:' && url.protocol !== 'https:') return null
+    url.username = ''
+    url.password = ''
+    return url.toString()
+  } catch {
+    return null
+  }
 }
 
 type BuildIdSource = {

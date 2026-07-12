@@ -1427,6 +1427,16 @@ class TestFromStoredParams:
         assert source is not None
         assert source.gcs_bucket == _TEST_GCS_BUCKET
 
+    def test_rejects_invalid_stored_gcs_prefix(self):
+        params = {
+            "gcs_bucket": _TEST_GCS_BUCKET,
+            "prow_job_name": "test-job",
+            "build_id": "123",
+            "prow_url": _TEST_PROW_URL,
+            "gcs_prefix": "logs/wrong-job/999",
+        }
+        assert ProwSource.from_stored_params(params) is None
+
 
 class TestParseProwjobJsonDefensive:
     """Tests for defensive parsing of malformed prowjob.json."""

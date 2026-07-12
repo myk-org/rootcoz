@@ -10,7 +10,7 @@ import re
 import sqlite3
 import threading
 import time as _time
-from urllib.parse import quote as _urlquote, urlparse, urlunparse
+from urllib.parse import quote as _urlquote, urlparse
 import uuid
 from collections import defaultdict
 from collections.abc import Callable, Coroutine, Sequence
@@ -7968,13 +7968,9 @@ async def get_capabilities(settings: Settings = _SETTINGS_DEP) -> dict:
 
 def _strip_url_userinfo(url: str) -> str:
     """Remove userinfo (username/password) from a URL for safe API responses."""
-    if not url:
-        return url
-    parsed = urlparse(url)
-    if parsed.username or parsed.password:
-        clean_netloc = parsed.netloc.rsplit("@", 1)[-1]
-        return urlunparse(parsed._replace(netloc=clean_netloc))
-    return url
+    from rootcoz.prow_validation import strip_url_userinfo
+
+    return strip_url_userinfo(url)
 
 
 @app.get("/api/default-server-settings", operation_id="getDefaultServerSettings")
@@ -8046,6 +8042,8 @@ async def get_default_server_settings(settings: Settings = _SETTINGS_DEP) -> dic
             "jira_url",
             "jira_project_key",
             "jenkins_url",
+            "prow_url",
+            "gcs_bucket",
             "reportportal_url",
             "reportportal_project",
         }
@@ -9848,10 +9846,24 @@ async def update_admin_settings(request: Request) -> JSONResponse:
 
     # Validate values against Settings field types and constraints
     errors = []
+    from rootcoz.prow_validation import normalize_gcs_bucket, normalize_prow_url
+
     for key, value in settings_updates.items():
         field_info = Settings.model_fields[key]
         # Skip validation for None/empty — those reset to default
         if value is None or value == "":
+            continue
+        if key == "prow_url":
+            try:
+                settings_updates[key] = normalize_prow_url(value)
+            except ValueError as exc:
+                errors.append(str(exc))
+            continue
+        if key == "gcs_bucket":
+            try:
+                settings_updates[key] = normalize_gcs_bucket(value)
+            except ValueError as exc:
+                errors.append(str(exc))
             continue
         # Check integer fields
         annotation = field_info.annotation
@@ -10763,8 +10775,8 @@ async def _resolve_chat_credentials(
 ) -> tuple[str, str, str, str, str]:
     """Resolve Jira and GitHub credentials for chat.
 
-    Chat uses ONLY user-scoped tokens — never global server credentials.
-    If the user hasn't configured their tokens, the tools are unavailable.
+    Jira uses user-scoped tokens only. GitHub falls back to job-stored
+    and server deployment tokens so presubmit PR diffs match analysis.
 
     Returns:
         (jira_url, jira_email, jira_token, github_token, github_repo)
@@ -10787,10 +10799,14 @@ async def _resolve_chat_credentials(
     # Jira URL from job params or server settings (URL is not a credential)
     jira_url = decrypted_params.get("jira_url", "") or str(settings.jira_url or "")
 
-    # User-scoped credentials ONLY — no fallback to server settings or job params
+    # User-scoped credentials with server/job fallbacks for GitHub PR diffs
     jira_email = user_tokens.get("jira_email", "")
     jira_token = user_tokens.get("jira_token", "")
-    github_token = user_tokens.get("github_token", "")
+    github_token = (user_tokens.get("github_token") or "").strip()
+    if not github_token:
+        github_token = (decrypted_params.get("github_token") or "").strip()
+    if not github_token and settings.github_token:
+        github_token = settings.github_token.get_secret_value()
 
     return jira_url, jira_email, jira_token, github_token, github_repo
 

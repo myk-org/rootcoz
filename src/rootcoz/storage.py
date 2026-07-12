@@ -367,14 +367,21 @@ def _row_build_url(row) -> str:
 
 def stamp_build_url(result: dict, build_url: str) -> None:
     """Set canonical and legacy build URL fields on a result dict."""
-    if build_url:
-        result["build_url"] = build_url
-        result["jenkins_url"] = build_url
+    from rootcoz.prow_validation import sanitize_http_href
+
+    safe_url = sanitize_http_href(build_url)
+    if safe_url:
+        result["build_url"] = safe_url
+        result["jenkins_url"] = safe_url
 
 
 def with_build_url_aliases(record: dict) -> dict:
     """Ensure API records expose both build_url and jenkins_url."""
-    url = record.get("build_url") or record.get("jenkins_url") or ""
+    from rootcoz.prow_validation import sanitize_http_href
+
+    url = sanitize_http_href(
+        str(record.get("build_url") or record.get("jenkins_url") or "")
+    )
     if url:
         record["build_url"] = url
         record["jenkins_url"] = url

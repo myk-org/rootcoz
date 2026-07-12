@@ -137,6 +137,8 @@ export function NewAnalysisPage() {
       setPollInterval(defaults.poll_interval_minutes)
       setMaxWait(defaults.max_wait_minutes)
       if (defaults.jenkins_url) setJenkinsUrl(defaults.jenkins_url)
+      if (defaults.prow_url) setProwUrl(defaults.prow_url)
+      if (defaults.gcs_bucket) setGcsBucket(defaults.gcs_bucket)
     }).catch((err) => {
       if (resolved) return
       console.warn('Failed to load analysis defaults:', err)

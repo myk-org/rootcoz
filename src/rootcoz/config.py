@@ -316,6 +316,20 @@ class Settings(BaseSettings):
             raise ValueError(f"DEFAULT_USER_ROLE must be one of: {', '.join(allowed)}")
         return v
 
+    @field_validator("prow_url", mode="before")
+    @classmethod
+    def _validate_prow_url(cls, v: object) -> str:
+        from rootcoz.prow_validation import normalize_prow_url
+
+        return normalize_prow_url(v)
+
+    @field_validator("gcs_bucket", mode="before")
+    @classmethod
+    def _validate_gcs_bucket(cls, v: object) -> str:
+        from rootcoz.prow_validation import normalize_gcs_bucket
+
+        return normalize_gcs_bucket(v)
+
     # Admin authentication
     admin_key: str = Field(
         default="", repr=False

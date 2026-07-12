@@ -1064,6 +1064,16 @@ def _build_unavailable_section(custom_tools: list[dict]) -> str:
     return "\n\n## Unavailable Tools\n" + "\n".join(lines)
 
 
+def _resolve_ci_build_data_available(
+    ci_build_data_available: bool = False,
+    jenkins_data_available: bool | None = None,
+) -> bool:
+    """Normalize deprecated jenkins_data_available alias."""
+    if jenkins_data_available is not None:
+        return jenkins_data_available
+    return ci_build_data_available
+
+
 def build_welcome_message(
     *,
     job_name: str,
@@ -1074,6 +1084,9 @@ def build_welcome_message(
     github_available: bool = False,
 ) -> str:
     """Build a dynamic welcome message listing available resources."""
+    ci_build_data_available = _resolve_ci_build_data_available(
+        ci_build_data_available, jenkins_data_available
+    )
     resources = [
         "📊 Job analysis results (failures, classifications, AI analysis)",
         "💬 Job comments and discussion",
@@ -1113,6 +1126,9 @@ def build_system_prompt(
     jenkins_data_available: bool = False,
 ) -> str:
     """Build a system prompt that scopes the AI to a specific analyzed job."""
+    ci_build_data_available = _resolve_ci_build_data_available(
+        ci_build_data_available, jenkins_data_available
+    )
     tools_section = _build_tools_section(custom_tools)
     unavailable_section = _build_unavailable_section(custom_tools)
 
@@ -1291,6 +1307,9 @@ async def init_chat_session(
     jenkins_data_available: bool = False,
 ) -> str | None:
     """Initialize a chat session via the sidecar. Returns session_id or None."""
+    ci_build_data_available = _resolve_ci_build_data_available(
+        ci_build_data_available, jenkins_data_available
+    )
     system_prompt = build_system_prompt(
         job_name=job_name,
         build_number=build_number,
@@ -1438,6 +1457,9 @@ async def chat_with_ai(
     jenkins_data_available: bool = False,
 ) -> tuple[bool, str, str | None]:
     """Send a chat message and get an AI response via the sidecar."""
+    ci_build_data_available = _resolve_ci_build_data_available(
+        ci_build_data_available, jenkins_data_available
+    )
 
     def _build_prompt() -> str:
         return build_system_prompt(

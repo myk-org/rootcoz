@@ -3,7 +3,6 @@
 import re
 from datetime import datetime
 from typing import Annotated, Literal, TypeVar
-from urllib.parse import urlparse
 from uuid import uuid4
 
 from pydantic import (
@@ -18,6 +17,13 @@ from pydantic import (
 )
 
 from rootcoz.repository import RESERVED_REPO_NAMES
+from rootcoz.prow_validation import (
+    normalize_gcs_bucket,
+    normalize_gcs_prefix,
+    normalize_prow_url,
+    validate_gcs_prefix_suffix,
+    validate_prow_job_name,
+)
 
 _SYSTEM_TAGS: set[str] = {"re-analyze"}
 
@@ -711,14 +717,7 @@ class UnifiedAnalyzeRequest(_JenkinsParamsMixin, _NameTagsMixin, BaseAnalysisReq
     def _validate_prow_job_name(cls, v: str | None) -> str | None:
         if v is None:
             return v
-        v = v.strip()
-        if not v:
-            raise ValueError("prow_job_name cannot be blank")
-        if not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9._-]*", v):
-            raise ValueError(
-                "prow_job_name must be alphanumeric with hyphens, dots, or underscores"
-            )
-        return v
+        return validate_prow_job_name(v)
 
     @field_validator("build_id", mode="before")
     @classmethod
@@ -735,53 +734,17 @@ class UnifiedAnalyzeRequest(_JenkinsParamsMixin, _NameTagsMixin, BaseAnalysisReq
     @field_validator("gcs_bucket", mode="before")
     @classmethod
     def _validate_gcs_bucket(cls, v: object) -> str:
-        if v is None:
-            return ""
-        if not isinstance(v, str):
-            raise ValueError("gcs_bucket must be a string")
-        v = v.strip()
-        if not v:
-            return v  # empty = use server default
-        if not re.fullmatch(r"[a-z0-9][a-z0-9._-]*", v):
-            raise ValueError(
-                "gcs_bucket must be lowercase alphanumeric with hyphens, dots, or underscores"
-            )
-        return v
+        return normalize_gcs_bucket(v)
 
     @field_validator("gcs_prefix", mode="before")
     @classmethod
     def _validate_gcs_prefix(cls, v: object) -> str:
-        if v is None:
-            return ""
-        if not isinstance(v, str):
-            raise ValueError("gcs_prefix must be a string")
-        v = v.strip().rstrip("/")
-        if not v:
-            return v
-        if ".." in v:
-            raise ValueError("gcs_prefix must not contain '..'")
-        if not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9/_.-]*", v):
-            raise ValueError("gcs_prefix contains invalid characters")
-        return v
+        return normalize_gcs_prefix(v)
 
     @field_validator("prow_url", mode="before")
     @classmethod
     def _validate_prow_url(cls, v: object) -> str:
-        if v is None:
-            return ""
-        if not isinstance(v, str):
-            raise ValueError("prow_url must be a string")
-        v = v.strip()
-        if not v:
-            return v  # empty = use server default
-        if not v.startswith("https://"):
-            raise ValueError("prow_url must start with https://")
-        parsed = urlparse(v)
-        if parsed.username or parsed.password:
-            raise ValueError("prow_url must not contain credentials")
-        if not parsed.hostname:
-            raise ValueError("prow_url must include a hostname")
-        return v
+        return normalize_prow_url(v)
 
     @model_validator(mode="after")
     def _validate_by_type(self) -> "UnifiedAnalyzeRequest":
@@ -811,12 +774,9 @@ class UnifiedAnalyzeRequest(_JenkinsParamsMixin, _NameTagsMixin, BaseAnalysisReq
             if not self.build_id:
                 raise ValueError("build_id is required for type=prow")
             if self.gcs_prefix:
-                expected_suffix = f"/{self.prow_job_name}/{self.build_id}"
-                if not self.gcs_prefix.endswith(expected_suffix):
-                    raise ValueError(
-                        f"gcs_prefix must end with {expected_suffix} "
-                        f"for prow_job_name={self.prow_job_name!r} and build_id={self.build_id!r}"
-                    )
+                validate_gcs_prefix_suffix(
+                    self.gcs_prefix, self.prow_job_name, self.build_id
+                )
         return self
 
 
