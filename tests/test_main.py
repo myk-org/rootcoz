@@ -711,6 +711,7 @@ class TestProwIdentityStamping:
         result = ProwSource.identity_fields("my-prow-job", "1234567890123456789")
         assert result == {
             "job_name": "my-prow-job",
+            "build_id": "1234567890123456789",
             "build_number": "1234567890123456789",
         }
 
@@ -718,7 +719,10 @@ class TestProwIdentityStamping:
         from rootcoz.sources.prow_source import ProwSource
 
         result = ProwSource.identity_fields("my-prow-job", "abc-not-numeric")
-        assert result == {"job_name": "my-prow-job"}
+        assert result == {
+            "job_name": "my-prow-job",
+            "build_id": "abc-not-numeric",
+        }
         assert "build_number" not in result
 
     def test_empty_build_id_excluded(self):
@@ -5429,6 +5433,46 @@ class TestReAnalyzeEndpoint:
         params = stored["result"]["request_params"]
         assert params["reanalyzed_from_job_id"] == "file-origin"
         assert params["reanalyzed_from_job_name"] == "File Job"
+
+    @pytest.mark.asyncio
+    async def test_re_analyze_prow_applies_force_override(self, test_client) -> None:
+        """Re-analyze accepts force/get_job_artifacts overrides for Prow jobs."""
+        result_data = {
+            "summary": "prow failure",
+            "job_name": "pull-test",
+            "display_name": "pull-test",
+            "build_id": "1234567890",
+            "request_params": encrypt_sensitive_fields(
+                {
+                    "analysis_type": "prow",
+                    "prow_job_name": "pull-test",
+                    "build_id": "1234567890",
+                    "prow_url": "https://prow.example.com",
+                    "gcs_bucket": "test-bucket",
+                    "force": False,
+                    "get_job_artifacts": False,
+                    "ai_provider": "claude",
+                    "ai_model": "opus",
+                }
+            ),
+        }
+        await self._create_origin_job(
+            "prow-origin",
+            "https://prow.example.com/view/gs/test-bucket/logs/pull-test/1234567890",
+            result_data,
+        )
+        with patch("rootcoz.main._process_non_jenkins_analysis") as mock_process:
+            response = test_client.post(
+                "/re-analyze/prow-origin",
+                json={"force": True, "get_job_artifacts": True},
+            )
+        assert response.status_code == 202
+        mock_process.assert_called_once()
+        call_kwargs = mock_process.call_args.kwargs
+        assert call_kwargs["body"].force is True
+        assert call_kwargs["body"].get_job_artifacts is True
+        assert call_kwargs["body"].prow_job_name == "pull-test"
+        assert call_kwargs["body"].build_id == "1234567890"
 
     @pytest.mark.asyncio
     async def test_results_endpoint_returns_origin_info(self, test_client) -> None:

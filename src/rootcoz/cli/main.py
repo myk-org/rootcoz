@@ -1150,7 +1150,10 @@ def analyze(
         0,
         "--build-number",
         "-b",
-        help="Build number to analyze (required for jenkins and prow sources).",
+        help=(
+            "Build number (Jenkins) or Prow build ID as numeric string "
+            "(required for jenkins and prow sources)."
+        ),
     ),
     xml_file: str = typer.Option(
         "",
@@ -1173,7 +1176,11 @@ def analyze(
     gcs_prefix: str = typer.Option(
         "",
         "--gcs-prefix",
-        help="GCS object prefix (e.g. pr-logs/pull/org_repo/pr/job/build). Overrides default logs/{job}/{build}.",
+        help=(
+            "GCS object prefix; must end with /{job_name}/{build_id} "
+            "(e.g. pr-logs/pull/org_repo/123/my-job/456). "
+            "Leave empty for auto-resolution."
+        ),
     ),
     name: _NameOpt = "",
     provider: _ProviderOpt = "",

@@ -16,10 +16,14 @@ docker run -d -p 8000:8000 -v ./data:/data \
   -e JENKINS_URL=https://jenkins.example.com \
   -e JENKINS_USER=your-username \
   -e JENKINS_PASSWORD=your-api-token \
+  -e PROW_URL=https://prow.example.com \
+  -e GCS_BUCKET=your-gcs-bucket \
   -e AI_PROVIDER=claude \
   -e AI_MODEL=your-model-name \
   ghcr.io/myk-org/rootcoz:latest
 ```
+
+For Prow-only deployments, set `PROW_URL` and `GCS_BUCKET` instead of (or in addition to) Jenkins credentials. Both can also be configured per-request or via Server Settings.
 
 ### Analysis Tuning
 

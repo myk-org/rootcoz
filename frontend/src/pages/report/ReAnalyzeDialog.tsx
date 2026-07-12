@@ -218,7 +218,11 @@ export function ReAnalyzeDialog({ open, onOpenChange, result, jobId, failureUuid
               </div>
               <div className="space-y-1.5">
                 <FieldLabel>Build ID</FieldLabel>
-                <Input value={result.build_number || ''} disabled className="opacity-70" />
+                <Input
+                  value={String(result.request_params?.build_id ?? result.build_id ?? result.build_number ?? '')}
+                  disabled
+                  className="opacity-70"
+                />
               </div>
             </div>
             <p className="text-[11px] text-text-tertiary">

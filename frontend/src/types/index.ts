@@ -156,6 +156,7 @@ export interface AnalysisResult {
   job_id: string
   job_name: string
   build_number: number
+  build_id?: string
   build_url?: string | null
   jenkins_url: string | null
   status: AnalysisStatus

@@ -2,7 +2,8 @@
 
 import re
 from datetime import datetime
-from typing import Annotated, Literal
+from typing import Annotated, Literal, TypeVar
+from urllib.parse import urlparse
 from uuid import uuid4
 
 from pydantic import (
@@ -19,6 +20,19 @@ from pydantic import (
 from rootcoz.repository import RESERVED_REPO_NAMES
 
 _SYSTEM_TAGS: set[str] = {"re-analyze"}
+
+_TUrl = TypeVar("_TUrl", bound=HttpUrl | str | None)
+
+
+def _apply_build_url_aliases(
+    build_url: _TUrl,
+    jenkins_url: _TUrl,
+) -> tuple[_TUrl, _TUrl]:
+    """Keep build_url and deprecated jenkins_url alias in sync."""
+    url = build_url or jenkins_url
+    if url:
+        return url, url
+    return build_url, jenkins_url
 
 
 def _uuid_str() -> str:
@@ -543,10 +557,9 @@ class ChildJobAnalysis(BaseModel):
 
     @model_validator(mode="after")
     def _sync_build_url_aliases(self) -> "ChildJobAnalysis":
-        url = self.build_url or self.jenkins_url
-        if url:
-            self.build_url = url
-            self.jenkins_url = url
+        self.build_url, self.jenkins_url = _apply_build_url_aliases(
+            self.build_url, self.jenkins_url
+        )
         return self
 
 
@@ -584,7 +597,11 @@ class AnalysisResult(BaseModel):
 
     job_id: str = Field(description="Unique identifier for the analysis job")
     job_name: str = Field(default="", description="CI job name")
-    build_number: int = Field(default=0, description="CI build number")
+    build_number: int = Field(default=0, description="CI build number (Jenkins)")
+    build_id: str = Field(
+        default="",
+        description="Prow build ID as numeric string (exceeds JS MAX_SAFE_INTEGER)",
+    )
     build_url: HttpUrl | None = Field(
         default=None,
         description="URL of the analyzed CI build",
@@ -614,10 +631,9 @@ class AnalysisResult(BaseModel):
 
     @model_validator(mode="after")
     def _sync_build_url_aliases(self) -> "AnalysisResult":
-        url = self.build_url or self.jenkins_url
-        if url:
-            self.build_url = url
-            self.jenkins_url = url
+        self.build_url, self.jenkins_url = _apply_build_url_aliases(
+            self.build_url, self.jenkins_url
+        )
         return self
 
 
@@ -667,15 +683,20 @@ class UnifiedAnalyzeRequest(_JenkinsParamsMixin, _NameTagsMixin, BaseAnalysisReq
     )
     build_id: str | None = Field(
         default=None,
-        description="Prow build ID (required for type=prow)",
+        description="Prow build ID, numeric string (required for type=prow)",
     )
     prow_url: str = Field(
         default="",
-        description="Prow Deck URL (empty = use server default from Settings)",
+        description=(
+            "Prow Deck URL (overrides PROW_URL env var / Server Settings default)"
+        ),
     )
     gcs_bucket: str = Field(
         default="",
-        description="GCS bucket name for Prow artifacts (empty = use server default from Settings)",
+        description=(
+            "GCS bucket for Prow artifacts (overrides GCS_BUCKET env var / "
+            "Server Settings default)"
+        ),
     )
     gcs_prefix: str = Field(
         default="",
@@ -755,6 +776,11 @@ class UnifiedAnalyzeRequest(_JenkinsParamsMixin, _NameTagsMixin, BaseAnalysisReq
             return v  # empty = use server default
         if not v.startswith("https://"):
             raise ValueError("prow_url must start with https://")
+        parsed = urlparse(v)
+        if parsed.username or parsed.password:
+            raise ValueError("prow_url must not contain credentials")
+        if not parsed.hostname:
+            raise ValueError("prow_url must include a hostname")
         return v
 
     @model_validator(mode="after")
@@ -792,6 +818,10 @@ class UnifiedAnalyzeRequest(_JenkinsParamsMixin, _NameTagsMixin, BaseAnalysisReq
                         f"for prow_job_name={self.prow_job_name!r} and build_id={self.build_id!r}"
                     )
         return self
+
+
+class ReAnalyzeRequest(_JenkinsParamsMixin, _NameTagsMixin, BaseAnalysisRequest):
+    """Override fields for ``POST /re-analyze/{job_id}``."""
 
 
 class FailureAnalysisResult(BaseModel):

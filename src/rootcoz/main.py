@@ -133,6 +133,7 @@ from rootcoz.models import (
     PreviewIssueRequest,
     PushSubscriptionRequest,
     ReAnalyzeFailureRequest,
+    ReAnalyzeRequest,
     ReportPortalPushResult,
     SetCanViewReportsRequest,
     SetReviewedRequest,
@@ -1120,6 +1121,24 @@ async def _preserve_request_params(job_id: str, result_data: dict) -> None:
         for key in ("request_params", "tags", "display_name"):
             if key in stored_result and key not in result_data:
                 result_data[key] = stored_result[key]
+
+
+async def _persist_resolved_gcs_prefix(job_id: str, gcs_prefix: str) -> None:
+    """Store auto-resolved GCS prefix in request_params for re-analyze/chat."""
+    if not gcs_prefix:
+        return
+
+    def _patch(data: dict) -> None:
+        params = data.get("request_params")
+        if not isinstance(params, dict):
+            return
+        decrypted = decrypt_sensitive_fields(dict(params))
+        if decrypted.get("gcs_prefix") == gcs_prefix:
+            return
+        decrypted["gcs_prefix"] = gcs_prefix
+        data["request_params"] = encrypt_sensitive_fields(decrypted)
+
+    await patch_result_json(job_id, _patch)
 
 
 async def _fail_resumed_waiting_job(job_id: str, result_data: dict, error: str) -> None:
@@ -3555,7 +3574,7 @@ async def _process_non_jenkins_analysis(
     job_id_var.set(job_id)
 
     # Only these keys may be overridden by CISourceResult.identity.
-    _ALLOWED_IDENTITY_KEYS = {"job_name", "build_number"}
+    _ALLOWED_IDENTITY_KEYS = {"job_name", "build_number", "build_id"}
 
     def _stamp_source_identity(data: dict) -> None:
         """Apply source identity overrides (e.g. Prow job_name/build_number)."""
@@ -3569,10 +3588,16 @@ async def _process_non_jenkins_analysis(
         if source_result is not None and source_result.warnings:
             data["source_warnings"] = source_result.warnings
 
+    def _stamp_source_metadata(data: dict) -> None:
+        """Attach Prow job metadata from the source plugin when available."""
+        if source_result is not None and source_result.source_metadata:
+            data["source_metadata"] = source_result.source_metadata
+
     def _stamp_result_metadata(data: dict) -> None:
-        """Apply source identity, warnings, and build URL to result dict."""
+        """Apply source identity, warnings, metadata, and build URL to result dict."""
         _stamp_source_identity(data)
         _stamp_source_warnings(data)
+        _stamp_source_metadata(data)
         if source_result is not None and source_result.build_url:
             stamp_build_url(data, source_result.build_url)
 
@@ -3627,12 +3652,25 @@ async def _process_non_jenkins_analysis(
         if source_result.build_url:
             await storage.update_build_url(job_id, source_result.build_url)
 
+        if body.type == "prow" and isinstance(source, ProwSource):
+            resolved_prefix = source.resolved_gcs_prefix
+            if resolved_prefix:
+                await _persist_resolved_gcs_prefix(job_id, resolved_prefix)
+
         if source_result.build_passed:
-            # No failures found (XML with no failures)
+            if body.type == "prow":
+                summary = (
+                    "Prow build passed; analysis skipped "
+                    "(use force to analyze successful builds)."
+                )
+            elif body.type == "file":
+                summary = "No test failures found in the provided input."
+            else:
+                summary = "No test failures found in the provided input."
             analysis_result = FailureAnalysisResult(
                 job_id=job_id,
                 status="completed",
-                summary="No test failures found in the provided input.",
+                summary=summary,
                 enriched_xml=body.raw_xml if body.type == "file" else None,
             )
             result_data = analysis_result.model_dump(mode="json")
@@ -4234,7 +4272,7 @@ async def analyze(
 async def re_analyze(
     job_id: str,
     request: Request,
-    body: BaseAnalysisRequest,
+    body: ReAnalyzeRequest,
     _: None = Depends(_bind_job_id),
 ) -> dict:
     """Re-analyze a previously analyzed job with the same (or overridden) settings.
@@ -4566,39 +4604,6 @@ async def get_failure_by_uuid(failure_uuid: str) -> dict:
     return result
 
 
-def _reconstruct_source(
-    analysis_type: str,
-    source_params: dict,
-    settings: Settings,
-    *,
-    child_job_name: str = "",
-    child_build_number: int = 0,
-) -> CISource | None:
-    """Reconstruct a CISource plugin from stored request params.
-
-    Used by per-failure reanalysis to recreate the original source so
-    it can refetch console output and artifacts.
-
-    Args:
-        analysis_type: Source type string (``"jenkins"``, ``"prow"``, etc.).
-        source_params: Decrypted ``request_params`` from the stored result.
-        settings: Server settings for connection info and artifact config.
-        child_job_name: For child job failures — overrides job name.
-        child_build_number: For child job failures — overrides build number.
-
-    Returns:
-        A ``CISource`` instance, or ``None`` if the source type has no
-        remote context to refetch (e.g. file, raw).
-    """
-    return source_chat_workspace.reconstruct_source(
-        analysis_type,
-        source_params,
-        settings,
-        child_job_name=child_job_name,
-        child_build_number=child_build_number,
-    )
-
-
 async def _reanalyze_failure_background(
     job_id: str,
     failure_uuid: str,
@@ -4737,7 +4742,7 @@ async def _reanalyze_failure_background(
         artifacts_context = ""
         if source_params and analysis_type and settings:
             try:
-                source = _reconstruct_source(
+                source = source_chat_workspace.reconstruct_source(
                     analysis_type,
                     source_params,
                     settings,

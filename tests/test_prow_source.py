@@ -1168,6 +1168,15 @@ class TestUnifiedAnalyzeRequestProw:
                 prow_url="http://prow.example.com",
             )
 
+    def test_prow_url_rejects_credentials(self):
+        with pytest.raises(ValueError, match="must not contain credentials"):
+            UnifiedAnalyzeRequest(
+                type="prow",
+                prow_job_name="my-job",
+                build_id="1",
+                prow_url="https://user:pass@prow.example.com",  # pragma: allowlist secret
+            )
+
     def test_prow_url_rejects_non_url(self):
         with pytest.raises(ValueError, match="https://"):
             UnifiedAnalyzeRequest(

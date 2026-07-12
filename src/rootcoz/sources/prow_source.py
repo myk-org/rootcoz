@@ -67,6 +67,8 @@ def prow_identity(job_name: str, build_id: str) -> dict:
     identity: dict = {}
     if job_name:
         identity["job_name"] = job_name
+    if build_id:
+        identity["build_id"] = build_id
     if build_id and build_id.isdigit():
         identity["build_number"] = build_id
     return identity
@@ -818,6 +820,64 @@ class ProwSource(CISource):
         )
         return default
 
+    @property
+    def resolved_gcs_prefix(self) -> str | None:
+        """Resolved GCS prefix after ``fetch()`` or prefix resolution."""
+        return self._resolved_gcs_prefix
+
+    async def _fetch_build_log(
+        self,
+        client: httpx.AsyncClient,
+        gcs_prefix: str,
+        warnings: list[str],
+    ) -> str | None:
+        """Download build-log.txt from GCS, recording access warnings."""
+        build_log_url = _gcs_url(self.gcs_bucket, gcs_prefix, "build-log.txt")
+        try:
+            return await _fetch_gcs_text(
+                client,
+                build_log_url,
+                label="build-log.txt",
+                max_size=_MAX_SIZE_BUILD_LOG,
+            )
+        except GCSAccessError as exc:
+            warnings.append(str(exc))
+            return None
+
+    async def _download_non_junit_artifacts(
+        self,
+        client: httpx.AsyncClient,
+        gcs_prefix: str,
+        warnings: list[str],
+    ) -> tuple[list[dict], Path | None]:
+        """List and download non-JUnit artifacts when enabled."""
+        if not self.get_job_artifacts:
+            return [], None
+        artifacts_prefix = f"{gcs_prefix}/artifacts/"
+        try:
+            all_objects = await _list_gcs_objects(
+                client,
+                self.gcs_bucket,
+                artifacts_prefix,
+                warnings=warnings,
+            )
+        except GCSAccessError as exc:
+            warnings.append(str(exc))
+            return [], None
+        non_junit = [obj for obj in all_objects if not _is_junit(obj)]
+        extract_path: Path | None = None
+        if non_junit:
+            extract_path = await _download_gcs_artifacts(
+                client,
+                self.gcs_bucket,
+                non_junit,
+                artifacts_prefix,
+                warnings=warnings,
+            )
+            if extract_path:
+                self._extract_path = extract_path
+        return non_junit, extract_path
+
     async def _resolve_gcs_prefix(self, client: httpx.AsyncClient) -> str:
         """Resolve the GCS prefix and fetch job metadata.
 
@@ -1011,14 +1071,10 @@ class ProwSource(CISource):
             self._resolved_gcs_prefix = gcs_prefix
 
             if not console_file.exists():
-                build_log_url = _gcs_url(self.gcs_bucket, gcs_prefix, "build-log.txt")
+                build_log = await self._fetch_build_log(
+                    client, gcs_prefix, self._resolution_warnings
+                )
                 try:
-                    build_log = await _fetch_gcs_text(
-                        client,
-                        build_log_url,
-                        label="build-log.txt",
-                        max_size=_MAX_SIZE_BUILD_LOG,
-                    )
                     content = (
                         build_log
                         if build_log
@@ -1030,8 +1086,10 @@ class ProwSource(CISource):
                         len(content),
                     )
                     wrote_any = True
-                except GCSAccessError as exc:
-                    logger.warning("Chat: failed to fetch Prow build log: %s", exc)
+                except OSError:
+                    logger.warning(
+                        "Chat: failed to write console-output.txt", exc_info=True
+                    )
 
             for workspace_file in await self.prepare_workspace(
                 repo_path=workspace, github_token=github_token
@@ -1048,30 +1106,14 @@ class ProwSource(CISource):
                         )
 
             if self.get_job_artifacts and not artifacts_link.exists():
-                artifacts_prefix = f"{gcs_prefix}/artifacts/"
                 try:
-                    all_objects = await _list_gcs_objects(
-                        client,
-                        self.gcs_bucket,
-                        artifacts_prefix,
-                        warnings=self._resolution_warnings,
+                    non_junit, extract_path = await self._download_non_junit_artifacts(
+                        client, gcs_prefix, self._resolution_warnings
                     )
-                    non_junit = [obj for obj in all_objects if not _is_junit(obj)]
-                    if non_junit:
-                        extract_path = await _download_gcs_artifacts(
-                            client,
-                            self.gcs_bucket,
-                            non_junit,
-                            artifacts_prefix,
-                            warnings=self._resolution_warnings,
-                        )
-                        if extract_path:
-                            self._extract_path = extract_path
-                            artifacts_link.symlink_to(extract_path)
-                            logger.info(
-                                "Chat: linked Prow artifacts into %s", workspace
-                            )
-                            wrote_any = True
+                    if non_junit and extract_path:
+                        artifacts_link.symlink_to(extract_path)
+                        logger.info("Chat: linked Prow artifacts into %s", workspace)
+                        wrote_any = True
                 except Exception:
                     logger.warning(
                         "Chat: failed to download Prow artifacts", exc_info=True
@@ -1237,17 +1279,7 @@ class ProwSource(CISource):
         # ------------------------------------------------------------------
         # 2. Fetch build-log.txt for console context
         # ------------------------------------------------------------------
-        build_log_url = _gcs_url(self.gcs_bucket, gcs_prefix, "build-log.txt")
-        try:
-            build_log = await _fetch_gcs_text(
-                client,
-                build_log_url,
-                label="build-log.txt",
-                max_size=_MAX_SIZE_BUILD_LOG,
-            )
-        except GCSAccessError as exc:
-            access_warnings.append(str(exc))
-            build_log = None
+        build_log = await self._fetch_build_log(client, gcs_prefix, access_warnings)
         console_context = extract_relevant_console_lines(build_log or "")
 
         # ------------------------------------------------------------------
@@ -1378,45 +1410,24 @@ class ProwSource(CISource):
             warnings.extend(self._resolution_warnings)
 
             # 1. Fetch build-log.txt
-            build_log_url = _gcs_url(self.gcs_bucket, gcs_prefix, "build-log.txt")
-            try:
-                build_log = await _fetch_gcs_text(
-                    client,
-                    build_log_url,
-                    label="build-log.txt",
-                    max_size=_MAX_SIZE_BUILD_LOG,
+            build_log = await self._fetch_build_log(client, gcs_prefix, warnings)
+            if build_log:
+                console_context = extract_relevant_console_lines(build_log)
+                logger.info(
+                    "Refetched Prow build log (%d chars, %d relevant)",
+                    len(build_log),
+                    len(console_context),
                 )
-                if build_log:
-                    console_context = extract_relevant_console_lines(build_log)
-                    logger.info(
-                        "Refetched Prow build log (%d chars, %d relevant)",
-                        len(build_log),
-                        len(console_context),
-                    )
-            except GCSAccessError as exc:
-                warnings.append(str(exc))
-                logger.warning("Failed to refetch Prow build log: %s", exc)
 
             # 2. Download non-JUnit artifacts
             if self.get_job_artifacts:
-                artifacts_prefix = f"{gcs_prefix}/artifacts/"
                 try:
-                    all_objects = await _list_gcs_objects(
-                        client, self.gcs_bucket, artifacts_prefix, warnings=warnings
+                    non_junit, extract_path = await self._download_non_junit_artifacts(
+                        client, gcs_prefix, warnings
                     )
-                    non_junit = [obj for obj in all_objects if not _is_junit(obj)]
-                    if non_junit:
-                        extract_path = await _download_gcs_artifacts(
-                            client,
-                            self.gcs_bucket,
-                            non_junit,
-                            artifacts_prefix,
-                            warnings=warnings,
-                        )
-                        if extract_path:
-                            self._extract_path = extract_path
-                            artifacts_context = str(extract_path)
-                            logger.info("Refetched Prow artifacts to %s", extract_path)
+                    if non_junit and extract_path:
+                        artifacts_context = str(extract_path)
+                        logger.info("Refetched Prow artifacts to %s", extract_path)
                 except Exception as exc:
                     warnings.append(f"Failed to refetch Prow artifacts: {exc}")
                     logger.warning("Failed to refetch Prow artifacts: %s", exc)
