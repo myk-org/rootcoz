@@ -826,9 +826,22 @@ class ProwSource(CISource):
         4. Fall back to ``logs/{job}/{build_id}`` with no metadata.
         """
         if self._custom_gcs_prefix:
-            # Explicit prefix — just try to fetch metadata there
-            await self._fetch_prowjob_metadata(client, self._custom_gcs_prefix)
-            return self._custom_gcs_prefix
+            prefix = self._custom_gcs_prefix.rstrip("/")
+            if ".." in prefix or any(c in prefix for c in "\n\r\x00"):
+                raise GCSAccessError(
+                    "gcs_prefix",
+                    400,
+                    prefix,
+                )
+            expected_suffix = f"/{self.job_name}/{self.build_id}"
+            if not prefix.endswith(expected_suffix):
+                raise GCSAccessError(
+                    "gcs_prefix",
+                    400,
+                    prefix,
+                )
+            await self._fetch_prowjob_metadata(client, prefix)
+            return prefix
 
         default = f"logs/{self.job_name}/{self.build_id}"
 

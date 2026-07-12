@@ -246,6 +246,7 @@ export function NewAnalysisPage() {
           ...(gcsBucket && { gcs_bucket: gcsBucket }),
           ...(gcsPrefix && { gcs_prefix: gcsPrefix }),
           force,
+          get_job_artifacts: getArtifacts,
           ...(tags.length > 0 && { tags }),
         }
         const data = await api.post<{ job_id: string }>('/analyze', body)

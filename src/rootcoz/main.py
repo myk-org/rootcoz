@@ -4312,6 +4312,7 @@ async def re_analyze(
                 "prow_url",
                 "gcs_bucket",
                 "gcs_prefix",
+                "get_job_artifacts",
             ):
                 if prow_field in decrypted_params:
                     unified_fields[prow_field] = decrypted_params[prow_field]

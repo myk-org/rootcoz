@@ -205,7 +205,7 @@ _IssuePromptOpt = Annotated[
     str,
     typer.Option(
         "--issue-prompt",
-        help="Custom issue generation prompt (overrides JOB_INSIGHT_ISSUE_PROMPT.md from test repo)",
+        help="Custom issue generation prompt (overrides .rootcoz/ROOTCOZ_ISSUE_PROMPT.md from test repo)",
     ),
 ]
 _PeersOpt = Annotated[
@@ -1161,12 +1161,14 @@ def analyze(
     prow_url: str = typer.Option(
         "",
         "--prow-url",
-        help="Prow Deck URL.",
+        envvar="PROW_URL",
+        help="Prow Deck URL (overrides server PROW_URL default).",
     ),
     gcs_bucket: str = typer.Option(
         "",
         "--gcs-bucket",
-        help="GCS bucket for Prow artifacts.",
+        envvar="GCS_BUCKET",
+        help="GCS bucket for Prow artifacts (overrides server GCS_BUCKET default).",
     ),
     gcs_prefix: str = typer.Option(
         "",
