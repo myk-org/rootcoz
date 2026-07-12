@@ -8,7 +8,7 @@ import os
 import re
 import sqlite3
 import time as _time
-import urllib.parse
+from urllib.parse import quote as _urlquote, urlparse, urlunparse
 import uuid
 from collections import defaultdict
 from collections.abc import Callable, Coroutine, Sequence
@@ -66,13 +66,17 @@ from rootcoz.comment_enrichment import (
 from rootcoz.config import (
     Settings,
     get_settings,
+    parse_additional_repos,
     parse_peer_configs,
     parse_repo_ref,
+    remove_from_db_settings_cache,
+    update_db_settings_cache,
 )
 from rootcoz.encryption import (
     SENSITIVE_KEYS,
     decrypt_sensitive_fields,
     encrypt_sensitive_fields,
+    strip_sensitive_from_response,
 )
 from rootcoz.engine.core import (
     ROOTCOZ_ISSUE_PROMPT_FILENAME,
@@ -188,6 +192,32 @@ _SENSITIVE_SETTINGS: frozenset[str] = frozenset(
         "reportportal_api_token",
         "admin_key",
         "vapid_private_key",
+    }
+)
+
+# Server-only settings that should not be exposed to API clients.
+# These are deployment/admin toggles, not analysis configuration.
+_SERVER_ONLY_SETTINGS: frozenset[str] = frozenset(
+    {
+        "default_user_role",
+        "debug",
+        "secure_cookies",
+        "trust_proxy_headers",
+        "require_approval",
+        "allowed_users",
+        "admin_wait_approve_msg",
+        "log_level",
+        "db_path",
+        "enable_github_issues",
+        "enable_reportportal",
+        "enable_auto_review",
+        "metadata_rules_file",
+        "public_base_url",
+        "rp_push_classifications",
+        "rp_push_rootcoz_url",
+        "rp_push_tracker_links",
+        "vapid_claim_email",
+        "vapid_public_key",
     }
 )
 
@@ -582,8 +612,6 @@ async def _bind_job_id(job_id: str) -> None:
 # Statuses that indicate the analysis is still in progress.
 IN_PROGRESS_STATUSES = ("pending", "running", "waiting")
 
-AI_PROVIDER = os.getenv("AI_PROVIDER", "").lower()
-AI_MODEL = os.getenv("AI_MODEL", "")
 
 _VALID_GROUP_BY = frozenset(
     {"provider", "model", "call_type", "day", "week", "month", "job"}
@@ -639,7 +667,7 @@ def build_jenkins_url(base_url: str, job_name: str, build_number: int) -> str:
     """
     # Handle folder-style job names by URL-encoding each segment and joining with '/job/'
     segments = job_name.split("/")
-    encoded_segments = [urllib.parse.quote(segment, safe="") for segment in segments]
+    encoded_segments = [_urlquote(segment, safe="") for segment in segments]
     job_path = "/job/".join(encoded_segments)
     return f"{base_url.rstrip('/')}/job/{job_path}/{build_number}/"
 
@@ -1223,7 +1251,16 @@ async def lifespan(_app: FastAPI):
     _install_job_id_filter()
     _setup_usage_recorder()
 
-    # Startup config validation
+    await init_db()
+    await storage.cleanup_expired_sessions()
+
+    # Load DB setting overrides BEFORE config validation so
+    # validate_startup_config() sees merged env + DB values.
+    from rootcoz.config import load_db_settings
+
+    await load_db_settings()
+
+    # Startup config validation (after DB settings loaded)
     config_result = validate_startup_config()
     for error in config_result.errors:
         logger.error("[startup] %s", error)
@@ -1232,24 +1269,9 @@ async def lifespan(_app: FastAPI):
     if config_result.errors:
         raise RuntimeError("Startup configuration validation failed")
 
-    await init_db()
-    await storage.cleanup_expired_sessions()
-    cleanup_task = asyncio.create_task(_periodic_session_cleanup())
-
-    # Load DB setting overrides into env before get_settings() is called
-    from rootcoz.config import load_db_settings_into_env
-
-    await load_db_settings_into_env()
-
-    # Track which env vars came from DB (for safe cleanup on DELETE)
     try:
-        db_settings = await storage.get_server_settings()
-        for db_key in db_settings:
-            _db_injected_env_vars.add(db_key.upper())
-    except Exception:
-        pass
+        cleanup_task = asyncio.create_task(_periodic_session_cleanup())
 
-    try:
         # Pre-populate cursor models in background (don't block startup)
         task = asyncio.create_task(_safe_preload_cursor_models())
         _background_tasks.add(task)
@@ -1846,15 +1868,34 @@ def _ai_not_configured_message(request: Request | None, what: str) -> str:
     )
 
 
+def _resolve_ai_provider_model(
+    ai_provider: str | None = None,
+    ai_model: str | None = None,
+    settings: Settings | None = None,
+) -> tuple[str, str]:
+    """Resolve AI provider and model without validation.
+
+    Resolution order (first non-empty wins):
+    1. Per-request value (ai_provider/ai_model arguments)
+    2. Merged settings (env var base + DB overrides via get_settings())
+
+    Returns:
+        Tuple of (resolved_provider, resolved_model). May be empty strings.
+    """
+    if settings is None:
+        settings = get_settings()
+    provider = (ai_provider or settings.ai_provider).lower()
+    model = ai_model or settings.ai_model
+    return provider, model
+
+
 def _resolve_ai_config_values(
     ai_provider: str | None, ai_model: str | None, *, request: Request | None = None
 ) -> tuple[str, str]:
     """Resolve and validate AI provider and model.
 
-    Resolution order (first non-empty wins):
-    1. Per-request value (ai_provider/ai_model arguments)
-    2. Settings DB value (admin server settings page)
-    3. Environment variable (AI_PROVIDER/AI_MODEL)
+    Uses ``_resolve_ai_provider_model`` for resolution, then validates
+    that provider and model are configured and the provider is supported.
 
     Args:
         ai_provider: Provider from request body (or None).
@@ -1866,9 +1907,7 @@ def _resolve_ai_config_values(
     Raises:
         HTTPException: If provider or model is not configured.
     """
-    settings = get_settings()
-    provider = (ai_provider or settings.ai_provider or AI_PROVIDER).lower()
-    model = ai_model or settings.ai_model or AI_MODEL
+    provider, model = _resolve_ai_provider_model(ai_provider, ai_model)
     if not provider:
         raise HTTPException(
             status_code=400,
@@ -3139,8 +3178,8 @@ async def _enqueue_analysis_job(
         "request_params": _build_request_params(
             body,
             merged,
-            body.ai_provider or AI_PROVIDER,
-            body.ai_model or AI_MODEL,
+            body.ai_provider or get_settings().ai_provider,
+            body.ai_model or get_settings().ai_model,
             peer_ai_configs_resolved=resolved_peers,
         ),
     }
@@ -4969,8 +5008,8 @@ async def preview_github_issue(
     )
 
     # AI config is best-effort for preview — fallback content is generated if not configured
-    ai_provider = body.ai_provider or AI_PROVIDER
-    ai_model = body.ai_model or AI_MODEL
+    ai_provider = body.ai_provider or get_settings().ai_provider
+    ai_model = body.ai_model or get_settings().ai_model
     base_url = _extract_base_url()
     effective_include_links = body.include_links and bool(base_url)
     report_url, jenkins_url = _build_report_context(
@@ -5048,8 +5087,8 @@ async def preview_jira_bug(
     )
 
     # AI config is best-effort for preview — fallback content is generated if not configured
-    ai_provider = body.ai_provider or AI_PROVIDER
-    ai_model = body.ai_model or AI_MODEL
+    ai_provider = body.ai_provider or get_settings().ai_provider
+    ai_model = body.ai_model or get_settings().ai_model
     base_url = _extract_base_url()
     effective_include_links = body.include_links and bool(base_url)
     report_url, jenkins_url = _build_report_context(
@@ -5099,9 +5138,15 @@ async def preview_jira_bug(
             # AI relevance filtering — only if AI is configured and candidates exist
             request_params = result_data.get("request_params") or {}
             ai_provider = (
-                body.ai_provider or request_params.get("ai_provider", "") or AI_PROVIDER
+                body.ai_provider
+                or request_params.get("ai_provider", "")
+                or get_settings().ai_provider
             )
-            ai_model = body.ai_model or request_params.get("ai_model", "") or AI_MODEL
+            ai_model = (
+                body.ai_model
+                or request_params.get("ai_model", "")
+                or get_settings().ai_model
+            )
             if candidates and ai_provider and ai_model:
                 try:
                     matches = await filter_matches_with_ai(
@@ -5178,8 +5223,8 @@ def _build_capabilities(settings: Settings) -> dict[str, bool | str]:
         "reportportal": settings.reportportal_enabled,
         "reportportal_project": settings.reportportal_project or "",
         "feedback_enabled": settings.feedback_enabled
-        and bool(AI_PROVIDER)
-        and bool(AI_MODEL),
+        and bool(settings.ai_provider)
+        and bool(settings.ai_model),
     }
 
 
@@ -5801,9 +5846,7 @@ async def _execute_rp_push(
         # Use child job's data for RP push
         result_data = child
         # Build anchor fragment for the child section (URL-encoded job name)
-        anchor = (
-            f"child-{urllib.parse.quote(child_job_name, safe='')}-{child_build_number}"
-        )
+        anchor = f"child-{_urlquote(child_job_name, safe='')}-{child_build_number}"
         report_url = f"{report_url}#{anchor}"
     elif child_build_number is not None:
         raise ValueError("child_build_number requires child_job_name to be set")
@@ -5860,7 +5903,7 @@ async def _execute_rp_push(
         # urlparse().port on malformed ports.
         try:
             rp_host = (
-                urllib.parse.urlparse(rp.url).netloc.rsplit("@", 1)[-1] or "unknown"
+                urlparse(rp.url).netloc.rsplit("@", 1)[-1] or "unknown"
                 if rp.url
                 else "unknown"
             )
@@ -7042,6 +7085,110 @@ async def get_capabilities(settings: Settings = _SETTINGS_DEP) -> dict:
     UI can decide if user-supplied tokens are required or optional.
     """
     return _build_capabilities(settings)
+
+
+def _strip_url_userinfo(url: str) -> str:
+    """Remove userinfo (username/password) from a URL for safe API responses."""
+    if not url:
+        return url
+    parsed = urlparse(url)
+    if parsed.username or parsed.password:
+        clean_netloc = parsed.netloc.rsplit("@", 1)[-1]
+        return urlunparse(parsed._replace(netloc=clean_netloc))
+    return url
+
+
+@app.get("/api/default-server-settings")
+async def get_default_server_settings(settings: Settings = _SETTINGS_DEP) -> dict:
+    """Return all non-sensitive server settings.
+
+    Authenticated (any role). Iterates all Settings model fields and
+    excludes sensitive fields (passwords, tokens, credentials, SecretStr).
+    Structured string fields (peer_ai_configs, additional_repos,
+    tests_repo_url) are parsed into their rich representations.
+    """
+    from pydantic import SecretStr as _SecretStr
+
+    result: dict = {}
+    for field_name in type(settings).model_fields:
+        if field_name in _SENSITIVE_SETTINGS or field_name in _SERVER_ONLY_SETTINGS:
+            continue
+        value = getattr(settings, field_name)
+        # Skip SecretStr fields (defensive — all should be in _SENSITIVE_SETTINGS)
+        if isinstance(value, _SecretStr):
+            continue
+        result[field_name] = value
+
+    # Resolve AI provider/model using the shared resolution helper
+    ai_provider, ai_model = _resolve_ai_provider_model(settings=settings)
+    result["ai_provider"] = ai_provider
+    result["ai_model"] = ai_model
+
+    # Parse peer_ai_configs string → list of dicts
+    if settings.peer_ai_configs:
+        try:
+            result["peer_ai_configs"] = parse_peer_configs(settings.peer_ai_configs)
+        except ValueError:
+            logger.warning(
+                "Failed to parse PEER_AI_CONFIGS for default-server-settings"
+            )
+            result["peer_ai_configs"] = []
+    else:
+        result["peer_ai_configs"] = []
+
+    # Parse additional_repos string → list of dicts (tokens + userinfo stripped)
+    if settings.additional_repos:
+        try:
+            parsed = parse_additional_repos(settings.additional_repos)
+            result["additional_repos"] = [
+                {
+                    **{k: v for k, v in repo.items() if k != "token"},
+                    "url": _strip_url_userinfo(repo["url"]),
+                }
+                for repo in parsed
+            ]
+        except ValueError:
+            logger.warning(
+                "Failed to parse ADDITIONAL_REPOS for default-server-settings"
+            )
+            result["additional_repos"] = []
+    else:
+        result["additional_repos"] = []
+
+    # Split tests_repo_url into URL and ref, strip userinfo
+    tests_url, tests_ref = parse_repo_ref(settings.tests_repo_url or "")
+    result["tests_repo_url"] = _strip_url_userinfo(tests_url)
+    result["tests_repo_ref"] = tests_ref
+
+    # Coerce None → "" only for optional string fields; keep None for booleans/others
+    _OPTIONAL_STRING_FIELDS = frozenset(
+        {
+            "tests_repo_url",
+            "jira_url",
+            "jira_project_key",
+            "jenkins_url",
+            "reportportal_url",
+            "reportportal_project",
+        }
+    )
+    for key, value in result.items():
+        if value is None and key in _OPTIONAL_STRING_FIELDS:
+            result[key] = ""
+
+    # Add computed jira_enabled for UI display (safe: no secrets)
+    result["jira_enabled"] = settings.jira_enabled
+
+    # Strip userinfo from all URL-like values
+    for key, value in result.items():
+        if isinstance(value, str) and "://" in value:
+            result[key] = _strip_url_userinfo(value)
+
+    # Belt-and-suspenders: pop any sensitive keys that might have slipped through
+    for key in SENSITIVE_KEYS:
+        result.pop(key, None)
+    # strip_sensitive_from_response is a no-op for this dict shape (no request_params key),
+    # but required by compliance rule 805017 for all API response paths.
+    return strip_sensitive_from_response(result)
 
 
 class JiraProjectsRequest(BaseModel):
@@ -8323,9 +8470,6 @@ async def rotate_key_endpoint(request: Request, username: str) -> JSONResponse:
 # --- SSE for settings changes ---
 _settings_listeners: set[asyncio.Event] = set()
 
-# Track env vars injected from DB overrides (vs. actual deployment env vars)
-_db_injected_env_vars: set[str] = set()
-
 
 def _broadcast_settings_change() -> None:
     """Signal all SSE listeners that settings changed."""
@@ -8372,6 +8516,18 @@ async def get_admin_settings(
             item["value"] = db_value
             item["updated_by"] = override.get("updated_by", "")
             item["updated_at"] = override.get("updated_at", "")
+            # Flag if an OS env var also exists (from configmap/container),
+            # distinct from DB-injected env vars loaded at startup.
+            # Since DB values are NOT written to os.environ, checking
+            # os.environ directly tells us if an OS env var also exists.
+            env_val = os.environ.get(item["env_var"])
+            if env_val is not None:
+                item["has_env_var"] = True
+                if not item["sensitive"]:
+                    # Strip userinfo from URL-like values for safety
+                    item["env_var_value"] = (
+                        _strip_url_userinfo(env_val) if "://" in env_val else env_val
+                    )
         elif os.environ.get(item["env_var"]) is not None:
             item["source"] = "env"
         else:
@@ -8454,14 +8610,13 @@ async def update_admin_settings(request: Request) -> JSONResponse:
 
     # Save each setting to DB and apply to running process
     for key, value in settings_updates.items():
-        # Handle null values — treat as empty string (reset-like)
-        if value is None:
-            str_value = ""
-        else:
-            str_value = str(value)
-
-        # Store in DB (encrypt sensitive values)
-        if key in _SENSITIVE_SETTINGS and str_value:
+        str_value = str(value) if value is not None else ""
+        if not str_value:
+            # Empty/null = reset: delete from DB so cache and DB stay in sync
+            await storage.delete_server_setting(key, deleted_by=username)
+            continue
+        # Non-empty: upsert to DB (encrypt sensitive values)
+        if key in _SENSITIVE_SETTINGS:
             from rootcoz.encryption import encrypt_value
 
             db_value = encrypt_value(str_value)
@@ -8469,17 +8624,19 @@ async def update_admin_settings(request: Request) -> JSONResponse:
             db_value = str_value
         await storage.set_server_setting(key, db_value, updated_by=username)
 
-        # Apply plain text value to env vars for runtime effect
-        env_key = key.upper()
-        if str_value == "" or value is None:
-            os.environ.pop(env_key, None)
-            _db_injected_env_vars.discard(env_key)
-        else:
-            os.environ[env_key] = str_value
-            _db_injected_env_vars.add(env_key)
-
-    # Clear cached settings so next get_settings() picks up env changes
-    get_settings.cache_clear()
+    # Update in-memory cache so get_settings() picks up changes.
+    # Empty/null values are removed from cache (fall back to env/default),
+    # non-empty values are stored for merge.
+    cache_updates = {
+        k: str(v) for k, v in settings_updates.items() if v is not None and str(v) != ""
+    }
+    cache_removals = [
+        k for k, v in settings_updates.items() if v is None or str(v) == ""
+    ]
+    if cache_removals:
+        remove_from_db_settings_cache(cache_removals)
+    if cache_updates:
+        update_db_settings_cache(cache_updates)
 
     _broadcast_settings_change()
 
@@ -8529,12 +8686,8 @@ async def reset_admin_setting(request: Request, key: str) -> JSONResponse:
             status_code=404, detail=f"Setting '{key}' has no DB override"
         )
 
-    # Only remove the env var if it was injected by a DB override (not set by deployment)
-    env_key = key.upper()
-    if env_key in _db_injected_env_vars:
-        os.environ.pop(env_key, None)
-        _db_injected_env_vars.discard(env_key)
-    get_settings.cache_clear()
+    # Remove from in-memory cache so get_settings() falls back to env/default
+    remove_from_db_settings_cache([key])
 
     _broadcast_settings_change()
 
@@ -9114,8 +9267,8 @@ async def analyze_comment_intent(
     _check_allow_list(request)
     _require_reviewer(request)
 
-    ai_provider = body.ai_provider or AI_PROVIDER
-    ai_model = body.ai_model or AI_MODEL
+    ai_provider = body.ai_provider or get_settings().ai_provider
+    ai_model = body.ai_model or get_settings().ai_model
     # Fall back to the job's stored AI config as an atomic pair
     # Only use stored config when request doesn't set either field
     if not ai_provider and not ai_model and body.job_id:
@@ -9393,12 +9546,17 @@ async def init_chat(job_id: str, request: Request) -> dict:
         logger.warning("Failed to decrypt request_params for chat init", exc_info=True)
 
     # Resolve AI provider/model
+    _settings = get_settings()
     ai_provider = (
         result_data.get("ai_provider", "")
         or params.get("ai_provider", "")
-        or AI_PROVIDER
+        or _settings.ai_provider
     )
-    ai_model = result_data.get("ai_model", "") or params.get("ai_model", "") or AI_MODEL
+    ai_model = (
+        result_data.get("ai_model", "")
+        or params.get("ai_model", "")
+        or _settings.ai_model
+    )
 
     (
         jira_url,
@@ -9738,17 +9896,18 @@ async def _process_chat_message(
             result_data = stored["result"]
             params = result_data.get("request_params", {})
 
+            _chat_settings = get_settings()
             ai_provider = (
                 ai_provider_override
                 or result_data.get("ai_provider", "")
                 or params.get("ai_provider", "")
-                or AI_PROVIDER
+                or _chat_settings.ai_provider
             )
             ai_model = (
                 ai_model_override
                 or result_data.get("ai_model", "")
                 or params.get("ai_model", "")
-                or AI_MODEL
+                or _chat_settings.ai_model
             )
 
             if not ai_provider:
@@ -10100,8 +10259,9 @@ async def init_admin_chat(request: Request) -> dict:
     )
 
     username = getattr(request.state, "username", "")
-    ai_provider = AI_PROVIDER
-    ai_model = AI_MODEL
+    _admin_settings = get_settings()
+    ai_provider = _admin_settings.ai_provider
+    ai_model = _admin_settings.ai_model
 
     workspace = ensure_chat_workspace(ADMIN_CHAT_JOB_ID, username=username)
 
@@ -10286,8 +10446,8 @@ async def _process_admin_chat_message(
 
     async with lock:
         try:
-            ai_provider = ai_provider_override or AI_PROVIDER
-            ai_model = ai_model_override or AI_MODEL
+            ai_provider = ai_provider_override or get_settings().ai_provider
+            ai_model = ai_model_override or get_settings().ai_model
 
             if not ai_provider:
                 raise RuntimeError("No AI provider configured")
@@ -10600,5 +10760,5 @@ async def serve_frontend_catchall(request: Request, path: str) -> HTMLResponse:
 
 def run() -> None:
     """Entry point for the CLI."""
-    reload = os.getenv("DEBUG", "").lower() == "true"
+    reload = os.getenv("DEV_MODE", os.getenv("DEBUG", "")).lower() == "true"
     uvicorn.run("rootcoz.main:app", host="0.0.0.0", port=APP_PORT, reload=reload)

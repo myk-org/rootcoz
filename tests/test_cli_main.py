@@ -4571,3 +4571,68 @@ class TestReportsCommands:
         result = runner.invoke(app, ["reports", "totals"])
         assert result.exit_code == 1
         assert "500" in result.output or "error" in result.output.lower()
+
+
+class TestConfigDefaults:
+    """Tests for 'rootcoz config defaults' command."""
+
+    _DEFAULTS_RESPONSE: ClassVar[dict] = {
+        "ai_provider": "gemini",
+        "ai_model": "gemini-2.5-pro",
+        "ai_call_timeout": 10,
+        "tests_repo_url": "https://github.com/org/tests",
+        "tests_repo_ref": "main",
+        "additional_repos": [
+            {"name": "helpers", "url": "https://github.com/org/helpers", "ref": ""}
+        ],
+        "peer_ai_configs": [
+            {"ai_provider": "claude", "ai_model": "claude-sonnet-4-20250514"}
+        ],
+        "peer_analysis_max_rounds": 3,
+        "enable_jira": True,
+        "jira_url": "https://jira.example.com",
+        "jira_project_key": "PROJ",
+        "force_analysis": False,
+        "get_job_artifacts": True,
+        "jenkins_artifacts_max_size_mb": 500,
+        "wait_for_completion": True,
+        "poll_interval_minutes": 2,
+        "max_wait_minutes": 0,
+        "jenkins_url": "",
+        "jenkins_ssl_verify": True,
+    }
+
+    def test_config_defaults_human(self, mock_client):
+        mock_client.get_default_server_settings.return_value = self._DEFAULTS_RESPONSE
+        result = runner.invoke(app, ["config", "defaults"])
+        assert result.exit_code == 0
+        assert "Server Analysis Defaults:" in result.output
+        assert "ai_provider: gemini" in result.output
+        assert "ai_model: gemini-2.5-pro" in result.output
+        assert "jira_url: https://jira.example.com" in result.output
+
+    def test_config_defaults_json(self, mock_client):
+        mock_client.get_default_server_settings.return_value = self._DEFAULTS_RESPONSE
+        result = runner.invoke(app, ["config", "defaults", "--json"])
+        assert result.exit_code == 0
+        parsed = json.loads(result.output)
+        assert parsed["ai_provider"] == "gemini"
+        assert parsed["peer_ai_configs"] == [
+            {"ai_provider": "claude", "ai_model": "claude-sonnet-4-20250514"}
+        ]
+
+    def test_config_defaults_with_server_flag(self, mock_client):
+        mock_client.get_default_server_settings.return_value = self._DEFAULTS_RESPONSE
+        result = runner.invoke(
+            app, ["--server", "https://example.com", "config", "defaults", "--json"]
+        )
+        assert result.exit_code == 0
+        parsed = json.loads(result.output)
+        assert parsed["ai_provider"] == "gemini"
+
+    def test_config_defaults_error(self, mock_client):
+        mock_client.get_default_server_settings.side_effect = RootCozError(
+            status_code=401, detail="Authentication required"
+        )
+        result = runner.invoke(app, ["config", "defaults"])
+        assert result.exit_code == 1

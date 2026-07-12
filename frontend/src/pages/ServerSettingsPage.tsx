@@ -53,6 +53,8 @@ interface ServerSetting {
   source: 'default' | 'env' | 'db'
   updated_by: string
   updated_at: string
+  has_env_var?: boolean
+  env_var_value?: string
 }
 
 interface CategoryGroup {
@@ -295,6 +297,27 @@ function SourceBadge({ source }: { source: 'default' | 'env' | 'db' }) {
     <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium ${styles[source]}`}>
       {source}
     </span>
+  )
+}
+
+function EnvVarWarning({ setting }: { setting: ServerSetting }) {
+  if (setting.source !== 'db' || !setting.has_env_var) return null
+  const valuesMatch = setting.env_var_value !== undefined && setting.value === setting.env_var_value
+  return (
+    <Tooltip>
+      <TooltipTrigger>
+        <AlertTriangle className="h-3.5 w-3.5 text-signal-amber" />
+      </TooltipTrigger>
+      <TooltipContent side="top" className="max-w-xs">
+        {valuesMatch ? (
+          <p className="text-xs">Environment variable <code className="font-mono">{setting.env_var}={setting.env_var_value}</code> is set to the same value. This DB override is redundant — consider resetting it to use the environment variable directly.</p>
+        ) : setting.env_var_value === undefined ? (
+          <p className="text-xs">Environment variable <code className="font-mono">{setting.env_var}</code> is also set (value hidden). The server setting (DB) takes priority, but consider removing the environment variable to avoid confusion.</p>
+        ) : (
+          <p className="text-xs">Environment variable <code className="font-mono">{setting.env_var}={setting.env_var_value}</code> is also set. The server setting (DB) takes priority, but consider removing the environment variable to avoid confusion.</p>
+        )}
+      </TooltipContent>
+    </Tooltip>
   )
 }
 
@@ -708,6 +731,7 @@ export function ServerSettingsPage() {
                                 <div className="flex items-center gap-2">
                                   <span className="font-mono text-xs font-semibold text-text-primary">{setting.env_var}</span>
                                   <SourceBadge source={setting.source} />
+                                  <EnvVarWarning setting={setting} />
                                 </div>
                                 {peerEditing ? (
                                   <div className="space-y-3">
@@ -781,6 +805,7 @@ export function ServerSettingsPage() {
                                 <div className="flex items-center gap-2">
                                   <span className="font-mono text-xs font-semibold text-text-primary">{setting.env_var}</span>
                                   <SourceBadge source={setting.source} />
+                                  <EnvVarWarning setting={setting} />
                                 </div>
                                 <p className="text-xs text-text-tertiary">
                                   Managed via Peer AI Configs above. Current: <span className="font-mono font-medium text-text-primary">{setting.value || '3'}</span>
@@ -796,6 +821,7 @@ export function ServerSettingsPage() {
                                 <div className="flex items-center gap-2">
                                   <span className="font-mono text-xs font-semibold text-text-primary">{setting.env_var}</span>
                                   <SourceBadge source={setting.source} />
+                                  <EnvVarWarning setting={setting} />
                                 </div>
                                 {reposEditing ? (
                                   <div className="space-y-3">
@@ -936,6 +962,7 @@ function AiSettingRow({
       <div className="flex items-center gap-2">
         <span className="font-mono text-xs font-semibold text-text-primary">{setting.env_var}</span>
         <SourceBadge source={setting.source} />
+        <EnvVarWarning setting={setting} />
       </div>
       {editing ? (
         <div className="space-y-3">
@@ -1049,6 +1076,7 @@ function SettingRow({
         <div className="flex items-center gap-2">
           <span className="font-mono text-xs font-semibold text-text-primary">{setting.env_var}</span>
           <SourceBadge source={setting.source} />
+          <EnvVarWarning setting={setting} />
           {setting.restart_required && <RestartBadge />}
         </div>
         <Input
@@ -1104,6 +1132,7 @@ function SettingRow({
           <div className="flex items-center gap-2 flex-wrap">
             <span className="font-mono text-xs font-semibold text-text-primary">{setting.env_var}</span>
             <SourceBadge source={setting.source} />
+            <EnvVarWarning setting={setting} />
             {setting.restart_required && <RestartBadge />}
             {setting.sensitive && (
               <button

@@ -231,8 +231,8 @@ async def check_ai_provider() -> dict[str, str]:
     from rootcoz.config import get_settings
 
     settings = get_settings()
-    provider = settings.ai_provider or os.getenv("AI_PROVIDER", "")
-    model = settings.ai_model or os.getenv("AI_MODEL", "")
+    provider = settings.ai_provider
+    model = settings.ai_model
     config_issues = []
     error_issues = []
 
@@ -382,8 +382,8 @@ def validate_startup_config() -> StartupConfigResult:
     from rootcoz.config import get_settings
 
     settings = get_settings()
-    provider = settings.ai_provider or os.getenv("AI_PROVIDER", "")
-    model = settings.ai_model or os.getenv("AI_MODEL", "")
+    provider = settings.ai_provider
+    model = settings.ai_model
     if not provider:
         findings.append(
             _ConfigFinding(
@@ -450,22 +450,22 @@ def validate_startup_config() -> StartupConfigResult:
             )
         )
 
-    # Optional integration URLs
-    if not os.getenv("JENKINS_URL", ""):
+    # Optional integration URLs (use settings — merged env + DB)
+    if not settings.jenkins_url:
         findings.append(
             _ConfigFinding(
                 "warning",
                 "JENKINS_URL is not set. Jenkins-based analysis will require jenkins_url in the request body.",
             )
         )
-    if not os.getenv("JIRA_URL", ""):
+    if not settings.jira_url:
         findings.append(
             _ConfigFinding(
                 "warning",
                 "JIRA_URL is not set. Jira enrichment will be disabled unless provided per-request.",
             )
         )
-    if not os.getenv("REPORTPORTAL_URL", ""):
+    if not settings.reportportal_url:
         findings.append(
             _ConfigFinding(
                 "warning",
@@ -474,7 +474,7 @@ def validate_startup_config() -> StartupConfigResult:
         )
 
     # Peer AI configs (optional)
-    if not os.getenv("PEER_AI_CONFIGS", ""):
+    if not settings.peer_ai_configs:
         findings.append(
             _ConfigFinding(
                 "warning",
@@ -483,7 +483,7 @@ def validate_startup_config() -> StartupConfigResult:
         )
 
     # Admin key (optional but recommended)
-    if not os.getenv("ADMIN_KEY", ""):
+    if not settings.admin_key:
         findings.append(
             _ConfigFinding(
                 "warning",

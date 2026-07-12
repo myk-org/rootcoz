@@ -945,6 +945,10 @@ class RootCozClient:
             params["provider"] = provider
         return self._request("GET", "/api/ai-models", params=params)
 
+    def get_default_server_settings(self) -> dict:
+        """Get non-sensitive server settings. GET /api/default-server-settings"""
+        return self._request("GET", "/api/default-server-settings")
+
     # -- Classification Override ----------------------------------------------
 
     def override_classification(
