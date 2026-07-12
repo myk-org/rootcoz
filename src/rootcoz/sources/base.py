@@ -139,6 +139,27 @@ class CISource(ABC):
         """
         return CISourceResult(failures=[])
 
+    async def populate_chat_workspace(
+        self,
+        workspace: Path,
+        *,
+        github_token: str = "",
+    ) -> bool:
+        """Write CI build context files into a chat workspace.
+
+        Called when a user opens chat for an analyzed job so the AI can
+        read console output, artifacts, and source-specific context files.
+        Sources without remote data return ``False``.
+
+        Args:
+            workspace: Per-user chat workspace directory.
+            github_token: Optional GitHub token for PR diffs and repo access.
+
+        Returns:
+            True if any files were written to the workspace.
+        """
+        return False
+
     @classmethod
     def from_stored_params(
         cls,

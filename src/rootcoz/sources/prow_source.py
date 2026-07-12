@@ -984,7 +984,12 @@ class ProwSource(CISource):
         """Identity fields to stamp before ``fetch()`` completes."""
         return cls.identity_fields(job_name, build_id)
 
-    async def populate_chat_workspace(self, workspace: Path) -> bool:
+    async def populate_chat_workspace(
+        self,
+        workspace: Path,
+        *,
+        github_token: str = "",
+    ) -> bool:
         """Write Prow build log, context files, and artifacts for chat."""
         wrote_any = False
         console_file = workspace / "console-output.txt"
@@ -1020,7 +1025,9 @@ class ProwSource(CISource):
                 except GCSAccessError as exc:
                     logger.warning("Chat: failed to fetch Prow build log: %s", exc)
 
-            for workspace_file in await self.prepare_workspace(repo_path=workspace):
+            for workspace_file in await self.prepare_workspace(
+                repo_path=workspace, github_token=github_token
+            ):
                 target = workspace / workspace_file.filename
                 if not target.exists():
                     try:
@@ -1407,6 +1414,8 @@ class ProwSource(CISource):
         Prow has no child-job concept.
         """
         gcs_bucket = params.get("gcs_bucket", "")
+        if not gcs_bucket and settings is not None:
+            gcs_bucket = getattr(settings, "gcs_bucket", "") or ""
         prow_job_name = params.get("prow_job_name", "")
         build_id = params.get("build_id", "")
         prow_url = params.get("prow_url", "")
@@ -1419,9 +1428,12 @@ class ProwSource(CISource):
             )
             return None
 
-        get_job_artifacts = True
-        if settings is not None:
+        if "get_job_artifacts" in params:
+            get_job_artifacts = bool(params["get_job_artifacts"])
+        elif settings is not None:
             get_job_artifacts = getattr(settings, "get_job_artifacts", True)
+        else:
+            get_job_artifacts = True
 
         return cls(
             job_name=prow_job_name,

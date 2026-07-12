@@ -1346,6 +1346,68 @@ class TestProwSourceProperties:
         assert source.get_job_artifacts is False
 
 
+class TestFromStoredParams:
+    """Tests for ProwSource.from_stored_params reconstruction."""
+
+    def test_reads_stored_get_job_artifacts_false(self):
+        params = {
+            "gcs_bucket": _TEST_GCS_BUCKET,
+            "prow_job_name": "test-job",
+            "build_id": "123",
+            "prow_url": _TEST_PROW_URL,
+            "get_job_artifacts": False,
+        }
+        source = ProwSource.from_stored_params(params)
+        assert source is not None
+        assert source.get_job_artifacts is False
+
+    def test_settings_fallback_when_not_in_params(self):
+        from types import SimpleNamespace
+
+        params = {
+            "gcs_bucket": _TEST_GCS_BUCKET,
+            "prow_job_name": "test-job",
+            "build_id": "123",
+            "prow_url": _TEST_PROW_URL,
+        }
+        settings = SimpleNamespace(get_job_artifacts=False)
+        source = ProwSource.from_stored_params(params, settings)
+        assert source is not None
+        assert source.get_job_artifacts is False
+
+    def test_stored_get_job_artifacts_overrides_settings(self):
+        from types import SimpleNamespace
+
+        params = {
+            "gcs_bucket": _TEST_GCS_BUCKET,
+            "prow_job_name": "test-job",
+            "build_id": "123",
+            "prow_url": _TEST_PROW_URL,
+            "get_job_artifacts": True,
+        }
+        settings = SimpleNamespace(get_job_artifacts=False)
+        source = ProwSource.from_stored_params(params, settings)
+        assert source is not None
+        assert source.get_job_artifacts is True
+
+    def test_gcs_bucket_settings_fallback(self):
+        from types import SimpleNamespace
+
+        params = {
+            "prow_job_name": "test-job",
+            "build_id": "123",
+            "prow_url": _TEST_PROW_URL,
+        }
+        settings = SimpleNamespace(
+            gcs_bucket=_TEST_GCS_BUCKET,
+            prow_url=_TEST_PROW_URL,
+            get_job_artifacts=True,
+        )
+        source = ProwSource.from_stored_params(params, settings)
+        assert source is not None
+        assert source.gcs_bucket == _TEST_GCS_BUCKET
+
+
 class TestParseProwjobJsonDefensive:
     """Tests for defensive parsing of malformed prowjob.json."""
 

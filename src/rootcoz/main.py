@@ -168,10 +168,10 @@ from rootcoz.rootcoz_repo_settings import (
     resolve_tests_repo_url,
     tests_repo_available,
 )
+from rootcoz.engine.chat import setup_jenkins_workspace
 from rootcoz.sources import (
     CISource,
     FileSource,
-    JenkinsSource,
     ProwSource,
     RawSource,
     append_repo_context,
@@ -180,6 +180,7 @@ from rootcoz.sources import (
     run_console_only_analysis,
     setup_analysis_workspace,
 )
+from rootcoz.sources import chat_workspace as source_chat_workspace
 from rootcoz.sources.jenkins_source import analyze_job, wait_for_jenkins_completion
 from rootcoz.storage import (
     AI_SYSTEM_USERNAME,
@@ -207,6 +208,8 @@ from rootcoz.vapid import get_vapid_config
 from rootcoz.xml_enrichment import (
     build_enriched_xml,
 )
+
+source_chat_workspace.register_jenkins_chat_setup(setup_jenkins_workspace)
 
 # Module-level Depends singletons (B008: avoid function calls in defaults)
 _SETTINGS_DEP = Depends(get_settings)
@@ -4564,12 +4567,6 @@ async def get_failure_by_uuid(failure_uuid: str) -> dict:
     return result
 
 
-_SOURCE_REGISTRY: dict[str, type[CISource]] = {
-    "prow": ProwSource,
-    "jenkins": JenkinsSource,
-}
-
-
 def _reconstruct_source(
     analysis_type: str,
     source_params: dict,
@@ -4594,11 +4591,8 @@ def _reconstruct_source(
         A ``CISource`` instance, or ``None`` if the source type has no
         remote context to refetch (e.g. file, raw).
     """
-    source_cls = _SOURCE_REGISTRY.get(analysis_type)
-    if source_cls is None:
-        return None
-
-    return source_cls.from_stored_params(
+    return source_chat_workspace.reconstruct_source(
+        analysis_type,
         source_params,
         settings,
         child_job_name=child_job_name,
@@ -10836,11 +10830,11 @@ async def init_chat(job_id: str, request: Request) -> dict:
     from rootcoz.engine.chat import (
         ensure_chat_workspace,
         clone_chat_repos,
-        setup_ci_build_workspace,
         build_chat_custom_tools,
         build_welcome_message,
         init_chat_session,
     )
+    from rootcoz.sources.chat_workspace import setup_ci_build_workspace
 
     stored = await get_result(job_id, strip_sensitive=False)
     if not stored or not stored.get("result"):
@@ -10896,7 +10890,10 @@ async def init_chat(job_id: str, request: Request) -> dict:
 
         # Populate workspace with CI build data: console output, metadata, artifacts
         ci_build_data_available = await setup_ci_build_workspace(
-            workspace, _build_ci_workspace_params(decrypted_params, result_data)
+            workspace,
+            _build_ci_workspace_params(decrypted_params, result_data),
+            github_token=github_token,
+            settings=_settings,
         )
 
         existing = await storage.get_chat_messages(job_id, limit=1, username=username)
@@ -11249,9 +11246,9 @@ async def _process_chat_message(
         chat_with_ai,
         ensure_chat_workspace,
         clone_chat_repos,
-        setup_ci_build_workspace,
         build_chat_custom_tools,
     )
+    from rootcoz.sources.chat_workspace import setup_ci_build_workspace
 
     lock = _get_chat_lock(f"{job_id}:{username}")
     auth_header = ""
@@ -11329,13 +11326,15 @@ async def _process_chat_message(
                 workspace, decrypted_params, user_repo_token=github_token
             )
 
-            # Populate workspace with Jenkins data: console output, build info, artifacts
+            settings = get_settings()
+
+            # Populate workspace with CI build data: console output, metadata, artifacts
             ci_build_data_available = await setup_ci_build_workspace(
                 workspace,
                 _build_ci_workspace_params(decrypted_params, result_data),
+                github_token=github_token,
+                settings=settings,
             )
-
-            settings = get_settings()
 
             server_url = _build_internal_server_url()
             auth_header = await _create_ai_auth_header(username)
