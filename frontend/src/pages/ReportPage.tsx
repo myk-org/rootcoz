@@ -3,7 +3,7 @@ import { useParams, useNavigate, useLocation, Link } from 'react-router-dom'
 import { useSSE } from '@/lib/SSEProvider'
 import { api } from '@/lib/api'
 import { useClipboard } from '@/lib/useClipboard'
-import { parseApiTimestamp, isAnalysisTimeout, formatDuration, formatTimestamp, ciSourceLabel, resolveBuildUrl } from '@/lib/utils'
+import { parseApiTimestamp, isAnalysisTimeout, formatDuration, formatTimestamp, ciSourceLabel, resolveBuildUrl, resolveBuildDisplayId } from '@/lib/utils'
 import { buildRepoUrls, type RepoUrl } from '@/lib/autoLink'
 import { groupFailures } from '@/lib/grouping'
 import { useExpandCollapseAll } from '@/lib/useExpandCollapseAll'
@@ -403,6 +403,7 @@ function ReportContent() {
   if (!result) return null
 
   const buildUrl = resolveBuildUrl(result)
+  const buildDisplayId = resolveBuildDisplayId(result)
 
   return (
     <TooltipProvider delayDuration={200}>
@@ -413,13 +414,13 @@ function ReportContent() {
           <h1 className="font-display text-lg font-bold text-text-primary truncate">
             {result.job_name || result.job_id}
           </h1>
-          {result.build_number > 0 && (
+          {buildDisplayId && (
             buildUrl ? (
               <a href={buildUrl} target="_blank" rel="noopener noreferrer" className="font-mono text-sm text-text-link hover:underline">
-                #{result.build_number}
+                #{buildDisplayId}
               </a>
             ) : (
-              <span className="font-mono text-sm text-text-tertiary">#{result.build_number}</span>
+              <span className="font-mono text-sm text-text-tertiary">#{buildDisplayId}</span>
             )
           )}
           <StatusChip status={isAnalysisTimeout(result.status, result.error, result.summary) ? 'timeout' : result.status} />

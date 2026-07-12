@@ -20,7 +20,7 @@ import {
   SelectValue,
 } from '@/components/ui/select'
 import { api } from '@/lib/api'
-import { toIntInRange } from '@/lib/utils'
+import { toIntInRange, resolveBuildDisplayId } from '@/lib/utils'
 import type { AnalysisResult } from '@/types'
 import { Section } from '@/components/shared/Section'
 import { Toggle } from '@/components/shared/Toggle'
@@ -219,7 +219,7 @@ export function ReAnalyzeDialog({ open, onOpenChange, result, jobId, failureUuid
               <div className="space-y-1.5">
                 <FieldLabel>Build ID</FieldLabel>
                 <Input
-                  value={String(result.request_params?.build_id ?? result.build_id ?? result.build_number ?? '')}
+                  value={resolveBuildDisplayId(result) ?? ''}
                   disabled
                   className="opacity-70"
                 />

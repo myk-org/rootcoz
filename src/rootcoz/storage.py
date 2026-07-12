@@ -2978,6 +2978,8 @@ def _parse_dashboard_row(row) -> dict:
         entry["job_name"] = result_data.get("job_name", "")
         if "build_number" in result_data:
             entry["build_number"] = result_data["build_number"]
+        if result_data.get("build_id"):
+            entry["build_id"] = result_data["build_id"]
         entry["failure_count"] = count_all_failures(result_data)
         child_jobs = result_data.get("child_job_analyses", [])
         if child_jobs:

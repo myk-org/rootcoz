@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { ciSourceLabel, resolveBuildUrl } from '../utils'
+import { ciSourceLabel, resolveBuildUrl, resolveBuildDisplayId } from '../utils'
 
 describe('ciSourceLabel', () => {
   it('returns "Prow" for prow analysis_type', () => {
@@ -49,5 +49,24 @@ describe('resolveBuildUrl', () => {
   it('returns null when neither field is set', () => {
     expect(resolveBuildUrl({})).toBeNull()
     expect(resolveBuildUrl(null)).toBeNull()
+  })
+})
+
+describe('resolveBuildDisplayId', () => {
+  it('prefers request_params.build_id for Prow', () => {
+    expect(resolveBuildDisplayId({
+      build_number: 42,
+      request_params: { build_id: '2072664659076321280' },
+    })).toBe('2072664659076321280')
+  })
+
+  it('falls back to build_id then build_number', () => {
+    expect(resolveBuildDisplayId({ build_id: '999' })).toBe('999')
+    expect(resolveBuildDisplayId({ build_number: 42 })).toBe('42')
+  })
+
+  it('returns null for missing build info', () => {
+    expect(resolveBuildDisplayId({})).toBeNull()
+    expect(resolveBuildDisplayId({ build_number: 0 })).toBeNull()
   })
 })

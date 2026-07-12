@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
 import { useSSE } from '@/lib/SSEProvider'
 import { api, ApiError } from '@/lib/api'
-import { formatTimestamp, isAnalysisTimeout, INVALID_DATE_FALLBACK, ciSourceLabel, resolveBuildUrl } from '@/lib/utils'
+import { formatTimestamp, isAnalysisTimeout, INVALID_DATE_FALLBACK, ciSourceLabel, resolveBuildUrl, resolveBuildDisplayId } from '@/lib/utils'
 import type { ResultResponse } from '@/types'
 import { Card, CardContent } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
@@ -254,6 +254,7 @@ export function StatusPage() {
   const submitter = data?.result?.request_params?.submitted_by ?? ''
   const canAbort = isAdmin || (!!username && username === submitter)
   const buildUrl = resolveBuildUrl(data?.result) ?? resolveBuildUrl(data)
+  const buildDisplayId = resolveBuildDisplayId(data?.result)
 
   return (
     <>
@@ -265,13 +266,13 @@ export function StatusPage() {
               <h1 className="font-display text-lg font-bold text-text-primary truncate">
                 {data.result.job_name || jobId}
               </h1>
-              {data.result.build_number > 0 && (
+              {buildDisplayId && (
                 buildUrl ? (
                   <a href={buildUrl} target="_blank" rel="noopener noreferrer" className="font-mono text-sm text-text-link hover:underline">
-                    #{data.result.build_number}
+                    #{buildDisplayId}
                   </a>
                 ) : (
-                  <span className="font-mono text-sm text-text-tertiary">#{data.result.build_number}</span>
+                  <span className="font-mono text-sm text-text-tertiary">#{buildDisplayId}</span>
                 )
               )}
               <StatusChip status={displayStatus} />
@@ -429,16 +430,16 @@ export function StatusPage() {
               {data?.result?.job_name && (
                 <Row label="JOB" value={data.result.job_name} mono />
               )}
-              {data?.result?.build_number != null && (
+              {buildDisplayId && (
                 <Row
                   label="BUILD"
                   value={
                     buildUrl ? (
                       <a href={buildUrl} target="_blank" rel="noopener noreferrer" className="text-text-link hover:underline font-mono">
-                        #{data.result.build_number}
+                        #{buildDisplayId}
                       </a>
                     ) : (
-                      `#${data.result.build_number}`
+                      `#${buildDisplayId}`
                     )
                   }
                   mono

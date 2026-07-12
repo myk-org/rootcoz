@@ -112,3 +112,20 @@ export function resolveBuildUrl(data?: { build_url?: string | null; jenkins_url?
   if (!data) return null
   return data.build_url ?? data.jenkins_url ?? null
 }
+
+type BuildIdSource = {
+  build_id?: string
+  build_number?: number | string
+  request_params?: Record<string, unknown>
+}
+
+/** Canonical build identifier for display (Prow build_id string preferred over build_number). */
+export function resolveBuildDisplayId(data?: BuildIdSource | null): string | null {
+  if (!data) return null
+  const fromParams = data.request_params?.build_id
+  if (typeof fromParams === 'string' && fromParams) return fromParams
+  if (data.build_id) return data.build_id
+  const bn = data.build_number
+  if (bn === undefined || bn === null || bn === '' || bn === 0) return null
+  return String(bn)
+}

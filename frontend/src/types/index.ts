@@ -198,6 +198,7 @@ export interface DashboardJob {
   comment_count: number
   job_name?: string
   build_number?: number
+  build_id?: string
   failure_count?: number
   child_job_count?: number
   summary?: string

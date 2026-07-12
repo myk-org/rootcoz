@@ -31,7 +31,7 @@ import {
   TooltipTrigger,
 } from '@/components/ui/tooltip'
 import { Skeleton } from '@/components/ui/skeleton'
-import { parseApiTimestamp, isAnalysisTimeout, formatDuration, formatTimestamp } from '@/lib/utils'
+import { parseApiTimestamp, isAnalysisTimeout, formatDuration, formatTimestamp, resolveBuildDisplayId } from '@/lib/utils'
 import { StatusChip } from '@/components/shared/StatusChip'
 import { SearchInput } from '@/components/shared/SearchInput'
 import { Pagination } from '@/components/shared/Pagination'
@@ -732,12 +732,12 @@ export function DashboardPage() {
                           to={rowDest}
                           className="font-display text-sm font-medium text-text-primary hover:underline focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent-blue"
                           onClick={(e) => e.stopPropagation()}
-                          aria-label={`Open ${getJobDisplayName(job)}${job.build_number !== undefined ? ` #${job.build_number}` : ''}`}
+                          aria-label={`Open ${getJobDisplayName(job)}${resolveBuildDisplayId(job) ? ` #${resolveBuildDisplayId(job)}` : ''}`}
                         >
                           {getJobDisplayName(job)}
                         </Link>
-                        {job.build_number !== undefined && (
-                          <span className="ml-2 font-mono text-xs text-text-tertiary">#{job.build_number}</span>
+                        {resolveBuildDisplayId(job) && (
+                          <span className="ml-2 font-mono text-xs text-text-tertiary">#{resolveBuildDisplayId(job)}</span>
                         )}
                       </div>
                       <MetadataBadges metadata={job.metadata} />
@@ -949,12 +949,12 @@ export function DashboardPage() {
                                     to={rowDest}
                                     className="font-display text-sm font-medium text-text-primary hover:underline focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent-blue"
                                     onClick={(e) => e.stopPropagation()}
-                                    aria-label={`Open ${getJobDisplayName(job)}${job.build_number !== undefined ? ` #${job.build_number}` : ''}`}
+                                    aria-label={`Open ${getJobDisplayName(job)}${resolveBuildDisplayId(job) ? ` #${resolveBuildDisplayId(job)}` : ''}`}
                                   >
                                     {getJobDisplayName(job)}
                                   </Link>
-                                  {job.build_number !== undefined && (
-                                    <span className="ml-2 font-mono text-xs text-text-tertiary">#{job.build_number}</span>
+                                  {resolveBuildDisplayId(job) && (
+                                    <span className="ml-2 font-mono text-xs text-text-tertiary">#{resolveBuildDisplayId(job)}</span>
                                   )}
                                 </div>
                                 <MetadataBadges metadata={job.metadata} />
