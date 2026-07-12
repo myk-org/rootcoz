@@ -773,6 +773,19 @@ export function NewAnalysisPage() {
             )}
           </Section>
           </>)}
+
+          {inputMode === 'prow' && (
+          <>
+          <hr className="border-border-muted" />
+
+          {/* Prow Artifacts */}
+          <Section title="Build Artifacts" dotColor="bg-[#58a6ff]">
+            <div className="flex items-center justify-between">
+              <span className="text-sm text-text-secondary">Fetch GCS build artifacts</span>
+              <Toggle checked={getArtifacts} onChange={setGetArtifacts} label="Fetch GCS build artifacts" />
+            </div>
+          </Section>
+          </>)}
         </div>
 
         {/* Footer */}

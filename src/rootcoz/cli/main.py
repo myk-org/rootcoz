@@ -2175,7 +2175,7 @@ def preview_issue(
     issue_prompt: str = typer.Option(
         "",
         "--issue-prompt",
-        help="Additional AI instructions for issue generation.",
+        help="Custom issue generation prompt (overrides .rootcoz/ROOTCOZ_ISSUE_PROMPT.md from test repo)",
     ),
     json_output: bool = _JSON_OPTION,
 ):

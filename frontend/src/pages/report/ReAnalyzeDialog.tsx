@@ -385,21 +385,21 @@ export function ReAnalyzeDialog({ open, onOpenChange, result, jobId, failureUuid
               <Toggle checked={force} onChange={setForce} label="Force analysis on successful builds" />
             </div>
             <p className="text-[11px] text-text-tertiary">
-              When enabled, analysis runs even if Jenkins reports the build as SUCCESS.
+              When enabled, analysis runs even if the CI system reports the build as SUCCESS.
             </p>
           </Section>
 
           <hr className="border-border-muted" />
 
-          {/* Jenkins Artifacts */}
-          {!isProwJob && (
-          <>
-          <Section title="Jenkins Artifacts" dotColor="bg-[#58a6ff]">
+          {/* Build Artifacts */}
+          <Section title={isProwJob ? 'Build Artifacts' : 'Jenkins Artifacts'} dotColor="bg-[#58a6ff]">
             <div className="flex items-center justify-between">
-              <span className="text-sm text-text-secondary">Fetch build artifacts</span>
+              <span className="text-sm text-text-secondary">
+                {isProwJob ? 'Fetch GCS build artifacts' : 'Fetch build artifacts'}
+              </span>
               <Toggle checked={getArtifacts ?? true} onChange={setGetArtifacts} label="Fetch build artifacts" />
             </div>
-            {getArtifacts && (
+            {!isProwJob && getArtifacts && (
               <div className="space-y-1.5">
                 <FieldLabel>Max Size (MB)</FieldLabel>
                 <Input
@@ -412,8 +412,6 @@ export function ReAnalyzeDialog({ open, onOpenChange, result, jobId, failureUuid
               </div>
             )}
           </Section>
-          </>
-          )}
         </div>
 
         <DialogFooter className="px-6 py-4 border-t border-border-default flex-shrink-0">

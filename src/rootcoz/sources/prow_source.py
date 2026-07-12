@@ -810,6 +810,14 @@ class ProwSource(CISource):
             return self._custom_gcs_prefix
         return f"logs/{self.job_name}/{self.build_id}"
 
+    def _fallback_default_prefix(self, reason: str) -> str:
+        """Return default prefix and record why pointer resolution failed."""
+        default = f"logs/{self.job_name}/{self.build_id}"
+        self._resolution_warnings.append(
+            f"Using default GCS prefix {default}: {reason}"
+        )
+        return default
+
     async def _resolve_gcs_prefix(self, client: httpx.AsyncClient) -> str:
         """Resolve the GCS prefix and fetch job metadata.
 
@@ -882,52 +890,37 @@ class ProwSource(CISource):
             pointer_content = None
 
         if not pointer_content:
-            return default
+            return self._fallback_default_prefix("directory pointer file not found")
 
         pointer_content = pointer_content.strip()
         expected_prefix = f"gs://{self.gcs_bucket}/"
         if not pointer_content.startswith(expected_prefix):
-            logger.warning(
-                "Directory pointer content does not match expected bucket "
-                "(expected gs://%s/..., got %s) — using default prefix",
-                self.gcs_bucket,
-                pointer_content,
-            )
-            return default
+            return self._fallback_default_prefix("directory pointer bucket mismatch")
 
         resolved = pointer_content[len(expected_prefix) :].rstrip("/")
         # Validate: pointer content is from external GCS — reject
         # suspicious values (newlines, control chars, excessive length,
         # path traversal, or mismatched job/build)
         if any(c in resolved for c in "\n\r\x00") or len(resolved) > 500:
-            logger.warning(
-                "Suspicious directory pointer content (len=%d), using default prefix",
-                len(resolved),
+            return self._fallback_default_prefix(
+                "directory pointer content is suspicious"
             )
-            return default
 
         if ".." in resolved:
-            logger.warning("Directory pointer contains path traversal: %s", resolved)
-            return default
+            return self._fallback_default_prefix(
+                "directory pointer contains path traversal"
+            )
 
         if not resolved.startswith("pr-logs/"):
-            logger.warning(
-                "Directory pointer path is not under pr-logs/: %s "
-                "\u2014 using default prefix",
-                resolved,
+            return self._fallback_default_prefix(
+                "directory pointer path is not under pr-logs/"
             )
-            return default
 
         expected_suffix = f"/{self.job_name}/{self.build_id}"
         if not resolved.endswith(expected_suffix):
-            logger.warning(
-                "Directory pointer path does not end with /%s/%s: %s "
-                "\u2014 using default prefix",
-                self.job_name,
-                self.build_id,
-                resolved,
+            return self._fallback_default_prefix(
+                f"directory pointer path does not end with {expected_suffix}"
             )
-            return default
 
         logger.info("Resolved GCS prefix via directory pointer: %s", resolved)
 
@@ -955,7 +948,9 @@ class ProwSource(CISource):
                 label="prowjob.json",
                 max_size=_MAX_SIZE_PROWJOB,
             )
-        except GCSAccessError:
+        except GCSAccessError as exc:
+            if exc.status_code != 404:
+                self._resolution_warnings.append(str(exc))
             return False
 
         if not prowjob_text:
@@ -1327,6 +1322,30 @@ class ProwSource(CISource):
         # ------------------------------------------------------------------
         # 6. Build and return CISourceResult
         # ------------------------------------------------------------------
+        _FAILED_STATES = {"FAILURE", "FAILED", "ERROR", "ABORTED"}
+        if not all_failures and not console_context:
+            if build_state in _FAILED_STATES:
+                access_warnings.append(
+                    f"Prow build state is {build_state} but no test failures "
+                    "or console output were found in GCS"
+                )
+            elif (
+                not build_state
+                and not build_log
+                and not junit_files
+                and not non_junit_objects
+                and not self._prowjob_metadata
+            ):
+                access_warnings.append(
+                    f"No Prow build artifacts found at gs://{self.gcs_bucket}/{gcs_prefix} "
+                    "(check prow_job_name, build_id, gcs_bucket, and gcs_prefix)"
+                )
+            elif not build_state and not build_log and not all_artifact_objects:
+                access_warnings.append(
+                    "No build completion metadata or console log found; "
+                    "job may still be running or GCS path may be incorrect"
+                )
+
         return CISourceResult(
             failures=all_failures,
             console_context=console_context,

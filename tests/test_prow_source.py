@@ -1000,9 +1000,11 @@ class TestProwSourceFetch:
         async with httpx.AsyncClient(transport=transport) as client:
             result = await source._fetch_with_client(client)
 
-        assert len(result.warnings) == 2
+        assert len(result.warnings) == 4
         assert any("403" in w for w in result.warnings)
         assert any("500" in w for w in result.warnings)
+        assert any("default GCS prefix" in w for w in result.warnings)
+        assert any("No Prow build artifacts" in w for w in result.warnings)
         assert result.failures == []
 
     async def test_fetch_multiple_junit_files(self):
@@ -1205,8 +1207,8 @@ class TestUnifiedAnalyzeRequestProw:
     def test_gcs_prefix_accepts_valid_pr_logs(self):
         req = UnifiedAnalyzeRequest(
             type="prow",
-            prow_job_name="my-job",
-            build_id="1",
+            prow_job_name="pull-kubevirt-fuzz",
+            build_id="123",
             gcs_prefix="pr-logs/pull/kubevirt_kubevirt/17598/pull-kubevirt-fuzz/123",
         )
         assert (
@@ -1214,14 +1216,23 @@ class TestUnifiedAnalyzeRequestProw:
             == "pr-logs/pull/kubevirt_kubevirt/17598/pull-kubevirt-fuzz/123"
         )
 
+    def test_gcs_prefix_rejects_job_build_suffix_mismatch(self):
+        with pytest.raises(ValueError, match="must end with"):
+            UnifiedAnalyzeRequest(
+                type="prow",
+                prow_job_name="my-job",
+                build_id="1",
+                gcs_prefix="pr-logs/pull/kubevirt_kubevirt/17598/pull-kubevirt-fuzz/123",
+            )
+
     def test_gcs_prefix_accepts_valid_logs(self):
         req = UnifiedAnalyzeRequest(
             type="prow",
             prow_job_name="my-job",
             build_id="1",
-            gcs_prefix="logs/periodic-ci-e2e/999",
+            gcs_prefix="logs/periodic-ci-e2e/my-job/1",
         )
-        assert req.gcs_prefix == "logs/periodic-ci-e2e/999"
+        assert req.gcs_prefix == "logs/periodic-ci-e2e/my-job/1"
 
 
 class TestFormatProwContext:

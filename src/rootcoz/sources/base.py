@@ -1,6 +1,6 @@
 """Abstract base class for CI source plugins.
 
-Every CI source (Jenkins, raw input, future integrations) implements `CISource`
+Every CI source (Jenkins, Prow, file/JUnit XML, raw input) implements `CISource`
 to fetch build data and return a normalized `CISourceResult`.  The core analysis
 engine works exclusively with these abstractions, keeping CI-specific details
 out of the pipeline logic.
@@ -407,15 +407,12 @@ async def run_console_only_analysis(
     from rootcoz.engine.core import analyze_failure_group
     from rootcoz.models import FailedTest
 
-    full_context = console_context
-    if extra_context:
-        full_context = (
-            f"{console_context}\n{extra_context}" if console_context else extra_context
-        )
-
     synthetic_failure = FailedTest(
         test_name=test_name,
-        error_message=full_context or "Console-only analysis (no JUnit report)",
+        error_message=(
+            "Console-only analysis — read console-output.txt in the workspace "
+            "before analyzing."
+        ),
     )
 
     try:

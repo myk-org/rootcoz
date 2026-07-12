@@ -3265,9 +3265,7 @@ async def _enqueue_non_jenkins_analysis(
 ) -> dict:
     """Build params, persist initial state, spawn task, and return response.
 
-    Shared by the ``/analyze`` file/raw path and the ``/re-analyze`` file/raw
-    path.  Callers handle request-specific reconstruction/validation before
-    calling this helper with a ready-to-go *body*.
+    Shared by the ``/analyze`` and ``/re-analyze`` file/raw/prow paths.
 
     Args:
         body: The analysis request (``UnifiedAnalyzeRequest`` or similar).

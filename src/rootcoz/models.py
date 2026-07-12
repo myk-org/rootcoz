@@ -784,6 +784,13 @@ class UnifiedAnalyzeRequest(_JenkinsParamsMixin, _NameTagsMixin, BaseAnalysisReq
                 raise ValueError("prow_job_name is required for type=prow")
             if not self.build_id:
                 raise ValueError("build_id is required for type=prow")
+            if self.gcs_prefix:
+                expected_suffix = f"/{self.prow_job_name}/{self.build_id}"
+                if not self.gcs_prefix.endswith(expected_suffix):
+                    raise ValueError(
+                        f"gcs_prefix must end with {expected_suffix} "
+                        f"for prow_job_name={self.prow_job_name!r} and build_id={self.build_id!r}"
+                    )
         return self
 
 

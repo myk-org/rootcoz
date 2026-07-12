@@ -48,7 +48,7 @@ function getPhaseLabel(phase: string | undefined): string | undefined {
 
 const statusMessages: Record<string, { title: string; subtitle: string }> = {
   waiting: {
-    title: 'Waiting for Jenkins job',
+    title: 'Waiting for CI job',
     subtitle: 'Monitoring build until it completes...',
   },
   pending: {

@@ -166,6 +166,7 @@ export interface AnalysisResult {
   child_job_analyses: ChildJobAnalysis[]
   token_usage?: TokenUsageSummary
   error?: string
+  source_warnings?: string[]
   progress_log?: Array<{ phase: string; timestamp: number }>
   progress_phase?: string
   request_params?: {
