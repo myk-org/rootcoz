@@ -89,6 +89,9 @@ MIN_KEY_LENGTH = 16
 VALID_USER_STATUSES = ("active", "pending", "rejected")
 AI_SYSTEM_USERNAME = "rootcoz-ai"
 
+# SQLite signed INTEGER max — Prow build_id strings may exceed this.
+SQLITE_INT_MAX = 9223372036854775807
+
 
 def validate_api_key(key: str) -> None:
     """Validate API key meets minimum requirements."""
@@ -1958,13 +1961,34 @@ def _resolve_history_build_fields(result_data: dict) -> tuple[str, int]:
     if isinstance(raw_bn, str):
         if not build_id and raw_bn.isdigit():
             build_id = raw_bn
-        build_number = int(raw_bn) if raw_bn.isdigit() else 0
+        build_number = _coerce_sqlite_build_number(raw_bn)
     else:
-        build_number = int(raw_bn or 0)
+        build_number = _coerce_sqlite_build_number(raw_bn)
         if not build_id and build_number > 0:
             build_id = str(build_number)
 
     return build_id, build_number
+
+
+def _coerce_sqlite_build_number(value: object) -> int:
+    """Coerce a build number to SQLite INTEGER range, else return 0."""
+    if isinstance(value, str):
+        if not value.isdigit():
+            return 0
+        try:
+            number = int(value)
+        except ValueError:
+            return 0
+    elif isinstance(value, int):
+        number = value
+    elif value is None:
+        return 0
+    else:
+        return 0
+
+    if number < 0 or number > SQLITE_INT_MAX:
+        return 0
+    return number
 
 
 def _failure_to_history_row(

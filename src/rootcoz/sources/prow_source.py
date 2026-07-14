@@ -47,9 +47,6 @@ _MAX_SIZE_PROWJOB = 2_000_000  # 2 MB
 # Maximum total download size for non-JUnit artifacts (bytes)
 _MAX_SIZE_ARTIFACTS_TOTAL = 50_000_000  # 50 MB
 
-# Maximum PR diff download size (bytes)
-_MAX_SIZE_PR_DIFF = 5_000_000  # 5 MB
-
 # Maximum additional PRs to fetch in batch jobs
 _MAX_ADDITIONAL_PRS = 20
 
@@ -724,11 +721,6 @@ async def _fetch_pr_changes(
             diff_text = ""
             if diff_resp.status_code == 200:
                 diff_text = diff_resp.text
-                if len(diff_text) > _MAX_SIZE_PR_DIFF:
-                    diff_text = (
-                        diff_text[:_MAX_SIZE_PR_DIFF]
-                        + f"\n\n... [PR diff truncated at {_MAX_SIZE_PR_DIFF} bytes] ..."
-                    )
 
     except httpx.RequestError:
         logger.warning(
