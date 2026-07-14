@@ -426,19 +426,14 @@ async def run_console_only_analysis(
     max_concurrent_ai_calls: int = 3,
 ) -> tuple[bool, list, str]:
     """Run console-only AI analysis when no structured test failures exist."""
-    from rootcoz.engine.core import analyze_failure_group, get_failure_signature
+    from rootcoz.engine.core import analyze_failure_group
     from rootcoz.models import FailedTest
 
     synthetic_failure = FailedTest(
         test_name=test_name,
-        error_message="Console-only analysis pending",
-    )
-    console_file_name = f"console-output-{get_failure_signature(synthetic_failure)}.txt"
-    synthetic_failure = FailedTest(
-        test_name=test_name,
         error_message=(
-            f"Console-only analysis — read {console_file_name} in the workspace "
-            "before analyzing."
+            "Console-only analysis — read the mandatory console-output section "
+            "in the analysis prompt before analyzing."
         ),
     )
 

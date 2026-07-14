@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import httpx
 import pytest
@@ -1491,6 +1492,27 @@ class TestParseProwjobJsonDefensive:
         assert meta.additional_prs[0]["number"] == 102
         assert meta.additional_prs[1]["author"] == "charlie"
 
+    def test_batch_job_preserves_all_additional_prs(self):
+        """Batch jobs keep every additional PR without truncation."""
+        pulls = [{"number": 1, "author": "lead"}]
+        pulls.extend({"number": i, "author": f"dev{i}"} for i in range(2, 25))
+        data = {
+            "spec": {
+                "type": "batch",
+                "refs": {
+                    "org": "kubevirt",
+                    "repo": "kubevirt",
+                    "pulls": pulls,
+                },
+            },
+            "status": {"state": "failure"},
+        }
+        meta = _parse_prowjob_json(json.dumps(data))
+        assert meta is not None
+        assert meta.additional_prs is not None
+        assert len(meta.additional_prs) == 23
+        assert meta.additional_prs[-1]["number"] == 24
+
 
 class TestPointerValidation:
     """Tests for pointer path validation (job_name/build_id suffix check)."""
@@ -1906,6 +1928,41 @@ class TestDownloadGcsArtifacts:
                 client, "bucket", artifacts, "prefix/"
             )
         assert result is None
+
+    async def test_write_oserror_continues_with_other_artifacts(
+        self, tmp_path, monkeypatch
+    ):
+        monkeypatch.setattr("rootcoz.sources.prow_source._ARTIFACTS_BASE", tmp_path)
+
+        original_write_bytes = Path.write_bytes
+
+        def flaky_write_bytes(self, data):
+            if self.name == "bad.txt":
+                raise OSError(28, "No space left on device")
+            return original_write_bytes(self, data)
+
+        monkeypatch.setattr(Path, "write_bytes", flaky_write_bytes)
+
+        transport = httpx.MockTransport(
+            lambda req: httpx.Response(200, content=b"artifact-data")
+        )
+        artifacts = [
+            {"name": "prefix/bad.txt", "size": "13"},
+            {"name": "prefix/good.txt", "size": "13"},
+        ]
+        warnings: list[str] = []
+        async with httpx.AsyncClient(transport=transport) as client:
+            result = await _download_gcs_artifacts(
+                client,
+                "bucket",
+                artifacts,
+                "prefix/",
+                warnings=warnings,
+            )
+        assert result is not None
+        assert not (result / "bad.txt").exists()
+        assert (result / "good.txt").read_bytes() == b"artifact-data"
+        assert any("bad.txt" in w for w in warnings)
 
     async def test_rejects_path_traversal(self, tmp_path, monkeypatch):
         monkeypatch.setattr("rootcoz.sources.prow_source._ARTIFACTS_BASE", tmp_path)

@@ -2671,6 +2671,58 @@ class TestAnalyzeProwCommand:
         assert call_kwargs["prow_url"] == "https://prow.custom.org"
         assert call_kwargs["gcs_bucket"] == "custom-bucket"
 
+    def test_analyze_prow_gcs_prefix_cli_only_not_config(self, mock_client):
+        """gcs_prefix is per-request only; only the CLI flag is sent."""
+        mock_client.analyze.return_value = {
+            "status": "queued",
+            "job_id": "prow-prefix",
+            "result_url": "/results/prow-prefix",
+        }
+        cfg = ServerConfig(
+            url=_TEST_SERVER,
+            prow_url="https://prow.example.org",
+            gcs_bucket="prow-artifacts",
+        )
+        with (
+            patch(
+                "rootcoz.cli.main.get_server_config",
+                return_value=cfg,
+            ),
+            patch("rootcoz.cli.main._get_client", return_value=mock_client),
+            patch.dict(os.environ, {}, clear=True),
+        ):
+            result = runner.invoke(
+                app,
+                [
+                    *self._PROW_BASE,
+                    "--job-name",
+                    "my-job",
+                    "--build-number",
+                    "42",
+                ],
+            )
+        assert result.exit_code == 0
+        call_kwargs = mock_client.analyze.call_args[1]
+        assert "gcs_prefix" not in call_kwargs
+        assert call_kwargs["prow_url"] == "https://prow.example.org"
+        assert call_kwargs["gcs_bucket"] == "prow-artifacts"
+
+        result = runner.invoke(
+            app,
+            [
+                *self._PROW_BASE,
+                "--job-name",
+                "my-job",
+                "--build-number",
+                "42",
+                "--gcs-prefix",
+                "pr-logs/pull/org_repo/99/my-job/42",
+            ],
+        )
+        assert result.exit_code == 0
+        call_kwargs = mock_client.analyze.call_args[1]
+        assert call_kwargs["gcs_prefix"] == "pr-logs/pull/org_repo/99/my-job/42"
+
     def test_analyze_prow_with_provider_and_model(self, mock_client):
         mock_client.analyze.return_value = {
             "status": "queued",

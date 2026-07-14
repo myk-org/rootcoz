@@ -47,9 +47,6 @@ _MAX_SIZE_PROWJOB = 2_000_000  # 2 MB
 # Maximum total download size for non-JUnit artifacts (bytes)
 _MAX_SIZE_ARTIFACTS_TOTAL = 50_000_000  # 50 MB
 
-# Maximum additional PRs to fetch in batch jobs
-_MAX_ADDITIONAL_PRS = 20
-
 # Maximum size for a single non-JUnit artifact file (bytes)
 _MAX_SIZE_SINGLE_ARTIFACT = 10_000_000  # 10 MB
 
@@ -154,15 +151,9 @@ def _parse_prowjob_json(raw: str) -> ProwJobMetadata | None:
                         "number": p.get("number"),
                         "author": p.get("author", ""),
                     }
-                    for p in pulls[1 : 1 + _MAX_ADDITIONAL_PRS]
+                    for p in pulls[1:]
                     if isinstance(p, dict)
                 ]
-                if len(pulls) - 1 > _MAX_ADDITIONAL_PRS:
-                    logger.warning(
-                        "Batch job has %d additional PRs; only first %d will be fetched",
-                        len(pulls) - 1,
-                        _MAX_ADDITIONAL_PRS,
-                    )
 
     # status.state
     status = data.get("status", {})
@@ -549,8 +540,16 @@ async def _download_gcs_artifacts(
             if data is None:
                 continue
 
-            target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_bytes(data)
+            try:
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(data)
+            except OSError as exc:
+                msg = f"Failed to write artifact {rel_path} locally: {exc}"
+                logger.warning(msg, exc_info=True)
+                if warnings is not None:
+                    warnings.append(msg)
+                continue
+
             total_downloaded += len(data)
             files_downloaded += 1
 
@@ -1166,7 +1165,7 @@ class ProwSource(CISource):
         pr_repo = metadata.get("repo", "")
         if pr_num is not None and pr_org and pr_repo:
             all_pr_nums = [pr_num]
-            for extra in (metadata.get("additional_prs") or [])[:_MAX_ADDITIONAL_PRS]:
+            for extra in metadata.get("additional_prs") or []:
                 num = extra.get("number")
                 if num is not None:
                     all_pr_nums.append(num)
