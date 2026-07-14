@@ -1979,7 +1979,7 @@ def _coerce_sqlite_build_number(value: object) -> int:
             number = int(value)
         except ValueError:
             return 0
-    elif isinstance(value, int):
+    elif type(value) is int:
         number = value
     elif value is None:
         return 0

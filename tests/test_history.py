@@ -168,6 +168,36 @@ class TestPopulateFailureHistory:
                 assert row["build_id"] == prow_build_id
                 assert row["build_number"] == 0
 
+    async def test_populate_rejects_bool_build_number(self, setup_test_db):
+        """JSON bool build_number must not coerce to 1 or stamp build_id."""
+        with patch.object(storage, "DB_PATH", setup_test_db):
+            result_data = {
+                "job_name": "periodic-ci-e2e-aws",
+                "build_number": True,
+                "failures": [
+                    {
+                        "test_name": "tests.TestA.test_one",
+                        "error": "failed",
+                        "error_signature": "sig-bool",
+                        "analysis": {"classification": "CODE ISSUE"},
+                    },
+                ],
+                "child_job_analyses": [],
+            }
+            await storage.populate_failure_history("job-bool", result_data)
+
+            import aiosqlite
+
+            async with aiosqlite.connect(setup_test_db) as db:
+                db.row_factory = aiosqlite.Row
+                cursor = await db.execute(
+                    "SELECT build_id, build_number FROM failure_history WHERE job_id = ?",
+                    ("job-bool",),
+                )
+                row = dict(await cursor.fetchone())
+                assert row["build_number"] == 0
+                assert row["build_id"] == ""
+
     async def test_populate_from_child_job_analyses(self, setup_test_db):
         """Test populating from a result with child job failures."""
         with patch.object(storage, "DB_PATH", setup_test_db):
