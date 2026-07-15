@@ -2461,10 +2461,92 @@ class TestProwPrepareWorkspace:
         finally:
             prow_mod._fetch_pr_changes = orig
 
-        assert call_log == [10, 20]
+        assert sorted(call_log) == [10, 20]
         diff_file = next(f for f in files if f.filename == "pr-changes.diff")
         assert "PR #10" in diff_file.content
         assert "PR #20" in diff_file.content
+
+    @pytest.mark.asyncio
+    async def test_batch_job_fetches_all_additional_prs(self):
+        """Batch job with many PRs → all extras are fetched (no cap)."""
+        source = self._make_source()
+        num_extras = 15
+        extras = [
+            {"number": i, "author": f"dev{i}"} for i in range(100, 100 + num_extras)
+        ]
+        source._prowjob_metadata = ProwJobMetadata(
+            job_type="batch",
+            org="kubevirt",
+            repo="kubevirt",
+            base_ref="main",
+            pr_number=1,
+            pr_author="lead",
+            additional_prs=extras,
+        )
+
+        call_log = []
+
+        import rootcoz.sources.prow_source as prow_mod
+
+        orig = prow_mod._fetch_pr_changes
+
+        async def mock_fetch(org, repo, pr_num, token="", **kw):
+            call_log.append(pr_num)
+            return f"=== PR #{pr_num}: title ===\ndiff\n"
+
+        prow_mod._fetch_pr_changes = mock_fetch
+        try:
+            files = await source.prepare_workspace()
+        finally:
+            prow_mod._fetch_pr_changes = orig
+
+        # Primary + ALL extras (no cap)
+        assert len(call_log) == 1 + num_extras
+        assert 1 in call_log  # primary always included
+        diff_file = next(f for f in files if f.filename == "pr-changes.diff")
+        # No skipped/cap notes
+        assert "skipped" not in diff_file.content.lower()
+        assert "cap=" not in diff_file.content
+        # Metadata still has ALL additional PRs
+        assert len(source._prowjob_metadata.additional_prs) == num_extras
+
+    @pytest.mark.asyncio
+    async def test_batch_job_gather_handles_individual_failure(self):
+        """One PR fetch failing doesn't block others in gather."""
+        source = self._make_source()
+        source._prowjob_metadata = ProwJobMetadata(
+            job_type="batch",
+            org="kubevirt",
+            repo="kubevirt",
+            base_ref="main",
+            pr_number=1,
+            pr_author="dev1",
+            additional_prs=[
+                {"number": 2, "author": "dev2"},
+                {"number": 3, "author": "dev3"},
+            ],
+        )
+
+        import rootcoz.sources.prow_source as prow_mod
+
+        orig = prow_mod._fetch_pr_changes
+
+        async def flaky_fetch(org, repo, pr_num, token="", **kw):
+            if pr_num == 2:
+                raise httpx.ConnectError("connection refused")
+            return f"=== PR #{pr_num}: title ===\ndiff\n"
+
+        prow_mod._fetch_pr_changes = flaky_fetch
+        try:
+            files = await source.prepare_workspace()
+        finally:
+            prow_mod._fetch_pr_changes = orig
+
+        diff_file = next(f for f in files if f.filename == "pr-changes.diff")
+        assert "PR #1" in diff_file.content
+        assert "PR #3" in diff_file.content
+        # PR #2 failed but didn't block others
+        assert "PR #2" not in diff_file.content
 
     @pytest.mark.asyncio
     async def test_pr_fetch_failure_returns_context_only(self):

@@ -87,12 +87,13 @@ src/rootcoz/
                             # of any specific CI system.
     chat.py                 # Chat engine: workspace, AI session, prompt builder
   sources/                  # CI source plugins (data fetching)
-    base.py                 # CISource ABC + CISourceResult dataclass
+    base.py                 # CISource ABC, CISourceResult, WorkspaceFile, and shared workspace setup helpers
     jenkins_source.py       # Jenkins plugin: JenkinsSource, analyze_job, analyze_child_job,
                             # wait_for_jenkins_completion, Jenkins helpers (handle_jenkins_exception, extract_*, etc.)
     file_source.py          # JUnit XML plugin: FileSource
     raw_source.py           # Raw failure list plugin: RawSource
     prow_source.py          # Prow CI plugin: ProwSource (GCS artifacts)
+    chat_workspace.py       # CI-source chat workspace population dispatcher
   main.py                   # FastAPI app, unified POST /analyze endpoint, background tasks
   models.py                 # Pydantic request/response models
   config.py                 # Settings (env vars)
@@ -101,6 +102,7 @@ src/rootcoz/
   sidecar-helper/            # Pi SDK sidecar service (Node.js/TypeScript)
     src/server.ts           # Thin wrapper calling @myk-org/pi-sidecar startSidecar()
   cli/                      # CLI client (rootcoz command)
+  prow_validation.py        # Shared Prow input validation (URL, bucket, prefix, job name, build ID)
   peer_analysis.py          # Multi-AI peer debate loop
   ...                       # Other modules (jira, github_issues, monitoring, etc.)
 ```

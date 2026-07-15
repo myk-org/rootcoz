@@ -485,8 +485,8 @@ export function StatusPage() {
                   Source Warnings
                 </h3>
                 <ul className="list-disc pl-4 space-y-1 text-sm text-text-secondary">
-                  {data.result.source_warnings.map((warning) => (
-                    <li key={warning}>{warning}</li>
+                  {data.result.source_warnings.map((warning, i) => (
+                    <li key={`sw-${i}`}>{warning}</li>
                   ))}
                 </ul>
               </div>

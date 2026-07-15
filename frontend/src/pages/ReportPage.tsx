@@ -571,8 +571,8 @@ function ReportContent() {
         <div className="rounded-lg border border-border-default bg-bg-secondary p-4 animate-slide-up">
           <h2 className="text-xs font-display uppercase tracking-widest text-signal-orange mb-2">Source Warnings</h2>
           <ul className="list-disc pl-4 space-y-1 text-sm text-text-secondary">
-            {result.source_warnings.map((warning) => (
-              <li key={warning}>{warning}</li>
+            {result.source_warnings.map((warning, i) => (
+              <li key={`sw-${i}`}>{warning}</li>
             ))}
           </ul>
         </div>

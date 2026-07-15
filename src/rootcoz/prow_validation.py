@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from urllib.parse import urlunparse, urlparse
+from urllib.parse import urlparse, urlunparse
 
 
 def strip_url_userinfo(url: str) -> str:

@@ -59,7 +59,7 @@ Presubmit jobs can omit `gcs_prefix`; RootCoz resolves it from the Prow director
 |-------|---------|-----------|-------------|
 | `prow_url` | `PROW_URL` | `--prow-url` | `[server] prow_url` |
 | `gcs_bucket` | `GCS_BUCKET` | `--gcs-bucket` | `[server] gcs_bucket` |
-| `gcs_prefix` | — | `--gcs-prefix` / payload | `[analyze] gcs_prefix` |
+| `gcs_prefix` | — | `--gcs-prefix` / payload | — |
 | `prow_job_name` | — | `--job-name` (prow) | — |
 | `build_id` | — | `--build-number` (prow) | — |
 

@@ -8,6 +8,7 @@ which is publicly accessible via HTTPS.
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import json
 import os
@@ -49,6 +50,9 @@ _MAX_SIZE_ARTIFACTS_TOTAL = 50_000_000  # 50 MB
 
 # Maximum size for a single non-JUnit artifact file (bytes)
 _MAX_SIZE_SINGLE_ARTIFACT = 10_000_000  # 10 MB
+
+# Maximum number of concurrent PR-change fetches
+MAX_PR_FETCH_CONCURRENCY = 5
 
 # Base directory for artifact extraction
 _ARTIFACTS_BASE = Path("/tmp/prow-artifacts")
@@ -1164,23 +1168,61 @@ class ProwSource(CISource):
         pr_org = metadata.get("org", "")
         pr_repo = metadata.get("repo", "")
         if pr_num is not None and pr_org and pr_repo:
-            all_pr_nums = [pr_num]
-            for extra in metadata.get("additional_prs") or []:
-                num = extra.get("number")
-                if num is not None:
-                    all_pr_nums.append(num)
+            additional = metadata.get("additional_prs") or []
+            extra_nums = [
+                extra["number"]
+                for extra in additional
+                if extra.get("number") is not None
+            ]
+            all_pr_nums = [pr_num] + extra_nums
+
+            sem = asyncio.Semaphore(MAX_PR_FETCH_CONCURRENCY)
+
+            async def _bounded_fetch(num: int) -> str | None:
+                async with sem:
+                    return await _fetch_pr_changes(pr_org, pr_repo, num, github_token)
 
             pr_sections: list[str] = []
-            for num in all_pr_nums:
-                content = await _fetch_pr_changes(pr_org, pr_repo, num, github_token)
-                if content:
-                    pr_sections.append(content)
+            skipped_note = ""
+            tasks_list = [asyncio.create_task(_bounded_fetch(n)) for n in all_pr_nums]
+            try:
+                done, pending = await asyncio.wait(tasks_list, timeout=60)
+            except Exception:
+                done, pending = set(), set(tasks_list)
 
-            if pr_sections:
+            for task in pending:
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await task
+
+            # Collect results preserving original all_pr_nums order
+            for task in tasks_list:
+                if task in done:
+                    try:
+                        result = task.result()
+                    except Exception as exc:
+                        logger.warning("PR fetch failed: %s", exc)
+                    else:
+                        if result:
+                            pr_sections.append(result)
+
+            if pending:
+                logger.warning(
+                    "PR enrichment timed out after 60s; %d of %d PRs incomplete",
+                    len(pending),
+                    len(tasks_list),
+                )
+                skipped_note += (
+                    f"\n\n--- WARNING: PR enrichment timed out after 60s. "
+                    f"{len(pending)} of {len(tasks_list)} PR fetch(es) incomplete. ---\n"
+                )
+
+            if pr_sections or skipped_note:
+                content = "\n".join(pr_sections) + skipped_note
                 files.append(
                     WorkspaceFile(
                         filename="pr-changes.diff",
-                        content="\n".join(pr_sections),
+                        content=content,
                         instruction=(
                             "It contains the PR code changes (diff), title, "
                             "and description. Cross-reference test failures "
@@ -1484,9 +1526,13 @@ class ProwSource(CISource):
             normalize_gcs_prefix,
             normalize_prow_url,
             validate_gcs_prefix_suffix,
+            validate_prow_build_id,
+            validate_prow_job_name,
         )
 
         try:
+            validate_prow_job_name(prow_job_name)
+            validate_prow_build_id(build_id)
             prow_url = normalize_prow_url(prow_url) if prow_url else ""
             gcs_bucket = normalize_gcs_bucket(gcs_bucket)
             gcs_prefix = normalize_gcs_prefix(params.get("gcs_prefix", ""))

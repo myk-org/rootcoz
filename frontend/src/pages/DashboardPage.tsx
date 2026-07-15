@@ -703,6 +703,7 @@ export function DashboardPage() {
                 const failureCount = job.failure_count ?? 0
                 const failureHint = job.summary || job.error
                 const rowDest = getJobRoute(job)
+                const buildDisplayId = resolveBuildDisplayId(job)
 
                 return (
                   <TableRow
@@ -732,12 +733,12 @@ export function DashboardPage() {
                           to={rowDest}
                           className="font-display text-sm font-medium text-text-primary hover:underline focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent-blue"
                           onClick={(e) => e.stopPropagation()}
-                          aria-label={`Open ${getJobDisplayName(job)}${resolveBuildDisplayId(job) ? ` #${resolveBuildDisplayId(job)}` : ''}`}
+                          aria-label={`Open ${getJobDisplayName(job)}${buildDisplayId ? ` #${buildDisplayId}` : ''}`}
                         >
                           {getJobDisplayName(job)}
                         </Link>
-                        {resolveBuildDisplayId(job) && (
-                          <span className="ml-2 font-mono text-xs text-text-tertiary">#{resolveBuildDisplayId(job)}</span>
+                        {buildDisplayId && (
+                          <span className="ml-2 font-mono text-xs text-text-tertiary">#{buildDisplayId}</span>
                         )}
                       </div>
                       <MetadataBadges metadata={job.metadata} />
@@ -921,6 +922,7 @@ export function DashboardPage() {
                           const failureCount = job.failure_count ?? 0
                           const failureHint = job.summary || job.error
                           const rowDest = getJobRoute(job)
+                          const buildDisplayId = resolveBuildDisplayId(job)
 
                           return (
                             <TableRow
@@ -949,12 +951,12 @@ export function DashboardPage() {
                                     to={rowDest}
                                     className="font-display text-sm font-medium text-text-primary hover:underline focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent-blue"
                                     onClick={(e) => e.stopPropagation()}
-                                    aria-label={`Open ${getJobDisplayName(job)}${resolveBuildDisplayId(job) ? ` #${resolveBuildDisplayId(job)}` : ''}`}
+                                    aria-label={`Open ${getJobDisplayName(job)}${buildDisplayId ? ` #${buildDisplayId}` : ''}`}
                                   >
                                     {getJobDisplayName(job)}
                                   </Link>
-                                  {resolveBuildDisplayId(job) && (
-                                    <span className="ml-2 font-mono text-xs text-text-tertiary">#{resolveBuildDisplayId(job)}</span>
+                                  {buildDisplayId && (
+                                    <span className="ml-2 font-mono text-xs text-text-tertiary">#{buildDisplayId}</span>
                                   )}
                                 </div>
                                 <MetadataBadges metadata={job.metadata} />

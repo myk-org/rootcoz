@@ -9,6 +9,7 @@ out of the pipeline logic.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
@@ -426,7 +427,7 @@ async def run_console_only_analysis(
     max_concurrent_ai_calls: int = 3,
 ) -> tuple[bool, list, str]:
     """Run console-only AI analysis when no structured test failures exist."""
-    from rootcoz.engine.core import analyze_failure_group
+    from rootcoz.engine.core import analyze_failure_group, normalize_for_signature
     from rootcoz.models import FailedTest
 
     synthetic_failure = FailedTest(
@@ -435,6 +436,7 @@ async def run_console_only_analysis(
             "Console-only analysis — read the mandatory console-output section "
             "in the analysis prompt before analyzing."
         ),
+        stack_trace=f"console_sha256:{hashlib.sha256(normalize_for_signature(console_context).encode()).hexdigest()}",
     )
 
     try:
