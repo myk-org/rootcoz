@@ -1531,8 +1531,8 @@ class ProwSource(CISource):
         )
 
         try:
-            validate_prow_job_name(prow_job_name)
-            validate_prow_build_id(build_id)
+            prow_job_name = validate_prow_job_name(prow_job_name)
+            build_id = validate_prow_build_id(build_id)
             prow_url = normalize_prow_url(prow_url) if prow_url else ""
             gcs_bucket = normalize_gcs_bucket(gcs_bucket)
             gcs_prefix = normalize_gcs_prefix(params.get("gcs_prefix", ""))
