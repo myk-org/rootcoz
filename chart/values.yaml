@@ -1,0 +1,127 @@
+# Bootstrap-only Helm values for rootcoz.
+# Integrations (Jenkins, Jira, GitHub, Report Portal, feature toggles) are configured
+# via Server Settings in the UI after first login.
+
+nameOverride: ""
+fullnameOverride: ""
+
+image:
+  # Container image repository
+  repository: ghcr.io/myk-org/rootcoz
+  # Image tag (defaults to latest when empty)
+  tag: ""
+  pullPolicy: Always
+
+# Pull secrets for private registries (create manually; see chart/README.md)
+imagePullSecrets: []
+
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
+
+# OpenShift Route (default on). Disable when using Ingress or ClusterIP-only access.
+route:
+  enabled: true
+  # REQUIRED: set your OpenShift apps domain before install
+  host: rootcoz.apps.example.com
+  # Long timeout for AI analysis and SSE streams
+  timeout: 300s
+  annotations: {}
+
+# Kubernetes Ingress (vanilla K8s). Mutually exclusive with route.enabled.
+ingress:
+  enabled: false
+  host: ""
+  className: ""
+  annotations: {}
+  tls:
+    enabled: false
+    secretName: ""
+
+ai:
+  # Required: gemini | claude | cursor → AI_PROVIDER
+  provider: ""
+  # Required → AI_MODEL
+  model: ""
+  # When provider=gemini → GEMINI_API_KEY (secret)
+  geminiApiKey: ""
+  # When provider=claude (Anthropic API) → ANTHROPIC_API_KEY (secret)
+  anthropicApiKey: ""
+  vertex:
+    # When provider=claude via Google Vertex AI
+    enabled: false
+    # → ANTHROPIC_VERTEX_PROJECT_ID (configmap)
+    projectId: ""
+    # → CLOUD_ML_REGION (configmap)
+    region: us-east5
+    # GCP service account JSON key (secret, mounted at /gcloud-credentials)
+    serviceAccountKey: ""
+  cursor:
+    # When provider=cursor → CURSOR_API_KEY (secret)
+    apiKey: ""
+    # Cursor auth.json content (secret, mounted at /home/appuser/.cursor-auth/auth.json)
+    authJson: ""
+
+# Bootstrap admin API key → ADMIN_KEY (secret). Auto-generated on first install if empty.
+admin:
+  key: ""
+
+# → ROOTCOZ_ENCRYPTION_KEY (separate secret). Auto-generated on first install if empty.
+encryptionKey: ""
+
+persistence:
+  enabled: true
+  # PVC size for SQLite database and app data
+  size: 5Gi
+  storageClass: ""
+  annotations:
+    helm.sh/resource-policy: keep
+
+resources:
+  # Modest defaults for dev/evaluation clusters. For production AI workloads use
+  # requests/limits of 4 CPU and 32Gi memory (see chart/README.md).
+  requests:
+    cpu: "1"
+    memory: 4Gi
+  limits:
+    cpu: "2"
+    memory: 8Gi
+
+env:
+  # OpenShift arbitrary-UID compatibility → XDG_DATA_HOME
+  xdgDataHome: /data
+  # Writable config dir → XDG_CONFIG_HOME
+  xdgConfigHome: /tmp/config
+  # Override auto-derived SECURE_COOKIES (true when Route or TLS Ingress, else false)
+  secureCookies: ""
+  # Override auto-derived PUBLIC_BASE_URL (https://route.host or ingress host)
+  publicBaseUrl: ""
+
+tuning:
+  # → LOG_LEVEL (omit for app default INFO)
+  logLevel: ""
+
+podAnnotations: {}
+podLabels: {}
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
+
+# OpenShift ImageStream for auto-import from GHCR (optional)
+imageStream:
+  enabled: false
+  name: rootcoz
+  namespace: ""
+
+# CSI VolumeSnapshot backup CronJob (requires snapshot-capable storage class)
+snapshots:
+  enabled: false
+  schedule: "0 3 * * *"
+  retention: 7
+  volumeSnapshotClass: ""
+
+# Helm test pod image (must include curl)
+tests:
+  image: curlimages/curl:8.12.1

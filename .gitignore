@@ -61,3 +61,10 @@ frontend/.vite/
 .envrc
 .claude/
 jji.db
+
+# Helm setup script output (contains secrets)
+values.secrets.yaml
+values.generated.yaml
+
+# Local tool downloads (optional helm binary for dev)
+.tools/

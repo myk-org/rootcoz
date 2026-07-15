@@ -25,7 +25,7 @@
 
 ## Testing — MANDATORY
 
-**`tox` must pass before every commit. No exceptions.**
+**`tox` must pass before every commit. No exceptions.** Requires [Helm 3](https://helm.sh/docs/intro/install/) for the `chart` environment.
 
 Run all tests:
 
@@ -33,15 +33,17 @@ Run all tests:
 uvx --with tox-uv tox
 ```
 
-This runs both environments:
+This runs all three environments:
 - `backend` — Python tests via `uv run pytest tests/ -q`
 - `frontend` — Frontend build (`vite build`) + Vitest tests (`npm test`)
+- `chart` — Helm lint + template smoke tests (requires [Helm 3](https://helm.sh/docs/intro/install/))
 
 Individual environments:
 
 ```bash
 uvx --with tox-uv tox -e backend    # Python only
 uvx --with tox-uv tox -e frontend   # Frontend only
+uvx --with tox-uv tox -e chart      # Helm chart only
 ```
 
 ## Smart Context Management
@@ -327,6 +329,15 @@ When adding a new analysis setting:
 3. Add the field to `_merge_settings()` in `main.py` so request values override env defaults
 4. Add the CLI option to the relevant command in `cli/main.py`
 5. Add the field to `ServerConfig` in `cli/config.py`
+
+**Helm chart parity (bootstrap-only):** When adding environment variables that **cannot** be configured via Server Settings UI, also update the Helm chart:
+
+- Sidecar AI keys (`GEMINI_API_KEY`, `ANTHROPIC_API_KEY`, `CURSOR_API_KEY`, Vertex/Cursor mount paths)
+- Bootstrap secrets (`ADMIN_KEY`, `ROOTCOZ_ENCRYPTION_KEY`)
+- Container runtime env (`XDG_*`, auto-derived `SECURE_COOKIES`, `PUBLIC_BASE_URL` derivation)
+- Routing templates (Route/Ingress)
+
+DB-configurable `Settings` fields do **not** require Helm chart changes — users set those after login in Server Settings.
 
 Exceptions (server-level only, no payload equivalent):
 - `ADMIN_KEY` — server-only bootstrap secret for admin superuser authentication; never expose via request payloads, CLI flags, or shared config files. Rotating `ADMIN_KEY` only affects the bootstrap admin login — delegated admin API keys use `ROOTCOZ_ENCRYPTION_KEY` for HMAC hashing and are not affected by `ADMIN_KEY` rotation.

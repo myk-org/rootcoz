@@ -1,0 +1,13 @@
+apiVersion: v2
+name: rootcoz
+description: AI-powered root cause analysis for CI/CD test failures
+type: application
+version: 4.2.0
+appVersion: "4.2.0"
+kubeVersion: ">=1.25.0"
+home: https://github.com/myk-org/rootcoz
+sources:
+  - https://github.com/myk-org/rootcoz
+maintainers:
+  - name: myk-org
+    url: https://github.com/myk-org

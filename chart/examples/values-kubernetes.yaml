@@ -1,0 +1,16 @@
+# Minimal vanilla Kubernetes example with TLS Ingress.
+route:
+  enabled: false
+
+ingress:
+  enabled: true
+  host: rootcoz.example.com
+  className: nginx
+  tls:
+    enabled: true
+    secretName: rootcoz-tls  # pragma: allowlist secret
+
+ai:
+  provider: gemini
+  model: gemini-2.5-pro
+  # Set geminiApiKey in values.secrets.yaml (see chart/README.md)

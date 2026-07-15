@@ -1,0 +1,19 @@
+{{- include "rootcoz.validate" . -}}
+apiVersion: v1
+kind: Pod
+metadata:
+  name: {{ include "rootcoz.fullname" . }}-test-health
+  labels:
+    {{- include "rootcoz.labels" . | nindent 4 }}
+  annotations:
+    helm.sh/hook: test
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+spec:
+  restartPolicy: Never
+  containers:
+    - name: curl
+      image: {{ .Values.tests.image | quote }}
+      command:
+        - sh
+        - -c
+        - curl -fsS "http://{{ include "rootcoz.fullname" . }}:8000/health"

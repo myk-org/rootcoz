@@ -1,5 +1,5 @@
 skipsdist = true
-envlist = ["backend", "frontend"]
+envlist = ["backend", "frontend", "chart"]
 
 [env.backend]
 description = "Run Python tests"
@@ -40,3 +40,131 @@ description = "Run frontend build and tests"
 skip_install = true
 allowlist_externals = ["npm", "npx"]
 change_dir = "frontend"
+
+[env.chart]
+description = "Helm chart lint and template smoke tests"
+skip_install = true
+allowlist_externals = ["helm", "sh"]
+passenv = ["PATH"]
+commands = [
+  ["helm", "lint", "chart/"],
+  [
+    "helm",
+    "template",
+    "rootcoz",
+    "chart/",
+    "-f",
+    "chart/examples/values-openshift.yaml",
+    "--set",
+    "ai.geminiApiKey=test-key",  # pragma: allowlist secret
+    "--set",
+    "admin.key=test-admin-key",  # pragma: allowlist secret
+    "--set",
+    "encryptionKey=test-encryption-key-for-helm-template-render",  # pragma: allowlist secret
+  ],
+  [
+    "helm",
+    "template",
+    "rootcoz",
+    "chart/",
+    "-f",
+    "chart/examples/values-kubernetes.yaml",
+    "--set",
+    "ai.geminiApiKey=test-key",  # pragma: allowlist secret
+    "--set",
+    "admin.key=test-admin-key",  # pragma: allowlist secret
+    "--set",
+    "encryptionKey=test-encryption-key-for-helm-template-render",  # pragma: allowlist secret
+  ],
+  [
+    "helm",
+    "template",
+    "rootcoz",
+    "chart/",
+    "-f",
+    "chart/examples/values-clusterip.yaml",
+    "--set",
+    "ai.geminiApiKey=test-key",  # pragma: allowlist secret
+    "--set",
+    "admin.key=test-admin-key",  # pragma: allowlist secret
+    "--set",
+    "encryptionKey=test-encryption-key-for-helm-template-render",  # pragma: allowlist secret
+  ],
+  [
+    "sh",
+    "-c",
+    "helm template rootcoz chart/ -f chart/examples/values-openshift.yaml --set route.enabled=true --set ingress.enabled=true --set route.host=x.example.com --set ingress.host=y.example.com --set ai.geminiApiKey=k --set admin.key=a --set encryptionKey=test-encryption-key-for-helm-template-render 2>&1 | grep -q 'mutually exclusive'",  # pragma: allowlist secret
+  ],
+  [
+    "helm",
+    "template",
+    "rootcoz",
+    "chart/",
+    "-f",
+    "chart/examples/values-openshift.yaml",
+    "--set",
+    "ai.vertex.enabled=true",
+    "--set",
+    "ai.vertex.projectId=test-project",
+    "--set",
+    "ai.vertex.serviceAccountKey={}",  # pragma: allowlist secret
+    "--set",
+    "ai.geminiApiKey=test-key",  # pragma: allowlist secret
+    "--set",
+    "admin.key=test-admin-key",  # pragma: allowlist secret
+    "--set",
+    "encryptionKey=test-encryption-key-for-helm-template-render",  # pragma: allowlist secret
+  ],
+  [
+    "helm",
+    "template",
+    "rootcoz",
+    "chart/",
+    "-f",
+    "chart/examples/values-openshift.yaml",
+    "--set",
+    "ai.provider=cursor",
+    "--set",
+    "ai.cursor.authJson={}",
+    "--set",
+    "ai.geminiApiKey=",  # pragma: allowlist secret
+    "--set",
+    "admin.key=test-admin-key",  # pragma: allowlist secret
+    "--set",
+    "encryptionKey=test-encryption-key-for-helm-template-render",  # pragma: allowlist secret
+  ],
+  [
+    "helm",
+    "template",
+    "rootcoz",
+    "chart/",
+    "-f",
+    "chart/examples/values-openshift.yaml",
+    "--set",
+    "snapshots.enabled=true",
+    "--set",
+    "snapshots.volumeSnapshotClass=test-snapclass",
+    "--set",
+    "ai.geminiApiKey=test-key",  # pragma: allowlist secret
+    "--set",
+    "admin.key=test-admin-key",  # pragma: allowlist secret
+    "--set",
+    "encryptionKey=test-encryption-key-for-helm-template-render",  # pragma: allowlist secret
+  ],
+  [
+    "helm",
+    "template",
+    "rootcoz",
+    "chart/",
+    "-f",
+    "chart/examples/values-openshift.yaml",
+    "--set",
+    "imageStream.enabled=true",
+    "--set",
+    "ai.geminiApiKey=test-key",  # pragma: allowlist secret
+    "--set",
+    "admin.key=test-admin-key",  # pragma: allowlist secret
+    "--set",
+    "encryptionKey=test-encryption-key-for-helm-template-render",  # pragma: allowlist secret
+  ],
+]
