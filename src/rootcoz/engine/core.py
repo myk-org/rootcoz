@@ -1318,7 +1318,7 @@ Note: Multiple tests failed with the same error. Provide ONE analysis that appli
                 ai_model=ai_model,
                 cwd=str(repo_path) if repo_path else None,
                 ai_call_timeout=ai_call_timeout,
-                tools=ANALYSIS_BUILTIN_TOOLS,
+                tools=list(ANALYSIS_BUILTIN_TOOLS),
             )
         except Exception:
             logger.exception(

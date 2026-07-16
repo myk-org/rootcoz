@@ -59,7 +59,7 @@ class TestChatSessionTools:
 
         assert session_id == "sess-123"
         passed_kwargs = mock_client.create_session.call_args.kwargs
-        assert passed_kwargs.get("tools") == CHAT_BUILTIN_TOOLS
+        assert passed_kwargs.get("tools") == list(CHAT_BUILTIN_TOOLS)
 
     @pytest.mark.asyncio
     async def test_create_chat_session_no_restrict(self):
@@ -103,7 +103,7 @@ class TestChatImplTools:
             )
 
         assert success
-        assert mock_call_ai.call_args[1].get("tools") == CHAT_BUILTIN_TOOLS
+        assert mock_call_ai.call_args[1].get("tools") == list(CHAT_BUILTIN_TOOLS)
 
     @pytest.mark.asyncio
     async def test_existing_session_no_tools(self):
@@ -150,7 +150,7 @@ class TestChatImplTools:
 
         assert success
         retry_kwargs = mock_call_ai.call_args_list[1][1]
-        assert retry_kwargs.get("tools") == CHAT_BUILTIN_TOOLS
+        assert retry_kwargs.get("tools") == list(CHAT_BUILTIN_TOOLS)
         assert retry_kwargs.get("session_id") is None
 
 
@@ -201,7 +201,7 @@ class TestAnalysisTools:
             job_id="test-job",
         )
 
-        assert captured_kwargs.get("tools") == ANALYSIS_BUILTIN_TOOLS
+        assert captured_kwargs.get("tools") == list(ANALYSIS_BUILTIN_TOOLS)
 
 
 class TestPeerAnalysisTools:
@@ -271,8 +271,9 @@ class TestPeerAnalysisTools:
         )
 
         assert any(
-            kw.get("tools") == ANALYSIS_BUILTIN_TOOLS for kw in captured_call_ai_kwargs
-        ), f"No call_ai call had tools={ANALYSIS_BUILTIN_TOOLS}"
+            kw.get("tools") == list(ANALYSIS_BUILTIN_TOOLS)
+            for kw in captured_call_ai_kwargs
+        ), f"No call_ai call had tools={list(ANALYSIS_BUILTIN_TOOLS)}"
 
 
 class TestResourcesAgentDiscovery:

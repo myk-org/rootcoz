@@ -637,15 +637,16 @@ async def analyze_failure_group_with_peers(
                     idx,
                     job_id,
                 )
-                ai_result = await call_ai(
-                    prompt,
-                    ai_provider=config.ai_provider,
-                    ai_model=config.ai_model,
-                    cwd=str(repo_path) if repo_path else None,
-                    ai_call_timeout=ai_call_timeout,
-                    session_id=session,
-                    tools=ANALYSIS_BUILTIN_TOOLS,
-                )
+                peer_kwargs: dict = {
+                    "ai_provider": config.ai_provider,
+                    "ai_model": config.ai_model,
+                    "cwd": str(repo_path) if repo_path else None,
+                    "ai_call_timeout": ai_call_timeout,
+                    "session_id": session,
+                }
+                if not session:
+                    peer_kwargs["tools"] = list(ANALYSIS_BUILTIN_TOOLS)
+                ai_result = await call_ai(prompt, **peer_kwargs)
                 logger.debug(
                     "Peer %d (%s/%s) AI result: success=%s, text_length=%d",
                     idx,
@@ -853,7 +854,7 @@ async def analyze_failure_group_with_peers(
                         ai_model=main_ai_model,
                         cwd=str(repo_path) if repo_path else None,
                         ai_call_timeout=ai_call_timeout,
-                        tools=ANALYSIS_BUILTIN_TOOLS,
+                        tools=list(ANALYSIS_BUILTIN_TOOLS),
                     )
                     logger.debug(
                         "Revision round %d AI result: success=%s, text_length=%d, provider=%s, model=%s",

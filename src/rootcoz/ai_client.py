@@ -8,8 +8,8 @@ VALID_AI_PROVIDERS = {"claude", "cursor", "gemini"}
 # Builtin tools for AI sessions — no bash access (MANDATORY per project rules)
 # Separate constants to allow independent evolution: analysis may gain tools
 # (e.g. write) that chat should never have.
-CHAT_BUILTIN_TOOLS: list[str] = ["read", "ls", "find", "grep", "subagent"]
-ANALYSIS_BUILTIN_TOOLS: list[str] = ["read", "ls", "find", "grep", "subagent"]
+CHAT_BUILTIN_TOOLS: tuple[str, ...] = ("read", "ls", "find", "grep", "subagent")
+ANALYSIS_BUILTIN_TOOLS: tuple[str, ...] = ("read", "ls", "find", "grep", "subagent")
 
 
 def _setup_usage_recorder() -> None:

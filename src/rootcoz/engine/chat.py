@@ -1060,7 +1060,7 @@ async def _create_chat_session(
         if custom_tools:
             create_kwargs["custom_tools"] = custom_tools
         if restrict_tools:
-            create_kwargs["tools"] = CHAT_BUILTIN_TOOLS
+            create_kwargs["tools"] = list(CHAT_BUILTIN_TOOLS)
         session_id = await client.create_session(**create_kwargs)
         logger.info("%s: session created: %s", log_prefix, session_id)
         return session_id
@@ -1169,7 +1169,7 @@ async def _chat_with_ai_impl(
     if custom_tools:
         call_kwargs["custom_tools"] = custom_tools
     if not session_id and restrict_tools:
-        call_kwargs["tools"] = CHAT_BUILTIN_TOOLS
+        call_kwargs["tools"] = list(CHAT_BUILTIN_TOOLS)
     result = await call_ai(prompt, **call_kwargs)
 
     # If session was lost, retry with fresh session
@@ -1194,7 +1194,7 @@ async def _chat_with_ai_impl(
         if custom_tools:
             retry_kwargs["custom_tools"] = custom_tools
         if restrict_tools:
-            retry_kwargs["tools"] = CHAT_BUILTIN_TOOLS
+            retry_kwargs["tools"] = list(CHAT_BUILTIN_TOOLS)
         result = await call_ai(prompt, **retry_kwargs)
 
     await result.record_usage(
