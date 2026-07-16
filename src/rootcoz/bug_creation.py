@@ -11,7 +11,7 @@ import httpx
 from simple_logger.logger import get_logger
 
 from rootcoz.config import Settings
-from pi_sidecar_client import call_ai_once
+from rootcoz.ai_client import call_ai_once
 from rootcoz.jira import JiraClient
 from rootcoz.models import (
     AnalysisDetail,
@@ -252,6 +252,7 @@ async def _generate_issue_content_via_ai(
             ai_provider=ai_provider,
             ai_model=ai_model,
             ai_call_timeout=ai_call_timeout,
+            tools=[],
         )
     except Exception:
         logger.exception("AI call raised for %s issue", issue_type)

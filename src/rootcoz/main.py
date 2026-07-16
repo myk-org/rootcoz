@@ -22,12 +22,11 @@ import aiosqlite
 import httpx
 import uvicorn
 from pi_sidecar_client import (
-    call_ai_once,
     check_sidecar_available,
     list_models,
     run_parallel_with_limit,
 )
-from rootcoz.ai_client import VALID_AI_PROVIDERS, _setup_usage_recorder
+from rootcoz.ai_client import VALID_AI_PROVIDERS, _setup_usage_recorder, call_ai_once
 from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Query, Request
 from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
@@ -9314,6 +9313,7 @@ Respond with ONLY a JSON object:
         ai_provider=ai_provider,
         ai_model=ai_model,
         ai_call_timeout=None,
+        tools=[],
     )
 
     await result.record_usage(

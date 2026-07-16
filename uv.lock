@@ -727,13 +727,13 @@ wheels = [
 
 [[package]]
 name = "pi-sidecar-client"
-version = "1.1.5"
+version = "1.2.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "httpx" },
     { name = "python-simple-logger" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/7e/72/732b0602ec0a17dd32a98f6e30f4ffa427f441eedd7b53802da40740f51c/pi_sidecar_client-1.1.5.tar.gz", hash = "sha256:b4ca1a872e9dfded0903028ac27119f243244c2f4eb95d3f86cf05dc6137310b", size = 13708, upload-time = "2026-06-28T15:14:27.297Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/55/01/9d5c4456e23de513e6f3da3747615785eed24ff6e915ceddf31130e9c61f/pi_sidecar_client-1.2.0.tar.gz", hash = "sha256:ba2701781a9f1b829f554cbddeefddeab2c68a4c7d0acf8b6e332facdcbae324", size = 10788, upload-time = "2026-07-16T16:04:04.446Z" }
 
 [[package]]
 name = "pluggy"

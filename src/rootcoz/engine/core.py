@@ -18,9 +18,9 @@ from pathlib import Path
 
 from simple_logger.logger import get_logger
 
+from rootcoz.ai_client import AIResult, ANALYSIS_BUILTIN_TOOLS, call_ai_once
 from rootcoz.config import Settings, parse_additional_repos
 from rootcoz.logging_context import get_log_file
-from pi_sidecar_client import AIResult, call_ai_once
 from rootcoz.models import (
     AdditionalRepo,
     AiConfigEntry,
@@ -1043,6 +1043,15 @@ def build_resources_section(
                     f" at {repo_history_prompt} — read and follow"
                     f" alongside the main history analysis instructions"
                 )
+            # Advertise project-provided agents (from .rootcoz/agents/)
+            pi_agents_dir = path / ".rootcoz" / "agents"
+            if pi_agents_dir.is_dir():
+                agent_files = sorted(pi_agents_dir.glob("*.md"))
+                if agent_files:
+                    agent_names = ", ".join(f.stem for f in agent_files)
+                    resources.append(
+                        f"- Project agents available via `subagent` tool: {agent_names}"
+                    )
 
     if resources:
         return "\n\nAVAILABLE RESOURCES:\n" + "\n".join(resources) + "\n"
@@ -1309,6 +1318,7 @@ Note: Multiple tests failed with the same error. Provide ONE analysis that appli
                 ai_model=ai_model,
                 cwd=str(repo_path) if repo_path else None,
                 ai_call_timeout=ai_call_timeout,
+                tools=ANALYSIS_BUILTIN_TOOLS,
             )
         except Exception:
             logger.exception(

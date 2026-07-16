@@ -195,7 +195,7 @@ prompt = f"Here is the data: {content}"
 
 AI chat sessions MUST use restricted tool sets — **never give bash access**.
 
-- **Allowed builtin tools**: `["read", "ls", "find", "grep"]` — filesystem browsing only
+- **Allowed builtin tools**: `["read", "ls", "find", "grep", "subagent"]` — filesystem browsing + delegating to project-provided agents
 - **Data access**: Use HTTP-backed custom tools via pi-sidecar (pi-sidecar ≥1.1.0)
 - **Never**: `bash`, `exec`, `write`, `edit` — the AI must not execute arbitrary commands or modify files
 - Custom tools define exactly which API endpoints the AI can call — nothing else is reachable

@@ -13,14 +13,12 @@ from pathlib import Path
 from typing import Any, Literal, TypedDict, cast, get_args
 
 from pi_sidecar_client import (
-    AIResult,
-    call_ai,
-    call_ai_once,
     get_sidecar_client,
     run_parallel_with_limit,
 )
 from simple_logger.logger import get_logger
 
+from rootcoz.ai_client import AIResult, ANALYSIS_BUILTIN_TOOLS, call_ai, call_ai_once
 from rootcoz.engine.core import (
     JSON_RESPONSE_SCHEMA,
     TIMELINE_RULE,
@@ -646,6 +644,7 @@ async def analyze_failure_group_with_peers(
                     cwd=str(repo_path) if repo_path else None,
                     ai_call_timeout=ai_call_timeout,
                     session_id=session,
+                    tools=ANALYSIS_BUILTIN_TOOLS,
                 )
                 logger.debug(
                     "Peer %d (%s/%s) AI result: success=%s, text_length=%d",
@@ -854,6 +853,7 @@ async def analyze_failure_group_with_peers(
                         ai_model=main_ai_model,
                         cwd=str(repo_path) if repo_path else None,
                         ai_call_timeout=ai_call_timeout,
+                        tools=ANALYSIS_BUILTIN_TOOLS,
                     )
                     logger.debug(
                         "Revision round %d AI result: success=%s, text_length=%d, provider=%s, model=%s",

@@ -11,7 +11,9 @@ from pathlib import Path
 
 from simple_logger.logger import get_logger
 
-from pi_sidecar_client import call_ai, get_sidecar_client
+from pi_sidecar_client import get_sidecar_client
+
+from rootcoz.ai_client import CHAT_BUILTIN_TOOLS, call_ai
 
 logger = get_logger(name=__name__)
 
@@ -1058,7 +1060,7 @@ async def _create_chat_session(
         if custom_tools:
             create_kwargs["custom_tools"] = custom_tools
         if restrict_tools:
-            create_kwargs["tools"] = ["read", "ls", "find", "grep"]
+            create_kwargs["tools"] = CHAT_BUILTIN_TOOLS
         session_id = await client.create_session(**create_kwargs)
         logger.info("%s: session created: %s", log_prefix, session_id)
         return session_id
@@ -1166,6 +1168,8 @@ async def _chat_with_ai_impl(
     }
     if custom_tools:
         call_kwargs["custom_tools"] = custom_tools
+    if not session_id and restrict_tools:
+        call_kwargs["tools"] = CHAT_BUILTIN_TOOLS
     result = await call_ai(prompt, **call_kwargs)
 
     # If session was lost, retry with fresh session
@@ -1189,6 +1193,8 @@ async def _chat_with_ai_impl(
         }
         if custom_tools:
             retry_kwargs["custom_tools"] = custom_tools
+        if restrict_tools:
+            retry_kwargs["tools"] = CHAT_BUILTIN_TOOLS
         result = await call_ai(prompt, **retry_kwargs)
 
     await result.record_usage(

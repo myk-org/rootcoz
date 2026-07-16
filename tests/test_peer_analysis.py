@@ -674,6 +674,7 @@ class TestAnalyzeWithPeers:
             ai_model="",
             ai_call_timeout=None,
             session_id=None,
+            **_kwargs,
         ):
             return AIResult(success=True, text=peer_response)
 
@@ -741,6 +742,7 @@ class TestAnalyzeWithPeers:
             ai_model="",
             ai_call_timeout=None,
             session_id=None,
+            **_kwargs,
         ):
             nonlocal call_count
             call_count += 1
@@ -813,6 +815,7 @@ class TestAnalyzeWithPeers:
             ai_model="",
             ai_call_timeout=None,
             session_id=None,
+            **_kwargs,
         ):
             nonlocal call_count
             call_count += 1
@@ -887,6 +890,7 @@ class TestAnalyzeWithPeers:
             ai_model="",
             ai_call_timeout=None,
             session_id=None,
+            **_kwargs,
         ):
             nonlocal call_count
             call_count += 1
@@ -983,6 +987,7 @@ class TestAnalyzeWithPeers:
             ai_model="",
             ai_call_timeout=None,
             session_id=None,
+            **_kwargs,
         ):
             nonlocal call_count
             call_count += 1
@@ -1082,6 +1087,7 @@ class TestAnalyzeWithPeers:
             ai_model="",
             ai_call_timeout=None,
             session_id=None,
+            **_kwargs,
         ):
             nonlocal call_count
             call_count += 1
@@ -1175,6 +1181,7 @@ class TestAnalyzeWithPeers:
             ai_model="",
             ai_call_timeout=None,
             session_id=None,
+            **_kwargs,
         ):
             nonlocal call_count
             call_count += 1
@@ -1244,6 +1251,7 @@ class TestAnalyzeWithPeers:
             ai_model="",
             ai_call_timeout=None,
             session_id=None,
+            **_kwargs,
         ):
             # Revision calls: main AI always returns same classification
             if "revision" in prompt.lower() or "revise" in prompt.lower():
@@ -1330,6 +1338,7 @@ class TestAnalyzeWithPeers:
             ai_model="",
             ai_call_timeout=None,
             session_id=None,
+            **_kwargs,
         ):
             return AIResult(success=True, text=peer_response)
 
@@ -1387,6 +1396,7 @@ class TestAnalyzeWithPeers:
             ai_model="",
             ai_call_timeout=None,
             session_id=None,
+            **_kwargs,
         ):
             nonlocal call_count
             call_count += 1
@@ -1456,6 +1466,7 @@ class TestAnalyzeWithPeers:
             ai_model="",
             ai_call_timeout=None,
             session_id=None,
+            **_kwargs,
         ):
             nonlocal call_count
             call_count += 1
@@ -1534,6 +1545,7 @@ class TestAnalyzeWithPeers:
             ai_model="",
             ai_call_timeout=None,
             session_id=None,
+            **_kwargs,
         ):
             nonlocal call_count
             call_count += 1
@@ -1600,6 +1612,7 @@ class TestAnalyzeWithPeers:
             ai_model="",
             ai_call_timeout=None,
             session_id=None,
+            **_kwargs,
         ):
             return AIResult(success=True, text=peer_agree)
 
@@ -1660,6 +1673,7 @@ class TestAnalyzeWithPeers:
             ai_model="",
             ai_call_timeout=None,
             session_id=None,
+            **_kwargs,
         ):
             nonlocal call_count
             call_count += 1
@@ -1810,6 +1824,7 @@ class TestAnalyzeWithPeers:
             ai_model="",
             ai_call_timeout=None,
             session_id=None,
+            **_kwargs,
         ):
             return AIResult(success=True, text=peer_response)
 
@@ -2027,6 +2042,7 @@ class TestAnalyzeWithPeers:
             ai_model="",
             ai_call_timeout=None,
             session_id=None,
+            **_kwargs,
         ):
             nonlocal call_count
             call_count += 1
@@ -2115,6 +2131,7 @@ class TestAnalyzeWithPeers:
             ai_model="",
             ai_call_timeout=None,
             session_id=None,
+            **_kwargs,
         ):
             nonlocal call_count
             call_count += 1
@@ -2204,6 +2221,7 @@ class TestAnalyzeWithPeers:
             ai_model="",
             ai_call_timeout=None,
             session_id=None,
+            **_kwargs,
         ):
             nonlocal call_count
             call_count += 1
@@ -2294,6 +2312,7 @@ class TestAnalyzeWithPeers:
             ai_model="",
             ai_call_timeout=None,
             session_id=None,
+            **_kwargs,
         ):
             nonlocal call_count
             call_count += 1
@@ -2356,6 +2375,7 @@ class TestAnalyzeWithPeers:
             ai_model="",
             ai_call_timeout=None,
             session_id=None,
+            **_kwargs,
         ):
             nonlocal peer_call_count
             peer_call_count += 1
@@ -2454,6 +2474,7 @@ class TestAnalyzeWithPeers:
             ai_model="",
             ai_call_timeout=None,
             session_id=None,
+            **_kwargs,
         ):
             nonlocal call_count
             call_count += 1
@@ -2564,6 +2585,7 @@ class TestAnalyzeWithPeers:
             ai_model="",
             ai_call_timeout=None,
             session_id=None,
+            **_kwargs,
         ):
             nonlocal call_count
             call_count += 1
@@ -3036,6 +3058,7 @@ class TestOrchestratorEmptyFallback:
             ai_model="",
             ai_call_timeout=None,
             session_id=None,
+            **_kwargs,
         ):
             return AIResult(success=True, text=peer_response)
 
@@ -3088,6 +3111,7 @@ class TestOrchestratorEmptyFallback:
             ai_model="",
             ai_call_timeout=None,
             session_id=None,
+            **_kwargs,
         ):
             nonlocal call_count
             call_count += 1
@@ -3158,6 +3182,7 @@ class TestOrchestratorEmptyFallback:
             ai_model="",
             ai_call_timeout=None,
             session_id=None,
+            **_kwargs,
         ):
             return AIResult(success=False, text="CLI error")
 
@@ -3217,6 +3242,7 @@ class TestOrchestratorEmptyFallback:
             ai_model="",
             ai_call_timeout=None,
             session_id=None,
+            **_kwargs,
         ):
             return AIResult(success=True, text=peer_response)
 
@@ -3281,6 +3307,7 @@ class TestOrchestratorEmptyFallback:
             ai_model="",
             ai_call_timeout=None,
             session_id=None,
+            **_kwargs,
         ):
             return AIResult(success=True, text=peer_response)
 
@@ -3341,6 +3368,7 @@ class TestOrchestratorEmptyFallback:
             ai_model="",
             ai_call_timeout=None,
             session_id=None,
+            **_kwargs,
         ):
             return AIResult(success=True, text=peer_response)
 
@@ -3400,6 +3428,7 @@ class TestOrchestratorEmptyFallback:
             ai_model="",
             ai_call_timeout=None,
             session_id=None,
+            **_kwargs,
         ):
             return AIResult(success=True, text=peer_response)
 
