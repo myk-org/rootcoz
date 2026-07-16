@@ -14,7 +14,7 @@ import json
 import os
 import re
 import shutil
-import uuid
+import tempfile
 from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -54,9 +54,6 @@ _MAX_SIZE_SINGLE_ARTIFACT = 10_000_000  # 10 MB
 # Maximum number of concurrent PR-change fetches
 MAX_PR_FETCH_CONCURRENCY = 5
 
-# Base directory for artifact extraction
-_ARTIFACTS_BASE = Path("/tmp/prow-artifacts")
-
 
 def prow_identity(job_name: str, build_id: str) -> dict:
     """Derive Prow identity fields for the result dict.
@@ -73,7 +70,7 @@ def prow_identity(job_name: str, build_id: str) -> dict:
     if build_id:
         identity["build_id"] = build_id
     if build_id and build_id.isdigit():
-        identity["build_number"] = build_id
+        identity["build_number"] = int(build_id)
     return identity
 
 
@@ -275,11 +272,26 @@ async def _fetch_gcs_response(
     # a defense-in-depth fallback for the rare case where the header is
     # missing or inaccurate.
     try:
-        resp = await client.get(url)
-        if resp.status_code == 404:
-            logger.debug("GCS %s not found: %s", effective_label, url)
-            return None
-        resp.raise_for_status()
+        async with client.stream("GET", url) as resp:
+            if resp.status_code == 404:
+                logger.debug("GCS %s not found: %s", effective_label, url)
+                return None
+            resp.raise_for_status()
+
+            # Check Content-Length *before* downloading the body
+            try:
+                content_length = int(resp.headers.get("content-length", 0))
+            except (ValueError, TypeError):
+                content_length = 0
+            _raise_if_oversize(effective_label, content_length, max_size, url)
+
+            # Stream body into memory only after header check passes
+            await resp.aread()
+            # Defense-in-depth: verify actual body bytes
+            _raise_if_oversize(effective_label, len(resp.content), max_size, url)
+            return resp
+    except GCSOversizeError:
+        raise
     except httpx.HTTPStatusError as exc:
         logger.warning(
             "GCS %s access error (%d): %s",
@@ -291,16 +303,6 @@ async def _fetch_gcs_response(
     except httpx.HTTPError as exc:
         logger.warning("GCS network error for %s: %s", effective_label, exc)
         raise GCSAccessError(effective_label, 0, url) from exc
-
-    try:
-        content_length = int(resp.headers.get("content-length", 0))
-    except (ValueError, TypeError):
-        content_length = 0
-    _raise_if_oversize(effective_label, content_length, max_size, url)
-    # Defense-in-depth: check actual body bytes when content-length is
-    # missing or lies.
-    _raise_if_oversize(effective_label, len(resp.content), max_size, url)
-    return resp
 
 
 async def _fetch_gcs_text(
@@ -441,7 +443,7 @@ async def _download_gcs_artifacts(
 ) -> Path | None:
     """Download non-JUnit artifacts from GCS to a local directory.
 
-    Creates a temporary directory under ``_ARTIFACTS_BASE`` and downloads
+    Creates a temporary directory and downloads
     each artifact file, preserving the directory structure relative to
     the artifacts prefix.
 
@@ -465,8 +467,7 @@ async def _download_gcs_artifacts(
     if not artifact_objects:
         return None
 
-    dest_dir = _ARTIFACTS_BASE / f"prow-{uuid.uuid4().hex}"
-    dest_dir.mkdir(parents=True, exist_ok=False)
+    dest_dir = Path(tempfile.mkdtemp(prefix="prow-artifacts-"))
 
     total_downloaded = 0
     files_downloaded = 0
@@ -1316,7 +1317,14 @@ class ProwSource(CISource):
                 failures=[],
                 build_passed=True,
                 build_url=self.build_url,
-                source_metadata=self._metadata_dict(),
+                build_passed_summary=(
+                    "Prow build passed; analysis skipped "
+                    "(use force to analyze successful builds)."
+                ),
+                source_metadata={
+                    **self._metadata_dict(),
+                    "resolved_gcs_prefix": self._resolved_gcs_prefix or "",
+                },
                 identity=self._identity_dict(),
                 warnings=access_warnings,
             )
@@ -1435,7 +1443,10 @@ class ProwSource(CISource):
             artifacts_context=artifacts_context,
             build_url=self.build_url,
             warnings=access_warnings,
-            source_metadata=self._metadata_dict(),
+            source_metadata={
+                **self._metadata_dict(),
+                "resolved_gcs_prefix": self._resolved_gcs_prefix or "",
+            },
             identity=self._identity_dict(),
             extract_path=extract_path,
         )

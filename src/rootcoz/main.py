@@ -2218,8 +2218,11 @@ def _merge_settings(body: BaseAnalysisRequest, settings: Settings) -> Settings:
 
         # force has a non-None default (False); only override when
         # explicitly sent so that omitted requests inherit from env/settings.
-        if "force" in body.model_fields_set:
-            overrides["force_analysis"] = body.force
+
+    # force — shared by both AnalyzeRequest and UnifiedAnalyzeRequest
+    # (both inherit _JenkinsParamsMixin.force)
+    if "force" in body.model_fields_set:
+        overrides["force_analysis"] = getattr(body, "force")
 
     # UnifiedAnalyzeRequest-specific fields (Prow overrides)
     if isinstance(body, UnifiedAnalyzeRequest):
@@ -2227,9 +2230,6 @@ def _merge_settings(body: BaseAnalysisRequest, settings: Settings) -> Settings:
             overrides["prow_url"] = body.prow_url
         if "gcs_bucket" in body.model_fields_set and body.gcs_bucket:
             overrides["gcs_bucket"] = body.gcs_bucket
-        # force for file/raw/prow — AnalyzeRequest block above only covers Jenkins
-        if "force" in body.model_fields_set and body.force is not None:
-            overrides["force_analysis"] = body.force
 
     if overrides:
         merged_data = settings.model_dump(mode="python") | overrides
@@ -3605,12 +3605,7 @@ async def _process_non_jenkins_analysis(
     repo_manager: RepositoryManager | None = None
     source: CISource | None = None  # set after source creation; used by cleanup
     source_result = None  # set after source.fetch(); used by _stamp_source_warnings
-    # Use real job identity for metadata matching (display_name may have UUID suffix)
-    metadata_job_name = (
-        body.prow_job_name
-        if body.type == "prow" and body.prow_job_name
-        else display_name
-    )
+    metadata_job_name = display_name  # updated from source_result.identity after fetch
 
     try:
         logger.info(
@@ -3644,6 +3639,11 @@ async def _process_non_jenkins_analysis(
             f"Source fetch complete: {len(source_result.failures)} failures, build_passed={source_result.build_passed}"
         )
 
+        # Use source-provided job identity for metadata matching
+        identity_job = source_result.identity.get("job_name")
+        if identity_job:
+            metadata_job_name = identity_job
+
         # Log and track source warnings (e.g. GCS access errors, oversize artifacts)
         for warning in source_result.warnings:
             logger.warning("Source warning for job %s: %s", job_id, warning)
@@ -3652,21 +3652,12 @@ async def _process_non_jenkins_analysis(
         if source_result.build_url:
             await storage.update_build_url(job_id, source_result.build_url)
 
-        if body.type == "prow" and isinstance(source, ProwSource):
-            resolved_prefix = source.resolved_gcs_prefix
-            if resolved_prefix:
-                await _persist_resolved_gcs_prefix(job_id, resolved_prefix)
+        resolved_prefix = source_result.source_metadata.get("resolved_gcs_prefix")
+        if resolved_prefix:
+            await _persist_resolved_gcs_prefix(job_id, resolved_prefix)
 
         if source_result.build_passed:
-            if body.type == "prow":
-                summary = (
-                    "Prow build passed; analysis skipped "
-                    "(use force to analyze successful builds)."
-                )
-            elif body.type == "file":
-                summary = "No test failures found in the provided input."
-            else:
-                summary = "No test failures found in the provided input."
+            summary = source_result.build_passed_summary
             analysis_result = FailureAnalysisResult(
                 job_id=job_id,
                 status="completed",
@@ -3697,17 +3688,15 @@ async def _process_non_jenkins_analysis(
         notify_job_status_changed(job_id)
 
         # Pre-flight: verify AI is reachable before spawning parallel tasks
-        _preflight_build_number: int | str | None = None
-        if body.type == "prow" and body.build_id and body.build_id.isdigit():
-            _preflight_build_number = (
-                body.build_id
-            )  # String — Prow IDs exceed JS MAX_SAFE_INTEGER
+        _preflight_build_number: int | str | None = source_result.identity.get(
+            "build_number"
+        )
         if not await _preflight_sidecar_check(
             job_id,
             ai_provider,
             ai_model,
             display_name,
-            job_name=body.prow_job_name or body.job_name or "",
+            job_name=metadata_job_name,
             build_number=_preflight_build_number,
             jenkins_url=source_result.build_url or "",
             source_warnings=source_result.warnings or None,
@@ -3891,7 +3880,7 @@ async def _process_non_jenkins_analysis(
         # context exists (e.g. Prow build with no JUnit artifacts)
         if not test_failures and console_context:
             success, console_results, error_text = await run_console_only_analysis(
-                test_name=body.prow_job_name or body.job_name or display_name,
+                test_name=metadata_job_name,
                 console_context=console_context,
                 artifacts_context=artifacts_context,
                 repo_path=repo_path,
@@ -3934,7 +3923,7 @@ async def _process_non_jenkins_analysis(
 
             all_analyses = list(console_results)
             synthetic_failure = FailedTest(
-                test_name=body.prow_job_name or body.job_name or display_name,
+                test_name=metadata_job_name,
                 error_message=console_context,
             )
             unique_errors = 1
@@ -10775,8 +10764,9 @@ async def _resolve_chat_credentials(
 ) -> tuple[str, str, str, str, str]:
     """Resolve Jira and GitHub credentials for chat.
 
-    Jira uses user-scoped tokens only. GitHub falls back to job-stored
-    and server deployment tokens so presubmit PR diffs match analysis.
+    Both Jira and GitHub use user-scoped tokens only, with job-stored
+    tokens as fallback. Server deployment tokens are never exposed to
+    chat sessions.
 
     Returns:
         (jira_url, jira_email, jira_token, github_token, github_repo)
@@ -10805,8 +10795,6 @@ async def _resolve_chat_credentials(
     github_token = (user_tokens.get("github_token") or "").strip()
     if not github_token:
         github_token = (decrypted_params.get("github_token") or "").strip()
-    if not github_token and settings.github_token:
-        github_token = settings.github_token.get_secret_value()
 
     return jira_url, jira_email, jira_token, github_token, github_repo
 

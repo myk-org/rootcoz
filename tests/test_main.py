@@ -712,7 +712,7 @@ class TestProwIdentityStamping:
         assert result == {
             "job_name": "my-prow-job",
             "build_id": "1234567890123456789",
-            "build_number": "1234567890123456789",
+            "build_number": 1234567890123456789,
         }
 
     def test_non_numeric_build_id_excluded(self):
@@ -756,7 +756,7 @@ class TestProwIdentityStamping:
         )
         identity = source._identity_dict()
         assert identity["job_name"] == "my-prow-job"
-        assert identity["build_number"] == "1234567890123456789"
+        assert identity["build_number"] == 1234567890123456789
 
 
 class TestAnalyzeProwEndpoint:
@@ -967,12 +967,19 @@ class TestAnalyzeProwEndpoint:
             failures=[],
             build_passed=True,
             build_url="https://prow.example.com/view/gs/test-bucket/logs/my-prow-job/99",
+            build_passed_summary=(
+                "Prow build passed; analysis skipped "
+                "(use force to analyze successful builds)."
+            ),
             identity={
                 "job_name": "my-prow-job",
                 "build_id": "99",
                 "build_number": "99",
             },
-            source_metadata={"job_type": "periodic"},
+            source_metadata={
+                "job_type": "periodic",
+                "resolved_gcs_prefix": "logs/my-prow-job/99",
+            },
         )
 
         with (
@@ -981,11 +988,6 @@ class TestAnalyzeProwEndpoint:
                 "rootcoz.sources.prow_source.ProwSource.fetch",
                 new_callable=AsyncMock,
                 return_value=passed_result,
-            ),
-            patch(
-                "rootcoz.sources.prow_source.ProwSource.resolved_gcs_prefix",
-                new_callable=PropertyMock,
-                return_value="logs/my-prow-job/99",
             ),
             _patch_preflight(),
         ):

@@ -1837,7 +1837,10 @@ class TestDownloadGcsArtifacts:
     async def test_downloads_artifacts_preserving_structure(
         self, tmp_path, monkeypatch
     ):
-        monkeypatch.setattr("rootcoz.sources.prow_source._ARTIFACTS_BASE", tmp_path)
+        monkeypatch.setattr(
+            "tempfile.mkdtemp",
+            lambda suffix=None, prefix=None, dir=None: str(tmp_path / (prefix or "")),
+        )
 
         def handler(request: httpx.Request):
             url = str(request.url)
@@ -1864,7 +1867,10 @@ class TestDownloadGcsArtifacts:
         assert (result / "e2e" / "events.json").read_bytes() == b'{"events": []}'
 
     async def test_skips_oversize_single_file(self, tmp_path, monkeypatch):
-        monkeypatch.setattr("rootcoz.sources.prow_source._ARTIFACTS_BASE", tmp_path)
+        monkeypatch.setattr(
+            "tempfile.mkdtemp",
+            lambda suffix=None, prefix=None, dir=None: str(tmp_path / (prefix or "")),
+        )
 
         transport = httpx.MockTransport(
             lambda req: httpx.Response(200, content=b"small")
@@ -1889,7 +1895,10 @@ class TestDownloadGcsArtifacts:
         assert any("big.bin" in w for w in warnings)
 
     async def test_stops_at_total_budget(self, tmp_path, monkeypatch):
-        monkeypatch.setattr("rootcoz.sources.prow_source._ARTIFACTS_BASE", tmp_path)
+        monkeypatch.setattr(
+            "tempfile.mkdtemp",
+            lambda suffix=None, prefix=None, dir=None: str(tmp_path / (prefix or "")),
+        )
 
         transport = httpx.MockTransport(
             lambda req: httpx.Response(200, content=b"x" * 60)
@@ -1920,7 +1929,10 @@ class TestDownloadGcsArtifacts:
         assert result is None
 
     async def test_returns_none_when_all_404(self, tmp_path, monkeypatch):
-        monkeypatch.setattr("rootcoz.sources.prow_source._ARTIFACTS_BASE", tmp_path)
+        monkeypatch.setattr(
+            "tempfile.mkdtemp",
+            lambda suffix=None, prefix=None, dir=None: str(tmp_path / (prefix or "")),
+        )
         transport = httpx.MockTransport(lambda req: httpx.Response(404))
         artifacts = [{"name": "prefix/missing.txt", "size": "10"}]
         async with httpx.AsyncClient(transport=transport) as client:
@@ -1932,7 +1944,10 @@ class TestDownloadGcsArtifacts:
     async def test_write_oserror_continues_with_other_artifacts(
         self, tmp_path, monkeypatch
     ):
-        monkeypatch.setattr("rootcoz.sources.prow_source._ARTIFACTS_BASE", tmp_path)
+        monkeypatch.setattr(
+            "tempfile.mkdtemp",
+            lambda suffix=None, prefix=None, dir=None: str(tmp_path / (prefix or "")),
+        )
 
         original_write_bytes = Path.write_bytes
 
@@ -1965,7 +1980,10 @@ class TestDownloadGcsArtifacts:
         assert any("bad.txt" in w for w in warnings)
 
     async def test_rejects_path_traversal(self, tmp_path, monkeypatch):
-        monkeypatch.setattr("rootcoz.sources.prow_source._ARTIFACTS_BASE", tmp_path)
+        monkeypatch.setattr(
+            "tempfile.mkdtemp",
+            lambda suffix=None, prefix=None, dir=None: str(tmp_path / (prefix or "")),
+        )
         transport = httpx.MockTransport(
             lambda req: httpx.Response(200, content=b"evil")
         )
@@ -1979,7 +1997,10 @@ class TestDownloadGcsArtifacts:
         assert result is None  # nothing downloaded
 
     async def test_rejects_absolute_path(self, tmp_path, monkeypatch):
-        monkeypatch.setattr("rootcoz.sources.prow_source._ARTIFACTS_BASE", tmp_path)
+        monkeypatch.setattr(
+            "tempfile.mkdtemp",
+            lambda suffix=None, prefix=None, dir=None: str(tmp_path / (prefix or "")),
+        )
         transport = httpx.MockTransport(
             lambda req: httpx.Response(200, content=b"evil")
         )
@@ -1993,7 +2014,10 @@ class TestDownloadGcsArtifacts:
         assert result is None
 
     async def test_download_error_continues(self, tmp_path, monkeypatch):
-        monkeypatch.setattr("rootcoz.sources.prow_source._ARTIFACTS_BASE", tmp_path)
+        monkeypatch.setattr(
+            "tempfile.mkdtemp",
+            lambda suffix=None, prefix=None, dir=None: str(tmp_path / (prefix or "")),
+        )
 
         def handler(request: httpx.Request):
             if "fail.txt" in str(request.url):
@@ -2074,7 +2098,10 @@ class TestProwSourceArtifacts:
     """Tests for ProwSource artifact downloading integration."""
 
     async def test_artifacts_downloaded_on_failure(self, tmp_path, monkeypatch):
-        monkeypatch.setattr("rootcoz.sources.prow_source._ARTIFACTS_BASE", tmp_path)
+        monkeypatch.setattr(
+            "tempfile.mkdtemp",
+            lambda suffix=None, prefix=None, dir=None: str(tmp_path / (prefix or "")),
+        )
         handler = _make_artifact_handler()
         transport = httpx.MockTransport(handler)
         source = ProwSource(
@@ -2124,7 +2151,10 @@ class TestProwSourceArtifacts:
         assert result.extract_path is None
 
     async def test_cleanup_removes_artifacts(self, tmp_path, monkeypatch):
-        monkeypatch.setattr("rootcoz.sources.prow_source._ARTIFACTS_BASE", tmp_path)
+        monkeypatch.setattr(
+            "tempfile.mkdtemp",
+            lambda suffix=None, prefix=None, dir=None: str(tmp_path / (prefix or "")),
+        )
         handler = _make_artifact_handler()
         transport = httpx.MockTransport(handler)
         source = ProwSource(
@@ -2145,7 +2175,10 @@ class TestProwSourceArtifacts:
         assert source._extract_path is None
 
     async def test_cleanup_idempotent(self, tmp_path, monkeypatch):
-        monkeypatch.setattr("rootcoz.sources.prow_source._ARTIFACTS_BASE", tmp_path)
+        monkeypatch.setattr(
+            "tempfile.mkdtemp",
+            lambda suffix=None, prefix=None, dir=None: str(tmp_path / (prefix or "")),
+        )
         handler = _make_artifact_handler()
         transport = httpx.MockTransport(handler)
         source = ProwSource(
@@ -2163,7 +2196,10 @@ class TestProwSourceArtifacts:
     async def test_artifact_download_failure_produces_warning(
         self, tmp_path, monkeypatch
     ):
-        monkeypatch.setattr("rootcoz.sources.prow_source._ARTIFACTS_BASE", tmp_path)
+        monkeypatch.setattr(
+            "tempfile.mkdtemp",
+            lambda suffix=None, prefix=None, dir=None: str(tmp_path / (prefix or "")),
+        )
         artifact_prefix = "logs/my-job/42/artifacts/"
 
         def handler(request: httpx.Request):
@@ -2201,7 +2237,10 @@ class TestProwSourceArtifacts:
         assert any("fail.log" in w for w in result.warnings)
 
     async def test_junit_files_excluded_from_artifacts(self, tmp_path, monkeypatch):
-        monkeypatch.setattr("rootcoz.sources.prow_source._ARTIFACTS_BASE", tmp_path)
+        monkeypatch.setattr(
+            "tempfile.mkdtemp",
+            lambda suffix=None, prefix=None, dir=None: str(tmp_path / (prefix or "")),
+        )
         junit_name = "logs/my-job/42/artifacts/junit/junit_results.xml"
         all_items = [
             {"name": junit_name, "size": "500"},

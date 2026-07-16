@@ -58,6 +58,8 @@ class CISourceResult:
         source_metadata: Optional metadata from the CI source plugin
             (e.g. Prow job type, PR number, repo info from prowjob.json).
         identity: Override fields for the result dict (e.g. job_name, build_number for Prow).
+        build_passed_summary: Human-readable summary when the build passed
+            with no failures. Each source plugin can override the default.
     """
 
     failures: list[FailedTest]
@@ -70,6 +72,7 @@ class CISourceResult:
     warnings: list[str] = field(default_factory=list)
     source_metadata: dict = field(default_factory=dict)
     identity: dict = field(default_factory=dict)
+    build_passed_summary: str = "No test failures found in the provided input."
 
 
 class CISource(ABC):
@@ -421,7 +424,6 @@ async def run_console_only_analysis(
     additional_repos: dict[str, Path] | None,
     auth_header: str,
     call_type: str = "console",
-    extra_context: str = "",
     peer_ai_configs: list | None = None,
     peer_analysis_max_rounds: int = 3,
     max_concurrent_ai_calls: int = 3,
