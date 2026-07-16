@@ -189,6 +189,7 @@ export type UserRole = 'viewer' | 'reviewer' | 'operator' | 'admin'
 
 export interface DashboardJob {
   job_id: string
+  build_url?: string | null
   jenkins_url: string | null
   status: AnalysisStatus
   created_at: string
@@ -347,6 +348,7 @@ export interface TrackedInEntry {
 
 export interface ResultResponse {
   job_id: string
+  build_url?: string | null
   jenkins_url: string | null
   status: AnalysisStatus
   error?: string

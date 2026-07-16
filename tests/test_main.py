@@ -708,12 +708,23 @@ class TestProwIdentityStamping:
     def test_valid_job_and_build(self):
         from rootcoz.sources.prow_source import ProwSource
 
+        result = ProwSource.identity_fields("my-prow-job", "42")
+        assert result == {
+            "job_name": "my-prow-job",
+            "build_id": "42",
+            "build_number": 42,
+        }
+
+    def test_oversized_build_id_omits_build_number(self):
+        """Build IDs exceeding JS MAX_SAFE_INTEGER must not set build_number."""
+        from rootcoz.sources.prow_source import ProwSource
+
         result = ProwSource.identity_fields("my-prow-job", "1234567890123456789")
         assert result == {
             "job_name": "my-prow-job",
             "build_id": "1234567890123456789",
-            "build_number": 1234567890123456789,
         }
+        assert "build_number" not in result
 
     def test_non_numeric_build_id_excluded(self):
         from rootcoz.sources.prow_source import ProwSource
@@ -750,13 +761,13 @@ class TestProwIdentityStamping:
 
         source = ProwSource(
             job_name="my-prow-job",
-            build_id="1234567890123456789",
+            build_id="42",
             gcs_bucket="test-bucket",
             prow_url="https://prow.example.com",
         )
         identity = source._identity_dict()
         assert identity["job_name"] == "my-prow-job"
-        assert identity["build_number"] == 1234567890123456789
+        assert identity["build_number"] == 42
 
 
 class TestAnalyzeProwEndpoint:

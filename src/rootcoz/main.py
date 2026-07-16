@@ -140,6 +140,7 @@ from rootcoz.models import (
     SetTrackedInRequest,
     UnifiedAnalyzeRequest,
     UnsubscribeRequest,
+    _JenkinsParamsMixin,
     _SYSTEM_TAGS,
 )
 from rootcoz.monitoring import (
@@ -2221,8 +2222,8 @@ def _merge_settings(body: BaseAnalysisRequest, settings: Settings) -> Settings:
 
     # force — shared by both AnalyzeRequest and UnifiedAnalyzeRequest
     # (both inherit _JenkinsParamsMixin.force)
-    if "force" in body.model_fields_set:
-        overrides["force_analysis"] = getattr(body, "force")
+    if isinstance(body, _JenkinsParamsMixin) and "force" in body.model_fields_set:
+        overrides["force_analysis"] = body.force
 
     # UnifiedAnalyzeRequest-specific fields (Prow overrides)
     if isinstance(body, UnifiedAnalyzeRequest):
@@ -10764,9 +10765,9 @@ async def _resolve_chat_credentials(
 ) -> tuple[str, str, str, str, str]:
     """Resolve Jira and GitHub credentials for chat.
 
-    Both Jira and GitHub use user-scoped tokens only, with job-stored
-    tokens as fallback. Server deployment tokens are never exposed to
-    chat sessions.
+    Jira uses user-scoped tokens only. GitHub uses user-scoped tokens
+    with job-stored tokens as fallback. Server deployment tokens are
+    never exposed to chat sessions.
 
     Returns:
         (jira_url, jira_email, jira_token, github_token, github_repo)

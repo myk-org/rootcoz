@@ -511,14 +511,14 @@ class TestBuildSystemPrompt:
         )
         assert "Source repositories are cloned" not in prompt
 
-    def test_jenkins_data_available_note(self):
+    def test_ci_build_data_available_note(self):
         tools = self._make_tools()
         prompt = build_system_prompt(
             job_name="j",
             build_number=1,
             job_id="j1",
             custom_tools=tools,
-            jenkins_data_available=True,
+            ci_build_data_available=True,
         )
         assert "console-output.txt" in prompt
         assert "build-info.json" in prompt
@@ -531,7 +531,7 @@ class TestBuildSystemPrompt:
             build_number=1,
             job_id="j1",
             custom_tools=tools,
-            jenkins_data_available=False,
+            ci_build_data_available=False,
         )
         assert "console-output.txt" not in prompt
         assert "build-info.json" not in prompt
@@ -631,7 +631,7 @@ class TestBuildWelcomeMessage:
         msg = build_welcome_message(
             job_name="j",
             build_number=1,
-            jenkins_data_available=True,
+            ci_build_data_available=True,
         )
         assert "Build artifacts" in msg
         assert "console output" in msg.lower()
@@ -650,7 +650,7 @@ class TestBuildWelcomeMessage:
             job_name="pipeline",
             build_number=99,
             repos_available=True,
-            jenkins_data_available=True,
+            ci_build_data_available=True,
             jira_available=True,
             github_available=True,
         )

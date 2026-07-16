@@ -38,6 +38,7 @@ _HTTP_TIMEOUT = 60
 _MAX_SIZE_FINISHED = 1_000_000  # 1 MB
 _MAX_SIZE_BUILD_LOG = 10_000_000  # 10 MB
 _MAX_SIZE_JUNIT_XML = 5_000_000  # 5 MB
+_JS_MAX_SAFE_INTEGER = 9007199254740991  # 2^53 - 1
 
 # Strict pattern for GitHub org/repo names — prevents path traversal in API URLs.
 _GITHUB_NAME_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._-]*$")
@@ -53,25 +54,6 @@ _MAX_SIZE_SINGLE_ARTIFACT = 10_000_000  # 10 MB
 
 # Maximum number of concurrent PR-change fetches
 MAX_PR_FETCH_CONCURRENCY = 5
-
-
-def prow_identity(job_name: str, build_id: str) -> dict:
-    """Derive Prow identity fields for the result dict.
-
-    Prefer ``ProwSource.identity_fields()`` or ``ProwSource.pre_persist_identity()``
-    from orchestration code instead of importing this helper directly.
-
-    Returns:
-        Dict with ``job_name`` and optionally ``build_number``.
-    """
-    identity: dict = {}
-    if job_name:
-        identity["job_name"] = job_name
-    if build_id:
-        identity["build_id"] = build_id
-    if build_id and build_id.isdigit():
-        identity["build_number"] = int(build_id)
-    return identity
 
 
 @dataclass
@@ -167,6 +149,10 @@ def _parse_prowjob_json(raw: str) -> ProwJobMetadata | None:
 def _gcs_url(bucket: str, *path_parts: str) -> str:
     """Build an HTTPS URL for a GCS object.
 
+    Each path segment is percent-encoded to prevent special characters
+    (``#``, ``?``, ``%``, etc.) from being misinterpreted as URL
+    fragments or query strings.
+
     Args:
         bucket: GCS bucket name.
         *path_parts: Path segments within the bucket.
@@ -174,7 +160,9 @@ def _gcs_url(bucket: str, *path_parts: str) -> str:
     Returns:
         Full HTTPS URL to the GCS object.
     """
-    path = "/".join(path_parts)
+    from urllib.parse import quote
+
+    path = "/".join(quote(part, safe="/") for part in path_parts)
     return f"{GCS_BASE_URL}/{bucket}/{path}"
 
 
@@ -1045,8 +1033,23 @@ class ProwSource(CISource):
 
     @staticmethod
     def identity_fields(job_name: str, build_id: str) -> dict:
-        """Derive persisted identity fields for a Prow job."""
-        return prow_identity(job_name, build_id)
+        """Derive persisted identity fields for a Prow job.
+
+        Returns:
+            Dict with ``job_name``, ``build_id``, and optionally
+            ``build_number`` (as int, when ``build_id`` is numeric).
+        """
+        identity: dict = {}
+        if job_name:
+            identity["job_name"] = job_name
+        if build_id:
+            identity["build_id"] = build_id
+        if build_id and build_id.isdigit():
+            numeric_id = int(build_id)
+            # Cap at JS MAX_SAFE_INTEGER to prevent precision loss in frontend
+            if numeric_id <= _JS_MAX_SAFE_INTEGER:
+                identity["build_number"] = numeric_id
+        return identity
 
     @classmethod
     def pre_persist_identity(cls, job_name: str, build_id: str) -> dict:
