@@ -161,10 +161,10 @@ async def list_models(provider: str = "") -> list[dict]:
             mid = m.get("id") or ""
             if not mid:
                 continue
-            _model_route_cache[(friendly, mid)] = sidecar_id
             if mid in seen_ids:
                 continue
             seen_ids.add(mid)
+            _model_route_cache[(friendly, mid)] = sidecar_id
             result.append(
                 {
                     "id": mid,

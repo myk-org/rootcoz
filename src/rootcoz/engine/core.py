@@ -1173,7 +1173,7 @@ def write_failure_details_file(
         + f"\n\nERROR:\n{representative.error_message}\n"
         + f"\nSTACK TRACE:\n{representative.stack_trace}\n"
     )
-    filepath = workspace_dir / f"failure-details-{error_signature[:8]}.txt"
+    filepath = workspace_dir / f"failure-details-{error_signature}.txt"
     filepath.write_text(content)
     return filepath
 

@@ -329,7 +329,7 @@ class TestWriteFailureDetailsFile:
     def test_filename_uses_signature_prefix(self, tmp_path: Path) -> None:
         f = FailedTest(test_name="t", error_message="e", stack_trace="s")
         filepath = write_failure_details_file([f], "sigprefixXX", tmp_path)
-        assert filepath.name == "failure-details-sigprefi.txt"
+        assert filepath.name == "failure-details-sigprefixXX.txt"
 
 
 class TestWriteOtherGroupsFile:

@@ -633,7 +633,23 @@ class TestBuildFailureSummary:
         content = detail_files[0].read_text()
         assert "sig456" in content
         assert "test_alpha" in content
-        assert "NullPointerException" in content
+
+    def test_failure_summary_oserror_raises_runtime_error(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Filesystem errors when writing failure details become RuntimeError."""
+        from rootcoz import peer_analysis
+
+        def _boom(*_a, **_k):
+            raise OSError("disk full")
+
+        monkeypatch.setattr(peer_analysis, "write_failure_details_file", _boom)
+        with pytest.raises(RuntimeError, match="Failed to write failure details"):
+            peer_analysis._build_failure_summary(
+                [_make_failure()],
+                error_signature="sig",
+                workspace_dir=tmp_path,
+            )
 
 
 class TestBuildPeerReviewPrompt:

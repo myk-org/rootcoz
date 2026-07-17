@@ -402,7 +402,13 @@ def _build_failure_summary(
     Writes error/stack/test names to a workspace file and returns a MANDATORY
     read instruction. Peers must read the file — not receive data in the prompt.
     """
-    filepath = write_failure_details_file(failures, error_signature, workspace_dir)
+    try:
+        filepath = write_failure_details_file(failures, error_signature, workspace_dir)
+    except OSError as exc:
+        raise RuntimeError(
+            f"Failed to write failure details to {workspace_dir}: {exc}. "
+            "Check filesystem permissions and available disk space."
+        ) from exc
     return (
         f"ERROR SIGNATURE: {error_signature}\n"
         f"{build_failure_details_instruction(filepath)}"

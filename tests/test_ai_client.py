@@ -123,3 +123,31 @@ async def test_list_models_merges_and_tags_source(
     assert by_id["cursor:default[]"]["provider"] == "cursor"
     assert by_id["cursor:composer-2"]["source"] == "cli"
     assert ai_client._model_route_cache[("cursor", "cursor:composer-2")] == "cli-cursor"
+
+
+@pytest.mark.asyncio
+async def test_list_models_route_cache_first_source_wins(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Duplicate model ids keep the first sidecar route (ACPX before CLI)."""
+
+    class FakeClient:
+        async def get_models(self):
+            return [
+                {
+                    "id": "cursor:shared",
+                    "name": "Shared ACPX",
+                    "provider": "acpx-cursor",
+                },
+                {
+                    "id": "cursor:shared",
+                    "name": "Shared CLI",
+                    "provider": "cli-cursor",
+                },
+            ]
+
+    monkeypatch.setattr(ai_client, "get_sidecar_client", lambda: FakeClient())
+    models = await ai_client.list_models("cursor")
+    assert len(models) == 1
+    assert models[0]["source"] == "acpx"
+    assert ai_client._model_route_cache[("cursor", "cursor:shared")] == "acpx-cursor"

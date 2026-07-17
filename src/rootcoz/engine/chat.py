@@ -20,6 +20,7 @@ from rootcoz.ai_client import (
     map_provider_model_for_sidecar,
     normalize_provider,
 )
+from rootcoz.storage import AI_SYSTEM_USERNAME
 
 logger = get_logger(name=__name__)
 
@@ -503,7 +504,8 @@ def build_analysis_history_tools(
             auth_headers=auth_headers,
             description=(
                 "MANDATORY for every failed test. Prior classifications and "
-                "created_by (user vs rootcoz-ai). Never override user classifications."
+                f"created_by (user vs {AI_SYSTEM_USERNAME}). Never override "
+                "user classifications."
             ),
             query_params={"test_name": "{test_name}"},
         ),

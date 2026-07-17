@@ -469,10 +469,10 @@ export function ServerSettingsPage() {
       // model list) reflects the newly saved provider immediately, before
       // fetchSettings() re-renders with the server-side state.
       setAiProviderValue(value)
-      setAiModelValue('')
-      // Always clear model when provider changes so the user must pick a
-      // model that belongs to the new provider (do not fall back to env AI_MODEL).
+      // Clear model only when provider actually changes so the user must pick
+      // a model for the new provider (do not fall back to env AI_MODEL).
       if (value !== previousProvider) {
+        setAiModelValue('')
         await saveSettingValue('ai_model', '')
       }
     }

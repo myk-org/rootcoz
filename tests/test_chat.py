@@ -136,6 +136,9 @@ class TestBuildAnalysisHistoryTools:
         c_cls = next(t for t in chat if t["name"] == "get_classification_history")
         assert a_cls["http"]["url"] == c_cls["http"]["url"]
         assert a_cls["http"]["headers"] == c_cls["http"]["headers"]
+        from rootcoz.storage import AI_SYSTEM_USERNAME
+
+        assert AI_SYSTEM_USERNAME in a_cls["description"]
 
 
 class TestBuildChatCustomTools:

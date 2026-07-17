@@ -8777,8 +8777,9 @@ async def update_admin_settings(request: Request) -> JSONResponse:
 
     # String settings that may be intentionally cleared to "" (DB override that
     # masks env). Empty for other keys still means "reset to env/default".
-    # Used when switching AI provider so the old/env model is not re-applied.
-    _explicit_empty_ok = frozenset({"ai_model", "ai_provider"})
+    # ai_model: clear on provider switch so env AI_MODEL is not re-applied.
+    # ai_provider: empty always resets to env (never mask with "").
+    _explicit_empty_ok = frozenset({"ai_model"})
 
     # Save each setting to DB and apply to running process
     for key, value in settings_updates.items():
@@ -8800,8 +8801,8 @@ async def update_admin_settings(request: Request) -> JSONResponse:
         await storage.set_server_setting(key, db_value, updated_by=username)
 
     # Update in-memory cache so get_settings() picks up changes.
-    # Explicit empty ai_provider/ai_model stay in cache (mask env).
-    # Other empty/null values are removed (fall back to env/default).
+    # Explicit empty ai_model stays in cache (mask env). Empty ai_provider
+    # and other empty/null values are removed (fall back to env/default).
     cache_updates: dict[str, str] = {}
     cache_removals: list[str] = []
     for k, v in settings_updates.items():

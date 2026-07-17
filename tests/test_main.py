@@ -5861,6 +5861,32 @@ class TestAdminSettingsEndpoints:
         # Runtime settings must not fall back to env model either
         assert get_settings().ai_model == ""
 
+    def test_put_empty_ai_provider_resets_to_env(
+        self, test_client, monkeypatch
+    ) -> None:
+        """Empty ai_provider deletes DB override so AI_PROVIDER env is used."""
+        monkeypatch.setenv("AI_PROVIDER", "claude")
+        from rootcoz.config import clear_db_settings_cache, get_settings
+
+        clear_db_settings_cache()
+        get_settings.cache_clear()
+
+        test_client.put(
+            "/api/admin/settings",
+            json={"settings": {"ai_provider": "cursor"}},
+        )
+        response = test_client.put(
+            "/api/admin/settings",
+            json={"settings": {"ai_provider": ""}},
+        )
+        assert response.status_code == 200
+
+        get_resp = test_client.get("/api/admin/settings")
+        settings = get_resp.json()
+        ai_provider = next(s for s in settings if s["key"] == "ai_provider")
+        assert ai_provider["source"] != "db"
+        assert get_settings().ai_provider == "claude"
+
     def test_put_empty_ai_call_timeout_still_resets(self, test_client) -> None:
         """Empty non-clearable settings still reset to env/default (delete DB)."""
         test_client.put(
