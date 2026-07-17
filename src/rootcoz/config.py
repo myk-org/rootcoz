@@ -5,7 +5,7 @@ from typing import NamedTuple
 from functools import lru_cache
 from urllib.parse import urlsplit, urlunsplit
 
-from rootcoz.ai_client import VALID_AI_PROVIDERS
+from rootcoz.ai_client import VALID_AI_PROVIDERS, normalize_provider
 from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from simple_logger.logger import get_logger
@@ -61,7 +61,7 @@ def parse_peer_configs(raw: str) -> list[dict]:
                 f"Invalid peer config at position {i + 1}: '{entry}' (expected 'provider:model')"
             )
         provider, model = entry.split(":", 1)
-        provider, model = provider.strip(), model.strip()
+        provider, model = normalize_provider(provider.strip()), model.strip()
         if not provider:
             raise ValueError(f"Empty provider at position {i + 1}: '{entry}'")
         if not model:
@@ -426,9 +426,11 @@ class Settings(BaseSettings):
             value = getattr(self, field_name)
             if isinstance(value, str):
                 object.__setattr__(self, field_name, value.strip())
-        # Normalize ai_provider to lowercase (provider names are case-insensitive)
+        # Normalize ai_provider (lowercase + legacy *-cli → canonical)
         if self.ai_provider:
-            object.__setattr__(self, "ai_provider", self.ai_provider.lower())
+            object.__setattr__(
+                self, "ai_provider", normalize_provider(self.ai_provider)
+            )
         # Strip whitespace from secret fields; blank becomes None
         for field_name in (
             "github_token",

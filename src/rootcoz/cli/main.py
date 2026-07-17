@@ -790,7 +790,9 @@ def analyze(
         help="Display name for this analysis on the dashboard (defaults to job_name).",
     ),
     provider: str = typer.Option(
-        "", "--provider", help="AI provider (e.g. claude, gemini, cursor)."
+        "",
+        "--provider",
+        help=("AI provider (claude, gemini, or cursor)."),
     ),
     model: str = typer.Option("", "--model", help="AI model to use."),
     jira: bool | None = typer.Option(
@@ -1714,7 +1716,10 @@ def ai_models_cmd(
         "",
         "--provider",
         "-p",
-        help="Filter by AI provider (e.g. cursor, claude, gemini).",
+        help=(
+            "Filter by AI provider (claude, gemini, or cursor). "
+            "CLI models are listed under the same provider when enabled."
+        ),
     ),
     json_output: bool = _JSON_OPTION,
 ):

@@ -235,12 +235,7 @@ export function FailureCard({ group, jobId, childJobName, childBuildNumber, inde
 
   function handleProviderChange(provider: string) {
     setSelectedProvider(provider)
-    const providerModelIds = (aiModels[provider] ?? []).map((m) => m.id)
-    if (providerModelIds.length === 0) {
-      setSelectedModel('')
-    } else if (!providerModelIds.includes(selectedModel)) {
-      setSelectedModel(providerModelIds[0])
-    }
+    setSelectedModel('')
   }
 
   const scopedReviewKey = (testName: string) =>

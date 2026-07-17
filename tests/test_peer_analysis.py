@@ -2,6 +2,7 @@
 
 import json
 from contextlib import contextmanager
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
@@ -585,17 +586,33 @@ class TestParsePeerResponse:
 
 
 class TestBuildFailureSummary:
-    def test_no_stack_trace_in_summary(self) -> None:
-        """Failure summary should NOT contain stack trace -- peers have repo access."""
+    def test_no_embedded_error_or_stack_in_summary(self, tmp_path: Path) -> None:
+        """Failure summary must not embed error/stack — only a file pointer."""
         from rootcoz.peer_analysis import _build_failure_summary
 
-        failures = [_make_failure(stack_trace="at com.example.Foo.bar(Foo.java:10)")]
-        summary = _build_failure_summary(failures, error_signature="abc123")
-        assert "STACK TRACE" not in summary
+        failures = [
+            _make_failure(
+                error_message="NullPointerException at line 42",
+                stack_trace="at com.example.Foo.bar(Foo.java:10)",
+            )
+        ]
+        summary = _build_failure_summary(
+            failures, error_signature="abc123", workspace_dir=tmp_path
+        )
         assert "Foo.java:10" not in summary
+        assert "NullPointerException at line 42" not in summary
+        assert "abc123" in summary
+        assert "failure-details-" in summary
+        detail_files = list(tmp_path.glob("failure-details-*.txt"))
+        assert len(detail_files) == 1
+        content = detail_files[0].read_text()
+        assert "NullPointerException at line 42" in content
+        assert "Foo.java:10" in content
 
-    def test_failure_summary_contains_essentials(self) -> None:
-        """Failure summary includes error signature, test names, and error message."""
+    def test_failure_summary_points_to_file_with_essentials(
+        self, tmp_path: Path
+    ) -> None:
+        """Summary points at a file that contains signature, tests, and error."""
         from rootcoz.peer_analysis import _build_failure_summary
 
         failures = [
@@ -605,10 +622,18 @@ class TestBuildFailureSummary:
                 stack_trace="ignored",
             )
         ]
-        summary = _build_failure_summary(failures, error_signature="sig456")
+        summary = _build_failure_summary(
+            failures, error_signature="sig456", workspace_dir=tmp_path
+        )
         assert "sig456" in summary
-        assert "test_alpha" in summary
-        assert "NullPointerException" in summary
+        assert "test_alpha" not in summary  # in file, not prompt
+        assert "NullPointerException" not in summary
+        detail_files = list(tmp_path.glob("failure-details-*.txt"))
+        assert len(detail_files) == 1
+        content = detail_files[0].read_text()
+        assert "sig456" in content
+        assert "test_alpha" in content
+        assert "NullPointerException" in content
 
 
 class TestBuildPeerReviewPrompt:

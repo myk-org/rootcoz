@@ -22,11 +22,13 @@ from rootcoz.ai_client import AIResult, ANALYSIS_BUILTIN_TOOLS, call_ai, call_ai
 from rootcoz.engine.core import (
     JSON_RESPONSE_SCHEMA,
     TIMELINE_RULE,
+    build_failure_details_instruction,
     build_other_groups_instruction,
     build_prompt_sections,
     parse_json_response,
     run_single_ai_analysis,
     safe_update_progress,
+    write_failure_details_file,
     write_other_groups_file,
 )
 from rootcoz.models import (
@@ -393,26 +395,17 @@ classification if you believe the peers are wrong — justify your reasoning.
 def _build_failure_summary(
     failures: list[FailedTest],
     error_signature: str,
+    workspace_dir: Path,
 ) -> str:
-    """Build a concise failure summary for peer prompts.
+    """Build a failure summary for peer prompts (file pointer, no embedded data).
 
-    Peers get the summary — not raw console dumps. They have data access
-    via resources_section if they need to dig deeper.
-
-    Args:
-        failures: The failure group.
-        error_signature: SHA-256 hash of the failure signature.
-
-    Returns:
-        Formatted failure summary string.
+    Writes error/stack/test names to a workspace file and returns a MANDATORY
+    read instruction. Peers must read the file — not receive data in the prompt.
     """
-    representative = failures[0]
-    test_names = [f.test_name for f in failures]
+    filepath = write_failure_details_file(failures, error_signature, workspace_dir)
     return (
         f"ERROR SIGNATURE: {error_signature}\n"
-        f"AFFECTED TESTS ({len(failures)} tests with same error):\n"
-        + "\n".join(f"- {name}" for name in test_names)
-        + f"\n\nERROR: {representative.error_message}"
+        f"{build_failure_details_instruction(filepath)}"
     )
 
 
@@ -516,8 +509,13 @@ async def analyze_failure_group_with_peers(
         parsed_analysis = parsed_analysis.model_copy(update={"classification": ""})
 
     # Build failure summary and resources section for peer prompts
-    failure_summary = _build_failure_summary(failures, error_signature)
-    _, _, resources_section, _ = build_prompt_sections(
+    peer_workspace = repo_path
+    if peer_workspace is None:
+        import tempfile
+
+        peer_workspace = Path(tempfile.mkdtemp(prefix="rootcoz-peer-"))
+    failure_summary = _build_failure_summary(failures, error_signature, peer_workspace)
+    _, _, _, resources_section, _ = build_prompt_sections(
         custom_prompt,
         artifacts_context,
         repo_path,
@@ -980,7 +978,8 @@ async def analyze_failure_group_with_peers(
             ai_configs=[
                 AiConfigEntry(
                     ai_provider=cast(
-                        Literal["claude", "gemini", "cursor"], main_ai_provider
+                        Literal["claude", "gemini", "cursor"],
+                        main_ai_provider,
                     ),
                     ai_model=main_ai_model,
                 ),

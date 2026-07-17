@@ -27,11 +27,13 @@ import { Toggle } from '@/components/shared/Toggle'
 import { FieldLabel } from '@/components/shared/FieldLabel'
 import { ModelCombobox } from '@/components/shared/ModelCombobox'
 import type { ModelOption } from '@/components/shared/ModelCombobox'
+import { useProviderOptions } from '@/lib/useProviderOptions'
 import { PeerConfigList } from '@/components/shared/PeerConfigList'
 import type { PeerConfigWithId } from '@/components/shared/PeerConfigList'
 import { AdditionalReposList } from '@/components/shared/AdditionalReposList'
 import type { RepoWithId } from '@/components/shared/AdditionalReposList'
 import { RotateCw } from 'lucide-react'
+import { normalizeProvider } from '@/lib/aiProviders'
 
 interface ReAnalyzeDialogProps {
   open: boolean
@@ -43,12 +45,16 @@ interface ReAnalyzeDialogProps {
 
 function initFormState(p: AnalysisResult['request_params']) {
   return {
-    aiProvider: p?.ai_provider || 'claude',
+    aiProvider: normalizeProvider(p?.ai_provider || 'claude'),
     aiModel: p?.ai_model || '',
     aiCallTimeout: p?.ai_call_timeout != null ? (p.ai_call_timeout as number) : undefined,
     rawPrompt: (p?.raw_prompt as string) || '',
     enablePeers: !!(p?.peer_ai_configs?.length),
-    peerConfigs: (p?.peer_ai_configs || []).map(c => ({ ...c, id: crypto.randomUUID() })),
+    peerConfigs: (p?.peer_ai_configs || []).map(c => ({
+      ...c,
+      ai_provider: normalizeProvider(c.ai_provider || 'claude'),
+      id: crypto.randomUUID(),
+    })),
     maxRounds: p?.peer_analysis_max_rounds || 3,
     testsRepoUrl: p?.tests_repo_url || '',
     testsRepoRef: p?.tests_repo_ref || '',
@@ -95,6 +101,7 @@ export function ReAnalyzeDialog({ open, onOpenChange, result, jobId, failureUuid
   const [force, setForce] = useState(init.force)
 
   const availableModels = useProviderModels(aiProvider)
+  const providerOptions = useProviderOptions(aiProvider)
   const peerModels = usePeerModels(peerConfigs, enablePeers)
 
   const [submitting, setSubmitting] = useState(false)
@@ -198,20 +205,28 @@ export function ReAnalyzeDialog({ open, onOpenChange, result, jobId, failureUuid
           </DialogDescription>
         </DialogHeader>
 
-        <div className="overflow-y-auto flex-1 px-6 py-5 space-y-1">
+        <div className="overflow-y-auto overflow-x-hidden flex-1 px-6 py-5 space-y-1">
           {/* AI Configuration */}
           <Section title="AI Configuration" dotColor="bg-signal-blue" defaultOpen>
             <div className="grid grid-cols-2 gap-3">
               <div className="space-y-1.5">
                 <FieldLabel>AI Provider</FieldLabel>
-                <Select value={aiProvider} onValueChange={setAiProvider}>
+                <Select
+                  value={aiProvider}
+                  onValueChange={(v) => {
+                    setAiProvider(v)
+                    setAiModel('')
+                  }}
+                >
                   <SelectTrigger>
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
-                    <SelectItem value="claude">Claude</SelectItem>
-                    <SelectItem value="gemini">Gemini</SelectItem>
-                    <SelectItem value="cursor">Cursor</SelectItem>
+                    {providerOptions.map((opt) => (
+                      <SelectItem key={opt.value} value={opt.value}>
+                        {opt.label}
+                      </SelectItem>
+                    ))}
                   </SelectContent>
                 </Select>
               </div>

@@ -26,7 +26,7 @@ DialogOverlay.displayName = DialogPrimitive.Overlay.displayName
 const DialogContent = React.forwardRef<
   React.ComponentRef<typeof DialogPrimitive.Content>,
   React.ComponentPropsWithoutRef<typeof DialogPrimitive.Content> & { hideCloseButton?: boolean }
->(({ className, children, hideCloseButton, ...props }, ref) => (
+>(({ className, children, hideCloseButton, onInteractOutside, ...props }, ref) => (
   <DialogPortal>
     <DialogOverlay />
     <DialogPrimitive.Content
@@ -35,6 +35,15 @@ const DialogContent = React.forwardRef<
         "fixed left-[50%] top-[50%] z-50 grid w-full max-w-lg max-h-[calc(100vh-2rem)] overflow-y-auto translate-x-[-50%] translate-y-[-50%] gap-4 border border-border-default bg-surface-card p-6 shadow-xl data-[state=open]:animate-scale-in rounded-lg",
         className,
       )}
+      onInteractOutside={(event) => {
+        // ModelCombobox portals its list to document.body; treat those
+        // interactions as inside the dialog so select/scroll keep working.
+        const target = event.target as HTMLElement | null
+        if (target?.closest?.("[data-model-combobox-dropdown]")) {
+          event.preventDefault()
+        }
+        onInteractOutside?.(event)
+      }}
       {...props}
     >
       {children}

@@ -20,6 +20,7 @@ from rootcoz.engine.core import (
     recover_from_details,
     resolve_additional_repos,
     run_single_ai_analysis,
+    write_failure_details_file,
     write_other_groups_file,
 )
 from rootcoz.models import (
@@ -305,6 +306,32 @@ class TestRunSingleAiAnalysis:
         assert call_kwargs["auth_header"] == "Bearer test-token"
 
 
+class TestWriteFailureDetailsFile:
+    """Tests for write_failure_details_file (no-embed failure data)."""
+
+    def test_writes_error_stack_and_tests(self, tmp_path: Path) -> None:
+        f1 = FailedTest(
+            test_name="test_a",
+            error_message="boom",
+            stack_trace="line1\nline2",
+        )
+        f2 = FailedTest(test_name="test_b", error_message="boom", stack_trace="line1")
+        filepath = write_failure_details_file([f1, f2], "abcdef12deadbeef", tmp_path)
+        assert filepath.exists()
+        content = filepath.read_text()
+        assert "abcdef12deadbeef" in content
+        assert "test_a" in content
+        assert "test_b" in content
+        assert "boom" in content
+        assert "line1" in content
+        assert "line2" in content
+
+    def test_filename_uses_signature_prefix(self, tmp_path: Path) -> None:
+        f = FailedTest(test_name="t", error_message="e", stack_trace="s")
+        filepath = write_failure_details_file([f], "sigprefixXX", tmp_path)
+        assert filepath.name == "failure-details-sigprefi.txt"
+
+
 class TestWriteOtherGroupsFile:
     """Tests for write_other_groups_file cross-reference file writer."""
 
@@ -482,6 +509,57 @@ class TestRunSingleAiAnalysisGroupContext:
         groups_files = list(tmp_path.glob("other-failure-groups-*.txt"))
         assert len(groups_files) == 1
         assert "test_b" in groups_files[0].read_text()
+
+    @pytest.mark.asyncio
+    async def test_prompt_does_not_embed_error_or_stack(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """Error message and stack trace are written to a file, not the prompt."""
+        captured_prompt: dict[str, str] = {}
+
+        async def mock_ai(prompt, **kwargs):
+            captured_prompt["text"] = prompt
+            return AIResult(
+                success=True,
+                text=json.dumps(
+                    {
+                        "classification": "CODE ISSUE",
+                        "affected_tests": ["test_a"],
+                        "details": "broken",
+                    }
+                ),
+            )
+
+        monkeypatch.setattr("rootcoz.engine.core.call_ai_once", mock_ai)
+
+        unique_error = "UNIQUE_ERROR_MSG_DO_NOT_EMBED_XYZ"
+        unique_stack = "UNIQUE_STACK_FRAME_DO_NOT_EMBED_ABC"
+        failure = FailedTest(
+            test_name="test_a",
+            error_message=unique_error,
+            stack_trace=unique_stack,
+        )
+        await run_single_ai_analysis(
+            failures=[failure],
+            console_context="",
+            repo_path=tmp_path,
+            ai_provider="claude",
+            ai_model="opus",
+            ai_call_timeout=None,
+            custom_prompt="",
+            artifacts_context="",
+            server_url="",
+            job_id="",
+        )
+        prompt = captured_prompt["text"]
+        assert unique_error not in prompt
+        assert unique_stack not in prompt
+        assert "failure-details-" in prompt
+        detail_files = list(tmp_path.glob("failure-details-*.txt"))
+        assert len(detail_files) == 1
+        content = detail_files[0].read_text()
+        assert unique_error in content
+        assert unique_stack in content
 
     @pytest.mark.asyncio
     async def test_timeline_rule_in_prompt(

@@ -5,6 +5,7 @@ import { Button } from '@/components/ui/button'
 import { ProviderSelect } from '@/components/shared/ProviderSelect'
 import { ModelCombobox } from '@/components/shared/ModelCombobox'
 import { useProviderModels } from '@/hooks/useProviderModels'
+import { normalizeProvider } from '@/lib/aiProviders'
 import { Tooltip, TooltipTrigger, TooltipContent } from '@/components/ui/tooltip'
 import { TooltipProvider } from '@/components/ui/tooltip'
 import { Textarea } from '@/components/ui/textarea'
@@ -81,7 +82,7 @@ export function ChatUI({
   const [initStepIndex, setInitStepIndex] = useState(0)
   const [initError, setInitError] = useState('')
 
-  const [aiProvider, setAiProvider] = useState(defaultProvider)
+  const [aiProvider, setAiProvider] = useState(() => normalizeProvider(defaultProvider))
   const [aiModel, setAiModel] = useState(defaultModel)
   const { models: availableModels } = useProviderModels(aiProvider)
 
@@ -97,7 +98,7 @@ export function ChatUI({
 
   // Sync provider/model from props when they change (e.g., after job info loads)
   useEffect(() => {
-    if (defaultProvider) setAiProvider(defaultProvider)
+    if (defaultProvider) setAiProvider(normalizeProvider(defaultProvider))
   }, [defaultProvider])
 
   useEffect(() => {

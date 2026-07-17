@@ -662,11 +662,26 @@ class TestAiConfigEntry:
         assert entry.ai_provider == "claude"
         assert entry.ai_model == "opus"
 
-    @pytest.mark.parametrize("provider", ["claude", "gemini", "cursor"])
+    @pytest.mark.parametrize(
+        "provider",
+        ["claude", "gemini", "cursor"],
+    )
     def test_valid_providers(self, provider: str) -> None:
         """Test all valid AI providers are accepted."""
         entry = AiConfigEntry(ai_provider=provider, ai_model="model-1")
         assert entry.ai_provider == provider
+
+    @pytest.mark.parametrize(
+        ("legacy", "canonical"),
+        [
+            ("cursor-cli", "cursor"),
+            ("claude-cli", "claude"),
+            ("gemini-cli", "gemini"),
+        ],
+    )
+    def test_legacy_cli_providers_normalize(self, legacy: str, canonical: str) -> None:
+        entry = AiConfigEntry(ai_provider=legacy, ai_model="model-1")
+        assert entry.ai_provider == canonical
 
     def test_invalid_provider(self) -> None:
         """Test that invalid AI provider is rejected."""

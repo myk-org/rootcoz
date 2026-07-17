@@ -5831,6 +5831,52 @@ class TestAdminSettingsEndpoints:
         response = test_client.delete("/api/admin/settings/jenkins_url")
         assert response.status_code == 404
 
+    def test_put_empty_ai_model_masks_env(self, test_client, monkeypatch) -> None:
+        """Empty ai_model is stored as a DB override so env AI_MODEL is not shown."""
+        monkeypatch.setenv("AI_MODEL", "claude-opus-4-6-1m")
+        from rootcoz.config import clear_db_settings_cache, get_settings
+
+        clear_db_settings_cache()
+        get_settings.cache_clear()
+
+        # Set provider + model first
+        test_client.put(
+            "/api/admin/settings",
+            json={
+                "settings": {"ai_provider": "cursor", "ai_model": "cursor:composer-2"}
+            },
+        )
+        # Clear model (provider switch path)
+        response = test_client.put(
+            "/api/admin/settings",
+            json={"settings": {"ai_model": ""}},
+        )
+        assert response.status_code == 200
+
+        get_resp = test_client.get("/api/admin/settings")
+        settings = get_resp.json()
+        ai_model = next(s for s in settings if s["key"] == "ai_model")
+        assert ai_model["source"] == "db"
+        assert ai_model["value"] == ""
+        # Runtime settings must not fall back to env model either
+        assert get_settings().ai_model == ""
+
+    def test_put_empty_ai_call_timeout_still_resets(self, test_client) -> None:
+        """Empty non-clearable settings still reset to env/default (delete DB)."""
+        test_client.put(
+            "/api/admin/settings",
+            json={"settings": {"ai_call_timeout": "30"}},
+        )
+        response = test_client.put(
+            "/api/admin/settings",
+            json={"settings": {"ai_call_timeout": ""}},
+        )
+        assert response.status_code == 200
+        get_resp = test_client.get("/api/admin/settings")
+        settings = get_resp.json()
+        ai_timeout = next(s for s in settings if s["key"] == "ai_call_timeout")
+        assert ai_timeout["source"] != "db"
+
     def test_put_settings_non_admin_forbidden(self, test_client) -> None:
         """Non-admin users cannot update settings."""
         response = test_client.put(

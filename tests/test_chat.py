@@ -11,6 +11,7 @@ from rootcoz.engine.chat import (
     _extract_build_params,
     build_admin_custom_tools,
     build_admin_system_prompt,
+    build_analysis_history_tools,
     build_chat_custom_tools,
     build_chat_prompt,
     build_system_prompt,
@@ -71,6 +72,70 @@ async def setup_test_db(temp_db_path: Path):
 # ---------------------------------------------------------------------------
 # build_system_prompt tests
 # ---------------------------------------------------------------------------
+
+
+class TestBuildAnalysisHistoryTools:
+    """Tests for build_analysis_history_tools (analysis history, no prompt tokens)."""
+
+    def test_expected_tool_names(self):
+        tools = build_analysis_history_tools(
+            server_url="http://localhost:8700",
+            auth_token="secret-tok",
+            job_id="job-1",
+        )
+        assert [t["name"] for t in tools] == [
+            "get_failure_history",
+            "search_error_signature",
+            "get_classification_history",
+            "get_job_history_stats",
+            "classify_test_pattern",
+        ]
+
+    def test_auth_only_in_http_headers(self):
+        tools = build_analysis_history_tools(
+            server_url="http://localhost:8700/",
+            auth_token="secret-tok",
+            job_id="job-1",
+        )
+        for tool in tools:
+            assert tool["http"]["headers"]["Authorization"] == "Bearer secret-tok"
+            assert "secret-tok" not in tool["description"]
+            assert "secret-tok" not in tool["name"]
+
+    def test_exclude_job_id_baked_in(self):
+        tools = build_analysis_history_tools(
+            server_url="http://localhost:8700",
+            auth_token="tok",
+            job_id="exclude-me",
+        )
+        hist = next(t for t in tools if t["name"] == "get_failure_history")
+        assert hist["http"]["query_params"]["exclude_job_id"] == "exclude-me"
+        classify = next(t for t in tools if t["name"] == "classify_test_pattern")
+        assert classify["http"]["body_template"]["job_id"] == "exclude-me"
+        assert classify["http"]["body_template"]["source"] == "ai"
+
+    def test_shared_history_url_and_auth_shape_with_chat(self):
+        """Chat and analysis share the same endpoint + bearer header shape."""
+        analysis = build_analysis_history_tools(
+            server_url="http://localhost:8700",
+            auth_token="tok",
+            job_id="job-a",
+        )
+        chat = build_chat_custom_tools(
+            server_url="http://localhost:8700",
+            auth_token="tok",
+            job_id="job-a",
+        )
+        a_hist = next(t for t in analysis if t["name"] == "get_failure_history")
+        c_hist = next(t for t in chat if t["name"] == "get_failure_history")
+        assert a_hist["http"]["url"] == c_hist["http"]["url"]
+        assert a_hist["http"]["method"] == c_hist["http"]["method"] == "GET"
+        assert a_hist["http"]["headers"] == c_hist["http"]["headers"]
+
+        a_cls = next(t for t in analysis if t["name"] == "get_classification_history")
+        c_cls = next(t for t in chat if t["name"] == "get_classification_history")
+        assert a_cls["http"]["url"] == c_cls["http"]["url"]
+        assert a_cls["http"]["headers"] == c_cls["http"]["headers"]
 
 
 class TestBuildChatCustomTools:

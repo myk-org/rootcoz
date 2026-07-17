@@ -6,6 +6,16 @@ import {
   SelectValue,
 } from '@/components/ui/select'
 import { cn } from '@/lib/utils'
+import { useProviderOptions } from '@/lib/useProviderOptions'
+import { normalizeProvider } from '@/lib/aiProviders'
+
+export type { AiProviderOption } from '@/lib/aiProviders'
+export {
+  AI_PROVIDER_OPTIONS,
+  BASE_AI_PROVIDER_OPTIONS,
+  buildProviderOptions,
+  normalizeProvider,
+} from '@/lib/aiProviders'
 
 interface ProviderSelectProps {
   value: string
@@ -15,15 +25,20 @@ interface ProviderSelectProps {
 }
 
 export function ProviderSelect({ value, onChange, className, compact }: ProviderSelectProps) {
+  const normalized = normalizeProvider(value)
+  const options = useProviderOptions(normalized)
+
   return (
-    <Select value={value} onValueChange={onChange}>
+    <Select value={normalized || undefined} onValueChange={onChange}>
       <SelectTrigger className={cn(compact && 'w-[120px] h-8 text-xs', className)}>
         <SelectValue placeholder="Provider" />
       </SelectTrigger>
       <SelectContent>
-        <SelectItem value="claude">Claude</SelectItem>
-        <SelectItem value="gemini">Gemini</SelectItem>
-        <SelectItem value="cursor">Cursor</SelectItem>
+        {options.map((opt) => (
+          <SelectItem key={opt.value} value={opt.value}>
+            {opt.label}
+          </SelectItem>
+        ))}
       </SelectContent>
     </Select>
   )

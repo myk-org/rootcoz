@@ -77,9 +77,12 @@ services:
       # ===================
       # AI CLI Configuration
       # ===================
-      # AI_PROVIDER: claude, gemini, or cursor
+      # AI_PROVIDER: claude, gemini, or cursor (CLI models use the same name when CLI_AGENTS is set)
+      # *-cli requires CLI_AGENTS (same ops pattern as ACPX_AGENTS; nothing enabled by default)
       - AI_PROVIDER=${AI_PROVIDER:?AI_PROVIDER is required}
       - AI_MODEL=${AI_MODEL:?AI_MODEL is required}
+      # - ACPX_AGENTS=${ACPX_AGENTS:-}
+      # - CLI_AGENTS=${CLI_AGENTS:-}
 
       # Claude CLI - Option 1: API Key
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}

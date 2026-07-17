@@ -461,6 +461,7 @@ export function ServerSettingsPage() {
   }
 
   async function handleSaveAiProvider(value: string) {
+    const previousProvider = savedAiProvider
     const ok = await saveSettingValue('ai_provider', value)
     if (ok) {
       setAiProviderEditing(false)
@@ -468,6 +469,12 @@ export function ServerSettingsPage() {
       // model list) reflects the newly saved provider immediately, before
       // fetchSettings() re-renders with the server-side state.
       setAiProviderValue(value)
+      setAiModelValue('')
+      // Always clear model when provider changes so the user must pick a
+      // model that belongs to the new provider (do not fall back to env AI_MODEL).
+      if (value !== previousProvider) {
+        await saveSettingValue('ai_model', '')
+      }
     }
   }
 
@@ -688,7 +695,13 @@ export function ServerSettingsPage() {
                                 configureLabel="Configure provider"
                                 notConfiguredLabel="Not configured (uses AI_PROVIDER env var)"
                               >
-                                <ProviderSelect value={aiProviderValue} onChange={setAiProviderValue} />
+                                <ProviderSelect
+                                  value={aiProviderValue}
+                                  onChange={(v) => {
+                                    setAiProviderValue(v)
+                                    setAiModelValue('')
+                                  }}
+                                />
                               </AiSettingRow>
                             )
                           }

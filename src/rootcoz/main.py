@@ -24,10 +24,15 @@ import httpx
 import uvicorn
 from pi_sidecar_client import (
     check_sidecar_available,
-    list_models,
     run_parallel_with_limit,
 )
-from rootcoz.ai_client import VALID_AI_PROVIDERS, _setup_usage_recorder, call_ai_once
+from rootcoz.ai_client import (
+    VALID_AI_PROVIDERS,
+    _setup_usage_recorder,
+    call_ai_once,
+    list_models,
+    normalize_provider,
+)
 from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Query, Request
 from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
@@ -1885,7 +1890,7 @@ def _resolve_ai_provider_model(
     """
     if settings is None:
         settings = get_settings()
-    provider = (ai_provider or settings.ai_provider).lower()
+    provider = normalize_provider(ai_provider or settings.ai_provider)
     model = ai_model or settings.ai_model
     return provider, model
 
@@ -7455,7 +7460,10 @@ async def classify_test(request: Request, body: ClassifyTestRequest) -> dict:
     classification = body.classification
     reason = body.reason
     job_name = body.job_name
+    # Sidecar body_template leaves "{references}" when the model omits the arg.
     references = body.references
+    if references.strip("{}") == "references" or references == "{references}":
+        references = ""
     classify_job_id = body.job_id
 
     if not test_name:
@@ -7566,14 +7574,18 @@ async def get_classifications(
 @app.get("/api/ai-models")
 async def list_ai_models(
     provider: str = Query(
-        "", description="Filter by AI provider (e.g. cursor, claude, gemini)"
+        "",
+        description=(
+            "Filter by AI provider (claude, gemini, or cursor). "
+            "CLI models are included under the same provider when CLI_AGENTS is set."
+        ),
     ),
 ) -> dict:
     """List available AI models for one or all configured providers."""
     logger.debug("GET /api/ai-models provider=%s", provider)
     try:
         if provider:
-            provider = provider.lower().strip()
+            provider = normalize_provider(provider)
             if provider not in VALID_AI_PROVIDERS:
                 raise HTTPException(
                     status_code=400,
@@ -7616,8 +7628,14 @@ async def refresh_ai_models(request: Request) -> dict:
     try:
         from pi_sidecar_client import get_sidecar_client
 
+        import rootcoz.ai_client as ai_client_mod
+
+        ai_client_mod._model_route_cache.clear()
         client = get_sidecar_client()
         models = await client.refresh_models()
+        # Rebuild friendly provider catalogs + route cache
+        for p in sorted(VALID_AI_PROVIDERS):
+            await list_models(p)
         logger.info("Model refresh complete: %d models available", len(models))
         return {"models": models, "count": len(models)}
     except Exception:
@@ -8757,12 +8775,20 @@ async def update_admin_settings(request: Request) -> JSONResponse:
 
     username = request.state.username or "admin"
 
+    # String settings that may be intentionally cleared to "" (DB override that
+    # masks env). Empty for other keys still means "reset to env/default".
+    # Used when switching AI provider so the old/env model is not re-applied.
+    _explicit_empty_ok = frozenset({"ai_model", "ai_provider"})
+
     # Save each setting to DB and apply to running process
     for key, value in settings_updates.items():
         str_value = str(value) if value is not None else ""
         if not str_value:
-            # Empty/null = reset: delete from DB so cache and DB stay in sync
-            await storage.delete_server_setting(key, deleted_by=username)
+            if key in _explicit_empty_ok:
+                await storage.set_server_setting(key, "", updated_by=username)
+            else:
+                # Empty/null = reset: delete from DB so cache and DB stay in sync
+                await storage.delete_server_setting(key, deleted_by=username)
             continue
         # Non-empty: upsert to DB (encrypt sensitive values)
         if key in _SENSITIVE_SETTINGS:
@@ -8774,14 +8800,19 @@ async def update_admin_settings(request: Request) -> JSONResponse:
         await storage.set_server_setting(key, db_value, updated_by=username)
 
     # Update in-memory cache so get_settings() picks up changes.
-    # Empty/null values are removed from cache (fall back to env/default),
-    # non-empty values are stored for merge.
-    cache_updates = {
-        k: str(v) for k, v in settings_updates.items() if v is not None and str(v) != ""
-    }
-    cache_removals = [
-        k for k, v in settings_updates.items() if v is None or str(v) == ""
-    ]
+    # Explicit empty ai_provider/ai_model stay in cache (mask env).
+    # Other empty/null values are removed (fall back to env/default).
+    cache_updates: dict[str, str] = {}
+    cache_removals: list[str] = []
+    for k, v in settings_updates.items():
+        if v is None:
+            cache_removals.append(k)
+            continue
+        s = str(v)
+        if s == "" and k not in _explicit_empty_ok:
+            cache_removals.append(k)
+        else:
+            cache_updates[k] = s
     if cache_removals:
         remove_from_db_settings_cache(cache_removals)
     if cache_updates:

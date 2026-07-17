@@ -277,53 +277,69 @@ def _clear_db_settings_cache():
 
 @pytest.fixture(autouse=True)
 def _mock_sidecar_calls():
-    """Prevent ALL tests from hitting a real sidecar service.
+    """Prevent ALL tests from hitting a real sidecar or any AI HTTP client.
 
-    Mocks list_models, check_sidecar_available, get_sidecar_client,
-    call_ai, and call_ai_once so no test accidentally calls the real
-    sidecar on localhost:9100.
+    Patches every import site that can reach pi-sidecar (including
+    ``rootcoz.ai_client`` bound names). Accidental AI calls raise
+    AssertionError so tests fail loudly instead of talking to :9100.
     """
+
+    def _deny_sidecar(*_a, **_kw):
+        raise AssertionError(
+            "Unexpected real sidecar/AI call in unit test — mock it explicitly"
+        )
+
     mock_client = MagicMock()
     mock_client.delete_session = AsyncMock()
     mock_client.get_models = AsyncMock(return_value=[])
+    mock_client.refresh_models = AsyncMock(return_value=[])
     mock_client.health = AsyncMock(return_value={"status": "ok"})
     mock_client.create_session = AsyncMock(return_value="mock-session")
-    mock_client.prompt = AsyncMock()
+    mock_client.prompt = AsyncMock(side_effect=_deny_sidecar)
+    mock_client.abort = AsyncMock()
+
+    deny_ai = AsyncMock(side_effect=_deny_sidecar)
+
     with (
-        patch("rootcoz.main.list_models", new_callable=AsyncMock, return_value=[]),
+        # --- clients (bound imports + package) ---
+        patch("pi_sidecar_client.get_sidecar_client", return_value=mock_client),
+        patch("rootcoz.ai_client.get_sidecar_client", return_value=mock_client),
+        patch("rootcoz.engine.chat.get_sidecar_client", return_value=mock_client),
+        patch("rootcoz.peer_analysis.get_sidecar_client", return_value=mock_client),
+        # list_models is NOT stubbed: it runs against the mock client above
+        # (get_models → []) so catalog/routing tests can still exercise it.
+        # --- low-level AI calls inside ai_client ---
+        patch("rootcoz.ai_client._call_ai", deny_ai),
+        patch("rootcoz.ai_client._call_ai_once", deny_ai),
+        patch(
+            "rootcoz.ai_client._list_models_raw",
+            new_callable=AsyncMock,
+            return_value=[],
+        ),
+        patch("rootcoz.ai_client.call_ai", deny_ai),
+        patch("rootcoz.ai_client.call_ai_once", deny_ai),
+        # --- call sites that import call_ai* by name ---
+        patch("rootcoz.engine.chat.call_ai", deny_ai),
+        patch("rootcoz.engine.core.call_ai_once", deny_ai),
+        patch("rootcoz.peer_analysis.call_ai", deny_ai),
+        patch("rootcoz.peer_analysis.call_ai_once", deny_ai),
+        patch("pi_sidecar_client.call_ai", deny_ai),
+        patch("pi_sidecar_client.call_ai_once", deny_ai),
+        # --- health checks ---
         patch(
             "rootcoz.main.check_sidecar_available",
             new_callable=AsyncMock,
             return_value=(True, "mocked"),
         ),
         patch(
-            "pi_sidecar_client.get_sidecar_client",
-            return_value=mock_client,
-        ),
-        patch(
-            "rootcoz.peer_analysis.get_sidecar_client",
-            return_value=mock_client,
-        ),
-        patch(
             "rootcoz.sources.jenkins_source.check_sidecar_available",
             new_callable=AsyncMock,
             return_value=(True, "mocked"),
         ),
-        patch("rootcoz.engine.chat.get_sidecar_client", return_value=mock_client),
         patch(
-            "rootcoz.engine.chat.call_ai",
+            "pi_sidecar_client.check_sidecar_available",
             new_callable=AsyncMock,
-            side_effect=AssertionError("Unexpected sidecar call in test"),
-        ),
-        patch(
-            "rootcoz.peer_analysis.call_ai",
-            new_callable=AsyncMock,
-            side_effect=AssertionError("Unexpected sidecar call in test"),
-        ),
-        patch(
-            "rootcoz.peer_analysis.call_ai_once",
-            new_callable=AsyncMock,
-            side_effect=AssertionError("Unexpected sidecar call in test"),
+            return_value=(True, "mocked"),
         ),
     ):
-        yield
+        yield mock_client

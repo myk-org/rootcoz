@@ -7,7 +7,7 @@ restrictions.
 
 import json
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from pi_sidecar_client import AIResult
@@ -43,38 +43,36 @@ class TestChatSessionTools:
     """Verify _create_chat_session passes tools correctly."""
 
     @pytest.mark.asyncio
-    async def test_create_chat_session_passes_tools(self):
+    async def test_create_chat_session_passes_tools(self, _mock_sidecar_calls):
         from rootcoz.engine.chat import _create_chat_session
 
-        mock_client = MagicMock()
+        mock_client = _mock_sidecar_calls
         mock_client.create_session = AsyncMock(return_value="sess-123")
 
-        with patch("rootcoz.engine.chat.get_sidecar_client", return_value=mock_client):
-            session_id = await _create_chat_session(
-                system_prompt="test",
-                ai_provider="gemini",
-                ai_model="pro",
-                restrict_tools=True,
-            )
+        session_id = await _create_chat_session(
+            system_prompt="test",
+            ai_provider="gemini",
+            ai_model="pro",
+            restrict_tools=True,
+        )
 
         assert session_id == "sess-123"
         passed_kwargs = mock_client.create_session.call_args.kwargs
         assert passed_kwargs.get("tools") == list(CHAT_BUILTIN_TOOLS)
 
     @pytest.mark.asyncio
-    async def test_create_chat_session_no_restrict(self):
+    async def test_create_chat_session_no_restrict(self, _mock_sidecar_calls):
         from rootcoz.engine.chat import _create_chat_session
 
-        mock_client = MagicMock()
+        mock_client = _mock_sidecar_calls
         mock_client.create_session = AsyncMock(return_value="sess-456")
 
-        with patch("rootcoz.engine.chat.get_sidecar_client", return_value=mock_client):
-            await _create_chat_session(
-                system_prompt="test",
-                ai_provider="gemini",
-                ai_model="pro",
-                restrict_tools=False,
-            )
+        await _create_chat_session(
+            system_prompt="test",
+            ai_provider="gemini",
+            ai_model="pro",
+            restrict_tools=False,
+        )
 
         passed_kwargs = mock_client.create_session.call_args.kwargs
         assert "tools" not in passed_kwargs
@@ -202,6 +200,64 @@ class TestAnalysisTools:
         )
 
         assert captured_kwargs.get("tools") == list(ANALYSIS_BUILTIN_TOOLS)
+        assert "custom_tools" not in captured_kwargs
+
+    @pytest.mark.asyncio
+    async def test_analyze_passes_history_custom_tools(self, monkeypatch, tmp_path):
+        from rootcoz.engine.core import run_single_ai_analysis
+        from rootcoz.models import FailedTest
+
+        captured_kwargs = {}
+        captured_prompt = {}
+
+        async def mock_ai_once(prompt, **kwargs):
+            captured_prompt["text"] = prompt
+            captured_kwargs.update(kwargs)
+            return AIResult(
+                success=True,
+                text=json.dumps(
+                    {
+                        "classification": "CODE ISSUE",
+                        "details": "test",
+                    }
+                ),
+            )
+
+        monkeypatch.setattr("rootcoz.engine.core.call_ai_once", mock_ai_once)
+        monkeypatch.setattr("rootcoz.engine.core.update_progress_phase", AsyncMock())
+
+        # Ensure history prompt file is discoverable
+        failures = [
+            FailedTest(
+                test_name="test_example",
+                error_message="AssertionError",
+                stack_trace="trace",
+            )
+        ]
+        await run_single_ai_analysis(
+            failures=failures,
+            console_context="",
+            repo_path=tmp_path,
+            ai_provider="gemini",
+            ai_model="pro",
+            ai_call_timeout=None,
+            custom_prompt="",
+            artifacts_context="",
+            server_url="http://localhost:8700",
+            job_id="job-xyz",
+            auth_header="Bearer super-secret-token",
+        )
+
+        tools = captured_kwargs.get("custom_tools") or []
+        names = [t["name"] for t in tools]
+        assert "get_failure_history" in names
+        assert "classify_test_pattern" in names
+        # Token must never appear in the prompt
+        assert "super-secret-token" not in captured_prompt["text"]
+        assert "Authorization" not in captured_prompt["text"]
+        # Token only in tool headers
+        for t in tools:
+            assert t["http"]["headers"]["Authorization"] == "Bearer super-secret-token"
 
 
 class TestPeerAnalysisTools:
@@ -298,7 +354,7 @@ class TestResourcesAgentDiscovery:
             additional_repos={"my-repo": repo},
         )
 
-        assert "MANDATORY" in result
+        assert "STEP 0" in result or "Project agents" in result
         assert "my-analyzer" in result
         assert "my-helper" in result
         assert "agentScope" in result
@@ -331,7 +387,7 @@ class TestResourcesAgentDiscovery:
             additional_repos={"my-repo": repo},
         )
 
-        assert "MANDATORY" not in result
+        assert "Project agents" not in result
 
     def test_empty_agents_dir(self, tmp_path):
         from rootcoz.engine.core import build_resources_section
@@ -345,7 +401,51 @@ class TestResourcesAgentDiscovery:
             additional_repos={"my-repo": repo},
         )
 
-        assert "MANDATORY" not in result
+        assert "Project agents" not in result
+
+
+class TestAgentGateSection:
+    """Front-loaded STEP 0 gate for project agents."""
+
+    def test_gate_lists_agents_and_subagent_params(self, tmp_path):
+        from rootcoz.engine.core import (
+            build_agent_gate_section,
+            build_prompt_sections,
+            discover_project_agent_names,
+        )
+
+        repo = tmp_path / "my-repo"
+        agents_dir = repo / ".rootcoz" / "agents"
+        agents_dir.mkdir(parents=True)
+        (agents_dir / "analyzer.md").write_text(
+            "---\nname: rootcoz-test-agent\ndescription: Test\n---\nDo stuff"
+        )
+
+        names = discover_project_agent_names({"my-repo": repo})
+        assert names == ["rootcoz-test-agent"]
+
+        gate = build_agent_gate_section(names)
+        assert "STEP 0" in gate
+        assert "rootcoz-test-agent" in gate
+        assert 'agentScope="both"' in gate
+        assert "confirmProjectAgents=false" in gate
+        assert "do not have bash" in gate.lower() or "You do not have bash" in gate
+
+        agent_gate, *_rest = build_prompt_sections(
+            "",
+            "",
+            tmp_path,
+            "http://localhost:8000",
+            "job-1",
+            additional_repos={"my-repo": repo},
+        )
+        assert "STEP 0" in agent_gate
+        assert "rootcoz-test-agent" in agent_gate
+
+    def test_gate_empty_without_agents(self):
+        from rootcoz.engine.core import build_agent_gate_section
+
+        assert build_agent_gate_section([]) == ""
 
 
 class TestSidecarArgvFix:

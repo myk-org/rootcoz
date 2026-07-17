@@ -299,6 +299,8 @@ export interface AiModel {
   id: string
   name: string
   provider: string
+  /** acpx | cli | api — catalog metadata only; not sent on analyze */
+  source?: string
 }
 
 /** Response shape from GET /api/ai-models (no provider filter) */
