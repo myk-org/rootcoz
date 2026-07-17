@@ -34,6 +34,9 @@ function getLineColor(line: string): string {
 
 const INITIAL_LINES_OPTIONS = ['100', '500', '1000', '5000', '10000']
 
+/** Maximum log lines kept in the browser buffer to prevent unbounded memory growth. */
+const MAX_LOG_BUFFER = 10_000
+
 export function LogsPage() {
   const [lines, setLines] = useState<string[]>([])
   const [autoScroll, setAutoScroll] = useState(true)
@@ -72,10 +75,11 @@ export function LogsPage() {
 
     es.addEventListener('log', (e) => {
       const clean = stripAnsi(e.data)
-      setLines(prev => {
-        const next = [...prev, clean]
-        return next.length > 10000 ? next.slice(-10000) : next
-      })
+      setLines(prev =>
+        prev.length >= MAX_LOG_BUFFER
+          ? [...prev.slice(-(MAX_LOG_BUFFER - 1)), clean]
+          : [...prev, clean]
+      )
       setError('')
     })
 
