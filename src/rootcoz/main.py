@@ -3,6 +3,7 @@ import copy
 import hmac
 import json
 import logging
+import logging.handlers
 import math
 import os
 import re
@@ -10,7 +11,7 @@ import sqlite3
 import time as _time
 from urllib.parse import quote as _urlquote, urlparse, urlunparse
 import uuid
-from collections import defaultdict
+from collections import defaultdict, deque
 from collections.abc import Callable, Coroutine, Sequence
 import contextlib
 from contextlib import asynccontextmanager
@@ -1248,6 +1249,7 @@ async def _deferred_resume_waiting_jobs(waiting_jobs: list[dict]) -> None:
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     _install_job_id_filter()
+    _install_sse_log_handler()
     _setup_usage_recorder()
 
     await init_db()
@@ -8226,6 +8228,128 @@ async def save_user_tokens_endpoint(request: Request) -> JSONResponse:
 
 
 # --- Admin endpoints ---
+
+
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+
+# --- Live log broadcast for SSE streaming ---
+_log_listeners: set[asyncio.Queue] = set()
+
+
+class _SSELogHandler(logging.Handler):
+    """Logging handler that broadcasts formatted records to SSE listeners."""
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            msg = self.format(record)
+            clean = _ANSI_RE.sub("", msg)
+            for q in list(_log_listeners):
+                try:
+                    q.put_nowait(clean)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+
+# Singleton handler instance — attached to all loggers once.
+_sse_log_handler: _SSELogHandler | None = None
+
+
+def _install_sse_log_handler() -> None:
+    """Install SSE broadcast handler on all known loggers.
+
+    simple_logger creates per-module loggers with propagate=False,
+    so attaching to the root logger alone catches nothing.
+    This mirrors _install_job_id_filter's approach of walking
+    every registered logger.
+    """
+    global _sse_log_handler  # noqa: PLW0603
+    handler = _SSELogHandler()
+    handler.setLevel(logging.DEBUG)
+    # Copy formatter from the first RotatingFileHandler we find
+    for name in [None, *list(logging.Logger.manager.loggerDict)]:
+        lg = logging.getLogger(name)
+        for h in getattr(lg, "handlers", []):
+            if isinstance(h, logging.handlers.RotatingFileHandler) and h.formatter:
+                handler.setFormatter(h.formatter)
+                break
+        if handler.formatter:
+            break
+    # Attach to every logger
+    for name in [None, *list(logging.Logger.manager.loggerDict)]:
+        lg = logging.getLogger(name)
+        if hasattr(lg, "addHandler"):
+            lg.addHandler(handler)
+    _sse_log_handler = handler
+
+
+@app.get("/api/admin/logs/stream")
+async def stream_logs(
+    request: Request,
+    lines: int = Query(100, ge=1, le=10000, description="Initial tail lines"),
+    level: str = Query(
+        "", description="Filter by log level (INFO, WARNING, ERROR, DEBUG)"
+    ),
+) -> StreamingResponse:
+    """Stream server logs via SSE (admin only)."""
+    _require_admin(request)
+
+    level_filter = level.upper().strip() if level else ""
+
+    def _matches_level(line: str) -> bool:
+        if not level_filter:
+            return True
+        return level_filter in line
+
+    def _read_tail(path: Path, n: int) -> list[str]:
+        """Read last n lines from log file. Runs in thread."""
+        with open(path, "rb") as f:
+            raw = f.read()
+            text = raw.decode("utf-8", errors="replace")
+            all_lines = text.splitlines()
+            return list(deque(all_lines, maxlen=n))
+
+    async def event_generator():
+        # Send initial tail from log file
+        if _LOG_FILE:
+            log_path = Path(_LOG_FILE)
+            if log_path.exists():
+                try:
+                    tail_lines = await asyncio.to_thread(_read_tail, log_path, lines)
+                    for line in tail_lines:
+                        clean = _ANSI_RE.sub("", line)
+                        if _matches_level(clean):
+                            yield f"event: log\ndata: {clean}\n\n"
+                except OSError:
+                    pass
+
+        # Stream live logs via broadcast queue
+        queue: asyncio.Queue = asyncio.Queue(maxsize=1000)
+        _log_listeners.add(queue)
+        try:
+            while True:
+                if await request.is_disconnected():
+                    break
+                try:
+                    line = await asyncio.wait_for(queue.get(), timeout=30)
+                    if _matches_level(line):
+                        yield f"event: log\ndata: {line}\n\n"
+                except asyncio.TimeoutError:
+                    yield ": keepalive\n\n"
+        finally:
+            _log_listeners.discard(queue)
+
+    logger.info(
+        "GET /api/admin/logs/stream: streaming logs (lines=%s, level=%s)",
+        lines,
+        level_filter or "ALL",
+    )
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 @app.get("/api/admin/token-usage")

@@ -124,6 +124,7 @@ src/rootcoz/
   - `/api/results/{job_id}/comments/stream` — per-job comment changes
   - `/api/admin/token-usage/stream` — token usage data changes
   - `/api/chat/{job_id}/stream` — per-job chat message changes
+  - `/api/admin/logs/stream` — real-time server log tailing (admin only)
 - **Reports API**: Analytics endpoints for aggregated metrics:
   - `GET /api/reports/totals?team=&tier=&version=&from=&to=` — total jobs, failures, reviewed with per-job detail list
   - `GET /api/reports/classification-overrides?...` — user classification overrides grouped by from→to transition

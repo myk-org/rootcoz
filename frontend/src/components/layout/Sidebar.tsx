@@ -8,6 +8,7 @@ import {
   Coins,
   LayoutDashboard,
   MessageSquare,
+  ScrollText,
   Settings,
   Users,
   type LucideIcon,
@@ -46,6 +47,7 @@ const ADMIN_NAV_ITEMS: NavItem[] = [
   { to: '/admin/token-usage', label: 'Tokens', icon: Coins },
   { to: '/reports', label: 'Reports', icon: BarChart3 },
   { to: '/admin/chat', label: 'Chat', icon: MessageSquare },
+  { to: '/admin/logs', label: 'Logs', icon: ScrollText },
   { to: '/admin/settings', label: 'Settings', icon: Settings },
 ]
 
