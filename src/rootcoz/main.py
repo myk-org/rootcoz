@@ -11,7 +11,7 @@ import sqlite3
 import time as _time
 from urllib.parse import quote as _urlquote, urlparse, urlunparse
 import uuid
-from collections import defaultdict, deque
+from collections import defaultdict
 from collections.abc import Callable, Coroutine, Sequence
 import contextlib
 from contextlib import asynccontextmanager
@@ -8266,6 +8266,8 @@ def _install_sse_log_handler() -> None:
     every registered logger.
     """
     global _sse_log_handler  # noqa: PLW0603
+    if _sse_log_handler is not None:
+        return
     handler = _SSELogHandler()
     handler.setLevel(logging.DEBUG)
     # Copy formatter from the first RotatingFileHandler we find
@@ -8304,12 +8306,17 @@ async def stream_logs(
         return level_filter in line
 
     def _read_tail(path: Path, n: int) -> list[str]:
-        """Read last n lines from log file. Runs in thread."""
+        """Read last n lines from log file efficiently. Runs in thread."""
         with open(path, "rb") as f:
+            f.seek(0, 2)  # seek to end
+            size = f.tell()
+            # Read in chunks from the end
+            chunk_size = min(size, 8192 * n)  # estimate ~8KB per line max
+            f.seek(max(0, size - chunk_size))
             raw = f.read()
             text = raw.decode("utf-8", errors="replace")
             all_lines = text.splitlines()
-            return list(deque(all_lines, maxlen=n))
+            return all_lines[-n:]
 
     async def event_generator():
         # Send initial tail from log file
@@ -8321,7 +8328,7 @@ async def stream_logs(
                     for line in tail_lines:
                         clean = _ANSI_RE.sub("", line)
                         if _matches_level(clean):
-                            yield f"event: log\ndata: {clean}\n\n"
+                            yield f"event: log\ndata: {clean.replace(chr(10), '  ')}\n\n"
                 except OSError:
                     pass
 
@@ -8335,7 +8342,7 @@ async def stream_logs(
                 try:
                     line = await asyncio.wait_for(queue.get(), timeout=30)
                     if _matches_level(line):
-                        yield f"event: log\ndata: {line}\n\n"
+                        yield f"event: log\ndata: {line.replace(chr(10), '  ')}\n\n"
                 except asyncio.TimeoutError:
                     yield ": keepalive\n\n"
         finally:

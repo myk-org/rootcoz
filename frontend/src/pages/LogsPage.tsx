@@ -72,7 +72,10 @@ export function LogsPage() {
 
     es.addEventListener('log', (e) => {
       const clean = stripAnsi(e.data)
-      setLines(prev => [...prev, clean])
+      setLines(prev => {
+        const next = [...prev, clean]
+        return next.length > 10000 ? next.slice(-10000) : next
+      })
       setError('')
     })
 
