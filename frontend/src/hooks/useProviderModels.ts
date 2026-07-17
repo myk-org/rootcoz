@@ -49,7 +49,10 @@ export function useProviderModels(provider: string) {
     } catch (err) {
       console.error('Failed to refresh AI models:', err)
     } finally {
-      setRefreshing(false)
+      // Only clear refreshing if no newer refresh started
+      if (refreshSeqRef.current === seq) {
+        setRefreshing(false)
+      }
     }
   }, [])
 
