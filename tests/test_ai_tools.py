@@ -14,6 +14,8 @@ from pi_sidecar_client import AIResult
 
 from rootcoz.ai_client import ANALYSIS_BUILTIN_TOOLS, CHAT_BUILTIN_TOOLS
 
+REPO_ROOT = Path(__file__).resolve().parents[1]
+
 
 class TestToolConstants:
     """Verify tool list constants have correct values."""
@@ -452,11 +454,12 @@ class TestSidecarArgvFix:
     """Verify sidecar server.ts points argv[1] at the pi CLI for subagents."""
 
     def test_server_ts_sets_argv_to_pi_cli(self):
-        server_ts = Path("sidecar-helper/src/server.ts").read_text()
+        server_ts = (REPO_ROOT / "sidecar-helper/src/server.ts").read_text()
         assert "resolvePiCli" in server_ts
         assert "process.argv[1] = resolvePiCli()" in server_ts
         assert "@earendil-works/pi-coding-agent/dist/cli.js" in server_ts
+        assert 'require.resolve("@myk-org/pi-sidecar/package.json")' in server_ts
 
     def test_entrypoint_puts_pi_on_path(self):
-        entrypoint = Path("entrypoint.sh").read_text()
+        entrypoint = (REPO_ROOT / "entrypoint.sh").read_text()
         assert "sidecar-helper/node_modules/.bin" in entrypoint
