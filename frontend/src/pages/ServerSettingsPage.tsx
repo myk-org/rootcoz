@@ -26,6 +26,7 @@ import {
   RotateCcw,
   Loader2,
   Clock,
+  RefreshCw,
 } from 'lucide-react'
 import { PeerConfigList } from '@/components/shared/PeerConfigList'
 import type { PeerConfigWithId } from '@/components/shared/PeerConfigList'
@@ -345,7 +346,7 @@ export function ServerSettingsPage() {
   const effectiveAiProvider = aiProviderEditing
     ? aiProviderValue
     : (savedAiProvider || aiProviderValue)
-  const aiModels = useProviderModels(effectiveAiProvider)
+  const { models: aiModels, refresh: refreshModels, refreshing: refreshingModels } = useProviderModels(effectiveAiProvider)
 
   // Additional repos structured editor state
   const [additionalRepos, setAdditionalRepos] = useState<RepoWithId[]>([])
@@ -710,13 +711,29 @@ export function ServerSettingsPage() {
                                 configureLabel="Configure model"
                                 notConfiguredLabel="Not configured (uses AI_MODEL env var)"
                               >
-                                <ModelCombobox
-                                  value={aiModelValue}
-                                  onChange={setAiModelValue}
-                                  options={aiModels}
-                                  placeholder="Select model..."
-                                  className="max-w-md"
-                                />
+                                <div className="flex items-center gap-2">
+                                  <ModelCombobox
+                                    value={aiModelValue}
+                                    onChange={setAiModelValue}
+                                    options={aiModels}
+                                    placeholder="Select model..."
+                                    className="max-w-md"
+                                  />
+                                  <Tooltip>
+                                    <TooltipTrigger asChild>
+                                      <Button
+                                        variant="ghost"
+                                        size="icon"
+                                        onClick={refreshModels}
+                                        disabled={refreshingModels || !effectiveAiProvider}
+                                        className="h-8 w-8 shrink-0"
+                                      >
+                                        <RefreshCw className={`h-4 w-4 ${refreshingModels ? 'animate-spin' : ''}`} />
+                                      </Button>
+                                    </TooltipTrigger>
+                                    <TooltipContent>Refresh models from sidecar</TooltipContent>
+                                  </Tooltip>
+                                </div>
                                 {!effectiveAiProvider && (
                                   <p className="text-xs text-signal-amber">Select a provider first to see available models</p>
                                 )}

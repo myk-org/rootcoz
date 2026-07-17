@@ -1827,6 +1827,38 @@ class TestRootCozClientAiModels:
         assert result["models"] == []
 
 
+class TestRootCozClientRefreshAiModels:
+    def test_refresh_ai_models(self):
+        """Test refresh_ai_models sends POST to /api/admin/ai-models/refresh."""
+        models = [
+            {"id": "claude-sonnet-4", "name": "Claude Sonnet 4"},
+            {"id": "gemini-2.5-pro", "name": "Gemini 2.5 Pro"},
+        ]
+
+        def handler(request):
+            assert request.method == "POST"
+            assert request.url.path == "/api/admin/ai-models/refresh"
+            return httpx.Response(200, json={"models": models, "count": 2})
+
+        client = _make_client(handler)
+        result = client.refresh_ai_models()
+        assert result["count"] == 2
+        assert len(result["models"]) == 2
+
+    def test_refresh_ai_models_error(self):
+        """Test refresh_ai_models raises on server error."""
+
+        def handler(request):
+            return httpx.Response(
+                502, json={"detail": "Failed to refresh AI models from sidecar"}
+            )
+
+        client = _make_client(handler)
+        with pytest.raises(RootCozError) as exc_info:
+            client.refresh_ai_models()
+        assert exc_info.value.status_code == 502
+
+
 class TestRootCozClientAbort:
     def test_abort_job(self):
         """Test abort_job sends POST to /results/{job_id}/abort."""

@@ -6152,6 +6152,41 @@ class TestSanitizeControlChars:
         assert _sanitize_control_chars(input_val) == expected
 
 
+class TestRefreshAiModelsEndpoint:
+    """Tests for POST /api/admin/ai-models/refresh."""
+
+    def test_refresh_ai_models_returns_updated_list(self, test_client) -> None:
+        """Admin can refresh models and get updated list."""
+        mock_models = [
+            {"id": "claude-sonnet-4", "name": "Claude Sonnet 4"},
+            {"id": "gemini-2.5-pro", "name": "Gemini 2.5 Pro"},
+        ]
+        with patch(
+            "pi_sidecar_client.get_sidecar_client",
+        ) as mock_get_client:
+            mock_client = AsyncMock()
+            mock_client.refresh_models.return_value = mock_models
+            mock_get_client.return_value = mock_client
+            response = test_client.post("/api/admin/ai-models/refresh")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["count"] == 2
+        assert data["models"] == mock_models
+        mock_client.refresh_models.assert_awaited_once()
+
+    def test_refresh_ai_models_sidecar_failure_returns_502(self, test_client) -> None:
+        """Returns 502 when sidecar refresh fails."""
+        with patch(
+            "pi_sidecar_client.get_sidecar_client",
+            side_effect=RuntimeError("sidecar down"),
+        ):
+            response = test_client.post("/api/admin/ai-models/refresh")
+
+        assert response.status_code == 502
+        assert "Failed to refresh" in response.json()["detail"]
+
+
 class TestIsChildReviewKey:
     """Tests for _is_child_review_key."""
 

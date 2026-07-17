@@ -1074,10 +1074,13 @@ def build_resources_section(
                     for af in agent_files:
                         extracted = _extract_agent_name(af)
                         agent_names.append(extracted if extracted else af.stem)
+                    names_str = ", ".join(agent_names)
                     resources.append(
-                        "- Project agents available via `subagent` tool"
-                        ' (always use agentScope="both" and'
-                        " confirmProjectAgents=false): " + ", ".join(agent_names)
+                        "- MANDATORY: Before analyzing failures, delegate to "
+                        "each of the following project agents "
+                        '(use agentScope="both" and confirmProjectAgents=false). '
+                        "Include each agent's full response in your analysis. "
+                        f"Agents: {names_str}"
                     )
 
     if resources:

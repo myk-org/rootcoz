@@ -3518,6 +3518,42 @@ class TestAdminUsersChangeRole:
         assert output["role"] == "admin"
 
 
+class TestAdminModelsRefreshCommand:
+    def test_admin_models_refresh(self, mock_client):
+        mock_client.refresh_ai_models.return_value = {
+            "models": [
+                {"id": "claude-sonnet-4", "name": "Claude Sonnet 4"},
+                {"id": "gemini-2.5-pro", "name": "Gemini 2.5 Pro"},
+            ],
+            "count": 2,
+        }
+        result = runner.invoke(app, ["admin", "models", "refresh"])
+        assert result.exit_code == 0
+        mock_client.refresh_ai_models.assert_called_once()
+        assert "2" in result.output
+
+    def test_admin_models_refresh_json(self, mock_client):
+        payload = {
+            "models": [{"id": "claude-sonnet-4", "name": "Claude Sonnet 4"}],
+            "count": 1,
+        }
+        mock_client.refresh_ai_models.return_value = payload
+        result = runner.invoke(app, ["--json", "admin", "models", "refresh"])
+        assert result.exit_code == 0
+        parsed = json.loads(result.output)
+        assert parsed["count"] == 1
+
+    def test_admin_models_refresh_error(self, mock_client):
+        from rootcoz.cli.client import RootCozError
+
+        mock_client.refresh_ai_models.side_effect = RootCozError(
+            status_code=502, detail="Failed to refresh AI models from sidecar"
+        )
+        result = runner.invoke(app, ["admin", "models", "refresh"])
+        assert result.exit_code == 1
+        assert "Error" in result.output
+
+
 class TestAdminSettingsCommand:
     def test_admin_settings_list(self, mock_client):
         mock_client.admin_list_settings.return_value = [

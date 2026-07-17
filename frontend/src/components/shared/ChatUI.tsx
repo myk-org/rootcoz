@@ -83,7 +83,7 @@ export function ChatUI({
 
   const [aiProvider, setAiProvider] = useState(defaultProvider)
   const [aiModel, setAiModel] = useState(defaultModel)
-  const availableModels = useProviderModels(aiProvider)
+  const { models: availableModels } = useProviderModels(aiProvider)
 
   const [copiedMsgId, setCopiedMsgId] = useState<number | null>(null)
   const [copiedAll, setCopiedAll] = useState(false)

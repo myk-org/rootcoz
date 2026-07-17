@@ -298,13 +298,10 @@ class TestResourcesAgentDiscovery:
             additional_repos={"my-repo": repo},
         )
 
-        assert "subagent" in result
+        assert "MANDATORY" in result
         assert "my-analyzer" in result
         assert "my-helper" in result
         assert "agentScope" in result
-        # Filename stems should NOT appear since frontmatter names differ
-        assert "analyzer" in result  # substring of my-analyzer
-        assert "helper" in result  # substring of my-helper
 
     def test_agents_fallback_to_filename(self, tmp_path):
         """Without frontmatter, falls back to filename stem."""
@@ -334,7 +331,7 @@ class TestResourcesAgentDiscovery:
             additional_repos={"my-repo": repo},
         )
 
-        assert "subagent" not in result
+        assert "MANDATORY" not in result
 
     def test_empty_agents_dir(self, tmp_path):
         from rootcoz.engine.core import build_resources_section
@@ -348,7 +345,7 @@ class TestResourcesAgentDiscovery:
             additional_repos={"my-repo": repo},
         )
 
-        assert "subagent" not in result
+        assert "MANDATORY" not in result
 
 
 class TestSidecarArgvFix:

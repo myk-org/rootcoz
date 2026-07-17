@@ -1,13 +1,10 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useCallback } from 'react'
 import { api } from '@/lib/api'
 import type { ModelOption } from '@/components/shared/ModelCombobox'
 
-/**
- * Fetches available models for the given AI provider.
- * Returns the models list. Automatically clears models when the provider changes.
- */
 export function useProviderModels(provider: string) {
   const [availableModels, setAvailableModels] = useState<ModelOption[]>([])
+  const [refreshing, setRefreshing] = useState(false)
 
   useEffect(() => {
     if (!provider) {
@@ -29,5 +26,23 @@ export function useProviderModels(provider: string) {
     }
   }, [provider])
 
-  return availableModels
+  const refresh = useCallback(async () => {
+    setRefreshing(true)
+    try {
+      await api.post('/api/admin/ai-models/refresh')
+      // Re-fetch models for current provider after sidecar refresh
+      if (provider) {
+        const res = await api.get<{ models: ModelOption[] }>(
+          `/api/ai-models?provider=${provider}`,
+        )
+        setAvailableModels(res.models ?? [])
+      }
+    } catch (err) {
+      console.error('Failed to refresh AI models:', err)
+    } finally {
+      setRefreshing(false)
+    }
+  }, [provider])
+
+  return { models: availableModels, refresh, refreshing }
 }

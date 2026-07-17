@@ -7606,6 +7606,24 @@ async def list_ai_models(
         return {"providers": {}}
 
 
+@app.post("/api/admin/ai-models/refresh")
+async def refresh_ai_models() -> dict:
+    """Trigger model re-discovery on the sidecar and return updated list."""
+    logger.info("POST /api/admin/ai-models/refresh: refreshing models")
+    try:
+        from pi_sidecar_client import get_sidecar_client
+
+        client = get_sidecar_client()
+        models = await client.refresh_models()
+        logger.info("Model refresh complete: %d models available", len(models))
+        return {"models": models, "count": len(models)}
+    except Exception:
+        logger.exception("Failed to refresh AI models")
+        raise HTTPException(
+            status_code=502, detail="Failed to refresh AI models from sidecar"
+        )
+
+
 @app.get("/health")
 async def health_check() -> dict:
     """Basic health check endpoint (legacy, lightweight)."""
