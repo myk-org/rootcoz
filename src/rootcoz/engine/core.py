@@ -159,6 +159,28 @@ ROOTCOZ_HISTORY_PROMPT_FILENAME = "ROOTCOZ_HISTORY_PROMPT.md"
 _ROOTCOZ_PI_SUBDIRS = ("agents", "skills", "extensions")
 
 
+def _extract_agent_name(agent_file: Path) -> str | None:
+    """Extract the ``name`` field from an agent .md file's YAML frontmatter.
+
+    Returns the name string, or ``None`` if the frontmatter is missing
+    or does not contain a ``name`` field.
+    """
+    try:
+        text = agent_file.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    if not text.startswith("---"):
+        return None
+    end = text.find("---", 3)
+    if end == -1:
+        return None
+    for line in text[3:end].splitlines():
+        line = line.strip()
+        if line.lower().startswith("name:"):
+            return line.split(":", 1)[1].strip()
+    return None
+
+
 def _ignore_symlinks(directory: str, contents: list[str]) -> list[str]:
     """Ignore symlinks during copytree to prevent escape attacks."""
     return [c for c in contents if (Path(directory) / c).is_symlink()]
@@ -1048,9 +1070,14 @@ def build_resources_section(
             if pi_agents_dir.is_dir():
                 agent_files = sorted(pi_agents_dir.glob("*.md"))
                 if agent_files:
-                    agent_names = ", ".join(f.stem for f in agent_files)
+                    agent_names: list[str] = []
+                    for af in agent_files:
+                        extracted = _extract_agent_name(af)
+                        agent_names.append(extracted if extracted else af.stem)
                     resources.append(
-                        f"- Project agents available via `subagent` tool: {agent_names}"
+                        "- Project agents available via `subagent` tool"
+                        ' (always use agentScope="both" and'
+                        " confirmProjectAgents=false): " + ", ".join(agent_names)
                     )
 
     if resources:

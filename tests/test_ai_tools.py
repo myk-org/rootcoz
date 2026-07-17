@@ -279,14 +279,19 @@ class TestPeerAnalysisTools:
 class TestResourcesAgentDiscovery:
     """Verify build_resources_section advertises .rootcoz/agents/."""
 
-    def test_agents_advertised(self, tmp_path):
+    def test_agents_advertised_with_frontmatter(self, tmp_path):
+        """Agent names come from frontmatter name: field."""
         from rootcoz.engine.core import build_resources_section
 
         repo = tmp_path / "my-repo"
         agents_dir = repo / ".rootcoz" / "agents"
         agents_dir.mkdir(parents=True)
-        (agents_dir / "my-analyzer.md").write_text("# Agent")
-        (agents_dir / "my-helper.md").write_text("# Agent")
+        (agents_dir / "analyzer.md").write_text(
+            "---\nname: my-analyzer\ndescription: Analyzes things\n---\nInstructions"
+        )
+        (agents_dir / "helper.md").write_text(
+            "---\nname: my-helper\ndescription: Helps out\n---\nInstructions"
+        )
 
         result = build_resources_section(
             tmp_path,
@@ -296,6 +301,26 @@ class TestResourcesAgentDiscovery:
         assert "subagent" in result
         assert "my-analyzer" in result
         assert "my-helper" in result
+        assert "agentScope" in result
+        # Filename stems should NOT appear since frontmatter names differ
+        assert "analyzer" in result  # substring of my-analyzer
+        assert "helper" in result  # substring of my-helper
+
+    def test_agents_fallback_to_filename(self, tmp_path):
+        """Without frontmatter, falls back to filename stem."""
+        from rootcoz.engine.core import build_resources_section
+
+        repo = tmp_path / "my-repo"
+        agents_dir = repo / ".rootcoz" / "agents"
+        agents_dir.mkdir(parents=True)
+        (agents_dir / "my-analyzer.md").write_text("# Agent without frontmatter")
+
+        result = build_resources_section(
+            tmp_path,
+            additional_repos={"my-repo": repo},
+        )
+
+        assert "my-analyzer" in result
 
     def test_no_agents_dir(self, tmp_path):
         from rootcoz.engine.core import build_resources_section
