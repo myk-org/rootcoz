@@ -9,6 +9,7 @@ import {
   SelectValue,
 } from '@/components/ui/select'
 import { Trash2, ArrowDownToLine, Pause, Play, AlertCircle } from 'lucide-react'
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
 
 /** Strip ANSI escape codes (color, bold, reset, etc.) from a string. */
 function stripAnsi(text: string): string {
@@ -105,11 +106,16 @@ export function LogsPage() {
     : lines
 
   return (
+    <TooltipProvider delayDuration={200}>
     <div className="flex flex-col -mx-4 -my-6 sm:-mx-6 lg:-mx-8" style={{ height: 'calc(100vh - 56px)' }}>
       {/* Fixed toolbar */}
       <div className="shrink-0 flex items-center gap-2 p-3 border-b border-border bg-surface-secondary">
-        <div className={`h-2 w-2 rounded-full shrink-0 ${connected ? 'bg-emerald-500' : 'bg-red-500'}`}
-             title={connected ? 'Connected' : 'Disconnected'} />
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <div className={`h-2 w-2 rounded-full shrink-0 ${connected ? 'bg-emerald-500' : 'bg-red-500'}`} />
+          </TooltipTrigger>
+          <TooltipContent>{connected ? 'Connected' : 'Disconnected'}</TooltipContent>
+        </Tooltip>
         <span className="text-xs text-text-secondary whitespace-nowrap">{filteredLines.length} lines</span>
 
         <Select value={levelFilter} onValueChange={(v) => { setLevelFilter(v); setLines([]) }}>
@@ -145,21 +151,33 @@ export function LogsPage() {
 
         <div className="flex-1" />
 
-        <Button variant="ghost" size="icon" className="h-8 w-8"
-          onClick={() => setAutoScroll(!autoScroll)}
-          title={autoScroll ? 'Pause auto-scroll' : 'Resume auto-scroll'}>
-          {autoScroll ? <Pause className="h-4 w-4" /> : <Play className="h-4 w-4" />}
-        </Button>
-        <Button variant="ghost" size="icon" className="h-8 w-8"
-          onClick={scrollToBottom}
-          title="Scroll to bottom">
-          <ArrowDownToLine className="h-4 w-4" />
-        </Button>
-        <Button variant="ghost" size="icon" className="h-8 w-8"
-          onClick={() => setLines([])}
-          title="Clear logs">
-          <Trash2 className="h-4 w-4" />
-        </Button>
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <Button variant="ghost" size="icon" className="h-8 w-8"
+              onClick={() => setAutoScroll(!autoScroll)}>
+              {autoScroll ? <Pause className="h-4 w-4" /> : <Play className="h-4 w-4" />}
+            </Button>
+          </TooltipTrigger>
+          <TooltipContent>{autoScroll ? 'Pause auto-scroll' : 'Resume auto-scroll'}</TooltipContent>
+        </Tooltip>
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <Button variant="ghost" size="icon" className="h-8 w-8"
+              onClick={scrollToBottom}>
+              <ArrowDownToLine className="h-4 w-4" />
+            </Button>
+          </TooltipTrigger>
+          <TooltipContent>Scroll to bottom</TooltipContent>
+        </Tooltip>
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <Button variant="ghost" size="icon" className="h-8 w-8"
+              onClick={() => setLines([])}>
+              <Trash2 className="h-4 w-4" />
+            </Button>
+          </TooltipTrigger>
+          <TooltipContent>Clear logs</TooltipContent>
+        </Tooltip>
       </div>
 
       {/* Error banner */}
@@ -181,5 +199,6 @@ export function LogsPage() {
         ))}
       </div>
     </div>
+    </TooltipProvider>
   )
 }

@@ -7609,8 +7609,9 @@ async def list_ai_models(
 
 
 @app.post("/api/admin/ai-models/refresh")
-async def refresh_ai_models() -> dict:
+async def refresh_ai_models(request: Request) -> dict:
     """Trigger model re-discovery on the sidecar and return updated list."""
+    _require_admin(request)
     logger.info("POST /api/admin/ai-models/refresh: refreshing models")
     try:
         from pi_sidecar_client import get_sidecar_client

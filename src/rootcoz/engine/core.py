@@ -167,7 +167,7 @@ def _extract_agent_name(agent_file: Path) -> str | None:
     """
     try:
         text = agent_file.read_text(encoding="utf-8")
-    except OSError:
+    except (OSError, UnicodeDecodeError):
         return None
     if not text.startswith("---"):
         return None
@@ -177,7 +177,11 @@ def _extract_agent_name(agent_file: Path) -> str | None:
     for line in text[3:end].splitlines():
         line = line.strip()
         if line.lower().startswith("name:"):
-            return line.split(":", 1)[1].strip()
+            name = line.split(":", 1)[1].strip()
+            # Constrain to safe characters to prevent prompt injection
+            if re.match(r"^[A-Za-z0-9._-]{1,64}$", name):
+                return name
+            return None
     return None
 
 
