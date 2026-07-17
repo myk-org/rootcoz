@@ -39,6 +39,9 @@ fi
 if [ -f /app/sidecar-helper/dist/server.js ]; then
     export SIDECAR_PORT="${SIDECAR_PORT:-9100}"
     export SIDECAR_ACPX_EXTENSION_PATH="/app/sidecar-helper/node_modules/@myk-org/pi-sidecar/node_modules/pi-orchestrator-config/extensions/acpx-provider/index.ts"
+    # Subagent extension falls back to spawning `pi` when argv[1] is unset;
+    # keep the CLI on PATH so that path works in the container.
+    export PATH="/app/sidecar-helper/node_modules/.bin:${PATH}"
     node /app/sidecar-helper/dist/server.js &
     SIDECAR_PID=$!
     echo "[sidecar] Started Pi SDK sidecar (PID $SIDECAR_PID) on port $SIDECAR_PORT"

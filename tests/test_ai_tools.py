@@ -349,8 +349,14 @@ class TestResourcesAgentDiscovery:
 
 
 class TestSidecarArgvFix:
-    """Verify sidecar server.ts clears process.argv[1]."""
+    """Verify sidecar server.ts points argv[1] at the pi CLI for subagents."""
 
-    def test_server_ts_clears_argv(self):
+    def test_server_ts_sets_argv_to_pi_cli(self):
         server_ts = Path("sidecar-helper/src/server.ts").read_text()
-        assert 'process.argv[1] = ""' in server_ts
+        assert "resolvePiCli" in server_ts
+        assert "process.argv[1] = resolvePiCli()" in server_ts
+        assert "@earendil-works/pi-coding-agent/dist/cli.js" in server_ts
+
+    def test_entrypoint_puts_pi_on_path(self):
+        entrypoint = Path("entrypoint.sh").read_text()
+        assert "sidecar-helper/node_modules/.bin" in entrypoint
