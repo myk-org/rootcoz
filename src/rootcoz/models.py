@@ -423,7 +423,10 @@ class AnalysisDetail(BaseModel):
     details: str = Field(default="", description="Detailed analysis text")
     artifacts_evidence: str = Field(
         default="",
-        description="Verbatim log lines from build artifacts supporting the analysis (not a summary)",
+        description=(
+            "Evidence from build artifacts supporting the analysis: verbatim text "
+            "lines and/or image observations from read (not a vague summary)"
+        ),
     )
     code_fix: CodeFix | bool | None = Field(
         default=False, description="Code fix (if CODE ISSUE)"

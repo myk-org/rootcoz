@@ -2898,6 +2898,24 @@ class TestJsonResponseSchemaParagraphBreaks:
             in JSON_RESPONSE_SCHEMA
         )
 
+    def test_artifacts_evidence_allows_image_observations(self) -> None:
+        """Schema instructs AI to read images and record visual observations."""
+        assert "png/jpg/gif/webp/bmp" in JSON_RESPONSE_SCHEMA
+        assert "describe what you see" in JSON_RESPONSE_SCHEMA
+        assert "text and/or images" in JSON_RESPONSE_SCHEMA
+
+    def test_build_artifacts_section_mentions_images(self) -> None:
+        """Artifacts prompt tells the AI to read images, not only text logs."""
+        from rootcoz.engine.core import build_artifacts_section
+
+        section = build_artifacts_section("/tmp/artifacts-test")
+        assert "png/jpg/gif/webp/bmp" in section
+        assert "vision" in section.lower() or "read tool" in section.lower()
+        assert "webm/mp4" in section
+        assert "VERBATIM lines" in section
+        # Still path-only — no embedded file inventory
+        assert "test-failed" not in section
+
     def test_product_bug_report_description_has_paragraph_break_instruction(
         self,
     ) -> None:

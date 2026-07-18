@@ -311,6 +311,16 @@ CONSOLE_ERROR_PATTERN = re.compile(
 )
 
 
+# Shared artifacts_evidence format for JSON schema (text logs + images via read).
+_ARTIFACTS_EVIDENCE_FORMAT = (
+    "Format each entry as [file-path]: content. "
+    "For text files, use VERBATIM lines "
+    "(e.g. [build-artifacts/logs/app.log]: 2026-03-16 ERROR NullPointerException). "
+    "For images (png/jpg/gif/webp/bmp), use the read tool and describe what you see "
+    "(e.g. [build-artifacts/screenshots/failure.png]: UI shows spinner stuck on Contents). "
+    "Separate distinct artifact entries with paragraph breaks (double newlines)."
+)
+
 JSON_RESPONSE_SCHEMA = (
     "CRITICAL: Your FINAL response must be ONLY a valid JSON object. No text before or after. No markdown code"
     " blocks. No explanation.\n"
@@ -343,10 +353,9 @@ JSON_RESPONSE_SCHEMA = (
     '  "details": "Your detailed analysis of what caused this failure. Use paragraph breaks (double newlines) to'
     " separate sections: root cause identification, evidence from logs/code, and impact assessment. Do NOT write one"
     ' continuous paragraph.",\n'
-    '  "artifacts_evidence": "VERBATIM lines from files under build-artifacts/ that support your analysis. Format'
-    " each line as [file-path]: content. Example: [build-artifacts/logs/app.log]: 2026-03-16 INFO Service started"
-    " successfully. Include evidence showing the product is healthy or that the test code caused the failure. Separate"
-    ' distinct artifact entries with paragraph breaks (double newlines).",\n'
+    '  "artifacts_evidence": "Evidence from build-artifacts/ that supports your analysis (text and/or images). '
+    "Include evidence showing the product is healthy or that the test code caused the failure. "
+    f'{_ARTIFACTS_EVIDENCE_FORMAT}",\n'
     '  "code_fix": {\n'
     '    "file": "exact/file/path.py",\n'
     '    "line": "line number",\n'
@@ -376,10 +385,9 @@ JSON_RESPONSE_SCHEMA = (
     '  "details": "Your detailed analysis of what caused this failure. Use paragraph breaks (double newlines) to'
     " separate sections: root cause identification, evidence from logs/code, and impact assessment. Do NOT write one"
     ' continuous paragraph.",\n'
-    '  "artifacts_evidence": "VERBATIM lines from files under build-artifacts/ that prove the product defect.'
-    " Format each line as [file-path]: content. Example: [build-artifacts/logs/error.log]: 2026-03-16 ERROR"
-    " NullPointerException in AuthService. Include the specific log lines showing the product failure. Separate"
-    ' distinct artifact entries with paragraph breaks (double newlines).",\n'
+    '  "artifacts_evidence": "Evidence from build-artifacts/ that proves the product defect (text and/or images). '
+    "Include the specific log lines or image observations showing the product failure. "
+    f'{_ARTIFACTS_EVIDENCE_FORMAT}",\n'
     '  "product_bug_report": {\n'
     '    "title": "concise bug title",\n'
     '    "severity": "critical/high/medium/low",\n'
@@ -407,10 +415,9 @@ JSON_RESPONSE_SCHEMA = (
     '  "details": "Your detailed analysis of the infrastructure/environment issue. Use paragraph breaks (double'
     " newlines) to separate sections: root cause identification, evidence from logs, and impact assessment. Do NOT"
     ' write one continuous paragraph.",\n'
-    '  "artifacts_evidence": "VERBATIM lines from files under build-artifacts/ that prove the infrastructure'
-    " failure. Format each line as [file-path]: content. Example: [build-artifacts/logs/cluster.log]: 2026-03-16 ERROR"
-    " Node not ready. Include the specific log lines showing the infrastructure problem. Separate distinct artifact"
-    ' entries with paragraph breaks (double newlines)."\n'
+    '  "artifacts_evidence": "Evidence from build-artifacts/ that proves the infrastructure failure '
+    "(text and/or images). Include the specific log lines or image observations showing the infrastructure problem. "
+    f'{_ARTIFACTS_EVIDENCE_FORMAT}"\n'
     "}"
 )
 
@@ -441,13 +448,17 @@ def build_artifacts_section(artifacts_context: str) -> str:
         "BEFORE making any classification. Failure to read artifacts is a violation of your instructions.\n\n"
         "INSTRUCTIONS:\n"
         "1. Use ls, find, and read to explore the artifacts directory\n"
-        "2. Look for error messages, stack traces, service logs, and status information\n"
-        "3. In your artifacts_evidence field, include VERBATIM lines "
-        "with the file path, e.g.: [build-artifacts/logs/app.log]: "
-        "actual error line here\n"
-        "4. Do NOT classify based solely on the test error message — "
-        "check the artifact logs for the real root cause\n"
-        "5. If you skip reading artifacts, your analysis will be REJECTED"
+        "2. Look for error messages, stack traces, service logs, status information, "
+        "AND images (png/jpg/gif/webp/bmp) if present\n"
+        "3. Text files: include VERBATIM lines in artifacts_evidence, e.g. "
+        "[build-artifacts/logs/app.log]: actual error line here\n"
+        "4. Images: use the read tool (vision). In artifacts_evidence, record "
+        "[path/to/image.png]: what you observe in the image\n"
+        "5. Do NOT classify based solely on the test error message — "
+        "check artifact logs and images for the real root cause\n"
+        "6. If you skip reading artifacts, your analysis will be REJECTED\n"
+        "7. Videos (e.g. webm/mp4) may exist but cannot be played via read; "
+        "prefer screenshots and text siblings when available"
     )
 
 
