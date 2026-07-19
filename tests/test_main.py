@@ -6259,6 +6259,80 @@ class TestRefreshAiModelsEndpoint:
         assert "Failed to refresh" in response.json()["detail"]
 
 
+class TestCursorStatusForClient:
+    """Tests for _cursor_status_for_client credential redaction."""
+
+    def test_admin_keeps_has_api_key(self) -> None:
+        from rootcoz.main import _cursor_status_for_client
+
+        raw = {
+            "ok": False,
+            "reason": "auth_expired",
+            "hint": "login expired",
+            "has_api_key": False,
+            "model_count": 0,
+        }
+        out = _cursor_status_for_client(raw, is_admin=True)
+        assert out["has_api_key"] is False
+        assert out["reason"] == "auth_expired"
+        assert out["hint"] == "login expired"
+
+    def test_non_admin_strips_credential_state(self) -> None:
+        from rootcoz.main import _cursor_status_for_client
+
+        raw = {
+            "ok": False,
+            "reason": "api_key_not_applied",
+            "hint": "CURSOR_API_KEY is set but unavailable",
+            "has_api_key": True,
+            "model_count": 0,
+        }
+        out = _cursor_status_for_client(raw, is_admin=False)
+        assert "has_api_key" not in out
+        assert out["reason"] == "unavailable"
+        assert "administrator" in out["hint"].lower()
+
+
+class TestResolveChatAiConfig:
+    """Tests for shared chat provider/model resolution helper."""
+
+    def test_override_pair_wins(self) -> None:
+        from rootcoz.main import _resolve_chat_ai_config
+
+        provider, model = _resolve_chat_ai_config(
+            override_provider="cursor",
+            override_model="composer-1",
+            settings_provider="claude",
+            settings_model="sonnet",
+            result_data={"ai_provider": "gemini", "ai_model": "pro"},
+        )
+        assert (provider, model) == ("cursor", "composer-1")
+
+    def test_partial_override_raises(self) -> None:
+        from rootcoz.main import _resolve_chat_ai_config
+
+        with pytest.raises(RuntimeError, match="Both AI provider and model"):
+            _resolve_chat_ai_config(
+                override_provider="cursor",
+                override_model=None,
+                settings_provider="claude",
+                settings_model="sonnet",
+            )
+
+    def test_falls_back_to_result_then_settings(self) -> None:
+        from rootcoz.main import _resolve_chat_ai_config
+
+        provider, model = _resolve_chat_ai_config(
+            override_provider=None,
+            override_model=None,
+            settings_provider="claude",
+            settings_model="sonnet",
+            result_data={"ai_provider": "gemini", "ai_model": ""},
+            request_params={"ai_model": "flash"},
+        )
+        assert (provider, model) == ("gemini", "flash")
+
+
 class TestIsChildReviewKey:
     """Tests for _is_child_review_key."""
 

@@ -7574,8 +7574,26 @@ async def get_classifications(
     return {"classifications": classifications}
 
 
+def _cursor_status_for_client(status: dict, *, is_admin: bool) -> dict:
+    """Return Cursor provider_status safe for the caller's role.
+
+    Non-admins must not learn whether ``CURSOR_API_KEY`` is configured
+    (``has_api_key`` or credential-revealing reasons/hints).
+    """
+    out = dict(status)
+    if is_admin:
+        return out
+    out.pop("has_api_key", None)
+    if out.get("reason") in ("auth_expired", "api_key_not_applied"):
+        out["reason"] = "unavailable"
+    if not out.get("ok"):
+        out["hint"] = "Cursor is unavailable. Contact an administrator."
+    return out
+
+
 @app.get("/api/ai-models")
 async def list_ai_models(
+    request: Request,
     provider: str = Query(
         "",
         description=(
@@ -7589,8 +7607,10 @@ async def list_ai_models(
     When listing all providers (or cursor alone), includes ``provider_status``
     with a Cursor auth probe (browser ``agent login`` expires; ``CURSOR_API_KEY``
     does not expire and always works when set in the server env).
+    Credential-state fields (``has_api_key``) are admin-only.
     """
     logger.debug("GET /api/ai-models provider=%s", provider)
+    is_admin = bool(getattr(request.state, "is_admin", False))
     try:
         if provider:
             provider = normalize_provider(provider)
@@ -7605,7 +7625,11 @@ async def list_ai_models(
             models = await list_models(provider)
             payload: dict = {"provider": provider, "models": models}
             if provider == "cursor":
-                payload["provider_status"] = {"cursor": await probe_cursor_auth()}
+                payload["provider_status"] = {
+                    "cursor": _cursor_status_for_client(
+                        await probe_cursor_auth(), is_admin=is_admin
+                    )
+                }
             return payload
 
         # No provider specified — return models for all known providers
@@ -7619,7 +7643,9 @@ async def list_ai_models(
                     "Failed to list models for provider=%s", p, exc_info=True
                 )
                 all_models[p] = []
-        cursor_status = await probe_cursor_auth()
+        cursor_status = _cursor_status_for_client(
+            await probe_cursor_auth(), is_admin=is_admin
+        )
         return {
             "providers": all_models,
             "provider_status": {"cursor": cursor_status},
@@ -9986,11 +10012,14 @@ def _normalize_and_validate_ai_params(
 ) -> tuple[str | None, str | None]:
     """Normalize and validate AI provider/model from request body.
 
-    Returns (provider, model) with whitespace stripped and blanks as None.
-    Raises HTTPException 422 for invalid providers, or when only one of
-    provider/model is set (avoids pairing UI provider with settings model).
+    Returns (provider, model) with whitespace stripped, legacy aliases
+    normalized (e.g. ``cursor-cli`` / ``CURSOR`` → ``cursor``), and blanks
+    as None. Raises HTTPException 422 for invalid providers, or when only
+    one of provider/model is set (avoids pairing UI provider with settings
+    model).
     """
-    provider = (ai_provider or "").strip() or None
+    provider_raw = (ai_provider or "").strip()
+    provider = (normalize_provider(provider_raw) or None) if provider_raw else None
     model = (ai_model or "").strip() or None
     if provider and provider not in VALID_AI_PROVIDERS:
         raise HTTPException(
@@ -10001,6 +10030,43 @@ def _normalize_and_validate_ai_params(
         raise HTTPException(
             status_code=422,
             detail="Both ai_provider and ai_model are required when either is set",
+        )
+    return provider, model
+
+
+def _resolve_chat_ai_config(
+    *,
+    override_provider: str | None,
+    override_model: str | None,
+    settings_provider: str,
+    settings_model: str,
+    result_data: dict | None = None,
+    request_params: dict | None = None,
+) -> tuple[str, str]:
+    """Resolve provider/model for job and admin chat background processors.
+
+    Prefer an explicit override pair; otherwise fall back to result /
+    request_params / settings. Raises RuntimeError on partial override or
+    missing final config.
+    """
+    if override_provider and override_model:
+        return override_provider, override_model
+    if override_provider or override_model:
+        raise RuntimeError(
+            "Both AI provider and model are required. Select both before sending."
+        )
+    result = result_data or {}
+    params = request_params or {}
+    provider = (
+        result.get("ai_provider", "")
+        or params.get("ai_provider", "")
+        or settings_provider
+    )
+    model = result.get("ai_model", "") or params.get("ai_model", "") or settings_model
+    if not provider or not model:
+        raise RuntimeError(
+            "No AI provider/model configured. Select provider and model "
+            "in chat, or set defaults in Server Settings → AI."
         )
     return provider, model
 
@@ -10110,30 +10176,14 @@ async def _process_chat_message(
             params = result_data.get("request_params", {})
 
             _chat_settings = get_settings()
-            if ai_provider_override and ai_model_override:
-                ai_provider, ai_model = ai_provider_override, ai_model_override
-            elif not ai_provider_override and not ai_model_override:
-                ai_provider = (
-                    result_data.get("ai_provider", "")
-                    or params.get("ai_provider", "")
-                    or _chat_settings.ai_provider
-                )
-                ai_model = (
-                    result_data.get("ai_model", "")
-                    or params.get("ai_model", "")
-                    or _chat_settings.ai_model
-                )
-            else:
-                raise RuntimeError(
-                    "Both AI provider and model are required. "
-                    "Select both before sending."
-                )
-
-            if not ai_provider or not ai_model:
-                raise RuntimeError(
-                    "No AI provider/model configured. Select provider and model "
-                    "in chat, or set defaults in Server Settings → AI."
-                )
+            ai_provider, ai_model = _resolve_chat_ai_config(
+                override_provider=ai_provider_override,
+                override_model=ai_model_override,
+                settings_provider=_chat_settings.ai_provider,
+                settings_model=_chat_settings.ai_model,
+                result_data=result_data,
+                request_params=params,
+            )
 
             # Get conversation history
             msg_count = await storage.count_chat_messages(job_id, username=username)
@@ -10659,23 +10709,13 @@ async def _process_admin_chat_message(
 
     async with lock:
         try:
-            if ai_provider_override and ai_model_override:
-                ai_provider, ai_model = ai_provider_override, ai_model_override
-            elif not ai_provider_override and not ai_model_override:
-                _admin_settings = get_settings()
-                ai_provider = _admin_settings.ai_provider
-                ai_model = _admin_settings.ai_model
-            else:
-                raise RuntimeError(
-                    "Both AI provider and model are required. "
-                    "Select both before sending."
-                )
-
-            if not ai_provider or not ai_model:
-                raise RuntimeError(
-                    "No AI provider/model configured. Select provider and model "
-                    "in chat, or set defaults in Server Settings → AI."
-                )
+            _admin_settings = get_settings()
+            ai_provider, ai_model = _resolve_chat_ai_config(
+                override_provider=ai_provider_override,
+                override_model=ai_model_override,
+                settings_provider=_admin_settings.ai_provider,
+                settings_model=_admin_settings.ai_model,
+            )
 
             msg_count = await storage.count_chat_messages(
                 ADMIN_CHAT_JOB_ID, username=username
