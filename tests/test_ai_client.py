@@ -151,3 +151,116 @@ async def test_list_models_route_cache_first_source_wins(
     assert len(models) == 1
     assert models[0]["source"] == "acpx"
     assert ai_client._model_route_cache[("cursor", "cursor:shared")] == "acpx-cursor"
+
+
+def test_format_chat_ai_user_error_session_url_not_expired() -> None:
+    msg = ai_client.format_chat_ai_user_error(
+        "Client error '400 Bad Request' for url 'http://127.0.0.1:9100/sessions'"
+    )
+    assert "session expired" not in msg.lower()
+    assert "provider/model" in msg.lower() or "cursor" in msg.lower()
+
+
+def test_format_chat_ai_user_error_true_session_not_found() -> None:
+    msg = ai_client.format_chat_ai_user_error("Session xyz not found")
+    assert "session expired" in msg.lower()
+
+
+def test_format_chat_ai_user_error_auth() -> None:
+    msg = ai_client.format_chat_ai_user_error(
+        "Error: Authentication required. Please run 'agent login' first"
+    )
+    assert "CURSOR_API_KEY" in msg
+    assert "does not expire" in msg or "agent login" in msg.lower()
+
+
+def test_parse_agent_status_auth_expired() -> None:
+    assert (
+        ai_client._parse_agent_status_text("Not logged in. Run agent login.")
+        == "auth_expired"
+    )
+    assert ai_client._parse_agent_status_text("Logged in as user@example.com") is None
+
+
+@pytest.mark.asyncio
+async def test_probe_cursor_auth_ok_when_models(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ai_client.clear_cursor_auth_cache()
+
+    async def fake_list(_provider: str = ""):
+        return [{"id": "cursor:default[]", "provider": "cursor", "source": "acpx"}]
+
+    monkeypatch.setattr(ai_client, "list_models", fake_list)
+    status = await ai_client.probe_cursor_auth(force=True)
+    assert status["ok"] is True
+    assert status["model_count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_probe_cursor_auth_expired_when_empty_no_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ai_client.clear_cursor_auth_cache()
+    monkeypatch.delenv("CURSOR_API_KEY", raising=False)
+
+    async def fake_list(_provider: str = ""):
+        return []
+
+    class FakeProc:
+        returncode = 1
+
+        async def communicate(self):
+            return b"Not logged in\n", b""
+
+        def kill(self):
+            return None
+
+        async def wait(self):
+            return 1
+
+    async def fake_exec(*_a, **_k):
+        return FakeProc()
+
+    monkeypatch.setattr(ai_client, "list_models", fake_list)
+    monkeypatch.setattr(ai_client.asyncio, "create_subprocess_exec", fake_exec)
+    status = await ai_client.probe_cursor_auth(force=True)
+    assert status["ok"] is False
+    assert status["reason"] == "auth_expired"
+    assert status["has_api_key"] is False
+    assert "does not expire" in status["hint"]
+
+
+@pytest.mark.asyncio
+async def test_probe_cursor_auth_key_set_never_auth_expired(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """CURSOR_API_KEY does not expire — never label auth_expired when key is set."""
+    ai_client.clear_cursor_auth_cache()
+    monkeypatch.setenv("CURSOR_API_KEY", "test-key-not-real")
+
+    async def fake_list(_provider: str = ""):
+        return []
+
+    class FakeProc:
+        returncode = 1
+
+        async def communicate(self):
+            return b"Not logged in\n", b""
+
+        def kill(self):
+            return None
+
+        async def wait(self):
+            return 1
+
+    async def fake_exec(*_a, **_k):
+        return FakeProc()
+
+    monkeypatch.setattr(ai_client, "list_models", fake_list)
+    monkeypatch.setattr(ai_client.asyncio, "create_subprocess_exec", fake_exec)
+    status = await ai_client.probe_cursor_auth(force=True)
+    assert status["ok"] is False
+    assert status["reason"] == "api_key_not_applied"
+    assert status["has_api_key"] is True
+    assert "does not expire" in status["hint"]

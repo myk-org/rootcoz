@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
+import os
+import time
 from typing import Any
 
 from pi_sidecar_client import AIResult, set_usage_recorder
@@ -9,6 +12,9 @@ from pi_sidecar_client import call_ai as _call_ai
 from pi_sidecar_client import call_ai_once as _call_ai_once
 from pi_sidecar_client import get_sidecar_client
 from pi_sidecar_client import list_models as _list_models_raw
+from simple_logger.logger import get_logger
+
+logger = get_logger(name=__name__)
 
 # Public provider names only — CLI is a model source under these, not a provider.
 VALID_AI_PROVIDERS = {
@@ -40,6 +46,22 @@ _CLI_SIDECAR: dict[str, str] = {
 
 # (friendly_provider, model_id) → sidecar provider id (filled by list_models)
 _model_route_cache: dict[tuple[str, str], str] = {}
+
+# Cached cursor auth probe: (monotonic_ts, status_dict)
+_cursor_auth_cache: tuple[float, dict[str, Any]] | None = None
+_CURSOR_AUTH_CACHE_TTL_SEC = 60.0
+# Browser `agent login` expires. CURSOR_API_KEY does NOT — when set in env it keeps working.
+_CURSOR_BROWSER_LOGIN_EXPIRED_HINT = (
+    "Cursor browser login (`agent login`) expired or is missing. "
+    "Set CURSOR_API_KEY on the server (does not expire; always works when set), "
+    "or re-run `agent login` on the host and restart the sidecar. "
+    "Browser login cannot be auto-refreshed."
+)
+_CURSOR_KEY_SET_BUT_UNAVAILABLE_HINT = (
+    "CURSOR_API_KEY is set (that key does not expire) but Cursor models are "
+    "unavailable. Check the key is visible to the sidecar process, restart "
+    "the sidecar, and verify network to Cursor APIs."
+)
 
 # Builtin tools for AI sessions — no bash access (MANDATORY per project rules)
 # Separate constants to allow independent evolution: analysis may gain tools
@@ -176,6 +198,167 @@ async def list_models(provider: str = "") -> list[dict]:
     return result
 
 
+def _parse_agent_status_text(text: str) -> str | None:
+    """Return auth reason from `agent status` output, or None if looks OK."""
+    lower = text.lower()
+    if any(
+        s in lower
+        for s in (
+            "authentication required",
+            "not authenticated",
+            "not logged in",
+            "please run 'agent login'",
+            'please run "agent login"',
+            "agent login' first",
+        )
+    ):
+        return "auth_expired"
+    if "logged in" in lower or "authenticated" in lower:
+        return None
+    return "unavailable"
+
+
+async def probe_cursor_auth(*, force: bool = False) -> dict[str, Any]:
+    """Probe Cursor CLI/ACPX auth health for admin UI.
+
+    Browser ``agent login`` expires and cannot be auto-refreshed.
+    ``CURSOR_API_KEY`` does **not** expire — when set in the server/sidecar
+    env it keeps working. Prefer the API key for Dev/prod.
+
+    Returns dict: ok, reason, hint, has_api_key, model_count.
+    """
+    global _cursor_auth_cache
+    now = time.monotonic()
+    if (
+        not force
+        and _cursor_auth_cache is not None
+        and (now - _cursor_auth_cache[0]) < _CURSOR_AUTH_CACHE_TTL_SEC
+    ):
+        return dict(_cursor_auth_cache[1])
+
+    has_api_key = bool(os.environ.get("CURSOR_API_KEY", "").strip())
+    models = await list_models("cursor")
+    model_count = len(models)
+    if model_count > 0:
+        status: dict[str, Any] = {
+            "ok": True,
+            "reason": None,
+            "hint": None,
+            "has_api_key": has_api_key,
+            "model_count": model_count,
+        }
+        _cursor_auth_cache = (now, status)
+        return dict(status)
+
+    reason = "no_models"
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "agent",
+            "status",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env=os.environ.copy(),
+        )
+        try:
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=20)
+        except TimeoutError:
+            proc.kill()
+            await proc.wait()
+            reason = "unavailable"
+            logger.warning("Cursor auth probe: agent status timed out")
+        else:
+            text = (stdout or b"").decode(errors="replace") + (stderr or b"").decode(
+                errors="replace"
+            )
+            parsed = _parse_agent_status_text(text)
+            if parsed:
+                reason = parsed
+            elif proc.returncode not in (0, None):
+                reason = "unavailable"
+            logger.info(
+                "Cursor auth probe: models=0 reason=%s returncode=%s has_api_key=%s",
+                reason,
+                proc.returncode,
+                has_api_key,
+            )
+    except FileNotFoundError:
+        reason = "agent_missing"
+        logger.warning("Cursor auth probe: agent binary not found on PATH")
+    except Exception:
+        reason = "unavailable"
+        logger.warning("Cursor auth probe failed", exc_info=True)
+
+    # Empty catalog without API key → browser login likely expired.
+    # CURSOR_API_KEY never expires; if key is set, do not label auth_expired.
+    if reason == "no_models" and not has_api_key:
+        reason = "auth_expired"
+    if reason == "auth_expired" and has_api_key:
+        reason = "api_key_not_applied"
+
+    if has_api_key:
+        hint = _CURSOR_KEY_SET_BUT_UNAVAILABLE_HINT
+    else:
+        hint = _CURSOR_BROWSER_LOGIN_EXPIRED_HINT
+
+    status = {
+        "ok": False,
+        "reason": reason,
+        "hint": hint,
+        "has_api_key": has_api_key,
+        "model_count": model_count,
+    }
+    _cursor_auth_cache = (now, status)
+    return dict(status)
+
+
+def clear_cursor_auth_cache() -> None:
+    """Clear cached cursor auth probe (e.g. after model refresh)."""
+    global _cursor_auth_cache
+    _cursor_auth_cache = None
+
+
+def format_chat_ai_user_error(response_text: str) -> str:
+    """Map raw sidecar/AI errors to user-friendly chat messages.
+
+    Avoid matching the URL path ``/sessions`` as a lost chat session.
+    """
+    text = (response_text or "").strip()
+    lower = text.lower()
+    if not text:
+        return "AI call failed. Please try again."
+
+    if any(
+        s in lower
+        for s in (
+            "authentication required",
+            "not authenticated",
+            "not logged in",
+            "agent login",
+            "cursor_api_key",
+        )
+    ):
+        has_api_key = bool(os.environ.get("CURSOR_API_KEY", "").strip())
+        if has_api_key:
+            return _CURSOR_KEY_SET_BUT_UNAVAILABLE_HINT
+        return _CURSOR_BROWSER_LOGIN_EXPIRED_HINT
+
+    if "400" in lower and "/sessions" in lower:
+        return (
+            "Failed to create AI session (bad provider/model or Cursor auth). "
+            "Select a valid provider and model. If using Cursor without "
+            "CURSOR_API_KEY, browser `agent login` may have expired — set "
+            "CURSOR_API_KEY (does not expire) or re-login and restart sidecar."
+        )
+
+    # True lost-session cases from sidecar ("session not found"), not URL paths
+    if "session not found" in lower or (
+        "not found" in lower and "session" in lower and "/sessions" not in lower
+    ):
+        return "AI session expired. Please try sending your message again."
+
+    return text
+
+
 async def call_ai(*args: Any, ai_provider: str = "", ai_model: str = "", **kwargs: Any):
     """call_ai with rootcoz friendly→sidecar provider/model routing."""
     await _ensure_route_cache(ai_provider)
@@ -240,9 +423,12 @@ __all__ = [
     "_setup_usage_recorder",
     "call_ai",
     "call_ai_once",
+    "clear_cursor_auth_cache",
+    "format_chat_ai_user_error",
     "list_models",
     "map_provider_for_sidecar",
     "map_provider_from_sidecar",
     "map_provider_model_for_sidecar",
     "normalize_provider",
+    "probe_cursor_auth",
 ]

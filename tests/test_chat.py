@@ -1114,7 +1114,11 @@ class TestChatEndpoints:
             mock_chat.return_value = (True, "AI response here", None)
             response = test_client.post(
                 "/api/chat/chat-send-job",
-                json={"message": "what failed?", "ai_provider": "claude"},
+                json={
+                    "message": "what failed?",
+                    "ai_provider": "claude",
+                    "ai_model": "sonnet-4",
+                },
             )
         assert response.status_code == 202
         data = response.json()
@@ -1141,7 +1145,11 @@ class TestChatEndpoints:
             mock_chat.return_value = (True, "first response", None)
             test_client.post(
                 "/api/chat/chat-hist-job",
-                json={"message": "hello", "ai_provider": "claude"},
+                json={
+                    "message": "hello",
+                    "ai_provider": "claude",
+                    "ai_model": "sonnet-4",
+                },
             )
         # Verify messages by fetching chat history
         response = test_client.get("/api/chat/chat-hist-job")
@@ -1161,7 +1169,11 @@ class TestChatEndpoints:
             mock_chat.return_value = (True, "resp", None)
             test_client.post(
                 "/api/chat/chat-del-job",
-                json={"message": "hello", "ai_provider": "claude"},
+                json={
+                    "message": "hello",
+                    "ai_provider": "claude",
+                    "ai_model": "sonnet-4",
+                },
             )
         response = test_client.delete("/api/chat/chat-del-job")
         assert response.status_code == 200
@@ -1189,7 +1201,7 @@ class TestChatEndpoints:
     def test_send_message_404_for_missing_job(self, test_client):
         response = test_client.post(
             "/api/chat/nonexistent-job",
-            json={"message": "hello", "ai_provider": "claude"},
+            json={"message": "hello", "ai_provider": "claude", "ai_model": "sonnet-4"},
         )
         assert response.status_code == 404
 
@@ -1197,10 +1209,25 @@ class TestChatEndpoints:
         await _save_job(temp_db_path, "chat-badprov-job")
         response = test_client.post(
             "/api/chat/chat-badprov-job",
-            json={"message": "hello", "ai_provider": "invalid-provider"},
+            json={
+                "message": "hello",
+                "ai_provider": "invalid-provider",
+                "ai_model": "x",
+            },
         )
         assert response.status_code == 422
         assert "Invalid AI provider" in response.json()["detail"]
+
+    async def test_send_message_provider_without_model_rejected(
+        self, test_client, temp_db_path: Path
+    ):
+        await _save_job(temp_db_path, "chat-partial-job")
+        response = test_client.post(
+            "/api/chat/chat-partial-job",
+            json={"message": "hello", "ai_provider": "claude"},
+        )
+        assert response.status_code == 422
+        assert "Both ai_provider and ai_model" in response.json()["detail"]
 
     async def test_send_message_ai_failure_marks_failed(
         self, test_client, temp_db_path: Path
@@ -1217,7 +1244,11 @@ class TestChatEndpoints:
             mock_chat.return_value = (False, "AI CLI timed out", None)
             response = test_client.post(
                 "/api/chat/chat-fail-job",
-                json={"message": "hello", "ai_provider": "claude"},
+                json={
+                    "message": "hello",
+                    "ai_provider": "claude",
+                    "ai_model": "sonnet-4",
+                },
             )
         assert response.status_code == 202
         # Background task processes failure — check history
@@ -1236,7 +1267,11 @@ class TestChatEndpoints:
             for i in range(3):
                 test_client.post(
                     "/api/chat/chat-page-job",
-                    json={"message": f"msg-{i}", "ai_provider": "claude"},
+                    json={
+                        "message": f"msg-{i}",
+                        "ai_provider": "claude",
+                        "ai_model": "sonnet-4",
+                    },
                 )
         # 3 user + 3 assistant = 6 total
         response = test_client.get("/api/chat/chat-page-job?limit=2&offset=0")

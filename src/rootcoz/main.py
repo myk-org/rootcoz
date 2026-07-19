@@ -30,8 +30,11 @@ from rootcoz.ai_client import (
     VALID_AI_PROVIDERS,
     _setup_usage_recorder,
     call_ai_once,
+    clear_cursor_auth_cache,
+    format_chat_ai_user_error,
     list_models,
     normalize_provider,
+    probe_cursor_auth,
 )
 from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Query, Request
 from fastapi.encoders import jsonable_encoder
@@ -7581,7 +7584,12 @@ async def list_ai_models(
         ),
     ),
 ) -> dict:
-    """List available AI models for one or all configured providers."""
+    """List available AI models for one or all configured providers.
+
+    When listing all providers (or cursor alone), includes ``provider_status``
+    with a Cursor auth probe (browser ``agent login`` expires; ``CURSOR_API_KEY``
+    does not expire and always works when set in the server env).
+    """
     logger.debug("GET /api/ai-models provider=%s", provider)
     try:
         if provider:
@@ -7595,7 +7603,10 @@ async def list_ai_models(
                     ),
                 )
             models = await list_models(provider)
-            return {"provider": provider, "models": models}
+            payload: dict = {"provider": provider, "models": models}
+            if provider == "cursor":
+                payload["provider_status"] = {"cursor": await probe_cursor_auth()}
+            return payload
 
         # No provider specified — return models for all known providers
         all_models: dict[str, list[dict]] = {}
@@ -7608,7 +7619,11 @@ async def list_ai_models(
                     "Failed to list models for provider=%s", p, exc_info=True
                 )
                 all_models[p] = []
-        return {"providers": all_models}
+        cursor_status = await probe_cursor_auth()
+        return {
+            "providers": all_models,
+            "provider_status": {"cursor": cursor_status},
+        }
     except HTTPException:
         raise
     except Exception:
@@ -7617,7 +7632,7 @@ async def list_ai_models(
         )
         if provider:
             return {"provider": provider, "models": []}
-        return {"providers": {}}
+        return {"providers": {}, "provider_status": {}}
 
 
 @app.post("/api/admin/ai-models/refresh")
@@ -7631,13 +7646,23 @@ async def refresh_ai_models(request: Request) -> dict:
         import rootcoz.ai_client as ai_client_mod
 
         ai_client_mod._model_route_cache.clear()
+        clear_cursor_auth_cache()
         client = get_sidecar_client()
         models = await client.refresh_models()
         # Rebuild friendly provider catalogs + route cache
         for p in sorted(VALID_AI_PROVIDERS):
             await list_models(p)
-        logger.info("Model refresh complete: %d models available", len(models))
-        return {"models": models, "count": len(models)}
+        cursor_status = await probe_cursor_auth(force=True)
+        logger.info(
+            "Model refresh complete: %d models available (cursor_ok=%s)",
+            len(models),
+            cursor_status.get("ok"),
+        )
+        return {
+            "models": models,
+            "count": len(models),
+            "provider_status": {"cursor": cursor_status},
+        }
     except Exception:
         logger.exception("Failed to refresh AI models")
         raise HTTPException(
@@ -9962,7 +9987,8 @@ def _normalize_and_validate_ai_params(
     """Normalize and validate AI provider/model from request body.
 
     Returns (provider, model) with whitespace stripped and blanks as None.
-    Raises HTTPException 422 for invalid providers.
+    Raises HTTPException 422 for invalid providers, or when only one of
+    provider/model is set (avoids pairing UI provider with settings model).
     """
     provider = (ai_provider or "").strip() or None
     model = (ai_model or "").strip() or None
@@ -9970,6 +9996,11 @@ def _normalize_and_validate_ai_params(
         raise HTTPException(
             status_code=422,
             detail=f"Invalid AI provider '{provider}'. Valid providers: {', '.join(sorted(VALID_AI_PROVIDERS))}",
+        )
+    if (provider and not model) or (model and not provider):
+        raise HTTPException(
+            status_code=422,
+            detail="Both ai_provider and ai_model are required when either is set",
         )
     return provider, model
 
@@ -10079,21 +10110,30 @@ async def _process_chat_message(
             params = result_data.get("request_params", {})
 
             _chat_settings = get_settings()
-            ai_provider = (
-                ai_provider_override
-                or result_data.get("ai_provider", "")
-                or params.get("ai_provider", "")
-                or _chat_settings.ai_provider
-            )
-            ai_model = (
-                ai_model_override
-                or result_data.get("ai_model", "")
-                or params.get("ai_model", "")
-                or _chat_settings.ai_model
-            )
+            if ai_provider_override and ai_model_override:
+                ai_provider, ai_model = ai_provider_override, ai_model_override
+            elif not ai_provider_override and not ai_model_override:
+                ai_provider = (
+                    result_data.get("ai_provider", "")
+                    or params.get("ai_provider", "")
+                    or _chat_settings.ai_provider
+                )
+                ai_model = (
+                    result_data.get("ai_model", "")
+                    or params.get("ai_model", "")
+                    or _chat_settings.ai_model
+                )
+            else:
+                raise RuntimeError(
+                    "Both AI provider and model are required. "
+                    "Select both before sending."
+                )
 
-            if not ai_provider:
-                raise RuntimeError("No AI provider configured")
+            if not ai_provider or not ai_model:
+                raise RuntimeError(
+                    "No AI provider/model configured. Select provider and model "
+                    "in chat, or set defaults in Server Settings → AI."
+                )
 
             # Get conversation history
             msg_count = await storage.count_chat_messages(job_id, username=username)
@@ -10225,16 +10265,7 @@ async def _process_chat_message(
                 logger.error(
                     "Chat AI call failed for job %s: %s", job_id, response_text
                 )
-                # Update assistant message with error
-                # Show user-friendly error, not raw sidecar messages
-                user_error = response_text
-                if (
-                    "not found" in response_text.lower()
-                    or "session" in response_text.lower()
-                ):
-                    user_error = (
-                        "AI session expired. Please try sending your message again."
-                    )
+                user_error = format_chat_ai_user_error(response_text)
                 await storage.update_chat_message_content(
                     assistant_msg_id, f"Error: {user_error}"
                 )
@@ -10628,11 +10659,23 @@ async def _process_admin_chat_message(
 
     async with lock:
         try:
-            ai_provider = ai_provider_override or get_settings().ai_provider
-            ai_model = ai_model_override or get_settings().ai_model
+            if ai_provider_override and ai_model_override:
+                ai_provider, ai_model = ai_provider_override, ai_model_override
+            elif not ai_provider_override and not ai_model_override:
+                _admin_settings = get_settings()
+                ai_provider = _admin_settings.ai_provider
+                ai_model = _admin_settings.ai_model
+            else:
+                raise RuntimeError(
+                    "Both AI provider and model are required. "
+                    "Select both before sending."
+                )
 
-            if not ai_provider:
-                raise RuntimeError("No AI provider configured")
+            if not ai_provider or not ai_model:
+                raise RuntimeError(
+                    "No AI provider/model configured. Select provider and model "
+                    "in chat, or set defaults in Server Settings → AI."
+                )
 
             msg_count = await storage.count_chat_messages(
                 ADMIN_CHAT_JOB_ID, username=username
@@ -10712,14 +10755,7 @@ async def _process_admin_chat_message(
 
             if not success:
                 logger.error("Admin chat AI call failed: %s", response_text)
-                user_error = response_text
-                if (
-                    "not found" in response_text.lower()
-                    or "session" in response_text.lower()
-                ):
-                    user_error = (
-                        "AI session expired. Please try sending your message again."
-                    )
+                user_error = format_chat_ai_user_error(response_text)
                 await storage.update_chat_message_content(
                     assistant_msg_id, f"Error: {user_error}"
                 )

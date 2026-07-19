@@ -28,4 +28,11 @@ describe('buildProviderOptions', () => {
       buildProviderOptions(['cursor'], ['claude']).map((o) => o.value),
     ).toEqual(['claude', 'cursor'])
   })
+
+  it('keeps auth-failed providers when passed as currentValues', () => {
+    // useProviderOptions merges status-failed ids into currentValues
+    expect(
+      buildProviderOptions(['claude'], ['cursor']).map((o) => o.value),
+    ).toEqual(['claude', 'cursor'])
+  })
 })

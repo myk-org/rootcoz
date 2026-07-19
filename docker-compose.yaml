@@ -95,7 +95,8 @@ services:
       # Gemini CLI - API Key
       - GEMINI_API_KEY=${GEMINI_API_KEY:-}
 
-      # Cursor Agent CLI - API key
+      # Cursor Agent — CURSOR_API_KEY does NOT expire (unlike browser `agent login`).
+      # When set in the container env, Cursor auth keeps working. Dashboard → API Keys.
       # - CURSOR_API_KEY=${CURSOR_API_KEY:-}
 
       # AI call timeout in minutes (default: 10)

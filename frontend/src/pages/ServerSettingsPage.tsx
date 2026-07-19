@@ -33,7 +33,9 @@ import type { PeerConfigWithId } from '@/components/shared/PeerConfigList'
 import { usePeerModels } from '@/lib/usePeerModels'
 import { ProviderSelect } from '@/components/shared/ProviderSelect'
 import { ModelCombobox } from '@/components/shared/ModelCombobox'
+import { CursorAuthBanner } from '@/components/shared/CursorAuthBanner'
 import { useProviderModels } from '@/hooks/useProviderModels'
+import { useCursorAuthStatus } from '@/lib/useProviderOptions'
 import { AdditionalReposList } from '@/components/shared/AdditionalReposList'
 import type { RepoWithId } from '@/components/shared/AdditionalReposList'
 
@@ -347,6 +349,7 @@ export function ServerSettingsPage() {
     ? aiProviderValue
     : (savedAiProvider || aiProviderValue)
   const { models: aiModels, refresh: refreshModels, refreshing: refreshingModels } = useProviderModels(effectiveAiProvider)
+  const cursorAuthStatus = useCursorAuthStatus()
 
   // Additional repos structured editor state
   const [additionalRepos, setAdditionalRepos] = useState<RepoWithId[]>([])
@@ -675,6 +678,11 @@ export function ServerSettingsPage() {
                   </button>
                   {!isCollapsed && (
                     <CardContent className="px-4 pb-4 pt-0">
+                      {category === 'AI' && cursorAuthStatus && (
+                        <div className="mb-3">
+                          <CursorAuthBanner status={cursorAuthStatus} />
+                        </div>
+                      )}
                       <div className="divide-y divide-border-default">
                         {settings.map((setting) => {
                           if (setting.key === 'ai_provider') {

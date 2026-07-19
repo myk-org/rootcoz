@@ -4,7 +4,9 @@ import { useSSE } from '@/lib/SSEProvider'
 import { Button } from '@/components/ui/button'
 import { ProviderSelect } from '@/components/shared/ProviderSelect'
 import { ModelCombobox } from '@/components/shared/ModelCombobox'
+import { CursorAuthBanner } from '@/components/shared/CursorAuthBanner'
 import { useProviderModels } from '@/hooks/useProviderModels'
+import { useCursorAuthStatus } from '@/lib/useProviderOptions'
 import { normalizeProvider } from '@/lib/aiProviders'
 import { Tooltip, TooltipTrigger, TooltipContent } from '@/components/ui/tooltip'
 import { TooltipProvider } from '@/components/ui/tooltip'
@@ -70,7 +72,7 @@ export function ChatUI({
   apiBasePath,
   sseTopic,
   header,
-  defaultProvider = 'claude',
+  defaultProvider = '',
   defaultModel = '',
   emptyMessage = 'Start a conversation',
   emptySubtitle = '',
@@ -85,6 +87,7 @@ export function ChatUI({
   const [aiProvider, setAiProvider] = useState(() => normalizeProvider(defaultProvider))
   const [aiModel, setAiModel] = useState(defaultModel)
   const { models: availableModels } = useProviderModels(aiProvider)
+  const cursorAuthStatus = useCursorAuthStatus()
 
   const [copiedMsgId, setCopiedMsgId] = useState<number | null>(null)
   const [copiedAll, setCopiedAll] = useState(false)
@@ -95,6 +98,15 @@ export function ChatUI({
   const pollGenerationRef = useRef(0)
 
   const hasPending = messages.some(m => m.status === 'pending')
+  const needsProviderModel = !aiProvider || !aiModel
+  const canSend = Boolean(!needsProviderModel && input.trim() && !hasPending)
+  const sendBlockedReason = needsProviderModel
+    ? 'Select an AI provider and model before sending'
+    : hasPending
+      ? 'Wait for the current reply to finish'
+      : !input.trim()
+        ? 'Type a message'
+        : undefined
 
   // Sync provider/model from props when they change (e.g., after job info loads)
   useEffect(() => {
@@ -240,6 +252,10 @@ export function ChatUI({
     e?.preventDefault()
     const trimmed = input.trim()
     if (!trimmed) return
+    if (!aiProvider || !aiModel) {
+      setError('Select both an AI provider and a model before sending.')
+      return
+    }
 
     setError('')
     setInput('')
@@ -250,8 +266,8 @@ export function ChatUI({
         assistant_message_id: number
       }>(apiBasePath, {
         message: trimmed,
-        ai_provider: aiProvider || undefined,
-        ai_model: aiModel || undefined,
+        ai_provider: aiProvider,
+        ai_model: aiModel,
       })
 
       // Add user message only — assistant placeholder arrives via SSE when processing starts
@@ -404,7 +420,7 @@ export function ChatUI({
               value={aiModel}
               onChange={setAiModel}
               options={availableModels}
-              placeholder={availableModels[0]?.id || "Default model"}
+              placeholder="Select a model"
               className="w-[400px]"
             />
             <Tooltip>
@@ -433,6 +449,24 @@ export function ChatUI({
             </Button>
           </div>
         </div>
+
+        {cursorAuthStatus && aiProvider === 'cursor' && (
+          <div className="px-6 pt-3 shrink-0">
+            <CursorAuthBanner status={cursorAuthStatus} />
+          </div>
+        )}
+
+        {needsProviderModel && (
+          <div className="px-6 pt-2 shrink-0">
+            <p className="text-xs text-signal-orange" role="status">
+              {!aiProvider && !aiModel
+                ? 'Select an AI provider and a model before sending a message.'
+                : !aiProvider
+                  ? 'Select an AI provider before sending a message.'
+                  : 'Select a model before sending a message.'}
+            </p>
+          </div>
+        )}
 
         {/* Messages area */}
         <div className="flex-1 flex flex-col overflow-y-auto px-6 py-4 space-y-4">
@@ -547,9 +581,23 @@ export function ChatUI({
               className="flex-1 min-h-[44px] max-h-[300px] resize-y overflow-y-auto"
               rows={1}
             />
-            <Button type="submit" disabled={!input.trim()} className="self-end h-[44px] w-[44px] shrink-0" aria-label="Send message">
-              <Send className="h-5 w-5" />
-            </Button>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <span className="self-end inline-flex">
+                  <Button
+                    type="submit"
+                    disabled={!canSend}
+                    className="h-[44px] w-[44px] shrink-0"
+                    aria-label={canSend ? 'Send message' : sendBlockedReason || 'Send message'}
+                  >
+                    <Send className="h-5 w-5" />
+                  </Button>
+                </span>
+              </TooltipTrigger>
+              {!canSend && sendBlockedReason && (
+                <TooltipContent>{sendBlockedReason}</TooltipContent>
+              )}
+            </Tooltip>
           </form>
         </div>
       </div>
