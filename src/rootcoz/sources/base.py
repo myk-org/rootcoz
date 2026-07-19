@@ -466,6 +466,19 @@ async def run_console_only_analysis(
         return False, [], str(exc)
 
 
+def resolve_display_build_id(result_data: dict) -> str | int:
+    """Resolve the best display identifier for a build.
+
+    Returns build_id (string) when build_number is missing/zero,
+    otherwise build_number (int).
+    """
+    build_number = result_data.get("build_number")
+    if build_number:
+        return build_number
+    build_id = result_data.get("build_id", "")
+    return build_id if build_id else 0
+
+
 def link_artifacts_to_workspace(
     repo_path: Path, extract_path: Path, job_id: str
 ) -> bool:

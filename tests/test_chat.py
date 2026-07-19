@@ -662,6 +662,15 @@ class TestBuildWelcomeMessage:
         assert "GitHub" in msg
         assert "console output" in msg.lower()
 
+    def test_string_build_number(self):
+        """build_welcome_message works with string build_number (large Prow build_id)."""
+        msg = build_welcome_message(
+            job_name="prow-job",
+            build_number="9007199254740999",
+        )
+        assert "prow-job" in msg
+        assert "#9007199254740999" in msg
+
 
 # ---------------------------------------------------------------------------
 # build_chat_prompt tests

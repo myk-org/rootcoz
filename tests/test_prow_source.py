@@ -2586,6 +2586,9 @@ class TestProwPrepareWorkspace:
         assert "PR #3" in diff_file.content
         # PR #2 failed but didn't block others
         assert "PR #2" not in diff_file.content
+        # Warning about failed PR fetch is present
+        assert "Failed to fetch PR diff for #2" in diff_file.content
+        assert "incomplete PR context" in diff_file.content
 
     @pytest.mark.asyncio
     async def test_pr_fetch_failure_returns_context_only(self):
@@ -2613,3 +2616,31 @@ class TestProwPrepareWorkspace:
 
         assert len(files) == 1
         assert files[0].filename == "prow-context.txt"
+
+
+class TestResolveDisplayBuildId:
+    """Tests for resolve_display_build_id helper."""
+
+    def test_returns_build_number_when_present(self):
+        from rootcoz.sources.base import resolve_display_build_id
+
+        result = resolve_display_build_id({"build_number": 42, "build_id": "999"})
+        assert result == 42
+
+    def test_falls_back_to_build_id_string(self):
+        from rootcoz.sources.base import resolve_display_build_id
+
+        result = resolve_display_build_id({"build_id": "9007199254740999"})
+        assert result == "9007199254740999"
+
+    def test_returns_zero_when_both_empty(self):
+        from rootcoz.sources.base import resolve_display_build_id
+
+        assert resolve_display_build_id({}) == 0
+        assert resolve_display_build_id({"build_number": 0, "build_id": ""}) == 0
+
+    def test_build_number_zero_falls_back_to_build_id(self):
+        from rootcoz.sources.base import resolve_display_build_id
+
+        result = resolve_display_build_id({"build_number": 0, "build_id": "12345"})
+        assert result == "12345"

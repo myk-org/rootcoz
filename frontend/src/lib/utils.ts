@@ -140,6 +140,6 @@ export function resolveBuildDisplayId(data?: BuildIdSource | null): string | nul
   if (typeof fromParams === 'string' && fromParams) return fromParams
   if (data.build_id) return data.build_id
   const bn = data.build_number
-  if (bn === undefined || bn === null || bn === '' || bn === 0) return null
+  if (bn === undefined || bn === null || bn === '' || bn === 0 || bn === '0') return null
   return String(bn)
 }

@@ -91,6 +91,8 @@ from rootcoz.encryption import (
 from rootcoz.engine.core import (
     ROOTCOZ_ISSUE_PROMPT_FILENAME,
     analyze_failure_group,
+    clone_additional_repos,
+    copy_rootcoz_pi_resources,
     extract_json_dict,
     get_failure_signature,
     resolve_additional_repos,
@@ -154,6 +156,7 @@ from rootcoz.notifications import send_mention_notifications
 from rootcoz.reportportal import AmbiguousLaunchError, ReportPortalClient
 from rootcoz.repository import (
     RepositoryManager,
+    derive_test_repo_name,
     redact_url,
 )
 from rootcoz.request_resolution import resolve_tests_repo_token
@@ -178,10 +181,12 @@ from rootcoz.sources import (
     RawSource,
     append_repo_context,
     apply_source_workspace_files,
+    link_artifacts_to_workspace,
     link_refetched_artifacts,
     run_console_only_analysis,
     setup_analysis_workspace,
 )
+from rootcoz.sources.base import resolve_display_build_id
 from rootcoz.sources import chat_workspace as source_chat_workspace
 from rootcoz.sources.jenkins_source import analyze_job, wait_for_jenkins_completion
 from rootcoz.storage import (
@@ -1154,7 +1159,7 @@ async def _fail_resumed_waiting_job(job_id: str, result_data: dict, error: str) 
         "job_name": result_data.get("job_name", ""),
         "display_name": result_data.get("display_name")
         or result_data.get("job_name", ""),
-        "build_number": result_data.get("build_number", 0),
+        "build_number": resolve_display_build_id(result_data),
         "error": error,
     }
     if "request_params" in result_data:
@@ -2232,10 +2237,8 @@ def _merge_settings(body: BaseAnalysisRequest, settings: Settings) -> Settings:
         if "gcs_bucket" in body.model_fields_set and body.gcs_bucket:
             overrides["gcs_bucket"] = body.gcs_bucket
 
-    if overrides:
-        merged_data = settings.model_dump(mode="python") | overrides
-        return Settings.model_validate(merged_data)
-    return settings
+    merged_data = settings.model_dump(mode="python") | overrides
+    return Settings.model_validate(merged_data)
 
 
 # Truncation length for error signatures in log messages (SHA-256 prefix for readability)
@@ -2247,7 +2250,7 @@ async def _apply_auto_review(
     test_name: str,
     error_sig: str,
     prev_job_id: str,
-    prev_build: int,
+    prev_build: int | str,
     child_job_name: str = "",
     child_build_number: int = 0,
 ) -> None:
@@ -2356,7 +2359,7 @@ async def _match_and_auto_review_failures(
             continue
 
         prev_job_id = previous["job_id"]
-        prev_build = previous["build_number"]
+        prev_build = previous["build_number"] or previous.get("build_id") or 0
         await _apply_auto_review(
             job_id,
             test_name,
@@ -4117,12 +4120,12 @@ async def _process_non_jenkins_analysis(
             await _auto_review_matching_failures(
                 job_id,
                 metadata_job_name,
-                result_data.get("build_number", 0),
+                resolve_display_build_id(result_data),
                 result_data,
                 merged,
             )
         except Exception:
-            _build_number = result_data.get("build_number", 0)
+            _build_number = resolve_display_build_id(result_data)
             logger.warning(
                 "Auto-review failed for job_id=%s, job_name=%s, build=%s",
                 job_id,
@@ -6582,7 +6585,7 @@ def _log_and_return_rp_error(
     *,
     log_msg: str = "",
     job_name: str = "",
-    build_number: int | None = None,
+    build_number: int | str | None = None,
     jenkins_url: str = "",
     launch_id: int | None = None,
 ) -> dict:
@@ -6781,7 +6784,7 @@ async def _execute_rp_push(
     with rp_client_ctx as rp_client:
         jenkins_url = result_data.get("jenkins_url", "")
         job_name = result_data.get("job_name", "")
-        build_number = result_data.get("build_number", 0)
+        build_number = resolve_display_build_id(result_data)
 
         logger.debug(
             "RP push: searching for launch job='%s' #%s, jenkins_url='%s'",
@@ -10753,7 +10756,7 @@ def _build_ci_workspace_params(decrypted_params: dict, result_data: dict) -> dic
     return {
         **decrypted_params,
         "job_name": result_data.get("job_name", ""),
-        "build_number": result_data.get("build_number", 0),
+        "build_number": resolve_display_build_id(result_data),
         "analysis_type": decrypted_params.get(
             "analysis_type", result_data.get("analysis_type", "jenkins")
         ),
@@ -10933,7 +10936,7 @@ async def init_chat(job_id: str, request: Request) -> dict:
             session_id = await init_chat_session(
                 job_id=job_id,
                 job_name=result_data.get("job_name", "unknown"),
-                build_number=result_data.get("build_number", 0),
+                build_number=resolve_display_build_id(result_data),
                 ai_provider=ai_provider,
                 ai_model=ai_model,
                 repo_path=workspace,
@@ -10956,7 +10959,7 @@ async def init_chat(job_id: str, request: Request) -> dict:
             # Insert welcome message as first visible assistant message
             welcome_text = build_welcome_message(
                 job_name=result_data.get("job_name", "unknown"),
-                build_number=result_data.get("build_number", 0),
+                build_number=resolve_display_build_id(result_data),
                 repos_available=repos_available,
                 ci_build_data_available=ci_build_data_available,
                 jira_available=bool(jira_url and jira_token),
@@ -10991,7 +10994,7 @@ async def init_chat(job_id: str, request: Request) -> dict:
         "repo_names": repo_names,
         "jenkins_data_available": ci_build_data_available,
         "job_name": result_data.get("job_name", ""),
-        "build_number": result_data.get("build_number", 0),
+        "build_number": resolve_display_build_id(result_data),
         "session_id": session_id or "",
     }
 
@@ -11384,7 +11387,7 @@ async def _process_chat_message(
             success, response_text, new_session_id = await chat_with_ai(
                 job_id=job_id,
                 job_name=result_data.get("job_name", "unknown"),
-                build_number=result_data.get("build_number", 0),
+                build_number=resolve_display_build_id(result_data),
                 message=message,
                 history=history,
                 ai_provider=ai_provider,

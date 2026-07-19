@@ -1064,26 +1064,37 @@ def _build_unavailable_section(custom_tools: list[dict]) -> str:
     return "\n\n## Unavailable Tools\n" + "\n".join(lines)
 
 
+def _resolve_ci_build_data_available(
+    ci_build_data_available: bool, jenkins_data_available: bool
+) -> bool:
+    """Merge ci_build_data_available and legacy jenkins_data_available flags."""
+    return ci_build_data_available or jenkins_data_available
+
+
 def build_welcome_message(
     *,
     job_name: str,
-    build_number: int,
+    build_number: int | str,
     repos_available: bool = False,
     jenkins_data_available: bool = False,
+    ci_build_data_available: bool = False,
     jira_available: bool = False,
     github_available: bool = False,
 ) -> str:
     """Build a dynamic welcome message listing available resources."""
+    ci_build_data_available = _resolve_ci_build_data_available(
+        ci_build_data_available, jenkins_data_available
+    )
     resources = [
         "📊 Job analysis results (failures, classifications, AI analysis)",
         "💬 Job comments and discussion",
     ]
     if repos_available:
         resources.append("📁 Test repository and source code")
-    if jenkins_data_available:
+    if ci_build_data_available:
         resources.append("🔧 Build artifacts (logs, test output, cluster data)")
-        resources.append("🖥️ Jenkins console output")
-        resources.append("⚙️ Jenkins build info (status, params, timing)")
+        resources.append("🖥️ CI console output")
+        resources.append("⚙️ Build metadata (status, params, timing)")
     resources.append("🔍 Failure history — check if this test failed before")
     resources.append("📋 Classification history — see who changed classifications")
     if jira_available:
@@ -1106,7 +1117,7 @@ _COMMON_RULES = """- Do NOT modify any data — read-only access only
 
 def build_system_prompt(
     job_name: str,
-    build_number: int,
+    build_number: int | str,
     job_id: str,
     custom_tools: list[dict],
     repos_available: bool = False,
@@ -1114,6 +1125,9 @@ def build_system_prompt(
     ci_build_data_available: bool = False,
 ) -> str:
     """Build a system prompt that scopes the AI to a specific analyzed job."""
+    ci_build_data_available = _resolve_ci_build_data_available(
+        ci_build_data_available, jenkins_data_available
+    )
     tools_section = _build_tools_section(custom_tools)
     unavailable_section = _build_unavailable_section(custom_tools)
 
@@ -1123,7 +1137,7 @@ def build_system_prompt(
             "\n\nSource repositories are cloned in your working directory. "
             "You can explore test and product code directly."
         )
-    if jenkins_data_available:
+    if ci_build_data_available:
         repos_note += (
             "\n\nJenkins build data is available in your working directory:"
             "\n- `console-output.txt` \u2014 full Jenkins console output"
@@ -1283,7 +1297,7 @@ async def init_chat_session(
     *,
     job_id: str,
     job_name: str,
-    build_number: int,
+    build_number: int | str,
     ai_provider: str,
     ai_model: str,
     repo_path: Path | None = None,
@@ -1427,7 +1441,7 @@ async def chat_with_ai(
     *,
     job_id: str,
     job_name: str,
-    build_number: int,
+    build_number: int | str,
     message: str,
     history: list[dict],
     ai_provider: str,

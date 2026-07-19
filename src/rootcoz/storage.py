@@ -2159,8 +2159,8 @@ async def find_matching_previous_analysis(
 
     Returns:
         Dict with previous failure_history row data if found, None otherwise.
-        Includes keys: job_id, build_number, error_signature, classification,
-        pattern, analyzed_at.
+        Includes keys: job_id, build_number, build_id, error_signature,
+        classification, pattern, analyzed_at.
     """
     async with _connect_db() as db:
         # Find the most recent failure_history row for the same job+test
@@ -2173,7 +2173,7 @@ async def find_matching_previous_analysis(
         # wildcard (matches any fh.child_build_number), consistent with
         # the API model where child_build_number=0 means "not specified".
         cursor = await db.execute(
-            "SELECT fh.job_id, fh.build_number, fh.error_signature, "
+            "SELECT fh.job_id, fh.build_number, fh.build_id, fh.error_signature, "
             "fh.classification, fh.pattern, fh.analyzed_at "
             "FROM failure_history fh "
             "WHERE fh.job_name = ? AND fh.test_name = ? AND fh.job_id != ? "
@@ -5656,7 +5656,8 @@ async def update_chat_message_ai_fields(
 _RESULT_DATA_SUBQUERY = """
     SELECT job_id,
            json_extract(result_json, '$.job_name') AS job_name,
-           json_extract(result_json, '$.build_number') AS build_number
+           json_extract(result_json, '$.build_number') AS build_number,
+           json_extract(result_json, '$.build_id') AS build_id
     FROM results WHERE result_json IS NOT NULL
 """
 
@@ -5804,6 +5805,7 @@ async def get_report_totals(
                 r.job_id,
                 r_data.job_name,
                 r_data.build_number,
+                r_data.build_id,
                 r.created_at,
                 COALESCE(fc.failure_count, 0) AS failure_count,
                 COALESCE(rv.reviewed_count, 0) AS reviewed_count
@@ -5845,6 +5847,7 @@ async def get_report_totals(
                 "job_id": row["job_id"],
                 "job_name": row["job_name"] or row["job_id"],
                 "build_number": row["build_number"],
+                "build_id": row["build_id"] or "",
                 "failure_count": fc,
                 "reviewed_count": rc,
                 "created_at": row["created_at"],
@@ -5985,6 +5988,7 @@ async def get_report_classification_overrides(
                 tc.original_classification,
                 tc.original_pattern,
                 fh.build_number,
+                fh.build_id,
                 'classification' AS override_axis
             FROM test_classifications tc
             {meta_join}
@@ -6025,6 +6029,7 @@ async def get_report_classification_overrides(
                 tc.original_classification,
                 tc.original_pattern,
                 fh.build_number,
+                fh.build_id,
                 'pattern' AS override_axis
             FROM test_classifications tc
             {meta_join}
@@ -6096,6 +6101,7 @@ async def get_report_classification_overrides(
                 "job_name": row["job_name"],
                 "job_id": row["job_id"],
                 "build_number": row["build_number"],
+                "build_id": row["build_id"] or "",
                 "from_classification": orig,
                 "to_classification": override,
                 "override_axis": axis,
@@ -6182,7 +6188,7 @@ async def get_report_issues_created(
         sql = f"""
             SELECT c.id, c.job_id, c.test_name, c.comment,
                    c.username, c.created_at,
-                   r_data.job_name, r_data.build_number
+                   r_data.job_name, r_data.build_number, r_data.build_id
             FROM comments c
             {join_type} ({_RESULT_DATA_SUBQUERY}
             ) r_data ON r_data.job_id = c.job_id
@@ -6220,6 +6226,7 @@ async def get_report_issues_created(
                 "job_name": row["job_name"] or row["job_id"],
                 "job_id": row["job_id"],
                 "build_number": row["build_number"],
+                "build_id": row["build_id"] or "",
                 "created_by": row["username"],
                 "created_at": row["created_at"],
             }

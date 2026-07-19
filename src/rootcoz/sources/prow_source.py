@@ -1200,12 +1200,14 @@ class ProwSource(CISource):
                     await task
 
             # Collect results preserving original all_pr_nums order
-            for task in tasks_list:
+            failed_prs: list[int] = []
+            for i, task in enumerate(tasks_list):
                 if task in done:
                     try:
                         result = task.result()
                     except Exception as exc:
                         logger.warning("PR fetch failed: %s", exc)
+                        failed_prs.append(all_pr_nums[i])
                     else:
                         if result:
                             pr_sections.append(result)
@@ -1219,6 +1221,13 @@ class ProwSource(CISource):
                 skipped_note += (
                     f"\n\n--- WARNING: PR enrichment timed out after 60s. "
                     f"{len(pending)} of {len(tasks_list)} PR fetch(es) incomplete. ---\n"
+                )
+
+            if failed_prs:
+                failed_list = ", ".join(f"#{n}" for n in failed_prs)
+                skipped_note += (
+                    f"\n\n--- WARNING: Failed to fetch PR diff for {failed_list}. "
+                    f"Analysis may be based on incomplete PR context. ---\n"
                 )
 
             if pr_sections or skipped_note:

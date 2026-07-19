@@ -34,7 +34,6 @@ from rootcoz.engine.core import (
     resolve_additional_repos,
     safe_update_progress,
 )
-from rootcoz.sources.base import link_artifacts_to_workspace
 from rootcoz.error_messages import ai_not_configured_message, make_user_friendly_error
 from rootcoz.jenkins import JenkinsClient
 from rootcoz.jenkins_artifacts import cleanup_extract_dir, process_build_artifacts
@@ -47,7 +46,7 @@ from rootcoz.models import (
     FailedTest,
     FailureAnalysis,
 )
-from rootcoz.repository import RepositoryManager, derive_test_repo_name, redact_url
+from rootcoz.repository import RepositoryManager, derive_test_repo_name
 from rootcoz.rootcoz_repo_settings import (
     RootcozSettingsError,
     assert_no_tests_repo_name_collision,
@@ -1080,37 +1079,15 @@ async def analyze_job(
             cloned_repos = ws_result.cloned_repos
             repo_context = ws_result.repo_context
 
+            # Derive tests_cloned_path from workspace result (already cloned
+            # by setup_analysis_workspace above — no second clone needed).
             tests_cloned_path: Path | None = None
             if tests_repo_url:
-                try:
-                    clean_tests_url, tests_ref = parse_repo_ref(str(tests_repo_url))
-                    repo_name = derive_test_repo_name(
-                        clean_tests_url, additional_repos_list
-                    )
-                    logger.info(
-                        f"Cloning test repository: {redact_url(clean_tests_url)}"
-                        + (f" (ref={tests_ref})" if tests_ref else "")
-                    )
-                    await asyncio.to_thread(
-                        repo_manager.clone_into,
-                        clean_tests_url,
-                        repo_path / repo_name,
-                        depth=50,
-                        branch=tests_ref,
-                        token=tests_repo_token or None,
-                    )
-                    cloned_repos[repo_name] = repo_path / repo_name
-                    tests_cloned_path = cloned_repos[repo_name]
-                    logger.info(
-                        f"Successfully cloned test repository into {repo_name}/"
-                    )
-                    repo_context = f"\nTest repository cloned from: {redact_url(clean_tests_url)} (at {repo_name}/)"
-                except Exception as e:  # non-fatal tests repo clone failure
-                    logger.warning(
-                        "Failed to clone repository (%s)",
-                        type(e).__name__,
-                    )
-                    repo_context = "\nFailed to clone repository (details redacted)"
+                clean_tests_url, _tests_ref = parse_repo_ref(str(tests_repo_url))
+                repo_name = derive_test_repo_name(
+                    clean_tests_url, additional_repos_list
+                )
+                tests_cloned_path = cloned_repos.get(repo_name)
 
             # Central settings.json merge (skip when main already resolved successfully)
             if not settings_json_resolved:
@@ -1186,24 +1163,6 @@ async def analyze_job(
             custom_prompt = append_repo_context(
                 (request.raw_prompt or "").strip(), repo_context
             )
-
-            # Make artifacts accessible in the AI working directory
-            if source_result.extract_path:
-                if not link_artifacts_to_workspace(
-                    repo_path, source_result.extract_path, job_id
-                ):
-                    artifacts_context = ""
-
-            # Clone additional repositories for AI context
-            if additional_repos_list:
-                additional_repos_cloned, repo_path = await clone_additional_repos(
-                    repo_manager, additional_repos_list, repo_path
-                )
-                cloned_repos.update(additional_repos_cloned)
-
-            # Copy .rootcoz/{agents,skills,extensions}/ to workspace .pi/
-            if cloned_repos:
-                copy_rootcoz_pi_resources(cloned_repos, repo_path)
 
             # Pre-flight: verify AI sidecar is reachable before spawning parallel tasks
             preflight_available, preflight_msg = await check_sidecar_available()
