@@ -393,10 +393,10 @@ export function ServerSettingsPage() {
   useSSE('settings', settingsEvents)
 
   // ---- Shared save helper ----
-  async function saveSettingValue(key: string, value: string): Promise<boolean> {
+  async function saveSettings(updates: Record<string, string>): Promise<boolean> {
     dispatch({ type: 'SAVE_START' })
     try {
-      await api.put('/api/admin/settings', { settings: { [key]: value } })
+      await api.put('/api/admin/settings', { settings: updates })
       dispatch({ type: 'SAVE_SUCCESS' })
       fetchSettings()
       return true
@@ -409,6 +409,10 @@ export function ServerSettingsPage() {
       dispatch({ type: 'SAVE_ERROR', error: msg })
       return false
     }
+  }
+
+  async function saveSettingValue(key: string, value: string): Promise<boolean> {
+    return saveSettings({ [key]: value })
   }
 
   // ---- Save setting ----
@@ -447,42 +451,58 @@ export function ServerSettingsPage() {
     const configStr = serializePeerConfigs(peerConfigs)
     const updates: Record<string, string> = { peer_ai_configs: configStr }
     updates.peer_analysis_max_rounds = String(peerMaxRounds)
-    dispatch({ type: 'SAVE_START' })
-    try {
-      await api.put('/api/admin/settings', { settings: updates })
-      dispatch({ type: 'SAVE_SUCCESS' })
-      fetchSettings()
-      setPeerEditing(false)  // Only close on success
-    } catch (err) {
-      let msg = 'Failed to save'
-      if (err instanceof ApiError) {
-        const body = err.body as { detail?: string } | null
-        msg = body?.detail ?? 'Save failed'
-      }
-      dispatch({ type: 'SAVE_ERROR', error: msg })
-      // Don't close — user can fix and retry
-    }
+    const ok = await saveSettings(updates)
+    if (ok) setPeerEditing(false)  // Only close on success
   }
 
   async function handleSaveAiProvider(value: string) {
     const previousProvider = savedAiProvider
+    if (value !== previousProvider) {
+      // Provider changed: require a model and persist both atomically so we never
+      // delete ai_model (empty → env fallback) or leave a mismatched pair.
+      const model = aiModelValue.trim()
+      if (!model) {
+        setAiModelEditing(true)
+        dispatch({
+          type: 'SAVE_ERROR',
+          error: 'Select a model for the new provider before saving.',
+        })
+        return
+      }
+      const ok = await saveSettings({ ai_provider: value, ai_model: model })
+      if (ok) {
+        setAiProviderEditing(false)
+        setAiModelEditing(false)
+        setAiProviderValue(value)
+      }
+      return
+    }
     const ok = await saveSettingValue('ai_provider', value)
     if (ok) {
       setAiProviderEditing(false)
-      // Keep aiProviderValue in sync so effectiveAiProvider (and thus the
-      // model list) reflects the newly saved provider immediately, before
-      // fetchSettings() re-renders with the server-side state.
       setAiProviderValue(value)
-      // Clear model only when provider actually changes so the user must pick
-      // a model for the new provider (do not fall back to env AI_MODEL).
-      if (value !== previousProvider) {
-        setAiModelValue('')
-        await saveSettingValue('ai_model', '')
-      }
     }
   }
 
   async function handleSaveAiModel(value: string) {
+    const providerDraft = (aiProviderValue || savedAiProvider).trim()
+    if (providerDraft && providerDraft !== savedAiProvider) {
+      const model = value.trim()
+      if (!model) {
+        dispatch({
+          type: 'SAVE_ERROR',
+          error: 'Select a model for the new provider before saving.',
+        })
+        return
+      }
+      const ok = await saveSettings({ ai_provider: providerDraft, ai_model: model })
+      if (ok) {
+        setAiProviderEditing(false)
+        setAiModelEditing(false)
+        setAiProviderValue(providerDraft)
+      }
+      return
+    }
     const ok = await saveSettingValue('ai_model', value)
     if (ok) setAiModelEditing(false)
   }

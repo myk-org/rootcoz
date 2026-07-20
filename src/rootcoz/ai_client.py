@@ -71,7 +71,7 @@ CHAT_BUILTIN_TOOLS: tuple[str, ...] = ("read", "ls", "find", "grep", "subagent")
 ANALYSIS_BUILTIN_TOOLS: tuple[str, ...] = ("read", "ls", "find", "grep", "subagent")
 # Prompt wording for cloned repos — must match tool policy (no shell/git).
 RESOURCE_REPO_BROWSE_HINT = (
-    "browse with read, ls, find, and grep only (no shell execution)"
+    "browse with read, ls, find, and grep only (no shell, bash, or git commands)"
 )
 
 

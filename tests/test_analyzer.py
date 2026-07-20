@@ -1835,7 +1835,7 @@ class TestBuildResourcesSectionAdditionalRepos:
         result = build_resources_section(workspace, additional_repos=additional)
         assert "ROOTCOZ_PROMPT.md" in result
         assert "Project-specific analysis instructions" in result
-        assert "not pre-loaded" in result
+        assert "body not embedded" in result
         assert "issue #74" in result
         assert "sha256=" in result
         assert "bytes=" in result

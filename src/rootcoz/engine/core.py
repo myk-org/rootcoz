@@ -1183,8 +1183,8 @@ def build_resources_section(
                 resources.append(
                     f"- Project-specific analysis instructions at {rootcoz_prompt} — "
                     f"MANDATORY: open with the read tool and follow them "
-                    f"(file verified on disk{prompt_fp}; contents not pre-loaded "
-                    f"into this prompt; see issue #74)"
+                    f"(file opened for fingerprint{prompt_fp}; body not embedded "
+                    f"per AGENTS.md file-based data policy / issue #74)"
                 )
             repo_history_prompt = path / ".rootcoz" / ROOTCOZ_HISTORY_PROMPT_FILENAME
             if history_enabled and repo_history_prompt.exists():
@@ -1192,7 +1192,8 @@ def build_resources_section(
                 resources.append(
                     f"- Project-specific history analysis instructions"
                     f" at {repo_history_prompt} — MANDATORY: open with the read tool"
-                    f" (file verified on disk{hist_fp}; not pre-loaded; see issue #74)"
+                    f" (file opened for fingerprint{hist_fp}; body not embedded"
+                    f" per AGENTS.md / issue #74)"
                     f" alongside the main history analysis instructions"
                 )
             # Advertise project-provided agents (from .rootcoz/agents/)

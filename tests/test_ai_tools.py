@@ -499,7 +499,9 @@ class TestAgentGateSection:
             assert tool in RESOURCE_REPO_BROWSE_HINT
             assert tool in CHAT_BUILTIN_TOOLS
         assert "bash" not in CHAT_BUILTIN_TOOLS
-        assert "no shell execution" in RESOURCE_REPO_BROWSE_HINT
+        assert "no shell" in RESOURCE_REPO_BROWSE_HINT
+        assert "git commands" in RESOURCE_REPO_BROWSE_HINT
+        assert RESOURCE_REPO_BROWSE_HINT.startswith("browse with")
 
     def test_rootcoz_prompt_fingerprint_matches_on_disk_bytes(self, tmp_path):
         """Advertise path proves the file was read (sha256) without embedding body."""
@@ -523,6 +525,8 @@ class TestAgentGateSection:
         assert body not in section
         assert "MANDATORY: open with the read tool" in section
         assert "issue #74" in section
+        assert "body not embedded" in section
+        assert "fingerprint" in section
 
     def test_history_section_requires_auth_token(self, tmp_path, monkeypatch):
         from rootcoz.engine import core as core_mod
