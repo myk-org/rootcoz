@@ -10042,12 +10042,13 @@ def _resolve_chat_ai_config(
     settings_model: str,
     result_data: dict | None = None,
     request_params: dict | None = None,
+    is_admin: bool = False,
 ) -> tuple[str, str]:
     """Resolve provider/model for job and admin chat background processors.
 
     Prefer an explicit override pair; otherwise fall back to result /
     request_params / settings. Raises RuntimeError on partial override or
-    missing final config.
+    missing final config. Missing-config errors are role-aware.
     """
     if override_provider and override_model:
         return override_provider, override_model
@@ -10064,9 +10065,14 @@ def _resolve_chat_ai_config(
     )
     model = result.get("ai_model", "") or params.get("ai_model", "") or settings_model
     if not provider or not model:
+        if is_admin:
+            raise RuntimeError(
+                "No AI provider/model configured. Select provider and model "
+                "in chat, or set defaults in Server Settings → AI."
+            )
         raise RuntimeError(
             "No AI provider/model configured. Select provider and model "
-            "in chat, or set defaults in Server Settings → AI."
+            "in chat, or contact a server administrator to configure AI settings."
         )
     return provider, model
 
@@ -10130,6 +10136,7 @@ async def send_chat_message(
         ai_provider_override=ai_provider,
         ai_model_override=ai_model,
         username=request.state.username,
+        is_admin=bool(getattr(request.state, "is_admin", False)),
     )
 
     return {
@@ -10153,6 +10160,7 @@ async def _process_chat_message(
     ai_provider_override: str | None,
     ai_model_override: str | None,
     username: str,
+    is_admin: bool = False,
 ) -> None:
     """Background task: process a single chat message with AI."""
     from rootcoz.engine.chat import (
@@ -10183,6 +10191,7 @@ async def _process_chat_message(
                 settings_model=_chat_settings.ai_model,
                 result_data=result_data,
                 request_params=params,
+                is_admin=is_admin,
             )
 
             # Get conversation history
@@ -10674,6 +10683,7 @@ async def send_admin_chat_message(
         ai_provider_override=ai_provider,
         ai_model_override=ai_model,
         username=request.state.username,
+        is_admin=True,
     )
 
     return {
@@ -10696,6 +10706,7 @@ async def _process_admin_chat_message(
     ai_provider_override: str | None,
     ai_model_override: str | None,
     username: str,
+    is_admin: bool = True,
 ) -> None:
     """Background task: process a single admin chat message with AI."""
     from rootcoz.engine.chat import (
@@ -10715,6 +10726,7 @@ async def _process_admin_chat_message(
                 override_model=ai_model_override,
                 settings_provider=_admin_settings.ai_provider,
                 settings_model=_admin_settings.ai_model,
+                is_admin=is_admin,
             )
 
             msg_count = await storage.count_chat_messages(

@@ -6,16 +6,29 @@ interface CursorAuthBannerProps {
   className?: string
 }
 
-/** Admin-facing notice when Cursor models are unavailable / browser login expired. */
+/** Notice when Cursor models are unavailable (admin gets detailed diagnosis). */
 export function CursorAuthBanner({ status, className }: CursorAuthBannerProps) {
-  // Prefer reason (always present); has_api_key is admin-only on the API.
+  // has_api_key is admin-only; its absence means the API redacted credential state.
+  const redacted = typeof status.has_api_key !== 'boolean' // pragma: allowlist secret
   const keyConfigured =
-    status.has_api_key === true || status.reason === 'api_key_not_applied'
-  const hint =
-    status.hint ||
-    (keyConfigured
-      ? 'CURSOR_API_KEY is set (it does not expire) but Cursor is unavailable. Check sidecar env/restart/network.'
-      : 'Cursor browser login (`agent login`) expired. Set CURSOR_API_KEY on the server — that key does not expire and always works when set.')
+    status.has_api_key === true || status.reason === 'api_key_not_applied' // pragma: allowlist secret
+
+  let title: string
+  let hint: string
+  if (redacted) {
+    title = 'Cursor unavailable'
+    hint = status.hint || 'Cursor is unavailable. Contact an administrator.'
+  } else if (keyConfigured) {
+    title = 'Cursor unavailable (API key is set)'
+    hint =
+      status.hint ||
+      'CURSOR_API_KEY is set (it does not expire) but Cursor is unavailable. Check sidecar env/restart/network.'
+  } else {
+    title = 'Cursor browser login expired'
+    hint =
+      status.hint ||
+      'Cursor browser login (`agent login`) expired. Set CURSOR_API_KEY on the server — that key does not expire and always works when set.'
+  }
 
   return (
     <div
@@ -25,13 +38,11 @@ export function CursorAuthBanner({ status, className }: CursorAuthBannerProps) {
       <AlertTriangle className="h-4 w-4 text-signal-orange shrink-0 mt-0.5" />
       <div className="flex flex-col gap-1 min-w-0">
         <p className="text-sm font-medium text-text-primary">
-          {keyConfigured
-            ? 'Cursor unavailable (API key is set)'
-            : 'Cursor browser login expired'}
+          {title}
           {status.reason ? ` (${status.reason})` : ''}
         </p>
         <p className="text-xs text-text-secondary break-words">{hint}</p>
-        {!keyConfigured && status.reason !== 'unavailable' && (
+        {!redacted && !keyConfigured && status.reason !== 'unavailable' && (
           <p className="text-xs text-text-tertiary">
             <code className="text-[11px]">CURSOR_API_KEY</code> does not expire.
             Prefer it over <code className="text-[11px]">agent login</code> on Dev/prod.

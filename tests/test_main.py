@@ -6332,6 +6332,30 @@ class TestResolveChatAiConfig:
         )
         assert (provider, model) == ("gemini", "flash")
 
+    def test_missing_config_admin_mentions_settings(self) -> None:
+        from rootcoz.main import _resolve_chat_ai_config
+
+        with pytest.raises(RuntimeError, match="Server Settings"):
+            _resolve_chat_ai_config(
+                override_provider=None,
+                override_model=None,
+                settings_provider="",
+                settings_model="",
+                is_admin=True,
+            )
+
+    def test_missing_config_non_admin_contacts_admin(self) -> None:
+        from rootcoz.main import _resolve_chat_ai_config
+
+        with pytest.raises(RuntimeError, match="contact a server administrator"):
+            _resolve_chat_ai_config(
+                override_provider=None,
+                override_model=None,
+                settings_provider="",
+                settings_model="",
+                is_admin=False,
+            )
+
 
 class TestIsChildReviewKey:
     """Tests for _is_child_review_key."""
