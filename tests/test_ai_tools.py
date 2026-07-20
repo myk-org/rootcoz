@@ -440,9 +440,39 @@ class TestAgentGateSection:
             "http://localhost:8000",
             "job-1",
             additional_repos={"my-repo": repo},
+            auth_header="Bearer test-token",
         )
         assert "STEP 0" in agent_gate
         assert "rootcoz-test-agent" in agent_gate
+
+    def test_history_section_requires_auth_token(self, tmp_path, monkeypatch):
+        from rootcoz.engine import core as core_mod
+
+        monkeypatch.setattr(
+            core_mod, "QUERY_MD_PATH", tmp_path / "FAILURE_HISTORY_ANALYSIS.md"
+        )
+        (tmp_path / "FAILURE_HISTORY_ANALYSIS.md").write_text("history steps")
+
+        *_, query_no_auth = core_mod.build_prompt_sections(
+            "",
+            "",
+            tmp_path,
+            "http://localhost:8000",
+            "job-1",
+            auth_header="",
+        )
+        assert query_no_auth == ""
+
+        *_, query_with_auth = core_mod.build_prompt_sections(
+            "",
+            "",
+            tmp_path,
+            "http://localhost:8000",
+            "job-1",
+            auth_header="Bearer tok",
+        )
+        assert "MANDATORY" in query_with_auth
+        assert "FAILURE_HISTORY_ANALYSIS.md" in query_with_auth
 
     def test_gate_empty_without_agents(self):
         from rootcoz.engine.core import build_agent_gate_section

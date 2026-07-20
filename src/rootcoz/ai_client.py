@@ -98,6 +98,16 @@ def map_provider_from_sidecar(provider: str) -> str:
     return reverse.get(provider, provider)
 
 
+def map_provider_for_sidecar(provider: str) -> str:
+    """Map friendly provider to default sidecar id (ACPX/API).
+
+    Prefer ``map_provider_model_for_sidecar`` when a model id is known so CLI
+    models route correctly.
+    """
+    friendly = normalize_provider(provider)
+    return _DEFAULT_SIDECAR.get(friendly, friendly)
+
+
 def _resolve_sidecar_for_model(friendly: str, model: str) -> str:
     """Pick ACPX/API vs CLI sidecar for a friendly provider + model id."""
     cached = _model_route_cache.get((friendly, model))
@@ -107,12 +117,12 @@ def _resolve_sidecar_for_model(friendly: str, model: str) -> str:
     # Cursor id shapes: ACPX uses bracket params; CLI uses plain cursor:… ids.
     if friendly == "cursor":
         if "[" in model:
-            return _DEFAULT_SIDECAR["cursor"]
+            return map_provider_for_sidecar("cursor")
         if model.startswith("cursor:"):
             return _CLI_SIDECAR["cursor"]
-        return _DEFAULT_SIDECAR["cursor"]
+        return map_provider_for_sidecar("cursor")
 
-    return _DEFAULT_SIDECAR.get(friendly, friendly)
+    return map_provider_for_sidecar(friendly)
 
 
 def _map_model_for_sidecar(sidecar_provider: str, model: str) -> str:
@@ -132,16 +142,6 @@ def map_provider_model_for_sidecar(provider: str, model: str) -> tuple[str, str]
     model = (model or "").strip()
     sidecar_provider = _resolve_sidecar_for_model(friendly, model)
     return sidecar_provider, _map_model_for_sidecar(sidecar_provider, model)
-
-
-def map_provider_for_sidecar(provider: str) -> str:
-    """Map friendly provider to default sidecar id (ACPX/API).
-
-    Prefer ``map_provider_model_for_sidecar`` when a model id is known so CLI
-    models route correctly.
-    """
-    friendly = normalize_provider(provider)
-    return _DEFAULT_SIDECAR.get(friendly, friendly)
 
 
 async def _ensure_route_cache(friendly: str) -> None:

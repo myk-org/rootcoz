@@ -1011,7 +1011,10 @@ def build_prompt_sections(
     )
 
     artifacts_section = build_artifacts_section(artifacts_context)
-    history_enabled = bool(server_url and job_id and QUERY_MD_PATH.exists())
+    history_token = auth_header.removeprefix("Bearer ").strip() if auth_header else ""
+    history_enabled = bool(
+        server_url and job_id and QUERY_MD_PATH.exists() and history_token
+    )
     resources_section = build_resources_section(
         repo_path, additional_repos=additional_repos, history_enabled=history_enabled
     )
@@ -1031,6 +1034,11 @@ def build_prompt_sections(
     if server_url and not job_id:
         logger.warning(
             "job_id is empty; disabling history-aware classification to avoid unscoped history queries"
+        )
+    if server_url and job_id and QUERY_MD_PATH.exists() and not history_token:
+        logger.warning(
+            "auth_header is empty; disabling history-aware classification "
+            "(history HTTP tools require a Bearer token)"
         )
 
     query_section = ""
@@ -1062,7 +1070,7 @@ These instructions complement (do not replace) the main instructions above.
             logger.debug("No repo path provided, skipping repo history prompt check")
 
         auth_instruction = ""
-        if auth_header:
+        if history_token:
             auth_instruction = (
                 "\nHistory tools are already authenticated — call "
                 "get_failure_history, search_error_signature, "

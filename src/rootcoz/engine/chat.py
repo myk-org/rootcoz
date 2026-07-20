@@ -641,13 +641,9 @@ def build_chat_custom_tools(
                 "Get pass/fail history for a specific test — total runs, "
                 "failure rate, classifications, recent occurrences"
             ),
-            query_params={"job_name": "{job_name}"},
-            properties={
-                "job_name": {
-                    "type": "string",
-                    "description": "Optional: filter history by job name",
-                },
-            },
+            # Omit optional {job_name}: unsubstituted placeholders become
+            # literal filters. Server sanitizes placeholders if they arrive.
+            query_params={},
         )
     )
 
@@ -659,13 +655,8 @@ def build_chat_custom_tools(
                 "Get classification history for a test — who changed it, "
                 "when, from what to what"
             ),
-            query_params={"test_name": "{test_name}", "job_id": "{job_id}"},
-            properties={
-                "job_id": {
-                    "type": "string",
-                    "description": "Optional: filter by specific job ID",
-                },
-            },
+            # test_name is required; omit optional {job_id} placeholder.
+            query_params={"test_name": "{test_name}"},
         )
     )
 

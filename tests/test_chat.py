@@ -167,10 +167,10 @@ class TestBuildChatCustomTools:
         )
         tool = next(t for t in tools if t["name"] == "get_failure_history")
         assert "test_name" in tool["parameters"]["properties"]
-        assert "job_name" in tool["parameters"]["properties"]
+        assert "job_name" not in tool["parameters"]["properties"]
         assert tool["parameters"]["required"] == ["test_name"]
         assert "{test_name}" in tool["http"]["url"]
-        assert tool["http"]["query_params"]["job_name"] == "{job_name}"
+        assert "job_name" not in tool["http"]["query_params"]
         assert tool["http"]["method"] == "GET"
 
     def test_classification_history_tool(self):
@@ -181,10 +181,10 @@ class TestBuildChatCustomTools:
         )
         tool = next(t for t in tools if t["name"] == "get_classification_history")
         assert "test_name" in tool["parameters"]["properties"]
-        assert "job_id" in tool["parameters"]["properties"]
+        assert "job_id" not in tool["parameters"]["properties"]
         assert tool["parameters"]["required"] == ["test_name"]
         assert tool["http"]["query_params"]["test_name"] == "{test_name}"
-        assert tool["http"]["query_params"]["job_id"] == "{job_id}"
+        assert "job_id" not in tool["http"]["query_params"]
 
     def test_jira_tools(self):
         tools = build_chat_custom_tools(

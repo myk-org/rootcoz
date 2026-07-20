@@ -6357,6 +6357,19 @@ class TestResolveChatAiConfig:
             )
 
 
+class TestSanitizeSidecarPlaceholder:
+    """Unsubstituted sidecar placeholders must not become filter values."""
+
+    def test_clears_brace_placeholders(self) -> None:
+        from rootcoz.main import _sanitize_sidecar_placeholder
+
+        assert _sanitize_sidecar_placeholder("{job_name}") == ""
+        assert _sanitize_sidecar_placeholder("{job_id}") == ""
+        assert _sanitize_sidecar_placeholder("{references}") == ""
+        assert _sanitize_sidecar_placeholder("real-job") == "real-job"
+        assert _sanitize_sidecar_placeholder("") == ""
+
+
 class TestIsChildReviewKey:
     """Tests for _is_child_review_key."""
 

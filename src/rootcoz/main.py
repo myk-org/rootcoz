@@ -7384,6 +7384,22 @@ async def validate_token(
             return _invalid("Could not reach Jira API")
 
 
+def _sanitize_sidecar_placeholder(value: str) -> str:
+    """Clear unsubstituted sidecar placeholders (e.g. ``{job_name}`` → ``\"\"``).
+
+    When the model omits an optional tool arg, the sidecar may leave the
+    literal ``{param}`` string in query/body fields. Treat that as empty.
+    """
+    if not value:
+        return ""
+    stripped = value.strip()
+    if stripped.startswith("{") and stripped.endswith("}") and len(stripped) > 2:
+        inner = stripped[1:-1]
+        if inner.isidentifier():
+            return ""
+    return value
+
+
 @app.get("/history/failures")
 async def get_all_failures_endpoint(
     search: str = Query(default=""),
@@ -7421,6 +7437,8 @@ async def get_test_history_endpoint(
     ),
 ) -> dict:
     """Get pass/fail history for a specific test."""
+    job_name = _sanitize_sidecar_placeholder(job_name)
+    exclude_job_id = _sanitize_sidecar_placeholder(exclude_job_id)
     logger.debug(f"GET /history/test/{test_name}: limit={limit}, job_name={job_name!r}")
     return await storage.get_test_history(
         test_name, limit=limit, job_name=job_name, exclude_job_id=exclude_job_id
@@ -7464,9 +7482,7 @@ async def classify_test(request: Request, body: ClassifyTestRequest) -> dict:
     reason = body.reason
     job_name = body.job_name
     # Sidecar body_template leaves "{references}" when the model omits the arg.
-    references = body.references
-    if references.strip("{}") == "references" or references == "{references}":
-        references = ""
+    references = _sanitize_sidecar_placeholder(body.references)
     classify_job_id = body.job_id
 
     if not test_name:
@@ -7560,6 +7576,11 @@ async def get_classifications(
     job_id: str = Query(default=""),
 ) -> dict:
     """Get test classifications."""
+    test_name = _sanitize_sidecar_placeholder(test_name)
+    classification = _sanitize_sidecar_placeholder(classification)
+    job_name = _sanitize_sidecar_placeholder(job_name)
+    parent_job_name = _sanitize_sidecar_placeholder(parent_job_name)
+    job_id = _sanitize_sidecar_placeholder(job_id)
     logger.debug(
         f"GET /history/classifications: test_name={test_name!r}, classification={classification!r}, "
         f"job_name={job_name!r}, parent_job_name={parent_job_name!r}, job_id={job_id!r}"
