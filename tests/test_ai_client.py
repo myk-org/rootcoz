@@ -7,7 +7,6 @@ import pytest
 from rootcoz import ai_client
 from rootcoz.ai_client import (
     VALID_AI_PROVIDERS,
-    map_provider_for_sidecar,
     map_provider_from_sidecar,
     map_provider_model_for_sidecar,
     normalize_provider,
@@ -40,10 +39,10 @@ def test_normalize_provider(raw: str, canonical: str) -> None:
 
 
 def test_default_sidecar_mapping() -> None:
-    assert map_provider_for_sidecar("cursor") == "acpx-cursor"
-    assert map_provider_for_sidecar("claude") == "google-vertex-claude"
-    assert map_provider_for_sidecar("gemini") == "google"
-    assert map_provider_for_sidecar("cursor-cli") == "acpx-cursor"
+    assert map_provider_model_for_sidecar("cursor", "")[0] == "acpx-cursor"
+    assert map_provider_model_for_sidecar("claude", "")[0] == "google-vertex-claude"
+    assert map_provider_model_for_sidecar("gemini", "")[0] == "google"
+    assert map_provider_model_for_sidecar("cursor-cli", "")[0] == "acpx-cursor"
 
 
 def test_map_from_sidecar() -> None:

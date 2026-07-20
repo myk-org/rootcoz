@@ -98,16 +98,6 @@ def map_provider_from_sidecar(provider: str) -> str:
     return reverse.get(provider, provider)
 
 
-def map_provider_for_sidecar(provider: str) -> str:
-    """Map friendly provider to default sidecar id (ACPX/API).
-
-    Prefer ``map_provider_model_for_sidecar`` when a model id is known so CLI
-    models route correctly.
-    """
-    friendly = normalize_provider(provider)
-    return _DEFAULT_SIDECAR.get(friendly, friendly)
-
-
 def _resolve_sidecar_for_model(friendly: str, model: str) -> str:
     """Pick ACPX/API vs CLI sidecar for a friendly provider + model id."""
     cached = _model_route_cache.get((friendly, model))
@@ -117,12 +107,12 @@ def _resolve_sidecar_for_model(friendly: str, model: str) -> str:
     # Cursor id shapes: ACPX uses bracket params; CLI uses plain cursor:… ids.
     if friendly == "cursor":
         if "[" in model:
-            return map_provider_for_sidecar("cursor")
+            return _DEFAULT_SIDECAR["cursor"]
         if model.startswith("cursor:"):
             return _CLI_SIDECAR["cursor"]
-        return map_provider_for_sidecar("cursor")
+        return _DEFAULT_SIDECAR["cursor"]
 
-    return map_provider_for_sidecar(friendly)
+    return _DEFAULT_SIDECAR.get(friendly, friendly)
 
 
 def _map_model_for_sidecar(sidecar_provider: str, model: str) -> str:
@@ -144,14 +134,6 @@ def map_provider_model_for_sidecar(provider: str, model: str) -> tuple[str, str]
     return sidecar_provider, _map_model_for_sidecar(sidecar_provider, model)
 
 
-async def _ensure_route_cache(friendly: str) -> None:
-    """Populate model→sidecar cache for a friendly provider if empty."""
-    friendly = normalize_provider(friendly)
-    if any(fp == friendly for fp, _ in _model_route_cache):
-        return
-    await list_models(friendly)
-
-
 async def list_models(provider: str = "") -> list[dict]:
     """List models for a friendly provider, merging ACPX/API + CLI sources.
 
@@ -168,7 +150,7 @@ async def list_models(provider: str = "") -> list[dict]:
     client = get_sidecar_client()
     all_models = await client.get_models()
 
-    sidecar_order = [map_provider_for_sidecar(friendly)]
+    sidecar_order = [_DEFAULT_SIDECAR[friendly]]
     cli_id = _CLI_SIDECAR.get(friendly)
     if cli_id:
         sidecar_order.append(cli_id)
@@ -361,7 +343,9 @@ def format_chat_ai_user_error(response_text: str) -> str:
 
 async def call_ai(*args: Any, ai_provider: str = "", ai_model: str = "", **kwargs: Any):
     """call_ai with rootcoz friendly→sidecar provider/model routing."""
-    await _ensure_route_cache(ai_provider)
+    friendly = normalize_provider(ai_provider)
+    if friendly and not any(fp == friendly for fp, _ in _model_route_cache):
+        await list_models(friendly)
     sidecar_provider, sidecar_model = map_provider_model_for_sidecar(
         ai_provider, ai_model
     )
@@ -374,7 +358,9 @@ async def call_ai_once(
     *args: Any, ai_provider: str = "", ai_model: str = "", **kwargs: Any
 ):
     """call_ai_once with rootcoz friendly→sidecar provider/model routing."""
-    await _ensure_route_cache(ai_provider)
+    friendly = normalize_provider(ai_provider)
+    if friendly and not any(fp == friendly for fp, _ in _model_route_cache):
+        await list_models(friendly)
     sidecar_provider, sidecar_model = map_provider_model_for_sidecar(
         ai_provider, ai_model
     )
@@ -426,7 +412,6 @@ __all__ = [
     "clear_cursor_auth_cache",
     "format_chat_ai_user_error",
     "list_models",
-    "map_provider_for_sidecar",
     "map_provider_from_sidecar",
     "map_provider_model_for_sidecar",
     "normalize_provider",
