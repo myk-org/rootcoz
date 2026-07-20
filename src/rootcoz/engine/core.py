@@ -160,6 +160,9 @@ ROOTCOZ_HISTORY_PROMPT_FILENAME = "ROOTCOZ_HISTORY_PROMPT.md"
 _ROOTCOZ_PI_SUBDIRS = ("agents", "skills", "extensions")
 
 
+_SAFE_AGENT_NAME_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
+
+
 def _extract_agent_name(agent_file: Path) -> str | None:
     """Extract the ``name`` field from an agent .md file's YAML frontmatter.
 
@@ -180,7 +183,7 @@ def _extract_agent_name(agent_file: Path) -> str | None:
         if line.lower().startswith("name:"):
             name = line.split(":", 1)[1].strip()
             # Constrain to safe characters to prevent prompt injection
-            if re.match(r"^[A-Za-z0-9._-]{1,64}$", name):
+            if _SAFE_AGENT_NAME_RE.match(name):
                 return name
             return None
     return None
@@ -191,7 +194,8 @@ def discover_project_agent_names(
 ) -> list[str]:
     """Return unique project agent names from ``.rootcoz/agents/*.md``.
 
-    Prefers frontmatter ``name:``; falls back to the filename stem.
+    Prefers frontmatter ``name:``; falls back to the filename stem when it
+    matches the same safe-name regex (otherwise the file is skipped).
     """
     if not additional_repos:
         return []
@@ -203,7 +207,17 @@ def discover_project_agent_names(
             continue
         for agent_file in sorted(agents_dir.glob("*.md")):
             extracted = _extract_agent_name(agent_file)
-            name = extracted if extracted else agent_file.stem
+            if extracted:
+                name = extracted
+            elif _SAFE_AGENT_NAME_RE.match(agent_file.stem):
+                name = agent_file.stem
+            else:
+                logger.warning(
+                    "Skipping agent file with unsafe stem %r: %s",
+                    agent_file.stem,
+                    agent_file,
+                )
+                continue
             if name in seen:
                 continue
             seen.add(name)
@@ -1133,7 +1147,7 @@ def build_resources_section(
             if is_git:
                 resources.append(
                     f"- Repository '{name}' at {path} — browse with read, ls, find, "
-                    "and grep only (bash/git CLI are not available)"
+                    "and grep only (no shell execution)"
                 )
             else:
                 resources.append(

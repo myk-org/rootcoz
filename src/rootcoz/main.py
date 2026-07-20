@@ -7612,6 +7612,18 @@ def _cursor_status_for_client(status: dict, *, is_admin: bool) -> dict:
     return out
 
 
+def _cursor_status_from_model_count(model_count: int) -> dict:
+    """Coarse Cursor status for non-admins (no subprocess / credential probe)."""
+    if model_count > 0:
+        return {"ok": True, "reason": None, "hint": None, "model_count": model_count}
+    return {
+        "ok": False,
+        "reason": "unavailable",
+        "hint": "Cursor is unavailable. Contact an administrator.",
+        "model_count": model_count,
+    }
+
+
 @app.get("/api/ai-models")
 async def list_ai_models(
     request: Request,
@@ -7629,6 +7641,8 @@ async def list_ai_models(
     with a Cursor auth probe (browser ``agent login`` expires; ``CURSOR_API_KEY``
     does not expire and always works when set in the server env).
     Credential-state fields (``has_api_key``) are admin-only.
+    Non-admins get a coarse ok/unavailable status from model_count only
+    (no ``agent status`` subprocess).
     """
     logger.debug("GET /api/ai-models provider=%s", provider)
     is_admin = bool(getattr(request.state, "is_admin", False))
@@ -7646,12 +7660,12 @@ async def list_ai_models(
             models = await list_models(provider)
             payload: dict = {"provider": provider, "models": models}
             if provider == "cursor":
-                payload["provider_status"] = {
-                    "cursor": _cursor_status_for_client(
-                        await probe_cursor_auth(model_count=len(models)),
-                        is_admin=is_admin,
-                    )
-                }
+                if is_admin:
+                    cursor_raw = await probe_cursor_auth(model_count=len(models))
+                    cursor_status = _cursor_status_for_client(cursor_raw, is_admin=True)
+                else:
+                    cursor_status = _cursor_status_from_model_count(len(models))
+                payload["provider_status"] = {"cursor": cursor_status}
             return payload
 
         # No provider specified — return models for all known providers
@@ -7665,10 +7679,14 @@ async def list_ai_models(
                     "Failed to list models for provider=%s", p, exc_info=True
                 )
                 all_models[p] = []
-        cursor_status = _cursor_status_for_client(
-            await probe_cursor_auth(model_count=len(all_models.get("cursor", []))),
-            is_admin=is_admin,
-        )
+        cursor_count = len(all_models.get("cursor", []))
+        if is_admin:
+            cursor_status = _cursor_status_for_client(
+                await probe_cursor_auth(model_count=cursor_count),
+                is_admin=True,
+            )
+        else:
+            cursor_status = _cursor_status_from_model_count(cursor_count)
         return {
             "providers": all_models,
             "provider_status": {"cursor": cursor_status},

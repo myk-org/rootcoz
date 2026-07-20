@@ -445,6 +445,30 @@ class TestAgentGateSection:
         assert "STEP 0" in agent_gate
         assert "rootcoz-test-agent" in agent_gate
 
+    def test_discover_skips_unsafe_filename_stem(self, tmp_path):
+        from rootcoz.engine.core import discover_project_agent_names
+
+        repo = tmp_path / "my-repo"
+        agents_dir = repo / ".rootcoz" / "agents"
+        agents_dir.mkdir(parents=True)
+        (agents_dir / "safe-agent.md").write_text("no frontmatter")
+        (agents_dir / "bad name with spaces.md").write_text("no frontmatter")
+        (agents_dir / "inject;rm.md").write_text("no frontmatter")
+        names = discover_project_agent_names({"my-repo": repo})
+        assert names == ["safe-agent"]
+
+    def test_resources_section_does_not_advertise_git(self, tmp_path):
+        from rootcoz.engine.core import build_resources_section
+
+        repo = tmp_path / "repo"
+        (repo / ".git").mkdir(parents=True)
+        section = build_resources_section(
+            tmp_path, additional_repos={"repo": repo}, history_enabled=False
+        )
+        assert "run git" not in section.lower()
+        assert "git commands" not in section.lower()
+        assert "read" in section.lower() and "grep" in section.lower()
+
     def test_history_section_requires_auth_token(self, tmp_path, monkeypatch):
         from rootcoz.engine import core as core_mod
 
