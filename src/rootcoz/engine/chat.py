@@ -1256,7 +1256,7 @@ async def _create_chat_session(
     try:
         client = get_sidecar_client()
         # Best-effort catalog warm; heuristic routing still works if this fails.
-        await _prewarm_model_routes(normalize_provider(ai_provider))
+        await _prewarm_model_routes(normalize_provider(ai_provider), ai_model)
         sidecar_provider, sidecar_model = map_provider_model_for_sidecar(
             ai_provider, ai_model
         )

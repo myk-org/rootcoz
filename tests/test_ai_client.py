@@ -183,6 +183,7 @@ def test_format_chat_ai_user_error_session_url_not_expired() -> None:
     msg = ai_client.format_chat_ai_user_error(
         "Client error '400 Bad Request' for url 'http://127.0.0.1:9100/sessions'",
         is_admin=True,
+        ai_provider="cursor",
     )
     assert "session expired" not in msg.lower()
     assert "provider/model" in msg.lower() or "cursor" in msg.lower()
@@ -197,6 +198,7 @@ def test_format_chat_ai_user_error_auth_admin() -> None:
     msg = ai_client.format_chat_ai_user_error(
         "Error: Authentication required. Please run 'agent login' first",
         is_admin=True,
+        ai_provider="cursor",
     )
     assert "CURSOR_API_KEY" in msg
     assert "does not expire" in msg or "agent login" in msg.lower()
@@ -206,9 +208,32 @@ def test_format_chat_ai_user_error_auth_non_admin_no_key_leak() -> None:
     msg = ai_client.format_chat_ai_user_error(
         "Error: Authentication required. Please run 'agent login' first",
         is_admin=False,
+        ai_provider="cursor",
     )
     assert "CURSOR_API_KEY" not in msg
     assert "administrator" in msg.lower()
+
+
+def test_format_chat_ai_user_error_generic_auth_not_cursor() -> None:
+    msg = ai_client.format_chat_ai_user_error(
+        "Error: Authentication required",
+        is_admin=True,
+        ai_provider="claude",
+    )
+    assert "CURSOR_API_KEY" not in msg
+    assert "claude" in msg.lower()
+    assert "cursor is unavailable" not in msg.lower()
+
+
+def test_format_chat_ai_user_error_generic_auth_non_admin_claude() -> None:
+    msg = ai_client.format_chat_ai_user_error(
+        "Error: not authenticated",
+        is_admin=False,
+        ai_provider="gemini",
+    )
+    assert "CURSOR_API_KEY" not in msg
+    assert "gemini" in msg.lower()
+    assert "cursor" not in msg.lower()
 
 
 def test_parse_agent_status_auth_expired() -> None:
@@ -353,3 +378,27 @@ async def test_prewarm_model_routes_swallows_catalog_errors(
     monkeypatch.setattr(ai_client, "list_models", boom)
     # Should not raise
     await ai_client._prewarm_model_routes("cursor")
+
+
+@pytest.mark.asyncio
+async def test_prewarm_model_routes_refetches_when_model_uncached(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Do not skip prewarm when the requested model is missing from the cache."""
+    ai_client._model_route_cache.clear()
+    ai_client._model_route_cache[("claude", "old-model")] = "google-vertex-claude"
+    calls: list[str] = []
+
+    async def fake_list(provider: str = "") -> list:
+        calls.append(provider)
+        return [{"id": "new-cli-model", "provider": "claude", "source": "cli"}]
+
+    monkeypatch.setattr(ai_client, "list_models", fake_list)
+    await ai_client._prewarm_model_routes("claude", "new-cli-model")
+    assert calls == ["claude"]
+
+    # Exact key now present (or still skipped after another populate attempt)
+    calls.clear()
+    ai_client._model_route_cache[("claude", "new-cli-model")] = "cli-claude"
+    await ai_client._prewarm_model_routes("claude", "new-cli-model")
+    assert calls == []

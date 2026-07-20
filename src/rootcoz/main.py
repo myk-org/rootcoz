@@ -10424,7 +10424,9 @@ async def _process_chat_message(
                 logger.error(
                     "Chat AI call failed for job %s: %s", job_id, response_text
                 )
-                user_error = format_chat_ai_user_error(response_text, is_admin=is_admin)
+                user_error = format_chat_ai_user_error(
+                    response_text, is_admin=is_admin, ai_provider=ai_provider
+                )
                 await storage.update_chat_message_content(
                     assistant_msg_id, f"Error: {user_error}"
                 )
@@ -10907,7 +10909,9 @@ async def _process_admin_chat_message(
 
             if not success:
                 logger.error("Admin chat AI call failed: %s", response_text)
-                user_error = format_chat_ai_user_error(response_text, is_admin=True)
+                user_error = format_chat_ai_user_error(
+                    response_text, is_admin=True, ai_provider=ai_provider
+                )
                 await storage.update_chat_message_content(
                     assistant_msg_id, f"Error: {user_error}"
                 )

@@ -345,10 +345,14 @@ def clear_cursor_auth_cache() -> None:
     _cursor_auth_cache = None
 
 
-def format_chat_ai_user_error(response_text: str, *, is_admin: bool = False) -> str:
+def format_chat_ai_user_error(
+    response_text: str, *, is_admin: bool = False, ai_provider: str = ""
+) -> str:
     """Map raw sidecar/AI errors to user-friendly chat messages.
 
     Avoid matching the URL path ``/sessions`` as a lost chat session.
+    Cursor-specific remediation applies only when ``ai_provider`` is cursor
+    (or Cursor-only markers like ``agent login`` / ``cursor_api_key`` appear).
     Credential-state hints (whether ``CURSOR_API_KEY`` is set) are admin-only.
     """
     text = (response_text or "").strip()
@@ -356,16 +360,17 @@ def format_chat_ai_user_error(response_text: str, *, is_admin: bool = False) -> 
     if not text:
         return "AI call failed. Please try again."
 
-    if any(
-        s in lower
-        for s in (
-            "authentication required",
-            "not authenticated",
-            "not logged in",
-            "agent login",
-            "cursor_api_key",
-        )
-    ):
+    friendly = normalize_provider(ai_provider)
+    cursor_only_markers = ("agent login", "cursor_api_key")
+    generic_auth_markers = (
+        "authentication required",
+        "not authenticated",
+        "not logged in",
+    )
+    is_cursor_marker = any(s in lower for s in cursor_only_markers)
+    is_generic_auth = any(s in lower for s in generic_auth_markers)
+
+    if is_cursor_marker or (is_generic_auth and friendly == "cursor"):
         if not is_admin:
             return "Cursor is unavailable. Contact an administrator."
         has_api_key = bool(os.environ.get("CURSOR_API_KEY", "").strip())
@@ -373,17 +378,36 @@ def format_chat_ai_user_error(response_text: str, *, is_admin: bool = False) -> 
             return _CURSOR_KEY_SET_BUT_UNAVAILABLE_HINT
         return _CURSOR_BROWSER_LOGIN_EXPIRED_HINT
 
+    if is_generic_auth:
+        label = friendly or "AI"
+        if not is_admin:
+            return f"{label} authentication failed. Contact an administrator."
+        return (
+            f"{label} authentication failed. Check provider credentials in "
+            "Server Settings → AI."
+        )
+
     if "400" in lower and "/sessions" in lower:
+        if friendly == "cursor":
+            if not is_admin:
+                return (
+                    "Failed to create AI session. Select a valid provider and model, "
+                    "or contact an administrator if Cursor stays unavailable."
+                )
+            return (
+                "Failed to create AI session (bad provider/model or Cursor auth). "
+                "Select a valid provider and model. If using Cursor without "
+                "CURSOR_API_KEY, browser `agent login` may have expired — set "
+                "CURSOR_API_KEY (does not expire) or re-login and restart sidecar."
+            )
         if not is_admin:
             return (
                 "Failed to create AI session. Select a valid provider and model, "
-                "or contact an administrator if Cursor stays unavailable."
+                "or contact an administrator."
             )
         return (
-            "Failed to create AI session (bad provider/model or Cursor auth). "
-            "Select a valid provider and model. If using Cursor without "
-            "CURSOR_API_KEY, browser `agent login` may have expired — set "
-            "CURSOR_API_KEY (does not expire) or re-login and restart sidecar."
+            "Failed to create AI session (bad provider/model or credentials). "
+            "Select a valid provider and model in Server Settings → AI."
         )
 
     # True lost-session cases from sidecar ("session not found"), not URL paths
@@ -395,13 +419,20 @@ def format_chat_ai_user_error(response_text: str, *, is_admin: bool = False) -> 
     return text
 
 
-async def _prewarm_model_routes(friendly: str) -> None:
+async def _prewarm_model_routes(friendly: str, model: str = "") -> None:
     """Best-effort catalog fetch to populate ``_model_route_cache``.
 
-    Failures are non-fatal: ``map_provider_model_for_sidecar`` still has
-    heuristic defaults when the cache is empty.
+    When ``model`` is set, skip only if that exact ``(friendly, model)`` route
+    is already cached — so newly available CLI models are still discovered in
+    long-lived processes. Failures are non-fatal: heuristic defaults still apply.
     """
-    if not friendly or any(fp == friendly for fp, _ in _model_route_cache):
+    if not friendly:
+        return
+    model = (model or "").strip()
+    if model:
+        if (friendly, model) in _model_route_cache:
+            return
+    elif any(fp == friendly for fp, _ in _model_route_cache):
         return
     try:
         await list_models(friendly)
@@ -416,7 +447,7 @@ async def _prewarm_model_routes(friendly: str) -> None:
 async def call_ai(*args: Any, ai_provider: str = "", ai_model: str = "", **kwargs: Any):
     """call_ai with rootcoz friendly→sidecar provider/model routing."""
     friendly = normalize_provider(ai_provider)
-    await _prewarm_model_routes(friendly)
+    await _prewarm_model_routes(friendly, ai_model)
     sidecar_provider, sidecar_model = map_provider_model_for_sidecar(
         ai_provider, ai_model
     )
@@ -430,7 +461,7 @@ async def call_ai_once(
 ):
     """call_ai_once with rootcoz friendly→sidecar provider/model routing."""
     friendly = normalize_provider(ai_provider)
-    await _prewarm_model_routes(friendly)
+    await _prewarm_model_routes(friendly, ai_model)
     sidecar_provider, sidecar_model = map_provider_model_for_sidecar(
         ai_provider, ai_model
     )

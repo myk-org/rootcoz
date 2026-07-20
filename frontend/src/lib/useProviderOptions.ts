@@ -69,11 +69,15 @@ function loadProviderCatalog(cacheKey: string): Promise<CatalogState> {
   return req
 }
 
-/** Clear shared catalog cache and notify mounted consumers to refetch. */
+/**
+ * Clear shared catalog cache and notify mounted useProviderCatalog consumers
+ * so they refetch (login/logout/admin refresh/tests).
+ */
 export function resetProviderCatalogCache(): void {
   catalogInflight = null
   catalogCache = null
   catalogCacheKey = null
+  // Wake every mounted hook — cacheKey alone does not change on refresh.
   for (const notify of [...catalogSubscribers]) {
     notify()
   }

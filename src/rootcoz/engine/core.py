@@ -159,6 +159,9 @@ QUERY_MD_PATH = (
 
 ROOTCOZ_PROMPT_FILENAME = "ROOTCOZ_PROMPT.md"
 ROOTCOZ_HISTORY_PROMPT_FILENAME = "ROOTCOZ_HISTORY_PROMPT.md"
+# On-disk VCS metadata directory name — used only for existence checks; never
+# advertised as a shell/git capability in prompts (see RESOURCE_REPO_BROWSE_HINT).
+_VCS_METADATA_DIR = ".git"
 
 
 def _rootcoz_prompt_fingerprint(path: Path) -> str:
@@ -1168,7 +1171,7 @@ def build_resources_section(
     # Advertise each cloned repo
     if additional_repos:
         for name, path in additional_repos.items():
-            has_vcs_metadata = (path / ".git").exists()
+            has_vcs_metadata = (path / _VCS_METADATA_DIR).exists()
             if has_vcs_metadata:
                 resources.append(
                     f"- Repository '{name}' at {path} — {RESOURCE_REPO_BROWSE_HINT}"
