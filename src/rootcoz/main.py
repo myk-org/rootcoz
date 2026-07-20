@@ -7451,24 +7451,28 @@ async def get_test_history_endpoint(
 
 @app.get("/history/search")
 async def search_by_signature_endpoint(
+    request: Request,
     signature: str = Query(...),
     exclude_job_id: str = Query(
         default="", description="Exclude results from this job ID"
     ),
 ) -> dict:
     """Find all tests that failed with the same error signature."""
+    _require_authenticated(request)
     logger.debug(f"GET /history/search: signature={signature}")
     return await storage.search_by_signature(signature, exclude_job_id=exclude_job_id)
 
 
 @app.get("/history/stats/{job_name:path}")
 async def get_job_stats_endpoint(
+    request: Request,
     job_name: str,
     exclude_job_id: str = Query(
         default="", description="Exclude results from this job ID"
     ),
 ) -> dict:
     """Get aggregate statistics for a specific job."""
+    _require_authenticated(request)
     logger.debug(f"GET /history/stats/{job_name}")
     return await storage.get_job_stats(job_name, exclude_job_id=exclude_job_id)
 

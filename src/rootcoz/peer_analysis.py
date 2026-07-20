@@ -527,7 +527,7 @@ async def analyze_failure_group_with_peers(
     _, _, _, resources_section, _ = build_prompt_sections(
         custom_prompt,
         artifacts_context,
-        repo_path,
+        peer_workspace,
         server_url,
         job_id,
         additional_repos=additional_repos,
@@ -647,7 +647,7 @@ async def analyze_failure_group_with_peers(
                 peer_kwargs: dict = {
                     "ai_provider": config.ai_provider,
                     "ai_model": config.ai_model,
-                    "cwd": str(repo_path) if repo_path else None,
+                    "cwd": str(peer_workspace),
                     "ai_call_timeout": ai_call_timeout,
                     "session_id": session,
                 }
@@ -859,7 +859,7 @@ async def analyze_failure_group_with_peers(
                         revision_prompt,
                         ai_provider=main_ai_provider,
                         ai_model=main_ai_model,
-                        cwd=str(repo_path) if repo_path else None,
+                        cwd=str(peer_workspace),
                         ai_call_timeout=ai_call_timeout,
                         tools=list(ANALYSIS_BUILTIN_TOOLS),
                     )

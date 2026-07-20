@@ -2971,6 +2971,8 @@ class TestHistoryEndpoints:
             main_mod.get_test_history_endpoint,
             main_mod.get_classifications,
             main_mod.list_ai_models,
+            main_mod.search_by_signature_endpoint,
+            main_mod.get_job_stats_endpoint,
         ):
             src = inspect.getsource(fn)
             assert "_require_authenticated" in src, fn.__name__

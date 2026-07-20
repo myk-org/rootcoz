@@ -171,7 +171,7 @@ def _rootcoz_prompt_fingerprint(path: Path) -> str:
         raw = path.read_bytes()
     except OSError:
         return ""
-    digest = hashlib.sha256(raw).hexdigest()[:12]
+    digest = hashlib.sha256(raw).hexdigest()
     return f", sha256={digest}, bytes={len(raw)}"
 
 
