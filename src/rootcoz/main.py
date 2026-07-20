@@ -8847,21 +8847,13 @@ async def update_admin_settings(request: Request) -> JSONResponse:
 
     username = request.state.username or "admin"
 
-    # String settings that may be intentionally cleared to "" (DB override that
-    # masks env). Empty for other keys still means "reset to env/default".
-    # ai_model: clear on provider switch so env AI_MODEL is not re-applied.
-    # ai_provider: empty always resets to env (never mask with "").
-    _explicit_empty_ok = frozenset({"ai_model"})
-
-    # Save each setting to DB and apply to running process
+    # Save each setting to DB and apply to running process.
+    # Empty/null = reset: delete from DB so resolution falls through to env
+    # (request → DB → env; first non-empty wins).
     for key, value in settings_updates.items():
         str_value = str(value) if value is not None else ""
         if not str_value:
-            if key in _explicit_empty_ok:
-                await storage.set_server_setting(key, "", updated_by=username)
-            else:
-                # Empty/null = reset: delete from DB so cache and DB stay in sync
-                await storage.delete_server_setting(key, deleted_by=username)
+            await storage.delete_server_setting(key, deleted_by=username)
             continue
         # Non-empty: upsert to DB (encrypt sensitive values)
         if key in _SENSITIVE_SETTINGS:
@@ -8873,19 +8865,14 @@ async def update_admin_settings(request: Request) -> JSONResponse:
         await storage.set_server_setting(key, db_value, updated_by=username)
 
     # Update in-memory cache so get_settings() picks up changes.
-    # Explicit empty ai_model stays in cache (mask env). Empty ai_provider
-    # and other empty/null values are removed (fall back to env/default).
+    # Empty/null values are removed (fall back to env/default).
     cache_updates: dict[str, str] = {}
     cache_removals: list[str] = []
     for k, v in settings_updates.items():
-        if v is None:
-            cache_removals.append(k)
-            continue
-        s = str(v)
-        if s == "" and k not in _explicit_empty_ok:
+        if v is None or str(v) == "":
             cache_removals.append(k)
         else:
-            cache_updates[k] = s
+            cache_updates[k] = str(v)
     if cache_removals:
         remove_from_db_settings_cache(cache_removals)
     if cache_updates:

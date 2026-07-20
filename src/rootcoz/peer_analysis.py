@@ -492,12 +492,14 @@ async def analyze_failure_group_with_peers(
     # Compute other_groups_file path for peer/revision prompts
     # (the file was already written by run_single_ai_analysis above)
     other_groups_file: Path | None = None
+    ephemeral_dirs: list[Path] = []
     if all_groups and len(all_groups) > 1:
         workspace_dir = repo_path
         if workspace_dir is None:
             import tempfile
 
             workspace_dir = Path(tempfile.mkdtemp(prefix="rootcoz-console-"))
+            ephemeral_dirs.append(workspace_dir)
         other_groups_file = write_other_groups_file(
             all_groups, error_signature, workspace_dir
         )
@@ -520,6 +522,7 @@ async def analyze_failure_group_with_peers(
         import tempfile
 
         peer_workspace = Path(tempfile.mkdtemp(prefix="rootcoz-peer-"))
+        ephemeral_dirs.append(peer_workspace)
     failure_summary = _build_failure_summary(failures, error_signature, peer_workspace)
     _, _, _, resources_section, _ = build_prompt_sections(
         custom_prompt,
@@ -1002,6 +1005,19 @@ async def analyze_failure_group_with_peers(
             except Exception:
                 logger.debug(
                     "Failed to delete peer session %s", peer_sid, exc_info=True
+                )
+        # Remove ephemeral workspaces created when repo_path was missing
+        import shutil
+
+        for temp_dir in ephemeral_dirs:
+            try:
+                shutil.rmtree(temp_dir, ignore_errors=True)
+                logger.debug("Removed peer ephemeral workspace %s", temp_dir)
+            except Exception:
+                logger.debug(
+                    "Failed to remove peer ephemeral workspace %s",
+                    temp_dir,
+                    exc_info=True,
                 )
 
     # Apply analysis to all failures in the group.

@@ -5831,8 +5831,8 @@ class TestAdminSettingsEndpoints:
         response = test_client.delete("/api/admin/settings/jenkins_url")
         assert response.status_code == 404
 
-    def test_put_empty_ai_model_masks_env(self, test_client, monkeypatch) -> None:
-        """Empty ai_model is stored as a DB override so env AI_MODEL is not shown."""
+    def test_put_empty_ai_model_resets_to_env(self, test_client, monkeypatch) -> None:
+        """Empty ai_model deletes DB override so AI_MODEL env is used."""
         monkeypatch.setenv("AI_MODEL", "claude-opus-4-6-1m")
         from rootcoz.config import clear_db_settings_cache, get_settings
 
@@ -5846,7 +5846,7 @@ class TestAdminSettingsEndpoints:
                 "settings": {"ai_provider": "cursor", "ai_model": "cursor:composer-2"}
             },
         )
-        # Clear model (provider switch path)
+        # Clear model — must fall back to env (first non-empty: request→DB→env)
         response = test_client.put(
             "/api/admin/settings",
             json={"settings": {"ai_model": ""}},
@@ -5856,10 +5856,9 @@ class TestAdminSettingsEndpoints:
         get_resp = test_client.get("/api/admin/settings")
         settings = get_resp.json()
         ai_model = next(s for s in settings if s["key"] == "ai_model")
-        assert ai_model["source"] == "db"
-        assert ai_model["value"] == ""
-        # Runtime settings must not fall back to env model either
-        assert get_settings().ai_model == ""
+        assert ai_model["source"] == "env"
+        assert ai_model["value"] == "claude-opus-4-6-1m"
+        assert get_settings().ai_model == "claude-opus-4-6-1m"
 
     def test_put_empty_ai_provider_resets_to_env(
         self, test_client, monkeypatch

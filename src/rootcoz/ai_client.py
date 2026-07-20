@@ -168,7 +168,7 @@ async def list_models(provider: str = "") -> list[dict]:
     client = get_sidecar_client()
     all_models = await client.get_models()
 
-    sidecar_order = [_DEFAULT_SIDECAR[friendly]]
+    sidecar_order = [map_provider_for_sidecar(friendly)]
     cli_id = _CLI_SIDECAR.get(friendly)
     if cli_id:
         sidecar_order.append(cli_id)
