@@ -1837,6 +1837,8 @@ class TestBuildResourcesSectionAdditionalRepos:
         assert "Project-specific analysis instructions" in result
         assert "not pre-loaded" in result
         assert "issue #74" in result
+        assert "sha256=" in result
+        assert "bytes=" in result
 
     def test_history_prompt_in_repo(self, tmp_path) -> None:
         """Test that history prompt in a cloned repo is advertised when history enabled."""

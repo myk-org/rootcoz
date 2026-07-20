@@ -158,8 +158,24 @@ QUERY_MD_PATH = (
 )
 
 ROOTCOZ_PROMPT_FILENAME = "ROOTCOZ_PROMPT.md"
-ROOTCOZ_ISSUE_PROMPT_FILENAME = "ROOTCOZ_ISSUE_PROMPT.md"
 ROOTCOZ_HISTORY_PROMPT_FILENAME = "ROOTCOZ_HISTORY_PROMPT.md"
+
+
+def _rootcoz_prompt_fingerprint(path: Path) -> str:
+    """Read a ``.rootcoz`` prompt file and return a short content fingerprint.
+
+    Proves the file was opened/validated without embedding its body in the
+    AI prompt (file-based access policy — issue #74).
+    """
+    try:
+        raw = path.read_bytes()
+    except OSError:
+        return ""
+    digest = hashlib.sha256(raw).hexdigest()[:12]
+    return f", sha256={digest}, bytes={len(raw)}"
+
+
+ROOTCOZ_ISSUE_PROMPT_FILENAME = "ROOTCOZ_ISSUE_PROMPT.md"
 
 # Subdirectories under .rootcoz/ that are copied to workspace .pi/
 _ROOTCOZ_PI_SUBDIRS = ("agents", "skills", "extensions")
@@ -1163,18 +1179,21 @@ def build_resources_section(
             # Check for project-specific instructions in each repo
             rootcoz_prompt = path / ".rootcoz" / ROOTCOZ_PROMPT_FILENAME
             if rootcoz_prompt.exists():
+                prompt_fp = _rootcoz_prompt_fingerprint(rootcoz_prompt)
                 resources.append(
                     f"- Project-specific analysis instructions at {rootcoz_prompt} — "
-                    "MANDATORY: open with the read tool and follow them "
-                    "(contents are not pre-loaded into this prompt; see issue #74)"
+                    f"MANDATORY: open with the read tool and follow them "
+                    f"(file verified on disk{prompt_fp}; contents not pre-loaded "
+                    f"into this prompt; see issue #74)"
                 )
             repo_history_prompt = path / ".rootcoz" / ROOTCOZ_HISTORY_PROMPT_FILENAME
             if history_enabled and repo_history_prompt.exists():
+                hist_fp = _rootcoz_prompt_fingerprint(repo_history_prompt)
                 resources.append(
                     f"- Project-specific history analysis instructions"
                     f" at {repo_history_prompt} — MANDATORY: open with the read tool"
-                    f" (not pre-loaded; see issue #74) alongside the main history"
-                    f" analysis instructions"
+                    f" (file verified on disk{hist_fp}; not pre-loaded; see issue #74)"
+                    f" alongside the main history analysis instructions"
                 )
             # Advertise project-provided agents (from .rootcoz/agents/)
             pi_agents_dir = path / ".rootcoz" / "agents"

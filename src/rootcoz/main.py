@@ -8,6 +8,7 @@ import math
 import os
 import re
 import sqlite3
+import threading
 import time as _time
 from urllib.parse import quote as _urlquote, urlparse, urlunparse
 import uuid
@@ -8366,15 +8367,17 @@ _ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 # Each listener is (owning_loop, queue) so emit() can wake the correct loop
 # from non-asyncio logging threads via call_soon_threadsafe.
 _log_listeners: set[tuple[asyncio.AbstractEventLoop, asyncio.Queue[str]]] = set()
+_log_listeners_lock = threading.Lock()
 
 
 class _SSELogHandler(logging.Handler):
     """Logging handler that broadcasts formatted records to SSE listeners."""
 
     def emit(self, record: logging.LogRecord) -> None:
-        # Fast path: skip format/ANSI work when no admin SSE clients are connected.
-        if not _log_listeners:
-            return
+        with _log_listeners_lock:
+            if not _log_listeners:
+                return
+            listeners = list(_log_listeners)
         try:
             msg = self.format(record)
             clean = _ANSI_RE.sub("", msg)
@@ -8385,13 +8388,13 @@ class _SSELogHandler(logging.Handler):
                 except asyncio.QueueFull:
                     pass
 
-            for loop, q in list(_log_listeners):
+            for loop, q in listeners:
                 try:
                     loop.call_soon_threadsafe(_enqueue, q, clean)
                 except Exception:
-                    pass
+                    logger.debug("SSE log enqueue failed for a listener", exc_info=True)
         except Exception:
-            pass
+            logger.debug("SSE log emit failed", exc_info=True)
 
 
 # Singleton handler instance — attached to all loggers once.
@@ -8504,7 +8507,8 @@ async def stream_logs(
         queue: asyncio.Queue = asyncio.Queue(maxsize=1000)
         loop = asyncio.get_running_loop()
         listener = (loop, queue)
-        _log_listeners.add(listener)
+        with _log_listeners_lock:
+            _log_listeners.add(listener)
         try:
             while True:
                 if await request.is_disconnected():
@@ -8516,7 +8520,8 @@ async def stream_logs(
                 except asyncio.TimeoutError:
                     yield ": keepalive\n\n"
         finally:
-            _log_listeners.discard(listener)
+            with _log_listeners_lock:
+                _log_listeners.discard(listener)
 
     logger.info(
         "GET /api/admin/logs/stream: streaming logs (lines=%s, level=%s)",

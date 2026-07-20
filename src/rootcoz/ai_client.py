@@ -66,6 +66,7 @@ _CURSOR_KEY_SET_BUT_UNAVAILABLE_HINT = (
 # Builtin tools for AI sessions — no bash access (MANDATORY per project rules)
 # Separate constants to allow independent evolution: analysis may gain tools
 # (e.g. write) that chat should never have.
+# Prompts must not claim shell/git — use RESOURCE_REPO_BROWSE_HINT instead.
 CHAT_BUILTIN_TOOLS: tuple[str, ...] = ("read", "ls", "find", "grep", "subagent")
 ANALYSIS_BUILTIN_TOOLS: tuple[str, ...] = ("read", "ls", "find", "grep", "subagent")
 # Prompt wording for cloned repos — must match tool policy (no shell/git).
