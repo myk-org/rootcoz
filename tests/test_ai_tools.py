@@ -490,6 +490,7 @@ class TestAgentGateSection:
         )
         assert "run git" not in section.lower()
         assert "git commands" not in section.lower()
+        assert "git" not in RESOURCE_REPO_BROWSE_HINT.lower()
         assert RESOURCE_REPO_BROWSE_HINT in section
         assert "read" in section.lower() and "grep" in section.lower()
         from rootcoz.ai_client import CHAT_BUILTIN_TOOLS
@@ -499,6 +500,29 @@ class TestAgentGateSection:
             assert tool in CHAT_BUILTIN_TOOLS
         assert "bash" not in CHAT_BUILTIN_TOOLS
         assert "no shell execution" in RESOURCE_REPO_BROWSE_HINT
+
+    def test_rootcoz_prompt_fingerprint_matches_on_disk_bytes(self, tmp_path):
+        """Advertise path proves the file was read (sha256) without embedding body."""
+        import hashlib
+
+        from rootcoz.engine.core import build_resources_section
+
+        repo = tmp_path / "repo"
+        (repo / ".git").mkdir(parents=True)
+        rootcoz = repo / ".rootcoz"
+        rootcoz.mkdir()
+        body = "project-specific analysis rules for tests"
+        prompt = rootcoz / "ROOTCOZ_PROMPT.md"
+        prompt.write_text(body)
+        section = build_resources_section(
+            tmp_path, additional_repos={"repo": repo}, history_enabled=False
+        )
+        digest = hashlib.sha256(body.encode()).hexdigest()
+        assert f"sha256={digest}" in section
+        assert f"bytes={len(body.encode())}" in section
+        assert body not in section
+        assert "MANDATORY: open with the read tool" in section
+        assert "issue #74" in section
 
     def test_history_section_requires_auth_token(self, tmp_path, monkeypatch):
         from rootcoz.engine import core as core_mod

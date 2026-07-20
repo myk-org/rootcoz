@@ -235,6 +235,44 @@ async def test_probe_cursor_auth_ok_when_models(
 
 
 @pytest.mark.asyncio
+async def test_probe_cursor_auth_uses_fresh_model_count_over_stale_cache(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When callers pass model_count, do not return a stale cached probe."""
+    ai_client.clear_cursor_auth_cache()
+    monkeypatch.delenv("CURSOR_API_KEY", raising=False)
+
+    async def empty_list(_provider: str = ""):
+        return []
+
+    class FakeProc:
+        returncode = 1
+
+        async def communicate(self):
+            return b"Not logged in\n", b""
+
+        def kill(self):
+            return None
+
+        async def wait(self):
+            return 1
+
+    async def fake_exec(*_a, **_k):
+        return FakeProc()
+
+    monkeypatch.setattr(ai_client, "list_models", empty_list)
+    monkeypatch.setattr(ai_client.asyncio, "create_subprocess_exec", fake_exec)
+    stale = await ai_client.probe_cursor_auth(force=True)
+    assert stale["ok"] is False
+    assert stale["model_count"] == 0
+
+    # Fresh catalog from /api/ai-models: pass count without force — must refresh.
+    fresh = await ai_client.probe_cursor_auth(model_count=3)
+    assert fresh["ok"] is True
+    assert fresh["model_count"] == 3
+
+
+@pytest.mark.asyncio
 async def test_probe_cursor_auth_expired_when_empty_no_key(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

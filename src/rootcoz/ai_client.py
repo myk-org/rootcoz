@@ -244,8 +244,20 @@ async def probe_cursor_auth(
     now = time.monotonic()
     if (
         not force
+        and model_count is None
         and _cursor_auth_cache is not None
         and (now - _cursor_auth_cache[0]) < _CURSOR_AUTH_CACHE_TTL_SEC
+    ):
+        return dict(_cursor_auth_cache[1])
+
+    # When the caller already enumerated models, prefer that count over a
+    # cached probe that may reflect a previous catalog size.
+    if (
+        not force
+        and model_count is not None
+        and _cursor_auth_cache is not None
+        and (now - _cursor_auth_cache[0]) < _CURSOR_AUTH_CACHE_TTL_SEC
+        and _cursor_auth_cache[1].get("model_count") == model_count
     ):
         return dict(_cursor_auth_cache[1])
 
