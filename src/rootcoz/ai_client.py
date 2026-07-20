@@ -84,8 +84,8 @@ def _source_for_sidecar(sidecar_provider: str) -> str:
     return "api"
 
 
-def map_provider_from_sidecar(provider: str) -> str:
-    """Map sidecar provider ids back to rootcoz friendly names."""
+def _friendly_provider_from_sidecar(provider: str) -> str:
+    """Map sidecar provider ids back to rootcoz friendly names for usage logs."""
     if not provider:
         return provider
     if provider.startswith("cli-"):
@@ -299,10 +299,11 @@ def clear_cursor_auth_cache() -> None:
     _cursor_auth_cache = None
 
 
-def format_chat_ai_user_error(response_text: str) -> str:
+def format_chat_ai_user_error(response_text: str, *, is_admin: bool = False) -> str:
     """Map raw sidecar/AI errors to user-friendly chat messages.
 
     Avoid matching the URL path ``/sessions`` as a lost chat session.
+    Credential-state hints (whether ``CURSOR_API_KEY`` is set) are admin-only.
     """
     text = (response_text or "").strip()
     lower = text.lower()
@@ -319,12 +320,19 @@ def format_chat_ai_user_error(response_text: str) -> str:
             "cursor_api_key",
         )
     ):
+        if not is_admin:
+            return "Cursor is unavailable. Contact an administrator."
         has_api_key = bool(os.environ.get("CURSOR_API_KEY", "").strip())
         if has_api_key:
             return _CURSOR_KEY_SET_BUT_UNAVAILABLE_HINT
         return _CURSOR_BROWSER_LOGIN_EXPIRED_HINT
 
     if "400" in lower and "/sessions" in lower:
+        if not is_admin:
+            return (
+                "Failed to create AI session. Select a valid provider and model, "
+                "or contact an administrator if Cursor stays unavailable."
+            )
         return (
             "Failed to create AI session (bad provider/model or Cursor auth). "
             "Select a valid provider and model. If using Cursor without "
@@ -394,7 +402,7 @@ def _setup_usage_recorder() -> None:
             result=result,
             call_type=call_type,
             prompt_chars=prompt_chars,
-            ai_provider=map_provider_from_sidecar(ai_provider),
+            ai_provider=_friendly_provider_from_sidecar(ai_provider),
             ai_model=ai_model,
         )
 
@@ -412,7 +420,6 @@ __all__ = [
     "clear_cursor_auth_cache",
     "format_chat_ai_user_error",
     "list_models",
-    "map_provider_from_sidecar",
     "map_provider_model_for_sidecar",
     "normalize_provider",
     "probe_cursor_auth",

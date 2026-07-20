@@ -1132,8 +1132,8 @@ def build_resources_section(
             is_git = (path / ".git").exists()
             if is_git:
                 resources.append(
-                    f"- Repository '{name}' at {path} — explore with read/ls/find/grep "
-                    "(no bash; do not run git commands)"
+                    f"- Repository '{name}' at {path} — browse with read, ls, find, "
+                    "and grep only (bash/git CLI are not available)"
                 )
             else:
                 resources.append(

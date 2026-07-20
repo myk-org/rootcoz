@@ -7,7 +7,6 @@ import pytest
 from rootcoz import ai_client
 from rootcoz.ai_client import (
     VALID_AI_PROVIDERS,
-    map_provider_from_sidecar,
     map_provider_model_for_sidecar,
     normalize_provider,
 )
@@ -46,11 +45,11 @@ def test_default_sidecar_mapping() -> None:
 
 
 def test_map_from_sidecar() -> None:
-    assert map_provider_from_sidecar("acpx-cursor") == "cursor"
-    assert map_provider_from_sidecar("cli-cursor") == "cursor"
-    assert map_provider_from_sidecar("google-vertex-claude") == "claude"
-    assert map_provider_from_sidecar("cli-claude") == "claude"
-    assert map_provider_from_sidecar("google") == "gemini"
+    assert ai_client._friendly_provider_from_sidecar("acpx-cursor") == "cursor"
+    assert ai_client._friendly_provider_from_sidecar("cli-cursor") == "cursor"
+    assert ai_client._friendly_provider_from_sidecar("google-vertex-claude") == "claude"
+    assert ai_client._friendly_provider_from_sidecar("cli-claude") == "claude"
+    assert ai_client._friendly_provider_from_sidecar("google") == "gemini"
 
 
 def test_cursor_acpx_model_routes_to_acpx() -> None:
@@ -154,7 +153,8 @@ async def test_list_models_route_cache_first_source_wins(
 
 def test_format_chat_ai_user_error_session_url_not_expired() -> None:
     msg = ai_client.format_chat_ai_user_error(
-        "Client error '400 Bad Request' for url 'http://127.0.0.1:9100/sessions'"
+        "Client error '400 Bad Request' for url 'http://127.0.0.1:9100/sessions'",
+        is_admin=True,
     )
     assert "session expired" not in msg.lower()
     assert "provider/model" in msg.lower() or "cursor" in msg.lower()
@@ -165,12 +165,22 @@ def test_format_chat_ai_user_error_true_session_not_found() -> None:
     assert "session expired" in msg.lower()
 
 
-def test_format_chat_ai_user_error_auth() -> None:
+def test_format_chat_ai_user_error_auth_admin() -> None:
     msg = ai_client.format_chat_ai_user_error(
-        "Error: Authentication required. Please run 'agent login' first"
+        "Error: Authentication required. Please run 'agent login' first",
+        is_admin=True,
     )
     assert "CURSOR_API_KEY" in msg
     assert "does not expire" in msg or "agent login" in msg.lower()
+
+
+def test_format_chat_ai_user_error_auth_non_admin_no_key_leak() -> None:
+    msg = ai_client.format_chat_ai_user_error(
+        "Error: Authentication required. Please run 'agent login' first",
+        is_admin=False,
+    )
+    assert "CURSOR_API_KEY" not in msg
+    assert "administrator" in msg.lower()
 
 
 def test_parse_agent_status_auth_expired() -> None:
