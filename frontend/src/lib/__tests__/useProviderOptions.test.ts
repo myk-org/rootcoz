@@ -15,6 +15,20 @@ vi.mock('@/lib/api', () => ({
   },
 }))
 
+vi.mock('@/lib/auth', () => ({
+  useAuth: () => ({
+    username: 'alice',
+    isAdmin: false,
+    isOperator: false,
+    role: 'reviewer',
+    loading: false,
+    authenticated: true,
+    login: async () => {},
+    logout: async () => {},
+    refreshAuth: async () => {},
+  }),
+}))
+
 describe('useProviderCatalog shared fetch', () => {
   afterEach(() => {
     _resetProviderCatalogCacheForTests()

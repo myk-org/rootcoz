@@ -7672,7 +7672,7 @@ async def list_ai_models(
                 else:
                     cursor_status = _cursor_status_from_model_count(len(models))
                 payload["provider_status"] = {"cursor": cursor_status}
-            return payload
+            return strip_sensitive_from_response(payload)
 
         # No provider specified — one sidecar catalog, then split per friendly provider
         from pi_sidecar_client import get_sidecar_client
@@ -7691,10 +7691,12 @@ async def list_ai_models(
             )
         else:
             cursor_status = _cursor_status_from_model_count(cursor_count)
-        return {
-            "providers": all_models,
-            "provider_status": {"cursor": cursor_status},
-        }
+        return strip_sensitive_from_response(
+            {
+                "providers": all_models,
+                "provider_status": {"cursor": cursor_status},
+            }
+        )
     except HTTPException:
         raise
     except Exception:
@@ -7702,8 +7704,8 @@ async def list_ai_models(
             "Failed to list AI models for provider=%s", provider, exc_info=True
         )
         if provider:
-            return {"provider": provider, "models": []}
-        return {"providers": {}, "provider_status": {}}
+            return strip_sensitive_from_response({"provider": provider, "models": []})
+        return strip_sensitive_from_response({"providers": {}, "provider_status": {}})
 
 
 @app.post("/api/admin/ai-models/refresh")
@@ -7728,11 +7730,13 @@ async def refresh_ai_models(request: Request) -> dict:
             len(models),
             cursor_status.get("ok"),
         )
-        return {
-            "models": models,
-            "count": len(models),
-            "provider_status": {"cursor": cursor_status},
-        }
+        return strip_sensitive_from_response(
+            {
+                "models": models,
+                "count": len(models),
+                "provider_status": {"cursor": cursor_status},
+            }
+        )
     except Exception:
         logger.exception("Failed to refresh AI models")
         raise HTTPException(
@@ -8367,6 +8371,9 @@ class _SSELogHandler(logging.Handler):
     """Logging handler that broadcasts formatted records to SSE listeners."""
 
     def emit(self, record: logging.LogRecord) -> None:
+        # Fast path: skip format/ANSI work when no admin SSE clients are connected.
+        if not _log_listeners:
+            return
         try:
             msg = self.format(record)
             clean = _ANSI_RE.sub("", msg)

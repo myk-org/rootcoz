@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { api } from '@/lib/api'
+import { useAuth } from '@/lib/auth'
 import type { AiModelsResponse, ProviderStatus } from '@/types'
 import {
   AI_PROVIDER_OPTIONS,
@@ -19,14 +20,23 @@ const EMPTY_CATALOG: CatalogState = { enabled: [], providerStatus: {} }
 /** Shared in-flight / completed catalog so concurrent hook mounts share one fetch. */
 let catalogInflight: Promise<CatalogState> | null = null
 let catalogCache: CatalogState | null = null
+/** Auth-scoped key (`username:adminFlag`) for the active cache entry. */
+let catalogCacheKey: string | null = null
 
-function loadProviderCatalog(): Promise<CatalogState> {
-  if (catalogCache) {
+function catalogKeyFor(username: string, isAdmin: boolean, authenticated: boolean): string {
+  if (!authenticated || !username) return 'anon'
+  return `${username}:${isAdmin ? '1' : '0'}`
+}
+
+function loadProviderCatalog(cacheKey: string): Promise<CatalogState> {
+  if (catalogCache && catalogCacheKey === cacheKey) {
     return Promise.resolve(catalogCache)
   }
-  if (catalogInflight) {
+  if (catalogInflight && catalogCacheKey === cacheKey) {
     return catalogInflight
   }
+  catalogCacheKey = cacheKey
+  catalogCache = null
   catalogInflight = api
     .get<AiModelsResponse>('/api/ai-models')
     .then((res) => {
@@ -37,7 +47,10 @@ function loadProviderCatalog(): Promise<CatalogState> {
         ),
         providerStatus: res.provider_status ?? {},
       }
-      catalogCache = next
+      // Only commit if this response still matches the active auth scope.
+      if (catalogCacheKey === cacheKey) {
+        catalogCache = next
+      }
       catalogInflight = null
       return next
     })
@@ -48,10 +61,16 @@ function loadProviderCatalog(): Promise<CatalogState> {
   return catalogInflight
 }
 
-/** Test helper — clear shared catalog cache between tests. */
-export function _resetProviderCatalogCacheForTests(): void {
+/** Clear shared catalog cache (login/logout/refresh/tests). */
+export function resetProviderCatalogCache(): void {
   catalogInflight = null
   catalogCache = null
+  catalogCacheKey = null
+}
+
+/** @deprecated Prefer resetProviderCatalogCache — kept for existing tests. */
+export function _resetProviderCatalogCacheForTests(): void {
+  resetProviderCatalogCache()
 }
 
 /** Provider ids that currently have at least one discovered model. */
@@ -65,11 +84,15 @@ export function useProviderCatalog(): {
   enabled: string[]
   providerStatus: Record<string, ProviderStatus>
 } {
-  const [state, setState] = useState<CatalogState>(catalogCache ?? EMPTY_CATALOG)
+  const { username, isAdmin, authenticated } = useAuth()
+  const cacheKey = catalogKeyFor(username, isAdmin, authenticated)
+  const [state, setState] = useState<CatalogState>(
+    catalogCache && catalogCacheKey === cacheKey ? catalogCache : EMPTY_CATALOG,
+  )
 
   useEffect(() => {
     let ignore = false
-    loadProviderCatalog()
+    loadProviderCatalog(cacheKey)
       .then((next) => {
         if (!ignore) setState(next)
       })
@@ -79,7 +102,7 @@ export function useProviderCatalog(): {
     return () => {
       ignore = true
     }
-  }, [])
+  }, [cacheKey])
 
   return state
 }

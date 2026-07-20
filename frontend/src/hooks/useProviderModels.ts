@@ -44,6 +44,8 @@ export function useProviderModels(provider: string) {
     setRefreshing(true)
     try {
       await api.post('/api/admin/ai-models/refresh')
+      const { resetProviderCatalogCache } = await import('@/lib/useProviderOptions')
+      resetProviderCatalogCache()
       if (
         currentProvider &&
         providerRef.current === currentProvider &&

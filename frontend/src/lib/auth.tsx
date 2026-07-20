@@ -81,6 +81,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, [refreshAuth])
 
   const login = useCallback(async (loginUsername: string, apiKey: string) => {
+    const { resetProviderCatalogCache } = await import('@/lib/useProviderOptions')
+    resetProviderCatalogCache()
     const result = await api.post<{ username: string; role: string; is_admin: boolean }>(
       '/api/auth/login',
       { username: loginUsername, api_key: apiKey }
@@ -101,6 +103,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     } catch {
       // ignore
     }
+    const { resetProviderCatalogCache } = await import('@/lib/useProviderOptions')
+    resetProviderCatalogCache()
     clearPrivileges()
     clearTokens()
     clearUsername()
