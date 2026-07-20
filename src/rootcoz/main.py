@@ -7913,14 +7913,15 @@ def _require_admin(request: Request) -> None:
 
 
 def _require_authenticated(request: Request) -> None:
-    """Raise 403 if the request has no authenticated username.
+    """Raise 401 if the request has no authenticated username.
 
     Middleware already blocks anonymous access for non-public paths; this is an
     explicit handler-level gate for endpoints that return non-public data.
+    Uses 401 (not 403) so frontend auth refresh treats missing auth as logout.
     """
     username = getattr(request.state, "username", "")
     if not username:
-        raise HTTPException(status_code=403, detail="Authentication required")
+        raise HTTPException(status_code=401, detail="Authentication required")
 
 
 def _require_reviewer(request: Request) -> None:

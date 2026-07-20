@@ -1835,6 +1835,8 @@ class TestBuildResourcesSectionAdditionalRepos:
         result = build_resources_section(workspace, additional_repos=additional)
         assert "ROOTCOZ_PROMPT.md" in result
         assert "Project-specific analysis instructions" in result
+        assert "not pre-loaded" in result
+        assert "issue #74" in result
 
     def test_history_prompt_in_repo(self, tmp_path) -> None:
         """Test that history prompt in a cloned repo is advertised when history enabled."""

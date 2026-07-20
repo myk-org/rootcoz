@@ -1151,8 +1151,8 @@ def build_resources_section(
     # Advertise each cloned repo
     if additional_repos:
         for name, path in additional_repos.items():
-            is_git = (path / ".git").exists()
-            if is_git:
+            has_vcs_metadata = (path / ".git").exists()
+            if has_vcs_metadata:
                 resources.append(
                     f"- Repository '{name}' at {path} — {RESOURCE_REPO_BROWSE_HINT}"
                 )
@@ -1164,14 +1164,17 @@ def build_resources_section(
             rootcoz_prompt = path / ".rootcoz" / ROOTCOZ_PROMPT_FILENAME
             if rootcoz_prompt.exists():
                 resources.append(
-                    f"- Project-specific analysis instructions at {rootcoz_prompt} — read and follow them"
+                    f"- Project-specific analysis instructions at {rootcoz_prompt} — "
+                    "MANDATORY: open with the read tool and follow them "
+                    "(contents are not pre-loaded into this prompt; see issue #74)"
                 )
             repo_history_prompt = path / ".rootcoz" / ROOTCOZ_HISTORY_PROMPT_FILENAME
             if history_enabled and repo_history_prompt.exists():
                 resources.append(
                     f"- Project-specific history analysis instructions"
-                    f" at {repo_history_prompt} — read and follow"
-                    f" alongside the main history analysis instructions"
+                    f" at {repo_history_prompt} — MANDATORY: open with the read tool"
+                    f" (not pre-loaded; see issue #74) alongside the main history"
+                    f" analysis instructions"
                 )
             # Advertise project-provided agents (from .rootcoz/agents/)
             pi_agents_dir = path / ".rootcoz" / "agents"
