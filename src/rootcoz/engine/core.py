@@ -271,6 +271,49 @@ You do not have bash — use history HTTP tools for history steps and still sati
 """
 
 
+def discover_rootcoz_prompt_paths(
+    additional_repos: dict[str, Path] | None,
+    *,
+    history_enabled: bool = False,
+) -> list[Path]:
+    """Return existing ``.rootcoz`` prompt files under cloned repos."""
+    if not additional_repos:
+        return []
+    found: list[Path] = []
+    for path in additional_repos.values():
+        prompt = path / ".rootcoz" / ROOTCOZ_PROMPT_FILENAME
+        if prompt.is_file():
+            found.append(prompt)
+        if history_enabled:
+            hist = path / ".rootcoz" / ROOTCOZ_HISTORY_PROMPT_FILENAME
+            if hist.is_file():
+                found.append(hist)
+    return found
+
+
+def build_rootcoz_prompt_gate_section(prompt_paths: list[Path]) -> str:
+    """Hard gate: require ``read`` of project ``.rootcoz`` prompts before analysis.
+
+    Opens each file for a sha256/bytes fingerprint (proves load) but does not
+    embed bodies — AGENTS.md file-based data policy / issue #74.
+    """
+    if not prompt_paths:
+        return ""
+    lines: list[str] = []
+    for path in prompt_paths:
+        fp = _rootcoz_prompt_fingerprint(path)
+        lines.append(f"- {path}{fp}")
+    listed = "\n".join(lines)
+    return f"""
+STEP 0b — PROJECT .rootcoz PROMPTS (HARD GATE — READ BEFORE ANALYSIS):
+These project instruction files were opened on disk for verification (fingerprints below).
+You MUST open EACH with the read tool and follow them before analyzing.
+Bodies are intentionally not embedded in this prompt (AGENTS.md / issue #74).
+{listed}
+Do not skip these reads.
+"""
+
+
 def _ignore_symlinks(directory: str, contents: list[str]) -> list[str]:
     """Ignore symlinks during copytree to prevent escape attacks."""
     return [c for c in contents if (Path(directory) / c).is_symlink()]
@@ -1059,6 +1102,9 @@ def build_prompt_sections(
     )
     agent_gate_section = build_agent_gate_section(
         discover_project_agent_names(additional_repos)
+    )
+    agent_gate_section += build_rootcoz_prompt_gate_section(
+        discover_rootcoz_prompt_paths(additional_repos, history_enabled=history_enabled)
     )
 
     if not QUERY_MD_PATH.exists():

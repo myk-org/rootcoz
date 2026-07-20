@@ -39,10 +39,10 @@ class TestToolConstants:
         assert ANALYSIS_BUILTIN_TOOLS[:4] == _FS_BROWSE_TOOLS
         for tool in _FS_BROWSE_TOOLS:
             assert tool in RESOURCE_REPO_BROWSE_HINT
-        assert "git commands" in RESOURCE_REPO_BROWSE_HINT
         assert "no shell" in RESOURCE_REPO_BROWSE_HINT
         lower = RESOURCE_REPO_BROWSE_HINT.lower()
         assert "run git" not in lower
+        assert "git" not in lower
         assert "bash" in lower  # explicitly forbidden in the hint text
 
     def test_chat_tools_filesystem_browsing(self):
@@ -480,6 +480,29 @@ class TestAgentGateSection:
         assert "STEP 0" in agent_gate
         assert "rootcoz-test-agent" in agent_gate
 
+    def test_rootcoz_prompt_gate_requires_read_without_embedding(self, tmp_path):
+        from rootcoz.engine.core import build_prompt_sections
+
+        repo = tmp_path / "my-repo"
+        rootcoz = repo / ".rootcoz"
+        rootcoz.mkdir(parents=True)
+        body = "secret project analysis instructions that must not be embedded"
+        (rootcoz / "ROOTCOZ_PROMPT.md").write_text(body)
+
+        agent_gate, *_rest = build_prompt_sections(
+            "",
+            "",
+            tmp_path,
+            "",
+            "",
+            additional_repos={"my-repo": repo},
+        )
+        assert "STEP 0b" in agent_gate
+        assert "ROOTCOZ_PROMPT.md" in agent_gate
+        assert "sha256=" in agent_gate
+        assert "read tool" in agent_gate.lower()
+        assert body not in agent_gate
+
     def test_discover_skips_unsafe_filename_stem(self, tmp_path):
         from rootcoz.engine.core import discover_project_agent_names
 
@@ -513,7 +536,7 @@ class TestAgentGateSection:
             assert tool in CHAT_BUILTIN_TOOLS
         assert "bash" not in CHAT_BUILTIN_TOOLS
         assert "no shell" in RESOURCE_REPO_BROWSE_HINT
-        assert "git commands" in RESOURCE_REPO_BROWSE_HINT
+        assert "bash" in RESOURCE_REPO_BROWSE_HINT.lower()
         assert RESOURCE_REPO_BROWSE_HINT.startswith("browse with")
 
     def test_rootcoz_prompt_fingerprint_matches_on_disk_bytes(self, tmp_path):
