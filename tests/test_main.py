@@ -6287,6 +6287,22 @@ class TestRefreshAiModelsEndpoint:
         assert response.status_code == 502
         assert "Failed to refresh" in response.json()["detail"]
 
+    def test_refresh_ai_models_failure_preserves_route_cache(self, test_client) -> None:
+        """Failed refresh must not clear CLI routing cache mid-flight."""
+        import rootcoz.ai_client as ai_client_mod
+
+        ai_client_mod._model_route_cache[("claude", "cli-model")] = "cli-claude"
+        with patch(
+            "pi_sidecar_client.get_sidecar_client",
+        ) as mock_get_client:
+            mock_client = AsyncMock()
+            mock_client.refresh_models.side_effect = RuntimeError("sidecar down")
+            mock_get_client.return_value = mock_client
+            response = test_client.post("/api/admin/ai-models/refresh")
+
+        assert response.status_code == 502
+        assert ai_client_mod._model_route_cache[("claude", "cli-model")] == "cli-claude"
+
 
 class TestCursorStatusForClient:
     """Tests for _cursor_status_for_client credential redaction."""

@@ -7726,10 +7726,12 @@ async def refresh_ai_models(request: Request) -> dict:
 
         import rootcoz.ai_client as ai_client_mod
 
+        client = get_sidecar_client()
+        # Keep the previous route cache until refresh succeeds so concurrent AI
+        # calls (and refresh failures) do not fall back to default sidecars.
+        models = await client.refresh_models()
         ai_client_mod._model_route_cache.clear()
         clear_cursor_auth_cache()
-        client = get_sidecar_client()
-        models = await client.refresh_models()
         # Rebuild friendly provider catalogs + route cache from one catalog
         build_friendly_catalog(models)
         cursor_status = await probe_cursor_auth(force=True)
