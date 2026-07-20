@@ -37,7 +37,7 @@ function loadProviderCatalog(cacheKey: string): Promise<CatalogState> {
   }
   catalogCacheKey = cacheKey
   catalogCache = null
-  catalogInflight = api
+  const req = api
     .get<AiModelsResponse>('/api/ai-models')
     .then((res) => {
       const providers = res.providers ?? {}
@@ -51,14 +51,20 @@ function loadProviderCatalog(cacheKey: string): Promise<CatalogState> {
       if (catalogCacheKey === cacheKey) {
         catalogCache = next
       }
-      catalogInflight = null
+      // Don't clear a newer inflight started after this request.
+      if (catalogInflight === req) {
+        catalogInflight = null
+      }
       return next
     })
     .catch((err) => {
-      catalogInflight = null
+      if (catalogInflight === req) {
+        catalogInflight = null
+      }
       throw err
     })
-  return catalogInflight
+  catalogInflight = req
+  return req
 }
 
 /** Clear shared catalog cache (login/logout/refresh/tests). */
