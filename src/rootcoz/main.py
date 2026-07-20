@@ -7648,7 +7648,8 @@ async def list_ai_models(
             if provider == "cursor":
                 payload["provider_status"] = {
                     "cursor": _cursor_status_for_client(
-                        await probe_cursor_auth(), is_admin=is_admin
+                        await probe_cursor_auth(model_count=len(models)),
+                        is_admin=is_admin,
                     )
                 }
             return payload
@@ -7665,7 +7666,8 @@ async def list_ai_models(
                 )
                 all_models[p] = []
         cursor_status = _cursor_status_for_client(
-            await probe_cursor_auth(), is_admin=is_admin
+            await probe_cursor_auth(model_count=len(all_models.get("cursor", []))),
+            is_admin=is_admin,
         )
         return {
             "providers": all_models,
@@ -8324,7 +8326,9 @@ async def save_user_tokens_endpoint(request: Request) -> JSONResponse:
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 
 # --- Live log broadcast for SSE streaming ---
-_log_listeners: set[asyncio.Queue] = set()
+# Each listener is (owning_loop, queue) so emit() can wake the correct loop
+# from non-asyncio logging threads via call_soon_threadsafe.
+_log_listeners: set[tuple[asyncio.AbstractEventLoop, asyncio.Queue[str]]] = set()
 
 
 class _SSELogHandler(logging.Handler):
@@ -8334,9 +8338,16 @@ class _SSELogHandler(logging.Handler):
         try:
             msg = self.format(record)
             clean = _ANSI_RE.sub("", msg)
-            for q in list(_log_listeners):
+
+            def _enqueue(q: asyncio.Queue[str], line: str) -> None:
                 try:
-                    q.put_nowait(clean)
+                    q.put_nowait(line)
+                except asyncio.QueueFull:
+                    pass
+
+            for loop, q in list(_log_listeners):
+                try:
+                    loop.call_soon_threadsafe(_enqueue, q, clean)
                 except Exception:
                     pass
         except Exception:
@@ -8424,7 +8435,9 @@ async def stream_logs(
 
         # Stream live logs via broadcast queue
         queue: asyncio.Queue = asyncio.Queue(maxsize=1000)
-        _log_listeners.add(queue)
+        loop = asyncio.get_running_loop()
+        listener = (loop, queue)
+        _log_listeners.add(listener)
         try:
             while True:
                 if await request.is_disconnected():
@@ -8436,7 +8449,7 @@ async def stream_logs(
                 except asyncio.TimeoutError:
                     yield ": keepalive\n\n"
         finally:
-            _log_listeners.discard(queue)
+            _log_listeners.discard(listener)
 
     logger.info(
         "GET /api/admin/logs/stream: streaming logs (lines=%s, level=%s)",

@@ -200,12 +200,19 @@ def _parse_agent_status_text(text: str) -> str | None:
     return "unavailable"
 
 
-async def probe_cursor_auth(*, force: bool = False) -> dict[str, Any]:
+async def probe_cursor_auth(
+    *, force: bool = False, model_count: int | None = None
+) -> dict[str, Any]:
     """Probe Cursor CLI/ACPX auth health for admin UI.
 
     Browser ``agent login`` expires and cannot be auto-refreshed.
     ``CURSOR_API_KEY`` does **not** expire — when set in the server/sidecar
     env it keeps working. Prefer the API key for Dev/prod.
+
+    Args:
+        force: Bypass the in-process probe cache.
+        model_count: When provided (e.g. from a concurrent ``list_models``
+            call), skip a second sidecar model enumeration.
 
     Returns dict: ok, reason, hint, has_api_key, model_count.
     """
@@ -219,8 +226,9 @@ async def probe_cursor_auth(*, force: bool = False) -> dict[str, Any]:
         return dict(_cursor_auth_cache[1])
 
     has_api_key = bool(os.environ.get("CURSOR_API_KEY", "").strip())
-    models = await list_models("cursor")
-    model_count = len(models)
+    if model_count is None:
+        models = await list_models("cursor")
+        model_count = len(models)
     if model_count > 0:
         status: dict[str, Any] = {
             "ok": True,

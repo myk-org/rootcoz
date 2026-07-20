@@ -345,6 +345,7 @@ export function ServerSettingsPage() {
   const [aiModelValue, setAiModelValue] = useState('')
   // For the model combobox, use the editing provider if editing, otherwise the saved setting value
   const savedAiProvider = state.settings.find(s => s.key === 'ai_provider')?.value || ''
+  const savedAiModel = state.settings.find(s => s.key === 'ai_model')?.value || ''
   const effectiveAiProvider = aiProviderEditing
     ? aiProviderValue
     : (savedAiProvider || aiProviderValue)
@@ -692,7 +693,11 @@ export function ServerSettingsPage() {
                                 setting={setting}
                                 editing={aiProviderEditing}
                                 onStartEdit={(v) => { setAiProviderValue(v); setAiProviderEditing(true) }}
-                                onCancel={() => { setAiProviderEditing(false); setAiProviderValue(savedAiProvider) }}
+                                onCancel={() => {
+                                  setAiProviderEditing(false)
+                                  setAiProviderValue(savedAiProvider)
+                                  setAiModelValue(savedAiModel)
+                                }}
                                 onSave={() => handleSaveAiProvider(aiProviderValue)}
                                 onReset={() => handleReset(setting.key)}
                                 saving={state.saving}
