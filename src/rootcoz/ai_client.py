@@ -381,11 +381,28 @@ def format_chat_ai_user_error(response_text: str, *, is_admin: bool = False) -> 
     return text
 
 
+async def _prewarm_model_routes(friendly: str) -> None:
+    """Best-effort catalog fetch to populate ``_model_route_cache``.
+
+    Failures are non-fatal: ``map_provider_model_for_sidecar`` still has
+    heuristic defaults when the cache is empty.
+    """
+    if not friendly or any(fp == friendly for fp, _ in _model_route_cache):
+        return
+    try:
+        await list_models(friendly)
+    except Exception:
+        logger.debug(
+            "Model catalog prewarm failed for provider=%s; using heuristic routes",
+            friendly,
+            exc_info=True,
+        )
+
+
 async def call_ai(*args: Any, ai_provider: str = "", ai_model: str = "", **kwargs: Any):
     """call_ai with rootcoz friendly→sidecar provider/model routing."""
     friendly = normalize_provider(ai_provider)
-    if friendly and not any(fp == friendly for fp, _ in _model_route_cache):
-        await list_models(friendly)
+    await _prewarm_model_routes(friendly)
     sidecar_provider, sidecar_model = map_provider_model_for_sidecar(
         ai_provider, ai_model
     )
@@ -399,8 +416,7 @@ async def call_ai_once(
 ):
     """call_ai_once with rootcoz friendly→sidecar provider/model routing."""
     friendly = normalize_provider(ai_provider)
-    if friendly and not any(fp == friendly for fp, _ in _model_route_cache):
-        await list_models(friendly)
+    await _prewarm_model_routes(friendly)
     sidecar_provider, sidecar_model = map_provider_model_for_sidecar(
         ai_provider, ai_model
     )

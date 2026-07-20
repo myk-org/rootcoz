@@ -7444,9 +7444,10 @@ async def get_test_history_endpoint(
     job_name = _sanitize_sidecar_placeholder(job_name)
     exclude_job_id = _sanitize_sidecar_placeholder(exclude_job_id)
     logger.debug(f"GET /history/test/{test_name}: limit={limit}, job_name={job_name!r}")
-    return await storage.get_test_history(
+    result = await storage.get_test_history(
         test_name, limit=limit, job_name=job_name, exclude_job_id=exclude_job_id
     )
+    return strip_sensitive_from_response(result)
 
 
 @app.get("/history/search")
@@ -7602,7 +7603,7 @@ async def get_classifications(
         parent_job_name=parent_job_name,
         job_id=job_id,
     )
-    return {"classifications": classifications}
+    return strip_sensitive_from_response({"classifications": classifications})
 
 
 def _cursor_status_for_client(status: dict, *, is_admin: bool) -> dict:

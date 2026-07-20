@@ -301,3 +301,17 @@ async def test_probe_cursor_auth_key_set_never_auth_expired(
     assert status["reason"] == "api_key_not_applied"
     assert status["has_api_key"] is True
     assert "does not expire" in status["hint"]
+
+
+@pytest.mark.asyncio
+async def test_prewarm_model_routes_swallows_catalog_errors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Catalog prewarm errors must not raise (AI call can still proceed)."""
+
+    async def boom(_provider: str = "") -> list:
+        raise RuntimeError("sidecar catalog unavailable")
+
+    monkeypatch.setattr(ai_client, "list_models", boom)
+    # Should not raise
+    await ai_client._prewarm_model_routes("cursor")
