@@ -7430,6 +7430,7 @@ async def get_all_failures_endpoint(
 
 @app.get("/history/test/{test_name:path}")
 async def get_test_history_endpoint(
+    request: Request,
     test_name: str,
     limit: int = Query(default=20, le=100),
     job_name: str = Query(default=""),
@@ -7438,6 +7439,7 @@ async def get_test_history_endpoint(
     ),
 ) -> dict:
     """Get pass/fail history for a specific test."""
+    _require_authenticated(request)
     job_name = _sanitize_sidecar_placeholder(job_name)
     exclude_job_id = _sanitize_sidecar_placeholder(exclude_job_id)
     logger.debug(f"GET /history/test/{test_name}: limit={limit}, job_name={job_name!r}")
@@ -7570,6 +7572,7 @@ async def classify_test(request: Request, body: ClassifyTestRequest) -> dict:
 
 @app.get("/history/classifications")
 async def get_classifications(
+    request: Request,
     test_name: str = Query(default=""),
     classification: str = Query(default=""),
     job_name: str = Query(default=""),
@@ -7577,6 +7580,7 @@ async def get_classifications(
     job_id: str = Query(default=""),
 ) -> dict:
     """Get test classifications."""
+    _require_authenticated(request)
     test_name = _sanitize_sidecar_placeholder(test_name)
     classification = _sanitize_sidecar_placeholder(classification)
     job_name = _sanitize_sidecar_placeholder(job_name)
@@ -7645,6 +7649,7 @@ async def list_ai_models(
     Non-admins get a coarse ok/unavailable status from model_count only
     (no ``agent status`` subprocess).
     """
+    _require_authenticated(request)
     logger.debug("GET /api/ai-models provider=%s", provider)
     is_admin = bool(getattr(request.state, "is_admin", False))
     try:
@@ -7901,6 +7906,17 @@ def _require_admin(request: Request) -> None:
     """Raise 403 if the request is not from an authenticated admin."""
     if not request.state.is_admin:
         raise HTTPException(status_code=403, detail="Admin access required")
+
+
+def _require_authenticated(request: Request) -> None:
+    """Raise 403 if the request has no authenticated username.
+
+    Middleware already blocks anonymous access for non-public paths; this is an
+    explicit handler-level gate for endpoints that return non-public data.
+    """
+    username = getattr(request.state, "username", "")
+    if not username:
+        raise HTTPException(status_code=403, detail="Authentication required")
 
 
 def _require_reviewer(request: Request) -> None:
@@ -8445,7 +8461,7 @@ def _read_log_tail(
 @app.get("/api/admin/logs/stream")
 async def stream_logs(
     request: Request,
-    lines: int = Query(100, ge=1, le=10000, description="Initial tail lines"),
+    lines: int = Query(100, ge=1, le=2000, description="Initial tail lines"),
     level: str = Query(
         "", description="Filter by log level (INFO, WARNING, ERROR, DEBUG)"
     ),

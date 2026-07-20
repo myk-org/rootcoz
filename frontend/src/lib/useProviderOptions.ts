@@ -9,6 +9,51 @@ import {
 
 export type { ProviderStatus }
 
+type CatalogState = {
+  enabled: string[]
+  providerStatus: Record<string, ProviderStatus>
+}
+
+const EMPTY_CATALOG: CatalogState = { enabled: [], providerStatus: {} }
+
+/** Shared in-flight / completed catalog so concurrent hook mounts share one fetch. */
+let catalogInflight: Promise<CatalogState> | null = null
+let catalogCache: CatalogState | null = null
+
+function loadProviderCatalog(): Promise<CatalogState> {
+  if (catalogCache) {
+    return Promise.resolve(catalogCache)
+  }
+  if (catalogInflight) {
+    return catalogInflight
+  }
+  catalogInflight = api
+    .get<AiModelsResponse>('/api/ai-models')
+    .then((res) => {
+      const providers = res.providers ?? {}
+      const next: CatalogState = {
+        enabled: AI_PROVIDER_OPTIONS.map((o) => o.value).filter(
+          (p) => (providers[p] ?? []).length > 0,
+        ),
+        providerStatus: res.provider_status ?? {},
+      }
+      catalogCache = next
+      catalogInflight = null
+      return next
+    })
+    .catch((err) => {
+      catalogInflight = null
+      throw err
+    })
+  return catalogInflight
+}
+
+/** Test helper — clear shared catalog cache between tests. */
+export function _resetProviderCatalogCacheForTests(): void {
+  catalogInflight = null
+  catalogCache = null
+}
+
 /** Provider ids that currently have at least one discovered model. */
 export function useEnabledProviders(): string[] {
   const { enabled } = useProviderCatalog()
@@ -20,37 +65,23 @@ export function useProviderCatalog(): {
   enabled: string[]
   providerStatus: Record<string, ProviderStatus>
 } {
-  const [enabled, setEnabled] = useState<string[]>([])
-  const [providerStatus, setProviderStatus] = useState<Record<string, ProviderStatus>>(
-    {},
-  )
+  const [state, setState] = useState<CatalogState>(catalogCache ?? EMPTY_CATALOG)
 
   useEffect(() => {
     let ignore = false
-    api
-      .get<AiModelsResponse>('/api/ai-models')
-      .then((res) => {
-        if (ignore) return
-        const providers = res.providers ?? {}
-        setEnabled(
-          AI_PROVIDER_OPTIONS.map((o) => o.value).filter(
-            (p) => (providers[p] ?? []).length > 0,
-          ),
-        )
-        setProviderStatus(res.provider_status ?? {})
+    loadProviderCatalog()
+      .then((next) => {
+        if (!ignore) setState(next)
       })
       .catch(() => {
-        if (!ignore) {
-          setEnabled([])
-          setProviderStatus({})
-        }
+        if (!ignore) setState(EMPTY_CATALOG)
       })
     return () => {
       ignore = true
     }
   }, [])
 
-  return { enabled, providerStatus }
+  return state
 }
 
 /**

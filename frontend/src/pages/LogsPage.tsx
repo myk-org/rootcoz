@@ -32,7 +32,7 @@ function getLineColor(line: string): string {
   return 'text-zinc-300'
 }
 
-const INITIAL_LINES_OPTIONS = ['100', '500', '1000', '5000', '10000']
+const INITIAL_LINES_OPTIONS = ['100', '500', '1000', '2000']
 
 /** Maximum log lines kept in the browser buffer to prevent unbounded memory growth. */
 const MAX_LOG_BUFFER = 10_000

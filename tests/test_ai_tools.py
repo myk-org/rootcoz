@@ -470,6 +470,13 @@ class TestAgentGateSection:
         assert "git commands" not in section.lower()
         assert RESOURCE_REPO_BROWSE_HINT in section
         assert "read" in section.lower() and "grep" in section.lower()
+        from rootcoz.ai_client import CHAT_BUILTIN_TOOLS
+
+        for tool in ("read", "ls", "find", "grep"):
+            assert tool in RESOURCE_REPO_BROWSE_HINT
+            assert tool in CHAT_BUILTIN_TOOLS
+        assert "bash" not in CHAT_BUILTIN_TOOLS
+        assert "no shell execution" in RESOURCE_REPO_BROWSE_HINT
 
     def test_history_section_requires_auth_token(self, tmp_path, monkeypatch):
         from rootcoz.engine import core as core_mod

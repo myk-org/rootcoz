@@ -2947,6 +2947,20 @@ class TestHistoryEndpoints:
         assert isinstance(data["comments"], list)
         assert isinstance(data["classifications"], dict)
 
+    def test_history_and_ai_models_require_auth(
+        self, mock_settings, temp_db_path: Path
+    ) -> None:
+        """Handler-level auth gates reject anonymous callers (middleware + explicit)."""
+        with patch.object(storage, "DB_PATH", temp_db_path):
+            from starlette.testclient import TestClient
+
+            from rootcoz.main import app
+
+            with TestClient(app) as client:
+                assert client.get("/history/test/some.test").status_code == 401
+                assert client.get("/history/classifications").status_code == 401
+                assert client.get("/api/ai-models").status_code == 401
+
     @pytest.mark.asyncio
     async def test_search_by_signature(self, test_client) -> None:
         """Test that /history/search returns expected structure."""
