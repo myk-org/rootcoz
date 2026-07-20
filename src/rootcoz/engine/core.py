@@ -1123,9 +1123,11 @@ def build_resources_section(
 ) -> str:
     """Build a section telling the AI about available resources.
 
-    Instead of pre-fetching data (history, custom prompt files), this tells the
-    AI what tools and files are available so it can access them on its own.
-    Capability text comes from ``RESOURCE_REPO_BROWSE_HINT`` (tied to tool policy).
+    Instead of embedding history or custom prompt file contents, this advertises
+    paths (including ``.rootcoz/ROOTCOZ_PROMPT.md`` when present) so the AI must
+    open them with the ``read`` tool. Capability text comes from
+    ``RESOURCE_REPO_BROWSE_HINT`` (tied to tool policy). See GitHub issue #74
+    design note on file-based prompts.
 
     Args:
         repo_path: Path to workspace root (all repos are subdirectories), or None.
@@ -1503,7 +1505,9 @@ Note: Multiple tests failed with the same error. Provide ONE analysis that appli
             call_kwargs: dict = {
                 "ai_provider": ai_provider,
                 "ai_model": ai_model,
-                "cwd": str(repo_path) if repo_path else None,
+                # Always set cwd to the directory containing mandatory workspace
+                # files (repo or temp) so sidecar file tools can resolve them.
+                "cwd": str(workspace_dir),
                 "ai_call_timeout": ai_call_timeout,
                 "tools": list(ANALYSIS_BUILTIN_TOOLS),
             }

@@ -2961,6 +2961,20 @@ class TestHistoryEndpoints:
                 assert client.get("/history/classifications").status_code == 401
                 assert client.get("/api/ai-models").status_code == 401
 
+    def test_history_and_ai_models_handlers_call_require_authenticated(self) -> None:
+        """Source of gated handlers must invoke ``_require_authenticated``."""
+        import inspect
+
+        from rootcoz import main as main_mod
+
+        for fn in (
+            main_mod.get_test_history_endpoint,
+            main_mod.get_classifications,
+            main_mod.list_ai_models,
+        ):
+            src = inspect.getsource(fn)
+            assert "_require_authenticated" in src, fn.__name__
+
     @pytest.mark.asyncio
     async def test_search_by_signature(self, test_client) -> None:
         """Test that /history/search returns expected structure."""

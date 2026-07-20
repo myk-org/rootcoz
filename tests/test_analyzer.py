@@ -227,6 +227,46 @@ class TestRunSingleAiAnalysis:
         assert isinstance(sig, str) and len(sig) == 64  # SHA-256 hex
 
     @pytest.mark.asyncio
+    async def test_cwd_uses_temp_workspace_when_no_repo(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """When repo_path is None, call_ai_once cwd is the temp workspace dir."""
+        captured: dict[str, object] = {}
+
+        async def mock_cli(prompt, **kwargs):
+            captured.update(kwargs)
+            return AIResult(
+                success=True,
+                text=json.dumps(
+                    {
+                        "classification": "CODE ISSUE",
+                        "affected_tests": ["test_foo"],
+                        "details": "ok",
+                    }
+                ),
+            )
+
+        monkeypatch.setattr("rootcoz.engine.core.call_ai_once", mock_cli)
+        failure = FailedTest(
+            test_name="test_foo", error_message="AssertionError", stack_trace="line 42"
+        )
+        await run_single_ai_analysis(
+            failures=[failure],
+            console_context="console lines",
+            repo_path=None,
+            ai_provider="claude",
+            ai_model="opus",
+            ai_call_timeout=None,
+            custom_prompt="",
+            artifacts_context="",
+            server_url="",
+            job_id="",
+        )
+        cwd = captured.get("cwd")
+        assert isinstance(cwd, str) and cwd
+        assert Path(cwd).name.startswith("rootcoz-console-")
+
+    @pytest.mark.asyncio
     async def test_failed_ai_call_returns_fallback(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
