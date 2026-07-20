@@ -1,8 +1,13 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
-import { api } from '@/lib/api'
 import type { ModelOption } from '@/components/shared/ModelCombobox'
 import { normalizeProvider } from '@/lib/aiProviders'
+import { fetchModelsForProvider } from '@/lib/useProviderModels'
+import { api } from '@/lib/api'
 
+/**
+ * Provider models with admin refresh support.
+ * Reuses lib/fetchModelsForProvider for the shared fetch path.
+ */
 export function useProviderModels(provider: string) {
   const [availableModels, setAvailableModels] = useState<ModelOption[]>([])
   const [refreshing, setRefreshing] = useState(false)
@@ -10,8 +15,9 @@ export function useProviderModels(provider: string) {
   const providerRef = useRef(normalized)
   const refreshSeqRef = useRef(0)
 
-  // Keep provider ref in sync
-  useEffect(() => { providerRef.current = normalized }, [normalized])
+  useEffect(() => {
+    providerRef.current = normalized
+  }, [normalized])
 
   useEffect(() => {
     if (!normalized) {
@@ -20,10 +26,9 @@ export function useProviderModels(provider: string) {
     }
     let ignore = false
     setAvailableModels([])
-    api
-      .get<{ models: ModelOption[] }>(`/api/ai-models?provider=${encodeURIComponent(normalized)}`)
-      .then((res) => {
-        if (!ignore) setAvailableModels(res.models ?? [])
+    fetchModelsForProvider(normalized)
+      .then((models) => {
+        if (!ignore) setAvailableModels(models)
       })
       .catch(() => {
         if (!ignore) setAvailableModels([])
@@ -39,19 +44,19 @@ export function useProviderModels(provider: string) {
     setRefreshing(true)
     try {
       await api.post('/api/admin/ai-models/refresh')
-      // Only apply results if provider hasn't changed and no newer refresh started
-      if (currentProvider && providerRef.current === currentProvider && refreshSeqRef.current === seq) {
-        const res = await api.get<{ models: ModelOption[] }>(
-          `/api/ai-models?provider=${encodeURIComponent(currentProvider)}`,
-        )
+      if (
+        currentProvider &&
+        providerRef.current === currentProvider &&
+        refreshSeqRef.current === seq
+      ) {
+        const models = await fetchModelsForProvider(currentProvider)
         if (providerRef.current === currentProvider && refreshSeqRef.current === seq) {
-          setAvailableModels(res.models ?? [])
+          setAvailableModels(models)
         }
       }
     } catch (err) {
       console.error('Failed to refresh AI models:', err)
     } finally {
-      // Only clear refreshing if no newer refresh started
       if (refreshSeqRef.current === seq) {
         setRefreshing(false)
       }

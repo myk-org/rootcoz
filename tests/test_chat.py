@@ -110,6 +110,8 @@ class TestBuildAnalysisHistoryTools:
         )
         hist = next(t for t in tools if t["name"] == "get_failure_history")
         assert hist["http"]["query_params"]["exclude_job_id"] == "exclude-me"
+        assert hist["http"]["query_params"]["job_name"] == "{job_name}"
+        assert hist["parameters"]["required"] == ["test_name", "job_name"]
         classify = next(t for t in tools if t["name"] == "classify_test_pattern")
         assert classify["http"]["body_template"]["job_id"] == "exclude-me"
         assert classify["http"]["body_template"]["source"] == "ai"
@@ -167,10 +169,10 @@ class TestBuildChatCustomTools:
         )
         tool = next(t for t in tools if t["name"] == "get_failure_history")
         assert "test_name" in tool["parameters"]["properties"]
-        assert "job_name" not in tool["parameters"]["properties"]
-        assert tool["parameters"]["required"] == ["test_name"]
+        assert "job_name" in tool["parameters"]["properties"]
+        assert tool["parameters"]["required"] == ["test_name", "job_name"]
         assert "{test_name}" in tool["http"]["url"]
-        assert "job_name" not in tool["http"]["query_params"]
+        assert tool["http"]["query_params"]["job_name"] == "{job_name}"
         assert tool["http"]["method"] == "GET"
 
     def test_classification_history_tool(self):

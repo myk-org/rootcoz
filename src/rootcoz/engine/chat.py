@@ -391,6 +391,7 @@ def _tool_get_failure_history(
     description: str,
     query_params: dict[str, str],
     properties: dict[str, dict] | None = None,
+    required: list[str] | None = None,
 ) -> dict:
     """Shared GET /history/test/{test_name} tool definition."""
     props: dict[str, dict] = {
@@ -404,7 +405,7 @@ def _tool_get_failure_history(
         "parameters": {
             "type": "object",
             "properties": props,
-            "required": ["test_name"],
+            "required": required or ["test_name"],
         },
         "http": {
             "method": "GET",
@@ -469,9 +470,17 @@ def build_analysis_history_tools(
             description=(
                 "MANDATORY for every failed test before classifying. "
                 "Pass/fail history: failure_rate, consecutive_failures, "
-                "classifications, comments, recent_runs."
+                "classifications, comments, recent_runs. "
+                "Always pass job_name so passes/failure_rate are computed."
             ),
-            query_params=exclude,
+            query_params={**exclude, "job_name": "{job_name}"},
+            properties={
+                "job_name": {
+                    "type": "string",
+                    "description": "CI job name (required for pass/fail rates)",
+                },
+            },
+            required=["test_name", "job_name"],
         ),
         {
             "name": "search_error_signature",
@@ -639,11 +648,17 @@ def build_chat_custom_tools(
             auth_headers=auth_headers,
             description=(
                 "Get pass/fail history for a specific test — total runs, "
-                "failure rate, classifications, recent occurrences"
+                "failure rate, classifications, recent occurrences. "
+                "Always pass job_name so passes/failure_rate are computed."
             ),
-            # Omit optional {job_name}: unsubstituted placeholders become
-            # literal filters. Server sanitizes placeholders if they arrive.
-            query_params={},
+            query_params={"job_name": "{job_name}"},
+            properties={
+                "job_name": {
+                    "type": "string",
+                    "description": "CI job name (required for pass/fail rates)",
+                },
+            },
+            required=["test_name", "job_name"],
         )
     )
 
