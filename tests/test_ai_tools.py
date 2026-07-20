@@ -79,6 +79,28 @@ class TestChatSessionTools:
         passed_kwargs = mock_client.create_session.call_args.kwargs
         assert "tools" not in passed_kwargs
 
+    @pytest.mark.asyncio
+    async def test_create_chat_session_survives_prewarm_failure(
+        self, _mock_sidecar_calls, monkeypatch: pytest.MonkeyPatch
+    ):
+        from rootcoz.engine.chat import _create_chat_session
+
+        mock_client = _mock_sidecar_calls
+        mock_client.create_session = AsyncMock(return_value="sess-prewarm")
+
+        async def boom(_provider: str = "") -> list:
+            raise RuntimeError("catalog down")
+
+        monkeypatch.setattr("rootcoz.ai_client.list_models", boom)
+        session_id = await _create_chat_session(
+            system_prompt="test",
+            ai_provider="cursor",
+            ai_model="cursor:default[]",
+            restrict_tools=True,
+        )
+        assert session_id == "sess-prewarm"
+        assert mock_client.create_session.await_count == 1
+
 
 class TestChatImplTools:
     """Verify _chat_with_ai_impl passes tools on new session and retry."""
