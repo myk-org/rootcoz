@@ -6403,3 +6403,24 @@ class TestIsChildReviewKey:
         from rootcoz.main import _is_child_review_key
 
         assert _is_child_review_key(key) == expected
+
+
+class TestReadLogTail:
+    """Bounded backwards log tail reader for /api/admin/logs/stream."""
+
+    def test_returns_last_n_lines(self, tmp_path) -> None:
+        from rootcoz.main import _read_log_tail
+
+        path = tmp_path / "app.log"
+        path.write_text("\n".join(f"line-{i}" for i in range(20)) + "\n")
+        assert _read_log_tail(path, 5) == [f"line-{i}" for i in range(15, 20)]
+
+    def test_respects_max_bytes_budget(self, tmp_path) -> None:
+        from rootcoz.main import _read_log_tail
+
+        path = tmp_path / "big.log"
+        # 50 lines of 100 bytes each; max_bytes=250 should not return all 50
+        path.write_bytes((b"y" * 99 + b"\n") * 50)
+        result = _read_log_tail(path, 50, max_bytes=250, chunk_size=100)
+        assert 0 < len(result) < 50
+        assert all(line.startswith("y") for line in result)

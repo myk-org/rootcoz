@@ -68,6 +68,10 @@ _CURSOR_KEY_SET_BUT_UNAVAILABLE_HINT = (
 # (e.g. write) that chat should never have.
 CHAT_BUILTIN_TOOLS: tuple[str, ...] = ("read", "ls", "find", "grep", "subagent")
 ANALYSIS_BUILTIN_TOOLS: tuple[str, ...] = ("read", "ls", "find", "grep", "subagent")
+# Prompt wording for cloned repos — must match tool policy (no shell/git).
+RESOURCE_REPO_BROWSE_HINT = (
+    "browse with read, ls, find, and grep only (no shell execution)"
+)
 
 
 def normalize_provider(provider: str) -> str:
@@ -134,21 +138,15 @@ def map_provider_model_for_sidecar(provider: str, model: str) -> tuple[str, str]
     return sidecar_provider, _map_model_for_sidecar(sidecar_provider, model)
 
 
-async def list_models(provider: str = "") -> list[dict]:
-    """List models for a friendly provider, merging ACPX/API + CLI sources.
+def list_models_from_catalog(friendly: str, all_models: list[dict]) -> list[dict]:
+    """Filter a sidecar catalog into one friendly provider's models.
 
-    Each entry includes ``source``: ``acpx`` | ``cli`` | ``api``.
+    Updates ``_model_route_cache`` for each ``(friendly, model_id)``.
     Deduplicates by model id (first source wins: default/ACPX/API before CLI).
     """
-    if not provider:
-        return await _list_models_raw("")
-
-    friendly = normalize_provider(provider)
+    friendly = normalize_provider(friendly)
     if friendly not in VALID_AI_PROVIDERS:
         return []
-
-    client = get_sidecar_client()
-    all_models = await client.get_models()
 
     sidecar_order = [_DEFAULT_SIDECAR[friendly]]
     cli_id = _CLI_SIDECAR.get(friendly)
@@ -178,6 +176,31 @@ async def list_models(provider: str = "") -> list[dict]:
                 }
             )
     return result
+
+
+def build_friendly_catalog(all_models: list[dict]) -> dict[str, list[dict]]:
+    """Build per-friendly-provider catalogs from one sidecar ``get_models()`` result."""
+    return {
+        p: list_models_from_catalog(p, all_models) for p in sorted(VALID_AI_PROVIDERS)
+    }
+
+
+async def list_models(provider: str = "") -> list[dict]:
+    """List models for a friendly provider, merging ACPX/API + CLI sources.
+
+    Each entry includes ``source``: ``acpx`` | ``cli`` | ``api``.
+    Deduplicates by model id (first source wins: default/ACPX/API before CLI).
+    """
+    if not provider:
+        return await _list_models_raw("")
+
+    friendly = normalize_provider(provider)
+    if friendly not in VALID_AI_PROVIDERS:
+        return []
+
+    client = get_sidecar_client()
+    all_models = await client.get_models()
+    return list_models_from_catalog(friendly, all_models)
 
 
 def _parse_agent_status_text(text: str) -> str | None:

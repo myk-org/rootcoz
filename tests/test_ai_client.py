@@ -124,6 +124,34 @@ async def test_list_models_merges_and_tags_source(
 
 
 @pytest.mark.asyncio
+async def test_build_friendly_catalog_single_pass() -> None:
+    """One sidecar catalog builds all friendly providers without re-fetching."""
+    catalog = [
+        {
+            "id": "cursor:default[]",
+            "name": "Default",
+            "provider": "acpx-cursor",
+        },
+        {
+            "id": "claude-opus-4-6",
+            "name": "Opus",
+            "provider": "google-vertex-claude",
+        },
+        {
+            "id": "gemini-2.5-pro",
+            "name": "Gemini",
+            "provider": "google",
+        },
+    ]
+    result = ai_client.build_friendly_catalog(catalog)
+    assert set(result) == VALID_AI_PROVIDERS
+    assert [m["id"] for m in result["cursor"]] == ["cursor:default[]"]
+    assert [m["id"] for m in result["claude"]] == ["claude-opus-4-6"]
+    assert [m["id"] for m in result["gemini"]] == ["gemini-2.5-pro"]
+    assert ai_client._model_route_cache[("cursor", "cursor:default[]")] == "acpx-cursor"
+
+
+@pytest.mark.asyncio
 async def test_list_models_route_cache_first_source_wins(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

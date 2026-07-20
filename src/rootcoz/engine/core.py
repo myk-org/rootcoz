@@ -18,7 +18,12 @@ from pathlib import Path
 
 from simple_logger.logger import get_logger
 
-from rootcoz.ai_client import AIResult, ANALYSIS_BUILTIN_TOOLS, call_ai_once
+from rootcoz.ai_client import (
+    AIResult,
+    ANALYSIS_BUILTIN_TOOLS,
+    RESOURCE_REPO_BROWSE_HINT,
+    call_ai_once,
+)
 from rootcoz.config import Settings, parse_additional_repos
 from rootcoz.engine.chat import build_analysis_history_tools
 from rootcoz.logging_context import get_log_file
@@ -1118,8 +1123,9 @@ def build_resources_section(
 ) -> str:
     """Build a section telling the AI about available resources.
 
-    Instead of pre-fetching data (git log, custom prompt files), this tells the
+    Instead of pre-fetching data (history, custom prompt files), this tells the
     AI what tools and files are available so it can access them on its own.
+    Capability text comes from ``RESOURCE_REPO_BROWSE_HINT`` (tied to tool policy).
 
     Args:
         repo_path: Path to workspace root (all repos are subdirectories), or None.
@@ -1146,8 +1152,7 @@ def build_resources_section(
             is_git = (path / ".git").exists()
             if is_git:
                 resources.append(
-                    f"- Repository '{name}' at {path} — browse with read, ls, find, "
-                    "and grep only (no shell execution)"
+                    f"- Repository '{name}' at {path} — {RESOURCE_REPO_BROWSE_HINT}"
                 )
             else:
                 resources.append(

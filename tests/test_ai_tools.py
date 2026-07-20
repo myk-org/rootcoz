@@ -458,6 +458,7 @@ class TestAgentGateSection:
         assert names == ["safe-agent"]
 
     def test_resources_section_does_not_advertise_git(self, tmp_path):
+        from rootcoz.ai_client import RESOURCE_REPO_BROWSE_HINT
         from rootcoz.engine.core import build_resources_section
 
         repo = tmp_path / "repo"
@@ -467,6 +468,7 @@ class TestAgentGateSection:
         )
         assert "run git" not in section.lower()
         assert "git commands" not in section.lower()
+        assert RESOURCE_REPO_BROWSE_HINT in section
         assert "read" in section.lower() and "grep" in section.lower()
 
     def test_history_section_requires_auth_token(self, tmp_path, monkeypatch):

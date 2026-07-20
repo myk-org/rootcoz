@@ -29,6 +29,7 @@ from pi_sidecar_client import (
 from rootcoz.ai_client import (
     VALID_AI_PROVIDERS,
     _setup_usage_recorder,
+    build_friendly_catalog,
     call_ai_once,
     clear_cursor_auth_cache,
     format_chat_ai_user_error,
@@ -7668,17 +7669,15 @@ async def list_ai_models(
                 payload["provider_status"] = {"cursor": cursor_status}
             return payload
 
-        # No provider specified — return models for all known providers
-        all_models: dict[str, list[dict]] = {}
-        for p in sorted(VALID_AI_PROVIDERS):
-            try:
-                models = await list_models(p)
-                all_models[p] = models
-            except Exception:
-                logger.warning(
-                    "Failed to list models for provider=%s", p, exc_info=True
-                )
-                all_models[p] = []
+        # No provider specified — one sidecar catalog, then split per friendly provider
+        from pi_sidecar_client import get_sidecar_client
+
+        try:
+            raw_catalog = await get_sidecar_client().get_models()
+            all_models = build_friendly_catalog(raw_catalog)
+        except Exception:
+            logger.warning("Failed to list models for all providers", exc_info=True)
+            all_models = {p: [] for p in sorted(VALID_AI_PROVIDERS)}
         cursor_count = len(all_models.get("cursor", []))
         if is_admin:
             cursor_status = _cursor_status_for_client(
@@ -7716,9 +7715,8 @@ async def refresh_ai_models(request: Request) -> dict:
         clear_cursor_auth_cache()
         client = get_sidecar_client()
         models = await client.refresh_models()
-        # Rebuild friendly provider catalogs + route cache
-        for p in sorted(VALID_AI_PROVIDERS):
-            await list_models(p)
+        # Rebuild friendly provider catalogs + route cache from one catalog
+        build_friendly_catalog(models)
         cursor_status = await probe_cursor_auth(force=True)
         logger.info(
             "Model refresh complete: %d models available (cursor_ok=%s)",
@@ -8406,6 +8404,44 @@ def _install_sse_log_handler() -> None:
     _sse_log_handler = handler
 
 
+_MAX_LOG_TAIL_BYTES = 8 * 1024 * 1024  # 8 MiB hard cap independent of line count
+_LOG_TAIL_CHUNK_BYTES = 256 * 1024  # 256 KiB backwards reads
+
+
+def _read_log_tail(
+    path: Path,
+    n: int,
+    *,
+    max_bytes: int = _MAX_LOG_TAIL_BYTES,
+    chunk_size: int = _LOG_TAIL_CHUNK_BYTES,
+) -> list[str]:
+    """Read last ``n`` lines from a log file with a hard max-byte budget.
+
+    Reads backwards in fixed-size chunks until ``n`` lines are collected or
+    ``max_bytes`` is reached (whichever first). Intended for ``asyncio.to_thread``.
+    """
+    with open(path, "rb") as f:
+        f.seek(0, 2)
+        size = f.tell()
+        if size == 0:
+            return []
+        parts: list[bytes] = []
+        pos = size
+        bytes_read = 0
+        newline_count = 0
+        while pos > 0 and bytes_read < max_bytes and newline_count <= n:
+            to_read = min(chunk_size, pos, max_bytes - bytes_read)
+            pos -= to_read
+            f.seek(pos)
+            chunk = f.read(to_read)
+            parts.append(chunk)
+            bytes_read += to_read
+            newline_count += chunk.count(b"\n")
+        raw = b"".join(reversed(parts))
+        text = raw.decode("utf-8", errors="replace")
+        return text.splitlines()[-n:]
+
+
 @app.get("/api/admin/logs/stream")
 async def stream_logs(
     request: Request,
@@ -8424,26 +8460,15 @@ async def stream_logs(
             return True
         return level_filter in line
 
-    def _read_tail(path: Path, n: int) -> list[str]:
-        """Read last n lines from log file efficiently. Runs in thread."""
-        with open(path, "rb") as f:
-            f.seek(0, 2)  # seek to end
-            size = f.tell()
-            # Read in chunks from the end
-            chunk_size = min(size, 8192 * n)  # estimate ~8KB per line max
-            f.seek(max(0, size - chunk_size))
-            raw = f.read()
-            text = raw.decode("utf-8", errors="replace")
-            all_lines = text.splitlines()
-            return all_lines[-n:]
-
     async def event_generator():
         # Send initial tail from log file
         if _LOG_FILE:
             log_path = Path(_LOG_FILE)
             if log_path.exists():
                 try:
-                    tail_lines = await asyncio.to_thread(_read_tail, log_path, lines)
+                    tail_lines = await asyncio.to_thread(
+                        _read_log_tail, log_path, lines
+                    )
                     for line in tail_lines:
                         clean = _ANSI_RE.sub("", line)
                         if _matches_level(clean):
