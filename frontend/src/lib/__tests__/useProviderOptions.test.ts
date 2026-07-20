@@ -2,6 +2,7 @@ import { act, renderHook, waitFor } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   _resetProviderCatalogCacheForTests,
+  resetProviderCatalogCache,
   useCursorAuthStatus,
   useEnabledProviders,
   useProviderCatalog,
@@ -74,5 +75,51 @@ describe('useProviderCatalog shared fetch', () => {
     a.unmount()
     b.unmount()
     c.unmount()
+  })
+
+  it('refetches mounted catalog consumers after resetProviderCatalogCache', async () => {
+    getMock
+      .mockResolvedValueOnce({
+        providers: {
+          cursor: [{ id: 'cursor:1', name: 'One' }],
+          claude: [],
+          gemini: [],
+        },
+        provider_status: {
+          cursor: { ok: false, reason: 'unavailable', hint: 'stale' },
+        },
+      })
+      .mockResolvedValueOnce({
+        providers: {
+          cursor: [{ id: 'cursor:1', name: 'One' }],
+          claude: [{ id: 'claude:1', name: 'Sonnet' }],
+          gemini: [],
+        },
+        provider_status: {
+          cursor: { ok: true, reason: null, hint: null },
+        },
+      })
+
+    const { result, unmount } = renderHook(() => useProviderCatalog())
+
+    await waitFor(() => {
+      expect(result.current.enabled).toEqual(['cursor'])
+      expect(result.current.providerStatus.cursor?.ok).toBe(false)
+    })
+    expect(getMock).toHaveBeenCalledTimes(1)
+
+    await act(async () => {
+      resetProviderCatalogCache()
+    })
+
+    await waitFor(() => {
+      expect(result.current.enabled).toEqual(
+        expect.arrayContaining(['cursor', 'claude']),
+      )
+      expect(result.current.enabled).toHaveLength(2)
+      expect(result.current.providerStatus.cursor?.ok).toBe(true)
+    })
+    expect(getMock).toHaveBeenCalledTimes(2)
+    unmount()
   })
 })

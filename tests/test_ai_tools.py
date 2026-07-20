@@ -32,6 +32,19 @@ class TestToolConstants:
     def test_analysis_tools_no_bash(self):
         assert "bash" not in ANALYSIS_BUILTIN_TOOLS
 
+    def test_browse_hint_derived_from_fs_tools(self):
+        from rootcoz.ai_client import RESOURCE_REPO_BROWSE_HINT, _FS_BROWSE_TOOLS
+
+        assert CHAT_BUILTIN_TOOLS[:4] == _FS_BROWSE_TOOLS
+        assert ANALYSIS_BUILTIN_TOOLS[:4] == _FS_BROWSE_TOOLS
+        for tool in _FS_BROWSE_TOOLS:
+            assert tool in RESOURCE_REPO_BROWSE_HINT
+        assert "git commands" in RESOURCE_REPO_BROWSE_HINT
+        assert "no shell" in RESOURCE_REPO_BROWSE_HINT
+        lower = RESOURCE_REPO_BROWSE_HINT.lower()
+        assert "run git" not in lower
+        assert "bash" in lower  # explicitly forbidden in the hint text
+
     def test_chat_tools_filesystem_browsing(self):
         for tool in ("read", "ls", "find", "grep"):
             assert tool in CHAT_BUILTIN_TOOLS

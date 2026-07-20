@@ -162,10 +162,11 @@ ROOTCOZ_HISTORY_PROMPT_FILENAME = "ROOTCOZ_HISTORY_PROMPT.md"
 
 
 def _rootcoz_prompt_fingerprint(path: Path) -> str:
-    """Read a ``.rootcoz`` prompt file and return a short content fingerprint.
+    """Open a ``.rootcoz`` prompt file and return a content fingerprint.
 
-    Proves the file was opened/validated without embedding its body in the
-    AI prompt (file-based access policy — issue #74).
+    Uses ``Path.read_bytes()`` so the file is actually loaded for verification,
+    then advertises only sha256/size — never the body — so the AI must use the
+    ``read`` tool (AGENTS.md file-based data policy / issue #74).
     """
     try:
         raw = path.read_bytes()

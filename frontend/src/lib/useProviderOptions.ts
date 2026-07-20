@@ -22,6 +22,8 @@ let catalogInflight: Promise<CatalogState> | null = null
 let catalogCache: CatalogState | null = null
 /** Auth-scoped key (`username:adminFlag`) for the active cache entry. */
 let catalogCacheKey: string | null = null
+/** Mounted useProviderCatalog consumers — notified on cache reset. */
+const catalogSubscribers = new Set<() => void>()
 
 function catalogKeyFor(username: string, isAdmin: boolean, authenticated: boolean): string {
   if (!authenticated || !username) return 'anon'
@@ -67,11 +69,14 @@ function loadProviderCatalog(cacheKey: string): Promise<CatalogState> {
   return req
 }
 
-/** Clear shared catalog cache (login/logout/refresh/tests). */
+/** Clear shared catalog cache and notify mounted consumers to refetch. */
 export function resetProviderCatalogCache(): void {
   catalogInflight = null
   catalogCache = null
   catalogCacheKey = null
+  for (const notify of [...catalogSubscribers]) {
+    notify()
+  }
 }
 
 /** @deprecated Prefer resetProviderCatalogCache — kept for existing tests. */
@@ -92,9 +97,18 @@ export function useProviderCatalog(): {
 } {
   const { username, isAdmin, authenticated } = useAuth()
   const cacheKey = catalogKeyFor(username, isAdmin, authenticated)
+  const [reloadToken, setReloadToken] = useState(0)
   const [state, setState] = useState<CatalogState>(
     catalogCache && catalogCacheKey === cacheKey ? catalogCache : EMPTY_CATALOG,
   )
+
+  useEffect(() => {
+    const notify = () => setReloadToken((n) => n + 1)
+    catalogSubscribers.add(notify)
+    return () => {
+      catalogSubscribers.delete(notify)
+    }
+  }, [])
 
   useEffect(() => {
     let ignore = false
@@ -108,7 +122,7 @@ export function useProviderCatalog(): {
     return () => {
       ignore = true
     }
-  }, [cacheKey])
+  }, [cacheKey, reloadToken])
 
   return state
 }
