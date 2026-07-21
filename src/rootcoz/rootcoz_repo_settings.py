@@ -41,6 +41,9 @@ ROOTCOZ_SETTINGS_FILENAME = "settings.json"
 ROOTCOZ_SETTINGS_SCHEMA_PATH = (
     Path(__file__).resolve().parent / "schemas" / "rootcoz-settings.schema.json"
 )
+# Hard cap for untrusted .rootcoz/settings.json from a cloned tests repo.
+MAX_SETTINGS_JSON_BYTES = 256 * 1024
+
 
 # Allowed top-level keys — keep in sync with RootcozRepoSettings fields.
 ROOTCOZ_SETTINGS_KEYS = frozenset(
@@ -101,7 +104,8 @@ class RootcozAdditionalRepo(BaseModel):
         try:
             AdditionalRepo.model_validate({"name": "x", "url": v})
         except ValidationError as exc:
-            raise ValueError(f"invalid additional_repos url: {v}") from exc
+            # Never embed the raw URL — it may contain credentials in userinfo.
+            raise ValueError("invalid additional_repos url") from exc
         return v
 
 
@@ -228,7 +232,10 @@ def load_rootcoz_repo_settings(tests_repo_path: Path) -> RootcozRepoSettings | N
             "(symlinks are not allowed)"
         )
     if not path.is_file():
-        return None
+        raise RootcozSettingsError(
+            f"{ROOTCOZ_SETTINGS_FILENAME} must be a regular file "
+            "(directories and other non-file paths are not allowed)"
+        )
     try:
         resolved = path.resolve(strict=True)
         repo_root = tests_repo_path.resolve(strict=True)
@@ -241,11 +248,31 @@ def load_rootcoz_repo_settings(tests_repo_path: Path) -> RootcozRepoSettings | N
             f"{ROOTCOZ_SETTINGS_FILENAME} resolves outside the test repository"
         )
     try:
-        raw_text = path.read_text(encoding="utf-8")
+        size = path.stat().st_size
+    except OSError as exc:
+        raise RootcozSettingsError(
+            f"Failed to stat {ROOTCOZ_SETTINGS_FILENAME}"
+        ) from exc
+    if size > MAX_SETTINGS_JSON_BYTES:
+        raise RootcozSettingsError(
+            f"{ROOTCOZ_SETTINGS_FILENAME} exceeds maximum size "
+            f"({MAX_SETTINGS_JSON_BYTES} bytes)"
+        )
+    try:
+        # Read with an explicit byte cap to avoid TOCTOU growth after the size check.
+        with path.open("rb") as fh:
+            raw_bytes = fh.read(MAX_SETTINGS_JSON_BYTES + 1)
     except OSError as exc:
         raise RootcozSettingsError(
             f"Failed to read {ROOTCOZ_SETTINGS_FILENAME}"
         ) from exc
+    if len(raw_bytes) > MAX_SETTINGS_JSON_BYTES:
+        raise RootcozSettingsError(
+            f"{ROOTCOZ_SETTINGS_FILENAME} exceeds maximum size "
+            f"({MAX_SETTINGS_JSON_BYTES} bytes)"
+        )
+    try:
+        raw_text = raw_bytes.decode("utf-8")
     except UnicodeError as exc:
         raise RootcozSettingsError(
             f"Invalid encoding in {ROOTCOZ_SETTINGS_FILENAME}"

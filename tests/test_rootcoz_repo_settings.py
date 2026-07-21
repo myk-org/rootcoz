@@ -192,6 +192,46 @@ class TestLoadRootcozRepoSettings:
         with pytest.raises(RootcozSettingsError, match="symlink|regular file"):
             load_rootcoz_repo_settings(tmp_path)
 
+    def test_rejects_directory_settings(self, tmp_path: Path) -> None:
+        rootcoz = tmp_path / ".rootcoz"
+        rootcoz.mkdir()
+        (rootcoz / "settings.json").mkdir()
+        with pytest.raises(RootcozSettingsError, match="regular file"):
+            load_rootcoz_repo_settings(tmp_path)
+
+    def test_rejects_oversized_settings(self, tmp_path: Path) -> None:
+        from rootcoz.rootcoz_repo_settings import MAX_SETTINGS_JSON_BYTES
+
+        rootcoz = tmp_path / ".rootcoz"
+        rootcoz.mkdir()
+        (rootcoz / "settings.json").write_bytes(
+            b"{" + (b"a" * (MAX_SETTINGS_JSON_BYTES + 1)) + b"}"
+        )
+        with pytest.raises(RootcozSettingsError, match="maximum size"):
+            load_rootcoz_repo_settings(tmp_path)
+
+    def test_credential_url_not_leaked_in_error(self, tmp_path: Path) -> None:
+        secret = "p@ssw0rd-secret"  # pragma: allowlist secret
+        _write_settings(
+            tmp_path,
+            {
+                "additional_repos": [
+                    {
+                        "name": "extra",
+                        # Invalid scheme so validation fails; must not echo URL.
+                        "url": f"ftp://user:{secret}@evil.example/repo",
+                    }
+                ]
+            },
+        )
+        with pytest.raises(RootcozSettingsError) as exc_info:
+            load_rootcoz_repo_settings(tmp_path)
+        msg = str(exc_info.value)
+        assert secret not in msg
+        assert "ftp://" not in msg
+        assert "evil.example" not in msg
+        assert "invalid additional_repos url" in msg
+
     def test_rejects_non_utf8_settings(self, tmp_path: Path) -> None:
         rootcoz = tmp_path / ".rootcoz"
         rootcoz.mkdir()
