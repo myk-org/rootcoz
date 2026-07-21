@@ -11,6 +11,7 @@ from rootcoz.engine.chat import (
     _extract_build_params,
     build_admin_custom_tools,
     build_admin_system_prompt,
+    build_analysis_history_tools,
     build_chat_custom_tools,
     build_chat_prompt,
     build_system_prompt,
@@ -73,6 +74,75 @@ async def setup_test_db(temp_db_path: Path):
 # ---------------------------------------------------------------------------
 
 
+class TestBuildAnalysisHistoryTools:
+    """Tests for build_analysis_history_tools (analysis history, no prompt tokens)."""
+
+    def test_expected_tool_names(self):
+        tools = build_analysis_history_tools(
+            server_url="http://localhost:8700",
+            auth_token="secret-tok",
+            job_id="job-1",
+        )
+        assert [t["name"] for t in tools] == [
+            "get_failure_history",
+            "search_error_signature",
+            "get_classification_history",
+            "get_job_history_stats",
+            "classify_test_pattern",
+        ]
+
+    def test_auth_only_in_http_headers(self):
+        tools = build_analysis_history_tools(
+            server_url="http://localhost:8700/",
+            auth_token="secret-tok",
+            job_id="job-1",
+        )
+        for tool in tools:
+            assert tool["http"]["headers"]["Authorization"] == "Bearer secret-tok"
+            assert "secret-tok" not in tool["description"]
+            assert "secret-tok" not in tool["name"]
+
+    def test_exclude_job_id_baked_in(self):
+        tools = build_analysis_history_tools(
+            server_url="http://localhost:8700",
+            auth_token="tok",
+            job_id="exclude-me",
+        )
+        hist = next(t for t in tools if t["name"] == "get_failure_history")
+        assert hist["http"]["query_params"]["exclude_job_id"] == "exclude-me"
+        assert hist["http"]["query_params"]["job_name"] == "{job_name}"
+        assert hist["parameters"]["required"] == ["test_name", "job_name"]
+        classify = next(t for t in tools if t["name"] == "classify_test_pattern")
+        assert classify["http"]["body_template"]["job_id"] == "exclude-me"
+        assert classify["http"]["body_template"]["source"] == "ai"
+
+    def test_shared_history_url_and_auth_shape_with_chat(self):
+        """Chat and analysis share the same endpoint + bearer header shape."""
+        analysis = build_analysis_history_tools(
+            server_url="http://localhost:8700",
+            auth_token="tok",
+            job_id="job-a",
+        )
+        chat = build_chat_custom_tools(
+            server_url="http://localhost:8700",
+            auth_token="tok",
+            job_id="job-a",
+        )
+        a_hist = next(t for t in analysis if t["name"] == "get_failure_history")
+        c_hist = next(t for t in chat if t["name"] == "get_failure_history")
+        assert a_hist["http"]["url"] == c_hist["http"]["url"]
+        assert a_hist["http"]["method"] == c_hist["http"]["method"] == "GET"
+        assert a_hist["http"]["headers"] == c_hist["http"]["headers"]
+
+        a_cls = next(t for t in analysis if t["name"] == "get_classification_history")
+        c_cls = next(t for t in chat if t["name"] == "get_classification_history")
+        assert a_cls["http"]["url"] == c_cls["http"]["url"]
+        assert a_cls["http"]["headers"] == c_cls["http"]["headers"]
+        from rootcoz.storage import AI_SYSTEM_USERNAME
+
+        assert AI_SYSTEM_USERNAME in a_cls["description"]
+
+
 class TestBuildChatCustomTools:
     """Tests for build_chat_custom_tools."""
 
@@ -100,7 +170,7 @@ class TestBuildChatCustomTools:
         tool = next(t for t in tools if t["name"] == "get_failure_history")
         assert "test_name" in tool["parameters"]["properties"]
         assert "job_name" in tool["parameters"]["properties"]
-        assert tool["parameters"]["required"] == ["test_name"]
+        assert tool["parameters"]["required"] == ["test_name", "job_name"]
         assert "{test_name}" in tool["http"]["url"]
         assert tool["http"]["query_params"]["job_name"] == "{job_name}"
         assert tool["http"]["method"] == "GET"
@@ -113,10 +183,10 @@ class TestBuildChatCustomTools:
         )
         tool = next(t for t in tools if t["name"] == "get_classification_history")
         assert "test_name" in tool["parameters"]["properties"]
-        assert "job_id" in tool["parameters"]["properties"]
+        assert "job_id" not in tool["parameters"]["properties"]
         assert tool["parameters"]["required"] == ["test_name"]
         assert tool["http"]["query_params"]["test_name"] == "{test_name}"
-        assert tool["http"]["query_params"]["job_id"] == "{job_id}"
+        assert "job_id" not in tool["http"]["query_params"]
 
     def test_jira_tools(self):
         tools = build_chat_custom_tools(
@@ -1046,7 +1116,11 @@ class TestChatEndpoints:
             mock_chat.return_value = (True, "AI response here", None)
             response = test_client.post(
                 "/api/chat/chat-send-job",
-                json={"message": "what failed?", "ai_provider": "claude"},
+                json={
+                    "message": "what failed?",
+                    "ai_provider": "claude",
+                    "ai_model": "sonnet-4",
+                },
             )
         assert response.status_code == 202
         data = response.json()
@@ -1073,7 +1147,11 @@ class TestChatEndpoints:
             mock_chat.return_value = (True, "first response", None)
             test_client.post(
                 "/api/chat/chat-hist-job",
-                json={"message": "hello", "ai_provider": "claude"},
+                json={
+                    "message": "hello",
+                    "ai_provider": "claude",
+                    "ai_model": "sonnet-4",
+                },
             )
         # Verify messages by fetching chat history
         response = test_client.get("/api/chat/chat-hist-job")
@@ -1093,7 +1171,11 @@ class TestChatEndpoints:
             mock_chat.return_value = (True, "resp", None)
             test_client.post(
                 "/api/chat/chat-del-job",
-                json={"message": "hello", "ai_provider": "claude"},
+                json={
+                    "message": "hello",
+                    "ai_provider": "claude",
+                    "ai_model": "sonnet-4",
+                },
             )
         response = test_client.delete("/api/chat/chat-del-job")
         assert response.status_code == 200
@@ -1121,7 +1203,7 @@ class TestChatEndpoints:
     def test_send_message_404_for_missing_job(self, test_client):
         response = test_client.post(
             "/api/chat/nonexistent-job",
-            json={"message": "hello", "ai_provider": "claude"},
+            json={"message": "hello", "ai_provider": "claude", "ai_model": "sonnet-4"},
         )
         assert response.status_code == 404
 
@@ -1129,10 +1211,70 @@ class TestChatEndpoints:
         await _save_job(temp_db_path, "chat-badprov-job")
         response = test_client.post(
             "/api/chat/chat-badprov-job",
-            json={"message": "hello", "ai_provider": "invalid-provider"},
+            json={
+                "message": "hello",
+                "ai_provider": "invalid-provider",
+                "ai_model": "x",
+            },
         )
         assert response.status_code == 422
         assert "Invalid AI provider" in response.json()["detail"]
+
+    async def test_send_message_normalizes_legacy_provider_alias(
+        self, test_client, temp_db_path: Path
+    ):
+        """Legacy aliases (cursor-cli) must normalize to cursor before validation."""
+        await _save_job(temp_db_path, "chat-alias-job")
+        with patch(
+            "rootcoz.engine.chat.chat_with_ai", new_callable=AsyncMock
+        ) as mock_chat:
+            mock_chat.return_value = (True, "ok", None)
+            response = test_client.post(
+                "/api/chat/chat-alias-job",
+                json={
+                    "message": "hello",
+                    "ai_provider": "cursor-cli",
+                    "ai_model": "composer-1",
+                },
+            )
+        assert response.status_code == 202
+        history = test_client.get("/api/chat/chat-alias-job").json()
+        assistant_msgs = [m for m in history["messages"] if m["role"] == "assistant"]
+        assert assistant_msgs[0]["ai_provider"] == "cursor"
+        assert assistant_msgs[0]["ai_model"] == "composer-1"
+
+    async def test_send_message_normalizes_provider_case(
+        self, test_client, temp_db_path: Path
+    ):
+        await _save_job(temp_db_path, "chat-case-job")
+        with patch(
+            "rootcoz.engine.chat.chat_with_ai", new_callable=AsyncMock
+        ) as mock_chat:
+            mock_chat.return_value = (True, "ok", None)
+            response = test_client.post(
+                "/api/chat/chat-case-job",
+                json={
+                    "message": "hello",
+                    "ai_provider": "CURSOR",
+                    "ai_model": "composer-1",
+                },
+            )
+        assert response.status_code == 202
+        history = test_client.get("/api/chat/chat-case-job").json()
+        assistant_msgs = [m for m in history["messages"] if m["role"] == "assistant"]
+        assert assistant_msgs[0]["ai_provider"] == "cursor"
+        assert assistant_msgs[0]["ai_model"] == "composer-1"
+
+    async def test_send_message_provider_without_model_rejected(
+        self, test_client, temp_db_path: Path
+    ):
+        await _save_job(temp_db_path, "chat-partial-job")
+        response = test_client.post(
+            "/api/chat/chat-partial-job",
+            json={"message": "hello", "ai_provider": "claude"},
+        )
+        assert response.status_code == 422
+        assert "Both ai_provider and ai_model" in response.json()["detail"]
 
     async def test_send_message_ai_failure_marks_failed(
         self, test_client, temp_db_path: Path
@@ -1149,7 +1291,11 @@ class TestChatEndpoints:
             mock_chat.return_value = (False, "AI CLI timed out", None)
             response = test_client.post(
                 "/api/chat/chat-fail-job",
-                json={"message": "hello", "ai_provider": "claude"},
+                json={
+                    "message": "hello",
+                    "ai_provider": "claude",
+                    "ai_model": "sonnet-4",
+                },
             )
         assert response.status_code == 202
         # Background task processes failure — check history
@@ -1168,7 +1314,11 @@ class TestChatEndpoints:
             for i in range(3):
                 test_client.post(
                     "/api/chat/chat-page-job",
-                    json={"message": f"msg-{i}", "ai_provider": "claude"},
+                    json={
+                        "message": f"msg-{i}",
+                        "ai_provider": "claude",
+                        "ai_model": "sonnet-4",
+                    },
                 )
         # 3 user + 3 assistant = 6 total
         response = test_client.get("/api/chat/chat-page-job?limit=2&offset=0")

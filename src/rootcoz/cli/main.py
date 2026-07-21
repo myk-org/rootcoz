@@ -43,6 +43,7 @@ auth_app = typer.Typer(help="Authentication commands.", no_args_is_help=True)
 admin_app = typer.Typer(help="Admin management commands.", no_args_is_help=True)
 admin_users_app = typer.Typer(help="Manage admin users.", no_args_is_help=True)
 admin_settings_app = typer.Typer(help="Manage server settings.", no_args_is_help=True)
+admin_models_app = typer.Typer(help="Manage AI models.", no_args_is_help=True)
 
 metadata_app = typer.Typer(help="Manage job metadata.", no_args_is_help=True)
 failure_app = typer.Typer(
@@ -64,6 +65,7 @@ app.add_typer(auth_app, name="auth")
 app.add_typer(admin_app, name="admin")
 admin_app.add_typer(admin_users_app, name="users")
 admin_app.add_typer(admin_settings_app, name="settings")
+admin_app.add_typer(admin_models_app, name="models")
 
 # -- Global state managed via app callback ------------------------------------
 
@@ -788,7 +790,9 @@ def analyze(
         help="Display name for this analysis on the dashboard (defaults to job_name).",
     ),
     provider: str = typer.Option(
-        "", "--provider", help="AI provider (e.g. claude, gemini, cursor)."
+        "",
+        "--provider",
+        help=("AI provider (claude, gemini, or cursor)."),
     ),
     model: str = typer.Option("", "--model", help="AI model to use."),
     jira: bool | None = typer.Option(
@@ -1712,7 +1716,10 @@ def ai_models_cmd(
         "",
         "--provider",
         "-p",
-        help="Filter by AI provider (e.g. cursor, claude, gemini).",
+        help=(
+            "Filter by AI provider (claude, gemini, or cursor). "
+            "CLI models are listed under the same provider when enabled."
+        ),
     ),
     json_output: bool = _JSON_OPTION,
 ):
@@ -2616,6 +2623,21 @@ def admin_settings_reset(
     )
     if not _state.get("json", False):
         typer.echo(f"Reset: {key}")
+
+
+# -- AI Models (Admin) --------------------------------------------------------
+
+
+@admin_models_app.command("refresh")
+def admin_models_refresh(
+    json_output: bool = _JSON_OPTION,
+) -> None:
+    """Refresh AI model list from sidecar."""
+    _run_client_command(
+        json_output,
+        lambda c: c.refresh_ai_models(),
+        columns=["count"],
+    )
 
 
 # -- Token Usage (Admin) ------------------------------------------------------

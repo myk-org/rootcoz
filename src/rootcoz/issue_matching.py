@@ -9,7 +9,7 @@ import os
 
 from simple_logger.logger import get_logger
 
-from pi_sidecar_client import call_ai_once
+from rootcoz.ai_client import call_ai_once
 
 logger = get_logger(name=__name__, level=os.environ.get("LOG_LEVEL", "INFO"))
 
@@ -99,6 +99,7 @@ Respond with ONLY the JSON array, no other text."""
         ai_provider=ai_provider,
         ai_model=ai_model,
         ai_call_timeout=ai_call_timeout,
+        tools=[],
     )
 
     if job_id:

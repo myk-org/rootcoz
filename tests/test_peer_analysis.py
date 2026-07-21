@@ -2,6 +2,7 @@
 
 import json
 from contextlib import contextmanager
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
@@ -585,17 +586,33 @@ class TestParsePeerResponse:
 
 
 class TestBuildFailureSummary:
-    def test_no_stack_trace_in_summary(self) -> None:
-        """Failure summary should NOT contain stack trace -- peers have repo access."""
+    def test_no_embedded_error_or_stack_in_summary(self, tmp_path: Path) -> None:
+        """Failure summary must not embed error/stack — only a file pointer."""
         from rootcoz.peer_analysis import _build_failure_summary
 
-        failures = [_make_failure(stack_trace="at com.example.Foo.bar(Foo.java:10)")]
-        summary = _build_failure_summary(failures, error_signature="abc123")
-        assert "STACK TRACE" not in summary
+        failures = [
+            _make_failure(
+                error_message="NullPointerException at line 42",
+                stack_trace="at com.example.Foo.bar(Foo.java:10)",
+            )
+        ]
+        summary = _build_failure_summary(
+            failures, error_signature="abc123", workspace_dir=tmp_path
+        )
         assert "Foo.java:10" not in summary
+        assert "NullPointerException at line 42" not in summary
+        assert "abc123" in summary
+        assert "failure-details-" in summary
+        detail_files = list(tmp_path.glob("failure-details-*.txt"))
+        assert len(detail_files) == 1
+        content = detail_files[0].read_text()
+        assert "NullPointerException at line 42" in content
+        assert "Foo.java:10" in content
 
-    def test_failure_summary_contains_essentials(self) -> None:
-        """Failure summary includes error signature, test names, and error message."""
+    def test_failure_summary_points_to_file_with_essentials(
+        self, tmp_path: Path
+    ) -> None:
+        """Summary points at a file that contains signature, tests, and error."""
         from rootcoz.peer_analysis import _build_failure_summary
 
         failures = [
@@ -605,10 +622,34 @@ class TestBuildFailureSummary:
                 stack_trace="ignored",
             )
         ]
-        summary = _build_failure_summary(failures, error_signature="sig456")
+        summary = _build_failure_summary(
+            failures, error_signature="sig456", workspace_dir=tmp_path
+        )
         assert "sig456" in summary
-        assert "test_alpha" in summary
-        assert "NullPointerException" in summary
+        assert "test_alpha" not in summary  # in file, not prompt
+        assert "NullPointerException" not in summary
+        detail_files = list(tmp_path.glob("failure-details-*.txt"))
+        assert len(detail_files) == 1
+        content = detail_files[0].read_text()
+        assert "sig456" in content
+        assert "test_alpha" in content
+
+    def test_failure_summary_oserror_raises_runtime_error(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Filesystem errors when writing failure details become RuntimeError."""
+        from rootcoz import peer_analysis
+
+        def _boom(*_a, **_k):
+            raise OSError("disk full")
+
+        monkeypatch.setattr(peer_analysis, "write_failure_details_file", _boom)
+        with pytest.raises(RuntimeError, match="Failed to write failure details"):
+            peer_analysis._build_failure_summary(
+                [_make_failure()],
+                error_signature="sig",
+                workspace_dir=tmp_path,
+            )
 
 
 class TestBuildPeerReviewPrompt:
@@ -674,6 +715,7 @@ class TestAnalyzeWithPeers:
             ai_model="",
             ai_call_timeout=None,
             session_id=None,
+            **_kwargs,
         ):
             return AIResult(success=True, text=peer_response)
 
@@ -741,6 +783,7 @@ class TestAnalyzeWithPeers:
             ai_model="",
             ai_call_timeout=None,
             session_id=None,
+            **_kwargs,
         ):
             nonlocal call_count
             call_count += 1
@@ -813,6 +856,7 @@ class TestAnalyzeWithPeers:
             ai_model="",
             ai_call_timeout=None,
             session_id=None,
+            **_kwargs,
         ):
             nonlocal call_count
             call_count += 1
@@ -887,6 +931,7 @@ class TestAnalyzeWithPeers:
             ai_model="",
             ai_call_timeout=None,
             session_id=None,
+            **_kwargs,
         ):
             nonlocal call_count
             call_count += 1
@@ -983,6 +1028,7 @@ class TestAnalyzeWithPeers:
             ai_model="",
             ai_call_timeout=None,
             session_id=None,
+            **_kwargs,
         ):
             nonlocal call_count
             call_count += 1
@@ -1082,6 +1128,7 @@ class TestAnalyzeWithPeers:
             ai_model="",
             ai_call_timeout=None,
             session_id=None,
+            **_kwargs,
         ):
             nonlocal call_count
             call_count += 1
@@ -1175,6 +1222,7 @@ class TestAnalyzeWithPeers:
             ai_model="",
             ai_call_timeout=None,
             session_id=None,
+            **_kwargs,
         ):
             nonlocal call_count
             call_count += 1
@@ -1244,6 +1292,7 @@ class TestAnalyzeWithPeers:
             ai_model="",
             ai_call_timeout=None,
             session_id=None,
+            **_kwargs,
         ):
             # Revision calls: main AI always returns same classification
             if "revision" in prompt.lower() or "revise" in prompt.lower():
@@ -1330,6 +1379,7 @@ class TestAnalyzeWithPeers:
             ai_model="",
             ai_call_timeout=None,
             session_id=None,
+            **_kwargs,
         ):
             return AIResult(success=True, text=peer_response)
 
@@ -1387,6 +1437,7 @@ class TestAnalyzeWithPeers:
             ai_model="",
             ai_call_timeout=None,
             session_id=None,
+            **_kwargs,
         ):
             nonlocal call_count
             call_count += 1
@@ -1456,6 +1507,7 @@ class TestAnalyzeWithPeers:
             ai_model="",
             ai_call_timeout=None,
             session_id=None,
+            **_kwargs,
         ):
             nonlocal call_count
             call_count += 1
@@ -1534,6 +1586,7 @@ class TestAnalyzeWithPeers:
             ai_model="",
             ai_call_timeout=None,
             session_id=None,
+            **_kwargs,
         ):
             nonlocal call_count
             call_count += 1
@@ -1600,6 +1653,7 @@ class TestAnalyzeWithPeers:
             ai_model="",
             ai_call_timeout=None,
             session_id=None,
+            **_kwargs,
         ):
             return AIResult(success=True, text=peer_agree)
 
@@ -1660,6 +1714,7 @@ class TestAnalyzeWithPeers:
             ai_model="",
             ai_call_timeout=None,
             session_id=None,
+            **_kwargs,
         ):
             nonlocal call_count
             call_count += 1
@@ -1810,6 +1865,7 @@ class TestAnalyzeWithPeers:
             ai_model="",
             ai_call_timeout=None,
             session_id=None,
+            **_kwargs,
         ):
             return AIResult(success=True, text=peer_response)
 
@@ -2027,6 +2083,7 @@ class TestAnalyzeWithPeers:
             ai_model="",
             ai_call_timeout=None,
             session_id=None,
+            **_kwargs,
         ):
             nonlocal call_count
             call_count += 1
@@ -2115,6 +2172,7 @@ class TestAnalyzeWithPeers:
             ai_model="",
             ai_call_timeout=None,
             session_id=None,
+            **_kwargs,
         ):
             nonlocal call_count
             call_count += 1
@@ -2204,6 +2262,7 @@ class TestAnalyzeWithPeers:
             ai_model="",
             ai_call_timeout=None,
             session_id=None,
+            **_kwargs,
         ):
             nonlocal call_count
             call_count += 1
@@ -2294,6 +2353,7 @@ class TestAnalyzeWithPeers:
             ai_model="",
             ai_call_timeout=None,
             session_id=None,
+            **_kwargs,
         ):
             nonlocal call_count
             call_count += 1
@@ -2356,6 +2416,7 @@ class TestAnalyzeWithPeers:
             ai_model="",
             ai_call_timeout=None,
             session_id=None,
+            **_kwargs,
         ):
             nonlocal peer_call_count
             peer_call_count += 1
@@ -2454,6 +2515,7 @@ class TestAnalyzeWithPeers:
             ai_model="",
             ai_call_timeout=None,
             session_id=None,
+            **_kwargs,
         ):
             nonlocal call_count
             call_count += 1
@@ -2564,6 +2626,7 @@ class TestAnalyzeWithPeers:
             ai_model="",
             ai_call_timeout=None,
             session_id=None,
+            **_kwargs,
         ):
             nonlocal call_count
             call_count += 1
@@ -3036,6 +3099,7 @@ class TestOrchestratorEmptyFallback:
             ai_model="",
             ai_call_timeout=None,
             session_id=None,
+            **_kwargs,
         ):
             return AIResult(success=True, text=peer_response)
 
@@ -3088,6 +3152,7 @@ class TestOrchestratorEmptyFallback:
             ai_model="",
             ai_call_timeout=None,
             session_id=None,
+            **_kwargs,
         ):
             nonlocal call_count
             call_count += 1
@@ -3158,6 +3223,7 @@ class TestOrchestratorEmptyFallback:
             ai_model="",
             ai_call_timeout=None,
             session_id=None,
+            **_kwargs,
         ):
             return AIResult(success=False, text="CLI error")
 
@@ -3217,6 +3283,7 @@ class TestOrchestratorEmptyFallback:
             ai_model="",
             ai_call_timeout=None,
             session_id=None,
+            **_kwargs,
         ):
             return AIResult(success=True, text=peer_response)
 
@@ -3281,6 +3348,7 @@ class TestOrchestratorEmptyFallback:
             ai_model="",
             ai_call_timeout=None,
             session_id=None,
+            **_kwargs,
         ):
             return AIResult(success=True, text=peer_response)
 
@@ -3341,6 +3409,7 @@ class TestOrchestratorEmptyFallback:
             ai_model="",
             ai_call_timeout=None,
             session_id=None,
+            **_kwargs,
         ):
             return AIResult(success=True, text=peer_response)
 
@@ -3400,6 +3469,7 @@ class TestOrchestratorEmptyFallback:
             ai_model="",
             ai_call_timeout=None,
             session_id=None,
+            **_kwargs,
         ):
             return AIResult(success=True, text=peer_response)
 

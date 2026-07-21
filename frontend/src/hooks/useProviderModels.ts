@@ -1,25 +1,34 @@
-import { useState, useEffect } from 'react'
-import { api } from '@/lib/api'
+import { useState, useEffect, useCallback, useRef } from 'react'
 import type { ModelOption } from '@/components/shared/ModelCombobox'
+import { normalizeProvider } from '@/lib/aiProviders'
+import { fetchModelsForProvider } from '@/lib/useProviderModels'
+import { api } from '@/lib/api'
 
 /**
- * Fetches available models for the given AI provider.
- * Returns the models list. Automatically clears models when the provider changes.
+ * Provider models with admin refresh support.
+ * Reuses lib/fetchModelsForProvider for the shared fetch path.
  */
 export function useProviderModels(provider: string) {
   const [availableModels, setAvailableModels] = useState<ModelOption[]>([])
+  const [refreshing, setRefreshing] = useState(false)
+  const normalized = normalizeProvider(provider)
+  const providerRef = useRef(normalized)
+  const refreshSeqRef = useRef(0)
 
   useEffect(() => {
-    if (!provider) {
+    providerRef.current = normalized
+  }, [normalized])
+
+  useEffect(() => {
+    if (!normalized) {
       setAvailableModels([])
       return
     }
     let ignore = false
     setAvailableModels([])
-    api
-      .get<{ models: ModelOption[] }>(`/api/ai-models?provider=${provider}`)
-      .then((res) => {
-        if (!ignore) setAvailableModels(res.models ?? [])
+    fetchModelsForProvider(normalized)
+      .then((models) => {
+        if (!ignore) setAvailableModels(models)
       })
       .catch(() => {
         if (!ignore) setAvailableModels([])
@@ -27,7 +36,34 @@ export function useProviderModels(provider: string) {
     return () => {
       ignore = true
     }
-  }, [provider])
+  }, [normalized])
 
-  return availableModels
+  const refresh = useCallback(async () => {
+    const seq = ++refreshSeqRef.current
+    const currentProvider = providerRef.current
+    setRefreshing(true)
+    try {
+      await api.post('/api/admin/ai-models/refresh')
+      const { resetProviderCatalogCache } = await import('@/lib/useProviderOptions')
+      resetProviderCatalogCache()
+      if (
+        currentProvider &&
+        providerRef.current === currentProvider &&
+        refreshSeqRef.current === seq
+      ) {
+        const models = await fetchModelsForProvider(currentProvider)
+        if (providerRef.current === currentProvider && refreshSeqRef.current === seq) {
+          setAvailableModels(models)
+        }
+      }
+    } catch (err) {
+      console.error('Failed to refresh AI models:', err)
+    } finally {
+      if (refreshSeqRef.current === seq) {
+        setRefreshing(false)
+      }
+    }
+  }, [])
+
+  return { models: availableModels, refresh, refreshing }
 }

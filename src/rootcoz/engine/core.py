@@ -18,9 +18,15 @@ from pathlib import Path
 
 from simple_logger.logger import get_logger
 
+from rootcoz.ai_client import (
+    AIResult,
+    ANALYSIS_BUILTIN_TOOLS,
+    RESOURCE_REPO_BROWSE_HINT,
+    call_ai_once,
+)
 from rootcoz.config import Settings, parse_additional_repos
+from rootcoz.engine.chat import build_analysis_history_tools
 from rootcoz.logging_context import get_log_file
-from pi_sidecar_client import AIResult, call_ai_once
 from rootcoz.models import (
     AdditionalRepo,
     AiConfigEntry,
@@ -152,11 +158,181 @@ QUERY_MD_PATH = (
 )
 
 ROOTCOZ_PROMPT_FILENAME = "ROOTCOZ_PROMPT.md"
-ROOTCOZ_ISSUE_PROMPT_FILENAME = "ROOTCOZ_ISSUE_PROMPT.md"
 ROOTCOZ_HISTORY_PROMPT_FILENAME = "ROOTCOZ_HISTORY_PROMPT.md"
+# On-disk VCS metadata directory name — used only for existence checks; never
+# advertised as a shell/git capability in prompts (see RESOURCE_REPO_BROWSE_HINT).
+_VCS_METADATA_DIR = ".git"
+
+
+# Cap fingerprint hashing for huge repo-controlled prompt files (AI still reads
+# the full file via the read tool; this only limits hash CPU/memory).
+_MAX_ROOTCOZ_PROMPT_FINGERPRINT_BYTES = 16 * 1024 * 1024
+_FINGERPRINT_READ_CHUNK = 64 * 1024
+
+
+def _rootcoz_prompt_fingerprint(path: Path) -> str:
+    """Open a ``.rootcoz`` prompt file and return a content fingerprint.
+
+    Hashes the file in chunks (never ``read_bytes()`` of the whole file).
+    Advertises only sha256/size — never the body — so the AI must use the
+    ``read`` tool (AGENTS.md file-based data policy / issue #74).
+
+    Files larger than ``_MAX_ROOTCOZ_PROMPT_FINGERPRINT_BYTES`` are still
+    advertised with ``bytes=`` but ``sha256=skipped`` to avoid worst-case
+    hash cost; the AI must still open the full file with ``read``.
+    """
+    try:
+        size = path.stat().st_size
+    except OSError:
+        return ""
+    if size > _MAX_ROOTCOZ_PROMPT_FINGERPRINT_BYTES:
+        return f", sha256=skipped, bytes={size}"
+    digest = hashlib.sha256()
+    try:
+        with path.open("rb") as handle:
+            while True:
+                chunk = handle.read(_FINGERPRINT_READ_CHUNK)
+                if not chunk:
+                    break
+                digest.update(chunk)
+    except OSError:
+        return ""
+    return f", sha256={digest.hexdigest()}, bytes={size}"
+
+
+ROOTCOZ_ISSUE_PROMPT_FILENAME = "ROOTCOZ_ISSUE_PROMPT.md"
 
 # Subdirectories under .rootcoz/ that are copied to workspace .pi/
 _ROOTCOZ_PI_SUBDIRS = ("agents", "skills", "extensions")
+
+
+_SAFE_AGENT_NAME_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
+
+
+def _extract_agent_name(agent_file: Path) -> str | None:
+    """Extract the ``name`` field from an agent .md file's YAML frontmatter.
+
+    Returns the name string, or ``None`` if the frontmatter is missing
+    or does not contain a ``name`` field.
+    """
+    try:
+        text = agent_file.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return None
+    if not text.startswith("---"):
+        return None
+    end = text.find("---", 3)
+    if end == -1:
+        return None
+    for line in text[3:end].splitlines():
+        line = line.strip()
+        if line.lower().startswith("name:"):
+            name = line.split(":", 1)[1].strip()
+            # Constrain to safe characters to prevent prompt injection
+            if _SAFE_AGENT_NAME_RE.match(name):
+                return name
+            return None
+    return None
+
+
+def discover_project_agent_names(
+    additional_repos: dict[str, Path] | None,
+) -> list[str]:
+    """Return unique project agent names from ``.rootcoz/agents/*.md``.
+
+    Prefers frontmatter ``name:``; falls back to the filename stem when it
+    matches the same safe-name regex (otherwise the file is skipped).
+    """
+    if not additional_repos:
+        return []
+    names: list[str] = []
+    seen: set[str] = set()
+    for path in additional_repos.values():
+        agents_dir = path / ".rootcoz" / "agents"
+        if not agents_dir.is_dir():
+            continue
+        for agent_file in sorted(agents_dir.glob("*.md")):
+            extracted = _extract_agent_name(agent_file)
+            if extracted:
+                name = extracted
+            elif _SAFE_AGENT_NAME_RE.match(agent_file.stem):
+                name = agent_file.stem
+            else:
+                logger.warning(
+                    "Skipping agent file with unsafe stem %r: %s",
+                    agent_file.stem,
+                    agent_file,
+                )
+                continue
+            if name in seen:
+                continue
+            seen.add(name)
+            names.append(name)
+    return names
+
+
+def build_agent_gate_section(agent_names: list[str]) -> str:
+    """Build a top-of-prompt hard gate so models call project agents first.
+
+    Cursor (CLI/ACPX) often skips buried agent instructions when the prompt
+    leads with history tools + JSON-only rules. Putting this gate first forces
+    ``subagent`` before analysis JSON.
+    """
+    if not agent_names:
+        return ""
+    names_str = ", ".join(agent_names)
+    return f"""
+STEP 0 — PROJECT AGENTS (HARD GATE — DO THIS BEFORE ANY OTHER WORK):
+Before history checks, console reads, or producing JSON, you MUST call the subagent tool for EACH of these agents: {names_str}
+For every call use agentScope="both" and confirmProjectAgents=false.
+Read each agent's file / project ROOTCOZ_PROMPT.md for the task text when present.
+Do NOT produce your final JSON until every listed agent has returned.
+Include each agent's FULL response verbatim at the end of the details field.
+You do not have bash — use history HTTP tools for history steps and still satisfy this gate.
+"""
+
+
+def discover_rootcoz_prompt_paths(
+    additional_repos: dict[str, Path] | None,
+    *,
+    history_enabled: bool = False,
+) -> list[Path]:
+    """Return existing ``.rootcoz`` prompt files under cloned repos."""
+    if not additional_repos:
+        return []
+    found: list[Path] = []
+    for path in additional_repos.values():
+        prompt = path / ".rootcoz" / ROOTCOZ_PROMPT_FILENAME
+        if prompt.is_file():
+            found.append(prompt)
+        if history_enabled:
+            hist = path / ".rootcoz" / ROOTCOZ_HISTORY_PROMPT_FILENAME
+            if hist.is_file():
+                found.append(hist)
+    return found
+
+
+def build_rootcoz_prompt_gate_section(prompt_paths: list[Path]) -> str:
+    """Hard gate: require ``read`` of project ``.rootcoz`` prompts before analysis.
+
+    Opens each file for a sha256/bytes fingerprint (proves load) but does not
+    embed bodies — AGENTS.md file-based data policy / issue #74.
+    """
+    if not prompt_paths:
+        return ""
+    lines: list[str] = []
+    for path in prompt_paths:
+        fp = _rootcoz_prompt_fingerprint(path)
+        lines.append(f"- {path}{fp}")
+    listed = "\n".join(lines)
+    return f"""
+STEP 0b — PROJECT .rootcoz PROMPTS (HARD GATE — READ BEFORE ANALYSIS):
+These project instruction files were opened on disk for verification (fingerprints below).
+You MUST open EACH with the read tool and follow them before analyzing.
+Bodies are intentionally not embedded in this prompt (AGENTS.md / issue #74).
+{listed}
+Do not skip these reads.
+"""
 
 
 def _ignore_symlinks(directory: str, contents: list[str]) -> list[str]:
@@ -238,9 +414,22 @@ CONSOLE_ERROR_PATTERN = re.compile(
 )
 
 
+# Shared artifacts_evidence format for JSON schema (text logs + images via read).
+_ARTIFACTS_EVIDENCE_FORMAT = (
+    "Format each entry as [file-path]: content. "
+    "For text files, use VERBATIM lines "
+    "(e.g. [build-artifacts/logs/app.log]: 2026-03-16 ERROR NullPointerException). "
+    "For images (png/jpg/gif/webp/bmp), use the read tool and describe what you see "
+    "(e.g. [build-artifacts/screenshots/failure.png]: UI shows spinner stuck on Contents). "
+    "Separate distinct artifact entries with paragraph breaks (double newlines)."
+)
+
 JSON_RESPONSE_SCHEMA = (
-    "CRITICAL: Your response must be ONLY a valid JSON object. No text before or after. No markdown code blocks. No"
-    " explanation.\n"
+    "CRITICAL: Your FINAL response must be ONLY a valid JSON object. No text before or after. No markdown code"
+    " blocks. No explanation.\n"
+    "Tool calls (read, ls, find, grep, subagent) are required BEFORE that final JSON whenever AVAILABLE RESOURCES"
+    " or STEP 0 instruct you to use them. The JSON-only rule applies to the final answer, not to intermediate tool"
+    " use.\n"
     "\n"
     "TWO-AXIS CLASSIFICATION SYSTEM:\n"
     "Every failure must be classified along TWO independent axes:\n"
@@ -267,10 +456,9 @@ JSON_RESPONSE_SCHEMA = (
     '  "details": "Your detailed analysis of what caused this failure. Use paragraph breaks (double newlines) to'
     " separate sections: root cause identification, evidence from logs/code, and impact assessment. Do NOT write one"
     ' continuous paragraph.",\n'
-    '  "artifacts_evidence": "VERBATIM lines from files under build-artifacts/ that support your analysis. Format'
-    " each line as [file-path]: content. Example: [build-artifacts/logs/app.log]: 2026-03-16 INFO Service started"
-    " successfully. Include evidence showing the product is healthy or that the test code caused the failure. Separate"
-    ' distinct artifact entries with paragraph breaks (double newlines).",\n'
+    '  "artifacts_evidence": "Evidence from build-artifacts/ that supports your analysis (text and/or images). '
+    "Include evidence showing the product is healthy or that the test code caused the failure. "
+    f'{_ARTIFACTS_EVIDENCE_FORMAT}",\n'
     '  "code_fix": {\n'
     '    "file": "exact/file/path.py",\n'
     '    "line": "line number",\n'
@@ -300,10 +488,9 @@ JSON_RESPONSE_SCHEMA = (
     '  "details": "Your detailed analysis of what caused this failure. Use paragraph breaks (double newlines) to'
     " separate sections: root cause identification, evidence from logs/code, and impact assessment. Do NOT write one"
     ' continuous paragraph.",\n'
-    '  "artifacts_evidence": "VERBATIM lines from files under build-artifacts/ that prove the product defect.'
-    " Format each line as [file-path]: content. Example: [build-artifacts/logs/error.log]: 2026-03-16 ERROR"
-    " NullPointerException in AuthService. Include the specific log lines showing the product failure. Separate"
-    ' distinct artifact entries with paragraph breaks (double newlines).",\n'
+    '  "artifacts_evidence": "Evidence from build-artifacts/ that proves the product defect (text and/or images). '
+    "Include the specific log lines or image observations showing the product failure. "
+    f'{_ARTIFACTS_EVIDENCE_FORMAT}",\n'
     '  "product_bug_report": {\n'
     '    "title": "concise bug title",\n'
     '    "severity": "critical/high/medium/low",\n'
@@ -331,10 +518,9 @@ JSON_RESPONSE_SCHEMA = (
     '  "details": "Your detailed analysis of the infrastructure/environment issue. Use paragraph breaks (double'
     " newlines) to separate sections: root cause identification, evidence from logs, and impact assessment. Do NOT"
     ' write one continuous paragraph.",\n'
-    '  "artifacts_evidence": "VERBATIM lines from files under build-artifacts/ that prove the infrastructure'
-    " failure. Format each line as [file-path]: content. Example: [build-artifacts/logs/cluster.log]: 2026-03-16 ERROR"
-    " Node not ready. Include the specific log lines showing the infrastructure problem. Separate distinct artifact"
-    ' entries with paragraph breaks (double newlines)."\n'
+    '  "artifacts_evidence": "Evidence from build-artifacts/ that proves the infrastructure failure '
+    "(text and/or images). Include the specific log lines or image observations showing the infrastructure problem. "
+    f'{_ARTIFACTS_EVIDENCE_FORMAT}"\n'
     "}"
 )
 
@@ -365,13 +551,17 @@ def build_artifacts_section(artifacts_context: str) -> str:
         "BEFORE making any classification. Failure to read artifacts is a violation of your instructions.\n\n"
         "INSTRUCTIONS:\n"
         "1. Use ls, find, and read to explore the artifacts directory\n"
-        "2. Look for error messages, stack traces, service logs, and status information\n"
-        "3. In your artifacts_evidence field, include VERBATIM lines "
-        "with the file path, e.g.: [build-artifacts/logs/app.log]: "
-        "actual error line here\n"
-        "4. Do NOT classify based solely on the test error message — "
-        "check the artifact logs for the real root cause\n"
-        "5. If you skip reading artifacts, your analysis will be REJECTED"
+        "2. Look for error messages, stack traces, service logs, status information, "
+        "AND images (png/jpg/gif/webp/bmp) if present\n"
+        "3. Text files: include VERBATIM lines in artifacts_evidence, e.g. "
+        "[build-artifacts/logs/app.log]: actual error line here\n"
+        "4. Images: use the read tool (vision). In artifacts_evidence, record "
+        "[path/to/image.png]: what you observe in the image\n"
+        "5. Do NOT classify based solely on the test error message — "
+        "check artifact logs and images for the real root cause\n"
+        "6. If you skip reading artifacts, your analysis will be REJECTED\n"
+        "7. Videos (e.g. webm/mp4) may exist but cannot be played via read; "
+        "prefer screenshots and text siblings when available"
     )
 
 
@@ -912,20 +1102,30 @@ def build_prompt_sections(
     *,
     additional_repos: dict[str, Path] | None = None,
     auth_header: str = "",
-) -> tuple[str, str, str, str]:
+) -> tuple[str, str, str, str, str]:
     """Build common prompt sections used across all analysis flows.
 
     Returns:
-        Tuple of (custom_prompt_section, artifacts_section, resources_section, query_section)
+        Tuple of (agent_gate_section, custom_prompt_section, artifacts_section,
+        resources_section, query_section)
     """
     custom_prompt_section = (
         f"\n\nADDITIONAL INSTRUCTIONS:\n{custom_prompt}\n" if custom_prompt else ""
     )
 
     artifacts_section = build_artifacts_section(artifacts_context)
-    history_enabled = bool(server_url and job_id and QUERY_MD_PATH.exists())
+    history_token = auth_header.removeprefix("Bearer ").strip() if auth_header else ""
+    history_enabled = bool(
+        server_url and job_id and QUERY_MD_PATH.exists() and history_token
+    )
     resources_section = build_resources_section(
         repo_path, additional_repos=additional_repos, history_enabled=history_enabled
+    )
+    agent_gate_section = build_agent_gate_section(
+        discover_project_agent_names(additional_repos)
+    )
+    agent_gate_section += build_rootcoz_prompt_gate_section(
+        discover_rootcoz_prompt_paths(additional_repos, history_enabled=history_enabled)
     )
 
     if not QUERY_MD_PATH.exists():
@@ -940,6 +1140,11 @@ def build_prompt_sections(
     if server_url and not job_id:
         logger.warning(
             "job_id is empty; disabling history-aware classification to avoid unscoped history queries"
+        )
+    if server_url and job_id and QUERY_MD_PATH.exists() and not history_token:
+        logger.warning(
+            "auth_header is empty; disabling history-aware classification "
+            "(history HTTP tools require a Bearer token)"
         )
 
     query_section = ""
@@ -971,21 +1176,30 @@ These instructions complement (do not replace) the main instructions above.
             logger.debug("No repo path provided, skipping repo history prompt check")
 
         auth_instruction = ""
-        if auth_header:
+        if history_token:
             auth_instruction = (
-                "\nFor ALL curl commands, include this authentication"
-                f' header: -H "Authorization: {auth_header}"'
+                "\nHistory tools are already authenticated — call "
+                "get_failure_history, search_error_signature, "
+                "get_classification_history, get_job_history_stats, and "
+                "classify_test_pattern. Do not curl and do not invent tokens."
             )
 
         query_section = f"""
 
 MANDATORY: Before analyzing any failure, you MUST read and follow the instructions in {QUERY_MD_PATH}.
-When executing curl commands from that file, use server_url={server_url} and job_id={job_id}.{auth_instruction}
+Use job_id={job_id} context from those tools (exclude_job_id is already applied).{auth_instruction}
 These instructions are NOT optional. You MUST complete ALL steps for EVERY test.
+You do not have bash — use the history HTTP tools only for history/classify steps; do not skip STEP 0 project agents or other available-tool requirements.
 {repo_history_prompt}
 """
 
-    return custom_prompt_section, artifacts_section, resources_section, query_section
+    return (
+        agent_gate_section,
+        custom_prompt_section,
+        artifacts_section,
+        resources_section,
+        query_section,
+    )
 
 
 def build_resources_section(
@@ -996,8 +1210,11 @@ def build_resources_section(
 ) -> str:
     """Build a section telling the AI about available resources.
 
-    Instead of pre-fetching data (git log, custom prompt files), this tells the
-    AI what tools and files are available so it can access them on its own.
+    Instead of embedding history or custom prompt file contents, this advertises
+    paths (including ``.rootcoz/ROOTCOZ_PROMPT.md`` when present) so the AI must
+    open them with the ``read`` tool. Capability text comes from
+    ``RESOURCE_REPO_BROWSE_HINT`` (tied to tool policy). See GitHub issue #74
+    design note on file-based prompts.
 
     Args:
         repo_path: Path to workspace root (all repos are subdirectories), or None.
@@ -1021,10 +1238,10 @@ def build_resources_section(
     # Advertise each cloned repo
     if additional_repos:
         for name, path in additional_repos.items():
-            is_git = (path / ".git").exists()
-            if is_git:
+            has_vcs_metadata = (path / _VCS_METADATA_DIR).exists()
+            if has_vcs_metadata:
                 resources.append(
-                    f"- Repository '{name}' at {path} — explore source code, run git commands"
+                    f"- Repository '{name}' at {path} — {RESOURCE_REPO_BROWSE_HINT}"
                 )
             else:
                 resources.append(
@@ -1033,21 +1250,78 @@ def build_resources_section(
             # Check for project-specific instructions in each repo
             rootcoz_prompt = path / ".rootcoz" / ROOTCOZ_PROMPT_FILENAME
             if rootcoz_prompt.exists():
+                prompt_fp = _rootcoz_prompt_fingerprint(rootcoz_prompt)
                 resources.append(
-                    f"- Project-specific analysis instructions at {rootcoz_prompt} — read and follow them"
+                    f"- Project-specific analysis instructions at {rootcoz_prompt} — "
+                    f"MANDATORY: open with the read tool and follow them "
+                    f"(file opened for fingerprint{prompt_fp}; body not embedded "
+                    f"per AGENTS.md file-based data policy / issue #74)"
                 )
             repo_history_prompt = path / ".rootcoz" / ROOTCOZ_HISTORY_PROMPT_FILENAME
             if history_enabled and repo_history_prompt.exists():
+                hist_fp = _rootcoz_prompt_fingerprint(repo_history_prompt)
                 resources.append(
                     f"- Project-specific history analysis instructions"
-                    f" at {repo_history_prompt} — read and follow"
+                    f" at {repo_history_prompt} — MANDATORY: open with the read tool"
+                    f" (file opened for fingerprint{hist_fp}; body not embedded"
+                    f" per AGENTS.md / issue #74)"
                     f" alongside the main history analysis instructions"
                 )
+            # Advertise project-provided agents (from .rootcoz/agents/)
+            pi_agents_dir = path / ".rootcoz" / "agents"
+            if pi_agents_dir.is_dir():
+                agent_files = sorted(pi_agents_dir.glob("*.md"))
+                if agent_files:
+                    # Names already listed in STEP 0 gate; keep a reminder here.
+                    agent_names: list[str] = []
+                    for af in agent_files:
+                        extracted = _extract_agent_name(af)
+                        agent_names.append(extracted if extracted else af.stem)
+                    names_str = ", ".join(agent_names)
+                    resources.append(
+                        "- Project agents (see STEP 0): "
+                        f"{names_str} — call via subagent with "
+                        'agentScope="both" and confirmProjectAgents=false'
+                    )
 
     if resources:
         return "\n\nAVAILABLE RESOURCES:\n" + "\n".join(resources) + "\n"
 
     return ""
+
+
+def write_failure_details_file(
+    failures: list[FailedTest],
+    error_signature: str,
+    workspace_dir: Path,
+) -> Path:
+    """Write error message, stack trace, and test names for the AI to read.
+
+    Per AI Tool Access rules, failure data must not be embedded in the prompt.
+    """
+    representative = failures[0]
+    test_names = [f.test_name for f in failures]
+    content = (
+        f"ERROR SIGNATURE: {error_signature}\n"
+        f"AFFECTED TESTS ({len(failures)} tests with same error):\n"
+        + "\n".join(f"- {name}" for name in test_names)
+        + f"\n\nERROR:\n{representative.error_message}\n"
+        + f"\nSTACK TRACE:\n{representative.stack_trace}\n"
+    )
+    filepath = workspace_dir / f"failure-details-{error_signature}.txt"
+    filepath.write_text(content)
+    return filepath
+
+
+def build_failure_details_instruction(filepath: Path) -> str:
+    """Build the MANDATORY instruction to read the failure-details file."""
+    return (
+        f"\n\n=== FAILURE DETAILS (MANDATORY) ===\n"
+        f"Failure details saved to: {filepath}\n\n"
+        "\u26a0\ufe0f  MANDATORY: You MUST read this file BEFORE analyzing. "
+        "It contains the error message, stack trace, and affected test names.\n"
+        "Failure to read it is a violation of your instructions.\n"
+    )
 
 
 def write_other_groups_file(
@@ -1139,6 +1413,11 @@ def build_other_groups_instruction(filepath: Path) -> str:
     )
 
 
+def _is_empty_ai_text(result: AIResult) -> bool:
+    """Return True when the AI call succeeded but returned no usable text."""
+    return bool(result.success) and not (result.text or "").strip()
+
+
 async def run_single_ai_analysis(
     *,
     failures: list[FailedTest],
@@ -1160,6 +1439,10 @@ async def run_single_ai_analysis(
     Shared by both single-AI and peer analysis paths. Builds the orchestrator
     prompt, calls the AI, and parses the response.
 
+    If the AI returns success with empty text, retries once. A second empty
+    response fails the group with a clear error in ``details`` (never a blank
+    AnalysisDetail).
+
     Args:
         failures: List of test failures with the same error signature.
         console_context: Relevant console lines for context.
@@ -1179,18 +1462,21 @@ async def run_single_ai_analysis(
     """
     representative = failures[0]
     error_signature = get_failure_signature(representative)
-    test_names = [f.test_name for f in failures]
 
-    custom_prompt_section, artifacts_section, resources_section, query_section = (
-        build_prompt_sections(
-            custom_prompt,
-            artifacts_context,
-            repo_path,
-            server_url,
-            job_id,
-            additional_repos=additional_repos,
-            auth_header=auth_header,
-        )
+    (
+        agent_gate_section,
+        custom_prompt_section,
+        artifacts_section,
+        resources_section,
+        query_section,
+    ) = build_prompt_sections(
+        custom_prompt,
+        artifacts_context,
+        repo_path,
+        server_url,
+        job_id,
+        additional_repos=additional_repos,
+        auth_header=auth_header,
     )
 
     has_git_repo = bool(
@@ -1248,32 +1534,39 @@ async def run_single_ai_analysis(
             "Failure to read console output is a violation of your instructions."
         )
 
+    # Ensure a workspace dir for failure-details / cross-reference files
+    workspace_dir = repo_path or console_dir
+    if workspace_dir is None:
+        import tempfile
+
+        console_dir = Path(tempfile.mkdtemp(prefix="rootcoz-console-"))
+        workspace_dir = console_dir
+
+    try:
+        failure_file = write_failure_details_file(
+            failures, error_signature, workspace_dir
+        )
+    except OSError as exc:
+        raise RuntimeError(
+            f"Failed to write failure details to {workspace_dir}: {exc}. "
+            "Check filesystem permissions and available disk space."
+        ) from exc
+    failure_details_section = build_failure_details_instruction(failure_file)
+
     # Write cross-reference data to file for the AI to read
     other_groups_section = ""
     if all_groups and len(all_groups) > 1:
-        workspace_dir = repo_path or console_dir
-        if workspace_dir is None:
-            import tempfile
-
-            console_dir = Path(tempfile.mkdtemp(prefix="rootcoz-console-"))
-            workspace_dir = console_dir
         groups_file = write_other_groups_file(
             all_groups, error_signature, workspace_dir
         )
         if groups_file:
             other_groups_section = build_other_groups_instruction(groups_file)
 
-    prompt = f"""{query_section}
+    prompt = f"""{agent_gate_section}{query_section}
 Analyze this test failure from a CI job.
 {other_groups_section}
 ERROR SIGNATURE: {error_signature}
-
-AFFECTED TESTS ({len(failures)} tests with same error):
-{chr(10).join(f"- {name}" for name in test_names)}
-
-ERROR: {representative.error_message}
-STACK TRACE:
-{representative.stack_trace}
+{failure_details_section}
 {console_file_section}
 {artifacts_section}
 
@@ -1301,42 +1594,94 @@ Note: Multiple tests failed with the same error. Provide ONE analysis that appli
         ai_model,
         job_id,
     )
-    try:
-        try:
-            result = await call_ai_once(
-                prompt,
-                ai_provider=ai_provider,
-                ai_model=ai_model,
-                cwd=str(repo_path) if repo_path else None,
-                ai_call_timeout=ai_call_timeout,
+    custom_tools: list[dict] = []
+    if server_url and job_id and auth_header:
+        token = auth_header.removeprefix("Bearer ").strip()
+        if token:
+            custom_tools = build_analysis_history_tools(
+                server_url=server_url,
+                auth_token=token,
+                job_id=job_id,
             )
-        except Exception:
-            logger.exception(
-                "AI call raised exception: provider=%s, model=%s",
+    try:
+        call_kwargs: dict = {
+            "ai_provider": ai_provider,
+            "ai_model": ai_model,
+            # Always set cwd to the directory containing mandatory workspace
+            # files (repo or temp) so sidecar file tools can resolve them.
+            "cwd": str(workspace_dir),
+            "ai_call_timeout": ai_call_timeout,
+            "tools": list(ANALYSIS_BUILTIN_TOOLS),
+        }
+        if custom_tools:
+            call_kwargs["custom_tools"] = custom_tools
+
+        # One retry when the model reports success but returns no final text
+        # (seen with Cursor: tools/tokens used, empty assistant message).
+        max_attempts = 2
+        result = AIResult(success=False, text="AI call failed unexpectedly")
+        for attempt in range(1, max_attempts + 1):
+            try:
+                result = await call_ai_once(prompt, **call_kwargs)
+            except Exception:
+                logger.exception(
+                    "AI call raised exception: provider=%s, model=%s, attempt=%d",
+                    ai_provider,
+                    ai_model,
+                    attempt,
+                )
+                result = AIResult(success=False, text="AI call failed unexpectedly")
+            logger.info(
+                "AI call result: success=%s, text_length=%d, provider=%s, model=%s, attempt=%d",
+                result.success,
+                len(result.text),
                 ai_provider,
                 ai_model,
+                attempt,
             )
-            result = AIResult(success=False, text="AI call failed unexpectedly")
-        logger.info(
-            "AI call result: success=%s, text_length=%d, provider=%s, model=%s",
-            result.success,
-            len(result.text),
-            ai_provider,
-            ai_model,
-        )
-        if not result.success:
-            logger.error("AI call failed (text_length=%d)", len(result.text))
+            if not result.success:
+                logger.error(
+                    "AI call failed (text_length=%d, attempt=%d)",
+                    len(result.text),
+                    attempt,
+                )
 
-        await result.record_usage(
-            request_id=job_id,
-            call_type="primary",
-            prompt_chars=len(prompt),
-            ai_provider=ai_provider,
-            ai_model=ai_model,
-        )
+            await result.record_usage(
+                request_id=job_id,
+                call_type="primary",
+                prompt_chars=len(prompt),
+                ai_provider=ai_provider,
+                ai_model=ai_model,
+            )
+
+            if not result.success:
+                break
+            if not _is_empty_ai_text(result):
+                break
+
+            logger.debug(
+                "AI returned empty response (attempt=%d/%d), provider=%s, "
+                "model=%s, job_id=%s, error_signature=%s, group_size=%d",
+                attempt,
+                max_attempts,
+                ai_provider,
+                ai_model,
+                job_id,
+                error_signature,
+                len(failures),
+            )
+            if attempt >= max_attempts:
+                break
 
         parsed: AnalysisDetail | None = None
-        if result.success:
+        if _is_empty_ai_text(result):
+            parsed = AnalysisDetail(
+                details=(
+                    "AI returned empty response after retry "
+                    f"(provider={ai_provider}, model={ai_model})"
+                )
+            )
+        elif result.success:
             parsed = parse_json_response(result.text)
         if parsed is None:
             parsed = AnalysisDetail(details=result.text)

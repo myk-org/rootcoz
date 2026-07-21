@@ -2947,6 +2947,36 @@ class TestHistoryEndpoints:
         assert isinstance(data["comments"], list)
         assert isinstance(data["classifications"], dict)
 
+    def test_history_and_ai_models_require_auth(
+        self, mock_settings, temp_db_path: Path
+    ) -> None:
+        """Handler-level auth gates reject anonymous callers (middleware + explicit)."""
+        with patch.object(storage, "DB_PATH", temp_db_path):
+            from starlette.testclient import TestClient
+
+            from rootcoz.main import app
+
+            with TestClient(app) as client:
+                assert client.get("/history/test/some.test").status_code == 401
+                assert client.get("/history/classifications").status_code == 401
+                assert client.get("/api/ai-models").status_code == 401
+
+    def test_history_and_ai_models_handlers_call_require_authenticated(self) -> None:
+        """Source of gated handlers must invoke ``_require_authenticated``."""
+        import inspect
+
+        from rootcoz import main as main_mod
+
+        for fn in (
+            main_mod.get_test_history_endpoint,
+            main_mod.get_classifications,
+            main_mod.list_ai_models,
+            main_mod.search_by_signature_endpoint,
+            main_mod.get_job_stats_endpoint,
+        ):
+            src = inspect.getsource(fn)
+            assert "_require_authenticated" in src, fn.__name__
+
     @pytest.mark.asyncio
     async def test_search_by_signature(self, test_client) -> None:
         """Test that /history/search returns expected structure."""
@@ -5831,6 +5861,77 @@ class TestAdminSettingsEndpoints:
         response = test_client.delete("/api/admin/settings/jenkins_url")
         assert response.status_code == 404
 
+    def test_put_empty_ai_model_resets_to_env(self, test_client, monkeypatch) -> None:
+        """Empty ai_model deletes DB override so AI_MODEL env is used."""
+        monkeypatch.setenv("AI_MODEL", "claude-opus-4-6-1m")
+        from rootcoz.config import clear_db_settings_cache, get_settings
+
+        clear_db_settings_cache()
+        get_settings.cache_clear()
+
+        # Set provider + model first
+        test_client.put(
+            "/api/admin/settings",
+            json={
+                "settings": {"ai_provider": "cursor", "ai_model": "cursor:composer-2"}
+            },
+        )
+        # Clear model — must fall back to env (first non-empty: request→DB→env)
+        response = test_client.put(
+            "/api/admin/settings",
+            json={"settings": {"ai_model": ""}},
+        )
+        assert response.status_code == 200
+
+        get_resp = test_client.get("/api/admin/settings")
+        settings = get_resp.json()
+        ai_model = next(s for s in settings if s["key"] == "ai_model")
+        assert ai_model["source"] == "env"
+        assert ai_model["value"] == "claude-opus-4-6-1m"
+        assert get_settings().ai_model == "claude-opus-4-6-1m"
+
+    def test_put_empty_ai_provider_resets_to_env(
+        self, test_client, monkeypatch
+    ) -> None:
+        """Empty ai_provider deletes DB override so AI_PROVIDER env is used."""
+        monkeypatch.setenv("AI_PROVIDER", "claude")
+        from rootcoz.config import clear_db_settings_cache, get_settings
+
+        clear_db_settings_cache()
+        get_settings.cache_clear()
+
+        test_client.put(
+            "/api/admin/settings",
+            json={"settings": {"ai_provider": "cursor"}},
+        )
+        response = test_client.put(
+            "/api/admin/settings",
+            json={"settings": {"ai_provider": ""}},
+        )
+        assert response.status_code == 200
+
+        get_resp = test_client.get("/api/admin/settings")
+        settings = get_resp.json()
+        ai_provider = next(s for s in settings if s["key"] == "ai_provider")
+        assert ai_provider["source"] != "db"
+        assert get_settings().ai_provider == "claude"
+
+    def test_put_empty_ai_call_timeout_still_resets(self, test_client) -> None:
+        """Empty non-clearable settings still reset to env/default (delete DB)."""
+        test_client.put(
+            "/api/admin/settings",
+            json={"settings": {"ai_call_timeout": "30"}},
+        )
+        response = test_client.put(
+            "/api/admin/settings",
+            json={"settings": {"ai_call_timeout": ""}},
+        )
+        assert response.status_code == 200
+        get_resp = test_client.get("/api/admin/settings")
+        settings = get_resp.json()
+        ai_timeout = next(s for s in settings if s["key"] == "ai_call_timeout")
+        assert ai_timeout["source"] != "db"
+
     def test_put_settings_non_admin_forbidden(self, test_client) -> None:
         """Non-admin users cannot update settings."""
         response = test_client.put(
@@ -6152,6 +6253,168 @@ class TestSanitizeControlChars:
         assert _sanitize_control_chars(input_val) == expected
 
 
+class TestRefreshAiModelsEndpoint:
+    """Tests for POST /api/admin/ai-models/refresh."""
+
+    def test_refresh_ai_models_returns_updated_list(self, test_client) -> None:
+        """Admin can refresh models and get updated list."""
+        mock_models = [
+            {"id": "claude-sonnet-4", "name": "Claude Sonnet 4"},
+            {"id": "gemini-2.5-pro", "name": "Gemini 2.5 Pro"},
+        ]
+        with patch(
+            "pi_sidecar_client.get_sidecar_client",
+        ) as mock_get_client:
+            mock_client = AsyncMock()
+            mock_client.refresh_models.return_value = mock_models
+            mock_get_client.return_value = mock_client
+            response = test_client.post("/api/admin/ai-models/refresh")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["count"] == 2
+        assert data["models"] == mock_models
+        mock_client.refresh_models.assert_awaited_once()
+
+    def test_refresh_ai_models_sidecar_failure_returns_502(self, test_client) -> None:
+        """Returns 502 when sidecar refresh fails."""
+        with patch(
+            "pi_sidecar_client.get_sidecar_client",
+            side_effect=RuntimeError("sidecar down"),
+        ):
+            response = test_client.post("/api/admin/ai-models/refresh")
+
+        assert response.status_code == 502
+        assert "Failed to refresh" in response.json()["detail"]
+
+    def test_refresh_ai_models_failure_preserves_route_cache(self, test_client) -> None:
+        """Failed refresh must not clear CLI routing cache mid-flight."""
+        import rootcoz.ai_client as ai_client_mod
+
+        ai_client_mod._model_route_cache[("claude", "cli-model")] = "cli-claude"
+        with patch(
+            "pi_sidecar_client.get_sidecar_client",
+        ) as mock_get_client:
+            mock_client = AsyncMock()
+            mock_client.refresh_models.side_effect = RuntimeError("sidecar down")
+            mock_get_client.return_value = mock_client
+            response = test_client.post("/api/admin/ai-models/refresh")
+
+        assert response.status_code == 502
+        assert ai_client_mod._model_route_cache[("claude", "cli-model")] == "cli-claude"
+
+
+class TestCursorStatusForClient:
+    """Tests for _cursor_status_for_client credential redaction."""
+
+    def test_admin_keeps_has_api_key(self) -> None:
+        from rootcoz.main import _cursor_status_for_client
+
+        raw = {
+            "ok": False,
+            "reason": "auth_expired",
+            "hint": "login expired",
+            "has_api_key": False,
+            "model_count": 0,
+        }
+        out = _cursor_status_for_client(raw, is_admin=True)
+        assert out["has_api_key"] is False
+        assert out["reason"] == "auth_expired"
+        assert out["hint"] == "login expired"
+
+    def test_non_admin_strips_credential_state(self) -> None:
+        from rootcoz.main import _cursor_status_for_client
+
+        raw = {
+            "ok": False,
+            "reason": "api_key_not_applied",
+            "hint": "CURSOR_API_KEY is set but unavailable",
+            "has_api_key": True,
+            "model_count": 0,
+        }
+        out = _cursor_status_for_client(raw, is_admin=False)
+        assert "has_api_key" not in out
+        assert out["reason"] == "unavailable"
+        assert "administrator" in out["hint"].lower()
+
+
+class TestResolveChatAiConfig:
+    """Tests for shared chat provider/model resolution helper."""
+
+    def test_override_pair_wins(self) -> None:
+        from rootcoz.main import _resolve_chat_ai_config
+
+        provider, model = _resolve_chat_ai_config(
+            override_provider="cursor",
+            override_model="composer-1",
+            settings_provider="claude",
+            settings_model="sonnet",
+            result_data={"ai_provider": "gemini", "ai_model": "pro"},
+        )
+        assert (provider, model) == ("cursor", "composer-1")
+
+    def test_partial_override_raises(self) -> None:
+        from rootcoz.main import _resolve_chat_ai_config
+
+        with pytest.raises(RuntimeError, match="Both AI provider and model"):
+            _resolve_chat_ai_config(
+                override_provider="cursor",
+                override_model=None,
+                settings_provider="claude",
+                settings_model="sonnet",
+            )
+
+    def test_falls_back_to_result_then_settings(self) -> None:
+        from rootcoz.main import _resolve_chat_ai_config
+
+        provider, model = _resolve_chat_ai_config(
+            override_provider=None,
+            override_model=None,
+            settings_provider="claude",
+            settings_model="sonnet",
+            result_data={"ai_provider": "gemini", "ai_model": ""},
+            request_params={"ai_model": "flash"},
+        )
+        assert (provider, model) == ("gemini", "flash")
+
+    def test_missing_config_admin_mentions_settings(self) -> None:
+        from rootcoz.main import _resolve_chat_ai_config
+
+        with pytest.raises(RuntimeError, match="Server Settings"):
+            _resolve_chat_ai_config(
+                override_provider=None,
+                override_model=None,
+                settings_provider="",
+                settings_model="",
+                is_admin=True,
+            )
+
+    def test_missing_config_non_admin_contacts_admin(self) -> None:
+        from rootcoz.main import _resolve_chat_ai_config
+
+        with pytest.raises(RuntimeError, match="contact a server administrator"):
+            _resolve_chat_ai_config(
+                override_provider=None,
+                override_model=None,
+                settings_provider="",
+                settings_model="",
+                is_admin=False,
+            )
+
+
+class TestSanitizeSidecarPlaceholder:
+    """Unsubstituted sidecar placeholders must not become filter values."""
+
+    def test_clears_brace_placeholders(self) -> None:
+        from rootcoz.main import _sanitize_sidecar_placeholder
+
+        assert _sanitize_sidecar_placeholder("{job_name}") == ""
+        assert _sanitize_sidecar_placeholder("{job_id}") == ""
+        assert _sanitize_sidecar_placeholder("{references}") == ""
+        assert _sanitize_sidecar_placeholder("real-job") == "real-job"
+        assert _sanitize_sidecar_placeholder("") == ""
+
+
 class TestIsChildReviewKey:
     """Tests for _is_child_review_key."""
 
@@ -6186,3 +6449,24 @@ class TestIsChildReviewKey:
         from rootcoz.main import _is_child_review_key
 
         assert _is_child_review_key(key) == expected
+
+
+class TestReadLogTail:
+    """Bounded backwards log tail reader for /api/admin/logs/stream."""
+
+    def test_returns_last_n_lines(self, tmp_path) -> None:
+        from rootcoz.main import _read_log_tail
+
+        path = tmp_path / "app.log"
+        path.write_text("\n".join(f"line-{i}" for i in range(20)) + "\n")
+        assert _read_log_tail(path, 5) == [f"line-{i}" for i in range(15, 20)]
+
+    def test_respects_max_bytes_budget(self, tmp_path) -> None:
+        from rootcoz.main import _read_log_tail
+
+        path = tmp_path / "big.log"
+        # 50 lines of 100 bytes each; max_bytes=250 should not return all 50
+        path.write_bytes((b"y" * 99 + b"\n") * 50)
+        result = _read_log_tail(path, 50, max_bytes=250, chunk_size=100)
+        assert 0 < len(result) < 50
+        assert all(line.startswith("y") for line in result)

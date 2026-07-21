@@ -299,11 +299,22 @@ export interface AiModel {
   id: string
   name: string
   provider: string
+  /** acpx | cli | api — catalog metadata only; not sent on analyze */
+  source?: string
 }
 
 /** Response shape from GET /api/ai-models (no provider filter) */
+export interface ProviderStatus {
+  ok: boolean
+  reason?: string | null
+  hint?: string | null
+  has_api_key?: boolean
+  model_count?: number
+}
+
 export interface AiModelsResponse {
   providers: Record<string, AiModel[]>
+  provider_status?: Record<string, ProviderStatus>
 }
 
 // -- Result wrapper (from GET /results/{jobId}) ---------------------

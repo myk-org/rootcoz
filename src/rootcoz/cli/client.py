@@ -945,6 +945,10 @@ class RootCozClient:
             params["provider"] = provider
         return self._request("GET", "/api/ai-models", params=params)
 
+    def refresh_ai_models(self) -> dict:
+        """Refresh AI models from sidecar. POST /api/admin/ai-models/refresh"""
+        return self._request("POST", "/api/admin/ai-models/refresh")
+
     def get_default_server_settings(self) -> dict:
         """Get non-sensitive server settings. GET /api/default-server-settings"""
         return self._request("GET", "/api/default-server-settings")

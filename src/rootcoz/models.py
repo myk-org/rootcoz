@@ -6,6 +6,7 @@ from uuid import uuid4
 
 from pydantic import (
     BaseModel,
+    BeforeValidator,
     Field,
     HttpUrl,
     field_validator,
@@ -40,12 +41,28 @@ def _normalize_tags_list(tags: object) -> list[str]:
     return result
 
 
+AiProviderName = Literal[
+    "claude",
+    "gemini",
+    "cursor",
+]
+
+
+def _coerce_ai_provider(v: object) -> object:
+    if not isinstance(v, str):
+        return v
+    from rootcoz.ai_client import normalize_provider
+
+    return normalize_provider(v)
+
+
+NormalizedAiProvider = Annotated[AiProviderName, BeforeValidator(_coerce_ai_provider)]
+
+
 class AiConfigEntry(BaseModel):
     """Single AI provider/model configuration for peer analysis."""
 
-    ai_provider: Literal["claude", "gemini", "cursor"] = Field(
-        description="AI provider"
-    )
+    ai_provider: NormalizedAiProvider = Field(description="AI provider")
     ai_model: str = Field(min_length=1, description="AI model identifier")
 
     @field_validator("ai_model")
@@ -108,9 +125,13 @@ class BaseAnalysisRequest(BaseModel):
         description="Authentication token for cloning private tests repo (overrides TESTS_REPO_TOKEN env var)",
         json_schema_extra={"format": "password"},
     )
-    ai_provider: Literal["claude", "gemini", "cursor"] | None = Field(
+    ai_provider: NormalizedAiProvider | None = Field(
         default=None,
-        description="AI provider to use: claude, gemini, or cursor (overrides env var default)",
+        description=(
+            "AI provider to use: claude, gemini, or cursor "
+            "(overrides env var default). CLI models use the same provider "
+            "names when CLI_AGENTS is set."
+        ),
     )
     ai_model: str | None = Field(
         default=None,
@@ -402,7 +423,10 @@ class AnalysisDetail(BaseModel):
     details: str = Field(default="", description="Detailed analysis text")
     artifacts_evidence: str = Field(
         default="",
-        description="Verbatim log lines from build artifacts supporting the analysis (not a summary)",
+        description=(
+            "Evidence from build artifacts supporting the analysis: verbatim text "
+            "lines and/or image observations from read (not a vague summary)"
+        ),
     )
     code_fix: CodeFix | bool | None = Field(
         default=False, description="Code fix (if CODE ISSUE)"

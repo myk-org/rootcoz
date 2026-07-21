@@ -11,7 +11,16 @@ from pathlib import Path
 
 from simple_logger.logger import get_logger
 
-from pi_sidecar_client import call_ai, get_sidecar_client
+from pi_sidecar_client import get_sidecar_client
+
+from rootcoz.ai_client import (
+    CHAT_BUILTIN_TOOLS,
+    _prewarm_model_routes,
+    call_ai,
+    map_provider_model_for_sidecar,
+    normalize_provider,
+)
+from rootcoz.storage import AI_SYSTEM_USERNAME
 
 logger = get_logger(name=__name__)
 
@@ -370,6 +379,223 @@ async def setup_jenkins_workspace(
     return wrote_any
 
 
+def _bearer_headers(auth_token: str) -> dict[str, str]:
+    """Authorization headers for sidecar HTTP custom tools."""
+    return {"Authorization": f"Bearer {auth_token}"}
+
+
+def _tool_get_failure_history(
+    *,
+    server_url: str,
+    auth_headers: dict[str, str],
+    description: str,
+    query_params: dict[str, str],
+    properties: dict[str, dict] | None = None,
+    required: list[str] | None = None,
+) -> dict:
+    """Shared GET /history/test/{test_name} tool definition."""
+    props: dict[str, dict] = {
+        "test_name": {"type": "string", "description": "Full test name"},
+    }
+    if properties:
+        props.update(properties)
+    return {
+        "name": "get_failure_history",
+        "description": description,
+        "parameters": {
+            "type": "object",
+            "properties": props,
+            "required": required or ["test_name"],
+        },
+        "http": {
+            "method": "GET",
+            "url": f"{server_url.rstrip('/')}/history/test/{{test_name}}",
+            "headers": auth_headers,
+            "query_params": query_params,
+        },
+    }
+
+
+def _tool_get_classification_history(
+    *,
+    server_url: str,
+    auth_headers: dict[str, str],
+    description: str,
+    query_params: dict[str, str],
+    properties: dict[str, dict] | None = None,
+) -> dict:
+    """Shared GET /history/classifications tool definition."""
+    props: dict[str, dict] = {
+        "test_name": {"type": "string", "description": "Full test name"},
+    }
+    if properties:
+        props.update(properties)
+    return {
+        "name": "get_classification_history",
+        "description": description,
+        "parameters": {
+            "type": "object",
+            "properties": props,
+            "required": ["test_name"],
+        },
+        "http": {
+            "method": "GET",
+            "url": f"{server_url.rstrip('/')}/history/classifications",
+            "headers": auth_headers,
+            "query_params": query_params,
+        },
+    }
+
+
+def build_analysis_history_tools(
+    *,
+    server_url: str,
+    auth_token: str,
+    job_id: str,
+) -> list[dict]:
+    """HTTP-backed history tools for analysis sessions.
+
+    Auth stays in tool ``http.headers`` (sidecar executes the request).
+    The AI never sees the token and has no bash/curl.
+    Reuses shared history GET builders with chat; adds analysis-only tools.
+    """
+    server_url = server_url.rstrip("/")
+    auth_headers = _bearer_headers(auth_token)
+    exclude = {"exclude_job_id": job_id}
+
+    return [
+        _tool_get_failure_history(
+            server_url=server_url,
+            auth_headers=auth_headers,
+            description=(
+                "MANDATORY for every failed test before classifying. "
+                "Pass/fail history: failure_rate, consecutive_failures, "
+                "classifications, comments, recent_runs. "
+                "Always pass job_name so passes/failure_rate are computed."
+            ),
+            query_params={**exclude, "job_name": "{job_name}"},
+            properties={
+                "job_name": {
+                    "type": "string",
+                    "description": "CI job name (required for pass/fail rates)",
+                },
+            },
+            required=["test_name", "job_name"],
+        ),
+        {
+            "name": "search_error_signature",
+            "description": (
+                "MANDATORY for every failure group. Find other tests/jobs "
+                "sharing this error signature (infrastructure vs isolated)."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "signature": {
+                        "type": "string",
+                        "description": "Error signature hash for this failure group",
+                    },
+                },
+                "required": ["signature"],
+            },
+            "http": {
+                "method": "GET",
+                "url": f"{server_url}/history/search",
+                "headers": auth_headers,
+                "query_params": {
+                    "signature": "{signature}",
+                    **exclude,
+                },
+            },
+        },
+        _tool_get_classification_history(
+            server_url=server_url,
+            auth_headers=auth_headers,
+            description=(
+                "MANDATORY for every failed test. Prior classifications and "
+                f"created_by (user vs {AI_SYSTEM_USERNAME}). Never override "
+                "user classifications."
+            ),
+            query_params={"test_name": "{test_name}"},
+        ),
+        {
+            "name": "get_job_history_stats",
+            "description": (
+                "MANDATORY once per job. Overall job health stats for pattern context."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "job_name": {
+                        "type": "string",
+                        "description": "Jenkins / CI job name",
+                    },
+                },
+                "required": ["job_name"],
+            },
+            "http": {
+                "method": "GET",
+                "url": f"{server_url}/history/stats/{{job_name}}",
+                "headers": auth_headers,
+                "query_params": exclude,
+            },
+        },
+        {
+            "name": "classify_test_pattern",
+            "description": (
+                "MANDATORY for every analyzed test (unless a human user already "
+                "classified it). Records pattern only (NEW/REGRESSION/FLAKY/"
+                "INTERMITTENT/KNOWN_BUG/PERSISTENT). source is always ai."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "test_name": {"type": "string"},
+                    "classification": {
+                        "type": "string",
+                        "description": (
+                            "Pattern: NEW, REGRESSION, FLAKY, INTERMITTENT, "
+                            "KNOWN_BUG, or PERSISTENT"
+                        ),
+                    },
+                    "reason": {
+                        "type": "string",
+                        "description": "Evidence-backed reason citing history data",
+                    },
+                    "job_name": {"type": "string"},
+                    "references": {
+                        "type": "string",
+                        "description": (
+                            "Jira keys / URLs / evidence ids, or empty string if none"
+                        ),
+                    },
+                },
+                "required": [
+                    "test_name",
+                    "classification",
+                    "reason",
+                    "job_name",
+                    "references",
+                ],
+            },
+            "http": {
+                "method": "POST",
+                "url": f"{server_url}/history/classify",
+                "headers": {**auth_headers, "Content-Type": "application/json"},
+                "body_template": {
+                    "test_name": "{test_name}",
+                    "classification": "{classification}",
+                    "reason": "{reason}",
+                    "job_name": "{job_name}",
+                    "job_id": job_id,
+                    "references": "{references}",
+                    "source": "ai",
+                },
+            },
+        },
+    ]
+
+
 def build_chat_custom_tools(
     *,
     server_url: str,
@@ -387,7 +613,8 @@ def build_chat_custom_tools(
     executes directly — no bash, no scripts on disk.
     """
     tools: list[dict] = []
-    auth_headers = {"Authorization": f"Bearer {auth_token}"}
+    server_url = server_url.rstrip("/")
+    auth_headers = _bearer_headers(auth_token)
 
     tools.append(
         {
@@ -416,57 +643,36 @@ def build_chat_custom_tools(
     )
 
     tools.append(
-        {
-            "name": "get_failure_history",
-            "description": "Get pass/fail history for a specific test — total runs, failure rate, classifications, recent occurrences",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "test_name": {
-                        "type": "string",
-                        "description": "Full test name",
-                    },
-                    "job_name": {
-                        "type": "string",
-                        "description": "Optional: filter history by job name",
-                    },
+        _tool_get_failure_history(
+            server_url=server_url,
+            auth_headers=auth_headers,
+            description=(
+                "Get pass/fail history for a specific test — total runs, "
+                "failure rate, classifications, recent occurrences. "
+                "Always pass job_name so passes/failure_rate are computed."
+            ),
+            query_params={"job_name": "{job_name}"},
+            properties={
+                "job_name": {
+                    "type": "string",
+                    "description": "CI job name (required for pass/fail rates)",
                 },
-                "required": ["test_name"],
             },
-            "http": {
-                "method": "GET",
-                "url": f"{server_url}/history/test/{{test_name}}",
-                "headers": auth_headers,
-                "query_params": {"job_name": "{job_name}"},
-            },
-        }
+            required=["test_name", "job_name"],
+        )
     )
 
     tools.append(
-        {
-            "name": "get_classification_history",
-            "description": "Get classification history for a test — who changed it, when, from what to what",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "test_name": {
-                        "type": "string",
-                        "description": "Full test name",
-                    },
-                    "job_id": {
-                        "type": "string",
-                        "description": "Optional: filter by specific job ID",
-                    },
-                },
-                "required": ["test_name"],
-            },
-            "http": {
-                "method": "GET",
-                "url": f"{server_url}/history/classifications",
-                "headers": auth_headers,
-                "query_params": {"test_name": "{test_name}", "job_id": "{job_id}"},
-            },
-        }
+        _tool_get_classification_history(
+            server_url=server_url,
+            auth_headers=auth_headers,
+            description=(
+                "Get classification history for a test — who changed it, "
+                "when, from what to what"
+            ),
+            # test_name is required; omit optional {job_id} placeholder.
+            query_params={"test_name": "{test_name}"},
+        )
     )
 
     if jira_url and jira_token:
@@ -1049,16 +1255,21 @@ async def _create_chat_session(
     )
     try:
         client = get_sidecar_client()
+        # Best-effort catalog warm; heuristic routing still works if this fails.
+        await _prewarm_model_routes(normalize_provider(ai_provider), ai_model)
+        sidecar_provider, sidecar_model = map_provider_model_for_sidecar(
+            ai_provider, ai_model
+        )
         create_kwargs: dict = {
-            "provider": ai_provider,
-            "model": ai_model,
+            "provider": sidecar_provider,
+            "model": sidecar_model,
             "system_prompt": system_prompt,
             "cwd": str(repo_path) if repo_path else "/tmp",
         }
         if custom_tools:
             create_kwargs["custom_tools"] = custom_tools
         if restrict_tools:
-            create_kwargs["tools"] = ["read", "ls", "find", "grep"]
+            create_kwargs["tools"] = list(CHAT_BUILTIN_TOOLS)
         session_id = await client.create_session(**create_kwargs)
         logger.info("%s: session created: %s", log_prefix, session_id)
         return session_id
@@ -1166,6 +1377,8 @@ async def _chat_with_ai_impl(
     }
     if custom_tools:
         call_kwargs["custom_tools"] = custom_tools
+    if not session_id and restrict_tools:
+        call_kwargs["tools"] = list(CHAT_BUILTIN_TOOLS)
     result = await call_ai(prompt, **call_kwargs)
 
     # If session was lost, retry with fresh session
@@ -1189,6 +1402,8 @@ async def _chat_with_ai_impl(
         }
         if custom_tools:
             retry_kwargs["custom_tools"] = custom_tools
+        if restrict_tools:
+            retry_kwargs["tools"] = list(CHAT_BUILTIN_TOOLS)
         result = await call_ai(prompt, **retry_kwargs)
 
     await result.record_usage(

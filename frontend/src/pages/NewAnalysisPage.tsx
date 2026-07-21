@@ -18,12 +18,14 @@ import { Toggle } from '@/components/shared/Toggle'
 import { FieldLabel } from '@/components/shared/FieldLabel'
 import { ModelCombobox } from '@/components/shared/ModelCombobox'
 import type { ModelOption } from '@/components/shared/ModelCombobox'
+import { useProviderOptions } from '@/lib/useProviderOptions'
 import { PeerConfigList } from '@/components/shared/PeerConfigList'
 import type { PeerConfigWithId } from '@/components/shared/PeerConfigList'
 import { AdditionalReposList } from '@/components/shared/AdditionalReposList'
 import type { RepoWithId } from '@/components/shared/AdditionalReposList'
 import { Send, Upload, Loader2 } from 'lucide-react'
 import type { DefaultServerSettings } from '@/types'
+import { normalizeProvider } from '@/lib/aiProviders'
 
 export function NewAnalysisPage() {
   const navigate = useNavigate()
@@ -92,7 +94,7 @@ export function NewAnalysisPage() {
     }, 5000)
     api.get<DefaultServerSettings>('/api/default-server-settings').then((defaults) => {
       if (cancelled || resolved) return
-      if (defaults.ai_provider) setAiProvider(defaults.ai_provider)
+      if (defaults.ai_provider) setAiProvider(normalizeProvider(defaults.ai_provider))
       if (defaults.ai_model) setAiModel(defaults.ai_model)
       setAiCallTimeout(defaults.ai_call_timeout)
       setTestsRepoUrl(defaults.tests_repo_url)
@@ -112,7 +114,7 @@ export function NewAnalysisPage() {
         setPeerConfigs(
           defaults.peer_ai_configs.map((p) => ({
             id: crypto.randomUUID(),
-            ai_provider: p.ai_provider,
+            ai_provider: normalizeProvider(p.ai_provider),
             ai_model: p.ai_model,
           }))
         )
@@ -143,6 +145,7 @@ export function NewAnalysisPage() {
   const fileInputRef = useRef<HTMLInputElement>(null)
 
   const availableModels = useProviderModels(aiProvider)
+  const providerOptions = useProviderOptions(aiProvider)
   const peerModels = usePeerModels(peerConfigs, enablePeers)
 
   const [submitting, setSubmitting] = useState(false)
@@ -467,14 +470,22 @@ export function NewAnalysisPage() {
             <div className="grid grid-cols-2 gap-3">
               <div className="space-y-1.5">
                 <FieldLabel>AI Provider</FieldLabel>
-                <Select value={aiProvider || undefined} onValueChange={setAiProvider}>
+                <Select
+                  value={aiProvider || undefined}
+                  onValueChange={(v) => {
+                    setAiProvider(v)
+                    setAiModel('')
+                  }}
+                >
                   <SelectTrigger>
                     <SelectValue placeholder="Select provider..." />
                   </SelectTrigger>
                   <SelectContent>
-                    <SelectItem value="claude">Claude</SelectItem>
-                    <SelectItem value="gemini">Gemini</SelectItem>
-                    <SelectItem value="cursor">Cursor</SelectItem>
+                    {providerOptions.map((opt) => (
+                      <SelectItem key={opt.value} value={opt.value}>
+                        {opt.label}
+                      </SelectItem>
+                    ))}
                   </SelectContent>
                 </Select>
               </div>

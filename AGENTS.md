@@ -72,7 +72,7 @@ uvx --with tox-uv tox -e frontend   # Frontend only
 
 - **Backend**: Python + FastAPI + SQLite (aiosqlite)
 - **Frontend**: Vite + React 19 + TypeScript + Tailwind CSS + shadcn/ui (in `/frontend/`)
-- **AI Integration**: Pi SDK sidecar — Node.js service wrapping the Pi coding agent SDK. Provides Claude (via Vertex), Cursor (via acpx), and Gemini models. No direct CLI dependencies. `AI_PROVIDER` env var selects provider.
+- **AI Integration**: Pi SDK sidecar — Node.js service wrapping the Pi coding agent SDK. Provides Claude (via Vertex), Cursor (via acpx), Gemini, and optional CLI models under the same provider names when `CLI_AGENTS` is set (same pattern as `ACPX_AGENTS`). No bash in analysis/chat tool lists. `AI_PROVIDER` env var selects provider (`claude` / `gemini` / `cursor`).
 - **CLI**: `rootcoz` CLI tool for querying the API — run `rootcoz --help` for available commands. Sub-commands include `results`, `history`, `comments`, `classifications`, `metadata`, `failure`, `chat`, `reports`, `config`, `auth`, `admin`, `admin-chat`
 
 ### Backend Module Layout
@@ -124,6 +124,7 @@ src/rootcoz/
   - `/api/results/{job_id}/comments/stream` — per-job comment changes
   - `/api/admin/token-usage/stream` — token usage data changes
   - `/api/chat/{job_id}/stream` — per-job chat message changes
+  - `/api/admin/logs/stream` — real-time server log tailing (admin only)
 - **Reports API**: Analytics endpoints for aggregated metrics:
   - `GET /api/reports/totals?team=&tier=&version=&from=&to=` — total jobs, failures, reviewed with per-job detail list
   - `GET /api/reports/classification-overrides?...` — user classification overrides grouped by from→to transition
@@ -195,7 +196,7 @@ prompt = f"Here is the data: {content}"
 
 AI chat sessions MUST use restricted tool sets — **never give bash access**.
 
-- **Allowed builtin tools**: `["read", "ls", "find", "grep"]` — filesystem browsing only
+- **Allowed builtin tools**: `["read", "ls", "find", "grep", "subagent"]` — filesystem browsing + delegating to project-provided agents
 - **Data access**: Use HTTP-backed custom tools via pi-sidecar (pi-sidecar ≥1.1.0)
 - **Never**: `bash`, `exec`, `write`, `edit` — the AI must not execute arbitrary commands or modify files
 - Custom tools define exactly which API endpoints the AI can call — nothing else is reachable
@@ -280,7 +281,7 @@ Node.js service running inside the same container, wrapping the Pi coding agent 
 - `call_ai_once()` — single-shot AI call with automatic session cleanup
 - `call_ai()` — multi-turn AI call (caller manages session lifecycle)
 - `AIResult.record_usage()` — record token usage to DB
-- Provider mapping: `cursor` → `acpx-cursor`, `claude` → `google-vertex-claude`, `gemini` → `google`
+- Provider mapping: `cursor` → `acpx-cursor` (default) or `cli-cursor` (when the chosen model is from CLI / `CLI_AGENTS`); `claude` → `google-vertex-claude` or `cli-claude`; `gemini` → `google` or `cli-gemini`. Public API uses only `claude` / `gemini` / `cursor` — never `*-cli` provider names.
 
 **Container integration:**
 - Dockerfile: sidecar build stage, `acpx` CLI installed globally

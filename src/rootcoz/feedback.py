@@ -174,6 +174,7 @@ Do NOT include any sensitive data (tokens, passwords, etc.) in the output."""
             ai_provider=ai_provider,
             ai_model=ai_model,
             ai_call_timeout=ai_call_timeout,
+            tools=[],
         )
     except Exception as exc:  # feedback formatting should fall back
         logger.warning("AI call failed for feedback formatting: %s", exc)

@@ -9,6 +9,8 @@ import {
 import { FieldLabel } from '@/components/shared/FieldLabel'
 import { ModelCombobox } from '@/components/shared/ModelCombobox'
 import type { ModelOption } from '@/components/shared/ModelCombobox'
+import { useProviderOptions } from '@/lib/useProviderOptions'
+import { normalizeProvider } from '@/lib/aiProviders'
 import { toIntInRange } from '@/lib/utils'
 import { Plus, Trash2 } from 'lucide-react'
 import type { AiConfig } from '@/types'
@@ -30,6 +32,8 @@ export function PeerConfigList({
   maxRounds,
   setMaxRounds,
 }: PeerConfigListProps) {
+  const providerOptions = useProviderOptions(peerConfigs.map((p) => p.ai_provider))
+
   const updatePeer = (id: string, patch: Partial<PeerConfigWithId>) => {
     setPeerConfigs((prev) => prev.map((p) => (p.id === id ? { ...p, ...patch } : p)))
   }
@@ -44,16 +48,18 @@ export function PeerConfigList({
           >
             <div className="flex items-center gap-2">
               <Select
-                value={peer.ai_provider}
-                onValueChange={(v) => updatePeer(peer.id, { ai_provider: v })}
+                value={normalizeProvider(peer.ai_provider) || undefined}
+                onValueChange={(v) => updatePeer(peer.id, { ai_provider: v, ai_model: '' })}
               >
                 <SelectTrigger className="w-[120px]">
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="claude">Claude</SelectItem>
-                  <SelectItem value="gemini">Gemini</SelectItem>
-                  <SelectItem value="cursor">Cursor</SelectItem>
+                  {providerOptions.map((opt) => (
+                    <SelectItem key={opt.value} value={opt.value}>
+                      {opt.label}
+                    </SelectItem>
+                  ))}
                 </SelectContent>
               </Select>
               <div className="flex-1" />

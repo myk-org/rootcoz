@@ -26,13 +26,16 @@ import {
   RotateCcw,
   Loader2,
   Clock,
+  RefreshCw,
 } from 'lucide-react'
 import { PeerConfigList } from '@/components/shared/PeerConfigList'
 import type { PeerConfigWithId } from '@/components/shared/PeerConfigList'
 import { usePeerModels } from '@/lib/usePeerModels'
 import { ProviderSelect } from '@/components/shared/ProviderSelect'
 import { ModelCombobox } from '@/components/shared/ModelCombobox'
+import { CursorAuthBanner } from '@/components/shared/CursorAuthBanner'
 import { useProviderModels } from '@/hooks/useProviderModels'
+import { useCursorAuthStatus } from '@/lib/useProviderOptions'
 import { AdditionalReposList } from '@/components/shared/AdditionalReposList'
 import type { RepoWithId } from '@/components/shared/AdditionalReposList'
 
@@ -342,10 +345,12 @@ export function ServerSettingsPage() {
   const [aiModelValue, setAiModelValue] = useState('')
   // For the model combobox, use the editing provider if editing, otherwise the saved setting value
   const savedAiProvider = state.settings.find(s => s.key === 'ai_provider')?.value || ''
+  const savedAiModel = state.settings.find(s => s.key === 'ai_model')?.value || ''
   const effectiveAiProvider = aiProviderEditing
     ? aiProviderValue
     : (savedAiProvider || aiProviderValue)
-  const aiModels = useProviderModels(effectiveAiProvider)
+  const { models: aiModels, refresh: refreshModels, refreshing: refreshingModels } = useProviderModels(effectiveAiProvider)
+  const cursorAuthStatus = useCursorAuthStatus()
 
   // Additional repos structured editor state
   const [additionalRepos, setAdditionalRepos] = useState<RepoWithId[]>([])
@@ -388,10 +393,10 @@ export function ServerSettingsPage() {
   useSSE('settings', settingsEvents)
 
   // ---- Shared save helper ----
-  async function saveSettingValue(key: string, value: string): Promise<boolean> {
+  async function saveSettings(updates: Record<string, string>): Promise<boolean> {
     dispatch({ type: 'SAVE_START' })
     try {
-      await api.put('/api/admin/settings', { settings: { [key]: value } })
+      await api.put('/api/admin/settings', { settings: updates })
       dispatch({ type: 'SAVE_SUCCESS' })
       fetchSettings()
       return true
@@ -404,6 +409,10 @@ export function ServerSettingsPage() {
       dispatch({ type: 'SAVE_ERROR', error: msg })
       return false
     }
+  }
+
+  async function saveSettingValue(key: string, value: string): Promise<boolean> {
+    return saveSettings({ [key]: value })
   }
 
   // ---- Save setting ----
@@ -442,35 +451,58 @@ export function ServerSettingsPage() {
     const configStr = serializePeerConfigs(peerConfigs)
     const updates: Record<string, string> = { peer_ai_configs: configStr }
     updates.peer_analysis_max_rounds = String(peerMaxRounds)
-    dispatch({ type: 'SAVE_START' })
-    try {
-      await api.put('/api/admin/settings', { settings: updates })
-      dispatch({ type: 'SAVE_SUCCESS' })
-      fetchSettings()
-      setPeerEditing(false)  // Only close on success
-    } catch (err) {
-      let msg = 'Failed to save'
-      if (err instanceof ApiError) {
-        const body = err.body as { detail?: string } | null
-        msg = body?.detail ?? 'Save failed'
-      }
-      dispatch({ type: 'SAVE_ERROR', error: msg })
-      // Don't close — user can fix and retry
-    }
+    const ok = await saveSettings(updates)
+    if (ok) setPeerEditing(false)  // Only close on success
   }
 
   async function handleSaveAiProvider(value: string) {
+    const previousProvider = savedAiProvider
+    if (value !== previousProvider) {
+      // Provider changed: require a model and persist both atomically so we never
+      // delete ai_model (empty → env fallback) or leave a mismatched pair.
+      const model = aiModelValue.trim()
+      if (!model) {
+        setAiModelEditing(true)
+        dispatch({
+          type: 'SAVE_ERROR',
+          error: 'Select a model for the new provider before saving.',
+        })
+        return
+      }
+      const ok = await saveSettings({ ai_provider: value, ai_model: model })
+      if (ok) {
+        setAiProviderEditing(false)
+        setAiModelEditing(false)
+        setAiProviderValue(value)
+      }
+      return
+    }
     const ok = await saveSettingValue('ai_provider', value)
     if (ok) {
       setAiProviderEditing(false)
-      // Keep aiProviderValue in sync so effectiveAiProvider (and thus the
-      // model list) reflects the newly saved provider immediately, before
-      // fetchSettings() re-renders with the server-side state.
       setAiProviderValue(value)
     }
   }
 
   async function handleSaveAiModel(value: string) {
+    const providerDraft = (aiProviderValue || savedAiProvider).trim()
+    if (providerDraft && providerDraft !== savedAiProvider) {
+      const model = value.trim()
+      if (!model) {
+        dispatch({
+          type: 'SAVE_ERROR',
+          error: 'Select a model for the new provider before saving.',
+        })
+        return
+      }
+      const ok = await saveSettings({ ai_provider: providerDraft, ai_model: model })
+      if (ok) {
+        setAiProviderEditing(false)
+        setAiModelEditing(false)
+        setAiProviderValue(providerDraft)
+      }
+      return
+    }
     const ok = await saveSettingValue('ai_model', value)
     if (ok) setAiModelEditing(false)
   }
@@ -667,6 +699,11 @@ export function ServerSettingsPage() {
                   </button>
                   {!isCollapsed && (
                     <CardContent className="px-4 pb-4 pt-0">
+                      {category === 'AI' && cursorAuthStatus && (
+                        <div className="mb-3">
+                          <CursorAuthBanner status={cursorAuthStatus} />
+                        </div>
+                      )}
                       <div className="divide-y divide-border-default">
                         {settings.map((setting) => {
                           if (setting.key === 'ai_provider') {
@@ -676,7 +713,11 @@ export function ServerSettingsPage() {
                                 setting={setting}
                                 editing={aiProviderEditing}
                                 onStartEdit={(v) => { setAiProviderValue(v); setAiProviderEditing(true) }}
-                                onCancel={() => { setAiProviderEditing(false); setAiProviderValue(savedAiProvider) }}
+                                onCancel={() => {
+                                  setAiProviderEditing(false)
+                                  setAiProviderValue(savedAiProvider)
+                                  setAiModelValue(savedAiModel)
+                                }}
                                 onSave={() => handleSaveAiProvider(aiProviderValue)}
                                 onReset={() => handleReset(setting.key)}
                                 saving={state.saving}
@@ -687,7 +728,13 @@ export function ServerSettingsPage() {
                                 configureLabel="Configure provider"
                                 notConfiguredLabel="Not configured (uses AI_PROVIDER env var)"
                               >
-                                <ProviderSelect value={aiProviderValue} onChange={setAiProviderValue} />
+                                <ProviderSelect
+                                  value={aiProviderValue}
+                                  onChange={(v) => {
+                                    setAiProviderValue(v)
+                                    setAiModelValue('')
+                                  }}
+                                />
                               </AiSettingRow>
                             )
                           }
@@ -710,13 +757,29 @@ export function ServerSettingsPage() {
                                 configureLabel="Configure model"
                                 notConfiguredLabel="Not configured (uses AI_MODEL env var)"
                               >
-                                <ModelCombobox
-                                  value={aiModelValue}
-                                  onChange={setAiModelValue}
-                                  options={aiModels}
-                                  placeholder="Select model..."
-                                  className="max-w-md"
-                                />
+                                <div className="flex items-center gap-2">
+                                  <ModelCombobox
+                                    value={aiModelValue}
+                                    onChange={setAiModelValue}
+                                    options={aiModels}
+                                    placeholder="Select model..."
+                                    className="max-w-md"
+                                  />
+                                  <Tooltip>
+                                    <TooltipTrigger asChild>
+                                      <Button
+                                        variant="ghost"
+                                        size="icon"
+                                        onClick={refreshModels}
+                                        disabled={refreshingModels || !effectiveAiProvider}
+                                        className="h-8 w-8 shrink-0"
+                                      >
+                                        <RefreshCw className={`h-4 w-4 ${refreshingModels ? 'animate-spin' : ''}`} />
+                                      </Button>
+                                    </TooltipTrigger>
+                                    <TooltipContent>Refresh models from sidecar</TooltipContent>
+                                  </Tooltip>
+                                </div>
                                 {!effectiveAiProvider && (
                                   <p className="text-xs text-signal-amber">Select a provider first to see available models</p>
                                 )}

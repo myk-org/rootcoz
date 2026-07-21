@@ -20,6 +20,7 @@ from rootcoz.engine.core import (
     recover_from_details,
     resolve_additional_repos,
     run_single_ai_analysis,
+    write_failure_details_file,
     write_other_groups_file,
 )
 from rootcoz.models import (
@@ -226,6 +227,46 @@ class TestRunSingleAiAnalysis:
         assert isinstance(sig, str) and len(sig) == 64  # SHA-256 hex
 
     @pytest.mark.asyncio
+    async def test_cwd_uses_temp_workspace_when_no_repo(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """When repo_path is None, call_ai_once cwd is the temp workspace dir."""
+        captured: dict[str, object] = {}
+
+        async def mock_cli(prompt, **kwargs):
+            captured.update(kwargs)
+            return AIResult(
+                success=True,
+                text=json.dumps(
+                    {
+                        "classification": "CODE ISSUE",
+                        "affected_tests": ["test_foo"],
+                        "details": "ok",
+                    }
+                ),
+            )
+
+        monkeypatch.setattr("rootcoz.engine.core.call_ai_once", mock_cli)
+        failure = FailedTest(
+            test_name="test_foo", error_message="AssertionError", stack_trace="line 42"
+        )
+        await run_single_ai_analysis(
+            failures=[failure],
+            console_context="console lines",
+            repo_path=None,
+            ai_provider="claude",
+            ai_model="opus",
+            ai_call_timeout=None,
+            custom_prompt="",
+            artifacts_context="",
+            server_url="",
+            job_id="",
+        )
+        cwd = captured.get("cwd")
+        assert isinstance(cwd, str) and cwd
+        assert Path(cwd).name.startswith("rootcoz-console-")
+
+    @pytest.mark.asyncio
     async def test_failed_ai_call_returns_fallback(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -252,6 +293,108 @@ class TestRunSingleAiAnalysis:
         assert parsed.details == "CLI timeout"
         assert parsed.classification == ""
         assert isinstance(sig, str) and len(sig) == 64
+        mock_cli.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_empty_response_retries_once_then_succeeds(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Empty success text triggers one retry; second non-empty response is used."""
+        good = json.dumps(
+            {
+                "classification": "INFRASTRUCTURE",
+                "affected_tests": ["test_foo"],
+                "details": "recovered after retry",
+            }
+        )
+        mock_cli = AsyncMock(
+            side_effect=[
+                AIResult(success=True, text=""),
+                AIResult(success=True, text=good),
+            ]
+        )
+        monkeypatch.setattr("rootcoz.engine.core.call_ai_once", mock_cli)
+
+        failure = FailedTest(
+            test_name="test_foo", error_message="timeout", stack_trace="st"
+        )
+        parsed, _sig = await run_single_ai_analysis(
+            failures=[failure],
+            console_context="",
+            repo_path=None,
+            ai_provider="cursor",
+            ai_model="cursor:grok",
+            ai_call_timeout=None,
+            custom_prompt="",
+            artifacts_context="",
+            server_url="",
+            job_id="job-1",
+        )
+        assert mock_cli.await_count == 2
+        assert parsed.classification == "INFRASTRUCTURE"
+        assert parsed.details == "recovered after retry"
+
+    @pytest.mark.asyncio
+    async def test_empty_response_twice_fails_with_clear_error(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Two empty success responses fail the group with an explicit error message."""
+        mock_cli = AsyncMock(return_value=AIResult(success=True, text=""))
+        monkeypatch.setattr("rootcoz.engine.core.call_ai_once", mock_cli)
+
+        failure = FailedTest(
+            test_name="test_foo", error_message="timeout", stack_trace="st"
+        )
+        parsed, _sig = await run_single_ai_analysis(
+            failures=[failure],
+            console_context="",
+            repo_path=None,
+            ai_provider="cursor",
+            ai_model="cursor:grok",
+            ai_call_timeout=None,
+            custom_prompt="",
+            artifacts_context="",
+            server_url="",
+            job_id="job-1",
+        )
+        assert mock_cli.await_count == 2
+        assert parsed.classification == ""
+        assert "empty response after retry" in parsed.details
+        assert "provider=cursor" in parsed.details
+        assert "model=cursor:grok" in parsed.details
+
+    @pytest.mark.asyncio
+    async def test_non_empty_first_response_does_not_retry(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A usable first response must not trigger a retry."""
+        ai_response = json.dumps(
+            {
+                "classification": "CODE ISSUE",
+                "affected_tests": ["test_foo"],
+                "details": "first try",
+            }
+        )
+        mock_cli = AsyncMock(return_value=AIResult(success=True, text=ai_response))
+        monkeypatch.setattr("rootcoz.engine.core.call_ai_once", mock_cli)
+
+        failure = FailedTest(
+            test_name="test_foo", error_message="err", stack_trace="st"
+        )
+        parsed, _sig = await run_single_ai_analysis(
+            failures=[failure],
+            console_context="",
+            repo_path=None,
+            ai_provider="claude",
+            ai_model="opus",
+            ai_call_timeout=None,
+            custom_prompt="",
+            artifacts_context="",
+            server_url="",
+            job_id="",
+        )
+        mock_cli.assert_awaited_once()
+        assert parsed.details == "first try"
 
     @pytest.mark.asyncio
     async def test_peer_analysis_uses_shared_helper(
@@ -303,6 +446,32 @@ class TestRunSingleAiAnalysis:
         assert call_kwargs["ai_provider"] == "claude"
         assert call_kwargs["ai_model"] == "opus"
         assert call_kwargs["auth_header"] == "Bearer test-token"
+
+
+class TestWriteFailureDetailsFile:
+    """Tests for write_failure_details_file (no-embed failure data)."""
+
+    def test_writes_error_stack_and_tests(self, tmp_path: Path) -> None:
+        f1 = FailedTest(
+            test_name="test_a",
+            error_message="boom",
+            stack_trace="line1\nline2",
+        )
+        f2 = FailedTest(test_name="test_b", error_message="boom", stack_trace="line1")
+        filepath = write_failure_details_file([f1, f2], "abcdef12deadbeef", tmp_path)
+        assert filepath.exists()
+        content = filepath.read_text()
+        assert "abcdef12deadbeef" in content
+        assert "test_a" in content
+        assert "test_b" in content
+        assert "boom" in content
+        assert "line1" in content
+        assert "line2" in content
+
+    def test_filename_uses_signature_prefix(self, tmp_path: Path) -> None:
+        f = FailedTest(test_name="t", error_message="e", stack_trace="s")
+        filepath = write_failure_details_file([f], "sigprefixXX", tmp_path)
+        assert filepath.name == "failure-details-sigprefixXX.txt"
 
 
 class TestWriteOtherGroupsFile:
@@ -482,6 +651,57 @@ class TestRunSingleAiAnalysisGroupContext:
         groups_files = list(tmp_path.glob("other-failure-groups-*.txt"))
         assert len(groups_files) == 1
         assert "test_b" in groups_files[0].read_text()
+
+    @pytest.mark.asyncio
+    async def test_prompt_does_not_embed_error_or_stack(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """Error message and stack trace are written to a file, not the prompt."""
+        captured_prompt: dict[str, str] = {}
+
+        async def mock_ai(prompt, **kwargs):
+            captured_prompt["text"] = prompt
+            return AIResult(
+                success=True,
+                text=json.dumps(
+                    {
+                        "classification": "CODE ISSUE",
+                        "affected_tests": ["test_a"],
+                        "details": "broken",
+                    }
+                ),
+            )
+
+        monkeypatch.setattr("rootcoz.engine.core.call_ai_once", mock_ai)
+
+        unique_error = "UNIQUE_ERROR_MSG_DO_NOT_EMBED_XYZ"
+        unique_stack = "UNIQUE_STACK_FRAME_DO_NOT_EMBED_ABC"
+        failure = FailedTest(
+            test_name="test_a",
+            error_message=unique_error,
+            stack_trace=unique_stack,
+        )
+        await run_single_ai_analysis(
+            failures=[failure],
+            console_context="",
+            repo_path=tmp_path,
+            ai_provider="claude",
+            ai_model="opus",
+            ai_call_timeout=None,
+            custom_prompt="",
+            artifacts_context="",
+            server_url="",
+            job_id="",
+        )
+        prompt = captured_prompt["text"]
+        assert unique_error not in prompt
+        assert unique_stack not in prompt
+        assert "failure-details-" in prompt
+        detail_files = list(tmp_path.glob("failure-details-*.txt"))
+        assert len(detail_files) == 1
+        content = detail_files[0].read_text()
+        assert unique_error in content
+        assert unique_stack in content
 
     @pytest.mark.asyncio
     async def test_timeline_rule_in_prompt(
@@ -1717,6 +1937,10 @@ class TestBuildResourcesSectionAdditionalRepos:
         result = build_resources_section(workspace, additional_repos=additional)
         assert "ROOTCOZ_PROMPT.md" in result
         assert "Project-specific analysis instructions" in result
+        assert "body not embedded" in result
+        assert "issue #74" in result
+        assert "sha256=" in result
+        assert "bytes=" in result
 
     def test_history_prompt_in_repo(self, tmp_path) -> None:
         """Test that history prompt in a cloned repo is advertised when history enabled."""
@@ -2819,6 +3043,24 @@ class TestJsonResponseSchemaParagraphBreaks:
             "Separate distinct artifact entries with paragraph breaks"
             in JSON_RESPONSE_SCHEMA
         )
+
+    def test_artifacts_evidence_allows_image_observations(self) -> None:
+        """Schema instructs AI to read images and record visual observations."""
+        assert "png/jpg/gif/webp/bmp" in JSON_RESPONSE_SCHEMA
+        assert "describe what you see" in JSON_RESPONSE_SCHEMA
+        assert "text and/or images" in JSON_RESPONSE_SCHEMA
+
+    def test_build_artifacts_section_mentions_images(self) -> None:
+        """Artifacts prompt tells the AI to read images, not only text logs."""
+        from rootcoz.engine.core import build_artifacts_section
+
+        section = build_artifacts_section("/tmp/artifacts-test")
+        assert "png/jpg/gif/webp/bmp" in section
+        assert "vision" in section.lower() or "read tool" in section.lower()
+        assert "webm/mp4" in section
+        assert "VERBATIM lines" in section
+        # Still path-only — no embedded file inventory
+        assert "test-failed" not in section
 
     def test_product_bug_report_description_has_paragraph_break_instruction(
         self,

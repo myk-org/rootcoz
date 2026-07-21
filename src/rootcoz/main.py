@@ -3,10 +3,12 @@ import copy
 import hmac
 import json
 import logging
+import logging.handlers
 import math
 import os
 import re
 import sqlite3
+import threading
 import time as _time
 from urllib.parse import quote as _urlquote, urlparse, urlunparse
 import uuid
@@ -22,12 +24,20 @@ import aiosqlite
 import httpx
 import uvicorn
 from pi_sidecar_client import (
-    call_ai_once,
     check_sidecar_available,
-    list_models,
     run_parallel_with_limit,
 )
-from rootcoz.ai_client import VALID_AI_PROVIDERS, _setup_usage_recorder
+from rootcoz.ai_client import (
+    VALID_AI_PROVIDERS,
+    _setup_usage_recorder,
+    build_friendly_catalog,
+    call_ai_once,
+    clear_cursor_auth_cache,
+    format_chat_ai_user_error,
+    list_models,
+    normalize_provider,
+    probe_cursor_auth,
+)
 from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Query, Request
 from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
@@ -1249,6 +1259,7 @@ async def _deferred_resume_waiting_jobs(waiting_jobs: list[dict]) -> None:
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     _install_job_id_filter()
+    _install_sse_log_handler()
     _setup_usage_recorder()
 
     await init_db()
@@ -1884,7 +1895,7 @@ def _resolve_ai_provider_model(
     """
     if settings is None:
         settings = get_settings()
-    provider = (ai_provider or settings.ai_provider).lower()
+    provider = normalize_provider(ai_provider or settings.ai_provider)
     model = ai_model or settings.ai_model
     return provider, model
 
@@ -7375,6 +7386,22 @@ async def validate_token(
             return _invalid("Could not reach Jira API")
 
 
+def _sanitize_sidecar_placeholder(value: str) -> str:
+    """Clear unsubstituted sidecar placeholders (e.g. ``{job_name}`` → ``\"\"``).
+
+    When the model omits an optional tool arg, the sidecar may leave the
+    literal ``{param}`` string in query/body fields. Treat that as empty.
+    """
+    if not value:
+        return ""
+    stripped = value.strip()
+    if stripped.startswith("{") and stripped.endswith("}") and len(stripped) > 2:
+        inner = stripped[1:-1]
+        if inner.isidentifier():
+            return ""
+    return value
+
+
 @app.get("/history/failures")
 async def get_all_failures_endpoint(
     search: str = Query(default=""),
@@ -7404,6 +7431,7 @@ async def get_all_failures_endpoint(
 
 @app.get("/history/test/{test_name:path}")
 async def get_test_history_endpoint(
+    request: Request,
     test_name: str,
     limit: int = Query(default=20, le=100),
     job_name: str = Query(default=""),
@@ -7412,34 +7440,44 @@ async def get_test_history_endpoint(
     ),
 ) -> dict:
     """Get pass/fail history for a specific test."""
+    _require_authenticated(request)
+    job_name = _sanitize_sidecar_placeholder(job_name)
+    exclude_job_id = _sanitize_sidecar_placeholder(exclude_job_id)
     logger.debug(f"GET /history/test/{test_name}: limit={limit}, job_name={job_name!r}")
-    return await storage.get_test_history(
+    result = await storage.get_test_history(
         test_name, limit=limit, job_name=job_name, exclude_job_id=exclude_job_id
     )
+    return strip_sensitive_from_response(result)
 
 
 @app.get("/history/search")
 async def search_by_signature_endpoint(
+    request: Request,
     signature: str = Query(...),
     exclude_job_id: str = Query(
         default="", description="Exclude results from this job ID"
     ),
 ) -> dict:
     """Find all tests that failed with the same error signature."""
+    _require_authenticated(request)
     logger.debug(f"GET /history/search: signature={signature}")
-    return await storage.search_by_signature(signature, exclude_job_id=exclude_job_id)
+    result = await storage.search_by_signature(signature, exclude_job_id=exclude_job_id)
+    return strip_sensitive_from_response(result)
 
 
 @app.get("/history/stats/{job_name:path}")
 async def get_job_stats_endpoint(
+    request: Request,
     job_name: str,
     exclude_job_id: str = Query(
         default="", description="Exclude results from this job ID"
     ),
 ) -> dict:
     """Get aggregate statistics for a specific job."""
+    _require_authenticated(request)
     logger.debug(f"GET /history/stats/{job_name}")
-    return await storage.get_job_stats(job_name, exclude_job_id=exclude_job_id)
+    result = await storage.get_job_stats(job_name, exclude_job_id=exclude_job_id)
+    return strip_sensitive_from_response(result)
 
 
 @app.post("/history/classify", status_code=201)
@@ -7454,7 +7492,8 @@ async def classify_test(request: Request, body: ClassifyTestRequest) -> dict:
     classification = body.classification
     reason = body.reason
     job_name = body.job_name
-    references = body.references
+    # Sidecar body_template leaves "{references}" when the model omits the arg.
+    references = _sanitize_sidecar_placeholder(body.references)
     classify_job_id = body.job_id
 
     if not test_name:
@@ -7541,6 +7580,7 @@ async def classify_test(request: Request, body: ClassifyTestRequest) -> dict:
 
 @app.get("/history/classifications")
 async def get_classifications(
+    request: Request,
     test_name: str = Query(default=""),
     classification: str = Query(default=""),
     job_name: str = Query(default=""),
@@ -7548,6 +7588,12 @@ async def get_classifications(
     job_id: str = Query(default=""),
 ) -> dict:
     """Get test classifications."""
+    _require_authenticated(request)
+    test_name = _sanitize_sidecar_placeholder(test_name)
+    classification = _sanitize_sidecar_placeholder(classification)
+    job_name = _sanitize_sidecar_placeholder(job_name)
+    parent_job_name = _sanitize_sidecar_placeholder(parent_job_name)
+    job_id = _sanitize_sidecar_placeholder(job_id)
     logger.debug(
         f"GET /history/classifications: test_name={test_name!r}, classification={classification!r}, "
         f"job_name={job_name!r}, parent_job_name={parent_job_name!r}, job_id={job_id!r}"
@@ -7559,20 +7605,64 @@ async def get_classifications(
         parent_job_name=parent_job_name,
         job_id=job_id,
     )
-    return {"classifications": classifications}
+    return strip_sensitive_from_response({"classifications": classifications})
+
+
+def _cursor_status_for_client(status: dict, *, is_admin: bool) -> dict:
+    """Return Cursor provider_status safe for the caller's role.
+
+    Non-admins must not learn whether ``CURSOR_API_KEY`` is configured
+    (``has_api_key`` or credential-revealing reasons/hints).
+    """
+    out = dict(status)
+    if is_admin:
+        return out
+    out.pop("has_api_key", None)
+    if out.get("reason") in ("auth_expired", "api_key_not_applied"):
+        out["reason"] = "unavailable"
+    if not out.get("ok"):
+        out["hint"] = "Cursor is unavailable. Contact an administrator."
+    return out
+
+
+def _cursor_status_from_model_count(model_count: int) -> dict:
+    """Coarse Cursor status for non-admins (no subprocess / credential probe)."""
+    if model_count > 0:
+        return {"ok": True, "reason": None, "hint": None, "model_count": model_count}
+    return {
+        "ok": False,
+        "reason": "unavailable",
+        "hint": "Cursor is unavailable. Contact an administrator.",
+        "model_count": model_count,
+    }
 
 
 @app.get("/api/ai-models")
 async def list_ai_models(
+    request: Request,
     provider: str = Query(
-        "", description="Filter by AI provider (e.g. cursor, claude, gemini)"
+        "",
+        description=(
+            "Filter by AI provider (claude, gemini, or cursor). "
+            "CLI models are included under the same provider when CLI_AGENTS is set."
+        ),
     ),
 ) -> dict:
-    """List available AI models for one or all configured providers."""
+    """List available AI models for one or all configured providers.
+
+    When listing all providers (or cursor alone), includes ``provider_status``
+    with a Cursor auth probe (browser ``agent login`` expires; ``CURSOR_API_KEY``
+    does not expire and always works when set in the server env).
+    Credential-state fields (``has_api_key``) are admin-only.
+    Non-admins get a coarse ok/unavailable status from model_count only
+    (no ``agent status`` subprocess).
+    """
+    _require_authenticated(request)
     logger.debug("GET /api/ai-models provider=%s", provider)
+    is_admin = bool(getattr(request.state, "is_admin", False))
     try:
         if provider:
-            provider = provider.lower().strip()
+            provider = normalize_provider(provider)
             if provider not in VALID_AI_PROVIDERS:
                 raise HTTPException(
                     status_code=400,
@@ -7582,20 +7672,39 @@ async def list_ai_models(
                     ),
                 )
             models = await list_models(provider)
-            return {"provider": provider, "models": models}
+            payload: dict = {"provider": provider, "models": models}
+            if provider == "cursor":
+                if is_admin:
+                    cursor_raw = await probe_cursor_auth(model_count=len(models))
+                    cursor_status = _cursor_status_for_client(cursor_raw, is_admin=True)
+                else:
+                    cursor_status = _cursor_status_from_model_count(len(models))
+                payload["provider_status"] = {"cursor": cursor_status}
+            return strip_sensitive_from_response(payload)
 
-        # No provider specified — return models for all known providers
-        all_models: dict[str, list[dict]] = {}
-        for p in sorted(VALID_AI_PROVIDERS):
-            try:
-                models = await list_models(p)
-                all_models[p] = models
-            except Exception:
-                logger.warning(
-                    "Failed to list models for provider=%s", p, exc_info=True
-                )
-                all_models[p] = []
-        return {"providers": all_models}
+        # No provider specified — one sidecar catalog, then split per friendly provider
+        from pi_sidecar_client import get_sidecar_client
+
+        try:
+            raw_catalog = await get_sidecar_client().get_models()
+            all_models = build_friendly_catalog(raw_catalog)
+        except Exception:
+            logger.warning("Failed to list models for all providers", exc_info=True)
+            all_models = {p: [] for p in sorted(VALID_AI_PROVIDERS)}
+        cursor_count = len(all_models.get("cursor", []))
+        if is_admin:
+            cursor_status = _cursor_status_for_client(
+                await probe_cursor_auth(model_count=cursor_count),
+                is_admin=True,
+            )
+        else:
+            cursor_status = _cursor_status_from_model_count(cursor_count)
+        return strip_sensitive_from_response(
+            {
+                "providers": all_models,
+                "provider_status": {"cursor": cursor_status},
+            }
+        )
     except HTTPException:
         raise
     except Exception:
@@ -7603,8 +7712,46 @@ async def list_ai_models(
             "Failed to list AI models for provider=%s", provider, exc_info=True
         )
         if provider:
-            return {"provider": provider, "models": []}
-        return {"providers": {}}
+            return strip_sensitive_from_response({"provider": provider, "models": []})
+        return strip_sensitive_from_response({"providers": {}, "provider_status": {}})
+
+
+@app.post("/api/admin/ai-models/refresh")
+async def refresh_ai_models(request: Request) -> dict:
+    """Trigger model re-discovery on the sidecar and return updated list."""
+    _require_admin(request)
+    logger.info("POST /api/admin/ai-models/refresh: refreshing models")
+    try:
+        from pi_sidecar_client import get_sidecar_client
+
+        import rootcoz.ai_client as ai_client_mod
+
+        client = get_sidecar_client()
+        # Keep the previous route cache until refresh succeeds so concurrent AI
+        # calls (and refresh failures) do not fall back to default sidecars.
+        models = await client.refresh_models()
+        ai_client_mod._model_route_cache.clear()
+        clear_cursor_auth_cache()
+        # Rebuild friendly provider catalogs + route cache from one catalog
+        build_friendly_catalog(models)
+        cursor_status = await probe_cursor_auth(force=True)
+        logger.info(
+            "Model refresh complete: %d models available (cursor_ok=%s)",
+            len(models),
+            cursor_status.get("ok"),
+        )
+        return strip_sensitive_from_response(
+            {
+                "models": models,
+                "count": len(models),
+                "provider_status": {"cursor": cursor_status},
+            }
+        )
+    except Exception:
+        logger.exception("Failed to refresh AI models")
+        raise HTTPException(
+            status_code=502, detail="Failed to refresh AI models from sidecar"
+        )
 
 
 @app.get("/health")
@@ -7773,6 +7920,18 @@ def _require_admin(request: Request) -> None:
     """Raise 403 if the request is not from an authenticated admin."""
     if not request.state.is_admin:
         raise HTTPException(status_code=403, detail="Admin access required")
+
+
+def _require_authenticated(request: Request) -> None:
+    """Raise 401 if the request has no authenticated username.
+
+    Middleware already blocks anonymous access for non-public paths; this is an
+    explicit handler-level gate for endpoints that return non-public data.
+    Uses 401 (not 403) so frontend auth refresh treats missing auth as logout.
+    """
+    username = getattr(request.state, "username", "")
+    if not username:
+        raise HTTPException(status_code=401, detail="Authentication required")
 
 
 def _require_reviewer(request: Request) -> None:
@@ -8211,6 +8370,180 @@ async def save_user_tokens_endpoint(request: Request) -> JSONResponse:
 # --- Admin endpoints ---
 
 
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+
+# --- Live log broadcast for SSE streaming ---
+# Each listener is (owning_loop, queue) so emit() can wake the correct loop
+# from non-asyncio logging threads via call_soon_threadsafe.
+_log_listeners: set[tuple[asyncio.AbstractEventLoop, asyncio.Queue[str]]] = set()
+_log_listeners_lock = threading.Lock()
+
+
+class _SSELogHandler(logging.Handler):
+    """Logging handler that broadcasts formatted records to SSE listeners."""
+
+    def emit(self, record: logging.LogRecord) -> None:
+        with _log_listeners_lock:
+            if not _log_listeners:
+                return
+            listeners = list(_log_listeners)
+        try:
+            msg = self.format(record)
+            clean = _ANSI_RE.sub("", msg)
+
+            def _enqueue(q: asyncio.Queue[str], line: str) -> None:
+                try:
+                    q.put_nowait(line)
+                except asyncio.QueueFull:
+                    pass
+
+            for loop, q in listeners:
+                try:
+                    loop.call_soon_threadsafe(_enqueue, q, clean)
+                except Exception:
+                    logger.debug("SSE log enqueue failed for a listener", exc_info=True)
+        except Exception:
+            logger.debug("SSE log emit failed", exc_info=True)
+
+
+# Singleton handler instance — attached to all loggers once.
+_sse_log_handler: _SSELogHandler | None = None
+
+
+def _install_sse_log_handler() -> None:
+    """Install SSE broadcast handler on all known loggers.
+
+    simple_logger creates per-module loggers with propagate=False,
+    so attaching to the root logger alone catches nothing.
+    This mirrors _install_job_id_filter's approach of walking
+    every registered logger.
+    """
+    global _sse_log_handler  # noqa: PLW0603
+    if _sse_log_handler is not None:
+        return
+    handler = _SSELogHandler()
+    handler.setLevel(logging.DEBUG)
+    # Copy formatter from the first RotatingFileHandler we find
+    for name in [None, *list(logging.Logger.manager.loggerDict)]:
+        lg = logging.getLogger(name)
+        for h in getattr(lg, "handlers", []):
+            if isinstance(h, logging.handlers.RotatingFileHandler) and h.formatter:
+                handler.setFormatter(h.formatter)
+                break
+        if handler.formatter:
+            break
+    # Attach to every logger
+    for name in [None, *list(logging.Logger.manager.loggerDict)]:
+        lg = logging.getLogger(name)
+        if hasattr(lg, "addHandler"):
+            lg.addHandler(handler)
+    _sse_log_handler = handler
+
+
+_MAX_LOG_TAIL_BYTES = 8 * 1024 * 1024  # 8 MiB hard cap independent of line count
+_LOG_TAIL_CHUNK_BYTES = 256 * 1024  # 256 KiB backwards reads
+
+
+def _read_log_tail(
+    path: Path,
+    n: int,
+    *,
+    max_bytes: int = _MAX_LOG_TAIL_BYTES,
+    chunk_size: int = _LOG_TAIL_CHUNK_BYTES,
+) -> list[str]:
+    """Read last ``n`` lines from a log file with a hard max-byte budget.
+
+    Reads backwards in fixed-size chunks until ``n`` lines are collected or
+    ``max_bytes`` is reached (whichever first). Intended for ``asyncio.to_thread``.
+    """
+    with open(path, "rb") as f:
+        f.seek(0, 2)
+        size = f.tell()
+        if size == 0:
+            return []
+        parts: list[bytes] = []
+        pos = size
+        bytes_read = 0
+        newline_count = 0
+        while pos > 0 and bytes_read < max_bytes and newline_count <= n:
+            to_read = min(chunk_size, pos, max_bytes - bytes_read)
+            pos -= to_read
+            f.seek(pos)
+            chunk = f.read(to_read)
+            parts.append(chunk)
+            bytes_read += to_read
+            newline_count += chunk.count(b"\n")
+        raw = b"".join(reversed(parts))
+        text = raw.decode("utf-8", errors="replace")
+        return text.splitlines()[-n:]
+
+
+@app.get("/api/admin/logs/stream")
+async def stream_logs(
+    request: Request,
+    lines: int = Query(100, ge=1, le=2000, description="Initial tail lines"),
+    level: str = Query(
+        "", description="Filter by log level (INFO, WARNING, ERROR, DEBUG)"
+    ),
+) -> StreamingResponse:
+    """Stream server logs via SSE (admin only)."""
+    _require_admin(request)
+
+    level_filter = level.upper().strip() if level else ""
+
+    def _matches_level(line: str) -> bool:
+        if not level_filter:
+            return True
+        return level_filter in line
+
+    async def event_generator():
+        # Send initial tail from log file
+        if _LOG_FILE:
+            log_path = Path(_LOG_FILE)
+            if log_path.exists():
+                try:
+                    tail_lines = await asyncio.to_thread(
+                        _read_log_tail, log_path, lines
+                    )
+                    for line in tail_lines:
+                        clean = _ANSI_RE.sub("", line)
+                        if _matches_level(clean):
+                            yield f"event: log\ndata: {clean.replace(chr(10), '  ')}\n\n"
+                except OSError:
+                    pass
+
+        # Stream live logs via broadcast queue
+        queue: asyncio.Queue = asyncio.Queue(maxsize=1000)
+        loop = asyncio.get_running_loop()
+        listener = (loop, queue)
+        with _log_listeners_lock:
+            _log_listeners.add(listener)
+        try:
+            while True:
+                if await request.is_disconnected():
+                    break
+                try:
+                    line = await asyncio.wait_for(queue.get(), timeout=30)
+                    if _matches_level(line):
+                        yield f"event: log\ndata: {line.replace(chr(10), '  ')}\n\n"
+                except asyncio.TimeoutError:
+                    yield ": keepalive\n\n"
+        finally:
+            with _log_listeners_lock:
+                _log_listeners.discard(listener)
+
+    logger.info(
+        "GET /api/admin/logs/stream: streaming logs (lines=%s, level=%s)",
+        lines,
+        level_filter or "ALL",
+    )
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
 @app.get("/api/admin/token-usage")
 async def get_token_usage(
     request: Request,
@@ -8608,11 +8941,12 @@ async def update_admin_settings(request: Request) -> JSONResponse:
 
     username = request.state.username or "admin"
 
-    # Save each setting to DB and apply to running process
+    # Save each setting to DB and apply to running process.
+    # Empty/null = reset: delete from DB so resolution falls through to env
+    # (request → DB → env; first non-empty wins).
     for key, value in settings_updates.items():
         str_value = str(value) if value is not None else ""
         if not str_value:
-            # Empty/null = reset: delete from DB so cache and DB stay in sync
             await storage.delete_server_setting(key, deleted_by=username)
             continue
         # Non-empty: upsert to DB (encrypt sensitive values)
@@ -8625,14 +8959,14 @@ async def update_admin_settings(request: Request) -> JSONResponse:
         await storage.set_server_setting(key, db_value, updated_by=username)
 
     # Update in-memory cache so get_settings() picks up changes.
-    # Empty/null values are removed from cache (fall back to env/default),
-    # non-empty values are stored for merge.
-    cache_updates = {
-        k: str(v) for k, v in settings_updates.items() if v is not None and str(v) != ""
-    }
-    cache_removals = [
-        k for k, v in settings_updates.items() if v is None or str(v) == ""
-    ]
+    # Empty/null values are removed (fall back to env/default).
+    cache_updates: dict[str, str] = {}
+    cache_removals: list[str] = []
+    for k, v in settings_updates.items():
+        if v is None or str(v) == "":
+            cache_removals.append(k)
+        else:
+            cache_updates[k] = str(v)
     if cache_removals:
         remove_from_db_settings_cache(cache_removals)
     if cache_updates:
@@ -9314,6 +9648,7 @@ Respond with ONLY a JSON object:
         ai_provider=ai_provider,
         ai_model=ai_model,
         ai_call_timeout=None,
+        tools=[],
     )
 
     await result.record_usage(
@@ -9779,15 +10114,67 @@ def _normalize_and_validate_ai_params(
 ) -> tuple[str | None, str | None]:
     """Normalize and validate AI provider/model from request body.
 
-    Returns (provider, model) with whitespace stripped and blanks as None.
-    Raises HTTPException 422 for invalid providers.
+    Returns (provider, model) with whitespace stripped, legacy aliases
+    normalized (e.g. ``cursor-cli`` / ``CURSOR`` → ``cursor``), and blanks
+    as None. Raises HTTPException 422 for invalid providers, or when only
+    one of provider/model is set (avoids pairing UI provider with settings
+    model).
     """
-    provider = (ai_provider or "").strip() or None
+    provider_raw = (ai_provider or "").strip()
+    provider = (normalize_provider(provider_raw) or None) if provider_raw else None
     model = (ai_model or "").strip() or None
     if provider and provider not in VALID_AI_PROVIDERS:
         raise HTTPException(
             status_code=422,
             detail=f"Invalid AI provider '{provider}'. Valid providers: {', '.join(sorted(VALID_AI_PROVIDERS))}",
+        )
+    if (provider and not model) or (model and not provider):
+        raise HTTPException(
+            status_code=422,
+            detail="Both ai_provider and ai_model are required when either is set",
+        )
+    return provider, model
+
+
+def _resolve_chat_ai_config(
+    *,
+    override_provider: str | None,
+    override_model: str | None,
+    settings_provider: str,
+    settings_model: str,
+    result_data: dict | None = None,
+    request_params: dict | None = None,
+    is_admin: bool = False,
+) -> tuple[str, str]:
+    """Resolve provider/model for job and admin chat background processors.
+
+    Prefer an explicit override pair; otherwise fall back to result /
+    request_params / settings. Raises RuntimeError on partial override or
+    missing final config. Missing-config errors are role-aware.
+    """
+    if override_provider and override_model:
+        return override_provider, override_model
+    if override_provider or override_model:
+        raise RuntimeError(
+            "Both AI provider and model are required. Select both before sending."
+        )
+    result = result_data or {}
+    params = request_params or {}
+    provider = (
+        result.get("ai_provider", "")
+        or params.get("ai_provider", "")
+        or settings_provider
+    )
+    model = result.get("ai_model", "") or params.get("ai_model", "") or settings_model
+    if not provider or not model:
+        if is_admin:
+            raise RuntimeError(
+                "No AI provider/model configured. Select provider and model "
+                "in chat, or set defaults in Server Settings → AI."
+            )
+        raise RuntimeError(
+            "No AI provider/model configured. Select provider and model "
+            "in chat, or contact a server administrator to configure AI settings."
         )
     return provider, model
 
@@ -9851,6 +10238,7 @@ async def send_chat_message(
         ai_provider_override=ai_provider,
         ai_model_override=ai_model,
         username=request.state.username,
+        is_admin=bool(getattr(request.state, "is_admin", False)),
     )
 
     return {
@@ -9874,6 +10262,7 @@ async def _process_chat_message(
     ai_provider_override: str | None,
     ai_model_override: str | None,
     username: str,
+    is_admin: bool = False,
 ) -> None:
     """Background task: process a single chat message with AI."""
     from rootcoz.engine.chat import (
@@ -9897,21 +10286,15 @@ async def _process_chat_message(
             params = result_data.get("request_params", {})
 
             _chat_settings = get_settings()
-            ai_provider = (
-                ai_provider_override
-                or result_data.get("ai_provider", "")
-                or params.get("ai_provider", "")
-                or _chat_settings.ai_provider
+            ai_provider, ai_model = _resolve_chat_ai_config(
+                override_provider=ai_provider_override,
+                override_model=ai_model_override,
+                settings_provider=_chat_settings.ai_provider,
+                settings_model=_chat_settings.ai_model,
+                result_data=result_data,
+                request_params=params,
+                is_admin=is_admin,
             )
-            ai_model = (
-                ai_model_override
-                or result_data.get("ai_model", "")
-                or params.get("ai_model", "")
-                or _chat_settings.ai_model
-            )
-
-            if not ai_provider:
-                raise RuntimeError("No AI provider configured")
 
             # Get conversation history
             msg_count = await storage.count_chat_messages(job_id, username=username)
@@ -10043,16 +10426,9 @@ async def _process_chat_message(
                 logger.error(
                     "Chat AI call failed for job %s: %s", job_id, response_text
                 )
-                # Update assistant message with error
-                # Show user-friendly error, not raw sidecar messages
-                user_error = response_text
-                if (
-                    "not found" in response_text.lower()
-                    or "session" in response_text.lower()
-                ):
-                    user_error = (
-                        "AI session expired. Please try sending your message again."
-                    )
+                user_error = format_chat_ai_user_error(
+                    response_text, is_admin=is_admin, ai_provider=ai_provider
+                )
                 await storage.update_chat_message_content(
                     assistant_msg_id, f"Error: {user_error}"
                 )
@@ -10411,6 +10787,7 @@ async def send_admin_chat_message(
         ai_provider_override=ai_provider,
         ai_model_override=ai_model,
         username=request.state.username,
+        is_admin=True,
     )
 
     return {
@@ -10433,6 +10810,7 @@ async def _process_admin_chat_message(
     ai_provider_override: str | None,
     ai_model_override: str | None,
     username: str,
+    is_admin: bool = True,
 ) -> None:
     """Background task: process a single admin chat message with AI."""
     from rootcoz.engine.chat import (
@@ -10446,11 +10824,14 @@ async def _process_admin_chat_message(
 
     async with lock:
         try:
-            ai_provider = ai_provider_override or get_settings().ai_provider
-            ai_model = ai_model_override or get_settings().ai_model
-
-            if not ai_provider:
-                raise RuntimeError("No AI provider configured")
+            _admin_settings = get_settings()
+            ai_provider, ai_model = _resolve_chat_ai_config(
+                override_provider=ai_provider_override,
+                override_model=ai_model_override,
+                settings_provider=_admin_settings.ai_provider,
+                settings_model=_admin_settings.ai_model,
+                is_admin=is_admin,
+            )
 
             msg_count = await storage.count_chat_messages(
                 ADMIN_CHAT_JOB_ID, username=username
@@ -10530,14 +10911,9 @@ async def _process_admin_chat_message(
 
             if not success:
                 logger.error("Admin chat AI call failed: %s", response_text)
-                user_error = response_text
-                if (
-                    "not found" in response_text.lower()
-                    or "session" in response_text.lower()
-                ):
-                    user_error = (
-                        "AI session expired. Please try sending your message again."
-                    )
+                user_error = format_chat_ai_user_error(
+                    response_text, is_admin=True, ai_provider=ai_provider
+                )
                 await storage.update_chat_message_content(
                     assistant_msg_id, f"Error: {user_error}"
                 )
