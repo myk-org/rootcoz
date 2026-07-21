@@ -1973,14 +1973,26 @@ def _resolve_ai_config_allow_defer(
             ),
         )
     if provider and model:
-        return _resolve_ai_config_values(provider, model, request=request)
+        return provider, model
     if tests_repo_available(body, settings):
         logger.info(
             "AI provider/model not set on request/server; "
             "deferring to .rootcoz/settings.json after tests repo clone"
         )
         return "", ""
-    return _resolve_ai_config_values(body.ai_provider, body.ai_model, request=request)
+    # Validate using the already-resolved values from *settings* — do not
+    # re-resolve via _resolve_ai_config_values (that uses global get_settings()).
+    if not provider:
+        raise HTTPException(
+            status_code=400,
+            detail=_ai_not_configured_message(request, "AI provider"),
+        )
+    if not model:
+        raise HTTPException(
+            status_code=400,
+            detail=_ai_not_configured_message(request, "AI model"),
+        )
+    return provider, model
 
 
 def _resolve_peer_ai_configs(
@@ -2039,12 +2051,16 @@ def _merge_settings(body: BaseAnalysisRequest, settings: Settings) -> Settings:
     Request values take precedence over environment variable defaults.
     Only non-None request values are applied as overrides.
 
+    Always returns a **new** ``Settings`` instance so later in-place mutations
+    (e.g. ``propagate_repo_settings_overlay``) cannot alter the cached
+    ``get_settings()`` object.
+
     Args:
         body: The analysis request with optional override fields.
         settings: Base application settings from environment.
 
     Returns:
-        Settings instance with overrides applied (or original if no overrides).
+        New Settings instance with overrides applied (copy even when empty).
     """
     overrides: dict = {}
 
@@ -2119,10 +2135,8 @@ def _merge_settings(body: BaseAnalysisRequest, settings: Settings) -> Settings:
         if "force" in body.model_fields_set:
             overrides["force_analysis"] = body.force
 
-    if overrides:
-        merged_data = settings.model_dump(mode="python") | overrides
-        return Settings.model_validate(merged_data)
-    return settings
+    merged_data = settings.model_dump(mode="python") | overrides
+    return Settings.model_validate(merged_data)
 
 
 # Truncation length for error signatures in log messages (SHA-256 prefix for readability)

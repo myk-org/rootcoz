@@ -4244,6 +4244,66 @@ class TestPeerAnalysisParams:
         merged = _merge_settings(body, settings)
         assert merged.max_concurrent_ai_calls == 9
 
+    def test_merge_settings_always_returns_copy(self) -> None:
+        """_merge_settings always copies so overlay mutation cannot touch the cache."""
+        from rootcoz.main import _merge_settings
+        from rootcoz.models import AnalyzeRequest
+        from rootcoz.rootcoz_repo_settings import propagate_repo_settings_overlay
+
+        body = AnalyzeRequest(
+            job_name="test",
+            build_number=1,
+            ai_provider="claude",
+            ai_model="test-model",
+        )
+        settings = Settings(
+            ai_call_timeout=10,
+            max_concurrent_ai_calls=3,
+            peer_analysis_max_rounds=3,
+        )
+        merged = _merge_settings(body, settings)
+        assert merged is not settings
+        propagate_repo_settings_overlay(
+            merged,
+            Settings(
+                ai_call_timeout=99,
+                max_concurrent_ai_calls=11,
+                peer_analysis_max_rounds=7,
+            ),
+        )
+        assert settings.ai_call_timeout == 10
+        assert settings.max_concurrent_ai_calls == 3
+        assert settings.peer_analysis_max_rounds == 3
+        assert merged.ai_call_timeout == 99
+
+    def test_resolve_ai_config_allow_defer_respects_passed_settings(self) -> None:
+        """allow_defer uses the passed Settings, not global get_settings()."""
+        from fastapi import HTTPException
+
+        from rootcoz.main import _resolve_ai_config_allow_defer
+        from rootcoz.models import BaseAnalysisRequest
+
+        body = BaseAnalysisRequest()
+        empty = Settings(ai_provider="", ai_model="")
+        # Global settings appear configured; passed settings do not and no tests repo.
+        with patch(
+            "rootcoz.main.get_settings",
+            return_value=Settings(ai_provider="claude", ai_model="opus"),
+        ):
+            with pytest.raises(HTTPException) as exc_info:
+                _resolve_ai_config_allow_defer(body, empty)
+        assert exc_info.value.status_code == 400
+        assert "AI" in exc_info.value.detail
+
+        configured = Settings(ai_provider="gemini", ai_model="flash")
+        with patch(
+            "rootcoz.main.get_settings",
+            return_value=Settings(ai_provider="", ai_model=""),
+        ):
+            provider, model = _resolve_ai_config_allow_defer(body, configured)
+        assert provider == "gemini"
+        assert model == "flash"
+
     def test_resolve_peer_ai_configs_none_uses_env(self, test_client) -> None:
         """When peer_ai_configs is None in request, _resolve_peer_ai_configs falls back to env default."""
         from rootcoz.main import _merge_settings, _resolve_peer_ai_configs
