@@ -25,7 +25,7 @@ from pydantic import (
 )
 from simple_logger.logger import get_logger
 
-from rootcoz.ai_client import normalize_provider
+from rootcoz.ai_client import VALID_AI_PROVIDERS, normalize_provider
 from rootcoz.config import Settings, parse_additional_repos, parse_peer_configs
 from rootcoz.models import (
     AdditionalRepo,
@@ -198,9 +198,9 @@ def load_rootcoz_repo_settings(tests_repo_path: Path) -> RootcozRepoSettings | N
     try:
         return _SETTINGS_ADAPTER.validate_python(data)
     except ValidationError as exc:
-        raise RootcozSettingsError(
-            f"JSON Schema validation failed for {path}: {exc}"
-        ) from exc
+        # Do not embed ValidationError text — it can include rejected input
+        # values (e.g. a token someone mistakenly put in settings.json).
+        raise RootcozSettingsError(f"JSON Schema validation failed for {path}") from exc
 
 
 def _request_set_ai_provider(body: BaseAnalysisRequest) -> bool:
@@ -234,8 +234,38 @@ def _additional_repos_from_repo(
         ]
     except ValidationError as exc:
         raise RootcozSettingsError(
-            f"Invalid additional_repos in .rootcoz/settings.json: {exc}"
+            "Invalid additional_repos in .rootcoz/settings.json"
         ) from exc
+
+
+def assert_no_tests_repo_name_collision(
+    tests_dir_name: str | None,
+    additional_repos: list[AdditionalRepo],
+) -> None:
+    """Fail when an additional repo name matches the tests clone directory.
+
+    Called after ``settings.json`` may replace ``additional_repos``, so the
+    final list is checked against the already-cloned tests repo dirname.
+    """
+    if not tests_dir_name:
+        return
+    for ar in additional_repos:
+        if ar.name == tests_dir_name:
+            raise RootcozSettingsError(
+                f"additional_repos contains name '{ar.name}' which collides "
+                "with the tests repo clone directory; choose a different name"
+            )
+
+
+def validate_effective_ai_provider(provider: str) -> None:
+    """Reject unsupported AI providers after settings overlay."""
+    if not provider:
+        return
+    if provider not in VALID_AI_PROVIDERS:
+        raise RootcozSettingsError(
+            f"Unsupported AI provider: {provider}. "
+            f"Valid providers: {', '.join(sorted(VALID_AI_PROVIDERS))}"
+        )
 
 
 def apply_rootcoz_repo_settings(
@@ -314,6 +344,8 @@ def apply_rootcoz_repo_settings(
     if overrides:
         merged_data = settings.model_dump(mode="python") | overrides
         merged = Settings(**merged_data)
+
+    validate_effective_ai_provider(resolved_provider)
 
     return EffectiveRepoAnalysisSettings(
         settings=merged,

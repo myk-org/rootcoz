@@ -158,6 +158,7 @@ from rootcoz.repository import (
 from rootcoz.request_resolution import resolve_tests_repo_token
 from rootcoz.rootcoz_repo_settings import (
     RootcozSettingsError,
+    assert_no_tests_repo_name_collision,
     load_and_apply_rootcoz_repo_settings,
     tests_repo_available,
 )
@@ -1867,21 +1868,14 @@ async def root() -> HTMLResponse:
 
 def _ai_not_configured_message(request: Request | None, what: str) -> str:
     """Build a role-aware error message when AI provider/model is not configured."""
+    from rootcoz.error_messages import ai_not_configured_message
+
     is_admin = (
         getattr(getattr(request, "state", None), "is_admin", False)
         if request
         else False
     )
-    if is_admin:
-        return (
-            f"{what} is not configured. "
-            f"Go to Server Settings \u2192 AI to configure the default provider and model."
-        )
-    # For non-admin users, tell them to contact an admin
-    return (
-        f"{what} is not configured on this server. "
-        f"Please contact a server administrator to configure AI settings."
-    )
+    return ai_not_configured_message(what, is_admin=bool(is_admin))
 
 
 def _resolve_ai_provider_model(
@@ -1962,10 +1956,21 @@ def _resolve_ai_config_allow_defer(
     Priority after clone is request → ``.rootcoz/settings.json`` → server.
     When neither request nor server provides AI but a tests repo URL exists,
     return empty strings so analysis can load ``settings.json`` after clone.
+
+    Unsupported providers fail immediately even when model is missing (defer
+    only applies to incomplete config, not invalid providers).
     """
     provider, model = _resolve_ai_provider_model(
         body.ai_provider, body.ai_model, settings=settings
     )
+    if provider and provider not in VALID_AI_PROVIDERS:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Unsupported AI provider: {provider}. "
+                f"Valid providers: {', '.join(sorted(VALID_AI_PROVIDERS))}"
+            ),
+        )
     if provider and model:
         return _resolve_ai_config_values(provider, model, request=request)
     if tests_repo_available(body, settings):
@@ -3385,7 +3390,7 @@ async def _process_file_raw_analysis(
                 additional_repos=additional_repos_list,
             )
         except RootcozSettingsError as exc:
-            logger.error("Invalid .rootcoz/settings.json: %s", exc)
+            logger.error("Invalid .rootcoz/settings.json (details redacted)")
             fail_data = {
                 "job_name": display_name,
                 "display_name": display_name,
@@ -3403,14 +3408,31 @@ async def _process_file_raw_analysis(
         additional_repos_list = effective.additional_repos
         merged = effective.settings
 
+        tests_dir_name = (
+            tests_cloned_path.name if tests_cloned_path is not None else None
+        )
+        try:
+            assert_no_tests_repo_name_collision(tests_dir_name, additional_repos_list)
+        except RootcozSettingsError as exc:
+            logger.error(
+                "Invalid .rootcoz/settings.json after overlay (details redacted)"
+            )
+            fail_data = {
+                "job_name": display_name,
+                "display_name": display_name,
+                "error": str(exc),
+            }
+            await update_status(job_id, "failed", fail_data)
+            notify_active_count_changed()
+            notify_dashboard_changed()
+            notify_job_status_changed(job_id)
+            return
+
         if not ai_provider or not ai_model:
             fail_data = {
                 "job_name": display_name,
                 "display_name": display_name,
-                "error": (
-                    "AI provider/model not configured. Set them via request, "
-                    "server settings, or .rootcoz/settings.json in the test repo."
-                ),
+                "error": _ai_not_configured_message(None, "AI provider/model"),
             }
             await update_status(job_id, "failed", fail_data)
             notify_active_count_changed()
@@ -4084,10 +4106,14 @@ async def _reanalyze_failure_background(
             if ai_call_timeout is None:
                 ai_call_timeout = effective.settings.ai_call_timeout
             max_concurrent_ai_calls = effective.settings.max_concurrent_ai_calls
+            tests_dir_name = (
+                tests_cloned_path.name if tests_cloned_path is not None else None
+            )
+            assert_no_tests_repo_name_collision(tests_dir_name, additional_repos_list)
         except RootcozSettingsError as exc:
             logger.error(
-                "Invalid .rootcoz/settings.json during failure re-analysis: %s",
-                exc,
+                "Invalid .rootcoz/settings.json during failure re-analysis "
+                "(details redacted)"
             )
             await update_status(job_id, "failed", {"error": str(exc)})
             return

@@ -36,7 +36,7 @@ from rootcoz.engine.core import (
     resolve_additional_repos,
     safe_update_progress,
 )
-from rootcoz.error_messages import make_user_friendly_error
+from rootcoz.error_messages import ai_not_configured_message, make_user_friendly_error
 from rootcoz.jenkins import JenkinsClient
 from rootcoz.jenkins_artifacts import cleanup_extract_dir, process_build_artifacts
 from rootcoz.models import (
@@ -50,6 +50,7 @@ from rootcoz.models import (
 from rootcoz.repository import RepositoryManager, derive_test_repo_name, redact_url
 from rootcoz.rootcoz_repo_settings import (
     RootcozSettingsError,
+    assert_no_tests_repo_name_collision,
     load_and_apply_rootcoz_repo_settings,
 )
 from rootcoz.request_resolution import resolve_tests_repo_token
@@ -1064,7 +1065,7 @@ async def analyze_job(
                     additional_repos=additional_repos_list,
                 )
             except RootcozSettingsError as exc:
-                logger.error("Invalid .rootcoz/settings.json: %s", exc)
+                logger.error("Invalid .rootcoz/settings.json (details redacted)")
                 return AnalysisResult(
                     job_id=job_id,
                     job_name=request.job_name,
@@ -1084,6 +1085,29 @@ async def analyze_job(
             additional_repos_list = effective.additional_repos
             settings = effective.settings
 
+            tests_dir_name = (
+                tests_cloned_path.name if tests_cloned_path is not None else None
+            )
+            try:
+                assert_no_tests_repo_name_collision(
+                    tests_dir_name, additional_repos_list
+                )
+            except RootcozSettingsError as exc:
+                logger.error(
+                    "Invalid .rootcoz/settings.json after overlay (details redacted)"
+                )
+                return AnalysisResult(
+                    job_id=job_id,
+                    job_name=request.job_name,
+                    build_number=request.build_number,
+                    jenkins_url=HttpUrl(jenkins_build_url),
+                    status="failed",
+                    summary=str(exc),
+                    ai_provider=ai_provider,
+                    ai_model=ai_model,
+                    failures=[],
+                )
+
             if not ai_provider or not ai_model:
                 return AnalysisResult(
                     job_id=job_id,
@@ -1091,10 +1115,7 @@ async def analyze_job(
                     build_number=request.build_number,
                     jenkins_url=HttpUrl(jenkins_build_url),
                     status="failed",
-                    summary=(
-                        "AI provider/model not configured. Set them via request, "
-                        "server settings, or .rootcoz/settings.json in the test repo."
-                    ),
+                    summary=ai_not_configured_message("AI provider/model"),
                     ai_provider=ai_provider,
                     ai_model=ai_model,
                     failures=[],

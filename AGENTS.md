@@ -220,11 +220,13 @@ Every new API endpoint MUST also be supported via the `rootcoz` CLI tool. When a
 
 AI provider and model are resolved in this order (first non-empty wins):
 1. Per-request value (`ai_provider`/`ai_model` in request body)
-2. `.rootcoz/settings.json` in the cloned test repo (when present)
+2. `.rootcoz/settings.json` in the cloned test repo (when present) — intentional
+   extension for the keys allowed in that file (`ai_provider`, `ai_model`, timeouts,
+   peers, `additional_repos`). Documented in issue #189.
 3. Settings DB value (admin server settings page → AI category)
 4. Environment variable (`AI_PROVIDER`/`AI_MODEL`)
 
-When not configured, error messages are role-aware: admins are pointed to Server Settings → AI, users are told to contact an administrator. If a tests repo URL is set but AI is still unset at submit time, resolution may defer until after clone so `settings.json` can supply it.
+When not configured, error messages are role-aware: admins are pointed to Server Settings → AI, users are told to contact an administrator. If a tests repo URL is set but AI is still unset at submit time, resolution may defer until after clone so `settings.json` can supply it. Unsupported `ai_provider` values fail immediately (even when deferring for a missing model).
 
 ### AI System Identity
 

@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 from rootcoz.config import Settings
-from rootcoz.models import BaseAnalysisRequest
+from rootcoz.models import AdditionalRepo, BaseAnalysisRequest
 from rootcoz.rootcoz_repo_settings import (
     ROOTCOZ_SETTINGS_SCHEMA_PATH,
     RootcozRepoSettings,
@@ -117,6 +117,32 @@ class TestLoadRootcozRepoSettings:
         _write_settings(tmp_path, {"ai_call_timeout": -1})
         with pytest.raises(RootcozSettingsError, match="JSON Schema validation"):
             load_rootcoz_repo_settings(tmp_path)
+        # Message must not embed raw ValidationError input values
+        with pytest.raises(RootcozSettingsError) as exc_info:
+            load_rootcoz_repo_settings(tmp_path)
+        assert "input_value" not in str(exc_info.value)
+
+    def test_collision_detection(self) -> None:
+        from rootcoz.rootcoz_repo_settings import assert_no_tests_repo_name_collision
+
+        repos = [
+            AdditionalRepo(name="my-tests", url="https://github.com/org/other", ref="")
+        ]
+        with pytest.raises(RootcozSettingsError, match="collides"):
+            assert_no_tests_repo_name_collision("my-tests", repos)
+
+    def test_unsupported_provider_rejected(self) -> None:
+        body = BaseAnalysisRequest()
+        settings = Settings(ai_provider="", ai_model="")
+        # Force an unsupported provider via pre-resolved args when repo unset
+        with pytest.raises(RootcozSettingsError, match="Unsupported AI provider"):
+            apply_rootcoz_repo_settings(
+                body,
+                settings,
+                None,
+                ai_provider="not-a-provider",
+                ai_model="x",
+            )
 
 
 class TestApplyRootcozRepoSettings:
