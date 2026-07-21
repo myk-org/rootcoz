@@ -184,7 +184,8 @@ def rootcoz_settings_json_schema() -> dict[str, Any]:
     schema["title"] = "rootcoz .rootcoz/settings.json"
     schema["description"] = (
         "Non-sensitive per-repo analysis settings. "
-        "Priority: request (CLI/API/UI) > this file > server defaults."
+        "For ai_provider/ai_model: request (CLI/API/UI) > server defaults > this file. "
+        "For other keys: request > this file > server defaults."
     )
     schema["additionalProperties"] = False
     return schema

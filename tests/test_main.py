@@ -3435,6 +3435,160 @@ class TestProcessAnalysisWaiting:
             assert "running" in statuses
 
     @pytest.mark.asyncio
+    async def test_deferred_ai_resolves_before_jenkins_wait(self) -> None:
+        """Deferred AI is resolved from settings.json before Jenkins wait."""
+        import json
+        from pathlib import Path
+
+        from rootcoz.main import process_analysis_with_id
+        from rootcoz.models import AnalyzeRequest
+        from rootcoz.repository import RepositoryManager
+
+        body = AnalyzeRequest(
+            job_name="my-job",
+            build_number=1,
+            wait_for_completion=True,
+            tests_repo_url="https://github.com/org/tests",
+        )
+        merged = _build_wait_settings(
+            jenkins_url="https://jenkins.example.com",
+            jenkins_user="user",
+            jenkins_password=FAKE_JENKINS_PASSWORD,
+            wait_for_completion=True,
+            ai_provider="",
+            ai_model="",
+        )
+
+        call_order: list[str] = []
+
+        async def track_wait(*_a, **_k):
+            call_order.append("wait")
+            return (True, "")
+
+        async def track_preflight(*_a, **_k):
+            call_order.append("preflight")
+            return True
+
+        def fake_clone_into(self, url, target, depth=1, branch="", token=None):
+            call_order.append("clone")
+            path = Path(target)
+            path.mkdir(parents=True, exist_ok=True)
+            rootcoz = path / ".rootcoz"
+            rootcoz.mkdir(parents=True)
+            (rootcoz / "settings.json").write_text(
+                json.dumps({"ai_provider": "claude", "ai_model": "opus"}),
+                encoding="utf-8",
+            )
+            return path
+
+        with (
+            patch(
+                "rootcoz.main.wait_for_jenkins_completion",
+                side_effect=track_wait,
+            ),
+            patch(
+                "rootcoz.main._preflight_sidecar_check",
+                side_effect=track_preflight,
+            ) as mock_preflight,
+            patch.object(RepositoryManager, "clone_into", fake_clone_into),
+            patch("rootcoz.main.update_status", new_callable=AsyncMock),
+            patch(
+                "rootcoz.main.safe_update_progress",
+                new_callable=AsyncMock,
+            ),
+            patch("rootcoz.main.analyze_job", new_callable=AsyncMock) as mock_analyze,
+            patch("rootcoz.main._resolve_enable_jira", return_value=False),
+            patch(
+                "rootcoz.main.populate_failure_history",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "rootcoz.main.storage.make_classifications_visible",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "rootcoz.main._preserve_request_params",
+                new_callable=AsyncMock,
+            ),
+        ):
+            mock_analyze.return_value = AnalysisResult(
+                job_id="test-id",
+                status="completed",
+                summary="ok",
+            )
+            await process_analysis_with_id("test-id", body, merged)
+
+        assert "clone" in call_order
+        assert "preflight" in call_order
+        assert "wait" in call_order
+        assert call_order.index("clone") < call_order.index("wait")
+        assert call_order.index("preflight") < call_order.index("wait")
+        assert mock_preflight.await_args.args[1] == "claude"
+        assert mock_preflight.await_args.args[2] == "opus"
+
+    @pytest.mark.asyncio
+    async def test_deferred_ai_fails_fast_when_settings_json_missing_ai(
+        self,
+    ) -> None:
+        """Successful early clone with no AI in settings.json fails before wait."""
+        import json
+        from pathlib import Path
+
+        from rootcoz.main import process_analysis_with_id
+        from rootcoz.models import AnalyzeRequest
+        from rootcoz.repository import RepositoryManager
+
+        body = AnalyzeRequest(
+            job_name="my-job",
+            build_number=1,
+            wait_for_completion=True,
+            tests_repo_url="https://github.com/org/tests",
+        )
+        merged = _build_wait_settings(
+            jenkins_url="https://jenkins.example.com",
+            jenkins_user="user",
+            jenkins_password=FAKE_JENKINS_PASSWORD,
+            wait_for_completion=True,
+            ai_provider="",
+            ai_model="",
+        )
+
+        def fake_clone_into(self, url, target, depth=1, branch="", token=None):
+            path = Path(target)
+            path.mkdir(parents=True, exist_ok=True)
+            rootcoz = path / ".rootcoz"
+            rootcoz.mkdir(parents=True)
+            (rootcoz / "settings.json").write_text(
+                json.dumps({"ai_call_timeout": 15}),
+                encoding="utf-8",
+            )
+            return path
+
+        statuses: list[str] = []
+
+        async def capture_status(job_id, status, result=None):
+            statuses.append(status)
+
+        with (
+            patch(
+                "rootcoz.main.wait_for_jenkins_completion",
+                new_callable=AsyncMock,
+            ) as mock_wait,
+            patch.object(RepositoryManager, "clone_into", fake_clone_into),
+            patch("rootcoz.main.update_status", side_effect=capture_status),
+            patch(
+                "rootcoz.main._preserve_request_params",
+                new_callable=AsyncMock,
+            ),
+            patch("rootcoz.main.analyze_job", new_callable=AsyncMock) as mock_analyze,
+        ):
+            await process_analysis_with_id("test-id", body, merged)
+
+        mock_wait.assert_not_called()
+        mock_analyze.assert_not_called()
+        assert "failed" in statuses
+
+    @pytest.mark.asyncio
     async def test_wait_for_completion_false_skips_waiting(self) -> None:
         """When wait_for_completion=False, skip waiting entirely."""
         from rootcoz.main import process_analysis_with_id

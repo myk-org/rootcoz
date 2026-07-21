@@ -102,6 +102,9 @@ class TestRootcozRepoSettingsSchema:
         shipped = json.loads(ROOTCOZ_SETTINGS_SCHEMA_PATH.read_text(encoding="utf-8"))
         assert json.loads(generated.read_text(encoding="utf-8")) == shipped
         assert rootcoz_settings_json_schema()["additionalProperties"] is False
+        desc = rootcoz_settings_json_schema()["description"]
+        assert "ai_provider/ai_model" in desc
+        assert "server defaults > this file" in desc
 
 
 class TestLoadRootcozRepoSettings:
