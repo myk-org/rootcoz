@@ -1392,6 +1392,11 @@ def build_other_groups_instruction(filepath: Path) -> str:
     )
 
 
+def _is_empty_ai_text(result: AIResult) -> bool:
+    """Return True when the AI call succeeded but returned no usable text."""
+    return bool(result.success) and not (result.text or "").strip()
+
+
 async def run_single_ai_analysis(
     *,
     failures: list[FailedTest],
@@ -1412,6 +1417,10 @@ async def run_single_ai_analysis(
 
     Shared by both single-AI and peer analysis paths. Builds the orchestrator
     prompt, calls the AI, and parses the response.
+
+    If the AI returns success with empty text, retries once. A second empty
+    response fails the group with a clear error in ``details`` (never a blank
+    AnalysisDetail).
 
     Args:
         failures: List of test failures with the same error signature.
@@ -1574,46 +1583,84 @@ Note: Multiple tests failed with the same error. Provide ONE analysis that appli
                 job_id=job_id,
             )
     try:
-        try:
-            call_kwargs: dict = {
-                "ai_provider": ai_provider,
-                "ai_model": ai_model,
-                # Always set cwd to the directory containing mandatory workspace
-                # files (repo or temp) so sidecar file tools can resolve them.
-                "cwd": str(workspace_dir),
-                "ai_call_timeout": ai_call_timeout,
-                "tools": list(ANALYSIS_BUILTIN_TOOLS),
-            }
-            if custom_tools:
-                call_kwargs["custom_tools"] = custom_tools
-            result = await call_ai_once(prompt, **call_kwargs)
-        except Exception:
-            logger.exception(
-                "AI call raised exception: provider=%s, model=%s",
+        call_kwargs: dict = {
+            "ai_provider": ai_provider,
+            "ai_model": ai_model,
+            # Always set cwd to the directory containing mandatory workspace
+            # files (repo or temp) so sidecar file tools can resolve them.
+            "cwd": str(workspace_dir),
+            "ai_call_timeout": ai_call_timeout,
+            "tools": list(ANALYSIS_BUILTIN_TOOLS),
+        }
+        if custom_tools:
+            call_kwargs["custom_tools"] = custom_tools
+
+        # One retry when the model reports success but returns no final text
+        # (seen with Cursor: tools/tokens used, empty assistant message).
+        max_attempts = 2
+        result = AIResult(success=False, text="AI call failed unexpectedly")
+        for attempt in range(1, max_attempts + 1):
+            try:
+                result = await call_ai_once(prompt, **call_kwargs)
+            except Exception:
+                logger.exception(
+                    "AI call raised exception: provider=%s, model=%s, attempt=%d",
+                    ai_provider,
+                    ai_model,
+                    attempt,
+                )
+                result = AIResult(success=False, text="AI call failed unexpectedly")
+            logger.info(
+                "AI call result: success=%s, text_length=%d, provider=%s, model=%s, attempt=%d",
+                result.success,
+                len(result.text),
                 ai_provider,
                 ai_model,
+                attempt,
             )
-            result = AIResult(success=False, text="AI call failed unexpectedly")
-        logger.info(
-            "AI call result: success=%s, text_length=%d, provider=%s, model=%s",
-            result.success,
-            len(result.text),
-            ai_provider,
-            ai_model,
-        )
-        if not result.success:
-            logger.error("AI call failed (text_length=%d)", len(result.text))
+            if not result.success:
+                logger.error(
+                    "AI call failed (text_length=%d, attempt=%d)",
+                    len(result.text),
+                    attempt,
+                )
 
-        await result.record_usage(
-            request_id=job_id,
-            call_type="primary",
-            prompt_chars=len(prompt),
-            ai_provider=ai_provider,
-            ai_model=ai_model,
-        )
+            await result.record_usage(
+                request_id=job_id,
+                call_type="primary",
+                prompt_chars=len(prompt),
+                ai_provider=ai_provider,
+                ai_model=ai_model,
+            )
+
+            if not result.success:
+                break
+            if not _is_empty_ai_text(result):
+                break
+
+            logger.debug(
+                "AI returned empty response (attempt=%d/%d), provider=%s, "
+                "model=%s, job_id=%s, error_signature=%s, group_size=%d",
+                attempt,
+                max_attempts,
+                ai_provider,
+                ai_model,
+                job_id,
+                error_signature[:16],
+                len(failures),
+            )
+            if attempt >= max_attempts:
+                break
 
         parsed: AnalysisDetail | None = None
-        if result.success:
+        if _is_empty_ai_text(result):
+            parsed = AnalysisDetail(
+                details=(
+                    "AI returned empty response after retry "
+                    f"(provider={ai_provider}, model={ai_model})"
+                )
+            )
+        elif result.success:
             parsed = parse_json_response(result.text)
         if parsed is None:
             parsed = AnalysisDetail(details=result.text)

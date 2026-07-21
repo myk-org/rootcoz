@@ -293,6 +293,108 @@ class TestRunSingleAiAnalysis:
         assert parsed.details == "CLI timeout"
         assert parsed.classification == ""
         assert isinstance(sig, str) and len(sig) == 64
+        mock_cli.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_empty_response_retries_once_then_succeeds(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Empty success text triggers one retry; second non-empty response is used."""
+        good = json.dumps(
+            {
+                "classification": "INFRASTRUCTURE",
+                "affected_tests": ["test_foo"],
+                "details": "recovered after retry",
+            }
+        )
+        mock_cli = AsyncMock(
+            side_effect=[
+                AIResult(success=True, text=""),
+                AIResult(success=True, text=good),
+            ]
+        )
+        monkeypatch.setattr("rootcoz.engine.core.call_ai_once", mock_cli)
+
+        failure = FailedTest(
+            test_name="test_foo", error_message="timeout", stack_trace="st"
+        )
+        parsed, _sig = await run_single_ai_analysis(
+            failures=[failure],
+            console_context="",
+            repo_path=None,
+            ai_provider="cursor",
+            ai_model="cursor:grok",
+            ai_call_timeout=None,
+            custom_prompt="",
+            artifacts_context="",
+            server_url="",
+            job_id="job-1",
+        )
+        assert mock_cli.await_count == 2
+        assert parsed.classification == "INFRASTRUCTURE"
+        assert parsed.details == "recovered after retry"
+
+    @pytest.mark.asyncio
+    async def test_empty_response_twice_fails_with_clear_error(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Two empty success responses fail the group with an explicit error message."""
+        mock_cli = AsyncMock(return_value=AIResult(success=True, text=""))
+        monkeypatch.setattr("rootcoz.engine.core.call_ai_once", mock_cli)
+
+        failure = FailedTest(
+            test_name="test_foo", error_message="timeout", stack_trace="st"
+        )
+        parsed, _sig = await run_single_ai_analysis(
+            failures=[failure],
+            console_context="",
+            repo_path=None,
+            ai_provider="cursor",
+            ai_model="cursor:grok",
+            ai_call_timeout=None,
+            custom_prompt="",
+            artifacts_context="",
+            server_url="",
+            job_id="job-1",
+        )
+        assert mock_cli.await_count == 2
+        assert parsed.classification == ""
+        assert "empty response after retry" in parsed.details
+        assert "provider=cursor" in parsed.details
+        assert "model=cursor:grok" in parsed.details
+
+    @pytest.mark.asyncio
+    async def test_non_empty_first_response_does_not_retry(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A usable first response must not trigger a retry."""
+        ai_response = json.dumps(
+            {
+                "classification": "CODE ISSUE",
+                "affected_tests": ["test_foo"],
+                "details": "first try",
+            }
+        )
+        mock_cli = AsyncMock(return_value=AIResult(success=True, text=ai_response))
+        monkeypatch.setattr("rootcoz.engine.core.call_ai_once", mock_cli)
+
+        failure = FailedTest(
+            test_name="test_foo", error_message="err", stack_trace="st"
+        )
+        parsed, _sig = await run_single_ai_analysis(
+            failures=[failure],
+            console_context="",
+            repo_path=None,
+            ai_provider="claude",
+            ai_model="opus",
+            ai_call_timeout=None,
+            custom_prompt="",
+            artifacts_context="",
+            server_url="",
+            job_id="",
+        )
+        mock_cli.assert_awaited_once()
+        assert parsed.details == "first try"
 
     @pytest.mark.asyncio
     async def test_peer_analysis_uses_shared_helper(
