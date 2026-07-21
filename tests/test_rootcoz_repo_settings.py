@@ -1,0 +1,207 @@
+"""Tests for .rootcoz/settings.json load, schema validation, and merge priority."""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+import pytest
+
+from rootcoz.config import Settings
+from rootcoz.models import BaseAnalysisRequest
+from rootcoz.rootcoz_repo_settings import (
+    ROOTCOZ_SETTINGS_SCHEMA_PATH,
+    RootcozRepoSettings,
+    RootcozSettingsError,
+    apply_rootcoz_repo_settings,
+    load_rootcoz_repo_settings,
+    rootcoz_settings_json_schema,
+    write_rootcoz_settings_schema,
+)
+
+
+def _write_settings(repo: Path, data: dict) -> Path:
+    rootcoz = repo / ".rootcoz"
+    rootcoz.mkdir(parents=True)
+    path = rootcoz / "settings.json"
+    path.write_text(json.dumps(data), encoding="utf-8")
+    return path
+
+
+class TestRootcozRepoSettingsSchema:
+    def test_valid_full_document(self) -> None:
+        s = RootcozRepoSettings.model_validate(
+            {
+                "ai_provider": "claude",
+                "ai_model": "claude-sonnet-4-5",
+                "ai_call_timeout": 10,
+                "max_concurrent_ai_calls": 3,
+                "peer_ai_configs": [
+                    {"ai_provider": "gemini", "ai_model": "gemini-2.5-pro"}
+                ],
+                "peer_analysis_max_rounds": 3,
+                "additional_repos": [
+                    {
+                        "name": "product",
+                        "url": "https://github.com/org/product",
+                        "ref": "main",
+                    }
+                ],
+            }
+        )
+        assert s.ai_provider == "claude"
+        assert s.additional_repos is not None
+        assert s.additional_repos[0].name == "product"
+
+    def test_rejects_unknown_keys(self) -> None:
+        with pytest.raises(Exception, match="Unknown keys|extra"):
+            RootcozRepoSettings.model_validate({"jenkins_url": "https://x"})
+
+    def test_rejects_token_in_additional_repos(self) -> None:
+        with pytest.raises(Exception):
+            RootcozRepoSettings.model_validate(
+                {
+                    "additional_repos": [
+                        {
+                            "name": "product",
+                            "url": "https://github.com/org/product",
+                            "token": "secret",
+                        }
+                    ]
+                }
+            )
+
+    def test_rejects_extra_keys_on_peer_configs(self) -> None:
+        with pytest.raises(Exception, match="extra|forbidden"):
+            RootcozRepoSettings.model_validate(
+                {
+                    "peer_ai_configs": [
+                        {
+                            "ai_provider": "claude",
+                            "ai_model": "opus",
+                            "unexpected_field": "nope",
+                        }
+                    ]
+                }
+            )
+
+    def test_schema_file_matches_model(self, tmp_path: Path) -> None:
+        generated = write_rootcoz_settings_schema(tmp_path / "schema.json")
+        shipped = json.loads(ROOTCOZ_SETTINGS_SCHEMA_PATH.read_text(encoding="utf-8"))
+        assert json.loads(generated.read_text(encoding="utf-8")) == shipped
+        assert rootcoz_settings_json_schema()["additionalProperties"] is False
+
+
+class TestLoadRootcozRepoSettings:
+    def test_missing_file_returns_none(self, tmp_path: Path) -> None:
+        assert load_rootcoz_repo_settings(tmp_path) is None
+
+    def test_valid_file(self, tmp_path: Path) -> None:
+        _write_settings(
+            tmp_path,
+            {"ai_provider": "gemini", "ai_model": "gemini-2.5-flash"},
+        )
+        loaded = load_rootcoz_repo_settings(tmp_path)
+        assert loaded is not None
+        assert loaded.ai_provider == "gemini"
+        assert loaded.ai_model == "gemini-2.5-flash"
+
+    def test_invalid_json_raises(self, tmp_path: Path) -> None:
+        rootcoz = tmp_path / ".rootcoz"
+        rootcoz.mkdir()
+        (rootcoz / "settings.json").write_text("{not-json", encoding="utf-8")
+        with pytest.raises(RootcozSettingsError, match="Invalid JSON"):
+            load_rootcoz_repo_settings(tmp_path)
+
+    def test_schema_failure_raises(self, tmp_path: Path) -> None:
+        _write_settings(tmp_path, {"ai_call_timeout": -1})
+        with pytest.raises(RootcozSettingsError, match="JSON Schema validation"):
+            load_rootcoz_repo_settings(tmp_path)
+
+
+class TestApplyRootcozRepoSettings:
+    def test_request_wins_over_repo_and_server(self) -> None:
+        body = BaseAnalysisRequest(ai_provider="cursor", ai_model="gpt-5")
+        settings = Settings(ai_provider="claude", ai_model="claude-sonnet-4-5")
+        repo = RootcozRepoSettings(
+            ai_provider="gemini",
+            ai_model="gemini-2.5-pro",
+        )
+        effective = apply_rootcoz_repo_settings(
+            body, settings, repo, ai_provider="claude", ai_model="claude-sonnet-4-5"
+        )
+        assert effective.ai_provider == "cursor"
+        assert effective.ai_model == "gpt-5"
+
+    def test_repo_wins_over_server_when_request_unset(self) -> None:
+        body = BaseAnalysisRequest()
+        settings = Settings(
+            ai_provider="claude",
+            ai_model="claude-sonnet-4-5",
+            ai_call_timeout=10,
+            max_concurrent_ai_calls=3,
+        )
+        repo = RootcozRepoSettings(
+            ai_provider="gemini",
+            ai_model="gemini-2.5-pro",
+            ai_call_timeout=20,
+            max_concurrent_ai_calls=5,
+            peer_ai_configs=[{"ai_provider": "claude", "ai_model": "opus"}],
+            peer_analysis_max_rounds=4,
+            additional_repos=[
+                {
+                    "name": "product",
+                    "url": "https://github.com/org/product",
+                    "ref": "main",
+                }
+            ],
+        )
+        effective = apply_rootcoz_repo_settings(
+            body,
+            settings,
+            repo,
+            ai_provider="claude",
+            ai_model="claude-sonnet-4-5",
+        )
+        assert effective.ai_provider == "gemini"
+        assert effective.ai_model == "gemini-2.5-pro"
+        assert effective.settings.ai_call_timeout == 20
+        assert effective.settings.max_concurrent_ai_calls == 5
+        assert effective.settings.peer_analysis_max_rounds == 4
+        assert effective.peer_ai_configs is not None
+        assert len(effective.peer_ai_configs) == 1
+        assert len(effective.additional_repos) == 1
+        assert effective.additional_repos[0].name == "product"
+
+    def test_empty_request_additional_repos_disables(self) -> None:
+        body = BaseAnalysisRequest(additional_repos=[])
+        settings = Settings(additional_repos="product:https://github.com/org/product")
+        repo = RootcozRepoSettings(
+            additional_repos=[
+                {
+                    "name": "from-repo",
+                    "url": "https://github.com/org/from-repo",
+                }
+            ]
+        )
+        effective = apply_rootcoz_repo_settings(body, settings, repo)
+        assert effective.additional_repos == []
+
+    def test_server_used_when_no_repo_file(self) -> None:
+        body = BaseAnalysisRequest()
+        settings = Settings(
+            ai_provider="claude",
+            ai_model="sonnet",
+            peer_ai_configs="gemini:flash",
+        )
+        effective = apply_rootcoz_repo_settings(
+            body,
+            settings,
+            None,
+            ai_provider="claude",
+            ai_model="sonnet",
+        )
+        assert effective.ai_provider == "claude"
+        assert effective.ai_model == "sonnet"
+        assert effective.peer_ai_configs is not None
+        assert effective.peer_ai_configs[0]["ai_provider"] == "gemini"

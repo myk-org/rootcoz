@@ -224,8 +224,11 @@ class TestAnalyzeEndpoint:
         assert response.status_code == 422
 
     def test_analyze_accepts_tests_repo_url_with_ref(self, test_client) -> None:
-        """Test that tests_repo_url with ':ref' suffix is accepted (no URL validation)."""
-        # mock_settings has no AI_PROVIDER/AI_MODEL, so settings.ai_provider is empty
+        """Test that tests_repo_url with ':ref' suffix is accepted (no URL validation).
+
+        AI may be deferred to .rootcoz/settings.json when a tests repo is set,
+        so missing server AI no longer returns 400 at submit time.
+        """
         response = test_client.post(
             "/analyze",
             json={
@@ -235,9 +238,13 @@ class TestAnalyzeEndpoint:
                 "tests_repo_url": "https://github.com/org/repo:develop",
             },
         )
-        # 400 from missing AI config, not 422 from URL validation
-        assert response.status_code == 400
-        assert "AI provider" in response.json()["detail"]
+        # Queued (AI deferred) or 400 only if Jenkins/other validation fails first.
+        # Must not be 422 from URL validation.
+        assert response.status_code in (202, 400)
+        if response.status_code == 400:
+            assert "URL" not in response.json()["detail"]
+        else:
+            assert "job_id" in response.json()
 
     def test_analyze_missing_required_field(self, test_client) -> None:
         """Test that missing required field returns 422."""

@@ -148,6 +148,7 @@ Analyzed repositories can provide project-specific customization files under a `
 ```text
 <analyzed-repo>/
   .rootcoz/
+    settings.json                  # Per-repo AI analysis settings (see below)
     ROOTCOZ_PROMPT.md              # Custom analysis instructions for the AI
     ROOTCOZ_HISTORY_PROMPT.md      # Custom history analysis instructions
     ROOTCOZ_ISSUE_PROMPT.md        # Custom issue generation prompt
@@ -156,6 +157,7 @@ Analyzed repositories can provide project-specific customization files under a `
     extensions/                    # Custom pi extensions for this project
 ```
 
+- **`settings.json`**: Optional non-sensitive analysis settings for the test repo. Validated against the JSON Schema in `src/rootcoz/schemas/rootcoz-settings.schema.json` (Pydantic model `RootcozRepoSettings`). Allowed keys only: `ai_provider`, `ai_model`, `ai_call_timeout`, `max_concurrent_ai_calls`, `peer_ai_configs`, `peer_analysis_max_rounds`, `additional_repos`. No secrets (tokens rejected). Priority per field: request (CLI/API/UI) → `.rootcoz/settings.json` → server env/DB → fail if still required and missing. Loaded after the test repo is cloned (`rootcoz_repo_settings.py`).
 - **Prompt files**: `build_resources_section()` and `build_prompt_sections()` in `engine/core.py` scan `<repo>/.rootcoz/` for `ROOTCOZ_PROMPT.md` and `ROOTCOZ_HISTORY_PROMPT.md`. The issue prompt (`ROOTCOZ_ISSUE_PROMPT.md`) is fetched via the GitHub Contents API from `.rootcoz/` in `main.py`.
 - **Pi resources**: After cloning repos (analysis, re-analysis, and chat paths), `.rootcoz/{agents,skills,extensions}/` are copied into `<workspace>/.pi/` via `copy_rootcoz_pi_resources()` so pi's `DefaultResourceLoader` discovers them.
 - This is a **breaking change** — the previous legacy prompt filenames in the repo root are no longer supported. Only `.rootcoz/` is recognized.
@@ -218,10 +220,11 @@ Every new API endpoint MUST also be supported via the `rootcoz` CLI tool. When a
 
 AI provider and model are resolved in this order (first non-empty wins):
 1. Per-request value (`ai_provider`/`ai_model` in request body)
-2. Settings DB value (admin server settings page → AI category)
-3. Environment variable (`AI_PROVIDER`/`AI_MODEL`)
+2. `.rootcoz/settings.json` in the cloned test repo (when present)
+3. Settings DB value (admin server settings page → AI category)
+4. Environment variable (`AI_PROVIDER`/`AI_MODEL`)
 
-When not configured, error messages are role-aware: admins are pointed to Server Settings → AI, users are told to contact an administrator.
+When not configured, error messages are role-aware: admins are pointed to Server Settings → AI, users are told to contact an administrator. If a tests repo URL is set but AI is still unset at submit time, resolution may defer until after clone so `settings.json` can supply it.
 
 ### AI System Identity
 

@@ -48,6 +48,10 @@ from rootcoz.models import (
     FailureAnalysis,
 )
 from rootcoz.repository import RepositoryManager, derive_test_repo_name, redact_url
+from rootcoz.rootcoz_repo_settings import (
+    RootcozSettingsError,
+    load_and_apply_rootcoz_repo_settings,
+)
 from rootcoz.request_resolution import resolve_tests_repo_token
 from rootcoz.sources.base import CISource, CISourceResult
 from rootcoz.utils import is_jenkins_connectivity_error
@@ -1008,13 +1012,15 @@ async def analyze_job(
         # Use RepositoryManager context for entire analysis (child jobs and main job)
         cloned_repos: dict[str, Path] = {}
         async with contextlib.AsyncExitStack() as stack:
-            # Resolve additional repos list early so we know if a workspace is needed
+            # Preliminary additional repos (request|server) for clone naming only.
+            # Final list may come from .rootcoz/settings.json after the tests repo clone.
             additional_repos_list = resolve_additional_repos(request, settings)
 
             repo_manager = RepositoryManager()
             stack.enter_context(repo_manager)
             repo_path = repo_manager.create_workspace()
 
+            tests_cloned_path: Path | None = None
             if tests_repo_url:
                 try:
                     clean_tests_url, tests_ref = parse_repo_ref(str(tests_repo_url))
@@ -1034,6 +1040,7 @@ async def analyze_job(
                         token=tests_repo_token or None,
                     )
                     cloned_repos[repo_name] = repo_path / repo_name
+                    tests_cloned_path = cloned_repos[repo_name]
                     logger.info(
                         f"Successfully cloned test repository into {repo_name}/"
                     )
@@ -1044,6 +1051,54 @@ async def analyze_job(
                         type(e).__name__,
                     )
                     repo_context = "\nFailed to clone repository (details redacted)"
+
+            # Overlay .rootcoz/settings.json (request > settings.json > server)
+            try:
+                effective = load_and_apply_rootcoz_repo_settings(
+                    tests_cloned_path,
+                    request,
+                    settings,
+                    ai_provider=ai_provider,
+                    ai_model=ai_model,
+                    peer_ai_configs=peer_ai_configs,
+                    additional_repos=additional_repos_list,
+                )
+            except RootcozSettingsError as exc:
+                logger.error("Invalid .rootcoz/settings.json: %s", exc)
+                return AnalysisResult(
+                    job_id=job_id,
+                    job_name=request.job_name,
+                    build_number=request.build_number,
+                    jenkins_url=HttpUrl(jenkins_build_url),
+                    status="failed",
+                    summary=str(exc),
+                    ai_provider=ai_provider,
+                    ai_model=ai_model,
+                    failures=[],
+                )
+
+            ai_provider = effective.ai_provider
+            ai_model = effective.ai_model
+            peer_ai_configs = effective.peer_ai_configs
+            peer_analysis_max_rounds = effective.settings.peer_analysis_max_rounds
+            additional_repos_list = effective.additional_repos
+            settings = effective.settings
+
+            if not ai_provider or not ai_model:
+                return AnalysisResult(
+                    job_id=job_id,
+                    job_name=request.job_name,
+                    build_number=request.build_number,
+                    jenkins_url=HttpUrl(jenkins_build_url),
+                    status="failed",
+                    summary=(
+                        "AI provider/model not configured. Set them via request, "
+                        "server settings, or .rootcoz/settings.json in the test repo."
+                    ),
+                    ai_provider=ai_provider,
+                    ai_model=ai_model,
+                    failures=[],
+                )
 
             custom_prompt = (request.raw_prompt or "").strip()
 

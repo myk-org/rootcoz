@@ -59,6 +59,9 @@ filterwarnings = [
 [tool.hatch.build.targets.wheel]
 packages = ["src/rootcoz"]
 
+[tool.hatch.build.targets.wheel.force-include]
+"src/rootcoz/schemas/rootcoz-settings.schema.json" = "rootcoz/schemas/rootcoz-settings.schema.json"
+
 [dependency-groups]
 dev = [
     "pytest>=9.0.2",
