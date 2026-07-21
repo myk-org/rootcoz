@@ -1667,7 +1667,7 @@ Note: Multiple tests failed with the same error. Provide ONE analysis that appli
                 ai_provider,
                 ai_model,
                 job_id,
-                error_signature[:16],
+                error_signature,
                 len(failures),
             )
             if attempt >= max_attempts:
