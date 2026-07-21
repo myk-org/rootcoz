@@ -164,19 +164,40 @@ ROOTCOZ_HISTORY_PROMPT_FILENAME = "ROOTCOZ_HISTORY_PROMPT.md"
 _VCS_METADATA_DIR = ".git"
 
 
+# Cap fingerprint hashing for huge repo-controlled prompt files (AI still reads
+# the full file via the read tool; this only limits hash CPU/memory).
+_MAX_ROOTCOZ_PROMPT_FINGERPRINT_BYTES = 16 * 1024 * 1024
+_FINGERPRINT_READ_CHUNK = 64 * 1024
+
+
 def _rootcoz_prompt_fingerprint(path: Path) -> str:
     """Open a ``.rootcoz`` prompt file and return a content fingerprint.
 
-    Uses ``Path.read_bytes()`` so the file is actually loaded for verification,
-    then advertises only sha256/size — never the body — so the AI must use the
+    Hashes the file in chunks (never ``read_bytes()`` of the whole file).
+    Advertises only sha256/size — never the body — so the AI must use the
     ``read`` tool (AGENTS.md file-based data policy / issue #74).
+
+    Files larger than ``_MAX_ROOTCOZ_PROMPT_FINGERPRINT_BYTES`` are still
+    advertised with ``bytes=`` but ``sha256=skipped`` to avoid worst-case
+    hash cost; the AI must still open the full file with ``read``.
     """
     try:
-        raw = path.read_bytes()
+        size = path.stat().st_size
     except OSError:
         return ""
-    digest = hashlib.sha256(raw).hexdigest()
-    return f", sha256={digest}, bytes={len(raw)}"
+    if size > _MAX_ROOTCOZ_PROMPT_FINGERPRINT_BYTES:
+        return f", sha256=skipped, bytes={size}"
+    digest = hashlib.sha256()
+    try:
+        with path.open("rb") as handle:
+            while True:
+                chunk = handle.read(_FINGERPRINT_READ_CHUNK)
+                if not chunk:
+                    break
+                digest.update(chunk)
+    except OSError:
+        return ""
+    return f", sha256={digest.hexdigest()}, bytes={size}"
 
 
 ROOTCOZ_ISSUE_PROMPT_FILENAME = "ROOTCOZ_ISSUE_PROMPT.md"

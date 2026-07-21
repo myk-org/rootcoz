@@ -564,6 +564,30 @@ class TestAgentGateSection:
         assert "body not embedded" in section
         assert "fingerprint" in section
 
+    def test_rootcoz_prompt_fingerprint_skips_hash_when_too_large(self, tmp_path):
+        """Oversized prompt files advertise size but skip sha256 hashing."""
+        from rootcoz.engine import core as core_mod
+
+        repo = tmp_path / "repo"
+        (repo / ".git").mkdir(parents=True)
+        rootcoz = repo / ".rootcoz"
+        rootcoz.mkdir()
+        prompt = rootcoz / "ROOTCOZ_PROMPT.md"
+        prompt.write_bytes(b"x" * 1024)
+
+        original = core_mod._MAX_ROOTCOZ_PROMPT_FINGERPRINT_BYTES
+        try:
+            core_mod._MAX_ROOTCOZ_PROMPT_FINGERPRINT_BYTES = 512
+            section = core_mod.build_resources_section(
+                tmp_path, additional_repos={"repo": repo}, history_enabled=False
+            )
+        finally:
+            core_mod._MAX_ROOTCOZ_PROMPT_FINGERPRINT_BYTES = original
+
+        assert "sha256=skipped" in section
+        assert "bytes=1024" in section
+        assert "ROOTCOZ_PROMPT.md" in section
+
     def test_history_section_requires_auth_token(self, tmp_path, monkeypatch):
         from rootcoz.engine import core as core_mod
 
