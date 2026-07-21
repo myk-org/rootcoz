@@ -4344,9 +4344,6 @@ async def re_analyze_failure(
         ai_provider = overrides.ai_provider
     if overrides.ai_model is not None:
         ai_model = overrides.ai_model
-    ai_provider, ai_model = _resolve_ai_config_values(
-        ai_provider, ai_model, request=request
-    )
 
     ai_call_timeout = decrypted_params.get("ai_call_timeout")
     if overrides.ai_call_timeout is not None:
@@ -4369,6 +4366,19 @@ async def re_analyze_failure(
     tests_repo_token = decrypted_params.get("tests_repo_token", "")
     if overrides.tests_repo_url is not None:
         tests_repo_url, tests_repo_ref = parse_repo_ref(overrides.tests_repo_url)
+
+    # Defer AI validation when a tests repo can supply .rootcoz/settings.json
+    # (same as submit-time deferred AI). Background applies settings.json after clone.
+    settings = get_settings()
+    ai_provider, ai_model = _resolve_ai_config_allow_defer(
+        BaseAnalysisRequest(
+            ai_provider=ai_provider or None,
+            ai_model=ai_model or None,
+            tests_repo_url=tests_repo_url or None,
+        ),
+        settings,
+        request=request,
+    )
 
     if "additional_repos" not in decrypted_params:
         additional_repos_list: list[AdditionalRepo] | None = None

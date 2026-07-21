@@ -5167,8 +5167,82 @@ class TestReAnalyzeFailure:
         assert failure["duration"] == 12.5
         assert failure["status"] == "FAILED"
 
+    @pytest.mark.asyncio
+    async def test_re_analyze_failure_defers_ai_with_tests_repo(
+        self, test_client
+    ) -> None:
+        """Empty stored AI is accepted when a tests repo can supply settings.json."""
+        from rootcoz import storage
 
-class TestBuildEffectiveJiraSettings:
+        fa = FailureAnalysis(
+            test_name="tests.TestDeferAi.test_one",
+            error="ValueError",
+            analysis=AnalysisDetail(classification="CODE ISSUE"),
+        )
+        fa_dict = fa.model_dump(mode="json")
+        result_data = {
+            "summary": "1 failure",
+            "failures": [fa_dict],
+            "request_params": encrypt_sensitive_fields(
+                {
+                    "ai_provider": "",
+                    "ai_model": "",
+                    "tests_repo_url": "https://github.com/org/tests",
+                    "submitted_by": "admin",
+                }
+            ),
+        }
+        result_data["request_params"]["submitted_by"] = "admin"
+        await storage.save_result("job-reanalyze-defer", "", "completed", result_data)
+
+        with (
+            patch(
+                "rootcoz.main.analyze_failure_group",
+                new_callable=AsyncMock,
+                return_value=[fa],
+            ),
+            patch(
+                "rootcoz.main._create_ai_auth_header",
+                new_callable=AsyncMock,
+                return_value="",
+            ),
+            patch("rootcoz.main.RepositoryManager"),
+        ):
+            response = test_client.post(f"/api/failures/{fa.id}/re-analyze")
+        assert response.status_code == 202
+        assert response.json()["status"] == "accepted"
+
+    @pytest.mark.asyncio
+    async def test_re_analyze_failure_rejects_missing_ai_without_tests_repo(
+        self, test_client
+    ) -> None:
+        """Empty stored AI without a tests repo still returns 400."""
+        from rootcoz import storage
+
+        fa = FailureAnalysis(
+            test_name="tests.TestNoDefer.test_one",
+            error="ValueError",
+            analysis=AnalysisDetail(classification="CODE ISSUE"),
+        )
+        fa_dict = fa.model_dump(mode="json")
+        result_data = {
+            "summary": "1 failure",
+            "failures": [fa_dict],
+            "request_params": encrypt_sensitive_fields(
+                {
+                    "ai_provider": "",
+                    "ai_model": "",
+                    "submitted_by": "admin",
+                }
+            ),
+        }
+        result_data["request_params"]["submitted_by"] = "admin"
+        await storage.save_result("job-reanalyze-no-ai", "", "completed", result_data)
+
+        response = test_client.post(f"/api/failures/{fa.id}/re-analyze")
+        assert response.status_code == 400
+        assert "AI" in response.json()["detail"]
+
     """Tests for _build_effective_jira_settings helper."""
 
     def test_no_user_token_returns_original(self):

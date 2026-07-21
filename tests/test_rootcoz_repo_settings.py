@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 
 import pytest
+from pydantic import ValidationError
 
 from rootcoz.config import Settings
 from rootcoz.models import AdditionalRepo, BaseAnalysisRequest
@@ -71,6 +72,17 @@ class TestRootcozRepoSettingsSchema:
                 }
             )
 
+    def test_rejects_duplicate_additional_repo_names(self) -> None:
+        with pytest.raises(ValidationError, match="Duplicate additional repo names"):
+            RootcozRepoSettings.model_validate(
+                {
+                    "additional_repos": [
+                        {"name": "extra", "url": "https://github.com/org/a"},
+                        {"name": "extra", "url": "https://github.com/org/b"},
+                    ]
+                }
+            )
+
     def test_rejects_extra_keys_on_peer_configs(self) -> None:
         with pytest.raises(Exception, match="extra|forbidden"):
             RootcozRepoSettings.model_validate(
@@ -121,6 +133,21 @@ class TestLoadRootcozRepoSettings:
         with pytest.raises(RootcozSettingsError) as exc_info:
             load_rootcoz_repo_settings(tmp_path)
         assert "input_value" not in str(exc_info.value)
+
+    def test_rejects_duplicate_additional_repo_names_in_file(
+        self, tmp_path: Path
+    ) -> None:
+        _write_settings(
+            tmp_path,
+            {
+                "additional_repos": [
+                    {"name": "dup", "url": "https://github.com/org/a"},
+                    {"name": "dup", "url": "https://github.com/org/b"},
+                ]
+            },
+        )
+        with pytest.raises(RootcozSettingsError, match="JSON Schema validation"):
+            load_rootcoz_repo_settings(tmp_path)
 
     def test_rejects_symlink_settings(self, tmp_path: Path) -> None:
         rootcoz = tmp_path / ".rootcoz"

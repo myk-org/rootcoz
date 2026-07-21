@@ -132,6 +132,20 @@ class RootcozRepoSettings(BaseModel):
             raise ValueError("ai_model must not be blank when set")
         return stripped
 
+    @field_validator("additional_repos")
+    @classmethod
+    def _unique_additional_repo_names(
+        cls,
+        v: list[RootcozAdditionalRepo] | None,
+    ) -> list[RootcozAdditionalRepo] | None:
+        if v is None:
+            return v
+        names = [ar.name for ar in v]
+        dupes = sorted({n for n in names if names.count(n) > 1})
+        if dupes:
+            raise ValueError(f"Duplicate additional repo names: {', '.join(dupes)}")
+        return v
+
     @model_validator(mode="before")
     @classmethod
     def _reject_unknown_and_normalize(cls, data: Any) -> Any:
