@@ -3407,6 +3407,7 @@ async def _process_file_raw_analysis(
                 "display_name": display_name,
                 "error": str(exc),
             }
+            await _preserve_request_params(job_id, fail_data)
             await update_status(job_id, "failed", fail_data)
             notify_active_count_changed()
             notify_dashboard_changed()
@@ -3433,6 +3434,7 @@ async def _process_file_raw_analysis(
                 "display_name": display_name,
                 "error": str(exc),
             }
+            await _preserve_request_params(job_id, fail_data)
             await update_status(job_id, "failed", fail_data)
             notify_active_count_changed()
             notify_dashboard_changed()
@@ -3445,6 +3447,7 @@ async def _process_file_raw_analysis(
                 "display_name": display_name,
                 "error": _ai_not_configured_message(None, "AI provider/model"),
             }
+            await _preserve_request_params(job_id, fail_data)
             await update_status(job_id, "failed", fail_data)
             notify_active_count_changed()
             notify_dashboard_changed()
@@ -4131,7 +4134,9 @@ async def _reanalyze_failure_background(
                 "Invalid .rootcoz/settings.json during failure re-analysis "
                 "(details redacted)"
             )
-            await update_status(job_id, "failed", {"error": str(exc)})
+            fail_data = {"error": str(exc)}
+            await _preserve_request_params(job_id, fail_data)
+            await update_status(job_id, "failed", fail_data)
             return
 
         if additional_repos_list:

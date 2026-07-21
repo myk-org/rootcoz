@@ -52,6 +52,7 @@ from rootcoz.rootcoz_repo_settings import (
     RootcozSettingsError,
     assert_no_tests_repo_name_collision,
     load_and_apply_rootcoz_repo_settings,
+    propagate_repo_settings_overlay,
 )
 from rootcoz.request_resolution import resolve_tests_repo_token
 from rootcoz.sources.base import CISource, CISourceResult
@@ -1083,6 +1084,8 @@ async def analyze_job(
             peer_ai_configs = effective.peer_ai_configs
             peer_analysis_max_rounds = effective.settings.peer_analysis_max_rounds
             additional_repos_list = effective.additional_repos
+            # Mutate caller Settings so enrichment sees the same overlay knobs
+            propagate_repo_settings_overlay(settings, effective.settings)
             settings = effective.settings
 
             tests_dir_name = (

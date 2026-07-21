@@ -183,6 +183,24 @@ class TestLoadRootcozRepoSettings:
         assert effective.settings.peer_analysis_max_rounds == 2
         assert effective.settings.max_concurrent_ai_calls == 7
 
+    def test_propagate_repo_settings_overlay_mutates_caller(self) -> None:
+        from rootcoz.rootcoz_repo_settings import propagate_repo_settings_overlay
+
+        caller = Settings(
+            ai_call_timeout=10,
+            max_concurrent_ai_calls=3,
+            peer_analysis_max_rounds=3,
+        )
+        effective = Settings(
+            ai_call_timeout=42,
+            max_concurrent_ai_calls=9,
+            peer_analysis_max_rounds=5,
+        )
+        propagate_repo_settings_overlay(caller, effective)
+        assert caller.ai_call_timeout == 42
+        assert caller.max_concurrent_ai_calls == 9
+        assert caller.peer_analysis_max_rounds == 5
+
     def test_collision_detection(self) -> None:
         from rootcoz.rootcoz_repo_settings import assert_no_tests_repo_name_collision
 
