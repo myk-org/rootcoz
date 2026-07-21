@@ -4096,6 +4096,9 @@ async def _reanalyze_failure_background(
             shim_data["ai_call_timeout"] = ai_call_timeout
         if peer_ai_configs is not None:
             shim_data["peer_ai_configs"] = peer_ai_configs
+        # Stored/override concurrency + peer rounds are request-tier
+        shim_data["peer_analysis_max_rounds"] = peer_analysis_max_rounds
+        shim_data["max_concurrent_ai_calls"] = max_concurrent_ai_calls
         # Preserve [] (explicit disable) vs None (unset / inherit settings.json)
         if additional_repos_list is not None:
             shim_data["additional_repos"] = additional_repos_list
@@ -4114,6 +4117,7 @@ async def _reanalyze_failure_background(
             ai_model = effective.ai_model
             peer_ai_configs = effective.peer_ai_configs
             additional_repos_list = effective.additional_repos
+            # Request-tier values win; effective mirrors shim for these fields
             peer_analysis_max_rounds = effective.settings.peer_analysis_max_rounds
             if ai_call_timeout is None:
                 ai_call_timeout = effective.settings.ai_call_timeout

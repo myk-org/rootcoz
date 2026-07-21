@@ -183,25 +183,55 @@ def load_rootcoz_repo_settings(tests_repo_path: Path) -> RootcozRepoSettings | N
         Parsed settings, or ``None`` when the file is absent.
 
     Raises:
-        RootcozSettingsError: File exists but is invalid JSON or fails schema.
+        RootcozSettingsError: File exists but is invalid JSON or fails schema,
+            or the path is a symlink / escapes the repo tree.
     """
     path = tests_repo_path / ".rootcoz" / ROOTCOZ_SETTINGS_FILENAME
+    if not path.exists():
+        return None
+    # Untrusted clone: never follow symlinks into host files
+    if path.is_symlink():
+        raise RootcozSettingsError(
+            f"{ROOTCOZ_SETTINGS_FILENAME} must be a regular file "
+            "(symlinks are not allowed)"
+        )
     if not path.is_file():
         return None
     try:
+        resolved = path.resolve(strict=True)
+        repo_root = tests_repo_path.resolve(strict=True)
+    except OSError as exc:
+        raise RootcozSettingsError(
+            f"Failed to resolve {ROOTCOZ_SETTINGS_FILENAME}"
+        ) from exc
+    if not resolved.is_relative_to(repo_root):
+        raise RootcozSettingsError(
+            f"{ROOTCOZ_SETTINGS_FILENAME} resolves outside the test repository"
+        )
+    try:
         raw_text = path.read_text(encoding="utf-8")
     except OSError as exc:
-        raise RootcozSettingsError(f"Failed to read {path}: {exc}") from exc
+        raise RootcozSettingsError(
+            f"Failed to read {ROOTCOZ_SETTINGS_FILENAME}"
+        ) from exc
+    except UnicodeError as exc:
+        raise RootcozSettingsError(
+            f"Invalid encoding in {ROOTCOZ_SETTINGS_FILENAME}"
+        ) from exc
     try:
         data = json.loads(raw_text)
     except json.JSONDecodeError as exc:
-        raise RootcozSettingsError(f"Invalid JSON in {path}: {exc}") from exc
+        raise RootcozSettingsError(
+            f"Invalid JSON in {ROOTCOZ_SETTINGS_FILENAME}"
+        ) from exc
     try:
         return _SETTINGS_ADAPTER.validate_python(data)
     except ValidationError as exc:
         # Do not embed ValidationError text — it can include rejected input
         # values (e.g. a token someone mistakenly put in settings.json).
-        raise RootcozSettingsError(f"JSON Schema validation failed for {path}") from exc
+        raise RootcozSettingsError(
+            f"JSON Schema validation failed for {ROOTCOZ_SETTINGS_FILENAME}"
+        ) from exc
 
 
 def _request_set_ai_provider(body: BaseAnalysisRequest) -> bool:

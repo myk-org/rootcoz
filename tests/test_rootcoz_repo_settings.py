@@ -122,6 +122,40 @@ class TestLoadRootcozRepoSettings:
             load_rootcoz_repo_settings(tmp_path)
         assert "input_value" not in str(exc_info.value)
 
+    def test_rejects_symlink_settings(self, tmp_path: Path) -> None:
+        rootcoz = tmp_path / ".rootcoz"
+        rootcoz.mkdir()
+        outside = tmp_path / "outside.json"
+        outside.write_text('{"ai_provider": "claude"}', encoding="utf-8")
+        target = rootcoz / "settings.json"
+        target.symlink_to(outside)
+        with pytest.raises(RootcozSettingsError, match="symlink|regular file"):
+            load_rootcoz_repo_settings(tmp_path)
+
+    def test_rejects_non_utf8_settings(self, tmp_path: Path) -> None:
+        rootcoz = tmp_path / ".rootcoz"
+        rootcoz.mkdir()
+        (rootcoz / "settings.json").write_bytes(b"\xff\xfe not utf-8")
+        with pytest.raises(RootcozSettingsError, match="encoding|Invalid"):
+            load_rootcoz_repo_settings(tmp_path)
+
+    def test_request_tier_rounds_and_concurrency_win(self) -> None:
+        body = BaseAnalysisRequest(
+            peer_analysis_max_rounds=2,
+            max_concurrent_ai_calls=7,
+        )
+        settings = Settings(
+            peer_analysis_max_rounds=3,
+            max_concurrent_ai_calls=3,
+        )
+        repo = RootcozRepoSettings(
+            peer_analysis_max_rounds=9,
+            max_concurrent_ai_calls=1,
+        )
+        effective = apply_rootcoz_repo_settings(body, settings, repo)
+        assert effective.settings.peer_analysis_max_rounds == 2
+        assert effective.settings.max_concurrent_ai_calls == 7
+
     def test_collision_detection(self) -> None:
         from rootcoz.rootcoz_repo_settings import assert_no_tests_repo_name_collision
 
