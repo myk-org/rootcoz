@@ -3348,7 +3348,18 @@ async def _process_file_raw_analysis(
             f"Failure grouping complete: {len(groups)} unique signatures from {len(test_failures)} failures"
         )
 
-        # Clone tests repo first so .rootcoz/settings.json can overlay defaults
+        # Fail fast when AI already resolved (settings.json cannot change it).
+        ai_resolved_before_overlay = bool(ai_provider and ai_model)
+        if ai_resolved_before_overlay and not await _preflight_sidecar_check(
+            job_id,
+            ai_provider,
+            ai_model,
+            display_name,
+            job_name=body.job_name or "",
+        ):
+            return
+
+        # Clone tests repo so .rootcoz/settings.json can overlay defaults
         repo_manager = RepositoryManager()
         cloned_repos: dict[str, Path] = {}
         repo_path = repo_manager.create_workspace()
@@ -3440,8 +3451,8 @@ async def _process_file_raw_analysis(
             notify_job_status_changed(job_id)
             return
 
-        # Pre-flight after settings.json overlay (AI may have been deferred)
-        if not await _preflight_sidecar_check(
+        # Post-overlay preflight only when AI was deferred / changed by settings.json
+        if not ai_resolved_before_overlay and not await _preflight_sidecar_check(
             job_id,
             ai_provider,
             ai_model,
@@ -4034,7 +4045,7 @@ async def _reanalyze_failure_background(
     tests_repo_url: str,
     tests_repo_ref: str,
     tests_repo_token: str,
-    additional_repos_list: list,
+    additional_repos_list: list | None,
     username: str,
     max_concurrent_ai_calls: int,
 ) -> None:
@@ -4054,7 +4065,7 @@ async def _reanalyze_failure_background(
         if tests_repo_url:
             try:
                 repo_name = derive_test_repo_name(
-                    str(tests_repo_url), additional_repos_list
+                    str(tests_repo_url), additional_repos_list or []
                 )
                 await asyncio.to_thread(
                     repo_manager.clone_into,
@@ -4085,7 +4096,8 @@ async def _reanalyze_failure_background(
             shim_data["ai_call_timeout"] = ai_call_timeout
         if peer_ai_configs is not None:
             shim_data["peer_ai_configs"] = peer_ai_configs
-        if additional_repos_list:
+        # Preserve [] (explicit disable) vs None (unset / inherit settings.json)
+        if additional_repos_list is not None:
             shim_data["additional_repos"] = additional_repos_list
         shim = BaseAnalysisRequest(**shim_data)
         try:
@@ -4096,7 +4108,7 @@ async def _reanalyze_failure_background(
                 ai_provider=ai_provider,
                 ai_model=ai_model,
                 peer_ai_configs=peer_ai_configs,
-                additional_repos=additional_repos_list or [],
+                additional_repos=additional_repos_list,
             )
             ai_provider = effective.ai_provider
             ai_model = effective.ai_model
@@ -4354,11 +4366,17 @@ async def re_analyze_failure(
     if overrides.tests_repo_url is not None:
         tests_repo_url, tests_repo_ref = parse_repo_ref(overrides.tests_repo_url)
 
-    additional_repos_list_raw = decrypted_params.get("additional_repos") or []
-    additional_repos_list: list[AdditionalRepo] = [
-        AdditionalRepo(**r) if isinstance(r, dict) else r
-        for r in additional_repos_list_raw
-    ]
+    if "additional_repos" not in decrypted_params:
+        additional_repos_list: list[AdditionalRepo] | None = None
+    else:
+        additional_repos_list_raw = decrypted_params.get("additional_repos")
+        if additional_repos_list_raw is None:
+            additional_repos_list = None
+        else:
+            additional_repos_list = [
+                AdditionalRepo(**r) if isinstance(r, dict) else r
+                for r in additional_repos_list_raw
+            ]
     if overrides.additional_repos is not None:
         additional_repos_list = [
             AdditionalRepo(**r) if isinstance(r, dict) else r
