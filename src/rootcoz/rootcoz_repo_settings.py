@@ -2,8 +2,9 @@
 
 Priority for analysis settings (per field):
 1. Explicit request (CLI / API / UI)
-2. ``.rootcoz/settings.json``
-3. Server default (env / Admin Settings DB)
+2. For ``ai_provider`` / ``ai_model``: server default (env / Admin DB), then
+   ``.rootcoz/settings.json`` (fills only when server unset)
+3. For other allowed keys: ``.rootcoz/settings.json``, then server default
 4. Fail when a required value is still missing
 """
 
@@ -287,19 +288,25 @@ def apply_rootcoz_repo_settings(
     overrides: dict[str, Any] = {}
 
     # --- AI provider / model ---
+    # Compliance: request → server (DB/env) → settings.json for provider/model.
+    # Other settings.json keys still prefer repo over server (see below).
     if _request_set_ai_provider(body):
         resolved_provider = normalize_provider(str(body.ai_provider))
+    elif (ai_provider or settings.ai_provider or "").strip():
+        resolved_provider = normalize_provider(ai_provider or settings.ai_provider)
     elif repo is not None and repo.ai_provider:
         resolved_provider = normalize_provider(repo.ai_provider)
     else:
-        resolved_provider = normalize_provider(ai_provider or settings.ai_provider)
+        resolved_provider = ""
 
     if _request_set_ai_model(body):
         resolved_model = str(body.ai_model).strip()
+    elif (ai_model or settings.ai_model or "").strip():
+        resolved_model = (ai_model or settings.ai_model or "").strip()
     elif repo is not None and repo.ai_model:
         resolved_model = repo.ai_model
     else:
-        resolved_model = (ai_model or settings.ai_model or "").strip()
+        resolved_model = ""
 
     # --- timeouts / concurrency / peer rounds ---
     if body.ai_call_timeout is not None:

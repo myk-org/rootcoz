@@ -189,8 +189,10 @@ class TestApplyRootcozRepoSettings:
             ai_provider="claude",
             ai_model="claude-sonnet-4-5",
         )
-        assert effective.ai_provider == "gemini"
-        assert effective.ai_model == "gemini-2.5-pro"
+        # AI provider/model: server wins over settings.json
+        assert effective.ai_provider == "claude"
+        assert effective.ai_model == "claude-sonnet-4-5"
+        # Other keys: settings.json wins over server
         assert effective.settings.ai_call_timeout == 20
         assert effective.settings.max_concurrent_ai_calls == 5
         assert effective.settings.peer_analysis_max_rounds == 4
@@ -198,6 +200,17 @@ class TestApplyRootcozRepoSettings:
         assert len(effective.peer_ai_configs) == 1
         assert len(effective.additional_repos) == 1
         assert effective.additional_repos[0].name == "product"
+
+    def test_repo_fills_ai_when_server_unset(self) -> None:
+        body = BaseAnalysisRequest()
+        settings = Settings(ai_provider="", ai_model="")
+        repo = RootcozRepoSettings(
+            ai_provider="gemini",
+            ai_model="gemini-2.5-pro",
+        )
+        effective = apply_rootcoz_repo_settings(body, settings, repo)
+        assert effective.ai_provider == "gemini"
+        assert effective.ai_model == "gemini-2.5-pro"
 
     def test_empty_request_additional_repos_disables(self) -> None:
         body = BaseAnalysisRequest(additional_repos=[])
