@@ -135,7 +135,35 @@ class TestLoadRootcozRepoSettings:
         # Message must not embed raw ValidationError input values
         with pytest.raises(RootcozSettingsError) as exc_info:
             load_rootcoz_repo_settings(tmp_path)
-        assert "input_value" not in str(exc_info.value)
+        msg = str(exc_info.value)
+        assert "input_value" not in msg
+        assert "ai_call_timeout" in msg
+
+    def test_unknown_keys_named_in_error(self, tmp_path: Path) -> None:
+        _write_settings(tmp_path, {"jenkins_url": "https://x", "ai_provider": "claude"})
+        with pytest.raises(RootcozSettingsError, match="Unknown keys.*jenkins_url"):
+            load_rootcoz_repo_settings(tmp_path)
+
+    def test_rejected_token_value_not_in_error(self, tmp_path: Path) -> None:
+        secret = "super-secret-token-value"  # pragma: allowlist secret
+        _write_settings(
+            tmp_path,
+            {
+                "additional_repos": [
+                    {
+                        "name": "extra",
+                        "url": "https://github.com/org/extra",
+                        "token": secret,
+                    }
+                ]
+            },
+        )
+        with pytest.raises(RootcozSettingsError) as exc_info:
+            load_rootcoz_repo_settings(tmp_path)
+        msg = str(exc_info.value)
+        assert secret not in msg
+        assert "input_value" not in msg
+        assert "additional_repos" in msg or "token" in msg or "Extra" in msg
 
     def test_rejects_duplicate_additional_repo_names_in_file(
         self, tmp_path: Path
@@ -149,7 +177,9 @@ class TestLoadRootcozRepoSettings:
                 ]
             },
         )
-        with pytest.raises(RootcozSettingsError, match="JSON Schema validation"):
+        with pytest.raises(
+            RootcozSettingsError, match="Duplicate additional repo names"
+        ):
             load_rootcoz_repo_settings(tmp_path)
 
     def test_rejects_symlink_settings(self, tmp_path: Path) -> None:

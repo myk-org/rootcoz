@@ -161,9 +161,26 @@ class RootcozRepoSettings(BaseModel):
 
 _SETTINGS_ADAPTER: TypeAdapter[RootcozRepoSettings] = TypeAdapter(RootcozRepoSettings)
 
+# Cap how many validation issues we surface (avoid huge error blobs).
+_MAX_SETTINGS_VALIDATION_ERRORS = 10
+
 
 class RootcozSettingsError(ValueError):
     """Invalid or unreadable ``.rootcoz/settings.json``."""
+
+
+def _sanitized_validation_message(exc: ValidationError) -> str:
+    """Build a settings.json error from loc + msg only (never input values)."""
+    parts: list[str] = []
+    for err in exc.errors()[:_MAX_SETTINGS_VALIDATION_ERRORS]:
+        loc = ".".join(str(p) for p in err.get("loc", ()) if p != "__root__")
+        msg = str(err.get("msg", "invalid value"))
+        parts.append(f"{loc}: {msg}" if loc else msg)
+    omitted = len(exc.errors()) - _MAX_SETTINGS_VALIDATION_ERRORS
+    if omitted > 0:
+        parts.append(f"...and {omitted} more")
+    detail = "; ".join(parts) if parts else "invalid document"
+    return f"JSON Schema validation failed for {ROOTCOZ_SETTINGS_FILENAME}: {detail}"
 
 
 @dataclass(frozen=True)
@@ -242,11 +259,8 @@ def load_rootcoz_repo_settings(tests_repo_path: Path) -> RootcozRepoSettings | N
     try:
         return _SETTINGS_ADAPTER.validate_python(data)
     except ValidationError as exc:
-        # Do not embed ValidationError text — it can include rejected input
-        # values (e.g. a token someone mistakenly put in settings.json).
-        raise RootcozSettingsError(
-            f"JSON Schema validation failed for {ROOTCOZ_SETTINGS_FILENAME}"
-        ) from exc
+        # Surface loc + msg only — never embed input/ctx (may contain secrets).
+        raise RootcozSettingsError(_sanitized_validation_message(exc)) from exc
 
 
 def _request_set_ai_provider(body: BaseAnalysisRequest) -> bool:
