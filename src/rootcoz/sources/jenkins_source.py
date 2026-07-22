@@ -959,6 +959,8 @@ async def analyze_job(
     auth_header: str = "",
     additional_repos: list[AdditionalRepo] | None = None,
     settings_json_resolved: bool = False,
+    *,
+    is_admin: bool = False,
 ) -> AnalysisResult:
     """Analyze a Jenkins job failure.
 
@@ -1127,7 +1129,9 @@ async def analyze_job(
                     build_number=request.build_number,
                     jenkins_url=HttpUrl(jenkins_build_url),
                     status="failed",
-                    summary=ai_not_configured_message("AI provider/model"),
+                    summary=ai_not_configured_message(
+                        "AI provider/model", is_admin=is_admin
+                    ),
                     ai_provider=ai_provider,
                     ai_model=ai_model,
                     failures=[],

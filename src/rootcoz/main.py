@@ -2884,6 +2884,7 @@ async def process_analysis_with_id(
             auth_header=auth_header,
             additional_repos=additional_repos_resolved,
             settings_json_resolved=settings_json_resolved,
+            is_admin=is_admin,
         )
 
         # analyze_job may overlay .rootcoz/settings.json — use effective AI
