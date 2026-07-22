@@ -11,7 +11,8 @@ def strip_url_userinfo(url: str) -> str:
     if not url:
         return url
     parsed = urlparse(url)
-    if parsed.username or parsed.password:
+    # ``is not None`` catches empty userinfo (e.g. ``https://@host`` / ``https://:@host``)
+    if parsed.username is not None or parsed.password is not None:
         clean_netloc = parsed.netloc.rsplit("@", 1)[-1]
         return urlunparse(parsed._replace(netloc=clean_netloc))
     return url
@@ -40,7 +41,8 @@ def normalize_prow_url(value: object) -> str:
     if not url.startswith("https://"):
         raise ValueError("prow_url must start with https://")
     parsed = urlparse(url)
-    if parsed.username or parsed.password:
+    # ``is not None`` catches empty userinfo (e.g. ``https://@host`` / ``https://:@host``)
+    if parsed.username is not None or parsed.password is not None:
         raise ValueError("prow_url must not contain credentials")
     if not parsed.hostname:
         raise ValueError("prow_url must include a hostname")

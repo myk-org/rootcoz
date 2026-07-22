@@ -1392,3 +1392,31 @@ class TestUpdateBuildUrl:
         args = mock_logger.warning.call_args[0]
         assert "no row found" in args[0]
         assert "nonexistent-id" in args
+
+
+class TestWithBuildUrlAliases:
+    """Tests for with_build_url_aliases sanitization."""
+
+    def test_clears_unsafe_urls(self) -> None:
+        record = {
+            "build_url": "javascript:alert(1)",
+            "jenkins_url": "javascript:alert(1)",
+        }
+        out = storage.with_build_url_aliases(record)
+        assert out["build_url"] == ""
+        assert out["jenkins_url"] == ""
+
+    def test_prefers_build_url_and_aliases(self) -> None:
+        record = {
+            "build_url": "https://prow.example.com/job/1",
+            "jenkins_url": "https://jenkins.example.com/job/1",
+        }
+        out = storage.with_build_url_aliases(record)
+        assert out["build_url"] == "https://prow.example.com/job/1"
+        assert out["jenkins_url"] == "https://prow.example.com/job/1"
+
+    def test_falls_back_to_jenkins_url(self) -> None:
+        record = {"jenkins_url": "https://jenkins.example.com/job/1"}
+        out = storage.with_build_url_aliases(record)
+        assert out["build_url"] == "https://jenkins.example.com/job/1"
+        assert out["jenkins_url"] == "https://jenkins.example.com/job/1"

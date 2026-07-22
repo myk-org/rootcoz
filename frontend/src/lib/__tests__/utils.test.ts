@@ -51,6 +51,13 @@ describe('resolveBuildUrl', () => {
     expect(resolveBuildUrl(null)).toBeNull()
   })
 
+  it('falls back to jenkins_url when build_url is invalid', () => {
+    expect(resolveBuildUrl({
+      build_url: 'javascript:alert(1)',
+      jenkins_url: 'https://jenkins.example/job/1',
+    })).toBe('https://jenkins.example/job/1')
+  })
+
   it('strips credentials and rejects unsafe schemes', () => {
     expect(resolveBuildUrl({ build_url: 'https://user:pass@prow.example.com/job' })) // pragma: allowlist secret
       .toBe('https://prow.example.com/job')

@@ -177,7 +177,12 @@ def _build_url(prow_url: str, bucket: str, gcs_prefix: str) -> str:
     return sanitize_http_href(url)
 
 
-def _parse_junit_failures(raw_xml: str) -> list[FailedTest]:
+def _parse_junit_failures(
+    raw_xml: str,
+    *,
+    warnings: list[str] | None = None,
+    label: str = "",
+) -> list[FailedTest]:
     """Parse a JUnit XML string and extract failures.
 
     Uses the shared ``extract_test_failures`` helper from xml_enrichment
@@ -185,6 +190,8 @@ def _parse_junit_failures(raw_xml: str) -> list[FailedTest]:
 
     Args:
         raw_xml: Raw JUnit XML content.
+        warnings: Optional list to append a structured warning when parsing fails.
+        label: Optional artifact path/label included in the warning message.
 
     Returns:
         List of FailedTest objects extracted from the XML.
@@ -193,6 +200,9 @@ def _parse_junit_failures(raw_xml: str) -> list[FailedTest]:
         return extract_test_failures(raw_xml)
     except Exception as exc:
         logger.warning("Failed to parse JUnit XML: %s", exc)
+        if warnings is not None:
+            where = f" ({label})" if label else ""
+            warnings.append(f"Failed to parse JUnit XML{where}: {exc}")
         return []
 
 
@@ -1391,7 +1401,11 @@ class ProwSource(CISource):
                 access_warnings.append(str(exc))
                 continue
             if xml_content:
-                failures = _parse_junit_failures(xml_content)
+                failures = _parse_junit_failures(
+                    xml_content,
+                    warnings=access_warnings,
+                    label=junit_path,
+                )
                 all_failures.extend(failures)
 
         logger.info(
@@ -1415,7 +1429,8 @@ class ProwSource(CISource):
                     warnings=access_warnings,
                 )
                 if extract_path:
-                    artifacts_context = str(extract_path)
+                    # Stable workspace-relative path (symlink target is extract_path).
+                    artifacts_context = "Artifacts are available under build-artifacts/"
                     self._extract_path = extract_path
                     logger.info("Build artifacts available at %s", extract_path)
             except Exception as exc:
@@ -1499,7 +1514,9 @@ class ProwSource(CISource):
                         client, gcs_prefix, warnings
                     )
                     if non_junit and extract_path:
-                        artifacts_context = str(extract_path)
+                        artifacts_context = (
+                            "Artifacts are available under build-artifacts/"
+                        )
                         logger.info("Refetched Prow artifacts to %s", extract_path)
                 except Exception as exc:
                     warnings.append(f"Failed to refetch Prow artifacts: {exc}")

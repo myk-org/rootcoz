@@ -611,13 +611,22 @@ def results_list(
     json_output: bool = _JSON_OPTION,
 ):
     """List recent analyzed jobs."""
+
+    def _list(c):
+        data = c.list_results(limit=limit)
+        if isinstance(data, list):
+            for row in data:
+                if isinstance(row, dict) and not row.get("build_url"):
+                    row["build_url"] = row.get("jenkins_url") or ""
+        return data
+
     _run_client_command(
         json_output,
-        lambda c: c.list_results(limit=limit),
-        columns=["job_id", "status", "jenkins_url", "created_at"],
+        _list,
+        columns=["job_id", "status", "build_url", "created_at"],
         labels={
             "job_id": "JOB ID",
-            "jenkins_url": "JENKINS URL",
+            "build_url": "BUILD URL",
             "created_at": "CREATED",
         },
     )

@@ -579,17 +579,53 @@ class JenkinsSource(CISource):
 
         # For child job failures, use child job coordinates
         job_name = child_job_name or params.get("job_name", "")
-        build_number = child_build_number or params.get("build_number", 0)
+        raw_build_number = (
+            child_build_number if child_build_number else params.get("build_number", 0)
+        )
 
-        if not job_name or not build_number:
+        if not job_name or not raw_build_number:
             logger.warning(
                 "Cannot reconstruct JenkinsSource: missing job_name/build_number"
             )
             return None
 
+        # Reject bool (True→1) and non-numeric strings that would raise or mis-coerce.
+        if isinstance(raw_build_number, bool):
+            logger.warning(
+                "Cannot reconstruct JenkinsSource: invalid build_number type %r",
+                type(raw_build_number).__name__,
+            )
+            return None
+        if isinstance(raw_build_number, str):
+            if not raw_build_number.isdigit():
+                logger.warning(
+                    "Cannot reconstruct JenkinsSource: non-numeric build_number %r",
+                    raw_build_number,
+                )
+                return None
+            build_number = int(raw_build_number)
+        elif isinstance(raw_build_number, int):
+            build_number = raw_build_number
+        else:
+            try:
+                build_number = int(raw_build_number)
+            except (TypeError, ValueError):
+                logger.warning(
+                    "Cannot reconstruct JenkinsSource: invalid build_number %r",
+                    raw_build_number,
+                )
+                return None
+
+        if build_number <= 0:
+            logger.warning(
+                "Cannot reconstruct JenkinsSource: non-positive build_number %r",
+                build_number,
+            )
+            return None
+
         return cls(
             job_name=job_name,
-            build_number=int(build_number),
+            build_number=build_number,
             settings=settings,
             force=True,  # reanalysis always forces
         )

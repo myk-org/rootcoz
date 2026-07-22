@@ -111,10 +111,8 @@ export function ciSourceLabel(requestParams?: { [key: string]: unknown }): strin
 export const PROW_JOB_NAME_RE = /^[a-zA-Z0-9][a-zA-Z0-9._-]*$/
 export const PROW_BUILD_ID_RE = /^[0-9]+$/
 
-/** Resolve CI build URL from API payload (prefers build_url, falls back to jenkins_url). */
-export function resolveBuildUrl(data?: { build_url?: string | null; jenkins_url?: string | null } | null): string | null {
-  if (!data) return null
-  const raw = data.build_url ?? data.jenkins_url ?? null
+/** Sanitize a single URL candidate; returns null if missing or not http(s). */
+function sanitizeBuildUrlCandidate(raw: string | null | undefined): string | null {
   if (!raw) return null
   try {
     const url = new URL(raw)
@@ -125,6 +123,15 @@ export function resolveBuildUrl(data?: { build_url?: string | null; jenkins_url?
   } catch {
     return null
   }
+}
+
+/** Resolve CI build URL from API payload (prefers build_url, falls back to jenkins_url). */
+export function resolveBuildUrl(data?: { build_url?: string | null; jenkins_url?: string | null } | null): string | null {
+  if (!data) return null
+  return (
+    sanitizeBuildUrlCandidate(data.build_url) ??
+    sanitizeBuildUrlCandidate(data.jenkins_url)
+  )
 }
 
 type BuildIdSource = {

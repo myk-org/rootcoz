@@ -177,6 +177,18 @@ class TestParseJunitFailures:
         failures = _parse_junit_failures("not xml at all")
         assert failures == []
 
+    def test_malformed_xml_appends_warning(self):
+        warnings: list[str] = []
+        failures = _parse_junit_failures(
+            "not xml at all",
+            warnings=warnings,
+            label="artifacts/junit.xml",
+        )
+        assert failures == []
+        assert len(warnings) == 1
+        assert "artifacts/junit.xml" in warnings[0]
+        assert "Failed to parse JUnit XML" in warnings[0]
+
 
 # ---------------------------------------------------------------------------
 # _fetch_gcs_text
@@ -2114,6 +2126,7 @@ class TestProwSourceArtifacts:
             result = await source._fetch_with_client(client)
 
         assert result.artifacts_context != ""
+        assert "build-artifacts" in result.artifacts_context
         assert result.extract_path is not None
         assert result.extract_path.exists()
         assert len(result.failures) == 2

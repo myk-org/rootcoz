@@ -28,6 +28,12 @@ class TestNormalizeProwUrl:
         with pytest.raises(ValueError, match="credentials"):
             normalize_prow_url(url)
 
+    def test_rejects_empty_userinfo(self):
+        with pytest.raises(ValueError, match="credentials"):
+            normalize_prow_url("https://@prow.example.com")
+        with pytest.raises(ValueError, match="credentials"):
+            normalize_prow_url("https://:@prow.example.com")
+
     def test_empty_allowed(self):
         assert normalize_prow_url("") == ""
         assert normalize_prow_url(None) == ""
@@ -92,3 +98,11 @@ class TestStripUrlUserinfo:
     def test_no_change_without_userinfo(self):
         url = "https://prow.example.com/path"
         assert strip_url_userinfo(url) == url
+
+    def test_strips_empty_userinfo(self):
+        assert strip_url_userinfo("https://@prow.example.com/path") == (
+            "https://prow.example.com/path"
+        )
+        assert strip_url_userinfo("https://:@prow.example.com/path") == (
+            "https://prow.example.com/path"
+        )

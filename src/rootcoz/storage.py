@@ -415,15 +415,19 @@ def stamp_build_url(result: dict, build_url: str) -> None:
 
 
 def with_build_url_aliases(record: dict) -> dict:
-    """Ensure API records expose both build_url and jenkins_url."""
+    """Ensure API records expose both build_url and jenkins_url.
+
+    Always overwrites both fields with a sanitized http(s) URL, or clears
+    them to ``""`` when no safe candidate exists — never leaves a rejected
+    URL in place.
+    """
     from rootcoz.prow_validation import sanitize_http_href
 
     url = sanitize_http_href(
         str(record.get("build_url") or record.get("jenkins_url") or "")
     )
-    if url:
-        record["build_url"] = url
-        record["jenkins_url"] = url
+    record["build_url"] = url
+    record["jenkins_url"] = url
     return record
 
 
