@@ -241,6 +241,22 @@ class TestLoadRootcozRepoSettings:
         assert "evil.example" not in msg
         assert "invalid additional_repos url" in msg
 
+    def test_rejects_http_scheme_additional_repo_url(self, tmp_path: Path) -> None:
+        """Clone allowlist is https/git only — reject http:// at settings load."""
+        _write_settings(
+            tmp_path,
+            {
+                "additional_repos": [
+                    {
+                        "name": "extra",
+                        "url": "http://github.com/org/repo",
+                    }
+                ]
+            },
+        )
+        with pytest.raises(RootcozSettingsError, match="invalid additional_repos url"):
+            load_rootcoz_repo_settings(tmp_path)
+
     def test_rejects_non_utf8_settings(self, tmp_path: Path) -> None:
         rootcoz = tmp_path / ".rootcoz"
         rootcoz.mkdir()

@@ -53,6 +53,7 @@ from rootcoz.rootcoz_repo_settings import (
     RootcozSettingsError,
     assert_no_tests_repo_name_collision,
     resolve_repo_analysis_settings,
+    resolve_tests_repo_url,
 )
 from rootcoz.request_resolution import resolve_tests_repo_token
 from rootcoz.sources.base import CISource, CISourceResult
@@ -1012,8 +1013,7 @@ async def analyze_job(
         child_job_analyses: list[ChildJobAnalysis] = []
 
         # Clone repo for context BEFORE child job analysis so it's available for all jobs
-        # Use request value if provided, otherwise fall back to settings
-        tests_repo_url = request.tests_repo_url or settings.tests_repo_url
+        tests_repo_url = resolve_tests_repo_url(request, settings)
         tests_repo_token = resolve_tests_repo_token(request, settings)
         repo_context = ""
         custom_prompt = ""

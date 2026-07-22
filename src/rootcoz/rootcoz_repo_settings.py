@@ -106,6 +106,13 @@ class RootcozAdditionalRepo(BaseModel):
         except ValidationError as exc:
             # Never embed the raw URL — it may contain credentials in userinfo.
             raise ValueError("invalid additional_repos url") from exc
+        # Match RepositoryManager.clone_into allowlist (https:// / git:// only).
+        try:
+            from rootcoz.repository import _validate_repo_url
+
+            _validate_repo_url(v)
+        except ValueError as exc:
+            raise ValueError("invalid additional_repos url") from exc
         return v
 
 

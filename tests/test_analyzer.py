@@ -2216,6 +2216,79 @@ class TestAnalyzeJobWorkspacePattern:
         assert call["depth"] == 50  # Test repo uses depth=50 for git history
 
     @pytest.mark.asyncio
+    async def test_explicit_empty_tests_repo_url_skips_clone(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path
+    ) -> None:
+        """Explicit tests_repo_url='' must not fall back to server default."""
+
+        body = AnalyzeRequest.model_validate(
+            {
+                "job_name": "my-job",
+                "build_number": 123,
+                "tests_repo_url": "",
+            }
+        )
+        settings = Settings()
+        settings_data = settings.model_dump(mode="python")
+        settings_data["jenkins_url"] = "https://jenkins.example.com"
+        settings_data["jenkins_user"] = "user"
+        settings_data["jenkins_password"] = _FAKE_JENKINS_PASSWORD
+        settings_data["tests_repo_url"] = "https://github.com/org/server-tests"
+        merged = Settings.model_validate(settings_data)
+
+        workspace_dir = tmp_path / "workspace"
+        workspace_dir.mkdir()
+
+        mock_client = MagicMock()
+        mock_client.get_build_info_safe.return_value = {
+            "result": "FAILURE",
+            "building": False,
+        }
+        mock_client.get_build_console.return_value = "Build failed"
+        mock_client.get_test_report.return_value = None
+        mock_client.session = MagicMock()
+
+        monkeypatch.setattr(
+            "rootcoz.sources.jenkins_source.JenkinsClient",
+            lambda **_kwargs: mock_client,
+        )
+
+        async def fake_to_thread(func, *args, **kwargs):
+            return func(*args, **kwargs)
+
+        monkeypatch.setattr(
+            "rootcoz.sources.jenkins_source.asyncio.to_thread",
+            fake_to_thread,
+        )
+        _patch_sidecar_analysis_success(monkeypatch)
+
+        clone_into_calls: list[dict] = []
+        mock_repo_manager = MagicMock()
+        mock_repo_manager.create_workspace.return_value = workspace_dir
+
+        def fake_clone_into(url, target, depth=1, branch="", token=None):
+            clone_into_calls.append({"url": url, "target": target})
+            target.mkdir(parents=True, exist_ok=True)
+            (target / ".git").mkdir(exist_ok=True)
+            return target
+
+        mock_repo_manager.clone_into = MagicMock(side_effect=fake_clone_into)
+        monkeypatch.setattr(
+            "rootcoz.sources.jenkins_source.RepositoryManager",
+            lambda: mock_repo_manager,
+        )
+
+        await analyze_job(
+            body,
+            merged,
+            ai_provider="claude",
+            ai_model="test-model",
+            job_id="test-job-id",
+        )
+
+        assert clone_into_calls == []
+
+    @pytest.mark.asyncio
     async def test_test_repo_name_derived_from_url(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path
     ) -> None:
