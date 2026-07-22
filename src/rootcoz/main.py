@@ -3525,6 +3525,18 @@ async def _process_file_raw_analysis(
         repo_path = repo_manager.create_workspace()
         logger.debug(f"Workspace created at {repo_path}")
 
+        async def _fail_settings_overlay(error: str) -> None:
+            fail_data = {
+                "job_name": display_name,
+                "display_name": display_name,
+                "error": error,
+            }
+            await _preserve_request_params(job_id, fail_data)
+            await update_status(job_id, "failed", fail_data)
+            notify_active_count_changed()
+            notify_dashboard_changed()
+            notify_job_status_changed(job_id)
+
         tests_cloned_path: Path | None = None
         if tests_repo_url:
             logger.debug(
@@ -3563,16 +3575,7 @@ async def _process_file_raw_analysis(
             )
         except RootcozSettingsError as exc:
             logger.error("Invalid .rootcoz/settings.json (details redacted)")
-            fail_data = {
-                "job_name": display_name,
-                "display_name": display_name,
-                "error": str(exc),
-            }
-            await _preserve_request_params(job_id, fail_data)
-            await update_status(job_id, "failed", fail_data)
-            notify_active_count_changed()
-            notify_dashboard_changed()
-            notify_job_status_changed(job_id)
+            await _fail_settings_overlay(str(exc))
             return
 
         ai_provider = effective.ai_provider
@@ -3590,29 +3593,13 @@ async def _process_file_raw_analysis(
             logger.error(
                 "Invalid .rootcoz/settings.json after overlay (details redacted)"
             )
-            fail_data = {
-                "job_name": display_name,
-                "display_name": display_name,
-                "error": str(exc),
-            }
-            await _preserve_request_params(job_id, fail_data)
-            await update_status(job_id, "failed", fail_data)
-            notify_active_count_changed()
-            notify_dashboard_changed()
-            notify_job_status_changed(job_id)
+            await _fail_settings_overlay(str(exc))
             return
 
         if not ai_provider or not ai_model:
-            fail_data = {
-                "job_name": display_name,
-                "display_name": display_name,
-                "error": _ai_not_configured_message(None, "AI provider/model"),
-            }
-            await _preserve_request_params(job_id, fail_data)
-            await update_status(job_id, "failed", fail_data)
-            notify_active_count_changed()
-            notify_dashboard_changed()
-            notify_job_status_changed(job_id)
+            await _fail_settings_overlay(
+                _ai_not_configured_message(None, "AI provider/model")
+            )
             return
 
         # Post-overlay preflight only when AI was deferred / changed by settings.json

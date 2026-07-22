@@ -193,6 +193,14 @@ class TestLoadRootcozRepoSettings:
         with pytest.raises(RootcozSettingsError, match="symlink|regular file"):
             load_rootcoz_repo_settings(tmp_path)
 
+    def test_rejects_dangling_symlink_settings(self, tmp_path: Path) -> None:
+        rootcoz = tmp_path / ".rootcoz"
+        rootcoz.mkdir()
+        target = rootcoz / "settings.json"
+        target.symlink_to(tmp_path / "missing-target.json")
+        with pytest.raises(RootcozSettingsError, match="symlink|regular file"):
+            load_rootcoz_repo_settings(tmp_path)
+
     def test_rejects_directory_settings(self, tmp_path: Path) -> None:
         rootcoz = tmp_path / ".rootcoz"
         rootcoz.mkdir()

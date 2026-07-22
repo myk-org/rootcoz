@@ -222,14 +222,15 @@ def load_rootcoz_repo_settings(tests_repo_path: Path) -> RootcozRepoSettings | N
             or the path is a symlink / escapes the repo tree.
     """
     path = tests_repo_path / ".rootcoz" / ROOTCOZ_SETTINGS_FILENAME
-    if not path.exists():
-        return None
-    # Untrusted clone: never follow symlinks into host files
+    # Untrusted clone: reject symlinks before exists() so dangling links fail
+    # loudly instead of being treated as "file absent".
     if path.is_symlink():
         raise RootcozSettingsError(
             f"{ROOTCOZ_SETTINGS_FILENAME} must be a regular file "
             "(symlinks are not allowed)"
         )
+    if not path.exists():
+        return None
     if not path.is_file():
         raise RootcozSettingsError(
             f"{ROOTCOZ_SETTINGS_FILENAME} must be a regular file "
