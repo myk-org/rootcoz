@@ -4301,6 +4301,14 @@ async def _reanalyze_failure_background(
             await update_status(job_id, "failed", fail_data)
             return
 
+        if not ai_provider or not ai_model:
+            fail_data = {
+                "error": _ai_not_configured_message(None, "AI provider/model"),
+            }
+            await _preserve_request_params(job_id, fail_data)
+            await update_status(job_id, "failed", fail_data)
+            return
+
         if additional_repos_list:
             additional_repos_cloned, repo_path = await clone_additional_repos(
                 repo_manager, additional_repos_list, repo_path
