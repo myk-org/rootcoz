@@ -55,7 +55,7 @@
     }
   },
   "additionalProperties": false,
-  "description": "Non-sensitive per-repo analysis settings. For ai_provider/ai_model: request (CLI/API/UI) > server defaults > this file. For other keys: request > this file > server defaults.",
+  "description": "Non-sensitive per-repo analysis settings. Priority for all keys: request (CLI/API/UI) > this file > server defaults.",
   "properties": {
     "ai_provider": {
       "anyOf": [

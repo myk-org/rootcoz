@@ -157,10 +157,10 @@ from rootcoz.repository import (
 )
 from rootcoz.request_resolution import resolve_tests_repo_token
 from rootcoz.rootcoz_repo_settings import (
+    EffectiveRepoAnalysisSettings,
     RootcozSettingsError,
     assert_no_tests_repo_name_collision,
-    load_and_apply_rootcoz_repo_settings,
-    propagate_repo_settings_overlay,
+    resolve_repo_analysis_settings,
     tests_repo_available,
 )
 from rootcoz.sources import CISource, FileSource, RawSource
@@ -2604,7 +2604,7 @@ async def _carry_forward_overrides(job_id: str, result_data: dict) -> None:
         )
 
 
-async def _early_resolve_deferred_ai_from_settings_json(
+async def _resolve_settings_json_before_analysis(
     job_id: str,
     body: BaseAnalysisRequest,
     settings: Settings,
@@ -2615,94 +2615,25 @@ async def _early_resolve_deferred_ai_from_settings_json(
     build_number: int | None = None,
     jenkins_url: str = "",
     job_name: str = "",
-) -> tuple[str, str] | None:
-    """Shallow-clone tests repo and resolve deferred AI before Jenkins wait.
+) -> tuple[EffectiveRepoAnalysisSettings, bool] | None:
+    """Shallow-clone tests repo and resolve ``.rootcoz/settings.json`` once.
 
-    When AI was deferred to ``.rootcoz/settings.json``, resolve it early so
-    missing/invalid config fails before ``wait_for_jenkins_completion``.
+    Runs for every analysis that has a tests repo (not only when AI is deferred)
+    so request → settings.json → server is applied before Jenkins wait / preflight.
 
     Returns:
-        ``(ai_provider, ai_model)`` when the caller should continue (values may
-        still be empty if the early clone could not run).
+        ``(effective, clone_ok)`` when the caller should continue.
+        ``clone_ok`` is True when there was no tests repo, or the early clone
+        succeeded (analysis need not re-merge). False means analysis must
+        re-resolve after its full workspace clone.
         ``None`` when the job was already marked failed (caller must return).
     """
-    tests_repo_url_raw = (
-        str(body.tests_repo_url)
-        if body.tests_repo_url is not None
-        else str(settings.tests_repo_url or "")
-    ).strip()
-    if not tests_repo_url_raw:
-        return ai_provider, ai_model
 
-    clean_url, tests_ref = parse_repo_ref(tests_repo_url_raw)
-    token = resolve_tests_repo_token(body, settings)
-    peer_ai_configs = _resolve_peer_ai_configs(body, settings)
-    additional_repos_list = resolve_additional_repos(body, settings)
-
-    logger.info(
-        "AI deferred — early-cloning tests repo for .rootcoz/settings.json "
-        "before Jenkins wait (job_id=%s)",
-        job_id,
-    )
-    with RepositoryManager() as repo_manager:
-        workspace = repo_manager.create_workspace()
-        target = workspace / "tests-repo-early"
-        try:
-            await asyncio.to_thread(
-                repo_manager.clone_into,
-                clean_url,
-                target,
-                depth=1,
-                branch=tests_ref,
-                token=token or None,
-            )
-        except Exception as exc:
-            # Keep deferred: analyze_job will retry clone with full depth later.
-            logger.warning(
-                "Early settings.json clone failed (%s); "
-                "continuing with deferred AI until analyze_job",
-                type(exc).__name__,
-            )
-            return ai_provider, ai_model
-
-        try:
-            effective = load_and_apply_rootcoz_repo_settings(
-                target,
-                body,
-                settings,
-                ai_provider=ai_provider,
-                ai_model=ai_model,
-                peer_ai_configs=peer_ai_configs,
-                additional_repos=additional_repos_list,
-            )
-        except RootcozSettingsError:
-            logger.error("Invalid .rootcoz/settings.json (details redacted)")
-            fail_data: dict = {
-                "job_name": job_name or display_name,
-                "display_name": display_name,
-                "error": "Invalid .rootcoz/settings.json",
-            }
-            if build_number is not None:
-                fail_data["build_number"] = build_number
-            if jenkins_url:
-                fail_data["jenkins_url"] = jenkins_url
-            await _preserve_request_params(job_id, fail_data)
-            await update_status(job_id, "failed", fail_data)
-            notify_active_count_changed()
-            notify_dashboard_changed()
-            notify_job_status_changed(job_id)
-            return None
-
-        propagate_repo_settings_overlay(settings, effective.settings)
-        ai_provider = effective.ai_provider
-        ai_model = effective.ai_model
-
-    if not ai_provider or not ai_model:
-        # Clone succeeded but AI still missing — fail before Jenkins wait.
-        fail_data = {
+    async def _fail_job(error: str) -> None:
+        fail_data: dict[str, Any] = {
             "job_name": job_name or display_name,
             "display_name": display_name,
-            "error": _ai_not_configured_message(None, "AI provider/model"),
+            "error": error,
         }
         if build_number is not None:
             fail_data["build_number"] = build_number
@@ -2713,14 +2644,90 @@ async def _early_resolve_deferred_ai_from_settings_json(
         notify_active_count_changed()
         notify_dashboard_changed()
         notify_job_status_changed(job_id)
+
+    tests_repo_url_raw = (
+        str(body.tests_repo_url)
+        if body.tests_repo_url is not None
+        else str(settings.tests_repo_url or "")
+    ).strip()
+    peer_ai_configs = _resolve_peer_ai_configs(body, settings)
+    additional_repos_list = resolve_additional_repos(body, settings)
+
+    if not tests_repo_url_raw:
+        effective = await resolve_repo_analysis_settings(
+            job_id,
+            None,
+            body,
+            settings,
+            ai_provider=ai_provider,
+            ai_model=ai_model,
+            peer_ai_configs=peer_ai_configs,
+            additional_repos=additional_repos_list,
+        )
+        if not effective.ai_provider or not effective.ai_model:
+            await _fail_job(_ai_not_configured_message(None, "AI provider/model"))
+            return None
+        return effective, True
+
+    clean_url, tests_ref = parse_repo_ref(tests_repo_url_raw)
+    token = resolve_tests_repo_token(body, settings)
+
+    logger.info(
+        "Resolving .rootcoz/settings.json before analysis (job_id=%s)",
+        job_id,
+    )
+    clone_ok = False
+    with RepositoryManager() as repo_manager:
+        workspace = repo_manager.create_workspace()
+        target = workspace / "tests-repo-early"
+        tests_path: Path | None = target
+        try:
+            await asyncio.to_thread(
+                repo_manager.clone_into,
+                clean_url,
+                target,
+                depth=1,
+                branch=tests_ref,
+                token=token or None,
+            )
+            clone_ok = True
+        except Exception as exc:
+            logger.warning(
+                "Early settings.json clone failed (%s); "
+                "continuing until analysis workspace clone",
+                type(exc).__name__,
+            )
+            tests_path = None
+
+        try:
+            effective = await resolve_repo_analysis_settings(
+                job_id,
+                tests_path,
+                body,
+                settings,
+                ai_provider=ai_provider,
+                ai_model=ai_model,
+                peer_ai_configs=peer_ai_configs,
+                additional_repos=additional_repos_list,
+            )
+        except RootcozSettingsError:
+            logger.error("Invalid .rootcoz/settings.json (details redacted)")
+            await _fail_job("Invalid .rootcoz/settings.json")
+            return None
+
+    if not effective.ai_provider or not effective.ai_model:
+        if not clone_ok:
+            # Retry after full workspace clone in analyze_job.
+            return effective, False
+        await _fail_job(_ai_not_configured_message(None, "AI provider/model"))
         return None
 
     logger.info(
-        "Resolved deferred AI from settings.json before Jenkins wait: %s/%s",
-        ai_provider,
-        ai_model,
+        "Resolved analysis settings: %s/%s",
+        effective.ai_provider,
+        effective.ai_model,
     )
-    return ai_provider, ai_model
+    return effective, clone_ok
 
 
 async def process_analysis_with_id(
@@ -2746,7 +2753,6 @@ async def process_analysis_with_id(
         # Validate AI config early -- before potentially waiting hours for Jenkins.
         # May defer when tests repo can supply .rootcoz/settings.json after clone.
         ai_provider, ai_model = _resolve_ai_config_allow_defer(body, settings)
-        ai_deferred = not (ai_provider and ai_model)
 
         display_name = _get_display_name(body)
         jenkins_job_url = (
@@ -2757,28 +2763,28 @@ async def process_analysis_with_id(
             else ""
         )
 
-        # When AI is deferred, resolve settings.json now (shallow clone) so we
-        # fail fast / preflight before the potentially hours-long Jenkins wait.
-        if ai_deferred:
-            early = await _early_resolve_deferred_ai_from_settings_json(
-                job_id,
-                body,
-                settings,
-                ai_provider,
-                ai_model,
-                display_name,
-                build_number=body.build_number,
-                jenkins_url=jenkins_job_url,
-                job_name=body.job_name or "",
-            )
-            if early is None:
-                return
-            ai_provider, ai_model = early
-            ai_deferred = not (ai_provider and ai_model)
+        # Always resolve settings.json when possible (all sources / all keys).
+        early = await _resolve_settings_json_before_analysis(
+            job_id,
+            body,
+            settings,
+            ai_provider,
+            ai_model,
+            display_name,
+            build_number=body.build_number,
+            jenkins_url=jenkins_job_url,
+            job_name=body.job_name or "",
+        )
+        if early is None:
+            return
+        early_effective, settings_json_resolved = early
+        ai_provider = early_effective.ai_provider
+        ai_model = early_effective.ai_model
+        peer_ai_configs = early_effective.peer_ai_configs
+        additional_repos_resolved = early_effective.additional_repos
 
-        # Pre-flight: verify AI is reachable before expensive Jenkins wait
-        # (skipped only when AI is still deferred after early clone failure)
-        if not ai_deferred and not await _preflight_sidecar_check(
+        # Pre-flight when AI is known (skip if still deferred to analyze_job clone)
+        if (ai_provider and ai_model) and not await _preflight_sidecar_check(
             job_id,
             ai_provider,
             ai_model,
@@ -2852,11 +2858,6 @@ async def process_analysis_with_id(
 
         server_url = _build_internal_server_url()
 
-        # Resolve peer AI configs: request body (JSON list) takes precedence
-        # over env var default (parsed from "provider:model" string).
-        # None = not sent → use env default; [] = explicitly disable peers.
-        peer_ai_configs = _resolve_peer_ai_configs(body, settings)
-
         result = await analyze_job(
             body,
             settings,
@@ -2867,6 +2868,8 @@ async def process_analysis_with_id(
             peer_ai_configs=peer_ai_configs,
             peer_analysis_max_rounds=settings.peer_analysis_max_rounds,
             auth_header=auth_header,
+            additional_repos=additional_repos_resolved,
+            settings_json_resolved=settings_json_resolved,
         )
 
         # analyze_job may overlay .rootcoz/settings.json — use effective AI
@@ -3548,7 +3551,8 @@ async def _process_file_raw_analysis(
                 logger.warning("Failed to clone test repository", exc_info=True)
 
         try:
-            effective = load_and_apply_rootcoz_repo_settings(
+            effective = await resolve_repo_analysis_settings(
+                job_id,
                 tests_cloned_path,
                 body,
                 merged,
@@ -4264,7 +4268,8 @@ async def _reanalyze_failure_background(
             shim_data["additional_repos"] = additional_repos_list
         shim = BaseAnalysisRequest(**shim_data)
         try:
-            effective = load_and_apply_rootcoz_repo_settings(
+            effective = await resolve_repo_analysis_settings(
+                job_id,
                 tests_cloned_path,
                 shim,
                 get_settings(),

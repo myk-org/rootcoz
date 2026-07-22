@@ -40,6 +40,7 @@ from rootcoz.error_messages import ai_not_configured_message, make_user_friendly
 from rootcoz.jenkins import JenkinsClient
 from rootcoz.jenkins_artifacts import cleanup_extract_dir, process_build_artifacts
 from rootcoz.models import (
+    AdditionalRepo,
     AnalysisDetail,
     AnalysisResult,
     AnalyzeRequest,
@@ -51,8 +52,7 @@ from rootcoz.repository import RepositoryManager, derive_test_repo_name, redact_
 from rootcoz.rootcoz_repo_settings import (
     RootcozSettingsError,
     assert_no_tests_repo_name_collision,
-    load_and_apply_rootcoz_repo_settings,
-    propagate_repo_settings_overlay,
+    resolve_repo_analysis_settings,
 )
 from rootcoz.request_resolution import resolve_tests_repo_token
 from rootcoz.sources.base import CISource, CISourceResult
@@ -956,8 +956,15 @@ async def analyze_job(
     peer_ai_configs: list | None = None,
     peer_analysis_max_rounds: int = 3,
     auth_header: str = "",
+    additional_repos: list[AdditionalRepo] | None = None,
+    settings_json_resolved: bool = False,
 ) -> AnalysisResult:
-    """Analyze a Jenkins job failure."""
+    """Analyze a Jenkins job failure.
+
+    When ``settings_json_resolved`` is True, AI/peers/repos/Settings were already
+    merged via ``resolve_repo_analysis_settings`` in main (all sources share that
+    path). This function only re-resolves after clone when early resolve failed.
+    """
     # Track whether the caller supplied a persisted job_id so we only
     # issue progress-phase writes for jobs that actually exist in the DB.
     progress_job_id = job_id
@@ -1014,9 +1021,12 @@ async def analyze_job(
         # Use RepositoryManager context for entire analysis (child jobs and main job)
         cloned_repos: dict[str, Path] = {}
         async with contextlib.AsyncExitStack() as stack:
-            # Preliminary additional repos (request|server) for clone naming only.
-            # Final list may come from .rootcoz/settings.json after the tests repo clone.
-            additional_repos_list = resolve_additional_repos(request, settings)
+            # Prefer pre-resolved additional repos from central settings.json merge.
+            additional_repos_list = (
+                list(additional_repos)
+                if additional_repos is not None
+                else resolve_additional_repos(request, settings)
+            )
 
             repo_manager = RepositoryManager()
             stack.enter_context(repo_manager)
@@ -1054,39 +1064,38 @@ async def analyze_job(
                     )
                     repo_context = "\nFailed to clone repository (details redacted)"
 
-            # Overlay .rootcoz/settings.json (request > settings.json > server)
-            try:
-                effective = load_and_apply_rootcoz_repo_settings(
-                    tests_cloned_path,
-                    request,
-                    settings,
-                    ai_provider=ai_provider,
-                    ai_model=ai_model,
-                    peer_ai_configs=peer_ai_configs,
-                    additional_repos=additional_repos_list,
-                )
-            except RootcozSettingsError as exc:
-                logger.error("Invalid .rootcoz/settings.json (details redacted)")
-                return AnalysisResult(
-                    job_id=job_id,
-                    job_name=request.job_name,
-                    build_number=request.build_number,
-                    jenkins_url=HttpUrl(jenkins_build_url),
-                    status="failed",
-                    summary=str(exc),
-                    ai_provider=ai_provider,
-                    ai_model=ai_model,
-                    failures=[],
-                )
-
-            ai_provider = effective.ai_provider
-            ai_model = effective.ai_model
-            peer_ai_configs = effective.peer_ai_configs
-            peer_analysis_max_rounds = effective.settings.peer_analysis_max_rounds
-            additional_repos_list = effective.additional_repos
-            # Mutate caller Settings so enrichment sees the same overlay knobs
-            propagate_repo_settings_overlay(settings, effective.settings)
-            settings = effective.settings
+            # Central settings.json merge (skip when main already resolved successfully)
+            if not settings_json_resolved:
+                try:
+                    effective = await resolve_repo_analysis_settings(
+                        progress_job_id,
+                        tests_cloned_path,
+                        request,
+                        settings,
+                        ai_provider=ai_provider,
+                        ai_model=ai_model,
+                        peer_ai_configs=peer_ai_configs,
+                        additional_repos=additional_repos_list,
+                    )
+                except RootcozSettingsError as exc:
+                    logger.error("Invalid .rootcoz/settings.json (details redacted)")
+                    return AnalysisResult(
+                        job_id=job_id,
+                        job_name=request.job_name,
+                        build_number=request.build_number,
+                        jenkins_url=HttpUrl(jenkins_build_url),
+                        status="failed",
+                        summary=str(exc),
+                        ai_provider=ai_provider,
+                        ai_model=ai_model,
+                        failures=[],
+                    )
+                ai_provider = effective.ai_provider
+                ai_model = effective.ai_model
+                peer_ai_configs = effective.peer_ai_configs
+                peer_analysis_max_rounds = effective.settings.peer_analysis_max_rounds
+                additional_repos_list = effective.additional_repos
+                settings = effective.settings
 
             tests_dir_name = (
                 tests_cloned_path.name if tests_cloned_path is not None else None

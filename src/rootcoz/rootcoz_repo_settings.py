@@ -2,9 +2,8 @@
 
 Priority for analysis settings (per field):
 1. Explicit request (CLI / API / UI)
-2. For ``ai_provider`` / ``ai_model``: server default (env / Admin DB), then
-   ``.rootcoz/settings.json`` (fills only when server unset)
-3. For other allowed keys: ``.rootcoz/settings.json``, then server default
+2. ``.rootcoz/settings.json`` from the cloned tests repo
+3. Server default (env / Admin DB)
 4. Fail when a required value is still missing
 """
 
@@ -205,8 +204,7 @@ def rootcoz_settings_json_schema() -> dict[str, Any]:
     schema["title"] = "rootcoz .rootcoz/settings.json"
     schema["description"] = (
         "Non-sensitive per-repo analysis settings. "
-        "For ai_provider/ai_model: request (CLI/API/UI) > server defaults > this file. "
-        "For other keys: request > this file > server defaults."
+        "Priority for all keys: request (CLI/API/UI) > this file > server defaults."
     )
     schema["additionalProperties"] = False
     return schema
@@ -374,23 +372,22 @@ def apply_rootcoz_repo_settings(
     overrides: dict[str, Any] = {}
 
     # --- AI provider / model ---
-    # Compliance: request → server (DB/env) → settings.json for provider/model.
-    # Other settings.json keys still prefer repo over server (see below).
+    # request (CLI/API/UI) → settings.json → server (DB/env). Same as other keys.
     if _request_set_ai_provider(body):
         resolved_provider = normalize_provider(str(body.ai_provider))
-    elif (ai_provider or settings.ai_provider or "").strip():
-        resolved_provider = normalize_provider(ai_provider or settings.ai_provider)
     elif repo is not None and repo.ai_provider:
         resolved_provider = normalize_provider(repo.ai_provider)
+    elif (ai_provider or settings.ai_provider or "").strip():
+        resolved_provider = normalize_provider(ai_provider or settings.ai_provider)
     else:
         resolved_provider = ""
 
     if _request_set_ai_model(body):
         resolved_model = str(body.ai_model).strip()
-    elif (ai_model or settings.ai_model or "").strip():
-        resolved_model = (ai_model or settings.ai_model or "").strip()
     elif repo is not None and repo.ai_model:
         resolved_model = repo.ai_model
+    elif (ai_model or settings.ai_model or "").strip():
+        resolved_model = (ai_model or settings.ai_model or "").strip()
     else:
         resolved_model = ""
 
@@ -476,6 +473,58 @@ def propagate_repo_settings_overlay(
         )
 
 
+def effective_repo_settings_request_params_patch(
+    effective: EffectiveRepoAnalysisSettings,
+) -> dict[str, Any]:
+    """Build ``request_params`` fields reflecting post-overlay effective values."""
+    peers = effective.peer_ai_configs or []
+    return {
+        "ai_provider": effective.ai_provider,
+        "ai_model": effective.ai_model,
+        "peer_ai_configs": [
+            c.model_dump() if hasattr(c, "model_dump") else c for c in peers
+        ],
+        "additional_repos": [
+            ar.model_dump(mode="json") if hasattr(ar, "model_dump") else ar
+            for ar in effective.additional_repos
+        ],
+        "ai_call_timeout": effective.settings.ai_call_timeout,
+        "max_concurrent_ai_calls": effective.settings.max_concurrent_ai_calls,
+        "peer_analysis_max_rounds": effective.settings.peer_analysis_max_rounds,
+    }
+
+
+async def persist_effective_repo_settings(
+    job_id: str, effective: EffectiveRepoAnalysisSettings
+) -> None:
+    """Rewrite stored ``request_params`` with values after ``settings.json`` overlay.
+
+    Enqueue-time ``request_params`` are a pre-clone snapshot. Without this patch,
+    ``results show`` keeps looking like ``settings.json`` was ignored.
+
+    Best-effort: storage failures are logged and swallowed so analysis continues.
+    """
+    from rootcoz.storage import patch_result_json
+
+    patch = effective_repo_settings_request_params_patch(effective)
+
+    def _apply(result: dict) -> None:
+        params = result.get("request_params")
+        if not isinstance(params, dict):
+            params = {}
+            result["request_params"] = params
+        params.update(patch)
+
+    try:
+        await patch_result_json(job_id, _apply)
+    except Exception:
+        logger.warning(
+            "Failed to persist settings.json overlay into request_params (job_id=%s)",
+            job_id,
+            exc_info=True,
+        )
+
+
 def write_rootcoz_settings_schema(path: Path | None = None) -> Path:
     """Write the JSON Schema file (used by tests / packaging)."""
     out = path or ROOTCOZ_SETTINGS_SCHEMA_PATH
@@ -526,3 +575,48 @@ def load_and_apply_rootcoz_repo_settings(
         peer_ai_configs=peer_ai_configs,
         additional_repos=additional_repos,
     )
+
+
+async def resolve_repo_analysis_settings(
+    job_id: str | None,
+    tests_repo_path: Path | None,
+    body: BaseAnalysisRequest,
+    settings: Settings,
+    *,
+    ai_provider: str = "",
+    ai_model: str = "",
+    peer_ai_configs: list | None = None,
+    additional_repos: list[AdditionalRepo] | None = None,
+) -> EffectiveRepoAnalysisSettings:
+    """Single entrypoint: load ``settings.json``, merge, propagate, persist.
+
+    Used by every analysis path (Jenkins, file, raw, re-analyze). Sources must
+    not implement their own merge — call this once after the tests repo clone.
+
+    ``request_params`` are rewritten only when a ``settings.json`` file was
+    actually loaded, so enqueue-time snapshots are not wiped on a no-op merge.
+
+    Raises:
+        RootcozSettingsError: when the file exists but fails validation.
+    """
+    repo = None
+    if tests_repo_path is not None:
+        repo = load_rootcoz_repo_settings(tests_repo_path)
+        if repo is not None:
+            logger.info(
+                "Loaded .rootcoz/settings.json from %s",
+                tests_repo_path / ".rootcoz" / ROOTCOZ_SETTINGS_FILENAME,
+            )
+    effective = apply_rootcoz_repo_settings(
+        body,
+        settings,
+        repo,
+        ai_provider=ai_provider,
+        ai_model=ai_model,
+        peer_ai_configs=peer_ai_configs,
+        additional_repos=additional_repos,
+    )
+    propagate_repo_settings_overlay(settings, effective.settings)
+    if job_id and repo is not None:
+        await persist_effective_repo_settings(job_id, effective)
+    return effective

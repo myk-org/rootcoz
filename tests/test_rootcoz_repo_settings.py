@@ -103,8 +103,9 @@ class TestRootcozRepoSettingsSchema:
         assert json.loads(generated.read_text(encoding="utf-8")) == shipped
         assert rootcoz_settings_json_schema()["additionalProperties"] is False
         desc = rootcoz_settings_json_schema()["description"]
-        assert "ai_provider/ai_model" in desc
-        assert "server defaults > this file" in desc
+        assert "request (CLI/API/UI)" in desc
+        assert "this file" in desc
+        assert "server defaults" in desc
 
 
 class TestLoadRootcozRepoSettings:
@@ -341,10 +342,9 @@ class TestApplyRootcozRepoSettings:
             ai_provider="claude",
             ai_model="claude-sonnet-4-5",
         )
-        # AI provider/model: server wins over settings.json
-        assert effective.ai_provider == "claude"
-        assert effective.ai_model == "claude-sonnet-4-5"
-        # Other keys: settings.json wins over server
+        # request unset → settings.json wins over server for all keys
+        assert effective.ai_provider == "gemini"
+        assert effective.ai_model == "gemini-2.5-pro"
         assert effective.settings.ai_call_timeout == 20
         assert effective.settings.max_concurrent_ai_calls == 5
         assert effective.settings.peer_analysis_max_rounds == 4
