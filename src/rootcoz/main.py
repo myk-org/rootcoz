@@ -2710,9 +2710,9 @@ async def _resolve_settings_json_before_analysis(
                 peer_ai_configs=peer_ai_configs,
                 additional_repos=additional_repos_list,
             )
-        except RootcozSettingsError:
+        except RootcozSettingsError as exc:
             logger.error("Invalid .rootcoz/settings.json (details redacted)")
-            await _fail_job("Invalid .rootcoz/settings.json")
+            await _fail_job(str(exc))
             return None
 
     if not effective.ai_provider or not effective.ai_model:

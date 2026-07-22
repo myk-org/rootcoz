@@ -10,6 +10,7 @@ Priority for analysis settings (per field):
 from __future__ import annotations
 
 import json
+from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -144,7 +145,7 @@ class RootcozRepoSettings(BaseModel):
         if v is None:
             return v
         names = [ar.name for ar in v]
-        dupes = sorted({n for n in names if names.count(n) > 1})
+        dupes = sorted(n for n, count in Counter(names).items() if count > 1)
         if dupes:
             raise ValueError(f"Duplicate additional repo names: {', '.join(dupes)}")
         return v
@@ -541,40 +542,6 @@ def tests_repo_available(body: BaseAnalysisRequest, settings: Settings) -> bool:
     if body.tests_repo_url is not None and str(body.tests_repo_url).strip():
         return True
     return bool(settings.tests_repo_url and str(settings.tests_repo_url).strip())
-
-
-def load_and_apply_rootcoz_repo_settings(
-    tests_repo_path: Path | None,
-    body: BaseAnalysisRequest,
-    settings: Settings,
-    *,
-    ai_provider: str = "",
-    ai_model: str = "",
-    peer_ai_configs: list | None = None,
-    additional_repos: list[AdditionalRepo] | None = None,
-) -> EffectiveRepoAnalysisSettings:
-    """Load ``settings.json`` from *tests_repo_path* (if any) and merge.
-
-    Raises:
-        RootcozSettingsError: when the file exists but fails validation.
-    """
-    repo = None
-    if tests_repo_path is not None:
-        repo = load_rootcoz_repo_settings(tests_repo_path)
-        if repo is not None:
-            logger.info(
-                "Loaded .rootcoz/settings.json from %s",
-                tests_repo_path / ".rootcoz" / ROOTCOZ_SETTINGS_FILENAME,
-            )
-    return apply_rootcoz_repo_settings(
-        body,
-        settings,
-        repo,
-        ai_provider=ai_provider,
-        ai_model=ai_model,
-        peer_ai_configs=peer_ai_configs,
-        additional_repos=additional_repos,
-    )
 
 
 async def resolve_repo_analysis_settings(
