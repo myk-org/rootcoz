@@ -224,8 +224,11 @@ class TestAnalyzeEndpoint:
         assert response.status_code == 422
 
     def test_analyze_accepts_tests_repo_url_with_ref(self, test_client) -> None:
-        """Test that tests_repo_url with ':ref' suffix is accepted (no URL validation)."""
-        # mock_settings has no AI_PROVIDER/AI_MODEL, so settings.ai_provider is empty
+        """Test that tests_repo_url with ':ref' suffix is accepted (no URL validation).
+
+        AI may be deferred to .rootcoz/settings.json when a tests repo is set,
+        so missing server AI no longer returns 400 at submit time.
+        """
         response = test_client.post(
             "/analyze",
             json={
@@ -235,9 +238,13 @@ class TestAnalyzeEndpoint:
                 "tests_repo_url": "https://github.com/org/repo:develop",
             },
         )
-        # 400 from missing AI config, not 422 from URL validation
-        assert response.status_code == 400
-        assert "AI provider" in response.json()["detail"]
+        # Queued (AI deferred) or 400 only if Jenkins/other validation fails first.
+        # Must not be 422 from URL validation.
+        assert response.status_code in (202, 400)
+        if response.status_code == 400:
+            assert "URL" not in response.json()["detail"]
+        else:
+            assert "job_id" in response.json()
 
     def test_analyze_missing_required_field(self, test_client) -> None:
         """Test that missing required field returns 422."""
@@ -3428,6 +3435,160 @@ class TestProcessAnalysisWaiting:
             assert "running" in statuses
 
     @pytest.mark.asyncio
+    async def test_deferred_ai_resolves_before_jenkins_wait(self) -> None:
+        """Deferred AI is resolved from settings.json before Jenkins wait."""
+        import json
+        from pathlib import Path
+
+        from rootcoz.main import process_analysis_with_id
+        from rootcoz.models import AnalyzeRequest
+        from rootcoz.repository import RepositoryManager
+
+        body = AnalyzeRequest(
+            job_name="my-job",
+            build_number=1,
+            wait_for_completion=True,
+            tests_repo_url="https://github.com/org/tests",
+        )
+        merged = _build_wait_settings(
+            jenkins_url="https://jenkins.example.com",
+            jenkins_user="user",
+            jenkins_password=FAKE_JENKINS_PASSWORD,
+            wait_for_completion=True,
+            ai_provider="",
+            ai_model="",
+        )
+
+        call_order: list[str] = []
+
+        async def track_wait(*_a, **_k):
+            call_order.append("wait")
+            return (True, "")
+
+        async def track_preflight(*_a, **_k):
+            call_order.append("preflight")
+            return True
+
+        def fake_clone_into(self, url, target, depth=1, branch="", token=None):
+            call_order.append("clone")
+            path = Path(target)
+            path.mkdir(parents=True, exist_ok=True)
+            rootcoz = path / ".rootcoz"
+            rootcoz.mkdir(parents=True)
+            (rootcoz / "settings.json").write_text(
+                json.dumps({"ai_provider": "claude", "ai_model": "opus"}),
+                encoding="utf-8",
+            )
+            return path
+
+        with (
+            patch(
+                "rootcoz.main.wait_for_jenkins_completion",
+                side_effect=track_wait,
+            ),
+            patch(
+                "rootcoz.main._preflight_sidecar_check",
+                side_effect=track_preflight,
+            ) as mock_preflight,
+            patch.object(RepositoryManager, "clone_into", fake_clone_into),
+            patch("rootcoz.main.update_status", new_callable=AsyncMock),
+            patch(
+                "rootcoz.main.safe_update_progress",
+                new_callable=AsyncMock,
+            ),
+            patch("rootcoz.main.analyze_job", new_callable=AsyncMock) as mock_analyze,
+            patch("rootcoz.main._resolve_enable_jira", return_value=False),
+            patch(
+                "rootcoz.main.populate_failure_history",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "rootcoz.main.storage.make_classifications_visible",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "rootcoz.main._preserve_request_params",
+                new_callable=AsyncMock,
+            ),
+        ):
+            mock_analyze.return_value = AnalysisResult(
+                job_id="test-id",
+                status="completed",
+                summary="ok",
+            )
+            await process_analysis_with_id("test-id", body, merged)
+
+        assert "clone" in call_order
+        assert "preflight" in call_order
+        assert "wait" in call_order
+        assert call_order.index("clone") < call_order.index("wait")
+        assert call_order.index("preflight") < call_order.index("wait")
+        assert mock_preflight.await_args.args[1] == "claude"
+        assert mock_preflight.await_args.args[2] == "opus"
+
+    @pytest.mark.asyncio
+    async def test_deferred_ai_fails_fast_when_settings_json_missing_ai(
+        self,
+    ) -> None:
+        """Successful early clone with no AI in settings.json fails before wait."""
+        import json
+        from pathlib import Path
+
+        from rootcoz.main import process_analysis_with_id
+        from rootcoz.models import AnalyzeRequest
+        from rootcoz.repository import RepositoryManager
+
+        body = AnalyzeRequest(
+            job_name="my-job",
+            build_number=1,
+            wait_for_completion=True,
+            tests_repo_url="https://github.com/org/tests",
+        )
+        merged = _build_wait_settings(
+            jenkins_url="https://jenkins.example.com",
+            jenkins_user="user",
+            jenkins_password=FAKE_JENKINS_PASSWORD,
+            wait_for_completion=True,
+            ai_provider="",
+            ai_model="",
+        )
+
+        def fake_clone_into(self, url, target, depth=1, branch="", token=None):
+            path = Path(target)
+            path.mkdir(parents=True, exist_ok=True)
+            rootcoz = path / ".rootcoz"
+            rootcoz.mkdir(parents=True)
+            (rootcoz / "settings.json").write_text(
+                json.dumps({"ai_call_timeout": 15}),
+                encoding="utf-8",
+            )
+            return path
+
+        statuses: list[str] = []
+
+        async def capture_status(job_id, status, result=None):
+            statuses.append(status)
+
+        with (
+            patch(
+                "rootcoz.main.wait_for_jenkins_completion",
+                new_callable=AsyncMock,
+            ) as mock_wait,
+            patch.object(RepositoryManager, "clone_into", fake_clone_into),
+            patch("rootcoz.main.update_status", side_effect=capture_status),
+            patch(
+                "rootcoz.main._preserve_request_params",
+                new_callable=AsyncMock,
+            ),
+            patch("rootcoz.main.analyze_job", new_callable=AsyncMock) as mock_analyze,
+        ):
+            await process_analysis_with_id("test-id", body, merged)
+
+        mock_wait.assert_not_called()
+        mock_analyze.assert_not_called()
+        assert "failed" in statuses
+
+    @pytest.mark.asyncio
     async def test_wait_for_completion_false_skips_waiting(self) -> None:
         """When wait_for_completion=False, skip waiting entirely."""
         from rootcoz.main import process_analysis_with_id
@@ -4082,6 +4243,95 @@ class TestPeerAnalysisParams:
         settings = Settings(max_concurrent_ai_calls=9)
         merged = _merge_settings(body, settings)
         assert merged.max_concurrent_ai_calls == 9
+
+    def test_merge_settings_always_returns_copy(self) -> None:
+        """_merge_settings always copies so overlay mutation cannot touch the cache."""
+        from rootcoz.main import _merge_settings
+        from rootcoz.models import AnalyzeRequest
+        from rootcoz.rootcoz_repo_settings import propagate_repo_settings_overlay
+
+        body = AnalyzeRequest(
+            job_name="test",
+            build_number=1,
+            ai_provider="claude",
+            ai_model="test-model",
+        )
+        settings = Settings(
+            ai_call_timeout=10,
+            max_concurrent_ai_calls=3,
+            peer_analysis_max_rounds=3,
+        )
+        merged = _merge_settings(body, settings)
+        assert merged is not settings
+        propagate_repo_settings_overlay(
+            merged,
+            Settings(
+                ai_call_timeout=99,
+                max_concurrent_ai_calls=11,
+                peer_analysis_max_rounds=7,
+            ),
+        )
+        assert settings.ai_call_timeout == 10
+        assert settings.max_concurrent_ai_calls == 3
+        assert settings.peer_analysis_max_rounds == 3
+        assert merged.ai_call_timeout == 99
+
+    def test_resolve_ai_config_allow_defer_respects_passed_settings(self) -> None:
+        """allow_defer uses the passed Settings, not global get_settings()."""
+        from fastapi import HTTPException
+
+        from rootcoz.main import _resolve_ai_config_allow_defer
+        from rootcoz.models import BaseAnalysisRequest
+
+        body = BaseAnalysisRequest()
+        empty = Settings(ai_provider="", ai_model="")
+        # Global settings appear configured; passed settings do not and no tests repo.
+        with patch(
+            "rootcoz.main.get_settings",
+            return_value=Settings(ai_provider="claude", ai_model="opus"),
+        ):
+            with pytest.raises(HTTPException) as exc_info:
+                _resolve_ai_config_allow_defer(body, empty)
+        assert exc_info.value.status_code == 400
+        assert "AI" in exc_info.value.detail
+
+        configured = Settings(ai_provider="gemini", ai_model="flash")
+        with patch(
+            "rootcoz.main.get_settings",
+            return_value=Settings(ai_provider="", ai_model=""),
+        ):
+            provider, model = _resolve_ai_config_allow_defer(body, configured)
+        assert provider == "gemini"
+        assert model == "flash"
+
+    def test_resolve_ai_config_allow_defer_no_defer_on_explicit_empty_tests_repo(
+        self,
+    ) -> None:
+        """Explicit tests_repo_url='' must not defer via server tests_repo_url."""
+        from fastapi import HTTPException
+
+        from rootcoz.main import _resolve_ai_config_allow_defer
+        from rootcoz.models import BaseAnalysisRequest
+
+        body = BaseAnalysisRequest(tests_repo_url="")
+        settings = Settings(
+            ai_provider="",
+            ai_model="",
+            tests_repo_url="https://github.com/org/tests",
+        )
+        with pytest.raises(HTTPException) as exc_info:
+            _resolve_ai_config_allow_defer(body, settings)
+        assert exc_info.value.status_code == 400
+        assert "AI" in exc_info.value.detail
+
+    def test_ai_not_configured_message_respects_is_admin_kwarg(self) -> None:
+        from rootcoz.main import _ai_not_configured_message
+
+        admin_msg = _ai_not_configured_message(None, "AI provider/model", is_admin=True)
+        user_msg = _ai_not_configured_message(None, "AI provider/model", is_admin=False)
+        assert "Server Settings" in admin_msg
+        assert "contact a server administrator" in user_msg
+        assert admin_msg != user_msg
 
     def test_resolve_peer_ai_configs_none_uses_env(self, test_client) -> None:
         """When peer_ai_configs is None in request, _resolve_peer_ai_configs falls back to env default."""
@@ -5160,8 +5410,82 @@ class TestReAnalyzeFailure:
         assert failure["duration"] == 12.5
         assert failure["status"] == "FAILED"
 
+    @pytest.mark.asyncio
+    async def test_re_analyze_failure_defers_ai_with_tests_repo(
+        self, test_client
+    ) -> None:
+        """Empty stored AI is accepted when a tests repo can supply settings.json."""
+        from rootcoz import storage
 
-class TestBuildEffectiveJiraSettings:
+        fa = FailureAnalysis(
+            test_name="tests.TestDeferAi.test_one",
+            error="ValueError",
+            analysis=AnalysisDetail(classification="CODE ISSUE"),
+        )
+        fa_dict = fa.model_dump(mode="json")
+        result_data = {
+            "summary": "1 failure",
+            "failures": [fa_dict],
+            "request_params": encrypt_sensitive_fields(
+                {
+                    "ai_provider": "",
+                    "ai_model": "",
+                    "tests_repo_url": "https://github.com/org/tests",
+                    "submitted_by": "admin",
+                }
+            ),
+        }
+        result_data["request_params"]["submitted_by"] = "admin"
+        await storage.save_result("job-reanalyze-defer", "", "completed", result_data)
+
+        with (
+            patch(
+                "rootcoz.main.analyze_failure_group",
+                new_callable=AsyncMock,
+                return_value=[fa],
+            ),
+            patch(
+                "rootcoz.main._create_ai_auth_header",
+                new_callable=AsyncMock,
+                return_value="",
+            ),
+            patch("rootcoz.main.RepositoryManager"),
+        ):
+            response = test_client.post(f"/api/failures/{fa.id}/re-analyze")
+        assert response.status_code == 202
+        assert response.json()["status"] == "accepted"
+
+    @pytest.mark.asyncio
+    async def test_re_analyze_failure_rejects_missing_ai_without_tests_repo(
+        self, test_client
+    ) -> None:
+        """Empty stored AI without a tests repo still returns 400."""
+        from rootcoz import storage
+
+        fa = FailureAnalysis(
+            test_name="tests.TestNoDefer.test_one",
+            error="ValueError",
+            analysis=AnalysisDetail(classification="CODE ISSUE"),
+        )
+        fa_dict = fa.model_dump(mode="json")
+        result_data = {
+            "summary": "1 failure",
+            "failures": [fa_dict],
+            "request_params": encrypt_sensitive_fields(
+                {
+                    "ai_provider": "",
+                    "ai_model": "",
+                    "submitted_by": "admin",
+                }
+            ),
+        }
+        result_data["request_params"]["submitted_by"] = "admin"
+        await storage.save_result("job-reanalyze-no-ai", "", "completed", result_data)
+
+        response = test_client.post(f"/api/failures/{fa.id}/re-analyze")
+        assert response.status_code == 400
+        assert "AI" in response.json()["detail"]
+
     """Tests for _build_effective_jira_settings helper."""
 
     def test_no_user_token_returns_original(self):

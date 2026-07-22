@@ -74,3 +74,16 @@ def make_user_friendly_error(error: str | Exception) -> str:
     # Generic fallback — no internal details
     logger.debug("Error mapped to generic fallback: %s", err_str[:200])
     return "Analysis encountered an unexpected error. Please try again or contact an admin if the issue persists."
+
+
+def ai_not_configured_message(what: str, *, is_admin: bool = False) -> str:
+    """Build a role-aware error message when AI provider/model is not configured."""
+    if is_admin:
+        return (
+            f"{what} is not configured. "
+            f"Go to Server Settings \u2192 AI to configure the default provider and model."
+        )
+    return (
+        f"{what} is not configured on this server. "
+        f"Please contact a server administrator to configure AI settings."
+    )

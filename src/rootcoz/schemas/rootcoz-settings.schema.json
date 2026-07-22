@@ -1,0 +1,163 @@
+{
+  "$defs": {
+    "RootcozAdditionalRepo": {
+      "additionalProperties": false,
+      "description": "Additional repo entry for ``.rootcoz/settings.json`` (no secrets).",
+      "properties": {
+        "name": {
+          "minLength": 1,
+          "title": "Name",
+          "type": "string"
+        },
+        "url": {
+          "minLength": 1,
+          "title": "Url",
+          "type": "string"
+        },
+        "ref": {
+          "default": "",
+          "title": "Ref",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "url"
+      ],
+      "title": "RootcozAdditionalRepo",
+      "type": "object"
+    },
+    "RootcozPeerConfig": {
+      "additionalProperties": false,
+      "description": "Peer AI entry for ``.rootcoz/settings.json`` (no secrets / unknown keys).",
+      "properties": {
+        "ai_provider": {
+          "enum": [
+            "claude",
+            "gemini",
+            "cursor"
+          ],
+          "title": "Ai Provider",
+          "type": "string"
+        },
+        "ai_model": {
+          "minLength": 1,
+          "title": "Ai Model",
+          "type": "string"
+        }
+      },
+      "required": [
+        "ai_provider",
+        "ai_model"
+      ],
+      "title": "RootcozPeerConfig",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "description": "Non-sensitive per-repo analysis settings. Priority for all keys: request (CLI/API/UI) > this file > server defaults.",
+  "properties": {
+    "ai_provider": {
+      "anyOf": [
+        {
+          "enum": [
+            "claude",
+            "gemini",
+            "cursor"
+          ],
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Ai Provider"
+    },
+    "ai_model": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Ai Model"
+    },
+    "ai_call_timeout": {
+      "anyOf": [
+        {
+          "exclusiveMinimum": 0,
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Ai Call Timeout"
+    },
+    "max_concurrent_ai_calls": {
+      "anyOf": [
+        {
+          "exclusiveMinimum": 0,
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Max Concurrent Ai Calls"
+    },
+    "peer_ai_configs": {
+      "anyOf": [
+        {
+          "items": {
+            "$ref": "#/$defs/RootcozPeerConfig"
+          },
+          "type": "array"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Peer Ai Configs"
+    },
+    "peer_analysis_max_rounds": {
+      "anyOf": [
+        {
+          "maximum": 10,
+          "minimum": 1,
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Peer Analysis Max Rounds"
+    },
+    "additional_repos": {
+      "anyOf": [
+        {
+          "items": {
+            "$ref": "#/$defs/RootcozAdditionalRepo"
+          },
+          "type": "array"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Additional Repos"
+    }
+  },
+  "title": "rootcoz .rootcoz/settings.json",
+  "type": "object",
+  "$schema": "https://json-schema.org/draft/2020-12/schema"
+}
