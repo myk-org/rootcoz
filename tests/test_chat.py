@@ -1445,3 +1445,63 @@ class TestAdminChatArtifactEndpoints:
 
         # Artifact should be gone
         assert test_client.get(download_url).status_code == 404
+
+
+@pytest.mark.asyncio
+class TestCiBuildDataForwarding:
+    """Regression: ci_build_data_available must reach build_system_prompt."""
+
+    async def test_init_chat_session_forwards_ci_build_data_flag(self):
+        from rootcoz.engine.chat import init_chat_session
+
+        with (
+            patch(
+                "rootcoz.engine.chat.build_system_prompt",
+                return_value="prompt",
+            ) as mock_prompt,
+            patch(
+                "rootcoz.engine.chat._create_chat_session",
+                new_callable=AsyncMock,
+                return_value="sess-1",
+            ),
+        ):
+            await init_chat_session(
+                job_id="j1",
+                job_name="prow-job",
+                build_number="1234567890123456789",
+                ai_provider="claude",
+                ai_model="claude-opus-4-6",
+                ci_build_data_available=True,
+            )
+
+        mock_prompt.assert_called_once()
+        assert mock_prompt.call_args.kwargs["ci_build_data_available"] is True
+
+    async def test_chat_with_ai_forwards_ci_build_data_flag(self):
+        from rootcoz.engine.chat import chat_with_ai
+
+        with (
+            patch(
+                "rootcoz.engine.chat.build_system_prompt",
+                return_value="prompt",
+            ) as mock_prompt,
+            patch(
+                "rootcoz.engine.chat._chat_with_ai_impl",
+                new_callable=AsyncMock,
+                return_value=(True, "ok", "sess-1"),
+            ) as mock_impl,
+        ):
+            await chat_with_ai(
+                job_id="j1",
+                job_name="prow-job",
+                build_number="1234567890123456789",
+                message="hello",
+                history=[],
+                ai_provider="claude",
+                ai_model="claude-opus-4-6",
+                ci_build_data_available=True,
+            )
+            build_prompt_fn = mock_impl.call_args.kwargs["build_prompt_fn"]
+            build_prompt_fn()
+
+        assert mock_prompt.call_args.kwargs["ci_build_data_available"] is True

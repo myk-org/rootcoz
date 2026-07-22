@@ -1314,6 +1314,7 @@ async def init_chat_session(
         custom_tools=custom_tools or [],
         repos_available=repos_available,
         jenkins_data_available=jenkins_data_available,
+        ci_build_data_available=ci_build_data_available,
     )
     return await _create_chat_session(
         system_prompt=system_prompt,
@@ -1464,6 +1465,7 @@ async def chat_with_ai(
             custom_tools=custom_tools or [],
             repos_available=repos_available,
             jenkins_data_available=jenkins_data_available,
+            ci_build_data_available=ci_build_data_available,
         )
 
     return await _chat_with_ai_impl(
