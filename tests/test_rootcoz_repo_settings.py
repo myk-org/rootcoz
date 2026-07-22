@@ -396,3 +396,32 @@ class TestApplyRootcozRepoSettings:
         assert effective.ai_model == "sonnet"
         assert effective.peer_ai_configs is not None
         assert effective.peer_ai_configs[0]["ai_provider"] == "gemini"
+
+    def test_persist_patch_encrypts_additional_repo_tokens(self) -> None:
+        from rootcoz.encryption import encrypt_sensitive_fields
+        from rootcoz.models import AdditionalRepo
+        from rootcoz.rootcoz_repo_settings import (
+            EffectiveRepoAnalysisSettings,
+            effective_repo_settings_request_params_patch,
+        )
+
+        settings = Settings(ai_provider="claude", ai_model="sonnet")
+        effective = EffectiveRepoAnalysisSettings(
+            settings=settings,
+            ai_provider="claude",
+            ai_model="sonnet",
+            peer_ai_configs=None,
+            additional_repos=[
+                AdditionalRepo(
+                    name="infra",
+                    url="https://github.com/org/infra",
+                    token="ghp_plain_token_value",  # pragma: allowlist secret
+                )
+            ],
+        )
+        patch = encrypt_sensitive_fields(
+            effective_repo_settings_request_params_patch(effective)
+        )
+        token = patch["additional_repos"][0]["token"]
+        assert token.startswith("enc:")
+        assert "ghp_plain_token_value" not in token

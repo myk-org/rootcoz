@@ -503,11 +503,17 @@ async def persist_effective_repo_settings(
     Enqueue-time ``request_params`` are a pre-clone snapshot. Without this patch,
     ``results show`` keeps looking like ``settings.json`` was ignored.
 
+    Nested ``additional_repos[].token`` values are encrypted before write so the
+    overlay path matches enqueue-time at-rest encryption.
+
     Best-effort: storage failures are logged and swallowed so analysis continues.
     """
+    from rootcoz.encryption import encrypt_sensitive_fields
     from rootcoz.storage import patch_result_json
 
-    patch = effective_repo_settings_request_params_patch(effective)
+    patch = encrypt_sensitive_fields(
+        effective_repo_settings_request_params_patch(effective)
+    )
 
     def _apply(result: dict) -> None:
         params = result.get("request_params")
