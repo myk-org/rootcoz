@@ -4304,6 +4304,35 @@ class TestPeerAnalysisParams:
         assert provider == "gemini"
         assert model == "flash"
 
+    def test_resolve_ai_config_allow_defer_no_defer_on_explicit_empty_tests_repo(
+        self,
+    ) -> None:
+        """Explicit tests_repo_url='' must not defer via server tests_repo_url."""
+        from fastapi import HTTPException
+
+        from rootcoz.main import _resolve_ai_config_allow_defer
+        from rootcoz.models import BaseAnalysisRequest
+
+        body = BaseAnalysisRequest(tests_repo_url="")
+        settings = Settings(
+            ai_provider="",
+            ai_model="",
+            tests_repo_url="https://github.com/org/tests",
+        )
+        with pytest.raises(HTTPException) as exc_info:
+            _resolve_ai_config_allow_defer(body, settings)
+        assert exc_info.value.status_code == 400
+        assert "AI" in exc_info.value.detail
+
+    def test_ai_not_configured_message_respects_is_admin_kwarg(self) -> None:
+        from rootcoz.main import _ai_not_configured_message
+
+        admin_msg = _ai_not_configured_message(None, "AI provider/model", is_admin=True)
+        user_msg = _ai_not_configured_message(None, "AI provider/model", is_admin=False)
+        assert "Server Settings" in admin_msg
+        assert "contact a server administrator" in user_msg
+        assert admin_msg != user_msg
+
     def test_resolve_peer_ai_configs_none_uses_env(self, test_client) -> None:
         """When peer_ai_configs is None in request, _resolve_peer_ai_configs falls back to env default."""
         from rootcoz.main import _merge_settings, _resolve_peer_ai_configs

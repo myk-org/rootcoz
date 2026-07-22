@@ -544,11 +544,21 @@ def write_rootcoz_settings_schema(path: Path | None = None) -> Path:
     return out
 
 
+def resolve_tests_repo_url(body: BaseAnalysisRequest, settings: Settings) -> str:
+    """Resolve tests repo URL: explicit request value wins (even if empty).
+
+    When ``tests_repo_url`` is present on the request body (including ``\"\"``),
+    that value is authoritative and server settings are not used. When omitted,
+    fall back to ``settings.tests_repo_url``.
+    """
+    if "tests_repo_url" in body.model_fields_set:
+        return str(body.tests_repo_url or "").strip()
+    return str(settings.tests_repo_url or "").strip()
+
+
 def tests_repo_available(body: BaseAnalysisRequest, settings: Settings) -> bool:
     """True when a tests repo URL is available (request or server)."""
-    if body.tests_repo_url is not None and str(body.tests_repo_url).strip():
-        return True
-    return bool(settings.tests_repo_url and str(settings.tests_repo_url).strip())
+    return bool(resolve_tests_repo_url(body, settings))
 
 
 async def resolve_repo_analysis_settings(

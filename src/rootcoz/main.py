@@ -161,6 +161,7 @@ from rootcoz.rootcoz_repo_settings import (
     RootcozSettingsError,
     assert_no_tests_repo_name_collision,
     resolve_repo_analysis_settings,
+    resolve_tests_repo_url,
     tests_repo_available,
 )
 from rootcoz.sources import CISource, FileSource, RawSource
@@ -1867,15 +1868,21 @@ async def root() -> HTMLResponse:
     return _serve_spa()
 
 
-def _ai_not_configured_message(request: Request | None, what: str) -> str:
+def _ai_not_configured_message(
+    request: Request | None,
+    what: str,
+    *,
+    is_admin: bool | None = None,
+) -> str:
     """Build a role-aware error message when AI provider/model is not configured."""
     from rootcoz.error_messages import ai_not_configured_message
 
-    is_admin = (
-        getattr(getattr(request, "state", None), "is_admin", False)
-        if request
-        else False
-    )
+    if is_admin is None:
+        is_admin = bool(
+            getattr(getattr(request, "state", None), "is_admin", False)
+            if request
+            else False
+        )
     return ai_not_configured_message(what, is_admin=bool(is_admin))
 
 
@@ -2615,6 +2622,7 @@ async def _resolve_settings_json_before_analysis(
     build_number: int | None = None,
     jenkins_url: str = "",
     job_name: str = "",
+    is_admin: bool = False,
 ) -> tuple[EffectiveRepoAnalysisSettings, bool] | None:
     """Shallow-clone tests repo and resolve ``.rootcoz/settings.json`` once.
 
@@ -2645,11 +2653,7 @@ async def _resolve_settings_json_before_analysis(
         notify_dashboard_changed()
         notify_job_status_changed(job_id)
 
-    tests_repo_url_raw = (
-        str(body.tests_repo_url)
-        if body.tests_repo_url is not None
-        else str(settings.tests_repo_url or "")
-    ).strip()
+    tests_repo_url_raw = resolve_tests_repo_url(body, settings)
     peer_ai_configs = _resolve_peer_ai_configs(body, settings)
     additional_repos_list = resolve_additional_repos(body, settings)
 
@@ -2665,7 +2669,9 @@ async def _resolve_settings_json_before_analysis(
             additional_repos=additional_repos_list,
         )
         if not effective.ai_provider or not effective.ai_model:
-            await _fail_job(_ai_not_configured_message(None, "AI provider/model"))
+            await _fail_job(
+                _ai_not_configured_message(None, "AI provider/model", is_admin=is_admin)
+            )
             return None
         return effective, True
 
@@ -2719,7 +2725,9 @@ async def _resolve_settings_json_before_analysis(
         if not clone_ok:
             # Retry after full workspace clone in analyze_job.
             return effective, False
-        await _fail_job(_ai_not_configured_message(None, "AI provider/model"))
+        await _fail_job(
+            _ai_not_configured_message(None, "AI provider/model", is_admin=is_admin)
+        )
         return None
 
     logger.info(
@@ -2731,7 +2739,12 @@ async def _resolve_settings_json_before_analysis(
 
 
 async def process_analysis_with_id(
-    job_id: str, body: AnalyzeRequest, settings: Settings, username: str = ""
+    job_id: str,
+    body: AnalyzeRequest,
+    settings: Settings,
+    username: str = "",
+    *,
+    is_admin: bool = False,
 ) -> None:
     """Background task to process analysis with a pre-generated job_id.
 
@@ -2774,6 +2787,7 @@ async def process_analysis_with_id(
             build_number=body.build_number,
             jenkins_url=jenkins_job_url,
             job_name=body.job_name or "",
+            is_admin=is_admin,
         )
         if early is None:
             return
@@ -2892,11 +2906,7 @@ async def process_analysis_with_id(
             )
 
         # Enrich CODE ISSUE failures with tests repo issue matches
-        request_tests_repo_url = (
-            str(body.tests_repo_url)
-            if body.tests_repo_url is not None
-            else str(settings.tests_repo_url or "")
-        )
+        request_tests_repo_url = resolve_tests_repo_url(body, settings)
         if settings.tests_repo_url or request_tests_repo_url:
             await safe_update_progress(job_id, "enriching_tests_repo")
             notify_job_status_changed(job_id)
@@ -3175,6 +3185,7 @@ async def _enqueue_file_raw_analysis(
     message_prefix: str = "Analysis",
     reanalyzed_from_job_id: str = "",
     reanalyzed_from_job_name: str = "",
+    is_admin: bool = False,
 ) -> dict:
     """Build params, persist initial state, spawn task, and return response.
 
@@ -3200,11 +3211,7 @@ async def _enqueue_file_raw_analysis(
     ai_provider, ai_model = _resolve_ai_config_allow_defer(body, merged, request=None)
 
     # Resolve repos
-    tests_repo_url_raw = (
-        str(body.tests_repo_url)
-        if body.tests_repo_url is not None
-        else str(merged.tests_repo_url or "")
-    )
+    tests_repo_url_raw = resolve_tests_repo_url(body, merged)
     tests_repo_url, tests_repo_ref = parse_repo_ref(tests_repo_url_raw)
     resolved_tests_repo_token = (
         resolve_tests_repo_token(body, merged) if tests_repo_url else ""
@@ -3279,6 +3286,7 @@ async def _enqueue_file_raw_analysis(
             additional_repos_list=additional_repos_list,
             base_url=base_url,
             username=username,
+            is_admin=is_admin,
         )
     )
     _register_job_task(job_id, task)
@@ -3312,13 +3320,7 @@ def _build_request_params(
     Returns:
         Dict of serializable request parameters.
     """
-    resolved_tests_repo = (
-        str(body.tests_repo_url)
-        if body.tests_repo_url is not None
-        else str(merged.tests_repo_url)
-        if merged.tests_repo_url
-        else ""
-    )
+    resolved_tests_repo = resolve_tests_repo_url(body, merged)
     resolved_tests_repo, tests_repo_ref = parse_repo_ref(resolved_tests_repo)
     resolved_tests_repo_token = (
         resolve_tests_repo_token(body, merged) if resolved_tests_repo else ""
@@ -3369,6 +3371,7 @@ async def _enqueue_analysis_job(
     username: str = "",
     reanalyzed_from_job_id: str = "",
     reanalyzed_from_job_name: str = "",
+    is_admin: bool = False,
 ) -> dict:
     """Create, save, and enqueue a new analysis job.
 
@@ -3411,7 +3414,9 @@ async def _enqueue_analysis_job(
     notify_active_count_changed()
     notify_dashboard_changed()
     task = asyncio.create_task(
-        process_analysis_with_id(job_id, body, merged, username=username)
+        process_analysis_with_id(
+            job_id, body, merged, username=username, is_admin=is_admin
+        )
     )
     _register_job_task(job_id, task)
     response: dict = {
@@ -3437,6 +3442,7 @@ async def _process_file_raw_analysis(
     additional_repos_list: list,
     base_url: str,
     username: str = "",
+    is_admin: bool = False,
 ) -> None:
     """Background task for file/raw analysis."""
     job_id_var.set(job_id)
@@ -3598,7 +3604,7 @@ async def _process_file_raw_analysis(
 
         if not ai_provider or not ai_model:
             await _fail_settings_overlay(
-                _ai_not_configured_message(None, "AI provider/model")
+                _ai_not_configured_message(None, "AI provider/model", is_admin=is_admin)
             )
             return
 
@@ -3885,6 +3891,7 @@ async def analyze(
             resolved_peers,
             base_url,
             username=request.state.username,
+            is_admin=bool(request.state.is_admin),
         )
 
     # File or Raw — enqueue as async background task
@@ -3899,6 +3906,7 @@ async def analyze(
         base_url=base_url,
         username=request.state.username,
         message_prefix="Analysis",
+        is_admin=bool(request.state.is_admin),
     )
 
 
@@ -4024,6 +4032,7 @@ async def re_analyze(
             message_prefix="Re-analysis",
             reanalyzed_from_job_id=job_id,
             reanalyzed_from_job_name=origin_job_display_name,
+            is_admin=bool(request.state.is_admin),
         )
 
     # Jenkins path (existing code)
@@ -4070,6 +4079,7 @@ async def re_analyze(
         username=request.state.username,
         reanalyzed_from_job_id=job_id,
         reanalyzed_from_job_name=origin_job_display_name,
+        is_admin=bool(request.state.is_admin),
     )
 
 
@@ -4199,6 +4209,8 @@ async def _reanalyze_failure_background(
     additional_repos_list: list | None,
     username: str,
     max_concurrent_ai_calls: int,
+    *,
+    is_admin: bool = False,
 ) -> None:
     """Background task: re-analyze a single failure in-place."""
     job_id_var.set(job_id)
@@ -4290,7 +4302,9 @@ async def _reanalyze_failure_background(
 
         if not ai_provider or not ai_model:
             fail_data = {
-                "error": _ai_not_configured_message(None, "AI provider/model"),
+                "error": _ai_not_configured_message(
+                    None, "AI provider/model", is_admin=is_admin
+                ),
             }
             await _preserve_request_params(job_id, fail_data)
             await update_status(job_id, "failed", fail_data)
@@ -4604,6 +4618,7 @@ async def re_analyze_failure(
             additional_repos_list=additional_repos_list,
             username=request.state.username,
             max_concurrent_ai_calls=max_concurrent_ai_calls,
+            is_admin=bool(request.state.is_admin),
         )
     )
     _background_tasks.add(task)

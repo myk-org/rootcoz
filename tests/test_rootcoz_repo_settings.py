@@ -433,3 +433,33 @@ class TestApplyRootcozRepoSettings:
         token = patch["additional_repos"][0]["token"]
         assert token.startswith("enc:")
         assert "ghp_plain_token_value" not in token
+
+
+class TestTestsRepoAvailable:
+    def test_explicit_empty_url_does_not_fall_back_to_server(self) -> None:
+        from rootcoz.rootcoz_repo_settings import (
+            resolve_tests_repo_url,
+            tests_repo_available,
+        )
+
+        body = BaseAnalysisRequest(tests_repo_url="")
+        settings = Settings(
+            tests_repo_url="https://github.com/org/tests",
+            ai_provider="",
+            ai_model="",
+        )
+        assert "tests_repo_url" in body.model_fields_set
+        assert resolve_tests_repo_url(body, settings) == ""
+        assert tests_repo_available(body, settings) is False
+
+    def test_omitted_url_falls_back_to_server(self) -> None:
+        from rootcoz.rootcoz_repo_settings import (
+            resolve_tests_repo_url,
+            tests_repo_available,
+        )
+
+        body = BaseAnalysisRequest()
+        settings = Settings(tests_repo_url="https://github.com/org/tests")
+        assert "tests_repo_url" not in body.model_fields_set
+        assert resolve_tests_repo_url(body, settings) == "https://github.com/org/tests"
+        assert tests_repo_available(body, settings) is True
