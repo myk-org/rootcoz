@@ -32,7 +32,9 @@ fi
 if [ "${DEV_MODE:-}" = "true" ] && [ -f /app/sidecar-helper/src/server.ts ]; then
     echo "[sidecar] Dev mode: compiling TypeScript..."
     cd /app/sidecar-helper || { echo "[sidecar] Failed to enter sidecar-helper"; exit 1; }
-    npm install --ignore-scripts || { echo "[sidecar] npm install failed"; exit 1; }
+    # Run lifecycle scripts (same as Dockerfile `npm ci`) so @myk-org/pi-sidecar
+    # postinstall can enforce the protobufjs CVE floor — do not use --ignore-scripts.
+    npm install || { echo "[sidecar] npm install failed"; exit 1; }
     npx tsc || { echo "[sidecar] TypeScript build failed"; exit 1; }
     cd /app || { echo "[sidecar] Failed to return to /app"; exit 1; }
 fi
