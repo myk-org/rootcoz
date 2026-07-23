@@ -569,8 +569,6 @@ function ReportContent() {
         failures={result.failures ?? []}
         childJobAnalyses={result.child_job_analyses ?? []}
         repoUrls={repoUrls}
-        mainAiProvider={result.ai_provider}
-        mainAiModel={result.ai_model}
       />
 
       {/* ---- Top-level failures ---- */}

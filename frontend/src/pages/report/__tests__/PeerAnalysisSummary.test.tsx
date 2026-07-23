@@ -19,18 +19,7 @@ describe('getPeerAiLabels', () => {
   const peerClaude = { ai_provider: 'claude', ai_model: 'claude-opus-4-6-1m' }
   const peerComposer = { ai_provider: 'cursor', ai_model: 'cursor:composer-2.5-fast' }
 
-  it('excludes main AI when main identity is provided', () => {
-    const labels = getPeerAiLabels(
-      [debate([main, peerClaude, peerComposer])],
-      main,
-    )
-    expect(labels).toEqual([
-      'claude/claude-opus-4-6-1m',
-      'cursor/cursor:composer-2.5-fast',
-    ])
-  })
-
-  it('falls back to dropping ai_configs[0] when main is unknown', () => {
+  it('drops ai_configs[0] (main) and keeps peers', () => {
     const labels = getPeerAiLabels([debate([main, peerClaude, peerComposer])])
     expect(labels).toEqual([
       'claude/claude-opus-4-6-1m',
@@ -38,14 +27,16 @@ describe('getPeerAiLabels', () => {
     ])
   })
 
+  it('keeps a peer that shares the main provider/model', () => {
+    const labels = getPeerAiLabels([debate([main, main])])
+    expect(labels).toEqual(['cursor/cursor:cursor-grok-4.5-high-fast'])
+  })
+
   it('dedupes peer labels across debates', () => {
-    const labels = getPeerAiLabels(
-      [
-        debate([main, peerClaude]),
-        debate([main, peerClaude, peerComposer]),
-      ],
-      main,
-    )
+    const labels = getPeerAiLabels([
+      debate([main, peerClaude]),
+      debate([main, peerClaude, peerComposer]),
+    ])
     expect(labels).toEqual([
       'claude/claude-opus-4-6-1m',
       'cursor/cursor:composer-2.5-fast',
@@ -53,7 +44,6 @@ describe('getPeerAiLabels', () => {
   })
 
   it('returns empty when only main is present', () => {
-    expect(getPeerAiLabels([debate([main])], main)).toEqual([])
     expect(getPeerAiLabels([debate([main])])).toEqual([])
   })
 })

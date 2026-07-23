@@ -66,25 +66,15 @@ function aiConfigLabel(cfg: { ai_provider: string; ai_model: string }): string {
 }
 
 /** Unique peer AI labels for header badges — excludes the main AI.
- *  `peer_debate.ai_configs` is stored as `[main, ...peers]`; without main
- *  identity we fall back to dropping the first config per debate. */
-export function getPeerAiLabels(
-  debates: Array<{ debate: PeerDebate }>,
-  mainAi?: { ai_provider?: string | null; ai_model?: string | null } | null,
-): string[] {
-  const mainLabel =
-    mainAi?.ai_provider && mainAi.ai_model
-      ? `${mainAi.ai_provider}/${mainAi.ai_model}`
-      : null
-
+ *  `peer_debate.ai_configs` is stored as `[main, ...peers]`; always skip
+ *  index 0. Do not filter by label equality — a peer may share the main's
+ *  provider/model and must still appear in the badges. */
+export function getPeerAiLabels(debates: Array<{ debate: PeerDebate }>): string[] {
   const seen = new Set<string>()
   for (const { debate } of debates) {
     const configs = debate.ai_configs ?? []
-    const start = mainLabel ? 0 : configs.length > 0 ? 1 : 0
-    for (let i = start; i < configs.length; i++) {
-      const label = aiConfigLabel(configs[i])
-      if (mainLabel && label === mainLabel) continue
-      seen.add(label)
+    for (let i = 1; i < configs.length; i++) {
+      seen.add(aiConfigLabel(configs[i]))
     }
   }
   return [...seen].sort()
@@ -94,17 +84,12 @@ interface PeerAnalysisSummaryProps {
   failures: FailureAnalysis[]
   childJobAnalyses?: ChildJobAnalysis[]
   repoUrls: RepoUrl[]
-  /** Primary analysis AI — excluded from Peer Analysis badges. */
-  mainAiProvider?: string | null
-  mainAiModel?: string | null
 }
 
 export function PeerAnalysisSummary({
   failures,
   childJobAnalyses,
   repoUrls,
-  mainAiProvider,
-  mainAiModel,
 }: PeerAnalysisSummaryProps) {
   const [expanded, setExpanded] = useState(false)
 
@@ -114,8 +99,8 @@ export function PeerAnalysisSummary({
   )
 
   const participatingAis = useMemo(
-    () => getPeerAiLabels(debateFailures, { ai_provider: mainAiProvider, ai_model: mainAiModel }),
-    [debateFailures, mainAiProvider, mainAiModel],
+    () => getPeerAiLabels(debateFailures),
+    [debateFailures],
   )
   const consensusCount = useMemo(
     () => debateFailures.filter((d) => d.debate.consensus_reached).length,
