@@ -1139,8 +1139,8 @@ def build_system_prompt(
         )
     if ci_build_data_available:
         repos_note += (
-            "\n\nJenkins build data is available in your working directory:"
-            "\n- `console-output.txt` \u2014 full Jenkins console output"
+            "\n\nCI build data is available in your working directory:"
+            "\n- `console-output.txt` \u2014 full CI console output"
             "\n- `build-info.json` \u2014 build result, parameters, timing, and duration"
             "\n- `build-artifacts/` \u2014 downloaded build artifacts (logs, test outputs)"
             "\nUse the `read` tool to examine these files when relevant to the user's question."

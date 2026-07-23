@@ -511,20 +511,33 @@ class TestBuildSystemPrompt:
         )
         assert "Source repositories are cloned" not in prompt
 
-    def test_ci_build_data_available_note(self):
+    @pytest.mark.parametrize(
+        "flag_kwargs",
+        [
+            {"ci_build_data_available": True},
+            {"jenkins_data_available": True},  # legacy alias
+        ],
+        ids=["ci_build_data_available", "jenkins_data_available_alias"],
+    )
+    def test_ci_build_data_available_note(self, flag_kwargs: dict):
+        """CI-neutral wording for both new and legacy availability flags."""
         tools = self._make_tools()
         prompt = build_system_prompt(
             job_name="j",
             build_number=1,
             job_id="j1",
             custom_tools=tools,
-            ci_build_data_available=True,
+            **flag_kwargs,
         )
+        assert "CI build data is available in your working directory:" in prompt
+        assert "full CI console output" in prompt
         assert "console-output.txt" in prompt
         assert "build-info.json" in prompt
         assert "build-artifacts/" in prompt
+        assert "Jenkins build data" not in prompt
+        assert "Jenkins console" not in prompt
 
-    def test_jenkins_data_not_available(self):
+    def test_ci_build_data_not_available(self):
         tools = self._make_tools()
         prompt = build_system_prompt(
             job_name="j",
