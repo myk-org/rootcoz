@@ -161,10 +161,17 @@ export function CodeFixLiteralBlock({
   className: string
 }) {
   const unescaped = unescapeCodeContent(content)
+  const { copiedKey: copiedSection, copy: copyToClipboard } = useClipboard()
   return (
     <div className="mt-2">
-      <p className="text-xs font-display uppercase tracking-widest text-text-tertiary mb-1">{title}</p>
-      <pre className={`overflow-x-auto max-h-96 overflow-y-auto rounded bg-surface-elevated p-2 text-xs font-mono whitespace-pre-wrap ${className}`}>
+      <CopyableSectionHeader
+        title={title}
+        content={unescaped}
+        sectionId="code-block"
+        copiedSection={copiedSection}
+        onCopy={copyToClipboard}
+      />
+      <pre className={`overflow-x-auto max-h-96 overflow-y-auto rounded bg-surface-elevated p-2 text-xs font-mono whitespace-pre-wrap select-text ${className}`}>
         {unescaped}
       </pre>
     </div>
