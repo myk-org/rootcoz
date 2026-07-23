@@ -61,12 +61,20 @@ function collectDebateFailures(
   return result
 }
 
-/** Extract unique AI provider/model pairs from all debates. */
-function getUniqueAiLabels(debates: FailureWithDebate[]): string[] {
+function aiConfigLabel(cfg: { ai_provider: string; ai_model: string }): string {
+  return `${cfg.ai_provider}/${cfg.ai_model}`
+}
+
+/** Unique peer AI labels for header badges — excludes the main AI.
+ *  `peer_debate.ai_configs` is stored as `[main, ...peers]`; always skip
+ *  index 0. Do not filter by label equality — a peer may share the main's
+ *  provider/model and must still appear in the badges. */
+export function getPeerAiLabels(debates: Array<{ debate: PeerDebate }>): string[] {
   const seen = new Set<string>()
   for (const { debate } of debates) {
-    for (const cfg of debate.ai_configs ?? []) {
-      seen.add(`${cfg.ai_provider}/${cfg.ai_model}`)
+    const configs = debate.ai_configs ?? []
+    for (let i = 1; i < configs.length; i++) {
+      seen.add(aiConfigLabel(configs[i]))
     }
   }
   return [...seen].sort()
@@ -78,7 +86,11 @@ interface PeerAnalysisSummaryProps {
   repoUrls: RepoUrl[]
 }
 
-export function PeerAnalysisSummary({ failures, childJobAnalyses, repoUrls }: PeerAnalysisSummaryProps) {
+export function PeerAnalysisSummary({
+  failures,
+  childJobAnalyses,
+  repoUrls,
+}: PeerAnalysisSummaryProps) {
   const [expanded, setExpanded] = useState(false)
 
   const debateFailures = useMemo(
@@ -86,7 +98,10 @@ export function PeerAnalysisSummary({ failures, childJobAnalyses, repoUrls }: Pe
     [failures, childJobAnalyses],
   )
 
-  const participatingAis = useMemo(() => getUniqueAiLabels(debateFailures), [debateFailures])
+  const participatingAis = useMemo(
+    () => getPeerAiLabels(debateFailures),
+    [debateFailures],
+  )
   const consensusCount = useMemo(
     () => debateFailures.filter((d) => d.debate.consensus_reached).length,
     [debateFailures],
