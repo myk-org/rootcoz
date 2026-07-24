@@ -9,6 +9,7 @@ const mockAuth = {
   username: 'testuser',
   isAdmin: false,
   isOperator: false,
+  canViewReports: false,
   role: 'reviewer',
   loading: false,
   authenticated: true,
@@ -36,8 +37,10 @@ describe('Sidebar', () => {
   beforeEach(() => {
     localStorage.clear()
     mockAuth.isAdmin = false
+    mockAuth.canViewReports = false
     mockAuth.role = 'reviewer'
     mockAuth.username = 'testuser'
+    mockAuth.loading = false
   })
 
   it('renders the sidebar element', () => {
@@ -63,25 +66,70 @@ describe('Sidebar', () => {
     expect(screen.queryByText('Mentions')).toBeNull()
   })
 
-  it('shows admin section for admin users', () => {
+  it('shows Reports and admin items when admin and canViewReports', () => {
     mockAuth.isAdmin = true
+    mockAuth.canViewReports = true
     mockAuth.role = 'admin'
     renderSidebar()
+    expect(screen.getByText('Reports')).toBeDefined()
     expect(screen.getByText('Users')).toBeDefined()
     expect(screen.getByText('Tokens')).toBeDefined()
-    expect(screen.getByText('Reports')).toBeDefined()
     expect(screen.getByText('Settings')).toBeDefined()
     expect(screen.getByText('Chat')).toBeDefined()
+    expect(screen.getByText('Logs')).toBeDefined()
   })
 
-  it('hides admin section for non-admin users', () => {
-    mockAuth.isAdmin = false
+  it('shows admin items without Reports when isAdmin and canViewReports is false', () => {
+    // e.g. /me failed while isAdmin cookie is true — admin nav must still appear
+    mockAuth.isAdmin = true
+    mockAuth.canViewReports = false
+    mockAuth.role = 'admin'
+    mockAuth.loading = false
     renderSidebar()
+    expect(screen.queryByText('Reports')).toBeNull()
+    expect(screen.getByText('Users')).toBeDefined()
+    expect(screen.getByText('Tokens')).toBeDefined()
+    expect(screen.getByText('Settings')).toBeDefined()
+    expect(screen.getByText('Chat')).toBeDefined()
+    expect(screen.getByText('Logs')).toBeDefined()
+  })
+
+  it('shows Reports only for non-admin with canViewReports', () => {
+    mockAuth.isAdmin = false
+    mockAuth.canViewReports = true
+    mockAuth.role = 'reviewer'
+    renderSidebar()
+    expect(screen.getByText('Reports')).toBeDefined()
     expect(screen.queryByText('Users')).toBeNull()
     expect(screen.queryByText('Tokens')).toBeNull()
-    expect(screen.queryByText('Reports')).toBeNull()
     expect(screen.queryByText('Settings')).toBeNull()
     expect(screen.queryByText('Chat')).toBeNull()
+    expect(screen.queryByText('Logs')).toBeNull()
+  })
+
+  it('hides Reports and admin section for non-admin without canViewReports', () => {
+    mockAuth.isAdmin = false
+    mockAuth.canViewReports = false
+    renderSidebar()
+    expect(screen.queryByText('Reports')).toBeNull()
+    expect(screen.queryByText('Users')).toBeNull()
+    expect(screen.queryByText('Tokens')).toBeNull()
+    expect(screen.queryByText('Settings')).toBeNull()
+    expect(screen.queryByText('Chat')).toBeNull()
+  })
+
+  it('hides Reports and admin section while auth is loading', () => {
+    mockAuth.loading = true
+    mockAuth.isAdmin = true
+    mockAuth.canViewReports = true
+    mockAuth.role = 'admin'
+    renderSidebar()
+    expect(screen.queryByText('Reports')).toBeNull()
+    expect(screen.queryByText('Users')).toBeNull()
+    expect(screen.queryByText('Tokens')).toBeNull()
+    expect(screen.queryByText('Settings')).toBeNull()
+    expect(screen.queryByText('Chat')).toBeNull()
+    expect(screen.queryByText('Logs')).toBeNull()
   })
 
   it('highlights the active route', () => {
@@ -123,6 +171,7 @@ describe('Sidebar', () => {
 
   it('navigates to correct routes', () => {
     mockAuth.isAdmin = true
+    mockAuth.canViewReports = true
     mockAuth.role = 'admin'
     renderSidebar()
 

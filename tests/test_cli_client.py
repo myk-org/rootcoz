@@ -76,6 +76,27 @@ class TestRootCozClientResults:
         result = client.get_result("abc-123")
         assert result["job_id"] == "abc-123"
 
+    def test_get_result_with_fields(self):
+        def handler(request):
+            assert request.url.params.get("fields") == "status,result.summary"
+            return httpx.Response(
+                200, json={"status": "completed", "result": {"summary": "x"}}
+            )
+
+        client = _make_client(handler)
+        result = client.get_result("abc-123", fields="status,result.summary")
+        assert result["status"] == "completed"
+
+    def test_list_result_fields(self):
+        def handler(request):
+            assert request.method == "GET"
+            assert request.url.path == "/api/results/fields"
+            return httpx.Response(200, json={"fields": ["status", "job_id"]})
+
+        client = _make_client(handler)
+        result = client.list_result_fields()
+        assert "status" in result["fields"]
+
     def test_get_result_not_found(self):
         client = _make_client(
             lambda request: httpx.Response(404, json={"detail": "Job not found"})
@@ -1490,12 +1511,14 @@ class TestRootCozClientAdminUsers:
             body = json.loads(request.content)
             assert body["username"] == "newadmin"
             assert body["role"] == "admin"
+            assert body["can_view_reports"] is False
             return httpx.Response(
                 200,
                 json={
                     "username": "newadmin",
                     "api_key": "not-a-real-key",  # pragma: allowlist secret
                     "role": "admin",
+                    "can_view_reports": True,  # effective (admin), stored flag was False
                 },
             )
 
@@ -1503,6 +1526,41 @@ class TestRootCozClientAdminUsers:
         result = client.admin_create_user("newadmin", role="admin")
         assert result["username"] == "newadmin"
         assert "api_key" in result
+        assert result["can_view_reports"] is True
+
+    def test_admin_create_user_with_reports(self):
+        def handler(request):
+            body = json.loads(request.content)
+            assert body["can_view_reports"] is True
+            return httpx.Response(
+                200,
+                json={
+                    "username": "ruser",
+                    "role": "reviewer",
+                    "can_view_reports": True,
+                    "api_key": "k",  # pragma: allowlist secret
+                },
+            )
+
+        client = _make_client(handler)
+        result = client.admin_create_user(
+            "ruser", role="reviewer", can_view_reports=True
+        )
+        assert result["can_view_reports"] is True
+
+    def test_admin_set_can_view_reports(self):
+        def handler(request):
+            assert request.method == "PUT"
+            assert request.url.path == "/api/admin/users/alice/can-view-reports"
+            body = json.loads(request.content)
+            assert body == {"can_view_reports": True}
+            return httpx.Response(
+                200, json={"username": "alice", "can_view_reports": True}
+            )
+
+        client = _make_client(handler)
+        result = client.admin_set_can_view_reports("alice", True)
+        assert result["can_view_reports"] is True
 
     def test_admin_create_user_reviewer(self):
         def handler(request):

@@ -45,6 +45,9 @@ curl -X POST http://localhost:8000/analyze \
 
 - **AI-Powered Failure Analysis** — Classifies test failures as code issues or product bugs
 - **AI Token Usage Tracking** — Track token consumption, costs, and duration for all AI CLI calls. Admin dashboard shows usage by provider/model/time period with CSV export.
+- **Public OpenAPI** — `/openapi.json`, `/docs`, and `/redoc` are available without authentication
+- **Sparse result fields** — `GET /results/{job_id}?fields=status,result.summary,...` returns only allowlisted paths (full values). Discover paths via `GET /api/results/fields` or `rootcoz results fields`
+- **Reports access flag** — Non-admins need `can_view_reports` (admin grant / `rootcoz admin users set-can-view-reports`) to call `/api/reports/*` and `rootcoz reports`
 
 ## CLI
 

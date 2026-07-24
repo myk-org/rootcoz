@@ -36,7 +36,7 @@ export default function App() {
             <Route path="/dashboard" element={<Navigate to="/" replace />} />
             <Route path="/new-analysis" element={<ProtectedRoute operatorOnly><NewAnalysisPage /></ProtectedRoute>} />
             <Route path="/history" element={<ProtectedRoute><HistoryPage /></ProtectedRoute>} />
-            <Route path="/reports" element={<ProtectedRoute adminOnly><ReportsPage /></ProtectedRoute>} />
+            <Route path="/reports" element={<ProtectedRoute reportsAccess><ReportsPage /></ProtectedRoute>} />
             <Route path="/history/test/:testName" element={<ProtectedRoute><TestHistoryPage /></ProtectedRoute>} />
             <Route path="/mentions" element={<ProtectedRoute reviewerOnly><MentionsPage /></ProtectedRoute>} />
             <Route path="/results/:jobId" element={<ProtectedRoute><ReportPage /></ProtectedRoute>} />

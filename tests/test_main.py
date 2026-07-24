@@ -909,10 +909,26 @@ class TestOpenAPISchema:
         schema = response.json()
         assert schema["info"]["title"] == "rootcoz"
         assert schema["info"]["version"] == "0.1.0"
+        ops = [
+            op["operationId"]
+            for path_item in schema["paths"].values()
+            for op in path_item.values()
+            if isinstance(op, dict) and "operationId" in op
+        ]
+        assert len(ops) == len(set(ops))
+        assert all(
+            not (o.endswith("_get") or o.endswith("_post") or o.endswith("_put"))
+            for o in ops
+        )
 
     def test_docs_available(self, test_client) -> None:
         """Test that docs endpoint is available."""
         response = test_client.get("/docs")
+        assert response.status_code == 200
+
+    def test_redoc_available(self, test_client) -> None:
+        """Test that redoc endpoint is available."""
+        response = test_client.get("/redoc")
         assert response.status_code == 200
 
 

@@ -111,12 +111,13 @@ src/rootcoz/
 - **User identification**: Session-based — all users must register (auto-generated API key) and log in (username + API key → session cookie). The `rootcoz_username` cookie is set for display, but authentication is enforced via `rootcoz_session` cookie or Bearer token. When `TRUST_PROXY_HEADERS` is enabled, trusted `X-Forwarded-User` satisfies authentication without registration.
 - **Auth roles & permissions**:
   - Four roles: `viewer`, `reviewer`, `operator`, `admin`. A bootstrap `admin` superuser (via `ADMIN_KEY` env var) always exists outside the DB. `DEFAULT_USER_ROLE` env var controls the default role for new registrations (default: `reviewer`).
-  - All API endpoints require authentication except public paths (`/register`, `/health`, `/api/health`, `/api/auth/register`, `/api/auth/login`, `/api/auth/needs-key`, `/api/releases/latest`, `/metrics`). `/api/releases/latest` is intentionally public — it only proxies GitHub release metadata (version, changelog) with no sensitive data.
+  - All API endpoints require authentication except public paths (`/login`, `/health`, `/api/health`, `/api/auth/register`, `/api/auth/login`, `/api/auth/needs-key`, `/api/auth/pending-status`, `/api/releases/latest`, `/metrics`, `/pending`, `/favicon.ico`, `/favicon.svg`, `/sw.js`, `/openapi.json`, `/docs`, `/redoc`). `/api/releases/latest` is intentionally public — it only proxies GitHub release metadata (version, changelog) with no sensitive data. `/openapi.json`, `/docs`, and `/redoc` are public so API consumers can discover the schema without auth.
   - CORS preflight (OPTIONS) requests bypass authentication on all endpoints.
   - **Viewers** can: view jobs/results only. Cannot chat, comment, re-analyze, or modify anything.
   - **Reviewers** can: everything viewers can, plus chat about jobs, comment on jobs, register, login, rotate their own API key, manage their own tracker tokens.
   - **Operators** can: everything reviewers can, plus submit NEW analyses (`POST /analyze`), re-analyze any job, delete their own jobs.
-  - **Admins** can: everything operators can, plus delete any job, rotate any user's key (`POST /api/admin/users/{username}/rotate-key`), create/delete users, change user roles, access admin-only endpoints (`/api/admin/*`).
+  - **Admins** can: everything operators can, plus delete any job, rotate any user's key (`POST /api/admin/users/{username}/rotate-key`), create/delete users, change user roles, manage `can_view_reports`, access admin-only endpoints (`/api/admin/*`). Admins always have reports access.
+  - **`can_view_reports`** (DB flag, default false, orthogonal to role): when true, the user may call `/api/reports/*`. Non-admins reload the flag from the users table on each request (so grants/revokes apply without session invalidation); admins have effective access (`True`) without depending on the stored column. Managed via `PUT /api/admin/users/{username}/can-view-reports`, admin user create (`can_view_reports` in body), CLI `admin users create --can-view-reports` / `admin users set-can-view-reports`, and the admin UI. Exposed on `request.state.can_view_reports`, `GET /api/auth/me`, and `POST /api/auth/login`.
 - **Real-time updates**: Server-Sent Events (SSE) push real-time updates to the frontend. A polling fallback activates after sending a chat message if the SSE connection is dead, and cancels once SSE delivers an event. Backend broadcasts via per-connection `asyncio.Event` objects. Available SSE streams:
   - `/api/navbar/stream` — navbar badge counts (active analyses, unread mentions)
   - `/api/dashboard/stream` — dashboard job list changes
@@ -125,10 +126,11 @@ src/rootcoz/
   - `/api/admin/token-usage/stream` — token usage data changes
   - `/api/chat/{job_id}/stream` — per-job chat message changes
   - `/api/admin/logs/stream` — real-time server log tailing (admin only)
-- **Reports API**: Analytics endpoints for aggregated metrics:
+- **Reports API**: Analytics endpoints for aggregated metrics (requires admin **or** `can_view_reports`):
   - `GET /api/reports/totals?team=&tier=&version=&from=&to=` — total jobs, failures, reviewed with per-job detail list
   - `GET /api/reports/classification-overrides?...` — user classification overrides grouped by from→to transition
   - `GET /api/reports/issues-created?...` — GitHub/Jira issues created from analysis results
+- **Sparse result fields**: `GET /results/{job_id}?fields=status,result.summary,...` returns only allowlisted paths (full values, never truncated). Omit `fields` for the full response. Discover paths via `GET /api/results/fields` (CLI: `rootcoz results fields`) or pass `--fields` to `rootcoz results show`. Allowlist and filter helper live in `result_fields.py`.
 
 ### Server Settings Page
 
@@ -304,6 +306,10 @@ Uses `python-simple-logger`:
 - Configured via `LOG_LEVEL` environment variable
 
 ## API Design
+
+### Explicit OpenAPI operation IDs
+
+Every new FastAPI route that is included in the OpenAPI schema **MUST** set an explicit `operation_id` (camelCase, derived from the handler name). Do not rely on FastAPI auto-generated operationIds (they produce unstable `*_get` / path-suffix forms). Routes with `include_in_schema=False` (SPA/static) skip this.
 
 ### Configuration Parity
 

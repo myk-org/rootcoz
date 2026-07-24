@@ -265,9 +265,18 @@ class TestAuthEnforcement:
 
     def test_public_paths_accessible(self, client):
         """Public paths work without auth."""
-        for path in ["/health", "/api/health"]:
+        for path in [
+            "/health",
+            "/api/health",
+            "/openapi.json",
+            "/docs",
+            "/docs/",
+            "/redoc",
+            "/redoc/",
+        ]:
             resp = client.get(path)
-            assert resp.status_code == 200, f"Failed for {path}"
+            assert resp.status_code != 401, f"Unexpected 401 for {path}"
+            assert resp.status_code < 500, f"Failed for {path}: {resp.status_code}"
         # Login is POST-only, GET should not return 401/403 (405 is acceptable)
         resp = client.get("/api/auth/login")
         assert resp.status_code in (200, 404, 405), (

@@ -25,8 +25,9 @@ import { Skeleton } from '@/components/ui/skeleton'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
 import { Copy, Check, RefreshCw, Trash2, UserPlus, Shield, CheckCircle, XCircle } from 'lucide-react'
 import { Select, SelectTrigger, SelectValue, SelectContent, SelectItem } from '@/components/ui/select'
+import { Switch } from '@/components/ui/switch'
 import { formatTimestamp, formatRelativeTime } from '@/lib/utils'
-import type { AdminUser, CreateUserResponse, RotateKeyResponse, ChangeRoleResponse, UserRole } from '@/types'
+import type { AdminUser, CreateUserRequest, CreateUserResponse, RotateKeyResponse, ChangeRoleResponse, UserRole } from '@/types'
 import { useAuth } from '@/lib/auth'
 
 function CopyableKey({ label, value }: { label: string; value: string }) {
@@ -54,7 +55,7 @@ function CopyableKey({ label, value }: { label: string; value: string }) {
 }
 
 export function UsersPage() {
-  const { username: currentUser } = useAuth()
+  const { username: currentUser, refreshAuth } = useAuth()
   const [users, setUsers] = useState<AdminUser[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
@@ -63,6 +64,7 @@ export function UsersPage() {
   const [createOpen, setCreateOpen] = useState(false)
   const [newUsername, setNewUsername] = useState('')
   const [newUserRole, setNewUserRole] = useState<UserRole>('reviewer')
+  const [newUserCanViewReports, setNewUserCanViewReports] = useState(false)
   const [creating, setCreating] = useState(false)
   const [createError, setCreateError] = useState<string | null>(null)
   const [createdUser, setCreatedUser] = useState<CreateUserResponse | null>(null)
@@ -83,6 +85,8 @@ export function UsersPage() {
 
   // Approve/reject — single guard prevents concurrent actions on same user
   const [actionInProgress, setActionInProgress] = useState<string | null>(null)
+  // Toggle can_view_reports — track username while request in flight
+  const [reportsToggleInProgress, setReportsToggleInProgress] = useState<string | null>(null)
 
   // Action error
   const [actionError, setActionError] = useState<string | null>(null)
@@ -107,10 +111,13 @@ export function UsersPage() {
     setCreating(true)
     setCreateError(null)
     try {
-      const result = await api.post<CreateUserResponse>('/api/admin/users/create', {
+      const payload: CreateUserRequest = {
         username: trimmed,
         role: newUserRole,
-      })
+        // Admins always have effective reports access; ignore leftover switch state
+        can_view_reports: newUserRole === 'admin' ? false : newUserCanViewReports,
+      }
+      const result = await api.post<CreateUserResponse>('/api/admin/users/create', payload)
       setCreatedUser(result)
       fetchUsers()
     } catch (err) {
@@ -168,6 +175,7 @@ export function UsersPage() {
     setCreateOpen(false)
     setNewUsername('')
     setNewUserRole('reviewer')
+    setNewUserCanViewReports(false)
     setCreateError(null)
     setCreatedUser(null)
   }
@@ -244,6 +252,40 @@ export function UsersPage() {
     }
   }
 
+  async function handleToggleCanViewReports(username: string, canViewReports: boolean) {
+    setReportsToggleInProgress(username)
+    setActionError(null)
+    // Optimistic update
+    setUsers((prev) =>
+      prev.map((u) =>
+        u.username === username ? { ...u, can_view_reports: canViewReports } : u,
+      ),
+    )
+    try {
+      await api.put(`/api/admin/users/${encodeURIComponent(username)}/can-view-reports`, {
+        can_view_reports: canViewReports,
+      })
+      if (username === currentUser) {
+        await refreshAuth()
+      }
+    } catch (err) {
+      // Revert on failure
+      setUsers((prev) =>
+        prev.map((u) =>
+          u.username === username ? { ...u, can_view_reports: !canViewReports } : u,
+        ),
+      )
+      if (err instanceof ApiError) {
+        const body = err.body as { detail?: string } | null
+        setActionError(body?.detail ?? `Failed to update reports access (${err.status})`)
+      } else {
+        setActionError('Failed to update reports access')
+      }
+    } finally {
+      setReportsToggleInProgress(null)
+    }
+  }
+
   return (
     <div className="space-y-6">
       {/* Header */}
@@ -296,6 +338,7 @@ export function UsersPage() {
               <TableHead>Username</TableHead>
               <TableHead>Status</TableHead>
               <TableHead>Role</TableHead>
+              <TableHead>View reports</TableHead>
               <TableHead>Created</TableHead>
               <TableHead>Last Seen</TableHead>
               <TableHead className="w-40 text-right">Actions</TableHead>
@@ -354,6 +397,18 @@ export function UsersPage() {
                         <SelectItem value="admin">admin</SelectItem>
                       </SelectContent>
                     </Select>
+                  )}
+                </TableCell>
+                <TableCell>
+                  {user.role === 'admin' ? (
+                    <span className="text-xs text-text-tertiary">Always</span>
+                  ) : (
+                    <Switch
+                      checked={!!user.can_view_reports}
+                      disabled={reportsToggleInProgress === user.username}
+                      onCheckedChange={(checked) => handleToggleCanViewReports(user.username, checked)}
+                      aria-label={`Toggle view reports for ${user.username}`}
+                    />
                   )}
                 </TableCell>
                 <TableCell className="font-mono text-xs text-text-tertiary">
@@ -507,7 +562,14 @@ export function UsersPage() {
               </div>
               <div className="space-y-1.5">
                 <label className="block text-xs font-medium text-text-secondary">Role</label>
-                <Select value={newUserRole} onValueChange={(v) => setNewUserRole(v as UserRole)}>
+                <Select
+                  value={newUserRole}
+                  onValueChange={(v) => {
+                    const role = v as UserRole
+                    setNewUserRole(role)
+                    if (role === 'admin') setNewUserCanViewReports(false)
+                  }}
+                >
                   <SelectTrigger className="h-10">
                     <SelectValue />
                   </SelectTrigger>
@@ -519,6 +581,19 @@ export function UsersPage() {
                   </SelectContent>
                 </Select>
               </div>
+              {newUserRole !== 'admin' && (
+                <div className="flex items-center justify-between gap-3">
+                  <label htmlFor="new-user-can-view-reports" className="text-sm text-text-secondary">
+                    Allow viewing reports
+                  </label>
+                  <Switch
+                    id="new-user-can-view-reports"
+                    checked={newUserCanViewReports}
+                    onCheckedChange={setNewUserCanViewReports}
+                    aria-label="Allow viewing reports"
+                  />
+                </div>
+              )}
             </div>
           )}
           <DialogFooter>

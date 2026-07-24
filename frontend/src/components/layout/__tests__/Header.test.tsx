@@ -8,6 +8,7 @@ const mockAuth = {
   username: 'testuser',
   isAdmin: false,
   isOperator: false,
+  canViewReports: false,
   role: 'reviewer',
   loading: false,
   authenticated: true,

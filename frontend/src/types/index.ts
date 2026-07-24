@@ -19,6 +19,8 @@ export interface AuthUser {
   username: string
   role: string
   is_admin: boolean
+  /** Effective reports access (true for admins; otherwise the stored DB flag). */
+  can_view_reports: boolean
 }
 
 export interface AdminUser {
@@ -27,12 +29,22 @@ export interface AdminUser {
   status: 'active' | 'pending' | 'rejected'
   created_at: string
   last_seen: string | null
+  /** Stored DB flag for reports access (orthogonal to role; admins ignore this). */
+  can_view_reports: boolean
+}
+
+export interface CreateUserRequest {
+  username: string
+  role: string
+  can_view_reports?: boolean
 }
 
 export interface CreateUserResponse {
   username: string
   api_key: string
   role: string
+  /** Effective reports access (always true for admin role). */
+  can_view_reports: boolean
 }
 
 export interface RotateKeyResponse {
