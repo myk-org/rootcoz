@@ -201,7 +201,7 @@ export function Sidebar({ badges, mobileOpen, onMobileClose }: SidebarProps) {
       {!loading && (canViewReports || isAdmin) && (
         <>
           <Separator className="my-2" />
-          {canViewReports && renderItem(REPORTS_ITEM)}
+          {(canViewReports || isAdmin) && renderItem(REPORTS_ITEM)}
           {isAdmin && ADMIN_NAV_ITEMS.map(renderItem)}
         </>
       )}

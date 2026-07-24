@@ -6,7 +6,7 @@ interface Props {
   adminOnly?: boolean
   operatorOnly?: boolean
   reviewerOnly?: boolean
-  /** Allow access when canViewReports is true (admins included via that flag). */
+  /** Allow access when canViewReports OR isAdmin (backend always grants admins reports access). */
   reportsAccess?: boolean
 }
 
@@ -25,7 +25,7 @@ export function ProtectedRoute({ children, adminOnly, operatorOnly, reviewerOnly
     return <Navigate to="/" replace />
   }
 
-  if (reportsAccess && !canViewReports) {
+  if (reportsAccess && !(isAdmin || canViewReports)) {
     return <Navigate to="/" replace />
   }
 

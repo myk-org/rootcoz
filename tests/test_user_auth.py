@@ -265,15 +265,20 @@ class TestAuthEnforcement:
 
     def test_public_paths_accessible(self, client):
         """Public paths work without auth."""
-        for path in [
-            "/health",
-            "/api/health",
-            "/openapi.json",
-            "/docs",
-            "/docs/",
-            "/redoc",
-            "/redoc/",
-        ]:
+        for path in ["/health", "/api/health"]:
+            resp = client.get(path)
+            assert resp.status_code != 401, f"Unexpected 401 for {path}"
+            assert resp.status_code < 500, f"Failed for {path}: {resp.status_code}"
+        # Intentional unauthenticated schema discovery (issue #200): OpenAPI +
+        # Swagger/ReDoc must return 200 without auth.
+        for path in ["/openapi.json", "/docs", "/redoc"]:
+            resp = client.get(path)
+            assert resp.status_code == 200, (
+                f"Expected 200 for unauthenticated {path}, got {resp.status_code}"
+            )
+        # Trailing-slash forms stay on the public allowlist (no 401); FastAPI
+        # may 404 instead of redirecting to the non-slash route.
+        for path in ["/docs/", "/redoc/"]:
             resp = client.get(path)
             assert resp.status_code != 401, f"Unexpected 401 for {path}"
             assert resp.status_code < 500, f"Failed for {path}: {resp.status_code}"

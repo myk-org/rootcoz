@@ -66,6 +66,17 @@ describe('ProtectedRoute', () => {
     expect(screen.getByText('reports')).toBeDefined()
   })
 
+  it('allows reportsAccess when isAdmin even if canViewReports is false', () => {
+    // Stale auth: admin cookie/role true but canViewReports not yet refreshed
+    mockAuth.isAdmin = true
+    mockAuth.canViewReports = false
+    renderWithRoute(
+      <ProtectedRoute reportsAccess><div>reports</div></ProtectedRoute>,
+    )
+    expect(screen.getByText('reports')).toBeDefined()
+    expect(screen.queryByText('home')).toBeNull()
+  })
+
   it('blocks reportsAccess when canViewReports is false', () => {
     mockAuth.canViewReports = false
     mockAuth.isAdmin = false

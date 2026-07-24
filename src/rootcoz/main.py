@@ -1485,6 +1485,9 @@ class AuthMiddleware(BaseHTTPMiddleware):
             "/favicon.ico",
             "/favicon.svg",
             "/sw.js",
+            # Intentional public API-discovery surfaces (issue #200 / AGENTS.md):
+            # OpenAPI schema + Swagger/ReDoc UIs only — no job or user data.
+            # Project compliance allowlist source of truth for these paths.
             "/openapi.json",
             "/docs",
             "/redoc",

@@ -79,14 +79,14 @@ describe('Sidebar', () => {
     expect(screen.getByText('Logs')).toBeDefined()
   })
 
-  it('shows admin items without Reports when isAdmin and canViewReports is false', () => {
-    // e.g. /me failed while isAdmin cookie is true — admin nav must still appear
+  it('shows Reports and admin items when isAdmin even if canViewReports is false', () => {
+    // Stale auth: isAdmin true but canViewReports not refreshed — match backend grant
     mockAuth.isAdmin = true
     mockAuth.canViewReports = false
     mockAuth.role = 'admin'
     mockAuth.loading = false
     renderSidebar()
-    expect(screen.queryByText('Reports')).toBeNull()
+    expect(screen.getByText('Reports')).toBeDefined()
     expect(screen.getByText('Users')).toBeDefined()
     expect(screen.getByText('Tokens')).toBeDefined()
     expect(screen.getByText('Settings')).toBeDefined()
