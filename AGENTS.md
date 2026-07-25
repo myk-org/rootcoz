@@ -94,6 +94,8 @@ src/rootcoz/
     raw_source.py           # Raw failure list plugin: RawSource
     prow_source.py          # Prow CI plugin: ProwSource (GCS artifacts)
     chat_workspace.py       # CI-source chat workspace population dispatcher
+    prow_validation.py      # Prow-only input validation (URL, bucket, prefix, job, build ID)
+  url_utils.py              # Cross-cutting HTTP(S) URL sanitization (strip userinfo, href)
   main.py                   # FastAPI app, unified POST /analyze endpoint, background tasks
   models.py                 # Pydantic request/response models
   config.py                 # Settings (env vars)
@@ -102,7 +104,6 @@ src/rootcoz/
   sidecar-helper/            # Pi SDK sidecar service (Node.js/TypeScript)
     src/server.ts           # Thin wrapper calling @myk-org/pi-sidecar startSidecar()
   cli/                      # CLI client (rootcoz command)
-  prow_validation.py        # Shared Prow input validation (URL, bucket, prefix, job name, build ID)
   peer_analysis.py          # Multi-AI peer debate loop
   ...                       # Other modules (jira, github_issues, monitoring, etc.)
 ```
@@ -366,7 +367,11 @@ Exceptions (server-level only, no payload equivalent):
 - `VAPID_PUBLIC_KEY` — server-only VAPID public key for Web Push notifications; auto-generated with `VAPID_PRIVATE_KEY` if not set
 - Security-sensitive credentials for preview/create-issue endpoints (`GITHUB_TOKEN`, `TESTS_REPO_URL`, Jira credentials, `REPORTPORTAL_URL`, `REPORTPORTAL_API_TOKEN`, `REPORTPORTAL_PROJECT`) — these use deployment config, not per-request overrides
 
-Request-only fields (per-build, no server-level default):
+Request-tunable settings with full config parity (env, API payload, CLI, config.toml, Server Settings):
+- `prow_url` — Prow Deck base URL (server default; overridable per request via `UnifiedAnalyzeRequest`)
+- `gcs_bucket` — GCS bucket for Prow artifacts (server default; overridable per request)
+
+Request-only fields on `UnifiedAnalyzeRequest` (per-build, no server-level default):
 - `prow_job_name` — Prow job name for prow source analyses
 - `build_id` — Prow build ID (numeric string; may exceed JavaScript safe integer range)
 - `gcs_prefix` — GCS path prefix, unique per Prow build (e.g. `pr-logs/pull/org_repo/pr/job/build_id`). When empty, auto-resolves via prowjob.json or pr-logs/directory pointer.

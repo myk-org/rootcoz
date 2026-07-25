@@ -70,6 +70,23 @@ logger = get_logger(name=__name__, level=os.environ.get("LOG_LEVEL", "INFO"))
 # Jenkins-specific helper functions
 # ---------------------------------------------------------------------------
 
+_SENSITIVE_PARAM_PATTERNS = frozenset(
+    {"password", "token", "secret", "key", "credential", "auth"}
+)
+
+
+def _extract_build_params(build_info: dict) -> list[dict]:
+    """Extract build parameters from Jenkins build info, filtering sensitive values."""
+    params: list[dict] = []
+    for action in build_info.get("actions", []):
+        if action and action.get("_class", "").endswith("ParametersAction"):
+            for param in action.get("parameters", []):
+                name = param.get("name", "")
+                if any(p in name.lower() for p in _SENSITIVE_PARAM_PATTERNS):
+                    continue
+                params.append({"name": name, "value": param.get("value", "")})
+    return params
+
 
 def _normalize_child_results(
     failed_children: list[tuple[str, int]],
@@ -571,12 +588,6 @@ class JenkinsSource(CISource):
         child_build_number: int = 0,
     ) -> JenkinsSource | None:
         """Reconstruct a JenkinsSource from stored request params."""
-        if settings is None or not settings.jenkins_url:
-            logger.warning(
-                "Cannot reconstruct JenkinsSource: no settings or jenkins_url"
-            )
-            return None
-
         # For child job failures, use child job coordinates
         job_name = child_job_name or params.get("job_name", "")
         raw_build_number = (
@@ -623,12 +634,179 @@ class JenkinsSource(CISource):
             )
             return None
 
+        param_overrides: dict[str, Any] = {}
+        for key in (
+            "jenkins_url",
+            "jenkins_user",
+            "jenkins_password",
+            "jenkins_ssl_verify",
+            "jenkins_timeout",
+            "jenkins_artifacts_max_size_mb",
+            "get_job_artifacts",
+        ):
+            if key in params and params[key] not in (None, ""):
+                param_overrides[key] = params[key]
+
+        if settings is not None and settings.jenkins_url:
+            effective_settings = (
+                settings.model_copy(update=param_overrides)
+                if param_overrides
+                else settings
+            )
+        elif param_overrides.get("jenkins_url"):
+            # Chat / reanalysis: credentials may exist only on the stored job.
+            base = settings if settings is not None else Settings()
+            effective_settings = base.model_copy(update=param_overrides)
+        else:
+            logger.warning(
+                "Cannot reconstruct JenkinsSource: no settings or jenkins_url"
+            )
+            return None
+
         return cls(
             job_name=job_name,
             build_number=build_number,
-            settings=settings,
+            settings=effective_settings,
             force=True,  # reanalysis always forces
         )
+
+    async def populate_chat_workspace(
+        self,
+        workspace: Path,
+        *,
+        github_token: str = "",
+    ) -> bool:
+        """Populate the chat workspace with Jenkins build context.
+
+        Writes console-output.txt, build-info.json, and optionally links
+        build-artifacts/. Each resource is fetched independently.
+        """
+        _ = github_token  # unused — Jenkins chat does not fetch GitHub diffs
+        wrote_any = False
+        console_file = workspace / "console-output.txt"
+        build_info_file = workspace / "build-info.json"
+        need_console = not console_file.exists()
+        need_build_info = not build_info_file.exists()
+
+        console_output: str | None = None
+        build_info: dict = {}
+        if need_console or need_build_info:
+            tasks: list = []
+            if need_console:
+                tasks.append(
+                    asyncio.to_thread(
+                        self.client.get_build_console,
+                        self.job_name,
+                        self.build_number,
+                    )
+                )
+            if need_build_info:
+                tasks.append(
+                    asyncio.to_thread(
+                        self.client.get_build_info_safe,
+                        self.job_name,
+                        self.build_number,
+                    )
+                )
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+
+            idx = 0
+            if need_console:
+                r = results[idx]
+                if isinstance(r, BaseException):
+                    logger.warning(
+                        "Chat: failed to fetch console output: %s", r, exc_info=r
+                    )
+                else:
+                    console_output = r
+                idx += 1
+            if need_build_info:
+                r = results[idx]
+                if isinstance(r, BaseException):
+                    logger.warning(
+                        "Chat: failed to fetch build info: %s", r, exc_info=r
+                    )
+                else:
+                    build_info = r
+
+        if console_output is not None:
+            try:
+                content = (
+                    console_output
+                    if console_output
+                    else "No console output available for this build."
+                )
+                console_file.write_text(content)
+                logger.info("Chat: wrote console-output.txt (%d chars)", len(content))
+                wrote_any = True
+            except OSError:
+                logger.warning(
+                    "Chat: failed to write console-output.txt", exc_info=True
+                )
+
+        if build_info and need_build_info:
+            try:
+                import json as _json
+
+                build_params = _extract_build_params(build_info)
+                info_data = {
+                    "job_name": self.job_name,
+                    "build_number": self.build_number,
+                    "result": build_info.get("result"),
+                    "building": build_info.get("building", False),
+                    "duration_ms": build_info.get("duration", 0),
+                    "estimated_duration_ms": build_info.get("estimatedDuration", 0),
+                    "timestamp": build_info.get("timestamp", 0),
+                    "url": build_info.get("url", ""),
+                    "display_name": build_info.get("displayName", ""),
+                    "description": build_info.get("description", ""),
+                    "parameters": build_params,
+                }
+                build_info_file.write_text(_json.dumps(info_data, indent=2))
+                logger.info("Chat: wrote build-info.json")
+                wrote_any = True
+            except OSError:
+                logger.warning("Chat: failed to write build-info.json", exc_info=True)
+
+        artifacts_link = workspace / "build-artifacts"
+        if not artifacts_link.exists() and self.settings.get_job_artifacts:
+            if not build_info:
+                try:
+                    build_info = await asyncio.to_thread(
+                        self.client.get_build_info_safe,
+                        self.job_name,
+                        self.build_number,
+                    )
+                except Exception:
+                    logger.warning(
+                        "Chat: failed to fetch build info for artifacts",
+                        exc_info=True,
+                    )
+
+            artifact_list = build_info.get("artifacts", []) if build_info else []
+            build_url_from_info = (build_info or {}).get("url", "").rstrip("/")
+            if artifact_list and build_url_from_info:
+                max_size_mb = self.settings.jenkins_artifacts_max_size_mb
+                try:
+                    _, artifacts_dir = await asyncio.to_thread(
+                        process_build_artifacts,
+                        self.client.session,
+                        build_url_from_info,
+                        artifact_list,
+                        max_size_mb,
+                    )
+                    if artifacts_dir:
+                        self._extract_path = artifacts_dir
+                        artifacts_link.symlink_to(artifacts_dir)
+                        logger.info(
+                            "Chat: artifacts downloaded and linked in %s", workspace
+                        )
+                        wrote_any = True
+                except Exception:
+                    logger.warning("Chat: failed to download artifacts", exc_info=True)
+                    self.cleanup()
+
+        return wrote_any
 
     def cleanup(self) -> None:
         """Clean up artifact extraction directory."""

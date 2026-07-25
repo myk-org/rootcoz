@@ -173,14 +173,12 @@ from rootcoz.rootcoz_repo_settings import (
     resolve_tests_repo_url,
     tests_repo_available,
 )
-from rootcoz.engine.chat import setup_jenkins_workspace
 from rootcoz.sources import (
+    CI_SOURCE_REGISTRY,
     CISource,
-    FileSource,
-    ProwSource,
-    RawSource,
     append_repo_context,
     apply_source_workspace_files,
+    create_source_from_request,
     link_artifacts_to_workspace,
     link_refetched_artifacts,
     run_console_only_analysis,
@@ -215,8 +213,6 @@ from rootcoz.vapid import get_vapid_config
 from rootcoz.xml_enrichment import (
     build_enriched_xml,
 )
-
-source_chat_workspace.register_jenkins_chat_setup(setup_jenkins_workspace)
 
 # Module-level Depends singletons (B008: avoid function calls in defaults)
 _SETTINGS_DEP = Depends(get_settings)
@@ -1127,24 +1123,6 @@ async def _preserve_request_params(job_id: str, result_data: dict) -> None:
         for key in ("request_params", "tags", "display_name"):
             if key in stored_result and key not in result_data:
                 result_data[key] = stored_result[key]
-
-
-async def _persist_resolved_gcs_prefix(job_id: str, gcs_prefix: str) -> None:
-    """Store auto-resolved GCS prefix in request_params for re-analyze/chat."""
-    if not gcs_prefix:
-        return
-
-    def _patch(data: dict) -> None:
-        params = data.get("request_params")
-        if not isinstance(params, dict):
-            return
-        decrypted = decrypt_sensitive_fields(dict(params))
-        if decrypted.get("gcs_prefix") == gcs_prefix:
-            return
-        decrypted["gcs_prefix"] = gcs_prefix
-        data["request_params"] = encrypt_sensitive_fields(decrypted)
-
-    await patch_result_json(job_id, _patch)
 
 
 async def _fail_resumed_waiting_job(job_id: str, result_data: dict, error: str) -> None:
@@ -3215,11 +3193,9 @@ def _apply_base_analysis_overrides(
         if body.jira_max_results is not None
         else merged.jira_max_results
     )
-    params["github_token"] = (
-        body.github_token
-        if body.github_token is not None
-        else (merged.github_token.get_secret_value() if merged.github_token else "")
-    )
+    # Only persist explicitly submitted tokens — never the server deployment
+    # default. Chat sessions must not inherit GITHUB_TOKEN from job params.
+    params["github_token"] = body.github_token if body.github_token is not None else ""
     params["ai_call_timeout"] = (
         body.ai_call_timeout
         if body.ai_call_timeout is not None
@@ -3271,7 +3247,7 @@ def _strip_old_submitter_tag(tags: list[str], result_data: dict) -> list[str]:
     return [t for t in tags if not (isinstance(t, str) and t.lower() == old_normalized)]
 
 
-async def _enqueue_non_jenkins_analysis(
+async def _enqueue_ci_source_analysis(
     body: "UnifiedAnalyzeRequest",
     merged: "Settings",
     resolved_peers: list | None,
@@ -3288,7 +3264,9 @@ async def _enqueue_non_jenkins_analysis(
 ) -> dict:
     """Build params, persist initial state, spawn task, and return response.
 
-    Shared by the ``/analyze`` and ``/re-analyze`` file/raw/prow paths.
+    Shared post-fetch enqueue path for CISource plugins (file/raw/prow).
+    Jenkins still uses ``_enqueue_analysis_job`` / ``analyze_job`` until
+    fully migrated onto this shared path.
 
     Args:
         body: The analysis request (``UnifiedAnalyzeRequest`` or similar).
@@ -3346,35 +3324,16 @@ async def _enqueue_non_jenkins_analysis(
     base_params["original_name"] = body.name or ""
     _apply_base_analysis_overrides(base_params, body, merged)
 
-    if analysis_type == "file":
-        base_params["raw_xml"] = body.raw_xml
-    elif analysis_type == "prow":
-        if not merged.prow_url:
-            raise HTTPException(
-                status_code=422,
-                detail=(
-                    "prow_url is required \u2014 set PROW_URL env var, "
-                    "configure it in Server Settings, or pass prow_url in the request"
-                ),
-            )
-        if not merged.gcs_bucket:
-            raise HTTPException(
-                status_code=422,
-                detail=(
-                    "gcs_bucket is required \u2014 set GCS_BUCKET env var, "
-                    "configure it in Server Settings, or pass gcs_bucket in the request"
-                ),
-            )
-        base_params["prow_job_name"] = body.prow_job_name
-        base_params["build_id"] = body.build_id
-        base_params["prow_url"] = merged.prow_url
-        base_params["gcs_bucket"] = merged.gcs_bucket
-        base_params["gcs_prefix"] = body.gcs_prefix or ""
-        base_params["force"] = merged.force_analysis
-        base_params["get_job_artifacts"] = merged.get_job_artifacts
-    elif analysis_type == "raw":
-        assert body.failures is not None
-        base_params["failures"] = [f.model_dump() for f in body.failures]
+    source_cls = CI_SOURCE_REGISTRY.get(analysis_type)
+    if source_cls is None:
+        raise HTTPException(
+            status_code=422, detail=f"Unsupported analysis type: {analysis_type}"
+        )
+    try:
+        source_cls.validate_request(body, merged)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    source_cls.build_request_params(body, merged, base_params)
 
     initial_result: dict = {
         "job_name": display_name,
@@ -3382,12 +3341,7 @@ async def _enqueue_non_jenkins_analysis(
         "request_params": encrypt_sensitive_fields(base_params),
     }
     # Persist real identity for history matching and auto-review
-    if body.type == "prow":
-        initial_result.update(
-            ProwSource.pre_persist_identity(
-                body.prow_job_name or "", body.build_id or ""
-            )
-        )
+    initial_result.update(source_cls.pre_persist_identity_from_request(body))
     initial_result["request_params"]["submitted_by"] = username
     _stamp_reanalysis_metadata(
         initial_result["request_params"],
@@ -3402,7 +3356,7 @@ async def _enqueue_non_jenkins_analysis(
 
     # Spawn background task
     task = asyncio.create_task(
-        _process_non_jenkins_analysis(
+        _process_ci_source_analysis(
             job_id=job_id,
             body=body,
             merged=merged,
@@ -3557,7 +3511,7 @@ async def _enqueue_analysis_job(
     return _attach_result_links(response, base_url, job_id)
 
 
-async def _process_non_jenkins_analysis(
+async def _process_ci_source_analysis(
     *,
     job_id: str,
     body: UnifiedAnalyzeRequest,
@@ -3574,7 +3528,7 @@ async def _process_non_jenkins_analysis(
     username: str = "",
     is_admin: bool = False,
 ) -> None:
-    """Background task for file/raw/prow analysis."""
+    """Background task for CISource plugin analysis (file/raw/prow)."""
     job_id_var.set(job_id)
 
     # Only these keys may be overridden by CISourceResult.identity.
@@ -3616,26 +3570,9 @@ async def _process_non_jenkins_analysis(
             f"Starting {body.type} analysis for job_id={job_id}, display_name={display_name}"
         )
 
-        # Create source plugin
-        if body.type == "file":
-            assert body.raw_xml is not None
-            source = FileSource(raw_xml=body.raw_xml)
-        elif body.type == "prow":
-            assert body.prow_job_name is not None
-            assert body.build_id is not None
-            # prow_url/gcs_bucket validated in _enqueue_non_jenkins_analysis
-            source = ProwSource(
-                job_name=body.prow_job_name,
-                build_id=body.build_id,
-                gcs_bucket=merged.gcs_bucket,
-                prow_url=merged.prow_url,
-                gcs_prefix=body.gcs_prefix or "",
-                force=merged.force_analysis,
-                get_job_artifacts=merged.get_job_artifacts,
-            )
-        else:
-            assert body.failures is not None
-            source = RawSource(failures=body.failures)
+        # Create source plugin via registry (file/raw/prow share this path;
+        # Jenkins still uses analyze_job until fully migrated).
+        source = create_source_from_request(body.type, body, merged)
 
         # Fetch failures from source
         source_result = await source.fetch()
@@ -3656,9 +3593,7 @@ async def _process_non_jenkins_analysis(
         if source_result.build_url:
             await storage.update_build_url(job_id, source_result.build_url)
 
-        resolved_prefix = source_result.source_metadata.get("resolved_gcs_prefix")
-        if resolved_prefix:
-            await _persist_resolved_gcs_prefix(job_id, resolved_prefix)
+        await source.persist_fetch_metadata(job_id, source_result)
 
         if source_result.build_passed:
             summary = source_result.build_passed_summary
@@ -3760,30 +3695,14 @@ async def _process_non_jenkins_analysis(
             notify_dashboard_changed()
             notify_job_status_changed(job_id)
 
+        # Derive tests_cloned_path from workspace result (already cloned
+        # by setup_analysis_workspace above — no second clone needed).
         tests_cloned_path: Path | None = None
         if tests_repo_url:
-            logger.debug(
-                "Cloning test repo: %s (ref=%s)",
-                redact_url(str(tests_repo_url)),
-                tests_repo_ref,
+            repo_name = derive_test_repo_name(
+                str(tests_repo_url), additional_repos_list
             )
-            try:
-                repo_name = derive_test_repo_name(
-                    str(tests_repo_url), additional_repos_list
-                )
-                await asyncio.to_thread(
-                    repo_manager.clone_into,
-                    str(tests_repo_url),
-                    repo_path / repo_name,
-                    depth=50,
-                    branch=tests_repo_ref,
-                    token=resolved_tests_repo_token or None,
-                )
-                cloned_repos[repo_name] = repo_path / repo_name
-                tests_cloned_path = cloned_repos[repo_name]
-                logger.debug(f"Test repo cloned successfully into {repo_name}/")
-            except Exception:
-                logger.warning("Failed to clone test repository", exc_info=True)
+            tests_cloned_path = cloned_repos.get(repo_name)
 
         try:
             effective = await resolve_repo_analysis_settings(
@@ -4243,7 +4162,7 @@ async def analyze(
     # File, Raw, or Prow — enqueue as async background task
     merged = _merge_settings(body, settings)
     resolved_peers = _validate_peer_configs(body, merged)
-    return await _enqueue_non_jenkins_analysis(
+    return await _enqueue_ci_source_analysis(
         body=body,
         merged=merged,
         resolved_peers=resolved_peers,
@@ -4321,7 +4240,7 @@ async def re_analyze(
             "type": analysis_type,
         }
         # Only restore name if user explicitly provided one;
-        # leave unset so _enqueue_non_jenkins_analysis generates a fresh fallback.
+        # leave unset so _enqueue_ci_source_analysis generates a fresh fallback.
         stored_name = decrypted_params.get("original_name", "")
         if stored_name:
             unified_fields["name"] = stored_name
@@ -4396,7 +4315,7 @@ async def re_analyze(
         else:
             display_name = f"{analysis_type}-re-analysis"
 
-        return await _enqueue_non_jenkins_analysis(
+        return await _enqueue_ci_source_analysis(
             body=unified_body,
             merged=merged,
             resolved_peers=resolved_peers,
@@ -7961,7 +7880,7 @@ async def get_capabilities(settings: Settings = _SETTINGS_DEP) -> dict:
 
 def _strip_url_userinfo(url: str) -> str:
     """Remove userinfo (username/password) from a URL for safe API responses."""
-    from rootcoz.prow_validation import strip_url_userinfo
+    from rootcoz.url_utils import strip_url_userinfo
 
     return strip_url_userinfo(url)
 
@@ -10793,12 +10712,10 @@ async def _resolve_chat_credentials(
     # Jira URL from job params or server settings (URL is not a credential)
     jira_url = decrypted_params.get("jira_url", "") or str(settings.jira_url or "")
 
-    # User-scoped credentials with server/job fallbacks for GitHub PR diffs
+    # User-scoped credentials only — never job-stored or server deployment tokens
     jira_email = user_tokens.get("jira_email", "")
     jira_token = user_tokens.get("jira_token", "")
     github_token = (user_tokens.get("github_token") or "").strip()
-    if not github_token:
-        github_token = (decrypted_params.get("github_token") or "").strip()
 
     return jira_url, jira_email, jira_token, github_token, github_repo
 

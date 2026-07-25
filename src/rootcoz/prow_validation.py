@@ -1,32 +1,15 @@
-"""Shared validation helpers for Prow configuration and build URLs."""
+"""Shared validation helpers for Prow configuration.
+
+Cross-cutting URL helpers live in ``rootcoz.url_utils``.
+"""
 
 from __future__ import annotations
 
 import re
-from urllib.parse import urlparse, urlunparse
+from urllib.parse import urlparse
 
-
-def strip_url_userinfo(url: str) -> str:
-    """Remove userinfo (username/password) from a URL."""
-    if not url:
-        return url
-    parsed = urlparse(url)
-    # ``is not None`` catches empty userinfo (e.g. ``https://@host`` / ``https://:@host``)
-    if parsed.username is not None or parsed.password is not None:
-        clean_netloc = parsed.netloc.rsplit("@", 1)[-1]
-        return urlunparse(parsed._replace(netloc=clean_netloc))
-    return url
-
-
-def sanitize_http_href(url: str) -> str:
-    """Return a safe http(s) URL without credentials, or empty string if invalid."""
-    if not url:
-        return ""
-    cleaned = strip_url_userinfo(url.strip())
-    parsed = urlparse(cleaned)
-    if parsed.scheme not in ("http", "https") or not parsed.hostname:
-        return ""
-    return cleaned
+PROW_JOB_NAME_PATTERN = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._-]*$")
+PROW_BUILD_ID_PATTERN = re.compile(r"^[0-9]+$")
 
 
 def normalize_prow_url(value: object) -> str:
@@ -41,7 +24,6 @@ def normalize_prow_url(value: object) -> str:
     if not url.startswith("https://"):
         raise ValueError("prow_url must start with https://")
     parsed = urlparse(url)
-    # ``is not None`` catches empty userinfo (e.g. ``https://@host`` / ``https://:@host``)
     if parsed.username is not None or parsed.password is not None:
         raise ValueError("prow_url must not contain credentials")
     if not parsed.hostname:
@@ -121,5 +103,18 @@ def validate_prow_build_id(value: object) -> str:
     return build_id
 
 
-PROW_JOB_NAME_PATTERN = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._-]*$")
-PROW_BUILD_ID_PATTERN = re.compile(r"^[0-9]+$")
+# Re-export URL helpers for backward-compatible imports
+from rootcoz.url_utils import sanitize_http_href, strip_url_userinfo  # noqa: E402
+
+__all__ = [
+    "PROW_BUILD_ID_PATTERN",
+    "PROW_JOB_NAME_PATTERN",
+    "normalize_gcs_bucket",
+    "normalize_gcs_prefix",
+    "normalize_prow_url",
+    "sanitize_http_href",
+    "strip_url_userinfo",
+    "validate_gcs_prefix_suffix",
+    "validate_prow_build_id",
+    "validate_prow_job_name",
+]

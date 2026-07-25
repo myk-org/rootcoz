@@ -6,6 +6,7 @@ Builds job-scoped system prompts and manages AI CLI conversations.
 import asyncio
 import base64
 import shutil
+import tempfile
 from collections.abc import Callable
 from pathlib import Path
 
@@ -27,6 +28,11 @@ logger = get_logger(name=__name__)
 _CHAT_WORKSPACE_PREFIX = "rootcoz-chat-"
 
 
+def _tmp_root() -> Path:
+    """Return the process temp root (honors ``TMPDIR``)."""
+    return Path(tempfile.gettempdir()).resolve()
+
+
 def get_chat_workspace(job_id: str, username: str = "") -> Path:
     """Get the chat workspace path for a job and user."""
     # Sanitize job_id to prevent path traversal
@@ -36,14 +42,14 @@ def get_chat_workspace(job_id: str, username: str = "") -> Path:
         if username
         else ""
     )
+    tmp = _tmp_root()
     if safe_user:
-        workspace = Path(f"/tmp/{_CHAT_WORKSPACE_PREFIX}{safe_id}/{safe_user}")
+        workspace = tmp / f"{_CHAT_WORKSPACE_PREFIX}{safe_id}" / safe_user
     else:
-        workspace = Path(f"/tmp/{_CHAT_WORKSPACE_PREFIX}{safe_id}")
-    # Verify the resolved path is still under /tmp/
+        workspace = tmp / f"{_CHAT_WORKSPACE_PREFIX}{safe_id}"
+    # Verify the resolved path is still under the process temp root
     resolved = workspace.resolve()
-    tmp_resolved = Path("/tmp").resolve()
-    if not resolved.is_relative_to(tmp_resolved):
+    if not resolved.is_relative_to(tmp):
         raise ValueError(f"Invalid job_id/username for workspace: {job_id}/{username}")
     return workspace
 
@@ -200,183 +206,6 @@ async def clone_chat_repos(
             copy_rootcoz_pi_resources(cloned_repos, workspace)
 
     return cloned_any
-
-
-_SENSITIVE_PARAM_PATTERNS = frozenset(
-    {"password", "token", "secret", "key", "credential", "auth"}
-)
-
-
-def _extract_build_params(build_info: dict) -> list[dict]:
-    """Extract build parameters from Jenkins build info, filtering sensitive values."""
-    params: list[dict] = []
-    for action in build_info.get("actions", []):
-        if action and action.get("_class", "").endswith("ParametersAction"):
-            for param in action.get("parameters", []):
-                name = param.get("name", "")
-                if any(p in name.lower() for p in _SENSITIVE_PARAM_PATTERNS):
-                    continue
-                params.append({"name": name, "value": param.get("value", "")})
-    return params
-
-
-async def setup_jenkins_workspace(
-    workspace: Path,
-    request_params: dict,
-) -> bool:
-    """Populate the chat workspace with Jenkins build context.
-
-    Connects to Jenkins using stored credentials and writes:
-    - ``console-output.txt`` \u2014 full Jenkins console output
-    - ``build-info.json`` \u2014 structured build metadata (result, params, timing)
-    - ``build-artifacts/`` \u2014 symlink to downloaded artifacts directory
-
-    Skips silently if this is not a Jenkins job or credentials are missing.
-    Each resource is fetched independently \u2014 a failure in one does not
-    prevent the others.
-
-    Returns True if any Jenkins data was written to the workspace.
-    """
-    jenkins_url = request_params.get("jenkins_url", "")
-    jenkins_user = request_params.get("jenkins_user", "")
-    jenkins_password = request_params.get("jenkins_password", "")
-    if not jenkins_url or not jenkins_user or not jenkins_password:
-        return False
-
-    job_name = request_params.get("job_name", "")
-    build_number = request_params.get("build_number", 0)
-    if not job_name or not build_number:
-        return False
-
-    from rootcoz.jenkins import JenkinsClient
-
-    try:
-        client = JenkinsClient(
-            url=jenkins_url,
-            username=jenkins_user,
-            password=jenkins_password,
-            ssl_verify=request_params.get("jenkins_ssl_verify", True),
-            timeout=request_params.get("jenkins_timeout", 30),
-        )
-    except Exception:
-        logger.warning("Chat: failed to create Jenkins client", exc_info=True)
-        return False
-
-    wrote_any = False
-    console_file = workspace / "console-output.txt"
-    build_info_file = workspace / "build-info.json"
-    need_console = not console_file.exists()
-    need_build_info = not build_info_file.exists()
-
-    # 1. Fetch console output and build info in parallel
-    console_output: str | None = None
-    build_info: dict = {}
-    if need_console or need_build_info:
-        tasks: list = []
-        if need_console:
-            tasks.append(
-                asyncio.to_thread(client.get_build_console, job_name, build_number)
-            )
-        if need_build_info:
-            tasks.append(
-                asyncio.to_thread(client.get_build_info_safe, job_name, build_number)
-            )
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-
-        idx = 0
-        if need_console:
-            r = results[idx]
-            if isinstance(r, BaseException):
-                logger.warning(
-                    "Chat: failed to fetch console output: %s", r, exc_info=r
-                )
-            else:
-                console_output = r
-            idx += 1
-        if need_build_info:
-            r = results[idx]
-            if isinstance(r, BaseException):
-                logger.warning("Chat: failed to fetch build info: %s", r, exc_info=r)
-            else:
-                build_info = r
-
-    # 2. Write console-output.txt (full log — AI uses grep/read to find what it needs)
-    if console_output is not None:
-        try:
-            content = (
-                console_output
-                if console_output
-                else "No console output available for this build."
-            )
-            console_file.write_text(content)
-            logger.info("Chat: wrote console-output.txt (%d chars)", len(content))
-            wrote_any = True
-        except OSError:
-            logger.warning("Chat: failed to write console-output.txt", exc_info=True)
-
-    # 3. Write build-info.json
-    if build_info and need_build_info:
-        try:
-            import json as _json
-
-            build_params = _extract_build_params(build_info)
-            info_data = {
-                "job_name": job_name,
-                "build_number": build_number,
-                "result": build_info.get("result"),
-                "building": build_info.get("building", False),
-                "duration_ms": build_info.get("duration", 0),
-                "estimated_duration_ms": build_info.get("estimatedDuration", 0),
-                "timestamp": build_info.get("timestamp", 0),
-                "url": build_info.get("url", ""),
-                "display_name": build_info.get("displayName", ""),
-                "description": build_info.get("description", ""),
-                "parameters": build_params,
-            }
-            build_info_file.write_text(_json.dumps(info_data, indent=2))
-            logger.info("Chat: wrote build-info.json")
-            wrote_any = True
-        except OSError:
-            logger.warning("Chat: failed to write build-info.json", exc_info=True)
-
-    # 4. Build artifacts
-    artifacts_link = workspace / "build-artifacts"
-    if not artifacts_link.exists() and request_params.get("get_job_artifacts"):
-        # Reuse build_info if already fetched, otherwise fetch it
-        if not build_info:
-            try:
-                build_info = await asyncio.to_thread(
-                    client.get_build_info_safe, job_name, build_number
-                )
-            except Exception:
-                logger.warning(
-                    "Chat: failed to fetch build info for artifacts", exc_info=True
-                )
-
-        artifact_list = build_info.get("artifacts", [])
-        build_url_from_info = build_info.get("url", "").rstrip("/")
-        if artifact_list and build_url_from_info:
-            from rootcoz.jenkins_artifacts import process_build_artifacts
-
-            max_size_mb = request_params.get("jenkins_artifacts_max_size_mb", 500)
-            try:
-                _, artifacts_dir = await asyncio.to_thread(
-                    process_build_artifacts,
-                    client.session,
-                    build_url_from_info,
-                    artifact_list,
-                    max_size_mb,
-                )
-                if artifacts_dir:
-                    artifacts_link.symlink_to(artifacts_dir)
-                    logger.info(
-                        "Chat: artifacts downloaded and linked in %s", workspace
-                    )
-                    wrote_any = True
-            except Exception:
-                logger.warning("Chat: failed to download artifacts", exc_info=True)
-
-    return wrote_any
 
 
 def _bearer_headers(auth_token: str) -> dict[str, str]:
@@ -971,18 +800,20 @@ def build_admin_custom_tools(
 def _safe_remove_symlink(link: Path) -> None:
     """Remove a symlink and its target directory if safe.
 
-    Only deletes the target when it resolves to a path under ``/tmp/``
-    to prevent accidental deletion of system directories if the
-    symlink was manipulated.
+    Only deletes the target when it resolves to a path under the process
+    temp root (``tempfile.gettempdir()``, honors ``TMPDIR``) to prevent
+    accidental deletion of system directories if the symlink was manipulated.
     """
     target = link.resolve()
     link.unlink(missing_ok=True)
     if target.exists() and target.is_dir():
-        if target.is_relative_to(Path("/tmp").resolve()):
+        tmp_root = _tmp_root()
+        if target.is_relative_to(tmp_root):
             shutil.rmtree(target, ignore_errors=True)
         else:
             logger.warning(
-                "Chat cleanup: refusing to delete symlink target outside /tmp/: %s",
+                "Chat cleanup: refusing to delete symlink target outside %s: %s",
+                tmp_root,
                 target,
             )
 

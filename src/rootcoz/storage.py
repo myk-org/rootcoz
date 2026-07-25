@@ -406,7 +406,7 @@ def _row_build_url(row) -> str:
 
 def stamp_build_url(result: dict, build_url: str) -> None:
     """Set canonical and legacy build URL fields on a result dict."""
-    from rootcoz.prow_validation import sanitize_http_href
+    from rootcoz.url_utils import sanitize_http_href
 
     safe_url = sanitize_http_href(build_url)
     if safe_url:
@@ -421,7 +421,7 @@ def with_build_url_aliases(record: dict) -> dict:
     them to ``""`` when no safe candidate exists — never leaves a rejected
     URL in place.
     """
-    from rootcoz.prow_validation import sanitize_http_href
+    from rootcoz.url_utils import sanitize_http_href
 
     url = sanitize_http_href(
         str(record.get("build_url") or record.get("jenkins_url") or "")
@@ -1578,7 +1578,7 @@ async def update_status(
 
 async def update_build_url(job_id: str, build_url: str) -> None:
     """Update the build_url DB column for an existing result."""
-    from rootcoz.prow_validation import sanitize_http_href
+    from rootcoz.url_utils import sanitize_http_href
 
     safe_url = sanitize_http_href(build_url)
     if not safe_url:

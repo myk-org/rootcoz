@@ -165,6 +165,52 @@ class CISource(ABC):
         return False
 
     @classmethod
+    def validate_request(cls, body: Any, merged: Any) -> None:
+        """Validate source-specific request fields before enqueue.
+
+        Raise ``ValueError`` (or ``HTTPException``) when required config
+        is missing. Default is a no-op.
+        """
+        return None
+
+    @classmethod
+    def build_request_params(
+        cls, body: Any, merged: Any, base_params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Extend ``base_params`` with source-specific persisted fields.
+
+        Mutates and returns ``base_params``. Default leaves params unchanged.
+        """
+        return base_params
+
+    @classmethod
+    def pre_persist_identity_from_request(cls, body: Any) -> dict[str, Any]:
+        """Identity fields to stamp on the initial result before ``fetch``.
+
+        Default returns an empty dict (display name only until fetch).
+        """
+        return {}
+
+    @classmethod
+    def from_analyze_request(cls, body: Any, merged: Any) -> CISource:
+        """Construct a source plugin from an analyze/re-analyze request.
+
+        Subclasses used by the shared CI-source analysis path must override.
+        """
+        raise NotImplementedError(
+            f"{cls.__name__} does not support from_analyze_request"
+        )
+
+    async def persist_fetch_metadata(
+        self, job_id: str, source_result: CISourceResult
+    ) -> None:
+        """Persist source-specific metadata after ``fetch`` (optional).
+
+        Default is a no-op. Prow overrides to store the resolved GCS prefix.
+        """
+        return None
+
+    @classmethod
     def from_stored_params(
         cls,
         params: dict[str, Any],
@@ -225,7 +271,7 @@ async def setup_analysis_workspace(
     """Create workspace, clone repos, copy resources, link artifacts.
 
     Shared helper that eliminates workspace-setup duplication across
-    ``_process_non_jenkins_analysis``, ``_reanalyze_failure_background``,
+    ``_process_ci_source_analysis``, ``_reanalyze_failure_background``,
     and ``jenkins_source.analyze_job``.
 
     Args:

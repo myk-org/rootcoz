@@ -38,6 +38,7 @@ _HTTP_TIMEOUT = 60
 _MAX_SIZE_FINISHED = 1_000_000  # 1 MB
 _MAX_SIZE_BUILD_LOG = 10_000_000  # 10 MB
 _MAX_SIZE_JUNIT_XML = 5_000_000  # 5 MB
+_MAX_SIZE_PR_DIFF = 5_000_000  # 5 MB — GitHub PR unified diff
 _JS_MAX_SAFE_INTEGER = 9007199254740991  # 2^53 - 1
 
 # Strict pattern for GitHub org/repo names — prevents path traversal in API URLs.
@@ -168,7 +169,8 @@ def _gcs_url(bucket: str, *path_parts: str) -> str:
 
 def _build_url(prow_url: str, bucket: str, gcs_prefix: str) -> str:
     """Build the Prow Deck URL for a specific build."""
-    from rootcoz.prow_validation import normalize_prow_url, sanitize_http_href
+    from rootcoz.sources.prow_validation import normalize_prow_url
+    from rootcoz.url_utils import sanitize_http_href
 
     safe_prow = normalize_prow_url(prow_url) if prow_url else ""
     if not safe_prow:
@@ -719,10 +721,54 @@ async def _fetch_pr_changes(
             html_url = pr_data.get("html_url", "")
 
             diff_headers = {**headers, "Accept": "application/vnd.github.v3.diff"}
-            diff_resp = await client.get(pr_api, headers=diff_headers)
             diff_text = ""
-            if diff_resp.status_code == 200:
-                diff_text = diff_resp.text
+            try:
+                async with client.stream(
+                    "GET", pr_api, headers=diff_headers
+                ) as diff_resp:
+                    if diff_resp.status_code == 200:
+                        try:
+                            content_length = int(
+                                diff_resp.headers.get("content-length", 0)
+                            )
+                        except (ValueError, TypeError):
+                            content_length = 0
+                        if content_length > _MAX_SIZE_PR_DIFF:
+                            logger.warning(
+                                "PR diff too large (%d bytes, max %d) for %s/%s#%d",
+                                content_length,
+                                _MAX_SIZE_PR_DIFF,
+                                org,
+                                repo,
+                                pr_number,
+                            )
+                        else:
+                            chunks: list[bytes] = []
+                            total = 0
+                            async for chunk in diff_resp.aiter_bytes():
+                                total += len(chunk)
+                                if total > _MAX_SIZE_PR_DIFF:
+                                    logger.warning(
+                                        "PR diff exceeded %d bytes while streaming "
+                                        "for %s/%s#%d — truncating",
+                                        _MAX_SIZE_PR_DIFF,
+                                        org,
+                                        repo,
+                                        pr_number,
+                                    )
+                                    break
+                                chunks.append(chunk)
+                            diff_text = b"".join(chunks).decode(
+                                "utf-8", errors="replace"
+                            )
+            except httpx.HTTPError:
+                logger.warning(
+                    "Failed to stream PR diff for %s/%s#%d",
+                    org,
+                    repo,
+                    pr_number,
+                    exc_info=True,
+                )
 
     except httpx.RequestError:
         logger.warning(
@@ -901,7 +947,7 @@ class ProwSource(CISource):
         """
         if self._custom_gcs_prefix:
             prefix = self._custom_gcs_prefix.rstrip("/")
-            from rootcoz.prow_validation import validate_gcs_prefix_suffix
+            from rootcoz.sources.prow_validation import validate_gcs_prefix_suffix
 
             try:
                 validate_gcs_prefix_suffix(prefix, self.job_name, self.build_id)
@@ -1066,6 +1112,82 @@ class ProwSource(CISource):
         """Identity fields to stamp before ``fetch()`` completes."""
         return cls.identity_fields(job_name, build_id)
 
+    @classmethod
+    def pre_persist_identity_from_request(cls, body) -> dict:
+        """Identity fields from an analyze request before ``fetch()``."""
+        return cls.pre_persist_identity(
+            getattr(body, "prow_job_name", None) or "",
+            getattr(body, "build_id", None) or "",
+        )
+
+    @classmethod
+    def validate_request(cls, body, merged) -> None:
+        """Require prow_url and gcs_bucket before enqueue."""
+        _ = body
+        if not merged.prow_url:
+            raise ValueError(
+                "prow_url is required \u2014 set PROW_URL env var, "
+                "configure it in Server Settings, or pass prow_url in the request"
+            )
+        if not merged.gcs_bucket:
+            raise ValueError(
+                "gcs_bucket is required \u2014 set GCS_BUCKET env var, "
+                "configure it in Server Settings, or pass gcs_bucket in the request"
+            )
+
+    @classmethod
+    def build_request_params(cls, body, merged, base_params: dict) -> dict:
+        """Stamp Prow-specific fields onto persisted request params."""
+        base_params["prow_job_name"] = body.prow_job_name
+        base_params["build_id"] = body.build_id
+        base_params["prow_url"] = merged.prow_url
+        base_params["gcs_bucket"] = merged.gcs_bucket
+        base_params["gcs_prefix"] = body.gcs_prefix or ""
+        base_params["force"] = merged.force_analysis
+        base_params["get_job_artifacts"] = merged.get_job_artifacts
+        return base_params
+
+    @classmethod
+    def from_analyze_request(cls, body, merged) -> ProwSource:
+        """Construct a ProwSource from an analyze/re-analyze request."""
+        assert body.prow_job_name is not None
+        assert body.build_id is not None
+        return cls(
+            job_name=body.prow_job_name,
+            build_id=body.build_id,
+            gcs_bucket=merged.gcs_bucket,
+            prow_url=merged.prow_url,
+            gcs_prefix=body.gcs_prefix or "",
+            force=merged.force_analysis,
+            get_job_artifacts=merged.get_job_artifacts,
+        )
+
+    async def persist_fetch_metadata(
+        self, job_id: str, source_result: CISourceResult
+    ) -> None:
+        """Store auto-resolved GCS prefix in request_params for re-analyze/chat."""
+        gcs_prefix = source_result.source_metadata.get("resolved_gcs_prefix")
+        if not gcs_prefix:
+            return
+
+        from rootcoz.encryption import (
+            decrypt_sensitive_fields,
+            encrypt_sensitive_fields,
+        )
+        from rootcoz.storage import patch_result_json
+
+        def _patch(data: dict) -> None:
+            params = data.get("request_params")
+            if not isinstance(params, dict):
+                return
+            decrypted = decrypt_sensitive_fields(dict(params))
+            if decrypted.get("gcs_prefix") == gcs_prefix:
+                return
+            decrypted["gcs_prefix"] = gcs_prefix
+            data["request_params"] = encrypt_sensitive_fields(decrypted)
+
+        await patch_result_json(job_id, _patch)
+
     async def populate_chat_workspace(
         self,
         workspace: Path,
@@ -1138,6 +1260,7 @@ class ProwSource(CISource):
                         client, gcs_prefix, self._resolution_warnings
                     )
                     if non_junit and extract_path:
+                        self._extract_path = extract_path
                         artifacts_link.symlink_to(extract_path)
                         logger.info("Chat: linked Prow artifacts into %s", workspace)
                         wrote_any = True
@@ -1145,6 +1268,7 @@ class ProwSource(CISource):
                     logger.warning(
                         "Chat: failed to download Prow artifacts", exc_info=True
                     )
+                    self.cleanup()
 
         return wrote_any
 
@@ -1561,7 +1685,7 @@ class ProwSource(CISource):
             )
             return None
 
-        from rootcoz.prow_validation import (
+        from rootcoz.sources.prow_validation import (
             normalize_gcs_bucket,
             normalize_gcs_prefix,
             normalize_prow_url,

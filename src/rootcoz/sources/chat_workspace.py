@@ -1,36 +1,20 @@
 """Chat workspace population for CI source plugins.
 
 Keeps CI-specific chat setup out of ``engine/`` so the chat engine stays
-CI-agnostic.  Jenkins setup is injected from ``main.py`` at import time
-because its implementation still lives in ``engine/chat.py``.
+CI-agnostic. All CI types go through ``SOURCE_REGISTRY`` →
+``CISource.populate_chat_workspace()``.
 """
 
 from __future__ import annotations
 
 import logging
-from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
 
 from rootcoz.sources.base import CISource
-from rootcoz.sources.jenkins_source import JenkinsSource
-from rootcoz.sources.prow_source import ProwSource
+from rootcoz.sources.registry import SOURCE_REGISTRY, get_source_class
 
 logger = logging.getLogger(__name__)
-
-SOURCE_REGISTRY: dict[str, type[CISource]] = {
-    "prow": ProwSource,
-    "jenkins": JenkinsSource,
-}
-
-_JenkinsChatSetup = Callable[[Path, dict], Awaitable[bool]]
-_jenkins_chat_setup: _JenkinsChatSetup | None = None
-
-
-def register_jenkins_chat_setup(handler: _JenkinsChatSetup) -> None:
-    """Register Jenkins chat workspace setup (called from ``main``)."""
-    global _jenkins_chat_setup
-    _jenkins_chat_setup = handler
 
 
 def reconstruct_source(
@@ -42,7 +26,7 @@ def reconstruct_source(
     child_build_number: int = 0,
 ) -> CISource | None:
     """Reconstruct a CISource plugin from stored request params."""
-    source_cls = SOURCE_REGISTRY.get(analysis_type)
+    source_cls = get_source_class(analysis_type)
     if source_cls is None:
         return None
 
@@ -63,12 +47,6 @@ async def setup_ci_build_workspace(
 ) -> bool:
     """Populate the chat workspace with CI build data for the analyzed job."""
     analysis_type = request_params.get("analysis_type", "jenkins")
-    if analysis_type == "jenkins":
-        if _jenkins_chat_setup is None:
-            logger.warning("Jenkins chat workspace setup is not registered")
-            return False
-        return await _jenkins_chat_setup(workspace, request_params)
-
     source = reconstruct_source(analysis_type, request_params, settings)
     if source is None:
         return False
@@ -81,4 +59,13 @@ async def setup_ci_build_workspace(
         logger.warning(
             "Chat: failed to populate %s workspace", analysis_type, exc_info=True
         )
+        source.cleanup()
         return False
+
+
+# Re-export for callers that imported SOURCE_REGISTRY from this module.
+__all__ = [
+    "SOURCE_REGISTRY",
+    "reconstruct_source",
+    "setup_ci_build_workspace",
+]

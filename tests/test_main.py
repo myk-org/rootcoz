@@ -418,13 +418,13 @@ class TestBaseUrlDetection:
 def _post_analyze_queued(test_client, payload: dict) -> tuple[dict, AsyncMock]:
     """Post to /analyze, assert 202/queued, and return (response_data, mock).
 
-    Patches ``_process_non_jenkins_analysis`` with an ``AsyncMock``, sends the
+    Patches ``_process_ci_source_analysis`` with an ``AsyncMock``, sends the
     *payload* to ``POST /analyze``, asserts the response is 202 with
     ``status == "queued"``, and returns the parsed JSON **and** the mock so
     callers can inspect call args when needed.
     """
     with patch(
-        "rootcoz.main._process_non_jenkins_analysis", new_callable=AsyncMock
+        "rootcoz.main._process_ci_source_analysis", new_callable=AsyncMock
     ) as mock_process:
         response = test_client.post("/analyze", json=payload)
         assert response.status_code == 202
@@ -511,7 +511,7 @@ class TestAnalyzeFailuresEndpoint:
     def test_analyze_failures_handles_analysis_exception(self, test_client) -> None:
         """Test that when background task raises, job is still queued (202)."""
         with patch(
-            "rootcoz.main._process_non_jenkins_analysis",
+            "rootcoz.main._process_ci_source_analysis",
             new_callable=AsyncMock,
         ) as mock_process:
             mock_process.side_effect = RuntimeError("boom")
@@ -882,7 +882,7 @@ class TestAnalyzeProwEndpoint:
         self, temp_db_path: Path
     ) -> None:
         """When all GCS fetches error, the result must be 'failed', not 'completed'."""
-        from rootcoz.main import _process_non_jenkins_analysis
+        from rootcoz.main import _process_ci_source_analysis
         from rootcoz.models import UnifiedAnalyzeRequest
         from rootcoz.sources.base import CISourceResult
 
@@ -923,7 +923,7 @@ class TestAnalyzeProwEndpoint:
             await storage.init_db()
             await storage.save_result(job_id, "", "pending", {})
 
-            await _process_non_jenkins_analysis(
+            await _process_ci_source_analysis(
                 job_id=job_id,
                 body=body,
                 merged=merged,
@@ -955,7 +955,7 @@ class TestAnalyzeProwEndpoint:
         self, temp_db_path: Path
     ) -> None:
         """Successful Prow builds get a prow-specific early-exit summary."""
-        from rootcoz.main import _process_non_jenkins_analysis
+        from rootcoz.main import _process_ci_source_analysis
         from rootcoz.models import UnifiedAnalyzeRequest
         from rootcoz.sources.base import CISourceResult
 
@@ -1018,7 +1018,7 @@ class TestAnalyzeProwEndpoint:
                 },
             )
 
-            await _process_non_jenkins_analysis(
+            await _process_ci_source_analysis(
                 job_id=job_id,
                 body=body,
                 merged=merged,
@@ -5352,9 +5352,7 @@ class TestRequestParamsPreservation:
         self, test_client, temp_db_path: Path
     ) -> None:
         """POST /analyze with type=raw seeds request_params in pending state."""
-        with patch(
-            "rootcoz.main._process_non_jenkins_analysis", new_callable=AsyncMock
-        ):
+        with patch("rootcoz.main._process_ci_source_analysis", new_callable=AsyncMock):
             response = test_client.post(
                 "/analyze",
                 json={
@@ -5527,7 +5525,7 @@ class TestReAnalyzeEndpoint:
             "",
             result_data,
         )
-        with patch("rootcoz.main._process_non_jenkins_analysis"):
+        with patch("rootcoz.main._process_ci_source_analysis"):
             response = test_client.post("/re-analyze/file-origin", json={})
         assert response.status_code == 202
         new_job_id = response.json()["job_id"]
@@ -5564,7 +5562,7 @@ class TestReAnalyzeEndpoint:
             "https://prow.example.com/view/gs/test-bucket/logs/pull-test/1234567890",
             result_data,
         )
-        with patch("rootcoz.main._process_non_jenkins_analysis") as mock_process:
+        with patch("rootcoz.main._process_ci_source_analysis") as mock_process:
             response = test_client.post(
                 "/re-analyze/prow-origin",
                 json={"force": True, "get_job_artifacts": True},
