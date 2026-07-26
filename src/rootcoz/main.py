@@ -8883,14 +8883,12 @@ _ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 # from non-asyncio logging threads via call_soon_threadsafe.
 _log_listeners: set[tuple[asyncio.AbstractEventLoop, asyncio.Queue[str]]] = set()
 _log_listeners_lock = threading.Lock()
-_sse_log_drops: int = 0
 
 
 class _SSELogHandler(logging.Handler):
     """Logging handler that broadcasts formatted records to SSE listeners."""
 
     def emit(self, record: logging.LogRecord) -> None:
-        global _sse_log_drops  # noqa: PLW0603
         with _log_listeners_lock:
             if not _log_listeners:
                 return
@@ -8900,11 +8898,10 @@ class _SSELogHandler(logging.Handler):
             clean = _ANSI_RE.sub("", msg)
 
             def _enqueue(q: asyncio.Queue[str], line: str) -> None:
-                global _sse_log_drops  # noqa: PLW0603
                 try:
                     q.put_nowait(line)
                 except asyncio.QueueFull:
-                    _sse_log_drops += 1
+                    q._drop_count = getattr(q, "_drop_count", 0) + 1  # type: ignore[attr-defined]
 
             for loop, q in listeners:
                 try:
@@ -9040,9 +9037,7 @@ async def stream_logs(
         finally:
             with _log_listeners_lock:
                 _log_listeners.discard(listener)
-            global _sse_log_drops  # noqa: PLW0603
-            drops = _sse_log_drops
-            _sse_log_drops = 0
+            drops = getattr(queue, "_drop_count", 0)
             if drops > 0:
                 logger.warning(
                     "SSE log stream disconnected; %d log line(s) dropped due to full queue",

@@ -25,9 +25,8 @@ spec:
         {{- end }}
       annotations:
         checksum/config: {{ include "rootcoz.configMapData" . | sha256sum }}
-        {{- /* Hash values only — avoid randAlphaNum helpers (not memoized across includes). */}}
-        checksum/credentials: {{ printf "%s\n%s\n%s\n%s" .Values.admin.key .Values.ai.geminiApiKey .Values.ai.anthropicApiKey .Values.ai.cursor.apiKey | sha256sum }}
-        checksum/encryption: {{ .Values.encryptionKey | sha256sum }}
+        checksum/credentials: {{ include "rootcoz.credentialsSecretData" . | sha256sum }}
+        checksum/encryption: {{ include "rootcoz.encryptionKey" . | sha256sum }}
         {{- if and .Values.ai.vertex.enabled $gcloudKey }}
         checksum/gcloud: {{ $gcloudKey | sha256sum }}
         {{- end }}
