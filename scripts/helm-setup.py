@@ -745,14 +745,40 @@ def main() -> int:
         print(f"Helm install failed: {exc}", file=sys.stderr)
         return 1
 
+    release = install_target["release"]
+    namespace = install_target["namespace"]
+
+    # Try to fetch the route URL after deploy.
+    route_url = ""
+    if not args.dry_run and generated.get("route", {}).get("enabled"):
+        try:
+            route_host = subprocess.run(
+                [
+                    "kubectl",
+                    "get",
+                    "route",
+                    f"{release}-route",
+                    "-n",
+                    namespace,
+                    "-o",
+                    "jsonpath={.spec.host}",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            if route_host.returncode == 0 and route_host.stdout.strip():
+                route_url = f"https://{route_host.stdout.strip()}"
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            pass  # kubectl not available or timed out — skip
+
     print("\nDone. First login:")
+    if route_url:
+        print(f"  URL: {route_url}")
     print("  Username: admin")
     print("  Password: the admin API key you set during setup")
     print(f"(Also stored in {secrets_path} as admin.key.)")
-    print(
-        f"Release: {install_target['release']}  "
-        f"Namespace: {install_target['namespace']}"
-    )
+    print(f"Release: {release}  Namespace: {namespace}")
     return 0
 
 
