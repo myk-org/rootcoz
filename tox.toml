@@ -102,18 +102,10 @@ commands = [
     "chart/",
     "-f",
     "chart/examples/values-openshift.yaml",
-    "--set",
-    "ai.vertex.enabled=true",
-    "--set",
-    "ai.vertex.projectId=test-project",
-    "--set",
-    "ai.vertex.serviceAccountKey={}",  # pragma: allowlist secret
+    "-f",
+    "chart/examples/values-vertex-fixture.yaml",
     "--set",
     "ai.geminiApiKey=test-key",  # pragma: allowlist secret
-    "--set",
-    "admin.key=test-admin-key",  # pragma: allowlist secret
-    "--set",
-    "encryptionKey=test-encryption-key-for-helm-template-render",  # pragma: allowlist secret
   ],
   [
     "helm",
@@ -122,35 +114,10 @@ commands = [
     "chart/",
     "-f",
     "chart/examples/values-openshift.yaml",
-    "--set",
-    "ai.provider=cursor",
-    "--set",
-    "ai.cursor.authJson={}",
-    "--set",
-    "ai.geminiApiKey=",  # pragma: allowlist secret
-    "--set",
-    "admin.key=test-admin-key",  # pragma: allowlist secret
-    "--set",
-    "encryptionKey=test-encryption-key-for-helm-template-render",  # pragma: allowlist secret
-  ],
-  [
-    "helm",
-    "template",
-    "rootcoz",
-    "chart/",
     "-f",
-    "chart/examples/values-openshift.yaml",
-    "--set",
-    "snapshots.enabled=true",
-    "--set",
-    "snapshots.volumeSnapshotClass=test-snapclass",
-    "--set",
-    "ai.geminiApiKey=test-key",  # pragma: allowlist secret
-    "--set",
-    "admin.key=test-admin-key",  # pragma: allowlist secret
-    "--set",
-    "encryptionKey=test-encryption-key-for-helm-template-render",  # pragma: allowlist secret
+    "chart/examples/values-cursor-fixture.yaml",
   ],
+
   [
     "helm",
     "template",

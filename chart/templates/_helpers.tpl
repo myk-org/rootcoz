@@ -73,7 +73,7 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end }}
 
 {{/*
-Validate chart values: routing, snapshots, AI config.
+Validate chart values: routing, AI config.
 */}}
 {{- define "rootcoz.validate" -}}
 {{- if and .Values.route.enabled .Values.ingress.enabled -}}
@@ -84,9 +84,6 @@ Validate chart values: routing, snapshots, AI config.
 {{- end -}}
 {{- if and .Values.ingress.enabled (not .Values.ingress.host) -}}
 {{- fail "ingress.host is required when ingress.enabled is true" -}}
-{{- end -}}
-{{- if and .Values.snapshots.enabled (not .Values.snapshots.volumeSnapshotClass) -}}
-{{- fail "snapshots.volumeSnapshotClass is required when snapshots.enabled is true" -}}
 {{- end -}}
 {{- if .Release.IsInstall -}}
 {{- if or (not .Values.ai.provider) (not .Values.ai.model) -}}
@@ -239,6 +236,44 @@ CURSOR_API_KEY: {{ $cursor | b64enc | quote }}
 {{- end }}
 
 {{/*
+Generic secret-payload resolver: values override (string or map) → existing secret fallback.
+Call via: include "rootcoz.resolveSecretPayload" (dict "value" <val> "secretName" <name> "secretKey" <key> "Release" .Release)
+*/}}
+{{- define "rootcoz.resolveSecretPayload" -}}
+{{- $resolved := "" -}}
+{{- if kindIs "string" .value -}}
+{{- $resolved = .value -}}
+{{- else if kindIs "map" .value -}}
+{{- if .value -}}
+{{- $resolved = .value | toJson -}}
+{{- end -}}
+{{- end -}}
+{{- if $resolved -}}
+{{- $resolved -}}
+{{- else -}}
+{{- $secret := lookup "v1" "Secret" .Release.Namespace .secretName -}}
+{{- if and $secret (index $secret.data .secretKey) -}}
+{{- index $secret.data .secretKey | b64dec -}}
+{{- end -}}
+{{- end -}}
+{{- end }}
+
+{{/*
+Resolve Vertex SA JSON: values override, else preserve existing secret on upgrade.
+Accepts a non-empty string or map in values.
+*/}}
+{{- define "rootcoz.gcloudServiceAccountKey" -}}
+{{- include "rootcoz.resolveSecretPayload" (dict "value" .Values.ai.vertex.serviceAccountKey "secretName" (include "rootcoz.gcloudSecretName" .) "secretKey" "application_default_credentials.json" "Release" .Release) -}}
+{{- end }}
+
+{{/*
+Resolve Cursor auth.json: values override, else preserve existing secret on upgrade.
+*/}}
+{{- define "rootcoz.cursorAuthJson" -}}
+{{- include "rootcoz.resolveSecretPayload" (dict "value" .Values.ai.cursor.authJson "secretName" (include "rootcoz.cursorAuthSecretName" .) "secretKey" "auth.json" "Release" .Release) -}}
+{{- end }}
+
+{{/*
 Non-sensitive ConfigMap entries.
 */}}
 {{- define "rootcoz.configMapData" -}}
@@ -274,4 +309,23 @@ CLOUD_ML_REGION: {{ .Values.ai.vertex.region | quote }}
 ANTHROPIC_VERTEX_PROJECT_ID: {{ .Values.ai.vertex.projectId | quote }}
 {{- end }}
 {{- end }}
+{{- end }}
+
+{{/*
+Pod-level security context for restricted PodSecurity admission.
+*/}}
+{{- define "rootcoz.podSecurityContext" -}}
+seccompProfile:
+  type: RuntimeDefault
+{{- end }}
+
+{{/*
+Container-level security context for restricted PodSecurity admission.
+*/}}
+{{- define "rootcoz.containerSecurityContext" -}}
+allowPrivilegeEscalation: false
+runAsNonRoot: true
+capabilities:
+  drop:
+    - ALL
 {{- end }}

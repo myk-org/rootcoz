@@ -1,6 +1,9 @@
 """Interactive rootcoz Helm install helper.
 
-Prompts for bootstrap settings, writes split values files, and runs helm upgrade --install.
+Prompts for bootstrap settings, writes split values files under a user-chosen
+directory outside the git repo (default ``~/.config/rootcoz/helm``), and runs
+helm upgrade --install. On re-run, existing values files are offered as defaults.
+Legacy values files polluted with terminal escape codes are sanitized on load.
 """
 
 from __future__ import annotations
@@ -9,20 +12,61 @@ import argparse
 import getpass
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
 from pathlib import Path
 from typing import Any
 
+import yaml
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 CHART_DIR = REPO_ROOT / "chart"
 VALID_PROVIDERS = ("gemini", "claude", "cursor")
+_ADMIN_KEY_MIN_LENGTH = 16
+_GENERATED_FILENAME = "values.generated.yaml"
+_SECRETS_FILENAME = "values.secrets.yaml"  # pragma: allowlist secret
+_SETUP_META_FILENAME = "setup-meta.yaml"
+_DEFAULT_OUTPUT_DIR = Path.home() / ".config" / "rootcoz" / "helm"
+_DEFAULT_RELEASE = "rootcoz"
+_DEFAULT_NAMESPACE = "rootcoz"
+
+# CSI / OSC / other terminal escapes that getpass/input can capture on special keys
+# (e.g. Insert → ESC [ 2 ~).
+_ANSI_ESCAPE_RE = re.compile(
+    r"\x1b\[[0-9;?]*[ -/]*[@-~]"  # CSI
+    r"|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)"  # OSC
+    r"|\x1b[@-Z\\-_]"  # other Fe escapes
+)
+
+
+def _strip_terminal_controls(value: str, *, keep: str = "\t\n") -> str:
+    """Remove ANSI escapes and C0/C1 controls; keep selected whitespace chars.
+
+    Also drops Unicode C1 controls (U+0080–U+009F), including 8-bit CSI (``\\x9b``).
+    """
+    cleaned = _ANSI_ESCAPE_RE.sub("", value)
+    return "".join(
+        ch
+        for ch in cleaned
+        if ch in keep or (ord(ch) >= 32 and not (0x80 <= ord(ch) <= 0x9F))
+    )
+
+
+def _sanitize_user_input(value: str) -> str:
+    """Strip terminal escape sequences and C0 controls from interactive input."""
+    return _strip_terminal_controls(value, keep="\t\n").strip()
+
+
+def _sanitize_yaml_text(value: str) -> str:
+    """Strip terminal escapes/C0 controls from on-disk YAML without trimming edges."""
+    return _strip_terminal_controls(value, keep="\t\n\r")
 
 
 def _prompt(message: str, default: str = "") -> str:
     suffix = f" [{default}]" if default else ""
-    value = input(f"{message}{suffix}: ").strip()
+    value = _sanitize_user_input(input(f"{message}{suffix}: "))
     return value or default
 
 
@@ -37,7 +81,7 @@ def _prompt_choice(message: str, choices: tuple[str, ...], default: str) -> str:
 def _prompt_yes_no(message: str, default: bool = True) -> bool:
     default_label = "Y/n" if default else "y/N"
     while True:
-        value = input(f"{message} ({default_label}): ").strip().lower()
+        value = _sanitize_user_input(input(f"{message} ({default_label}): ")).lower()
         if not value:
             return default
         if value in {"y", "yes"}:
@@ -45,6 +89,89 @@ def _prompt_yes_no(message: str, default: bool = True) -> bool:
         if value in {"n", "no"}:
             return False
         print("Enter y or n.")
+
+
+def _prompt_secret(
+    message: str,
+    *,
+    required: bool = True,
+    existing: str = "",
+) -> str:
+    """Prompt for a secret. Blank keeps *existing* when set."""
+    suffix = " [stored — leave blank to keep]" if existing else ""
+    value = _sanitize_user_input(getpass.getpass(f"{message}{suffix}: "))
+    if not value and existing:
+        return existing
+    if required and not value:
+        raise ValueError(f"{message} is required")
+    return value
+
+
+def _nested_get(data: dict[str, Any], *keys: str, default: Any = "") -> Any:
+    cur: Any = data
+    for key in keys:
+        if not isinstance(cur, dict) or key not in cur:
+            return default
+        cur = cur[key]
+    if cur is None:
+        return default
+    return cur
+
+
+def _load_values_parse_error(path: Path, exc: Exception) -> ValueError:
+    """Build a ValueError for unrecoverable YAML parse failures."""
+    return ValueError(
+        f"Failed to parse {path}: {exc}. "
+        "The file may be corrupted (e.g. terminal escape codes in a secret). "
+        "Delete it and re-run setup."
+    )
+
+
+def _load_values(path: Path) -> dict[str, Any]:
+    """Load a previously written values YAML file, or {} if missing/empty.
+
+    Files written before input sanitization may contain terminal escape codes
+    (e.g. Insert → ESC[2~) that PyYAML rejects. Strip those, rewrite via
+    ``_write_values`` when possible, and continue so re-runs can re-prompt for
+    blanked secrets. If cleaned text still does not parse, raise with
+    delete-and-re-run guidance.
+    """
+    if not path.is_file():
+        return {}
+    raw = path.read_text(encoding="utf-8")
+    try:
+        # PyYAML rejects embedded ESC/control chars, so parse failure is the
+        # signal for the known Insert-key corruption mode.
+        data = yaml.safe_load(raw)
+    except yaml.YAMLError as first_exc:
+        cleaned = _sanitize_yaml_text(raw)
+        if cleaned == raw:
+            raise _load_values_parse_error(path, first_exc) from first_exc
+        try:
+            data = yaml.safe_load(cleaned)
+        except yaml.YAMLError as exc:
+            raise _load_values_parse_error(path, exc) from exc
+        if data is None:
+            data = {}
+        if not isinstance(data, dict):
+            raise ValueError(f"Expected a YAML mapping in {path}")
+        secret = path.name == _SECRETS_FILENAME
+        try:
+            _write_values(path, data, secret=secret)
+            rewrite_note = "and rewrote the file"
+        except OSError as write_exc:
+            rewrite_note = f"in memory only (could not rewrite file: {write_exc})"
+        print(
+            f"Warning: stripped terminal escape codes from {path} {rewrite_note}. "
+            "Re-enter any blanked secrets when prompted.",
+            file=sys.stderr,
+        )
+        return data
+    if data is None:
+        return {}
+    if not isinstance(data, dict):
+        raise ValueError(f"Expected a YAML mapping in {path}")
+    return data
 
 
 def _read_file(path: str) -> str:
@@ -140,11 +267,25 @@ def _yaml_scalar(value: Any, indent: int = 0) -> str:
     return text
 
 
-def _collect_routing() -> dict[str, Any]:
+def _infer_cluster(existing: dict[str, Any]) -> str:
+    """Derive cluster type from a previously saved generated values file."""
+    route_enabled = bool(_nested_get(existing, "route", "enabled", default=False))
+    ingress_enabled = bool(_nested_get(existing, "ingress", "enabled", default=False))
+    if route_enabled:
+        return "openshift"
+    if ingress_enabled:
+        return "kubernetes"
+    if existing.get("route") is not None or existing.get("ingress") is not None:
+        return "clusterip"
+    return "openshift"
+
+
+def _collect_routing(existing: dict[str, Any] | None = None) -> dict[str, Any]:
+    existing = existing or {}
     cluster = _prompt_choice(
         "Cluster type (openshift/kubernetes/clusterip)",
         ("openshift", "kubernetes", "clusterip"),
-        "openshift",
+        _infer_cluster(existing),
     )
     generated: dict[str, Any] = {
         "route": {"enabled": cluster == "openshift"},
@@ -154,62 +295,157 @@ def _collect_routing() -> dict[str, Any]:
         },
     }
     if cluster == "openshift":
-        host = _prompt("Route hostname (e.g. rootcoz.apps.cluster.com)")
+        host = _prompt(
+            "Route hostname (e.g. rootcoz.apps.cluster.com)",
+            str(_nested_get(existing, "route", "host", default="") or ""),
+        )
         if not host:
             raise ValueError("Route hostname is required for OpenShift")
         generated["route"]["host"] = host
     elif cluster == "kubernetes":
-        host = _prompt("Ingress hostname (e.g. rootcoz.example.com)")
+        host = _prompt(
+            "Ingress hostname (e.g. rootcoz.example.com)",
+            str(_nested_get(existing, "ingress", "host", default="") or ""),
+        )
         if not host:
             raise ValueError("Ingress hostname is required for Kubernetes")
         generated["ingress"]["host"] = host
-        generated["ingress"]["className"] = _prompt("Ingress class", "nginx")
+        generated["ingress"]["className"] = _prompt(
+            "Ingress class",
+            str(_nested_get(existing, "ingress", "className", default="") or "nginx"),
+        )
         generated["ingress"]["tls"]["secretName"] = _prompt(
-            "TLS secret name", "rootcoz-tls"
+            "TLS secret name",
+            str(
+                _nested_get(existing, "ingress", "tls", "secretName", default="")
+                or "rootcoz-tls"
+            ),
         )
     return generated
 
 
-def _prompt_secret(message: str, *, required: bool = True) -> str:
-    value = getpass.getpass(f"{message}: ").strip()
-    if required and not value:
-        raise ValueError(f"{message} is required")
-    return value
+def _collect_ai(
+    existing_generated: dict[str, Any] | None = None,
+    existing_secrets: dict[str, Any] | None = None,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    existing_generated = existing_generated or {}
+    existing_secrets = existing_secrets or {}
 
+    provider_default = str(
+        _nested_get(existing_generated, "ai", "provider", default="") or "gemini"
+    )
+    if provider_default not in VALID_PROVIDERS:
+        provider_default = "gemini"
+    provider = _prompt_choice("AI provider", VALID_PROVIDERS, provider_default)
 
-def _collect_ai() -> tuple[dict[str, Any], dict[str, Any]]:
-    provider = _prompt_choice("AI provider", VALID_PROVIDERS, "gemini")
-    model_default = {
+    model_defaults = {
         "gemini": "gemini-2.5-pro",
         "claude": "claude-sonnet-4-20250514",
         "cursor": "gpt-5",
-    }[provider]
+    }
+    saved_model = str(_nested_get(existing_generated, "ai", "model", default="") or "")
+    saved_provider = str(
+        _nested_get(existing_generated, "ai", "provider", default="") or ""
+    )
+    if saved_model and saved_provider == provider:
+        model_default = saved_model
+    else:
+        model_default = model_defaults[provider]
     model = _prompt("AI model", model_default)
 
     generated: dict[str, Any] = {"ai": {"provider": provider, "model": model}}
     secrets: dict[str, Any] = {"ai": {}}
 
     if provider == "gemini":
-        secrets["ai"]["geminiApiKey"] = _prompt_secret("Gemini API key")
+        secrets["ai"]["geminiApiKey"] = _prompt_secret(
+            "Gemini API key",
+            existing=str(
+                _nested_get(existing_secrets, "ai", "geminiApiKey", default="") or ""
+            ),
+        )
     elif provider == "claude":
-        use_vertex = _prompt_yes_no("Use Google Vertex AI for Claude?", default=False)
+        saved_vertex = bool(
+            _nested_get(existing_generated, "ai", "vertex", "enabled", default=False)
+        )
+        use_vertex = _prompt_yes_no(
+            "Use Google Vertex AI for Claude?", default=saved_vertex
+        )
         generated["ai"]["vertex"] = {"enabled": use_vertex}
         if use_vertex:
-            generated["ai"]["vertex"]["projectId"] = _prompt("GCP project ID")
-            generated["ai"]["vertex"]["region"] = _prompt("Vertex region", "us-east5")
-            sa_path = _prompt("Path to GCP service account JSON key file")
-            secrets["ai"]["vertex"] = {"serviceAccountKey": _read_file(sa_path)}
+            generated["ai"]["vertex"]["projectId"] = _prompt(
+                "GCP project ID",
+                str(
+                    _nested_get(
+                        existing_generated, "ai", "vertex", "projectId", default=""
+                    )
+                    or ""
+                ),
+            )
+            generated["ai"]["vertex"]["region"] = _prompt(
+                "Vertex region",
+                str(
+                    _nested_get(
+                        existing_generated, "ai", "vertex", "region", default=""
+                    )
+                    or "us-east5"
+                ),
+            )
+            existing_sa = _nested_get(
+                existing_secrets, "ai", "vertex", "serviceAccountKey", default=""
+            )
+            if isinstance(existing_sa, dict):
+                existing_sa = json.dumps(existing_sa)
+            existing_sa_str = str(existing_sa or "")
+            if existing_sa_str:
+                keep = _prompt_yes_no(
+                    "Keep existing GCP service account key?", default=True
+                )
+                if keep:
+                    secrets["ai"]["vertex"] = {"serviceAccountKey": existing_sa_str}
+                else:
+                    sa_path = _prompt("Path to GCP service account JSON key file")
+                    secrets["ai"]["vertex"] = {"serviceAccountKey": _read_file(sa_path)}
+            else:
+                sa_path = _prompt("Path to GCP service account JSON key file")
+                secrets["ai"]["vertex"] = {"serviceAccountKey": _read_file(sa_path)}
         else:
-            secrets["ai"]["anthropicApiKey"] = _prompt_secret("Anthropic API key")
+            secrets["ai"]["anthropicApiKey"] = _prompt_secret(
+                "Anthropic API key",
+                existing=str(
+                    _nested_get(existing_secrets, "ai", "anthropicApiKey", default="")
+                    or ""
+                ),
+            )
     else:
-        api_key = _prompt_secret("Cursor API key", required=False)
-        auth_path = _prompt("Path to Cursor auth.json (optional)", "")
+        existing_cursor_key = str(
+            _nested_get(existing_secrets, "ai", "cursor", "apiKey", default="") or ""
+        )
+        existing_auth = _nested_get(
+            existing_secrets, "ai", "cursor", "authJson", default=""
+        )
+        api_key = _prompt_secret(
+            "Cursor API key", required=False, existing=existing_cursor_key
+        )
         if api_key:
             secrets["ai"]["cursor"] = {"apiKey": api_key}
-        if auth_path:
-            secrets["ai"].setdefault("cursor", {})["authJson"] = _read_json_file(
-                auth_path
-            )
+
+        if existing_auth:
+            keep_auth = _prompt_yes_no("Keep existing Cursor auth.json?", default=True)
+            if keep_auth:
+                secrets["ai"].setdefault("cursor", {})["authJson"] = existing_auth
+            else:
+                auth_path = _prompt("Path to Cursor auth.json (optional)", "")
+                if auth_path:
+                    secrets["ai"].setdefault("cursor", {})["authJson"] = (
+                        _read_json_file(auth_path)
+                    )
+        else:
+            auth_path = _prompt("Path to Cursor auth.json (optional)", "")
+            if auth_path:
+                secrets["ai"].setdefault("cursor", {})["authJson"] = _read_json_file(
+                    auth_path
+                )
+
         if not secrets["ai"].get("cursor"):
             raise ValueError(
                 "Cursor provider requires an API key and/or auth.json file"
@@ -218,24 +454,41 @@ def _collect_ai() -> tuple[dict[str, Any], dict[str, Any]]:
     return generated, secrets
 
 
-def _write_values(path: Path, data: dict[str, Any], secret: bool) -> bool:
+def _collect_admin(existing_secrets: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Collect bootstrap admin API key used as the first-login password."""
+    existing_secrets = existing_secrets or {}
+    existing_key = str(_nested_get(existing_secrets, "admin", "key", default="") or "")
+    print(
+        "\nBootstrap admin login uses username 'admin' and an API key as the password."
+    )
+    while True:
+        key = _prompt_secret(
+            "Admin API key (first-login password)",
+            existing=existing_key,
+        )
+        if len(key) < _ADMIN_KEY_MIN_LENGTH:
+            print(f"Admin API key must be at least {_ADMIN_KEY_MIN_LENGTH} characters.")
+            continue
+        # Kept stored value — no re-confirm needed.
+        if existing_key and key == existing_key:
+            return {"admin": {"key": key}}
+        confirm = _prompt_secret("Confirm admin API key")
+        if key != confirm:
+            print("Keys do not match. Try again.")
+            continue
+        return {"admin": {"key": key}}
+
+
+def _write_values(path: Path, data: dict[str, Any], secret: bool) -> None:
     """Write a YAML values file, optionally with restricted permissions.
 
     For secret files the descriptor is opened with mode 0600 *before* any
     content is written, eliminating the TOCTOU window where a
     world-readable file briefly exists on disk.
 
-    If *path* already exists the user is prompted for confirmation before
-    overwriting.
-
-    Returns True if the file was written, False if skipped.
+    Always overwrites — callers collect fresh values (with prior values as
+    defaults) before writing.
     """
-    if path.exists():
-        answer = input(f"{path} already exists. Overwrite? (y/n): ").strip().lower()
-        if answer not in {"y", "yes"}:
-            print(f"Skipped writing {path}")
-            return False
-
     content = _dump_yaml(data)
     if secret:
         fd = os.open(
@@ -249,7 +502,89 @@ def _write_values(path: Path, data: dict[str, Any], secret: bool) -> bool:
     else:
         path.write_text(content, encoding="utf-8")
         os.chmod(path, 0o644)
-    return True
+
+
+def _path_under_repo(path: Path) -> bool:
+    """Return True if *path* resolves inside the rootcoz git checkout."""
+    try:
+        path.resolve().relative_to(REPO_ROOT.resolve())
+        return True
+    except ValueError:
+        return False
+
+
+def _ensure_output_dir(path: Path) -> Path:
+    """Create output dir with mode 0700; refuse accidental writes into the repo."""
+    resolved = path.expanduser().resolve()
+    if _path_under_repo(resolved):
+        raise ValueError(
+            f"Refusing to write values under the git repo ({resolved}). "
+            f"Choose a directory outside the checkout (default: {_DEFAULT_OUTPUT_DIR})."
+        )
+    try:
+        resolved.mkdir(parents=True, mode=0o700, exist_ok=True)
+        os.chmod(resolved, 0o700)
+    except OSError as exc:
+        raise ValueError(f"Cannot create output directory {resolved}: {exc}") from exc
+    return resolved
+
+
+def _resolve_output_paths(
+    output_dir: str | None,
+    *,
+    prompt: bool = True,
+) -> tuple[Path, Path]:
+    """Resolve generated/secrets paths under an output directory.
+
+    When *output_dir* is None and *prompt* is True, ask the user (defaulting to
+    ``~/.config/rootcoz/helm``).
+    """
+    if output_dir is None and prompt:
+        raw = _prompt(
+            "Output directory for values files (outside the git repo)",
+            str(_DEFAULT_OUTPUT_DIR),
+        )
+    else:
+        raw = output_dir or str(_DEFAULT_OUTPUT_DIR)
+    out = _ensure_output_dir(Path(raw))
+    return out / _GENERATED_FILENAME, out / _SECRETS_FILENAME
+
+
+def _collect_install_target(
+    existing_meta: dict[str, Any] | None = None,
+    *,
+    release_default: str | None = None,
+    namespace_default: str | None = None,
+) -> dict[str, str]:
+    """Prompt for Helm release name and Kubernetes namespace."""
+    existing_meta = existing_meta or {}
+    release = _prompt(
+        "Helm release name",
+        release_default or str(existing_meta.get("release") or "") or _DEFAULT_RELEASE,
+    )
+    namespace = _prompt(
+        "Kubernetes namespace",
+        namespace_default
+        or str(existing_meta.get("namespace") or "")
+        or _DEFAULT_NAMESPACE,
+    )
+    if not release:
+        raise ValueError("Helm release name is required")
+    if not namespace:
+        raise ValueError("Kubernetes namespace is required")
+    return {"release": release, "namespace": namespace}
+
+
+def _resolve_helm() -> str:
+    """Return the helm binary path or raise if Helm 3 is not on PATH."""
+    helm = shutil.which("helm")
+    if not helm:
+        raise RuntimeError(
+            "helm not found in PATH. Install Helm 3 "
+            "(https://helm.sh/docs/intro/install/) or re-run with --skip-helm "
+            "to only write values files."
+        )
+    return helm
 
 
 def _run_helm(
@@ -259,12 +594,8 @@ def _run_helm(
     secrets_path: Path,
     dry_run: bool,
 ) -> None:
-    helm = shutil.which("helm")
-    if not helm:
-        raise RuntimeError("helm not found in PATH")
-
     cmd = [
-        helm,
+        _resolve_helm(),
         "upgrade",
         "--install",
         release,
@@ -286,17 +617,23 @@ def _run_helm(
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Interactive rootcoz Helm setup")
-    parser.add_argument("--release", default="rootcoz", help="Helm release name")
-    parser.add_argument("--namespace", default="rootcoz", help="Kubernetes namespace")
     parser.add_argument(
-        "--generated-file",
-        default="values.generated.yaml",
-        help="Output path for non-secret values",
+        "--release",
+        default=None,
+        help=f"Helm release name (default: prompt, usually {_DEFAULT_RELEASE})",
     )
     parser.add_argument(
-        "--secrets-file",
-        default="values.secrets.yaml",
-        help="Output path for secret values",
+        "--namespace",
+        default=None,
+        help=f"Kubernetes namespace (default: prompt, usually {_DEFAULT_NAMESPACE})",
+    )
+    parser.add_argument(
+        "--output-dir",
+        default=None,
+        help=(
+            f"Directory for values.generated.yaml / values.secrets.yaml "
+            f"(default: prompt, usually {_DEFAULT_OUTPUT_DIR})"
+        ),
     )
     parser.add_argument(
         "--dry-run",
@@ -314,30 +651,80 @@ def main() -> int:
         print(f"Chart not found at {CHART_DIR}", file=sys.stderr)
         return 1
 
+    # Fail fast before prompts/credentials when Helm will be required.
+    if not args.skip_helm:
+        try:
+            _resolve_helm()
+        except RuntimeError as exc:
+            print(f"Setup failed: {exc}", file=sys.stderr)
+            return 1
+
     print("rootcoz Helm setup\n")
+
+    # Resolve output dir first so re-runs can load prior values as defaults.
     try:
-        generated = _collect_routing()
-        ai_generated, ai_secrets = _collect_ai()
+        generated_path, secrets_path = _resolve_output_paths(
+            args.output_dir,
+            prompt=args.output_dir is None,
+        )
+    except ValueError as exc:
+        print(f"Setup failed: {exc}", file=sys.stderr)
+        return 1
+
+    meta_path = generated_path.parent / _SETUP_META_FILENAME
+    try:
+        existing_generated = _load_values(generated_path)
+        existing_secrets = _load_values(secrets_path)
+        existing_meta = _load_values(meta_path)
+    except ValueError as exc:
+        print(f"Setup failed: {exc}", file=sys.stderr)
+        return 1
+
+    print(f"Values directory: {generated_path.parent}")
+    if existing_generated or existing_secrets or existing_meta:
+        print("Loaded existing values (used as defaults).")
+    print()
+
+    # Collect and save incrementally so earlier values survive if a later
+    # step fails (e.g. AI config error doesn't lose release/namespace).
+    try:
+        install_target = _collect_install_target(
+            existing_meta,
+            release_default=args.release,
+            namespace_default=args.namespace,
+        )
+        _write_values(meta_path, install_target, secret=False)
     except (ValueError, FileNotFoundError, json.JSONDecodeError) as exc:
         print(f"Setup failed: {exc}", file=sys.stderr)
         return 1
-    generated.update(ai_generated)
 
-    generated_path = Path(args.generated_file)
-    secrets_path = Path(args.secrets_file)
+    try:
+        generated = _collect_routing(existing_generated)
+        _write_values(generated_path, generated, secret=False)
+    except (ValueError, FileNotFoundError, json.JSONDecodeError) as exc:
+        print(f"Setup failed: {exc}", file=sys.stderr)
+        return 1
 
-    wrote_generated = _write_values(generated_path, generated, secret=False)
-    wrote_secrets = _write_values(secrets_path, ai_secrets, secret=True)
+    try:
+        ai_generated, ai_secrets = _collect_ai(existing_generated, existing_secrets)
+        generated.update(ai_generated)
+        _write_values(generated_path, generated, secret=False)
+    except (ValueError, FileNotFoundError, json.JSONDecodeError) as exc:
+        print(f"Setup failed: {exc}", file=sys.stderr)
+        return 1
 
-    if not wrote_generated and not wrote_secrets:
-        print("\nBoth files were skipped. Nothing to do.")
-        return 0
+    try:
+        admin_secrets = _collect_admin(existing_secrets)
+        ai_secrets.update(admin_secrets)
+        _write_values(secrets_path, ai_secrets, secret=True)
+    except (ValueError, FileNotFoundError, json.JSONDecodeError) as exc:
+        print(f"Setup failed: {exc}", file=sys.stderr)
+        return 1
 
-    if wrote_generated:
-        print(f"\nWrote {generated_path}")
-    if wrote_secrets:
-        print(f"Wrote {secrets_path} (mode 0600)")
-        print("Never commit values.secrets.yaml.")
+    print(f"\nWrote {meta_path}")
+    print(f"Wrote {generated_path}")
+    print(f"Wrote {secrets_path} (mode 0600)")
+    print("Do not commit these files — they live outside the git repo by design.")
 
     if args.skip_helm:
         print("\nSkipping helm install (--skip-helm).")
@@ -349,8 +736,8 @@ def main() -> int:
 
     try:
         _run_helm(
-            release=args.release,
-            namespace=args.namespace,
+            release=install_target["release"],
+            namespace=install_target["namespace"],
             generated_path=generated_path,
             secrets_path=secrets_path,
             dry_run=args.dry_run,
@@ -359,20 +746,13 @@ def main() -> int:
         print(f"Helm install failed: {exc}", file=sys.stderr)
         return 1
 
-    print("\nDone. Retrieve admin API key:")
-    # Replicate Helm _helpers.tpl fullname logic:
-    # 1. If fullnameOverride is set -> use it (truncated to 63 chars).
-    # 2. If release name already contains the chart name -> use release.
-    # 3. Otherwise -> "{release}-{chart}".
-    # Since this script doesn't set fullnameOverride, only cases 2-3 apply.
-    chart_name = "rootcoz"
-    if chart_name in args.release:
-        fullname = args.release[:63]
-    else:
-        fullname = f"{args.release}-{chart_name}"[:63]
+    print("\nDone. First login:")
+    print("  Username: admin")
+    print("  Password: the admin API key you set during setup")
+    print(f"(Also stored in {secrets_path} as admin.key.)")
     print(
-        f"  kubectl get secret {fullname}-secret -n {args.namespace} "
-        "-o jsonpath='{.data.ADMIN_KEY}' | base64 -d; echo"
+        f"Release: {install_target['release']}  "
+        f"Namespace: {install_target['namespace']}"
     )
     return 0
 

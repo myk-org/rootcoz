@@ -217,7 +217,7 @@ Every new API endpoint MUST also be supported via the `rootcoz` CLI tool. When a
 3. Add tests for both in `tests/test_cli_client.py` and `tests/test_cli_main.py`
 
 **Exceptions (no CLI equivalent needed):**
-- SSE streaming endpoints (`/api/navbar/stream`, `/api/dashboard/stream`, `/api/results/*/stream`, `/api/admin/token-usage/stream`, `/api/chat/*/stream`) — CLI is a one-shot tool, not a long-lived stream consumer. Equivalent GET endpoints remain available for CLI use.
+- SSE streaming endpoints (`/api/navbar/stream`, `/api/dashboard/stream`, `/api/results/*/stream`, `/api/admin/token-usage/stream`, `/api/chat/*/stream`, `/api/admin/logs/stream`) — CLI is a one-shot tool, not a long-lived stream consumer. Equivalent GET endpoints remain available for CLI use.
 - SPA bootstrap helpers (`/api/auth/needs-key`) — browser-only identity probes with no CLI use case
 
 ### AI Provider/Model Resolution
@@ -276,6 +276,7 @@ Node.js service running inside the same container, wrapping the Pi coding agent 
 - Extensions loaded by path (not from settings.json — no orchestrator):
   - `acpx-provider` — Cursor models via `acpx` CLI
   - `pi-vertex-claude` — Claude models via Google Vertex AI
+  - `cli-provider` — CLI agent models via local pi CLI (enabled by `CLI_AGENTS` env var)
 - Built-in providers: Google (Gemini), Anthropic (Claude via API key)
 - `SettingsManager.inMemory()` — no settings.json discovery
 

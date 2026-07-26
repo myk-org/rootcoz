@@ -134,6 +134,8 @@ uv run python scripts/setup.py
 
 The interactive setup script prompts for cluster type, hostname, AI provider, and credentials, then runs `helm upgrade --install`. See [chart/README.md](chart/README.md) for manual install, upgrade instructions, and examples. See [values.yaml](chart/values.yaml) for the full values reference with inline documentation.
 
+Validate the chart with `uvx --with tox-uv tox -e chart` (requires [Helm 3](https://helm.sh/docs/intro/install/)).
+
 ## Development
 
 ```bash

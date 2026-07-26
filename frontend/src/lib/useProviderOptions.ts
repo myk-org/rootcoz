@@ -83,11 +83,6 @@ export function resetProviderCatalogCache(): void {
   }
 }
 
-/** @deprecated Prefer resetProviderCatalogCache — kept for existing tests. */
-export function _resetProviderCatalogCacheForTests(): void {
-  resetProviderCatalogCache()
-}
-
 /** Provider ids that currently have at least one discovered model. */
 export function useEnabledProviders(): string[] {
   const { enabled } = useProviderCatalog()

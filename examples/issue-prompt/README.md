@@ -12,4 +12,4 @@ cp JOB_INSIGHT_ISSUE_PROMPT.md /path/to/your-repo/.rootcoz/ROOTCOZ_ISSUE_PROMPT.
 
 Edit the copy to match your project's issue conventions (title format, required sections, labels, etc.).
 
-See [AGENTS.md](../../AGENTS.md) for details on the `.rootcoz/` convention.
+See [AGENTS.md](../../AGENTS.md#project-customization-rootcoz-folder) for details on the `.rootcoz/` convention.

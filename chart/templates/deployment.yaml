@@ -1,4 +1,6 @@
 {{- include "rootcoz.validate" . -}}
+{{- $gcloudKey := include "rootcoz.gcloudServiceAccountKey" . -}}
+{{- $cursorAuth := include "rootcoz.cursorAuthJson" . -}}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -21,20 +23,34 @@ spec:
         {{- with .Values.podLabels }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
-      {{- with .Values.podAnnotations }}
       annotations:
+        checksum/config: {{ include "rootcoz.configMapData" . | sha256sum }}
+        {{- /* Hash values only — avoid randAlphaNum helpers (not memoized across includes). */}}
+        checksum/credentials: {{ printf "%s\n%s\n%s\n%s" .Values.admin.key .Values.ai.geminiApiKey .Values.ai.anthropicApiKey .Values.ai.cursor.apiKey | sha256sum }}
+        checksum/encryption: {{ .Values.encryptionKey | sha256sum }}
+        {{- if and .Values.ai.vertex.enabled $gcloudKey }}
+        checksum/gcloud: {{ $gcloudKey | sha256sum }}
+        {{- end }}
+        {{- if $cursorAuth }}
+        checksum/cursor-auth: {{ $cursorAuth | sha256sum }}
+        {{- end }}
+        {{- with .Values.podAnnotations }}
         {{- toYaml . | nindent 8 }}
-      {{- end }}
+        {{- end }}
     spec:
       serviceAccountName: {{ include "rootcoz.serviceAccountName" . }}
       {{- with .Values.imagePullSecrets }}
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
       {{- end }}
+      securityContext:
+        {{- include "rootcoz.podSecurityContext" . | nindent 8 }}
       containers:
         - name: {{ include "rootcoz.name" . }}
           image: {{ include "rootcoz.image" . | quote }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            {{- include "rootcoz.containerSecurityContext" . | nindent 12 }}
           ports:
             - name: http
               containerPort: 8000
@@ -46,7 +62,7 @@ spec:
               value: {{ .Values.env.xdgDataHome | quote }}
             - name: METADATA_RULES_FILE
               value: {{ printf "%s/metadata-rules.yaml" .Values.env.xdgDataHome | quote }}
-            {{- if and .Values.ai.vertex.enabled .Values.ai.vertex.serviceAccountKey }}
+            {{- if and .Values.ai.vertex.enabled $gcloudKey }}
             - name: CLOUDSDK_CONFIG
               value: /gcloud-credentials
             - name: GOOGLE_APPLICATION_CREDENTIALS
@@ -98,12 +114,12 @@ spec:
           volumeMounts:
             - name: data
               mountPath: {{ .Values.env.xdgDataHome }}
-            {{- if and .Values.ai.vertex.enabled .Values.ai.vertex.serviceAccountKey }}
+            {{- if and .Values.ai.vertex.enabled $gcloudKey }}
             - name: gcloud-credentials
               mountPath: /gcloud-credentials
               readOnly: true
             {{- end }}
-            {{- if .Values.ai.cursor.authJson }}
+            {{- if $cursorAuth }}
             - name: cursor-auth
               mountPath: /home/appuser/.cursor-auth
               readOnly: true
@@ -117,12 +133,12 @@ spec:
         - name: data
           emptyDir: {}
         {{- end }}
-        {{- if and .Values.ai.vertex.enabled .Values.ai.vertex.serviceAccountKey }}
+        {{- if and .Values.ai.vertex.enabled $gcloudKey }}
         - name: gcloud-credentials
           secret:
             secretName: {{ include "rootcoz.gcloudSecretName" . }}
         {{- end }}
-        {{- if .Values.ai.cursor.authJson }}
+        {{- if $cursorAuth }}
         - name: cursor-auth
           secret:
             secretName: {{ include "rootcoz.cursorAuthSecretName" . }}

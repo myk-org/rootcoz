@@ -62,7 +62,8 @@ frontend/.vite/
 .claude/
 jji.db
 
-# Helm setup script output (contains secrets)
+# Helm setup script output (legacy cwd filenames — script writes under
+# ~/.config/rootcoz/helm/ by default and refuses the git checkout)
 values.secrets.yaml
 values.generated.yaml
 

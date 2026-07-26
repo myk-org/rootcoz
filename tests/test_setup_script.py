@@ -246,6 +246,45 @@ def test_collect_ai_gemini_empty_key_raises() -> None:
 
 
 # ---------------------------------------------------------------------------
+# _collect_admin tests
+# ---------------------------------------------------------------------------
+
+
+def test_collect_admin_success() -> None:
+    key = "a" * setup._ADMIN_KEY_MIN_LENGTH
+    with patch("getpass.getpass", side_effect=[key, key]):
+        secrets = setup._collect_admin()
+    assert secrets == {"admin": {"key": key}}
+
+
+def test_collect_admin_rejects_short_then_accepts(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    short = "short"
+    good = "b" * setup._ADMIN_KEY_MIN_LENGTH
+    with patch("getpass.getpass", side_effect=[short, good, good]):
+        secrets = setup._collect_admin()
+    assert secrets["admin"]["key"] == good
+    assert "at least" in capsys.readouterr().out
+
+
+def test_collect_admin_mismatch_then_match(capsys: pytest.CaptureFixture[str]) -> None:
+    key = "c" * setup._ADMIN_KEY_MIN_LENGTH
+    with patch("getpass.getpass", side_effect=[key, "wrong-confirmation!!", key, key]):
+        secrets = setup._collect_admin()
+    assert secrets["admin"]["key"] == key
+    assert "do not match" in capsys.readouterr().out.lower()
+
+
+def test_collect_admin_empty_raises() -> None:
+    with (
+        patch("getpass.getpass", return_value=""),
+        pytest.raises(ValueError, match="(?i)required"),
+    ):
+        setup._collect_admin()
+
+
+# ---------------------------------------------------------------------------
 # _write_values tests
 # ---------------------------------------------------------------------------
 
@@ -301,31 +340,16 @@ def test_write_values_content_roundtrip() -> None:
 
 
 def test_write_values_overwrites_existing() -> None:
-    """Writing to an existing file after confirming overwrites content."""
+    """Writing always overwrites without prompting."""
     with tempfile.TemporaryDirectory() as tmpdir:
         path = Path(tmpdir) / "values.yaml"
         path.write_text("old: content\n")
 
-        with patch("builtins.input", return_value="y"):
-            setup._write_values(path, {"new": "content"}, secret=False)
+        setup._write_values(path, {"new": "content"}, secret=False)
 
         content = path.read_text()
         assert "old" not in content
         assert "new: content" in content
-
-
-def test_write_values_skips_on_decline() -> None:
-    """Declining overwrite keeps the original file unchanged."""
-    with tempfile.TemporaryDirectory() as tmpdir:
-        path = Path(tmpdir) / "values.yaml"
-        path.write_text("old: content\n")
-
-        with patch("builtins.input", return_value="n"):
-            setup._write_values(path, {"new": "content"}, secret=False)
-
-        content = path.read_text()
-        assert "old: content" in content
-        assert "new" not in content
 
 
 def test_dump_yaml_nested_structure() -> None:
@@ -357,14 +381,328 @@ def test_dump_yaml_nested_multiline_roundtrip() -> None:
     assert parsed["ai"]["vertex"]["serviceAccountKey"] == sa_key + "\n"
 
 
-def test_write_values_returns_false_on_decline() -> None:
-    """_write_values returns False when user declines overwrite."""
+def test_sanitize_user_input_strips_insert_key_escapes() -> None:
+    # Terminal Insert key often arrives as ESC [ 2 ~
+    polluted = "\x1b[2~\x1b[2~my-secret-key\x1b[2~"
+    assert setup._sanitize_user_input(polluted) == "my-secret-key"
+
+
+def test_sanitize_user_input_strips_c0_and_c1_controls() -> None:
+    assert setup._sanitize_user_input("ab\x00\x1fcd\x9b") == "abcd"
+
+
+def test_sanitize_yaml_text_preserves_edges() -> None:
+    raw = "\nai:\n  key: ok\n"
+    assert setup._sanitize_yaml_text(raw) == raw
+
+
+def test_load_values_missing_returns_empty() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir:
+        assert setup._load_values(Path(tmpdir) / "missing.yaml") == {}
+
+
+def test_load_values_non_dict_raises() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir:
+        path = Path(tmpdir) / "list.yaml"
+        path.write_text("- just\n- a\n- list\n", encoding="utf-8")
+        with pytest.raises(ValueError, match="Expected a YAML mapping"):
+            setup._load_values(path)
+
+
+def test_load_values_recovers_escape_corruption(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    with tempfile.TemporaryDirectory() as tmpdir:
+        path = Path(tmpdir) / "values.secrets.yaml"
+        path.write_text(
+            'ai:\n  geminiApiKey: kept\nadmin:\n  key: "\x1b[2~\x1b[2~"\n',  # pragma: allowlist secret
+            encoding="utf-8",
+        )
+        os.chmod(path, 0o644)
+        loaded = setup._load_values(path)
+        assert loaded["ai"]["geminiApiKey"] == "kept"  # pragma: allowlist secret
+        assert loaded["admin"]["key"] == ""
+        rewritten = yaml.safe_load(path.read_text(encoding="utf-8"))
+        assert rewritten["admin"]["key"] == ""
+        assert "\x1b" not in path.read_text(encoding="utf-8")
+        assert stat.S_IMODE(path.stat().st_mode) == 0o600
+    assert "stripped terminal escape" in capsys.readouterr().err
+
+
+def test_load_values_recovery_continues_if_rewrite_fails(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    with tempfile.TemporaryDirectory() as tmpdir:
+        path = Path(tmpdir) / "values.secrets.yaml"
+        path.write_text('admin:\n  key: "\x1b[2~"\n', encoding="utf-8")
+        with patch.object(setup, "_write_values", side_effect=OSError(30, "Read-only")):
+            loaded = setup._load_values(path)
+        assert loaded["admin"]["key"] == ""
+        # On-disk file left unchanged when rewrite fails.
+        assert "\x1b" in path.read_text(encoding="utf-8")
+    assert "in memory only" in capsys.readouterr().err
+
+
+def test_load_values_sanitize_still_invalid_raises() -> None:
+    """Escapes removed but YAML still structurally broken → hard fail."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        path = Path(tmpdir) / "bad.yaml"
+        path.write_text('admin:\n  key: "\x1b[2~"\n  :\n', encoding="utf-8")
+        with pytest.raises(ValueError, match="Failed to parse"):
+            setup._load_values(path)
+
+
+def test_load_values_still_raises_on_invalid_yaml() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir:
+        path = Path(tmpdir) / "bad.yaml"
+        path.write_text(":\n  - not: valid: yaml: [[[\n", encoding="utf-8")
+        with pytest.raises(ValueError, match="Failed to parse"):
+            setup._load_values(path)
+
+
+def test_collect_admin_reprompts_when_recovered_key_blank() -> None:
+    """After escape-only corruption, existing key is \"\" → must re-enter."""
+    existing = {"admin": {"key": ""}}
+    new_key = "n" * setup._ADMIN_KEY_MIN_LENGTH
+    with patch("getpass.getpass", side_effect=[new_key, new_key]):
+        secrets = setup._collect_admin(existing)
+    assert secrets == {"admin": {"key": new_key}}
+
+
+def test_load_values_roundtrip() -> None:
     with tempfile.TemporaryDirectory() as tmpdir:
         path = Path(tmpdir) / "values.yaml"
-        path.write_text("old: content\n")
+        data = {
+            "route": {"enabled": True, "host": "rootcoz.apps.example.com"},
+            "ai": {"provider": "gemini", "model": "gemini-2.5-pro"},
+        }
+        setup._write_values(path, data, secret=False)
+        loaded = setup._load_values(path)
+    assert loaded["route"]["host"] == "rootcoz.apps.example.com"
+    assert loaded["ai"]["provider"] == "gemini"
 
-        with patch("builtins.input", return_value="n"):
-            result = setup._write_values(path, {"new": "content"}, secret=False)
 
-        assert result is False
-        assert "old: content" in path.read_text()
+def test_infer_cluster_from_existing() -> None:
+    assert setup._infer_cluster({}) == "openshift"
+    assert (
+        setup._infer_cluster({"route": {"enabled": True, "host": "x"}}) == "openshift"
+    )
+    assert (
+        setup._infer_cluster(
+            {"route": {"enabled": False}, "ingress": {"enabled": True, "host": "x"}}
+        )
+        == "kubernetes"
+    )
+    assert (
+        setup._infer_cluster(
+            {"route": {"enabled": False}, "ingress": {"enabled": False}}
+        )
+        == "clusterip"
+    )
+
+
+def test_collect_routing_uses_existing_host_default() -> None:
+    existing = {
+        "route": {"enabled": True, "host": "rootcoz.apps.mycluster.com"},
+        "ingress": {"enabled": False},
+    }
+    # Accept defaults: cluster (openshift), host (existing)
+    user_inputs = iter(["", ""])
+    with patch("builtins.input", side_effect=user_inputs):
+        result = setup._collect_routing(existing)
+    assert result["route"]["host"] == "rootcoz.apps.mycluster.com"
+
+
+def test_collect_ai_keeps_existing_gemini_key() -> None:
+    existing_gen = {"ai": {"provider": "gemini", "model": "gemini-2.5-flash"}}
+    existing_sec = {
+        "ai": {"geminiApiKey": "stored-gem-key"}  # pragma: allowlist secret
+    }  # pragma: allowlist secret
+    user_inputs = iter(["", ""])  # provider default, model default
+    with (
+        patch("builtins.input", side_effect=user_inputs),
+        patch("getpass.getpass", return_value=""),  # keep stored
+    ):
+        generated, secrets = setup._collect_ai(existing_gen, existing_sec)
+    assert generated["ai"]["model"] == "gemini-2.5-flash"
+    assert secrets["ai"]["geminiApiKey"] == "stored-gem-key"  # pragma: allowlist secret
+
+
+def test_collect_admin_keeps_existing_without_confirm() -> None:
+    existing = {"admin": {"key": "d" * setup._ADMIN_KEY_MIN_LENGTH}}
+    with patch("getpass.getpass", return_value=""):  # keep stored
+        secrets = setup._collect_admin(existing)
+    assert secrets == existing
+
+
+def test_resolve_helm_returns_path_when_present() -> None:
+    with patch("shutil.which", return_value="/usr/bin/helm"):
+        assert setup._resolve_helm() == "/usr/bin/helm"
+
+
+def test_resolve_helm_raises_when_missing() -> None:
+    with patch("shutil.which", return_value=None):
+        with pytest.raises(RuntimeError, match="helm not found in PATH"):
+            setup._resolve_helm()
+
+
+def test_main_fails_fast_when_helm_missing(capsys: pytest.CaptureFixture[str]) -> None:
+    """Without --skip-helm, missing helm exits before interactive prompts."""
+    with (
+        patch("sys.argv", ["setup.py"]),
+        patch("shutil.which", return_value=None),
+        patch.object(setup, "_collect_routing") as collect_routing,
+    ):
+        rc = setup.main()
+
+    assert rc == 1
+    collect_routing.assert_not_called()
+    err = capsys.readouterr().err
+    assert "helm not found in PATH" in err
+    assert "--skip-helm" in err
+
+
+def test_collect_install_target_defaults() -> None:
+    with patch("builtins.input", side_effect=["", ""]):
+        result = setup._collect_install_target()
+    assert result == {"release": "rootcoz", "namespace": "rootcoz"}
+
+
+def test_collect_install_target_uses_existing_meta() -> None:
+    with patch("builtins.input", side_effect=["", ""]):
+        result = setup._collect_install_target(
+            {"release": "my-release", "namespace": "my-ns"}
+        )
+    assert result == {"release": "my-release", "namespace": "my-ns"}
+
+
+def test_main_skip_helm_does_not_require_helm() -> None:
+    """--skip-helm allows writing values without helm installed."""
+    user_inputs = iter(
+        [
+            "",  # release default
+            "",  # namespace default
+            "clusterip",  # routing
+            "gemini",  # provider
+            "gemini-2.5-pro",  # model
+        ]
+    )
+    with tempfile.TemporaryDirectory() as tmpdir:
+        out = Path(tmpdir)
+        gen = out / setup._GENERATED_FILENAME
+        sec = out / setup._SECRETS_FILENAME
+        meta = out / setup._SETUP_META_FILENAME
+        with (
+            patch(
+                "sys.argv",
+                [
+                    "setup.py",
+                    "--skip-helm",
+                    "--output-dir",
+                    str(out),
+                ],
+            ),
+            patch("builtins.input", side_effect=user_inputs),
+            patch(
+                "getpass.getpass",
+                side_effect=[
+                    "test-gemini-key",
+                    "test-admin-key-16",  # admin key
+                    "test-admin-key-16",  # confirm
+                ],
+            ),
+            patch("shutil.which", return_value=None),
+        ):
+            rc = setup.main()
+
+        assert rc == 0
+        assert gen.is_file()
+        assert sec.is_file()
+        assert meta.is_file()
+        assert yaml.safe_load(meta.read_text()) == {
+            "release": "rootcoz",
+            "namespace": "rootcoz",
+        }
+        assert "admin:" in sec.read_text()
+        assert "test-admin-key-16" in sec.read_text()
+
+
+def test_main_reuses_saved_values_as_defaults(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Second run loads prior files and keeps secrets when prompts are blank."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        out = Path(tmpdir)
+        gen = out / setup._GENERATED_FILENAME
+        sec = out / setup._SECRETS_FILENAME
+        meta = out / setup._SETUP_META_FILENAME
+        setup._write_values(
+            meta,
+            {"release": "kept-release", "namespace": "kept-ns"},
+            secret=False,
+        )
+        setup._write_values(
+            gen,
+            {
+                "route": {"enabled": False},
+                "ingress": {"enabled": False, "tls": {"enabled": False}},
+                "ai": {"provider": "gemini", "model": "gemini-2.5-flash"},
+            },
+            secret=False,
+        )
+        setup._write_values(
+            sec,
+            {
+                "ai": {"geminiApiKey": "kept-gemini"},  # pragma: allowlist secret
+                "admin": {"key": "e" * setup._ADMIN_KEY_MIN_LENGTH},
+            },
+            secret=True,
+        )
+        # Accept all defaults; blank secrets keep stored.
+        user_inputs = iter(["", "", "", "", ""])
+        with (
+            patch(
+                "sys.argv",
+                [
+                    "setup.py",
+                    "--skip-helm",
+                    "--output-dir",
+                    str(out),
+                ],
+            ),
+            patch("builtins.input", side_effect=user_inputs),
+            patch("getpass.getpass", return_value=""),
+            patch("shutil.which", return_value=None),
+        ):
+            rc = setup.main()
+
+        assert rc == 0
+        out_text = capsys.readouterr().out
+        assert "Loaded existing values" in out_text
+        loaded_sec = yaml.safe_load(sec.read_text())
+        assert (
+            loaded_sec["ai"]["geminiApiKey"]
+            == "kept-gemini"  # pragma: allowlist secret
+        )  # pragma: allowlist secret
+        assert loaded_sec["admin"]["key"] == "e" * setup._ADMIN_KEY_MIN_LENGTH
+        loaded_gen = yaml.safe_load(gen.read_text())
+        assert loaded_gen["ai"]["model"] == "gemini-2.5-flash"
+        assert yaml.safe_load(meta.read_text()) == {
+            "release": "kept-release",
+            "namespace": "kept-ns",
+        }
+
+
+def test_ensure_output_dir_refuses_repo_path() -> None:
+    with pytest.raises(ValueError, match="outside|Refusing|git repo"):
+        setup._ensure_output_dir(setup.REPO_ROOT / "chart")
+
+
+def test_resolve_output_paths_creates_dir() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir:
+        base = Path(tmpdir) / "helm-values"
+        gen, sec = setup._resolve_output_paths(str(base), prompt=False)
+        assert base.is_dir()
+        assert gen == base / setup._GENERATED_FILENAME
+        assert sec == base / setup._SECRETS_FILENAME
+        assert stat.S_IMODE(base.stat().st_mode) == 0o700

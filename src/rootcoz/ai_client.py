@@ -44,6 +44,9 @@ _CLI_SIDECAR: dict[str, str] = {
     "gemini": "cli-gemini",
 }
 
+# Reverse lookup: sidecar provider id → friendly name (built once from _DEFAULT_SIDECAR)
+_REVERSE_SIDECAR: dict[str, str] = {v: k for k, v in _DEFAULT_SIDECAR.items()}
+
 # (friendly_provider, model_id) → sidecar provider id (filled by list_models)
 _model_route_cache: dict[tuple[str, str], str] = {}
 
@@ -101,8 +104,7 @@ def _friendly_provider_from_sidecar(provider: str) -> str:
     if provider.startswith("acpx-"):
         agent = provider.removeprefix("acpx-")
         return agent if agent in VALID_AI_PROVIDERS else provider
-    reverse = {v: k for k, v in _DEFAULT_SIDECAR.items()}
-    return reverse.get(provider, provider)
+    return _REVERSE_SIDECAR.get(provider, provider)
 
 
 def _resolve_sidecar_for_model(friendly: str, model: str) -> str:
@@ -419,7 +421,7 @@ def format_chat_ai_user_error(
     return text
 
 
-async def _prewarm_model_routes(friendly: str, model: str = "") -> None:
+async def prewarm_model_routes(friendly: str, model: str = "") -> None:
     """Best-effort catalog fetch to populate ``_model_route_cache``.
 
     When ``model`` is set, skip only if that exact ``(friendly, model)`` route
@@ -447,7 +449,7 @@ async def _prewarm_model_routes(friendly: str, model: str = "") -> None:
 async def call_ai(*args: Any, ai_provider: str = "", ai_model: str = "", **kwargs: Any):
     """call_ai with rootcoz friendly→sidecar provider/model routing."""
     friendly = normalize_provider(ai_provider)
-    await _prewarm_model_routes(friendly, ai_model)
+    await prewarm_model_routes(friendly, ai_model)
     sidecar_provider, sidecar_model = map_provider_model_for_sidecar(
         ai_provider, ai_model
     )
@@ -461,7 +463,7 @@ async def call_ai_once(
 ):
     """call_ai_once with rootcoz friendly→sidecar provider/model routing."""
     friendly = normalize_provider(ai_provider)
-    await _prewarm_model_routes(friendly, ai_model)
+    await prewarm_model_routes(friendly, ai_model)
     sidecar_provider, sidecar_model = map_provider_model_for_sidecar(
         ai_provider, ai_model
     )
@@ -506,8 +508,10 @@ __all__ = [
     "AIResult",
     "ANALYSIS_BUILTIN_TOOLS",
     "CHAT_BUILTIN_TOOLS",
+    "RESOURCE_REPO_BROWSE_HINT",
     "VALID_AI_PROVIDERS",
     "_setup_usage_recorder",
+    "build_friendly_catalog",
     "call_ai",
     "call_ai_once",
     "clear_cursor_auth_cache",
@@ -515,5 +519,6 @@ __all__ = [
     "list_models",
     "map_provider_model_for_sidecar",
     "normalize_provider",
+    "prewarm_model_routes",
     "probe_cursor_auth",
 ]

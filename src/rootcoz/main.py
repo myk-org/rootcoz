@@ -1991,13 +1991,6 @@ def _resolve_ai_config_values(
     return provider, model
 
 
-def _resolve_ai_config(
-    body: BaseAnalysisRequest, request: Request | None = None
-) -> tuple[str, str]:
-    """Resolve AI config from an AnalyzeRequest."""
-    return _resolve_ai_config_values(body.ai_provider, body.ai_model, request=request)
-
-
 def _resolve_ai_config_allow_defer(
     body: BaseAnalysisRequest,
     settings: Settings,
@@ -2655,6 +2648,38 @@ async def _carry_forward_overrides(job_id: str, result_data: dict) -> None:
         )
 
 
+async def _fail_analysis(
+    job_id: str,
+    error: str,
+    *,
+    display_name: str = "",
+    build_number: int | None = None,
+    jenkins_url: str = "",
+    job_name: str = "",
+    notify: bool = True,
+) -> None:
+    """Mark a job as failed with optional dashboard/SSE notifications.
+
+    Shared helper that consolidates the fail-job pattern used across
+    analysis, file/raw processing, and failure re-analysis paths.
+    """
+    fail_data: dict[str, Any] = {"error": error}
+    if job_name or display_name:
+        fail_data["job_name"] = job_name or display_name
+    if display_name:
+        fail_data["display_name"] = display_name
+    if build_number is not None:
+        fail_data["build_number"] = build_number
+    if jenkins_url:
+        fail_data["jenkins_url"] = jenkins_url
+    await _preserve_request_params(job_id, fail_data)
+    await update_status(job_id, "failed", fail_data)
+    if notify:
+        notify_active_count_changed()
+        notify_dashboard_changed()
+        notify_job_status_changed(job_id)
+
+
 async def _resolve_settings_json_before_analysis(
     job_id: str,
     body: BaseAnalysisRequest,
@@ -2682,20 +2707,14 @@ async def _resolve_settings_json_before_analysis(
     """
 
     async def _fail_job(error: str) -> None:
-        fail_data: dict[str, Any] = {
-            "job_name": job_name or display_name,
-            "display_name": display_name,
-            "error": error,
-        }
-        if build_number is not None:
-            fail_data["build_number"] = build_number
-        if jenkins_url:
-            fail_data["jenkins_url"] = jenkins_url
-        await _preserve_request_params(job_id, fail_data)
-        await update_status(job_id, "failed", fail_data)
-        notify_active_count_changed()
-        notify_dashboard_changed()
-        notify_job_status_changed(job_id)
+        await _fail_analysis(
+            job_id,
+            error,
+            display_name=display_name,
+            build_number=build_number,
+            jenkins_url=jenkins_url,
+            job_name=job_name,
+        )
 
     tests_repo_url_raw = resolve_tests_repo_url(body, settings)
     peer_ai_configs = _resolve_peer_ai_configs(body, settings)
@@ -3577,16 +3596,12 @@ async def _process_file_raw_analysis(
         logger.debug(f"Workspace created at {repo_path}")
 
         async def _fail_settings_overlay(error: str) -> None:
-            fail_data = {
-                "job_name": display_name,
-                "display_name": display_name,
-                "error": error,
-            }
-            await _preserve_request_params(job_id, fail_data)
-            await update_status(job_id, "failed", fail_data)
-            notify_active_count_changed()
-            notify_dashboard_changed()
-            notify_job_status_changed(job_id)
+            await _fail_analysis(
+                job_id,
+                error,
+                display_name=display_name,
+                job_name=display_name,
+            )
 
         tests_cloned_path: Path | None = None
         if tests_repo_url:
@@ -4373,19 +4388,17 @@ async def _reanalyze_failure_background(
                 "Invalid .rootcoz/settings.json during failure re-analysis "
                 "(details redacted)"
             )
-            fail_data = {"error": str(exc)}
-            await _preserve_request_params(job_id, fail_data)
-            await update_status(job_id, "failed", fail_data)
+            await _fail_analysis(job_id, str(exc), notify=False)
             return
 
         if not ai_provider or not ai_model:
-            fail_data = {
-                "error": _ai_not_configured_message(
+            await _fail_analysis(
+                job_id,
+                _ai_not_configured_message(
                     None, "AI provider/model", is_admin=is_admin
                 ),
-            }
-            await _preserve_request_params(job_id, fail_data)
-            await update_status(job_id, "failed", fail_data)
+                notify=False,
+            )
             return
 
         if additional_repos_list:
@@ -8888,15 +8901,15 @@ class _SSELogHandler(logging.Handler):
                 try:
                     q.put_nowait(line)
                 except asyncio.QueueFull:
-                    pass
+                    pass  # intentionally silent — logging here would trigger re-entrant emit
 
             for loop, q in listeners:
                 try:
                     loop.call_soon_threadsafe(_enqueue, q, clean)
                 except Exception:
-                    logger.debug("SSE log enqueue failed for a listener", exc_info=True)
+                    pass  # intentionally silent — logging here would trigger re-entrant emit
         except Exception:
-            logger.debug("SSE log emit failed", exc_info=True)
+            pass  # intentionally silent — logging here would trigger re-entrant emit
 
 
 # Singleton handler instance — attached to all loggers once.
@@ -9001,7 +9014,7 @@ async def stream_logs(
                     for line in tail_lines:
                         clean = _ANSI_RE.sub("", line)
                         if _matches_level(clean):
-                            yield f"event: log\ndata: {clean.replace(chr(10), '  ')}\n\n"
+                            yield f"event: log\ndata: {clean.replace(chr(13), '  ').replace(chr(10), '  ')}\n\n"
                 except OSError:
                     pass
 
@@ -9018,7 +9031,7 @@ async def stream_logs(
                 try:
                     line = await asyncio.wait_for(queue.get(), timeout=30)
                     if _matches_level(line):
-                        yield f"event: log\ndata: {line.replace(chr(10), '  ')}\n\n"
+                        yield f"event: log\ndata: {line.replace(chr(13), '  ').replace(chr(10), '  ')}\n\n"
                 except asyncio.TimeoutError:
                     yield ": keepalive\n\n"
         finally:

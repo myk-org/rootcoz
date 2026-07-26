@@ -63,7 +63,8 @@ ai:
     # Cursor auth.json content (secret, mounted at /home/appuser/.cursor-auth/auth.json)
     authJson: ""
 
-# Bootstrap admin API key → ADMIN_KEY (secret). Auto-generated on first install if empty.
+# Bootstrap admin API key → ADMIN_KEY (secret). Required by scripts/setup.py;
+# auto-generated on first install if empty (manual helm installs only).
 admin:
   key: ""
 
@@ -114,13 +115,6 @@ imageStream:
   enabled: false
   name: rootcoz
   namespace: ""
-
-# CSI VolumeSnapshot backup CronJob (requires snapshot-capable storage class)
-snapshots:
-  enabled: false
-  schedule: "0 3 * * *"
-  retention: 7
-  volumeSnapshotClass: ""
 
 # Helm test pod image (must include curl)
 tests:
