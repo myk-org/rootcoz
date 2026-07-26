@@ -48,7 +48,7 @@ allowlist_externals = ["helm", "sh", "curl", "tar", "mkdir"]
 passenv = ["PATH", "HOME"]
 set_env.PATH = "{env:HOME}/.local/bin:{env:PATH}"
 commands_pre = [
-  ["sh", "-c", "command -v helm >/dev/null 2>&1 && exit 0; OS=$(uname -s | tr '[:upper:]' '[:lower:]') && ARCH=$(uname -m) && case $ARCH in x86_64) ARCH=amd64;; aarch64|arm64) ARCH=arm64;; esac && HELM_TAR=helm-v3.17.3-${OS}-${ARCH}.tar.gz && curl -fsSL https://get.helm.sh/${HELM_TAR} -o /tmp/helm.tar.gz && curl -fsSL https://get.helm.sh/${HELM_TAR}.sha256sum -o /tmp/helm.sha256 && cd /tmp && sha256sum -c helm.sha256 && tar -xzf /tmp/helm.tar.gz -C /tmp && mkdir -p $HOME/.local/bin && mv /tmp/${OS}-${ARCH}/helm $HOME/.local/bin/helm && rm -rf /tmp/${OS}-${ARCH} /tmp/helm.tar.gz /tmp/helm.sha256"],
+  ["sh", "-c", "command -v helm >/dev/null 2>&1 && exit 0; OS=$(uname -s | tr '[:upper:]' '[:lower:]') && ARCH=$(uname -m) && case $ARCH in x86_64) ARCH=amd64;; aarch64|arm64) ARCH=arm64;; esac && HELM_TAR=helm-v3.17.3-${OS}-${ARCH}.tar.gz && cd /tmp && curl -fsSL https://get.helm.sh/${HELM_TAR} -o ${HELM_TAR} && curl -fsSL https://get.helm.sh/${HELM_TAR}.sha256sum -o ${HELM_TAR}.sha256sum && sha256sum -c ${HELM_TAR}.sha256sum && tar -xzf ${HELM_TAR} && mkdir -p $HOME/.local/bin && mv ${OS}-${ARCH}/helm $HOME/.local/bin/helm && rm -rf ${OS}-${ARCH} ${HELM_TAR} ${HELM_TAR}.sha256sum"],
 ]
 commands = [
   ["helm", "lint", "chart/"],
