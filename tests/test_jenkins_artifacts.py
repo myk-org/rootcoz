@@ -3,6 +3,7 @@
 import io
 import shutil
 import tarfile
+import tempfile
 import zipfile
 from pathlib import Path
 from unittest.mock import MagicMock, Mock
@@ -18,6 +19,16 @@ from rootcoz.jenkins_artifacts import (
     store_artifact,
     validate_and_extract_archive,
 )
+
+
+def test_extract_base_uses_process_tempdir() -> None:
+    """EXTRACT_BASE must live under tempfile.gettempdir() for chat cleanup."""
+    assert jenkins_artifacts.EXTRACT_BASE == (
+        Path(tempfile.gettempdir()) / "jenkins-insight"
+    )
+    assert jenkins_artifacts.EXTRACT_BASE.is_relative_to(
+        Path(tempfile.gettempdir()).resolve()
+    ) or str(jenkins_artifacts.EXTRACT_BASE).startswith(tempfile.gettempdir())
 
 
 @pytest.fixture

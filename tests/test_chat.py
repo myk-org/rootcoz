@@ -987,6 +987,38 @@ class TestChatCleanup:
         assert not link.exists()
         assert not target.exists()  # under /tmp/ → deleted
 
+    def test_cleanup_deletes_jenkins_artifacts_when_tmpdir_differs(
+        self, tmp_path, monkeypatch
+    ):
+        """Jenkins extract dirs under gettempdir() are deleted even if TMPDIR != /tmp."""
+        import tempfile
+
+        from rootcoz import jenkins_artifacts
+        from rootcoz.engine.chat import cleanup_chat_workspace
+
+        custom_tmp = tmp_path / "custom-tmp"
+        custom_tmp.mkdir()
+        monkeypatch.setenv("TMPDIR", str(custom_tmp))
+        monkeypatch.setattr(tempfile, "gettempdir", lambda: str(custom_tmp))
+
+        extract_base = Path(tempfile.gettempdir()) / "jenkins-insight"
+        monkeypatch.setattr(jenkins_artifacts, "EXTRACT_BASE", extract_base)
+
+        artifacts_dir = extract_base / "artifacts-testhash"
+        artifacts_dir.mkdir(parents=True)
+        (artifacts_dir / "log.txt").write_text("data")
+
+        workspace = Path(tempfile.gettempdir()) / "rootcoz-chat-job-tmpdir"
+        workspace.mkdir(parents=True)
+        link = workspace / "build-artifacts"
+        link.symlink_to(artifacts_dir)
+
+        with patch("rootcoz.engine.chat.get_chat_workspace", return_value=workspace):
+            cleanup_chat_workspace("job-tmpdir")
+
+        assert not workspace.exists()
+        assert not artifacts_dir.exists()
+
 
 # ---------------------------------------------------------------------------
 # Chat storage tests
