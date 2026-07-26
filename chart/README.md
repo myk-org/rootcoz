@@ -57,7 +57,7 @@ helm upgrade --install rootcoz ./chart \
   -f ~/.config/rootcoz/helm/values.secrets.yaml
 ```
 
-Set AI credentials in your values files. Optionally set `route.host` for a custom hostname (if omitted, OpenShift auto-generates one).
+Set AI credentials in your values files. Optionally set `route.host` for a custom hostname (if omitted or empty, OpenShift auto-generates one).
 
 ### Vanilla Kubernetes (Ingress + TLS)
 
