@@ -455,30 +455,26 @@ export function ServerSettingsPage() {
     if (ok) setPeerEditing(false)  // Only close on success
   }
 
-  /** Validate model, save provider+model atomically, and reset editing state. */
-  async function saveProviderAndModel(provider: string, model: string): Promise<boolean> {
-    if (!model) {
-      setAiModelEditing(true)
-      dispatch({
-        type: 'SAVE_ERROR',
-        error: 'Select a model for the new provider before saving.',
-      })
-      return false
-    }
-    const ok = await saveSettings({ ai_provider: provider, ai_model: model })
-    if (ok) {
-      setAiProviderEditing(false)
-      setAiModelEditing(false)
-      setAiProviderValue(provider)
-    }
-    return ok
-  }
-
   async function handleSaveAiProvider(value: string) {
-    if (value !== savedAiProvider) {
+    const previousProvider = savedAiProvider
+    if (value !== previousProvider) {
       // Provider changed: require a model and persist both atomically so we never
       // delete ai_model (empty → env fallback) or leave a mismatched pair.
-      await saveProviderAndModel(value, aiModelValue.trim())
+      const model = aiModelValue.trim()
+      if (!model) {
+        setAiModelEditing(true)
+        dispatch({
+          type: 'SAVE_ERROR',
+          error: 'Select a model for the new provider before saving.',
+        })
+        return
+      }
+      const ok = await saveSettings({ ai_provider: value, ai_model: model })
+      if (ok) {
+        setAiProviderEditing(false)
+        setAiModelEditing(false)
+        setAiProviderValue(value)
+      }
       return
     }
     const ok = await saveSettingValue('ai_provider', value)
@@ -491,7 +487,20 @@ export function ServerSettingsPage() {
   async function handleSaveAiModel(value: string) {
     const providerDraft = (aiProviderValue || savedAiProvider).trim()
     if (providerDraft && providerDraft !== savedAiProvider) {
-      await saveProviderAndModel(providerDraft, value.trim())
+      const model = value.trim()
+      if (!model) {
+        dispatch({
+          type: 'SAVE_ERROR',
+          error: 'Select a model for the new provider before saving.',
+        })
+        return
+      }
+      const ok = await saveSettings({ ai_provider: providerDraft, ai_model: model })
+      if (ok) {
+        setAiProviderEditing(false)
+        setAiModelEditing(false)
+        setAiProviderValue(providerDraft)
+      }
       return
     }
     const ok = await saveSettingValue('ai_model', value)

@@ -377,7 +377,7 @@ async def test_prewarm_model_routes_swallows_catalog_errors(
 
     monkeypatch.setattr(ai_client, "list_models", boom)
     # Should not raise
-    await ai_client.prewarm_model_routes("cursor")
+    await ai_client._prewarm_model_routes("cursor")
 
 
 @pytest.mark.asyncio
@@ -394,11 +394,11 @@ async def test_prewarm_model_routes_refetches_when_model_uncached(
         return [{"id": "new-cli-model", "provider": "claude", "source": "cli"}]
 
     monkeypatch.setattr(ai_client, "list_models", fake_list)
-    await ai_client.prewarm_model_routes("claude", "new-cli-model")
+    await ai_client._prewarm_model_routes("claude", "new-cli-model")
     assert calls == ["claude"]
 
     # Exact key now present (or still skipped after another populate attempt)
     calls.clear()
     ai_client._model_route_cache[("claude", "new-cli-model")] = "cli-claude"
-    await ai_client.prewarm_model_routes("claude", "new-cli-model")
+    await ai_client._prewarm_model_routes("claude", "new-cli-model")
     assert calls == []

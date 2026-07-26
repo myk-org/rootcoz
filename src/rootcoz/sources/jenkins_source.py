@@ -993,25 +993,6 @@ async def analyze_job(
 
         jenkins_build_url = source.build_url
 
-        def _failed_result(
-            summary: str,
-            failures: list | None = None,
-            child_job_analyses: list[ChildJobAnalysis] | None = None,
-        ) -> AnalysisResult:
-            """Build an AnalysisResult with status='failed' using enclosing scope."""
-            return AnalysisResult(
-                job_id=job_id,
-                job_name=request.job_name,
-                build_number=request.build_number,
-                jenkins_url=HttpUrl(jenkins_build_url),
-                status="failed",
-                summary=summary,
-                ai_provider=ai_provider,
-                ai_model=ai_model,
-                failures=failures or [],
-                child_job_analyses=child_job_analyses or [],
-            )
-
         if source_result.build_passed:
             return AnalysisResult(
                 job_id=job_id,
@@ -1100,7 +1081,17 @@ async def analyze_job(
                     )
                 except RootcozSettingsError as exc:
                     logger.error("Invalid .rootcoz/settings.json (details redacted)")
-                    return _failed_result(summary=str(exc))
+                    return AnalysisResult(
+                        job_id=job_id,
+                        job_name=request.job_name,
+                        build_number=request.build_number,
+                        jenkins_url=HttpUrl(jenkins_build_url),
+                        status="failed",
+                        summary=str(exc),
+                        ai_provider=ai_provider,
+                        ai_model=ai_model,
+                        failures=[],
+                    )
                 ai_provider = effective.ai_provider
                 ai_model = effective.ai_model
                 peer_ai_configs = effective.peer_ai_configs
@@ -1119,13 +1110,31 @@ async def analyze_job(
                 logger.error(
                     "Invalid .rootcoz/settings.json after overlay (details redacted)"
                 )
-                return _failed_result(summary=str(exc))
+                return AnalysisResult(
+                    job_id=job_id,
+                    job_name=request.job_name,
+                    build_number=request.build_number,
+                    jenkins_url=HttpUrl(jenkins_build_url),
+                    status="failed",
+                    summary=str(exc),
+                    ai_provider=ai_provider,
+                    ai_model=ai_model,
+                    failures=[],
+                )
 
             if not ai_provider or not ai_model:
-                return _failed_result(
+                return AnalysisResult(
+                    job_id=job_id,
+                    job_name=request.job_name,
+                    build_number=request.build_number,
+                    jenkins_url=HttpUrl(jenkins_build_url),
+                    status="failed",
                     summary=ai_not_configured_message(
                         "AI provider/model", is_admin=is_admin
                     ),
+                    ai_provider=ai_provider,
+                    ai_model=ai_model,
+                    failures=[],
                 )
 
             custom_prompt = (request.raw_prompt or "").strip()
@@ -1163,8 +1172,16 @@ async def analyze_job(
                 logger.error(
                     "AI preflight failed for job %s: %s", job_id, preflight_msg
                 )
-                return _failed_result(
+                return AnalysisResult(
+                    job_id=job_id,
+                    job_name=request.job_name,
+                    build_number=request.build_number,
+                    jenkins_url=HttpUrl(jenkins_build_url),
+                    status="failed",
                     summary=make_user_friendly_error(preflight_msg),
+                    ai_provider=ai_provider,
+                    ai_model=ai_model,
+                    failures=[],
                 )
 
             # Analyze failed child jobs IN PARALLEL with bounded concurrency
@@ -1214,8 +1231,16 @@ async def analyze_job(
                     if (c.failures or c.failed_children) and not c.note
                 ]
                 if not analyzed_children:
-                    return _failed_result(
+                    return AnalysisResult(
+                        job_id=job_id,
+                        job_name=request.job_name,
+                        build_number=request.build_number,
+                        jenkins_url=HttpUrl(jenkins_build_url),
+                        status="failed",
                         summary=f"All {len(child_job_analyses)} child job analyses failed",
+                        ai_provider=ai_provider,
+                        ai_model=ai_model,
+                        failures=[],
                         child_job_analyses=child_job_analyses,
                     )
 
@@ -1269,8 +1294,15 @@ async def analyze_job(
 
                 # If every group analysis errored out, return failed status
                 if unique_errors > 0 and failed_groups == unique_errors:
-                    return _failed_result(
+                    return AnalysisResult(
+                        job_id=job_id,
+                        job_name=request.job_name,
+                        build_number=request.build_number,
+                        jenkins_url=HttpUrl(jenkins_build_url),
+                        status="failed",
                         summary=f"All {unique_errors} analysis group(s) failed",
+                        ai_provider=ai_provider,
+                        ai_model=ai_model,
                         failures=failures,
                         child_job_analyses=child_job_analyses,
                     )
@@ -1303,8 +1335,16 @@ async def analyze_job(
                         job_id,
                         error_text,
                     )
-                    return _failed_result(
+                    return AnalysisResult(
+                        job_id=job_id,
+                        job_name=request.job_name,
+                        build_number=request.build_number,
+                        jenkins_url=HttpUrl(jenkins_build_url),
+                        status="failed",
                         summary=make_user_friendly_error(error_text),
+                        ai_provider=ai_provider,
+                        ai_model=ai_model,
+                        failures=[],
                         child_job_analyses=child_job_analyses,
                     )
 

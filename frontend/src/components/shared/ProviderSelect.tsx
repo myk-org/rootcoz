@@ -9,6 +9,14 @@ import { cn } from '@/lib/utils'
 import { useProviderOptions } from '@/lib/useProviderOptions'
 import { normalizeProvider } from '@/lib/aiProviders'
 
+export type { AiProviderOption } from '@/lib/aiProviders'
+export {
+  AI_PROVIDER_OPTIONS,
+  BASE_AI_PROVIDER_OPTIONS,
+  buildProviderOptions,
+  normalizeProvider,
+} from '@/lib/aiProviders'
+
 interface ProviderSelectProps {
   value: string
   onChange: (value: string) => void

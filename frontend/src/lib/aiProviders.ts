@@ -7,6 +7,9 @@ export const AI_PROVIDER_OPTIONS: readonly AiProviderOption[] = [
   { value: 'cursor', label: 'Cursor' },
 ]
 
+/** @deprecated Use AI_PROVIDER_OPTIONS */
+export const BASE_AI_PROVIDER_OPTIONS = AI_PROVIDER_OPTIONS
+
 /** Legacy aliases accepted from older settings / URLs. */
 const LEGACY_PROVIDER_ALIASES: Record<string, string> = {
   'cursor-cli': 'cursor',

@@ -15,7 +15,7 @@ from pi_sidecar_client import get_sidecar_client
 
 from rootcoz.ai_client import (
     CHAT_BUILTIN_TOOLS,
-    prewarm_model_routes,
+    _prewarm_model_routes,
     call_ai,
     map_provider_model_for_sidecar,
     normalize_provider,
@@ -1256,7 +1256,7 @@ async def _create_chat_session(
     try:
         client = get_sidecar_client()
         # Best-effort catalog warm; heuristic routing still works if this fails.
-        await prewarm_model_routes(normalize_provider(ai_provider), ai_model)
+        await _prewarm_model_routes(normalize_provider(ai_provider), ai_model)
         sidecar_provider, sidecar_model = map_provider_model_for_sidecar(
             ai_provider, ai_model
         )

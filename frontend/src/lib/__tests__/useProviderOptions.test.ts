@@ -1,6 +1,7 @@
 import { act, renderHook, waitFor } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
+  _resetProviderCatalogCacheForTests,
   resetProviderCatalogCache,
   useCursorAuthStatus,
   useEnabledProviders,
@@ -32,7 +33,7 @@ vi.mock('@/lib/auth', () => ({
 
 describe('useProviderCatalog shared fetch', () => {
   afterEach(() => {
-    resetProviderCatalogCache()
+    _resetProviderCatalogCacheForTests()
     getMock.mockReset()
   })
 
