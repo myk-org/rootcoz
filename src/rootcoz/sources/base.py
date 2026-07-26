@@ -525,6 +525,43 @@ def resolve_display_build_id(result_data: dict) -> str | int:
     return build_id if build_id else 0
 
 
+def _artifacts_symlink_is_valid(link: Path, extract_path: Path) -> bool:
+    """Return True when *link* is a symlink that resolves to *extract_path*."""
+    if not link.is_symlink():
+        return False
+    try:
+        return link.resolve() == extract_path.resolve() and extract_path.exists()
+    except OSError:
+        return False
+
+
+def _remove_artifacts_symlink(link: Path, job_id: str, *, required: bool) -> bool:
+    """Best-effort removal of a ``build-artifacts`` symlink.
+
+    Args:
+        link: Path to the symlink.
+        job_id: Job id for log context.
+        required: When True, failure to remove is fatal (return False).
+            When False, removal is best-effort (always return True).
+
+    Returns:
+        ``False`` only when *required* and removal fails; otherwise ``True``.
+    """
+    if not link.is_symlink():
+        return True
+    try:
+        link.unlink()
+        logger.info("Removed artifacts symlink at %s (job %s)", link, job_id)
+        return True
+    except OSError:
+        logger.warning(
+            "Could not remove artifacts symlink for job %s",
+            job_id,
+            exc_info=True,
+        )
+        return not required
+
+
 def link_artifacts_to_workspace(
     repo_path: Path, extract_path: Path, job_id: str
 ) -> bool:
@@ -533,34 +570,62 @@ def link_artifacts_to_workspace(
     Creates a ``build-artifacts`` symlink inside *repo_path* pointing to
     *extract_path* so the AI can explore artifacts via a stable relative path.
 
-    If ``build-artifacts`` already exists (common on reanalysis / chat reuse),
-    treat that as success so callers do not clear ``artifacts_context``.
+    If ``build-artifacts`` already exists as a symlink to *extract_path*
+    (common on reanalysis / chat reuse), treat that as success so callers do
+    not clear ``artifacts_context``. Broken or wrong-target symlinks are
+    repaired (or removed if *extract_path* is missing). A pre-existing
+    non-symlink path is treated as failure.
 
     Returns:
-        ``True`` if the link was created or already exists, ``False`` on failure.
+        ``True`` if the link was created or already points at *extract_path*,
+        ``False`` on failure.
     """
     link = repo_path / "build-artifacts"
-    # Pre-existing path (symlink or directory) means artifacts are already
-    # reachable — do not report failure (callers clear context on False).
-    if link.exists() or link.is_symlink():
+    if _artifacts_symlink_is_valid(link, extract_path):
         logger.info(
-            "Artifacts path already present at %s (job %s) — keeping existing link",
+            "Artifacts symlink already valid at %s (job %s)",
             link,
             job_id,
         )
         return True
+    if link.is_symlink():
+        # Broken or wrong-target symlink — remove before recreate (or fail).
+        if not _remove_artifacts_symlink(link, job_id, required=True):
+            return False
+    elif link.exists():
+        # File or directory occupying the reserved name — do not claim success.
+        logger.warning(
+            "build-artifacts exists but is not a symlink to fetched artifacts "
+            "at %s (job %s) — clearing artifacts context",
+            link,
+            job_id,
+        )
+        return False
+    if not extract_path.exists():
+        logger.warning(
+            "Artifacts extract path missing at %s (job %s) — clearing artifacts context",
+            extract_path,
+            job_id,
+        )
+        return False
     try:
         link.symlink_to(extract_path)
-        logger.info("Linked artifacts into workspace: %s (job %s)", link, job_id)
-        return True
     except FileExistsError:
         # Race: created between the existence check and symlink_to.
-        logger.info(
-            "Artifacts path already present at %s (job %s) — keeping existing link",
+        if _artifacts_symlink_is_valid(link, extract_path):
+            logger.info(
+                "Artifacts symlink already valid at %s (job %s)",
+                link,
+                job_id,
+            )
+            return True
+        logger.warning(
+            "build-artifacts path conflict at %s (job %s) — clearing artifacts context",
             link,
             job_id,
         )
-        return True
+        _remove_artifacts_symlink(link, job_id, required=False)
+        return False
     except OSError:
         logger.warning(
             "Could not link artifacts into workspace for job %s",
@@ -568,3 +633,14 @@ def link_artifacts_to_workspace(
             exc_info=True,
         )
         return False
+    if not _artifacts_symlink_is_valid(link, extract_path):
+        logger.warning(
+            "Artifacts symlink invalid after create at %s (job %s) — "
+            "clearing artifacts context",
+            link,
+            job_id,
+        )
+        _remove_artifacts_symlink(link, job_id, required=False)
+        return False
+    logger.info("Linked artifacts into workspace: %s (job %s)", link, job_id)
+    return True
