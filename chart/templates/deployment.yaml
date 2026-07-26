@@ -38,6 +38,7 @@ spec:
         {{- toYaml . | nindent 8 }}
         {{- end }}
     spec:
+      automountServiceAccountToken: false
       serviceAccountName: {{ include "rootcoz.serviceAccountName" . }}
       {{- with .Values.imagePullSecrets }}
       imagePullSecrets:
@@ -60,8 +61,10 @@ spec:
               value: {{ .Values.env.xdgConfigHome | quote }}
             - name: XDG_DATA_HOME
               value: {{ .Values.env.xdgDataHome | quote }}
+            {{- if .Values.env.metadataRulesFile }}
             - name: METADATA_RULES_FILE
-              value: {{ printf "%s/metadata-rules.yaml" .Values.env.xdgDataHome | quote }}
+              value: {{ .Values.env.metadataRulesFile | quote }}
+            {{- end }}
             {{- if and .Values.ai.vertex.enabled $gcloudKey }}
             - name: CLOUDSDK_CONFIG
               value: /gcloud-credentials

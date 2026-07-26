@@ -24,7 +24,7 @@ serviceAccount:
 route:
   enabled: true
   # REQUIRED: set your OpenShift apps domain before install
-  host: rootcoz.apps.example.com
+  host: ""
   # Long timeout for AI analysis and SSE streams
   timeout: 300s
   annotations: {}
@@ -98,6 +98,7 @@ env:
   secureCookies: ""
   # Override auto-derived PUBLIC_BASE_URL (https://route.host or ingress host)
   publicBaseUrl: ""
+  metadataRulesFile: ""
 
 tuning:
   # → LOG_LEVEL (omit for app default INFO)

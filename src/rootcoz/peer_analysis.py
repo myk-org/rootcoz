@@ -1011,7 +1011,10 @@ async def analyze_failure_group_with_peers(
 
         for temp_dir in ephemeral_dirs:
             shutil.rmtree(temp_dir, ignore_errors=True)
-            logger.debug("Removed peer ephemeral workspace %s", temp_dir)
+            if not temp_dir.exists():
+                logger.debug("Removed peer ephemeral workspace %s", temp_dir)
+            else:
+                logger.warning("Failed to remove peer ephemeral workspace %s", temp_dir)
 
     # Apply analysis to all failures in the group.
     # All failures share the same signature (that's how they were grouped),

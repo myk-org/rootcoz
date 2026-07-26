@@ -156,7 +156,7 @@ helm upgrade rootcoz ./chart -n rootcoz \
   -f ~/.config/rootcoz/helm/values.secrets.yaml
 ```
 
-AI credential keys in values apply on upgrade. Auto-generated `ADMIN_KEY` and `ROOTCOZ_ENCRYPTION_KEY` are never rotated by Helm upgrade. Vertex SA JSON and Cursor `auth.json` are also preserved via `lookup` when omitted from values. Deployment pod template checksums restart the pod when ConfigMap/Secret content changes.
+AI credential keys in values apply on upgrade. Auto-generated `ADMIN_KEY` and `ROOTCOZ_ENCRYPTION_KEY` are never rotated by Helm upgrade. Vertex SA JSON and Cursor `auth.json` are also preserved via `lookup` when omitted from values. Deployment pod-template checksums trigger a rollout when values change. Out-of-band Secret edits (e.g. via External Secrets) require `kubectl rollout restart`.
 
 To rotate encryption key: delete the secret manually, then reinstall (destroys encrypted DB credentials — re-issue API keys).
 
