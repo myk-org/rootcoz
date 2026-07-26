@@ -25,8 +25,8 @@ spec:
         {{- end }}
       annotations:
         checksum/config: {{ include "rootcoz.configMapData" . | sha256sum }}
-        checksum/credentials: {{ include "rootcoz.credentialsSecretData" . | sha256sum }}
-        checksum/encryption: {{ include "rootcoz.encryptionKey" . | sha256sum }}
+        checksum/credentials: {{ include (print $.Template.BasePath "/secret-credentials.yaml") . | sha256sum }}
+        checksum/encryption: {{ include (print $.Template.BasePath "/secret-encryption-key.yaml") . | sha256sum }}
         {{- if and .Values.ai.vertex.enabled $gcloudKey }}
         checksum/gcloud: {{ $gcloudKey | sha256sum }}
         {{- end }}
