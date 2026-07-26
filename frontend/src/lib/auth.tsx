@@ -1,12 +1,15 @@
 import { createContext, useContext, useState, useEffect, useCallback, type ReactNode } from 'react'
 import { api, ApiError } from './api'
 import { getUsername, setUsername, getIsAdmin, setIsAdmin, setRole, clearTokens, clearUsername, setGithubToken, setJiraEmail, setJiraToken } from './cookies'
+import type { AuthUser } from '@/types'
 
 interface AuthState {
   username: string
   isAdmin: boolean
   /** True when the user has operator or admin role. */
   isOperator: boolean
+  /** Effective reports access from /me (true for admins; otherwise stored flag). */
+  canViewReports: boolean
   role: string
   loading: boolean
   authenticated: boolean
@@ -32,30 +35,37 @@ async function syncTokensFromServer(forUsername: string) {
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [username, setUsernameState] = useState(getUsername())
   const [isAdmin, setIsAdminState] = useState(getIsAdmin())
+  const [canViewReports, setCanViewReports] = useState(false)
   const [role, setRoleState] = useState('reviewer')
   const [loading, setLoading] = useState(true)
   const [authenticated, setAuthenticated] = useState(false)
 
   function clearPrivileges() {
     setIsAdminState(false)
+    setCanViewReports(false)
     setRoleState('reviewer')
     setIsAdmin(false)
     setRole('reviewer')
     setAuthenticated(false)
   }
 
+  function applyAuthUser(user: AuthUser) {
+    setUsernameState(user.username)
+    setIsAdminState(user.is_admin)
+    setCanViewReports(!!user.can_view_reports)
+    setRoleState(user.role)
+    setIsAdmin(user.is_admin)
+    setRole(user.role)
+    if (user.username) {
+      setUsername(user.username)
+    }
+    setAuthenticated(true)
+  }
+
   const refreshAuth = useCallback(async () => {
     try {
-      const me = await api.get<{ username: string; role: string; is_admin: boolean }>('/api/auth/me')
-      setUsernameState(me.username)
-      setIsAdminState(me.is_admin)
-      setRoleState(me.role)
-      setIsAdmin(me.is_admin)
-      setRole(me.role)
-      if (me.username) {
-        setUsername(me.username)
-      }
-      setAuthenticated(true)
+      const me = await api.get<AuthUser>('/api/auth/me')
+      applyAuthUser(me)
       await syncTokensFromServer(me.username)
     } catch (err) {
       // 401 means not authenticated — clear identity and require login
@@ -83,18 +93,23 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const login = useCallback(async (loginUsername: string, apiKey: string) => {
     const { resetProviderCatalogCache } = await import('@/lib/useProviderOptions')
     resetProviderCatalogCache()
-    const result = await api.post<{ username: string; role: string; is_admin: boolean }>(
+    const result = await api.post<AuthUser>(
       '/api/auth/login',
       { username: loginUsername, api_key: apiKey }
     )
-    setUsernameState(result.username)
-    setIsAdminState(result.is_admin)
-    setRoleState(result.role)
-    setUsername(result.username)
-    setIsAdmin(result.is_admin)
-    setRole(result.role)
-    setAuthenticated(true)
+    // Apply login payload (includes can_view_reports) immediately — do not wait on /me
+    applyAuthUser(result)
     await syncTokensFromServer(result.username)
+    // Optional /me refresh for other session fields; keep login values if it fails
+    try {
+      const me = await api.get<AuthUser>('/api/auth/me')
+      applyAuthUser(me)
+    } catch (err) {
+      console.warn(
+        'Post-login /api/auth/me refresh failed; keeping login response values:',
+        err instanceof Error ? err.message : err,
+      )
+    }
   }, [])
 
   const logout = useCallback(async () => {
@@ -113,7 +128,18 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, [])
 
   return (
-    <AuthContext.Provider value={{ username, isAdmin, isOperator: role === 'operator' || role === 'admin', role, loading, authenticated, login, logout, refreshAuth }}>
+    <AuthContext.Provider value={{
+      username,
+      isAdmin,
+      isOperator: role === 'operator' || role === 'admin',
+      canViewReports,
+      role,
+      loading,
+      authenticated,
+      login,
+      logout,
+      refreshAuth,
+    }}>
       {children}
     </AuthContext.Provider>
   )

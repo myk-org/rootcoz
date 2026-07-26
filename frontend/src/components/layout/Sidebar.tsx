@@ -42,10 +42,11 @@ const USER_NAV_ITEMS: NavItem[] = [
 
 const MENTIONS_ITEM: NavItem = { to: '/mentions', label: 'Mentions', icon: AtSign }
 
+const REPORTS_ITEM: NavItem = { to: '/reports', label: 'Reports', icon: BarChart3 }
+
 const ADMIN_NAV_ITEMS: NavItem[] = [
   { to: '/admin/users', label: 'Users', icon: Users },
   { to: '/admin/token-usage', label: 'Tokens', icon: Coins },
-  { to: '/reports', label: 'Reports', icon: BarChart3 },
   { to: '/admin/chat', label: 'Chat', icon: MessageSquare },
   { to: '/admin/logs', label: 'Logs', icon: ScrollText },
   { to: '/admin/settings', label: 'Settings', icon: Settings },
@@ -71,7 +72,7 @@ interface SidebarProps {
 
 export function Sidebar({ badges, mobileOpen, onMobileClose }: SidebarProps) {
   const location = useLocation()
-  const { isAdmin, role, username, loading } = useAuth()
+  const { isAdmin, canViewReports, role, username, loading } = useAuth()
 
   // ─── Width / collapse state ─────────────────────────────────────
   const [collapsed, setCollapsed] = useState(() => {
@@ -197,10 +198,11 @@ export function Sidebar({ badges, mobileOpen, onMobileClose }: SidebarProps) {
     <nav className="flex flex-1 flex-col gap-1 overflow-y-auto px-2 py-3">
       {userItems.map(renderItem)}
 
-      {isAdmin && (
+      {!loading && (canViewReports || isAdmin) && (
         <>
           <Separator className="my-2" />
-          {ADMIN_NAV_ITEMS.map(renderItem)}
+          {(canViewReports || isAdmin) && renderItem(REPORTS_ITEM)}
+          {isAdmin && ADMIN_NAV_ITEMS.map(renderItem)}
         </>
       )}
     </nav>

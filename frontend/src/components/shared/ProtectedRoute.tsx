@@ -6,10 +6,12 @@ interface Props {
   adminOnly?: boolean
   operatorOnly?: boolean
   reviewerOnly?: boolean
+  /** Allow access when canViewReports OR isAdmin (backend always grants admins reports access). */
+  reportsAccess?: boolean
 }
 
-export function ProtectedRoute({ children, adminOnly, operatorOnly, reviewerOnly }: Props) {
-  const { isAdmin, role, loading, authenticated } = useAuth()
+export function ProtectedRoute({ children, adminOnly, operatorOnly, reviewerOnly, reportsAccess }: Props) {
+  const { isAdmin, canViewReports, role, loading, authenticated } = useAuth()
   const location = useLocation()
 
   // Wait for auth to resolve before any redirect
@@ -20,6 +22,10 @@ export function ProtectedRoute({ children, adminOnly, operatorOnly, reviewerOnly
   }
 
   if (adminOnly && !isAdmin) {
+    return <Navigate to="/" replace />
+  }
+
+  if (reportsAccess && !(isAdmin || canViewReports)) {
     return <Navigate to="/" replace />
   }
 

@@ -21,6 +21,7 @@ vi.mock('@/lib/auth', () => ({
     username: 'alice',
     isAdmin: false,
     isOperator: false,
+    canViewReports: false,
     role: 'reviewer',
     loading: false,
     authenticated: true,

@@ -111,6 +111,7 @@ from rootcoz.metadata_rules import match_job_metadata
 from rootcoz.models import (
     AddCommentRequest,
     AdditionalRepo,
+    AdminCreateUserRequest,
     ChatMessageRequest,
     AnalyzeCommentRequest,
     AnalyzeCommentResponse,
@@ -135,6 +136,7 @@ from rootcoz.models import (
     PushSubscriptionRequest,
     ReAnalyzeFailureRequest,
     ReportPortalPushResult,
+    SetCanViewReportsRequest,
     SetReviewedRequest,
     SetTrackedInRequest,
     UnifiedAnalyzeRequest,
@@ -156,6 +158,11 @@ from rootcoz.repository import (
     redact_url,
 )
 from rootcoz.request_resolution import resolve_tests_repo_token
+from rootcoz.result_fields import (
+    RESULT_FIELD_PATHS,
+    filter_result_fields,
+    parse_fields_param,
+)
 from rootcoz.rootcoz_repo_settings import (
     EffectiveRepoAnalysisSettings,
     RootcozSettingsError,
@@ -1478,8 +1485,24 @@ class AuthMiddleware(BaseHTTPMiddleware):
             "/favicon.ico",
             "/favicon.svg",
             "/sw.js",
+            # Intentional public API-discovery surfaces (issue #200 / AGENTS.md):
+            # OpenAPI schema + Swagger/ReDoc UIs only — no job or user data.
+            # Project compliance allowlist source of truth for these paths.
+            "/openapi.json",
+            "/docs",
+            "/redoc",
         }
     )
+
+    @classmethod
+    def _is_public_path(cls, path: str) -> bool:
+        """True when path (or its non-root trailing-slash form) is public."""
+        if path in cls._PUBLIC_PATHS:
+            return True
+        # Treat /docs/ and /redoc/ (etc.) as public without turning "/" into "".
+        if path != "/" and path.rstrip("/") in cls._PUBLIC_PATHS:
+            return True
+        return False
 
     async def dispatch(self, request: Request, call_next):
         # CORS preflight requests must pass through without authentication
@@ -1487,6 +1510,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
             request.state.username = ""
             request.state.is_admin = False
             request.state.role = "reviewer"
+            request.state.can_view_reports = False
             origin = request.headers.get("origin", "*")
             return Response(
                 status_code=200,
@@ -1510,12 +1534,14 @@ class AuthMiddleware(BaseHTTPMiddleware):
         request.state.username = ""
         request.state.is_admin = False
         request.state.role = "reviewer"
+        request.state.can_view_reports = False
 
         # Public paths and static assets — pass through
         # (but /login may need SSO redirect, handled below;
         #  it stays in _PUBLIC_PATHS for non-SSO users who need the page)
+        path_key = path if path == "/" else path.rstrip("/")
         if path.startswith("/assets/") or (
-            path in self._PUBLIC_PATHS and path != "/login"
+            self._is_public_path(path) and path_key != "/login"
         ):
             return await call_next(request)
 
@@ -1548,6 +1574,8 @@ class AuthMiddleware(BaseHTTPMiddleware):
         resolved_role = get_settings().default_user_role  # default role until resolved
         authenticated_admin = False
         has_valid_session = False
+        # User row already loaded via Bearer key or SSO (reuse for can_view_reports).
+        fetched_user: dict | None = None
 
         # 1. Check session cookie (rootcoz_session) — user or admin session
         session_token = _read_cookie(request, "rootcoz_session")
@@ -1601,6 +1629,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
                 else:
                     user = await storage.get_user_by_key(token)
                     if user:
+                        fetched_user = user
                         username = str(user["username"])
                         resolved_role = str(user.get("role", "reviewer"))
                         has_valid_session = True
@@ -1628,6 +1657,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
                 # Resolve the user's actual role from DB
                 proxy_user = await storage.get_user_by_username(username)
                 if proxy_user:
+                    fetched_user = proxy_user
                     resolved_role = str(proxy_user.get("role", "reviewer"))
                     if resolved_role == "admin":
                         is_admin = True
@@ -1646,6 +1676,20 @@ class AuthMiddleware(BaseHTTPMiddleware):
         request.state.username = username
         request.state.is_admin = is_admin
         request.state.role = resolved_role
+        # can_view_reports: admins effective True; non-admins reload stored flag
+        # from users table each request (no session invalidation needed).
+        # Reuse a user row already loaded via Bearer/SSO when available.
+        if is_admin:
+            request.state.can_view_reports = effective_can_view_reports(True)
+        elif has_valid_session and username:
+            db_user = fetched_user
+            if db_user is None:
+                db_user = await storage.get_user_by_username(username)
+            request.state.can_view_reports = effective_can_view_reports(
+                False, bool(db_user and db_user.get("can_view_reports"))
+            )
+        else:
+            request.state.can_view_reports = False
 
         # Track user activity only for authenticated identities
         if has_valid_session and username:
@@ -1661,7 +1705,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
                 )
 
         # Require authentication for all non-public, non-optional paths
-        if not has_valid_session and path not in self._PUBLIC_PATHS:
+        if not has_valid_session and not self._is_public_path(path):
             accept = request.headers.get("accept", "")
             if "text/html" in accept and not path.startswith("/api/"):
                 return RedirectResponse(url="/login", status_code=303)
@@ -1679,7 +1723,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
             and username
             and not is_admin
             and settings.require_approval
-            and path not in self._PUBLIC_PATHS
+            and not self._is_public_path(path)
         ):
             user_status = await storage.get_user_status(username)
             blocked = _blocked_user_status_response(user_status)
@@ -3841,7 +3885,7 @@ async def _process_file_raw_analysis(
         await _cleanup_ai_session(auth_header)
 
 
-@app.post("/analyze", status_code=202, response_model=None)
+@app.post("/analyze", status_code=202, response_model=None, operation_id="analyze")
 async def analyze(
     request: Request,
     body: UnifiedAnalyzeRequest,
@@ -3911,7 +3955,12 @@ async def analyze(
     )
 
 
-@app.post("/re-analyze/{job_id}", status_code=202, response_model=None)
+@app.post(
+    "/re-analyze/{job_id}",
+    status_code=202,
+    response_model=None,
+    operation_id="reAnalyze",
+)
 async def re_analyze(
     job_id: str,
     request: Request,
@@ -4150,11 +4199,32 @@ async def _apply_effective_classifications(job_id: str, result_data: dict) -> No
     _walk_children(result_data.get("child_job_analyses", []))
 
 
-@app.get("/results/{job_id}", response_model=None)
+@app.get("/api/results/fields", operation_id="listResultFields")
+async def list_result_fields() -> dict:
+    """Return the allowlist of field paths for sparse GET /results/{job_id}."""
+    return {"fields": sorted(RESULT_FIELD_PATHS)}
+
+
+@app.get("/results/{job_id}", response_model=None, operation_id="getJobResult")
 async def get_job_result(
-    request: Request, job_id: str, response: Response, _: None = Depends(_bind_job_id)
+    request: Request,
+    job_id: str,
+    response: Response,
+    _: None = Depends(_bind_job_id),
+    fields: str | None = Query(
+        default=None,
+        description=(
+            "Comma-separated allowlisted field paths to return (full values, "
+            "never truncated). Omit for the full response. Unknown paths return "
+            "400. Discover paths via GET /api/results/fields."
+        ),
+    ),
 ):
-    """Retrieve stored result by job_id, or serve SPA for browser requests."""
+    """Retrieve stored result by job_id, or serve SPA for browser requests.
+
+    Optional ``fields`` query selects allowlisted paths only (no truncation).
+    Unknown fields yield HTTP 400. See ``GET /api/results/fields``.
+    """
     # Content negotiation: browsers requesting HTML get the SPA
     accept = request.headers.get("accept", "")
     if "text/html" in accept and "application/json" not in accept:
@@ -4162,6 +4232,11 @@ async def get_job_result(
         if result and result.get("status") in IN_PROGRESS_STATUSES:
             return RedirectResponse(url=f"/status/{job_id}", status_code=302)
         return _serve_spa()
+
+    try:
+        field_list = parse_fields_param(fields)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     logger.debug(f"GET /results/{job_id}")
     result = await get_result(job_id)
@@ -4178,10 +4253,12 @@ async def get_job_result(
     result["capabilities"] = _build_capabilities(settings)
     if result.get("status") in IN_PROGRESS_STATUSES:
         response.status_code = 202
+    if field_list is not None:
+        return filter_result_fields(result, field_list)
     return result
 
 
-@app.get("/api/failures/{failure_uuid}")
+@app.get("/api/failures/{failure_uuid}", operation_id="getFailureByUuid")
 async def get_failure_by_uuid(failure_uuid: str) -> dict:
     """Look up a single failure analysis by its UUID.
 
@@ -4449,7 +4526,11 @@ async def _reanalyze_failure_background(
                 logger.warning("Failed to cleanup repos", exc_info=True)
 
 
-@app.post("/api/failures/{failure_uuid}/re-analyze", status_code=202)
+@app.post(
+    "/api/failures/{failure_uuid}/re-analyze",
+    status_code=202,
+    operation_id="reAnalyzeFailure",
+)
 async def re_analyze_failure(
     failure_uuid: str,
     request: Request,
@@ -4863,7 +4944,7 @@ async def _resolve_effective_failure(
     )
 
 
-@app.get("/results/{job_id}/comments")
+@app.get("/results/{job_id}/comments", operation_id="getComments")
 async def get_comments(job_id: str, _: None = Depends(_bind_job_id)) -> dict:
     """Get all comments and review states for a job."""
     logger.debug(f"GET /results/{job_id}/comments")
@@ -4872,7 +4953,7 @@ async def get_comments(job_id: str, _: None = Depends(_bind_job_id)) -> dict:
     return {"comments": comments, "reviews": reviews}
 
 
-@app.post("/results/{job_id}/comments", status_code=201)
+@app.post("/results/{job_id}/comments", status_code=201, operation_id="addComment")
 async def add_comment(
     job_id: str,
     body: AddCommentRequest,
@@ -4936,7 +5017,9 @@ async def add_comment(
     return {"id": comment_id}
 
 
-@app.delete("/results/{job_id}/comments/{comment_id}")
+@app.delete(
+    "/results/{job_id}/comments/{comment_id}", operation_id="deleteCommentEndpoint"
+)
 async def delete_comment_endpoint(
     job_id: str, comment_id: int, request: Request, _: None = Depends(_bind_job_id)
 ) -> dict:
@@ -4986,7 +5069,7 @@ async def delete_comment_endpoint(
     return {"status": "deleted"}
 
 
-@app.put("/results/{job_id}/reviewed")
+@app.put("/results/{job_id}/reviewed", operation_id="setReviewed")
 async def set_reviewed(
     job_id: str,
     body: SetReviewedRequest,
@@ -5020,7 +5103,7 @@ async def set_reviewed(
     }
 
 
-@app.post("/results/{job_id}/enrich-comments")
+@app.post("/results/{job_id}/enrich-comments", operation_id="enrichComments")
 async def enrich_comments(
     job_id: str,
     request: Request,
@@ -5251,7 +5334,7 @@ async def _load_effective_failure(
     return failure, result_data, matched_child
 
 
-@app.get("/results/{job_id}/issue-prompt")
+@app.get("/results/{job_id}/issue-prompt", operation_id="getIssuePrompt")
 async def get_issue_prompt(
     job_id: str,
     request: Request,
@@ -5355,7 +5438,7 @@ async def get_issue_prompt(
 # These are server-level operations (GITHUB_TOKEN, TESTS_REPO_URL, Jira config)
 # that act on behalf of the server, not per-request analysis overrides. The
 # credentials and repo targets are fixed at deployment, not caller-supplied.
-@app.post("/results/{job_id}/preview-github-issue")
+@app.post("/results/{job_id}/preview-github-issue", operation_id="previewGithubIssue")
 async def preview_github_issue(
     job_id: str,
     body: PreviewIssueRequest,
@@ -5431,7 +5514,7 @@ async def preview_github_issue(
     }
 
 
-@app.post("/results/{job_id}/preview-jira-bug")
+@app.post("/results/{job_id}/preview-jira-bug", operation_id="previewJiraBug")
 async def preview_jira_bug(
     job_id: str,
     body: PreviewIssueRequest,
@@ -5729,7 +5812,11 @@ async def _add_tracker_comment(
     return comment_id
 
 
-@app.post("/results/{job_id}/create-github-issue", status_code=201)
+@app.post(
+    "/results/{job_id}/create-github-issue",
+    status_code=201,
+    operation_id="createGithubIssueEndpoint",
+)
 async def create_github_issue_endpoint(
     job_id: str,
     body: CreateIssueRequest,
@@ -5818,7 +5905,11 @@ async def create_github_issue_endpoint(
     }
 
 
-@app.post("/results/{job_id}/create-jira-bug", status_code=201)
+@app.post(
+    "/results/{job_id}/create-jira-bug",
+    status_code=201,
+    operation_id="createJiraBugEndpoint",
+)
 async def create_jira_bug_endpoint(
     job_id: str,
     body: CreateIssueRequest,
@@ -5927,7 +6018,7 @@ def _detect_tracker_type(url: str) -> str:
     return ""
 
 
-@app.put("/results/{job_id}/tracked-in")
+@app.put("/results/{job_id}/tracked-in", operation_id="setTrackedInEndpoint")
 async def set_tracked_in_endpoint(
     job_id: str,
     body: SetTrackedInRequest,
@@ -5975,7 +6066,7 @@ async def set_tracked_in_endpoint(
     }
 
 
-@app.get("/results/{job_id}/tracked-in")
+@app.get("/results/{job_id}/tracked-in", operation_id="getTrackedInEndpoint")
 async def get_tracked_in_endpoint(
     job_id: str,
     request: Request,
@@ -5990,7 +6081,9 @@ async def get_tracked_in_endpoint(
     return {"job_id": job_id, "tracked_in": tracked}
 
 
-@app.delete("/results/{job_id}/tracked-in/{link_id}")
+@app.delete(
+    "/results/{job_id}/tracked-in/{link_id}", operation_id="deleteTrackedInEndpoint"
+)
 async def delete_tracked_in_endpoint(
     job_id: str,
     link_id: int,
@@ -6017,7 +6110,11 @@ async def delete_tracked_in_endpoint(
     return {"status": "ok", "deleted_id": link_id}
 
 
-@app.post("/results/{job_id}/push-reportportal", response_model=ReportPortalPushResult)
+@app.post(
+    "/results/{job_id}/push-reportportal",
+    response_model=ReportPortalPushResult,
+    operation_id="pushToReportportal",
+)
 async def push_to_reportportal(
     job_id: str,
     request: Request,
@@ -6665,7 +6762,7 @@ def _apply_pattern_override(
     )
 
 
-@app.put("/results/{job_id}/tags")
+@app.put("/results/{job_id}/tags", operation_id="updateTags")
 async def update_tags(
     job_id: str,
     request: Request,
@@ -6708,7 +6805,10 @@ async def update_tags(
     return {"job_id": job_id, "tags": tags}
 
 
-@app.put("/results/{job_id}/override-classification")
+@app.put(
+    "/results/{job_id}/override-classification",
+    operation_id="overrideClassificationEndpoint",
+)
 async def override_classification_endpoint(
     job_id: str,
     body: OverrideClassificationRequest,
@@ -6769,7 +6869,7 @@ async def override_classification_endpoint(
     return {"status": "ok", "classification": body.classification}
 
 
-@app.put("/results/{job_id}/override-pattern")
+@app.put("/results/{job_id}/override-pattern", operation_id="overridePatternEndpoint")
 async def override_pattern_endpoint(
     job_id: str,
     body: OverridePatternRequest,
@@ -6823,21 +6923,21 @@ async def override_pattern_endpoint(
     return {"status": "ok", "pattern": body.pattern}
 
 
-@app.get("/results/{job_id}/review-status")
+@app.get("/results/{job_id}/review-status", operation_id="getReviewStatus")
 async def get_review_status(job_id: str, _: None = Depends(_bind_job_id)) -> dict:
     """Get review summary for a job (used by dashboard)."""
     logger.debug(f"GET /results/{job_id}/review-status")
     return await storage.get_review_status(job_id)
 
 
-@app.get("/results")
+@app.get("/results", operation_id="listJobResults")
 async def list_job_results(limit: int = Query(50, le=100)) -> list[dict]:
     """List recent analysis jobs."""
     logger.debug(f"GET /results: limit={limit}")
     return await list_results(limit)
 
 
-@app.delete("/api/results/bulk")
+@app.delete("/api/results/bulk", operation_id="bulkDeleteJobsEndpoint")
 async def bulk_delete_jobs_endpoint(body: BulkDeleteRequest, request: Request) -> dict:
     """Delete multiple jobs and all related data. Operator+ only.
 
@@ -6880,7 +6980,7 @@ async def bulk_delete_jobs_endpoint(body: BulkDeleteRequest, request: Request) -
     return result
 
 
-@app.delete("/results/{job_id}")
+@app.delete("/results/{job_id}", operation_id="deleteJobEndpoint")
 async def delete_job_endpoint(
     job_id: str, request: Request, _: None = Depends(_bind_job_id)
 ) -> dict:
@@ -6919,7 +7019,7 @@ async def delete_job_endpoint(
     return {"status": "deleted", "job_id": job_id}
 
 
-@app.post("/results/{job_id}/abort")
+@app.post("/results/{job_id}/abort", operation_id="abortAnalysis")
 async def abort_analysis(
     job_id: str,
     request: Request,
@@ -7003,7 +7103,7 @@ async def abort_analysis(
     return {"status": "aborted", "job_id": job_id}
 
 
-@app.get("/api/dashboard/active-count")
+@app.get("/api/dashboard/active-count", operation_id="getActiveAnalysisCount")
 async def get_active_analysis_count() -> dict:
     """Get count of currently active analyses (running/pending/waiting)."""
     logger.debug("GET /api/dashboard/active-count")
@@ -7018,7 +7118,7 @@ async def get_active_analysis_count() -> dict:
     return {"count": count}
 
 
-@app.get("/api/navbar/stream")
+@app.get("/api/navbar/stream", operation_id="streamNavbarCounts")
 async def stream_navbar_counts(request: Request) -> StreamingResponse:
     """SSE stream that pushes active analysis count and unread mention count."""
     username = request.state.username
@@ -7131,14 +7231,14 @@ async def stream_navbar_counts(request: Request) -> StreamingResponse:
     )
 
 
-@app.get("/api/dashboard/stream")
+@app.get("/api/dashboard/stream", operation_id="streamDashboard")
 async def stream_dashboard(request: Request) -> StreamingResponse:
     """SSE stream that notifies when the dashboard job list changes."""
     _check_allow_list(request)
     return _make_sse_stream(request, _dashboard_listeners, "dashboard-changed")
 
 
-@app.get("/api/results/{job_id}/stream")
+@app.get("/api/results/{job_id}/stream", operation_id="streamJobStatus")
 async def stream_job_status(job_id: str, request: Request) -> StreamingResponse:
     """SSE stream that notifies when a specific job's status changes."""
     _check_allow_list(request)
@@ -7151,7 +7251,7 @@ async def stream_job_status(job_id: str, request: Request) -> StreamingResponse:
     )
 
 
-@app.get("/api/results/{job_id}/comments/stream")
+@app.get("/api/results/{job_id}/comments/stream", operation_id="streamComments")
 async def stream_comments(job_id: str, request: Request) -> StreamingResponse:
     """SSE stream that notifies when comments change for a specific job."""
     _check_allow_list(request)
@@ -7164,14 +7264,14 @@ async def stream_comments(job_id: str, request: Request) -> StreamingResponse:
     )
 
 
-@app.get("/api/admin/token-usage/stream")
+@app.get("/api/admin/token-usage/stream", operation_id="streamTokenUsage")
 async def stream_token_usage(request: Request) -> StreamingResponse:
     """SSE stream that notifies when token usage data changes."""
     _check_allow_list(request)
     return _make_sse_stream(request, _token_usage_listeners, "usage-changed")
 
 
-@app.get("/api/stream")
+@app.get("/api/stream", operation_id="streamMultiplexed")
 async def stream_multiplexed(
     request: Request,
     topics: str = Query("", description="Comma-separated topic subscriptions"),
@@ -7436,7 +7536,7 @@ async def stream_multiplexed(
     )
 
 
-@app.get("/api/dashboard")
+@app.get("/api/dashboard", operation_id="apiDashboard")
 async def api_dashboard(
     limit: int = Query(default=500, ge=0, description="Max results (0 = no limit)"),
     offset: int = Query(default=0, ge=0, description="Rows to skip"),
@@ -7445,7 +7545,7 @@ async def api_dashboard(
     return await list_results_for_dashboard(limit=limit, offset=offset)
 
 
-@app.get("/api/capabilities")
+@app.get("/api/capabilities", operation_id="getCapabilities")
 async def get_capabilities(settings: Settings = _SETTINGS_DEP) -> dict:
     """Report server-level feature toggles and credential availability.
 
@@ -7468,7 +7568,7 @@ def _strip_url_userinfo(url: str) -> str:
     return url
 
 
-@app.get("/api/default-server-settings")
+@app.get("/api/default-server-settings", operation_id="getDefaultServerSettings")
 async def get_default_server_settings(settings: Settings = _SETTINGS_DEP) -> dict:
     """Return all non-sensitive server settings.
 
@@ -7584,7 +7684,7 @@ def _jira_client_from_body(
     return effective, token
 
 
-@app.post("/api/jira-projects")
+@app.post("/api/jira-projects", operation_id="listJiraProjects")
 async def list_jira_projects(
     body: JiraProjectsRequest,
     settings: Settings = _SETTINGS_DEP,
@@ -7630,7 +7730,7 @@ class JiraSecurityLevelsRequest(BaseModel):
     project_key: str = Field(description="Jira project key")
 
 
-@app.post("/api/jira-security-levels")
+@app.post("/api/jira-security-levels", operation_id="listJiraSecurityLevels")
 async def list_jira_security_levels(
     body: JiraSecurityLevelsRequest,
     settings: Settings = _SETTINGS_DEP,
@@ -7661,7 +7761,7 @@ class ValidateTokenRequest(BaseModel):
     email: str = Field(default="", description="Email for Jira Cloud auth")
 
 
-@app.post("/api/validate-token")
+@app.post("/api/validate-token", operation_id="validateToken")
 async def validate_token(
     body: ValidateTokenRequest,
     settings: Settings = _SETTINGS_DEP,
@@ -7761,7 +7861,7 @@ def _sanitize_sidecar_placeholder(value: str) -> str:
     return value
 
 
-@app.get("/history/failures")
+@app.get("/history/failures", operation_id="getAllFailuresEndpoint")
 async def get_all_failures_endpoint(
     search: str = Query(default=""),
     job_name: str = Query(default=""),
@@ -7788,7 +7888,7 @@ async def get_all_failures_endpoint(
     )
 
 
-@app.get("/history/test/{test_name:path}")
+@app.get("/history/test/{test_name:path}", operation_id="getTestHistoryEndpoint")
 async def get_test_history_endpoint(
     request: Request,
     test_name: str,
@@ -7809,7 +7909,7 @@ async def get_test_history_endpoint(
     return strip_sensitive_from_response(result)
 
 
-@app.get("/history/search")
+@app.get("/history/search", operation_id="searchBySignatureEndpoint")
 async def search_by_signature_endpoint(
     request: Request,
     signature: str = Query(...),
@@ -7824,7 +7924,7 @@ async def search_by_signature_endpoint(
     return strip_sensitive_from_response(result)
 
 
-@app.get("/history/stats/{job_name:path}")
+@app.get("/history/stats/{job_name:path}", operation_id="getJobStatsEndpoint")
 async def get_job_stats_endpoint(
     request: Request,
     job_name: str,
@@ -7839,7 +7939,7 @@ async def get_job_stats_endpoint(
     return strip_sensitive_from_response(result)
 
 
-@app.post("/history/classify", status_code=201)
+@app.post("/history/classify", status_code=201, operation_id="classifyTest")
 async def classify_test(request: Request, body: ClassifyTestRequest) -> dict:
     """Classify a test as FLAKY, REGRESSION, etc. Used by AI and humans."""
     _check_allow_list(request)
@@ -7937,7 +8037,7 @@ async def classify_test(request: Request, body: ClassifyTestRequest) -> dict:
     return {"id": classification_id}
 
 
-@app.get("/history/classifications")
+@app.get("/history/classifications", operation_id="getClassifications")
 async def get_classifications(
     request: Request,
     test_name: str = Query(default=""),
@@ -7996,7 +8096,7 @@ def _cursor_status_from_model_count(model_count: int) -> dict:
     }
 
 
-@app.get("/api/ai-models")
+@app.get("/api/ai-models", operation_id="listAiModels")
 async def list_ai_models(
     request: Request,
     provider: str = Query(
@@ -8075,7 +8175,7 @@ async def list_ai_models(
         return strip_sensitive_from_response({"providers": {}, "provider_status": {}})
 
 
-@app.post("/api/admin/ai-models/refresh")
+@app.post("/api/admin/ai-models/refresh", operation_id="refreshAiModels")
 async def refresh_ai_models(request: Request) -> dict:
     """Trigger model re-discovery on the sidecar and return updated list."""
     _require_admin(request)
@@ -8113,13 +8213,13 @@ async def refresh_ai_models(request: Request) -> dict:
         )
 
 
-@app.get("/health")
+@app.get("/health", operation_id="healthCheck")
 async def health_check() -> dict:
     """Basic health check endpoint (legacy, lightweight)."""
     return {"status": "healthy"}
 
 
-@app.get("/api/health")
+@app.get("/api/health", operation_id="healthCheckDetailed")
 async def health_check_detailed() -> Response:
     """Detailed health endpoint with dependency checks and error rates.
 
@@ -8133,7 +8233,7 @@ async def health_check_detailed() -> Response:
     return JSONResponse(content=result, status_code=status_code)
 
 
-@app.get("/metrics")
+@app.get("/metrics", operation_id="prometheusMetrics")
 async def prometheus_metrics() -> Response:
     """Prometheus metrics endpoint."""
     # Compute health_up from a lightweight health check
@@ -8172,7 +8272,7 @@ _RELEASE_CACHE_TTL = 3600  # 1 hour
 _release_cache_lock = asyncio.Lock()
 
 
-@app.get("/api/releases/latest")
+@app.get("/api/releases/latest", operation_id="getLatestRelease")
 async def get_latest_release() -> JSONResponse:
     """Return the latest GitHub release info (cached for 1 hour).
 
@@ -8275,10 +8375,29 @@ async def _read_json_object(request: Request) -> dict:
     return body
 
 
+def effective_can_view_reports(is_admin: bool, stored_flag: bool = False) -> bool:
+    """Effective reports access: admins always True; others use the stored DB flag."""
+    return True if is_admin else stored_flag
+
+
 def _require_admin(request: Request) -> None:
     """Raise 403 if the request is not from an authenticated admin."""
     if not request.state.is_admin:
         raise HTTPException(status_code=403, detail="Admin access required")
+
+
+def _require_can_view_reports(request: Request) -> None:
+    """Raise 403 unless the caller may access /api/reports/*.
+
+    AuthMiddleware sets ``request.state.can_view_reports`` to True for admins
+    and for users with the DB flag; handlers trust that single source of truth.
+    """
+    if getattr(request.state, "can_view_reports", False):
+        return
+    raise HTTPException(
+        status_code=403,
+        detail="Reports access required. Ask an administrator to grant can_view_reports.",
+    )
 
 
 def _require_authenticated(request: Request) -> None:
@@ -8342,9 +8461,13 @@ def _check_allow_list(request: Request) -> None:
         )
 
 
-@app.post("/api/auth/login")
+@app.post("/api/auth/login", operation_id="login")
 async def login(request: Request) -> JSONResponse:
-    """Authenticate admin with username + API key. Returns session cookie."""
+    """Authenticate any user with username + API key.
+
+    Returns a session cookie and user info including ``can_view_reports``
+    (True for admins; otherwise the stored DB flag).
+    """
     body = await _read_json_object(request)
 
     username = str(body.get("username", "")).strip().lower()
@@ -8357,6 +8480,7 @@ async def login(request: Request) -> JSONResponse:
     is_admin = False
     resolved_role = "reviewer"
     authenticated = False
+    can_view_reports = False
 
     # Check admin_key — username must be "admin"
     if (
@@ -8367,6 +8491,7 @@ async def login(request: Request) -> JSONResponse:
         is_admin = True
         resolved_role = "admin"
         authenticated = True
+        can_view_reports = effective_can_view_reports(True)
     else:
         # Check user API key
         user = await storage.get_user_by_key(api_key)
@@ -8375,6 +8500,9 @@ async def login(request: Request) -> JSONResponse:
             resolved_role = str(user.get("role", "reviewer"))
             if resolved_role == "admin":
                 is_admin = True
+            can_view_reports = effective_can_view_reports(
+                is_admin, bool(user.get("can_view_reports"))
+            )
 
     if not authenticated:
         logger.info(f"[AUDIT] Failed login attempt for username '{username}'")
@@ -8396,6 +8524,7 @@ async def login(request: Request) -> JSONResponse:
             "username": username,
             "role": resolved_role,
             "is_admin": is_admin,
+            "can_view_reports": can_view_reports,
         }
     )
     response.set_cookie(
@@ -8426,7 +8555,7 @@ async def login(request: Request) -> JSONResponse:
     return response
 
 
-@app.post("/api/auth/logout")
+@app.post("/api/auth/logout", operation_id="logout")
 async def logout(request: Request) -> JSONResponse:
     """Clear admin session."""
     session_token = _read_cookie(request, "rootcoz_session")
@@ -8449,19 +8578,24 @@ async def logout(request: Request) -> JSONResponse:
     return response
 
 
-@app.get("/api/auth/me")
+@app.get("/api/auth/me", operation_id="authMe")
 async def auth_me(request: Request) -> JSONResponse:
-    """Return current user info."""
+    """Return current user info, including ``can_view_reports``.
+
+    ``can_view_reports`` is True for admins and for users granted the flag
+    (see AuthMiddleware / ``request.state.can_view_reports``).
+    """
     return JSONResponse(
         content={
             "username": request.state.username,
             "role": request.state.role,
             "is_admin": request.state.is_admin,
+            "can_view_reports": bool(getattr(request.state, "can_view_reports", False)),
         }
     )
 
 
-@app.post("/api/auth/rotate-key")
+@app.post("/api/auth/rotate-key", operation_id="rotateOwnKeyEndpoint")
 async def rotate_own_key_endpoint(request: Request) -> JSONResponse:
     """Rotate the current user's API key. Returns the new key (shown once).
 
@@ -8510,7 +8644,7 @@ async def rotate_own_key_endpoint(request: Request) -> JSONResponse:
     return response
 
 
-@app.post("/api/auth/register")
+@app.post("/api/auth/register", operation_id="registerUser")
 async def register_user(request: Request) -> JSONResponse:
     """Register a new user or generate API key for existing user without one.
 
@@ -8607,7 +8741,7 @@ async def register_user(request: Request) -> JSONResponse:
     return response
 
 
-@app.get("/api/auth/needs-key")
+@app.get("/api/auth/needs-key", operation_id="checkNeedsKey")
 async def check_needs_key(request: Request) -> JSONResponse:
     """Check if the current user needs to generate an API key.
 
@@ -8654,7 +8788,7 @@ async def check_needs_key(request: Request) -> JSONResponse:
     )
 
 
-@app.get("/api/auth/pending-status")
+@app.get("/api/auth/pending-status", operation_id="pendingStatus")
 async def pending_status(request: Request) -> JSONResponse:
     """Return pending status info for unauthenticated users."""
     settings = get_settings()
@@ -8669,7 +8803,7 @@ async def pending_status(request: Request) -> JSONResponse:
 # --- User token endpoints ---
 
 
-@app.get("/api/user/tokens")
+@app.get("/api/user/tokens", operation_id="getUserTokensEndpoint")
 async def get_user_tokens_endpoint(request: Request) -> JSONResponse:
     """Get the current user's saved tokens."""
     username = request.state.username
@@ -8689,7 +8823,7 @@ async def get_user_tokens_endpoint(request: Request) -> JSONResponse:
     )
 
 
-@app.put("/api/user/tokens")
+@app.put("/api/user/tokens", operation_id="saveUserTokensEndpoint")
 async def save_user_tokens_endpoint(request: Request) -> JSONResponse:
     """Save tokens for the current user. Tokens are encrypted at rest.
 
@@ -8837,7 +8971,7 @@ def _read_log_tail(
         return text.splitlines()[-n:]
 
 
-@app.get("/api/admin/logs/stream")
+@app.get("/api/admin/logs/stream", operation_id="streamLogs")
 async def stream_logs(
     request: Request,
     lines: int = Query(100, ge=1, le=2000, description="Initial tail lines"),
@@ -8903,7 +9037,7 @@ async def stream_logs(
     )
 
 
-@app.get("/api/admin/token-usage")
+@app.get("/api/admin/token-usage", operation_id="getTokenUsage")
 async def get_token_usage(
     request: Request,
     start_date: str | None = None,
@@ -8930,14 +9064,14 @@ async def get_token_usage(
     )
 
 
-@app.get("/api/admin/token-usage/summary")
+@app.get("/api/admin/token-usage/summary", operation_id="getTokenUsageDashboard")
 async def get_token_usage_dashboard(request: Request) -> dict:
     """Get high-level token usage summary for dashboard. Admin only."""
     _require_admin(request)
     return await storage.get_token_usage_dashboard_summary()
 
 
-@app.get("/api/admin/token-usage/{job_id}")
+@app.get("/api/admin/token-usage/{job_id}", operation_id="getTokenUsageForJob")
 async def get_token_usage_for_job(request: Request, job_id: str) -> dict:
     """Get token usage breakdown for a specific job. Admin only."""
     _require_admin(request)
@@ -8949,16 +9083,19 @@ async def get_token_usage_for_job(request: Request, job_id: str) -> dict:
     return {"job_id": job_id, "records": records}
 
 
-@app.post("/api/admin/users/create")
-async def admin_create_user_endpoint(request: Request) -> JSONResponse:
-    """Admin creates a new user. Does NOT set session cookies (admin stays logged in)."""
-    _require_admin(request)
-    body = await _read_json_object(request)
+@app.post("/api/admin/users/create", operation_id="adminCreateUserEndpoint")
+async def admin_create_user_endpoint(
+    request: Request, body: AdminCreateUserRequest
+) -> JSONResponse:
+    """Admin creates a new user. Does NOT set session cookies (admin stays logged in).
 
-    username = body.get("username", "")
-    if not isinstance(username, str):
-        raise HTTPException(status_code=400, detail="Username must be a string")
-    username = username.strip().lower()
+    Response ``can_view_reports`` is the *effective* value (True for admins),
+    matching ``GET /api/auth/me``. The stored DB flag remains the request value
+    and is not force-set for admins.
+    """
+    _require_admin(request)
+
+    username = body.username.strip().lower()
     if not username:
         raise HTTPException(status_code=400, detail="Username is required")
 
@@ -8969,18 +9106,29 @@ async def admin_create_user_endpoint(request: Request) -> JSONResponse:
             detail="Usernames starting with 'rootcoz' are reserved for system use",
         )
 
-    role = body.get("role", "reviewer")
+    role = body.role
     if role not in storage.VALID_ROLES:
         raise HTTPException(
             status_code=400,
             detail=f"Role must be one of: {', '.join(sorted(storage.VALID_ROLES))}",
         )
 
+    # Store the request flag as-is (do not force True for admins — demotion
+    # must not leave an accidental grant). Response uses effective value.
+    stored_can_view_reports = body.can_view_reports
+
     try:
         if role == "admin":
-            username, raw_key = await storage.create_admin_user(username)
+            username, raw_key = await storage.create_admin_user(
+                username, can_view_reports=stored_can_view_reports
+            )
         else:
-            _, raw_key = await storage.create_user(username, status="active", role=role)
+            _, raw_key = await storage.create_user(
+                username,
+                status="active",
+                role=role,
+                can_view_reports=stored_can_view_reports,
+            )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
@@ -8989,14 +9137,22 @@ async def admin_create_user_endpoint(request: Request) -> JSONResponse:
 
     logger.info(
         f"[AUDIT] Admin '{request.state.username}' created {role} user '{username}'"
+        f" (can_view_reports={stored_can_view_reports})"
     )
     return JSONResponse(
-        content={"username": username, "api_key": raw_key, "role": role},
+        content={
+            "username": username,
+            "api_key": raw_key,
+            "role": role,
+            "can_view_reports": effective_can_view_reports(
+                role == "admin", stored_can_view_reports
+            ),
+        },
         headers={"Cache-Control": "no-store"},
     )
 
 
-@app.delete("/api/admin/users/{username}")
+@app.delete("/api/admin/users/{username}", operation_id="deleteUserEndpoint")
 async def delete_user_endpoint(request: Request, username: str) -> dict:
     """Delete a user. Bootstrap admin (ADMIN_KEY) is always available as fallback."""
     _require_admin(request)
@@ -9014,7 +9170,7 @@ async def delete_user_endpoint(request: Request, username: str) -> dict:
     return {"deleted": username}
 
 
-@app.put("/api/admin/users/{username}/role")
+@app.put("/api/admin/users/{username}/role", operation_id="changeUserRoleEndpoint")
 async def change_user_role_endpoint(request: Request, username: str) -> JSONResponse:
     """Change a user's role (reviewer, operator, or admin).
 
@@ -9052,7 +9208,34 @@ async def change_user_role_endpoint(request: Request, username: str) -> JSONResp
     )
 
 
-@app.get("/api/admin/users")
+@app.put(
+    "/api/admin/users/{username}/can-view-reports",
+    operation_id="setUserCanViewReports",
+)
+async def set_user_can_view_reports_endpoint(
+    request: Request, username: str, body: SetCanViewReportsRequest
+) -> JSONResponse:
+    """Set whether a user can access /api/reports/* (orthogonal to role)."""
+    _require_admin(request)
+    value = body.can_view_reports
+
+    try:
+        updated = await storage.set_user_can_view_reports(username, value)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if not updated:
+        raise HTTPException(status_code=404, detail=f"User '{username}' not found")
+
+    logger.info(
+        f"[AUDIT] Admin '{request.state.username}' set can_view_reports={value}"
+        f" for user '{username}'"
+    )
+    return JSONResponse(
+        content={"username": username, "can_view_reports": value},
+    )
+
+
+@app.get("/api/admin/users", operation_id="listUsersEndpoint")
 async def list_users_endpoint(request: Request) -> dict:
     """List all users (admin and regular)."""
     _require_admin(request)
@@ -9060,7 +9243,7 @@ async def list_users_endpoint(request: Request) -> dict:
     return {"users": users}
 
 
-@app.get("/api/admin/users/pending")
+@app.get("/api/admin/users/pending", operation_id="listPendingUsersEndpoint")
 async def list_pending_users_endpoint(request: Request) -> dict:
     """List users awaiting approval."""
     _require_admin(request)
@@ -9068,7 +9251,7 @@ async def list_pending_users_endpoint(request: Request) -> dict:
     return {"users": users}
 
 
-@app.post("/api/admin/users/{username}/approve")
+@app.post("/api/admin/users/{username}/approve", operation_id="approveUser")
 async def approve_user(username: str, request: Request) -> dict:
     """Approve a pending user registration."""
     _require_admin(request)
@@ -9089,7 +9272,7 @@ async def approve_user(username: str, request: Request) -> dict:
     }
 
 
-@app.post("/api/admin/users/{username}/reject")
+@app.post("/api/admin/users/{username}/reject", operation_id="rejectUser")
 async def reject_user(username: str, request: Request) -> dict:
     """Reject a pending user registration."""
     _require_admin(request)
@@ -9110,7 +9293,7 @@ async def reject_user(username: str, request: Request) -> dict:
     }
 
 
-@app.post("/api/admin/users/{username}/rotate-key")
+@app.post("/api/admin/users/{username}/rotate-key", operation_id="rotateKeyEndpoint")
 async def rotate_key_endpoint(request: Request, username: str) -> JSONResponse:
     """Rotate a user's API key. Works for both admin and regular users."""
     _require_admin(request)
@@ -9169,14 +9352,14 @@ def _broadcast_settings_change() -> None:
         ev.set()
 
 
-@app.get("/api/admin/settings/stream")
+@app.get("/api/admin/settings/stream", operation_id="settingsStream")
 async def settings_stream(request: Request):
     """SSE stream for server settings changes."""
     _require_admin(request)
     return _make_sse_stream(request, _settings_listeners, "settings-changed")
 
 
-@app.get("/api/admin/settings")
+@app.get("/api/admin/settings", operation_id="getAdminSettings")
 async def get_admin_settings(
     request: Request,
     reveal_key: str = Query(
@@ -9235,7 +9418,7 @@ async def get_admin_settings(
     return JSONResponse(content=metadata)
 
 
-@app.put("/api/admin/settings")
+@app.put("/api/admin/settings", operation_id="updateAdminSettings")
 async def update_admin_settings(request: Request) -> JSONResponse:
     """Update one or more server settings. Body: {"settings": {"key": "value", ...}}"""
     _require_admin(request)
@@ -9345,7 +9528,7 @@ async def update_admin_settings(request: Request) -> JSONResponse:
     )
 
 
-@app.get("/api/admin/settings/history")
+@app.get("/api/admin/settings/history", operation_id="getSettingsHistory")
 async def get_settings_history(
     request: Request,
     key: str = Query("", description="Filter by setting key"),
@@ -9364,7 +9547,7 @@ async def get_settings_history(
     return JSONResponse(content=history)
 
 
-@app.delete("/api/admin/settings/{key}")
+@app.delete("/api/admin/settings/{key}", operation_id="resetAdminSetting")
 async def reset_admin_setting(request: Request, key: str) -> JSONResponse:
     """Reset a server setting to its env/default value (removes DB override)."""
     _require_admin(request)
@@ -9432,7 +9615,7 @@ def _unpack_metadata_filters(
     return team, tier, version, label, exclude_label
 
 
-@app.get("/api/jobs/metadata")
+@app.get("/api/jobs/metadata", operation_id="listJobsMetadata")
 async def list_jobs_metadata(
     filters: Annotated[dict, Depends(_metadata_filters)],
 ) -> list[dict]:
@@ -9445,7 +9628,7 @@ async def list_jobs_metadata(
     )
 
 
-@app.get("/api/jobs/{job_name:path}/metadata")
+@app.get("/api/jobs/{job_name:path}/metadata", operation_id="getJobMetadataEndpoint")
 async def get_job_metadata_endpoint(job_name: str) -> dict:
     """Get metadata for a specific job."""
     logger.debug(f"GET /api/jobs/{job_name}/metadata")
@@ -9455,7 +9638,7 @@ async def get_job_metadata_endpoint(job_name: str) -> dict:
     return result
 
 
-@app.put("/api/jobs/{job_name:path}/metadata")
+@app.put("/api/jobs/{job_name:path}/metadata", operation_id="setJobMetadataEndpoint")
 async def set_job_metadata_endpoint(
     request: Request,
     job_name: str,
@@ -9478,7 +9661,9 @@ async def set_job_metadata_endpoint(
     )
 
 
-@app.delete("/api/jobs/{job_name:path}/metadata")
+@app.delete(
+    "/api/jobs/{job_name:path}/metadata", operation_id="deleteJobMetadataEndpoint"
+)
 async def delete_job_metadata_endpoint(request: Request, job_name: str) -> dict:
     """Delete metadata for a job."""
     _require_admin(request)
@@ -9489,7 +9674,7 @@ async def delete_job_metadata_endpoint(request: Request, job_name: str) -> dict:
     return {"status": "deleted", "job_name": job_name}
 
 
-@app.put("/api/jobs/metadata/bulk")
+@app.put("/api/jobs/metadata/bulk", operation_id="bulkSetJobMetadata")
 async def bulk_set_job_metadata(
     request: Request,
     body: BulkJobMetadataRequest,
@@ -9509,7 +9694,7 @@ async def bulk_set_job_metadata(
         raise HTTPException(status_code=422, detail=str(exc)) from None
 
 
-@app.get("/api/jobs/metadata/rules")
+@app.get("/api/jobs/metadata/rules", operation_id="listMetadataRules")
 async def list_metadata_rules() -> dict:
     """List configured metadata rules for auto-assignment."""
     logger.debug("GET /api/jobs/metadata/rules")
@@ -9525,7 +9710,7 @@ async def list_metadata_rules() -> dict:
     }
 
 
-@app.post("/api/jobs/metadata/rules/preview")
+@app.post("/api/jobs/metadata/rules/preview", operation_id="previewMetadataRules")
 async def preview_metadata_rules(body: dict) -> dict:
     """Preview what metadata would be assigned to a job name by rules.
 
@@ -9547,7 +9732,7 @@ async def preview_metadata_rules(body: dict) -> dict:
     }
 
 
-@app.get("/api/dashboard/filtered")
+@app.get("/api/dashboard/filtered", operation_id="apiDashboardFiltered")
 async def api_dashboard_filtered(
     filters: Annotated[dict, Depends(_metadata_filters)],
     search: str = Query(default="", description="Search job name or ID"),
@@ -9661,7 +9846,7 @@ def _validate_review_status(review_status: str) -> None:
         )
 
 
-@app.get("/api/reports/totals")
+@app.get("/api/reports/totals", operation_id="reportsTotals")
 async def reports_totals(
     request: Request,
     team: str = Query(default=""),
@@ -9676,8 +9861,11 @@ async def reports_totals(
     limit: int = Query(default=0, ge=0, le=1000),
     offset: int = Query(default=0, ge=0),
 ) -> dict:
-    """Aggregate totals: total jobs, failures, reviewed, with per-job detail list. Admin only."""
-    _require_admin(request)
+    """Aggregate totals: total jobs, failures, reviewed, with per-job detail list.
+
+    Requires admin or can_view_reports.
+    """
+    _require_can_view_reports(request)
     _validate_review_status(review_status)
     team_list, tier_list, version_list = _parse_report_metadata(team, tier, version)
     tag_list = _parse_csv_list(tags)
@@ -9710,7 +9898,10 @@ async def reports_totals(
     )
 
 
-@app.get("/api/reports/classification-overrides")
+@app.get(
+    "/api/reports/classification-overrides",
+    operation_id="reportsClassificationOverrides",
+)
 async def reports_classification_overrides(
     request: Request,
     team: str = Query(default=""),
@@ -9725,8 +9916,11 @@ async def reports_classification_overrides(
     limit: int = Query(default=0, ge=0, le=1000),
     offset: int = Query(default=0, ge=0),
 ) -> dict:
-    """Classification overrides grouped by from→to transition. Admin only."""
-    _require_admin(request)
+    """Classification overrides grouped by from→to transition.
+
+    Requires admin or can_view_reports.
+    """
+    _require_can_view_reports(request)
     _validate_review_status(review_status)
     team_list, tier_list, version_list = _parse_report_metadata(team, tier, version)
     tag_list = _parse_csv_list(tags)
@@ -9759,7 +9953,7 @@ async def reports_classification_overrides(
     )
 
 
-@app.get("/api/reports/issues-created")
+@app.get("/api/reports/issues-created", operation_id="reportsIssuesCreated")
 async def reports_issues_created(
     request: Request,
     team: str = Query(default=""),
@@ -9774,8 +9968,11 @@ async def reports_issues_created(
     limit: int = Query(default=0, ge=0, le=1000),
     offset: int = Query(default=0, ge=0),
 ) -> dict:
-    """GitHub/Jira issues created from analysis results. Admin only."""
-    _require_admin(request)
+    """GitHub/Jira issues created from analysis results.
+
+    Requires admin or can_view_reports.
+    """
+    _require_can_view_reports(request)
     _validate_review_status(review_status)
     team_list, tier_list, version_list = _parse_report_metadata(team, tier, version)
     tag_list = _parse_csv_list(tags)
@@ -9811,7 +10008,7 @@ async def reports_issues_created(
 # --- Notification endpoints ---
 
 
-@app.get("/api/notifications/vapid-public-key")
+@app.get("/api/notifications/vapid-public-key", operation_id="getVapidPublicKey")
 async def get_vapid_public_key():
     """Return the VAPID public key for frontend push subscription."""
     settings = get_settings()
@@ -9825,7 +10022,7 @@ async def get_vapid_public_key():
     return {"vapid_public_key": vapid_cfg["public_key"]}
 
 
-@app.post("/api/notifications/subscribe")
+@app.post("/api/notifications/subscribe", operation_id="subscribeNotifications")
 async def subscribe_notifications(body: PushSubscriptionRequest, request: Request):
     """Register a push subscription for the current user."""
     settings = get_settings()
@@ -9846,7 +10043,7 @@ async def subscribe_notifications(body: PushSubscriptionRequest, request: Reques
     return {"status": "subscribed"}
 
 
-@app.post("/api/notifications/unsubscribe")
+@app.post("/api/notifications/unsubscribe", operation_id="unsubscribeNotifications")
 async def unsubscribe_notifications(body: UnsubscribeRequest, request: Request):
     """Remove a push subscription."""
     settings = get_settings()
@@ -9864,7 +10061,7 @@ async def unsubscribe_notifications(body: UnsubscribeRequest, request: Request):
     return {"status": "unsubscribed"}
 
 
-@app.get("/api/users/mentions")
+@app.get("/api/users/mentions", operation_id="getUserMentions")
 async def get_user_mentions(request: Request):
     """Get comments that mention the current user."""
     username = request.state.username
@@ -9893,7 +10090,7 @@ async def get_user_mentions(request: Request):
     }
 
 
-@app.post("/api/users/mentions/read-all")
+@app.post("/api/users/mentions/read-all", operation_id="markAllMentionsReadEndpoint")
 async def mark_all_mentions_read_endpoint(request: Request):
     """Mark ALL mentions as read for the current user."""
     username = request.state.username
@@ -9905,7 +10102,7 @@ async def mark_all_mentions_read_endpoint(request: Request):
     return {"marked_read": count}
 
 
-@app.post("/api/users/mentions/read")
+@app.post("/api/users/mentions/read", operation_id="markMentionsAsRead")
 async def mark_mentions_as_read(request: Request):
     """Mark specific mentions as read."""
     username = request.state.username
@@ -9930,7 +10127,7 @@ async def mark_mentions_as_read(request: Request):
     return {"ok": True}
 
 
-@app.get("/api/users/mentions/unread-count")
+@app.get("/api/users/mentions/unread-count", operation_id="getUnreadMentionsCount")
 async def get_unread_mentions_count(request: Request):
     """Get count of unread mentions for navbar badge."""
     username = request.state.username
@@ -9941,7 +10138,7 @@ async def get_unread_mentions_count(request: Request):
     return {"count": count}
 
 
-@app.get("/api/users/mentionable")
+@app.get("/api/users/mentionable", operation_id="getMentionableUsers")
 async def get_mentionable_users(request: Request):
     """Return list of usernames that can be mentioned in comments."""
     username = request.state.username
@@ -9952,7 +10149,11 @@ async def get_mentionable_users(request: Request):
     return {"usernames": [u["username"] for u in users]}
 
 
-@app.post("/api/analyze-comment-intent", response_model=AnalyzeCommentResponse)
+@app.post(
+    "/api/analyze-comment-intent",
+    response_model=AnalyzeCommentResponse,
+    operation_id="analyzeCommentIntent",
+)
 async def analyze_comment_intent(
     request: Request, body: AnalyzeCommentRequest
 ) -> AnalyzeCommentResponse:
@@ -10037,6 +10238,7 @@ Respond with ONLY a JSON object:
     "/api/feedback/preview",
     status_code=200,
     response_model=FeedbackPreviewResponse,
+    operation_id="previewFeedback",
 )
 async def preview_feedback(request: Request, body: FeedbackRequest):
     """Preview user feedback as a formatted GitHub issue.
@@ -10067,7 +10269,12 @@ async def preview_feedback(request: Request, body: FeedbackRequest):
         ) from exc
 
 
-@app.post("/api/feedback/create", status_code=201, response_model=FeedbackResponse)
+@app.post(
+    "/api/feedback/create",
+    status_code=201,
+    response_model=FeedbackResponse,
+    operation_id="createFeedback",
+)
 async def create_feedback(request: Request, body: FeedbackCreateRequest):
     """Create a GitHub issue from a previewed feedback.
 
@@ -10179,7 +10386,7 @@ async def _resolve_chat_credentials(
 # -- Chat endpoints --
 
 
-@app.get("/api/chat/{job_id}")
+@app.get("/api/chat/{job_id}", operation_id="getChatHistory")
 async def get_chat_history(
     job_id: str,
     request: Request,
@@ -10207,7 +10414,7 @@ async def get_chat_history(
     return {"messages": messages, "total": total}
 
 
-@app.post("/api/chat/{job_id}/init")
+@app.post("/api/chat/{job_id}/init", operation_id="initChat")
 async def init_chat(job_id: str, request: Request) -> dict:
     """Initialize chat workspace: create directory, clone repos, and start AI session."""
     _check_allow_list(request)
@@ -10369,7 +10576,7 @@ async def init_chat(job_id: str, request: Request) -> dict:
     }
 
 
-@app.post("/api/chat/{job_id}/close")
+@app.post("/api/chat/{job_id}/close", operation_id="closeChat")
 async def close_chat(job_id: str, request: Request) -> dict:
     """Signal that a user left the chat page.
 
@@ -10382,7 +10589,7 @@ async def close_chat(job_id: str, request: Request) -> dict:
     return {"status": "ok"}
 
 
-@app.post("/api/chat/{job_id}/abort")
+@app.post("/api/chat/{job_id}/abort", operation_id="abortChat")
 async def abort_chat(job_id: str, request: Request) -> dict:
     """Abort the currently processing chat message for this user."""
     _check_allow_list(request)
@@ -10538,7 +10745,7 @@ def _resolve_chat_ai_config(
     return provider, model
 
 
-@app.get("/api/chat/{job_id}/stream")
+@app.get("/api/chat/{job_id}/stream", operation_id="chatStream")
 async def chat_stream(job_id: str, request: Request) -> StreamingResponse:
     """SSE stream for real-time chat message updates."""
     _check_allow_list(request)
@@ -10553,7 +10760,7 @@ async def chat_stream(job_id: str, request: Request) -> StreamingResponse:
     )
 
 
-@app.post("/api/chat/{job_id}", status_code=202)
+@app.post("/api/chat/{job_id}", status_code=202, operation_id="sendChatMessage")
 async def send_chat_message(
     job_id: str,
     body: ChatMessageRequest,
@@ -10848,7 +11055,7 @@ async def _process_chat_message(
             # and must stay alive for the sidecar session lifetime
 
 
-@app.delete("/api/chat/{job_id}")
+@app.delete("/api/chat/{job_id}", operation_id="clearChatHistory")
 async def clear_chat_history(job_id: str, request: Request) -> dict:
     """Clear chat messages for the current user on a job."""
     _check_allow_list(request)
@@ -10887,7 +11094,7 @@ async def clear_chat_history(job_id: str, request: Request) -> dict:
 # -- Admin DB endpoints (used by admin chat tools) --
 
 
-@app.get("/api/admin/db/schema")
+@app.get("/api/admin/db/schema", operation_id="adminDbSchema")
 async def admin_db_schema(request: Request) -> dict:
     """Get database schema — tables, columns, types, row counts. Admin only."""
     _require_admin(request)
@@ -10920,7 +11127,7 @@ async def admin_db_schema(request: Request) -> dict:
         conn.close()
 
 
-@app.post("/api/admin/db/query")
+@app.post("/api/admin/db/query", operation_id="adminDbQuery")
 async def admin_db_query(request: Request) -> dict:
     """Execute a read-only SQL query. Admin only."""
     _require_admin(request)
@@ -10962,7 +11169,7 @@ async def admin_db_query(request: Request) -> dict:
 # -- Admin chat endpoints --
 
 
-@app.get("/api/admin/chat")
+@app.get("/api/admin/chat", operation_id="getAdminChatHistory")
 async def get_admin_chat_history(
     request: Request,
     limit: int = Query(default=200, ge=1, le=500),
@@ -10983,7 +11190,7 @@ async def get_admin_chat_history(
     return {"messages": messages, "total": total}
 
 
-@app.post("/api/admin/chat/init")
+@app.post("/api/admin/chat/init", operation_id="initAdminChat")
 async def init_admin_chat(request: Request) -> dict:
     """Initialize admin chat workspace and AI session."""
     _require_admin(request)
@@ -11039,7 +11246,7 @@ async def init_admin_chat(request: Request) -> dict:
     return {"ready": True, "session_id": session_id or ""}
 
 
-@app.post("/api/admin/chat/close")
+@app.post("/api/admin/chat/close", operation_id="closeAdminChat")
 async def close_admin_chat(request: Request) -> dict:
     """Signal that a user left the admin chat page."""
     _require_admin(request)
@@ -11047,7 +11254,7 @@ async def close_admin_chat(request: Request) -> dict:
     return {"status": "ok"}
 
 
-@app.post("/api/admin/chat/abort")
+@app.post("/api/admin/chat/abort", operation_id="abortAdminChat")
 async def abort_admin_chat(request: Request) -> dict:
     """Abort the currently processing admin chat message for this user."""
     _require_admin(request)
@@ -11099,7 +11306,7 @@ async def abort_admin_chat(request: Request) -> dict:
     return {"aborted": len(pending)}
 
 
-@app.get("/api/admin/chat/stream")
+@app.get("/api/admin/chat/stream", operation_id="adminChatStream")
 async def admin_chat_stream(request: Request) -> StreamingResponse:
     """SSE stream for real-time admin chat message updates."""
     _require_admin(request)
@@ -11114,7 +11321,7 @@ async def admin_chat_stream(request: Request) -> StreamingResponse:
     )
 
 
-@app.post("/api/admin/chat", status_code=202)
+@app.post("/api/admin/chat", status_code=202, operation_id="sendAdminChatMessage")
 async def send_admin_chat_message(
     body: ChatMessageRequest,
     request: Request,
@@ -11361,7 +11568,7 @@ class SaveArtifactRequest(BaseModel):
     filename: str = Field(..., min_length=1, max_length=255)
 
 
-@app.post("/api/admin-chat/artifacts")
+@app.post("/api/admin-chat/artifacts", operation_id="saveAdminChatArtifact")
 async def save_admin_chat_artifact(
     body: SaveArtifactRequest,
     request: Request,
@@ -11408,7 +11615,7 @@ async def save_admin_chat_artifact(
     }
 
 
-@app.get("/api/admin-chat/artifacts/{artifact_id}")
+@app.get("/api/admin-chat/artifacts/{artifact_id}", operation_id="getAdminChatArtifact")
 async def get_admin_chat_artifact(
     artifact_id: str,
     request: Request,
@@ -11448,7 +11655,7 @@ async def get_admin_chat_artifact(
     )
 
 
-@app.delete("/api/admin/chat")
+@app.delete("/api/admin/chat", operation_id="clearAdminChatHistory")
 async def clear_admin_chat_history(request: Request) -> dict:
     """Clear admin chat messages for the current user."""
     _require_admin(request)

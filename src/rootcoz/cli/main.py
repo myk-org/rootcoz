@@ -50,7 +50,10 @@ failure_app = typer.Typer(
     help="Look up and re-analyze individual failures.", no_args_is_help=True
 )
 chat_app = typer.Typer(help="Chat with AI about analyzed jobs.", no_args_is_help=True)
-reports_app = typer.Typer(help="Analytics reports.", no_args_is_help=True)
+reports_app = typer.Typer(
+    help="Analytics reports (requires admin or can_view_reports).",
+    no_args_is_help=True,
+)
 
 app.add_typer(results_app, name="results")
 app.add_typer(history_app, name="history")
@@ -116,6 +119,12 @@ def _handle_error(err: RootCozError) -> None:
         if "allow list" in detail:
             typer.echo(
                 "Hint: Your user is not on the server's allow list. Contact an administrator.",
+                err=True,
+            )
+        elif "can_view_reports" in detail:
+            typer.echo(
+                "Hint: Ask an administrator to grant can_view_reports "
+                "(CLI: rootcoz admin users set-can-view-reports).",
                 err=True,
             )
         elif (
@@ -504,17 +513,25 @@ def dashboard(
 def results_show(
     job_id: str = typer.Argument(help="Job ID to show."),
     full: bool = typer.Option(False, "--full", "-f", help="Show complete JSON result."),
+    fields: str | None = typer.Option(
+        None,
+        "--fields",
+        help=(
+            "Comma-separated allowlisted field paths for a sparse response "
+            "(see `rootcoz results fields`). Unknown paths are rejected."
+        ),
+    ),
     json_output: bool = _JSON_OPTION,
 ):
     """Show analysis result for a job."""
     _set_json(json_output)
     try:
         client = _get_client()
-        data = client.get_result(job_id)
+        data = client.get_result(job_id, fields=fields)
     except RootCozError as err:
         _handle_error(err)
 
-    if full or _state.get("json", False):
+    if fields or full or _state.get("json", False):
         print_output(data, columns=[], as_json=True)
     else:
         summary = {
@@ -554,6 +571,22 @@ def results_show(
                         f"({link.get('tracked_in_type', '')}) "
                         f"by {link.get('tracked_in_by', '')}"
                     )
+
+
+@results_app.command("fields")
+def results_fields(
+    json_output: bool = _JSON_OPTION,
+):
+    """List allowlisted field paths for sparse GET /results/{job_id}."""
+    data = _run_client_command(
+        json_output,
+        lambda c: c.list_result_fields(),
+        emit_output=False,
+    )
+    if not _state.get("json", False):
+        fields_list = data.get("fields", [])
+        for field in fields_list:
+            typer.echo(field)
 
 
 @results_app.command("delete")
@@ -2365,7 +2398,7 @@ def auth_whoami(
     _run_client_command(
         json_output,
         lambda c: c.auth_me(),
-        columns=["username", "role", "is_admin"],
+        columns=["username", "role", "is_admin", "can_view_reports"],
     )
 
 
@@ -2387,8 +2420,18 @@ def admin_users_list(
         if users:
             print_output(
                 users,
-                columns=["username", "role", "created_at", "last_seen"],
-                labels={"created_at": "CREATED", "last_seen": "LAST SEEN"},
+                columns=[
+                    "username",
+                    "role",
+                    "can_view_reports",
+                    "created_at",
+                    "last_seen",
+                ],
+                labels={
+                    "created_at": "CREATED",
+                    "last_seen": "LAST SEEN",
+                    "can_view_reports": "REPORTS",
+                },
                 as_json=False,
             )
         else:
@@ -2401,6 +2444,11 @@ def admin_users_create(
     role: str = typer.Option(
         ..., "--role", help="Role: viewer, reviewer, operator, or admin."
     ),
+    can_view_reports: bool = typer.Option(
+        False,
+        "--can-view-reports/--no-can-view-reports",
+        help="Grant access to /api/reports/* (orthogonal to role).",
+    ),
     json_output: bool = _JSON_OPTION,
 ):
     """Create a new user with the specified role. The API key is shown once \u2014 save it."""
@@ -2412,7 +2460,9 @@ def admin_users_create(
         raise typer.Exit(1)
     data = _run_client_command(
         json_output,
-        lambda c: c.admin_create_user(username, role=role),
+        lambda c: c.admin_create_user(
+            username, role=role, can_view_reports=can_view_reports
+        ),
         emit_output=False,
     )
     if not _state.get("json", False):
@@ -2483,6 +2533,33 @@ def admin_users_change_role(
         api_key = data.get("api_key")
         if api_key:
             _echo_api_key_warning(api_key)
+
+
+@admin_users_app.command("set-can-view-reports")
+def admin_users_set_can_view_reports(
+    username: str = typer.Argument(..., help="Username to update."),
+    value: str = typer.Argument(..., help="true or false (also accepts 1/0, yes/no)."),
+    json_output: bool = _JSON_OPTION,
+):
+    """Grant or revoke access to /api/reports/* for a user."""
+    normalized = value.strip().lower()
+    if normalized in ("true", "1", "yes", "on"):
+        flag = True
+    elif normalized in ("false", "0", "no", "off"):
+        flag = False
+    else:
+        typer.echo("Error: value must be true or false", err=True)
+        raise typer.Exit(1)
+    data = _run_client_command(
+        json_output,
+        lambda c: c.admin_set_can_view_reports(username, flag),
+        emit_output=False,
+    )
+    if not _state.get("json", False):
+        typer.echo(
+            f"Set can_view_reports={data.get('can_view_reports', flag)}"
+            f" for '{data.get('username', username)}'"
+        )
 
 
 @admin_users_app.command("pending")

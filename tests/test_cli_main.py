@@ -202,6 +202,31 @@ class TestResultsCommands:
         result = runner.invoke(app, ["results", "show", "abc-123"])
         assert result.exit_code == 0
         assert "abc-123" in result.output
+        mock_client.get_result.assert_called_with("abc-123", fields=None)
+
+    def test_results_show_with_fields(self, mock_client):
+        mock_client.get_result.return_value = {
+            "status": "completed",
+            "result": {"summary": "x"},
+        }
+        result = runner.invoke(
+            app, ["results", "show", "abc-123", "--fields", "status,result.summary"]
+        )
+        assert result.exit_code == 0
+        mock_client.get_result.assert_called_with(
+            "abc-123", fields="status,result.summary"
+        )
+        assert "completed" in result.output
+
+    def test_results_fields(self, mock_client):
+        mock_client.list_result_fields.return_value = {
+            "fields": ["job_id", "status", "result.summary"]
+        }
+        result = runner.invoke(app, ["results", "fields"])
+        assert result.exit_code == 0
+        assert "job_id" in result.output
+        assert "result.summary" in result.output
+        mock_client.list_result_fields.assert_called_once()
 
     def test_results_delete(self, mock_client):
         mock_client.delete_job.return_value = {"status": "deleted", "job_id": "abc-123"}
@@ -746,6 +771,18 @@ class TestErrorHandling:
         assert result.exit_code == 1
         assert "allow list" in result.output.lower()
         # Should NOT hint about --api-key for allow list errors
+        assert "--api-key" not in result.output
+
+    def test_403_can_view_reports_hints_about_flag(self, mock_client):
+        """_handle_error should hint about can_view_reports, not admin key."""
+        mock_client.report_totals.side_effect = RootCozError(
+            status_code=403,
+            detail="Reports access required. Ask an administrator to grant can_view_reports.",
+        )
+        result = runner.invoke(app, ["reports", "totals"])
+        assert result.exit_code == 1
+        assert "can_view_reports" in result.output
+        assert "set-can-view-reports" in result.output
         assert "--api-key" not in result.output
 
 
@@ -3357,7 +3394,33 @@ class TestAdminUsersCreateCommand:
         assert "Created admin user: newadmin" in result.output
         assert "not-a-real-key" in result.output
         assert "Save this API key" in result.output
-        mock_client.admin_create_user.assert_called_once_with("newadmin", role="admin")
+        mock_client.admin_create_user.assert_called_once_with(
+            "newadmin", role="admin", can_view_reports=False
+        )
+
+    def test_admin_users_create_with_can_view_reports(self, mock_client):
+        mock_client.admin_create_user.return_value = {
+            "username": "ruser",
+            "api_key": "k",  # pragma: allowlist secret
+            "role": "reviewer",
+            "can_view_reports": True,
+        }
+        result = runner.invoke(
+            app,
+            [
+                "admin",
+                "users",
+                "create",
+                "ruser",
+                "--role",
+                "reviewer",
+                "--can-view-reports",
+            ],
+        )
+        assert result.exit_code == 0
+        mock_client.admin_create_user.assert_called_once_with(
+            "ruser", role="reviewer", can_view_reports=True
+        )
 
     def test_admin_users_create_reviewer(self, mock_client):
         """Create with --role reviewer, no API key shown."""
@@ -3372,7 +3435,7 @@ class TestAdminUsersCreateCommand:
         assert "Created reviewer user: newuser" in result.output
         assert "Save this API key" not in result.output
         mock_client.admin_create_user.assert_called_once_with(
-            "newuser", role="reviewer"
+            "newuser", role="reviewer", can_view_reports=False
         )
 
     def test_admin_users_create_invalid_role(self, mock_client):
@@ -3516,6 +3579,38 @@ class TestAdminUsersChangeRole:
         assert result.exit_code == 0
         output = json.loads(result.output)
         assert output["role"] == "admin"
+
+
+class TestAdminUsersSetCanViewReports:
+    def test_set_can_view_reports_true(self, mock_client):
+        mock_client.admin_set_can_view_reports.return_value = {
+            "username": "alice",
+            "can_view_reports": True,
+        }
+        result = runner.invoke(
+            app, ["admin", "users", "set-can-view-reports", "alice", "true"]
+        )
+        assert result.exit_code == 0
+        mock_client.admin_set_can_view_reports.assert_called_once_with("alice", True)
+        assert "can_view_reports=True" in result.output
+
+    def test_set_can_view_reports_false(self, mock_client):
+        mock_client.admin_set_can_view_reports.return_value = {
+            "username": "alice",
+            "can_view_reports": False,
+        }
+        result = runner.invoke(
+            app, ["admin", "users", "set-can-view-reports", "alice", "false"]
+        )
+        assert result.exit_code == 0
+        mock_client.admin_set_can_view_reports.assert_called_once_with("alice", False)
+
+    def test_set_can_view_reports_invalid(self, mock_client):
+        result = runner.invoke(
+            app, ["admin", "users", "set-can-view-reports", "alice", "maybe"]
+        )
+        assert result.exit_code == 1
+        mock_client.admin_set_can_view_reports.assert_not_called()
 
 
 class TestAdminModelsRefreshCommand:

@@ -667,6 +667,11 @@ async def init_db() -> None:
             db, "users", "status", "TEXT NOT NULL DEFAULT 'active'"
         )
 
+        # Migration: can_view_reports flag (orthogonal to role; admins always have access)
+        await _migrate_add_column(
+            db, "users", "can_view_reports", "INTEGER NOT NULL DEFAULT 0"
+        )
+
         # Migration: role='user' → role='operator' (RBAC three-role migration)
         cursor = await db.execute(
             "UPDATE users SET role = 'operator' WHERE role = 'user'"
@@ -3910,9 +3915,29 @@ async def mark_stale_results_failed() -> tuple[list[dict], list[dict]]:
 # --- Auth storage functions ---
 
 
-async def create_admin_user(username: str) -> tuple[str, str]:
+def _user_row_to_dict(row: aiosqlite.Row) -> dict:
+    """Convert a users table row to a response dict, normalizing can_view_reports."""
+    data = dict(row)
+    if "can_view_reports" in data:
+        data["can_view_reports"] = bool(data["can_view_reports"])
+    else:
+        data["can_view_reports"] = False
+    return data
+
+
+async def create_admin_user(
+    username: str, *, can_view_reports: bool = False
+) -> tuple[str, str]:
     """Create an admin user and return (username, raw_api_key).
-    Raises ValueError if username is invalid or taken."""
+
+    Raises ValueError if username is invalid or taken.
+
+    Args:
+        username: The username to create.
+        can_view_reports: Stored DB flag for /api/reports/* access. Orthogonal
+            to role — admins always have effective access regardless of this
+            value; keeping it false avoids an accidental grant on demotion.
+    """
     username = _normalize_username(username)
     _validate_username(username)
     raw_key = generate_api_key()
@@ -3920,8 +3945,9 @@ async def create_admin_user(username: str) -> tuple[str, str]:
     async with _connect_db() as db:
         try:
             await db.execute(
-                "INSERT INTO users (username, api_key_hash, role) VALUES (?, ?, 'admin')",
-                (username, key_hash),
+                "INSERT INTO users (username, api_key_hash, role, can_view_reports)"
+                " VALUES (?, ?, 'admin', ?)",
+                (username, key_hash, 1 if can_view_reports else 0),
             )
             await db.commit()
         except Exception as exc:
@@ -3937,11 +3963,12 @@ async def get_user_by_key(api_key: str) -> dict | None:
     key_hash = hash_api_key(api_key)
     async with _connect_db() as db:
         cursor = await db.execute(
-            "SELECT id, username, role, created_at, last_seen FROM users WHERE api_key_hash = ?",
+            "SELECT id, username, role, can_view_reports, created_at, last_seen"
+            " FROM users WHERE api_key_hash = ?",
             (key_hash,),
         )
         row = await cursor.fetchone()
-        return dict(row) if row else None
+        return _user_row_to_dict(row) if row else None
 
 
 async def get_user_by_username(username: str) -> dict | None:
@@ -3949,11 +3976,12 @@ async def get_user_by_username(username: str) -> dict | None:
     username = _normalize_username(username)
     async with _connect_db() as db:
         cursor = await db.execute(
-            "SELECT id, username, role, created_at, last_seen FROM users WHERE username = ?",
+            "SELECT id, username, role, can_view_reports, created_at, last_seen"
+            " FROM users WHERE username = ?",
             (username,),
         )
         row = await cursor.fetchone()
-        return dict(row) if row else None
+        return _user_row_to_dict(row) if row else None
 
 
 async def delete_user(username: str) -> bool:
@@ -4061,9 +4089,30 @@ async def list_users() -> list[dict]:
     """
     async with _connect_db() as db:
         cursor = await db.execute(
-            "SELECT id, username, role, status, created_at, last_seen FROM users WHERE username != 'admin' ORDER BY created_at DESC"
+            "SELECT id, username, role, status, can_view_reports, created_at, last_seen"
+            " FROM users WHERE username != 'admin' ORDER BY created_at DESC"
         )
-        return [dict(row) for row in await cursor.fetchall()]
+        return [_user_row_to_dict(row) for row in await cursor.fetchall()]
+
+
+async def set_user_can_view_reports(username: str, value: bool) -> bool:
+    """Set can_view_reports for a user. Returns True if the user was updated.
+
+    Reads of this flag happen from the users table on each authenticated
+    request (see AuthMiddleware), so sessions do not need invalidation —
+    the next request picks up the new value immediately.
+    """
+    username = _normalize_username(username)
+    if username == "admin":
+        msg = "Cannot change can_view_reports for reserved 'admin' user"
+        raise ValueError(msg)
+    async with _connect_db() as db:
+        cursor = await db.execute(
+            "UPDATE users SET can_view_reports = ? WHERE username = ?",
+            (1 if value else 0, username),
+        )
+        await db.commit()
+        return cursor.rowcount > 0
 
 
 async def track_user(username: str) -> None:
@@ -4164,7 +4213,11 @@ def _validate_user_status(status: str) -> None:
 
 
 async def create_user(
-    username: str, *, status: str = "active", role: str = ""
+    username: str,
+    *,
+    status: str = "active",
+    role: str = "",
+    can_view_reports: bool = False,
 ) -> tuple[str, str]:
     """Create a new user or generate an API key for an existing user without one.
 
@@ -4175,6 +4228,8 @@ async def create_user(
         username: The username to create.
         status: Initial user status ('active', 'pending', 'rejected').
         role: Role to assign. Empty string uses DEFAULT_USER_ROLE from settings.
+        can_view_reports: Whether the user may access /api/reports/* (admins
+            always can, regardless of this flag).
 
     Uses BEGIN IMMEDIATE to prevent TOCTOU races between the
     existence check and the INSERT.
@@ -4189,6 +4244,7 @@ async def create_user(
         role = get_settings().default_user_role
     raw_key = generate_api_key()
     key_hash = hash_api_key(raw_key)
+    reports_flag = 1 if can_view_reports else 0
 
     async with _connect_db() as db:
         await db.execute("BEGIN IMMEDIATE")
@@ -4206,9 +4262,11 @@ async def create_user(
                 if existing["api_key_hash"]:
                     msg = f"User '{username}' already has an API key. Please log in."
                     raise ValueError(msg)
-                # Existing user without key — generate one
+                # Existing user without key — generate one.
+                # Do NOT reset can_view_reports (preserve any admin-granted flag).
                 update_cursor = await db.execute(
-                    "UPDATE users SET api_key_hash = ? WHERE username = ? AND role != 'admin'",
+                    "UPDATE users SET api_key_hash = ?"
+                    " WHERE username = ? AND role != 'admin'",
                     (key_hash, username),
                 )
                 if update_cursor.rowcount == 0:
@@ -4216,8 +4274,10 @@ async def create_user(
                     raise ValueError(msg)
             else:
                 await db.execute(
-                    "INSERT INTO users (username, api_key_hash, role, status) VALUES (?, ?, ?, ?)",
-                    (username, key_hash, role, status),
+                    "INSERT INTO users"
+                    " (username, api_key_hash, role, status, can_view_reports)"
+                    " VALUES (?, ?, ?, ?, ?)",
+                    (username, key_hash, role, status, reports_flag),
                 )
             await db.commit()
         except ValueError:
@@ -4297,10 +4357,10 @@ async def list_pending_users() -> list[dict]:
     """List users with pending status."""
     async with _connect_db() as db:
         cursor = await db.execute(
-            "SELECT id, username, role, status, created_at, last_seen "
+            "SELECT id, username, role, status, can_view_reports, created_at, last_seen "
             "FROM users WHERE status = 'pending' AND role != 'admin' ORDER BY created_at DESC"
         )
-        return [dict(row) for row in await cursor.fetchall()]
+        return [_user_row_to_dict(row) for row in await cursor.fetchall()]
 
 
 async def rotate_user_key(username: str) -> str:

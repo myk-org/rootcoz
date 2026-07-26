@@ -151,7 +151,7 @@ class RootCozClient:
         return self._request("POST", "/api/auth/logout")
 
     def auth_me(self) -> dict:
-        """Get current user info. GET /api/auth/me"""
+        """Get current user info including can_view_reports. GET /api/auth/me"""
         return self._request("GET", "/api/auth/me")
 
     # -- Admin ----------------------------------------------------------------
@@ -160,12 +160,34 @@ class RootCozClient:
         """List all users. GET /api/admin/users"""
         return self._request("GET", "/api/admin/users")
 
-    def admin_create_user(self, username: str, role: str) -> dict:
-        """Create a user with the specified role. POST /api/admin/users/create"""
+    def admin_create_user(
+        self,
+        username: str,
+        role: str,
+        *,
+        can_view_reports: bool = False,
+    ) -> dict:
+        """Create a user with the specified role and optional can_view_reports.
+
+        POST /api/admin/users/create. Response can_view_reports is effective
+        (True for admins); the stored flag follows the request value.
+        """
         return self._request(
             "POST",
             "/api/admin/users/create",
-            json={"username": username, "role": role},
+            json={
+                "username": username,
+                "role": role,
+                "can_view_reports": can_view_reports,
+            },
+        )
+
+    def admin_set_can_view_reports(self, username: str, can_view_reports: bool) -> dict:
+        """Set can_view_reports for a user. PUT /api/admin/users/{username}/can-view-reports"""
+        return self._request(
+            "PUT",
+            f"/api/admin/users/{username}/can-view-reports",
+            json={"can_view_reports": can_view_reports},
         )
 
     def admin_delete_user(self, username: str) -> dict:
@@ -296,9 +318,21 @@ class RootCozClient:
         """Get count of currently active analyses. GET /api/dashboard/active-count"""
         return self._request("GET", "/api/dashboard/active-count")
 
-    def get_result(self, job_id: str) -> dict:
-        """Get a stored result by job_id. GET /results/{job_id}"""
-        return self._request("GET", f"/results/{job_id}")
+    def get_result(self, job_id: str, *, fields: str | None = None) -> dict:
+        """Get a stored result by job_id. GET /results/{job_id}
+
+        Optional ``fields`` is a comma-separated allowlist of paths for a
+        sparse response (full values, never truncated). Discover paths with
+        ``list_result_fields()`` / GET /api/results/fields.
+        """
+        params: dict | None = None
+        if fields:
+            params = {"fields": fields}
+        return self._request("GET", f"/results/{job_id}", params=params)
+
+    def list_result_fields(self) -> dict:
+        """List allowlisted sparse field paths. GET /api/results/fields"""
+        return self._request("GET", "/api/results/fields")
 
     def set_tracked_in(
         self,

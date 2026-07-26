@@ -9,6 +9,7 @@ from pydantic import (
     BeforeValidator,
     Field,
     HttpUrl,
+    Strict,
     field_validator,
     model_serializer,
     model_validator,
@@ -1181,6 +1182,33 @@ class ChatHistoryResponse(BaseModel):
 
     messages: list[ChatMessageResponse]
     total: int
+
+
+CanViewReportsFlag = Annotated[
+    bool,
+    Strict(),
+    Field(
+        description=(
+            "Stored DB flag for /api/reports/* access. Orthogonal to role: "
+            "admins always have effective access even when this is false "
+            "(so demotion does not leave an accidental grant)."
+        ),
+    ),
+]
+
+
+class AdminCreateUserRequest(BaseModel):
+    """Admin POST /api/admin/users/create body."""
+
+    username: str
+    role: str = "reviewer"
+    can_view_reports: CanViewReportsFlag = False
+
+
+class SetCanViewReportsRequest(BaseModel):
+    """Admin PUT /api/admin/users/{username}/can-view-reports body."""
+
+    can_view_reports: CanViewReportsFlag
 
 
 # Resolve forward references (CodeFix references SimilarIssue which is defined later)
