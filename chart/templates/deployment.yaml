@@ -25,9 +25,9 @@ spec:
         {{- end }}
       annotations:
         checksum/config: {{ include "rootcoz.configMapData" . | sha256sum }}
-        {{- /* Salt values with Release.Revision to prevent fingerprinting while staying deterministic. */}}
-        checksum/credentials: {{ printf "%s\n%s\n%s\n%s\n%d" .Values.admin.key .Values.ai.geminiApiKey .Values.ai.anthropicApiKey .Values.ai.cursor.apiKey .Release.Revision | sha256sum }}
-        checksum/encryption: {{ printf "%s\n%d" .Values.encryptionKey .Release.Revision | sha256sum }}
+        {{- /* Salt with Release.Name: constant across upgrades, unique per installation. */}}
+        checksum/credentials: {{ printf "%s\n%s\n%s\n%s\n%s" .Values.admin.key .Values.ai.geminiApiKey .Values.ai.anthropicApiKey .Values.ai.cursor.apiKey .Release.Name | sha256sum }}
+        checksum/encryption: {{ printf "%s\n%s" .Values.encryptionKey .Release.Name | sha256sum }}
         {{- if and .Values.ai.vertex.enabled $gcloudKey }}
         checksum/gcloud: {{ $gcloudKey | sha256sum }}
         {{- end }}
