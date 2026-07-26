@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft-07/schema#",
   "title": "rootcoz Helm values",
   "type": "object",
-  "additionalProperties": true,
+  "additionalProperties": false,
   "properties": {
     "nameOverride": { "type": "string" },
     "fullnameOverride": { "type": "string" },
@@ -101,7 +101,8 @@
         "xdgDataHome": { "type": "string" },
         "xdgConfigHome": { "type": "string" },
         "secureCookies": { "type": "string" },
-        "publicBaseUrl": { "type": "string" }
+        "publicBaseUrl": { "type": "string" },
+        "metadataRulesFile": { "type": "string" }
       }
     },
     "tuning": {

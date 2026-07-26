@@ -692,6 +692,92 @@ def test_main_reuses_saved_values_as_defaults(
         }
 
 
+def test_deep_merge_preserves_extra_keys() -> None:
+    """_deep_merge keeps keys that aren't in the overlay."""
+    base = {
+        "route": {"enabled": True, "host": "old.example.com"},
+        "resources": {"cpu": "2"},
+    }
+    overlay = {"route": {"enabled": False}}
+    result = setup._deep_merge(base, overlay)
+    assert result["route"] == {"enabled": False, "host": "old.example.com"}
+    assert result["resources"] == {"cpu": "2"}
+
+
+def test_deep_merge_replaces_non_dict() -> None:
+    base = {"key": "old"}
+    overlay = {"key": "new", "extra": "added"}
+    result = setup._deep_merge(base, overlay)
+    assert result == {"key": "new", "extra": "added"}
+
+
+def test_run_step_propagates_result() -> None:
+    result = setup._run_step("test", lambda x: x + 1, 41)
+    assert result == 42
+
+
+def test_run_step_converts_errors_to_system_exit() -> None:
+    def boom() -> None:
+        raise ValueError("kaboom")
+
+    with pytest.raises(SystemExit):
+        setup._run_step("test", boom)
+
+
+def test_main_preserves_user_custom_values_on_rerun() -> None:
+    """Re-run deep-merges prompted fields; user-added keys survive."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        out = Path(tmpdir)
+        gen = out / setup._GENERATED_FILENAME
+        sec = out / setup._SECRETS_FILENAME
+        meta = out / setup._SETUP_META_FILENAME
+        # Simulate user having manually added resources + nodeSelector.
+        setup._write_values(
+            gen,
+            {
+                "route": {"enabled": False},
+                "ingress": {"enabled": False, "tls": {"enabled": False}},
+                "ai": {"provider": "gemini", "model": "gemini-2.5-flash"},
+                "resources": {"limits": {"cpu": "4", "memory": "8Gi"}},
+                "nodeSelector": {"disktype": "ssd"},
+            },
+            secret=False,
+        )
+        setup._write_values(
+            sec,
+            {
+                "ai": {"geminiApiKey": "kept-key"},  # pragma: allowlist secret
+                "admin": {"key": "f" * setup._ADMIN_KEY_MIN_LENGTH},
+            },
+            secret=True,
+        )
+        setup._write_values(
+            meta,
+            {"release": "r", "namespace": "n"},
+            secret=False,
+        )
+        # Accept all defaults.
+        user_inputs = iter(["", "", "", "", ""])
+        with (
+            patch(
+                "sys.argv",
+                ["helm-setup.py", "--skip-helm", "--output-dir", str(out)],
+            ),
+            patch("builtins.input", side_effect=user_inputs),
+            patch("getpass.getpass", return_value=""),
+            patch("shutil.which", return_value=None),
+        ):
+            rc = setup.main()
+
+        assert rc == 0
+        loaded = yaml.safe_load(gen.read_text())
+        # User-added keys must survive.
+        assert loaded["resources"] == {"limits": {"cpu": "4", "memory": "8Gi"}}
+        assert loaded["nodeSelector"] == {"disktype": "ssd"}
+        # Prompted keys still present.
+        assert loaded["ai"]["model"] == "gemini-2.5-flash"
+
+
 def test_ensure_output_dir_refuses_repo_path() -> None:
     with pytest.raises(ValueError, match="outside|Refusing|git repo"):
         setup._ensure_output_dir(setup.REPO_ROOT / "chart")

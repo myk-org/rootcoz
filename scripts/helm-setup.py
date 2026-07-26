@@ -9,6 +9,7 @@ Legacy values files polluted with terminal escape codes are sanitized on load.
 from __future__ import annotations
 
 import argparse
+import copy
 import getpass
 import json
 import os
@@ -201,7 +202,11 @@ def _dump_yaml(data: dict[str, Any]) -> str:
         lines: list[str] = []
         if isinstance(value, dict):
             for key, item in value.items():
-                if isinstance(item, (dict, list)):
+                if isinstance(item, dict) and not item:
+                    lines.append(f"{prefix}{key}: {{}}")
+                elif isinstance(item, list) and not item:
+                    lines.append(f"{prefix}{key}: []")
+                elif isinstance(item, (dict, list)):
                     lines.append(f"{prefix}{key}:")
                     lines.extend(render(item, indent + 1))
                 elif isinstance(item, bool):
@@ -265,6 +270,57 @@ def _yaml_scalar(value: Any, indent: int = 0) -> str:
     except ValueError:
         pass
     return text
+
+
+def _deep_merge(base: dict[str, Any], overlay: dict[str, Any]) -> dict[str, Any]:
+    """Recursively merge *overlay* into *base* (mutates *base*)."""
+    for key, value in overlay.items():
+        if isinstance(value, dict) and isinstance(base.get(key), dict):
+            _deep_merge(base[key], value)
+        else:
+            base[key] = value
+    return base
+
+
+def _scrub_secrets(
+    data: dict[str, Any],
+    paths: list[tuple[str, ...]],
+) -> None:
+    """Delete nested keys from *data* so secrets don't leak into generated files."""
+    for key_path in paths:
+        parent = data
+        for key in key_path[:-1]:
+            if not isinstance(parent, dict) or key not in parent:
+                break
+            parent = parent[key]
+        else:
+            if isinstance(parent, dict):
+                parent.pop(key_path[-1], None)
+
+
+# Keys that must only appear in values.secrets.yaml, never in values.generated.yaml.
+_GENERATED_SECRET_KEYS: list[tuple[str, ...]] = [
+    ("admin", "key"),
+    ("encryptionKey",),
+    ("ai", "geminiApiKey"),
+    ("ai", "anthropicApiKey"),
+    ("ai", "cursor", "apiKey"),
+    ("ai", "cursor", "authJson"),
+    ("ai", "vertex", "serviceAccountKey"),
+]
+
+
+def _run_step(
+    label: str,
+    fn: Any,
+    *args: Any,
+) -> Any:
+    """Run a setup step, converting known exceptions to SystemExit(1)."""
+    try:
+        return fn(*args)
+    except (ValueError, FileNotFoundError, json.JSONDecodeError) as exc:
+        print(f"Setup failed ({label}): {exc}", file=sys.stderr)
+        raise SystemExit(1) from exc
 
 
 def _infer_cluster(existing: dict[str, Any]) -> str:
@@ -686,39 +742,38 @@ def main() -> int:
 
     # Collect and save incrementally so earlier values survive if a later
     # step fails (e.g. AI config error doesn't lose release/namespace).
-    try:
-        install_target = _collect_install_target(
+    # Deep-merge prompted fields into existing values so user-added keys
+    # (resources, nodeSelector, etc.) are preserved across re-runs.
+
+    def _do_install_target() -> dict[str, str]:
+        return _collect_install_target(
             existing_meta,
             release_default=args.release,
             namespace_default=args.namespace,
         )
-        _write_values(meta_path, install_target, secret=False)
-    except (ValueError, FileNotFoundError, json.JSONDecodeError) as exc:
-        print(f"Setup failed: {exc}", file=sys.stderr)
-        return 1
 
-    try:
-        generated = _collect_routing(existing_generated)
-        _write_values(generated_path, generated, secret=False)
-    except (ValueError, FileNotFoundError, json.JSONDecodeError) as exc:
-        print(f"Setup failed: {exc}", file=sys.stderr)
-        return 1
+    install_target = _run_step("install target", _do_install_target)
+    _run_step("write meta", _write_values, meta_path, install_target, False)
 
-    try:
-        ai_generated, ai_secrets = _collect_ai(existing_generated, existing_secrets)
-        generated.update(ai_generated)
-        _write_values(generated_path, generated, secret=False)
-    except (ValueError, FileNotFoundError, json.JSONDecodeError) as exc:
-        print(f"Setup failed: {exc}", file=sys.stderr)
-        return 1
+    generated = copy.deepcopy(existing_generated) if existing_generated else {}
 
-    try:
-        admin_secrets = _collect_admin(existing_secrets)
-        ai_secrets.update(admin_secrets)
-        _write_values(secrets_path, ai_secrets, secret=True)
-    except (ValueError, FileNotFoundError, json.JSONDecodeError) as exc:
-        print(f"Setup failed: {exc}", file=sys.stderr)
-        return 1
+    routing = _run_step("routing", _collect_routing, existing_generated)
+    _deep_merge(generated, routing)
+    _scrub_secrets(generated, _GENERATED_SECRET_KEYS)
+    _run_step("write generated", _write_values, generated_path, generated, False)
+
+    ai_generated, ai_secrets = _run_step(
+        "AI config", _collect_ai, existing_generated, existing_secrets
+    )
+    # Replace AI config entirely (not deep-merge) to clear stale provider
+    # branches when switching providers (e.g. Claude+Vertex → Gemini).
+    generated["ai"] = ai_generated.get("ai", {})
+    _scrub_secrets(generated, _GENERATED_SECRET_KEYS)
+    _run_step("write generated", _write_values, generated_path, generated, False)
+
+    admin_secrets = _run_step("admin", _collect_admin, existing_secrets)
+    _deep_merge(ai_secrets, admin_secrets)
+    _run_step("write secrets", _write_values, secrets_path, ai_secrets, True)
 
     print(f"\nWrote {meta_path}")
     print(f"Wrote {generated_path}")
@@ -757,11 +812,12 @@ def main() -> int:
                     "kubectl",
                     "get",
                     "route",
-                    f"{release}-route",
                     "-n",
                     namespace,
+                    "-l",
+                    f"app.kubernetes.io/instance={release}",
                     "-o",
-                    "jsonpath={.spec.host}",
+                    "jsonpath={.items[0].spec.host}",
                 ],
                 capture_output=True,
                 text=True,
