@@ -296,12 +296,11 @@ def _collect_routing(existing: dict[str, Any] | None = None) -> dict[str, Any]:
     }
     if cluster == "openshift":
         host = _prompt(
-            "Route hostname (e.g. rootcoz.apps.cluster.com)",
+            "Route hostname (optional, leave empty for OpenShift auto-generated)",
             str(_nested_get(existing, "route", "host", default="") or ""),
         )
-        if not host:
-            raise ValueError("Route hostname is required for OpenShift")
-        generated["route"]["host"] = host
+        if host:
+            generated["route"]["host"] = host
     elif cluster == "kubernetes":
         host = _prompt(
             "Ingress hostname (e.g. rootcoz.example.com)",

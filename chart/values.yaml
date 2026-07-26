@@ -23,7 +23,7 @@ serviceAccount:
 # OpenShift Route (default on). Disable when using Ingress or ClusterIP-only access.
 route:
   enabled: true
-  # REQUIRED: set your OpenShift apps domain before install
+  # Optional: set a custom hostname. If empty, OpenShift auto-generates one.
   host: ""
   # Long timeout for AI analysis and SSE streams
   timeout: 300s

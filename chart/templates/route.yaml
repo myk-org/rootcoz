@@ -12,7 +12,9 @@ metadata:
     {{- toYaml . | nindent 4 }}
     {{- end }}
 spec:
+  {{- if .Values.route.host }}
   host: {{ .Values.route.host | quote }}
+  {{- end }}
   to:
     kind: Service
     name: {{ include "rootcoz.fullname" . }}

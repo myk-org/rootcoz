@@ -79,9 +79,6 @@ Validate chart values: routing, AI config.
 {{- if and .Values.route.enabled .Values.ingress.enabled -}}
 {{- fail "route.enabled and ingress.enabled are mutually exclusive — enable at most one" -}}
 {{- end -}}
-{{- if and .Values.route.enabled (not .Values.route.host) -}}
-{{- fail "route.host is required when route.enabled is true" -}}
-{{- end -}}
 {{- if and .Values.ingress.enabled (not .Values.ingress.host) -}}
 {{- fail "ingress.host is required when ingress.enabled is true" -}}
 {{- end -}}
