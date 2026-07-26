@@ -48,7 +48,7 @@ allowlist_externals = ["helm", "sh", "curl", "tar", "mkdir"]
 passenv = ["PATH", "HOME"]
 set_env.PATH = "{env:HOME}/.local/bin:{env:PATH}"
 commands_pre = [
-  ["sh", "-c", "helm version --short 2>/dev/null | grep -q '^v3[.]' && exit 0; OS=$(uname -s | tr '[:upper:]' '[:lower:]') && ARCH=$(uname -m) && case $ARCH in x86_64) ARCH=amd64;; aarch64|arm64) ARCH=arm64;; esac && HELM_TAR=helm-v3.17.3-${OS}-${ARCH}.tar.gz && cd /tmp && curl -fsSL https://get.helm.sh/${HELM_TAR} -o ${HELM_TAR} && curl -fsSL https://get.helm.sh/${HELM_TAR}.sha256sum -o ${HELM_TAR}.sha256sum && sha256sum -c ${HELM_TAR}.sha256sum && tar -xzf ${HELM_TAR} && mkdir -p $HOME/.local/bin && mv ${OS}-${ARCH}/helm $HOME/.local/bin/helm && rm -rf ${OS}-${ARCH} ${HELM_TAR} ${HELM_TAR}.sha256sum"],
+  ["sh", "-c", "helm version --short 2>/dev/null | grep -q '^v3[.]' && exit 0; OS=$(uname -s | tr '[:upper:]' '[:lower:]') && ARCH=$(uname -m) && case $ARCH in x86_64) ARCH=amd64;; aarch64|arm64) ARCH=arm64;; *) echo \"Unsupported architecture: $ARCH\"; exit 1;; esac && TMPD=/tmp/helm-install-$$ && mkdir -p $TMPD && trap 'rm -rf $TMPD' EXIT && HELM_TAR=helm-v3.17.3-${OS}-${ARCH}.tar.gz && cd $TMPD && curl -fsSL https://get.helm.sh/${HELM_TAR} -o ${HELM_TAR} && curl -fsSL https://get.helm.sh/${HELM_TAR}.sha256sum -o ${HELM_TAR}.sha256sum && sha256sum -c ${HELM_TAR}.sha256sum && tar -xzf ${HELM_TAR} && mkdir -p $HOME/.local/bin && mv ${OS}-${ARCH}/helm $HOME/.local/bin/helm"],
 ]
 commands = [
   ["helm", "lint", "chart/"],
