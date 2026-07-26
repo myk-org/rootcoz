@@ -63,7 +63,7 @@ ai:
     # Cursor auth.json content (secret, mounted at /home/appuser/.cursor-auth/auth.json)
     authJson: ""
 
-# Bootstrap admin API key → ADMIN_KEY (secret). Required by scripts/setup.py;
+# Bootstrap admin API key → ADMIN_KEY (secret). Required by scripts/helm-setup.py;
 # auto-generated on first install if empty (manual helm installs only).
 admin:
   key: ""

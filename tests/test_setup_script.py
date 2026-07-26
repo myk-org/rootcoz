@@ -1,4 +1,4 @@
-"""Tests for scripts/setup.py helpers."""
+"""Tests for scripts/helm-setup.py helpers."""
 
 import importlib.util
 import os
@@ -10,7 +10,7 @@ from unittest.mock import patch
 import pytest
 import yaml
 
-_SETUP_PATH = Path(__file__).resolve().parents[1] / "scripts" / "setup.py"
+_SETUP_PATH = Path(__file__).resolve().parents[1] / "scripts" / "helm-setup.py"
 _SPEC = importlib.util.spec_from_file_location("rootcoz_setup", _SETUP_PATH)
 assert _SPEC and _SPEC.loader
 setup = importlib.util.module_from_spec(_SPEC)
@@ -548,7 +548,7 @@ def test_resolve_helm_raises_when_missing() -> None:
 def test_main_fails_fast_when_helm_missing(capsys: pytest.CaptureFixture[str]) -> None:
     """Without --skip-helm, missing helm exits before interactive prompts."""
     with (
-        patch("sys.argv", ["setup.py"]),
+        patch("sys.argv", ["helm-setup.py"]),
         patch("shutil.which", return_value=None),
         patch.object(setup, "_collect_routing") as collect_routing,
     ):
@@ -595,7 +595,7 @@ def test_main_skip_helm_does_not_require_helm() -> None:
             patch(
                 "sys.argv",
                 [
-                    "setup.py",
+                    "helm-setup.py",
                     "--skip-helm",
                     "--output-dir",
                     str(out),
@@ -663,7 +663,7 @@ def test_main_reuses_saved_values_as_defaults(
             patch(
                 "sys.argv",
                 [
-                    "setup.py",
+                    "helm-setup.py",
                     "--skip-helm",
                     "--output-dir",
                     str(out),

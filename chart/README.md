@@ -15,7 +15,7 @@ This chart installs rootcoz with routing, AI provider credentials, and admin boo
 ## Quick Start (interactive)
 
 ```bash
-uv run python scripts/setup.py
+uv run python scripts/helm-setup.py
 ```
 
 The setup script prompts for an **output directory** (default ``~/.config/rootcoz/helm``, outside the git repo), cluster type, hostname, AI provider, credentials, and the bootstrap **admin API key** (first-login password for username `admin`). It writes:
