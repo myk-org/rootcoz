@@ -36,7 +36,8 @@ from rootcoz.engine.core import (
 )
 from rootcoz.error_messages import ai_not_configured_message, make_user_friendly_error
 from rootcoz.jenkins import JenkinsClient
-from rootcoz.jenkins_artifacts import cleanup_extract_dir, process_build_artifacts
+from rootcoz.jenkins_artifacts import process_build_artifacts
+from rootcoz.sources.base import cleanup_extract_dir
 from rootcoz.models import (
     AdditionalRepo,
     AnalysisDetail,
@@ -796,8 +797,10 @@ class JenkinsSource(CISource):
                         max_size_mb,
                     )
                     if artifacts_dir:
-                        self._extract_path = artifacts_dir
                         artifacts_link.symlink_to(artifacts_dir)
+                        # Ownership transferred to workspace symlink —
+                        # cleaned later by cleanup_chat_workspace.
+                        self._extract_path = None
                         logger.info(
                             "Chat: artifacts downloaded and linked in %s", workspace
                         )
@@ -808,10 +811,15 @@ class JenkinsSource(CISource):
 
         return wrote_any
 
+    @classmethod
+    def default_display_name(cls, body) -> str:
+        """Default display name for Jenkins analyses."""
+        return getattr(body, "job_name", None) or "jenkins-analysis"
+
     def cleanup(self) -> None:
         """Clean up artifact extraction directory."""
         if self._extract_path:
-            cleanup_extract_dir(self._extract_path)
+            cleanup_extract_dir(self._extract_path, label="Jenkins artifacts")
             self._extract_path = None
 
 

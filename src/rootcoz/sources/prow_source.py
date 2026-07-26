@@ -23,7 +23,12 @@ import httpx
 from simple_logger.logger import get_logger
 
 from rootcoz.models import FailedTest
-from rootcoz.sources.base import CISource, CISourceResult, WorkspaceFile
+from rootcoz.sources.base import (
+    CISource,
+    CISourceResult,
+    WorkspaceFile,
+    cleanup_extract_dir,
+)
 from rootcoz.xml_enrichment import extract_test_failures
 
 logger = get_logger(name=__name__, level=os.environ.get("LOG_LEVEL", "INFO"))
@@ -39,6 +44,7 @@ _MAX_SIZE_FINISHED = 1_000_000  # 1 MB
 _MAX_SIZE_BUILD_LOG = 10_000_000  # 10 MB
 _MAX_SIZE_JUNIT_XML = 5_000_000  # 5 MB
 _MAX_SIZE_PR_DIFF = 5_000_000  # 5 MB — GitHub PR unified diff
+_MAX_SIZE_PR_METADATA = 1_000_000  # 1 MB — GitHub PR JSON metadata
 _JS_MAX_SAFE_INTEGER = 9007199254740991  # 2^53 - 1
 
 # Strict pattern for GitHub org/repo names — prevents path traversal in API URLs.
@@ -701,18 +707,58 @@ async def _fetch_pr_changes(
             else httpx.AsyncClient(timeout=15)
         )
         async with client_ctx as client:
-            pr_resp = await client.get(pr_api, headers=headers)
-            if pr_resp.status_code != 200:
-                logger.warning(
-                    "GitHub PR API returned %d for %s/%s#%d",
-                    pr_resp.status_code,
-                    org,
-                    repo,
-                    pr_number,
-                )
-                return None
+            pr_data: dict | None = None
+            async with client.stream("GET", pr_api, headers=headers) as pr_resp:
+                if pr_resp.status_code != 200:
+                    logger.warning(
+                        "GitHub PR API returned %d for %s/%s#%d",
+                        pr_resp.status_code,
+                        org,
+                        repo,
+                        pr_number,
+                    )
+                    return None
+                try:
+                    content_length = int(pr_resp.headers.get("content-length", 0))
+                except (ValueError, TypeError):
+                    content_length = 0
+                if content_length > _MAX_SIZE_PR_METADATA:
+                    logger.warning(
+                        "PR metadata too large (%d bytes, max %d) for %s/%s#%d",
+                        content_length,
+                        _MAX_SIZE_PR_METADATA,
+                        org,
+                        repo,
+                        pr_number,
+                    )
+                    return None
+                meta_chunks: list[bytes] = []
+                meta_total = 0
+                async for chunk in pr_resp.aiter_bytes():
+                    meta_total += len(chunk)
+                    if meta_total > _MAX_SIZE_PR_METADATA:
+                        logger.warning(
+                            "PR metadata exceeded %d bytes while streaming "
+                            "for %s/%s#%d",
+                            _MAX_SIZE_PR_METADATA,
+                            org,
+                            repo,
+                            pr_number,
+                        )
+                        return None
+                    meta_chunks.append(chunk)
+                try:
+                    pr_data = json.loads(b"".join(meta_chunks))
+                except (json.JSONDecodeError, TypeError, ValueError):
+                    logger.warning(
+                        "Failed to parse PR metadata JSON for %s/%s#%d",
+                        org,
+                        repo,
+                        pr_number,
+                        exc_info=True,
+                    )
+                    return None
 
-            pr_data = pr_resp.json()
             title = pr_data.get("title", "")
             body = (pr_data.get("body") or "").strip()
             changed_files = pr_data.get("changed_files", 0)
@@ -743,11 +789,11 @@ async def _fetch_pr_changes(
                                 pr_number,
                             )
                         else:
-                            chunks: list[bytes] = []
-                            total = 0
+                            diff_chunks: list[bytes] = []
+                            diff_total = 0
                             async for chunk in diff_resp.aiter_bytes():
-                                total += len(chunk)
-                                if total > _MAX_SIZE_PR_DIFF:
+                                diff_total += len(chunk)
+                                if diff_total > _MAX_SIZE_PR_DIFF:
                                     logger.warning(
                                         "PR diff exceeded %d bytes while streaming "
                                         "for %s/%s#%d — truncating",
@@ -757,8 +803,8 @@ async def _fetch_pr_changes(
                                         pr_number,
                                     )
                                     break
-                                chunks.append(chunk)
-                            diff_text = b"".join(chunks).decode(
+                                diff_chunks.append(chunk)
+                            diff_text = b"".join(diff_chunks).decode(
                                 "utf-8", errors="replace"
                             )
             except httpx.HTTPError:
@@ -1260,8 +1306,10 @@ class ProwSource(CISource):
                         client, gcs_prefix, self._resolution_warnings
                     )
                     if non_junit and extract_path:
-                        self._extract_path = extract_path
                         artifacts_link.symlink_to(extract_path)
+                        # Ownership transferred to workspace symlink —
+                        # cleaned later by cleanup_chat_workspace.
+                        self._extract_path = None
                         logger.info("Chat: linked Prow artifacts into %s", workspace)
                         wrote_any = True
                 except Exception:
@@ -1727,9 +1775,36 @@ class ProwSource(CISource):
             get_job_artifacts=get_job_artifacts,
         )
 
+    @classmethod
+    def default_display_name(cls, body) -> str:
+        """Default display name for Prow analyses."""
+        return getattr(body, "prow_job_name", None) or "prow-analysis"
+
+    @classmethod
+    def restore_reanalyze_fields(cls, decrypted_params: dict) -> dict:
+        """Restore Prow fields for re-analysis from stored params."""
+        fields: dict = {}
+        for prow_field in (
+            "prow_job_name",
+            "build_id",
+            "prow_url",
+            "gcs_bucket",
+            "gcs_prefix",
+            "get_job_artifacts",
+        ):
+            if prow_field in decrypted_params:
+                fields[prow_field] = decrypted_params[prow_field]
+        if "force" in decrypted_params:
+            fields["force"] = decrypted_params["force"]
+        if not fields.get("prow_job_name") or not fields.get("build_id"):
+            raise ValueError(
+                "Original prow analysis has no stored prow_job_name/build_id; "
+                "cannot re-analyze"
+            )
+        return fields
+
     def cleanup(self) -> None:
         """Remove temporary artifact directory."""
-        if self._extract_path and self._extract_path.exists():
-            shutil.rmtree(self._extract_path, ignore_errors=True)
-            logger.info("Cleaned up Prow artifacts: %s", self._extract_path)
+        if self._extract_path:
+            cleanup_extract_dir(self._extract_path, label="Prow artifacts")
             self._extract_path = None

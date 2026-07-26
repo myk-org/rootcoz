@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
+import shutil
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -22,6 +23,28 @@ if TYPE_CHECKING:
     from rootcoz.repository import RepositoryManager
 
 logger = logging.getLogger(__name__)
+
+
+def cleanup_extract_dir(
+    extract_path: Path | None, label: str = "extracted artifacts"
+) -> None:
+    """Remove a temporary artifact extraction directory.
+
+    Logs the cleanup operation. Errors during removal are logged as warnings
+    and swallowed so that cleanup failures never crash the pipeline.
+
+    Args:
+        extract_path: Path to the extracted directory to remove, or ``None``.
+        label: Human-readable label for log messages.
+    """
+    if extract_path is None or not extract_path.exists():
+        return
+    logger.info("Cleaning up %s: %s", label, extract_path)
+    try:
+        shutil.rmtree(extract_path)
+        logger.info("Cleanup complete: %s", extract_path)
+    except OSError as exc:
+        logger.warning("Failed to clean up %s: %s", extract_path, exc)
 
 
 @dataclass
@@ -199,6 +222,27 @@ class CISource(ABC):
         """
         raise NotImplementedError(
             f"{cls.__name__} does not support from_analyze_request"
+        )
+
+    @classmethod
+    def default_display_name(cls, body: Any) -> str:
+        """Default job display name when the request has no explicit ``name``.
+
+        Subclasses override to derive a name from source-specific fields.
+        """
+        return getattr(body, "job_name", None) or f"{cls.__name__}-analysis"
+
+    @classmethod
+    def restore_reanalyze_fields(
+        cls, decrypted_params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Restore source-specific fields for re-analysis from stored params.
+
+        Returns a dict of fields to merge into a ``UnifiedAnalyzeRequest``.
+        Raises ``ValueError`` when required stored fields are missing.
+        """
+        raise NotImplementedError(
+            f"{cls.__name__} does not support restore_reanalyze_fields"
         )
 
     async def persist_fetch_metadata(

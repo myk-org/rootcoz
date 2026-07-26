@@ -59,8 +59,11 @@ async def setup_ci_build_workspace(
         logger.warning(
             "Chat: failed to populate %s workspace", analysis_type, exc_info=True
         )
-        source.cleanup()
         return False
+    finally:
+        # Drop any leftover extract dirs not transferred to the workspace
+        # symlink (successful chat links nullify _extract_path first).
+        source.cleanup()
 
 
 # Re-export for callers that imported SOURCE_REGISTRY from this module.

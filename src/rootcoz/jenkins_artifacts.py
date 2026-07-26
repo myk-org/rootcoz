@@ -458,15 +458,9 @@ def _strip_archive_extension(filename: str) -> str:
 def cleanup_extract_dir(extract_path: Path) -> None:
     """Remove an extracted archive directory tree.
 
-    Logs the cleanup operation. Errors during removal are logged as warnings
-    and swallowed so that cleanup failures never crash the pipeline.
-
-    Args:
-        extract_path: Path to the extracted directory to remove.
+    Thin wrapper around ``sources.base.cleanup_extract_dir`` for callers that
+    historically imported cleanup from this module.
     """
-    logger.info(f"Cleaning up extracted archive directory: {extract_path}")
-    try:
-        shutil.rmtree(extract_path)
-        logger.info(f"Cleanup complete: {extract_path}")
-    except OSError as exc:
-        logger.warning(f"Failed to clean up {extract_path}: {exc}")
+    from rootcoz.sources.base import cleanup_extract_dir as _cleanup
+
+    _cleanup(extract_path, label="extracted archive directory")

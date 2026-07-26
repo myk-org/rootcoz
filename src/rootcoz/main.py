@@ -4123,17 +4123,17 @@ async def analyze(
     # Validate AI config early (may defer when tests repo can supply settings.json)
     _resolve_ai_config_allow_defer(body, settings, request)
 
-    # Resolve display name
+    # Resolve display name via plugin registry (source-agnostic)
     display_name: str = body.name or ""
     if not display_name:
-        if body.type == "jenkins":
-            display_name = body.job_name or "jenkins-analysis"
-        elif body.type == "prow":
-            display_name = body.prow_job_name or "prow-analysis"
-        elif body.type == "file":
-            display_name = "file-analysis"
-        else:
-            display_name = "raw-analysis"
+        from rootcoz.sources.registry import SOURCE_REGISTRY
+
+        source_cls = SOURCE_REGISTRY.get(body.type)
+        display_name = (
+            source_cls.default_display_name(body)
+            if source_cls is not None
+            else f"{body.type}-analysis"
+        )
 
     if body.type == "jenkins":
         # Build a legacy AnalyzeRequest for the existing Jenkins flow
@@ -4244,43 +4244,17 @@ async def re_analyze(
         stored_name = decrypted_params.get("original_name", "")
         if stored_name:
             unified_fields["name"] = stored_name
-        # Restore source data
-        if analysis_type == "file":
-            stored_xml = decrypted_params.get("raw_xml")
-            if not stored_xml:
-                raise HTTPException(
-                    status_code=400,
-                    detail="Original file analysis has no stored raw_xml; cannot re-analyze",
-                )
-            unified_fields["raw_xml"] = stored_xml
-        elif analysis_type == "prow":
-            for prow_field in (
-                "prow_job_name",
-                "build_id",
-                "prow_url",
-                "gcs_bucket",
-                "gcs_prefix",
-                "get_job_artifacts",
-            ):
-                if prow_field in decrypted_params:
-                    unified_fields[prow_field] = decrypted_params[prow_field]
-            if "force" in decrypted_params:
-                unified_fields["force"] = decrypted_params["force"]
-            if not unified_fields.get("prow_job_name") or not unified_fields.get(
-                "build_id"
-            ):
-                raise HTTPException(
-                    status_code=400,
-                    detail="Original prow analysis has no stored prow_job_name/build_id; cannot re-analyze",
-                )
-        else:
-            stored_failures = decrypted_params.get("failures")
-            if stored_failures is None:
-                raise HTTPException(
-                    status_code=400,
-                    detail="Original raw analysis has no stored failures; cannot re-analyze",
-                )
-            unified_fields["failures"] = stored_failures
+        # Restore source-specific fields via plugin registry
+        source_cls = CI_SOURCE_REGISTRY.get(analysis_type)
+        if source_cls is None:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Unsupported analysis type for re-analysis: {analysis_type}",
+            )
+        try:
+            unified_fields.update(source_cls.restore_reanalyze_fields(decrypted_params))
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
         _copy_analysis_settings(decrypted_params, unified_fields)
 
@@ -4307,13 +4281,10 @@ async def re_analyze(
         merged = _merge_settings(unified_body, get_settings())
         resolved_peers = _validate_peer_configs(unified_body, merged)
 
-        # Resolve display name — prefer original name, then source-specific fallback
-        if unified_body.name:
-            display_name = unified_body.name
-        elif analysis_type == "prow" and unified_body.prow_job_name:
-            display_name = unified_body.prow_job_name
-        else:
-            display_name = f"{analysis_type}-re-analysis"
+        # Resolve display name — prefer original name, then plugin fallback
+        display_name = unified_body.name or source_cls.default_display_name(
+            unified_body
+        )
 
         return await _enqueue_ci_source_analysis(
             body=unified_body,
@@ -10688,7 +10659,7 @@ async def _resolve_chat_credentials(
     """Resolve Jira and GitHub credentials for chat.
 
     Jira uses user-scoped tokens only. GitHub uses user-scoped tokens
-    with job-stored tokens as fallback. Server deployment tokens are
+    only. Server deployment tokens and job-stored tokens are
     never exposed to chat sessions.
 
     Returns:

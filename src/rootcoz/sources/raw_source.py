@@ -52,3 +52,21 @@ class RawSource(CISource):
         _ = merged
         assert body.failures is not None
         return cls(failures=body.failures)
+
+    @classmethod
+    def default_display_name(cls, body: Any) -> str:
+        """Default display name for raw analyses."""
+        _ = body
+        return "raw-analysis"
+
+    @classmethod
+    def restore_reanalyze_fields(
+        cls, decrypted_params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Restore failure list for raw re-analysis."""
+        stored_failures = decrypted_params.get("failures")
+        if stored_failures is None:
+            raise ValueError(
+                "Original raw analysis has no stored failures; cannot re-analyze"
+            )
+        return {"failures": stored_failures}
