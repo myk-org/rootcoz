@@ -1,0 +1,25 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": [
+    ":dependencyDashboard",
+    ":maintainLockFilesWeekly",
+    ":prHourlyLimitNone",
+    ":semanticCommitTypeAll(ci )"
+  ],
+  "prConcurrentLimit": 0,
+  "lockFileMaintenance": {
+    "enabled": true
+  },
+  "packageRules": [
+    {
+      "matchManagers": ["pip_requirements", "pip-compile", "pep621"],
+      "matchPackagePatterns": ["*"],
+      "groupName": "python-deps"
+    },
+    {
+      "matchManagers": ["npm"],
+      "matchPackageNames": ["@myk-org/pi-sidecar"],
+      "groupName": "npm-deps"
+    }
+  ]
+}
