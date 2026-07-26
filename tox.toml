@@ -1,5 +1,5 @@
 skipsdist = true
-envlist = ["backend", "frontend", "chart"]
+envlist = ["backend", "frontend"]
 
 [env.backend]
 description = "Run Python tests"
@@ -42,7 +42,7 @@ allowlist_externals = ["npm", "npx"]
 change_dir = "frontend"
 
 [env.chart]
-description = "Helm chart lint and template smoke tests"
+description = "Helm chart lint and template smoke tests (requires Helm 3)"
 skip_install = true
 allowlist_externals = ["helm", "sh"]
 passenv = ["PATH"]

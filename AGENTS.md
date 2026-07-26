@@ -33,10 +33,15 @@ Run all tests:
 uvx --with tox-uv tox
 ```
 
-This runs all three environments:
+This runs both environments:
 - `backend` — Python tests via `uv run pytest tests/ -q`
 - `frontend` — Frontend build (`vite build`) + Vitest tests (`npm test`)
-- `chart` — Helm lint + template smoke tests (requires [Helm 3](https://helm.sh/docs/intro/install/))
+
+Helm chart tests are opt-in (requires [Helm 3](https://helm.sh/docs/intro/install/)):
+
+```bash
+uvx --with tox-uv tox -e chart      # Helm lint + template smoke tests
+```
 
 Individual environments:
 
