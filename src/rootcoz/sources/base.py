@@ -533,13 +533,33 @@ def link_artifacts_to_workspace(
     Creates a ``build-artifacts`` symlink inside *repo_path* pointing to
     *extract_path* so the AI can explore artifacts via a stable relative path.
 
+    If ``build-artifacts`` already exists (common on reanalysis / chat reuse),
+    treat that as success so callers do not clear ``artifacts_context``.
+
     Returns:
-        ``True`` if the link was created successfully, ``False`` on failure.
+        ``True`` if the link was created or already exists, ``False`` on failure.
     """
     link = repo_path / "build-artifacts"
+    # Pre-existing path (symlink or directory) means artifacts are already
+    # reachable — do not report failure (callers clear context on False).
+    if link.exists() or link.is_symlink():
+        logger.info(
+            "Artifacts path already present at %s (job %s) — keeping existing link",
+            link,
+            job_id,
+        )
+        return True
     try:
         link.symlink_to(extract_path)
         logger.info("Linked artifacts into workspace: %s (job %s)", link, job_id)
+        return True
+    except FileExistsError:
+        # Race: created between the existence check and symlink_to.
+        logger.info(
+            "Artifacts path already present at %s (job %s) — keeping existing link",
+            link,
+            job_id,
+        )
         return True
     except OSError:
         logger.warning(
