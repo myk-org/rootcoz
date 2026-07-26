@@ -163,7 +163,7 @@ To rotate encryption key: delete the secret manually, then reinstall (destroys e
 ## Uninstall
 
 ```bash
-helm uninstall rootcoz -n rootcoz
+helm uninstall <release> -n <namespace>
 ```
 
 The PVC is retained (`helm.sh/resource-policy: keep`) to prevent accidental data loss.
@@ -171,9 +171,9 @@ The PVC is retained (`helm.sh/resource-policy: keep`) to prevent accidental data
 **Full cleanup** (removes PVC data and namespace):
 
 ```bash
-helm uninstall rootcoz -n rootcoz
-kubectl delete pvc rootcoz-data -n rootcoz
-kubectl delete namespace rootcoz
+helm uninstall <release> -n <namespace>
+kubectl delete pvc <release>-data -n <namespace>
+kubectl delete namespace <namespace>
 ```
 
 ## Optional Features
