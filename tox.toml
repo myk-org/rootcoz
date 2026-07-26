@@ -1,5 +1,5 @@
 skipsdist = true
-envlist = ["backend", "frontend"]
+envlist = ["backend", "frontend", "chart"]
 
 [env.backend]
 description = "Run Python tests"
@@ -42,10 +42,14 @@ allowlist_externals = ["npm", "npx"]
 change_dir = "frontend"
 
 [env.chart]
-description = "Helm chart lint and template smoke tests (requires Helm 3)"
+description = "Helm chart lint and template smoke tests"
 skip_install = true
-allowlist_externals = ["helm", "sh"]
-passenv = ["PATH"]
+allowlist_externals = ["helm", "sh", "curl", "tar", "mkdir"]
+passenv = ["PATH", "HOME"]
+set_env.PATH = "{env:HOME}/.local/bin:{env:PATH}"
+commands_pre = [
+  ["sh", "-c", "command -v helm >/dev/null 2>&1 && exit 0; curl -fsSL https://get.helm.sh/helm-v3.17.3-linux-amd64.tar.gz -o /tmp/helm.tar.gz && tar -xzf /tmp/helm.tar.gz -C /tmp && mkdir -p $HOME/.local/bin && mv /tmp/linux-amd64/helm $HOME/.local/bin/helm && rm -rf /tmp/linux-amd64 /tmp/helm.tar.gz"],
+]
 commands = [
   ["helm", "lint", "chart/"],
   [
