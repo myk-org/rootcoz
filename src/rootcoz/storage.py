@@ -366,18 +366,29 @@ async def _migrate_failure_history_build_id(db: aiosqlite.Connection) -> None:
     logger.info(
         "Migration: backfilling failure_history.build_id for %d row(s)", missing
     )
+    # Only accept JSON text values that match Prow build-id rules (digits only).
+    # Reject booleans/numbers/objects — json_extract would coerce them (e.g. true→"1").
     await db.execute(
         """
         UPDATE failure_history
         SET build_id = COALESCE(
-            NULLIF(json_extract(
-                (SELECT result_json FROM results WHERE results.job_id = failure_history.job_id),
-                '$.build_id'
-            ), ''),
-            NULLIF(json_extract(
-                (SELECT result_json FROM results WHERE results.job_id = failure_history.job_id),
-                '$.request_params.build_id'
-            ), ''),
+            (
+                SELECT CASE
+                    WHEN json_type(r.result_json, '$.build_id') = 'text'
+                         AND json_extract(r.result_json, '$.build_id') != ''
+                         AND json_extract(r.result_json, '$.build_id')
+                             NOT GLOB '*[^0-9]*'
+                    THEN json_extract(r.result_json, '$.build_id')
+                    WHEN json_type(r.result_json, '$.request_params.build_id') = 'text'
+                         AND json_extract(r.result_json, '$.request_params.build_id') != ''
+                         AND json_extract(r.result_json, '$.request_params.build_id')
+                             NOT GLOB '*[^0-9]*'
+                    THEN json_extract(r.result_json, '$.request_params.build_id')
+                    ELSE ''
+                END
+                FROM results r
+                WHERE r.job_id = failure_history.job_id
+            ),
             ''
         )
         WHERE build_id = '' OR build_id IS NULL

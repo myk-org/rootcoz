@@ -1356,6 +1356,96 @@ class TestRBACMigration:
                 await storage.change_user_role("badtest", "superuser")
 
 
+class TestFailureHistoryBuildIdMigration:
+    """Tests for _migrate_failure_history_build_id validation."""
+
+    async def test_backfill_accepts_only_numeric_text_build_ids(
+        self, setup_test_db: Path
+    ) -> None:
+        """Migration keeps only JSON-text digit build IDs; rejects coerced types."""
+        import json
+
+        cases = [
+            # job_id, result_json, expected build_id after migrate
+            (
+                "job-top-text",
+                {"build_id": "2072319655766134784"},
+                "2072319655766134784",
+            ),
+            (
+                "job-params-text",
+                {"request_params": {"build_id": "42"}},
+                "42",
+            ),
+            (
+                "job-bool",
+                {"build_id": True},
+                "",
+            ),
+            (
+                "job-int",
+                {"build_id": 123},
+                "",
+            ),
+            (
+                "job-mixed",
+                {"build_id": "12ab"},
+                "",
+            ),
+            (
+                "job-empty",
+                {"build_id": ""},
+                "",
+            ),
+            (
+                "job-prefer-top",
+                {
+                    "build_id": "99",
+                    "request_params": {"build_id": "true"},
+                },
+                "99",
+            ),
+            (
+                "job-fallback-params",
+                {
+                    "build_id": True,
+                    "request_params": {"build_id": "77"},
+                },
+                "77",
+            ),
+        ]
+
+        async with aiosqlite.connect(setup_test_db) as db:
+            for job_id, result_json, _expected in cases:
+                await db.execute(
+                    """INSERT INTO results (job_id, status, result_json)
+                       VALUES (?, 'completed', ?)""",
+                    (job_id, json.dumps(result_json)),
+                )
+                await db.execute(
+                    """INSERT INTO failure_history
+                       (job_id, job_name, build_number, build_id, test_name,
+                        classification, error_message)
+                       VALUES (?, ?, 1, '', ?, 'CODE ISSUE', 'err')""",
+                    (job_id, f"job-{job_id}", f"test-{job_id}"),
+                )
+            await db.commit()
+            await storage._migrate_failure_history_build_id(db)
+            await db.commit()
+
+            db.row_factory = aiosqlite.Row
+            for job_id, _result_json, expected in cases:
+                cursor = await db.execute(
+                    "SELECT build_id FROM failure_history WHERE job_id = ?",
+                    (job_id,),
+                )
+                row = await cursor.fetchone()
+                assert row is not None
+                assert row["build_id"] == expected, (
+                    f"{job_id}: expected {expected!r}, got {row['build_id']!r}"
+                )
+
+
 class TestUpdateBuildUrl:
     """Tests for update_build_url()."""
 
