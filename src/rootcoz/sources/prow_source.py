@@ -1435,9 +1435,15 @@ class ProwSource(CISource):
                     except asyncio.QueueEmpty:
                         return
                     try:
-                        results[num] = await _fetch_pr_changes(
+                        content = await _fetch_pr_changes(
                             pr_org, pr_repo, num, github_token
                         )
+                        results[num] = content
+                        # Soft failures (non-200, oversized, invalid metadata)
+                        # return None — treat as explicit fetch failure so
+                        # callers always get a warning / pr-changes note.
+                        if content is None:
+                            failed_prs.append(num)
                     except Exception as exc:
                         logger.warning("PR fetch failed for #%s: %s", num, exc)
                         failed_prs.append(num)
@@ -1445,12 +1451,23 @@ class ProwSource(CISource):
             n_workers = min(MAX_PR_FETCH_CONCURRENCY, len(all_pr_nums))
             workers = [asyncio.create_task(_worker()) for _ in range(n_workers)]
             try:
-                _finished = await asyncio.wait(
+                done, pending = await asyncio.wait(
                     workers, timeout=_PR_FETCH_TIMEOUT_SECONDS
                 )
-                pending = _finished[1]
             except Exception:
+                done = set()
                 pending = set(workers)
+
+            # Consume completed worker results so unexpected exceptions are not
+            # left as "Task exception was never retrieved".
+            for task in done:
+                try:
+                    task.result()
+                except Exception:
+                    logger.warning(
+                        "PR fetch worker crashed unexpectedly",
+                        exc_info=True,
+                    )
 
             for task in pending:
                 task.cancel()
@@ -1466,9 +1483,8 @@ class ProwSource(CISource):
                     pr_sections.append(content)
 
             if incomplete:
-                remaining = work.qsize() + sum(
-                    1 for n in all_pr_nums if n not in results and n not in failed_prs
-                )
+                completed = set(results) | set(failed_prs)
+                remaining = len(all_pr_nums) - len(completed)
                 logger.warning(
                     "PR enrichment timed out after %ds; %d of %d PRs incomplete",
                     _PR_FETCH_TIMEOUT_SECONDS,

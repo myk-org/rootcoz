@@ -2723,8 +2723,8 @@ class TestProwPrepareWorkspace:
         assert "incomplete PR context" in diff_file.content
 
     @pytest.mark.asyncio
-    async def test_pr_fetch_failure_returns_context_only(self):
-        """PR diff fetch fails → still returns prow-context.txt."""
+    async def test_pr_fetch_none_surfaces_failure_warning(self):
+        """None from _fetch_pr_changes → warning note in pr-changes.diff."""
         source = self._make_source()
         source._prowjob_metadata = ProwJobMetadata(
             job_type="presubmit",
@@ -2746,8 +2746,12 @@ class TestProwPrepareWorkspace:
         finally:
             prow_mod._fetch_pr_changes = orig
 
-        assert len(files) == 1
-        assert files[0].filename == "prow-context.txt"
+        filenames = [f.filename for f in files]
+        assert "prow-context.txt" in filenames
+        assert "pr-changes.diff" in filenames
+        diff_file = next(f for f in files if f.filename == "pr-changes.diff")
+        assert "Failed to fetch PR diff for #99" in diff_file.content
+        assert "incomplete PR context" in diff_file.content
 
 
 class TestResolveDisplayBuildId:
