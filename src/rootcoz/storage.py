@@ -368,26 +368,33 @@ async def _migrate_failure_history_build_id(db: aiosqlite.Connection) -> None:
     )
     # Only accept JSON text values that match Prow build-id rules (digits only).
     # Reject booleans/numbers/objects — json_extract would coerce them (e.g. true→"1").
+    # Guard with json_valid so a single malformed result_json cannot abort init_db.
     await db.execute(
         """
         UPDATE failure_history
         SET build_id = COALESCE(
             (
                 SELECT CASE
-                    WHEN json_type(r.result_json, '$.build_id') = 'text'
-                         AND json_extract(r.result_json, '$.build_id') != ''
-                         AND json_extract(r.result_json, '$.build_id')
+                    WHEN json_type(safe_rj, '$.build_id') = 'text'
+                         AND json_extract(safe_rj, '$.build_id') != ''
+                         AND json_extract(safe_rj, '$.build_id')
                              NOT GLOB '*[^0-9]*'
-                    THEN json_extract(r.result_json, '$.build_id')
-                    WHEN json_type(r.result_json, '$.request_params.build_id') = 'text'
-                         AND json_extract(r.result_json, '$.request_params.build_id') != ''
-                         AND json_extract(r.result_json, '$.request_params.build_id')
+                    THEN json_extract(safe_rj, '$.build_id')
+                    WHEN json_type(safe_rj, '$.request_params.build_id') = 'text'
+                         AND json_extract(safe_rj, '$.request_params.build_id') != ''
+                         AND json_extract(safe_rj, '$.request_params.build_id')
                              NOT GLOB '*[^0-9]*'
-                    THEN json_extract(r.result_json, '$.request_params.build_id')
+                    THEN json_extract(safe_rj, '$.request_params.build_id')
                     ELSE ''
                 END
-                FROM results r
-                WHERE r.job_id = failure_history.job_id
+                FROM (
+                    SELECT CASE
+                        WHEN json_valid(r.result_json) THEN r.result_json
+                        ELSE NULL
+                    END AS safe_rj
+                    FROM results r
+                    WHERE r.job_id = failure_history.job_id
+                )
             ),
             ''
         )

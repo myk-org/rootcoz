@@ -1445,6 +1445,36 @@ class TestFailureHistoryBuildIdMigration:
                     f"{job_id}: expected {expected!r}, got {row['build_id']!r}"
                 )
 
+    async def test_backfill_skips_malformed_result_json(
+        self, setup_test_db: Path
+    ) -> None:
+        """Malformed result_json must not abort migration; build_id stays empty."""
+        async with aiosqlite.connect(setup_test_db) as db:
+            await db.execute(
+                """INSERT INTO results (job_id, status, result_json)
+                   VALUES (?, 'completed', ?)""",
+                ("job-bad-json", "{not-json"),
+            )
+            await db.execute(
+                """INSERT INTO failure_history
+                   (job_id, job_name, build_number, build_id, test_name,
+                    classification, error_message)
+                   VALUES (?, 'job', 1, '', 'test-bad', 'CODE ISSUE', 'err')""",
+                ("job-bad-json",),
+            )
+            await db.commit()
+            await storage._migrate_failure_history_build_id(db)
+            await db.commit()
+
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute(
+                "SELECT build_id FROM failure_history WHERE job_id = ?",
+                ("job-bad-json",),
+            )
+            row = await cursor.fetchone()
+            assert row is not None
+            assert row["build_id"] == ""
+
 
 class TestUpdateBuildUrl:
     """Tests for update_build_url()."""
