@@ -349,15 +349,54 @@ async def _migrate_lowercase_usernames(db: aiosqlite.Connection) -> None:
     logger.info("Migration: case-insensitive username migration complete")
 
 
+# SQL scalar subquery: digit-only text build_id from results.result_json for the
+# current failure_history.job_id, or NULL if none / invalid JSON / ineligible.
+_FH_BUILD_ID_CANDIDATE_SQL = """
+(
+    SELECT CASE
+        WHEN json_type(safe_rj, '$.build_id') = 'text'
+             AND json_extract(safe_rj, '$.build_id') != ''
+             AND json_extract(safe_rj, '$.build_id')
+                 NOT GLOB '*[^0-9]*'
+        THEN json_extract(safe_rj, '$.build_id')
+        WHEN json_type(safe_rj, '$.request_params.build_id') = 'text'
+             AND json_extract(safe_rj, '$.request_params.build_id') != ''
+             AND json_extract(safe_rj, '$.request_params.build_id')
+                 NOT GLOB '*[^0-9]*'
+        THEN json_extract(safe_rj, '$.request_params.build_id')
+        ELSE NULL
+    END
+    FROM (
+        SELECT CASE
+            WHEN json_valid(r.result_json) THEN r.result_json
+            ELSE NULL
+        END AS safe_rj
+        FROM results r
+        WHERE r.job_id = failure_history.job_id
+    )
+)
+"""
+
+
 async def _migrate_failure_history_build_id(db: aiosqlite.Connection) -> None:
-    """Backfill failure_history.build_id from stored result JSON."""
+    """Backfill failure_history.build_id from stored result JSON.
+
+    Only rows that can actually receive a digit-only text build_id from valid
+    ``results.result_json`` are updated. Empty build_ids that will never be
+    filled (Jenkins / missing / malformed JSON) are ignored so the migration
+    becomes a no-op after eligible rows are backfilled.
+    """
     cursor = await db.execute("PRAGMA table_info(failure_history)")
     columns = {row[1] for row in await cursor.fetchall()}
     if "build_id" not in columns:
         return
 
     cursor = await db.execute(
-        "SELECT COUNT(*) FROM failure_history WHERE build_id = '' OR build_id IS NULL"
+        f"""
+        SELECT COUNT(*) FROM failure_history
+        WHERE (build_id = '' OR build_id IS NULL)
+          AND {_FH_BUILD_ID_CANDIDATE_SQL} IS NOT NULL
+        """
     )
     missing = (await cursor.fetchone())[0]
     if not missing:
@@ -366,39 +405,12 @@ async def _migrate_failure_history_build_id(db: aiosqlite.Connection) -> None:
     logger.info(
         "Migration: backfilling failure_history.build_id for %d row(s)", missing
     )
-    # Only accept JSON text values that match Prow build-id rules (digits only).
-    # Reject booleans/numbers/objects — json_extract would coerce them (e.g. true→"1").
-    # Guard with json_valid so a single malformed result_json cannot abort init_db.
     await db.execute(
-        """
+        f"""
         UPDATE failure_history
-        SET build_id = COALESCE(
-            (
-                SELECT CASE
-                    WHEN json_type(safe_rj, '$.build_id') = 'text'
-                         AND json_extract(safe_rj, '$.build_id') != ''
-                         AND json_extract(safe_rj, '$.build_id')
-                             NOT GLOB '*[^0-9]*'
-                    THEN json_extract(safe_rj, '$.build_id')
-                    WHEN json_type(safe_rj, '$.request_params.build_id') = 'text'
-                         AND json_extract(safe_rj, '$.request_params.build_id') != ''
-                         AND json_extract(safe_rj, '$.request_params.build_id')
-                             NOT GLOB '*[^0-9]*'
-                    THEN json_extract(safe_rj, '$.request_params.build_id')
-                    ELSE ''
-                END
-                FROM (
-                    SELECT CASE
-                        WHEN json_valid(r.result_json) THEN r.result_json
-                        ELSE NULL
-                    END AS safe_rj
-                    FROM results r
-                    WHERE r.job_id = failure_history.job_id
-                )
-            ),
-            ''
-        )
-        WHERE build_id = '' OR build_id IS NULL
+        SET build_id = {_FH_BUILD_ID_CANDIDATE_SQL}
+        WHERE (build_id = '' OR build_id IS NULL)
+          AND {_FH_BUILD_ID_CANDIDATE_SQL} IS NOT NULL
         """
     )
 

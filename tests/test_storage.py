@@ -1475,6 +1475,67 @@ class TestFailureHistoryBuildIdMigration:
             assert row is not None
             assert row["build_id"] == ""
 
+    async def test_backfill_skips_when_no_eligible_rows(
+        self, setup_test_db: Path
+    ) -> None:
+        """Ineligible empty build_ids must not keep the migration re-running."""
+        import json
+
+        async with aiosqlite.connect(setup_test_db) as db:
+            # Eligible: numeric text build_id in result_json
+            await db.execute(
+                """INSERT INTO results (job_id, status, result_json)
+                   VALUES (?, 'completed', ?)""",
+                ("job-eligible", json.dumps({"build_id": "12345"})),
+            )
+            await db.execute(
+                """INSERT INTO failure_history
+                   (job_id, job_name, build_number, build_id, test_name,
+                    classification, error_message)
+                   VALUES (?, 'prow-job', 0, '', 'test-e', 'CODE ISSUE', 'err')""",
+                ("job-eligible",),
+            )
+            # Ineligible: Jenkins-style result with no build_id (stays empty forever)
+            await db.execute(
+                """INSERT INTO results (job_id, status, result_json)
+                   VALUES (?, 'completed', ?)""",
+                ("job-jenkins", json.dumps({"build_number": 99})),
+            )
+            await db.execute(
+                """INSERT INTO failure_history
+                   (job_id, job_name, build_number, build_id, test_name,
+                    classification, error_message)
+                   VALUES (?, 'jenkins-job', 99, '', 'test-j', 'CODE ISSUE', 'err')""",
+                ("job-jenkins",),
+            )
+            await db.commit()
+
+            await storage._migrate_failure_history_build_id(db)
+            await db.commit()
+
+            db.row_factory = aiosqlite.Row
+            eligible_row = await (
+                await db.execute(
+                    "SELECT build_id FROM failure_history WHERE job_id = ?",
+                    ("job-eligible",),
+                )
+            ).fetchone()
+            jenkins_row = await (
+                await db.execute(
+                    "SELECT build_id FROM failure_history WHERE job_id = ?",
+                    ("job-jenkins",),
+                )
+            ).fetchone()
+            assert eligible_row is not None and jenkins_row is not None
+            assert eligible_row["build_id"] == "12345"
+            assert jenkins_row["build_id"] == ""
+
+            # Second run must be a no-op (no eligible empty rows left).
+            before = db.total_changes
+            await storage._migrate_failure_history_build_id(db)
+            await db.commit()
+            assert db.total_changes == before
+
 
 class TestUpdateBuildUrl:
     """Tests for update_build_url()."""
