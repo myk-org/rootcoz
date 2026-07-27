@@ -43,7 +43,9 @@ _HTTP_TIMEOUT = 60
 # Maximum download sizes per artifact type (bytes)
 _MAX_SIZE_FINISHED = 1_000_000  # 1 MB
 _MAX_SIZE_BUILD_LOG = 10_000_000  # 10 MB
-_MAX_SIZE_JUNIT_XML = 5_000_000  # 5 MB
+_MAX_SIZE_JUNIT_XML = 5_000_000  # 5 MB per JUnit file
+_MAX_SIZE_JUNIT_TOTAL = 50_000_000  # 50 MB across all JUnit files
+_MAX_JUNIT_FILES = 200  # hard cap on JUnit XMLs downloaded per build
 _MAX_SIZE_PR_DIFF = 5_000_000  # 5 MB — GitHub PR unified diff
 _MAX_SIZE_PR_METADATA = 1_000_000  # 1 MB — GitHub PR JSON metadata
 _JS_MAX_SAFE_INTEGER = 9007199254740991  # 2^53 - 1
@@ -60,8 +62,16 @@ _MAX_SIZE_ARTIFACTS_TOTAL = 50_000_000  # 50 MB
 # Maximum size for a single non-JUnit artifact file (bytes)
 _MAX_SIZE_SINGLE_ARTIFACT = 10_000_000  # 10 MB
 
-# Maximum number of concurrent PR-change fetches
+# GCS object listing budgets (JSON API pages + accumulated matches)
+_MAX_GCS_LIST_PAGE_BYTES = 2_000_000  # 2 MB per listing response page
+_MAX_GCS_LIST_OBJECTS = 5_000  # hard cap on matched objects returned
+_GCS_LIST_PAGE_SIZE = 1_000  # maxResults sent to GCS JSON API
+_GCS_LIST_MAX_PAGES = 100
+
+# Maximum number of concurrent PR-change fetches and overall wait budget.
+# additional_prs is not truncated (data-integrity); these bounds limit fan-out cost.
 MAX_PR_FETCH_CONCURRENCY = 5
+_PR_FETCH_TIMEOUT_SECONDS = 60
 
 
 @dataclass
@@ -255,10 +265,13 @@ async def _fetch_gcs_response(
     *,
     label: str = "",
     max_size: int = _MAX_SIZE_JUNIT_XML,
-) -> httpx.Response | None:
-    """Fetch a GCS object and validate size limits.
+) -> bytes | None:
+    """Fetch a GCS object and validate size limits while streaming.
 
-    Shared implementation for both text and binary GCS fetches.
+    Shared implementation for both text and binary GCS fetches. Streams the
+    body with a running byte counter (same pattern as ``_fetch_pr_changes``)
+    so oversized responses are rejected before the full body is buffered when
+    ``Content-Length`` is missing or wrong.
 
     Args:
         client: httpx async client.
@@ -267,17 +280,13 @@ async def _fetch_gcs_response(
         max_size: Maximum response size in bytes.
 
     Returns:
-        The validated ``httpx.Response`` on success, ``None`` on 404.
+        Response body bytes on success, ``None`` on 404.
 
     Raises:
         GCSAccessError: On non-404 HTTP errors (403, 500, etc.).
         GCSOversizeError: When the response exceeds *max_size*.
     """
     effective_label = label or "file"
-    # GCS always returns Content-Length, so the header check below is the
-    # primary defense against oversized responses.  The body-size check is
-    # a defense-in-depth fallback for the rare case where the header is
-    # missing or inaccurate.
     try:
         async with client.stream("GET", url) as resp:
             if resp.status_code == 404:
@@ -285,18 +294,20 @@ async def _fetch_gcs_response(
                 return None
             resp.raise_for_status()
 
-            # Check Content-Length *before* downloading the body
+            # Fast-fail when Content-Length is present and over budget
             try:
                 content_length = int(resp.headers.get("content-length", 0))
             except (ValueError, TypeError):
                 content_length = 0
             _raise_if_oversize(effective_label, content_length, max_size, url)
 
-            # Stream body into memory only after header check passes
-            await resp.aread()
-            # Defense-in-depth: verify actual body bytes
-            _raise_if_oversize(effective_label, len(resp.content), max_size, url)
-            return resp
+            chunks: list[bytes] = []
+            total = 0
+            async for chunk in resp.aiter_bytes():
+                total += len(chunk)
+                _raise_if_oversize(effective_label, total, max_size, url)
+                chunks.append(chunk)
+            return b"".join(chunks)
     except GCSOversizeError:
         raise
     except httpx.HTTPStatusError as exc:
@@ -335,10 +346,10 @@ async def _fetch_gcs_text(
         GCSAccessError: On non-404 HTTP errors (403, 500, etc.).
         GCSOversizeError: When the response exceeds *max_size*.
     """
-    resp = await _fetch_gcs_response(client, url, label=label, max_size=max_size)
-    if resp is None:
+    data = await _fetch_gcs_response(client, url, label=label, max_size=max_size)
+    if data is None:
         return None
-    return resp.text
+    return data.decode("utf-8", errors="replace")
 
 
 async def _fetch_gcs_bytes(
@@ -363,10 +374,7 @@ async def _fetch_gcs_bytes(
         GCSAccessError: On non-404 HTTP errors (403, 500, etc.).
         GCSOversizeError: When the response exceeds *max_size*.
     """
-    resp = await _fetch_gcs_response(client, url, label=label, max_size=max_size)
-    if resp is None:
-        return None
-    return resp.content
+    return await _fetch_gcs_response(client, url, label=label, max_size=max_size)
 
 
 async def _list_gcs_objects(
@@ -378,6 +386,10 @@ async def _list_gcs_objects(
     warnings: list[str] | None = None,
 ) -> list[dict]:
     """List GCS objects under a prefix, optionally filtered.
+
+    Listing is bounded: each JSON page is streamed with a byte budget,
+    ``maxResults`` is set, and accumulation stops at
+    ``_MAX_GCS_LIST_OBJECTS`` matched items.
 
     Args:
         client: httpx async client.
@@ -394,16 +406,33 @@ async def _list_gcs_objects(
     matched: list[dict] = []
     page_token: str | None = None
     api_url = f"https://storage.googleapis.com/storage/v1/b/{bucket}/o"
-    max_pages = 100
+    truncated = False
 
-    for _page in range(max_pages):
-        params: dict[str, str] = {"prefix": prefix}
+    for _page in range(_GCS_LIST_MAX_PAGES):
+        params: dict[str, str | int] = {
+            "prefix": prefix,
+            "maxResults": _GCS_LIST_PAGE_SIZE,
+        }
         if page_token:
             params["pageToken"] = page_token
 
         try:
-            resp = await client.get(api_url, params=params)
-            resp.raise_for_status()
+            async with client.stream("GET", api_url, params=params) as resp:
+                resp.raise_for_status()
+                chunks: list[bytes] = []
+                total = 0
+                async for chunk in resp.aiter_bytes():
+                    total += len(chunk)
+                    _raise_if_oversize(
+                        "gcs-listing",
+                        total,
+                        _MAX_GCS_LIST_PAGE_BYTES,
+                        api_url,
+                    )
+                    chunks.append(chunk)
+                raw = b"".join(chunks)
+        except GCSOversizeError:
+            raise
         except httpx.HTTPStatusError as exc:
             raise GCSAccessError(
                 "gcs-listing", exc.response.status_code, api_url
@@ -412,19 +441,31 @@ async def _list_gcs_objects(
             raise GCSAccessError("gcs-listing", 0, api_url) from exc
 
         try:
-            data = resp.json()
+            data = json.loads(raw)
         except ValueError as exc:
             raise GCSAccessError("gcs-listing-parse", 0, api_url) from exc
 
         for item in data.get("items", []):
             if filter_fn is None or filter_fn(item):
                 matched.append(item)
+                if len(matched) >= _MAX_GCS_LIST_OBJECTS:
+                    truncated = True
+                    break
+
+        if truncated:
+            break
 
         page_token = data.get("nextPageToken")
         if not page_token:
             break
     else:
-        msg = f"GCS listing exceeded {max_pages} pages for {prefix}, results truncated"
+        truncated = True
+
+    if truncated:
+        msg = (
+            f"GCS listing truncated for {prefix} "
+            f"(max {_MAX_GCS_LIST_OBJECTS} objects / {_GCS_LIST_MAX_PAGES} pages)"
+        )
         logger.warning(msg)
         if warnings is not None:
             warnings.append(msg)
@@ -1333,6 +1374,12 @@ class ProwSource(CISource):
         Produces:
         - ``prow-context.txt``: CI job type, PR info, repo details.
         - ``pr-changes.diff``: PR diff and description (presubmit/batch only).
+
+        All PRs from ``prowjob.json`` (primary + ``additional_prs``) are kept —
+        the list is not truncated (data integrity). Fan-out cost is bounded by
+        ``MAX_PR_FETCH_CONCURRENCY`` concurrent GitHub fetches and an overall
+        ``_PR_FETCH_TIMEOUT_SECONDS`` wait; each fetch also enforces
+        ``_MAX_SIZE_PR_METADATA`` / ``_MAX_SIZE_PR_DIFF``.
         """
         files: list[WorkspaceFile] = []
         metadata = self._metadata_dict()
@@ -1365,6 +1412,7 @@ class ProwSource(CISource):
             ]
             all_pr_nums = [pr_num] + extra_nums
 
+            # Bound concurrency/time — do not drop additional_prs entries.
             sem = asyncio.Semaphore(MAX_PR_FETCH_CONCURRENCY)
 
             async def _bounded_fetch(num: int) -> str | None:
@@ -1375,7 +1423,9 @@ class ProwSource(CISource):
             skipped_note = ""
             tasks_list = [asyncio.create_task(_bounded_fetch(n)) for n in all_pr_nums]
             try:
-                done, pending = await asyncio.wait(tasks_list, timeout=60)
+                done, pending = await asyncio.wait(
+                    tasks_list, timeout=_PR_FETCH_TIMEOUT_SECONDS
+                )
             except Exception:
                 done, pending = set(), set(tasks_list)
 
@@ -1399,12 +1449,14 @@ class ProwSource(CISource):
 
             if pending:
                 logger.warning(
-                    "PR enrichment timed out after 60s; %d of %d PRs incomplete",
+                    "PR enrichment timed out after %ds; %d of %d PRs incomplete",
+                    _PR_FETCH_TIMEOUT_SECONDS,
                     len(pending),
                     len(tasks_list),
                 )
                 skipped_note += (
-                    f"\n\n--- WARNING: PR enrichment timed out after 60s. "
+                    f"\n\n--- WARNING: PR enrichment timed out after "
+                    f"{_PR_FETCH_TIMEOUT_SECONDS}s. "
                     f"{len(pending)} of {len(tasks_list)} PR fetch(es) incomplete. ---\n"
                 )
 
@@ -1566,7 +1618,26 @@ class ProwSource(CISource):
         # 4. Fetch and parse JUnit XMLs to extract failures
         # ------------------------------------------------------------------
         all_failures: list[FailedTest] = []
+        junit_bytes_total = 0
+        junit_fetched = 0
         for junit_path in junit_files:
+            if junit_fetched >= _MAX_JUNIT_FILES:
+                msg = (
+                    f"JUnit download stopped after {_MAX_JUNIT_FILES} files "
+                    f"({len(junit_files) - junit_fetched} remaining skipped)"
+                )
+                logger.warning(msg)
+                access_warnings.append(msg)
+                break
+            if junit_bytes_total >= _MAX_SIZE_JUNIT_TOTAL:
+                msg = (
+                    f"JUnit download stopped after {_MAX_SIZE_JUNIT_TOTAL} total bytes "
+                    f"({len(junit_files) - junit_fetched} remaining skipped)"
+                )
+                logger.warning(msg)
+                access_warnings.append(msg)
+                break
+
             junit_url = _gcs_url(self.gcs_bucket, junit_path)
             try:
                 xml_content = await _fetch_gcs_text(
@@ -1576,6 +1647,8 @@ class ProwSource(CISource):
                 access_warnings.append(str(exc))
                 continue
             if xml_content:
+                junit_fetched += 1
+                junit_bytes_total += len(xml_content.encode("utf-8"))
                 failures = _parse_junit_failures(
                     xml_content,
                     warnings=access_warnings,
@@ -1584,9 +1657,11 @@ class ProwSource(CISource):
                 all_failures.extend(failures)
 
         logger.info(
-            "Extracted %d test failure(s) from %d JUnit file(s)",
+            "Extracted %d test failure(s) from %d JUnit file(s) (%d fetched, %d bytes)",
             len(all_failures),
             len(junit_files),
+            junit_fetched,
+            junit_bytes_total,
         )
 
         # ------------------------------------------------------------------

@@ -16,6 +16,7 @@ from rootcoz.sources.prow_source import (
     GCSOversizeError,
     ProwJobMetadata,
     ProwSource,
+    _GCS_LIST_MAX_PAGES,
     _MAX_SIZE_BUILD_LOG,
     _MAX_SIZE_FINISHED,
     _MAX_SIZE_JUNIT_XML,
@@ -312,6 +313,21 @@ class TestFetchGcsText:
                     max_size=_MAX_SIZE_FINISHED,
                 )
 
+    async def test_streaming_rejects_before_full_buffer(self):
+        """Missing Content-Length still rejects mid-stream via running counter."""
+        # Body larger than max; no content-length header.
+        big_text = "x" * 200
+        transport = httpx.MockTransport(lambda req: httpx.Response(200, text=big_text))
+        async with httpx.AsyncClient(transport=transport) as client:
+            with pytest.raises(GCSOversizeError) as exc_info:
+                await _fetch_gcs_text(
+                    client,
+                    "http://example.com/stream-big.txt",
+                    label="stream-test",
+                    max_size=50,
+                )
+        assert exc_info.value.max_size == 50
+
     async def test_oversized_build_log_raises(self):
         """Build-log.txt exceeding _MAX_SIZE_BUILD_LOG raises GCSOversizeError."""
         transport = httpx.MockTransport(
@@ -486,8 +502,8 @@ class TestListGcsObjectsJunitFiltering:
 
         transport = httpx.MockTransport(handler)
         warnings: list[str] = []
-        # max_pages=100 is hardcoded in _list_gcs_objects
-        original_max = 100
+        # max pages is _GCS_LIST_MAX_PAGES in _list_gcs_objects
+        original_max = _GCS_LIST_MAX_PAGES
         async with httpx.AsyncClient(transport=transport) as client:
             all_objects = await _list_gcs_objects(
                 client, "bucket", "prefix/", warnings=warnings
@@ -496,8 +512,7 @@ class TestListGcsObjectsJunitFiltering:
         files = _filter_junit(all_objects)
         assert len(files) == original_max  # one file per page
         assert len(warnings) == 1
-        assert "exceeded" in warnings[0]
-        assert "truncated" in warnings[0]
+        assert "truncated" in warnings[0].lower()
 
 
 # ---------------------------------------------------------------------------
@@ -986,6 +1001,45 @@ class TestProwSourceFetch:
 
         assert result.failures == []
         assert not result.build_passed
+
+    async def test_fetch_junit_file_budget_skips_remaining(self, monkeypatch):
+        """JUnit downloads stop after `_MAX_JUNIT_FILES` with a warning."""
+        monkeypatch.setattr("rootcoz.sources.prow_source._MAX_JUNIT_FILES", 2)
+        junit_files = [
+            f"logs/my-job/42/artifacts/junit/junit_{i}.xml" for i in range(5)
+        ]
+        fetch_count = 0
+
+        def handler(request: httpx.Request):
+            nonlocal fetch_count
+            url = str(request.url)
+            if "/storage/v1/b/" in url:
+                return httpx.Response(
+                    200, json={"items": [{"name": f} for f in junit_files]}
+                )
+            if url.endswith("prowjob.json") or "pr-logs/directory/" in url:
+                return httpx.Response(404)
+            if url.endswith("finished.json"):
+                return httpx.Response(200, text=FINISHED_JSON_FAILURE)
+            if url.endswith("build-log.txt"):
+                return httpx.Response(200, text=BUILD_LOG)
+            if url.endswith(".xml"):
+                fetch_count += 1
+                return httpx.Response(200, text=JUNIT_XML_WITH_FAILURES)
+            return httpx.Response(404)
+
+        transport = httpx.MockTransport(handler)
+        source = ProwSource(
+            job_name="my-job",
+            build_id="42",
+            gcs_bucket=_TEST_GCS_BUCKET,
+            prow_url=_TEST_PROW_URL,
+        )
+        async with httpx.AsyncClient(transport=transport) as client:
+            result = await source._fetch_with_client(client)
+
+        assert fetch_count == 2
+        assert any("JUnit download stopped" in w for w in result.warnings)
 
     async def test_fetch_gcs_errors_produce_warnings(self):
         """Non-404 GCS errors are tracked as warnings."""
@@ -1812,10 +1866,36 @@ class TestListGcsObjects:
         warnings: list[str] = []
         async with httpx.AsyncClient(transport=transport) as client:
             items = await _list_gcs_objects(client, "bucket", "p/", warnings=warnings)
-        assert call_count == 100
-        assert len(items) == 100
+        assert call_count == _GCS_LIST_MAX_PAGES
+        assert len(items) == _GCS_LIST_MAX_PAGES
         assert len(warnings) == 1
-        assert "exceeded" in warnings[0]
+        assert "truncated" in warnings[0].lower()
+
+    async def test_object_count_budget_stops_early(self, monkeypatch):
+        """Hard object-count budget truncates listing with a warning."""
+        monkeypatch.setattr("rootcoz.sources.prow_source._MAX_GCS_LIST_OBJECTS", 3)
+        response_data = {
+            "items": [{"name": f"p/f{i}.txt"} for i in range(10)],
+            "nextPageToken": "more",
+        }
+        transport = httpx.MockTransport(
+            lambda req: httpx.Response(200, json=response_data)
+        )
+        warnings: list[str] = []
+        async with httpx.AsyncClient(transport=transport) as client:
+            items = await _list_gcs_objects(client, "bucket", "p/", warnings=warnings)
+        assert len(items) == 3
+        assert warnings and "truncated" in warnings[0].lower()
+
+    async def test_oversized_listing_page_raises(self, monkeypatch):
+        """Listing page over the byte budget raises GCSOversizeError."""
+        monkeypatch.setattr("rootcoz.sources.prow_source._MAX_GCS_LIST_PAGE_BYTES", 50)
+        # No content-length so streaming counter is what enforces the limit.
+        big = json.dumps({"items": [{"name": "x" * 200}]}).encode()
+        transport = httpx.MockTransport(lambda req: httpx.Response(200, content=big))
+        async with httpx.AsyncClient(transport=transport) as client:
+            with pytest.raises(GCSOversizeError):
+                await _list_gcs_objects(client, "bucket", "p/")
 
 
 # ---------------------------------------------------------------------------
