@@ -37,7 +37,6 @@ from rootcoz.engine.core import (
 from rootcoz.error_messages import ai_not_configured_message, make_user_friendly_error
 from rootcoz.jenkins import JenkinsClient
 from rootcoz.jenkins_artifacts import process_build_artifacts
-from rootcoz.sources.base import cleanup_extract_dir
 from rootcoz.models import (
     AdditionalRepo,
     AnalysisDetail,
@@ -59,6 +58,8 @@ from rootcoz.sources.base import (
     CISource,
     CISourceResult,
     append_repo_context,
+    cleanup_extract_dir,
+    link_artifacts_to_workspace,
     run_console_only_analysis,
     setup_analysis_workspace,
 )
@@ -797,14 +798,18 @@ class JenkinsSource(CISource):
                         max_size_mb,
                     )
                     if artifacts_dir:
-                        artifacts_link.symlink_to(artifacts_dir)
-                        # Ownership transferred to workspace symlink —
-                        # cleaned later by cleanup_chat_workspace.
-                        self._extract_path = None
-                        logger.info(
-                            "Chat: artifacts downloaded and linked in %s", workspace
-                        )
-                        wrote_any = True
+                        self._extract_path = artifacts_dir
+                        if link_artifacts_to_workspace(
+                            workspace, artifacts_dir, "chat"
+                        ):
+                            # Ownership transferred to workspace symlink —
+                            # cleaned later by cleanup_chat_workspace.
+                            self._extract_path = None
+                            logger.info(
+                                "Chat: artifacts downloaded and linked in %s",
+                                workspace,
+                            )
+                            wrote_any = True
                 except Exception:
                     logger.warning("Chat: failed to download artifacts", exc_info=True)
                     self.cleanup()

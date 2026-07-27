@@ -94,7 +94,7 @@ src/rootcoz/
     raw_source.py           # Raw failure list plugin: RawSource
     prow_source.py          # Prow CI plugin: ProwSource (GCS artifacts)
     chat_workspace.py       # CI-source chat workspace population dispatcher
-    prow_validation.py      # Prow-only input validation (URL, bucket, prefix, job, build ID)
+    prow_validation.py      # Re-export shim of rootcoz.prow_validation for plugin imports
     registry.py             # CI source plugin registry: analysis_type → CISource class mapping
   prow_validation.py        # Canonical Prow validators (+ URL helper re-exports for compatibility)
   url_utils.py              # Cross-cutting HTTP(S) URL sanitization (strip userinfo, href)

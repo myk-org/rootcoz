@@ -28,6 +28,7 @@ from rootcoz.sources.base import (
     CISourceResult,
     WorkspaceFile,
     cleanup_extract_dir,
+    link_artifacts_to_workspace,
 )
 from rootcoz.xml_enrichment import extract_test_failures
 
@@ -1306,12 +1307,14 @@ class ProwSource(CISource):
                         client, gcs_prefix, self._resolution_warnings
                     )
                     if non_junit and extract_path:
-                        artifacts_link.symlink_to(extract_path)
-                        # Ownership transferred to workspace symlink —
-                        # cleaned later by cleanup_chat_workspace.
-                        self._extract_path = None
-                        logger.info("Chat: linked Prow artifacts into %s", workspace)
-                        wrote_any = True
+                        if link_artifacts_to_workspace(workspace, extract_path, "chat"):
+                            # Ownership transferred to workspace symlink —
+                            # cleaned later by cleanup_chat_workspace.
+                            self._extract_path = None
+                            logger.info(
+                                "Chat: linked Prow artifacts into %s", workspace
+                            )
+                            wrote_any = True
                 except Exception:
                     logger.warning(
                         "Chat: failed to download Prow artifacts", exc_info=True
