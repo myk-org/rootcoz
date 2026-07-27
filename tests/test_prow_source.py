@@ -1897,6 +1897,45 @@ class TestListGcsObjects:
             with pytest.raises(GCSOversizeError):
                 await _list_gcs_objects(client, "bucket", "p/")
 
+    async def test_non_object_json_raises_gcs_access_error(self):
+        """Non-dict listing JSON becomes GCSAccessError, not AttributeError."""
+        transport = httpx.MockTransport(
+            lambda req: httpx.Response(200, content=b'["not","an","object"]')
+        )
+        async with httpx.AsyncClient(transport=transport) as client:
+            with pytest.raises(GCSAccessError, match="gcs-listing-parse"):
+                await _list_gcs_objects(client, "bucket", "p/")
+
+    async def test_non_list_items_raises_gcs_access_error(self):
+        """items that is not a list becomes GCSAccessError."""
+        transport = httpx.MockTransport(
+            lambda req: httpx.Response(
+                200, content=json.dumps({"items": {"bad": True}}).encode()
+            )
+        )
+        async with httpx.AsyncClient(transport=transport) as client:
+            with pytest.raises(GCSAccessError, match="gcs-listing-parse"):
+                await _list_gcs_objects(client, "bucket", "p/")
+
+    async def test_skips_non_dict_items(self):
+        """Non-dict entries in items are skipped."""
+        transport = httpx.MockTransport(
+            lambda req: httpx.Response(
+                200,
+                json={
+                    "items": [
+                        "skip-me",
+                        {"name": "p/ok.txt"},
+                        42,
+                        {"name": "p/ok2.txt"},
+                    ]
+                },
+            )
+        )
+        async with httpx.AsyncClient(transport=transport) as client:
+            items = await _list_gcs_objects(client, "bucket", "p/")
+        assert [i["name"] for i in items] == ["p/ok.txt", "p/ok2.txt"]
+
 
 # ---------------------------------------------------------------------------
 # _is_junit

@@ -444,8 +444,16 @@ async def _list_gcs_objects(
             data = json.loads(raw)
         except ValueError as exc:
             raise GCSAccessError("gcs-listing-parse", 0, api_url) from exc
+        if not isinstance(data, dict):
+            raise GCSAccessError("gcs-listing-parse", 0, api_url)
 
-        for item in data.get("items", []):
+        items = data.get("items") or []
+        if not isinstance(items, list):
+            raise GCSAccessError("gcs-listing-parse", 0, api_url)
+
+        for item in items:
+            if not isinstance(item, dict):
+                continue
             if filter_fn is None or filter_fn(item):
                 matched.append(item)
                 if len(matched) >= _MAX_GCS_LIST_OBJECTS:
@@ -1377,9 +1385,9 @@ class ProwSource(CISource):
 
         All PRs from ``prowjob.json`` (primary + ``additional_prs``) are kept —
         the list is not truncated (data integrity). Fan-out cost is bounded by
-        ``MAX_PR_FETCH_CONCURRENCY`` concurrent GitHub fetches and an overall
-        ``_PR_FETCH_TIMEOUT_SECONDS`` wait; each fetch also enforces
-        ``_MAX_SIZE_PR_METADATA`` / ``_MAX_SIZE_PR_DIFF``.
+        at most ``MAX_PR_FETCH_CONCURRENCY`` worker tasks (queue-fed, not one
+        task per PR), an overall ``_PR_FETCH_TIMEOUT_SECONDS`` wait, and
+        per-fetch ``_MAX_SIZE_PR_METADATA`` / ``_MAX_SIZE_PR_DIFF`` caps.
         """
         files: list[WorkspaceFile] = []
         metadata = self._metadata_dict()
@@ -1412,52 +1420,65 @@ class ProwSource(CISource):
             ]
             all_pr_nums = [pr_num] + extra_nums
 
-            # Bound concurrency/time — do not drop additional_prs entries.
-            sem = asyncio.Semaphore(MAX_PR_FETCH_CONCURRENCY)
+            # Queue + fixed worker pool — preserve all PRs without N tasks.
+            work: asyncio.Queue[int] = asyncio.Queue()
+            for num in all_pr_nums:
+                work.put_nowait(num)
 
-            async def _bounded_fetch(num: int) -> str | None:
-                async with sem:
-                    return await _fetch_pr_changes(pr_org, pr_repo, num, github_token)
+            results: dict[int, str | None] = {}
+            failed_prs: list[int] = []
 
-            pr_sections: list[str] = []
-            skipped_note = ""
-            tasks_list = [asyncio.create_task(_bounded_fetch(n)) for n in all_pr_nums]
+            async def _worker() -> None:
+                while True:
+                    try:
+                        num = work.get_nowait()
+                    except asyncio.QueueEmpty:
+                        return
+                    try:
+                        results[num] = await _fetch_pr_changes(
+                            pr_org, pr_repo, num, github_token
+                        )
+                    except Exception as exc:
+                        logger.warning("PR fetch failed for #%s: %s", num, exc)
+                        failed_prs.append(num)
+
+            n_workers = min(MAX_PR_FETCH_CONCURRENCY, len(all_pr_nums))
+            workers = [asyncio.create_task(_worker()) for _ in range(n_workers)]
             try:
-                done, pending = await asyncio.wait(
-                    tasks_list, timeout=_PR_FETCH_TIMEOUT_SECONDS
+                _finished = await asyncio.wait(
+                    workers, timeout=_PR_FETCH_TIMEOUT_SECONDS
                 )
+                pending = _finished[1]
             except Exception:
-                done, pending = set(), set(tasks_list)
+                pending = set(workers)
 
             for task in pending:
                 task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
                     await task
 
-            # Collect results preserving original all_pr_nums order
-            failed_prs: list[int] = []
-            for i, task in enumerate(tasks_list):
-                if task in done:
-                    try:
-                        result = task.result()
-                    except Exception as exc:
-                        logger.warning("PR fetch failed: %s", exc)
-                        failed_prs.append(all_pr_nums[i])
-                    else:
-                        if result:
-                            pr_sections.append(result)
+            pr_sections: list[str] = []
+            skipped_note = ""
+            incomplete = len(pending) > 0 or work.qsize() > 0
+            for num in all_pr_nums:
+                content = results.get(num)
+                if content:
+                    pr_sections.append(content)
 
-            if pending:
+            if incomplete:
+                remaining = work.qsize() + sum(
+                    1 for n in all_pr_nums if n not in results and n not in failed_prs
+                )
                 logger.warning(
                     "PR enrichment timed out after %ds; %d of %d PRs incomplete",
                     _PR_FETCH_TIMEOUT_SECONDS,
-                    len(pending),
-                    len(tasks_list),
+                    remaining,
+                    len(all_pr_nums),
                 )
                 skipped_note += (
                     f"\n\n--- WARNING: PR enrichment timed out after "
                     f"{_PR_FETCH_TIMEOUT_SECONDS}s. "
-                    f"{len(pending)} of {len(tasks_list)} PR fetch(es) incomplete. ---\n"
+                    f"{remaining} of {len(all_pr_nums)} PR fetch(es) incomplete. ---\n"
                 )
 
             if failed_prs:
