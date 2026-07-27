@@ -1,0 +1,10 @@
+# Tox/helm template fixture — Vertex SA key as JSON object (not for production).
+ai:
+  vertex:
+    enabled: true
+    projectId: test-project
+    serviceAccountKey:
+      type: service_account
+admin:
+  key: test-admin-key
+encryptionKey: test-encryption-key-for-helm-template-render

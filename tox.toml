@@ -1,5 +1,5 @@
 skipsdist = true
-envlist = ["backend", "frontend"]
+envlist = ["backend", "frontend", "chart"]
 
 [env.backend]
 description = "Run Python tests"
@@ -40,3 +40,102 @@ description = "Run frontend build and tests"
 skip_install = true
 allowlist_externals = ["npm", "npx"]
 change_dir = "frontend"
+
+[env.chart]
+description = "Helm chart lint and template smoke tests"
+skip_install = true
+allowlist_externals = ["helm", "sh", "curl", "tar", "mkdir"]
+passenv = ["PATH", "HOME"]
+set_env.PATH = "{env:HOME}/.local/bin:{env:PATH}"
+commands_pre = [
+  ["sh", "-c", "helm version --short 2>/dev/null | grep -q '^v3[.]' && exit 0; OS=$(uname -s | tr '[:upper:]' '[:lower:]') && ARCH=$(uname -m) && case $ARCH in x86_64) ARCH=amd64;; aarch64|arm64) ARCH=arm64;; *) echo \"Unsupported architecture: $ARCH\"; exit 1;; esac && TMPD=/tmp/helm-install-$$ && mkdir -p $TMPD && trap 'rm -rf $TMPD' EXIT && HELM_TAR=helm-v3.17.3-${OS}-${ARCH}.tar.gz && cd $TMPD && curl -fsSL https://get.helm.sh/${HELM_TAR} -o ${HELM_TAR} && curl -fsSL https://get.helm.sh/${HELM_TAR}.sha256sum -o ${HELM_TAR}.sha256sum && sha256sum -c ${HELM_TAR}.sha256sum && tar -xzf ${HELM_TAR} && mkdir -p $HOME/.local/bin && mv ${OS}-${ARCH}/helm $HOME/.local/bin/helm"],
+]
+commands = [
+  ["helm", "lint", "chart/"],
+  [
+    "helm",
+    "template",
+    "rootcoz",
+    "chart/",
+    "-f",
+    "chart/examples/values-openshift.yaml",
+    "--set",
+    "ai.geminiApiKey=test-key",  # pragma: allowlist secret
+    "--set",
+    "admin.key=test-admin-key",  # pragma: allowlist secret
+    "--set",
+    "encryptionKey=test-encryption-key-for-helm-template-render",  # pragma: allowlist secret
+  ],
+  [
+    "helm",
+    "template",
+    "rootcoz",
+    "chart/",
+    "-f",
+    "chart/examples/values-kubernetes.yaml",
+    "--set",
+    "ai.geminiApiKey=test-key",  # pragma: allowlist secret
+    "--set",
+    "admin.key=test-admin-key",  # pragma: allowlist secret
+    "--set",
+    "encryptionKey=test-encryption-key-for-helm-template-render",  # pragma: allowlist secret
+  ],
+  [
+    "helm",
+    "template",
+    "rootcoz",
+    "chart/",
+    "-f",
+    "chart/examples/values-clusterip.yaml",
+    "--set",
+    "ai.geminiApiKey=test-key",  # pragma: allowlist secret
+    "--set",
+    "admin.key=test-admin-key",  # pragma: allowlist secret
+    "--set",
+    "encryptionKey=test-encryption-key-for-helm-template-render",  # pragma: allowlist secret
+  ],
+  [
+    "sh",
+    "-c",
+    "helm template rootcoz chart/ -f chart/examples/values-openshift.yaml --set route.enabled=true --set ingress.enabled=true --set route.host=x.example.com --set ingress.host=y.example.com --set ai.geminiApiKey=k --set admin.key=a --set encryptionKey=test-encryption-key-for-helm-template-render 2>&1 | grep -q 'mutually exclusive'",  # pragma: allowlist secret
+  ],
+  [
+    "helm",
+    "template",
+    "rootcoz",
+    "chart/",
+    "-f",
+    "chart/examples/values-openshift.yaml",
+    "-f",
+    "chart/examples/values-vertex-fixture.yaml",
+    "--set",
+    "ai.geminiApiKey=test-key",  # pragma: allowlist secret
+  ],
+  [
+    "helm",
+    "template",
+    "rootcoz",
+    "chart/",
+    "-f",
+    "chart/examples/values-openshift.yaml",
+    "-f",
+    "chart/examples/values-cursor-fixture.yaml",
+  ],
+
+  [
+    "helm",
+    "template",
+    "rootcoz",
+    "chart/",
+    "-f",
+    "chart/examples/values-openshift.yaml",
+    "--set",
+    "imageStream.enabled=true",
+    "--set",
+    "ai.geminiApiKey=test-key",  # pragma: allowlist secret
+    "--set",
+    "admin.key=test-admin-key",  # pragma: allowlist secret
+    "--set",
+    "encryptionKey=test-encryption-key-for-helm-template-render",  # pragma: allowlist secret
+  ],
+]

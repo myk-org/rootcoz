@@ -1,0 +1,17 @@
+{{- include "rootcoz.validate" . -}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "rootcoz.fullname" . }}
+  labels:
+    {{- include "rootcoz.labels" . | nindent 4 }}
+spec:
+  # Intentionally hardcoded: external access is provided via Route (OpenShift) or Ingress.
+  type: ClusterIP
+  ports:
+    - port: 8000
+      targetPort: http
+      protocol: TCP
+      name: http
+  selector:
+    {{- include "rootcoz.selectorLabels" . | nindent 4 }}

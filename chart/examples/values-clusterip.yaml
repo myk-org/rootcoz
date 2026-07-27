@@ -1,0 +1,10 @@
+# ClusterIP-only example (no Route or Ingress).
+route:
+  enabled: false
+
+ingress:
+  enabled: false
+
+ai:
+  provider: gemini
+  model: gemini-2.5-pro

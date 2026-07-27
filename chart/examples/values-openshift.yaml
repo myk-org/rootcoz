@@ -1,0 +1,12 @@
+# Minimal OpenShift example — copy and set secrets via values.secrets.yaml or --set-file.
+route:
+  enabled: true
+  host: rootcoz.apps.example.com
+
+ingress:
+  enabled: false
+
+ai:
+  provider: gemini
+  model: gemini-2.5-pro
+  # Set geminiApiKey in values.secrets.yaml (see chart/README.md)

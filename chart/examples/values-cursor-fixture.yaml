@@ -1,0 +1,11 @@
+# Tox/helm template fixture — Cursor auth.json object (not for production).
+ai:
+  provider: cursor
+  model: gpt-5
+  geminiApiKey: ""
+  cursor:
+    authJson:
+      accessToken: test
+admin:
+  key: test-admin-key
+encryptionKey: test-encryption-key-for-helm-template-render

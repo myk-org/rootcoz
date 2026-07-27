@@ -1,0 +1,9 @@
+{{- include "rootcoz.validate" . -}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "rootcoz.configMapName" . }}
+  labels:
+    {{- include "rootcoz.labels" . | nindent 4 }}
+data:
+  {{- include "rootcoz.configMapData" . | nindent 2 }}

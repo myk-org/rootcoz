@@ -61,3 +61,11 @@ frontend/.vite/
 .envrc
 .claude/
 jji.db
+
+# Helm setup script output (legacy cwd filenames — script writes under
+# ~/.config/rootcoz/helm/ by default and refuses the git checkout)
+values.secrets.yaml
+values.generated.yaml
+
+# Local tool downloads (optional helm binary for dev)
+.tools/

@@ -1,0 +1,21 @@
+{{- include "rootcoz.validate" . -}}
+{{- if .Values.imageStream.enabled }}
+apiVersion: image.openshift.io/v1
+kind: ImageStream
+metadata:
+  name: {{ .Values.imageStream.name }}
+  labels:
+    {{- include "rootcoz.labels" . | nindent 4 }}
+spec:
+  lookupPolicy:
+    local: false
+  tags:
+    - name: {{ default "latest" .Values.image.tag | quote }}
+      from:
+        kind: DockerImage
+        name: {{ printf "%s:%s" .Values.image.repository (include "rootcoz.imageTag" .) | quote }}
+      importPolicy:
+        scheduled: true
+      referencePolicy:
+        type: Local
+{{- end }}

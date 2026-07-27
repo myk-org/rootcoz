@@ -1,0 +1,161 @@
+{{- include "rootcoz.validate" . -}}
+{{- $gcloudKey := include "rootcoz.gcloudServiceAccountKey" . -}}
+{{- $cursorAuth := include "rootcoz.cursorAuthJson" . -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "rootcoz.fullname" . }}
+  labels:
+    {{- include "rootcoz.labels" . | nindent 4 }}
+spec:
+  replicas: 1
+  revisionHistoryLimit: 10
+  progressDeadlineSeconds: 600
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "rootcoz.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "rootcoz.selectorLabels" . | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      annotations:
+        checksum/config: {{ include "rootcoz.configMapData" . | sha256sum }}
+        {{- /* Salt with Release.Name: constant across upgrades, unique per installation. */}}
+        checksum/credentials: {{ printf "%s\n%s\n%s\n%s\n%s" .Values.admin.key .Values.ai.geminiApiKey .Values.ai.anthropicApiKey .Values.ai.cursor.apiKey .Release.Name | sha256sum }}
+        checksum/encryption: {{ printf "%s\n%s" .Values.encryptionKey .Release.Name | sha256sum }}
+        {{- if and .Values.ai.vertex.enabled $gcloudKey }}
+        checksum/gcloud: {{ $gcloudKey | sha256sum }}
+        {{- end }}
+        {{- if $cursorAuth }}
+        checksum/cursor-auth: {{ $cursorAuth | sha256sum }}
+        {{- end }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      automountServiceAccountToken: false
+      serviceAccountName: {{ include "rootcoz.serviceAccountName" . }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- include "rootcoz.podSecurityContext" . | nindent 8 }}
+      containers:
+        - name: {{ include "rootcoz.name" . }}
+          image: {{ include "rootcoz.image" . | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            {{- include "rootcoz.containerSecurityContext" . | nindent 12 }}
+          ports:
+            - name: http
+              containerPort: 8000
+              protocol: TCP
+          env:
+            - name: XDG_CONFIG_HOME
+              value: {{ .Values.env.xdgConfigHome | quote }}
+            - name: XDG_DATA_HOME
+              value: {{ .Values.env.xdgDataHome | quote }}
+            {{- if .Values.env.metadataRulesFile }}
+            - name: METADATA_RULES_FILE
+              value: {{ .Values.env.metadataRulesFile | quote }}
+            {{- end }}
+            {{- if and .Values.ai.vertex.enabled $gcloudKey }}
+            - name: CLOUDSDK_CONFIG
+              value: /gcloud-credentials
+            - name: GOOGLE_APPLICATION_CREDENTIALS
+              value: /gcloud-credentials/application_default_credentials.json
+            {{- end }}
+          envFrom:
+            - configMapRef:
+                name: {{ include "rootcoz.configMapName" . }}
+            {{- if include "rootcoz.credentialsSecretData" . }}
+            - secretRef:
+                name: {{ include "rootcoz.credentialsSecretName" . }}
+            {{- end }}
+            {{- if include "rootcoz.encryptionKey" . }}
+            - secretRef:
+                name: {{ include "rootcoz.encryptionSecretName" . }}
+            {{- end }}
+          startupProbe:
+            exec:
+              command:
+                - /bin/sh
+                - -c
+                - "curl -sf http://localhost:8000/health && curl -sf http://localhost:9100/health"
+            periodSeconds: 2
+            timeoutSeconds: 5
+            failureThreshold: 30
+            successThreshold: 1
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+              scheme: HTTP
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 1
+            failureThreshold: 3
+            successThreshold: 1
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+              scheme: HTTP
+            initialDelaySeconds: 15
+            periodSeconds: 30
+            timeoutSeconds: 30
+            failureThreshold: 5
+            successThreshold: 1
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            - name: data
+              mountPath: {{ .Values.env.xdgDataHome }}
+            {{- if and .Values.ai.vertex.enabled $gcloudKey }}
+            - name: gcloud-credentials
+              mountPath: /gcloud-credentials
+              readOnly: true
+            {{- end }}
+            {{- if $cursorAuth }}
+            - name: cursor-auth
+              mountPath: /home/appuser/.cursor-auth
+              readOnly: true
+            {{- end }}
+      volumes:
+        {{- if .Values.persistence.enabled }}
+        - name: data
+          persistentVolumeClaim:
+            claimName: {{ include "rootcoz.pvcName" . }}
+        {{- else }}
+        - name: data
+          emptyDir: {}
+        {{- end }}
+        {{- if and .Values.ai.vertex.enabled $gcloudKey }}
+        - name: gcloud-credentials
+          secret:
+            secretName: {{ include "rootcoz.gcloudSecretName" . }}
+        {{- end }}
+        {{- if $cursorAuth }}
+        - name: cursor-auth
+          secret:
+            secretName: {{ include "rootcoz.cursorAuthSecretName" . }}
+        {{- end }}
+      terminationGracePeriodSeconds: 30
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

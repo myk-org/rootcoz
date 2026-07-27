@@ -1,0 +1,142 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "title": "rootcoz Helm values",
+  "type": "object",
+  "additionalProperties": true,
+  "properties": {
+    "nameOverride": { "type": "string" },
+    "fullnameOverride": { "type": "string" },
+    "image": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "repository": { "type": "string" },
+        "tag": { "type": "string" },
+        "pullPolicy": { "type": "string", "enum": ["Always", "IfNotPresent", "Never"] }
+      }
+    },
+    "imagePullSecrets": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["name"],
+        "properties": {
+          "name": { "type": "string" }
+        }
+      }
+    },
+    "route": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "host": { "type": "string" },
+        "timeout": { "type": "string" },
+        "annotations": { "type": "object" }
+      }
+    },
+    "ingress": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "host": { "type": "string" },
+        "className": { "type": "string" },
+        "annotations": { "type": "object" },
+        "tls": {
+          "type": "object",
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "secretName": { "type": "string" }
+          }
+        }
+      }
+    },
+    "ai": {
+      "type": "object",
+      "properties": {
+        "provider": {
+          "type": "string",
+          "enum": ["", "gemini", "claude", "cursor"]
+        },
+        "model": { "type": "string" },
+        "geminiApiKey": { "type": "string" },
+        "anthropicApiKey": { "type": "string" },
+        "vertex": {
+          "type": "object",
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "projectId": { "type": "string" },
+            "region": { "type": "string" },
+            "serviceAccountKey": { "type": ["string", "object"] }
+          }
+        },
+        "cursor": {
+          "type": "object",
+          "properties": {
+            "apiKey": { "type": "string" },
+            "authJson": { "type": ["string", "object"] }
+          }
+        }
+      }
+    },
+    "admin": {
+      "type": "object",
+      "properties": {
+        "key": { "type": "string" }
+      }
+    },
+    "encryptionKey": { "type": "string" },
+    "persistence": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "size": { "type": "string" },
+        "storageClass": { "type": "string" },
+        "annotations": { "type": "object" }
+      }
+    },
+    "resources": { "type": "object" },
+    "env": {
+      "type": "object",
+      "properties": {
+        "xdgDataHome": { "type": "string" },
+        "xdgConfigHome": { "type": "string" },
+        "secureCookies": { "type": "string" },
+        "publicBaseUrl": { "type": "string" },
+        "metadataRulesFile": { "type": "string" }
+      }
+    },
+    "tuning": {
+      "type": "object",
+      "properties": {
+        "logLevel": { "type": "string" }
+      }
+    },
+    "imageStream": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "name": { "type": "string" },
+        "namespace": { "type": "string" }
+      }
+    },
+    "tests": {
+      "type": "object",
+      "properties": {
+        "image": { "type": "string" }
+      }
+    },
+    "serviceAccount": {
+      "type": "object",
+      "properties": {
+        "create": { "type": "boolean" },
+        "name": { "type": "string" },
+        "annotations": { "type": "object" }
+      }
+    },
+    "podAnnotations": { "type": "object" },
+    "podLabels": { "type": "object" },
+    "nodeSelector": { "type": "object" },
+    "tolerations": { "type": "array", "items": { "type": "object" } },
+    "affinity": { "type": "object" }
+  }
+}
