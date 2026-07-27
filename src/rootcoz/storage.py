@@ -413,10 +413,17 @@ async def _migrate_failure_history_build_id(db: aiosqlite.Connection) -> None:
         f"""
         WITH {_FH_BUILD_ID_CANDIDATES_CTE}
         UPDATE failure_history AS fh
-        SET build_id = c.candidate
-        FROM candidates AS c
-        WHERE fh.rowid = c.fh_rowid
-          AND c.candidate IS NOT NULL
+        SET build_id = (
+            SELECT c.candidate
+            FROM candidates AS c
+            WHERE c.fh_rowid = fh.rowid
+        )
+        WHERE EXISTS (
+            SELECT 1
+            FROM candidates AS c
+            WHERE c.fh_rowid = fh.rowid
+              AND c.candidate IS NOT NULL
+        )
         """
     )
 
