@@ -349,31 +349,36 @@ async def _migrate_lowercase_usernames(db: aiosqlite.Connection) -> None:
     logger.info("Migration: case-insensitive username migration complete")
 
 
-# SQL scalar subquery: digit-only text build_id from results.result_json for the
-# current failure_history.job_id, or NULL if none / invalid JSON / ineligible.
-_FH_BUILD_ID_CANDIDATE_SQL = """
-(
-    SELECT CASE
-        WHEN json_type(safe_rj, '$.build_id') = 'text'
-             AND json_extract(safe_rj, '$.build_id') != ''
-             AND json_extract(safe_rj, '$.build_id')
-                 NOT GLOB '*[^0-9]*'
-        THEN json_extract(safe_rj, '$.build_id')
-        WHEN json_type(safe_rj, '$.request_params.build_id') = 'text'
-             AND json_extract(safe_rj, '$.request_params.build_id') != ''
-             AND json_extract(safe_rj, '$.request_params.build_id')
-                 NOT GLOB '*[^0-9]*'
-        THEN json_extract(safe_rj, '$.request_params.build_id')
-        ELSE NULL
-    END
-    FROM (
-        SELECT CASE
-            WHEN json_valid(r.result_json) THEN r.result_json
+# CTE: digit-only text build_id candidates for empty failure_history rows.
+# Computed once per row (json_valid + extract), then reused by COUNT/UPDATE.
+_FH_BUILD_ID_CANDIDATES_CTE = """
+candidates AS (
+    SELECT
+        fh.rowid AS fh_rowid,
+        CASE
+            WHEN json_type(j.safe_rj, '$.build_id') = 'text'
+                 AND json_extract(j.safe_rj, '$.build_id') != ''
+                 AND json_extract(j.safe_rj, '$.build_id')
+                     NOT GLOB '*[^0-9]*'
+            THEN json_extract(j.safe_rj, '$.build_id')
+            WHEN json_type(j.safe_rj, '$.request_params.build_id') = 'text'
+                 AND json_extract(j.safe_rj, '$.request_params.build_id') != ''
+                 AND json_extract(j.safe_rj, '$.request_params.build_id')
+                     NOT GLOB '*[^0-9]*'
+            THEN json_extract(j.safe_rj, '$.request_params.build_id')
             ELSE NULL
-        END AS safe_rj
-        FROM results r
-        WHERE r.job_id = failure_history.job_id
-    )
+        END AS candidate
+    FROM failure_history AS fh
+    JOIN (
+        SELECT
+            job_id,
+            CASE
+                WHEN json_valid(result_json) THEN result_json
+                ELSE NULL
+            END AS safe_rj
+        FROM results
+    ) AS j ON j.job_id = fh.job_id
+    WHERE fh.build_id = '' OR fh.build_id IS NULL
 )
 """
 
@@ -393,9 +398,8 @@ async def _migrate_failure_history_build_id(db: aiosqlite.Connection) -> None:
 
     cursor = await db.execute(
         f"""
-        SELECT COUNT(*) FROM failure_history
-        WHERE (build_id = '' OR build_id IS NULL)
-          AND {_FH_BUILD_ID_CANDIDATE_SQL} IS NOT NULL
+        WITH {_FH_BUILD_ID_CANDIDATES_CTE}
+        SELECT COUNT(*) FROM candidates WHERE candidate IS NOT NULL
         """
     )
     missing = (await cursor.fetchone())[0]
@@ -407,10 +411,12 @@ async def _migrate_failure_history_build_id(db: aiosqlite.Connection) -> None:
     )
     await db.execute(
         f"""
-        UPDATE failure_history
-        SET build_id = {_FH_BUILD_ID_CANDIDATE_SQL}
-        WHERE (build_id = '' OR build_id IS NULL)
-          AND {_FH_BUILD_ID_CANDIDATE_SQL} IS NOT NULL
+        WITH {_FH_BUILD_ID_CANDIDATES_CTE}
+        UPDATE failure_history AS fh
+        SET build_id = c.candidate
+        FROM candidates AS c
+        WHERE fh.rowid = c.fh_rowid
+          AND c.candidate IS NOT NULL
         """
     )
 
