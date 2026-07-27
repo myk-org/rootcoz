@@ -58,10 +58,10 @@ from rootcoz.sources.base import (
     CISource,
     CISourceResult,
     append_repo_context,
-    cleanup_extract_dir,
     link_artifacts_to_workspace,
     run_console_only_analysis,
     setup_analysis_workspace,
+    write_console_output_file,
 )
 from rootcoz.utils import is_jenkins_connectivity_error
 
@@ -349,6 +349,8 @@ class JenkinsSource(CISource):
     artifacts, and test reports, then returns a normalized ``CISourceResult``
     for the core analysis engine.
     """
+
+    _extract_label = "Jenkins artifacts"
 
     def __init__(
         self,
@@ -732,19 +734,8 @@ class JenkinsSource(CISource):
                     build_info = r
 
         if console_output is not None:
-            try:
-                content = (
-                    console_output
-                    if console_output
-                    else "No console output available for this build."
-                )
-                console_file.write_text(content)
-                logger.info("Chat: wrote console-output.txt (%d chars)", len(content))
+            if write_console_output_file(workspace, console_output):
                 wrote_any = True
-            except OSError:
-                logger.warning(
-                    "Chat: failed to write console-output.txt", exc_info=True
-                )
 
         if build_info and need_build_info:
             try:
@@ -820,12 +811,6 @@ class JenkinsSource(CISource):
     def default_display_name(cls, body) -> str:
         """Default display name for Jenkins analyses."""
         return getattr(body, "job_name", None) or "jenkins-analysis"
-
-    def cleanup(self) -> None:
-        """Clean up artifact extraction directory."""
-        if self._extract_path:
-            cleanup_extract_dir(self._extract_path, label="Jenkins artifacts")
-            self._extract_path = None
 
 
 # ---------------------------------------------------------------------------

@@ -106,6 +106,11 @@ class CISource(ABC):
     ``cleanup``) have sensible defaults so simple sources only need ``fetch``.
     """
 
+    #: Label passed to ``cleanup_extract_dir`` when removing ``_extract_path``.
+    _extract_label: str = "extracted artifacts"
+    #: Temporary artifact directory set by plugins that download archives.
+    _extract_path: Path | None = None
+
     @abstractmethod
     async def fetch(self) -> CISourceResult:
         """Fetch build data from the CI source.
@@ -284,12 +289,16 @@ class CISource(ABC):
         return None
 
     def cleanup(self) -> None:
-        """Release temporary resources (e.g. artifact directories).
+        """Remove temporary artifact extraction directory when present.
 
-        Called by the core engine after analysis completes.  The default
-        implementation is a no-op.
+        Called by the core engine after analysis completes. Sources that
+        download artifacts set ``_extract_path`` and may override
+        ``_extract_label`` for log wording. Sources without an extract
+        directory are a no-op.
         """
-        return  # intentional no-op; subclasses override when needed
+        if self._extract_path:
+            cleanup_extract_dir(self._extract_path, label=self._extract_label)
+            self._extract_path = None
 
 
 @dataclass
@@ -428,6 +437,33 @@ def write_workspace_file_list(
         except OSError:
             logger.warning("Failed to write %s", target.name, exc_info=True)
     return wrote_any
+
+
+_NO_CONSOLE_OUTPUT = "No console output available for this build."
+
+
+def write_console_output_file(
+    workspace: Path,
+    raw_output: str | None,
+    *,
+    log_prefix: str = "Chat: ",
+) -> bool:
+    """Write ``console-output.txt`` for chat workspace population.
+
+    Empty/falsy ``raw_output`` uses a shared fallback message. Returns
+    ``True`` when the file was written successfully.
+    """
+    console_file = workspace / "console-output.txt"
+    content = raw_output if raw_output else _NO_CONSOLE_OUTPUT
+    try:
+        console_file.write_text(content)
+        logger.info("%swrote console-output.txt (%d chars)", log_prefix, len(content))
+        return True
+    except OSError:
+        logger.warning(
+            "%sfailed to write console-output.txt", log_prefix, exc_info=True
+        )
+        return False
 
 
 def write_workspace_context_file(

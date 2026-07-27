@@ -27,8 +27,8 @@ from rootcoz.sources.base import (
     CISource,
     CISourceResult,
     WorkspaceFile,
-    cleanup_extract_dir,
     link_artifacts_to_workspace,
+    write_console_output_file,
 )
 from rootcoz.xml_enrichment import extract_test_failures
 
@@ -906,6 +906,8 @@ class ProwSource(CISource):
     pointer file at ``pr-logs/directory/{job_name}/{build_id}.txt``.
     """
 
+    _extract_label = "Prow artifacts"
+
     def __init__(
         self,
         *,
@@ -1320,22 +1322,8 @@ class ProwSource(CISource):
                 build_log = await self._fetch_build_log(
                     client, gcs_prefix, self._resolution_warnings
                 )
-                try:
-                    content = (
-                        build_log
-                        if build_log
-                        else "No console output available for this build."
-                    )
-                    console_file.write_text(content)
-                    logger.info(
-                        "Chat: wrote console-output.txt for Prow job (%d chars)",
-                        len(content),
-                    )
+                if write_console_output_file(workspace, build_log):
                     wrote_any = True
-                except OSError:
-                    logger.warning(
-                        "Chat: failed to write console-output.txt", exc_info=True
-                    )
 
             workspace_files = await self.prepare_workspace(
                 repo_path=workspace, github_token=github_token
@@ -1917,9 +1905,3 @@ class ProwSource(CISource):
                 "cannot re-analyze"
             )
         return fields
-
-    def cleanup(self) -> None:
-        """Remove temporary artifact directory."""
-        if self._extract_path:
-            cleanup_extract_dir(self._extract_path, label="Prow artifacts")
-            self._extract_path = None
