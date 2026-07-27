@@ -452,14 +452,18 @@ def write_console_output_file(
 
     Empty/falsy ``raw_output`` uses a shared fallback message. Returns
     ``True`` when the file was written successfully.
+
+    Always writes UTF-8 with ``errors="replace"`` so remote build logs with
+    unpaired surrogates or other awkward characters cannot abort chat
+    workspace population via ``UnicodeEncodeError``.
     """
     console_file = workspace / "console-output.txt"
     content = raw_output if raw_output else _NO_CONSOLE_OUTPUT
     try:
-        console_file.write_text(content)
+        console_file.write_text(content, encoding="utf-8", errors="replace")
         logger.info("%swrote console-output.txt (%d chars)", log_prefix, len(content))
         return True
-    except OSError:
+    except (OSError, UnicodeError):
         logger.warning(
             "%sfailed to write console-output.txt", log_prefix, exc_info=True
         )

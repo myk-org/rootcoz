@@ -127,17 +127,30 @@ class TestWriteConsoleOutputFile:
 
     def test_writes_raw_output(self, tmp_path: Path) -> None:
         assert write_console_output_file(tmp_path, "build log") is True
-        assert (tmp_path / "console-output.txt").read_text() == "build log"
+        assert (tmp_path / "console-output.txt").read_text(
+            encoding="utf-8"
+        ) == "build log"
 
     def test_empty_output_uses_fallback(self, tmp_path: Path) -> None:
         assert write_console_output_file(tmp_path, "") is True
-        assert (
-            tmp_path / "console-output.txt"
-        ).read_text() == "No console output available for this build."
+        assert (tmp_path / "console-output.txt").read_text(
+            encoding="utf-8"
+        ) == "No console output available for this build."
 
     def test_none_output_uses_fallback(self, tmp_path: Path) -> None:
         assert write_console_output_file(tmp_path, None) is True
-        assert "No console output" in (tmp_path / "console-output.txt").read_text()
+        assert "No console output" in (tmp_path / "console-output.txt").read_text(
+            encoding="utf-8"
+        )
+
+    def test_unpaired_surrogate_writes_successfully(self, tmp_path: Path) -> None:
+        """Surrogates must not abort chat workspace population."""
+        assert write_console_output_file(tmp_path, "bad\ud800log") is True
+        out = tmp_path / "console-output.txt"
+        assert out.exists()
+        # Replacement char for the surrogate under utf-8 errors=replace
+        assert "bad" in out.read_text(encoding="utf-8")
+        assert "log" in out.read_text(encoding="utf-8")
 
 
 class TestCISourceCleanup:
