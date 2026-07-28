@@ -250,6 +250,27 @@ class CISource(ABC):
             f"{cls.__name__} does not support restore_reanalyze_fields"
         )
 
+    @classmethod
+    def initial_status(cls, body: Any, merged: Any) -> str:
+        """Initial job status when enqueueing. Default ``pending``."""
+        _ = body, merged
+        return "pending"
+
+    def requires_pre_fetch(self) -> bool:
+        """Whether ``pre_fetch`` should run before ``fetch`` (e.g. wait)."""
+        return False
+
+    async def pre_fetch(self, job_id: str) -> str | None:
+        """Optional pre-fetch hook (e.g. wait for CI build to finish).
+
+        Returns ``None`` on success, or an error message string on failure.
+        Called by ``_process_ci_source_analysis`` before ``source.fetch()``
+        when ``requires_pre_fetch()`` is True. Status updates are handled
+        by the caller — this method only performs the wait/poll work.
+        """
+        _ = job_id
+        return None
+
     async def persist_fetch_metadata(
         self, job_id: str, source_result: CISourceResult
     ) -> None:

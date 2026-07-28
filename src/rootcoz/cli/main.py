@@ -1277,6 +1277,23 @@ def analyze(
                 f"Error: --build-number is required when --source {source}.", err=True
             )
             raise typer.Exit(1)
+
+        if source == "prow":
+            from rootcoz.prow_validation import (
+                validate_prow_build_id,
+                validate_prow_job_name,
+            )
+
+            try:
+                job_name = validate_prow_job_name(job_name)
+            except ValueError as exc:
+                typer.echo(f"Error: invalid Prow job name: {exc}", err=True)
+                raise typer.Exit(1) from None
+            try:
+                build_number = validate_prow_build_id(build_number)
+            except ValueError as exc:
+                typer.echo(f"Error: invalid Prow build ID: {exc}", err=True)
+                raise typer.Exit(1) from None
     elif source == "file":
         if not xml_file:
             typer.echo("Error: --file is required when --source file.", err=True)

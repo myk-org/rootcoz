@@ -426,6 +426,10 @@ class JenkinsSource(CISource):
                 failures=[],
                 build_passed=True,
                 build_url=self.build_url,
+                identity={
+                    "job_name": self.job_name,
+                    "build_number": self.build_number,
+                },
             )
         if build_result == "SUCCESS" and self.force:
             logger.info(
@@ -510,6 +514,10 @@ class JenkinsSource(CISource):
             build_url=self.build_url,
             extract_path=self._extract_path,
             child_job_infos=failed_child_jobs,
+            identity={
+                "job_name": self.job_name,
+                "build_number": self.build_number,
+            },
         )
 
     def create_child_source(self, job_name: str, build_number: int) -> JenkinsSource:
@@ -811,6 +819,153 @@ class JenkinsSource(CISource):
     def default_display_name(cls, body) -> str:
         """Default display name for Jenkins analyses."""
         return getattr(body, "job_name", None) or "jenkins-analysis"
+
+    @classmethod
+    def validate_request(cls, body, merged) -> None:
+        """Require Jenkins credentials before enqueue."""
+        _ = body
+        if not merged.jenkins_url:
+            raise ValueError(
+                "jenkins_url is required — set JENKINS_URL env var or pass in request"
+            )
+
+    @classmethod
+    def build_request_params(cls, body, merged, base_params: dict) -> dict:
+        """Stamp Jenkins-specific fields onto persisted params."""
+        base_params["job_name"] = body.job_name
+        base_params["build_number"] = body.build_number
+        base_params["jenkins_url"] = merged.jenkins_url or ""
+        base_params["jenkins_user"] = merged.jenkins_user or ""
+        base_params["jenkins_password"] = merged.jenkins_password or ""
+        base_params["jenkins_ssl_verify"] = merged.jenkins_ssl_verify
+        base_params["jenkins_timeout"] = merged.jenkins_timeout
+        base_params["jenkins_artifacts_max_size_mb"] = (
+            merged.jenkins_artifacts_max_size_mb
+        )
+        base_params["force"] = merged.force_analysis
+        base_params["get_job_artifacts"] = merged.get_job_artifacts
+        base_params["wait_for_completion"] = merged.wait_for_completion
+        base_params["poll_interval_minutes"] = merged.poll_interval_minutes
+        base_params["max_wait_minutes"] = merged.max_wait_minutes
+        if merged.wait_for_completion:
+            base_params["wait_started_at"] = _time.time()
+        base_params["name"] = getattr(body, "name", None) or ""
+        return base_params
+
+    @classmethod
+    def pre_persist_identity_from_request(cls, body) -> dict:
+        """Stamp job_name and build_number on initial result."""
+        result: dict = {}
+        if getattr(body, "job_name", None):
+            result["job_name"] = body.job_name
+        if getattr(body, "build_number", None):
+            result["build_number"] = body.build_number
+        return result
+
+    @classmethod
+    def from_analyze_request(cls, body, merged) -> JenkinsSource:
+        """Construct JenkinsSource from an analyze/re-analyze request."""
+        assert body.job_name is not None
+        assert body.build_number is not None
+        return cls(
+            job_name=body.job_name,
+            build_number=body.build_number,
+            settings=merged,
+            force=merged.force_analysis,
+        )
+
+    @classmethod
+    def restore_reanalyze_fields(cls, decrypted_params: dict) -> dict:
+        """Restore Jenkins fields for re-analysis from stored params."""
+        fields: dict = {}
+        job_name = decrypted_params.get("job_name", "")
+        build_number = decrypted_params.get("build_number", 0)
+        if not job_name or not build_number:
+            raise ValueError(
+                "Original analysis has no stored job_name/build_number; "
+                "cannot re-analyze"
+            )
+        fields["job_name"] = job_name
+        fields["build_number"] = build_number
+        for key in (
+            "jenkins_url",
+            "jenkins_user",
+            "jenkins_password",
+            "jenkins_ssl_verify",
+            "jenkins_timeout",
+            "jenkins_artifacts_max_size_mb",
+            "wait_for_completion",
+            "poll_interval_minutes",
+            "max_wait_minutes",
+            "force",
+            "get_job_artifacts",
+        ):
+            if key in decrypted_params:
+                fields[key] = decrypted_params[key]
+        return fields
+
+    @classmethod
+    def initial_status(cls, body, merged) -> str:
+        """Use waiting when wait-for-completion is enabled."""
+        _ = body
+        if merged.wait_for_completion and merged.jenkins_url:
+            return "waiting"
+        return "pending"
+
+    def requires_pre_fetch(self) -> bool:
+        """Wait for Jenkins build completion when configured."""
+        return bool(self.settings.wait_for_completion and self.settings.jenkins_url)
+
+    async def pre_fetch(self, job_id: str) -> str | None:
+        """Wait for Jenkins build completion if configured."""
+        _ = job_id
+        if not self.requires_pre_fetch():
+            return None
+        logger.info(
+            "Waiting for Jenkins build %s #%s...",
+            self.job_name,
+            self.build_number,
+        )
+        completed, wait_error = await wait_for_jenkins_completion(
+            jenkins_url=self.settings.jenkins_url,
+            job_name=self.job_name,
+            build_number=self.build_number,
+            jenkins_user=self.settings.jenkins_user,
+            jenkins_password=self.settings.jenkins_password,
+            jenkins_ssl_verify=self.settings.jenkins_ssl_verify,
+            poll_interval_minutes=self.settings.poll_interval_minutes,
+            max_wait_minutes=self.settings.max_wait_minutes,
+            jenkins_timeout=self.settings.jenkins_timeout,
+        )
+        if not completed:
+            return wait_error
+        return None
+
+    async def persist_fetch_metadata(
+        self, job_id: str, source_result: CISourceResult
+    ) -> None:
+        """Store build_url in request_params for re-analyze/chat."""
+        build_url = source_result.build_url or self.build_url
+        if not build_url:
+            return
+
+        from rootcoz.encryption import (
+            decrypt_sensitive_fields,
+            encrypt_sensitive_fields,
+        )
+        from rootcoz.storage import patch_result_json
+
+        def _patch(data: dict) -> None:
+            params = data.get("request_params")
+            if not isinstance(params, dict):
+                return
+            decrypted = decrypt_sensitive_fields(dict(params))
+            if decrypted.get("build_url") == build_url:
+                return
+            decrypted["build_url"] = build_url
+            data["request_params"] = encrypt_sensitive_fields(decrypted)
+
+        await patch_result_json(job_id, _patch)
 
 
 # ---------------------------------------------------------------------------

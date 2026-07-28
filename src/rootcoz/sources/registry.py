@@ -19,11 +19,8 @@ SOURCE_REGISTRY: dict[str, type[CISource]] = {
     "jenkins": JenkinsSource,
 }
 
-# Shared analyze/enqueue path (file/raw/prow). Jenkins still uses
-# ``analyze_job`` until fully migrated onto this path.
-CI_SOURCE_REGISTRY: dict[str, type[CISource]] = {
-    key: SOURCE_REGISTRY[key] for key in ("file", "raw", "prow")
-}
+# Shared analyze/enqueue path — all registered sources use this path.
+CI_SOURCE_REGISTRY: dict[str, type[CISource]] = dict(SOURCE_REGISTRY)
 
 
 def get_source_class(analysis_type: str) -> type[CISource] | None:

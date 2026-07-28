@@ -115,7 +115,6 @@ from rootcoz.models import (
     ChatMessageRequest,
     AnalyzeCommentRequest,
     AnalyzeCommentResponse,
-    AnalyzeRequest,
     BaseAnalysisRequest,
     BulkDeleteRequest,
     BulkJobMetadataRequest,
@@ -185,7 +184,6 @@ from rootcoz.sources import (
 )
 from rootcoz.sources.base import CISourceResult, resolve_display_build_id
 from rootcoz.sources import chat_workspace as source_chat_workspace
-from rootcoz.sources.jenkins_source import analyze_job, wait_for_jenkins_completion
 from rootcoz.storage import (
     AI_SYSTEM_USERNAME,
     DB_PATH,
@@ -953,15 +951,17 @@ def _copy_analysis_settings(decrypted_params: dict, unified_fields: dict) -> Non
 
 def _reconstruct_from_params(
     result_data: dict,
-) -> tuple[AnalyzeRequest, Settings]:
-    """Reconstruct an AnalyzeRequest and Settings from stored request_params.
+) -> tuple[UnifiedAnalyzeRequest, Settings]:
+    """Reconstruct a UnifiedAnalyzeRequest and Settings from stored request_params.
+
+    Used to resume waiting Jenkins jobs after a server restart.
 
     Args:
         result_data: Stored result dict containing ``job_name``,
             ``build_number``, and ``request_params``.
 
     Returns:
-        Tuple of (AnalyzeRequest, Settings).
+        Tuple of (UnifiedAnalyzeRequest, Settings).
     """
     params = decrypt_sensitive_fields(result_data["request_params"])
     # Fail fast if any sensitive field is still encrypted (key changed / corrupt)
@@ -976,36 +976,55 @@ def _reconstruct_from_params(
             _token = _repo.get("token")
             if _is_encrypted_value(_token):
                 raise ValueError(
-                    "Cannot resume waiting job: stored additional_repos token could not be decrypted"
+                    "Cannot resume waiting job: stored additional_repos token "
+                    "could not be decrypted"
                 )
-    body = AnalyzeRequest(
-        job_name=result_data["job_name"],
-        build_number=result_data["build_number"],
-        name=params.get("name") or None,
-        ai_provider=params.get("ai_provider", ""),
-        ai_model=params.get("ai_model", ""),
-        wait_for_completion=params.get("wait_for_completion", True),
-        poll_interval_minutes=params.get("poll_interval_minutes", 2),
-        max_wait_minutes=params.get("max_wait_minutes", 0),
-        enable_jira=params.get("enable_jira"),
-        raw_prompt=params.get("raw_prompt") or None,
-        issue_prompt=params.get("issue_prompt") or None,
-        tests_repo_url=_recompose_repo_spec(
+
+    analysis_type = params.get("analysis_type", "jenkins")
+    unified_fields: dict = {
+        "type": analysis_type,
+        "job_name": result_data.get("job_name") or params.get("job_name"),
+        "build_number": result_data.get("build_number") or params.get("build_number"),
+        "name": params.get("name") or None,
+        "ai_provider": params.get("ai_provider", ""),
+        "ai_model": params.get("ai_model", ""),
+        "wait_for_completion": params.get("wait_for_completion", True),
+        "poll_interval_minutes": params.get("poll_interval_minutes", 2),
+        "max_wait_minutes": params.get("max_wait_minutes", 0),
+        "enable_jira": params.get("enable_jira"),
+        "raw_prompt": params.get("raw_prompt") or None,
+        "issue_prompt": params.get("issue_prompt") or None,
+        "tests_repo_url": _recompose_repo_spec(
             params.get("tests_repo_url", ""), params.get("tests_repo_ref", "")
         )
         or None,
-        peer_ai_configs=(
+        "peer_ai_configs": (
             params["peer_ai_configs"] if "peer_ai_configs" in params else []
         ),
-        peer_analysis_max_rounds=params.get("peer_analysis_max_rounds", 3),
-        additional_repos=(
+        "peer_analysis_max_rounds": params.get("peer_analysis_max_rounds", 3),
+        "additional_repos": (
             params["additional_repos"] if "additional_repos" in params else None
         ),
-        tests_repo_token=(
+        "tests_repo_token": (
             params["tests_repo_token"] if "tests_repo_token" in params else None
         ),
-        **({"force": params["force"]} if "force" in params else {}),
-    )
+    }
+    for jenkins_field in (
+        "jenkins_url",
+        "jenkins_user",
+        "jenkins_password",
+        "jenkins_ssl_verify",
+        "jenkins_timeout",
+        "jenkins_artifacts_max_size_mb",
+        "get_job_artifacts",
+    ):
+        if jenkins_field in params:
+            unified_fields[jenkins_field] = params[jenkins_field]
+    if "force" in params:
+        unified_fields["force"] = params["force"]
+
+    body = UnifiedAnalyzeRequest(**unified_fields)
+
     # Build Settings from env defaults, then layer stored overrides
     base_settings = get_settings()
     overrides: dict = {}
@@ -1237,9 +1256,37 @@ async def _resume_waiting_jobs(waiting_jobs: list[dict]) -> None:
                 "(pre-migration job); history-aware classification will be disabled",
                 job["job_id"],
             )
+
+        ai_provider, ai_model = _resolve_ai_config_allow_defer(body, merged)
+        tests_repo_url_raw = resolve_tests_repo_url(body, merged)
+        tests_repo_url, tests_repo_ref = parse_repo_ref(tests_repo_url_raw)
+        resolved_tests_repo_token = (
+            resolve_tests_repo_token(body, merged) if tests_repo_url else ""
+        )
+        additional_repos_list = resolve_additional_repos(body, merged)
+        display_name = (
+            result_data.get("display_name")
+            or result_data.get("job_name")
+            or body.job_name
+            or ""
+        )
+        resolved_peers = _validate_peer_configs(body, merged)
+
         task = asyncio.create_task(
-            process_analysis_with_id(
-                job["job_id"], body, merged, username=resumed_username
+            _process_ci_source_analysis(
+                job_id=job["job_id"],
+                body=body,
+                merged=merged,
+                display_name=display_name,
+                ai_provider=ai_provider,
+                ai_model=ai_model,
+                peer_ai_configs=resolved_peers,
+                tests_repo_url=tests_repo_url,
+                tests_repo_ref=tests_repo_ref,
+                resolved_tests_repo_token=resolved_tests_repo_token,
+                additional_repos_list=additional_repos_list,
+                base_url=_build_internal_server_url(),
+                username=resumed_username,
             )
         )
         _register_job_task(job["job_id"], task)
@@ -2172,8 +2219,9 @@ def _merge_settings(body: BaseAnalysisRequest, settings: Settings) -> Settings:
     if body.tests_repo_token is not None:
         overrides["tests_repo_token"] = SecretStr(body.tests_repo_token)
 
-    # AnalyzeRequest-specific fields (Jenkins overrides + monitoring)
-    if isinstance(body, AnalyzeRequest):
+    # Jenkins connection + polling overrides (AnalyzeRequest and
+    # UnifiedAnalyzeRequest both inherit _JenkinsParamsMixin).
+    if isinstance(body, _JenkinsParamsMixin):
         jenkins_fields = [
             "jenkins_url",
             "jenkins_user",
@@ -2201,11 +2249,8 @@ def _merge_settings(body: BaseAnalysisRequest, settings: Settings) -> Settings:
 
         # force has a non-None default (False); only override when
         # explicitly sent so that omitted requests inherit from env/settings.
-
-    # force — shared by both AnalyzeRequest and UnifiedAnalyzeRequest
-    # (both inherit _JenkinsParamsMixin.force)
-    if isinstance(body, _JenkinsParamsMixin) and "force" in body.model_fields_set:
-        overrides["force_analysis"] = body.force
+        if "force" in body.model_fields_set:
+            overrides["force_analysis"] = body.force
 
     # UnifiedAnalyzeRequest-specific fields (Prow overrides)
     if isinstance(body, UnifiedAnalyzeRequest):
@@ -2485,7 +2530,7 @@ def _collect_all_failures(
 
 
 async def _enrich_result_with_jira(
-    failures: list[FailureAnalysis | ChildJobAnalysis],
+    failures: Sequence[FailureAnalysis | ChildJobAnalysis],
     settings: Settings,
     ai_provider: str = "",
     ai_model: str = "",
@@ -2569,11 +2614,6 @@ async def _enrich_result_with_tests_repo_matches(
 
 
 _AI_SESSION_TTL_HOURS = 8  # Short-lived for AI internal API calls
-
-
-def _get_display_name(body: AnalyzeRequest | UnifiedAnalyzeRequest) -> str:
-    """Get display name from request, falling back to job_name."""
-    return body.name or body.job_name or ""
 
 
 async def _auto_assign_metadata(
@@ -2813,294 +2853,6 @@ async def _resolve_settings_json_before_analysis(
     return effective, clone_ok
 
 
-async def process_analysis_with_id(
-    job_id: str,
-    body: AnalyzeRequest,
-    settings: Settings,
-    username: str = "",
-    *,
-    is_admin: bool = False,
-) -> None:
-    """Background task to process analysis with a pre-generated job_id.
-
-    Args:
-        job_id: Pre-generated job ID for tracking.
-        body: The analysis request.
-        settings: Application settings.
-        username: Submitting user for session-based AI auth.
-    """
-    job_id_var.set(job_id)
-
-    logger.info(
-        f"Analysis request received for {body.job_name} #{body.build_number} "
-        f"(job_id: {job_id})"
-    )
-
-    auth_header = ""
-    try:
-        # Validate AI config early -- before potentially waiting hours for Jenkins.
-        # May defer when tests repo can supply .rootcoz/settings.json after clone.
-        ai_provider, ai_model = _resolve_ai_config_allow_defer(body, settings)
-
-        display_name = _get_display_name(body)
-        jenkins_job_url = (
-            build_jenkins_url(
-                settings.jenkins_url or "", body.job_name or "", body.build_number or 0
-            )
-            if settings.jenkins_url
-            else ""
-        )
-
-        # Always resolve settings.json when possible (all sources / all keys).
-        early = await _resolve_settings_json_before_analysis(
-            job_id,
-            body,
-            settings,
-            ai_provider,
-            ai_model,
-            display_name,
-            build_number=body.build_number,
-            jenkins_url=jenkins_job_url,
-            job_name=body.job_name or "",
-            is_admin=is_admin,
-        )
-        if early is None:
-            return
-        early_effective, settings_json_resolved = early
-        ai_provider = early_effective.ai_provider
-        ai_model = early_effective.ai_model
-        peer_ai_configs = early_effective.peer_ai_configs
-        additional_repos_resolved = early_effective.additional_repos
-
-        # Pre-flight when AI is known (skip if still deferred to analyze_job clone)
-        if (ai_provider and ai_model) and not await _preflight_sidecar_check(
-            job_id,
-            ai_provider,
-            ai_model,
-            display_name,
-            build_number=body.build_number,
-            jenkins_url=jenkins_job_url,
-            job_name=body.job_name or "",
-        ):
-            return
-
-        # Wait for Jenkins job to finish if requested and Jenkins is configured
-        if settings.wait_for_completion and not settings.jenkins_url:
-            logger.info(
-                f"Wait requested for job {job_id} but jenkins_url not configured, skipping wait"
-            )
-
-        if settings.wait_for_completion and settings.jenkins_url:
-            await update_status(job_id, "waiting")
-            notify_active_count_changed()
-            notify_dashboard_changed()
-            notify_job_status_changed(job_id)
-            await safe_update_progress(job_id, "waiting_for_jenkins")
-            notify_job_status_changed(job_id)
-
-            completed, wait_error = await wait_for_jenkins_completion(
-                jenkins_url=settings.jenkins_url,
-                job_name=body.job_name,
-                build_number=body.build_number,
-                jenkins_user=settings.jenkins_user,
-                jenkins_password=settings.jenkins_password,
-                jenkins_ssl_verify=settings.jenkins_ssl_verify,
-                poll_interval_minutes=settings.poll_interval_minutes,
-                max_wait_minutes=settings.max_wait_minutes,
-                jenkins_timeout=settings.jenkins_timeout,
-            )
-
-            if not completed:
-                display_name = _get_display_name(body)
-                fail_data = {
-                    "job_name": body.job_name,
-                    "display_name": display_name,
-                    "build_number": body.build_number,
-                    "error": wait_error,
-                }
-                await _preserve_request_params(job_id, fail_data)
-                await update_status(
-                    job_id,
-                    "failed",
-                    fail_data,
-                )
-                notify_active_count_changed()
-                notify_dashboard_changed()
-                notify_job_status_changed(job_id)
-                return
-
-        auth_header = await _create_ai_auth_header(username)
-
-        logger.debug(
-            f"process_analysis_with_id: updating status to running, job_id={job_id}"
-        )
-        await update_status(job_id, "running")
-        notify_active_count_changed()
-        notify_dashboard_changed()
-        notify_job_status_changed(job_id)
-        await safe_update_progress(job_id, "analyzing")
-        notify_job_status_changed(job_id)
-
-        logger.debug(
-            f"process_analysis_with_id: ai_provider={ai_provider}, ai_model={ai_model}"
-        )
-
-        server_url = _build_internal_server_url()
-
-        result = await analyze_job(
-            body,
-            settings,
-            ai_provider=ai_provider,
-            ai_model=ai_model,
-            job_id=job_id,
-            server_url=server_url,
-            peer_ai_configs=peer_ai_configs,
-            peer_analysis_max_rounds=settings.peer_analysis_max_rounds,
-            auth_header=auth_header,
-            additional_repos=additional_repos_resolved,
-            settings_json_resolved=settings_json_resolved,
-            is_admin=is_admin,
-        )
-
-        # analyze_job may overlay .rootcoz/settings.json — use effective AI
-        ai_provider = result.ai_provider or ai_provider
-        ai_model = result.ai_model or ai_model
-
-        # Enrich PRODUCT BUG failures with Jira matches
-        if _resolve_enable_jira(body, settings):
-            await safe_update_progress(job_id, "enriching_jira")
-            notify_job_status_changed(job_id)
-            logger.debug(
-                f"process_analysis_with_id: enriching with Jira matches, job_id={job_id}"
-            )
-            await _enrich_result_with_jira(
-                result.failures + list(result.child_job_analyses),
-                settings,
-                ai_provider,
-                ai_model,
-                job_id=job_id,
-            )
-
-        # Enrich CODE ISSUE failures with tests repo issue matches
-        request_tests_repo_url = resolve_tests_repo_url(body, settings)
-        if settings.tests_repo_url or request_tests_repo_url:
-            await safe_update_progress(job_id, "enriching_tests_repo")
-            notify_job_status_changed(job_id)
-            logger.debug(
-                f"process_analysis_with_id: enriching with tests repo matches, job_id={job_id}"
-            )
-            await _enrich_result_with_tests_repo_matches(
-                result.failures + list(result.child_job_analyses),
-                settings,
-                ai_provider,
-                ai_model,
-                job_id=job_id,
-                tests_repo_url=request_tests_repo_url,
-            )
-
-        await safe_update_progress(job_id, "saving")
-        notify_job_status_changed(job_id)
-        logger.debug(
-            f"process_analysis_with_id: saving completed result, job_id={job_id}"
-        )
-        result_data = result.model_dump(mode="json")
-        if result.status == "failed":
-            # Prefer child job error notes over the generic summary
-            child_errors = [
-                c.get("note", "")
-                for c in result_data.get("child_job_analyses", [])
-                if c.get("note")
-            ]
-            if child_errors:
-                result_data["error"] = "; ".join(child_errors)
-            else:
-                result_data["error"] = result.summary
-        await _preserve_request_params(job_id, result_data)
-
-        # Attach token usage summary before persisting
-        await _attach_token_usage(job_id, result_data)
-
-        # Populate failure history and auto-review BEFORE marking completed
-        if result.status == "completed":
-            try:
-                await populate_failure_history(job_id, result_data)
-            except Exception:
-                logger.warning(
-                    "Failed to populate failure_history for job_id=%s",
-                    job_id,
-                    exc_info=True,
-                )
-
-            await _carry_forward_overrides(job_id, result_data)
-
-            # Auto-review failures with matching signatures from previous analyses.
-            # enable_auto_review toggle is enforced inside the function (early return)
-            # to keep a single enforcement point and avoid DRY violation at call sites.
-            try:
-                await _auto_review_matching_failures(
-                    job_id,
-                    body.job_name,
-                    body.build_number,
-                    result_data,
-                    settings,
-                )
-            except Exception:
-                logger.warning(
-                    "Auto-review failed for job_id=%s, job_name=%s, build=%s",
-                    job_id,
-                    body.job_name,
-                    body.build_number,
-                    exc_info=True,
-                )
-
-        # Save to storage — do NOT persist base_url / result_url as they are
-        # request-derived and re-generated on every GET to avoid host-header
-        # injection from being stored.
-        await update_status(job_id, result.status, result_data)
-        notify_active_count_changed()
-        notify_dashboard_changed()
-        notify_job_status_changed(job_id)
-        notify_token_usage_changed()
-        logger.info(
-            f"Analysis completed for {body.job_name} #{body.build_number} "
-            f"(job_id: {job_id})"
-        )
-
-        # Auto-assign job metadata from name pattern rules
-        await _auto_assign_metadata(body.job_name, settings.metadata_rules)
-
-        # Reveal classifications created during analysis
-        await storage.make_classifications_visible(job_id)
-
-    except asyncio.CancelledError:
-        logger.info(f"Analysis task cancelled for job_id={job_id}")
-        return
-
-    except Exception as e:
-        logger.exception(f"Analysis failed for job {job_id}")
-        user_error = make_user_friendly_error(e)
-        display_name = _get_display_name(body)
-        error_data: dict = {
-            "job_name": body.job_name,
-            "display_name": display_name,
-            "build_number": body.build_number,
-            "error": user_error,
-        }
-        await _preserve_request_params(job_id, error_data)
-
-        # Attach token usage even on failure — partial AI calls may have been recorded
-        await _attach_token_usage(job_id, error_data)
-
-        await update_status(job_id, "failed", error_data)
-        notify_active_count_changed()
-        notify_dashboard_changed()
-        notify_job_status_changed(job_id)
-        notify_token_usage_changed()
-
-    finally:
-        await _cleanup_ai_session(auth_header)
-
-
 def _build_base_request_params(
     ai_provider: str,
     ai_model: str,
@@ -3263,16 +3015,15 @@ async def _enqueue_ci_source_analysis(
 ) -> dict:
     """Build params, persist initial state, spawn task, and return response.
 
-    Shared post-fetch enqueue path for CISource plugins (file/raw/prow).
-    Jenkins still uses ``_enqueue_analysis_job`` / ``analyze_job`` until
-    fully migrated onto this shared path.
+    Shared enqueue path for all CISource plugins (file/raw/prow/jenkins).
 
     Args:
         body: The analysis request (``UnifiedAnalyzeRequest`` or similar).
         merged: Merged settings.
         resolved_peers: Validated peer AI configs.
         display_name: Human-readable job name.
-        analysis_type: ``"file"``, ``"raw"``, or ``"prow"``.
+        analysis_type: Source type key (``"file"``, ``"raw"``, ``"prow"``,
+            ``"jenkins"``).
         base_url: Server base URL for result links.
         username: Authenticated user who submitted the request.
         tags: Optional pre-built tags list. When ``None``, uses ``body.tags``.
@@ -3300,9 +3051,11 @@ async def _enqueue_ci_source_analysis(
         "file-analysis",
         "raw-analysis",
         "prow-analysis",
+        "jenkins-analysis",
         "prow-re-analysis",
         "file-re-analysis",
         "raw-re-analysis",
+        "jenkins-re-analysis",
     }
     if display_name in _GENERIC_FALLBACK_NAMES and not body.name:
         display_name = f"{display_name}-{job_id[:8]}"
@@ -3349,7 +3102,19 @@ async def _enqueue_ci_source_analysis(
     )
     effective_tags = tags if tags is not None else (body.tags or None)
     initial_result["tags"] = _ensure_submitter_tag(effective_tags, username)
-    await save_result(job_id, "", "pending", initial_result)
+    initial_status = source_cls.initial_status(body, merged)
+    # Prefer a known build URL for Jenkins waiting jobs (dashboard links).
+    initial_build_url = ""
+    if (
+        analysis_type == "jenkins"
+        and merged.jenkins_url
+        and body.job_name
+        and body.build_number
+    ):
+        initial_build_url = build_jenkins_url(
+            merged.jenkins_url, body.job_name, body.build_number
+        )
+    await save_result(job_id, initial_build_url, initial_status, initial_result)
     notify_active_count_changed()
     notify_dashboard_changed()
 
@@ -3374,134 +3139,6 @@ async def _enqueue_ci_source_analysis(
     )
     _register_job_task(job_id, task)
 
-    response: dict = {
-        "status": "queued",
-        "job_id": job_id,
-        "message": f"{message_prefix} job queued. Poll /results/{job_id} for status.",
-    }
-    return _attach_result_links(response, base_url, job_id)
-
-
-def _build_request_params(
-    body: AnalyzeRequest,
-    merged: Settings,
-    ai_provider: str,
-    ai_model: str,
-    peer_ai_configs_resolved: list | None = None,
-) -> dict:
-    """Serialize the request parameters needed to resume a waiting job.
-
-    Captures everything ``process_analysis_with_id`` needs so that the
-    background task can be re-created after a server restart.
-
-    Args:
-        body: The original analysis request.
-        merged: Settings with per-request overrides applied.
-        ai_provider: Resolved AI provider name.
-        ai_model: Resolved AI model name.
-
-    Returns:
-        Dict of serializable request parameters.
-    """
-    resolved_tests_repo = resolve_tests_repo_url(body, merged)
-    resolved_tests_repo, tests_repo_ref = parse_repo_ref(resolved_tests_repo)
-    resolved_tests_repo_token = (
-        resolve_tests_repo_token(body, merged) if resolved_tests_repo else ""
-    )
-    resolved_additional = resolve_additional_repos(body, merged)
-    params = _build_base_request_params(
-        ai_provider,
-        ai_model,
-        peer_ai_configs_resolved,
-        tests_repo_url=resolved_tests_repo,
-        tests_repo_token=resolved_tests_repo_token,
-        tests_repo_ref=tests_repo_ref,
-        additional_repos=resolved_additional,
-    )
-    # Apply shared BaseAnalysisRequest fields (Jira, GitHub, AI settings).
-    # _apply_base_analysis_overrides is the single source of truth for these.
-    _apply_base_analysis_overrides(params, body, merged)
-    # Jenkins-specific fields on top.
-    params.update(
-        {
-            "jenkins_url": merged.jenkins_url,
-            "jenkins_user": merged.jenkins_user,
-            "jenkins_password": merged.jenkins_password,
-            "jenkins_ssl_verify": merged.jenkins_ssl_verify,
-            "jenkins_timeout": merged.jenkins_timeout,
-            "wait_for_completion": merged.wait_for_completion,
-            "poll_interval_minutes": merged.poll_interval_minutes,
-            "max_wait_minutes": merged.max_wait_minutes,
-            "jenkins_artifacts_max_size_mb": merged.jenkins_artifacts_max_size_mb,
-            "get_job_artifacts": merged.get_job_artifacts,
-            "raw_prompt": body.raw_prompt or "",
-            "issue_prompt": body.issue_prompt or "",
-            "force": merged.force_analysis,
-            "wait_started_at": _time.time(),
-            "name": getattr(body, "name", None) or "",
-        }
-    )
-    return encrypt_sensitive_fields(params)
-
-
-async def _enqueue_analysis_job(
-    body: AnalyzeRequest,
-    merged: Settings,
-    resolved_peers: list | None,
-    base_url: str,
-    *,
-    message_prefix: str = "Analysis",
-    username: str = "",
-    reanalyzed_from_job_id: str = "",
-    reanalyzed_from_job_name: str = "",
-    is_admin: bool = False,
-) -> dict:
-    """Create, save, and enqueue a new analysis job.
-
-    Shared by ``/analyze`` and ``/re-analyze`` to avoid duplicating
-    job setup, persistence, and response shaping.
-    """
-    job_id = str(uuid.uuid4())
-    job_id_var.set(job_id)
-    jenkins_url = build_jenkins_url(
-        merged.jenkins_url, body.job_name, body.build_number
-    )
-    display_name = _get_display_name(body)
-    initial_result: dict = {
-        "job_name": body.job_name,
-        "display_name": display_name,
-        "build_number": body.build_number,
-        "request_params": _build_request_params(
-            body,
-            merged,
-            body.ai_provider or get_settings().ai_provider,
-            body.ai_model or get_settings().ai_model,
-            peer_ai_configs_resolved=resolved_peers,
-        ),
-    }
-    initial_result["request_params"]["submitted_by"] = username
-    initial_result["request_params"]["analysis_type"] = "jenkins"
-    _stamp_reanalysis_metadata(
-        initial_result["request_params"],
-        reanalyzed_from_job_id,
-        reanalyzed_from_job_name,
-    )
-    initial_result["tags"] = _ensure_submitter_tag(body.tags, username)
-    can_resume_wait = merged.wait_for_completion and bool(merged.jenkins_url)
-    await save_result(
-        job_id,
-        jenkins_url,
-        "waiting" if can_resume_wait else "pending",
-        initial_result,
-    )
-    notify_active_count_changed()
-    notify_dashboard_changed()
-    task = asyncio.create_task(
-        process_analysis_with_id(
-            job_id, body, merged, username=username, is_admin=is_admin
-        )
-    )
-    _register_job_task(job_id, task)
     response: dict = {
         "status": "queued",
         "job_id": job_id,
@@ -3750,7 +3387,7 @@ async def _process_ci_source_analysis(
     username: str = "",
     is_admin: bool = False,
 ) -> None:
-    """Background task for CISource plugin analysis (file/raw/prow)."""
+    """Background task for CISource plugin analysis (file/raw/prow/jenkins)."""
     job_id_var.set(job_id)
 
     auth_header = ""
@@ -3764,9 +3401,32 @@ async def _process_ci_source_analysis(
             f"Starting {body.type} analysis for job_id={job_id}, display_name={display_name}"
         )
 
-        # Create source plugin via registry (file/raw/prow share this path;
-        # Jenkins still uses analyze_job until fully migrated).
+        # Create source plugin via registry
         source = create_source_from_request(body.type, body, merged)
+
+        # Pre-fetch hook (e.g. wait for Jenkins build completion)
+        if source.requires_pre_fetch():
+            await update_status(job_id, "waiting")
+            notify_active_count_changed()
+            notify_dashboard_changed()
+            notify_job_status_changed(job_id)
+            await safe_update_progress(job_id, "waiting_for_jenkins")
+            notify_job_status_changed(job_id)
+
+            pre_fetch_error = await source.pre_fetch(job_id)
+            if pre_fetch_error:
+                fail_data = {
+                    "job_name": display_name,
+                    "display_name": display_name,
+                    "error": pre_fetch_error,
+                }
+                _stamp_result_metadata(fail_data, None)
+                await _preserve_request_params(job_id, fail_data)
+                await update_status(job_id, "failed", fail_data)
+                notify_active_count_changed()
+                notify_dashboard_changed()
+                notify_job_status_changed(job_id)
+                return
 
         # Fetch failures from source
         source_result = await source.fetch()
@@ -3978,6 +3638,156 @@ async def _process_ci_source_analysis(
                     exc_info=True,
                 )
 
+        # Handle child jobs (Jenkins pipeline sub-jobs)
+        child_job_analyses: list[ChildJobAnalysis] = []
+        if source_result.child_job_infos:
+            from rootcoz.sources.jenkins_source import (
+                _normalize_child_results,
+                analyze_child_job,
+            )
+
+            await safe_update_progress(job_id, "analyzing_child_jobs")
+            notify_job_status_changed(job_id)
+            child_tasks = [
+                analyze_child_job(
+                    job_name=child_name,
+                    build_number=child_num,
+                    settings=merged,
+                    depth=0,
+                    max_depth=3,
+                    repo_path=repo_path,
+                    ai_provider=ai_provider,
+                    ai_model=ai_model,
+                    ai_call_timeout=merged.ai_call_timeout,
+                    custom_prompt=custom_prompt,
+                    server_url=server_url,
+                    job_id=job_id,
+                    peer_ai_configs=peer_ai_configs,
+                    peer_analysis_max_rounds=merged.peer_analysis_max_rounds,
+                    additional_repos=cloned_repos or None,
+                    max_concurrent_ai_calls=merged.max_concurrent_ai_calls,
+                    auth_header=auth_header,
+                )
+                for child_name, child_num in source_result.child_job_infos
+            ]
+            child_results = await run_parallel_with_limit(
+                child_tasks, max_concurrency=merged.max_concurrent_ai_calls
+            )
+            child_job_analyses = _normalize_child_results(
+                source_result.child_job_infos, child_results
+            )
+
+            # Pipeline/orchestrator: failed children, no direct test failures
+            if child_job_analyses and not test_failures:
+                analyzed_children = [
+                    c
+                    for c in child_job_analyses
+                    if (c.failures or c.failed_children) and not c.note
+                ]
+                if not analyzed_children:
+                    summary = f"All {len(child_job_analyses)} child job analyses failed"
+                    fail_result = FailureAnalysisResult(
+                        job_id=job_id,
+                        status="failed",
+                        summary=summary,
+                        ai_provider=ai_provider,
+                        ai_model=ai_model,
+                    )
+                    result_data = fail_result.model_dump(mode="json")
+                    result_data["error"] = summary
+                    result_data["job_name"] = display_name
+                    result_data["child_job_analyses"] = [
+                        c.model_dump(mode="json") for c in child_job_analyses
+                    ]
+                    _stamp_result_metadata(result_data, source_result)
+                    await _preserve_request_params(job_id, result_data)
+                    await _attach_token_usage(job_id, result_data)
+                    await update_status(job_id, "failed", result_data)
+                    notify_active_count_changed()
+                    notify_dashboard_changed()
+                    notify_job_status_changed(job_id)
+                    notify_token_usage_changed()
+                    return
+
+                total_failures = sum(
+                    len(child.failures) for child in child_job_analyses
+                )
+                summary = (
+                    f"Pipeline failed due to {len(child_job_analyses)} child job(s)."
+                )
+                if total_failures > 0:
+                    summary += (
+                        f" Total: {total_failures} failure(s) analyzed. "
+                        "See child analyses below."
+                    )
+
+                # Enrich child failures before saving
+                if _resolve_enable_jira(body, merged):
+                    await _enrich_result_with_jira(
+                        child_job_analyses,
+                        merged,
+                        ai_provider,
+                        ai_model,
+                        job_id=job_id,
+                    )
+                if merged.tests_repo_url or tests_repo_url:
+                    await _enrich_result_with_tests_repo_matches(
+                        child_job_analyses,
+                        merged,
+                        ai_provider,
+                        ai_model,
+                        job_id=job_id,
+                        tests_repo_url=tests_repo_url,
+                    )
+
+                analysis_result = FailureAnalysisResult(
+                    job_id=job_id,
+                    status="completed",
+                    summary=summary,
+                    ai_provider=ai_provider,
+                    ai_model=ai_model,
+                    failures=[],
+                )
+                result_data = analysis_result.model_dump(mode="json")
+                result_data["job_name"] = display_name
+                result_data["child_job_analyses"] = [
+                    c.model_dump(mode="json") for c in child_job_analyses
+                ]
+                _stamp_result_metadata(result_data, source_result)
+                await _preserve_request_params(job_id, result_data)
+                await _attach_token_usage(job_id, result_data)
+                try:
+                    await populate_failure_history(job_id, result_data)
+                except Exception:
+                    logger.warning(
+                        "Failed to populate failure_history for job_id=%s",
+                        job_id,
+                        exc_info=True,
+                    )
+                await _carry_forward_overrides(job_id, result_data)
+                try:
+                    await _auto_review_matching_failures(
+                        job_id,
+                        metadata_job_name,
+                        resolve_display_build_id(result_data),
+                        result_data,
+                        merged,
+                    )
+                except Exception:
+                    logger.warning(
+                        "Auto-review failed for job_id=%s",
+                        job_id,
+                        exc_info=True,
+                    )
+                await update_status(job_id, "completed", result_data)
+                notify_active_count_changed()
+                notify_dashboard_changed()
+                notify_job_status_changed(job_id)
+                notify_token_usage_changed()
+                await _auto_assign_metadata(metadata_job_name, merged.metadata_rules)
+                await storage.make_classifications_visible(job_id)
+                return
+
         analysis_result_tuple = await _analyze_failures_or_exit(
             job_id=job_id,
             test_failures=test_failures,
@@ -4006,14 +3816,21 @@ async def _process_ci_source_analysis(
             f"({unique_errors} unique errors). "
             f"{len(all_analyses)} analyzed successfully."
         )
+        if child_job_analyses:
+            summary = (
+                f"{summary} Additionally, {len(child_job_analyses)} failed child "
+                f"job(s) were analyzed recursively."
+            )
+
+        enrich_targets: list = list(all_analyses) + list(child_job_analyses)
 
         # Enrich with Jira matches
         logger.debug(
             f"Enriching with Jira matches (enable_jira={_resolve_enable_jira(body, merged)})"
         )
         if _resolve_enable_jira(body, merged):
-            await enrich_with_jira_matches(
-                all_analyses, merged, ai_provider, ai_model, job_id=job_id
+            await _enrich_result_with_jira(
+                enrich_targets, merged, ai_provider, ai_model, job_id=job_id
             )
 
         # Enrich with tests repo matches
@@ -4022,7 +3839,7 @@ async def _process_ci_source_analysis(
         )
         if merged.tests_repo_url or tests_repo_url:
             await _enrich_result_with_tests_repo_matches(
-                all_analyses,
+                enrich_targets,
                 merged,
                 ai_provider,
                 ai_model,
@@ -4050,6 +3867,10 @@ async def _process_ci_source_analysis(
 
         result_data = analysis_result.model_dump(mode="json")
         result_data["job_name"] = display_name
+        if child_job_analyses:
+            result_data["child_job_analyses"] = [
+                c.model_dump(mode="json") for c in child_job_analyses
+            ]
         _stamp_result_metadata(result_data, source_result)
         logger.info(f"Analysis completed for job_id={job_id}: {summary}")
         await _preserve_request_params(job_id, result_data)
@@ -4172,31 +3993,7 @@ async def analyze(
             else f"{body.type}-analysis"
         )
 
-    if body.type == "jenkins":
-        # Build a legacy AnalyzeRequest for the existing Jenkins flow
-        jenkins_fields: dict = {}
-        for field_name in AnalyzeRequest.model_fields:
-            if field_name in body.model_fields_set:
-                val = getattr(body, field_name, None)
-                if val is not None:
-                    jenkins_fields[field_name] = val
-        jenkins_fields["job_name"] = body.job_name
-        jenkins_fields["build_number"] = body.build_number
-        if body.name:
-            jenkins_fields["name"] = body.name
-        jenkins_body = AnalyzeRequest(**jenkins_fields)
-        merged = _merge_settings(jenkins_body, settings)
-        resolved_peers = _validate_peer_configs(jenkins_body, merged)
-        return await _enqueue_analysis_job(
-            jenkins_body,
-            merged,
-            resolved_peers,
-            base_url,
-            username=request.state.username,
-            is_admin=bool(request.state.is_admin),
-        )
-
-    # File, Raw, or Prow — enqueue as async background task
+    # All sources — enqueue as async background task
     merged = _merge_settings(body, settings)
     resolved_peers = _validate_peer_configs(body, merged)
     return await _enqueue_ci_source_analysis(
@@ -4258,128 +4055,77 @@ async def re_analyze(
         "analysis_type", "jenkins"
     )  # default to jenkins for backward compat
 
-    if analysis_type in ("file", "raw", "prow"):
-        # File/Raw/Prow re-analysis: rebuild a UnifiedAnalyzeRequest and re-submit
-        try:
-            decrypted_params = decrypt_sensitive_fields(dict(params))
-        except Exception as exc:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Failed to decrypt stored params: {exc}",
-            ) from exc
-
-        _validate_decrypted_sensitive_fields(decrypted_params)
-
-        # Build unified request from stored params
-        # Prefer the original user-supplied name (before UUID suffix was added)
-        # over the resolved display_name / job_name.
-        unified_fields: dict = {
-            "type": analysis_type,
-        }
-        # Only restore name if user explicitly provided one;
-        # leave unset so _enqueue_ci_source_analysis generates a fresh fallback.
-        stored_name = decrypted_params.get("original_name", "")
-        if stored_name:
-            unified_fields["name"] = stored_name
-        # Restore source-specific fields via plugin registry
-        source_cls = CI_SOURCE_REGISTRY.get(analysis_type)
-        if source_cls is None:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Unsupported analysis type for re-analysis: {analysis_type}",
-            )
-        try:
-            unified_fields.update(source_cls.restore_reanalyze_fields(decrypted_params))
-        except ValueError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-        _copy_analysis_settings(decrypted_params, unified_fields)
-
-        # Apply overrides from request body
-        for field_name in body.model_fields_set:
-            unified_fields[field_name] = getattr(body, field_name)
-
-        unified_body = UnifiedAnalyzeRequest(**unified_fields)
-
-        # Tags: carry forward + auto-add re-analyze
-        existing_tags = list(result_data.get("tags", []))
-        if "re-analyze" not in existing_tags:
-            existing_tags.append("re-analyze")
-        # Remove old submitter tag — enqueue will add the current submitter
-        existing_tags = _strip_old_submitter_tag(existing_tags, result_data)
-        if "tags" in body.model_fields_set:
-            for t in getattr(body, "tags", None) or []:
-                if t not in existing_tags:
-                    existing_tags.append(t)
-        unified_body.tags = existing_tags
-
-        # Validate and merge settings
-        _resolve_ai_config_allow_defer(unified_body, get_settings(), request)
-        merged = _merge_settings(unified_body, get_settings())
-        resolved_peers = _validate_peer_configs(unified_body, merged)
-
-        # Resolve display name — prefer original name, then plugin fallback
-        display_name = unified_body.name or source_cls.default_display_name(
-            unified_body
-        )
-
-        return await _enqueue_ci_source_analysis(
-            body=unified_body,
-            merged=merged,
-            resolved_peers=resolved_peers,
-            display_name=display_name,
-            analysis_type=analysis_type,
-            base_url=base_url,
-            username=request.state.username,
-            tags=unified_body.tags,
-            message_prefix="Re-analysis",
-            reanalyzed_from_job_id=job_id,
-            reanalyzed_from_job_name=origin_job_display_name,
-            is_admin=bool(request.state.is_admin),
-        )
-
-    # Jenkins path (existing code)
-    # Reconstruct the original AnalyzeRequest + Settings
+    # Rebuild a UnifiedAnalyzeRequest and re-submit via the shared CI source path
     try:
-        original_body, original_settings = _reconstruct_from_params(result_data)
-    except (ValueError, KeyError) as exc:
+        decrypted_params = decrypt_sensitive_fields(dict(params))
+    except Exception as exc:
         raise HTTPException(
             status_code=400,
-            detail=f"Failed to reconstruct original request: {exc}",
+            detail=f"Failed to decrypt stored params: {exc}",
         ) from exc
 
-    # Apply overrides from request body onto the reconstructed request
-    # For each non-None field in the override body, set it on original_body
-    for field_name in body.model_fields_set:
-        setattr(original_body, field_name, getattr(body, field_name))
+    _validate_decrypted_sensitive_fields(decrypted_params)
 
-    # Carry forward tags from the original result + auto-add re-analyze
+    # Prefer the original user-supplied name (before UUID suffix was added)
+    # over the resolved display_name / job_name.
+    unified_fields: dict = {
+        "type": analysis_type,
+    }
+    # Only restore name if user explicitly provided one;
+    # leave unset so _enqueue_ci_source_analysis generates a fresh fallback.
+    stored_name = decrypted_params.get("original_name", "")
+    if stored_name:
+        unified_fields["name"] = stored_name
+    # Restore source-specific fields via plugin registry
+    source_cls = CI_SOURCE_REGISTRY.get(analysis_type)
+    if source_cls is None:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unsupported analysis type for re-analysis: {analysis_type}",
+        )
+    try:
+        unified_fields.update(source_cls.restore_reanalyze_fields(decrypted_params))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    _copy_analysis_settings(decrypted_params, unified_fields)
+
+    # Apply overrides from request body
+    for field_name in body.model_fields_set:
+        unified_fields[field_name] = getattr(body, field_name)
+
+    unified_body = UnifiedAnalyzeRequest(**unified_fields)
+
+    # Tags: carry forward + auto-add re-analyze
     existing_tags = list(result_data.get("tags", []))
     if "re-analyze" not in existing_tags:
         existing_tags.append("re-analyze")
     # Remove old submitter tag — enqueue will add the current submitter
     existing_tags = _strip_old_submitter_tag(existing_tags, result_data)
-    # Merge with any user-supplied tags from the override body
     if "tags" in body.model_fields_set:
-        for t in original_body.tags or []:
+        for t in getattr(body, "tags", None) or []:
             if t not in existing_tags:
                 existing_tags.append(t)
-    original_body.tags = existing_tags
+    unified_body.tags = existing_tags
 
-    # Re-merge settings with overrides applied
-    merged = _merge_settings(original_body, original_settings)
+    # Validate and merge settings
+    _resolve_ai_config_allow_defer(unified_body, get_settings(), request)
+    merged = _merge_settings(unified_body, get_settings())
+    resolved_peers = _validate_peer_configs(unified_body, merged)
 
-    # Validate AI config and peers (may defer to .rootcoz/settings.json)
-    _resolve_ai_config_allow_defer(original_body, merged, request)
-    resolved_peers = _validate_peer_configs(original_body, merged)
+    # Resolve display name — prefer original name, then plugin fallback
+    display_name = unified_body.name or source_cls.default_display_name(unified_body)
 
-    return await _enqueue_analysis_job(
-        original_body,
-        merged,
-        resolved_peers,
-        base_url,
-        message_prefix="Re-analysis",
+    return await _enqueue_ci_source_analysis(
+        body=unified_body,
+        merged=merged,
+        resolved_peers=resolved_peers,
+        display_name=display_name,
+        analysis_type=analysis_type,
+        base_url=base_url,
         username=request.state.username,
+        tags=unified_body.tags,
+        message_prefix="Re-analysis",
         reanalyzed_from_job_id=job_id,
         reanalyzed_from_job_name=origin_job_display_name,
         is_admin=bool(request.state.is_admin),
