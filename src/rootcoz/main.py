@@ -179,12 +179,11 @@ from rootcoz.sources import (
     append_repo_context,
     apply_source_workspace_files,
     create_source_from_request,
-    link_artifacts_to_workspace,
     link_refetched_artifacts,
     run_console_only_analysis,
     setup_analysis_workspace,
 )
-from rootcoz.sources.base import resolve_display_build_id
+from rootcoz.sources.base import CISourceResult, resolve_display_build_id
 from rootcoz.sources import chat_workspace as source_chat_workspace
 from rootcoz.sources.jenkins_source import analyze_job, wait_for_jenkins_completion
 from rootcoz.storage import (
@@ -3511,6 +3510,229 @@ async def _enqueue_analysis_job(
     return _attach_result_links(response, base_url, job_id)
 
 
+# Keys that CISourceResult.identity is allowed to override on result dicts.
+_ALLOWED_IDENTITY_KEYS = {"job_name", "build_number", "build_id"}
+
+
+def _stamp_source_identity(data: dict, source_result: CISourceResult | None) -> None:
+    """Apply source identity overrides (e.g. Prow job_name/build_number)."""
+    if source_result is not None and source_result.identity:
+        for key, value in source_result.identity.items():
+            if key in _ALLOWED_IDENTITY_KEYS:
+                data[key] = value
+
+
+def _stamp_source_warnings(data: dict, source_result: CISourceResult | None) -> None:
+    """Attach source warnings (GCS errors, oversize artifacts) to result."""
+    if source_result is not None and source_result.warnings:
+        data["source_warnings"] = source_result.warnings
+
+
+def _stamp_source_metadata(data: dict, source_result: CISourceResult | None) -> None:
+    """Attach Prow job metadata from the source plugin when available."""
+    if source_result is not None and source_result.source_metadata:
+        data["source_metadata"] = source_result.source_metadata
+
+
+def _stamp_result_metadata(data: dict, source_result: CISourceResult | None) -> None:
+    """Apply source identity, warnings, metadata, and build URL to result dict."""
+    _stamp_source_identity(data, source_result)
+    _stamp_source_warnings(data, source_result)
+    _stamp_source_metadata(data, source_result)
+    if source_result is not None and source_result.build_url:
+        stamp_build_url(data, source_result.build_url)
+
+
+async def _analyze_failures_or_exit(
+    *,
+    job_id: str,
+    test_failures: list,
+    console_context: str,
+    artifacts_context: str,
+    metadata_job_name: str,
+    display_name: str,
+    repo_path: Path | None,
+    ai_provider: str,
+    ai_model: str,
+    merged: Settings,
+    custom_prompt: str,
+    server_url: str,
+    peer_ai_configs: list | None,
+    cloned_repos: dict,
+    auth_header: str,
+    groups: dict[str, list],
+    source_result: CISourceResult | None,
+) -> tuple[list, list, int] | None:
+    """Resolve console-only / no-failure / junit analysis paths.
+
+    Returns ``(all_analyses, test_failures, unique_errors)``, or ``None`` when an
+    early-exit path already updated job status.
+    """
+    # Console-only analysis when no JUnit failures found but console
+    # context exists (e.g. Prow build with no JUnit artifacts)
+    if not test_failures and console_context:
+        success, console_results, error_text = await run_console_only_analysis(
+            test_name=metadata_job_name,
+            console_context=console_context,
+            artifacts_context=artifacts_context,
+            repo_path=repo_path,
+            ai_provider=ai_provider,
+            ai_model=ai_model,
+            ai_call_timeout=merged.ai_call_timeout,
+            custom_prompt=custom_prompt,
+            server_url=server_url,
+            job_id=job_id,
+            peer_ai_configs=peer_ai_configs,
+            peer_analysis_max_rounds=merged.peer_analysis_max_rounds,
+            additional_repos=cloned_repos or None,
+            max_concurrent_ai_calls=merged.max_concurrent_ai_calls,
+            auth_header=auth_header,
+            call_type="console",
+        )
+        if not success:
+            logger.error("Console-only analysis failed: %s", error_text, exc_info=True)
+            fail_result = FailureAnalysisResult(
+                job_id=job_id,
+                status="failed",
+                summary=make_user_friendly_error(error_text),
+                ai_provider=ai_provider,
+                ai_model=ai_model,
+            )
+            fail_data = fail_result.model_dump(mode="json")
+            fail_data["error"] = fail_result.summary
+            fail_data["job_name"] = display_name
+            _stamp_result_metadata(fail_data, source_result)
+            await _preserve_request_params(job_id, fail_data)
+            await _attach_token_usage(job_id, fail_data)
+            await update_status(job_id, "failed", fail_data)
+            notify_active_count_changed()
+            notify_dashboard_changed()
+            notify_job_status_changed(job_id)
+            notify_token_usage_changed()
+            return None
+
+        all_analyses = list(console_results)
+        synthetic_failure = FailedTest(
+            test_name=metadata_job_name,
+            error_message=console_context,
+        )
+        return all_analyses, [synthetic_failure], 1
+
+    if not test_failures:
+        if source_result is not None and source_result.warnings and not console_context:
+            # All data sources errored — report as failed, not clean
+            analysis_result = FailureAnalysisResult(
+                job_id=job_id,
+                status="failed",
+                summary=f"Could not fetch test data: {'; '.join(source_result.warnings)}",
+                ai_provider=ai_provider,
+                ai_model=ai_model,
+            )
+            result_data = analysis_result.model_dump(mode="json")
+            result_data["error"] = analysis_result.summary
+            result_data["job_name"] = display_name
+            _stamp_result_metadata(result_data, source_result)
+            await _preserve_request_params(job_id, result_data)
+            await update_status(job_id, "failed", result_data)
+            notify_active_count_changed()
+            notify_dashboard_changed()
+            notify_job_status_changed(job_id)
+            return None
+
+        # No failures and no console context — nothing to analyze
+        analysis_result = FailureAnalysisResult(
+            job_id=job_id,
+            status="completed",
+            summary="No test failures found and no console output to analyze.",
+        )
+        result_data = analysis_result.model_dump(mode="json")
+        result_data["job_name"] = display_name
+        _stamp_result_metadata(result_data, source_result)
+        await _preserve_request_params(job_id, result_data)
+        await update_status(job_id, "completed", result_data)
+        notify_active_count_changed()
+        notify_dashboard_changed()
+        notify_job_status_changed(job_id)
+        await _auto_assign_metadata(metadata_job_name, merged.metadata_rules)
+        return None
+
+    # Normal path: structured test failures
+    logger.info(
+        f"Starting AI analysis for {len(groups)} failure groups (provider={ai_provider}, model={ai_model})"
+    )
+
+    # Analyze each group in parallel
+    coroutines: list[Coroutine[Any, Any, Any]] = [
+        analyze_failure_group(
+            failures=group_failures,
+            console_context=console_context,
+            repo_path=repo_path,
+            ai_provider=ai_provider,
+            ai_model=ai_model,
+            ai_call_timeout=merged.ai_call_timeout,
+            custom_prompt=custom_prompt,
+            artifacts_context=artifacts_context,
+            server_url=server_url,
+            job_id=job_id,
+            peer_ai_configs=peer_ai_configs,
+            peer_analysis_max_rounds=merged.peer_analysis_max_rounds,
+            additional_repos=cloned_repos or None,
+            max_concurrent_ai_calls=merged.max_concurrent_ai_calls,
+            auth_header=auth_header,
+            all_groups=groups,
+        )
+        for sig, group_failures in groups.items()
+    ]
+
+    results = await run_parallel_with_limit(
+        coroutines, max_concurrency=merged.max_concurrent_ai_calls
+    )
+    logger.debug(
+        f"AI analysis complete: {len(results)} results from {len(groups)} groups"
+    )
+
+    all_analyses = []
+    failed_group_count = 0
+    for result in results:
+        if isinstance(result, Exception):
+            failed_group_count += 1
+            logger.error(f"Failed to analyze failure group: {result}", exc_info=result)
+        else:
+            all_analyses.extend(result)
+
+    unique_errors = len(groups)
+
+    # If every group failed, treat the entire job as failed rather than
+    # saving a misleading "completed" result with zero findings.
+    if not all_analyses and failed_group_count == len(results):
+        error_msg = (
+            f"All {failed_group_count} failure group(s) failed during analysis "
+            f"({len(test_failures)} test failures, {unique_errors} unique errors)"
+        )
+        logger.error(f"Analysis fully failed for job_id={job_id}: {error_msg}")
+        fail_result = FailureAnalysisResult(
+            job_id=job_id,
+            status="failed",
+            summary=make_user_friendly_error(error_msg),
+            ai_provider=ai_provider,
+            ai_model=ai_model,
+        )
+        fail_data = fail_result.model_dump(mode="json")
+        fail_data["error"] = fail_result.summary
+        fail_data["job_name"] = display_name
+        _stamp_result_metadata(fail_data, source_result)
+        await _preserve_request_params(job_id, fail_data)
+        await _attach_token_usage(job_id, fail_data)
+        await update_status(job_id, "failed", fail_data)
+        notify_active_count_changed()
+        notify_dashboard_changed()
+        notify_job_status_changed(job_id)
+        notify_token_usage_changed()
+        return None
+
+    return all_analyses, test_failures, unique_errors
+
+
 async def _process_ci_source_analysis(
     *,
     job_id: str,
@@ -3530,34 +3752,6 @@ async def _process_ci_source_analysis(
 ) -> None:
     """Background task for CISource plugin analysis (file/raw/prow)."""
     job_id_var.set(job_id)
-
-    # Only these keys may be overridden by CISourceResult.identity.
-    _ALLOWED_IDENTITY_KEYS = {"job_name", "build_number", "build_id"}
-
-    def _stamp_source_identity(data: dict) -> None:
-        """Apply source identity overrides (e.g. Prow job_name/build_number)."""
-        if source_result is not None and source_result.identity:
-            for key, value in source_result.identity.items():
-                if key in _ALLOWED_IDENTITY_KEYS:
-                    data[key] = value
-
-    def _stamp_source_warnings(data: dict) -> None:
-        """Attach source warnings (GCS errors, oversize artifacts) to result."""
-        if source_result is not None and source_result.warnings:
-            data["source_warnings"] = source_result.warnings
-
-    def _stamp_source_metadata(data: dict) -> None:
-        """Attach Prow job metadata from the source plugin when available."""
-        if source_result is not None and source_result.source_metadata:
-            data["source_metadata"] = source_result.source_metadata
-
-    def _stamp_result_metadata(data: dict) -> None:
-        """Apply source identity, warnings, metadata, and build URL to result dict."""
-        _stamp_source_identity(data)
-        _stamp_source_warnings(data)
-        _stamp_source_metadata(data)
-        if source_result is not None and source_result.build_url:
-            stamp_build_url(data, source_result.build_url)
 
     auth_header = ""
     repo_manager: RepositoryManager | None = None
@@ -3605,7 +3799,7 @@ async def _process_ci_source_analysis(
             )
             result_data = analysis_result.model_dump(mode="json")
             result_data["job_name"] = display_name
-            _stamp_result_metadata(result_data)
+            _stamp_result_metadata(result_data, source_result)
             await _preserve_request_params(job_id, result_data)
             logger.info(f"No failures found for job_id={job_id}, completing early")
             await update_status(job_id, "completed", result_data)
@@ -3764,14 +3958,6 @@ async def _process_ci_source_analysis(
         if cloned_repos:
             copy_rootcoz_pi_resources(cloned_repos, repo_path)
 
-        # Make build artifacts accessible in the AI working directory
-        artifacts_context = source_result.artifacts_context
-        if source_result.extract_path:
-            if not link_artifacts_to_workspace(
-                repo_path, source_result.extract_path, job_id
-            ):
-                artifacts_context = ""
-
         custom_prompt = append_repo_context(
             (body.raw_prompt or "").strip(), ws_result.repo_context
         )
@@ -3799,171 +3985,28 @@ async def _process_ci_source_analysis(
                     exc_info=True,
                 )
 
-        # Console-only analysis when no JUnit failures found but console
-        # context exists (e.g. Prow build with no JUnit artifacts)
-        if not test_failures and console_context:
-            success, console_results, error_text = await run_console_only_analysis(
-                test_name=metadata_job_name,
-                console_context=console_context,
-                artifacts_context=artifacts_context,
-                repo_path=repo_path,
-                ai_provider=ai_provider,
-                ai_model=ai_model,
-                ai_call_timeout=merged.ai_call_timeout,
-                custom_prompt=custom_prompt,
-                server_url=server_url,
-                job_id=job_id,
-                peer_ai_configs=peer_ai_configs,
-                peer_analysis_max_rounds=merged.peer_analysis_max_rounds,
-                additional_repos=cloned_repos or None,
-                max_concurrent_ai_calls=merged.max_concurrent_ai_calls,
-                auth_header=auth_header,
-                call_type="console",
-            )
-            if not success:
-                logger.error(
-                    "Console-only analysis failed: %s", error_text, exc_info=True
-                )
-                fail_result = FailureAnalysisResult(
-                    job_id=job_id,
-                    status="failed",
-                    summary=make_user_friendly_error(error_text),
-                    ai_provider=ai_provider,
-                    ai_model=ai_model,
-                )
-                fail_data = fail_result.model_dump(mode="json")
-                fail_data["error"] = fail_result.summary
-                fail_data["job_name"] = display_name
-                _stamp_result_metadata(fail_data)
-                await _preserve_request_params(job_id, fail_data)
-                await _attach_token_usage(job_id, fail_data)
-                await update_status(job_id, "failed", fail_data)
-                notify_active_count_changed()
-                notify_dashboard_changed()
-                notify_job_status_changed(job_id)
-                notify_token_usage_changed()
-                return
-
-            all_analyses = list(console_results)
-            synthetic_failure = FailedTest(
-                test_name=metadata_job_name,
-                error_message=console_context,
-            )
-            unique_errors = 1
-            test_failures = [synthetic_failure]
-        elif not test_failures:
-            if source_result.warnings and not console_context:
-                # All data sources errored — report as failed, not clean
-                analysis_result = FailureAnalysisResult(
-                    job_id=job_id,
-                    status="failed",
-                    summary=f"Could not fetch test data: {'; '.join(source_result.warnings)}",
-                    ai_provider=ai_provider,
-                    ai_model=ai_model,
-                )
-                result_data = analysis_result.model_dump(mode="json")
-                result_data["error"] = analysis_result.summary
-                result_data["job_name"] = display_name
-                _stamp_result_metadata(result_data)
-                await _preserve_request_params(job_id, result_data)
-                await update_status(job_id, "failed", result_data)
-                notify_active_count_changed()
-                notify_dashboard_changed()
-                notify_job_status_changed(job_id)
-                return
-
-            # No failures and no console context — nothing to analyze
-            analysis_result = FailureAnalysisResult(
-                job_id=job_id,
-                status="completed",
-                summary="No test failures found and no console output to analyze.",
-            )
-            result_data = analysis_result.model_dump(mode="json")
-            result_data["job_name"] = display_name
-            _stamp_result_metadata(result_data)
-            await _preserve_request_params(job_id, result_data)
-            await update_status(job_id, "completed", result_data)
-            notify_active_count_changed()
-            notify_dashboard_changed()
-            notify_job_status_changed(job_id)
-            await _auto_assign_metadata(metadata_job_name, merged.metadata_rules)
+        analysis_result_tuple = await _analyze_failures_or_exit(
+            job_id=job_id,
+            test_failures=test_failures,
+            console_context=console_context,
+            artifacts_context=artifacts_context,
+            metadata_job_name=metadata_job_name,
+            display_name=display_name,
+            repo_path=repo_path,
+            ai_provider=ai_provider,
+            ai_model=ai_model,
+            merged=merged,
+            custom_prompt=custom_prompt,
+            server_url=server_url,
+            peer_ai_configs=peer_ai_configs,
+            cloned_repos=cloned_repos,
+            auth_header=auth_header,
+            groups=groups,
+            source_result=source_result,
+        )
+        if analysis_result_tuple is None:
             return
-        else:
-            # Normal path: structured test failures
-            logger.info(
-                f"Starting AI analysis for {len(groups)} failure groups (provider={ai_provider}, model={ai_model})"
-            )
-
-            # Analyze each group in parallel
-            coroutines: list[Coroutine[Any, Any, Any]] = [
-                analyze_failure_group(
-                    failures=group_failures,
-                    console_context=console_context,
-                    repo_path=repo_path,
-                    ai_provider=ai_provider,
-                    ai_model=ai_model,
-                    ai_call_timeout=merged.ai_call_timeout,
-                    custom_prompt=custom_prompt,
-                    artifacts_context=artifacts_context,
-                    server_url=server_url,
-                    job_id=job_id,
-                    peer_ai_configs=peer_ai_configs,
-                    peer_analysis_max_rounds=merged.peer_analysis_max_rounds,
-                    additional_repos=cloned_repos or None,
-                    max_concurrent_ai_calls=merged.max_concurrent_ai_calls,
-                    auth_header=auth_header,
-                    all_groups=groups,
-                )
-                for sig, group_failures in groups.items()
-            ]
-
-            results = await run_parallel_with_limit(
-                coroutines, max_concurrency=merged.max_concurrent_ai_calls
-            )
-            logger.debug(
-                f"AI analysis complete: {len(results)} results from {len(groups)} groups"
-            )
-
-            all_analyses = []
-            failed_group_count = 0
-            for result in results:
-                if isinstance(result, Exception):
-                    failed_group_count += 1
-                    logger.error(
-                        f"Failed to analyze failure group: {result}", exc_info=result
-                    )
-                else:
-                    all_analyses.extend(result)
-
-            unique_errors = len(groups)
-
-            # If every group failed, treat the entire job as failed rather than
-            # saving a misleading "completed" result with zero findings.
-            if not all_analyses and failed_group_count == len(results):
-                error_msg = (
-                    f"All {failed_group_count} failure group(s) failed during analysis "
-                    f"({len(test_failures)} test failures, {unique_errors} unique errors)"
-                )
-                logger.error(f"Analysis fully failed for job_id={job_id}: {error_msg}")
-                fail_result = FailureAnalysisResult(
-                    job_id=job_id,
-                    status="failed",
-                    summary=make_user_friendly_error(error_msg),
-                    ai_provider=ai_provider,
-                    ai_model=ai_model,
-                )
-                fail_data = fail_result.model_dump(mode="json")
-                fail_data["error"] = fail_result.summary
-                fail_data["job_name"] = display_name
-                _stamp_result_metadata(fail_data)
-                await _preserve_request_params(job_id, fail_data)
-                await _attach_token_usage(job_id, fail_data)
-                await update_status(job_id, "failed", fail_data)
-                notify_active_count_changed()
-                notify_dashboard_changed()
-                notify_job_status_changed(job_id)
-                notify_token_usage_changed()
-                return
+        all_analyses, test_failures, unique_errors = analysis_result_tuple
 
         summary = (
             f"Analyzed {len(test_failures)} test failures "
@@ -4014,7 +4057,7 @@ async def _process_ci_source_analysis(
 
         result_data = analysis_result.model_dump(mode="json")
         result_data["job_name"] = display_name
-        _stamp_result_metadata(result_data)
+        _stamp_result_metadata(result_data, source_result)
         logger.info(f"Analysis completed for job_id={job_id}: {summary}")
         await _preserve_request_params(job_id, result_data)
 
@@ -4083,7 +4126,7 @@ async def _process_ci_source_analysis(
         fail_data = fail_result.model_dump(mode="json")
         fail_data["error"] = fail_result.summary
         fail_data["job_name"] = display_name
-        _stamp_result_metadata(fail_data)
+        _stamp_result_metadata(fail_data, source_result)
         await _preserve_request_params(job_id, fail_data)
 
         # Attach token usage even on failure
@@ -9730,24 +9773,28 @@ async def update_admin_settings(request: Request) -> JSONResponse:
 
     # Validate values against Settings field types and constraints
     errors = []
-    from rootcoz.prow_validation import normalize_gcs_bucket, normalize_prow_url
+
+    # Pre-validate fields with Pydantic model-level validators
+    for key in ("prow_url", "gcs_bucket"):
+        if key not in settings_updates:
+            continue
+        value = settings_updates[key]
+        if value is None or value == "":
+            continue
+        try:
+            validated = Settings.model_validate({key: value})
+            settings_updates[key] = getattr(validated, key)
+        except ValidationError as exc:
+            for err in exc.errors():
+                ctx_err = err.get("ctx", {}).get("error")
+                errors.append(str(ctx_err) if ctx_err else err.get("msg", str(err)))
 
     for key, value in settings_updates.items():
         field_info = Settings.model_fields[key]
         # Skip validation for None/empty — those reset to default
         if value is None or value == "":
             continue
-        if key == "prow_url":
-            try:
-                settings_updates[key] = normalize_prow_url(value)
-            except ValueError as exc:
-                errors.append(str(exc))
-            continue
-        if key == "gcs_bucket":
-            try:
-                settings_updates[key] = normalize_gcs_bucket(value)
-            except ValueError as exc:
-                errors.append(str(exc))
+        if key in ("prow_url", "gcs_bucket"):
             continue
         # Check integer fields
         annotation = field_info.annotation

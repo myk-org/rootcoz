@@ -20,7 +20,7 @@ import {
   SelectValue,
 } from '@/components/ui/select'
 import { api } from '@/lib/api'
-import { toIntInRange, resolveBuildDisplayId } from '@/lib/utils'
+import { toIntInRange, resolveBuildDisplayId, ciSourceLabel } from '@/lib/utils'
 import type { AnalysisResult } from '@/types'
 import { Section } from '@/components/shared/Section'
 import { Toggle } from '@/components/shared/Toggle'
@@ -76,7 +76,7 @@ function initFormState(p: AnalysisResult['request_params']) {
 export function ReAnalyzeDialog({ open, onOpenChange, result, jobId, failureUuid }: ReAnalyzeDialogProps) {
   const navigate = useNavigate()
   const params = result.request_params
-  const isProwJob = String(result.request_params?.analysis_type ?? '') === 'prow'
+  const isProwJob = ciSourceLabel(result.request_params) === 'Prow'
 
   const init = initFormState(params)
   const [aiProvider, setAiProvider] = useState(init.aiProvider)

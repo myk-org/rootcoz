@@ -1155,8 +1155,8 @@ def analyze(
         "-j",
         help="Job name (required when --source jenkins or prow).",
     ),
-    build_number: int = typer.Option(
-        0,
+    build_number: str = typer.Option(
+        "",
         "--build-number",
         "-b",
         help=(
@@ -1272,7 +1272,7 @@ def analyze(
                 f"Error: --job-name is required when --source {source}.", err=True
             )
             raise typer.Exit(1)
-        if build_number <= 0:
+        if not build_number:
             typer.echo(
                 f"Error: --build-number is required when --source {source}.", err=True
             )
@@ -1290,9 +1290,19 @@ def analyze(
         "--jira-max-results": jira_max_results,
         "--ai-call-timeout": ai_call_timeout,
     }
-    if source in ("jenkins", "prow"):
-        _positive_int_fields["--build-number"] = build_number
+    jenkins_build_number = 0
     if source == "jenkins":
+        try:
+            jenkins_build_number = int(build_number)
+        except ValueError:
+            typer.echo(
+                "Error: --build-number must be a positive integer for Jenkins.",
+                err=True,
+            )
+            raise typer.Exit(1) from None
+        if jenkins_build_number <= 0:
+            typer.echo("Error: --build-number must be greater than 0.", err=True)
+            raise typer.Exit(1)
         _positive_int_fields["--poll-interval"] = poll_interval
         _positive_int_fields["--jenkins-artifacts-max-size-mb"] = (
             jenkins_artifacts_max_size_mb
@@ -1390,10 +1400,10 @@ def analyze(
         client = _get_client()
         data: dict
         if source == "jenkins":
-            data = client.analyze(job_name, build_number, name=name, **extras)
+            data = client.analyze(job_name, jenkins_build_number, name=name, **extras)
         elif source == "prow":
             extras["prow_job_name"] = job_name
-            extras["build_id"] = str(build_number)
+            extras["build_id"] = build_number
             # Apply config defaults for prow-specific fields (CLI flag overrides config)
             effective_prow_url = prow_url or (cfg.prow_url if cfg else "")
             effective_gcs_bucket = gcs_bucket or (cfg.gcs_bucket if cfg else "")

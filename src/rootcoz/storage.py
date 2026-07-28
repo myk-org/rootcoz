@@ -442,6 +442,9 @@ def _row_build_url(row) -> str:
     keys = row.keys()
     if "build_url" in keys and row["build_url"]:
         return row["build_url"]
+    # Backward compat: pre-migration rows may still use the old column name.
+    # Safe to remove after all databases have run _migrate_jenkins_url_to_build_url
+    # (i.e. after one full release cycle following the rename).
     if "jenkins_url" in keys and row["jenkins_url"]:
         return row["jenkins_url"]
     return ""

@@ -2622,7 +2622,7 @@ class TestAnalyzeProwCommand:
         call_kwargs = mock_client.analyze.call_args[1]
         assert call_kwargs["type"] == "prow"
         assert call_kwargs["prow_job_name"] == "periodic-ci-e2e-aws"
-        assert call_kwargs["build_id"] == "1234567890"  # int converted to str
+        assert call_kwargs["build_id"] == "1234567890"
 
     def test_analyze_prow_with_name(self, mock_client):
         mock_client.analyze.return_value = {
