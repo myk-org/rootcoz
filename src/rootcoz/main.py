@@ -3851,16 +3851,9 @@ async def _process_ci_source_analysis(
             f"Failure grouping complete: {len(groups)} unique signatures from {len(test_failures)} failures"
         )
 
-        # Fail fast when AI already resolved (settings.json cannot change it).
+        # Track whether AI was already resolved (settings.json cannot change it).
+        # Post-overlay preflight below runs only when this is False.
         ai_resolved_before_overlay = bool(ai_provider and ai_model)
-        if ai_resolved_before_overlay and not await _preflight_sidecar_check(
-            job_id,
-            ai_provider,
-            ai_model,
-            display_name,
-            job_name=body.job_name or "",
-        ):
-            return
 
         # Clone repos, copy resources, link artifacts
         repo_manager = RepositoryManager()

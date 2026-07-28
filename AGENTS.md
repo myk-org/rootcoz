@@ -110,7 +110,7 @@ src/rootcoz/
   ...                       # Other modules (jira, github_issues, monitoring, etc.)
 ```
 
-**Dependency direction:** `main` → `sources/` + `engine/`. `sources/` → `engine/`. `engine/` does NOT import `sources/`. `engine/core.py` has a lazy import of `peer_analysis` (only when `peer_ai_configs` is set). Adding a new CI plugin means adding a file under `sources/` and a dispatch branch in `main.py` — `engine/core.py` stays untouched.
+**Dependency direction:** `main` → `sources/` + `engine/`. `sources/` → `engine/`. `engine/` does NOT import `sources/`. `engine/core.py` has a lazy import of `peer_analysis` (only when `peer_ai_configs` is set). Adding a new CI plugin means adding a file under `sources/` and registering it in `sources/registry.py` — `engine/core.py` stays untouched.
 
 ### Frontend Patterns
 

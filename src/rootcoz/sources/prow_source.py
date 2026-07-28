@@ -51,6 +51,7 @@ _MAX_JUNIT_FILES = 200  # hard cap on JUnit XMLs downloaded per build
 _MAX_JUNIT_FETCH_ATTEMPTS = 250
 _MAX_SIZE_PR_DIFF = 5_000_000  # 5 MB — GitHub PR unified diff
 _MAX_SIZE_PR_METADATA = 1_000_000  # 1 MB — GitHub PR JSON metadata
+_MAX_PR_CONTEXT_TOTAL = 20_000_000  # 20 MB — aggregate cap for pr-changes.diff
 _JS_MAX_SAFE_INTEGER = 9007199254740991  # 2^53 - 1
 
 # Strict pattern for GitHub org/repo names — prevents path traversal in API URLs.
@@ -162,7 +163,8 @@ def _parse_prowjob_json(raw: str) -> ProwJobMetadata | None:
     # status.state
     status = data.get("status", {})
     if isinstance(status, dict):
-        meta.state = status.get("state", "")
+        state = status.get("state", "")
+        meta.state = state if isinstance(state, str) else ""
 
     return meta
 
@@ -1304,12 +1306,18 @@ class ProwSource(CISource):
         *,
         github_token: str = "",
     ) -> bool:
-        """Write Prow build log, context files, and artifacts for chat."""
-        wrote_any = False
+        """Write Prow build log, context files, and artifacts for chat.
+
+        Returns whether CI data is present in the workspace (not whether new
+        bytes were written). Callers use this as ``ci_build_data_available``.
+        """
         console_file = workspace / "console-output.txt"
         artifacts_link = workspace / "build-artifacts"
         prow_context_file = workspace / "prow-context.txt"
         pr_changes_file = workspace / "pr-changes.diff"
+
+        # Quick pre-check: if metadata is already resolved and all files
+        # exist, skip the GCS round-trip.
         metadata = self._metadata_dict()
         pr_num = metadata.get("pr_number")
         pr_org = metadata.get("org", "")
@@ -1321,7 +1329,7 @@ class ProwSource(CISource):
             and (not needs_pr_changes or pr_changes_file.exists())
             and (not self.get_job_artifacts or artifacts_link.exists())
         ):
-            return False
+            return True  # CI data already present from a previous turn
 
         async with httpx.AsyncClient(
             timeout=httpx.Timeout(_HTTP_TIMEOUT), follow_redirects=True
@@ -1330,25 +1338,42 @@ class ProwSource(CISource):
             gcs_prefix = await self._resolve_gcs_prefix(client)
             self._resolved_gcs_prefix = gcs_prefix
 
+            # Re-derive needs_pr_changes: _resolve_gcs_prefix populates
+            # _prowjob_metadata from prowjob.json, which is None when
+            # reconstructed via from_stored_params.
+            if not needs_pr_changes:
+                metadata = self._metadata_dict()
+                pr_num = metadata.get("pr_number")
+                pr_org = metadata.get("org", "")
+                pr_repo = metadata.get("repo", "")
+                needs_pr_changes = pr_num is not None and pr_org and pr_repo
+
+            # Full file-presence re-check after metadata resolution
+            if (
+                console_file.exists()
+                and prow_context_file.exists()
+                and (not needs_pr_changes or pr_changes_file.exists())
+                and (not self.get_job_artifacts or artifacts_link.exists())
+            ):
+                return True
+
             if not console_file.exists():
                 build_log = await self._fetch_build_log(
                     client, gcs_prefix, self._resolution_warnings
                 )
-                if write_console_output_file(workspace, build_log):
-                    wrote_any = True
+                write_console_output_file(workspace, build_log)
 
             workspace_files = await self.prepare_workspace(
                 repo_path=workspace, github_token=github_token
             )
             from rootcoz.sources.base import write_workspace_file_list
 
-            if write_workspace_file_list(
+            write_workspace_file_list(
                 workspace,
                 workspace_files,
                 skip_existing=True,
                 log_prefix="Chat: ",
-            ):
-                wrote_any = True
+            )
 
             if self.get_job_artifacts and not artifacts_link.exists():
                 try:
@@ -1363,14 +1388,13 @@ class ProwSource(CISource):
                             logger.info(
                                 "Chat: linked Prow artifacts into %s", workspace
                             )
-                            wrote_any = True
                 except Exception:
                     logger.warning(
                         "Chat: failed to download Prow artifacts", exc_info=True
                     )
                     self.cleanup()
 
-        return wrote_any
+        return True  # CI data is present (written now or previously)
 
     async def prepare_workspace(
         self,
@@ -1478,10 +1502,25 @@ class ProwSource(CISource):
             pr_sections: list[str] = []
             skipped_note = ""
             incomplete = len(pending) > 0 or work.qsize() > 0
+            cumulative_bytes = 0
+            budget_exhausted = False
             for num in all_pr_nums:
                 content = results.get(num)
                 if content:
+                    content_bytes = len(content.encode("utf-8", errors="replace"))
+                    if cumulative_bytes + content_bytes > _MAX_PR_CONTEXT_TOTAL:
+                        budget_exhausted = True
+                        break
                     pr_sections.append(content)
+                    cumulative_bytes += content_bytes
+
+            if budget_exhausted:
+                remaining_prs = len(all_pr_nums) - len(pr_sections)
+                skipped_note += (
+                    f"\n\n--- WARNING: PR context exceeded "
+                    f"{_MAX_PR_CONTEXT_TOTAL // 1_000_000} MB budget. "
+                    f"{remaining_prs} PR(s) omitted. ---\n"
+                )
 
             if incomplete:
                 completed = set(results) | set(failed_prs)
@@ -1560,7 +1599,11 @@ class ProwSource(CISource):
         # ------------------------------------------------------------------
         build_state = ""
         if self._prowjob_metadata and self._prowjob_metadata.state:
-            build_state = self._prowjob_metadata.state.upper()
+            build_state = (
+                self._prowjob_metadata.state.upper()
+                if isinstance(self._prowjob_metadata.state, str)
+                else ""
+            )
         else:
             # No prowjob.json metadata — fall back to finished.json
             finished_url = _gcs_url(self.gcs_bucket, gcs_prefix, "finished.json")
@@ -1584,8 +1627,11 @@ class ProwSource(CISource):
                             type(finished).__name__,
                         )
                     else:
-                        build_state = finished.get("result", "").upper()
-                except (ValueError, KeyError) as exc:
+                        raw_result = finished.get("result")
+                        build_state = (
+                            raw_result.upper() if isinstance(raw_result, str) else ""
+                        )
+                except (ValueError, KeyError, TypeError, AttributeError) as exc:
                     logger.warning("Failed to parse finished.json: %s", exc)
             else:
                 logger.info(

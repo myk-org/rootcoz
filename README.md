@@ -53,7 +53,7 @@ curl -X POST http://localhost:8000/analyze \
   -d '{"type": "prow", "prow_job_name": "periodic-ci-e2e-aws", "build_id": "1234567890", "prow_url": "https://prow.ci.openshift.org", "gcs_bucket": "test-platform-results", "gcs_prefix": "logs/periodic-ci-e2e-aws/1234567890"}'
 ```
 
-Presubmit jobs can omit `gcs_prefix`; RootCoz resolves it from the Prow directory pointer.
+Jobs can omit `gcs_prefix`; RootCoz auto-resolves it via prowjob.json or the Prow directory pointer (supports presubmit, postsubmit, and periodic jobs).
 
 | Field | Env var | API / CLI | Config file |
 |-------|---------|-----------|-------------|
@@ -66,6 +66,7 @@ Presubmit jobs can omit `gcs_prefix`; RootCoz resolves it from the Prow director
 ## Features
 
 - **AI-Powered Failure Analysis** — Classifies test failures as code issues or product bugs
+- **Multi-CI Support** — Analyzes builds from Jenkins, Prow (GCS artifacts), or raw JUnit XML input with a unified pipeline
 - **AI Token Usage Tracking** — Track token consumption, costs, and duration for all AI CLI calls. Admin dashboard shows usage by provider/model/time period with CSV export.
 - **Public OpenAPI** — `/openapi.json`, `/docs`, and `/redoc` are available without authentication
 - **Sparse result fields** — `GET /results/{job_id}?fields=status,result.summary,...` returns only allowlisted paths (full values). Discover paths via `GET /api/results/fields` or `rootcoz results fields`
