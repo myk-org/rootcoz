@@ -1106,8 +1106,9 @@ def _register_job_task(job_id: str, task: asyncio.Task) -> None:
 async def _preserve_request_params(job_id: str, result_data: dict) -> None:
     """Copy persisted enqueue-time fields from the stored result into result_data.
 
-    The initial ``save_result`` persists ``request_params``, ``tags``, and
-    ``display_name`` but the ``AnalysisResult`` model dump produced when
+    The initial ``save_result`` persists ``request_params``, ``tags``,
+    ``display_name``, and identity fields (``job_name``, ``build_number``,
+    ``build_id``) but the ``AnalysisResult`` model dump produced when
     analysis finishes does not include those keys.  Without this merge the
     fields would be silently lost when ``update_status`` overwrites
     ``result_json``.
@@ -1120,7 +1121,14 @@ async def _preserve_request_params(job_id: str, result_data: dict) -> None:
     stored = await get_result(job_id, strip_sensitive=False)
     if stored and stored.get("result"):
         stored_result = stored["result"]
-        for key in ("request_params", "tags", "display_name"):
+        for key in (
+            "request_params",
+            "tags",
+            "display_name",
+            "job_name",
+            "build_number",
+            "build_id",
+        ):
             if key in stored_result and key not in result_data:
                 result_data[key] = stored_result[key]
 
