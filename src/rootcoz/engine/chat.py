@@ -895,27 +895,16 @@ def _build_unavailable_section(custom_tools: list[dict]) -> str:
     return "\n\n## Unavailable Tools\n" + "\n".join(lines)
 
 
-def _resolve_ci_build_data_available(
-    ci_build_data_available: bool, jenkins_data_available: bool
-) -> bool:
-    """Merge ci_build_data_available and legacy jenkins_data_available flags."""
-    return ci_build_data_available or jenkins_data_available
-
-
 def build_welcome_message(
     *,
     job_name: str,
     build_number: int | str,
     repos_available: bool = False,
-    jenkins_data_available: bool = False,
     ci_build_data_available: bool = False,
     jira_available: bool = False,
     github_available: bool = False,
 ) -> str:
     """Build a dynamic welcome message listing available resources."""
-    ci_build_data_available = _resolve_ci_build_data_available(
-        ci_build_data_available, jenkins_data_available
-    )
     resources = [
         "📊 Job analysis results (failures, classifications, AI analysis)",
         "💬 Job comments and discussion",
@@ -952,13 +941,9 @@ def build_system_prompt(
     job_id: str,
     custom_tools: list[dict],
     repos_available: bool = False,
-    jenkins_data_available: bool = False,
     ci_build_data_available: bool = False,
 ) -> str:
     """Build a system prompt that scopes the AI to a specific analyzed job."""
-    ci_build_data_available = _resolve_ci_build_data_available(
-        ci_build_data_available, jenkins_data_available
-    )
     tools_section = _build_tools_section(custom_tools)
     unavailable_section = _build_unavailable_section(custom_tools)
 
@@ -1134,7 +1119,6 @@ async def init_chat_session(
     repo_path: Path | None = None,
     custom_tools: list[dict] | None = None,
     repos_available: bool = False,
-    jenkins_data_available: bool = False,
     ci_build_data_available: bool = False,
 ) -> str | None:
     """Initialize a chat session via the sidecar. Returns session_id or None."""
@@ -1144,7 +1128,6 @@ async def init_chat_session(
         job_id=job_id,
         custom_tools=custom_tools or [],
         repos_available=repos_available,
-        jenkins_data_available=jenkins_data_available,
         ci_build_data_available=ci_build_data_available,
     )
     return await _create_chat_session(
@@ -1283,7 +1266,6 @@ async def chat_with_ai(
     session_id: str | None = None,
     custom_tools: list[dict] | None = None,
     repos_available: bool = False,
-    jenkins_data_available: bool = False,
     ci_build_data_available: bool = False,
 ) -> tuple[bool, str, str | None]:
     """Send a chat message and get an AI response via the sidecar."""
@@ -1295,7 +1277,6 @@ async def chat_with_ai(
             job_id=job_id,
             custom_tools=custom_tools or [],
             repos_available=repos_available,
-            jenkins_data_available=jenkins_data_available,
             ci_build_data_available=ci_build_data_available,
         )
 

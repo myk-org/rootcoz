@@ -511,23 +511,15 @@ class TestBuildSystemPrompt:
         )
         assert "Source repositories are cloned" not in prompt
 
-    @pytest.mark.parametrize(
-        "flag_kwargs",
-        [
-            {"ci_build_data_available": True},
-            {"jenkins_data_available": True},  # legacy alias
-        ],
-        ids=["ci_build_data_available", "jenkins_data_available_alias"],
-    )
-    def test_ci_build_data_available_note(self, flag_kwargs: dict):
-        """CI-neutral wording for both new and legacy availability flags."""
+    def test_ci_build_data_available_note(self):
+        """CI-neutral wording when build data is available for chat."""
         tools = self._make_tools()
         prompt = build_system_prompt(
             job_name="j",
             build_number=1,
             job_id="j1",
             custom_tools=tools,
-            **flag_kwargs,
+            ci_build_data_available=True,
         )
         assert "CI build data is available in your working directory:" in prompt
         assert "full CI console output" in prompt

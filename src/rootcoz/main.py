@@ -3601,7 +3601,7 @@ async def _process_ci_source_analysis(
                 job_id=job_id,
                 status="completed",
                 summary=summary,
-                enriched_xml=body.raw_xml if body.type == "file" else None,
+                enriched_xml=getattr(source, "raw_xml", None),
             )
             result_data = analysis_result.model_dump(mode="json")
             result_data["job_name"] = display_name
@@ -3994,11 +3994,12 @@ async def _process_ci_source_analysis(
                 tests_repo_url=tests_repo_url,
             )
 
-        # Build enriched XML if applicable
+        # Build enriched XML if applicable (FileSource exposes raw_xml)
         enriched_xml = None
-        if body.type == "file" and body.raw_xml is not None:
+        source_raw_xml = getattr(source, "raw_xml", None)
+        if source_raw_xml is not None:
             enriched_xml = build_enriched_xml(
-                body.raw_xml, all_analyses, f"{base_url}/results/{job_id}"
+                source_raw_xml, all_analyses, f"{base_url}/results/{job_id}"
             )
 
         analysis_result = FailureAnalysisResult(
@@ -10880,7 +10881,7 @@ async def init_chat(job_id: str, request: Request) -> dict:
         "ready": True,
         "repos_cloned": repos_available,
         "repo_names": repo_names,
-        "jenkins_data_available": ci_build_data_available,
+        "ci_build_data_available": ci_build_data_available,
         "job_name": result_data.get("job_name", ""),
         "build_number": resolve_display_build_id(result_data),
         "session_id": session_id or "",

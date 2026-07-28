@@ -1041,6 +1041,46 @@ class TestProwSourceFetch:
         assert fetch_count == 2
         assert any("JUnit download stopped" in w for w in result.warnings)
 
+    async def test_fetch_junit_attempt_budget_caps_http_calls(self, monkeypatch):
+        """404/empty JUnit paths still count toward the attempt budget."""
+        monkeypatch.setattr("rootcoz.sources.prow_source._MAX_JUNIT_FETCH_ATTEMPTS", 3)
+        monkeypatch.setattr("rootcoz.sources.prow_source._MAX_JUNIT_FILES", 200)
+        junit_files = [
+            f"logs/my-job/42/artifacts/junit/junit_{i}.xml" for i in range(10)
+        ]
+        fetch_count = 0
+
+        def handler(request: httpx.Request):
+            nonlocal fetch_count
+            url = str(request.url)
+            if "/storage/v1/b/" in url:
+                return httpx.Response(
+                    200, json={"items": [{"name": f} for f in junit_files]}
+                )
+            if url.endswith("prowjob.json") or "pr-logs/directory/" in url:
+                return httpx.Response(404)
+            if url.endswith("finished.json"):
+                return httpx.Response(200, text=FINISHED_JSON_FAILURE)
+            if url.endswith("build-log.txt"):
+                return httpx.Response(200, text=BUILD_LOG)
+            if url.endswith(".xml"):
+                fetch_count += 1
+                return httpx.Response(404)
+            return httpx.Response(404)
+
+        transport = httpx.MockTransport(handler)
+        source = ProwSource(
+            job_name="my-job",
+            build_id="42",
+            gcs_bucket=_TEST_GCS_BUCKET,
+            prow_url=_TEST_PROW_URL,
+        )
+        async with httpx.AsyncClient(transport=transport) as client:
+            result = await source._fetch_with_client(client)
+
+        assert fetch_count == 3
+        assert any("attempts" in w for w in result.warnings)
+
     async def test_fetch_gcs_errors_produce_warnings(self):
         """Non-404 GCS errors are tracked as warnings."""
 

@@ -46,6 +46,9 @@ _MAX_SIZE_BUILD_LOG = 10_000_000  # 10 MB
 _MAX_SIZE_JUNIT_XML = 5_000_000  # 5 MB per JUnit file
 _MAX_SIZE_JUNIT_TOTAL = 50_000_000  # 50 MB across all JUnit files
 _MAX_JUNIT_FILES = 200  # hard cap on JUnit XMLs downloaded per build
+# Cap fetch attempts (including 404/empty/error) so a large listing of missing
+# junit names cannot force thousands of GCS HTTP requests.
+_MAX_JUNIT_FETCH_ATTEMPTS = 250
 _MAX_SIZE_PR_DIFF = 5_000_000  # 5 MB — GitHub PR unified diff
 _MAX_SIZE_PR_METADATA = 1_000_000  # 1 MB — GitHub PR JSON metadata
 _JS_MAX_SAFE_INTEGER = 9007199254740991  # 2^53 - 1
@@ -999,21 +1002,30 @@ class ProwSource(CISource):
         client: httpx.AsyncClient,
         gcs_prefix: str,
         warnings: list[str],
+        *,
+        objects: list[dict] | None = None,
     ) -> tuple[list[dict], Path | None]:
-        """List and download non-JUnit artifacts when enabled."""
+        """List (unless ``objects`` given) and download non-JUnit artifacts.
+
+        ``objects`` may be a pre-listed GCS object set from ``fetch`` so
+        fetch/refetch/chat share one download path without a second listing.
+        """
         if not self.get_job_artifacts:
             return [], None
         artifacts_prefix = f"{gcs_prefix}/artifacts/"
-        try:
-            all_objects = await _list_gcs_objects(
-                client,
-                self.gcs_bucket,
-                artifacts_prefix,
-                warnings=warnings,
-            )
-        except GCSAccessError as exc:
-            warnings.append(str(exc))
-            return [], None
+        if objects is None:
+            try:
+                all_objects = await _list_gcs_objects(
+                    client,
+                    self.gcs_bucket,
+                    artifacts_prefix,
+                    warnings=warnings,
+                )
+            except GCSAccessError as exc:
+                warnings.append(str(exc))
+                return [], None
+        else:
+            all_objects = objects
         non_junit = [obj for obj in all_objects if not _is_junit(obj)]
         extract_path: Path | None = None
         if non_junit:
@@ -1443,6 +1455,7 @@ class ProwSource(CISource):
                     workers, timeout=_PR_FETCH_TIMEOUT_SECONDS
                 )
             except Exception:
+                logger.warning("PR fetch asyncio.wait failed", exc_info=True)
                 done = set()
                 pending = set(workers)
 
@@ -1645,11 +1658,20 @@ class ProwSource(CISource):
         all_failures: list[FailedTest] = []
         junit_bytes_total = 0
         junit_fetched = 0
+        junit_attempts = 0
         for junit_path in junit_files:
             if junit_fetched >= _MAX_JUNIT_FILES:
                 msg = (
                     f"JUnit download stopped after {_MAX_JUNIT_FILES} files "
                     f"({len(junit_files) - junit_fetched} remaining skipped)"
+                )
+                logger.warning(msg)
+                access_warnings.append(msg)
+                break
+            if junit_attempts >= _MAX_JUNIT_FETCH_ATTEMPTS:
+                msg = (
+                    f"JUnit download stopped after {_MAX_JUNIT_FETCH_ATTEMPTS} "
+                    f"attempts ({len(junit_files) - junit_attempts} remaining skipped)"
                 )
                 logger.warning(msg)
                 access_warnings.append(msg)
@@ -1663,6 +1685,7 @@ class ProwSource(CISource):
                 access_warnings.append(msg)
                 break
 
+            junit_attempts += 1
             junit_url = _gcs_url(self.gcs_bucket, junit_path)
             try:
                 xml_content = await _fetch_gcs_text(
@@ -1682,10 +1705,12 @@ class ProwSource(CISource):
                 all_failures.extend(failures)
 
         logger.info(
-            "Extracted %d test failure(s) from %d JUnit file(s) (%d fetched, %d bytes)",
+            "Extracted %d test failure(s) from %d JUnit file(s) "
+            "(%d fetched, %d attempts, %d bytes)",
             len(all_failures),
             len(junit_files),
             junit_fetched,
+            junit_attempts,
             junit_bytes_total,
         )
 
@@ -1696,17 +1721,15 @@ class ProwSource(CISource):
         artifacts_context = ""
         if self.get_job_artifacts and non_junit_objects:
             try:
-                extract_path = await _download_gcs_artifacts(
+                _, extract_path = await self._download_non_junit_artifacts(
                     client,
-                    self.gcs_bucket,
-                    non_junit_objects,
-                    artifacts_prefix,
-                    warnings=access_warnings,
+                    gcs_prefix,
+                    access_warnings,
+                    objects=non_junit_objects,
                 )
                 if extract_path:
                     # Stable workspace-relative path (symlink target is extract_path).
                     artifacts_context = "Artifacts are available under build-artifacts/"
-                    self._extract_path = extract_path
                     logger.info("Build artifacts available at %s", extract_path)
             except Exception as exc:
                 logger.warning("Failed to download Prow artifacts: %s", exc)
