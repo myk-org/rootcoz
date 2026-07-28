@@ -695,24 +695,6 @@ def _build_internal_server_url() -> str:
     return url
 
 
-def build_jenkins_url(base_url: str, job_name: str, build_number: int) -> str:
-    """Construct full Jenkins build URL from job name and build number.
-
-    Args:
-        base_url: Base Jenkins URL from settings.
-        job_name: Job name (can include folders like "folder/job-name").
-        build_number: Build number.
-
-    Returns:
-        Full Jenkins build URL.
-    """
-    # Handle folder-style job names by URL-encoding each segment and joining with '/job/'
-    segments = job_name.split("/")
-    encoded_segments = [_urlquote(segment, safe="") for segment in segments]
-    job_path = "/job/".join(encoded_segments)
-    return f"{base_url.rstrip('/')}/job/{job_path}/{build_number}/"
-
-
 _CONTROL_CHAR_RE = re.compile(r"[\x00-\x1f\x7f]")
 
 
@@ -2838,7 +2820,7 @@ async def _resolve_settings_json_before_analysis(
 
     if not effective.ai_provider or not effective.ai_model:
         if not clone_ok:
-            # Retry after full workspace clone in analyze_job.
+            # Retry after full workspace clone in CI source analysis.
             return effective, False
         await _fail_job(
             _ai_not_configured_message(None, "AI provider/model", is_admin=is_admin)
@@ -3103,17 +3085,8 @@ async def _enqueue_ci_source_analysis(
     effective_tags = tags if tags is not None else (body.tags or None)
     initial_result["tags"] = _ensure_submitter_tag(effective_tags, username)
     initial_status = source_cls.initial_status(body, merged)
-    # Prefer a known build URL for Jenkins waiting jobs (dashboard links).
-    initial_build_url = ""
-    if (
-        analysis_type == "jenkins"
-        and merged.jenkins_url
-        and body.job_name
-        and body.build_number
-    ):
-        initial_build_url = build_jenkins_url(
-            merged.jenkins_url, body.job_name, body.build_number
-        )
+    # Prefer a known build URL at enqueue time (e.g. Jenkins waiting jobs).
+    initial_build_url = source_cls.pre_enqueue_build_url(body, merged)
     await save_result(job_id, initial_build_url, initial_status, initial_result)
     notify_active_count_changed()
     notify_dashboard_changed()
@@ -3410,7 +3383,7 @@ async def _process_ci_source_analysis(
             notify_active_count_changed()
             notify_dashboard_changed()
             notify_job_status_changed(job_id)
-            await safe_update_progress(job_id, "waiting_for_jenkins")
+            await safe_update_progress(job_id, source.pre_fetch_phase())
             notify_job_status_changed(job_id)
 
             pre_fetch_error = await source.pre_fetch(job_id)
@@ -3640,41 +3613,21 @@ async def _process_ci_source_analysis(
 
         # Handle child jobs (Jenkins pipeline sub-jobs)
         child_job_analyses: list[ChildJobAnalysis] = []
-        if source_result.child_job_infos:
-            from rootcoz.sources.jenkins_source import (
-                _normalize_child_results,
-                analyze_child_job,
-            )
-
+        if source_result.child_job_infos and source is not None:
             await safe_update_progress(job_id, "analyzing_child_jobs")
             notify_job_status_changed(job_id)
-            child_tasks = [
-                analyze_child_job(
-                    job_name=child_name,
-                    build_number=child_num,
-                    settings=merged,
-                    depth=0,
-                    max_depth=3,
-                    repo_path=repo_path,
-                    ai_provider=ai_provider,
-                    ai_model=ai_model,
-                    ai_call_timeout=merged.ai_call_timeout,
-                    custom_prompt=custom_prompt,
-                    server_url=server_url,
-                    job_id=job_id,
-                    peer_ai_configs=peer_ai_configs,
-                    peer_analysis_max_rounds=merged.peer_analysis_max_rounds,
-                    additional_repos=cloned_repos or None,
-                    max_concurrent_ai_calls=merged.max_concurrent_ai_calls,
-                    auth_header=auth_header,
-                )
-                for child_name, child_num in source_result.child_job_infos
-            ]
-            child_results = await run_parallel_with_limit(
-                child_tasks, max_concurrency=merged.max_concurrent_ai_calls
-            )
-            child_job_analyses = _normalize_child_results(
-                source_result.child_job_infos, child_results
+            child_job_analyses = await source.analyze_children(
+                source_result,
+                settings=merged,
+                repo_path=repo_path,
+                ai_provider=ai_provider,
+                ai_model=ai_model,
+                custom_prompt=custom_prompt,
+                server_url=server_url,
+                job_id=job_id,
+                peer_ai_configs=peer_ai_configs,
+                cloned_repos=cloned_repos,
+                auth_header=auth_header,
             )
 
             # Pipeline/orchestrator: failed children, no direct test failures

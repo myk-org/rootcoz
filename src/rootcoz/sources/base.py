@@ -271,6 +271,54 @@ class CISource(ABC):
         _ = job_id
         return None
 
+    def pre_fetch_phase(self) -> str:
+        """Progress phase name for the pre-fetch wait step."""
+        return "waiting_for_build"
+
+    async def analyze_children(
+        self,
+        source_result: CISourceResult,
+        *,
+        settings: Any = None,
+        repo_path: Path | None = None,
+        ai_provider: str = "",
+        ai_model: str = "",
+        custom_prompt: str = "",
+        server_url: str = "",
+        job_id: str = "",
+        peer_ai_configs: list | None = None,
+        cloned_repos: dict | None = None,
+        auth_header: str = "",
+    ) -> list:
+        """Analyze failed child jobs (e.g. Jenkins pipeline sub-jobs).
+
+        Default returns empty list. Jenkins overrides for recursive analysis.
+        """
+        _ = (
+            source_result,
+            settings,
+            repo_path,
+            ai_provider,
+            ai_model,
+            custom_prompt,
+            server_url,
+            job_id,
+            peer_ai_configs,
+            cloned_repos,
+            auth_header,
+        )
+        return []
+
+    @classmethod
+    def pre_enqueue_build_url(cls, body: Any, merged: Any) -> str:
+        """Compute a build URL to persist at enqueue time (before fetch).
+
+        Default returns empty string. Jenkins overrides to build the URL
+        from jenkins_url + job_name + build_number.
+        """
+        _ = body, merged
+        return ""
+
     async def persist_fetch_metadata(
         self, job_id: str, source_result: CISourceResult
     ) -> None:
@@ -346,7 +394,7 @@ async def setup_analysis_workspace(
 
     Shared helper that eliminates workspace-setup duplication across
     ``_process_ci_source_analysis``, ``_reanalyze_failure_background``,
-    and ``jenkins_source.analyze_job``.
+    and Jenkins child-job orchestration.
 
     Args:
         repo_manager: Pre-created ``RepositoryManager`` (caller owns lifecycle).

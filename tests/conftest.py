@@ -332,11 +332,6 @@ def _mock_sidecar_calls():
             return_value=(True, "mocked"),
         ),
         patch(
-            "rootcoz.sources.jenkins_source.check_sidecar_available",
-            new_callable=AsyncMock,
-            return_value=(True, "mocked"),
-        ),
-        patch(
             "pi_sidecar_client.check_sidecar_available",
             new_callable=AsyncMock,
             return_value=(True, "mocked"),
