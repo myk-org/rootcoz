@@ -5,6 +5,7 @@ import json as json_mod
 import sys
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Annotated, Any
 
 import typer
 import yaml
@@ -81,6 +82,169 @@ _JSON_OPTION = typer.Option(False, "--json", help="Output as JSON instead of tab
 # Config subcommands that require a server connection (all others are local-only).
 _SERVER_CONFIG_SUBCOMMANDS = frozenset({"defaults"})
 _TAG_OPTION = typer.Option([], "--tag", help="Tag for categorization (repeatable).")
+
+# ---------------------------------------------------------------------------
+# Shared analysis option types (used by analyze and future CI source backends)
+# ---------------------------------------------------------------------------
+_NameOpt = Annotated[
+    str,
+    typer.Option(
+        "--name",
+        "-n",
+        help="Display name for this analysis on the dashboard.",
+    ),
+]
+_ProviderOpt = Annotated[
+    str,
+    typer.Option(
+        "--provider",
+        help="AI provider (e.g. claude, gemini, cursor).",
+    ),
+]
+_ModelOpt = Annotated[str, typer.Option("--model", help="AI model to use.")]
+_JiraToggleOpt = Annotated[
+    bool | None,
+    typer.Option(
+        "--jira/--no-jira",
+        help="Enable/disable Jira integration.",
+    ),
+]
+_TestsRepoUrlOpt = Annotated[
+    str,
+    typer.Option(
+        "--tests-repo-url",
+        envvar="TESTS_REPO_URL",
+        help="Tests repository URL.",
+    ),
+]
+_TestsRepoTokenOpt = Annotated[
+    str,
+    typer.Option(
+        "--tests-repo-token",
+        envvar="TESTS_REPO_TOKEN",
+        help="Token for cloning private tests repository.",
+    ),
+]
+_JiraUrlOpt = Annotated[
+    str,
+    typer.Option(
+        "--jira-url",
+        envvar="JIRA_URL",
+        help="Jira instance URL.",
+    ),
+]
+_JiraEmailOpt = Annotated[
+    str,
+    typer.Option(
+        "--jira-email",
+        envvar="JIRA_EMAIL",
+        help="Jira Cloud email.",
+    ),
+]
+_JiraApiTokenOpt = Annotated[
+    str,
+    typer.Option(
+        "--jira-api-token",
+        envvar="JIRA_API_TOKEN",
+        help="Jira Cloud API token.",
+    ),
+]
+_JiraPatOpt = Annotated[
+    str,
+    typer.Option(
+        "--jira-pat",
+        envvar="JIRA_PAT",
+        help="Jira Server/DC personal access token.",
+    ),
+]
+_JiraProjectKeyOpt = Annotated[
+    str,
+    typer.Option(
+        "--jira-project-key",
+        envvar="JIRA_PROJECT_KEY",
+        help="Jira project key to scope searches.",
+    ),
+]
+_JiraSslVerifyOpt = Annotated[
+    bool | None,
+    typer.Option(
+        "--jira-ssl-verify/--no-jira-ssl-verify",
+        help="Jira SSL certificate verification.",
+    ),
+]
+_JiraMaxResultsOpt = Annotated[
+    int | None,
+    typer.Option(
+        "--jira-max-results",
+        help="Max Jira search results.",
+    ),
+]
+_GithubTokenOpt = Annotated[
+    str,
+    typer.Option(
+        "--github-token",
+        envvar="GITHUB_TOKEN",
+        help="GitHub API token.",
+    ),
+]
+_AiCallTimeoutOpt = Annotated[
+    int | None,
+    typer.Option(
+        "--ai-call-timeout",
+        help="AI timeout in minutes.",
+    ),
+]
+_RawPromptOpt = Annotated[
+    str,
+    typer.Option(
+        "--raw-prompt",
+        help="Raw prompt to append as additional AI instructions.",
+    ),
+]
+_IssuePromptOpt = Annotated[
+    str,
+    typer.Option(
+        "--issue-prompt",
+        help="Custom issue generation prompt (overrides .rootcoz/ROOTCOZ_ISSUE_PROMPT.md from test repo)",
+    ),
+]
+_PeersOpt = Annotated[
+    str,
+    typer.Option(
+        "--peers",
+        help='Peer AI configs as "provider:model,provider:model" '
+        '(e.g. "cursor:gpt-5.4-xhigh,gemini:gemini-2.5-pro").',
+    ),
+]
+_PeerMaxRoundsOpt = Annotated[
+    int | None,
+    typer.Option(
+        "--peer-analysis-max-rounds",
+        help="Maximum debate rounds (1-10, default: 3).",
+    ),
+]
+_AdditionalReposOpt = Annotated[
+    str,
+    typer.Option(
+        "--additional-repos",
+        help='Additional repos for AI context as "name:url,name:url" '
+        '(e.g. "infra:https://github.com/org/infra,product:https://github.com/org/product").',
+    ),
+]
+_ForceOpt = Annotated[
+    bool | None,
+    typer.Option(
+        "--force/--no-force",
+        help="Force analysis even if the build succeeded.",
+    ),
+]
+_MaxConcurrentOpt = Annotated[
+    int,
+    typer.Option(
+        "--max-concurrent",
+        help="Max concurrent AI calls (0 = no CLI override; config or server default will be used).",
+    ),
+]
 _LABEL_FILTER_OPTION = typer.Option(
     [], "--label", "-l", help="Filter by label (can repeat)."
 )
@@ -447,13 +611,22 @@ def results_list(
     json_output: bool = _JSON_OPTION,
 ):
     """List recent analyzed jobs."""
+
+    def _list(c):
+        data = c.list_results(limit=limit)
+        if isinstance(data, list):
+            for row in data:
+                if isinstance(row, dict) and not row.get("build_url"):
+                    row["build_url"] = row.get("jenkins_url") or ""
+        return data
+
     _run_client_command(
         json_output,
-        lambda c: c.list_results(limit=limit),
-        columns=["job_id", "status", "jenkins_url", "created_at"],
+        _list,
+        columns=["job_id", "status", "build_url", "created_at"],
         labels={
             "job_id": "JOB ID",
-            "jenkins_url": "JENKINS URL",
+            "build_url": "BUILD URL",
             "created_at": "CREATED",
         },
     )
@@ -791,286 +964,110 @@ def enrich_comments_cmd(
 # -- Analyze ------------------------------------------------------------------
 
 
-@app.command()
-def analyze(
-    source: str = typer.Option(
-        "jenkins",
-        "--source",
-        help="Analysis source: jenkins or file.",
-    ),
-    job_name: str = typer.Option(
-        "",
-        "--job-name",
-        "-j",
-        help="Jenkins job name (required when --source jenkins).",
-    ),
-    build_number: int = typer.Option(
-        0,
-        "--build-number",
-        "-b",
-        help="Build number to analyze (required when --source jenkins).",
-    ),
-    xml_file: str = typer.Option(
-        "",
-        "--file",
-        "-f",
-        help="Path to JUnit XML file (required when --source file).",
-    ),
-    name: str = typer.Option(
-        "",
-        "--name",
-        "-n",
-        help="Display name for this analysis on the dashboard (defaults to job_name).",
-    ),
-    provider: str = typer.Option(
-        "",
-        "--provider",
-        help=("AI provider (claude, gemini, or cursor)."),
-    ),
-    model: str = typer.Option("", "--model", help="AI model to use."),
-    jira: bool | None = typer.Option(
-        None, "--jira/--no-jira", help="Enable/disable Jira integration."
-    ),
-    jenkins_url: str = typer.Option(
-        "", "--jenkins-url", envvar="JENKINS_URL", help="Jenkins server URL."
-    ),
-    jenkins_user: str = typer.Option(
-        "", "--jenkins-user", envvar="JENKINS_USER", help="Jenkins username."
-    ),
-    jenkins_password: str = typer.Option(
-        "",
-        "--jenkins-password",
-        envvar="JENKINS_PASSWORD",
-        help="Jenkins password or API token.",
-    ),
-    jenkins_ssl_verify: bool | None = typer.Option(
-        None,
-        "--jenkins-ssl-verify/--no-jenkins-ssl-verify",
-        help="Jenkins SSL certificate verification.",
-    ),
-    jenkins_timeout: int | None = typer.Option(
-        None,
-        "--jenkins-timeout",
-        help="Jenkins API request timeout in seconds.",
-    ),
-    jenkins_artifacts_max_size_mb: int = typer.Option(
-        None,
-        "--jenkins-artifacts-max-size-mb",
-        help="Maximum Jenkins artifacts size in MB.",
-    ),
-    get_job_artifacts: bool | None = typer.Option(
-        None,
-        "--get-job-artifacts/--no-get-job-artifacts",
-        help="Download all build artifacts for AI context.",
-    ),
-    tests_repo_url: str = typer.Option(
-        "", "--tests-repo-url", envvar="TESTS_REPO_URL", help="Tests repository URL."
-    ),
-    tests_repo_token: str = typer.Option(
-        "",
-        "--tests-repo-token",
-        envvar="TESTS_REPO_TOKEN",
-        help="Token for cloning private tests repository.",
-    ),
-    jira_url: str = typer.Option(
-        "", "--jira-url", envvar="JIRA_URL", help="Jira instance URL."
-    ),
-    jira_email: str = typer.Option(
-        "", "--jira-email", envvar="JIRA_EMAIL", help="Jira Cloud email."
-    ),
-    jira_api_token: str = typer.Option(
-        "", "--jira-api-token", envvar="JIRA_API_TOKEN", help="Jira Cloud API token."
-    ),
-    jira_pat: str = typer.Option(
-        "",
-        "--jira-pat",
-        envvar="JIRA_PAT",
-        help="Jira Server/DC personal access token.",
-    ),
-    jira_project_key: str = typer.Option(
-        "",
-        "--jira-project-key",
-        envvar="JIRA_PROJECT_KEY",
-        help="Jira project key to scope searches.",
-    ),
-    jira_ssl_verify: bool | None = typer.Option(
-        None,
-        "--jira-ssl-verify/--no-jira-ssl-verify",
-        help="Jira SSL certificate verification.",
-    ),
-    jira_max_results: int = typer.Option(
-        None, "--jira-max-results", help="Max Jira search results."
-    ),
-    github_token: str = typer.Option(
-        "", "--github-token", envvar="GITHUB_TOKEN", help="GitHub API token."
-    ),
-    ai_call_timeout: int = typer.Option(
-        None, "--ai-call-timeout", help="AI timeout in minutes."
-    ),
-    raw_prompt: str = typer.Option(
-        "", "--raw-prompt", help="Raw prompt to append as additional AI instructions."
-    ),
-    issue_prompt: str = typer.Option(
-        "",
-        "--issue-prompt",
-        help="Custom issue generation prompt (overrides .rootcoz/ROOTCOZ_ISSUE_PROMPT.md from test repo)",
-    ),
-    peers: str = typer.Option(
-        "",
-        "--peers",
-        help='Peer AI configs as "provider:model,provider:model" (e.g. "cursor:gpt-5.4-xhigh,gemini:gemini-2.5-pro").',
-    ),
-    peer_analysis_max_rounds: int | None = typer.Option(
-        None,
-        "--peer-analysis-max-rounds",
-        help="Maximum debate rounds (1-10, default: 3).",
-    ),
-    additional_repos: str = typer.Option(
-        "",
-        "--additional-repos",
-        help='Additional repos for AI context as "name:url,name:url" (e.g. "infra:https://github.com/org/infra,product:https://github.com/org/product").',
-    ),
-    wait_for_completion: bool | None = typer.Option(
-        None,
-        "--wait/--no-wait",
-        help="Wait for Jenkins job to complete before analyzing.",
-    ),
-    poll_interval: int = typer.Option(
-        None, "--poll-interval", help="Minutes between Jenkins polls."
-    ),
-    max_wait: int = typer.Option(
-        None, "--max-wait", help="Maximum minutes to wait for completion."
-    ),
-    force: bool | None = typer.Option(
-        None,
-        "--force/--no-force",
-        help="Force analysis even if the build succeeded.",
-    ),
-    max_concurrent: int = typer.Option(
-        0,
-        "--max-concurrent",
-        help="Max concurrent AI calls (0 = no CLI override; config or server default will be used).",
-    ),
-    tags: list[str] = _TAG_OPTION,
-    json_output: bool = _JSON_OPTION,
-):
-    """Submit an analysis job (Jenkins or JUnit XML file)."""
-    _set_json(json_output)
+def _apply_common_config_defaults(
+    cfg: ServerConfig | None,
+    extras: dict[str, Any],
+    *,
+    include_jenkins: bool = False,
+) -> None:
+    """Apply config-file defaults to the extras dict (lowest priority).
 
-    if source not in ("jenkins", "file"):
-        typer.echo("Error: --source must be 'jenkins' or 'file'.", err=True)
-        raise typer.Exit(1)
+    String, integer, and boolean config fields for AI, Jira, tests repo, and
+    GitHub are merged.  When *include_jenkins* is True, Jenkins-specific fields
+    (URL, user, password, SSL, timeout, poll, wait) are also included.
+    """
+    if not cfg:
+        return
 
-    if source == "jenkins":
-        if not job_name:
-            typer.echo("Error: --job-name is required when --source jenkins.", err=True)
-            raise typer.Exit(1)
-        if build_number <= 0:
-            typer.echo(
-                "Error: --build-number is required when --source jenkins.", err=True
-            )
-            raise typer.Exit(1)
-    elif source == "file":
-        if not xml_file:
-            typer.echo("Error: --file is required when --source file.", err=True)
-            raise typer.Exit(1)
-        xml_path = Path(xml_file)
-        if not xml_path.exists() or not xml_path.is_file():
-            typer.echo(f"Error: file not found: {xml_file}", err=True)
-            raise typer.Exit(1)
-
-    _positive_int_fields: dict[str, int | None] = {}
-    if source == "jenkins":
-        _positive_int_fields["--build-number"] = build_number
-    _positive_int_fields.update(
-        {
-            "--poll-interval": poll_interval,
-            "--jira-max-results": jira_max_results,
-            "--ai-call-timeout": ai_call_timeout,
-            "--jenkins-artifacts-max-size-mb": jenkins_artifacts_max_size_mb,
-            "--jenkins-timeout": jenkins_timeout,
-        }
-    )
-    for flag_name, flag_value in _positive_int_fields.items():
-        if flag_value is not None and flag_value <= 0:
-            typer.echo(f"Error: {flag_name} must be greater than 0.", err=True)
-            raise typer.Exit(1)
-    if max_wait is not None and max_wait < 0:
-        typer.echo("Error: --max-wait must be non-negative.", err=True)
-        raise typer.Exit(1)
-    if max_concurrent < 0:
-        typer.echo("Error: --max-concurrent must be non-negative.", err=True)
-        raise typer.Exit(1)
-
-    # Start from config defaults (lowest priority), then overlay CLI flags.
-    extras: dict = {}
-    cfg = _state.get("server_config")
-    if cfg:
-        # String fields from config -- only set if non-empty.
-        _cfg_str_fields = {
-            "jenkins_url": cfg.jenkins_url,
-            "jenkins_user": cfg.jenkins_user,
-            "jenkins_password": cfg.jenkins_password,
-            "tests_repo_url": cfg.tests_repo_url,
-            "tests_repo_token": cfg.tests_repo_token,
-            "jira_url": cfg.jira_url,
-            "jira_email": cfg.jira_email,
-            "jira_api_token": cfg.jira_api_token,
-            "jira_pat": cfg.jira_pat,
-            "jira_project_key": cfg.jira_project_key,
-            "github_token": cfg.github_token,
-            "ai_provider": cfg.ai_provider,
-            "ai_model": cfg.ai_model,
-        }
-        for key, value in _cfg_str_fields.items():
-            if value:
-                extras[key] = value
-
-        # Integer fields from config -- only forward values that differ from
-        # the dataclass default (0 = "use server default" for all these fields).
-        _cfg_int_fields = {
-            "ai_call_timeout": cfg.ai_call_timeout,
-            "max_concurrent_ai_calls": cfg.max_concurrent_ai_calls,
-            "jira_max_results": cfg.jira_max_results,
-            "jenkins_timeout": cfg.jenkins_timeout,
-            "poll_interval_minutes": cfg.poll_interval_minutes,
-            "max_wait_minutes": cfg.max_wait_minutes,
-        }
-        _cfg_int_defaults = {
-            "ai_call_timeout": ServerConfig.ai_call_timeout,
-            "max_concurrent_ai_calls": ServerConfig.max_concurrent_ai_calls,
-            "jira_max_results": ServerConfig.jira_max_results,
-            "jenkins_timeout": ServerConfig.jenkins_timeout,
-            "poll_interval_minutes": ServerConfig.poll_interval_minutes,
-            "max_wait_minutes": ServerConfig.max_wait_minutes,
-        }
-        for key, value in _cfg_int_fields.items():
-            if value == _cfg_int_defaults[key]:
-                continue
-            if key == "max_wait_minutes":
-                if value < 0:
-                    typer.echo(f"Error: config {key} must be non-negative.", err=True)
-                    raise typer.Exit(1)
-            elif value <= 0:
-                typer.echo(f"Error: config {key} must be greater than 0.", err=True)
-                raise typer.Exit(1)
+    # String fields from config — only set if non-empty
+    _cfg_str_fields: dict[str, str] = {
+        "tests_repo_url": cfg.tests_repo_url,
+        "tests_repo_token": cfg.tests_repo_token,
+        "jira_url": cfg.jira_url,
+        "jira_email": cfg.jira_email,
+        "jira_api_token": cfg.jira_api_token,
+        "jira_pat": cfg.jira_pat,
+        "jira_project_key": cfg.jira_project_key,
+        "github_token": cfg.github_token,
+        "ai_provider": cfg.ai_provider,
+        "ai_model": cfg.ai_model,
+    }
+    if include_jenkins:
+        _cfg_str_fields.update(
+            {
+                "jenkins_url": cfg.jenkins_url,
+                "jenkins_user": cfg.jenkins_user,
+                "jenkins_password": cfg.jenkins_password,
+            }
+        )
+    for key, value in _cfg_str_fields.items():
+        if value:
             extras[key] = value
 
-        # Boolean fields from config -- forward when they differ from the
-        # dataclass default so that explicit ``enable_jira = false`` in the
-        # config is not silently dropped.
-        if cfg.enable_jira is not None:
-            extras["enable_jira"] = cfg.enable_jira
+    # Integer fields — only forward non-default values
+    _cfg_int_fields: dict[str, int] = {
+        "ai_call_timeout": cfg.ai_call_timeout,
+        "max_concurrent_ai_calls": cfg.max_concurrent_ai_calls,
+        "jira_max_results": cfg.jira_max_results,
+    }
+    _cfg_int_defaults: dict[str, int] = {
+        "ai_call_timeout": ServerConfig.ai_call_timeout,
+        "max_concurrent_ai_calls": ServerConfig.max_concurrent_ai_calls,
+        "jira_max_results": ServerConfig.jira_max_results,
+    }
+    if include_jenkins:
+        _cfg_int_fields.update(
+            {
+                "jenkins_timeout": cfg.jenkins_timeout,
+                "poll_interval_minutes": cfg.poll_interval_minutes,
+                "max_wait_minutes": cfg.max_wait_minutes,
+            }
+        )
+        _cfg_int_defaults.update(
+            {
+                "jenkins_timeout": ServerConfig.jenkins_timeout,
+                "poll_interval_minutes": ServerConfig.poll_interval_minutes,
+                "max_wait_minutes": ServerConfig.max_wait_minutes,
+            }
+        )
+    for int_key, int_value in _cfg_int_fields.items():
+        if int_value == _cfg_int_defaults[int_key]:
+            continue
+        if int_key == "max_wait_minutes":
+            if int_value < 0:
+                typer.echo(f"Error: config {int_key} must be non-negative.", err=True)
+                raise typer.Exit(1)
+        elif int_value <= 0:
+            typer.echo(f"Error: config {int_key} must be greater than 0.", err=True)
+            raise typer.Exit(1)
+        extras[int_key] = int_value
+
+    # Boolean fields — forward when they differ from the dataclass default
+    if cfg.enable_jira is not None:
+        extras["enable_jira"] = cfg.enable_jira
+    if cfg.jira_ssl_verify is not None:
+        extras["jira_ssl_verify"] = cfg.jira_ssl_verify
+    if cfg.force is not None:
+        extras["force"] = cfg.force
+    if include_jenkins:
         if cfg.jenkins_ssl_verify is not None:
             extras["jenkins_ssl_verify"] = cfg.jenkins_ssl_verify
-        if cfg.jira_ssl_verify is not None:
-            extras["jira_ssl_verify"] = cfg.jira_ssl_verify
         if cfg.wait_for_completion is not None:
             extras["wait_for_completion"] = cfg.wait_for_completion
-        if cfg.force is not None:
-            extras["force"] = cfg.force
 
-    # CLI flags override config (highest priority).
+
+def _apply_common_cli_overrides(
+    extras: dict[str, Any],
+    *,
+    provider: str,
+    model: str,
+    jira: bool | None,
+    str_fields: dict[str, str],
+    int_fields: dict[str, int | None],
+    bool_fields: dict[str, bool | None],
+    max_concurrent: int,
+) -> None:
+    """Apply CLI flag overrides (highest priority) to the extras dict."""
     if provider:
         extras["ai_provider"] = provider
     if model:
@@ -1078,56 +1075,31 @@ def analyze(
     if jira is not None:
         extras["enable_jira"] = jira
 
-    # String options: include only if non-empty.
-    _str_fields = {
-        "jenkins_url": jenkins_url,
-        "jenkins_user": jenkins_user,
-        "jenkins_password": jenkins_password,
-        "tests_repo_url": tests_repo_url,
-        "tests_repo_token": tests_repo_token,
-        "jira_url": jira_url,
-        "jira_email": jira_email,
-        "jira_api_token": jira_api_token,
-        "jira_pat": jira_pat,
-        "jira_project_key": jira_project_key,
-        "github_token": github_token,
-        "raw_prompt": raw_prompt,
-        "issue_prompt": issue_prompt,
-    }
-    for key, value in _str_fields.items():
-        if value:
-            extras[key] = value
+    for str_key, str_value in str_fields.items():
+        if str_value:
+            extras[str_key] = str_value
 
-    # Integer options: include only if provided.
-    _int_fields = {
-        "jira_max_results": jira_max_results,
-        "ai_call_timeout": ai_call_timeout,
-        "jenkins_artifacts_max_size_mb": jenkins_artifacts_max_size_mb,
-        "jenkins_timeout": jenkins_timeout,
-        "poll_interval_minutes": poll_interval,
-        "max_wait_minutes": max_wait,
-    }
-    for key, value in _int_fields.items():
-        if value is not None:
-            extras[key] = value
+    for int_key, int_value in int_fields.items():
+        if int_value is not None:
+            extras[int_key] = int_value
 
-    # max_concurrent: 0 means "not set" (use server default).
+    for bool_key, bool_value in bool_fields.items():
+        if bool_value is not None:
+            extras[bool_key] = bool_value
+
     if max_concurrent > 0:
         extras["max_concurrent_ai_calls"] = max_concurrent
 
-    # Boolean options: include only if explicitly set (not None).
-    _bool_fields = {
-        "jenkins_ssl_verify": jenkins_ssl_verify,
-        "jira_ssl_verify": jira_ssl_verify,
-        "get_job_artifacts": get_job_artifacts,
-        "wait_for_completion": wait_for_completion,
-        "force": force,
-    }
-    for key, value in _bool_fields.items():
-        if value is not None:
-            extras[key] = value
 
-    # Peer analysis: CLI flag overrides config, parse into list of dicts.
+def _apply_peer_and_repos(
+    extras: dict[str, Any],
+    *,
+    peers: str,
+    peer_analysis_max_rounds: int | None,
+    additional_repos: str,
+    cfg: ServerConfig | None,
+) -> None:
+    """Parse peer AI configs and additional repos into the extras dict."""
     peers_raw = (peers.strip() if peers else "") or (cfg.peers if cfg else "")
     if peers_raw and peers_raw.strip():
         try:
@@ -1151,7 +1123,6 @@ def analyze(
             raise typer.Exit(1) from None
         extras["peer_analysis_max_rounds"] = cfg.peer_analysis_max_rounds
 
-    # Additional repos: CLI flag overrides config, parse into list of dicts.
     additional_repos_raw = (additional_repos.strip() if additional_repos else "") or (
         cfg.additional_repos if cfg else ""
     )
@@ -1162,10 +1133,266 @@ def analyze(
             typer.echo(f"Error: {exc}", err=True)
             raise typer.Exit(code=1) from None
 
-    if source == "jenkins" and tags:
+
+def _emit_queued_output(data: dict) -> None:
+    """Print queued-job output — JSON or human-readable."""
+    if _state.get("json", False):
+        print_output(data, columns=[], as_json=True)
+    else:
+        _echo_queued_job(data)
+
+
+@app.command()
+def analyze(
+    source: str = typer.Option(
+        "jenkins",
+        "--source",
+        help="Analysis source: jenkins, file, or prow.",
+    ),
+    job_name: str = typer.Option(
+        "",
+        "--job-name",
+        "-j",
+        help="Job name (required when --source jenkins or prow).",
+    ),
+    build_number: str = typer.Option(
+        "",
+        "--build-number",
+        "-b",
+        help=(
+            "Build number (Jenkins) or Prow build ID as numeric string "
+            "(required for jenkins and prow sources)."
+        ),
+    ),
+    xml_file: str = typer.Option(
+        "",
+        "--file",
+        "-f",
+        help="Path to JUnit XML file (required when --source file).",
+    ),
+    prow_url: str = typer.Option(
+        "",
+        "--prow-url",
+        envvar="PROW_URL",
+        help="Prow Deck URL (overrides server PROW_URL default).",
+    ),
+    gcs_bucket: str = typer.Option(
+        "",
+        "--gcs-bucket",
+        envvar="GCS_BUCKET",
+        help="GCS bucket for Prow artifacts (overrides server GCS_BUCKET default).",
+    ),
+    gcs_prefix: str = typer.Option(
+        "",
+        "--gcs-prefix",
+        help=(
+            "GCS object prefix; must end with /{job_name}/{build_id} "
+            "(e.g. pr-logs/pull/org_repo/123/my-job/456). "
+            "Leave empty for auto-resolution."
+        ),
+    ),
+    name: _NameOpt = "",
+    provider: _ProviderOpt = "",
+    model: _ModelOpt = "",
+    jira: _JiraToggleOpt = None,
+    jenkins_url: str = typer.Option(
+        "", "--jenkins-url", envvar="JENKINS_URL", help="Jenkins server URL."
+    ),
+    jenkins_user: str = typer.Option(
+        "", "--jenkins-user", envvar="JENKINS_USER", help="Jenkins username."
+    ),
+    jenkins_password: str = typer.Option(
+        "",
+        "--jenkins-password",
+        envvar="JENKINS_PASSWORD",
+        help="Jenkins password or API token.",
+    ),
+    jenkins_ssl_verify: bool | None = typer.Option(
+        None,
+        "--jenkins-ssl-verify/--no-jenkins-ssl-verify",
+        help="Jenkins SSL certificate verification.",
+    ),
+    jenkins_timeout: int | None = typer.Option(
+        None,
+        "--jenkins-timeout",
+        help="Jenkins API request timeout in seconds.",
+    ),
+    jenkins_artifacts_max_size_mb: int | None = typer.Option(
+        None,
+        "--jenkins-artifacts-max-size-mb",
+        help="Maximum Jenkins artifacts size in MB.",
+    ),
+    get_job_artifacts: bool | None = typer.Option(
+        None,
+        "--get-job-artifacts/--no-get-job-artifacts",
+        help="Download all build artifacts for AI context.",
+    ),
+    tests_repo_url: _TestsRepoUrlOpt = "",
+    tests_repo_token: _TestsRepoTokenOpt = "",
+    jira_url: _JiraUrlOpt = "",
+    jira_email: _JiraEmailOpt = "",
+    jira_api_token: _JiraApiTokenOpt = "",
+    jira_pat: _JiraPatOpt = "",
+    jira_project_key: _JiraProjectKeyOpt = "",
+    jira_ssl_verify: _JiraSslVerifyOpt = None,
+    jira_max_results: _JiraMaxResultsOpt = None,
+    github_token: _GithubTokenOpt = "",
+    ai_call_timeout: _AiCallTimeoutOpt = None,
+    raw_prompt: _RawPromptOpt = "",
+    issue_prompt: _IssuePromptOpt = "",
+    peers: _PeersOpt = "",
+    peer_analysis_max_rounds: _PeerMaxRoundsOpt = None,
+    additional_repos: _AdditionalReposOpt = "",
+    wait_for_completion: bool | None = typer.Option(
+        None,
+        "--wait/--no-wait",
+        help="Wait for Jenkins job to complete before analyzing.",
+    ),
+    poll_interval: int = typer.Option(
+        None, "--poll-interval", help="Minutes between Jenkins polls."
+    ),
+    max_wait: int = typer.Option(
+        None, "--max-wait", help="Maximum minutes to wait for completion."
+    ),
+    force: _ForceOpt = None,
+    max_concurrent: _MaxConcurrentOpt = 0,
+    tags: list[str] = _TAG_OPTION,
+    json_output: bool = _JSON_OPTION,
+):
+    """Submit an analysis job (Jenkins, JUnit XML file, or Prow CI)."""
+    _set_json(json_output)
+
+    if source not in ("jenkins", "file", "prow"):
+        typer.echo("Error: --source must be 'jenkins', 'file', or 'prow'.", err=True)
+        raise typer.Exit(1)
+
+    if source in ("jenkins", "prow"):
+        if not job_name:
+            typer.echo(
+                f"Error: --job-name is required when --source {source}.", err=True
+            )
+            raise typer.Exit(1)
+        if not build_number:
+            typer.echo(
+                f"Error: --build-number is required when --source {source}.", err=True
+            )
+            raise typer.Exit(1)
+
+        if source == "prow":
+            from rootcoz.prow_validation import (
+                validate_prow_build_id,
+                validate_prow_job_name,
+            )
+
+            try:
+                job_name = validate_prow_job_name(job_name)
+            except ValueError as exc:
+                typer.echo(f"Error: invalid Prow job name: {exc}", err=True)
+                raise typer.Exit(1) from None
+            try:
+                build_number = validate_prow_build_id(build_number)
+            except ValueError as exc:
+                typer.echo(f"Error: invalid Prow build ID: {exc}", err=True)
+                raise typer.Exit(1) from None
+    elif source == "file":
+        if not xml_file:
+            typer.echo("Error: --file is required when --source file.", err=True)
+            raise typer.Exit(1)
+        xml_path = Path(xml_file)
+        if not xml_path.exists() or not xml_path.is_file():
+            typer.echo(f"Error: file not found: {xml_file}", err=True)
+            raise typer.Exit(1)
+
+    _positive_int_fields: dict[str, int | None] = {
+        "--jira-max-results": jira_max_results,
+        "--ai-call-timeout": ai_call_timeout,
+    }
+    jenkins_build_number = 0
+    if source == "jenkins":
+        try:
+            jenkins_build_number = int(build_number)
+        except ValueError:
+            typer.echo(
+                "Error: --build-number must be a positive integer for Jenkins.",
+                err=True,
+            )
+            raise typer.Exit(1) from None
+        if jenkins_build_number <= 0:
+            typer.echo("Error: --build-number must be greater than 0.", err=True)
+            raise typer.Exit(1)
+        _positive_int_fields["--poll-interval"] = poll_interval
+        _positive_int_fields["--jenkins-artifacts-max-size-mb"] = (
+            jenkins_artifacts_max_size_mb
+        )
+        _positive_int_fields["--jenkins-timeout"] = jenkins_timeout
+    for flag_name, flag_value in _positive_int_fields.items():
+        if flag_value is not None and flag_value <= 0:
+            typer.echo(f"Error: {flag_name} must be greater than 0.", err=True)
+            raise typer.Exit(1)
+    if source == "jenkins" and max_wait is not None and max_wait < 0:
+        typer.echo("Error: --max-wait must be non-negative.", err=True)
+        raise typer.Exit(1)
+    if max_concurrent < 0:
+        typer.echo("Error: --max-concurrent must be non-negative.", err=True)
+        raise typer.Exit(1)
+
+    # Start from config defaults (lowest priority), then overlay CLI flags.
+    extras: dict[str, Any] = {}
+    cfg = _state.get("server_config")
+    _apply_common_config_defaults(cfg, extras, include_jenkins=(source == "jenkins"))
+
+    # CLI flags override config (highest priority).
+    _apply_common_cli_overrides(
+        extras,
+        provider=provider,
+        model=model,
+        jira=jira,
+        str_fields={
+            "jenkins_url": jenkins_url,
+            "jenkins_user": jenkins_user,
+            "jenkins_password": jenkins_password,
+            "tests_repo_url": tests_repo_url,
+            "tests_repo_token": tests_repo_token,
+            "jira_url": jira_url,
+            "jira_email": jira_email,
+            "jira_api_token": jira_api_token,
+            "jira_pat": jira_pat,
+            "jira_project_key": jira_project_key,
+            "github_token": github_token,
+            "raw_prompt": raw_prompt,
+            "issue_prompt": issue_prompt,
+        },
+        int_fields={
+            "jira_max_results": jira_max_results,
+            "ai_call_timeout": ai_call_timeout,
+            "jenkins_artifacts_max_size_mb": jenkins_artifacts_max_size_mb,
+            "jenkins_timeout": jenkins_timeout,
+            "poll_interval_minutes": poll_interval,
+            "max_wait_minutes": max_wait,
+        },
+        bool_fields={
+            "jenkins_ssl_verify": jenkins_ssl_verify,
+            "jira_ssl_verify": jira_ssl_verify,
+            "get_job_artifacts": get_job_artifacts,
+            "wait_for_completion": wait_for_completion,
+            "force": force,
+        },
+        max_concurrent=max_concurrent,
+    )
+
+    _apply_peer_and_repos(
+        extras,
+        peers=peers,
+        peer_analysis_max_rounds=peer_analysis_max_rounds,
+        additional_repos=additional_repos,
+        cfg=cfg,
+    )
+
+    if tags:
         extras["tags"] = tags
 
-    if source == "file":
+    # Strip Jenkins-specific fields for non-Jenkins sources
+    if source in ("file", "prow"):
         for key in (
             "jenkins_url",
             "jenkins_user",
@@ -1173,34 +1400,48 @@ def analyze(
             "jenkins_ssl_verify",
             "jenkins_timeout",
             "jenkins_artifacts_max_size_mb",
-            "get_job_artifacts",
             "wait_for_completion",
             "poll_interval_minutes",
             "max_wait_minutes",
-            "force",
         ):
+            extras.pop(key, None)
+    if source == "file":
+        extras.pop("force", None)
+        extras.pop("get_job_artifacts", None)
+    # Strip Prow-specific fields for non-Prow sources
+    if source != "prow":
+        for key in ("prow_url", "gcs_bucket", "gcs_prefix"):
             extras.pop(key, None)
 
     try:
         client = _get_client()
+        data: dict
         if source == "jenkins":
-            data = client.analyze(job_name, build_number, name=name, **extras)
+            data = client.analyze(job_name, jenkins_build_number, name=name, **extras)
+        elif source == "prow":
+            extras["prow_job_name"] = job_name
+            extras["build_id"] = build_number
+            # Apply config defaults for prow-specific fields (CLI flag overrides config)
+            effective_prow_url = prow_url or (cfg.prow_url if cfg else "")
+            effective_gcs_bucket = gcs_bucket or (cfg.gcs_bucket if cfg else "")
+            if effective_prow_url:
+                extras["prow_url"] = effective_prow_url
+            if effective_gcs_bucket:
+                extras["gcs_bucket"] = effective_gcs_bucket
+            if gcs_prefix:
+                extras["gcs_prefix"] = gcs_prefix
+            data = client.analyze(name=name, type="prow", **extras)
         else:
             try:
                 raw_xml = Path(xml_file).read_text(encoding="utf-8")
             except (OSError, UnicodeDecodeError) as exc:
                 typer.echo(f"Error: cannot read XML file '{xml_file}': {exc}", err=True)
                 raise typer.Exit(1) from None
-            data = client.analyze_file(raw_xml, name=name, tags=tags or None, **extras)
+            data = client.analyze_file(raw_xml, name=name, **extras)
     except RootCozError as err:
         _handle_error(err)
 
-    if _state.get("json", False):
-        print_output(data, columns=[], as_json=True)
-    else:
-        typer.echo(f"Job queued: {data.get('job_id', '')}")
-        typer.echo(f"Status: {data.get('status', '')}")
-        typer.echo(f"Poll: {data.get('result_url', '')}")
+    _emit_queued_output(data)
 
 
 def _echo_queued_job(data: dict, prefix: str = "Job") -> None:
@@ -1977,7 +2218,7 @@ def preview_issue(
     issue_prompt: str = typer.Option(
         "",
         "--issue-prompt",
-        help="Additional AI instructions for issue generation.",
+        help="Custom issue generation prompt (overrides .rootcoz/ROOTCOZ_ISSUE_PROMPT.md from test repo)",
     ),
     json_output: bool = _JSON_OPTION,
 ):

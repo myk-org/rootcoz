@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
 import { useSSE } from '@/lib/SSEProvider'
 import { api, ApiError } from '@/lib/api'
-import { formatTimestamp, isAnalysisTimeout, INVALID_DATE_FALLBACK } from '@/lib/utils'
+import { formatTimestamp, isAnalysisTimeout, INVALID_DATE_FALLBACK, ciSourceLabel, resolveBuildUrl, resolveBuildDisplayId } from '@/lib/utils'
 import type { ResultResponse } from '@/types'
 import { Card, CardContent } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
@@ -48,7 +48,7 @@ function getPhaseLabel(phase: string | undefined): string | undefined {
 
 const statusMessages: Record<string, { title: string; subtitle: string }> = {
   waiting: {
-    title: 'Waiting for Jenkins job',
+    title: 'Waiting for CI job',
     subtitle: 'Monitoring build until it completes...',
   },
   pending: {
@@ -253,6 +253,8 @@ export function StatusPage() {
   const isViewer = role === 'viewer'
   const submitter = data?.result?.request_params?.submitted_by ?? ''
   const canAbort = isAdmin || (!!username && username === submitter)
+  const buildUrl = resolveBuildUrl(data?.result) ?? resolveBuildUrl(data)
+  const buildDisplayId = resolveBuildDisplayId(data?.result)
 
   return (
     <>
@@ -264,13 +266,13 @@ export function StatusPage() {
               <h1 className="font-display text-lg font-bold text-text-primary truncate">
                 {data.result.job_name || jobId}
               </h1>
-              {data.result.build_number > 0 && (
-                data.jenkins_url ? (
-                  <a href={String(data.jenkins_url)} target="_blank" rel="noopener noreferrer" className="font-mono text-sm text-text-link hover:underline">
-                    #{data.result.build_number}
+              {buildDisplayId && (
+                buildUrl ? (
+                  <a href={buildUrl} target="_blank" rel="noopener noreferrer" className="font-mono text-sm text-text-link hover:underline">
+                    #{buildDisplayId}
                   </a>
                 ) : (
-                  <span className="font-mono text-sm text-text-tertiary">#{data.result.build_number}</span>
+                  <span className="font-mono text-sm text-text-tertiary">#{buildDisplayId}</span>
                 )
               )}
               <StatusChip status={displayStatus} />
@@ -291,14 +293,14 @@ export function StatusPage() {
                     Re-Analyze
                   </Button>
                 )}
-                {data.jenkins_url && (
+                {buildUrl && (
                   <a
-                    href={String(data.jenkins_url)}
+                    href={buildUrl}
                     target="_blank"
                     rel="noopener noreferrer"
                     className="flex items-center gap-1 text-xs text-text-link hover:underline"
                   >
-                    Jenkins <ExternalLink className="h-3 w-3" />
+                    {ciSourceLabel(data.result?.request_params)} <ExternalLink className="h-3 w-3" />
                   </a>
                 )}
               </div>
@@ -428,16 +430,16 @@ export function StatusPage() {
               {data?.result?.job_name && (
                 <Row label="JOB" value={data.result.job_name} mono />
               )}
-              {data?.result?.build_number != null && (
+              {buildDisplayId && (
                 <Row
                   label="BUILD"
                   value={
-                    data?.jenkins_url ? (
-                      <a href={String(data.jenkins_url)} target="_blank" rel="noopener noreferrer" className="text-text-link hover:underline font-mono">
-                        #{data.result.build_number}
+                    buildUrl ? (
+                      <a href={buildUrl} target="_blank" rel="noopener noreferrer" className="text-text-link hover:underline font-mono">
+                        #{buildDisplayId}
                       </a>
                     ) : (
-                      `#${data.result.build_number}`
+                      `#${buildDisplayId}`
                     )
                   }
                   mono
@@ -476,6 +478,19 @@ export function StatusPage() {
                 />
               )}
             </div>
+
+            {data?.result?.source_warnings && data.result.source_warnings.length > 0 && (
+              <div className="w-full rounded-lg border border-border-default bg-bg-secondary p-4 text-left">
+                <h3 className="text-xs font-display uppercase tracking-widest text-signal-orange mb-2">
+                  Source Warnings
+                </h3>
+                <ul className="list-disc pl-4 space-y-1 text-sm text-text-secondary">
+                  {data.result.source_warnings.map((warning, i) => (
+                    <li key={`sw-${i}`}>{warning}</li>
+                  ))}
+                </ul>
+              </div>
+            )}
 
             {/* Origin job reference for re-analyses */}
             {data?.reanalyzed_from_job_id && (

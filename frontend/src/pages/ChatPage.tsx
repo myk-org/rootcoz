@@ -6,9 +6,13 @@ import { ChatUI } from '@/components/shared/ChatUI'
 import { ArrowLeft, Loader2 } from 'lucide-react'
 import { normalizeProvider } from '@/lib/aiProviders'
 
+import { resolveBuildDisplayId } from '@/lib/utils'
+
 interface JobInfo {
   job_name: string
-  build_number: number
+  build_number?: number | string
+  build_id?: string
+  request_params?: Record<string, unknown>
   summary: string
   ai_provider: string
   ai_model: string
@@ -55,6 +59,7 @@ export function ChatPage() {
   if (!jobId) return null
 
   const { provider, model } = analysisAiDefaults(jobInfo)
+  const buildDisplayId = resolveBuildDisplayId(jobInfo ?? undefined)
 
   const header = (
     <div className="flex items-center gap-3">
@@ -67,7 +72,7 @@ export function ChatPage() {
       <div>
         <h1 className="text-sm font-display font-medium text-text-primary">
           Chat: {jobInfo?.job_name || jobId}
-          {jobInfo?.build_number ? ` #${jobInfo.build_number}` : ''}
+          {buildDisplayId ? ` #${buildDisplayId}` : ''}
         </h1>
         <p className="text-xs text-text-tertiary truncate max-w-lg">{jobInfo?.summary}</p>
       </div>

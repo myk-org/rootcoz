@@ -139,3 +139,54 @@ class TestParseJenkinsUrl:
         job_name, build_number = JenkinsClient.parse_jenkins_url(url)
         assert job_name == "my-job"
         assert build_number == 10
+
+
+class TestJenkinsSourceFromStoredParams:
+    """Tests for JenkinsSource.from_stored_params build_number validation."""
+
+    def _settings(self):
+        from types import SimpleNamespace
+
+        return SimpleNamespace(jenkins_url="https://jenkins.example.com")
+
+    def test_valid_int(self) -> None:
+        from rootcoz.sources.jenkins_source import JenkinsSource
+
+        source = JenkinsSource.from_stored_params(
+            {"job_name": "my-job", "build_number": 42},
+            self._settings(),
+        )
+        assert source is not None
+        assert source.build_number == 42
+
+    def test_valid_numeric_string(self) -> None:
+        from rootcoz.sources.jenkins_source import JenkinsSource
+
+        source = JenkinsSource.from_stored_params(
+            {"job_name": "my-job", "build_number": "99"},
+            self._settings(),
+        )
+        assert source is not None
+        assert source.build_number == 99
+
+    def test_rejects_bool(self) -> None:
+        from rootcoz.sources.jenkins_source import JenkinsSource
+
+        assert (
+            JenkinsSource.from_stored_params(
+                {"job_name": "my-job", "build_number": True},
+                self._settings(),
+            )
+            is None
+        )
+
+    def test_rejects_non_numeric_string(self) -> None:
+        from rootcoz.sources.jenkins_source import JenkinsSource
+
+        assert (
+            JenkinsSource.from_stored_params(
+                {"job_name": "my-job", "build_number": "not-a-number"},
+                self._settings(),
+            )
+            is None
+        )

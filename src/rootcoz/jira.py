@@ -440,8 +440,8 @@ async def enrich_with_jira_matches(
     )
 
     total_matches = 0
-    async with JiraClient(settings) as client:
-        try:
+    try:
+        async with JiraClient(settings) as client:
             # Search Jira for each unique keyword set in parallel
             async def _search_safe(keywords: list[str]) -> list[dict]:
                 try:
@@ -498,6 +498,5 @@ async def enrich_with_jira_matches(
             logger.info(
                 "Jira search complete: %d relevant match(es) found", total_matches
             )
-
-        except Exception:
-            logger.exception("Jira enrichment failed unexpectedly")
+    except Exception:
+        logger.exception("Jira enrichment failed unexpectedly")

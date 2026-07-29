@@ -1,6 +1,6 @@
 # RootCoz
 
-AI-powered Jenkins failure analysis -- classifies test failures as code issues or product bugs.
+AI-powered CI failure analysis -- classifies test failures as code issues or product bugs. Supports Jenkins, Prow, and JUnit XML input.
 
 **[Documentation](https://myk-org.github.io/rootcoz/)** -- configuration, API reference, integrations, and more.
 
@@ -16,10 +16,14 @@ docker run -d -p 8000:8000 -v ./data:/data \
   -e JENKINS_URL=https://jenkins.example.com \
   -e JENKINS_USER=your-username \
   -e JENKINS_PASSWORD=your-api-token \
+  -e PROW_URL=https://prow.example.com \
+  -e GCS_BUCKET=your-gcs-bucket \
   -e AI_PROVIDER=claude \
   -e AI_MODEL=your-model-name \
   ghcr.io/myk-org/rootcoz:latest
 ```
+
+For Prow-only deployments, set `PROW_URL` and `GCS_BUCKET` instead of (or in addition to) Jenkins credentials. Both can also be configured per-request or via Server Settings.
 
 ### Analysis Tuning
 
@@ -41,9 +45,28 @@ curl -X POST http://localhost:8000/analyze \
   -d '{"type": "jenkins", "job_name": "my-job", "build_number": 42, "max_concurrent_ai_calls": 2}'
 ```
 
+Prow analysis (requires a GCS bucket with public HTTPS read access for build artifacts):
+
+```bash
+curl -X POST http://localhost:8000/analyze \
+  -H "Content-Type: application/json" \
+  -d '{"type": "prow", "prow_job_name": "periodic-ci-e2e-aws", "build_id": "1234567890", "prow_url": "https://prow.ci.openshift.org", "gcs_bucket": "test-platform-results", "gcs_prefix": "logs/periodic-ci-e2e-aws/1234567890"}'
+```
+
+Jobs can omit `gcs_prefix`; RootCoz auto-resolves it via prowjob.json or the Prow directory pointer (supports presubmit, postsubmit, and periodic jobs).
+
+| Field | Env var | API / CLI | Config file |
+|-------|---------|-----------|-------------|
+| `prow_url` | `PROW_URL` | `--prow-url` | `prow_url` |
+| `gcs_bucket` | `GCS_BUCKET` | `--gcs-bucket` | `gcs_bucket` |
+| `gcs_prefix` | — | `--gcs-prefix` / payload | — |
+| `prow_job_name` | — | `--job-name` (prow) | — |
+| `build_id` | — | `--build-number` (prow) | — |
+
 ## Features
 
 - **AI-Powered Failure Analysis** — Classifies test failures as code issues or product bugs
+- **Multi-CI Support** — Analyzes builds from Jenkins, Prow (GCS artifacts), or raw JUnit XML input with a unified pipeline
 - **AI Token Usage Tracking** — Track token consumption, costs, and duration for all AI CLI calls. Admin dashboard shows usage by provider/model/time period with CSV export.
 - **Public OpenAPI** — `/openapi.json`, `/docs`, and `/redoc` are available without authentication
 - **Sparse result fields** — `GET /results/{job_id}?fields=status,result.summary,...` returns only allowlisted paths (full values). Discover paths via `GET /api/results/fields` or `rootcoz results fields`
@@ -57,6 +80,12 @@ export ROOTCOZ_SERVER=http://localhost:8000
 
 rootcoz health
 rootcoz analyze --job-name my-job --build-number 42
+rootcoz analyze --source prow \
+  --job-name periodic-ci-e2e-aws \
+  --build-number 1234567890 \
+  --prow-url https://prow.ci.openshift.org \
+  --gcs-bucket test-platform-results \
+  --gcs-prefix logs/periodic-ci-e2e-aws/1234567890
 rootcoz results list
 rootcoz admin token-usage              # Summary dashboard
 rootcoz admin token-usage --group-by model  # Grouped breakdown

@@ -16,7 +16,6 @@ from rootcoz.encryption import encrypt_sensitive_fields
 from rootcoz.models import (
     AiConfigEntry,
     AnalysisDetail,
-    AnalysisResult,
     FailureAnalysis,
 )
 from rootcoz.sources.jenkins_source import JenkinsError
@@ -106,6 +105,48 @@ def _enable_feature(prop_name: str):
             get_settings.cache_clear()
 
 
+def _build_jenkins_request_params(
+    body,
+    merged,
+    ai_provider: str,
+    ai_model: str,
+    peer_ai_configs_resolved: list | None = None,
+) -> dict:
+    """Build encrypted Jenkins request_params (mirrors former main helper)."""
+    from rootcoz.config import parse_repo_ref
+    from rootcoz.encryption import encrypt_sensitive_fields
+    from rootcoz.main import (
+        _apply_base_analysis_overrides,
+        _build_base_request_params,
+    )
+    from rootcoz.engine.core import resolve_additional_repos
+    from rootcoz.request_resolution import resolve_tests_repo_token
+    from rootcoz.rootcoz_repo_settings import resolve_tests_repo_url
+    from rootcoz.sources.jenkins_source import JenkinsSource
+
+    resolved_tests_repo = resolve_tests_repo_url(body, merged)
+    resolved_tests_repo, tests_repo_ref = parse_repo_ref(resolved_tests_repo)
+    resolved_tests_repo_token = (
+        resolve_tests_repo_token(body, merged) if resolved_tests_repo else ""
+    )
+    resolved_additional = resolve_additional_repos(body, merged)
+    params = _build_base_request_params(
+        ai_provider,
+        ai_model,
+        peer_ai_configs_resolved,
+        tests_repo_url=resolved_tests_repo,
+        tests_repo_token=resolved_tests_repo_token,
+        tests_repo_ref=tests_repo_ref,
+        additional_repos=resolved_additional,
+    )
+    _apply_base_analysis_overrides(params, body, merged)
+    JenkinsSource.build_request_params(body, merged, params)
+    params["analysis_type"] = "jenkins"
+    params["raw_prompt"] = getattr(body, "raw_prompt", None) or ""
+    params["issue_prompt"] = getattr(body, "issue_prompt", None) or ""
+    return encrypt_sensitive_fields(params)
+
+
 def _build_wait_settings(**overrides) -> Settings:
     """Build a Settings instance with common waiting-test defaults.
 
@@ -192,7 +233,7 @@ class TestAnalyzeEndpoint:
 
     def test_analyze_async_returns_queued(self, test_client) -> None:
         """Test that async analyze returns queued status."""
-        with patch("rootcoz.main.process_analysis_with_id"):
+        with patch("rootcoz.main._process_ci_source_analysis"):
             response = test_client.post(
                 "/analyze",
                 json={
@@ -278,7 +319,7 @@ class TestAnalyzeEndpoint:
         The status page needs AI provider/model and peer configs from
         request_params regardless of whether the job is resumable.
         """
-        with patch("rootcoz.main.process_analysis_with_id"):
+        with patch("rootcoz.main._process_ci_source_analysis"):
             response = test_client.post(
                 "/analyze",
                 json={
@@ -330,7 +371,7 @@ class TestBaseUrlDetection:
 
                 with (
                     TestClient(app, headers=_ADMIN_AUTH_HEADERS) as client,
-                    patch("rootcoz.main.process_analysis_with_id"),
+                    patch("rootcoz.main._process_ci_source_analysis"),
                 ):
                     response = client.post(
                         "/analyze",
@@ -366,7 +407,7 @@ class TestBaseUrlDetection:
 
                 with (
                     TestClient(app, headers=_ADMIN_AUTH_HEADERS) as client,
-                    patch("rootcoz.main.process_analysis_with_id"),
+                    patch("rootcoz.main._process_ci_source_analysis"),
                 ):
                     response = client.post(
                         "/analyze",
@@ -381,7 +422,7 @@ class TestBaseUrlDetection:
 
     def test_base_url_empty_without_public_base_url(self, test_client) -> None:
         """Without PUBLIC_BASE_URL, base_url is empty (relative paths)."""
-        with patch("rootcoz.main.process_analysis_with_id"):
+        with patch("rootcoz.main._process_ci_source_analysis"):
             response = test_client.post(
                 "/analyze",
                 json=self._analyze_body(),
@@ -398,7 +439,7 @@ class TestBaseUrlDetection:
 
     def test_base_url_ignores_forwarded_headers(self, test_client) -> None:
         """Request headers are not trusted for building public URLs."""
-        with patch("rootcoz.main.process_analysis_with_id"):
+        with patch("rootcoz.main._process_ci_source_analysis"):
             response = test_client.post(
                 "/analyze",
                 json=self._analyze_body(),
@@ -418,13 +459,13 @@ class TestBaseUrlDetection:
 def _post_analyze_queued(test_client, payload: dict) -> tuple[dict, AsyncMock]:
     """Post to /analyze, assert 202/queued, and return (response_data, mock).
 
-    Patches ``_process_file_raw_analysis`` with an ``AsyncMock``, sends the
+    Patches ``_process_ci_source_analysis`` with an ``AsyncMock``, sends the
     *payload* to ``POST /analyze``, asserts the response is 202 with
     ``status == "queued"``, and returns the parsed JSON **and** the mock so
     callers can inspect call args when needed.
     """
     with patch(
-        "rootcoz.main._process_file_raw_analysis", new_callable=AsyncMock
+        "rootcoz.main._process_ci_source_analysis", new_callable=AsyncMock
     ) as mock_process:
         response = test_client.post("/analyze", json=payload)
         assert response.status_code == 202
@@ -511,7 +552,7 @@ class TestAnalyzeFailuresEndpoint:
     def test_analyze_failures_handles_analysis_exception(self, test_client) -> None:
         """Test that when background task raises, job is still queued (202)."""
         with patch(
-            "rootcoz.main._process_file_raw_analysis",
+            "rootcoz.main._process_ci_source_analysis",
             new_callable=AsyncMock,
         ) as mock_process:
             mock_process.side_effect = RuntimeError("boom")
@@ -700,6 +741,348 @@ class TestAnalyzeFailuresRawXml:
                 "ai_model": "test-model",
             },
         )
+
+
+class TestProwIdentityStamping:
+    """Tests for ProwSource identity helpers."""
+
+    def test_valid_job_and_build(self):
+        from rootcoz.sources.prow_source import ProwSource
+
+        result = ProwSource.identity_fields("my-prow-job", "42")
+        assert result == {
+            "job_name": "my-prow-job",
+            "build_id": "42",
+            "build_number": 42,
+        }
+
+    def test_oversized_build_id_omits_build_number(self):
+        """Build IDs exceeding JS MAX_SAFE_INTEGER must not set build_number."""
+        from rootcoz.sources.prow_source import ProwSource
+
+        result = ProwSource.identity_fields("my-prow-job", "1234567890123456789")
+        assert result == {
+            "job_name": "my-prow-job",
+            "build_id": "1234567890123456789",
+        }
+        assert "build_number" not in result
+
+    def test_non_numeric_build_id_excluded(self):
+        from rootcoz.sources.prow_source import ProwSource
+
+        result = ProwSource.identity_fields("my-prow-job", "abc-not-numeric")
+        assert result == {
+            "job_name": "my-prow-job",
+            "build_id": "abc-not-numeric",
+        }
+        assert "build_number" not in result
+
+    def test_empty_build_id_excluded(self):
+        from rootcoz.sources.prow_source import ProwSource
+
+        result = ProwSource.identity_fields("my-prow-job", "")
+        assert result == {"job_name": "my-prow-job"}
+
+    def test_empty_job_name_excluded(self):
+        from rootcoz.sources.prow_source import ProwSource
+
+        result = ProwSource.identity_fields("", "123")
+        assert "job_name" not in result
+
+    def test_pre_persist_identity_matches_identity_fields(self):
+        from rootcoz.sources.prow_source import ProwSource
+
+        assert ProwSource.pre_persist_identity(
+            "job", "42"
+        ) == ProwSource.identity_fields("job", "42")
+
+    def test_identity_dict_delegates_to_shared(self):
+        """ProwSource._identity_dict() uses the same shared helper."""
+        from rootcoz.sources.prow_source import ProwSource
+
+        source = ProwSource(
+            job_name="my-prow-job",
+            build_id="42",
+            gcs_bucket="test-bucket",
+            prow_url="https://prow.example.com",
+        )
+        identity = source._identity_dict()
+        assert identity["job_name"] == "my-prow-job"
+        assert identity["build_number"] == 42
+
+
+class TestAnalyzeProwEndpoint:
+    """Tests for the unified POST /analyze endpoint with type=prow."""
+
+    def test_prow_success(self, test_client) -> None:
+        """Test that valid prow request returns 202 (queued)."""
+        data, _mock = _post_analyze_queued(
+            test_client,
+            {
+                "type": "prow",
+                "prow_job_name": "periodic-ci-e2e-aws",
+                "build_id": "1234567890",
+                "prow_url": "https://prow.ci.openshift.org",
+                "gcs_bucket": "test-platform-results",
+                "ai_provider": "claude",
+                "ai_model": "test-model",
+            },
+        )
+        assert "job_id" in data
+        assert data["result_url"].startswith("/results/")
+
+    def test_prow_missing_prow_url(self, test_client) -> None:
+        """Test that missing prow_url returns 422 when no server default."""
+        response = test_client.post(
+            "/analyze",
+            json={
+                "type": "prow",
+                "prow_job_name": "my-job",
+                "build_id": "1",
+                "gcs_bucket": "some-bucket",
+                "ai_provider": "claude",
+                "ai_model": "test-model",
+            },
+        )
+        assert response.status_code == 422
+        assert "prow_url" in response.json()["detail"]
+
+    def test_prow_missing_gcs_bucket(self, test_client) -> None:
+        """Test that missing gcs_bucket returns 422 when no server default."""
+        response = test_client.post(
+            "/analyze",
+            json={
+                "type": "prow",
+                "prow_job_name": "my-job",
+                "build_id": "1",
+                "prow_url": "https://prow.ci.openshift.org",
+                "ai_provider": "claude",
+                "ai_model": "test-model",
+            },
+        )
+        assert response.status_code == 422
+        assert "gcs_bucket" in response.json()["detail"]
+
+    def test_prow_with_custom_url_and_bucket(self, test_client) -> None:
+        """Test that prow_url and gcs_bucket are accepted."""
+        data, _mock = _post_analyze_queued(
+            test_client,
+            {
+                "type": "prow",
+                "prow_job_name": "my-job",
+                "build_id": "42",
+                "prow_url": "https://prow.custom.org",
+                "gcs_bucket": "custom-bucket",
+                "ai_provider": "claude",
+                "ai_model": "test-model",
+            },
+        )
+        assert "job_id" in data
+
+    def test_prow_missing_job_name(self, test_client) -> None:
+        """Test that missing prow_job_name returns 422."""
+        response = test_client.post(
+            "/analyze",
+            json={
+                "type": "prow",
+                "build_id": "123",
+                "ai_provider": "claude",
+                "ai_model": "test-model",
+            },
+        )
+        assert response.status_code == 422
+
+    def test_prow_missing_build_id(self, test_client) -> None:
+        """Test that missing build_id returns 422."""
+        response = test_client.post(
+            "/analyze",
+            json={
+                "type": "prow",
+                "prow_job_name": "my-job",
+                "ai_provider": "claude",
+                "ai_model": "test-model",
+            },
+        )
+        assert response.status_code == 422
+
+    def test_prow_invalid_build_id(self, test_client) -> None:
+        """Test that non-numeric build_id returns 422."""
+        response = test_client.post(
+            "/analyze",
+            json={
+                "type": "prow",
+                "prow_job_name": "my-job",
+                "build_id": "not-a-number",
+                "ai_provider": "claude",
+                "ai_model": "test-model",
+            },
+        )
+        assert response.status_code == 422
+
+    async def test_prow_gcs_errors_produce_failed_not_completed(
+        self, temp_db_path: Path
+    ) -> None:
+        """When all GCS fetches error, the result must be 'failed', not 'completed'."""
+        from rootcoz.main import _process_ci_source_analysis
+        from rootcoz.models import UnifiedAnalyzeRequest
+        from rootcoz.sources.base import CISourceResult
+
+        body = UnifiedAnalyzeRequest(
+            type="prow",
+            prow_job_name="my-prow-job",
+            build_id="99",
+            prow_url="https://prow.example.com",
+            gcs_bucket="test-bucket",
+            ai_provider="claude",
+            ai_model="test-model",
+        )
+        merged = Settings(
+            prow_url="https://prow.example.com",
+            gcs_bucket="test-bucket",
+        )
+        job_id = "prow-gcs-error-test"
+
+        gcs_error_result = CISourceResult(
+            failures=[],
+            console_context="",
+            build_passed=False,
+            build_url="https://prow.example.com/view/gs/test-bucket/logs/my-prow-job/99",
+            warnings=[
+                "GCS junit-listing returned 403: https://storage.googleapis.com/storage/v1/b/test-bucket/o"
+            ],
+        )
+
+        with (
+            patch.object(storage, "DB_PATH", temp_db_path),
+            patch(
+                "rootcoz.sources.prow_source.ProwSource.fetch",
+                new_callable=AsyncMock,
+                return_value=gcs_error_result,
+            ),
+            _patch_preflight(),
+        ):
+            await storage.init_db()
+            await storage.save_result(job_id, "", "pending", {})
+
+            await _process_ci_source_analysis(
+                job_id=job_id,
+                body=body,
+                merged=merged,
+                display_name="my-prow-job-99",
+                ai_provider="claude",
+                ai_model="test-model",
+                peer_ai_configs=None,
+                tests_repo_url="",
+                tests_repo_ref="",
+                resolved_tests_repo_token="",
+                additional_repos_list=[],
+                base_url="",
+            )
+
+            row = await storage.get_result(job_id)
+            assert row is not None
+            assert row["status"] == "failed"
+            import json
+
+            result = (
+                json.loads(row["result"])
+                if isinstance(row["result"], str)
+                else row["result"]
+            )
+            assert "Could not fetch test data" in result.get("summary", "")
+            assert result.get("source_warnings")
+
+    async def test_prow_build_passed_uses_prow_summary(
+        self, temp_db_path: Path
+    ) -> None:
+        """Successful Prow builds get a prow-specific early-exit summary."""
+        from rootcoz.main import _process_ci_source_analysis
+        from rootcoz.models import UnifiedAnalyzeRequest
+        from rootcoz.sources.base import CISourceResult
+
+        body = UnifiedAnalyzeRequest(
+            type="prow",
+            prow_job_name="my-prow-job",
+            build_id="99",
+            prow_url="https://prow.example.com",
+            gcs_bucket="test-bucket",
+            ai_provider="claude",
+            ai_model="test-model",
+        )
+        merged = Settings(
+            prow_url="https://prow.example.com",
+            gcs_bucket="test-bucket",
+        )
+        job_id = "prow-passed-test"
+
+        passed_result = CISourceResult(
+            failures=[],
+            build_passed=True,
+            build_url="https://prow.example.com/view/gs/test-bucket/logs/my-prow-job/99",
+            build_passed_summary=(
+                "Prow build passed; analysis skipped "
+                "(use force to analyze successful builds)."
+            ),
+            identity={
+                "job_name": "my-prow-job",
+                "build_id": "99",
+                "build_number": "99",
+            },
+            source_metadata={
+                "job_type": "periodic",
+                "resolved_gcs_prefix": "logs/my-prow-job/99",
+            },
+        )
+
+        with (
+            patch.object(storage, "DB_PATH", temp_db_path),
+            patch(
+                "rootcoz.sources.prow_source.ProwSource.fetch",
+                new_callable=AsyncMock,
+                return_value=passed_result,
+            ),
+            _patch_preflight(),
+        ):
+            await storage.init_db()
+            await storage.save_result(
+                job_id,
+                "",
+                "pending",
+                {
+                    "request_params": encrypt_sensitive_fields(
+                        {
+                            "analysis_type": "prow",
+                            "prow_job_name": "my-prow-job",
+                            "build_id": "99",
+                        }
+                    )
+                },
+            )
+
+            await _process_ci_source_analysis(
+                job_id=job_id,
+                body=body,
+                merged=merged,
+                display_name="my-prow-job-99",
+                ai_provider="claude",
+                ai_model="test-model",
+                peer_ai_configs=None,
+                tests_repo_url="",
+                tests_repo_ref="",
+                resolved_tests_repo_token="",
+                additional_repos_list=[],
+                base_url="",
+            )
+
+            row = await storage.get_result(job_id, strip_sensitive=False)
+            assert row is not None
+            assert row["status"] == "completed"
+            result = row["result"]
+            assert "Prow build passed" in result.get("summary", "")
+            assert result.get("build_id") == "99"
+            assert result.get("source_metadata", {}).get("job_type") == "periodic"
+            params = result["request_params"]
+            assert params["gcs_prefix"] == "logs/my-prow-job/99"
 
 
 class TestResultsEndpoints:
@@ -3382,15 +3765,17 @@ class TestWaitForJenkinsCompletion:
 
 
 class TestProcessAnalysisWaiting:
-    """Tests for the waiting logic in process_analysis_with_id."""
+    """Tests for Jenkins wait-for-completion via the shared CI source path."""
 
     @pytest.mark.asyncio
-    async def test_wait_for_completion_true_waits(self) -> None:
-        """When wait_for_completion=True, sets status to 'waiting' and polls."""
-        from rootcoz.main import process_analysis_with_id
-        from rootcoz.models import AnalyzeRequest
+    async def test_wait_for_completion_true_waits(self, temp_db_path: Path) -> None:
+        """When wait_for_completion=True, sets status to waiting and polls."""
+        from rootcoz.main import _process_ci_source_analysis
+        from rootcoz.models import UnifiedAnalyzeRequest
+        from rootcoz.sources.base import CISourceResult
 
-        body = AnalyzeRequest(
+        body = UnifiedAnalyzeRequest(
+            type="jenkins",
             job_name="my-job",
             build_number=1,
             wait_for_completion=True,
@@ -3413,204 +3798,114 @@ class TestProcessAnalysisWaiting:
         async def capture_status(job_id, status, result=None):
             statuses.append(status)
 
+        passed = CISourceResult(
+            failures=[],
+            build_passed=True,
+            build_url="https://jenkins.example.com/job/my-job/1/",
+            identity={"job_name": "my-job", "build_number": 1},
+        )
+
         with (
+            patch.object(storage, "DB_PATH", temp_db_path),
             patch(
-                "rootcoz.main.wait_for_jenkins_completion",
+                "rootcoz.sources.jenkins_source.wait_for_jenkins_completion",
                 new_callable=AsyncMock,
                 return_value=(True, ""),
             ) as mock_wait,
+            patch(
+                "rootcoz.sources.jenkins_source.JenkinsSource.fetch",
+                new_callable=AsyncMock,
+                return_value=passed,
+            ),
             patch("rootcoz.main.update_status", side_effect=capture_status),
-            patch(
-                "rootcoz.main.safe_update_progress",
-                new_callable=AsyncMock,
-            ),
-            patch("rootcoz.main.analyze_job", new_callable=AsyncMock) as mock_analyze,
-            patch("rootcoz.main._resolve_enable_jira", return_value=False),
-            patch(
-                "rootcoz.main.populate_failure_history",
-                new_callable=AsyncMock,
-            ),
-            patch(
-                "rootcoz.main.storage.make_classifications_visible",
-                new_callable=AsyncMock,
-            ),
-            patch(
-                "rootcoz.main._preserve_request_params",
-                new_callable=AsyncMock,
-            ),
+            patch("rootcoz.main.safe_update_progress", new_callable=AsyncMock),
             _patch_preflight(),
         ):
-            mock_analyze.return_value = AnalysisResult(
+            await storage.init_db()
+            await storage.save_result("test-id", "", "pending", {"job_name": "my-job"})
+            await _process_ci_source_analysis(
                 job_id="test-id",
-                status="completed",
-                summary="ok",
+                body=body,
+                merged=merged,
+                display_name="my-job",
+                ai_provider="claude",
+                ai_model="test-model",
+                peer_ai_configs=None,
+                tests_repo_url="",
+                tests_repo_ref="",
+                resolved_tests_repo_token="",
+                additional_repos_list=[],
+                base_url="",
             )
-            await process_analysis_with_id("test-id", body, merged)
             mock_wait.assert_called_once()
             assert "waiting" in statuses
-            assert "running" in statuses
+            assert "completed" in statuses
 
     @pytest.mark.asyncio
-    async def test_deferred_ai_resolves_before_jenkins_wait(self) -> None:
-        """Deferred AI is resolved from settings.json before Jenkins wait."""
-        import json
-        from pathlib import Path
+    async def test_wait_failure_marks_job_failed(self, temp_db_path: Path) -> None:
+        """When Jenkins wait fails, job is marked failed without fetching."""
+        from rootcoz.main import _process_ci_source_analysis
+        from rootcoz.models import UnifiedAnalyzeRequest
 
-        from rootcoz.main import process_analysis_with_id
-        from rootcoz.models import AnalyzeRequest
-        from rootcoz.repository import RepositoryManager
-
-        body = AnalyzeRequest(
+        body = UnifiedAnalyzeRequest(
+            type="jenkins",
             job_name="my-job",
             build_number=1,
             wait_for_completion=True,
-            tests_repo_url="https://github.com/org/tests",
+            ai_provider="claude",
+            ai_model="test-model",
         )
         merged = _build_wait_settings(
             jenkins_url="https://jenkins.example.com",
             jenkins_user="user",
             jenkins_password=FAKE_JENKINS_PASSWORD,
             wait_for_completion=True,
-            ai_provider="",
-            ai_model="",
         )
 
-        call_order: list[str] = []
-
-        async def track_wait(*_a, **_k):
-            call_order.append("wait")
-            return (True, "")
-
-        async def track_preflight(*_a, **_k):
-            call_order.append("preflight")
-            return True
-
-        def fake_clone_into(self, url, target, depth=1, branch="", token=None):
-            call_order.append("clone")
-            path = Path(target)
-            path.mkdir(parents=True, exist_ok=True)
-            rootcoz = path / ".rootcoz"
-            rootcoz.mkdir(parents=True)
-            (rootcoz / "settings.json").write_text(
-                json.dumps({"ai_provider": "claude", "ai_model": "opus"}),
-                encoding="utf-8",
-            )
-            return path
-
         with (
+            patch.object(storage, "DB_PATH", temp_db_path),
             patch(
-                "rootcoz.main.wait_for_jenkins_completion",
-                side_effect=track_wait,
-            ),
-            patch(
-                "rootcoz.main._preflight_sidecar_check",
-                side_effect=track_preflight,
-            ) as mock_preflight,
-            patch.object(RepositoryManager, "clone_into", fake_clone_into),
-            patch("rootcoz.main.update_status", new_callable=AsyncMock),
-            patch(
-                "rootcoz.main.safe_update_progress",
+                "rootcoz.sources.jenkins_source.wait_for_jenkins_completion",
                 new_callable=AsyncMock,
-            ),
-            patch("rootcoz.main.analyze_job", new_callable=AsyncMock) as mock_analyze,
-            patch("rootcoz.main._resolve_enable_jira", return_value=False),
-            patch(
-                "rootcoz.main.populate_failure_history",
-                new_callable=AsyncMock,
+                return_value=(False, "timed out"),
             ),
             patch(
-                "rootcoz.main.storage.make_classifications_visible",
+                "rootcoz.sources.jenkins_source.JenkinsSource.fetch",
                 new_callable=AsyncMock,
-            ),
-            patch(
-                "rootcoz.main._preserve_request_params",
-                new_callable=AsyncMock,
-            ),
+            ) as mock_fetch,
+            patch("rootcoz.main.safe_update_progress", new_callable=AsyncMock),
         ):
-            mock_analyze.return_value = AnalysisResult(
+            await storage.init_db()
+            await storage.save_result("test-id", "", "waiting", {"job_name": "my-job"})
+            await _process_ci_source_analysis(
                 job_id="test-id",
-                status="completed",
-                summary="ok",
+                body=body,
+                merged=merged,
+                display_name="my-job",
+                ai_provider="claude",
+                ai_model="test-model",
+                peer_ai_configs=None,
+                tests_repo_url="",
+                tests_repo_ref="",
+                resolved_tests_repo_token="",
+                additional_repos_list=[],
+                base_url="",
             )
-            await process_analysis_with_id("test-id", body, merged)
-
-        assert "clone" in call_order
-        assert "preflight" in call_order
-        assert "wait" in call_order
-        assert call_order.index("clone") < call_order.index("wait")
-        assert call_order.index("preflight") < call_order.index("wait")
-        assert mock_preflight.await_args.args[1] == "claude"
-        assert mock_preflight.await_args.args[2] == "opus"
+            mock_fetch.assert_not_called()
+            row = await storage.get_result("test-id")
+            assert row is not None
+            assert row["status"] == "failed"
+            assert "timed out" in (row["result"].get("error") or "")
 
     @pytest.mark.asyncio
-    async def test_deferred_ai_fails_fast_when_settings_json_missing_ai(
-        self,
-    ) -> None:
-        """Successful early clone with no AI in settings.json fails before wait."""
-        import json
-        from pathlib import Path
+    async def test_wait_skipped_when_disabled(self, temp_db_path: Path) -> None:
+        """When wait_for_completion=False, pre_fetch wait is not invoked."""
+        from rootcoz.main import _process_ci_source_analysis
+        from rootcoz.models import UnifiedAnalyzeRequest
+        from rootcoz.sources.base import CISourceResult
 
-        from rootcoz.main import process_analysis_with_id
-        from rootcoz.models import AnalyzeRequest
-        from rootcoz.repository import RepositoryManager
-
-        body = AnalyzeRequest(
-            job_name="my-job",
-            build_number=1,
-            wait_for_completion=True,
-            tests_repo_url="https://github.com/org/tests",
-        )
-        merged = _build_wait_settings(
-            jenkins_url="https://jenkins.example.com",
-            jenkins_user="user",
-            jenkins_password=FAKE_JENKINS_PASSWORD,
-            wait_for_completion=True,
-            ai_provider="",
-            ai_model="",
-        )
-
-        def fake_clone_into(self, url, target, depth=1, branch="", token=None):
-            path = Path(target)
-            path.mkdir(parents=True, exist_ok=True)
-            rootcoz = path / ".rootcoz"
-            rootcoz.mkdir(parents=True)
-            (rootcoz / "settings.json").write_text(
-                json.dumps({"ai_call_timeout": 15}),
-                encoding="utf-8",
-            )
-            return path
-
-        statuses: list[str] = []
-
-        async def capture_status(job_id, status, result=None):
-            statuses.append(status)
-
-        with (
-            patch(
-                "rootcoz.main.wait_for_jenkins_completion",
-                new_callable=AsyncMock,
-            ) as mock_wait,
-            patch.object(RepositoryManager, "clone_into", fake_clone_into),
-            patch("rootcoz.main.update_status", side_effect=capture_status),
-            patch(
-                "rootcoz.main._preserve_request_params",
-                new_callable=AsyncMock,
-            ),
-            patch("rootcoz.main.analyze_job", new_callable=AsyncMock) as mock_analyze,
-        ):
-            await process_analysis_with_id("test-id", body, merged)
-
-        mock_wait.assert_not_called()
-        mock_analyze.assert_not_called()
-        assert "failed" in statuses
-
-    @pytest.mark.asyncio
-    async def test_wait_for_completion_false_skips_waiting(self) -> None:
-        """When wait_for_completion=False, skip waiting entirely."""
-        from rootcoz.main import process_analysis_with_id
-        from rootcoz.models import AnalyzeRequest
-
-        body = AnalyzeRequest(
+        body = UnifiedAnalyzeRequest(
+            type="jenkins",
             job_name="my-job",
             build_number=1,
             wait_for_completion=False,
@@ -3621,180 +3916,49 @@ class TestProcessAnalysisWaiting:
             jenkins_url="https://jenkins.example.com",
             wait_for_completion=False,
         )
-
-        statuses: list[str] = []
-
-        async def capture_status(job_id, status, result=None):
-            statuses.append(status)
+        passed = CISourceResult(
+            failures=[],
+            build_passed=True,
+            build_url="https://jenkins.example.com/job/my-job/1/",
+        )
 
         with (
+            patch.object(storage, "DB_PATH", temp_db_path),
             patch(
-                "rootcoz.main.wait_for_jenkins_completion",
+                "rootcoz.sources.jenkins_source.wait_for_jenkins_completion",
                 new_callable=AsyncMock,
             ) as mock_wait,
-            patch("rootcoz.main.update_status", side_effect=capture_status),
             patch(
-                "rootcoz.main.safe_update_progress",
+                "rootcoz.sources.jenkins_source.JenkinsSource.fetch",
                 new_callable=AsyncMock,
-            ),
-            patch("rootcoz.main.analyze_job", new_callable=AsyncMock) as mock_analyze,
-            patch("rootcoz.main._resolve_enable_jira", return_value=False),
-            patch(
-                "rootcoz.main.populate_failure_history",
-                new_callable=AsyncMock,
-            ),
-            patch(
-                "rootcoz.main.storage.make_classifications_visible",
-                new_callable=AsyncMock,
-            ),
-            patch(
-                "rootcoz.main._preserve_request_params",
-                new_callable=AsyncMock,
+                return_value=passed,
             ),
             _patch_preflight(),
         ):
-            mock_analyze.return_value = AnalysisResult(
+            await storage.init_db()
+            await storage.save_result("test-id", "", "pending", {"job_name": "my-job"})
+            await _process_ci_source_analysis(
                 job_id="test-id",
-                status="completed",
-                summary="ok",
+                body=body,
+                merged=merged,
+                display_name="my-job",
+                ai_provider="claude",
+                ai_model="test-model",
+                peer_ai_configs=None,
+                tests_repo_url="",
+                tests_repo_ref="",
+                resolved_tests_repo_token="",
+                additional_repos_list=[],
+                base_url="",
             )
-            await process_analysis_with_id("test-id", body, merged)
             mock_wait.assert_not_called()
-            assert "waiting" not in statuses
-            assert "running" in statuses
-
-    @pytest.mark.asyncio
-    async def test_wait_timeout_marks_failed(self) -> None:
-        """When waiting times out, the job is marked as failed."""
-        from rootcoz.main import process_analysis_with_id
-        from rootcoz.models import AnalyzeRequest
-
-        body = AnalyzeRequest(
-            job_name="my-job",
-            build_number=1,
-            wait_for_completion=True,
-            max_wait_minutes=10,
-            ai_provider="claude",
-            ai_model="test-model",
-        )
-        merged = _build_wait_settings(
-            jenkins_url="https://jenkins.example.com",
-            jenkins_user="user",
-            jenkins_password=FAKE_JENKINS_PASSWORD,
-            wait_for_completion=True,
-            poll_interval_minutes=1,
-            max_wait_minutes=10,
-        )
-
-        stored: list[tuple[str, dict | None]] = []
-
-        async def capture_status(job_id, status, result=None):
-            stored.append((status, result))
-
-        with (
-            patch(
-                "rootcoz.main.wait_for_jenkins_completion",
-                new_callable=AsyncMock,
-                return_value=(
-                    False,
-                    "Timed out waiting for Jenkins job my-job #1 after 10 minutes",
-                ),
-            ),
-            patch("rootcoz.main.update_status", side_effect=capture_status),
-            patch(
-                "rootcoz.main.safe_update_progress",
-                new_callable=AsyncMock,
-            ),
-            patch("rootcoz.main.analyze_job", new_callable=AsyncMock) as mock_analyze,
-            patch(
-                "rootcoz.main._preserve_request_params",
-                new_callable=AsyncMock,
-            ) as mock_preserve,
-            _patch_preflight(),
-        ):
-            await process_analysis_with_id("test-id", body, merged)
-            mock_analyze.assert_not_called()
-            # _preserve_request_params should have been called with fail_data
-            mock_preserve.assert_called_once()
-            preserve_args = mock_preserve.call_args
-            assert preserve_args[0][0] == "test-id"
-            assert "error" in preserve_args[0][1]
-            # The last update should be a failed status with timeout error
-            last_status, last_result = stored[-1]
-            assert last_status == "failed"
-            assert last_result is not None
-            assert "Timed out" in last_result["error"]
-            assert "10 minutes" in last_result["error"]
-
-    @pytest.mark.asyncio
-    async def test_no_jenkins_url_skips_waiting(self) -> None:
-        """When jenkins_url is empty, skip waiting even if wait_for_completion=True."""
-        from rootcoz.main import process_analysis_with_id
-        from rootcoz.models import AnalyzeRequest
-
-        body = AnalyzeRequest(
-            job_name="my-job",
-            build_number=1,
-            wait_for_completion=True,
-            ai_provider="claude",
-            ai_model="test-model",
-        )
-        settings = _build_wait_settings(
-            jenkins_url="",
-            wait_for_completion=True,
-            poll_interval_minutes=1,
-            max_wait_minutes=5,
-        )
-
-        statuses: list[str] = []
-
-        async def capture_status(job_id, status, result=None):
-            statuses.append(status)
-
-        with (
-            patch(
-                "rootcoz.main.wait_for_jenkins_completion",
-                new_callable=AsyncMock,
-            ) as mock_wait,
-            patch("rootcoz.main.update_status", side_effect=capture_status),
-            patch(
-                "rootcoz.main.safe_update_progress",
-                new_callable=AsyncMock,
-            ),
-            patch("rootcoz.main.analyze_job", new_callable=AsyncMock) as mock_analyze,
-            patch("rootcoz.main._resolve_enable_jira", return_value=False),
-            patch(
-                "rootcoz.main.populate_failure_history",
-                new_callable=AsyncMock,
-            ),
-            patch(
-                "rootcoz.main.storage.make_classifications_visible",
-                new_callable=AsyncMock,
-            ),
-            patch(
-                "rootcoz.main._preserve_request_params",
-                new_callable=AsyncMock,
-            ),
-            _patch_preflight(),
-        ):
-            mock_analyze.return_value = AnalysisResult(
-                job_id="test-id",
-                status="completed",
-                summary="ok",
-            )
-            await process_analysis_with_id("test-id", body, settings)
-            mock_wait.assert_not_called()
-            assert "waiting" not in statuses
-            mock_analyze.assert_called_once()
-            assert "running" in statuses
 
 
 class TestBuildRequestParams:
-    """Tests for _build_request_params helper."""
+    """Tests for _build_jenkins_request_params helper."""
 
     def test_serializes_all_fields(self, mock_settings) -> None:
         """All expected fields are present in the returned dict."""
-        from rootcoz.main import _build_request_params
         from rootcoz.models import AnalyzeRequest
 
         body = AnalyzeRequest(
@@ -3804,7 +3968,7 @@ class TestBuildRequestParams:
             ai_model="gemini-pro",
         )
         settings = Settings()
-        params = _build_request_params(body, settings, "gemini", "gemini-pro")
+        params = _build_jenkins_request_params(body, settings, "gemini", "gemini-pro")
         assert params["ai_provider"] == "gemini"
         assert params["ai_model"] == "gemini-pro"
         assert "base_url" not in params
@@ -3819,7 +3983,6 @@ class TestBuildRequestParams:
         from pydantic import SecretStr
 
         from rootcoz.encryption import _ENCRYPTED_PREFIX, SENSITIVE_KEYS
-        from rootcoz.main import _build_request_params
         from rootcoz.models import AnalyzeRequest
 
         body = AnalyzeRequest(
@@ -3831,7 +3994,7 @@ class TestBuildRequestParams:
         merged_data = settings.model_dump(mode="python")
         merged_data["github_token"] = SecretStr(FAKE_GITHUB_TOKEN)
         merged = Settings.model_validate(merged_data)
-        params = _build_request_params(body, merged, "", "")
+        params = _build_jenkins_request_params(body, merged, "", "")
         # Sensitive fields must carry the encryption prefix
         for key in SENSITIVE_KEYS:
             if params.get(key):
@@ -3847,12 +4010,11 @@ class TestReconstructFromParams:
     def test_reconstructs_body_and_settings(self, mock_settings) -> None:
         """AnalyzeRequest and Settings are reconstructed from stored params.
 
-        Uses _build_request_params to produce the persisted payload, validating
+        Uses _build_jenkins_request_params to produce the persisted payload, validating
         the round-trip serializer/encryption contract.
         """
         from rootcoz.config import get_settings
         from rootcoz.main import (
-            _build_request_params,
             _merge_settings,
             _reconstruct_from_params,
         )
@@ -3871,7 +4033,9 @@ class TestReconstructFromParams:
             enable_jira=False,
         )
         merged_in = _merge_settings(body_in, settings)
-        request_params = _build_request_params(body_in, merged_in, "claude", "opus")
+        request_params = _build_jenkins_request_params(
+            body_in, merged_in, "claude", "opus"
+        )
         result_data = {
             "job_name": "my-job",
             "build_number": 42,
@@ -3931,7 +4095,7 @@ class TestResumeWaitingJobs:
     async def test_resumes_valid_waiting_job(self, mock_settings) -> None:
         """A waiting job with valid request_params spawns a background task."""
         from rootcoz.config import get_settings
-        from rootcoz.main import _build_request_params, _resume_waiting_jobs
+        from rootcoz.main import _resume_waiting_jobs
         from rootcoz.models import AnalyzeRequest
 
         settings = get_settings()
@@ -3945,7 +4109,7 @@ class TestResumeWaitingJobs:
             poll_interval_minutes=2,
             max_wait_minutes=0,
         )
-        request_params = _build_request_params(body_in, settings, "gemini", "m")
+        request_params = _build_jenkins_request_params(body_in, settings, "gemini", "m")
         waiting_jobs = [
             {
                 "job_id": "w-1",
@@ -3958,7 +4122,7 @@ class TestResumeWaitingJobs:
         ]
         with (
             patch(
-                "rootcoz.main.process_analysis_with_id",
+                "rootcoz.main._process_ci_source_analysis",
                 new_callable=AsyncMock,
             ) as mock_process,
             patch(
@@ -3973,9 +4137,9 @@ class TestResumeWaitingJobs:
 
             await asyncio.sleep(0)
             mock_process.assert_called_once()
-            call_args = mock_process.call_args
-            assert call_args[0][0] == "w-1"  # job_id
-            resumed_body = call_args[0][1]
+            call_kwargs = mock_process.call_args.kwargs
+            assert call_kwargs["job_id"] == "w-1"
+            resumed_body = call_kwargs["body"]
             assert str(resumed_body.tests_repo_url) == "https://github.com/org/repo"
 
     async def test_marks_failed_when_no_request_params(
@@ -4029,7 +4193,7 @@ class TestLifespanResumesWaitingJobs:
         conn = sqlite3.connect(str(db_path))
         for job_id, jenkins_url, status, result_json in rows:
             conn.execute(
-                "INSERT INTO results (job_id, jenkins_url, status, result_json) VALUES (?, ?, ?, ?)",
+                "INSERT INTO results (job_id, build_url, status, result_json) VALUES (?, ?, ?, ?)",
                 (job_id, jenkins_url, status, result_json),
             )
         conn.commit()
@@ -4042,7 +4206,6 @@ class TestLifespanResumesWaitingJobs:
         import json
 
         from rootcoz.config import get_settings
-        from rootcoz.main import _build_request_params
         from rootcoz.models import AnalyzeRequest
 
         settings = get_settings()
@@ -4055,7 +4218,7 @@ class TestLifespanResumesWaitingJobs:
             poll_interval_minutes=2,
             max_wait_minutes=0,
         )
-        request_params = _build_request_params(body_in, settings, "gemini", "m")
+        request_params = _build_jenkins_request_params(body_in, settings, "gemini", "m")
         result_data = json.dumps(
             {
                 "job_name": "my-job",
@@ -4072,7 +4235,7 @@ class TestLifespanResumesWaitingJobs:
 
         with patch.object(storage, "DB_PATH", temp_db_path):
             with patch(
-                "rootcoz.main.process_analysis_with_id",
+                "rootcoz.main._process_ci_source_analysis",
                 new_callable=AsyncMock,
             ) as mock_process:
                 import threading
@@ -4147,7 +4310,7 @@ class TestPeerAnalysisParams:
 
     def test_analyze_with_peer_ai_configs_in_body(self, test_client) -> None:
         """POST /analyze with peer_ai_configs passes them to process_analysis_with_id."""
-        with patch("rootcoz.main.process_analysis_with_id") as mock_process:
+        with patch("rootcoz.main._process_ci_source_analysis") as mock_process:
             response = test_client.post(
                 "/analyze",
                 json={
@@ -4163,11 +4326,8 @@ class TestPeerAnalysisParams:
                 },
             )
             assert response.status_code == 202
-            # Verify process_analysis_with_id was called
             assert mock_process.called
-            # The body arg should have peer fields set
-            call_args = mock_process.call_args
-            body_arg = call_args[0][1]  # second positional arg
+            body_arg = mock_process.call_args.kwargs["body"]
             assert body_arg.peer_ai_configs == [
                 AiConfigEntry(ai_provider="gemini", ai_model="pro"),
             ]
@@ -4175,7 +4335,7 @@ class TestPeerAnalysisParams:
 
     def test_analyze_without_peers_backward_compatible(self, test_client) -> None:
         """POST /analyze without peer fields works unchanged."""
-        with patch("rootcoz.main.process_analysis_with_id") as mock_process:
+        with patch("rootcoz.main._process_ci_source_analysis") as mock_process:
             response = test_client.post(
                 "/analyze",
                 json={
@@ -4188,7 +4348,7 @@ class TestPeerAnalysisParams:
             )
             assert response.status_code == 202
             assert mock_process.called
-            body_arg = mock_process.call_args[0][1]
+            body_arg = mock_process.call_args.kwargs["body"]
             assert body_arg.peer_ai_configs is None
             assert body_arg.peer_analysis_max_rounds == 3  # default
 
@@ -4408,7 +4568,6 @@ class TestPeerAnalysisParams:
         """peer_ai_configs and peer_analysis_max_rounds round-trip through build/reconstruct."""
         from rootcoz.config import get_settings
         from rootcoz.main import (
-            _build_request_params,
             _merge_settings,
             _reconstruct_from_params,
         )
@@ -4427,7 +4586,7 @@ class TestPeerAnalysisParams:
             peer_analysis_max_rounds=5,
         )
         merged_in = _merge_settings(body_in, settings)
-        request_params = _build_request_params(
+        request_params = _build_jenkins_request_params(
             body_in,
             merged_in,
             "claude",
@@ -4480,11 +4639,10 @@ class TestPeerAnalysisParams:
         merged = call_kwargs["merged"]
         assert merged.peer_analysis_max_rounds == 7
 
-    def test_build_request_params_stores_resolved_peer_configs(
+    def test_build_jenkins_request_params_stores_resolved_peer_configs(
         self, mock_settings
     ) -> None:
-        """_build_request_params stores the resolved peer configs, not raw body."""
-        from rootcoz.main import _build_request_params
+        """_build_jenkins_request_params stores the resolved peer configs, not raw body."""
         from rootcoz.models import AnalyzeRequest
 
         # Body has peer_ai_configs=None (not provided by caller)
@@ -4499,7 +4657,7 @@ class TestPeerAnalysisParams:
         resolved = [
             AiConfigEntry(ai_provider="gemini", ai_model="pro"),
         ]
-        params = _build_request_params(
+        params = _build_jenkins_request_params(
             body, settings, "claude", "opus", peer_ai_configs_resolved=resolved
         )
         # Stored value should be the resolved list, not the raw body value
@@ -4514,7 +4672,6 @@ class TestPeerAnalysisParams:
     def test_reconstruct_uses_stored_peer_configs_directly(self, mock_settings) -> None:
         """_reconstruct_from_params uses stored peer_ai_configs without re-resolving from env."""
         from rootcoz.main import (
-            _build_request_params,
             _merge_settings,
             _reconstruct_from_params,
         )
@@ -4532,7 +4689,7 @@ class TestPeerAnalysisParams:
         resolved = [
             AiConfigEntry(ai_provider="gemini", ai_model="pro"),
         ]
-        request_params = _build_request_params(
+        request_params = _build_jenkins_request_params(
             body_in, merged, "claude", "opus", peer_ai_configs_resolved=resolved
         )
         result_data = {
@@ -4549,7 +4706,6 @@ class TestPeerAnalysisParams:
     def test_reconstruct_empty_peer_configs_preserved(self, mock_settings) -> None:
         """When peer_ai_configs was explicitly disabled ([]), reconstruction preserves empty list."""
         from rootcoz.main import (
-            _build_request_params,
             _merge_settings,
             _reconstruct_from_params,
         )
@@ -4565,7 +4721,7 @@ class TestPeerAnalysisParams:
         )
         merged = _merge_settings(body_in, settings)
         # Resolved is None because [] means explicitly disabled
-        request_params = _build_request_params(
+        request_params = _build_jenkins_request_params(
             body_in, merged, "claude", "opus", peer_ai_configs_resolved=None
         )
         result_data = {
@@ -4601,20 +4757,20 @@ class TestPeerAnalysisParams:
 
 
 class TestProgressPhaseTracking:
-    """Tests for progress_phase updates during process_analysis_with_id."""
+    """Tests for progress_phase updates during shared CI source analysis."""
 
     @pytest.mark.asyncio
-    async def test_progress_phases_with_jenkins_wait(self) -> None:
-        """When waiting for Jenkins, progress phases include waiting_for_jenkins and analyzing."""
-        from rootcoz.main import process_analysis_with_id
-        from rootcoz.models import AnalyzeRequest
+    async def test_progress_phases_with_jenkins_wait(self, temp_db_path: Path) -> None:
+        """Waiting path emits waiting_for_jenkins progress phase."""
+        from rootcoz.main import _process_ci_source_analysis
+        from rootcoz.models import UnifiedAnalyzeRequest
+        from rootcoz.sources.base import CISourceResult
 
-        body = AnalyzeRequest(
+        body = UnifiedAnalyzeRequest(
+            type="jenkins",
             job_name="my-job",
             build_number=1,
             wait_for_completion=True,
-            poll_interval_minutes=1,
-            max_wait_minutes=5,
             ai_provider="claude",
             ai_model="test-model",
         )
@@ -4623,242 +4779,69 @@ class TestProgressPhaseTracking:
             jenkins_user="user",
             jenkins_password=FAKE_JENKINS_PASSWORD,
             wait_for_completion=True,
-            poll_interval_minutes=1,
-            max_wait_minutes=5,
         )
-
         phases: list[str] = []
 
-        async def capture_phase(job_id, phase):
+        async def capture_progress(job_id, phase):
             phases.append(phase)
 
+        passed = CISourceResult(
+            failures=[],
+            build_passed=True,
+            build_url="https://jenkins.example.com/job/my-job/1/",
+        )
+
         with (
+            patch.object(storage, "DB_PATH", temp_db_path),
             patch(
-                "rootcoz.main.wait_for_jenkins_completion",
+                "rootcoz.sources.jenkins_source.wait_for_jenkins_completion",
                 new_callable=AsyncMock,
                 return_value=(True, ""),
             ),
-            patch("rootcoz.main.update_status", new_callable=AsyncMock),
+            patch(
+                "rootcoz.sources.jenkins_source.JenkinsSource.fetch",
+                new_callable=AsyncMock,
+                return_value=passed,
+            ),
             patch(
                 "rootcoz.main.safe_update_progress",
-                side_effect=capture_phase,
-            ),
-            patch("rootcoz.main.analyze_job", new_callable=AsyncMock) as mock_analyze,
-            patch("rootcoz.main._resolve_enable_jira", return_value=False),
-            patch(
-                "rootcoz.main.populate_failure_history",
-                new_callable=AsyncMock,
-            ),
-            patch(
-                "rootcoz.main.storage.make_classifications_visible",
-                new_callable=AsyncMock,
-            ),
-            patch(
-                "rootcoz.main._preserve_request_params",
-                new_callable=AsyncMock,
+                side_effect=capture_progress,
             ),
             _patch_preflight(),
         ):
-            mock_analyze.return_value = AnalysisResult(
+            await storage.init_db()
+            await storage.save_result("test-id", "", "pending", {"job_name": "my-job"})
+            await _process_ci_source_analysis(
                 job_id="test-id",
-                status="completed",
-                summary="ok",
+                body=body,
+                merged=merged,
+                display_name="my-job",
+                ai_provider="claude",
+                ai_model="test-model",
+                peer_ai_configs=None,
+                tests_repo_url="",
+                tests_repo_ref="",
+                resolved_tests_repo_token="",
+                additional_repos_list=[],
+                base_url="",
             )
-            await process_analysis_with_id("test-id", body, merged)
-
-        assert "waiting_for_jenkins" in phases
-        assert "analyzing" in phases
-        assert "saving" in phases
-        # waiting_for_jenkins comes before analyzing
-        assert phases.index("waiting_for_jenkins") < phases.index("analyzing")
-
-    @pytest.mark.asyncio
-    async def test_progress_phases_without_jenkins_wait(self) -> None:
-        """When not waiting for Jenkins, phases skip waiting_for_jenkins."""
-        from rootcoz.main import process_analysis_with_id
-        from rootcoz.models import AnalyzeRequest
-
-        body = AnalyzeRequest(
-            job_name="my-job",
-            build_number=1,
-            wait_for_completion=False,
-            ai_provider="claude",
-            ai_model="test-model",
-        )
-        merged = _build_wait_settings(
-            jenkins_url="https://jenkins.example.com",
-            wait_for_completion=False,
-        )
-
-        phases: list[str] = []
-
-        async def capture_phase(job_id, phase):
-            phases.append(phase)
-
-        with (
-            patch("rootcoz.main.update_status", new_callable=AsyncMock),
-            patch(
-                "rootcoz.main.safe_update_progress",
-                side_effect=capture_phase,
-            ),
-            patch("rootcoz.main.analyze_job", new_callable=AsyncMock) as mock_analyze,
-            patch("rootcoz.main._resolve_enable_jira", return_value=False),
-            patch(
-                "rootcoz.main.populate_failure_history",
-                new_callable=AsyncMock,
-            ),
-            patch(
-                "rootcoz.main.storage.make_classifications_visible",
-                new_callable=AsyncMock,
-            ),
-            patch(
-                "rootcoz.main._preserve_request_params",
-                new_callable=AsyncMock,
-            ),
-            _patch_preflight(),
-        ):
-            mock_analyze.return_value = AnalysisResult(
-                job_id="test-id",
-                status="completed",
-                summary="ok",
-            )
-            await process_analysis_with_id("test-id", body, merged)
-
-        assert "waiting_for_jenkins" not in phases
-        assert "analyzing" in phases
-        assert "saving" in phases
-
-    @pytest.mark.asyncio
-    async def test_progress_phases_with_jira_enrichment(self) -> None:
-        """When Jira enrichment is enabled, progress includes enriching_jira phase."""
-        from rootcoz.main import process_analysis_with_id
-        from rootcoz.models import AnalyzeRequest
-
-        body = AnalyzeRequest(
-            job_name="my-job",
-            build_number=1,
-            wait_for_completion=False,
-            ai_provider="claude",
-            ai_model="test-model",
-        )
-        merged = _build_wait_settings(
-            jenkins_url="https://jenkins.example.com",
-            wait_for_completion=False,
-        )
-
-        phases: list[str] = []
-
-        async def capture_phase(job_id, phase):
-            phases.append(phase)
-
-        with (
-            patch("rootcoz.main.update_status", new_callable=AsyncMock),
-            patch(
-                "rootcoz.main.safe_update_progress",
-                side_effect=capture_phase,
-            ),
-            patch("rootcoz.main.analyze_job", new_callable=AsyncMock) as mock_analyze,
-            patch("rootcoz.main._resolve_enable_jira", return_value=True),
-            patch(
-                "rootcoz.main._enrich_result_with_jira",
-                new_callable=AsyncMock,
-            ),
-            patch(
-                "rootcoz.main.populate_failure_history",
-                new_callable=AsyncMock,
-            ),
-            patch(
-                "rootcoz.main.storage.make_classifications_visible",
-                new_callable=AsyncMock,
-            ),
-            patch(
-                "rootcoz.main._preserve_request_params",
-                new_callable=AsyncMock,
-            ),
-            _patch_preflight(),
-        ):
-            mock_analyze.return_value = AnalysisResult(
-                job_id="test-id",
-                status="completed",
-                summary="ok",
-            )
-            await process_analysis_with_id("test-id", body, merged)
-
-        assert "enriching_jira" in phases
-        assert "saving" in phases
-        assert phases.index("enriching_jira") < phases.index("saving")
-
-    @pytest.mark.asyncio
-    async def test_progress_phase_exception_does_not_crash_analysis(self) -> None:
-        """update_progress_phase raising an exception must not abort the analysis."""
-        from rootcoz.main import process_analysis_with_id
-        from rootcoz.models import AnalyzeRequest
-
-        body = AnalyzeRequest(
-            job_name="my-job",
-            build_number=1,
-            wait_for_completion=False,
-            ai_provider="claude",
-            ai_model="test-model",
-        )
-        merged = _build_wait_settings(
-            jenkins_url="https://jenkins.example.com",
-            wait_for_completion=False,
-        )
-
-        with (
-            patch("rootcoz.main.update_status", new_callable=AsyncMock) as mock_status,
-            patch(
-                "rootcoz.engine.core.update_progress_phase",
-                side_effect=RuntimeError("DB connection lost"),
-            ),
-            patch("rootcoz.main.analyze_job", new_callable=AsyncMock) as mock_analyze,
-            patch("rootcoz.main._resolve_enable_jira", return_value=False),
-            patch(
-                "rootcoz.main.populate_failure_history",
-                new_callable=AsyncMock,
-            ),
-            patch(
-                "rootcoz.main.storage.make_classifications_visible",
-                new_callable=AsyncMock,
-            ),
-            patch(
-                "rootcoz.main._preserve_request_params",
-                new_callable=AsyncMock,
-            ),
-            _patch_preflight(),
-        ):
-            mock_analyze.return_value = AnalysisResult(
-                job_id="test-id",
-                status="completed",
-                summary="ok",
-            )
-            # Should complete without raising despite update_progress_phase failing
-            await process_analysis_with_id("test-id", body, merged)
-
-        # Analysis completed: update_status was called with the completed result
-        mock_analyze.assert_called_once()
-        status_calls = [c.args[1] for c in mock_status.call_args_list]
-        assert "completed" in status_calls
+            assert "waiting_for_jenkins" in phases
 
 
 class TestRequestParamsPreservation:
-    """Tests for request_params preservation across update_status calls.
-
-    The initial save_result includes request_params (ai_provider, ai_model,
-    peer_ai_configs). When analysis completes, update_status must preserve
-    request_params in the final result_data.
-    """
+    """Tests for request_params preservation across update_status calls."""
 
     @pytest.mark.asyncio
     async def test_process_analysis_preserves_request_params_on_success(
         self, temp_db_path: Path
     ) -> None:
         """request_params saved initially must survive when analysis completes."""
-        from rootcoz.main import process_analysis_with_id
-        from rootcoz.models import AnalyzeRequest
+        from rootcoz.main import _process_ci_source_analysis
+        from rootcoz.models import UnifiedAnalyzeRequest
+        from rootcoz.sources.base import CISourceResult
 
-        body = AnalyzeRequest(
+        body = UnifiedAnalyzeRequest(
+            type="jenkins",
             job_name="my-job",
             build_number=42,
             ai_provider="claude",
@@ -4879,11 +4862,18 @@ class TestRequestParamsPreservation:
             "additional_repos": [
                 {"name": "infra", "url": "https://github.com/org/infra"}
             ],
+            "analysis_type": "jenkins",
         }
+
+        passed = CISourceResult(
+            failures=[],
+            build_passed=True,
+            build_url="https://jenkins.example.com/job/my-job/42/",
+            identity={"job_name": "my-job", "build_number": 42},
+        )
 
         with patch.object(storage, "DB_PATH", temp_db_path):
             await storage.init_db()
-            # Save initial result with request_params
             await storage.save_result(
                 job_id,
                 "https://jenkins.example.com/job/my-job/42/",
@@ -4897,13 +4887,11 @@ class TestRequestParamsPreservation:
 
             with (
                 patch(
-                    "rootcoz.main.analyze_job",
+                    "rootcoz.sources.jenkins_source.JenkinsSource.fetch",
                     new_callable=AsyncMock,
-                ) as mock_analyze,
-                patch(
-                    "rootcoz.main._resolve_enable_jira",
-                    return_value=False,
+                    return_value=passed,
                 ),
+                patch("rootcoz.main._resolve_enable_jira", return_value=False),
                 patch(
                     "rootcoz.main.populate_failure_history",
                     new_callable=AsyncMock,
@@ -4912,139 +4900,32 @@ class TestRequestParamsPreservation:
                     "rootcoz.main.storage.make_classifications_visible",
                     new_callable=AsyncMock,
                 ),
+                _patch_preflight(),
             ):
-                mock_analyze.return_value = AnalysisResult(
+                await _process_ci_source_analysis(
                     job_id=job_id,
-                    status="completed",
-                    summary="1 failure analyzed",
+                    body=body,
+                    merged=merged,
+                    display_name="my-job",
                     ai_provider="claude",
                     ai_model="opus",
-                    failures=[
-                        FailureAnalysis(
-                            test_name="test_foo",
-                            error="assert False",
-                            analysis=AnalysisDetail(
-                                classification="CODE ISSUE",
-                                details="Test failed",
-                            ),
-                        )
-                    ],
+                    peer_ai_configs=None,
+                    tests_repo_url="",
+                    tests_repo_ref="",
+                    resolved_tests_repo_token="",
+                    additional_repos_list=[],
+                    base_url="",
                 )
-                await process_analysis_with_id(job_id, body, merged)
 
-            # Verify request_params survived in the stored result
             stored = await storage.get_result(job_id, strip_sensitive=False)
             assert stored is not None
             result = stored["result"]
-            assert "request_params" in result, (
-                "request_params must be preserved after analysis completes"
-            )
+            assert "request_params" in result
             assert result["request_params"]["ai_provider"] == "claude"
             assert result["request_params"]["ai_model"] == "opus"
             assert result["request_params"]["peer_ai_configs"] == [
                 {"ai_provider": "gemini", "ai_model": "flash"}
             ]
-            assert (
-                result["request_params"]["tests_repo_url"]
-                == "https://github.com/org/tests"
-            )
-            assert result["request_params"]["additional_repos"] == [
-                {"name": "infra", "url": "https://github.com/org/infra"}
-            ]
-
-    @pytest.mark.asyncio
-    async def test_process_analysis_preserves_request_params_on_failure(
-        self, temp_db_path: Path
-    ) -> None:
-        """request_params saved initially must survive when analysis fails."""
-        from rootcoz.main import process_analysis_with_id
-        from rootcoz.models import AnalyzeRequest
-
-        body = AnalyzeRequest(
-            job_name="my-job",
-            build_number=42,
-            ai_provider="claude",
-            ai_model="opus",
-            wait_for_completion=False,
-        )
-        merged = _build_wait_settings(
-            jenkins_url="https://jenkins.example.com",
-            wait_for_completion=False,
-        )
-
-        job_id = "preserve-params-failure"
-        initial_request_params = {
-            "ai_provider": "claude",
-            "ai_model": "opus",
-        }
-
-        with patch.object(storage, "DB_PATH", temp_db_path):
-            await storage.init_db()
-            await storage.save_result(
-                job_id,
-                "https://jenkins.example.com/job/my-job/42/",
-                "pending",
-                {
-                    "job_name": "my-job",
-                    "build_number": 42,
-                    "request_params": initial_request_params,
-                },
-            )
-
-            with patch(
-                "rootcoz.main.analyze_job",
-                new_callable=AsyncMock,
-                side_effect=RuntimeError("AI CLI crashed"),
-            ):
-                await process_analysis_with_id(job_id, body, merged)
-
-            stored = await storage.get_result(job_id, strip_sensitive=False)
-            assert stored is not None
-            result = stored["result"]
-            assert "request_params" in result, (
-                "request_params must be preserved even when analysis fails"
-            )
-            assert result["request_params"]["ai_provider"] == "claude"
-
-    def test_analyze_failures_preserves_request_params_on_success(
-        self, test_client, temp_db_path: Path
-    ) -> None:
-        """POST /analyze with type=raw seeds request_params in pending state."""
-        with patch("rootcoz.main._process_file_raw_analysis", new_callable=AsyncMock):
-            response = test_client.post(
-                "/analyze",
-                json={
-                    "type": "raw",
-                    "failures": [
-                        {
-                            "test_name": "test_foo",
-                            "error_message": "assert False",
-                            "stack_trace": "File test.py, line 10",
-                        }
-                    ],
-                    "ai_provider": "cursor",
-                    "ai_model": "test-model",
-                },
-            )
-            assert response.status_code == 202
-            data = response.json()
-            job_id = data["job_id"]
-
-        # Fetch the stored result and verify request_params were seeded
-        result_response = test_client.get(
-            f"/results/{job_id}",
-            headers={"accept": "application/json"},
-        )
-        assert result_response.status_code in (200, 202)
-        result_data = result_response.json()
-        assert "result" in result_data
-        result = result_data["result"]
-        assert "request_params" in result, (
-            "request_params must be seeded when the job is queued"
-        )
-        rp = result["request_params"]
-        assert rp["ai_provider"] == "cursor"
-        assert rp["ai_model"] == "test-model"
 
 
 class TestReAnalyzeEndpoint:
@@ -5112,7 +4993,7 @@ class TestReAnalyzeEndpoint:
             "completed",
             result_data,
         )
-        with patch("rootcoz.main.process_analysis_with_id") as mock_process:
+        with patch("rootcoz.main._process_ci_source_analysis") as mock_process:
             response = test_client.post("/re-analyze/job-reanalyze-ok", json={})
         assert response.status_code == 202
         data = response.json()
@@ -5149,7 +5030,7 @@ class TestReAnalyzeEndpoint:
             "http://jenkins/job/my-job/42/",
             result_data,
         )
-        with patch("rootcoz.main.process_analysis_with_id"):
+        with patch("rootcoz.main._process_ci_source_analysis"):
             response = test_client.post("/re-analyze/job-origin", json={})
         assert response.status_code == 202
         new_job_id = response.json()["job_id"]
@@ -5183,7 +5064,7 @@ class TestReAnalyzeEndpoint:
             "",
             result_data,
         )
-        with patch("rootcoz.main._process_file_raw_analysis"):
+        with patch("rootcoz.main._process_ci_source_analysis"):
             response = test_client.post("/re-analyze/file-origin", json={})
         assert response.status_code == 202
         new_job_id = response.json()["job_id"]
@@ -5192,6 +5073,46 @@ class TestReAnalyzeEndpoint:
         params = stored["result"]["request_params"]
         assert params["reanalyzed_from_job_id"] == "file-origin"
         assert params["reanalyzed_from_job_name"] == "File Job"
+
+    @pytest.mark.asyncio
+    async def test_re_analyze_prow_applies_force_override(self, test_client) -> None:
+        """Re-analyze accepts force/get_job_artifacts overrides for Prow jobs."""
+        result_data = {
+            "summary": "prow failure",
+            "job_name": "pull-test",
+            "display_name": "pull-test",
+            "build_id": "1234567890",
+            "request_params": encrypt_sensitive_fields(
+                {
+                    "analysis_type": "prow",
+                    "prow_job_name": "pull-test",
+                    "build_id": "1234567890",
+                    "prow_url": "https://prow.example.com",
+                    "gcs_bucket": "test-bucket",
+                    "force": False,
+                    "get_job_artifacts": False,
+                    "ai_provider": "claude",
+                    "ai_model": "opus",
+                }
+            ),
+        }
+        await self._create_origin_job(
+            "prow-origin",
+            "https://prow.example.com/view/gs/test-bucket/logs/pull-test/1234567890",
+            result_data,
+        )
+        with patch("rootcoz.main._process_ci_source_analysis") as mock_process:
+            response = test_client.post(
+                "/re-analyze/prow-origin",
+                json={"force": True, "get_job_artifacts": True},
+            )
+        assert response.status_code == 202
+        mock_process.assert_called_once()
+        call_kwargs = mock_process.call_args.kwargs
+        assert call_kwargs["body"].force is True
+        assert call_kwargs["body"].get_job_artifacts is True
+        assert call_kwargs["body"].prow_job_name == "pull-test"
+        assert call_kwargs["body"].build_id == "1234567890"
 
     @pytest.mark.asyncio
     async def test_results_endpoint_returns_origin_info(self, test_client) -> None:
@@ -6145,6 +6066,27 @@ class TestAdminSettingsEndpoints:
         )
         assert response.status_code == 400
 
+    def test_put_settings_invalid_prow_url(self, test_client) -> None:
+        """PUT rejects invalid prow_url values."""
+        response = test_client.put(
+            "/api/admin/settings",
+            json={"settings": {"prow_url": "http://prow.example.com"}},
+        )
+        assert response.status_code == 400
+        assert "https://" in response.json()["detail"]
+
+    def test_put_settings_prow_url_with_credentials_rejected(self, test_client) -> None:
+        response = test_client.put(
+            "/api/admin/settings",
+            json={
+                "settings": {
+                    "prow_url": "https://user:pass@prow.example.com",  # pragma: allowlist secret
+                }
+            },
+        )
+        assert response.status_code == 400
+        assert "credentials" in response.json()["detail"]
+
     def test_delete_setting_resets(self, test_client) -> None:
         """DELETE removes DB override."""
         # First set a value
@@ -6387,7 +6329,7 @@ class TestSubmitterAutoTag:
 
     def test_jenkins_analysis_auto_tags_submitter(self, test_client) -> None:
         """POST /analyze type=jenkins auto-adds the submitter username to tags."""
-        with patch("rootcoz.main.process_analysis_with_id"):
+        with patch("rootcoz.main._process_ci_source_analysis"):
             response = test_client.post(
                 "/analyze",
                 json={
@@ -6405,7 +6347,7 @@ class TestSubmitterAutoTag:
 
     def test_jenkins_analysis_no_duplicate_submitter_tag(self, test_client) -> None:
         """POST /analyze type=jenkins doesn't duplicate when tags already has the username."""
-        with patch("rootcoz.main.process_analysis_with_id"):
+        with patch("rootcoz.main._process_ci_source_analysis"):
             response = test_client.post(
                 "/analyze",
                 json={
@@ -6550,7 +6492,7 @@ class TestSubmitterAutoTag:
             "job-alice", "http://jenkins/job/test-job/1/", "completed", result_data
         )
         # Re-analyze as "admin" (the test_client user)
-        with patch("rootcoz.main.process_analysis_with_id"):
+        with patch("rootcoz.main._process_ci_source_analysis"):
             response = test_client.post("/re-analyze/job-alice", json={})
         assert response.status_code == 202
         new_job_id = response.json()["job_id"]

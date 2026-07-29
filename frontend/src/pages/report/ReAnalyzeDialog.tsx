@@ -20,7 +20,7 @@ import {
   SelectValue,
 } from '@/components/ui/select'
 import { api } from '@/lib/api'
-import { toIntInRange } from '@/lib/utils'
+import { toIntInRange, resolveBuildDisplayId, ciSourceLabel } from '@/lib/utils'
 import type { AnalysisResult } from '@/types'
 import { Section } from '@/components/shared/Section'
 import { Toggle } from '@/components/shared/Toggle'
@@ -76,6 +76,7 @@ function initFormState(p: AnalysisResult['request_params']) {
 export function ReAnalyzeDialog({ open, onOpenChange, result, jobId, failureUuid }: ReAnalyzeDialogProps) {
   const navigate = useNavigate()
   const params = result.request_params
+  const isProwJob = ciSourceLabel(result.request_params) === 'Prow'
 
   const init = initFormState(params)
   const [aiProvider, setAiProvider] = useState(init.aiProvider)
@@ -197,7 +198,7 @@ export function ReAnalyzeDialog({ open, onOpenChange, result, jobId, failureUuid
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="sm:max-w-[600px] max-h-[85vh] flex flex-col bg-surface-card border-border-default p-0">
         <DialogHeader className="px-6 pt-5 pb-4 border-b border-border-default flex-shrink-0">
-          <DialogTitle>🔄 {failureUuid ? 'Re-Analyze Test' : 'Re-Analyze Job'}</DialogTitle>
+          <DialogTitle>🔄 {failureUuid ? 'Re-Analyze Test' : isProwJob ? 'Re-Analyze Prow Job' : 'Re-Analyze Job'}</DialogTitle>
           <DialogDescription>
             {failureUuid
               ? 'Adjust settings and re-run analysis for this test failure. The result will update in-place.'
@@ -206,6 +207,33 @@ export function ReAnalyzeDialog({ open, onOpenChange, result, jobId, failureUuid
         </DialogHeader>
 
         <div className="overflow-y-auto overflow-x-hidden flex-1 px-6 py-5 space-y-1">
+          {/* Prow Job Info */}
+          {isProwJob && (
+          <>
+          <Section title="Prow Job" dotColor="bg-signal-red" defaultOpen>
+            <div className="grid grid-cols-2 gap-3">
+              <div className="space-y-1.5">
+                <FieldLabel>Job Name</FieldLabel>
+                <Input value={result.job_name || ''} disabled className="opacity-70" />
+              </div>
+              <div className="space-y-1.5">
+                <FieldLabel>Build ID</FieldLabel>
+                <Input
+                  value={resolveBuildDisplayId(result) ?? ''}
+                  disabled
+                  className="opacity-70"
+                />
+              </div>
+            </div>
+            <p className="text-[11px] text-text-tertiary">
+              Source details are carried over from the original analysis.
+            </p>
+          </Section>
+
+          <hr className="border-border-muted" />
+          </>
+          )}
+
           {/* AI Configuration */}
           <Section title="AI Configuration" dotColor="bg-signal-blue" defaultOpen>
             <div className="grid grid-cols-2 gap-3">
@@ -361,19 +389,21 @@ export function ReAnalyzeDialog({ open, onOpenChange, result, jobId, failureUuid
               <Toggle checked={force} onChange={setForce} label="Force analysis on successful builds" />
             </div>
             <p className="text-[11px] text-text-tertiary">
-              When enabled, analysis runs even if Jenkins reports the build as SUCCESS.
+              When enabled, analysis runs even if the CI system reports the build as SUCCESS.
             </p>
           </Section>
 
           <hr className="border-border-muted" />
 
-          {/* Jenkins Artifacts */}
-          <Section title="Jenkins Artifacts" dotColor="bg-[#58a6ff]">
+          {/* Build Artifacts */}
+          <Section title={isProwJob ? 'Build Artifacts' : 'Jenkins Artifacts'} dotColor="bg-[#58a6ff]">
             <div className="flex items-center justify-between">
-              <span className="text-sm text-text-secondary">Fetch build artifacts</span>
+              <span className="text-sm text-text-secondary">
+                {isProwJob ? 'Fetch GCS build artifacts' : 'Fetch build artifacts'}
+              </span>
               <Toggle checked={getArtifacts ?? true} onChange={setGetArtifacts} label="Fetch build artifacts" />
             </div>
-            {getArtifacts && (
+            {!isProwJob && getArtifacts && (
               <div className="space-y-1.5">
                 <FieldLabel>Max Size (MB)</FieldLabel>
                 <Input

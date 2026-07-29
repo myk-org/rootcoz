@@ -2,61 +2,50 @@
 
 Implements the ``CISource`` interface to fetch build data from Jenkins.
 Also houses Jenkins-specific helper functions (``handle_jenkins_exception``,
-``extract_failed_child_jobs``, etc.) and the top-level ``analyze_job`` /
-``analyze_child_job`` orchestration functions.
+``extract_failed_child_jobs``, etc.) and the ``analyze_child_job``
+orchestration function.
 """
 
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import os
 import re
 import time as _time
-import uuid
 from collections import defaultdict
 from collections.abc import Coroutine
 from pathlib import Path
 from typing import Any, NoReturn
+from urllib.parse import quote as _urlquote
 
 import jenkins
-from pi_sidecar_client import check_sidecar_available, run_parallel_with_limit
-from pydantic import HttpUrl
+from pi_sidecar_client import run_parallel_with_limit
 from simple_logger.logger import get_logger
 
-from rootcoz.config import Settings, parse_repo_ref
+from rootcoz.config import Settings
 from rootcoz.engine.core import (
     analyze_failure_group,
-    clone_additional_repos,
-    copy_rootcoz_pi_resources,
     derive_error_details,
     extract_relevant_console_lines,
     format_exception_with_type,
     get_failure_signature,
-    resolve_additional_repos,
-    safe_update_progress,
 )
-from rootcoz.error_messages import ai_not_configured_message, make_user_friendly_error
+from rootcoz.error_messages import make_user_friendly_error
 from rootcoz.jenkins import JenkinsClient
-from rootcoz.jenkins_artifacts import cleanup_extract_dir, process_build_artifacts
+from rootcoz.jenkins_artifacts import process_build_artifacts
 from rootcoz.models import (
-    AdditionalRepo,
     AnalysisDetail,
-    AnalysisResult,
-    AnalyzeRequest,
     ChildJobAnalysis,
     FailedTest,
     FailureAnalysis,
 )
-from rootcoz.repository import RepositoryManager, derive_test_repo_name, redact_url
-from rootcoz.rootcoz_repo_settings import (
-    RootcozSettingsError,
-    assert_no_tests_repo_name_collision,
-    resolve_repo_analysis_settings,
-    resolve_tests_repo_url,
+from rootcoz.sources.base import (
+    CISource,
+    CISourceResult,
+    link_artifacts_to_workspace,
+    run_console_only_analysis,
+    write_console_output_file,
 )
-from rootcoz.request_resolution import resolve_tests_repo_token
-from rootcoz.sources.base import CISource, CISourceResult
 from rootcoz.utils import is_jenkins_connectivity_error
 
 logger = get_logger(name=__name__, level=os.environ.get("LOG_LEVEL", "INFO"))
@@ -65,6 +54,40 @@ logger = get_logger(name=__name__, level=os.environ.get("LOG_LEVEL", "INFO"))
 # ---------------------------------------------------------------------------
 # Jenkins-specific helper functions
 # ---------------------------------------------------------------------------
+
+_SENSITIVE_PARAM_PATTERNS = frozenset(
+    {"password", "token", "secret", "key", "credential", "auth"}
+)
+
+
+def build_jenkins_url(base_url: str, job_name: str, build_number: int) -> str:
+    """Construct full Jenkins build URL from job name and build number.
+
+    Args:
+        base_url: Base Jenkins URL from settings.
+        job_name: Job name (can include folders like "folder/job-name").
+        build_number: Build number.
+
+    Returns:
+        Full Jenkins build URL.
+    """
+    segments = job_name.split("/")
+    encoded_segments = [_urlquote(segment, safe="") for segment in segments]
+    job_path = "/job/".join(encoded_segments)
+    return f"{base_url.rstrip('/')}/job/{job_path}/{build_number}/"
+
+
+def _extract_build_params(build_info: dict) -> list[dict]:
+    """Extract build parameters from Jenkins build info, filtering sensitive values."""
+    params: list[dict] = []
+    for action in build_info.get("actions", []):
+        if action and action.get("_class", "").endswith("ParametersAction"):
+            for param in action.get("parameters", []):
+                name = param.get("name", "")
+                if any(p in name.lower() for p in _SENSITIVE_PARAM_PATTERNS):
+                    continue
+                params.append({"name": name, "value": param.get("value", "")})
+    return params
 
 
 def _normalize_child_results(
@@ -327,6 +350,8 @@ class JenkinsSource(CISource):
     for the core analysis engine.
     """
 
+    _extract_label = "Jenkins artifacts"
+
     def __init__(
         self,
         job_name: str,
@@ -372,7 +397,7 @@ class JenkinsSource(CISource):
     async def fetch(self) -> CISourceResult:
         """Fetch build data from Jenkins and return normalized result.
 
-        Steps (extracted from analyze_job top half):
+        Steps (extracted from former analyze_job top half):
           1. Get build_info — check if build passed (early return if SUCCESS
              and not force).
           2. Download artifacts (if ``get_job_artifacts`` is enabled).
@@ -401,6 +426,10 @@ class JenkinsSource(CISource):
                 failures=[],
                 build_passed=True,
                 build_url=self.build_url,
+                identity={
+                    "job_name": self.job_name,
+                    "build_number": self.build_number,
+                },
             )
         if build_result == "SUCCESS" and self.force:
             logger.info(
@@ -485,6 +514,10 @@ class JenkinsSource(CISource):
             build_url=self.build_url,
             extract_path=self._extract_path,
             child_job_infos=failed_child_jobs,
+            identity={
+                "job_name": self.job_name,
+                "build_number": self.build_number,
+            },
         )
 
     def create_child_source(self, job_name: str, build_number: int) -> JenkinsSource:
@@ -496,11 +529,505 @@ class JenkinsSource(CISource):
             force=self.force,
         )
 
-    def cleanup(self) -> None:
-        """Clean up artifact extraction directory."""
-        if self._extract_path:
-            cleanup_extract_dir(self._extract_path)
-            self._extract_path = None
+    async def analyze_children(
+        self,
+        source_result: CISourceResult,
+        *,
+        settings: Any = None,
+        repo_path: Path | None = None,
+        ai_provider: str = "",
+        ai_model: str = "",
+        custom_prompt: str = "",
+        server_url: str = "",
+        job_id: str = "",
+        peer_ai_configs: list | None = None,
+        cloned_repos: dict | None = None,
+        auth_header: str = "",
+    ) -> list:
+        """Analyze failed Jenkins child jobs in parallel."""
+        if not source_result.child_job_infos:
+            return []
+        effective_settings = settings or self.settings
+        child_tasks = [
+            analyze_child_job(
+                job_name=child_name,
+                build_number=child_num,
+                settings=effective_settings,
+                depth=0,
+                max_depth=3,
+                repo_path=repo_path,
+                ai_provider=ai_provider,
+                ai_model=ai_model,
+                ai_call_timeout=effective_settings.ai_call_timeout,
+                custom_prompt=custom_prompt,
+                server_url=server_url,
+                job_id=job_id,
+                peer_ai_configs=peer_ai_configs,
+                peer_analysis_max_rounds=effective_settings.peer_analysis_max_rounds,
+                additional_repos=cloned_repos or None,
+                max_concurrent_ai_calls=effective_settings.max_concurrent_ai_calls,
+                auth_header=auth_header,
+            )
+            for child_name, child_num in source_result.child_job_infos
+        ]
+        child_results = await run_parallel_with_limit(
+            child_tasks, max_concurrency=effective_settings.max_concurrent_ai_calls
+        )
+        return _normalize_child_results(source_result.child_job_infos, child_results)
+
+    async def refetch_context(self) -> CISourceResult:
+        """Re-download console output and artifacts from Jenkins.
+
+        Fetches only the console output and build artifacts — skips
+        test report parsing and child job extraction since they are
+        not needed for per-failure reanalysis context.
+        """
+        console_context = ""
+        artifacts_context = ""
+        warnings: list[str] = []
+
+        # 1. Fetch console output
+        try:
+            console_output = await asyncio.to_thread(
+                self.client.get_build_console, self.job_name, self.build_number
+            )
+            if console_output:
+                console_context = extract_relevant_console_lines(console_output)
+                logger.info(
+                    "Refetched Jenkins console (%d chars, %d relevant)",
+                    len(console_output),
+                    len(console_context),
+                )
+        except Exception as exc:
+            warnings.append(f"Failed to refetch Jenkins console: {exc}")
+            logger.warning("Failed to refetch Jenkins console: %s", exc)
+
+        # 2. Download artifacts
+        if self.settings.get_job_artifacts:
+            try:
+                build_info = await asyncio.to_thread(
+                    self.client.get_build_info_safe,
+                    self.job_name,
+                    self.build_number,
+                )
+                artifacts = build_info.get("artifacts", [])
+                build_url = build_info.get("url", "").rstrip("/")
+                if artifacts and build_url:
+                    artifacts_context, extract_path = await asyncio.to_thread(
+                        process_build_artifacts,
+                        self.client.session,
+                        build_url,
+                        artifacts,
+                        self.settings.jenkins_artifacts_max_size_mb,
+                    )
+                    if extract_path:
+                        self._extract_path = extract_path
+                        logger.info("Refetched Jenkins artifacts to %s", extract_path)
+            except Exception as exc:
+                warnings.append(f"Failed to refetch Jenkins artifacts: {exc}")
+                logger.warning("Failed to refetch Jenkins artifacts: %s", exc)
+
+        return CISourceResult(
+            failures=[],
+            console_context=console_context,
+            artifacts_context=artifacts_context,
+            build_url=self.build_url,
+            extract_path=self._extract_path,
+            warnings=warnings,
+        )
+
+    @classmethod
+    def from_stored_params(
+        cls,
+        params: dict,
+        settings=None,
+        *,
+        child_job_name: str = "",
+        child_build_number: int = 0,
+    ) -> JenkinsSource | None:
+        """Reconstruct a JenkinsSource from stored request params."""
+        # For child job failures, use child job coordinates
+        job_name = child_job_name or params.get("job_name", "")
+        raw_build_number = (
+            child_build_number if child_build_number else params.get("build_number", 0)
+        )
+
+        if not job_name or not raw_build_number:
+            logger.warning(
+                "Cannot reconstruct JenkinsSource: missing job_name/build_number"
+            )
+            return None
+
+        # Reject bool (True→1) and non-numeric strings that would raise or mis-coerce.
+        if isinstance(raw_build_number, bool):
+            logger.warning(
+                "Cannot reconstruct JenkinsSource: invalid build_number type %r",
+                type(raw_build_number).__name__,
+            )
+            return None
+        if isinstance(raw_build_number, str):
+            if not raw_build_number.isdigit():
+                logger.warning(
+                    "Cannot reconstruct JenkinsSource: non-numeric build_number %r",
+                    raw_build_number,
+                )
+                return None
+            build_number = int(raw_build_number)
+        elif isinstance(raw_build_number, int):
+            build_number = raw_build_number
+        else:
+            try:
+                build_number = int(raw_build_number)
+            except (TypeError, ValueError):
+                logger.warning(
+                    "Cannot reconstruct JenkinsSource: invalid build_number %r",
+                    raw_build_number,
+                )
+                return None
+
+        if build_number <= 0:
+            logger.warning(
+                "Cannot reconstruct JenkinsSource: non-positive build_number %r",
+                build_number,
+            )
+            return None
+
+        param_overrides: dict[str, Any] = {}
+        for key in (
+            "jenkins_url",
+            "jenkins_user",
+            "jenkins_password",
+            "jenkins_ssl_verify",
+            "jenkins_timeout",
+            "jenkins_artifacts_max_size_mb",
+            "get_job_artifacts",
+        ):
+            if key in params and params[key] not in (None, ""):
+                param_overrides[key] = params[key]
+
+        if settings is not None and settings.jenkins_url:
+            effective_settings = (
+                settings.model_copy(update=param_overrides)
+                if param_overrides
+                else settings
+            )
+        elif param_overrides.get("jenkins_url"):
+            # Chat / reanalysis: credentials may exist only on the stored job.
+            base = settings if settings is not None else Settings()
+            effective_settings = base.model_copy(update=param_overrides)
+        else:
+            logger.warning(
+                "Cannot reconstruct JenkinsSource: no settings or jenkins_url"
+            )
+            return None
+
+        return cls(
+            job_name=job_name,
+            build_number=build_number,
+            settings=effective_settings,
+            force=True,  # reanalysis always forces
+        )
+
+    async def populate_chat_workspace(
+        self,
+        workspace: Path,
+        *,
+        github_token: str = "",
+    ) -> bool:
+        """Populate the chat workspace with Jenkins build context.
+
+        Writes console-output.txt, build-info.json, and optionally links
+        build-artifacts/. Each resource is fetched independently.
+        """
+        _ = github_token  # unused — Jenkins chat does not fetch GitHub diffs
+        wrote_any = False
+        console_file = workspace / "console-output.txt"
+        build_info_file = workspace / "build-info.json"
+        need_console = not console_file.exists()
+        need_build_info = not build_info_file.exists()
+
+        console_output: str | None = None
+        build_info: dict = {}
+        if need_console or need_build_info:
+            tasks: list = []
+            if need_console:
+                tasks.append(
+                    asyncio.to_thread(
+                        self.client.get_build_console,
+                        self.job_name,
+                        self.build_number,
+                    )
+                )
+            if need_build_info:
+                tasks.append(
+                    asyncio.to_thread(
+                        self.client.get_build_info_safe,
+                        self.job_name,
+                        self.build_number,
+                    )
+                )
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+
+            idx = 0
+            if need_console:
+                r = results[idx]
+                if isinstance(r, BaseException):
+                    logger.warning(
+                        "Chat: failed to fetch console output: %s", r, exc_info=r
+                    )
+                else:
+                    console_output = r
+                idx += 1
+            if need_build_info:
+                r = results[idx]
+                if isinstance(r, BaseException):
+                    logger.warning(
+                        "Chat: failed to fetch build info: %s", r, exc_info=r
+                    )
+                else:
+                    build_info = r
+
+        if console_output is not None:
+            if write_console_output_file(workspace, console_output):
+                wrote_any = True
+
+        if build_info and need_build_info:
+            try:
+                import json as _json
+
+                build_params = _extract_build_params(build_info)
+                info_data = {
+                    "job_name": self.job_name,
+                    "build_number": self.build_number,
+                    "result": build_info.get("result"),
+                    "building": build_info.get("building", False),
+                    "duration_ms": build_info.get("duration", 0),
+                    "estimated_duration_ms": build_info.get("estimatedDuration", 0),
+                    "timestamp": build_info.get("timestamp", 0),
+                    "url": build_info.get("url", ""),
+                    "display_name": build_info.get("displayName", ""),
+                    "description": build_info.get("description", ""),
+                    "parameters": build_params,
+                }
+                build_info_file.write_text(_json.dumps(info_data, indent=2))
+                logger.info("Chat: wrote build-info.json")
+                wrote_any = True
+            except OSError:
+                logger.warning("Chat: failed to write build-info.json", exc_info=True)
+
+        artifacts_link = workspace / "build-artifacts"
+        if not artifacts_link.exists() and self.settings.get_job_artifacts:
+            if not build_info:
+                try:
+                    build_info = await asyncio.to_thread(
+                        self.client.get_build_info_safe,
+                        self.job_name,
+                        self.build_number,
+                    )
+                except Exception:
+                    logger.warning(
+                        "Chat: failed to fetch build info for artifacts",
+                        exc_info=True,
+                    )
+
+            artifact_list = build_info.get("artifacts", []) if build_info else []
+            build_url_from_info = (build_info or {}).get("url", "").rstrip("/")
+            if artifact_list and build_url_from_info:
+                max_size_mb = self.settings.jenkins_artifacts_max_size_mb
+                try:
+                    _, artifacts_dir = await asyncio.to_thread(
+                        process_build_artifacts,
+                        self.client.session,
+                        build_url_from_info,
+                        artifact_list,
+                        max_size_mb,
+                    )
+                    if artifacts_dir:
+                        self._extract_path = artifacts_dir
+                        if link_artifacts_to_workspace(
+                            workspace, artifacts_dir, "chat"
+                        ):
+                            # Ownership transferred to workspace symlink —
+                            # cleaned later by cleanup_chat_workspace.
+                            self._extract_path = None
+                            logger.info(
+                                "Chat: artifacts downloaded and linked in %s",
+                                workspace,
+                            )
+                            wrote_any = True
+                except Exception:
+                    logger.warning("Chat: failed to download artifacts", exc_info=True)
+                    self.cleanup()
+
+        return wrote_any
+
+    @classmethod
+    def default_display_name(cls, body) -> str:
+        """Default display name for Jenkins analyses."""
+        return getattr(body, "job_name", None) or "jenkins-analysis"
+
+    @classmethod
+    def validate_request(cls, body, merged) -> None:
+        """Require Jenkins credentials before enqueue."""
+        _ = body
+        if not merged.jenkins_url:
+            raise ValueError(
+                "jenkins_url is required — set JENKINS_URL env var or pass in request"
+            )
+
+    @classmethod
+    def build_request_params(cls, body, merged, base_params: dict) -> dict:
+        """Stamp Jenkins-specific fields onto persisted params."""
+        base_params["job_name"] = body.job_name
+        base_params["build_number"] = body.build_number
+        base_params["jenkins_url"] = merged.jenkins_url or ""
+        base_params["jenkins_user"] = merged.jenkins_user or ""
+        base_params["jenkins_password"] = merged.jenkins_password or ""
+        base_params["jenkins_ssl_verify"] = merged.jenkins_ssl_verify
+        base_params["jenkins_timeout"] = merged.jenkins_timeout
+        base_params["jenkins_artifacts_max_size_mb"] = (
+            merged.jenkins_artifacts_max_size_mb
+        )
+        base_params["force"] = merged.force_analysis
+        base_params["get_job_artifacts"] = merged.get_job_artifacts
+        base_params["wait_for_completion"] = merged.wait_for_completion
+        base_params["poll_interval_minutes"] = merged.poll_interval_minutes
+        base_params["max_wait_minutes"] = merged.max_wait_minutes
+        if merged.wait_for_completion:
+            base_params["wait_started_at"] = _time.time()
+        base_params["name"] = getattr(body, "name", None) or ""
+        return base_params
+
+    @classmethod
+    def pre_persist_identity_from_request(cls, body) -> dict:
+        """Stamp job_name and build_number on initial result."""
+        result: dict = {}
+        if getattr(body, "job_name", None):
+            result["job_name"] = body.job_name
+        if getattr(body, "build_number", None):
+            result["build_number"] = body.build_number
+        return result
+
+    @classmethod
+    def from_analyze_request(cls, body, merged) -> JenkinsSource:
+        """Construct JenkinsSource from an analyze/re-analyze request."""
+        assert body.job_name is not None
+        assert body.build_number is not None
+        return cls(
+            job_name=body.job_name,
+            build_number=body.build_number,
+            settings=merged,
+            force=merged.force_analysis,
+        )
+
+    @classmethod
+    def restore_reanalyze_fields(cls, decrypted_params: dict) -> dict:
+        """Restore Jenkins fields for re-analysis from stored params."""
+        fields: dict = {}
+        job_name = decrypted_params.get("job_name", "")
+        build_number = decrypted_params.get("build_number", 0)
+        if not job_name or not build_number:
+            raise ValueError(
+                "Original analysis has no stored job_name/build_number; "
+                "cannot re-analyze"
+            )
+        fields["job_name"] = job_name
+        fields["build_number"] = build_number
+        for key in (
+            "jenkins_url",
+            "jenkins_user",
+            "jenkins_password",
+            "jenkins_ssl_verify",
+            "jenkins_timeout",
+            "jenkins_artifacts_max_size_mb",
+            "wait_for_completion",
+            "poll_interval_minutes",
+            "max_wait_minutes",
+            "force",
+            "get_job_artifacts",
+        ):
+            if key in decrypted_params:
+                fields[key] = decrypted_params[key]
+        return fields
+
+    @classmethod
+    def initial_status(cls, body, merged) -> str:
+        """Use waiting when wait-for-completion is enabled."""
+        _ = body
+        if merged.wait_for_completion and merged.jenkins_url:
+            return "waiting"
+        return "pending"
+
+    @classmethod
+    def pre_enqueue_build_url(cls, body, merged) -> str:
+        """Compute Jenkins build URL before fetch."""
+        if (
+            merged.jenkins_url
+            and getattr(body, "job_name", "")
+            and getattr(body, "build_number", 0)
+        ):
+            return build_jenkins_url(
+                merged.jenkins_url, body.job_name, body.build_number
+            )
+        return ""
+
+    def requires_pre_fetch(self) -> bool:
+        """Wait for Jenkins build completion when configured."""
+        return bool(self.settings.wait_for_completion and self.settings.jenkins_url)
+
+    def pre_fetch_phase(self) -> str:
+        return "waiting_for_jenkins"
+
+    async def pre_fetch(self, job_id: str) -> str | None:
+        """Wait for Jenkins build completion if configured."""
+        _ = job_id
+        if not self.requires_pre_fetch():
+            return None
+        logger.info(
+            "Waiting for Jenkins build %s #%s...",
+            self.job_name,
+            self.build_number,
+        )
+        completed, wait_error = await wait_for_jenkins_completion(
+            jenkins_url=self.settings.jenkins_url,
+            job_name=self.job_name,
+            build_number=self.build_number,
+            jenkins_user=self.settings.jenkins_user,
+            jenkins_password=self.settings.jenkins_password,
+            jenkins_ssl_verify=self.settings.jenkins_ssl_verify,
+            poll_interval_minutes=self.settings.poll_interval_minutes,
+            max_wait_minutes=self.settings.max_wait_minutes,
+            jenkins_timeout=self.settings.jenkins_timeout,
+        )
+        if not completed:
+            return wait_error
+        return None
+
+    async def persist_fetch_metadata(
+        self, job_id: str, source_result: CISourceResult
+    ) -> None:
+        """Store build_url in request_params for re-analyze/chat."""
+        build_url = source_result.build_url or self.build_url
+        if not build_url:
+            return
+
+        from rootcoz.encryption import (
+            decrypt_sensitive_fields,
+            encrypt_sensitive_fields,
+        )
+        from rootcoz.storage import patch_result_json
+
+        def _patch(data: dict) -> None:
+            params = data.get("request_params")
+            if not isinstance(params, dict):
+                return
+            decrypted = decrypt_sensitive_fields(dict(params))
+            if decrypted.get("build_url") == build_url:
+                return
+            decrypted["build_url"] = build_url
+            data["request_params"] = encrypt_sensitive_fields(decrypted)
+
+        await patch_result_json(job_id, _patch)
 
 
 # ---------------------------------------------------------------------------
@@ -706,74 +1233,6 @@ async def _analyze_grouped_failures(
     return failures, unique_errors, failed_groups
 
 
-async def _run_console_only_analysis(
-    *,
-    job_name: str,
-    build_number: int,
-    console_context: str,
-    artifacts_context: str,
-    repo_path: Path | None,
-    ai_provider: str,
-    ai_model: str,
-    ai_call_timeout: int | None,
-    custom_prompt: str,
-    server_url: str,
-    job_id: str,
-    additional_repos: dict[str, Path] | None,
-    auth_header: str,
-    call_type: str,
-    extra_context: str = "",
-    peer_ai_configs: list | None = None,
-    peer_analysis_max_rounds: int = 3,
-    max_concurrent_ai_calls: int = 3,
-) -> tuple[bool, list[FailureAnalysis], str]:
-    """Run console-only AI analysis when no structured test failures exist.
-
-    Creates a synthetic FailedTest and delegates to analyze_failure_group,
-    which handles both single-AI and peer analysis paths.
-
-    Returns:
-        A tuple of (success, failures_list, error_text).  On failure
-        ``success`` is ``False`` and ``error_text`` contains the error message.
-    """
-    # Build a synthetic FailedTest so we can use the standard analysis path
-    # (including peer debate when configured)
-    full_context = console_context
-    if extra_context:
-        full_context = (
-            f"{console_context}\n{extra_context}" if console_context else extra_context
-        )
-
-    synthetic_failure = FailedTest(
-        test_name=f"{job_name}#{build_number}",
-        error_message=full_context or "Console-only analysis (no JUnit report)",
-    )
-
-    try:
-        results = await analyze_failure_group(
-            failures=[synthetic_failure],
-            console_context=console_context,
-            repo_path=repo_path,
-            ai_provider=ai_provider,
-            ai_model=ai_model,
-            ai_call_timeout=ai_call_timeout,
-            custom_prompt=custom_prompt,
-            artifacts_context=artifacts_context,
-            server_url=server_url,
-            job_id=job_id,
-            peer_ai_configs=peer_ai_configs,
-            peer_analysis_max_rounds=peer_analysis_max_rounds,
-            group_label=call_type,
-            additional_repos=additional_repos,
-            max_concurrent_ai_calls=max_concurrent_ai_calls,
-            auth_header=auth_header,
-        )
-        return True, results, ""
-    except Exception as exc:
-        logger.error("Console-only analysis failed: %s", exc, exc_info=True)
-        return False, [], str(exc)
-
-
 async def _analyze_child_job_inner(
     *,
     source: JenkinsSource,
@@ -904,9 +1363,8 @@ async def _analyze_child_job_inner(
         )
 
     # No structured test failures - fall back to single AI analysis of console output
-    success, failures, error_text = await _run_console_only_analysis(
-        job_name=job_name,
-        build_number=build_number,
+    success, failures, error_text = await run_console_only_analysis(
+        test_name=f"{job_name}#{build_number}",
         console_context=console_context,
         artifacts_context=child_artifacts_context,
         repo_path=repo_path,
@@ -945,441 +1403,6 @@ async def _analyze_child_job_inner(
         summary="Analysis complete",
         failures=failures,
     )
-
-
-async def analyze_job(
-    request: AnalyzeRequest,
-    settings: Settings,
-    ai_provider: str,
-    ai_model: str,
-    job_id: str | None = None,
-    server_url: str = "",
-    peer_ai_configs: list | None = None,
-    peer_analysis_max_rounds: int = 3,
-    auth_header: str = "",
-    additional_repos: list[AdditionalRepo] | None = None,
-    settings_json_resolved: bool = False,
-    *,
-    is_admin: bool = False,
-) -> AnalysisResult:
-    """Analyze a Jenkins job failure.
-
-    When ``settings_json_resolved`` is True, AI/peers/repos/Settings were already
-    merged via ``resolve_repo_analysis_settings`` in main (all sources share that
-    path). This function only re-resolves after clone when early resolve failed.
-    """
-    # Track whether the caller supplied a persisted job_id so we only
-    # issue progress-phase writes for jobs that actually exist in the DB.
-    progress_job_id = job_id
-    if job_id is None:
-        job_id = str(uuid.uuid4())
-
-    job_name = request.job_name
-    build_number = request.build_number
-    logger.info(f"Starting analysis for job {job_name} #{build_number}")
-
-    force = request.force or settings.force_analysis
-
-    # Use JenkinsSource to fetch all build data (steps 1-8)
-    source = JenkinsSource(
-        job_name=job_name,
-        build_number=build_number,
-        settings=settings,
-        force=force,
-    )
-
-    try:
-        source_result = await source.fetch()
-
-        jenkins_build_url = source.build_url
-
-        if source_result.build_passed:
-            return AnalysisResult(
-                job_id=job_id,
-                job_name=request.job_name,
-                build_number=request.build_number,
-                jenkins_url=HttpUrl(jenkins_build_url),
-                status="completed",
-                summary="Build passed successfully. No failures to analyze.",
-                ai_provider=ai_provider,
-                ai_model=ai_model,
-                failures=[],
-            )
-
-        test_failures = source_result.failures
-        console_context = source_result.console_context
-        artifacts_context = source_result.artifacts_context
-        failed_child_jobs = source_result.child_job_infos
-
-        logger.debug(f"Extracted {len(failed_child_jobs)} failed child jobs")
-        child_job_analyses: list[ChildJobAnalysis] = []
-
-        # Clone repo for context BEFORE child job analysis so it's available for all jobs
-        tests_repo_url = resolve_tests_repo_url(request, settings)
-        tests_repo_token = resolve_tests_repo_token(request, settings)
-        repo_context = ""
-        custom_prompt = ""
-
-        # Use RepositoryManager context for entire analysis (child jobs and main job)
-        cloned_repos: dict[str, Path] = {}
-        async with contextlib.AsyncExitStack() as stack:
-            # Prefer pre-resolved additional repos from central settings.json merge.
-            additional_repos_list = (
-                list(additional_repos)
-                if additional_repos is not None
-                else resolve_additional_repos(request, settings)
-            )
-
-            repo_manager = RepositoryManager()
-            stack.enter_context(repo_manager)
-            repo_path = repo_manager.create_workspace()
-
-            tests_cloned_path: Path | None = None
-            if tests_repo_url:
-                try:
-                    clean_tests_url, tests_ref = parse_repo_ref(str(tests_repo_url))
-                    repo_name = derive_test_repo_name(
-                        clean_tests_url, additional_repos_list
-                    )
-                    logger.info(
-                        f"Cloning test repository: {redact_url(clean_tests_url)}"
-                        + (f" (ref={tests_ref})" if tests_ref else "")
-                    )
-                    await asyncio.to_thread(
-                        repo_manager.clone_into,
-                        clean_tests_url,
-                        repo_path / repo_name,
-                        depth=50,
-                        branch=tests_ref,
-                        token=tests_repo_token or None,
-                    )
-                    cloned_repos[repo_name] = repo_path / repo_name
-                    tests_cloned_path = cloned_repos[repo_name]
-                    logger.info(
-                        f"Successfully cloned test repository into {repo_name}/"
-                    )
-                    repo_context = f"\nTest repository cloned from: {redact_url(clean_tests_url)} (at {repo_name}/)"
-                except Exception as e:  # non-fatal tests repo clone failure
-                    logger.warning(
-                        "Failed to clone repository (%s)",
-                        type(e).__name__,
-                    )
-                    repo_context = "\nFailed to clone repository (details redacted)"
-
-            # Central settings.json merge (skip when main already resolved successfully)
-            if not settings_json_resolved:
-                try:
-                    effective = await resolve_repo_analysis_settings(
-                        progress_job_id,
-                        tests_cloned_path,
-                        request,
-                        settings,
-                        ai_provider=ai_provider,
-                        ai_model=ai_model,
-                        peer_ai_configs=peer_ai_configs,
-                        additional_repos=additional_repos_list,
-                    )
-                except RootcozSettingsError as exc:
-                    logger.error("Invalid .rootcoz/settings.json (details redacted)")
-                    return AnalysisResult(
-                        job_id=job_id,
-                        job_name=request.job_name,
-                        build_number=request.build_number,
-                        jenkins_url=HttpUrl(jenkins_build_url),
-                        status="failed",
-                        summary=str(exc),
-                        ai_provider=ai_provider,
-                        ai_model=ai_model,
-                        failures=[],
-                    )
-                ai_provider = effective.ai_provider
-                ai_model = effective.ai_model
-                peer_ai_configs = effective.peer_ai_configs
-                peer_analysis_max_rounds = effective.settings.peer_analysis_max_rounds
-                additional_repos_list = effective.additional_repos
-                settings = effective.settings
-
-            tests_dir_name = (
-                tests_cloned_path.name if tests_cloned_path is not None else None
-            )
-            try:
-                assert_no_tests_repo_name_collision(
-                    tests_dir_name, additional_repos_list
-                )
-            except RootcozSettingsError as exc:
-                logger.error(
-                    "Invalid .rootcoz/settings.json after overlay (details redacted)"
-                )
-                return AnalysisResult(
-                    job_id=job_id,
-                    job_name=request.job_name,
-                    build_number=request.build_number,
-                    jenkins_url=HttpUrl(jenkins_build_url),
-                    status="failed",
-                    summary=str(exc),
-                    ai_provider=ai_provider,
-                    ai_model=ai_model,
-                    failures=[],
-                )
-
-            if not ai_provider or not ai_model:
-                return AnalysisResult(
-                    job_id=job_id,
-                    job_name=request.job_name,
-                    build_number=request.build_number,
-                    jenkins_url=HttpUrl(jenkins_build_url),
-                    status="failed",
-                    summary=ai_not_configured_message(
-                        "AI provider/model", is_admin=is_admin
-                    ),
-                    ai_provider=ai_provider,
-                    ai_model=ai_model,
-                    failures=[],
-                )
-
-            custom_prompt = (request.raw_prompt or "").strip()
-
-            # Make artifacts accessible in the AI working directory
-            if source_result.extract_path:
-                artifacts_link = repo_path / "build-artifacts"
-                try:
-                    artifacts_link.symlink_to(source_result.extract_path)
-                    logger.info(f"Linked artifacts into workspace: {artifacts_link}")
-                except OSError as exc:
-                    logger.warning(f"Could not link artifacts into workspace: {exc}")
-                    artifacts_context = ""
-
-            # Clone additional repositories for AI context
-            if additional_repos_list:
-                additional_repos_cloned, repo_path = await clone_additional_repos(
-                    repo_manager, additional_repos_list, repo_path
-                )
-                cloned_repos.update(additional_repos_cloned)
-
-            # Copy .rootcoz/{agents,skills,extensions}/ to workspace .pi/
-            if cloned_repos:
-                copy_rootcoz_pi_resources(cloned_repos, repo_path)
-
-            # Pre-flight: verify AI sidecar is reachable before spawning parallel tasks
-            preflight_available, preflight_msg = await check_sidecar_available()
-            if not preflight_available:
-                logger.error(
-                    "AI sidecar sanity check failed for job %s (%s/%s)",
-                    job_id,
-                    ai_provider,
-                    ai_model,
-                )
-                logger.error(
-                    "AI preflight failed for job %s: %s", job_id, preflight_msg
-                )
-                return AnalysisResult(
-                    job_id=job_id,
-                    job_name=request.job_name,
-                    build_number=request.build_number,
-                    jenkins_url=HttpUrl(jenkins_build_url),
-                    status="failed",
-                    summary=make_user_friendly_error(preflight_msg),
-                    ai_provider=ai_provider,
-                    ai_model=ai_model,
-                    failures=[],
-                )
-
-            # Analyze failed child jobs IN PARALLEL with bounded concurrency
-            if failed_child_jobs:
-                await safe_update_progress(progress_job_id, "analyzing_child_jobs")
-                child_tasks: list[Coroutine[Any, Any, Any]] = [
-                    analyze_child_job(
-                        job_name=child_name,
-                        build_number=child_num,
-                        settings=settings,
-                        depth=0,
-                        max_depth=3,
-                        repo_path=repo_path,
-                        ai_provider=ai_provider,
-                        ai_model=ai_model,
-                        ai_call_timeout=settings.ai_call_timeout,
-                        custom_prompt=custom_prompt,
-                        server_url=server_url,
-                        job_id=job_id,
-                        peer_ai_configs=peer_ai_configs,
-                        peer_analysis_max_rounds=peer_analysis_max_rounds,
-                        additional_repos=cloned_repos or None,
-                        max_concurrent_ai_calls=settings.max_concurrent_ai_calls,
-                        auth_header=auth_header,
-                    )
-                    for child_name, child_num in failed_child_jobs
-                ]
-                child_results = await run_parallel_with_limit(
-                    child_tasks, max_concurrency=settings.max_concurrent_ai_calls
-                )
-
-                # Handle exceptions in results
-                child_job_analyses.extend(
-                    _normalize_child_results(failed_child_jobs, child_results)
-                )
-
-            # If this job has failed children AND no test failures, it's a pipeline/orchestrator
-            # Skip Claude CLI analysis - just return the child analyses
-            if child_job_analyses and not test_failures:
-                # Check if any child actually produced real findings
-                # Note: for multi-level pipelines, this check is shallow —
-                # a child with failed_children but no leaf findings still counts as analyzed.
-                # A recursive check could improve accuracy for deeply nested pipelines.
-                analyzed_children = [
-                    c
-                    for c in child_job_analyses
-                    if (c.failures or c.failed_children) and not c.note
-                ]
-                if not analyzed_children:
-                    return AnalysisResult(
-                        job_id=job_id,
-                        job_name=request.job_name,
-                        build_number=request.build_number,
-                        jenkins_url=HttpUrl(jenkins_build_url),
-                        status="failed",
-                        summary=f"All {len(child_job_analyses)} child job analyses failed",
-                        ai_provider=ai_provider,
-                        ai_model=ai_model,
-                        failures=[],
-                        child_job_analyses=child_job_analyses,
-                    )
-
-                total_failures = sum(
-                    len(child.failures) for child in child_job_analyses
-                )
-                summary = (
-                    f"Pipeline failed due to {len(child_job_analyses)} child job(s)."
-                )
-                if total_failures > 0:
-                    summary += f" Total: {total_failures} failure(s) analyzed. See child analyses below."
-
-                return AnalysisResult(
-                    job_id=job_id,
-                    job_name=request.job_name,
-                    build_number=request.build_number,
-                    jenkins_url=HttpUrl(jenkins_build_url),
-                    status="completed",
-                    summary=summary,
-                    ai_provider=ai_provider,
-                    ai_model=ai_model,
-                    failures=[],  # Pipeline has no direct failures
-                    child_job_analyses=child_job_analyses,
-                )
-
-            # Analyze main job test failures, grouping by signature to deduplicate
-            unique_errors = 0
-            if test_failures:
-                await safe_update_progress(progress_job_id, "analyzing_failures")
-                (
-                    failures,
-                    unique_errors,
-                    failed_groups,
-                ) = await _analyze_grouped_failures(
-                    test_failures,
-                    console_context=console_context,
-                    repo_path=repo_path,
-                    artifacts_context=artifacts_context,
-                    additional_repos=cloned_repos or None,
-                    ai_provider=ai_provider,
-                    ai_model=ai_model,
-                    ai_call_timeout=settings.ai_call_timeout,
-                    custom_prompt=custom_prompt,
-                    server_url=server_url,
-                    job_id=job_id,
-                    peer_ai_configs=peer_ai_configs,
-                    peer_analysis_max_rounds=peer_analysis_max_rounds,
-                    max_concurrent_ai_calls=settings.max_concurrent_ai_calls,
-                    auth_header=auth_header,
-                )
-
-                # If every group analysis errored out, return failed status
-                if unique_errors > 0 and failed_groups == unique_errors:
-                    return AnalysisResult(
-                        job_id=job_id,
-                        job_name=request.job_name,
-                        build_number=request.build_number,
-                        jenkins_url=HttpUrl(jenkins_build_url),
-                        status="failed",
-                        summary=f"All {unique_errors} analysis group(s) failed",
-                        ai_provider=ai_provider,
-                        ai_model=ai_model,
-                        failures=failures,
-                        child_job_analyses=child_job_analyses,
-                    )
-            else:
-                # No structured test failures - fall back to single AI analysis
-                success, failures, error_text = await _run_console_only_analysis(
-                    job_name=job_name,
-                    build_number=build_number,
-                    console_context=console_context,
-                    artifacts_context=artifacts_context,
-                    repo_path=repo_path,
-                    ai_provider=ai_provider,
-                    ai_model=ai_model,
-                    ai_call_timeout=settings.ai_call_timeout,
-                    custom_prompt=custom_prompt,
-                    server_url=server_url,
-                    job_id=job_id,
-                    additional_repos=cloned_repos or None,
-                    auth_header=auth_header,
-                    call_type="main_console",
-                    extra_context=repo_context,
-                    peer_ai_configs=peer_ai_configs,
-                    peer_analysis_max_rounds=peer_analysis_max_rounds,
-                    max_concurrent_ai_calls=settings.max_concurrent_ai_calls,
-                )
-
-                if not success:
-                    logger.error(
-                        "Console-only analysis failed for job %s: %s",
-                        job_id,
-                        error_text,
-                    )
-                    return AnalysisResult(
-                        job_id=job_id,
-                        job_name=request.job_name,
-                        build_number=request.build_number,
-                        jenkins_url=HttpUrl(jenkins_build_url),
-                        status="failed",
-                        summary=make_user_friendly_error(error_text),
-                        ai_provider=ai_provider,
-                        ai_model=ai_model,
-                        failures=[],
-                        child_job_analyses=child_job_analyses,
-                    )
-
-            # Build summary from parallel results
-            total_failures = len(failures)
-            # Include deduplication info in summary if applicable
-            if unique_errors > 0 and unique_errors < total_failures:
-                summary = (
-                    f"{total_failures} failure(s) analyzed "
-                    f"({unique_errors} unique error type(s))"
-                )
-            else:
-                summary = f"{total_failures} failure(s) analyzed"
-
-            if child_job_analyses:
-                summary = (
-                    f"{summary}. Additionally, {len(child_job_analyses)} failed child "
-                    f"job(s) were analyzed recursively."
-                )
-
-            logger.info(f"Analysis complete: {len(failures)} failures analyzed")
-            return AnalysisResult(
-                job_id=job_id,
-                job_name=request.job_name,
-                build_number=request.build_number,
-                jenkins_url=HttpUrl(jenkins_build_url),
-                status="completed",
-                summary=summary,
-                ai_provider=ai_provider,
-                ai_model=ai_model,
-                failures=failures,
-                child_job_analyses=child_job_analyses,
-            )
-    finally:
-        source.cleanup()
 
 
 async def wait_for_jenkins_completion(

@@ -89,6 +89,9 @@ MIN_KEY_LENGTH = 16
 VALID_USER_STATUSES = ("active", "pending", "rejected")
 AI_SYSTEM_USERNAME = "rootcoz-ai"
 
+# SQLite signed INTEGER max — Prow build_id strings may exceed this.
+SQLITE_INT_MAX = 9223372036854775807
+
 
 def validate_api_key(key: str) -> None:
     """Validate API key meets minimum requirements."""
@@ -346,6 +349,134 @@ async def _migrate_lowercase_usernames(db: aiosqlite.Connection) -> None:
     logger.info("Migration: case-insensitive username migration complete")
 
 
+# CTE: digit-only text build_id candidates for empty failure_history rows.
+# Computed once per row (json_valid + extract), then reused by COUNT/UPDATE.
+_FH_BUILD_ID_CANDIDATES_CTE = """
+candidates AS (
+    SELECT
+        fh.rowid AS fh_rowid,
+        CASE
+            WHEN json_type(j.safe_rj, '$.build_id') = 'text'
+                 AND json_extract(j.safe_rj, '$.build_id') != ''
+                 AND json_extract(j.safe_rj, '$.build_id')
+                     NOT GLOB '*[^0-9]*'
+            THEN json_extract(j.safe_rj, '$.build_id')
+            WHEN json_type(j.safe_rj, '$.request_params.build_id') = 'text'
+                 AND json_extract(j.safe_rj, '$.request_params.build_id') != ''
+                 AND json_extract(j.safe_rj, '$.request_params.build_id')
+                     NOT GLOB '*[^0-9]*'
+            THEN json_extract(j.safe_rj, '$.request_params.build_id')
+            ELSE NULL
+        END AS candidate
+    FROM failure_history AS fh
+    JOIN (
+        SELECT
+            job_id,
+            CASE
+                WHEN json_valid(result_json) THEN result_json
+                ELSE NULL
+            END AS safe_rj
+        FROM results
+    ) AS j ON j.job_id = fh.job_id
+    WHERE fh.build_id = '' OR fh.build_id IS NULL
+)
+"""
+
+
+async def _migrate_failure_history_build_id(db: aiosqlite.Connection) -> None:
+    """Backfill failure_history.build_id from stored result JSON.
+
+    Only rows that can actually receive a digit-only text build_id from valid
+    ``results.result_json`` are updated. Empty build_ids that will never be
+    filled (Jenkins / missing / malformed JSON) are ignored so the migration
+    becomes a no-op after eligible rows are backfilled.
+    """
+    cursor = await db.execute("PRAGMA table_info(failure_history)")
+    columns = {row[1] for row in await cursor.fetchall()}
+    if "build_id" not in columns:
+        return
+
+    cursor = await db.execute(
+        f"""
+        WITH {_FH_BUILD_ID_CANDIDATES_CTE}
+        SELECT COUNT(*) FROM candidates WHERE candidate IS NOT NULL
+        """
+    )
+    missing = (await cursor.fetchone())[0]
+    if not missing:
+        return
+
+    logger.info(
+        "Migration: backfilling failure_history.build_id for %d row(s)", missing
+    )
+    await db.execute(
+        f"""
+        WITH {_FH_BUILD_ID_CANDIDATES_CTE}
+        UPDATE failure_history AS fh
+        SET build_id = (
+            SELECT c.candidate
+            FROM candidates AS c
+            WHERE c.fh_rowid = fh.rowid
+        )
+        WHERE EXISTS (
+            SELECT 1
+            FROM candidates AS c
+            WHERE c.fh_rowid = fh.rowid
+              AND c.candidate IS NOT NULL
+        )
+        """
+    )
+
+
+async def _migrate_jenkins_url_to_build_url(db) -> None:
+    """Rename results.jenkins_url column to build_url (CI-agnostic naming)."""
+    cursor = await db.execute("PRAGMA table_info(results)")
+    columns = {row[1] for row in await cursor.fetchall()}
+    if "jenkins_url" in columns and "build_url" not in columns:
+        await db.execute("ALTER TABLE results RENAME COLUMN jenkins_url TO build_url")
+        logger.info("Migration: renamed results.jenkins_url to build_url")
+
+
+def _row_build_url(row) -> str:
+    """Read the build URL from a results table row."""
+    keys = row.keys()
+    if "build_url" in keys and row["build_url"]:
+        return row["build_url"]
+    # Backward compat: pre-migration rows may still use the old column name.
+    # Safe to remove after all databases have run _migrate_jenkins_url_to_build_url
+    # (i.e. after one full release cycle following the rename).
+    if "jenkins_url" in keys and row["jenkins_url"]:
+        return row["jenkins_url"]
+    return ""
+
+
+def stamp_build_url(result: dict, build_url: str) -> None:
+    """Set canonical and legacy build URL fields on a result dict."""
+    from rootcoz.url_utils import sanitize_http_href
+
+    safe_url = sanitize_http_href(build_url)
+    if safe_url:
+        result["build_url"] = safe_url
+        result["jenkins_url"] = safe_url
+
+
+def with_build_url_aliases(record: dict) -> dict:
+    """Ensure API records expose both build_url and jenkins_url.
+
+    Always overwrites both fields with a sanitized http(s) URL, or clears
+    them to ``""`` when no safe candidate exists — never leaves a rejected
+    URL in place.
+    """
+    from rootcoz.url_utils import sanitize_http_href
+
+    url = sanitize_http_href(
+        str(record.get("build_url") or record.get("jenkins_url") or "")
+    )
+    record["build_url"] = url
+    record["jenkins_url"] = url
+    return record
+
+
 async def init_db() -> None:
     """Initialize the database schema.
 
@@ -357,7 +488,7 @@ async def init_db() -> None:
         await db.execute("""
             CREATE TABLE IF NOT EXISTS results (
                 job_id TEXT PRIMARY KEY,
-                jenkins_url TEXT,
+                build_url TEXT,
                 status TEXT,
                 result_json TEXT,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -566,6 +697,11 @@ async def init_db() -> None:
         )
         await _migrate_add_column(
             db, "failure_history", "tracked_in_by", "TEXT NOT NULL DEFAULT ''"
+        )
+
+        # Migration: add build_id for Prow snowflake IDs (build_number is INTEGER)
+        await _migrate_add_column(
+            db, "failure_history", "build_id", "TEXT NOT NULL DEFAULT ''"
         )
 
         # tracked_in_links: supports multiple tracked links per failure
@@ -858,6 +994,9 @@ async def init_db() -> None:
         # (keep earliest created_at, upgrade to highest-privilege role),
         # and add a unique index on lower(username).
         await _migrate_lowercase_usernames(db)
+
+        await _migrate_jenkins_url_to_build_url(db)
+        await _migrate_failure_history_build_id(db)
 
         await db.commit()
 
@@ -1417,33 +1556,38 @@ def _build_status_update_clause(
 
 async def save_result(
     job_id: str,
-    jenkins_url: str,
-    status: str,
+    build_url: str = "",
+    status: str = "",
     result: dict | None = None,
+    *,
+    jenkins_url: str | None = None,
 ) -> None:
     """Save or update an analysis result.
 
     Args:
         job_id: Unique identifier for the analysis job.
-        jenkins_url: URL of the analyzed Jenkins build.
+        build_url: URL of the analyzed CI build.
         status: Current status of the analysis.
         result: Optional result data to store.
+        jenkins_url: Deprecated alias for ``build_url``.
     """
+    if jenkins_url is not None:
+        build_url = jenkins_url
     logger.debug(f"Saving result for job_id: {job_id} (status: {status})")
     result_json = json.dumps(result) if result is not None else None
     async with _connect_db() as db:
         # Insert the row if it doesn't exist yet (preserves created_at / analysis_started_at).
         await db.execute(
             """
-            INSERT OR IGNORE INTO results (job_id, jenkins_url, status, result_json)
+            INSERT OR IGNORE INTO results (job_id, build_url, status, result_json)
             VALUES (?, ?, ?, ?)
             """,
-            (job_id, jenkins_url, status, result_json),
+            (job_id, build_url, status, result_json),
         )
         # Update the row (handles both fresh inserts and existing rows).
         set_parts, params = _build_status_update_clause(status, result_json)
-        set_parts.insert(0, "jenkins_url = COALESCE(NULLIF(?, ''), jenkins_url)")
-        params.insert(0, jenkins_url)
+        set_parts.insert(0, "build_url = COALESCE(NULLIF(?, ''), build_url)")
+        params.insert(0, build_url)
         params.append(job_id)
         sql = f"UPDATE results SET {', '.join(set_parts)} WHERE job_id = ?"
         await db.execute(sql, params)
@@ -1476,6 +1620,23 @@ async def update_status(
         if cursor.rowcount == 0:
             logger.warning(f"update_status: no row found for job_id={job_id}")
         await db.commit()
+
+
+async def update_build_url(job_id: str, build_url: str) -> None:
+    """Update the build_url DB column for an existing result."""
+    from rootcoz.url_utils import sanitize_http_href
+
+    safe_url = sanitize_http_href(build_url)
+    if not safe_url:
+        return
+    async with _connect_db() as db:
+        cursor = await db.execute(
+            "UPDATE results SET build_url = ? WHERE job_id = ?",
+            (safe_url, job_id),
+        )
+        await db.commit()
+        if cursor.rowcount == 0:
+            logger.warning("update_build_url: no row found for job_id=%s", job_id)
 
 
 def _make_progress_phase_patcher(phase: str) -> Callable[[dict], None]:
@@ -1659,20 +1820,22 @@ async def get_result(job_id: str, *, strip_sensitive: bool = True) -> dict | Non
                 await _backfill_failure_uuids(job_id, parsed)
             if parsed and strip_sensitive:
                 parsed = strip_sensitive_from_response(parsed)
-            return {
-                "job_id": row["job_id"],
-                "jenkins_url": row["jenkins_url"],
-                "status": row["status"],
-                "error": row["error"] if "error" in row.keys() else "",
-                "result": parsed,
-                "created_at": row["created_at"],
-                "completed_at": row["completed_at"]
-                if "completed_at" in row.keys()
-                else None,
-                "analysis_started_at": row["analysis_started_at"]
-                if "analysis_started_at" in row.keys()
-                else None,
-            }
+            return with_build_url_aliases(
+                {
+                    "job_id": row["job_id"],
+                    "build_url": _row_build_url(row),
+                    "status": row["status"],
+                    "error": row["error"] if "error" in row.keys() else "",
+                    "result": parsed,
+                    "created_at": row["created_at"],
+                    "completed_at": row["completed_at"]
+                    if "completed_at" in row.keys()
+                    else None,
+                    "analysis_started_at": row["analysis_started_at"]
+                    if "analysis_started_at" in row.keys()
+                    else None,
+                }
+            )
         logger.debug(f"get_result: job_id={job_id}, found=False")
         return None
 
@@ -1789,7 +1952,7 @@ async def list_results(limit: int = 50) -> list[dict]:
     async with _connect_db() as db:
         cursor = await db.execute(
             """
-            SELECT job_id, jenkins_url, status, created_at
+            SELECT job_id, build_url, status, created_at
             FROM results
             ORDER BY created_at DESC
             LIMIT ?
@@ -1797,7 +1960,7 @@ async def list_results(limit: int = 50) -> list[dict]:
             (limit,),
         )
         rows = await cursor.fetchall()
-        return [dict(row) for row in rows]
+        return [with_build_url_aliases(dict(row)) for row in rows]
 
 
 def count_all_failures(result_data: dict) -> int:
@@ -1837,11 +2000,53 @@ def _count_child_failures_recursive(child: dict) -> int:
     return count
 
 
+def _resolve_history_build_fields(result_data: dict) -> tuple[str, int]:
+    """Extract build_id and build_number for failure_history rows."""
+    build_id = str(result_data.get("build_id") or "")
+    request_params = result_data.get("request_params") or {}
+    if not build_id and isinstance(request_params, dict):
+        build_id = str(request_params.get("build_id") or "")
+
+    raw_bn = result_data.get("build_number", 0)
+    if isinstance(raw_bn, str):
+        if not build_id and raw_bn.isdigit():
+            build_id = raw_bn
+        build_number = _coerce_sqlite_build_number(raw_bn)
+    else:
+        build_number = _coerce_sqlite_build_number(raw_bn)
+        if not build_id and build_number > 0:
+            build_id = str(build_number)
+
+    return build_id, build_number
+
+
+def _coerce_sqlite_build_number(value: object) -> int:
+    """Coerce a build number to SQLite INTEGER range, else return 0."""
+    if isinstance(value, str):
+        if not value.isdigit():
+            return 0
+        try:
+            number = int(value)
+        except ValueError:
+            return 0
+    elif type(value) is int:
+        number = value
+    elif value is None:
+        return 0
+    else:
+        return 0
+
+    if number < 0 or number > SQLITE_INT_MAX:
+        return 0
+    return number
+
+
 def _failure_to_history_row(
     failure: dict,
     job_id: str,
     job_name: str,
     build_number: int,
+    build_id: str = "",
     child_job_name: str = "",
     child_build_number: int = 0,
     analyzed_at: str = "",
@@ -1861,6 +2066,7 @@ def _failure_to_history_row(
         job_id,
         job_name,
         build_number,
+        build_id,
         failure.get("test_name", ""),
         failure.get("error", ""),
         failure.get("error_signature", ""),
@@ -1877,6 +2083,7 @@ def _extract_failures_for_history(
     job_id: str,
     job_name: str,
     build_number: int,
+    build_id: str = "",
     analyzed_at: str = "",
 ) -> list[tuple]:
     """Extract all failures from result_data into flat tuples for insertion.
@@ -1895,7 +2102,7 @@ def _extract_failures_for_history(
 
     Returns:
         List of tuples ready for INSERT:
-        (job_id, job_name, build_number, test_name, error_message,
+        (job_id, job_name, build_number, build_id, test_name, error_message,
          error_signature, classification, child_job_name, child_build_number, analyzed_at)
     """
     rows: list[tuple] = []
@@ -1904,14 +2111,20 @@ def _extract_failures_for_history(
     for f in result_data.get("failures", []):
         rows.append(
             _failure_to_history_row(
-                f, job_id, job_name, build_number, analyzed_at=analyzed_at
+                f, job_id, job_name, build_number, build_id, analyzed_at=analyzed_at
             )
         )
 
     # Child job analyses (recursive)
     for child in result_data.get("child_job_analyses", []):
         _extract_child_failures_for_history(
-            child, job_id, job_name, build_number, rows, analyzed_at=analyzed_at
+            child,
+            job_id,
+            job_name,
+            build_number,
+            rows,
+            build_id,
+            analyzed_at=analyzed_at,
         )
 
     return rows
@@ -1923,6 +2136,7 @@ def _extract_child_failures_for_history(
     job_name: str,
     build_number: int,
     rows: list[tuple],
+    build_id: str = "",
     analyzed_at: str = "",
 ) -> None:
     """Recursively extract failures from a child job analysis dict.
@@ -1945,6 +2159,7 @@ def _extract_child_failures_for_history(
                 job_id,
                 job_name,
                 build_number,
+                build_id,
                 child_job,
                 child_build,
                 analyzed_at=analyzed_at,
@@ -1953,7 +2168,13 @@ def _extract_child_failures_for_history(
 
     for nested in child.get("failed_children", []):
         _extract_child_failures_for_history(
-            nested, job_id, job_name, build_number, rows, analyzed_at=analyzed_at
+            nested,
+            job_id,
+            job_name,
+            build_number,
+            rows,
+            build_id,
+            analyzed_at=analyzed_at,
         )
 
 
@@ -1988,8 +2209,8 @@ async def find_matching_previous_analysis(
 
     Returns:
         Dict with previous failure_history row data if found, None otherwise.
-        Includes keys: job_id, build_number, error_signature, classification,
-        pattern, analyzed_at.
+        Includes keys: job_id, build_number, build_id, error_signature,
+        classification, pattern, analyzed_at.
     """
     async with _connect_db() as db:
         # Find the most recent failure_history row for the same job+test
@@ -2002,7 +2223,7 @@ async def find_matching_previous_analysis(
         # wildcard (matches any fh.child_build_number), consistent with
         # the API model where child_build_number=0 means "not specified".
         cursor = await db.execute(
-            "SELECT fh.job_id, fh.build_number, fh.error_signature, "
+            "SELECT fh.job_id, fh.build_number, fh.build_id, fh.error_signature, "
             "fh.classification, fh.pattern, fh.analyzed_at "
             "FROM failure_history fh "
             "WHERE fh.job_name = ? AND fh.test_name = ? AND fh.job_id != ? "
@@ -2044,10 +2265,10 @@ async def populate_failure_history(
     """
     logger.debug(f"populate_failure_history: job_id={job_id}")
     job_name = result_data.get("job_name", "")
-    build_number = result_data.get("build_number", 0)
+    build_id, build_number = _resolve_history_build_fields(result_data)
 
     rows = _extract_failures_for_history(
-        result_data, job_id, job_name, build_number, analyzed_at=analyzed_at
+        result_data, job_id, job_name, build_number, build_id, analyzed_at=analyzed_at
     )
     if not rows:
         logger.debug(
@@ -2067,10 +2288,10 @@ async def populate_failure_history(
             await db.executemany(
                 """
                 INSERT INTO failure_history
-                    (job_id, job_name, build_number, test_name, error_message,
+                    (job_id, job_name, build_number, build_id, test_name, error_message,
                      error_signature, classification, pattern,
                      child_job_name, child_build_number, analyzed_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 rows,
             )
@@ -2078,10 +2299,10 @@ async def populate_failure_history(
             await db.executemany(
                 """
                 INSERT INTO failure_history
-                    (job_id, job_name, build_number, test_name, error_message,
+                    (job_id, job_name, build_number, build_id, test_name, error_message,
                      error_signature, classification, pattern,
                      child_job_name, child_build_number)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 # Strip the analyzed_at field (last element) when not backfilling
                 [row[:-1] for row in rows],
@@ -2585,7 +2806,7 @@ async def get_test_history(
 
         # Recent runs (failures only, since we only track failures)
         cursor = await db.execute(
-            f"""SELECT fh.job_id, fh.job_name, fh.build_number, fh.error_message,
+            f"""SELECT fh.job_id, fh.job_name, fh.build_number, fh.build_id, fh.error_message,
                        fh.error_signature,
                        COALESCE(tc_latest.classification, fh.classification) AS classification,
                        fh.child_job_name, fh.child_build_number, fh.analyzed_at,
@@ -2904,7 +3125,7 @@ def _parse_dashboard_row(row) -> dict:
     """Parse a single dashboard result row into a dict with summary data."""
     entry: dict = {
         "job_id": row["job_id"],
-        "jenkins_url": row["jenkins_url"],
+        "build_url": _row_build_url(row),
         "status": row["status"],
         "created_at": row["created_at"],
         "completed_at": row["completed_at"] if "completed_at" in row.keys() else None,
@@ -2920,6 +3141,8 @@ def _parse_dashboard_row(row) -> dict:
         entry["job_name"] = result_data.get("job_name", "")
         if "build_number" in result_data:
             entry["build_number"] = result_data["build_number"]
+        if result_data.get("build_id"):
+            entry["build_id"] = result_data["build_id"]
         entry["failure_count"] = count_all_failures(result_data)
         child_jobs = result_data.get("child_job_analyses", [])
         if child_jobs:
@@ -2936,11 +3159,11 @@ def _parse_dashboard_row(row) -> dict:
         submitted_by = request_params.get("submitted_by", "")
         if submitted_by:
             entry["submitted_by"] = submitted_by
-    return entry
+    return with_build_url_aliases(entry)
 
 
 _DASHBOARD_BASE_SQL = """
-    SELECT r.job_id, r.jenkins_url, r.status, r.result_json,
+    SELECT r.job_id, r.build_url, r.status, r.result_json,
         r.created_at, r.completed_at, r.analysis_started_at, r.error,
         (SELECT COUNT(*) FROM failure_reviews fr
          WHERE fr.job_id = r.job_id AND fr.reviewed = 1) AS reviewed_count,
@@ -3359,7 +3582,7 @@ async def get_all_failures(
 
         # Get paginated results
         cursor = await db.execute(
-            f"SELECT fh.id, fh.job_id, fh.job_name, fh.build_number, fh.test_name, "
+            f"SELECT fh.id, fh.job_id, fh.job_name, fh.build_number, fh.build_id, fh.test_name, "
             f"fh.error_message, fh.error_signature, "
             f"COALESCE(tc_latest.classification, fh.classification) AS classification, "
             f"fh.child_job_name, fh.child_build_number, fh.analyzed_at "
@@ -5483,7 +5706,8 @@ async def update_chat_message_ai_fields(
 _RESULT_DATA_SUBQUERY = """
     SELECT job_id,
            json_extract(result_json, '$.job_name') AS job_name,
-           json_extract(result_json, '$.build_number') AS build_number
+           json_extract(result_json, '$.build_number') AS build_number,
+           json_extract(result_json, '$.build_id') AS build_id
     FROM results WHERE result_json IS NOT NULL
 """
 
@@ -5631,6 +5855,7 @@ async def get_report_totals(
                 r.job_id,
                 r_data.job_name,
                 r_data.build_number,
+                r_data.build_id,
                 r.created_at,
                 COALESCE(fc.failure_count, 0) AS failure_count,
                 COALESCE(rv.reviewed_count, 0) AS reviewed_count
@@ -5672,6 +5897,7 @@ async def get_report_totals(
                 "job_id": row["job_id"],
                 "job_name": row["job_name"] or row["job_id"],
                 "build_number": row["build_number"],
+                "build_id": row["build_id"] or "",
                 "failure_count": fc,
                 "reviewed_count": rc,
                 "created_at": row["created_at"],
@@ -5812,6 +6038,7 @@ async def get_report_classification_overrides(
                 tc.original_classification,
                 tc.original_pattern,
                 fh.build_number,
+                fh.build_id,
                 'classification' AS override_axis
             FROM test_classifications tc
             {meta_join}
@@ -5852,6 +6079,7 @@ async def get_report_classification_overrides(
                 tc.original_classification,
                 tc.original_pattern,
                 fh.build_number,
+                fh.build_id,
                 'pattern' AS override_axis
             FROM test_classifications tc
             {meta_join}
@@ -5923,6 +6151,7 @@ async def get_report_classification_overrides(
                 "job_name": row["job_name"],
                 "job_id": row["job_id"],
                 "build_number": row["build_number"],
+                "build_id": row["build_id"] or "",
                 "from_classification": orig,
                 "to_classification": override,
                 "override_axis": axis,
@@ -6009,7 +6238,7 @@ async def get_report_issues_created(
         sql = f"""
             SELECT c.id, c.job_id, c.test_name, c.comment,
                    c.username, c.created_at,
-                   r_data.job_name, r_data.build_number
+                   r_data.job_name, r_data.build_number, r_data.build_id
             FROM comments c
             {join_type} ({_RESULT_DATA_SUBQUERY}
             ) r_data ON r_data.job_id = c.job_id
@@ -6047,6 +6276,7 @@ async def get_report_issues_created(
                 "job_name": row["job_name"] or row["job_id"],
                 "job_id": row["job_id"],
                 "build_number": row["build_number"],
+                "build_id": row["build_id"] or "",
                 "created_by": row["username"],
                 "created_at": row["created_at"],
             }

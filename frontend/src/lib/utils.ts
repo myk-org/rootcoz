@@ -93,3 +93,60 @@ export function formatRelativeTime(ts: string | null | undefined): string {
   if (months < 12) return `${months}mo ago`
   return `${Math.floor(months / 12)}y ago`
 }
+
+/** Return a human-readable CI source label based on analysis_type from request_params.
+ *  Backend defaults missing analysis_type to 'jenkins', so the fallback matches. */
+export function ciSourceLabel(requestParams?: { [key: string]: unknown }): string {
+  const analysisType = requestParams?.analysis_type as string | undefined
+  switch (analysisType) {
+    case 'prow': return 'Prow'
+    case 'file': return 'CI Build'
+    case 'raw': return 'CI Build'
+    case 'jenkins':
+    default: return 'Jenkins'
+  }
+}
+
+/** Prow job name and build ID validation (mirrors backend prow_validation.py). */
+export const PROW_JOB_NAME_RE = /^[a-zA-Z0-9][a-zA-Z0-9._-]*$/
+export const PROW_BUILD_ID_RE = /^[0-9]+$/
+
+/** Sanitize a single URL candidate; returns null if missing or not http(s). */
+function sanitizeBuildUrlCandidate(raw: string | null | undefined): string | null {
+  if (!raw) return null
+  try {
+    const url = new URL(raw)
+    if (url.protocol !== 'http:' && url.protocol !== 'https:') return null
+    url.username = ''
+    url.password = ''
+    return url.toString()
+  } catch {
+    return null
+  }
+}
+
+/** Resolve CI build URL from API payload (prefers build_url, falls back to jenkins_url). */
+export function resolveBuildUrl(data?: { build_url?: string | null; jenkins_url?: string | null } | null): string | null {
+  if (!data) return null
+  return (
+    sanitizeBuildUrlCandidate(data.build_url) ??
+    sanitizeBuildUrlCandidate(data.jenkins_url)
+  )
+}
+
+type BuildIdSource = {
+  build_id?: string
+  build_number?: number | string
+  request_params?: Record<string, unknown>
+}
+
+/** Canonical build identifier for display (Prow build_id string preferred over build_number). */
+export function resolveBuildDisplayId(data?: BuildIdSource | null): string | null {
+  if (!data) return null
+  const fromParams = data.request_params?.build_id
+  if (typeof fromParams === 'string' && fromParams) return fromParams
+  if (data.build_id) return data.build_id
+  const bn = data.build_number
+  if (bn === undefined || bn === null || bn === '' || bn === 0 || bn === '0') return null
+  return String(bn)
+}

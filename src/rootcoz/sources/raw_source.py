@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 from rootcoz.models import FailedTest
 from rootcoz.sources.base import CISource, CISourceResult
 
@@ -33,3 +35,38 @@ class RawSource(CISource):
             CISourceResult with the provided failures.
         """
         return CISourceResult(failures=self._failures)
+
+    @classmethod
+    def build_request_params(
+        cls, body: Any, merged: Any, base_params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Persist raw failures on the job request params."""
+        _ = merged
+        assert body.failures is not None
+        base_params["failures"] = [f.model_dump() for f in body.failures]
+        return base_params
+
+    @classmethod
+    def from_analyze_request(cls, body: Any, merged: Any) -> RawSource:
+        """Construct from an analyze request."""
+        _ = merged
+        assert body.failures is not None
+        return cls(failures=body.failures)
+
+    @classmethod
+    def default_display_name(cls, body: Any) -> str:
+        """Default display name for raw analyses."""
+        _ = body
+        return "raw-analysis"
+
+    @classmethod
+    def restore_reanalyze_fields(
+        cls, decrypted_params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Restore failure list for raw re-analysis."""
+        stored_failures = decrypted_params.get("failures")
+        if stored_failures is None:
+            raise ValueError(
+                "Original raw analysis has no stored failures; cannot re-analyze"
+            )
+        return {"failures": stored_failures}

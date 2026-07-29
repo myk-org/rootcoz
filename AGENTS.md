@@ -87,11 +87,17 @@ src/rootcoz/
                             # of any specific CI system.
     chat.py                 # Chat engine: workspace, AI session, prompt builder
   sources/                  # CI source plugins (data fetching)
-    base.py                 # CISource ABC + CISourceResult dataclass
+    base.py                 # CISource ABC, CISourceResult, WorkspaceFile, and shared workspace setup helpers
     jenkins_source.py       # Jenkins plugin: JenkinsSource, analyze_job, analyze_child_job,
                             # wait_for_jenkins_completion, Jenkins helpers (handle_jenkins_exception, extract_*, etc.)
     file_source.py          # JUnit XML plugin: FileSource
     raw_source.py           # Raw failure list plugin: RawSource
+    prow_source.py          # Prow CI plugin: ProwSource (GCS artifacts)
+    chat_workspace.py       # CI-source chat workspace population dispatcher
+    prow_validation.py      # Re-export shim of rootcoz.prow_validation for plugin imports
+    registry.py             # CI source plugin registry: analysis_type → CISource class mapping
+  prow_validation.py        # Canonical Prow validators (+ URL helper re-exports for compatibility)
+  url_utils.py              # Cross-cutting HTTP(S) URL sanitization (strip userinfo, href)
   main.py                   # FastAPI app, unified POST /analyze endpoint, background tasks
   models.py                 # Pydantic request/response models
   config.py                 # Settings (env vars)
@@ -104,7 +110,7 @@ src/rootcoz/
   ...                       # Other modules (jira, github_issues, monitoring, etc.)
 ```
 
-**Dependency direction:** `main` → `sources/` + `engine/`. `sources/` → `engine/`. `engine/` does NOT import `sources/`. `engine/core.py` has a lazy import of `peer_analysis` (only when `peer_ai_configs` is set). Adding a new CI plugin means adding a file under `sources/` and a dispatch branch in `main.py` — `engine/core.py` stays untouched.
+**Dependency direction:** `main` → `sources/` + `engine/`. `sources/` → `engine/`. `engine/` does NOT import `sources/`. `engine/core.py` has a lazy import of `peer_analysis` (only when `peer_ai_configs` is set). Adding a new CI plugin means adding a file under `sources/` and registering it in `sources/registry.py` — `engine/core.py` stays untouched.
 
 ### Frontend Patterns
 
@@ -362,6 +368,17 @@ Exceptions (server-level only, no payload equivalent):
 - `VAPID_PRIVATE_KEY` — server-only VAPID private key for Web Push notifications; never expose via request payloads, CLI flags, or shared config files
 - `VAPID_PUBLIC_KEY` — server-only VAPID public key for Web Push notifications; auto-generated with `VAPID_PRIVATE_KEY` if not set
 - Security-sensitive credentials for preview/create-issue endpoints (`GITHUB_TOKEN`, `TESTS_REPO_URL`, Jira credentials, `REPORTPORTAL_URL`, `REPORTPORTAL_API_TOKEN`, `REPORTPORTAL_PROJECT`) — these use deployment config, not per-request overrides
+
+Request-tunable settings with full config parity (env, API payload, CLI, config.toml, Server Settings):
+- `prow_url` — Prow Deck base URL (server default; overridable per request via `UnifiedAnalyzeRequest`)
+- `gcs_bucket` — GCS bucket for Prow artifacts (server default; overridable per request)
+
+Request-only fields on `UnifiedAnalyzeRequest` (per-build, no server-level default):
+- `prow_job_name` — Prow job name for prow source analyses
+- `build_id` — Prow build ID (numeric string; may exceed JavaScript safe integer range)
+- `gcs_prefix` — GCS path prefix, unique per Prow build (e.g. `pr-logs/pull/org_repo/pr/job/build_id`). When empty, auto-resolves via prowjob.json or pr-logs/directory pointer.
+- `raw_xml` — raw JUnit XML content for file source
+- `failures` — raw failure list for raw source
 
 ### Sensitive Data Handling
 

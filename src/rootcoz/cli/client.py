@@ -380,29 +380,37 @@ class RootCozClient:
 
     def analyze(
         self,
-        job_name: str,
-        build_number: int,
+        job_name: str = "",
+        build_number: int = 0,
         *,
         name: str = "",
         tags: list[str] | None = None,
         **kwargs,
     ) -> dict:
-        """Submit a Jenkins job for analysis. POST /analyze
+        """Submit an analysis job. POST /analyze
+
+        For Jenkins: ``analyze("job-name", 123)``
+        For Prow: ``analyze(type="prow", prow_job_name="...", build_id="...")``
 
         Args:
-            job_name: Jenkins job name.
-            build_number: Build number to analyze.
+            job_name: Jenkins job name (when type=jenkins).
+            build_number: Jenkins build number (when type=jenkins).
             name: Display name for this analysis on the dashboard.
             tags: Optional list of tags for categorization.
-            **kwargs: Additional fields for the AnalyzeRequest body.
+            **kwargs: Additional fields (type, prow_job_name, build_id, etc.).
 
         Returns:
             Queued status with job_id for polling.
         """
         body: dict = {**kwargs}
-        body["type"] = "jenkins"
-        body["job_name"] = job_name
-        body["build_number"] = build_number
+        body.setdefault("type", "jenkins")
+        if body["type"] == "jenkins":
+            if not job_name:
+                raise ValueError("job_name is required for Jenkins analysis")
+            if build_number <= 0:
+                raise ValueError("build_number must be positive for Jenkins analysis")
+            body["job_name"] = job_name
+            body["build_number"] = build_number
         if name:
             body["name"] = name
         if tags:

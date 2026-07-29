@@ -337,7 +337,7 @@ class TestListResults:
             # Insert with explicit timestamps to ensure ordering
             async with aiosqlite.connect(setup_test_db) as db:
                 await db.execute(
-                    """INSERT INTO results (job_id, jenkins_url, status, created_at)
+                    """INSERT INTO results (job_id, build_url, status, created_at)
                        VALUES (?, ?, ?, ?)""",
                     (
                         "job-order-0",
@@ -347,7 +347,7 @@ class TestListResults:
                     ),
                 )
                 await db.execute(
-                    """INSERT INTO results (job_id, jenkins_url, status, created_at)
+                    """INSERT INTO results (job_id, build_url, status, created_at)
                        VALUES (?, ?, ?, ?)""",
                     (
                         "job-order-1",
@@ -357,7 +357,7 @@ class TestListResults:
                     ),
                 )
                 await db.execute(
-                    """INSERT INTO results (job_id, jenkins_url, status, created_at)
+                    """INSERT INTO results (job_id, build_url, status, created_at)
                        VALUES (?, ?, ?, ?)""",
                     (
                         "job-order-2",
@@ -862,7 +862,7 @@ class TestMarkStaleResultsFailed:
         with patch.object(storage, "DB_PATH", setup_test_db):
             async with aiosqlite.connect(setup_test_db) as db:
                 await db.execute(
-                    "INSERT INTO results (job_id, jenkins_url, status, result_json) "
+                    "INSERT INTO results (job_id, build_url, status, result_json) "
                     "VALUES (?, ?, ?, ?)",
                     ("w-bad-json", "http://j/7", "waiting", "{not-json"),
                 )
@@ -1354,3 +1354,250 @@ class TestRBACMigration:
                 await storage.change_user_role("badtest", "user")
             with pytest.raises(ValueError, match="Invalid role"):
                 await storage.change_user_role("badtest", "superuser")
+
+
+class TestFailureHistoryBuildIdMigration:
+    """Tests for _migrate_failure_history_build_id validation."""
+
+    async def test_backfill_accepts_only_numeric_text_build_ids(
+        self, setup_test_db: Path
+    ) -> None:
+        """Migration keeps only JSON-text digit build IDs; rejects coerced types."""
+        import json
+
+        cases = [
+            # job_id, result_json, expected build_id after migrate
+            (
+                "job-top-text",
+                {"build_id": "2072319655766134784"},
+                "2072319655766134784",
+            ),
+            (
+                "job-params-text",
+                {"request_params": {"build_id": "42"}},
+                "42",
+            ),
+            (
+                "job-bool",
+                {"build_id": True},
+                "",
+            ),
+            (
+                "job-int",
+                {"build_id": 123},
+                "",
+            ),
+            (
+                "job-mixed",
+                {"build_id": "12ab"},
+                "",
+            ),
+            (
+                "job-empty",
+                {"build_id": ""},
+                "",
+            ),
+            (
+                "job-prefer-top",
+                {
+                    "build_id": "99",
+                    "request_params": {"build_id": "true"},
+                },
+                "99",
+            ),
+            (
+                "job-fallback-params",
+                {
+                    "build_id": True,
+                    "request_params": {"build_id": "77"},
+                },
+                "77",
+            ),
+        ]
+
+        async with aiosqlite.connect(setup_test_db) as db:
+            for job_id, result_json, _expected in cases:
+                await db.execute(
+                    """INSERT INTO results (job_id, status, result_json)
+                       VALUES (?, 'completed', ?)""",
+                    (job_id, json.dumps(result_json)),
+                )
+                await db.execute(
+                    """INSERT INTO failure_history
+                       (job_id, job_name, build_number, build_id, test_name,
+                        classification, error_message)
+                       VALUES (?, ?, 1, '', ?, 'CODE ISSUE', 'err')""",
+                    (job_id, f"job-{job_id}", f"test-{job_id}"),
+                )
+            await db.commit()
+            await storage._migrate_failure_history_build_id(db)
+            await db.commit()
+
+            db.row_factory = aiosqlite.Row
+            for job_id, _result_json, expected in cases:
+                cursor = await db.execute(
+                    "SELECT build_id FROM failure_history WHERE job_id = ?",
+                    (job_id,),
+                )
+                row = await cursor.fetchone()
+                assert row is not None
+                assert row["build_id"] == expected, (
+                    f"{job_id}: expected {expected!r}, got {row['build_id']!r}"
+                )
+
+    async def test_backfill_skips_malformed_result_json(
+        self, setup_test_db: Path
+    ) -> None:
+        """Malformed result_json must not abort migration; build_id stays empty."""
+        async with aiosqlite.connect(setup_test_db) as db:
+            await db.execute(
+                """INSERT INTO results (job_id, status, result_json)
+                   VALUES (?, 'completed', ?)""",
+                ("job-bad-json", "{not-json"),
+            )
+            await db.execute(
+                """INSERT INTO failure_history
+                   (job_id, job_name, build_number, build_id, test_name,
+                    classification, error_message)
+                   VALUES (?, 'job', 1, '', 'test-bad', 'CODE ISSUE', 'err')""",
+                ("job-bad-json",),
+            )
+            await db.commit()
+            await storage._migrate_failure_history_build_id(db)
+            await db.commit()
+
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute(
+                "SELECT build_id FROM failure_history WHERE job_id = ?",
+                ("job-bad-json",),
+            )
+            row = await cursor.fetchone()
+            assert row is not None
+            assert row["build_id"] == ""
+
+    async def test_backfill_skips_when_no_eligible_rows(
+        self, setup_test_db: Path
+    ) -> None:
+        """Ineligible empty build_ids must not keep the migration re-running."""
+        import json
+
+        async with aiosqlite.connect(setup_test_db) as db:
+            # Eligible: numeric text build_id in result_json
+            await db.execute(
+                """INSERT INTO results (job_id, status, result_json)
+                   VALUES (?, 'completed', ?)""",
+                ("job-eligible", json.dumps({"build_id": "12345"})),
+            )
+            await db.execute(
+                """INSERT INTO failure_history
+                   (job_id, job_name, build_number, build_id, test_name,
+                    classification, error_message)
+                   VALUES (?, 'prow-job', 0, '', 'test-e', 'CODE ISSUE', 'err')""",
+                ("job-eligible",),
+            )
+            # Ineligible: Jenkins-style result with no build_id (stays empty forever)
+            await db.execute(
+                """INSERT INTO results (job_id, status, result_json)
+                   VALUES (?, 'completed', ?)""",
+                ("job-jenkins", json.dumps({"build_number": 99})),
+            )
+            await db.execute(
+                """INSERT INTO failure_history
+                   (job_id, job_name, build_number, build_id, test_name,
+                    classification, error_message)
+                   VALUES (?, 'jenkins-job', 99, '', 'test-j', 'CODE ISSUE', 'err')""",
+                ("job-jenkins",),
+            )
+            await db.commit()
+
+            await storage._migrate_failure_history_build_id(db)
+            await db.commit()
+
+            db.row_factory = aiosqlite.Row
+            eligible_row = await (
+                await db.execute(
+                    "SELECT build_id FROM failure_history WHERE job_id = ?",
+                    ("job-eligible",),
+                )
+            ).fetchone()
+            jenkins_row = await (
+                await db.execute(
+                    "SELECT build_id FROM failure_history WHERE job_id = ?",
+                    ("job-jenkins",),
+                )
+            ).fetchone()
+            assert eligible_row is not None and jenkins_row is not None
+            assert eligible_row["build_id"] == "12345"
+            assert jenkins_row["build_id"] == ""
+
+            # Second run must be a no-op (no eligible empty rows left).
+            before = db.total_changes
+            await storage._migrate_failure_history_build_id(db)
+            await db.commit()
+            assert db.total_changes == before
+
+
+class TestUpdateBuildUrl:
+    """Tests for update_build_url()."""
+
+    async def test_url_persisted(self, setup_test_db: Path) -> None:
+        """Happy path: build URL is persisted and retrievable."""
+        with patch.object(storage, "DB_PATH", setup_test_db):
+            await storage.save_result("job-url", "", "pending", {})
+            await storage.update_build_url(
+                "job-url", "https://prow.example.com/view/job/42"
+            )
+            row = await storage.get_result("job-url")
+            assert row is not None
+            assert row["jenkins_url"] == "https://prow.example.com/view/job/42"
+
+    async def test_empty_string_noop(self, setup_test_db: Path) -> None:
+        """Empty string is a no-op — existing URL stays unchanged."""
+        with patch.object(storage, "DB_PATH", setup_test_db):
+            await storage.save_result(
+                "job-noop", "https://original.url/job/1", "pending", {}
+            )
+            await storage.update_build_url("job-noop", "")
+            row = await storage.get_result("job-noop")
+            assert row is not None
+            assert row["jenkins_url"] == "https://original.url/job/1"
+
+    async def test_nonexistent_job_logs_warning(self, setup_test_db: Path) -> None:
+        """Updating a nonexistent job_id logs a warning."""
+        with (
+            patch.object(storage, "DB_PATH", setup_test_db),
+            patch.object(storage, "logger") as mock_logger,
+        ):
+            await storage.update_build_url("nonexistent-id", "https://example.com")
+        mock_logger.warning.assert_called_once()
+        args = mock_logger.warning.call_args[0]
+        assert "no row found" in args[0]
+        assert "nonexistent-id" in args
+
+
+class TestWithBuildUrlAliases:
+    """Tests for with_build_url_aliases sanitization."""
+
+    def test_clears_unsafe_urls(self) -> None:
+        record = {
+            "build_url": "javascript:alert(1)",
+            "jenkins_url": "javascript:alert(1)",
+        }
+        out = storage.with_build_url_aliases(record)
+        assert out["build_url"] == ""
+        assert out["jenkins_url"] == ""
+
+    def test_prefers_build_url_and_aliases(self) -> None:
+        record = {
+            "build_url": "https://prow.example.com/job/1",
+            "jenkins_url": "https://jenkins.example.com/job/1",
+        }
+        out = storage.with_build_url_aliases(record)
+        assert out["build_url"] == "https://prow.example.com/job/1"
+        assert out["jenkins_url"] == "https://prow.example.com/job/1"
+
+    def test_falls_back_to_jenkins_url(self) -> None:
+        record = {"jenkins_url": "https://jenkins.example.com/job/1"}
+        out = storage.with_build_url_aliases(record)
+        assert out["build_url"] == "https://jenkins.example.com/job/1"
+        assert out["jenkins_url"] == "https://jenkins.example.com/job/1"

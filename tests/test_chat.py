@@ -8,7 +8,6 @@ import pytest
 
 from rootcoz import storage
 from rootcoz.engine.chat import (
-    _extract_build_params,
     build_admin_custom_tools,
     build_admin_system_prompt,
     build_analysis_history_tools,
@@ -17,6 +16,7 @@ from rootcoz.engine.chat import (
     build_system_prompt,
     build_welcome_message,
 )
+from rootcoz.sources.jenkins_source import _extract_build_params
 
 _TEST_ADMIN_KEY = "test-admin-key-16chars"  # pragma: allowlist secret
 _TEST_ENCRYPTION_KEY = "test-encryption-key-for-hmac"  # pragma: allowlist secret
@@ -511,27 +511,32 @@ class TestBuildSystemPrompt:
         )
         assert "Source repositories are cloned" not in prompt
 
-    def test_jenkins_data_available_note(self):
+    def test_ci_build_data_available_note(self):
+        """CI-neutral wording when build data is available for chat."""
         tools = self._make_tools()
         prompt = build_system_prompt(
             job_name="j",
             build_number=1,
             job_id="j1",
             custom_tools=tools,
-            jenkins_data_available=True,
+            ci_build_data_available=True,
         )
+        assert "CI build data is available in your working directory:" in prompt
+        assert "full CI console output" in prompt
         assert "console-output.txt" in prompt
         assert "build-info.json" in prompt
         assert "build-artifacts/" in prompt
+        assert "Jenkins build data" not in prompt
+        assert "Jenkins console" not in prompt
 
-    def test_jenkins_data_not_available(self):
+    def test_ci_build_data_not_available(self):
         tools = self._make_tools()
         prompt = build_system_prompt(
             job_name="j",
             build_number=1,
             job_id="j1",
             custom_tools=tools,
-            jenkins_data_available=False,
+            ci_build_data_available=False,
         )
         assert "console-output.txt" not in prompt
         assert "build-info.json" not in prompt
@@ -631,11 +636,11 @@ class TestBuildWelcomeMessage:
         msg = build_welcome_message(
             job_name="j",
             build_number=1,
-            jenkins_data_available=True,
+            ci_build_data_available=True,
         )
         assert "Build artifacts" in msg
         assert "console output" in msg.lower()
-        assert "build info" in msg.lower()
+        assert "build metadata" in msg.lower()
 
     def test_jira_available(self):
         msg = build_welcome_message(job_name="j", build_number=1, jira_available=True)
@@ -650,7 +655,7 @@ class TestBuildWelcomeMessage:
             job_name="pipeline",
             build_number=99,
             repos_available=True,
-            jenkins_data_available=True,
+            ci_build_data_available=True,
             jira_available=True,
             github_available=True,
         )
@@ -661,6 +666,15 @@ class TestBuildWelcomeMessage:
         assert "Jira" in msg
         assert "GitHub" in msg
         assert "console output" in msg.lower()
+
+    def test_string_build_number(self):
+        """build_welcome_message works with string build_number (large Prow build_id)."""
+        msg = build_welcome_message(
+            job_name="prow-job",
+            build_number="9007199254740999",
+        )
+        assert "prow-job" in msg
+        assert "#9007199254740999" in msg
 
 
 # ---------------------------------------------------------------------------
@@ -752,64 +766,96 @@ class TestExtractBuildParams:
 
 
 # ---------------------------------------------------------------------------
-# setup_jenkins_workspace tests
+# Jenkins chat workspace population (via CISource plugin path)
 # ---------------------------------------------------------------------------
 
 
+def _jenkins_chat_settings(**overrides):
+    """Build a Settings-like object with model_copy for Jenkins chat tests."""
+    from types import SimpleNamespace
+
+    base = {
+        "jenkins_url": "https://jenkins.example.com",
+        "jenkins_user": "user",
+        "jenkins_password": "pass",  # pragma: allowlist secret
+        "jenkins_ssl_verify": True,
+        "jenkins_timeout": 30,
+        "jenkins_artifacts_max_size_mb": 500,
+        "get_job_artifacts": False,
+    }
+    base.update(overrides)
+
+    def _make(data: dict):
+        ns = SimpleNamespace(**data)
+
+        def _copy(update):
+            merged = {**data, **update}
+            return _make(merged)
+
+        ns.model_copy = _copy
+        return ns
+
+    return _make(base)
+
+
 class TestSetupJenkinsWorkspace:
-    """Tests for setup_jenkins_workspace."""
+    """Tests for Jenkins chat workspace via setup_ci_build_workspace."""
 
     @pytest.mark.asyncio
-    async def test_skips_without_jenkins_credentials(self, tmp_path):
-        from rootcoz.engine.chat import setup_jenkins_workspace
+    async def test_skips_without_jenkins_settings(self, tmp_path):
+        from rootcoz.sources.chat_workspace import setup_ci_build_workspace
 
         workspace = tmp_path / "workspace"
         workspace.mkdir()
         params = {
-            "jenkins_url": "https://jenkins.example.com",
-            # Missing jenkins_user and jenkins_password
+            "analysis_type": "jenkins",
+            "job_name": "test-pipeline",
+            "build_number": 42,
         }
-        result = await setup_jenkins_workspace(workspace, params)
+        result = await setup_ci_build_workspace(workspace, params, settings=None)
         assert result is False
 
     @pytest.mark.asyncio
     async def test_skips_without_job_name(self, tmp_path):
-        from rootcoz.engine.chat import setup_jenkins_workspace
+        from rootcoz.sources.chat_workspace import setup_ci_build_workspace
 
         workspace = tmp_path / "workspace"
         workspace.mkdir()
         params = {
+            "analysis_type": "jenkins",
             "jenkins_url": "https://jenkins.example.com",
             "jenkins_user": "user",
             "jenkins_password": "pass",  # pragma: allowlist secret
-            # Missing job_name and build_number
         }
-        result = await setup_jenkins_workspace(workspace, params)
+        result = await setup_ci_build_workspace(
+            workspace, params, settings=_jenkins_chat_settings()
+        )
         assert result is False
 
     @pytest.mark.asyncio
     async def test_skips_non_jenkins_job(self, tmp_path):
-        from rootcoz.engine.chat import setup_jenkins_workspace
+        from rootcoz.sources.chat_workspace import setup_ci_build_workspace
 
         workspace = tmp_path / "workspace"
         workspace.mkdir()
-        result = await setup_jenkins_workspace(workspace, {})
+        result = await setup_ci_build_workspace(workspace, {})
         assert result is False
 
     @pytest.mark.asyncio
     async def test_writes_console_and_build_info(self, tmp_path):
-        from rootcoz.engine.chat import setup_jenkins_workspace
+        from rootcoz.sources.chat_workspace import setup_ci_build_workspace
 
         workspace = tmp_path / "workspace"
         workspace.mkdir()
         params = {
+            "analysis_type": "jenkins",
             "jenkins_url": "https://jenkins.example.com",
             "jenkins_user": "user",
             "jenkins_password": "pass",  # pragma: allowlist secret
             "job_name": "test-pipeline",
             "build_number": 42,
         }
-        with patch("rootcoz.jenkins.JenkinsClient") as MockClient:
+        with patch("rootcoz.sources.jenkins_source.JenkinsClient") as MockClient:
             mock = MockClient.return_value
             mock.get_build_console.return_value = "line1\nERROR: boom\nline3"
             mock.get_build_info_safe.return_value = {
@@ -833,7 +879,9 @@ class TestSetupJenkinsWorkspace:
                 ],
                 "artifacts": [],
             }
-            result = await setup_jenkins_workspace(workspace, params)
+            result = await setup_ci_build_workspace(
+                workspace, params, settings=_jenkins_chat_settings()
+            )
 
         assert result is True
         assert (workspace / "console-output.txt").exists()
@@ -842,32 +890,31 @@ class TestSetupJenkinsWorkspace:
 
         info = json.loads((workspace / "build-info.json").read_text())
         assert info["result"] == "FAILURE"
-        # Sensitive params (TOKEN, PASSWORD) should be filtered out
         assert info["parameters"] == [{"name": "BRANCH", "value": "main"}]
 
     @pytest.mark.asyncio
     async def test_skips_existing_files(self, tmp_path):
-        from rootcoz.engine.chat import setup_jenkins_workspace
+        from rootcoz.sources.chat_workspace import setup_ci_build_workspace
 
         workspace = tmp_path / "workspace"
         workspace.mkdir()
-        # Pre-create files
         (workspace / "console-output.txt").write_text("existing")
         (workspace / "build-info.json").write_text("{}")
         params = {
+            "analysis_type": "jenkins",
             "jenkins_url": "https://jenkins.example.com",
             "jenkins_user": "user",
             "jenkins_password": "pass",  # pragma: allowlist secret
             "job_name": "test-pipeline",
             "build_number": 42,
         }
-        with patch("rootcoz.jenkins.JenkinsClient") as MockClient:
+        with patch("rootcoz.sources.jenkins_source.JenkinsClient") as MockClient:
             mock = MockClient.return_value
-            await setup_jenkins_workspace(workspace, params)
-            # Should not call Jenkins since files exist
+            await setup_ci_build_workspace(
+                workspace, params, settings=_jenkins_chat_settings()
+            )
             mock.get_build_console.assert_not_called()
             mock.get_build_info_safe.assert_not_called()
-        # Files still have original content
         assert (workspace / "console-output.txt").read_text() == "existing"
 
 
@@ -931,6 +978,38 @@ class TestChatCleanup:
         _safe_remove_symlink(link)
         assert not link.exists()
         assert not target.exists()  # under /tmp/ → deleted
+
+    def test_cleanup_deletes_jenkins_artifacts_when_tmpdir_differs(
+        self, tmp_path, monkeypatch
+    ):
+        """Jenkins extract dirs under gettempdir() are deleted even if TMPDIR != /tmp."""
+        import tempfile
+
+        from rootcoz import jenkins_artifacts
+        from rootcoz.engine.chat import cleanup_chat_workspace
+
+        custom_tmp = tmp_path / "custom-tmp"
+        custom_tmp.mkdir()
+        monkeypatch.setenv("TMPDIR", str(custom_tmp))
+        monkeypatch.setattr(tempfile, "gettempdir", lambda: str(custom_tmp))
+
+        extract_base = Path(tempfile.gettempdir()) / "jenkins-insight"
+        monkeypatch.setattr(jenkins_artifacts, "EXTRACT_BASE", extract_base)
+
+        artifacts_dir = extract_base / "artifacts-testhash"
+        artifacts_dir.mkdir(parents=True)
+        (artifacts_dir / "log.txt").write_text("data")
+
+        workspace = Path(tempfile.gettempdir()) / "rootcoz-chat-job-tmpdir"
+        workspace.mkdir(parents=True)
+        link = workspace / "build-artifacts"
+        link.symlink_to(artifacts_dir)
+
+        with patch("rootcoz.engine.chat.get_chat_workspace", return_value=workspace):
+            cleanup_chat_workspace("job-tmpdir")
+
+        assert not workspace.exists()
+        assert not artifacts_dir.exists()
 
 
 # ---------------------------------------------------------------------------
@@ -1436,3 +1515,63 @@ class TestAdminChatArtifactEndpoints:
 
         # Artifact should be gone
         assert test_client.get(download_url).status_code == 404
+
+
+@pytest.mark.asyncio
+class TestCiBuildDataForwarding:
+    """Regression: ci_build_data_available must reach build_system_prompt."""
+
+    async def test_init_chat_session_forwards_ci_build_data_flag(self):
+        from rootcoz.engine.chat import init_chat_session
+
+        with (
+            patch(
+                "rootcoz.engine.chat.build_system_prompt",
+                return_value="prompt",
+            ) as mock_prompt,
+            patch(
+                "rootcoz.engine.chat._create_chat_session",
+                new_callable=AsyncMock,
+                return_value="sess-1",
+            ),
+        ):
+            await init_chat_session(
+                job_id="j1",
+                job_name="prow-job",
+                build_number="1234567890123456789",
+                ai_provider="claude",
+                ai_model="claude-opus-4-6",
+                ci_build_data_available=True,
+            )
+
+        mock_prompt.assert_called_once()
+        assert mock_prompt.call_args.kwargs["ci_build_data_available"] is True
+
+    async def test_chat_with_ai_forwards_ci_build_data_flag(self):
+        from rootcoz.engine.chat import chat_with_ai
+
+        with (
+            patch(
+                "rootcoz.engine.chat.build_system_prompt",
+                return_value="prompt",
+            ) as mock_prompt,
+            patch(
+                "rootcoz.engine.chat._chat_with_ai_impl",
+                new_callable=AsyncMock,
+                return_value=(True, "ok", "sess-1"),
+            ) as mock_impl,
+        ):
+            await chat_with_ai(
+                job_id="j1",
+                job_name="prow-job",
+                build_number="1234567890123456789",
+                message="hello",
+                history=[],
+                ai_provider="claude",
+                ai_model="claude-opus-4-6",
+                ci_build_data_available=True,
+            )
+            build_prompt_fn = mock_impl.call_args.kwargs["build_prompt_fn"]
+            build_prompt_fn()
+
+        assert mock_prompt.call_args.kwargs["ci_build_data_available"] is True

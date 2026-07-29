@@ -1,7 +1,14 @@
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'react'
 import { Link, useSearchParams } from 'react-router-dom'
 import { api } from '@/lib/api'
-import { cn, parseApiTimestamp } from '@/lib/utils'
+import { cn, parseApiTimestamp, resolveBuildDisplayId } from '@/lib/utils'
+
+/** Render build ID badge using the shared resolver (handles Prow build_id fallback). */
+function BuildBadge({ buildNumber, buildId, className }: { buildNumber?: number; buildId?: string; className?: string }) {
+  const bid = resolveBuildDisplayId({ build_number: buildNumber, build_id: buildId })
+  if (!bid) return null
+  return <span className={cn('ml-1 font-mono', className)}>#{bid}</span>
+}
 import { Button } from '@/components/ui/button'
 import { Skeleton } from '@/components/ui/skeleton'
 import {
@@ -31,6 +38,7 @@ interface TotalsData {
     job_id: string
     job_name: string
     build_number: number
+    build_id?: string
     failure_count: number
     reviewed_count: number
     created_at: string
@@ -48,6 +56,7 @@ interface OverridesData {
     job_name: string
     job_id: string
     build_number: number
+    build_id?: string
     from_classification: string
     to_classification: string
     override_axis?: 'classification' | 'pattern'
@@ -68,6 +77,7 @@ interface IssuesData {
     job_name: string
     job_id: string
     build_number: number
+    build_id?: string
     created_by: string
     created_at: string
   }>
@@ -321,9 +331,7 @@ function TotalsReport({ data, search, expanded, onToggleExpanded, onSetExpanded 
                       <Link to={`/results/${job.job_id}`} className="text-sm text-text-link hover:underline">
                         {job.job_name}
                       </Link>
-                      {job.build_number != null && (
-                        <span className="ml-1 font-mono text-xs text-text-tertiary">#{job.build_number}</span>
-                      )}
+                      <BuildBadge buildNumber={job.build_number} buildId={job.build_id} className="text-xs text-text-tertiary" />
                     </TableCell>
                     <TableCell className="text-center font-mono text-xs">{job.failure_count}</TableCell>
                     <TableCell className="text-center font-mono text-xs">{job.reviewed_count}</TableCell>
@@ -455,9 +463,7 @@ function OverridesReport({ data, search, expandedGroups, onToggleGroup, onExpand
                               <TableCell>
                                 <Link to={`/results/${d.job_id}?highlight=${encodeURIComponent(d.test_name)}`} className="text-xs text-text-link hover:underline">
                                   {d.job_name}
-                                  {d.build_number != null && (
-                                    <span className="ml-1 font-mono text-[10px]">#{d.build_number}</span>
-                                  )}
+                                  <BuildBadge buildNumber={d.build_number} buildId={d.build_id} className="text-[10px]" />
                                 </Link>
                               </TableCell>
                               <TableCell className="text-xs text-text-secondary">{d.overridden_by}</TableCell>
@@ -546,9 +552,7 @@ function IssuesReport({ data, search }: { data: IssuesData; search: string }) {
                     <Link to={`/results/${issue.job_id}`} className="text-xs text-text-link hover:underline">
                       {issue.job_name}
                     </Link>
-                    {issue.build_number != null && (
-                      <span className="ml-1 font-mono text-[10px] text-text-tertiary">#{issue.build_number}</span>
-                    )}
+                    <BuildBadge buildNumber={issue.build_number} buildId={issue.build_id} className="text-[10px] text-text-tertiary" />
                   </TableCell>
                   <TableCell className="text-xs text-text-secondary">{issue.created_by}</TableCell>
                   <TableCell className="text-right font-mono text-xs text-text-tertiary">

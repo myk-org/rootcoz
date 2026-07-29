@@ -144,6 +144,7 @@ export interface ChildJobAnalysis {
   id: string
   job_name: string
   build_number: number
+  build_url?: string | null
   jenkins_url: string | null
   summary: string | null
   failures: FailureAnalysis[]
@@ -154,7 +155,9 @@ export interface ChildJobAnalysis {
 export interface AnalysisResult {
   job_id: string
   job_name: string
-  build_number: number
+  build_number: number | string
+  build_id?: string
+  build_url?: string | null
   jenkins_url: string | null
   status: AnalysisStatus
   summary: string
@@ -164,6 +167,7 @@ export interface AnalysisResult {
   child_job_analyses: ChildJobAnalysis[]
   token_usage?: TokenUsageSummary
   error?: string
+  source_warnings?: string[]
   progress_log?: Array<{ phase: string; timestamp: number }>
   progress_phase?: string
   request_params?: {
@@ -185,6 +189,7 @@ export type UserRole = 'viewer' | 'reviewer' | 'operator' | 'admin'
 
 export interface DashboardJob {
   job_id: string
+  build_url?: string | null
   jenkins_url: string | null
   status: AnalysisStatus
   created_at: string
@@ -194,6 +199,7 @@ export interface DashboardJob {
   comment_count: number
   job_name?: string
   build_number?: number
+  build_id?: string
   failure_count?: number
   child_job_count?: number
   summary?: string
@@ -257,6 +263,7 @@ export interface FailureHistoryEntry {
   job_id: string
   job_name: string
   build_number: number
+  build_id?: string
   test_name: string
   error_message: string
   error_signature: string
@@ -279,6 +286,7 @@ export interface TestHistory {
     job_id: string
     job_name: string
     build_number: number
+    build_id?: string
     classification: string
     analyzed_at: string
     child_job_name: string
@@ -340,6 +348,7 @@ export interface TrackedInEntry {
 
 export interface ResultResponse {
   job_id: string
+  build_url?: string | null
   jenkins_url: string | null
   status: AnalysisStatus
   error?: string
@@ -514,4 +523,7 @@ export interface DefaultServerSettings {
   wait_for_completion: boolean
   poll_interval_minutes: number
   max_wait_minutes: number
+  // Prow
+  prow_url: string
+  gcs_bucket: string
 }

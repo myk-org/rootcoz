@@ -3,7 +3,7 @@ import { useParams, useNavigate, useLocation, Link } from 'react-router-dom'
 import { useSSE } from '@/lib/SSEProvider'
 import { api } from '@/lib/api'
 import { useClipboard } from '@/lib/useClipboard'
-import { parseApiTimestamp, isAnalysisTimeout, formatDuration, formatTimestamp } from '@/lib/utils'
+import { parseApiTimestamp, isAnalysisTimeout, formatDuration, formatTimestamp, ciSourceLabel, resolveBuildUrl, resolveBuildDisplayId } from '@/lib/utils'
 import { buildRepoUrls, type RepoUrl } from '@/lib/autoLink'
 import { groupFailures } from '@/lib/grouping'
 import { useExpandCollapseAll } from '@/lib/useExpandCollapseAll'
@@ -402,6 +402,9 @@ function ReportContent() {
   // After early returns, result is guaranteed to be non-null
   if (!result) return null
 
+  const buildUrl = resolveBuildUrl(result)
+  const buildDisplayId = resolveBuildDisplayId(result)
+
   return (
     <TooltipProvider delayDuration={200}>
     <div className="space-y-6 animate-fade-in">
@@ -411,13 +414,13 @@ function ReportContent() {
           <h1 className="font-display text-lg font-bold text-text-primary truncate">
             {result.job_name || result.job_id}
           </h1>
-          {result.build_number > 0 && (
-            result.jenkins_url ? (
-              <a href={String(result.jenkins_url)} target="_blank" rel="noopener noreferrer" className="font-mono text-sm text-text-link hover:underline">
-                #{result.build_number}
+          {buildDisplayId && (
+            buildUrl ? (
+              <a href={buildUrl} target="_blank" rel="noopener noreferrer" className="font-mono text-sm text-text-link hover:underline">
+                #{buildDisplayId}
               </a>
             ) : (
-              <span className="font-mono text-sm text-text-tertiary">#{result.build_number}</span>
+              <span className="font-mono text-sm text-text-tertiary">#{buildDisplayId}</span>
             )
           )}
           <StatusChip status={isAnalysisTimeout(result.status, result.error, result.summary) ? 'timeout' : result.status} />
@@ -454,7 +457,7 @@ function ReportContent() {
           )}
           <div className="ml-auto flex items-center gap-3">
             {state.reportportalAvailable && (result.child_job_analyses ?? []).length === 0 && (
-              <ReportPortalButton jobId={result.job_id} jobName={result.job_name ?? result.job_id} buildNumber={result.build_number} hasFailures={(result.failures ?? []).length > 0} />
+              <ReportPortalButton jobId={result.job_id} jobName={result.job_name ?? result.job_id} buildNumber={resolveBuildDisplayId(result) ?? result.build_number} hasFailures={(result.failures ?? []).length > 0} />
             )}
             {!isViewer && (
               <Button variant="ghost" size="sm" className="gap-1.5 text-xs" asChild>
@@ -476,14 +479,14 @@ function ReportContent() {
                 Re-Analyze
               </Button>
             )}
-            {result.jenkins_url && (
+            {buildUrl && (
               <a
-                href={String(result.jenkins_url)}
+                href={buildUrl}
                 target="_blank"
                 rel="noopener noreferrer"
                 className="flex items-center gap-1 text-xs text-text-link hover:underline"
               >
-                Jenkins <ExternalLink className="h-3 w-3" />
+                {ciSourceLabel(result.request_params)} <ExternalLink className="h-3 w-3" />
               </a>
             )}
           </div>
@@ -561,6 +564,17 @@ function ReportContent() {
         <div className="rounded-lg border-l-4 border-l-signal-orange bg-glow-orange p-4 animate-slide-up">
           <h2 className="text-xs font-display uppercase tracking-widest text-signal-orange mb-2">Key Takeaway</h2>
           <p className="text-sm text-text-secondary whitespace-pre-wrap">{result.summary}</p>
+        </div>
+      )}
+
+      {result.source_warnings && result.source_warnings.length > 0 && (
+        <div className="rounded-lg border border-border-default bg-bg-secondary p-4 animate-slide-up">
+          <h2 className="text-xs font-display uppercase tracking-widest text-signal-orange mb-2">Source Warnings</h2>
+          <ul className="list-disc pl-4 space-y-1 text-sm text-text-secondary">
+            {result.source_warnings.map((warning, i) => (
+              <li key={`sw-${i}`}>{warning}</li>
+            ))}
+          </ul>
         </div>
       )}
 

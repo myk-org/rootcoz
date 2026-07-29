@@ -104,6 +104,100 @@ class TestPopulateFailureHistory:
                 assert row0["child_job_name"] == ""
                 assert row0["child_build_number"] == 0
 
+    async def test_populate_stores_prow_build_id(self, setup_test_db):
+        """Prow snowflake build IDs must be stored in failure_history.build_id."""
+        with patch.object(storage, "DB_PATH", setup_test_db):
+            prow_build_id = "2072319655766134784"
+            result_data = {
+                "job_name": "periodic-ci-e2e-aws",
+                "build_number": 0,
+                "build_id": prow_build_id,
+                "failures": [
+                    {
+                        "test_name": "tests.TestA.test_one",
+                        "error": "failed",
+                        "error_signature": "sig-prow",
+                        "analysis": {"classification": "CODE ISSUE"},
+                    },
+                ],
+                "child_job_analyses": [],
+            }
+            await storage.populate_failure_history("job-prow", result_data)
+
+            import aiosqlite
+
+            async with aiosqlite.connect(setup_test_db) as db:
+                db.row_factory = aiosqlite.Row
+                cursor = await db.execute(
+                    "SELECT build_id, build_number FROM failure_history WHERE job_id = ?",
+                    ("job-prow",),
+                )
+                row = dict(await cursor.fetchone())
+                assert row["build_id"] == prow_build_id
+                assert row["build_number"] == 0
+
+    async def test_populate_avoids_sqlite_int_overflow(self, setup_test_db):
+        """Large Prow build_number strings must not overflow failure_history INTEGER."""
+        with patch.object(storage, "DB_PATH", setup_test_db):
+            prow_build_id = "9223372036854775808"
+            result_data = {
+                "job_name": "periodic-ci-e2e-aws",
+                "build_number": prow_build_id,
+                "build_id": prow_build_id,
+                "failures": [
+                    {
+                        "test_name": "tests.TestA.test_one",
+                        "error": "failed",
+                        "error_signature": "sig-overflow",
+                        "analysis": {"classification": "CODE ISSUE"},
+                    },
+                ],
+                "child_job_analyses": [],
+            }
+            await storage.populate_failure_history("job-overflow", result_data)
+
+            import aiosqlite
+
+            async with aiosqlite.connect(setup_test_db) as db:
+                db.row_factory = aiosqlite.Row
+                cursor = await db.execute(
+                    "SELECT build_id, build_number FROM failure_history WHERE job_id = ?",
+                    ("job-overflow",),
+                )
+                row = dict(await cursor.fetchone())
+                assert row["build_id"] == prow_build_id
+                assert row["build_number"] == 0
+
+    async def test_populate_rejects_bool_build_number(self, setup_test_db):
+        """JSON bool build_number must not coerce to 1 or stamp build_id."""
+        with patch.object(storage, "DB_PATH", setup_test_db):
+            result_data = {
+                "job_name": "periodic-ci-e2e-aws",
+                "build_number": True,
+                "failures": [
+                    {
+                        "test_name": "tests.TestA.test_one",
+                        "error": "failed",
+                        "error_signature": "sig-bool",
+                        "analysis": {"classification": "CODE ISSUE"},
+                    },
+                ],
+                "child_job_analyses": [],
+            }
+            await storage.populate_failure_history("job-bool", result_data)
+
+            import aiosqlite
+
+            async with aiosqlite.connect(setup_test_db) as db:
+                db.row_factory = aiosqlite.Row
+                cursor = await db.execute(
+                    "SELECT build_id, build_number FROM failure_history WHERE job_id = ?",
+                    ("job-bool",),
+                )
+                row = dict(await cursor.fetchone())
+                assert row["build_number"] == 0
+                assert row["build_id"] == ""
+
     async def test_populate_from_child_job_analyses(self, setup_test_db):
         """Test populating from a result with child job failures."""
         with patch.object(storage, "DB_PATH", setup_test_db):
@@ -269,7 +363,7 @@ class TestBackfillFailureHistory:
             }
             async with aiosqlite.connect(setup_test_db) as db:
                 await db.execute(
-                    "INSERT INTO results (job_id, jenkins_url, status, result_json) VALUES (?, ?, ?, ?)",
+                    "INSERT INTO results (job_id, build_url, status, result_json) VALUES (?, ?, ?, ?)",
                     (
                         "backfill-1",
                         "https://jenkins.example.com/job/test/100/",
@@ -305,7 +399,7 @@ class TestBackfillFailureHistory:
                 )
                 # Insert a completed result whose job_id is already in failure_history
                 await db.execute(
-                    "INSERT INTO results (job_id, jenkins_url, status, result_json) VALUES (?, ?, ?, ?)",
+                    "INSERT INTO results (job_id, build_url, status, result_json) VALUES (?, ?, ?, ?)",
                     (
                         "existing-1",
                         "https://jenkins.example.com/job/test/100/",
@@ -351,7 +445,7 @@ class TestBackfillFailureHistory:
             }
             async with aiosqlite.connect(setup_test_db) as db:
                 await db.execute(
-                    "INSERT INTO results (job_id, jenkins_url, status, result_json) VALUES (?, ?, ?, ?)",
+                    "INSERT INTO results (job_id, build_url, status, result_json) VALUES (?, ?, ?, ?)",
                     (
                         "backfill-2",
                         "https://jenkins.example.com/job/test/200/",
@@ -389,7 +483,7 @@ class TestBackfillFailureHistory:
         with patch.object(storage, "DB_PATH", setup_test_db):
             async with aiosqlite.connect(setup_test_db) as db:
                 await db.execute(
-                    "INSERT INTO results (job_id, jenkins_url, status, result_json) VALUES (?, ?, ?, ?)",
+                    "INSERT INTO results (job_id, build_url, status, result_json) VALUES (?, ?, ?, ?)",
                     (
                         "pending-1",
                         "https://jenkins.example.com/job/test/1/",
@@ -398,7 +492,7 @@ class TestBackfillFailureHistory:
                     ),
                 )
                 await db.execute(
-                    "INSERT INTO results (job_id, jenkins_url, status, result_json) VALUES (?, ?, ?, ?)",
+                    "INSERT INTO results (job_id, build_url, status, result_json) VALUES (?, ?, ?, ?)",
                     (
                         "failed-1",
                         "https://jenkins.example.com/job/test/2/",
@@ -425,7 +519,7 @@ class TestGetTestHistory:
             # Insert results rows for pass inference
             for i in range(5):
                 await db.execute(
-                    "INSERT INTO results (job_id, jenkins_url, status, result_json) VALUES (?, ?, ?, ?)",
+                    "INSERT INTO results (job_id, build_url, status, result_json) VALUES (?, ?, ?, ?)",
                     (
                         f"job-{i}",
                         "https://jenkins.example.com/job/test/1/",
@@ -573,7 +667,7 @@ class TestGetJobStats:
                 # 3 builds, 2 with failures
                 for i in range(3):
                     await db.execute(
-                        "INSERT INTO results (job_id, jenkins_url, status, result_json) VALUES (?, ?, ?, ?)",
+                        "INSERT INTO results (job_id, build_url, status, result_json) VALUES (?, ?, ?, ?)",
                         (
                             f"stats-{i}",
                             "https://j.example.com/job/test/1/",

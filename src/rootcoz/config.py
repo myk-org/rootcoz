@@ -271,6 +271,16 @@ class Settings(BaseSettings):
     # Artifact download toggle
     get_job_artifacts: bool = True
 
+    # Prow configuration (optional; can be provided per-request via API body)
+    prow_url: str = Field(
+        default="",
+        description="Default Prow Deck URL (e.g. https://prow.ci.openshift.org)",
+    )
+    gcs_bucket: str = Field(
+        default="",
+        description="Default GCS bucket for Prow artifacts (e.g. test-platform-results)",
+    )
+
     # Force analysis on successful builds
     force_analysis: bool = False
 
@@ -305,6 +315,20 @@ class Settings(BaseSettings):
         if v not in allowed:
             raise ValueError(f"DEFAULT_USER_ROLE must be one of: {', '.join(allowed)}")
         return v
+
+    @field_validator("prow_url", mode="before")
+    @classmethod
+    def _validate_prow_url(cls, v: object) -> str:
+        from rootcoz.prow_validation import normalize_prow_url
+
+        return normalize_prow_url(v)
+
+    @field_validator("gcs_bucket", mode="before")
+    @classmethod
+    def _validate_gcs_bucket(cls, v: object) -> str:
+        from rootcoz.prow_validation import normalize_gcs_bucket
+
+        return normalize_gcs_bucket(v)
 
     # Admin authentication
     admin_key: str = Field(
@@ -422,6 +446,8 @@ class Settings(BaseSettings):
             "admin_wait_approve_msg",
             "ai_provider",
             "ai_model",
+            "prow_url",
+            "gcs_bucket",
         ):
             value = getattr(self, field_name)
             if isinstance(value, str):

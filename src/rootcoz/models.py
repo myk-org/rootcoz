@@ -1,7 +1,7 @@
 """Pydantic request and response models."""
 
 from datetime import datetime
-from typing import Annotated, Literal
+from typing import Annotated, Literal, TypeVar
 from uuid import uuid4
 
 from pydantic import (
@@ -16,8 +16,29 @@ from pydantic import (
 )
 
 from rootcoz.repository import RESERVED_REPO_NAMES
+from rootcoz.prow_validation import (
+    normalize_gcs_bucket,
+    normalize_gcs_prefix,
+    normalize_prow_url,
+    validate_gcs_prefix_suffix,
+    validate_prow_build_id,
+    validate_prow_job_name,
+)
 
 _SYSTEM_TAGS: set[str] = {"re-analyze"}
+
+_TUrl = TypeVar("_TUrl", bound=HttpUrl | str | None)
+
+
+def _apply_build_url_aliases(
+    build_url: _TUrl,
+    jenkins_url: _TUrl,
+) -> tuple[_TUrl, _TUrl]:
+    """Keep build_url and deprecated jenkins_url alias in sync."""
+    url = build_url or jenkins_url
+    if url:
+        return url, url
+    return build_url, jenkins_url
 
 
 def _uuid_str() -> str:
@@ -519,8 +540,13 @@ class ChildJobAnalysis(BaseModel):
     )
     job_name: str = Field(description="Name of the child job")
     build_number: int = Field(description="Build number of the child job")
-    jenkins_url: str | None = Field(
+    build_url: str | None = Field(
         default=None, description="URL of the child job build"
+    )
+    jenkins_url: str | None = Field(
+        default=None,
+        description="Deprecated alias for build_url",
+        json_schema_extra={"deprecated": True},
     )
     summary: str | None = Field(
         default=None, description="Summary of the child job failure analysis"
@@ -534,6 +560,13 @@ class ChildJobAnalysis(BaseModel):
     note: str | None = Field(
         default=None, description="Additional notes (e.g., max depth reached)"
     )
+
+    @model_validator(mode="after")
+    def _sync_build_url_aliases(self) -> "ChildJobAnalysis":
+        self.build_url, self.jenkins_url = _apply_build_url_aliases(
+            self.build_url, self.jenkins_url
+        )
+        return self
 
 
 class TokenUsageEntry(BaseModel):
@@ -566,14 +599,23 @@ class TokenUsageSummary(BaseModel):
 
 
 class AnalysisResult(BaseModel):
-    """Complete analysis result for a Jenkins job."""
+    """Complete analysis result for a CI job."""
 
     job_id: str = Field(description="Unique identifier for the analysis job")
-    job_name: str = Field(default="", description="Jenkins job name")
-    build_number: int = Field(default=0, description="Jenkins build number")
+    job_name: str = Field(default="", description="CI job name")
+    build_number: int = Field(default=0, description="CI build number (Jenkins)")
+    build_id: str = Field(
+        default="",
+        description="Prow build ID as numeric string (exceeds JS MAX_SAFE_INTEGER)",
+    )
+    build_url: HttpUrl | None = Field(
+        default=None,
+        description="URL of the analyzed CI build",
+    )
     jenkins_url: HttpUrl | None = Field(
         default=None,
-        description="URL of the analyzed Jenkins job (None for non-Jenkins analysis)",
+        description="Deprecated alias for build_url",
+        json_schema_extra={"deprecated": True},
     )
     status: Literal[
         "pending", "waiting", "running", "completed", "failed", "aborted"
@@ -593,6 +635,13 @@ class AnalysisResult(BaseModel):
         description="Aggregated token usage across all AI calls in this analysis",
     )
 
+    @model_validator(mode="after")
+    def _sync_build_url_aliases(self) -> "AnalysisResult":
+        self.build_url, self.jenkins_url = _apply_build_url_aliases(
+            self.build_url, self.jenkins_url
+        )
+        return self
+
 
 class JobStatus(BaseModel):
     """Status information for a queued analysis job."""
@@ -607,8 +656,8 @@ class JobStatus(BaseModel):
 class UnifiedAnalyzeRequest(_JenkinsParamsMixin, _NameTagsMixin, BaseAnalysisRequest):
     """Unified request payload for all analysis types."""
 
-    type: Literal["jenkins", "file", "raw"] = Field(
-        description="Analysis type: jenkins (CI job), file (JUnit XML), or raw (failure list)"
+    type: Literal["jenkins", "file", "raw", "prow"] = Field(
+        description="Analysis type: jenkins (CI job), file (JUnit XML), raw (failure list), or prow (Prow CI job)"
     )
 
     # Jenkins-specific fields (required when type="jenkins", optional otherwise)
@@ -633,6 +682,65 @@ class UnifiedAnalyzeRequest(_JenkinsParamsMixin, _NameTagsMixin, BaseAnalysisReq
         description="Raw test failures to analyze (required for type=raw)",
     )
 
+    # Prow-specific fields (required when type="prow")
+    prow_job_name: str | None = Field(
+        default=None,
+        description="Prow job name (required for type=prow)",
+    )
+    build_id: str | None = Field(
+        default=None,
+        description="Prow build ID, numeric string (required for type=prow)",
+    )
+    prow_url: str = Field(
+        default="",
+        description=(
+            "Prow Deck URL (overrides PROW_URL env var / Server Settings default)"
+        ),
+    )
+    gcs_bucket: str = Field(
+        default="",
+        description=(
+            "GCS bucket for Prow artifacts (overrides GCS_BUCKET env var / "
+            "Server Settings default)"
+        ),
+    )
+    gcs_prefix: str = Field(
+        default="",
+        description=(
+            "GCS object prefix for the build (e.g. 'logs/job/build' or 'pr-logs/pull/org_repo/pr/job/build'). "
+            "When empty, auto-resolves via prowjob.json or pr-logs/directory pointer."
+        ),
+    )
+
+    @field_validator("prow_job_name", mode="before")
+    @classmethod
+    def _validate_prow_job_name(cls, v: str | None) -> str | None:
+        if v is None:
+            return v
+        return validate_prow_job_name(v)
+
+    @field_validator("build_id", mode="before")
+    @classmethod
+    def _validate_build_id(cls, v: str | None) -> str | None:
+        if v is None:
+            return v
+        return validate_prow_build_id(v)
+
+    @field_validator("gcs_bucket", mode="before")
+    @classmethod
+    def _validate_gcs_bucket(cls, v: object) -> str:
+        return normalize_gcs_bucket(v)
+
+    @field_validator("gcs_prefix", mode="before")
+    @classmethod
+    def _validate_gcs_prefix(cls, v: object) -> str:
+        return normalize_gcs_prefix(v)
+
+    @field_validator("prow_url", mode="before")
+    @classmethod
+    def _validate_prow_url(cls, v: object) -> str:
+        return normalize_prow_url(v)
+
     @model_validator(mode="after")
     def _validate_by_type(self) -> "UnifiedAnalyzeRequest":
         """Validate required fields based on analysis type."""
@@ -655,7 +763,20 @@ class UnifiedAnalyzeRequest(_JenkinsParamsMixin, _NameTagsMixin, BaseAnalysisReq
                 raise ValueError(
                     "raw_xml cannot be provided for type=raw (use type=file)"
                 )
+        elif self.type == "prow":
+            if not self.prow_job_name:
+                raise ValueError("prow_job_name is required for type=prow")
+            if not self.build_id:
+                raise ValueError("build_id is required for type=prow")
+            if self.gcs_prefix:
+                validate_gcs_prefix_suffix(
+                    self.gcs_prefix, self.prow_job_name, self.build_id
+                )
         return self
+
+
+class ReAnalyzeRequest(_JenkinsParamsMixin, _NameTagsMixin, BaseAnalysisRequest):
+    """Override fields for ``POST /re-analyze/{job_id}``."""
 
 
 class FailureAnalysisResult(BaseModel):

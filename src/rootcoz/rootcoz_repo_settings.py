@@ -456,7 +456,7 @@ def apply_rootcoz_repo_settings(
 
 
 # Fields from settings.json that enrichment (and other callers) must see on the
-# same Settings instance passed into analyze_job / process_analysis_with_id.
+# same Settings instance passed into CI source analysis / process_analysis_with_id.
 _REPO_SETTINGS_OVERLAY_FIELDS: tuple[str, ...] = (
     "ai_call_timeout",
     "max_concurrent_ai_calls",
@@ -469,7 +469,7 @@ def propagate_repo_settings_overlay(
 ) -> None:
     """Copy settings.json overlay knobs onto the caller's Settings instance.
 
-    ``analyze_job`` rebinds a local ``settings`` to ``effective.settings``, which
+    Analysis rebinds a local ``settings`` to ``effective.settings``, which
     does not update the caller's reference. Enrichment in
     ``process_analysis_with_id`` still holds the original object — mutate it so
     timeouts / concurrency / peer rounds match analysis.
