@@ -40,7 +40,8 @@ if [ "${DEV_MODE:-}" = "true" ] && [ -f /app/sidecar-helper/src/server.ts ]; the
 fi
 if [ -f /app/sidecar-helper/dist/server.js ]; then
     export SIDECAR_PORT="${SIDECAR_PORT:-9100}"
-    # Hoisted under sidecar-helper/node_modules after npm ci (not nested under @myk-org/pi-sidecar).
+    # pi-sidecar 4.x uses monorepo-relative paths for extensions; when consumed
+    # as an npm package we must point to the hoisted pi-orchestrator-config copy.
     _pi_ext="/app/sidecar-helper/node_modules/pi-orchestrator-config/extensions"
     export SIDECAR_ACPX_EXTENSION_PATH="${SIDECAR_ACPX_EXTENSION_PATH:-$_pi_ext/acpx-provider/index.ts}"
     export SIDECAR_CLI_PROVIDER_EXTENSION_PATH="${SIDECAR_CLI_PROVIDER_EXTENSION_PATH:-$_pi_ext/cli-provider/index.ts}"
