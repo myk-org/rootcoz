@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>CLI Command Reference - rootcoz</title>
+    <title>Exploring History and Reports - rootcoz</title>
     <meta name="description" content="Understand failing CI runs, collaborate on fixes, and create follow-up issues faster.">
     <link rel="stylesheet" href="assets/style.css">
     <script>try{var t=localStorage.getItem('theme');if(t==='dark')document.documentElement.setAttribute('data-theme','dark')}catch(e){}</script>
@@ -93,7 +93,7 @@
                     
                     <li>
                         <a href="explore-history-and-reports.html"
-                           class="nav-link">
+                           class="nav-link active" aria-current="page">
                             Exploring History and Reports
                         </a>
                     </li>
@@ -149,7 +149,7 @@
                     
                     <li>
                         <a href="cli-reference.html"
-                           class="nav-link active" aria-current="page">
+                           class="nav-link">
                             CLI Command Reference
                         </a>
                     </li>
@@ -210,21 +210,131 @@
                          converted to HTML server-side by the markdown library, not
                          user-supplied input. XSS risk is minimal and accepted since
                          the AI generates the content, not end users. -->
-                    <h1 id="cli-command-reference">CLI Command Reference</h1>
-<p><em>Documentation generation failed. Please re-run.</em></p>
+                    <h1 id="exploring-history-and-reports">Exploring History and Reports</h1>
+<p>Use RootCoz's history views when you need to answer two practical questions quickly: has this failure happened before, and is it part of a broader trend? These screens help you move from one test failure to per-test history and then out to filtered team summaries.</p>
+<h2 id="prerequisites">Prerequisites</h2>
+<ul>
+<li>You are signed in to RootCoz.</li>
+<li>At least one analysis result already exists. See <a href="submit-analyses.html">Submitting Analyses</a> for details.</li>
+<li>Your account has access to <code>Reports</code> if you want the team summary views.</li>
+</ul>
+<h2 id="quick-example">Quick Example</h2>
+<div class="highlight"><pre><span></span><code>rootcoz<span class="w"> </span><span class="nb">history</span><span class="w"> </span>failures<span class="w"> </span>--search<span class="w"> </span>tests.test_auth.test_login
+rootcoz<span class="w"> </span><span class="nb">history</span><span class="w"> </span><span class="nb">test</span><span class="w"> </span><span class="s2">&quot;tests.test_auth.test_login&quot;</span>
+rootcoz<span class="w"> </span>reports<span class="w"> </span>totals<span class="w"> </span>--team<span class="w"> </span>alpha<span class="w"> </span>--from<span class="w"> </span><span class="m">2025</span>-01-01<span class="w"> </span>--to<span class="w"> </span><span class="m">2025</span>-06-01<span class="w"> </span>--review-status<span class="w"> </span>reviewed
+</code></pre></div>
+
+<p>Use the first command to find matching failures, the second to inspect one test over time, and the third to compare reviewed work for one team in a date window.</p>
+<h2 id="step-by-step">Step-by-Step</h2>
+<ol>
+<li>Start in the right place.</li>
+</ol>
+<table>
+<thead>
+<tr>
+<th>If you want to...</th>
+<th>Open</th>
+<th>Best for</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Check one failing test or result</td>
+<td><code>History</code></td>
+<td>Repeats, classifications, and recent runs</td>
+</tr>
+<tr>
+<td>Compare filtered job totals across teams or releases</td>
+<td><code>Reports</code></td>
+<td>Dates, metadata, labels, and review progress</td>
+</tr>
+<tr>
+<td>See where reviewers changed RootCoz's answer</td>
+<td><code>Reports</code></td>
+<td>Classification override patterns</td>
+</tr>
+<tr>
+<td>See what follow-up work already exists</td>
+<td><code>Reports</code></td>
+<td>GitHub and Jira issue summaries</td>
+</tr>
+</tbody>
+</table>
+<ol>
+<li>
+<p>Search recurring failures in <code>History</code>.
+Open <code>History</code>, use the search box to narrow the table by test name, then add a classification filter or date range if the list is still noisy. Click a row to open that result, or click the test name itself to open that test's dedicated history page.</p>
+</li>
+<li>
+<p>Read the test history page.
+Start with <code>Failure Rate</code>, <code>Total Runs</code>, <code>Failures</code>, and <code>Consecutive</code> to understand whether the test is stable, degrading, or repeatedly broken. Then read the classification badges, comments, <code>First seen</code>, and <code>Last seen</code>, and open any row in <code>Recent Runs</code> to jump back to a specific result.</p>
+</li>
+<li>
+<p>Move to <code>Reports</code> for broader trends.
+Choose <code>Total Failures</code> when you want summary counts, <code>Classification Overrides</code> when you want review changes, or <code>Issues Created</code> when you want follow-up visibility. Use the filters across the top to narrow by <code>Team</code>, <code>Tier</code>, <code>Version</code>, <code>Status</code>, <code>Review status</code>, date range, and label include/exclude chips.</p>
+</li>
+</ol>
+<blockquote>
+<p><strong>Note:</strong> If you leave the status filter empty, report summaries start with completed jobs only.</p>
+</blockquote>
+<ol>
+<li>Read the report detail that matches your question.
+In <code>Total Failures</code>, expand <code>Job Details</code> to compare jobs in the current slice. In <code>Classification Overrides</code>, expand a <code>from -&gt; to</code> group to see which tests changed and who changed them; in <code>Issues Created</code>, open the external issue link or the linked result to inspect the original analysis.</li>
+</ol>
+<p>When you find a specific result you want to confirm or correct, see <a href="review-and-classify-failures.html">Reviewing and Classifying Failures</a> for details.</p>
+<h2 id="advanced-usage">Advanced Usage</h2>
+<p>Use the CLI when you want repeatable lookups or want to save filters in shell history.</p>
+<div class="highlight"><pre><span></span><code>rootcoz<span class="w"> </span><span class="nb">history</span><span class="w"> </span>failures<span class="w"> </span>--classification<span class="w"> </span><span class="s2">&quot;INFRASTRUCTURE&quot;</span><span class="w"> </span>--limit<span class="w"> </span><span class="m">50</span>
+rootcoz<span class="w"> </span><span class="nb">history</span><span class="w"> </span><span class="nb">test</span><span class="w"> </span><span class="s2">&quot;tests.test_auth.test_login&quot;</span><span class="w"> </span>--limit<span class="w"> </span><span class="m">50</span>
+rootcoz<span class="w"> </span><span class="nb">history</span><span class="w"> </span>stats<span class="w"> </span><span class="s2">&quot;test-job&quot;</span>
+rootcoz<span class="w"> </span>reports<span class="w"> </span>overrides<span class="w"> </span>--status<span class="w"> </span>completed<span class="w"> </span>--tags<span class="w"> </span>nightly,smoke
+rootcoz<span class="w"> </span>reports<span class="w"> </span>issues<span class="w"> </span>--team<span class="w"> </span>alpha<span class="w"> </span>--review-status<span class="w"> </span>reviewed
+</code></pre></div>
+
+<blockquote>
+<p><strong>Tip:</strong> The <code>Reports</code> page keeps its active tab and filters in the URL, so you can refresh, bookmark, or share the same filtered view.</p>
+</blockquote>
+<p>See <a href="cli-reference.html">CLI Command Reference</a> for all flags, or see <a href="api-reference.html">API Endpoint Reference</a> if you want to script the same lookups.</p>
+<h2 id="troubleshooting">Troubleshooting</h2>
+<ul>
+<li>
+<p>I do not see <code>Reports</code> in the sidebar.<br />
+  Ask an administrator to grant report access, then reload the page.</p>
+</li>
+<li>
+<p><code>History</code> is empty for a test I expect to find.<br />
+  Remove the classification filter, widen the date range, or search with the full test name.</p>
+</li>
+<li>
+<p>A report looks smaller than expected.<br />
+  Add the statuses you care about, then re-check your team, version, and label filters.</p>
+</li>
+<li>
+<p>There is no data to explore yet.<br />
+  Run an analysis first. See <a href="submit-analyses.html">Submitting Analyses</a> for details.</p>
+</li>
+</ul>
+<h2 id="related-pages">Related Pages</h2>
+<ul>
+<li><a href="review-and-classify-failures.html">Reviewing and Classifying Failures</a></li>
+<li><a href="create-follow-up-issues-and-push-results.html">Creating Follow-Up Issues and Pushing Results</a></li>
+<li><a href="submit-analyses.html">Submitting Analyses</a></li>
+<li><a href="use-server-chat-for-cross-job-analysis.html">Use Server Chat for Cross-Job Analysis</a></li>
+<li><a href="cli-reference.html">CLI Command Reference</a></li>
+</ul>
                 </div>
             </article>
             <nav class="page-nav">
                 
-                <a href="api-reference.html" class="page-nav-link page-nav-prev">
+                <a href="create-follow-up-issues-and-push-results.html" class="page-nav-link page-nav-prev">
                     <span class="page-nav-label">Previous</span>
-                    <span class="page-nav-title">API Endpoint Reference</span>
+                    <span class="page-nav-title">Creating Follow-Up Issues and Pushing Results</span>
                 </a>
                 
                 
-                <a href="configuration-reference.html" class="page-nav-link page-nav-next">
+                <a href="manage-users-and-server-settings.html" class="page-nav-link page-nav-next">
                     <span class="page-nav-label">Next</span>
-                    <span class="page-nav-title">Configuration Reference</span>
+                    <span class="page-nav-title">Managing Users and Server Settings</span>
                 </a>
                 
             </nav>
@@ -233,7 +343,14 @@
                 <div class="toc-container">
                     <h3>On this page</h3>
                     <div class="toc">
-<ul></ul>
+<ul>
+<li><a href="#prerequisites">Prerequisites</a></li>
+<li><a href="#quick-example">Quick Example</a></li>
+<li><a href="#step-by-step">Step-by-Step</a></li>
+<li><a href="#advanced-usage">Advanced Usage</a></li>
+<li><a href="#troubleshooting">Troubleshooting</a></li>
+<li><a href="#related-pages">Related Pages</a></li>
+</ul>
 </div>
 
                 </div>

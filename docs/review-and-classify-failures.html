@@ -1,0 +1,552 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="light">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Reviewing and Classifying Failures - rootcoz</title>
+    <meta name="description" content="Understand failing CI runs, collaborate on fixes, and create follow-up issues faster.">
+    <link rel="stylesheet" href="assets/style.css">
+    <script>try{var t=localStorage.getItem('theme');if(t==='dark')document.documentElement.setAttribute('data-theme','dark')}catch(e){}</script>
+    <link rel="alternate" type="text/plain" title="LLM Documentation Index" href="llms.txt">
+    <link rel="alternate" type="text/plain" title="LLM Full Documentation" href="llms-full.txt">
+</head>
+<body>
+    <aside class="sidebar" id="sidebar">
+        <div class="sidebar-header">
+            <a href="index.html" class="sidebar-logo">rootcoz</a>
+            <p class="sidebar-tagline">Understand failing CI runs, collaborate on fixes, and create follow-up issues faster.</p>
+        </div>
+
+        <div class="sidebar-search">
+            <input type="text" id="search-input" placeholder="Search... (⌘K)" autocomplete="off" readonly>
+            <div id="search-results" class="search-results"></div>
+        </div>
+
+        <nav class="sidebar-nav">
+            
+            <div class="nav-group">
+                <h3 class="nav-group-title">Getting Started</h3>
+                <ul class="nav-group-pages">
+                    
+                    <li>
+                        <a href="quickstart.html"
+                           class="nav-link">
+                            Quickstart
+                        </a>
+                    </li>
+                    
+                </ul>
+            </div>
+            
+            <div class="nav-group">
+                <h3 class="nav-group-title">User Guides</h3>
+                <ul class="nav-group-pages">
+                    
+                    <li>
+                        <a href="submit-analyses.html"
+                           class="nav-link">
+                            Submitting Analyses
+                        </a>
+                    </li>
+                    
+                    <li>
+                        <a href="configure-analysis-context.html"
+                           class="nav-link">
+                            Configuring Analysis Context
+                        </a>
+                    </li>
+                    
+                    <li>
+                        <a href="track-analysis-progress.html"
+                           class="nav-link">
+                            Tracking Analysis Progress
+                        </a>
+                    </li>
+                    
+                    <li>
+                        <a href="review-and-classify-failures.html"
+                           class="nav-link active" aria-current="page">
+                            Reviewing and Classifying Failures
+                        </a>
+                    </li>
+                    
+                    <li>
+                        <a href="collaborate-on-results.html"
+                           class="nav-link">
+                            Collaborating on Results
+                        </a>
+                    </li>
+                    
+                    <li>
+                        <a href="manage-account-and-notifications.html"
+                           class="nav-link">
+                            Managing Your Account and Notifications
+                        </a>
+                    </li>
+                    
+                    <li>
+                        <a href="create-follow-up-issues-and-push-results.html"
+                           class="nav-link">
+                            Creating Follow-Up Issues and Pushing Results
+                        </a>
+                    </li>
+                    
+                    <li>
+                        <a href="explore-history-and-reports.html"
+                           class="nav-link">
+                            Exploring History and Reports
+                        </a>
+                    </li>
+                    
+                    <li>
+                        <a href="manage-users-and-server-settings.html"
+                           class="nav-link">
+                            Managing Users and Server Settings
+                        </a>
+                    </li>
+                    
+                    <li>
+                        <a href="use-server-chat-for-cross-job-analysis.html"
+                           class="nav-link">
+                            Use Server Chat for Cross-Job Analysis
+                        </a>
+                    </li>
+                    
+                </ul>
+            </div>
+            
+            <div class="nav-group">
+                <h3 class="nav-group-title">Recipes</h3>
+                <ul class="nav-group-pages">
+                    
+                    <li>
+                        <a href="automate-common-tasks-with-the-cli.html"
+                           class="nav-link">
+                            Automating Common Tasks with the CLI
+                        </a>
+                    </li>
+                    
+                    <li>
+                        <a href="deploy-rootcoz.html"
+                           class="nav-link">
+                            Deploying RootCoz
+                        </a>
+                    </li>
+                    
+                </ul>
+            </div>
+            
+            <div class="nav-group">
+                <h3 class="nav-group-title">Reference</h3>
+                <ul class="nav-group-pages">
+                    
+                    <li>
+                        <a href="api-reference.html"
+                           class="nav-link">
+                            API Endpoint Reference
+                        </a>
+                    </li>
+                    
+                    <li>
+                        <a href="cli-reference.html"
+                           class="nav-link">
+                            CLI Command Reference
+                        </a>
+                    </li>
+                    
+                    <li>
+                        <a href="configuration-reference.html"
+                           class="nav-link">
+                            Configuration Reference
+                        </a>
+                    </li>
+                    
+                </ul>
+            </div>
+            
+        </nav>
+    </aside>
+
+    <div class="main-wrapper">
+        <header class="top-bar">
+            <div class="top-bar-left">
+                <button class="sidebar-toggle" id="sidebar-toggle" aria-label="Toggle sidebar" aria-expanded="false">
+                    <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
+                        <path d="M3 5h14M3 10h14M3 15h14" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+                    </svg>
+                </button>
+                <a href="index.html" class="top-bar-title">rootcoz</a>
+            </div>
+            <div class="top-bar-spacer"></div>
+            <div class="top-bar-right">
+                <button class="top-bar-search-btn" id="search-trigger" aria-label="Search">
+                    <kbd>&#8984;K</kbd> Search
+                </button>
+                <a href="https://github.com/myk-org/docsfy" target="_blank" rel="noopener" class="docsfy-badge" title="Generated with docsfy">
+                    ⚡ docs<span class="brand-accent">fy</span>
+                </a>
+                
+                <a href="https://github.com/myk-org/rootcoz.git" target="_blank" rel="noopener noreferrer" class="top-bar-github" id="github-link" data-repo-url="https://github.com/myk-org/rootcoz.git">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><path d="M12 0c-6.626 0-12 5.373-12 12 0 5.302 3.438 9.8 8.207 11.387.599.111.793-.261.793-.577v-2.234c-3.338.726-4.033-1.416-4.033-1.416-.546-1.387-1.333-1.756-1.333-1.756-1.089-.745.083-.729.083-.729 1.205.084 1.839 1.237 1.839 1.237 1.07 1.834 2.807 1.304 3.492.997.107-.775.418-1.305.762-1.604-2.665-.305-5.467-1.334-5.467-5.931 0-1.311.469-2.381 1.236-3.221-.124-.303-.535-1.524.117-3.176 0 0 1.008-.322 3.301 1.23.957-.266 1.983-.399 3.003-.404 1.02.005 2.047.138 3.006.404 2.291-1.552 3.297-1.23 3.297-1.23.653 1.653.242 2.874.118 3.176.77.84 1.235 1.911 1.235 3.221 0 4.609-2.807 5.624-5.479 5.921.43.372.823 1.102.823 2.222v3.293c0 .319.192.694.801.576 4.765-1.589 8.199-6.086 8.199-11.386 0-6.627-5.373-12-12-12z"/></svg>
+                    <span class="github-stars" id="github-stars" title="GitHub stars"></span>
+                </a>
+                
+                <button class="theme-toggle" id="theme-toggle" aria-label="Toggle theme">
+                    <svg class="icon-sun" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+                        <circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/>
+                    </svg>
+                    <svg class="icon-moon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+                        <path d="M21 12.79A9 9 0 1111.21 3 7 7 0 0021 12.79z"/>
+                    </svg>
+                </button>
+            </div>
+        </header>
+
+        <main class="content">
+            
+            <article class="article">
+                <div class="article-body">
+                    <!-- SECURITY: |safe is intentional. Content is AI-generated markdown
+                         converted to HTML server-side by the markdown library, not
+                         user-supplied input. XSS risk is minimal and accepted since
+                         the AI generates the content, not end users. -->
+                    <h1 id="reviewing-and-classifying-failures">Reviewing and Classifying Failures</h1>
+<p>Use the report page when you need to decide whether RootCoz got a failure right and save the final answer your team should trust. This is where you compare the AI’s reasoning, finish human review, and correct the labels before the result drives follow-up work or downstream reporting.</p>
+<h2 id="prerequisites">Prerequisites</h2>
+<ul>
+<li>A completed analysis result.</li>
+<li><code>reviewer</code>, <code>operator</code>, or <code>admin</code> access to mark failures reviewed or change their labels.</li>
+<li><code>operator</code> or <code>admin</code> access if you plan to re-analyze a job or a single failure.</li>
+<li>If you want to use the CLI examples, a configured CLI profile.</li>
+</ul>
+<p>See <a href="track-analysis-progress.html">Tracking Analysis Progress</a> for details. See <a href="automate-common-tasks-with-the-cli.html">Automating Common Tasks with the CLI</a> for details.</p>
+<h2 id="quick-example">Quick Example</h2>
+<div class="highlight"><pre><span></span><code>rootcoz<span class="w"> </span>results<span class="w"> </span>review-status<span class="w"> </span>JOB_ID
+rootcoz<span class="w"> </span>results<span class="w"> </span>set-reviewed<span class="w"> </span>JOB_ID<span class="w"> </span>--test<span class="w"> </span><span class="s2">&quot;TEST_NAME&quot;</span><span class="w"> </span>--reviewed
+rootcoz<span class="w"> </span>override-classification<span class="w"> </span>JOB_ID<span class="w"> </span>--test<span class="w"> </span><span class="s2">&quot;TEST_NAME&quot;</span><span class="w"> </span>--classification<span class="w"> </span><span class="s2">&quot;PRODUCT BUG&quot;</span>
+rootcoz<span class="w"> </span>override-pattern<span class="w"> </span>JOB_ID<span class="w"> </span>--test<span class="w"> </span><span class="s2">&quot;TEST_NAME&quot;</span><span class="w"> </span>--pattern<span class="w"> </span><span class="s2">&quot;REGRESSION&quot;</span>
+</code></pre></div>
+
+<p>Use this when you already know the job ID and test name and only need to confirm review state, mark the failure reviewed, and correct both labels. The rest of this page shows the same workflow in the web report, where you can inspect grouped failures and compare AI reasoning first.</p>
+<h2 id="step-by-step">Step-by-Step</h2>
+<ol>
+<li>Open the result you want to review.</li>
+</ol>
+<p>Start from a completed job in the dashboard or history. If you need to find an older run or a recurring failure first, see <a href="explore-history-and-reports.html">Exploring History and Reports</a> for details.</p>
+<ol>
+<li>Triage the report header before you open individual failures.</li>
+</ol>
+<p>The header shows total failures, review progress, and the AI used for the run. If peer analysis was enabled, the <code>Peer Analysis</code> summary near the top also shows how many debates reached <code>Consensus</code> and how many did not.</p>
+<ol>
+<li>Expand one failure card and confirm the scope.</li>
+</ol>
+<p>A card can represent one failing test or several tests with the same error. When a group contains more than one test, RootCoz shows <code>Affected Tests</code> and gives you a group-level <code>Review All</code> button.</p>
+<blockquote>
+<p><strong>Note:</strong> Review state is tracked per test, but classification and pattern changes apply to the whole same-error group. Check <code>Affected Tests</code> before you change a grouped card.</p>
+</blockquote>
+<ol>
+<li>Compare the current answer with the evidence.</li>
+</ol>
+<p>Start with <code>Analysis</code>, then read <code>Artifacts Evidence</code>. If the failure has been re-run before, open <code>Previous Analysis</code> to compare the earlier answer with the current one.</p>
+<p>If peer analysis was enabled, expand <code>Peer Analysis</code> on the failure card to inspect each round and see whether the models agreed. This is the fastest way to decide whether the current answer looks solid or needs correction.</p>
+<ol>
+<li>Mark the review complete.</li>
+</ol>
+<p>Click <code>Review</code> on a single failure when you are satisfied with it. On grouped cards, use <code>Review All</code> when the whole group is ready, or review individual tests from the <code>Affected Tests</code> list if only part of the group is ready.</p>
+<p>The button changes to <code>Reviewed</code> and shows who reviewed it. Click it again if you need to reopen the failure.</p>
+<ol>
+<li>Correct the labels when the default answer is wrong.</li>
+</ol>
+<p>Use the <code>Classify</code> row on the failure card to change the root cause and the failure pattern.</p>
+<table>
+<thead>
+<tr>
+<th>Change this</th>
+<th>Choices</th>
+<th>Use it when</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Root cause</td>
+<td><code>CODE ISSUE</code>, <code>PRODUCT BUG</code>, <code>INFRASTRUCTURE</code></td>
+<td>The AI blamed the wrong owner or system</td>
+</tr>
+<tr>
+<td>Pattern</td>
+<td><code>NEW</code>, <code>REGRESSION</code>, <code>FLAKY</code>, <code>INTERMITENT</code>, <code>KNOWN BUG</code>, <code>PERSISTENT</code></td>
+<td>The root cause is right, but the failure's behavior over time is wrong</td>
+</tr>
+</tbody>
+</table>
+<ol>
+<li>Repeat the same flow inside child jobs when the report contains nested failures.</li>
+</ol>
+<p>If the result includes a <code>Child Jobs</code> section, expand the relevant job and review it the same way. Review and classification controls stay scoped to that child job instead of the top-level failure list.</p>
+<ol>
+<li>Finish the job after everything is reviewed.</li>
+</ol>
+<p>When every failure in the result is marked reviewed and Report Portal is available, RootCoz prompts you to update Report Portal. If you need to create or link follow-up issues after the review is final, see <a href="create-follow-up-issues-and-push-results.html">Creating Follow-Up Issues and Pushing Results</a> for details.</p>
+<h2 id="advanced-usage">Advanced Usage</h2>
+<p>Use re-analysis when you want a better answer, not just a different badge. <code>Re-Analyze</code> in the page header creates a new result for the whole job, while <code>Re-analyze</code> on a failure card updates only that failure in place and keeps the earlier answer under <code>Previous Analysis</code>.</p>
+<p>If peer analysis showed disagreement, or if the explanation is thin, re-run with different AI settings instead of stacking manual overrides. You can change the AI provider and model, peer analysis settings, tests repo, additional repositories, Jira search, artifact collection, and raw prompt. See <a href="configure-analysis-context.html">Configuring Analysis Context</a> for details.</p>
+<p>For child-job failures, add child scope in the CLI:</p>
+<div class="highlight"><pre><span></span><code>rootcoz<span class="w"> </span>results<span class="w"> </span>set-reviewed<span class="w"> </span>JOB_ID<span class="w"> </span>--test<span class="w"> </span><span class="s2">&quot;TEST_NAME&quot;</span><span class="w"> </span>--reviewed<span class="w"> </span>--child-job<span class="w"> </span><span class="s2">&quot;CHILD_JOB&quot;</span><span class="w"> </span>--child-build<span class="w"> </span><span class="m">12345</span>
+rootcoz<span class="w"> </span>override-pattern<span class="w"> </span>JOB_ID<span class="w"> </span>--test<span class="w"> </span><span class="s2">&quot;TEST_NAME&quot;</span><span class="w"> </span>--pattern<span class="w"> </span><span class="s2">&quot;KNOWN_BUG&quot;</span><span class="w"> </span>--child-job<span class="w"> </span><span class="s2">&quot;CHILD_JOB&quot;</span><span class="w"> </span>--child-build<span class="w"> </span><span class="m">12345</span>
+</code></pre></div>
+
+<blockquote>
+<p><strong>Tip:</strong> The UI label <code>KNOWN BUG</code> uses the CLI value <code>KNOWN_BUG</code>.</p>
+</blockquote>
+<p>Use <code>--not-reviewed</code> instead of <code>--reviewed</code> when you need to reopen a failure from the terminal. See <a href="cli-reference.html">CLI Command Reference</a> for details.</p>
+<h2 id="troubleshooting">Troubleshooting</h2>
+<ul>
+<li>
+<p><code>I can open the report but I can't change anything.</code><br />
+  You likely have viewer access. Review and classification actions require reviewer access, and re-analysis requires operator or admin access.</p>
+</li>
+<li>
+<p><code>My change affected several tests.</code><br />
+  That card represents a same-error group. RootCoz applies classification and pattern changes across the whole group, so confirm the <code>Affected Tests</code> list before you save.</p>
+</li>
+<li>
+<p><code>The label changed, but the explanation still needs work.</code><br />
+  Overrides update the labels immediately, but they do not replace the full AI narrative. Use <code>Re-analyze</code> if you want a fresh explanation that matches your corrected label.</p>
+</li>
+<li>
+<p><code>A section disappeared after I changed the classification.</code><br />
+  That is expected. Switching to <code>CODE ISSUE</code> removes old bug-report content, switching to <code>PRODUCT BUG</code> removes old suggested-fix content, and switching to <code>INFRASTRUCTURE</code> removes both.</p>
+</li>
+<li>
+<p><code>I never see the Report Portal prompt.</code><br />
+  The <code>All failures reviewed. Update Report Portal?</code> prompt only appears when every failure in the job is reviewed and Report Portal is enabled for the server.# Reviewing and Classifying Failures</p>
+</li>
+</ul>
+<p>Use the report page when you need to decide whether RootCoz got a failure right and save the final answer your team should trust. This is where you compare the AI’s reasoning, finish human review, and correct the labels before the result drives follow-up work or downstream reporting.</p>
+<h2 id="prerequisites_1">Prerequisites</h2>
+<ul>
+<li>A completed analysis result.</li>
+<li><code>reviewer</code>, <code>operator</code>, or <code>admin</code> access to mark failures reviewed or change their labels.</li>
+<li><code>operator</code> or <code>admin</code> access if you plan to re-analyze a job or a single failure.</li>
+<li>If you want to use the CLI examples, a configured CLI profile.</li>
+</ul>
+<p>See <a href="track-analysis-progress.html">Tracking Analysis Progress</a> for details. See <a href="automate-common-tasks-with-the-cli.html">Automating Common Tasks with the CLI</a> for details.</p>
+<h2 id="quick-example_1">Quick Example</h2>
+<div class="highlight"><pre><span></span><code>rootcoz<span class="w"> </span>results<span class="w"> </span>review-status<span class="w"> </span>JOB_ID
+rootcoz<span class="w"> </span>results<span class="w"> </span>set-reviewed<span class="w"> </span>JOB_ID<span class="w"> </span>--test<span class="w"> </span><span class="s2">&quot;TEST_NAME&quot;</span><span class="w"> </span>--reviewed
+rootcoz<span class="w"> </span>override-classification<span class="w"> </span>JOB_ID<span class="w"> </span>--test<span class="w"> </span><span class="s2">&quot;TEST_NAME&quot;</span><span class="w"> </span>--classification<span class="w"> </span><span class="s2">&quot;PRODUCT BUG&quot;</span>
+rootcoz<span class="w"> </span>override-pattern<span class="w"> </span>JOB_ID<span class="w"> </span>--test<span class="w"> </span><span class="s2">&quot;TEST_NAME&quot;</span><span class="w"> </span>--pattern<span class="w"> </span><span class="s2">&quot;REGRESSION&quot;</span>
+</code></pre></div>
+
+<p>Use this when you already know the job ID and test name and only need to confirm review state, mark the failure reviewed, and correct both labels. The rest of this page shows the same workflow in the web report, where you can inspect grouped failures and compare AI reasoning first.</p>
+<h2 id="step-by-step_1">Step-by-Step</h2>
+<ol>
+<li>Open the result you want to review.</li>
+</ol>
+<p>Start from a completed job in the dashboard or history. If you need to find an older run or a recurring failure first, see <a href="explore-history-and-reports.html">Exploring History and Reports</a> for details.</p>
+<ol>
+<li>Triage the report header before you open individual failures.</li>
+</ol>
+<p>The header shows total failures, review progress, and the AI used for the run. If peer analysis was enabled, the <code>Peer Analysis</code> summary near the top also shows how many debates reached <code>Consensus</code> and how many did not.</p>
+<ol>
+<li>Expand one failure card and confirm the scope.</li>
+</ol>
+<p>A card can represent one failing test or several tests with the same error. When a group contains more than one test, RootCoz shows <code>Affected Tests</code> and gives you a group-level <code>Review All</code> button.</p>
+<blockquote>
+<p><strong>Note:</strong> Review state is tracked per test, but classification and pattern changes apply to the whole same-error group. Check <code>Affected Tests</code> before you change a grouped card.</p>
+</blockquote>
+<ol>
+<li>Compare the current answer with the evidence.</li>
+</ol>
+<p>Start with <code>Analysis</code>, then read <code>Artifacts Evidence</code>. If the failure has been re-run before, open <code>Previous Analysis</code> to compare the earlier answer with the current one.</p>
+<p>If peer analysis was enabled, expand <code>Peer Analysis</code> on the failure card to inspect each round and see whether the models agreed. This is the fastest way to decide whether the current answer looks solid or needs correction.</p>
+<ol>
+<li>Mark the review complete.</li>
+</ol>
+<p>Click <code>Review</code> on a single failure when you are satisfied with it. On grouped cards, use <code>Review All</code> when the whole group is ready, or review individual tests from the <code>Affected Tests</code> list if only part of the group is ready.</p>
+<p>The button changes to <code>Reviewed</code> and shows who reviewed it. Click it again if you need to reopen the failure.</p>
+<ol>
+<li>Correct the labels when the default answer is wrong.</li>
+</ol>
+<p>Use the <code>Classify</code> row on the failure card to change the root cause and the failure pattern.</p>
+<table>
+<thead>
+<tr>
+<th>Change this</th>
+<th>Choices</th>
+<th>Use it when</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Root cause</td>
+<td><code>CODE ISSUE</code>, <code>PRODUCT BUG</code>, <code>INFRASTRUCTURE</code></td>
+<td>The AI blamed the wrong owner or system</td>
+</tr>
+<tr>
+<td>Pattern</td>
+<td><code>NEW</code>, <code>REGRESSION</code>, <code>FLAKY</code>, <code>INTERMITTENT</code>, <code>KNOWN BUG</code>, <code>PERSISTENT</code></td>
+<td>The root cause is right, but the failure's behavior over time is wrong</td>
+</tr>
+</tbody>
+</table>
+<ol>
+<li>Repeat the same flow inside child jobs when the report contains nested failures.</li>
+</ol>
+<p>If the result includes a <code>Child Jobs</code> section, expand the relevant job and review it the same way. Review and classification controls stay scoped to that child job instead of the top-level failure list.</p>
+<ol>
+<li>Finish the job after everything is reviewed.</li>
+</ol>
+<p>When every failure in the result is marked reviewed and Report Portal is available, RootCoz prompts you to update Report Portal. If you need to create or link follow-up issues after the review is final, see <a href="create-follow-up-issues-and-push-results.html">Creating Follow-Up Issues and Pushing Results</a> for details.</p>
+<h2 id="advanced-usage_1">Advanced Usage</h2>
+<p>Use re-analysis when you want a better answer, not just a different badge. <code>Re-Analyze</code> in the page header creates a new result for the whole job, while <code>Re-analyze</code> on a failure card updates only that failure in place and keeps the earlier answer under <code>Previous Analysis</code>.</p>
+<p>If peer analysis showed disagreement, or if the explanation is thin, re-run with different AI settings instead of stacking manual overrides. You can change the AI provider and model, peer analysis settings, tests repo, additional repositories, Jira search, artifact collection, and raw prompt. See <a href="configure-analysis-context.html">Configuring Analysis Context</a> for details.</p>
+<p>For child-job failures, add child scope in the CLI:</p>
+<div class="highlight"><pre><span></span><code>rootcoz<span class="w"> </span>results<span class="w"> </span>set-reviewed<span class="w"> </span>JOB_ID<span class="w"> </span>--test<span class="w"> </span><span class="s2">&quot;TEST_NAME&quot;</span><span class="w"> </span>--reviewed<span class="w"> </span>--child-job<span class="w"> </span><span class="s2">&quot;CHILD_JOB&quot;</span><span class="w"> </span>--child-build<span class="w"> </span><span class="m">12345</span>
+rootcoz<span class="w"> </span>override-pattern<span class="w"> </span>JOB_ID<span class="w"> </span>--test<span class="w"> </span><span class="s2">&quot;TEST_NAME&quot;</span><span class="w"> </span>--pattern<span class="w"> </span><span class="s2">&quot;KNOWN_BUG&quot;</span><span class="w"> </span>--child-job<span class="w"> </span><span class="s2">&quot;CHILD_JOB&quot;</span><span class="w"> </span>--child-build<span class="w"> </span><span class="m">12345</span>
+</code></pre></div>
+
+<blockquote>
+<p><strong>Tip:</strong> The UI label <code>KNOWN BUG</code> uses the CLI value <code>KNOWN_BUG</code>.</p>
+</blockquote>
+<p>Use <code>--not-reviewed</code> instead of <code>--reviewed</code> when you need to reopen a failure from the terminal. See <a href="cli-reference.html">CLI Command Reference</a> for details.</p>
+<h2 id="troubleshooting_1">Troubleshooting</h2>
+<ul>
+<li>
+<p><code>I can open the report but I can't change anything.</code><br />
+  You likely have viewer access. Review and classification actions require reviewer access, and re-analysis requires operator or admin access.</p>
+</li>
+<li>
+<p><code>My change affected several tests.</code><br />
+  That card represents a same-error group. RootCoz applies classification and pattern changes across the whole group, so confirm the <code>Affected Tests</code> list before you save.</p>
+</li>
+<li>
+<p><code>The label changed, but the explanation still needs work.</code><br />
+  Overrides update the labels immediately, but they do not replace the full AI narrative. Use <code>Re-analyze</code> if you want a fresh explanation that matches your corrected label.</p>
+</li>
+<li>
+<p><code>A section disappeared after I changed the classification.</code><br />
+  That is expected. Switching to <code>CODE ISSUE</code> removes old bug-report content, switching to <code>PRODUCT BUG</code> removes old suggested-fix content, and switching to <code>INFRASTRUCTURE</code> removes both.</p>
+</li>
+<li>
+<p><code>I never see the Report Portal prompt.</code><br />
+  The <code>All failures reviewed. Update Report Portal?</code> prompt only appears when every failure in the job is reviewed and Report Portal is enabled for the server.</p>
+</li>
+</ul>
+<h2 id="related-pages">Related Pages</h2>
+<ul>
+<li><a href="track-analysis-progress.html">Tracking Analysis Progress</a></li>
+<li><a href="collaborate-on-results.html">Collaborating on Results</a></li>
+<li><a href="create-follow-up-issues-and-push-results.html">Creating Follow-Up Issues and Pushing Results</a></li>
+<li><a href="explore-history-and-reports.html">Exploring History and Reports</a></li>
+<li><a href="configure-analysis-context.html">Configuring Analysis Context</a></li>
+</ul>
+                </div>
+            </article>
+            <nav class="page-nav">
+                
+                <a href="track-analysis-progress.html" class="page-nav-link page-nav-prev">
+                    <span class="page-nav-label">Previous</span>
+                    <span class="page-nav-title">Tracking Analysis Progress</span>
+                </a>
+                
+                
+                <a href="collaborate-on-results.html" class="page-nav-link page-nav-next">
+                    <span class="page-nav-label">Next</span>
+                    <span class="page-nav-title">Collaborating on Results</span>
+                </a>
+                
+            </nav>
+            
+            <aside class="toc-sidebar">
+                <div class="toc-container">
+                    <h3>On this page</h3>
+                    <div class="toc">
+<ul>
+<li><a href="#prerequisites">Prerequisites</a></li>
+<li><a href="#quick-example">Quick Example</a></li>
+<li><a href="#step-by-step">Step-by-Step</a></li>
+<li><a href="#advanced-usage">Advanced Usage</a></li>
+<li><a href="#troubleshooting">Troubleshooting</a></li>
+<li><a href="#prerequisites_1">Prerequisites</a></li>
+<li><a href="#quick-example_1">Quick Example</a></li>
+<li><a href="#step-by-step_1">Step-by-Step</a></li>
+<li><a href="#advanced-usage_1">Advanced Usage</a></li>
+<li><a href="#troubleshooting_1">Troubleshooting</a></li>
+<li><a href="#related-pages">Related Pages</a></li>
+</ul>
+</div>
+
+                </div>
+            </aside>
+            
+
+        </main>
+
+        <footer class="page-footer">
+            
+            <span class="footer-version">Generated from version 4.4.2</span>
+            <span class="footer-sep">&middot;</span>
+            
+            Generated with <a href="https://github.com/myk-org/docsfy" target="_blank" rel="noopener">docs<span class="brand-accent">fy</span></a>
+            <span class="footer-sep">&middot;</span>
+            <span class="footer-llm">LLM-friendly: <a href="llms.txt">llms.txt</a> &middot; <a href="llms-full.txt">llms-full.txt</a></span>
+        </footer>
+    </div>
+
+    <div class="sidebar-overlay" id="sidebar-overlay"></div>
+
+    <script src="assets/theme.js"></script>
+    <script src="assets/search.js"></script>
+    <script src="assets/copy.js"></script>
+    <script src="assets/callouts.js"></script>
+    <script src="assets/scrollspy.js"></script>
+    <script src="assets/codelabels.js"></script>
+    <script src="assets/github.js"></script>
+    <script>
+(function() {
+    var toggle = document.getElementById('sidebar-toggle');
+    var sidebar = document.getElementById('sidebar');
+    var overlay = document.getElementById('sidebar-overlay');
+    if (toggle && sidebar) {
+        toggle.addEventListener('click', function() {
+            sidebar.classList.toggle('open');
+            if (overlay) overlay.classList.toggle('open');
+            var expanded = sidebar.classList.contains('open');
+            toggle.setAttribute('aria-expanded', expanded ? 'true' : 'false');
+        });
+    }
+    if (overlay) {
+        overlay.addEventListener('click', function() {
+            sidebar.classList.remove('open');
+            overlay.classList.remove('open');
+            if (toggle) toggle.setAttribute('aria-expanded', 'false');
+        });
+    }
+})();
+</script>
+<script>
+(function() {
+    var sidebar = document.querySelector('.sidebar-nav') || document.querySelector('.sidebar');
+    if (!sidebar) return;
+
+    // Restore scroll position
+    var saved = sessionStorage.getItem('sidebar-scroll');
+    if (saved) sidebar.scrollTop = parseInt(saved, 10);
+
+    // Save scroll position before navigating
+    sidebar.addEventListener('scroll', function() {
+        sessionStorage.setItem('sidebar-scroll', sidebar.scrollTop.toString());
+    });
+
+    // Also scroll active link into view if no saved position
+    if (!saved) {
+        var active = sidebar.querySelector('.nav-link.active');
+        if (active) {
+            active.scrollIntoView({ block: 'center', behavior: 'instant' });
+        }
+    }
+})();
+</script>
+</body>
+</html>

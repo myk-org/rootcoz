@@ -1,31 +1,17 @@
 # rootcoz
 
-> Automatically diagnose CI/CD test failures with AI and get actionable root cause analysis in seconds
+> Understand failing CI runs, collaborate on fixes, and create follow-up issues faster.
 
 ## Getting Started
 
-- [Quickstart](quickstart.md): Install rootcoz via Docker Compose, configure your AI provider and CI system, register your first user, and run your first failure analysis in under five minutes
-- [Setting Up the CLI](cli-setup.md): Install the rootcoz CLI tool, configure server connections in config.toml, authenticate with API keys, and run your first analysis from the command line
+- [Quickstart](quickstart.md): Run RootCoz, sign in, and submit your first Jenkins, Prow, or JUnit XML analysis in just a few minutes.
 
 ## User Guides
 
-- [Analyzing Test Failures](analyzing-failures.md): Submit Jenkins jobs, JUnit XML files, or raw failure lists for AI-powered root cause analysis via the web UI, API, or CLI
-- [Reviewing Analysis Results](reviewing-results.md): Navigate the report page, understand AI classifications (Product Bug, Test Bug, Infra Bug), review failures, override classifications, and track review progress
-- [Chatting with AI About Failures](chatting-with-ai.md): Use the interactive chat feature to ask follow-up questions about analyzed jobs, explore root causes deeper, and get code fix suggestions
-- [Creating Bug Reports from Analysis](creating-issues.md): Preview and create GitHub issues or Jira bugs directly from failure analysis results, with AI-generated titles, descriptions, and duplicate detection
-- [Configuring Integrations](configuring-integrations.md): Set up Jenkins, Jira, GitHub, and Report Portal integrations including authentication, SSL settings, and per-request overrides
-- [Using Multi-AI Peer Analysis](peer-analysis.md): Configure multiple AI providers to debate and reach consensus on failure classifications, improving accuracy through peer review rounds
-- [Managing Users and Roles](managing-users.md): Register users, assign roles (viewer, reviewer, operator, admin), approve pending registrations, configure allow lists, and rotate API keys
-- [Tracking Failure History and Reports](tracking-history.md): Use the failure history page to find recurring test failures, view per-test timelines, and generate analytics reports on classification trends and team metrics
-- [Integrating with pytest](pytest-integration.md): Add the --analyze-with-ai flag to your pytest runs to automatically enrich JUnit XML reports with AI root cause analysis
+- [Reviewing and Classifying Failures](review-and-classify-failures.md): Inspect grouped failures, compare AI reasoning, mark reviews complete, and override classifications or patterns when the default answer needs correction.
+- [Exploring History and Reports](explore-history-and-reports.md): Search recurring failures, drill into test history, and compare team-level trends across dates, labels, metadata, and review status.
+- [Use Server Chat for Cross-Job Analysis](use-server-chat-for-cross-job-analysis.md): Show administrators how to ask RootCoz questions across all jobs, choose or override the AI model, follow live replies in the web UI or CLI, abort or clear a session, and save or download HTML report artifacts from chat output.
 
 ## Recipes
 
-- [Deployment Recipes](deployment-recipes.md): Common deployment patterns including Docker Compose production setup, OpenShift deployment, reverse proxy with trusted headers, and dev mode with hot reload
-- [CLI Recipes](cli-recipes.md): Copy-paste CLI commands for common workflows: batch analysis, bulk classification overrides, filtered dashboards, exporting reports, and admin operations
-
-## Reference
-
-- [REST API Reference](api-reference.md): Complete reference for all API endpoints including analysis submission, results retrieval, comments, classifications, chat, admin operations, and SSE streams
-- [CLI Command Reference](cli-reference.md): Full reference for all rootcoz CLI commands and subcommands: analyze, results, history, comments, classifications, chat, reports, config, auth, and admin
-- [Environment Variables and Configuration](environment-variables.md): Complete list of all environment variables organized by category: Jenkins, AI providers, Jira, GitHub, Report Portal, authentication, server settings, and Web Push
+- [Deploying RootCoz](deploy-rootcoz.md): Bring up RootCoz with Docker Compose for local use or Helm for Kubernetes and OpenShift when you need a shared deployment.
