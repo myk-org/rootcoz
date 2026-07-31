@@ -1151,7 +1151,7 @@ wheels = [
 
 [[package]]
 name = "rootcoz"
-version = "4.4.1"
+version = "4.4.2"
 source = { editable = "." }
 dependencies = [
     { name = "aiosqlite" },
