@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>CLI Command Reference - rootcoz</title>
+    <title>Use Server Chat for Cross-Job Analysis - rootcoz</title>
     <meta name="description" content="Understand failing CI runs, collaborate on fixes, and create follow-up issues faster.">
     <link rel="stylesheet" href="assets/style.css">
     <script>try{var t=localStorage.getItem('theme');if(t==='dark')document.documentElement.setAttribute('data-theme','dark')}catch(e){}</script>
@@ -107,7 +107,7 @@
                     
                     <li>
                         <a href="use-server-chat-for-cross-job-analysis.html"
-                           class="nav-link">
+                           class="nav-link active" aria-current="page">
                             Use Server Chat for Cross-Job Analysis
                         </a>
                     </li>
@@ -149,7 +149,7 @@
                     
                     <li>
                         <a href="cli-reference.html"
-                           class="nav-link active" aria-current="page">
+                           class="nav-link">
                             CLI Command Reference
                         </a>
                     </li>
@@ -210,21 +210,171 @@
                          converted to HTML server-side by the markdown library, not
                          user-supplied input. XSS risk is minimal and accepted since
                          the AI generates the content, not end users. -->
-                    <h1 id="cli-command-reference">CLI Command Reference</h1>
-<p><em>Documentation generation failed. Please re-run.</em></p>
+                    <h1 id="use-server-chat-for-cross-job-analysis">Use Server Chat for Cross-Job Analysis</h1>
+<p>Ask RootCoz questions across all jobs when you need trends, summaries, or reusable reports without opening runs one by one. This guide shows administrators how to start a server-wide chat, switch models for one question, follow replies, and keep or clear the session on their own terms.</p>
+<h2 id="prerequisites">Prerequisites</h2>
+<ul>
+<li>An admin account in RootCoz. The <code>Chat</code> page in the admin sidebar is admin-only.</li>
+<li>A default AI provider and model configured on the server, or a provider and model you can choose before sending a message. See <a href="manage-users-and-server-settings.html">Managing Users and Server Settings</a> for details.</li>
+<li>For CLI use, the <code>rootcoz</code> CLI installed and authenticated with an admin API key. See <a href="automate-common-tasks-with-the-cli.html">Automating Common Tasks with the CLI</a> for details.</li>
+</ul>
+<h2 id="quick-example">Quick Example</h2>
+<div class="highlight"><pre><span></span><code><span class="nb">export</span><span class="w"> </span><span class="nv">ROOTCOZ_SERVER</span><span class="o">=</span><span class="s2">&quot;https://rootcoz.example.com&quot;</span>
+<span class="nb">read</span><span class="w"> </span>-rsp<span class="w"> </span><span class="s2">&quot;Admin API key: &quot;</span><span class="w"> </span>ROOTCOZ_API_KEY
+<span class="nb">export</span><span class="w"> </span>ROOTCOZ_API_KEY
+<span class="nb">echo</span>
+
+rootcoz<span class="w"> </span>auth<span class="w"> </span>whoami
+rootcoz<span class="w"> </span>admin-chat<span class="w"> </span>send<span class="w"> </span><span class="s2">&quot;Summarize the top failure trends from the last 7 days.&quot;</span>
+</code></pre></div>
+
+<p>This confirms the CLI is using an admin identity, then asks a server-wide question and waits for the assistant reply.</p>
+<blockquote>
+<p><strong>Note:</strong> Server Chat is separate from chat on a single analysis result. For job-specific chat and comments, see <a href="collaborate-on-results.html">Collaborating on Results</a> for details.</p>
+</blockquote>
+<h2 id="step-by-step">Step-by-Step</h2>
+<ol>
+<li>Open Server Chat or confirm CLI admin access.</li>
+</ol>
+<p>In the web UI, open <code>Chat</code> from the admin section of the sidebar. The empty state prompts you to <code>Ask about server analytics</code>, which is the right place for cross-job questions such as failure trends, user activity, or report summaries.</p>
+<p>In the CLI, run this first when you want to confirm which admin account the shell is using:</p>
+<p><code>bash
+   rootcoz auth whoami</code></p>
+<ol>
+<li>Choose how RootCoz should pick the model.</li>
+</ol>
+<p>RootCoz can use the server default AI settings or a one-off override for the next question.</p>
+<table>
+<thead>
+<tr>
+<th>If you want</th>
+<th>Web UI</th>
+<th>CLI</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Use the server default</td>
+<td>Leave the provider and model already loaded in the header.</td>
+<td>Omit <code>--provider</code> and <code>--model</code>.</td>
+</tr>
+<tr>
+<td>Override for one question</td>
+<td>Pick a different provider and model in the header before sending.</td>
+<td>Add <code>--provider</code> and <code>--model</code> to <code>rootcoz admin-chat send</code>.</td>
+</tr>
+<tr>
+<td>Keep using the same override</td>
+<td>Leave the header selection in place.</td>
+<td>Repeat the same flags on the next <code>send</code> command.</td>
+</tr>
+</tbody>
+</table>
+<p>If you need to change the shared defaults for everyone, see <a href="manage-users-and-server-settings.html">Managing Users and Server Settings</a> for details.</p>
+<ol>
+<li>Ask a cross-job question and follow the reply.</li>
+</ol>
+<p>In the web UI, type your question and press <code>Enter</code> to send it. Use <code>Shift+Enter</code> when you want a newline instead. While RootCoz is working, the thread shows <code>Thinking...</code> and keeps the response in the same conversation.</p>
+<p>In the CLI, send the question directly:</p>
+<p><code>bash
+   rootcoz admin-chat send "Show where humans overrode the AI most often this month."</code></p>
+<p>The CLI waits for the assistant reply when it can. If you want to come back later, or the response takes longer than expected, check the stored conversation:</p>
+<p><code>bash
+   rootcoz admin-chat history --limit 20</code></p>
+<blockquote>
+<p><strong>Tip:</strong> Use the web UI when you want the clearest live experience. It shows the active reply immediately and gives you a <code>Stop</code> button while the assistant is still working.</p>
+</blockquote>
+<ol>
+<li>Stop the current reply or start over.</li>
+</ol>
+<p>Use the web UI <code>Stop</code> button when a reply is still running and you want to cancel it. When you want a completely fresh conversation, click <code>New Session</code> in the web UI or clear the current chat from the CLI:</p>
+<p><code>bash
+   rootcoz admin-chat clear</code></p>
+<p><code>New Session</code> and <code>clear</code> both reset your current Server Chat history so the next question starts clean.</p>
+<blockquote>
+<p><strong>Note:</strong> Server Chat history and saved artifacts are scoped to the current admin account, not shared across all admins.</p>
+<p><strong>Warning:</strong> Starting a new session in the web UI or running <code>rootcoz admin-chat clear</code> in the CLI also removes saved report artifacts for your account.</p>
+</blockquote>
+<ol>
+<li>Save or download HTML report artifacts.</li>
+</ol>
+<p>Use artifacts when you want a reusable HTML summary that can be downloaded later. The CLI can upload a local HTML file into the Server Chat artifact store and download it back by ID.</p>
+<p><code>bash
+   rootcoz admin-chat save-artifact ./weekly-summary.html
+   rootcoz admin-chat save-artifact ./weekly-summary.html --filename "failure-summary-2026-07-31.html"
+   rootcoz admin-chat download-artifact &lt;artifact-id&gt; --output ./failure-summary.html</code></p>
+<p><code>save-artifact</code> returns a download URL. <code>download-artifact</code> writes the file to the path you choose, and when you do not pass <code>--output</code>, RootCoz creates a local HTML filename automatically.</p>
+<p>In the web UI, when a Server Chat reply contains one of these artifact links, RootCoz renders it as a download button instead of a raw URL.</p>
+<h2 id="advanced-usage">Advanced Usage</h2>
+<p>Use one-off model overrides when you want to compare answers without changing the server default:</p>
+<div class="highlight"><pre><span></span><code>rootcoz<span class="w"> </span>admin-chat<span class="w"> </span>send<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span><span class="s2">&quot;Compare issue-creation trends for the last 30 days.&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--provider<span class="w"> </span>claude<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--model<span class="w"> </span>claude-opus-4-6
+</code></pre></div>
+
+<p>Use JSON history output when you want to hand the conversation to another script or save a machine-readable record:</p>
+<div class="highlight"><pre><span></span><code>rootcoz<span class="w"> </span>--json<span class="w"> </span>admin-chat<span class="w"> </span><span class="nb">history</span><span class="w"> </span>--limit<span class="w"> </span><span class="m">50</span>
+</code></pre></div>
+
+<p>Use custom filenames when you are saving reports for teammates or recurring reviews:</p>
+<div class="highlight"><pre><span></span><code>rootcoz<span class="w"> </span>admin-chat<span class="w"> </span>save-artifact<span class="w"> </span>./report.html<span class="w"> </span>--filename<span class="w"> </span><span class="s2">&quot;platform-weekly-review&quot;</span>
+</code></pre></div>
+
+<p>If the filename does not end in <code>.html</code>, RootCoz adds the extension for you.</p>
+<p>These prompt patterns work well in Server Chat because they match the built-in cross-job reporting tools:</p>
+<table>
+<thead>
+<tr>
+<th>Goal</th>
+<th>Example prompt</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Failure trends</td>
+<td><code>Summarize the top failure patterns from the last 7 days.</code></td>
+</tr>
+<tr>
+<td>Review accuracy</td>
+<td><code>Show where reviewers changed the AI classification most often this month.</code></td>
+</tr>
+<tr>
+<td>Follow-up volume</td>
+<td><code>Which jobs created the most GitHub issues or Jira bugs this quarter?</code></td>
+</tr>
+</tbody>
+</table>
+<p>For every available command and flag, see <a href="cli-reference.html">CLI Command Reference</a> for details. For raw endpoints, see <a href="api-reference.html">API Endpoint Reference</a> for details.</p>
+<h2 id="troubleshooting">Troubleshooting</h2>
+<ul>
+<li>The <code>Send</code> button is disabled in the web UI: choose both an AI provider and a model, type a message, and wait for any current reply to finish.</li>
+<li><code>rootcoz admin-chat send</code> fails with an admin error: verify the CLI is using an admin API key with <code>rootcoz auth whoami</code>.</li>
+<li>Server Chat says AI is not configured or the page never finishes initializing: configure the default AI provider and model in Server Settings. See <a href="manage-users-and-server-settings.html">Managing Users and Server Settings</a> and <a href="configuration-reference.html">Configuration Reference</a> for details.</li>
+<li>A saved artifact link returns <code>404</code>: you likely started a new session or ran <code>rootcoz admin-chat clear</code>, which removes saved artifacts for your account.</li>
+<li>The CLI did not show a final answer: check later with <code>rootcoz admin-chat history --limit 20</code>. If you need the raw endpoints instead, see <a href="api-reference.html">API Endpoint Reference</a> for details.</li>
+</ul>
+<h2 id="related-pages">Related Pages</h2>
+<ul>
+<li><a href="explore-history-and-reports.html">Exploring History and Reports</a></li>
+<li><a href="manage-users-and-server-settings.html">Managing Users and Server Settings</a></li>
+<li><a href="collaborate-on-results.html">Collaborating on Results</a></li>
+<li><a href="cli-reference.html">CLI Command Reference</a></li>
+<li><a href="api-reference.html">API Endpoint Reference</a></li>
+</ul>
                 </div>
             </article>
             <nav class="page-nav">
                 
-                <a href="api-reference.html" class="page-nav-link page-nav-prev">
+                <a href="manage-users-and-server-settings.html" class="page-nav-link page-nav-prev">
                     <span class="page-nav-label">Previous</span>
-                    <span class="page-nav-title">API Endpoint Reference</span>
+                    <span class="page-nav-title">Managing Users and Server Settings</span>
                 </a>
                 
                 
-                <a href="configuration-reference.html" class="page-nav-link page-nav-next">
+                <a href="automate-common-tasks-with-the-cli.html" class="page-nav-link page-nav-next">
                     <span class="page-nav-label">Next</span>
-                    <span class="page-nav-title">Configuration Reference</span>
+                    <span class="page-nav-title">Automating Common Tasks with the CLI</span>
                 </a>
                 
             </nav>
@@ -233,7 +383,14 @@
                 <div class="toc-container">
                     <h3>On this page</h3>
                     <div class="toc">
-<ul></ul>
+<ul>
+<li><a href="#prerequisites">Prerequisites</a></li>
+<li><a href="#quick-example">Quick Example</a></li>
+<li><a href="#step-by-step">Step-by-Step</a></li>
+<li><a href="#advanced-usage">Advanced Usage</a></li>
+<li><a href="#troubleshooting">Troubleshooting</a></li>
+<li><a href="#related-pages">Related Pages</a></li>
+</ul>
 </div>
 
                 </div>

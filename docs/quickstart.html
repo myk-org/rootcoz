@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Quickstart - rootcoz</title>
-    <meta name="description" content="Automatically diagnose CI/CD test failures with AI and get actionable root cause analysis in seconds">
+    <meta name="description" content="Understand failing CI runs, collaborate on fixes, and create follow-up issues faster.">
     <link rel="stylesheet" href="assets/style.css">
     <script>try{var t=localStorage.getItem('theme');if(t==='dark')document.documentElement.setAttribute('data-theme','dark')}catch(e){}</script>
     <link rel="alternate" type="text/plain" title="LLM Documentation Index" href="llms.txt">
@@ -14,7 +14,7 @@
     <aside class="sidebar" id="sidebar">
         <div class="sidebar-header">
             <a href="index.html" class="sidebar-logo">rootcoz</a>
-            <p class="sidebar-tagline">Automatically diagnose CI/CD test failures with AI and get actionable root cause analysis in seconds</p>
+            <p class="sidebar-tagline">Understand failing CI runs, collaborate on fixes, and create follow-up issues faster.</p>
         </div>
 
         <div class="sidebar-search">
@@ -35,13 +35,6 @@
                         </a>
                     </li>
                     
-                    <li>
-                        <a href="cli-setup.html"
-                           class="nav-link">
-                            Setting Up the CLI
-                        </a>
-                    </li>
-                    
                 </ul>
             </div>
             
@@ -50,65 +43,72 @@
                 <ul class="nav-group-pages">
                     
                     <li>
-                        <a href="analyzing-failures.html"
+                        <a href="submit-analyses.html"
                            class="nav-link">
-                            Analyzing Test Failures
+                            Submitting Analyses
                         </a>
                     </li>
                     
                     <li>
-                        <a href="reviewing-results.html"
+                        <a href="configure-analysis-context.html"
                            class="nav-link">
-                            Reviewing Analysis Results
+                            Configuring Analysis Context
                         </a>
                     </li>
                     
                     <li>
-                        <a href="chatting-with-ai.html"
+                        <a href="track-analysis-progress.html"
                            class="nav-link">
-                            Chatting with AI About Failures
+                            Tracking Analysis Progress
                         </a>
                     </li>
                     
                     <li>
-                        <a href="creating-issues.html"
+                        <a href="review-and-classify-failures.html"
                            class="nav-link">
-                            Creating Bug Reports from Analysis
+                            Reviewing and Classifying Failures
                         </a>
                     </li>
                     
                     <li>
-                        <a href="configuring-integrations.html"
+                        <a href="collaborate-on-results.html"
                            class="nav-link">
-                            Configuring Integrations
+                            Collaborating on Results
                         </a>
                     </li>
                     
                     <li>
-                        <a href="peer-analysis.html"
+                        <a href="manage-account-and-notifications.html"
                            class="nav-link">
-                            Using Multi-AI Peer Analysis
+                            Managing Your Account and Notifications
                         </a>
                     </li>
                     
                     <li>
-                        <a href="managing-users.html"
+                        <a href="create-follow-up-issues-and-push-results.html"
                            class="nav-link">
-                            Managing Users and Roles
+                            Creating Follow-Up Issues and Pushing Results
                         </a>
                     </li>
                     
                     <li>
-                        <a href="tracking-history.html"
+                        <a href="explore-history-and-reports.html"
                            class="nav-link">
-                            Tracking Failure History and Reports
+                            Exploring History and Reports
                         </a>
                     </li>
                     
                     <li>
-                        <a href="pytest-integration.html"
+                        <a href="manage-users-and-server-settings.html"
                            class="nav-link">
-                            Integrating with pytest
+                            Managing Users and Server Settings
+                        </a>
+                    </li>
+                    
+                    <li>
+                        <a href="use-server-chat-for-cross-job-analysis.html"
+                           class="nav-link">
+                            Use Server Chat for Cross-Job Analysis
                         </a>
                     </li>
                     
@@ -120,16 +120,16 @@
                 <ul class="nav-group-pages">
                     
                     <li>
-                        <a href="deployment-recipes.html"
+                        <a href="automate-common-tasks-with-the-cli.html"
                            class="nav-link">
-                            Deployment Recipes
+                            Automating Common Tasks with the CLI
                         </a>
                     </li>
                     
                     <li>
-                        <a href="cli-recipes.html"
+                        <a href="deploy-rootcoz.html"
                            class="nav-link">
-                            CLI Recipes
+                            Deploying RootCoz
                         </a>
                     </li>
                     
@@ -143,7 +143,7 @@
                     <li>
                         <a href="api-reference.html"
                            class="nav-link">
-                            REST API Reference
+                            API Endpoint Reference
                         </a>
                     </li>
                     
@@ -155,9 +155,9 @@
                     </li>
                     
                     <li>
-                        <a href="environment-variables.html"
+                        <a href="configuration-reference.html"
                            class="nav-link">
-                            Environment Variables and Configuration
+                            Configuration Reference
                         </a>
                     </li>
                     
@@ -210,14 +210,360 @@
                          converted to HTML server-side by the markdown library, not
                          user-supplied input. XSS risk is minimal and accepted since
                          the AI generates the content, not end users. -->
-                    <p>Let me start by reading the knowledge graph and pages manifest, then explore the codebase for quickstart-relevant details.Now let me explore the key files I need for the quickstart guide:Now let me look at the health endpoint and how to verify the setup:So there's no env_prefix, meaning <code>admin_key</code> maps to env var <code>ADMIN_KEY</code>. Let me check how login works:Now let me check how the CLI installation works:Let me check the require_approval default and how admins approve users:Now let me look at how config.toml works:Now let me check the REQUIRE_APPROVAL and SECURE_COOKIES env vars in the docker-compose file, and look at the raw source analysis flow:</p>
+                    <h1 id="quickstart">Quickstart</h1>
+<p>You want RootCoz running fast so you can move from failing CI output to a report you can review and act on. The quickest path is to start the bundled Docker stack, create an operator account, and submit one Jenkins, Prow, or JUnit XML analysis from the web UI.</p>
+<h2 id="prerequisites">Prerequisites</h2>
+<ul>
+<li>Docker with Docker Compose</li>
+<li>One AI credential for <code>claude</code>, <code>gemini</code>, or <code>cursor</code></li>
+<li>For Jenkins: a job name, build number, and Jenkins access</li>
+<li>For Prow: a job name, build ID, and access to the relevant Prow/GCS location</li>
+<li>For JUnit XML: a <code>.xml</code> file or raw JUnit XML text</li>
+</ul>
+<h2 id="quick-example">Quick Example</h2>
+<div class="highlight"><pre><span></span><code>cp<span class="w"> </span>.env.example<span class="w"> </span>.env
+</code></pre></div>
+
+<div class="highlight"><pre><span></span><code>AI_PROVIDER=claude
+AI_MODEL=your-model-name
+ANTHROPIC_API_KEY=your-anthropic-api-key
+DEFAULT_USER_ROLE=operator
+REQUIRE_APPROVAL=false
+</code></pre></div>
+
+<div class="highlight"><pre><span></span><code>docker<span class="w"> </span>compose<span class="w"> </span>up<span class="w"> </span>-d
+curl<span class="w"> </span>http://localhost:800/health
+</code></pre></div>
+
+<ol>
+<li>Open <code>http://localhost:800</code>.</li>
+<li>Click <code>Register</code>, enter a username, save the API key RootCoz shows once, then click <code>I've saved my key — Continue</code>.</li>
+<li>Open <code>New Analysis</code>.</li>
+<li>Choose <code>Upload File</code> or <code>Paste XML</code> for the fastest first run, or switch to <code>Jenkins Job</code> or <code>Prow Job</code>.</li>
+<li>Click <code>Submit Analysis</code>.</li>
+</ol>
+<p>XML submissions open the result directly. Jenkins and Prow submissions open a live status page first, then redirect to the report when analysis completes.</p>
+<blockquote>
+<p><strong>Note:</strong> The Docker image already includes the supported AI CLIs. For a first run, you only need one working provider credential plus <code>AI_PROVIDER</code> and <code>AI_MODEL</code>.</p>
+<p><strong>Warning:</strong> <code>DEFAULT_USER_ROLE=operator</code> and <code>REQUIRE_APPROVAL=false</code> are convenient for a local trial. For a shared deployment, keep approval enabled and manage roles deliberately. See <a href="manage-users-and-server-settings.html">Managing Users and Server Settings</a> for details.</p>
+</blockquote>
+<h2 id="step-by-step">Step-by-Step</h2>
+<ol>
+<li>Prepare <code>.env</code>.</li>
+</ol>
+<p>Start from <code>.env.example</code>, then add one AI provider, model, and the two quickstart lines shown above.</p>
+<table>
+<thead>
+<tr>
+<th>If your first analysis is...</th>
+<th>Add before startup</th>
+<th>You can also enter it in <code>New Analysis</code></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>JUnit XML</td>
+<td>nothing else</td>
+<td>n/a</td>
+</tr>
+<tr>
+<td>Jenkins</td>
+<td><code>JENKINS_URL</code>, <code>JENKINS_USER</code>, <code>JENKINS_PASSWORD</code></td>
+<td>yes</td>
+</tr>
+<tr>
+<td>Prow</td>
+<td><code>PROW_URL</code>, <code>GCS_BUCKET</code></td>
+<td>yes</td>
+</tr>
+</tbody>
+</table>
+<table>
+<thead>
+<tr>
+<th>AI provider</th>
+<th>Credential variable</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Claude</td>
+<td><code>ANTHROPIC_API_KEY</code></td>
+</tr>
+<tr>
+<td>Gemini</td>
+<td><code>GEMINI_API_KEY</code></td>
+</tr>
+<tr>
+<td>Cursor</td>
+<td><code>CURSOR_API_KEY</code></td>
+</tr>
+</tbody>
+</table>
+<blockquote>
+<p><strong>Warning:</strong> The bundled Compose file uses example Jenkins values when you do not override them. Replace those placeholders before you submit a Jenkins run, or type the correct values into the form for that specific submission.</p>
+</blockquote>
+<ol>
+<li>Start RootCoz.</li>
+</ol>
+<p><code>bash
+   docker compose up -d
+   curl http://localhost:800/health</code></p>
+<p>The web UI and API are both served from <code>http://localhost:800</code>. If the health check succeeds, the service is up and ready.</p>
+<ol>
+<li>Sign in with a user that can submit analyses.</li>
+</ol>
+<p>With the quickstart config above, click <code>Register</code>, choose a username, save the API key, and continue into the app. RootCoz creates an active <code>operator</code> session immediately after registration.</p>
+<blockquote>
+<p><strong>Tip:</strong> If you already have an operator or admin API key, use <code>Log in</code> instead of <code>Register</code>.</p>
+<p><strong>Tip:</strong> Leave <code>GitHub Token</code>, <code>Jira Email</code>, and <code>Jira Token</code> blank for your first run. Add them later when you are ready to create issues or link external trackers. See <a href="manage-account-and-notifications.html">Managing Your Account and Notifications</a> for details.</p>
+</blockquote>
+<ol>
+<li>Open <code>New Analysis</code> and choose the input mode that matches what you already have.</li>
+</ol>
+<table>
+<thead>
+<tr>
+<th>Choose in the UI</th>
+<th>Required fields</th>
+<th>Optional first-run fields</th>
+<th>What opens after submit</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>Upload File</code></td>
+<td>a <code>.xml</code> file</td>
+<td><code>AI Provider</code>, <code>AI Model</code>, tags</td>
+<td>Result page</td>
+</tr>
+<tr>
+<td><code>Paste XML</code></td>
+<td>JUnit XML content</td>
+<td><code>AI Provider</code>, <code>AI Model</code>, tags</td>
+<td>Result page</td>
+</tr>
+<tr>
+<td><code>Jenkins Job</code></td>
+<td><code>Job Name</code>, <code>Build Number</code></td>
+<td><code>Jenkins URL</code>, <code>Jenkins User</code>, <code>Jenkins Password / Token</code>, <code>Wait for build completion</code></td>
+<td>Status page, then result</td>
+</tr>
+<tr>
+<td><code>Prow Job</code></td>
+<td><code>Job Name</code>, numeric <code>Build ID</code></td>
+<td><code>Prow URL</code>, <code>GCS Bucket</code>, <code>GCS Prefix</code></td>
+<td>Status page, then result</td>
+</tr>
+</tbody>
+</table>
+<p>Leave <code>GCS Prefix</code> empty unless you want to override auto-detection. For Jenkins, <code>Wait for build completion</code> is enabled by default.</p>
+<blockquote>
+<p><strong>Tip:</strong> <code>Upload File</code> and <code>Paste XML</code> are the fastest first-run options because they do not depend on Jenkins or Prow connectivity.</p>
+</blockquote>
+<ol>
+<li>Submit and review the first result.</li>
+</ol>
+<p>Click <code>Submit Analysis</code>. RootCoz keeps the job on the dashboard so you can reopen it later without resubmitting.</p>
+<p>See <a href="submit-analyses.html">Submitting Analyses</a> for details. See <a href="review-and-classify-failures.html">Reviewing and Classifying Failures</a> for the next workflow. See <a href="track-analysis-progress.html">Tracking Analysis Progress</a> for the live status view.</p>
+<h2 id="advanced-usage">Advanced Usage</h2>
+<ul>
+<li>If you want admin login on day one, set <code>ADMIN_KEY</code> before startup, then log in as <code>admin</code> with that key.</li>
+<li>If you want to keep approval enabled, set <code>REQUIRE_APPROVAL=true</code>, log in as <code>admin</code>, and approve or create an <code>operator</code> before submitting jobs. See <a href="manage-users-and-server-settings.html">Managing Users and Server Settings</a> for details.</li>
+<li>If you want self-registered users to submit analyses without admin role changes, keep <code>DEFAULT_USER_ROLE=operator</code> before you start the stack.</li>
+<li>If you want richer analysis on the first run, add a tests repository, extra repositories, peer review models, or Jira search settings from the form. See <a href="configure-analysis-context.html">Configuring Analysis Context</a> for details.</li>
+<li>If you prefer terminal automation once the server is running, see <a href="automate-common-tasks-with-the-cli.html">Automating Common Tasks with the CLI</a> and <a href="cli-reference.html">CLI Command Reference</a>.</li>
+<li>If you need a production-style installation instead of the local Docker stack, see <a href="deploy-rootcoz.html">Deploying RootCoz</a> for details.</li>
+</ul>
+<h2 id="troubleshooting">Troubleshooting</h2>
+<ul>
+<li>If <code>docker compose up -d</code> fails with <code>AI_PROVIDER is required</code> or <code>AI_MODEL is required</code>, add both values to <code>.env</code> and start again.</li>
+<li>If you can log in but do not see <code>New Analysis</code>, your account is not <code>operator</code> or <code>admin</code>. Set <code>DEFAULT_USER_ROLE=operator</code> for a local trial or ask an admin to change your role.</li>
+<li>If registration succeeds but RootCoz says your account is awaiting approval, either disable approval for the local quickstart with <code>REQUIRE_APPROVAL=false</code> or have an admin approve the account.</li>
+<li>If a Jenkins submission fails immediately, verify <code>JENKINS_URL</code>, <code>JENKINS_USER</code>, and <code>JENKINS_PASSWORD</code>, or enter them directly on the form for that run.</li>
+<li>If a Prow submission fails immediately, provide <code>Prow URL</code> and <code>GCS Bucket</code> in the form or set <code>PROW_URL</code> and <code>GCS_BUCKET</code> in <code>.env</code> before restarting.</li>
+<li>If XML submission finishes with no useful report, make sure you pasted or uploaded real JUnit XML, not console output or HTML. RootCoz only analyzes failures and errors from the XML.# Quickstart</li>
+</ul>
+<p>You want RootCoz running fast so you can move from failing CI output to a report you can review and act on. The quickest path is to start the bundled Docker stack, create an operator account, and submit one Jenkins, Prow, or JUnit XML analysis from the web UI.</p>
+<h2 id="prerequisites_1">Prerequisites</h2>
+<ul>
+<li>Docker with Docker Compose</li>
+<li>One AI credential for <code>claude</code>, <code>gemini</code>, or <code>cursor</code></li>
+<li>For Jenkins: a job name, build number, and Jenkins access</li>
+<li>For Prow: a job name, build ID, and access to the relevant Prow/GCS location</li>
+<li>For JUnit XML: a <code>.xml</code> file or raw JUnit XML text</li>
+</ul>
+<h2 id="quick-example_1">Quick Example</h2>
+<div class="highlight"><pre><span></span><code>cp<span class="w"> </span>.env.example<span class="w"> </span>.env
+</code></pre></div>
+
+<div class="highlight"><pre><span></span><code>AI_PROVIDER=claude
+AI_MODEL=your-model-name
+ANTHROPIC_API_KEY=your-anthropic-api-key
+DEFAULT_USER_ROLE=operator
+REQUIRE_APPROVAL=false
+</code></pre></div>
+
+<div class="highlight"><pre><span></span><code>docker<span class="w"> </span>compose<span class="w"> </span>up<span class="w"> </span>-d
+curl<span class="w"> </span>http://localhost:8000/health
+</code></pre></div>
+
+<ol>
+<li>Open <code>http://localhost:8000</code>.</li>
+<li>Click <code>Register</code>, enter a username, save the API key RootCoz shows once, then click <code>I've saved my key — Continue</code>.</li>
+<li>Open <code>New Analysis</code>.</li>
+<li>Choose <code>Upload File</code> or <code>Paste XML</code> for the fastest first run, or switch to <code>Jenkins Job</code> or <code>Prow Job</code>.</li>
+<li>Click <code>Submit Analysis</code>.</li>
+</ol>
+<p>XML submissions open the result directly. Jenkins and Prow submissions open a live status page first, then redirect to the report when analysis completes.</p>
+<blockquote>
+<p><strong>Note:</strong> The Docker image already includes the supported AI CLIs. For a first run, you only need one working provider credential plus <code>AI_PROVIDER</code> and <code>AI_MODEL</code>.</p>
+<p><strong>Warning:</strong> <code>DEFAULT_USER_ROLE=operator</code> and <code>REQUIRE_APPROVAL=false</code> are convenient for a local trial. For a shared deployment, keep approval enabled and manage roles deliberately. See <a href="manage-users-and-server-settings.html">Managing Users and Server Settings</a> for details.</p>
+</blockquote>
+<h2 id="step-by-step_1">Step-by-Step</h2>
+<ol>
+<li>Prepare <code>.env</code>.</li>
+</ol>
+<p>Start from <code>.env.example</code>, then add one AI provider, model, and the two quickstart lines shown above.</p>
+<table>
+<thead>
+<tr>
+<th>If your first analysis is...</th>
+<th>Add before startup</th>
+<th>You can also enter it in <code>New Analysis</code></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>JUnit XML</td>
+<td>nothing else</td>
+<td>n/a</td>
+</tr>
+<tr>
+<td>Jenkins</td>
+<td><code>JENKINS_URL</code>, <code>JENKINS_USER</code>, <code>JENKINS_PASSWORD</code></td>
+<td>yes</td>
+</tr>
+<tr>
+<td>Prow</td>
+<td><code>PROW_URL</code>, <code>GCS_BUCKET</code></td>
+<td>yes</td>
+</tr>
+</tbody>
+</table>
+<table>
+<thead>
+<tr>
+<th>AI provider</th>
+<th>Credential variable</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Claude</td>
+<td><code>ANTHROPIC_API_KEY</code></td>
+</tr>
+<tr>
+<td>Gemini</td>
+<td><code>GEMINI_API_KEY</code></td>
+</tr>
+<tr>
+<td>Cursor</td>
+<td><code>CURSOR_API_KEY</code></td>
+</tr>
+</tbody>
+</table>
+<blockquote>
+<p><strong>Warning:</strong> The bundled Compose file uses example Jenkins values when you do not override them. Replace those placeholders before you submit a Jenkins run, or type the correct values into the form for that specific submission.</p>
+</blockquote>
+<ol>
+<li>Start RootCoz.</li>
+</ol>
+<p><code>bash
+   docker compose up -d
+   curl http://localhost:8000/health</code></p>
+<p>The web UI and API are both served from <code>http://localhost:8000</code>. If the health check succeeds, the service is up and ready.</p>
+<ol>
+<li>Sign in with a user that can submit analyses.</li>
+</ol>
+<p>With the quickstart config above, click <code>Register</code>, choose a username, save the API key, and continue into the app. RootCoz creates an active <code>operator</code> session immediately after registration.</p>
+<blockquote>
+<p><strong>Tip:</strong> If you already have an operator or admin API key, use <code>Log in</code> instead of <code>Register</code>.</p>
+<p><strong>Tip:</strong> Leave <code>GitHub Token</code>, <code>Jira Email</code>, and <code>Jira Token</code> blank for your first run. Add them later when you are ready to create issues or link external trackers. See <a href="manage-account-and-notifications.html">Managing Your Account and Notifications</a> for details.</p>
+</blockquote>
+<ol>
+<li>Open <code>New Analysis</code> and choose the input mode that matches what you already have.</li>
+</ol>
+<table>
+<thead>
+<tr>
+<th>Choose in the UI</th>
+<th>Required fields</th>
+<th>Optional first-run fields</th>
+<th>What opens after submit</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>Upload File</code></td>
+<td>a <code>.xml</code> file</td>
+<td><code>AI Provider</code>, <code>AI Model</code>, tags</td>
+<td>Result page</td>
+</tr>
+<tr>
+<td><code>Paste XML</code></td>
+<td>JUnit XML content</td>
+<td><code>AI Provider</code>, <code>AI Model</code>, tags</td>
+<td>Result page</td>
+</tr>
+<tr>
+<td><code>Jenkins Job</code></td>
+<td><code>Job Name</code>, <code>Build Number</code></td>
+<td><code>Jenkins URL</code>, <code>Jenkins User</code>, <code>Jenkins Password / Token</code>, <code>Wait for build completion</code></td>
+<td>Status page, then result</td>
+</tr>
+<tr>
+<td><code>Prow Job</code></td>
+<td><code>Job Name</code>, numeric <code>Build ID</code></td>
+<td><code>Prow URL</code>, <code>GCS Bucket</code>, <code>GCS Prefix</code></td>
+<td>Status page, then result</td>
+</tr>
+</tbody>
+</table>
+<p>Leave <code>GCS Prefix</code> empty unless you want to override auto-detection. For Jenkins, <code>Wait for build completion</code> is enabled by default.</p>
+<blockquote>
+<p><strong>Tip:</strong> <code>Upload File</code> and <code>Paste XML</code> are the fastest first-run options because they do not depend on Jenkins or Prow connectivity.</p>
+</blockquote>
+<ol>
+<li>Submit and review the first result.</li>
+</ol>
+<p>Click <code>Submit Analysis</code>. RootCoz keeps the job on the dashboard so you can reopen it later without resubmitting.</p>
+<p>See <a href="submit-analyses.html">Submitting Analyses</a> for details. See <a href="review-and-classify-failures.html">Reviewing and Classifying Failures</a> for the next workflow. See <a href="track-analysis-progress.html">Tracking Analysis Progress</a> for the live status view.</p>
+<h2 id="advanced-usage_1">Advanced Usage</h2>
+<ul>
+<li>If you want admin login on day one, set <code>ADMIN_KEY</code> before startup, then log in as <code>admin</code> with that key.</li>
+<li>If you want to keep approval enabled, set <code>REQUIRE_APPROVAL=true</code>, log in as <code>admin</code>, and approve or create an <code>operator</code> before submitting jobs. See <a href="manage-users-and-server-settings.html">Managing Users and Server Settings</a> for details.</li>
+<li>If you want self-registered users to submit analyses without admin role changes, keep <code>DEFAULT_USER_ROLE=operator</code> before you start the stack.</li>
+<li>If you want richer analysis on the first run, add a tests repository, extra repositories, peer review models, or Jira search settings from the form. See <a href="configure-analysis-context.html">Configuring Analysis Context</a> for details.</li>
+<li>If you prefer terminal automation once the server is running, see <a href="automate-common-tasks-with-the-cli.html">Automating Common Tasks with the CLI</a> and <a href="cli-reference.html">CLI Command Reference</a>.</li>
+<li>If you need a production-style installation instead of the local Docker stack, see <a href="deploy-rootcoz.html">Deploying RootCoz</a> for details.</li>
+</ul>
+<h2 id="troubleshooting_1">Troubleshooting</h2>
+<ul>
+<li>If <code>docker compose up -d</code> fails with <code>AI_PROVIDER is required</code> or <code>AI_MODEL is required</code>, add both values to <code>.env</code> and start again.</li>
+<li>If you can log in but do not see <code>New Analysis</code>, your account is not <code>operator</code> or <code>admin</code>. Set <code>DEFAULT_USER_ROLE=operator</code> for a local trial or ask an admin to change your role.</li>
+<li>If registration succeeds but RootCoz says your account is awaiting approval, either disable approval for the local quickstart with <code>REQUIRE_APPROVAL=false</code> or have an admin approve the account.</li>
+<li>If a Jenkins submission fails immediately, verify <code>JENKINS_URL</code>, <code>JENKINS_USER</code>, and <code>JENKINS_PASSWORD</code>, or enter them directly on the form for that run.</li>
+<li>If a Prow submission fails immediately, provide <code>Prow URL</code> and <code>GCS Bucket</code> in the form or set <code>PROW_URL</code> and <code>GCS_BUCKET</code> in <code>.env</code> before restarting.</li>
+<li>If XML submission finishes with no useful report, make sure you pasted or uploaded real JUnit XML, not console output or HTML. RootCoz only analyzes failures and errors from the XML.</li>
+</ul>
 <h2 id="related-pages">Related Pages</h2>
 <ul>
-<li><a href="cli-setup.html">Setting Up the CLI</a></li>
-<li><a href="analyzing-failures.html">Analyzing Test Failures</a></li>
-<li><a href="deployment-recipes.html">Deployment Recipes</a></li>
-<li><a href="environment-variables.html">Environment Variables and Configuration</a></li>
-<li><a href="configuring-integrations.html">Configuring Integrations</a></li>
+<li><a href="deploy-rootcoz.html">Deploying RootCoz</a></li>
+<li><a href="submit-analyses.html">Submitting Analyses</a></li>
+<li><a href="configure-analysis-context.html">Configuring Analysis Context</a></li>
+<li><a href="track-analysis-progress.html">Tracking Analysis Progress</a></li>
+<li><a href="review-and-classify-failures.html">Reviewing and Classifying Failures</a></li>
 </ul>
                 </div>
             </article>
@@ -226,9 +572,9 @@
                 <div></div>
                 
                 
-                <a href="cli-setup.html" class="page-nav-link page-nav-next">
+                <a href="submit-analyses.html" class="page-nav-link page-nav-next">
                     <span class="page-nav-label">Next</span>
-                    <span class="page-nav-title">Setting Up the CLI</span>
+                    <span class="page-nav-title">Submitting Analyses</span>
                 </a>
                 
             </nav>
@@ -238,6 +584,16 @@
                     <h3>On this page</h3>
                     <div class="toc">
 <ul>
+<li><a href="#prerequisites">Prerequisites</a></li>
+<li><a href="#quick-example">Quick Example</a></li>
+<li><a href="#step-by-step">Step-by-Step</a></li>
+<li><a href="#advanced-usage">Advanced Usage</a></li>
+<li><a href="#troubleshooting">Troubleshooting</a></li>
+<li><a href="#prerequisites_1">Prerequisites</a></li>
+<li><a href="#quick-example_1">Quick Example</a></li>
+<li><a href="#step-by-step_1">Step-by-Step</a></li>
+<li><a href="#advanced-usage_1">Advanced Usage</a></li>
+<li><a href="#troubleshooting_1">Troubleshooting</a></li>
 <li><a href="#related-pages">Related Pages</a></li>
 </ul>
 </div>
@@ -250,7 +606,7 @@
 
         <footer class="page-footer">
             
-            <span class="footer-version">Generated from version 4.2.0</span>
+            <span class="footer-version">Generated from version 4.4.2</span>
             <span class="footer-sep">&middot;</span>
             
             Generated with <a href="https://github.com/myk-org/docsfy" target="_blank" rel="noopener">docs<span class="brand-accent">fy</span></a>

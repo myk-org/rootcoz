@@ -1,4121 +1,1123 @@
 # rootcoz
 
-> Automatically diagnose CI/CD test failures with AI and get actionable root cause analysis in seconds
+> Understand failing CI runs, collaborate on fixes, and create follow-up issues faster.
 
 ---
 
 Source: quickstart.md
 
-Let me start by reading the knowledge graph and pages manifest, then explore the codebase for quickstart-relevant details.Now let me explore the key files I need for the quickstart guide:Now let me look at the health endpoint and how to verify the setup:So there's no env_prefix, meaning `admin_key` maps to env var `ADMIN_KEY`. Let me check how login works:Now let me check how the CLI installation works:Let me check the require_approval default and how admins approve users:Now let me look at how config.toml works:Now let me check the REQUIRE_APPROVAL and SECURE_COOKIES env vars in the docker-compose file, and look at the raw source analysis flow:
+# Quickstart
+
+You want RootCoz running fast so you can move from failing CI output to a report you can review and act on. The quickest path is to start the bundled Docker stack, create an operator account, and submit one Jenkins, Prow, or JUnit XML analysis from the web UI.
+
+## Prerequisites
+
+- Docker with Docker Compose
+- One AI credential for `claude`, `gemini`, or `cursor`
+- For Jenkins: a job name, build number, and Jenkins access
+- For Prow: a job name, build ID, and access to the relevant Prow/GCS location
+- For JUnit XML: a `.xml` file or raw JUnit XML text
+
+## Quick Example
+
+```bash
+cp .env.example .env
+```
+
+```dotenv
+AI_PROVIDER=claude
+AI_MODEL=your-model-name
+ANTHROPIC_API_KEY=your-anthropic-api-key
+DEFAULT_USER_ROLE=operator
+REQUIRE_APPROVAL=false
+```
+
+```bash
+docker compose up -d
+curl http://localhost:800/health
+```
+
+1. Open `http://localhost:800`.
+2. Click `Register`, enter a username, save the API key RootCoz shows once, then click `I've saved my key — Continue`.
+3. Open `New Analysis`.
+4. Choose `Upload File` or `Paste XML` for the fastest first run, or switch to `Jenkins Job` or `Prow Job`.
+5. Click `Submit Analysis`.
+
+XML submissions open the result directly. Jenkins and Prow submissions open a live status page first, then redirect to the report when analysis completes.
+
+> **Note:** The Docker image already includes the supported AI CLIs. For a first run, you only need one working provider credential plus `AI_PROVIDER` and `AI_MODEL`.
+
+
+> **Warning:** `DEFAULT_USER_ROLE=operator` and `REQUIRE_APPROVAL=false` are convenient for a local trial. For a shared deployment, keep approval enabled and manage roles deliberately. See [Managing Users and Server Settings](manage-users-and-server-settings.html) for details.
+
+## Step-by-Step
+
+1. Prepare `.env`.
+
+   Start from `.env.example`, then add one AI provider, model, and the two quickstart lines shown above.
+
+   | If your first analysis is... | Add before startup | You can also enter it in `New Analysis` |
+   | --- | --- | --- |
+   | JUnit XML | nothing else | n/a |
+   | Jenkins | `JENKINS_URL`, `JENKINS_USER`, `JENKINS_PASSWORD` | yes |
+   | Prow | `PROW_URL`, `GCS_BUCKET` | yes |
+
+   | AI provider | Credential variable |
+   | --- | --- |
+   | Claude | `ANTHROPIC_API_KEY` |
+   | Gemini | `GEMINI_API_KEY` |
+   | Cursor | `CURSOR_API_KEY` |
+
+   > **Warning:** The bundled Compose file uses example Jenkins values when you do not override them. Replace those placeholders before you submit a Jenkins run, or type the correct values into the form for that specific submission.
+
+2. Start RootCoz.
+
+   ```bash
+   docker compose up -d
+   curl http://localhost:800/health
+   ```
+
+   The web UI and API are both served from `http://localhost:800`. If the health check succeeds, the service is up and ready.
+
+3. Sign in with a user that can submit analyses.
+
+   With the quickstart config above, click `Register`, choose a username, save the API key, and continue into the app. RootCoz creates an active `operator` session immediately after registration.
+
+   > **Tip:** If you already have an operator or admin API key, use `Log in` instead of `Register`.
+
+
+   > **Tip:** Leave `GitHub Token`, `Jira Email`, and `Jira Token` blank for your first run. Add them later when you are ready to create issues or link external trackers. See [Managing Your Account and Notifications](manage-account-and-notifications.html) for details.
+
+4. Open `New Analysis` and choose the input mode that matches what you already have.
+
+   | Choose in the UI | Required fields | Optional first-run fields | What opens after submit |
+   | --- | --- | --- | --- |
+   | `Upload File` | a `.xml` file | `AI Provider`, `AI Model`, tags | Result page |
+   | `Paste XML` | JUnit XML content | `AI Provider`, `AI Model`, tags | Result page |
+   | `Jenkins Job` | `Job Name`, `Build Number` | `Jenkins URL`, `Jenkins User`, `Jenkins Password / Token`, `Wait for build completion` | Status page, then result |
+   | `Prow Job` | `Job Name`, numeric `Build ID` | `Prow URL`, `GCS Bucket`, `GCS Prefix` | Status page, then result |
+
+   Leave `GCS Prefix` empty unless you want to override auto-detection. For Jenkins, `Wait for build completion` is enabled by default.
+
+   > **Tip:** `Upload File` and `Paste XML` are the fastest first-run options because they do not depend on Jenkins or Prow connectivity.
+
+5. Submit and review the first result.
+
+   Click `Submit Analysis`. RootCoz keeps the job on the dashboard so you can reopen it later without resubmitting.
+
+   See [Submitting Analyses](submit-analyses.html) for details. See [Reviewing and Classifying Failures](review-and-classify-failures.html) for the next workflow. See [Tracking Analysis Progress](track-analysis-progress.html) for the live status view.
+
+## Advanced Usage
+
+- If you want admin login on day one, set `ADMIN_KEY` before startup, then log in as `admin` with that key.
+- If you want to keep approval enabled, set `REQUIRE_APPROVAL=true`, log in as `admin`, and approve or create an `operator` before submitting jobs. See [Managing Users and Server Settings](manage-users-and-server-settings.html) for details.
+- If you want self-registered users to submit analyses without admin role changes, keep `DEFAULT_USER_ROLE=operator` before you start the stack.
+- If you want richer analysis on the first run, add a tests repository, extra repositories, peer review models, or Jira search settings from the form. See [Configuring Analysis Context](configure-analysis-context.html) for details.
+- If you prefer terminal automation once the server is running, see [Automating Common Tasks with the CLI](automate-common-tasks-with-the-cli.html) and [CLI Command Reference](cli-reference.html).
+- If you need a production-style installation instead of the local Docker stack, see [Deploying RootCoz](deploy-rootcoz.html) for details.
+
+## Troubleshooting
+
+- If `docker compose up -d` fails with `AI_PROVIDER is required` or `AI_MODEL is required`, add both values to `.env` and start again.
+- If you can log in but do not see `New Analysis`, your account is not `operator` or `admin`. Set `DEFAULT_USER_ROLE=operator` for a local trial or ask an admin to change your role.
+- If registration succeeds but RootCoz says your account is awaiting approval, either disable approval for the local quickstart with `REQUIRE_APPROVAL=false` or have an admin approve the account.
+- If a Jenkins submission fails immediately, verify `JENKINS_URL`, `JENKINS_USER`, and `JENKINS_PASSWORD`, or enter them directly on the form for that run.
+- If a Prow submission fails immediately, provide `Prow URL` and `GCS Bucket` in the form or set `PROW_URL` and `GCS_BUCKET` in `.env` before restarting.
+- If XML submission finishes with no useful report, make sure you pasted or uploaded real JUnit XML, not console output or HTML. RootCoz only analyzes failures and errors from the XML.# Quickstart
+
+You want RootCoz running fast so you can move from failing CI output to a report you can review and act on. The quickest path is to start the bundled Docker stack, create an operator account, and submit one Jenkins, Prow, or JUnit XML analysis from the web UI.
+
+## Prerequisites
+
+- Docker with Docker Compose
+- One AI credential for `claude`, `gemini`, or `cursor`
+- For Jenkins: a job name, build number, and Jenkins access
+- For Prow: a job name, build ID, and access to the relevant Prow/GCS location
+- For JUnit XML: a `.xml` file or raw JUnit XML text
+
+## Quick Example
+
+```bash
+cp .env.example .env
+```
+
+```dotenv
+AI_PROVIDER=claude
+AI_MODEL=your-model-name
+ANTHROPIC_API_KEY=your-anthropic-api-key
+DEFAULT_USER_ROLE=operator
+REQUIRE_APPROVAL=false
+```
+
+```bash
+docker compose up -d
+curl http://localhost:8000/health
+```
+
+1. Open `http://localhost:8000`.
+2. Click `Register`, enter a username, save the API key RootCoz shows once, then click `I've saved my key — Continue`.
+3. Open `New Analysis`.
+4. Choose `Upload File` or `Paste XML` for the fastest first run, or switch to `Jenkins Job` or `Prow Job`.
+5. Click `Submit Analysis`.
+
+XML submissions open the result directly. Jenkins and Prow submissions open a live status page first, then redirect to the report when analysis completes.
+
+> **Note:** The Docker image already includes the supported AI CLIs. For a first run, you only need one working provider credential plus `AI_PROVIDER` and `AI_MODEL`.
+
+
+> **Warning:** `DEFAULT_USER_ROLE=operator` and `REQUIRE_APPROVAL=false` are convenient for a local trial. For a shared deployment, keep approval enabled and manage roles deliberately. See [Managing Users and Server Settings](manage-users-and-server-settings.html) for details.
+
+## Step-by-Step
+
+1. Prepare `.env`.
+
+   Start from `.env.example`, then add one AI provider, model, and the two quickstart lines shown above.
+
+   | If your first analysis is... | Add before startup | You can also enter it in `New Analysis` |
+   | --- | --- | --- |
+   | JUnit XML | nothing else | n/a |
+   | Jenkins | `JENKINS_URL`, `JENKINS_USER`, `JENKINS_PASSWORD` | yes |
+   | Prow | `PROW_URL`, `GCS_BUCKET` | yes |
+
+   | AI provider | Credential variable |
+   | --- | --- |
+   | Claude | `ANTHROPIC_API_KEY` |
+   | Gemini | `GEMINI_API_KEY` |
+   | Cursor | `CURSOR_API_KEY` |
+
+   > **Warning:** The bundled Compose file uses example Jenkins values when you do not override them. Replace those placeholders before you submit a Jenkins run, or type the correct values into the form for that specific submission.
+
+2. Start RootCoz.
+
+   ```bash
+   docker compose up -d
+   curl http://localhost:8000/health
+   ```
+
+   The web UI and API are both served from `http://localhost:8000`. If the health check succeeds, the service is up and ready.
+
+3. Sign in with a user that can submit analyses.
+
+   With the quickstart config above, click `Register`, choose a username, save the API key, and continue into the app. RootCoz creates an active `operator` session immediately after registration.
+
+   > **Tip:** If you already have an operator or admin API key, use `Log in` instead of `Register`.
+
+
+   > **Tip:** Leave `GitHub Token`, `Jira Email`, and `Jira Token` blank for your first run. Add them later when you are ready to create issues or link external trackers. See [Managing Your Account and Notifications](manage-account-and-notifications.html) for details.
+
+4. Open `New Analysis` and choose the input mode that matches what you already have.
+
+   | Choose in the UI | Required fields | Optional first-run fields | What opens after submit |
+   | --- | --- | --- | --- |
+   | `Upload File` | a `.xml` file | `AI Provider`, `AI Model`, tags | Result page |
+   | `Paste XML` | JUnit XML content | `AI Provider`, `AI Model`, tags | Result page |
+   | `Jenkins Job` | `Job Name`, `Build Number` | `Jenkins URL`, `Jenkins User`, `Jenkins Password / Token`, `Wait for build completion` | Status page, then result |
+   | `Prow Job` | `Job Name`, numeric `Build ID` | `Prow URL`, `GCS Bucket`, `GCS Prefix` | Status page, then result |
+
+   Leave `GCS Prefix` empty unless you want to override auto-detection. For Jenkins, `Wait for build completion` is enabled by default.
+
+   > **Tip:** `Upload File` and `Paste XML` are the fastest first-run options because they do not depend on Jenkins or Prow connectivity.
+
+5. Submit and review the first result.
+
+   Click `Submit Analysis`. RootCoz keeps the job on the dashboard so you can reopen it later without resubmitting.
+
+   See [Submitting Analyses](submit-analyses.html) for details. See [Reviewing and Classifying Failures](review-and-classify-failures.html) for the next workflow. See [Tracking Analysis Progress](track-analysis-progress.html) for the live status view.
+
+## Advanced Usage
+
+- If you want admin login on day one, set `ADMIN_KEY` before startup, then log in as `admin` with that key.
+- If you want to keep approval enabled, set `REQUIRE_APPROVAL=true`, log in as `admin`, and approve or create an `operator` before submitting jobs. See [Managing Users and Server Settings](manage-users-and-server-settings.html) for details.
+- If you want self-registered users to submit analyses without admin role changes, keep `DEFAULT_USER_ROLE=operator` before you start the stack.
+- If you want richer analysis on the first run, add a tests repository, extra repositories, peer review models, or Jira search settings from the form. See [Configuring Analysis Context](configure-analysis-context.html) for details.
+- If you prefer terminal automation once the server is running, see [Automating Common Tasks with the CLI](automate-common-tasks-with-the-cli.html) and [CLI Command Reference](cli-reference.html).
+- If you need a production-style installation instead of the local Docker stack, see [Deploying RootCoz](deploy-rootcoz.html) for details.
+
+## Troubleshooting
+
+- If `docker compose up -d` fails with `AI_PROVIDER is required` or `AI_MODEL is required`, add both values to `.env` and start again.
+- If you can log in but do not see `New Analysis`, your account is not `operator` or `admin`. Set `DEFAULT_USER_ROLE=operator` for a local trial or ask an admin to change your role.
+- If registration succeeds but RootCoz says your account is awaiting approval, either disable approval for the local quickstart with `REQUIRE_APPROVAL=false` or have an admin approve the account.
+- If a Jenkins submission fails immediately, verify `JENKINS_URL`, `JENKINS_USER`, and `JENKINS_PASSWORD`, or enter them directly on the form for that run.
+- If a Prow submission fails immediately, provide `Prow URL` and `GCS Bucket` in the form or set `PROW_URL` and `GCS_BUCKET` in `.env` before restarting.
+- If XML submission finishes with no useful report, make sure you pasted or uploaded real JUnit XML, not console output or HTML. RootCoz only analyzes failures and errors from the XML.
 
 ## Related Pages
 
-- [Setting Up the CLI](cli-setup.html)
-- [Analyzing Test Failures](analyzing-failures.html)
-- [Deployment Recipes](deployment-recipes.html)
-- [Environment Variables and Configuration](environment-variables.html)
-- [Configuring Integrations](configuring-integrations.html)
+- [Deploying RootCoz](deploy-rootcoz.html)
+- [Submitting Analyses](submit-analyses.html)
+- [Configuring Analysis Context](configure-analysis-context.html)
+- [Tracking Analysis Progress](track-analysis-progress.html)
+- [Reviewing and Classifying Failures](review-and-classify-failures.html)
 
 ---
 
-Source: cli-setup.md
+Source: review-and-classify-failures.md
 
-# Setting Up the CLI
+# Reviewing and Classifying Failures
 
-Get the `rootcoz` command-line tool installed, connected to your server, and authenticated so you can submit analyses, query results, and manage jobs without leaving your terminal.
+Use the report page when you need to decide whether RootCoz got a failure right and save the final answer your team should trust. This is where you compare the AI’s reasoning, finish human review, and correct the labels before the result drives follow-up work or downstream reporting.
 
-**Prerequisites:**
+## Prerequisites
+- A completed analysis result.
+- `reviewer`, `operator`, or `admin` access to mark failures reviewed or change their labels.
+- `operator` or `admin` access if you plan to re-analyze a job or a single failure.
+- If you want to use the CLI examples, a configured CLI profile.
 
-- A running rootcoz server (see [Quickstart](quickstart.html))
-- Python 3.12 or later
-- [uv](https://docs.astral.sh/uv/) package manager (recommended) or pip
+See [Tracking Analysis Progress](track-analysis-progress.html) for details. See [Automating Common Tasks with the CLI](automate-common-tasks-with-the-cli.html) for details.
 
-## Quick example
-
+## Quick Example
 ```bash
-uv tool install rootcoz
-export ROOTCOZ_SERVER=http://localhost:8000
-rootcoz health
+rootcoz results review-status JOB_ID
+rootcoz results set-reviewed JOB_ID --test "TEST_NAME" --reviewed
+rootcoz override-classification JOB_ID --test "TEST_NAME" --classification "PRODUCT BUG"
+rootcoz override-pattern JOB_ID --test "TEST_NAME" --pattern "REGRESSION"
 ```
 
-If you see `Status: healthy`, you're ready to go.
+Use this when you already know the job ID and test name and only need to confirm review state, mark the failure reviewed, and correct both labels. The rest of this page shows the same workflow in the web report, where you can inspect grouped failures and compare AI reasoning first.
 
-## Installing the CLI
+## Step-by-Step
+1. Open the result you want to review.
 
-The recommended way to install is with `uv tool`, which gives you an isolated `rootcoz` command:
+   Start from a completed job in the dashboard or history. If you need to find an older run or a recurring failure first, see [Exploring History and Reports](explore-history-and-reports.html) for details.
+
+2. Triage the report header before you open individual failures.
+
+   The header shows total failures, review progress, and the AI used for the run. If peer analysis was enabled, the `Peer Analysis` summary near the top also shows how many debates reached `Consensus` and how many did not.
+
+3. Expand one failure card and confirm the scope.
+
+   A card can represent one failing test or several tests with the same error. When a group contains more than one test, RootCoz shows `Affected Tests` and gives you a group-level `Review All` button.
+
+> **Note:** Review state is tracked per test, but classification and pattern changes apply to the whole same-error group. Check `Affected Tests` before you change a grouped card.
+
+4. Compare the current answer with the evidence.
+
+   Start with `Analysis`, then read `Artifacts Evidence`. If the failure has been re-run before, open `Previous Analysis` to compare the earlier answer with the current one.
+
+   If peer analysis was enabled, expand `Peer Analysis` on the failure card to inspect each round and see whether the models agreed. This is the fastest way to decide whether the current answer looks solid or needs correction.
+
+5. Mark the review complete.
+
+   Click `Review` on a single failure when you are satisfied with it. On grouped cards, use `Review All` when the whole group is ready, or review individual tests from the `Affected Tests` list if only part of the group is ready.
+
+   The button changes to `Reviewed` and shows who reviewed it. Click it again if you need to reopen the failure.
+
+6. Correct the labels when the default answer is wrong.
+
+   Use the `Classify` row on the failure card to change the root cause and the failure pattern.
+
+   | Change this | Choices | Use it when |
+   | --- | --- | --- |
+   | Root cause | `CODE ISSUE`, `PRODUCT BUG`, `INFRASTRUCTURE` | The AI blamed the wrong owner or system |
+   | Pattern | `NEW`, `REGRESSION`, `FLAKY`, `INTERMITENT`, `KNOWN BUG`, `PERSISTENT` | The root cause is right, but the failure's behavior over time is wrong |
+
+7. Repeat the same flow inside child jobs when the report contains nested failures.
+
+   If the result includes a `Child Jobs` section, expand the relevant job and review it the same way. Review and classification controls stay scoped to that child job instead of the top-level failure list.
+
+8. Finish the job after everything is reviewed.
+
+   When every failure in the result is marked reviewed and Report Portal is available, RootCoz prompts you to update Report Portal. If you need to create or link follow-up issues after the review is final, see [Creating Follow-Up Issues and Pushing Results](create-follow-up-issues-and-push-results.html) for details.
+
+## Advanced Usage
+Use re-analysis when you want a better answer, not just a different badge. `Re-Analyze` in the page header creates a new result for the whole job, while `Re-analyze` on a failure card updates only that failure in place and keeps the earlier answer under `Previous Analysis`.
+
+If peer analysis showed disagreement, or if the explanation is thin, re-run with different AI settings instead of stacking manual overrides. You can change the AI provider and model, peer analysis settings, tests repo, additional repositories, Jira search, artifact collection, and raw prompt. See [Configuring Analysis Context](configure-analysis-context.html) for details.
+
+For child-job failures, add child scope in the CLI:
 
 ```bash
-uv tool install rootcoz
+rootcoz results set-reviewed JOB_ID --test "TEST_NAME" --reviewed --child-job "CHILD_JOB" --child-build 12345
+rootcoz override-pattern JOB_ID --test "TEST_NAME" --pattern "KNOWN_BUG" --child-job "CHILD_JOB" --child-build 12345
 ```
 
-Alternatively, install with pip:
+> **Tip:** The UI label `KNOWN BUG` uses the CLI value `KNOWN_BUG`.
 
+Use `--not-reviewed` instead of `--reviewed` when you need to reopen a failure from the terminal. See [CLI Command Reference](cli-reference.html) for details.
+
+## Troubleshooting
+- `I can open the report but I can't change anything.`  
+  You likely have viewer access. Review and classification actions require reviewer access, and re-analysis requires operator or admin access.
+
+- `My change affected several tests.`  
+  That card represents a same-error group. RootCoz applies classification and pattern changes across the whole group, so confirm the `Affected Tests` list before you save.
+
+- `The label changed, but the explanation still needs work.`  
+  Overrides update the labels immediately, but they do not replace the full AI narrative. Use `Re-analyze` if you want a fresh explanation that matches your corrected label.
+
+- `A section disappeared after I changed the classification.`  
+  That is expected. Switching to `CODE ISSUE` removes old bug-report content, switching to `PRODUCT BUG` removes old suggested-fix content, and switching to `INFRASTRUCTURE` removes both.
+
+- `I never see the Report Portal prompt.`  
+  The `All failures reviewed. Update Report Portal?` prompt only appears when every failure in the job is reviewed and Report Portal is enabled for the server.# Reviewing and Classifying Failures
+
+Use the report page when you need to decide whether RootCoz got a failure right and save the final answer your team should trust. This is where you compare the AI’s reasoning, finish human review, and correct the labels before the result drives follow-up work or downstream reporting.
+
+## Prerequisites
+- A completed analysis result.
+- `reviewer`, `operator`, or `admin` access to mark failures reviewed or change their labels.
+- `operator` or `admin` access if you plan to re-analyze a job or a single failure.
+- If you want to use the CLI examples, a configured CLI profile.
+
+See [Tracking Analysis Progress](track-analysis-progress.html) for details. See [Automating Common Tasks with the CLI](automate-common-tasks-with-the-cli.html) for details.
+
+## Quick Example
 ```bash
-pip install rootcoz
+rootcoz results review-status JOB_ID
+rootcoz results set-reviewed JOB_ID --test "TEST_NAME" --reviewed
+rootcoz override-classification JOB_ID --test "TEST_NAME" --classification "PRODUCT BUG"
+rootcoz override-pattern JOB_ID --test "TEST_NAME" --pattern "REGRESSION"
 ```
 
-Verify the installation:
+Use this when you already know the job ID and test name and only need to confirm review state, mark the failure reviewed, and correct both labels. The rest of this page shows the same workflow in the web report, where you can inspect grouped failures and compare AI reasoning first.
+
+## Step-by-Step
+1. Open the result you want to review.
+
+   Start from a completed job in the dashboard or history. If you need to find an older run or a recurring failure first, see [Exploring History and Reports](explore-history-and-reports.html) for details.
+
+2. Triage the report header before you open individual failures.
+
+   The header shows total failures, review progress, and the AI used for the run. If peer analysis was enabled, the `Peer Analysis` summary near the top also shows how many debates reached `Consensus` and how many did not.
+
+3. Expand one failure card and confirm the scope.
+
+   A card can represent one failing test or several tests with the same error. When a group contains more than one test, RootCoz shows `Affected Tests` and gives you a group-level `Review All` button.
+
+> **Note:** Review state is tracked per test, but classification and pattern changes apply to the whole same-error group. Check `Affected Tests` before you change a grouped card.
+
+4. Compare the current answer with the evidence.
+
+   Start with `Analysis`, then read `Artifacts Evidence`. If the failure has been re-run before, open `Previous Analysis` to compare the earlier answer with the current one.
+
+   If peer analysis was enabled, expand `Peer Analysis` on the failure card to inspect each round and see whether the models agreed. This is the fastest way to decide whether the current answer looks solid or needs correction.
+
+5. Mark the review complete.
+
+   Click `Review` on a single failure when you are satisfied with it. On grouped cards, use `Review All` when the whole group is ready, or review individual tests from the `Affected Tests` list if only part of the group is ready.
+
+   The button changes to `Reviewed` and shows who reviewed it. Click it again if you need to reopen the failure.
+
+6. Correct the labels when the default answer is wrong.
+
+   Use the `Classify` row on the failure card to change the root cause and the failure pattern.
+
+   | Change this | Choices | Use it when |
+   | --- | --- | --- |
+   | Root cause | `CODE ISSUE`, `PRODUCT BUG`, `INFRASTRUCTURE` | The AI blamed the wrong owner or system |
+   | Pattern | `NEW`, `REGRESSION`, `FLAKY`, `INTERMITTENT`, `KNOWN BUG`, `PERSISTENT` | The root cause is right, but the failure's behavior over time is wrong |
+
+7. Repeat the same flow inside child jobs when the report contains nested failures.
+
+   If the result includes a `Child Jobs` section, expand the relevant job and review it the same way. Review and classification controls stay scoped to that child job instead of the top-level failure list.
+
+8. Finish the job after everything is reviewed.
+
+   When every failure in the result is marked reviewed and Report Portal is available, RootCoz prompts you to update Report Portal. If you need to create or link follow-up issues after the review is final, see [Creating Follow-Up Issues and Pushing Results](create-follow-up-issues-and-push-results.html) for details.
+
+## Advanced Usage
+Use re-analysis when you want a better answer, not just a different badge. `Re-Analyze` in the page header creates a new result for the whole job, while `Re-analyze` on a failure card updates only that failure in place and keeps the earlier answer under `Previous Analysis`.
+
+If peer analysis showed disagreement, or if the explanation is thin, re-run with different AI settings instead of stacking manual overrides. You can change the AI provider and model, peer analysis settings, tests repo, additional repositories, Jira search, artifact collection, and raw prompt. See [Configuring Analysis Context](configure-analysis-context.html) for details.
+
+For child-job failures, add child scope in the CLI:
 
 ```bash
-rootcoz --help
+rootcoz results set-reviewed JOB_ID --test "TEST_NAME" --reviewed --child-job "CHILD_JOB" --child-build 12345
+rootcoz override-pattern JOB_ID --test "TEST_NAME" --pattern "KNOWN_BUG" --child-job "CHILD_JOB" --child-build 12345
 ```
 
-This prints all available commands and global options.
+> **Tip:** The UI label `KNOWN BUG` uses the CLI value `KNOWN_BUG`.
 
-## Connecting to a server
+Use `--not-reviewed` instead of `--reviewed` when you need to reopen a failure from the terminal. See [CLI Command Reference](cli-reference.html) for details.
 
-The CLI needs to know which rootcoz server to talk to. You have three options, from quickest to most permanent.
+## Troubleshooting
+- `I can open the report but I can't change anything.`  
+  You likely have viewer access. Review and classification actions require reviewer access, and re-analysis requires operator or admin access.
 
-### Option 1: Environment variable
+- `My change affected several tests.`  
+  That card represents a same-error group. RootCoz applies classification and pattern changes across the whole group, so confirm the `Affected Tests` list before you save.
 
+- `The label changed, but the explanation still needs work.`  
+  Overrides update the labels immediately, but they do not replace the full AI narrative. Use `Re-analyze` if you want a fresh explanation that matches your corrected label.
+
+- `A section disappeared after I changed the classification.`  
+  That is expected. Switching to `CODE ISSUE` removes old bug-report content, switching to `PRODUCT BUG` removes old suggested-fix content, and switching to `INFRASTRUCTURE` removes both.
+
+- `I never see the Report Portal prompt.`  
+  The `All failures reviewed. Update Report Portal?` prompt only appears when every failure in the job is reviewed and Report Portal is enabled for the server.
+
+## Related Pages
+
+- [Tracking Analysis Progress](track-analysis-progress.html)
+- [Collaborating on Results](collaborate-on-results.html)
+- [Creating Follow-Up Issues and Pushing Results](create-follow-up-issues-and-push-results.html)
+- [Exploring History and Reports](explore-history-and-reports.html)
+- [Configuring Analysis Context](configure-analysis-context.html)
+
+---
+
+Source: explore-history-and-reports.md
+
+# Exploring History and Reports
+
+Use RootCoz's history views when you need to answer two practical questions quickly: has this failure happened before, and is it part of a broader trend? These screens help you move from one test failure to per-test history and then out to filtered team summaries.
+
+## Prerequisites
+- You are signed in to RootCoz.
+- At least one analysis result already exists. See [Submitting Analyses](submit-analyses.html) for details.
+- Your account has access to `Reports` if you want the team summary views.
+
+## Quick Example
 ```bash
-export ROOTCOZ_SERVER=http://localhost:8000
-rootcoz health
+rootcoz history failures --search tests.test_auth.test_login
+rootcoz history test "tests.test_auth.test_login"
+rootcoz reports totals --team alpha --from 2025-01-01 --to 2025-06-01 --review-status reviewed
 ```
 
-### Option 2: CLI flag
+Use the first command to find matching failures, the second to inspect one test over time, and the third to compare reviewed work for one team in a date window.
+
+## Step-by-Step
+1. Start in the right place.
+
+| If you want to... | Open | Best for |
+| --- | --- | --- |
+| Check one failing test or result | `History` | Repeats, classifications, and recent runs |
+| Compare filtered job totals across teams or releases | `Reports` | Dates, metadata, labels, and review progress |
+| See where reviewers changed RootCoz's answer | `Reports` | Classification override patterns |
+| See what follow-up work already exists | `Reports` | GitHub and Jira issue summaries |
+
+2. Search recurring failures in `History`.
+Open `History`, use the search box to narrow the table by test name, then add a classification filter or date range if the list is still noisy. Click a row to open that result, or click the test name itself to open that test's dedicated history page.
+
+3. Read the test history page.
+Start with `Failure Rate`, `Total Runs`, `Failures`, and `Consecutive` to understand whether the test is stable, degrading, or repeatedly broken. Then read the classification badges, comments, `First seen`, and `Last seen`, and open any row in `Recent Runs` to jump back to a specific result.
+
+4. Move to `Reports` for broader trends.
+Choose `Total Failures` when you want summary counts, `Classification Overrides` when you want review changes, or `Issues Created` when you want follow-up visibility. Use the filters across the top to narrow by `Team`, `Tier`, `Version`, `Status`, `Review status`, date range, and label include/exclude chips.
+
+> **Note:** If you leave the status filter empty, report summaries start with completed jobs only.
+
+5. Read the report detail that matches your question.
+In `Total Failures`, expand `Job Details` to compare jobs in the current slice. In `Classification Overrides`, expand a `from -> to` group to see which tests changed and who changed them; in `Issues Created`, open the external issue link or the linked result to inspect the original analysis.
+
+When you find a specific result you want to confirm or correct, see [Reviewing and Classifying Failures](review-and-classify-failures.html) for details.
+
+## Advanced Usage
+Use the CLI when you want repeatable lookups or want to save filters in shell history.
 
 ```bash
-rootcoz --server http://localhost:8000 health
+rootcoz history failures --classification "INFRASTRUCTURE" --limit 50
+rootcoz history test "tests.test_auth.test_login" --limit 50
+rootcoz history stats "test-job"
+rootcoz reports overrides --status completed --tags nightly,smoke
+rootcoz reports issues --team alpha --review-status reviewed
 ```
 
-### Option 3: Config file (recommended)
+> **Tip:** The `Reports` page keeps its active tab and filters in the URL, so you can refresh, bookmark, or share the same filtered view.
 
-Create `~/.config/rootcoz/config.toml` to store server connections permanently:
+See [CLI Command Reference](cli-reference.html) for all flags, or see [API Endpoint Reference](api-reference.html) if you want to script the same lookups.
+
+## Troubleshooting
+- I do not see `Reports` in the sidebar.  
+  Ask an administrator to grant report access, then reload the page.
+
+- `History` is empty for a test I expect to find.  
+  Remove the classification filter, widen the date range, or search with the full test name.
+
+- A report looks smaller than expected.  
+  Add the statuses you care about, then re-check your team, version, and label filters.
+
+- There is no data to explore yet.  
+  Run an analysis first. See [Submitting Analyses](submit-analyses.html) for details.
+
+## Related Pages
+
+- [Reviewing and Classifying Failures](review-and-classify-failures.html)
+- [Creating Follow-Up Issues and Pushing Results](create-follow-up-issues-and-push-results.html)
+- [Submitting Analyses](submit-analyses.html)
+- [Use Server Chat for Cross-Job Analysis](use-server-chat-for-cross-job-analysis.html)
+- [CLI Command Reference](cli-reference.html)
+
+---
+
+Source: use-server-chat-for-cross-job-analysis.md
+
+# Use Server Chat for Cross-Job Analysis
+
+Ask RootCoz questions across all jobs when you need trends, summaries, or reusable reports without opening runs one by one. This guide shows administrators how to start a server-wide chat, switch models for one question, follow replies, and keep or clear the session on their own terms.
+
+## Prerequisites
+
+- An admin account in RootCoz. The `Chat` page in the admin sidebar is admin-only.
+- A default AI provider and model configured on the server, or a provider and model you can choose before sending a message. See [Managing Users and Server Settings](manage-users-and-server-settings.html) for details.
+- For CLI use, the `rootcoz` CLI installed and authenticated with an admin API key. See [Automating Common Tasks with the CLI](automate-common-tasks-with-the-cli.html) for details.
+
+## Quick Example
 
 ```bash
-mkdir -p ~/.config/rootcoz
-cat > ~/.config/rootcoz/config.toml << 'EOF'
-[default]
-server = "dev"
+export ROOTCOZ_SERVER="https://rootcoz.example.com"
+read -rsp "Admin API key: " ROOTCOZ_API_KEY
+export ROOTCOZ_API_KEY
+echo
 
-[servers.dev]
-url = "http://localhost:8000"
-username = "myuser"
+rootcoz auth whoami
+rootcoz admin-chat send "Summarize the top failure trends from the last 7 days."
+```
+
+This confirms the CLI is using an admin identity, then asks a server-wide question and waits for the assistant reply.
+
+> **Note:** Server Chat is separate from chat on a single analysis result. For job-specific chat and comments, see [Collaborating on Results](collaborate-on-results.html) for details.
+
+## Step-by-Step
+
+1. Open Server Chat or confirm CLI admin access.
+
+   In the web UI, open `Chat` from the admin section of the sidebar. The empty state prompts you to `Ask about server analytics`, which is the right place for cross-job questions such as failure trends, user activity, or report summaries.
+
+   In the CLI, run this first when you want to confirm which admin account the shell is using:
+
+   ```bash
+   rootcoz auth whoami
+   ```
+
+2. Choose how RootCoz should pick the model.
+
+   RootCoz can use the server default AI settings or a one-off override for the next question.
+
+   | If you want | Web UI | CLI |
+   | --- | --- | --- |
+   | Use the server default | Leave the provider and model already loaded in the header. | Omit `--provider` and `--model`. |
+   | Override for one question | Pick a different provider and model in the header before sending. | Add `--provider` and `--model` to `rootcoz admin-chat send`. |
+   | Keep using the same override | Leave the header selection in place. | Repeat the same flags on the next `send` command. |
+
+   If you need to change the shared defaults for everyone, see [Managing Users and Server Settings](manage-users-and-server-settings.html) for details.
+
+3. Ask a cross-job question and follow the reply.
+
+   In the web UI, type your question and press `Enter` to send it. Use `Shift+Enter` when you want a newline instead. While RootCoz is working, the thread shows `Thinking...` and keeps the response in the same conversation.
+
+   In the CLI, send the question directly:
+
+   ```bash
+   rootcoz admin-chat send "Show where humans overrode the AI most often this month."
+   ```
+
+   The CLI waits for the assistant reply when it can. If you want to come back later, or the response takes longer than expected, check the stored conversation:
+
+   ```bash
+   rootcoz admin-chat history --limit 20
+   ```
+
+   > **Tip:** Use the web UI when you want the clearest live experience. It shows the active reply immediately and gives you a `Stop` button while the assistant is still working.
+
+4. Stop the current reply or start over.
+
+   Use the web UI `Stop` button when a reply is still running and you want to cancel it. When you want a completely fresh conversation, click `New Session` in the web UI or clear the current chat from the CLI:
+
+   ```bash
+   rootcoz admin-chat clear
+   ```
+
+   `New Session` and `clear` both reset your current Server Chat history so the next question starts clean.
+
+   > **Note:** Server Chat history and saved artifacts are scoped to the current admin account, not shared across all admins.
+
+
+   > **Warning:** Starting a new session in the web UI or running `rootcoz admin-chat clear` in the CLI also removes saved report artifacts for your account.
+
+5. Save or download HTML report artifacts.
+
+   Use artifacts when you want a reusable HTML summary that can be downloaded later. The CLI can upload a local HTML file into the Server Chat artifact store and download it back by ID.
+
+   ```bash
+   rootcoz admin-chat save-artifact ./weekly-summary.html
+   rootcoz admin-chat save-artifact ./weekly-summary.html --filename "failure-summary-2026-07-31.html"
+   rootcoz admin-chat download-artifact <artifact-id> --output ./failure-summary.html
+   ```
+
+   `save-artifact` returns a download URL. `download-artifact` writes the file to the path you choose, and when you do not pass `--output`, RootCoz creates a local HTML filename automatically.
+
+   In the web UI, when a Server Chat reply contains one of these artifact links, RootCoz renders it as a download button instead of a raw URL.
+
+## Advanced Usage
+
+Use one-off model overrides when you want to compare answers without changing the server default:
+
+```bash
+rootcoz admin-chat send \
+  "Compare issue-creation trends for the last 30 days." \
+  --provider claude \
+  --model claude-opus-4-6
+```
+
+Use JSON history output when you want to hand the conversation to another script or save a machine-readable record:
+
+```bash
+rootcoz --json admin-chat history --limit 50
+```
+
+Use custom filenames when you are saving reports for teammates or recurring reviews:
+
+```bash
+rootcoz admin-chat save-artifact ./report.html --filename "platform-weekly-review"
+```
+
+If the filename does not end in `.html`, RootCoz adds the extension for you.
+
+These prompt patterns work well in Server Chat because they match the built-in cross-job reporting tools:
+
+| Goal | Example prompt |
+| --- | --- |
+| Failure trends | `Summarize the top failure patterns from the last 7 days.` |
+| Review accuracy | `Show where reviewers changed the AI classification most often this month.` |
+| Follow-up volume | `Which jobs created the most GitHub issues or Jira bugs this quarter?` |
+
+For every available command and flag, see [CLI Command Reference](cli-reference.html) for details. For raw endpoints, see [API Endpoint Reference](api-reference.html) for details.
+
+## Troubleshooting
+
+- The `Send` button is disabled in the web UI: choose both an AI provider and a model, type a message, and wait for any current reply to finish.
+- `rootcoz admin-chat send` fails with an admin error: verify the CLI is using an admin API key with `rootcoz auth whoami`.
+- Server Chat says AI is not configured or the page never finishes initializing: configure the default AI provider and model in Server Settings. See [Managing Users and Server Settings](manage-users-and-server-settings.html) and [Configuration Reference](configuration-reference.html) for details.
+- A saved artifact link returns `404`: you likely started a new session or ran `rootcoz admin-chat clear`, which removes saved artifacts for your account.
+- The CLI did not show a final answer: check later with `rootcoz admin-chat history --limit 20`. If you need the raw endpoints instead, see [API Endpoint Reference](api-reference.html) for details.
+
+## Related Pages
+
+- [Exploring History and Reports](explore-history-and-reports.html)
+- [Managing Users and Server Settings](manage-users-and-server-settings.html)
+- [Collaborating on Results](collaborate-on-results.html)
+- [CLI Command Reference](cli-reference.html)
+- [API Endpoint Reference](api-reference.html)
+
+---
+
+Source: deploy-rootcoz.md
+
+# Deploying RootCoz
+
+> **Note:** The Helm chart bootstraps RootCoz itself. Configure Jenkins, Jira, GitHub, Report Portal, and other runtime settings in the UI after first login. See [Configuration Reference](configuration-reference.html) and [Managing Users and Server Settings](manage-users-and-server-settings.html) for details.
+
+
+> **Warning:** The Helm chart is single-replica and expects one persistent volume. Enable either `route` or `ingress`, not both.
+
+## Start locally with Docker Compose
+
+Bring up a local RootCoz on `http://localhost:800` with persistent data in `./data`.
+
+```bash
+cat > .env <<'EOF'
+JENKINS_URL=https://jenkins.example.com
+JENKINS_USER=ci-reader
+JENKINS_PASSWORD=jenkins-api-token
+JENKINS_SSL_VERIFY=true
+AI_PROVIDER=gemini
+AI_MODEL=gemini-2.5-pro
+GEMINI_API_KEY=replace-with-real-gemini-key
+LOG_LEVEL=INFO
+DEBUG=false
 EOF
+
+docker compose up -d
+curl http://localhost:800/health
 ```
 
-Now every command uses the `dev` server automatically:
+This uses the repo’s `docker-compose.yaml`, builds the local image, and keeps the SQLite database in `./data`. Use it for laptops, demos, and single-user environments where `localhost` access is enough.
+
+- After changing `.env`, reload with `docker compose up -d --force-recreate rootcoz`.
+- Continue with [Quickstart](quickstart.html) once the health check returns `{"status":"ok"}`.
+
+## Bootstrap a shared cluster interactively
+
+Use the setup script to generate safe Helm values files outside the repo and install the chart in one pass.
 
 ```bash
-rootcoz health
+mkdir -p "$HOME/.config/rootcoz/helm"
+
+uv run python scripts/helm-setup.py \
+  --release rootcoz \
+  --namespace rootcoz \
+  --output-dir "$HOME/.config/rootcoz/helm"
 ```
 
-> **Tip:** The config file location follows the [XDG Base Directory Specification](https://specifications.freedesktop.org/basedir-spec/latest/). Set `XDG_CONFIG_HOME` to change the base path.
+The script prompts for cluster type, hostname, AI provider, credentials, and the bootstrap admin key, then writes `values.generated.yaml` and `values.secrets.yaml` before running `helm upgrade --install`. Use this when you want the fastest first-time shared deployment without hand-editing values files.
 
-Verify your config with:
+- Add `--skip-helm` to write files only.
+- Add `--dry-run` to pass `--dry-run` through to Helm.
+
+## Install on OpenShift with a Route
+
+Publish RootCoz on OpenShift with a stable route and keep sensitive values outside the git checkout.
 
 ```bash
-rootcoz config show
+NAMESPACE=rootcoz
+VALUES_DIR="$HOME/.config/rootcoz/helm"
+mkdir -p "$VALUES_DIR"
+
+cat > "$VALUES_DIR/values.generated.yaml" <<'EOF'
+route:
+  enabled: true
+  host: rootcoz.apps.example.com
+ingress:
+  enabled: false
+ai:
+  provider: gemini
+  model: gemini-2.5-pro
+EOF
+
+cat > "$VALUES_DIR/values.secrets.yaml" <<'EOF'
+ai:
+  geminiApiKey: "replace-with-real-gemini-key"
+admin:
+  key: "rootcoz-admin-2026-demo-key-please-change"
+encryptionKey: "7d7f4cef5a224778a3a1a5d8af4c12b62"
+EOF
+
+helm upgrade --install rootcoz ./chart \
+  --namespace "$NAMESPACE" --create-namespace \
+  -f "$VALUES_DIR/values.generated.yaml" \
+  -f "$VALUES_DIR/values.secrets.yaml"
+
+oc get route -n "$NAMESPACE"
 ```
 
-## Authenticating
+This uses the chart’s default OpenShift-friendly path: a Route on top of the `rootcoz` service, persistent storage, and a bootstrap admin key you control from day one. Use it when you want a shared internal deployment with the smallest amount of cluster-specific tuning.
 
-Most operations require authentication. Register a user account on the server to get an API key:
+- Omit `route.host` or set it to `""` if you want OpenShift to generate the hostname.
+- After the route exists, sign in as `admin` and continue with [Quickstart](quickstart.html).
+
+## Install on Kubernetes with TLS Ingress
+
+Run RootCoz behind a standard Kubernetes Ingress and a TLS secret so browser sessions stay on HTTPS.
 
 ```bash
-rootcoz register myuser
+NAMESPACE=rootcoz
+VALUES_DIR="$HOME/.config/rootcoz/helm"
+mkdir -p "$VALUES_DIR" /tmp/rootcoz-tls
+
+kubectl create namespace "$NAMESPACE" --dry-run=client -o yaml | kubectl apply -f -
+
+openssl req -x509 -nodes -newkey rsa:2048 \
+  -keyout /tmp/rootcoz-tls/tls.key \
+  -out /tmp/rootcoz-tls/tls.crt \
+  -days 365 \
+  -subj "/CN=rootcoz.example.com"
+
+kubectl create secret tls rootcoz-tls \
+  --cert=/tmp/rootcoz-tls/tls.crt \
+  --key=/tmp/rootcoz-tls/tls.key \
+  -n "$NAMESPACE" \
+  --dry-run=client -o yaml | kubectl apply -f -
+
+cat > "$VALUES_DIR/values.generated.yaml" <<'EOF'
+route:
+  enabled: false
+ingress:
+  enabled: true
+  host: rootcoz.example.com
+  className: nginx
+  tls:
+    enabled: true
+    secretName: rootcoz-tls
+ai:
+  provider: gemini
+  model: gemini-2.5-pro
+EOF
+
+cat > "$VALUES_DIR/values.secrets.yaml" <<'EOF'
+ai:
+  geminiApiKey: "replace-with-real-gemini-key"
+admin:
+  key: "rootcoz-admin-2026-demo-key-please-change"
+encryptionKey: "7d7f4cef5a224778a3a1a5d8af4c12b62"
+EOF
+
+helm upgrade --install rootcoz ./chart \
+  --namespace "$NAMESPACE" --create-namespace \
+  -f "$VALUES_DIR/values.generated.yaml" \
+  -f "$VALUES_DIR/values.secrets.yaml"
 ```
 
-Output:
+This recipe is for vanilla Kubernetes clusters where you want shared browser access and secure cookies from the start. The self-signed certificate keeps the recipe copy-pasteable; swap it for your normal cluster TLS secret or cert-manager output before exposing the service broadly.
 
-```
-Registered: myuser
+- Replace `className: nginx` with your actual ingress class if needed.
+- For production certificates, keep the same `secretName` and remove the `openssl` step.
 
-⚠️  Save this API key — you won't see it again!
-API Key: rcz_a1b2c3d4e5f6...
-```
+## Run a private ClusterIP-only release and port-forward it
 
-> **Warning:** Copy the API key immediately. It is only shown once and cannot be retrieved later.
-
-### Storing your API key
-
-Add the key to your config file so you don't have to pass it on every command:
-
-```toml
-[servers.dev]
-url = "http://localhost:8000"
-username = "myuser"
-api_key = "rcz_a1b2c3d4e5f6..."
-```
-
-Alternatively, use an environment variable or CLI flag:
+Use this when you want a shared in-cluster deployment without exposing RootCoz through a Route or Ingress yet.
 
 ```bash
-# Environment variable
-export ROOTCOZ_API_KEY=rcz_a1b2c3d4e5f6...
+NAMESPACE=rootcoz
+VALUES_DIR="$HOME/.config/rootcoz/helm"
+mkdir -p "$VALUES_DIR"
 
-# CLI flag
-rootcoz --api-key rcz_a1b2c3d4e5f6... results list
+cat > "$VALUES_DIR/values.generated.yaml" <<'EOF'
+route:
+  enabled: false
+ingress:
+  enabled: false
+ai:
+  provider: gemini
+  model: gemini-2.5-pro
+EOF
+
+cat > "$VALUES_DIR/values.secrets.yaml" <<'EOF'
+ai:
+  geminiApiKey: "replace-with-real-gemini-key"
+admin:
+  key: "rootcoz-admin-2026-demo-key-please-change"
+encryptionKey: "7d7f4cef5a224778a3a1a5d8af4c12b62"
+EOF
+
+helm upgrade --install rootcoz ./chart \
+  --namespace "$NAMESPACE" --create-namespace \
+  -f "$VALUES_DIR/values.generated.yaml" \
+  -f "$VALUES_DIR/values.secrets.yaml"
+
+kubectl port-forward svc/rootcoz 800:800 -n "$NAMESPACE"
 ```
 
-### Verifying authentication
+This keeps the service internal to the cluster and gives you temporary browser and API access on `http://localhost:800` through `kubectl port-forward`. Use it for admin-only testing, locked-down evaluation clusters, or the period before your ingress or route is approved.
+
+- With no Route or TLS Ingress, the chart automatically falls back to non-secure cookies for this HTTP-only access pattern.
+- When you are ready to publish it, switch to the Route or Ingress recipe instead of editing the Service directly.
+
+## Upgrade and smoke-test a Helm release
+
+Apply new values, wait for the rollout, and run the chart’s built-in health test after any deployment change.
 
 ```bash
-rootcoz auth whoami
+VALUES_DIR="$HOME/.config/rootcoz/helm"
+
+helm upgrade rootcoz ./chart -n rootcoz \
+  -f "$VALUES_DIR/values.generated.yaml" \
+  -f "$VALUES_DIR/values.secrets.yaml"
+
+kubectl rollout status deployment/rootcoz -n rootcoz
+helm test rootcoz -n rootcoz
 ```
 
-This shows your username, role, and admin status.
+This is the shortest safe path for normal Helm updates once your release is already running. The `helm test` pod curls `/health`, so you get a quick verification that the app is listening after the rollout finishes.
 
-## Running your first analysis
+- If you changed external secrets out of band, follow with `kubectl rollout restart deployment/rootcoz -n rootcoz`.
+- For first-login and first-analysis steps after the rollout, see [Quickstart](quickstart.html).# Deploying RootCoz
 
-Submit a Jenkins job for analysis:
+> **Note:** The Helm chart bootstraps RootCoz itself. Configure Jenkins, Jira, GitHub, Report Portal, and other runtime settings in the UI after first login. See [Configuration Reference](configuration-reference.html) and [Managing Users and Server Settings](manage-users-and-server-settings.html) for details.
+
+
+> **Warning:** The Helm chart is single-replica and expects one persistent volume. Enable either `route` or `ingress`, not both.
+
+## Start locally with Docker Compose
+
+Bring up a local RootCoz on `http://localhost:8000` with persistent data in `./data`.
 
 ```bash
-rootcoz analyze --job-name my-pipeline --build-number 42
+cat > .env <<'EOF'
+JENKINS_URL=https://jenkins.example.com
+JENKINS_USER=ci-reader
+JENKINS_PASSWORD=jenkins-api-token
+JENKINS_SSL_VERIFY=true
+AI_PROVIDER=gemini
+AI_MODEL=gemini-2.5-pro
+GEMINI_API_KEY=replace-with-real-gemini-key
+LOG_LEVEL=INFO
+DEBUG=false
+EOF
+
+docker compose up -d
+curl http://localhost:8000/health
 ```
 
-Output:
+This uses the repo’s `docker-compose.yaml`, builds the local image, and keeps the SQLite database in `./data`. Use it for laptops, demos, and single-user environments where `localhost` access is enough.
 
-```
-Job queued: a1b2c3d4-e5f6-...
-Status: queued
-Poll: http://localhost:8000/results/a1b2c3d4-e5f6-...
-```
+- After changing `.env`, reload with `docker compose up -d --force-recreate rootcoz`.
+- Continue with [Quickstart](quickstart.html) once the health check returns `{"status":"ok"}`.
 
-Check the status:
+## Bootstrap a shared cluster interactively
+
+Use the setup script to generate safe Helm values files outside the repo and install the chart in one pass.
 
 ```bash
-rootcoz status a1b2c3d4-e5f6-...
+mkdir -p "$HOME/.config/rootcoz/helm"
+
+uv run python scripts/helm-setup.py \
+  --release rootcoz \
+  --namespace rootcoz \
+  --output-dir "$HOME/.config/rootcoz/helm"
 ```
 
-View the result once it completes:
+The script prompts for cluster type, hostname, AI provider, credentials, and the bootstrap admin key, then writes `values.generated.yaml` and `values.secrets.yaml` before running `helm upgrade --install`. Use this when you want the fastest first-time shared deployment without hand-editing values files.
+
+- Add `--skip-helm` to write files only.
+- Add `--dry-run` to pass `--dry-run` through to Helm.
+
+## Install on OpenShift with a Route
+
+Publish RootCoz on OpenShift with a stable route and keep sensitive values outside the git checkout.
 
 ```bash
-rootcoz results show a1b2c3d4-e5f6-...
+NAMESPACE=rootcoz
+VALUES_DIR="$HOME/.config/rootcoz/helm"
+mkdir -p "$VALUES_DIR"
+
+cat > "$VALUES_DIR/values.generated.yaml" <<'EOF'
+route:
+  enabled: true
+  host: rootcoz.apps.example.com
+ingress:
+  enabled: false
+ai:
+  provider: gemini
+  model: gemini-2.5-pro
+EOF
+
+cat > "$VALUES_DIR/values.secrets.yaml" <<'EOF'
+ai:
+  geminiApiKey: "replace-with-real-gemini-key"
+admin:
+  key: "rootcoz-admin-2026-demo-key-please-change"
+encryptionKey: "7d7f4cef5a224778a3a1a5d8af4c12b62"
+EOF
+
+helm upgrade --install rootcoz ./chart \
+  --namespace "$NAMESPACE" --create-namespace \
+  -f "$VALUES_DIR/values.generated.yaml" \
+  -f "$VALUES_DIR/values.secrets.yaml"
+
+oc get route -n "$NAMESPACE"
 ```
 
-For the full JSON response, add `--full`:
+This uses the chart’s default OpenShift-friendly path: a Route on top of the `rootcoz` service, persistent storage, and a bootstrap admin key you control from day one. Use it when you want a shared internal deployment with the smallest amount of cluster-specific tuning.
+
+- Omit `route.host` or set it to `""` if you want OpenShift to generate the hostname.
+- After the route exists, sign in as `admin` and continue with [Quickstart](quickstart.html).
+
+## Install on Kubernetes with TLS Ingress
+
+Run RootCoz behind a standard Kubernetes Ingress and a TLS secret so browser sessions stay on HTTPS.
 
 ```bash
-rootcoz results show a1b2c3d4-e5f6-... --full
+NAMESPACE=rootcoz
+VALUES_DIR="$HOME/.config/rootcoz/helm"
+mkdir -p "$VALUES_DIR" /tmp/rootcoz-tls
+
+kubectl create namespace "$NAMESPACE" --dry-run=client -o yaml | kubectl apply -f -
+
+openssl req -x509 -nodes -newkey rsa:2048 \
+  -keyout /tmp/rootcoz-tls/tls.key \
+  -out /tmp/rootcoz-tls/tls.crt \
+  -days 365 \
+  -subj "/CN=rootcoz.example.com"
+
+kubectl create secret tls rootcoz-tls \
+  --cert=/tmp/rootcoz-tls/tls.crt \
+  --key=/tmp/rootcoz-tls/tls.key \
+  -n "$NAMESPACE" \
+  --dry-run=client -o yaml | kubectl apply -f -
+
+cat > "$VALUES_DIR/values.generated.yaml" <<'EOF'
+route:
+  enabled: false
+ingress:
+  enabled: true
+  host: rootcoz.example.com
+  className: nginx
+  tls:
+    enabled: true
+    secretName: rootcoz-tls
+ai:
+  provider: gemini
+  model: gemini-2.5-pro
+EOF
+
+cat > "$VALUES_DIR/values.secrets.yaml" <<'EOF'
+ai:
+  geminiApiKey: "replace-with-real-gemini-key"
+admin:
+  key: "rootcoz-admin-2026-demo-key-please-change"
+encryptionKey: "7d7f4cef5a224778a3a1a5d8af4c12b62"
+EOF
+
+helm upgrade --install rootcoz ./chart \
+  --namespace "$NAMESPACE" --create-namespace \
+  -f "$VALUES_DIR/values.generated.yaml" \
+  -f "$VALUES_DIR/values.secrets.yaml"
 ```
 
-### Analyzing a JUnit XML file
+This recipe is for vanilla Kubernetes clusters where you want shared browser access and secure cookies from the start. The self-signed certificate keeps the recipe copy-pasteable; swap it for your normal cluster TLS secret or cert-manager output before exposing the service broadly.
 
-You can also analyze a local JUnit XML file without Jenkins:
+- Replace `className: nginx` with your actual ingress class if needed.
+- For production certificates, keep the same `secretName` and remove the `openssl` step.
+
+## Run a private ClusterIP-only release and port-forward it
+
+Use this when you want a shared in-cluster deployment without exposing RootCoz through a Route or Ingress yet.
 
 ```bash
-rootcoz analyze --source file --file test-results.xml
+NAMESPACE=rootcoz
+VALUES_DIR="$HOME/.config/rootcoz/helm"
+mkdir -p "$VALUES_DIR"
+
+cat > "$VALUES_DIR/values.generated.yaml" <<'EOF'
+route:
+  enabled: false
+ingress:
+  enabled: false
+ai:
+  provider: gemini
+  model: gemini-2.5-pro
+EOF
+
+cat > "$VALUES_DIR/values.secrets.yaml" <<'EOF'
+ai:
+  geminiApiKey: "replace-with-real-gemini-key"
+admin:
+  key: "rootcoz-admin-2026-demo-key-please-change"
+encryptionKey: "7d7f4cef5a224778a3a1a5d8af4c12b62"
+EOF
+
+helm upgrade --install rootcoz ./chart \
+  --namespace "$NAMESPACE" --create-namespace \
+  -f "$VALUES_DIR/values.generated.yaml" \
+  -f "$VALUES_DIR/values.secrets.yaml"
+
+kubectl port-forward svc/rootcoz 8000:8000 -n "$NAMESPACE"
 ```
 
-For more analysis options, see [Analyzing Test Failures](analyzing-failures.html).
+This keeps the service internal to the cluster and gives you temporary browser and API access on `http://localhost:8000` through `kubectl port-forward`. Use it for admin-only testing, locked-down evaluation clusters, or the period before your ingress or route is approved.
 
-## Global options
+- With no Route or TLS Ingress, the chart automatically falls back to non-secure cookies for this HTTP-only access pattern.
+- When you are ready to publish it, switch to the Route or Ingress recipe instead of editing the Service directly.
 
-Every command supports these flags:
+## Upgrade and smoke-test a Helm release
 
-| Flag | Env Variable | Description |
-|------|-------------|-------------|
-| `--server`, `-s` | `ROOTCOZ_SERVER` | Server name from config or URL |
-| `--user` | `ROOTCOZ_USERNAME` | Username for comments and reviews |
-| `--api-key` | `ROOTCOZ_API_KEY` | API key for authentication |
-| `--json` | — | Output as JSON instead of table |
-| `--no-verify-ssl` | `ROOTCOZ_NO_VERIFY_SSL` | Disable SSL certificate verification |
-| `--verify-ssl` | — | Force SSL verification on (overrides config) |
-| `--insecure` | — | Alias for `--no-verify-ssl` |
-
-> **Note:** `--verify-ssl` and `--insecure` are mutually exclusive.
-
-## Config file reference
-
-The config file uses [TOML](https://toml.io/) format with three sections:
-
-```toml
-# Set the default server for all commands
-[default]
-server = "dev"
-
-# Shared settings inherited by all servers
-[defaults]
-jenkins_url = "https://jenkins.example.com"
-jenkins_user = "ci-bot"
-jenkins_password = "api-token"
-ai_provider = "claude"
-ai_model = "opus-4"
-tests_repo_url = "https://github.com/org/tests"
-
-# Per-server configuration
-[servers.dev]
-url = "http://localhost:8000"
-username = "myuser"
-api_key = "rcz_..."
-
-[servers.prod]
-url = "https://rootcoz.example.com"
-username = "prod-user"
-no_verify_ssl = false
-# Override defaults for this server
-ai_provider = "gemini"
-ai_model = "gemini-2.5-pro"
-```
-
-The `[defaults]` section is optional. Any field set there is inherited by every server entry. Per-server values override defaults.
-
-### Available config fields
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `url` | string | **Required.** Server URL |
-| `username` | string | Username for the session |
-| `api_key` | string | API key for authentication |
-| `no_verify_ssl` | boolean | Disable SSL verification |
-| `ai_provider` | string | AI provider (e.g. `claude`, `gemini`, `cursor`) |
-| `ai_model` | string | AI model name |
-| `ai_call_timeout` | integer | AI timeout in minutes |
-| `max_concurrent_ai_calls` | integer | Max parallel AI calls |
-| `jenkins_url` | string | Jenkins server URL |
-| `jenkins_user` | string | Jenkins username |
-| `jenkins_password` | string | Jenkins API token |
-| `jenkins_ssl_verify` | boolean | Verify Jenkins SSL certificates |
-| `jenkins_timeout` | integer | Jenkins API timeout in seconds |
-| `tests_repo_url` | string | Test source repository URL |
-| `tests_repo_token` | string | Token for cloning private test repos |
-| `jira_url` | string | Jira instance URL |
-| `jira_email` | string | Jira Cloud email |
-| `jira_api_token` | string | Jira Cloud API token |
-| `jira_pat` | string | Jira Server/DC personal access token |
-| `jira_token` | string | Jira token (config-only, used for bug creation) |
-| `jira_project_key` | string | Jira project key |
-| `jira_security_level` | string | Jira security level name |
-| `jira_ssl_verify` | boolean | Verify Jira SSL certificates |
-| `jira_max_results` | integer | Max Jira search results |
-| `enable_jira` | boolean | Enable/disable Jira integration |
-| `github_token` | string | GitHub API token |
-| `github_repo_url` | string | GitHub repository URL |
-| `peers` | string | Peer AI configs (`"provider:model,provider:model"`) |
-| `peer_analysis_max_rounds` | integer | Max peer debate rounds (1–10) |
-| `additional_repos` | string | Extra repos for AI context (`"name:url,name:url"`) |
-| `wait_for_completion` | boolean | Wait for Jenkins job to finish before analyzing |
-| `poll_interval_minutes` | integer | Minutes between Jenkins polls |
-| `max_wait_minutes` | integer | Max wait time for Jenkins completion |
-| `force` | boolean | Analyze even if the build succeeded |
-
-### Priority order
-
-Settings are resolved with this priority (highest wins):
-
-1. **CLI flags** (e.g. `--provider claude`)
-2. **Environment variables** (e.g. `ROOTCOZ_API_KEY`)
-3. **Per-server config** (e.g. `[servers.dev]`)
-4. **Global defaults** (e.g. `[defaults]`)
-5. **Server-side defaults**
-
-## Switching between servers
-
-Use `--server` to target a specific server by config name:
+Apply new values, wait for the rollout, and run the chart’s built-in health test after any deployment change.
 
 ```bash
-rootcoz --server prod results list
-rootcoz --server dev analyze --job-name my-job --build-number 1
+VALUES_DIR="$HOME/.config/rootcoz/helm"
+
+helm upgrade rootcoz ./chart -n rootcoz \
+  -f "$VALUES_DIR/values.generated.yaml" \
+  -f "$VALUES_DIR/values.secrets.yaml"
+
+kubectl rollout status deployment/rootcoz -n rootcoz
+helm test rootcoz -n rootcoz
 ```
 
-Or pass a URL directly to skip config resolution:
+This is the shortest safe path for normal Helm updates once your release is already running. The `helm test` pod curls `/health`, so you get a quick verification that the app is listening after the rollout finishes.
 
-```bash
-rootcoz --server https://rootcoz.example.com health
-```
-
-List all configured servers:
-
-```bash
-rootcoz config servers
-```
-
-## Shell completion
-
-Enable tab completion for faster command entry:
-
-```bash
-# Show setup instructions
-rootcoz config completion zsh    # or: bash
-```
-
-Follow the printed instructions to add the completion to your shell config.
-
-## Advanced Usage
-
-### JSON output for scripting
-
-Every command supports `--json` for machine-readable output. This makes it easy to pipe into `jq` or other tools:
-
-```bash
-rootcoz results list --json | jq '.[].job_id'
-rootcoz --json results show a1b2c3d4-... | jq '.result.failures | length'
-```
-
-### Rotating your API key
-
-If your key is compromised, rotate it immediately:
-
-```bash
-rootcoz auth rotate-key
-```
-
-The new key is printed once — update your config file with the replacement.
-
-### Self-signed certificates
-
-When connecting to servers with self-signed SSL certificates, disable verification per-server in your config:
-
-```toml
-[servers.internal]
-url = "https://rootcoz.internal.local"
-no_verify_ssl = true
-```
-
-Or per-command:
-
-```bash
-rootcoz --insecure --server https://rootcoz.internal.local health
-```
-
-> **Warning:** Disabling SSL verification reduces security. Only use this for trusted internal servers.
-
-### Multiple config profiles
-
-Define separate profiles for different environments, teams, or credentials:
-
-```toml
-[default]
-server = "team-a"
-
-[defaults]
-ai_provider = "claude"
-
-[servers.team-a]
-url = "https://rootcoz-a.example.com"
-username = "alice"
-api_key = "rcz_aaa..."
-jira_project_key = "TEAMA"
-
-[servers.team-b]
-url = "https://rootcoz-b.example.com"
-username = "alice"
-api_key = "rcz_bbb..."
-jira_project_key = "TEAMB"
-ai_provider = "gemini"
-```
-
-## Troubleshooting
-
-**"No server specified"** — Set `ROOTCOZ_SERVER`, use `--server`, or create a config file. Run `rootcoz config show` to check your current configuration.
-
-**"HTTP 401" / "Use --api-key or set ROOTCOZ_API_KEY"** — Your API key is missing or invalid. Register with `rootcoz register <username>` and save the key to your config file.
-
-**"HTTP 403" / "requires a higher role"** — Your user role doesn't have permission for this action. Contact an admin to upgrade your role. See [Managing Users and Roles](managing-users.html) for the role hierarchy.
-
-**"Cannot connect to ..."** — The server is unreachable. Verify the URL is correct and the server is running with `rootcoz health`.
-
-**"Request timed out"** — The server took too long to respond. This can happen during large analyses. Increase the timeout or check server health.
-
-**SSL errors connecting to Jenkins/Jira** — If the target service uses a self-signed certificate, disable verification for that integration:
-
-```bash
-rootcoz analyze --job-name my-job --build-number 1 --no-jenkins-ssl-verify
-```
-
-Or set it permanently in config:
-
-```toml
-[servers.dev]
-url = "http://localhost:8000"
-jenkins_ssl_verify = false
-jira_ssl_verify = false
-```
-
-For the full command reference, see [CLI Command Reference](cli-reference.html). For ready-to-use workflow recipes, see [CLI Recipes](cli-recipes.html).
+- If you changed external secrets out of band, follow with `kubectl rollout restart deployment/rootcoz -n rootcoz`.
+- For first-login and first-analysis steps after the rollout, see [Quickstart](quickstart.html).
 
 ## Related Pages
 
 - [Quickstart](quickstart.html)
-- [CLI Command Reference](cli-reference.html)
-- [CLI Recipes](cli-recipes.html)
-- [Analyzing Test Failures](analyzing-failures.html)
-- [Managing Users and Roles](managing-users.html)
-
----
-
-Source: analyzing-failures.md
-
-# Analyzing Test Failures
-
-Submit your test failures to rootcoz for AI-powered root cause analysis. Whether your tests run in Jenkins, produce JUnit XML reports, or you have a list of failures on hand, rootcoz classifies each failure as a **Code Issue**, **Product Bug**, or **Infrastructure** problem and explains why.
-
-## Prerequisites
-
-- A running rootcoz server (see [Quickstart](quickstart.html))
-- An account with **operator** or **admin** role (see [Managing Users and Roles](managing-users.html))
-- For CLI usage: the `rootcoz` CLI configured with a server connection (see [Setting Up the CLI](cli-setup.html))
-
-## Quick Example
-
-**CLI — analyze a Jenkins job:**
-
-```bash
-rootcoz analyze --source jenkins --job-name my-project/regression-tests --build-number 142
-```
-
-**CLI — analyze a JUnit XML file:**
-
-```bash
-rootcoz analyze --source file --file test-results.xml
-```
-
-Both commands return a job ID you can use to check progress:
-
-```
-Job queued: a1b2c3d4-5678-90ab-cdef-1234567890ab
-Status: pending
-Poll: https://rootcoz.example.com/results/a1b2c3d4-5678-90ab-cdef-1234567890ab
-```
-
-## Submitting from the Web UI
-
-1. Click **New Analysis** in the navigation bar.
-2. Choose your input mode: **Jenkins Job**, **Paste XML**, or **Upload File**.
-3. Fill in the required fields (job name + build number for Jenkins, or XML content for file mode).
-4. Click **Submit Analysis**.
-
-The UI redirects to a live status page where you can watch the analysis progress. When it completes, you're taken to the results page automatically.
-
-### Jenkins Job Mode
-
-Enter the Jenkins job name (including any folder path, e.g. `team/nightly-regression`) and the build number. Optionally provide Jenkins connection details if different from the server defaults.
-
-The **Wait for build completion** toggle (on by default) tells rootcoz to poll Jenkins until the build finishes before starting analysis. Configure the poll interval and maximum wait time as needed.
-
-### Paste XML / Upload File Mode
-
-Paste JUnit XML content directly or drag-and-drop an `.xml` file. rootcoz parses the XML, extracts failed test cases, and runs AI analysis on each failure.
-
-> **Tip:** This mode works with any CI system that produces JUnit-compatible XML — GitHub Actions, GitLab CI, CircleCI, and others.
-
-## Submitting from the CLI
-
-### Jenkins Analysis
-
-```bash
-rootcoz analyze \
-  --source jenkins \
-  --job-name team/nightly-regression \
-  --build-number 142
-```
-
-The `--source` flag defaults to `jenkins`, so you can omit it:
-
-```bash
-rootcoz analyze --job-name team/nightly-regression --build-number 142
-```
-
-### JUnit XML File Analysis
-
-```bash
-rootcoz analyze --source file --file path/to/junit-results.xml
-```
-
-### Common Options
-
-| Flag | Description |
-|------|-------------|
-| `--name "My Analysis"` | Custom display name on the dashboard |
-| `--provider claude` | AI provider: `claude`, `gemini`, or `cursor` |
-| `--model <model-id>` | Specific AI model to use |
-| `--tag regression` | Tag for categorization (repeatable) |
-| `--jira / --no-jira` | Enable or disable Jira bug search |
-| `--json` | Output as JSON instead of human-readable text |
-
-### Checking Status
-
-After submitting, check the analysis status:
-
-```bash
-rootcoz status <job-id>
-```
-
-View the full results:
-
-```bash
-rootcoz results show <job-id>
-```
-
-Or get the complete JSON output:
-
-```bash
-rootcoz results show <job-id> --full --json
-```
-
-List all recent analyses on the dashboard:
-
-```bash
-rootcoz results dashboard
-```
-
-### Aborting an Analysis
-
-Cancel a running or waiting analysis:
-
-```bash
-rootcoz abort <job-id>
-```
-
-## What Happens During Analysis
-
-When you submit a job, rootcoz runs these steps in the background:
-
-1. **Fetch data** — pulls test results (and optionally console logs and build artifacts) from Jenkins, or parses the provided XML
-2. **Group failures** — deduplicates failures by error signature so identical errors are analyzed only once
-3. **AI analysis** — sends each unique failure group to the AI with full context (error messages, stack traces, console output, artifacts, and source code from configured repositories)
-4. **Classification** — the AI classifies each failure and assigns a pattern:
-   - **Classification** (root cause): `CODE ISSUE`, `PRODUCT BUG`, or `INFRASTRUCTURE`
-   - **Pattern** (behavior): `NEW`, `REGRESSION`, `FLAKY`, `INTERMITTENT`, `KNOWN_BUG`, or `PERSISTENT`
-5. **Post-processing** — if Jira is enabled, searches for existing bugs matching any `PRODUCT BUG` findings; if a tests repo is configured, searches for related issues on `CODE ISSUE` findings
-6. **Pipeline expansion** — for Jenkins pipeline jobs, recursively analyzes failed child jobs
-
-> **Note:** Analysis runs asynchronously. The submission endpoint returns immediately with a job ID. Use the status page or `rootcoz status <job-id>` to monitor progress.
-
-## Re-Analyzing Jobs
-
-You can re-run analysis on a previously analyzed job — useful when you want to try a different AI provider, model, or prompt.
-
-**Web UI:** Open the results page for any completed job and click **Re-Analyze**.
-
-**CLI:**
-
-```bash
-rootcoz re-analyze <job-id>
-```
-
-Re-analysis creates a new job with a fresh job ID while preserving a link back to the original.
-
-### Re-Analyzing a Single Failure
-
-To re-analyze just one failure instead of the entire job:
-
-```bash
-rootcoz failure re-analyze <failure-uuid>
-```
-
-Find failure UUIDs with:
-
-```bash
-rootcoz results show <job-id> --json
-```
-
-## Advanced Usage
-
-### Per-Request Jenkins Overrides
-
-Override server-level Jenkins settings for a single analysis:
-
-```bash
-rootcoz analyze \
-  --job-name my-job \
-  --build-number 42 \
-  --jenkins-url https://other-jenkins.example.com \
-  --jenkins-user myuser \
-  --jenkins-password mytoken
-```
-
-### Build Artifacts
-
-By default, rootcoz downloads build artifacts from Jenkins to give the AI richer context. Control this behavior:
-
-```bash
-# Disable artifact download
-rootcoz analyze --job-name my-job --build-number 42 --no-get-job-artifacts
-
-# Limit artifact download size
-rootcoz analyze --job-name my-job --build-number 42 --jenkins-artifacts-max-size-mb 100
-```
-
-### Waiting for In-Progress Builds
-
-Submit analysis for a build that hasn't finished yet:
-
-```bash
-rootcoz analyze \
-  --job-name my-job \
-  --build-number 42 \
-  --wait \
-  --poll-interval 5 \
-  --max-wait 120
-```
-
-This polls Jenkins every 5 minutes, waiting up to 120 minutes for the build to complete before analyzing.
-
-To skip waiting and analyze only if the build is already done:
-
-```bash
-rootcoz analyze --job-name my-job --build-number 42 --no-wait
-```
-
-### Forcing Analysis on Successful Builds
-
-By default, rootcoz skips analysis when a build reports SUCCESS. To analyze anyway:
-
-```bash
-rootcoz analyze --job-name my-job --build-number 42 --force
-```
-
-### Custom AI Instructions
-
-Append custom instructions to the AI prompt:
-
-```bash
-rootcoz analyze \
-  --job-name my-job \
-  --build-number 42 \
-  --raw-prompt "Focus on database connection timeouts. This is a known flaky area."
-```
-
-In the web UI, expand the **AI Configuration** section and fill in the **Raw Prompt** field.
-
-### Additional Source Repositories
-
-Give the AI access to additional code repositories for better context:
-
-```bash
-rootcoz analyze \
-  --job-name my-job \
-  --build-number 42 \
-  --additional-repos "infra:https://github.com/org/infra,product:https://github.com/org/product:main"
-```
-
-The format is `name:url` or `name:url:ref` (comma-separated). In the web UI, use the **Source Repositories** section.
-
-### Multi-AI Peer Analysis
-
-Have multiple AI providers review and debate each other's classifications for higher accuracy:
-
-```bash
-rootcoz analyze \
-  --job-name my-job \
-  --build-number 42 \
-  --peers "gemini:gemini-2.5-pro,cursor:gpt-5.4-xhigh" \
-  --peer-analysis-max-rounds 3
-```
-
-See [Using Multi-AI Peer Analysis](peer-analysis.html) for details on configuring peer review.
-
-### Saving Defaults in Config
-
-Instead of passing flags every time, save defaults in your config file (`~/.config/rootcoz/config.toml`):
-
-```toml
-[servers.myserver]
-url = "https://rootcoz.example.com"
-username = "alice"
-api_key = "rk_..."
-ai_provider = "claude"
-jenkins_url = "https://jenkins.example.com"
-jenkins_user = "ci-user"
-jenkins_password = "api-token"
-enable_jira = true
-peers = "gemini:gemini-2.5-pro"
-```
-
-Then simply run:
-
-```bash
-rootcoz --server myserver analyze --job-name my-job --build-number 42
-```
-
-See [Setting Up the CLI](cli-setup.html) for the full config file reference.
-
-### Using Tags for Organization
-
-Tags help you filter and group analyses on the dashboard:
-
-```bash
-rootcoz analyze \
-  --job-name my-job \
-  --build-number 42 \
-  --tag nightly \
-  --tag regression
-```
-
-Tags are normalized to lowercase and deduplicated automatically.
-
-### pytest Integration
-
-If you use pytest, you can enrich JUnit XML reports with AI analysis directly from your test runs without manually submitting files. See [Integrating with pytest](pytest-integration.html).
-
-## Troubleshooting
-
-**"This action requires a higher role"** — You need the `operator` or `admin` role to submit analyses. Ask an administrator to upgrade your role. See [Managing Users and Roles](managing-users.html).
-
-**"No server specified"** — The CLI doesn't know where to connect. Set `--server`, the `ROOTCOZ_SERVER` environment variable, or configure a default server in `~/.config/rootcoz/config.toml`. See [Setting Up the CLI](cli-setup.html).
-
-**Analysis stuck in "waiting" status** — The job is waiting for the Jenkins build to complete. Check that the build is still running in Jenkins. Use `rootcoz abort <job-id>` to cancel waiting, or set `--max-wait` to limit how long rootcoz waits.
-
-**Analysis completed with "build passed"** — The Jenkins build reported SUCCESS and rootcoz skipped analysis. Use `--force` if you want to analyze a successful build.
-
-**"file not found" when using --file** — Verify the path to your XML file. The CLI expects a local file path, not a URL.
-
-**XML parsing errors** — Ensure your file is valid JUnit-compatible XML. rootcoz supports standard JUnit XML with `<testsuite>` and `<testcase>` elements containing `<failure>` or `<error>` children.
-
-## Related Pages
-
-- [Reviewing Analysis Results](reviewing-results.html)
-- [Setting Up the CLI](cli-setup.html)
-- [Using Multi-AI Peer Analysis](peer-analysis.html)
-- [Configuring Integrations](configuring-integrations.html)
-- [Integrating with pytest](pytest-integration.html)
-
----
-
-Source: reviewing-results.md
-
-# Reviewing Analysis Results
-
-After submitting a test failure analysis, you need to review the AI's findings, verify its classifications, and track which failures your team has addressed. This guide walks you through navigating the report page, understanding what the AI found, correcting classifications when needed, and marking failures as reviewed.
-
-## Prerequisites
-
-- A completed analysis job (see [Analyzing Test Failures](analyzing-failures.html))
-- A rootcoz account with **reviewer** role or higher (see [Managing Users and Roles](managing-users.html))
-- Viewers can see results but cannot comment, override classifications, or mark failures as reviewed
-
-## Quick Example
-
-Open any completed job from the dashboard and you'll see the report page:
-
-1. Click a job row on the dashboard to open its report
-2. Read the **Key Takeaway** summary at the top
-3. Expand a failure card to see the full AI analysis
-4. Use the classification dropdown to correct the AI if needed
-5. Click **Review** to mark the failure as reviewed
-
-From the CLI:
-
-```bash
-rootcoz results show <job-id>
-```
-
-Or with full JSON output:
-
-```bash
-rootcoz results show <job-id> --full
-```
-
-## Understanding the Report Page
-
-### Header Bar
-
-The sticky header at the top shows:
-
-- **Job name** and build number (linked to Jenkins when available)
-- **Status chip** — `completed`, `timeout`, etc.
-- **Failure count** — total number of failed tests across all child jobs
-- **Review progress** — color-coded badge showing how many failures have been reviewed:
-  - 🟢 Green "Reviewed" — all failures reviewed
-  - 🟠 Orange "3/5 Reviewed" — partially reviewed
-  - 🔴 Red "Needs Review" — no failures reviewed yet
-- **AI provider/model** — which AI analyzed the job
-- **Chat** button — opens the AI chat for follow-up questions
-- **Re-Analyze** button — re-run analysis with different settings (operators only)
-- **Jenkins** link — opens the original Jenkins build
-
-### Key Takeaway
-
-The orange-bordered summary box below the header gives you a one-paragraph overview of the most important findings. Read this first to understand the overall picture before diving into individual failures.
-
-### Metadata Row
-
-Below the summary, a row of metadata shows:
-
-- Who submitted the analysis
-- When it was created and completed
-- Analysis duration
-- AI provider/model used
-- Linked repositories (with tooltips showing full URLs)
-
-## Reviewing Individual Failures
-
-Each failure appears as a collapsible card. Click anywhere on the card header to expand it.
-
-### Failure Card Header
-
-The collapsed card shows at a glance:
-
-- **Test name** — the failing test (hover for the full name, click the copy icon to copy)
-- **Group count** — if multiple tests failed with the same error, you'll see "+N more with same error"
-- **Classification badge** — the AI's root cause classification
-- **Pattern badge** — the failure pattern (if set)
-- **Review toggle** — mark individual tests or the entire group as reviewed
-- **Comment count** — number of comments on this failure
-
-### Expanded Card Sections
-
-When you expand a failure card, you'll see:
-
-1. **Error** — the raw error message and stack trace, shown in a red-bordered box. Use the copy button to grab it for bug reports.
-
-2. **Analysis** — the AI's detailed explanation of what went wrong, with clickable links to source files when repositories are configured.
-
-3. **Artifacts Evidence** — verbatim log lines from build artifacts that support the AI's conclusion. This is the raw evidence, not a summary.
-
-4. **Suggested Fix** (Code Issue only) — when the AI classifies a failure as a code issue, it suggests a specific fix including file path, line number, and before/after code. File paths link directly to your repository when configured.
-
-5. **Bug Report** (Product Bug only) — when the AI classifies a failure as a product bug, it generates a structured bug report with title, severity, description, and any matching Jira issues it found.
-
-6. **Previous Analyses** — if the failure was re-analyzed, previous AI analyses are preserved in collapsible sections so you can compare.
-
-7. **Peer Debate** — if multi-AI peer analysis was used, the debate trail shows each AI's position and how they reached (or didn't reach) consensus. See [Using Multi-AI Peer Analysis](peer-analysis.html) for details.
-
-8. **Comments** — team discussion thread for this failure group.
-
-### Grouped Failures
-
-When multiple tests fail with the same error signature, rootcoz groups them into a single card. The card header shows the representative test name with "+N more with same error."
-
-Expanding a grouped failure card reveals:
-
-- **Review All** button — mark all tests in the group as reviewed/unreviewed in one click
-- **Affected Tests** list — every test in the group, each with its own individual review toggle
-- The analysis, suggested fix, and bug report apply to all tests in the group since they share the same root cause
-
-## Understanding AI Classifications
-
-Every failure is classified along two independent axes:
-
-### Root Cause (Classification)
-
-| Classification | Meaning | What the AI Provides |
-|---|---|---|
-| **CODE ISSUE** | The test code itself is wrong — an assertion error, incorrect setup, outdated expectation | Suggested code fix with file, line, and before/after code |
-| **PRODUCT BUG** | The product under test has a defect — the test is correct but the product isn't behaving as expected | Structured bug report with title, severity, and matching Jira issues |
-| **INFRASTRUCTURE** | An environment, cluster, or resource problem — timeouts, network failures, missing dependencies | Root cause details (no fix or bug report) |
-
-### Pattern
-
-| Pattern | Meaning |
-|---|---|
-| **NEW** | First occurrence or initial analysis (default) |
-| **REGRESSION** | Failure started after a recent change |
-| **FLAKY** | Passes and fails unpredictably |
-| **INTERMITTENT** | Similar to flaky, fails sporadically |
-| **KNOWN_BUG** | Matches a known, reported bug |
-| **PERSISTENT** | Consistently failing across many runs |
-
-> **Note:** The pattern is initially set to `NEW` by default. Use [failure history](tracking-history.html) and manual overrides to refine it as you learn more about the failure.
-
-## Overriding Classifications
-
-The AI isn't always right. You can correct both the root cause classification and the failure pattern.
-
-### Override via the Web UI
-
-1. Expand the failure card
-2. At the bottom of the card, find the **classification dropdown** (shows the current classification)
-3. Select the correct value: `CODE ISSUE`, `PRODUCT BUG`, or `INFRASTRUCTURE`
-4. The change saves immediately and updates the card display
-
-To override the pattern:
-
-1. Find the **pattern dropdown** next to the classification dropdown
-2. Select: `NEW`, `REGRESSION`, `FLAKY`, `INTERMITTENT`, `KNOWN_BUG`, or `PERSISTENT`
-
-> **Tip:** For grouped failures, overriding the classification or pattern applies to all tests in the group at once.
-
-### Override via the CLI
-
-```bash
-rootcoz override-classification <job-id> \
-  --test "com.example.MyTest.testMethod" \
-  --classification "PRODUCT BUG"
-```
-
-```bash
-rootcoz override-pattern <job-id> \
-  --test "com.example.MyTest.testMethod" \
-  --pattern "REGRESSION"
-```
-
-For failures inside a child job, add `--child-job` and `--child-build`:
-
-```bash
-rootcoz override-classification <job-id> \
-  --test "com.example.MyTest.testMethod" \
-  --classification "INFRASTRUCTURE" \
-  --child-job "my-child-job" \
-  --child-build 42
-```
-
-### What Happens When You Override
-
-- The classification badge updates immediately in the UI
-- For **classification** overrides: switching away from `CODE ISSUE` clears the suggested fix; switching away from `PRODUCT BUG` clears the bug report. This prevents stale data from showing under the wrong classification.
-- The override is recorded in the classification history and appears in [analytics reports](tracking-history.html)
-
-## Tracking Review Progress
-
-Marking failures as reviewed helps your team track which findings have been addressed.
-
-### Mark a Single Failure as Reviewed
-
-Click the **Review** button on the right side of any failure card header. It turns green and shows "Reviewed by *username*."
-
-Click it again to unmark it.
-
-### Mark an Entire Group as Reviewed
-
-For grouped failures, click the **Review N/M** button in the header. This marks all tests in the group in one operation.
-
-Inside the expanded card, you can also use the **Review All** button, or toggle individual tests from the "Affected Tests" list.
-
-### Mark as Reviewed via the CLI
-
-```bash
-rootcoz results set-reviewed <job-id> \
-  --test "com.example.MyTest.testMethod" \
-  --reviewed
-```
-
-To unmark:
-
-```bash
-rootcoz results set-reviewed <job-id> \
-  --test "com.example.MyTest.testMethod" \
-  --not-reviewed
-```
-
-Check the review status summary for a job:
-
-```bash
-rootcoz results review-status <job-id>
-```
-
-### Smart Review Suggestions
-
-rootcoz can detect when your actions imply a failure has been reviewed:
-
-- **After commenting** — if your comment suggests the failure is resolved (e.g., "Filed JIRA-123 for this" or "Fixed in commit abc123"), rootcoz prompts: *"Your comment suggests this failure has been reviewed. Would you like to mark it as reviewed?"*
-- **After creating a bug** — when you create a GitHub issue or Jira ticket from a failure, rootcoz prompts: *"A bug issue was linked to this failure. Would you like to mark it as reviewed?"*
-
-These are suggestions only — click "Yes" to accept or "No" to dismiss.
-
-### Dashboard Progress Tracking
-
-Back on the dashboard, each job row shows a **Reviewed** column with color-coded progress:
-
-- 🟢 Green — all failures reviewed
-- 🟠 Orange — some reviewed
-- 🔴 Red — none reviewed
-
-Sort by the "Reviewed" column to find jobs that need attention.
-
-## Adding Comments
-
-Comments let your team discuss failures directly on the report page. Each failure group has its own comment thread.
-
-1. Expand a failure card
-2. Scroll to the **Comments** section at the bottom
-3. Type your comment in the text area (supports `@mentions` to notify team members)
-4. Click **Post**
-
-Comments appear in real-time for other users viewing the same report. Links to Jira tickets and GitHub PRs in comments are automatically enriched with their current status (e.g., "Open," "Merged," "Closed").
-
-> **Tip:** You can delete your own comments by hovering over them and clicking the trash icon. A confirmation dialog prevents accidental deletions.
-
-For more on using comments to collaborate, see [Chatting with AI About Failures](chatting-with-ai.html) for AI-powered follow-up questions.
-
-## Navigating Child Jobs
-
-Jenkins pipeline jobs often produce child job failures. These appear in a separate **Child Jobs** section below the top-level failures.
-
-Each child job is a collapsible section showing:
-
-- Child job name and build number
-- Failure count badge
-- Link to the child's Jenkins build
-- Its own set of failure cards (with all the same review, comment, and override features)
-
-Child jobs can be nested — a child job may contain its own child jobs. Use the **Expand All / Collapse All** buttons to quickly navigate deep hierarchies.
-
-### Deep Linking
-
-Click on a child job section header to add a hash fragment to the URL (e.g., `#child-job-name--42`). Share this URL to link teammates directly to a specific child job within the report.
-
-## Advanced Usage
-
-### Peer Analysis Summary
-
-When [multi-AI peer analysis](peer-analysis.html) was used, a **Peer Analysis** section appears between the key takeaway and the failure list. It shows:
-
-- Which AI providers participated in the debate
-- Consensus results — how many failure groups reached consensus vs. disagreed
-- Per-failure debate timelines showing each AI's position across rounds
-
-Expand the section to audit the AI debate trail before accepting a classification.
-
-### Re-Analyzing Failures
-
-If you disagree with the AI's analysis, you have two options:
-
-- **Re-analyze the entire job** — click the **Re-Analyze** button in the header bar to re-run with different settings (e.g., a different AI provider). Available to operators only.
-- **Re-analyze a single failure** — expand the failure card, and click the **Re-analyze** button in the actions bar to re-run analysis for just that failure.
-
-During re-analysis, the failure card shows a pulsing "Re-analyzing" badge. When complete, the new analysis replaces the current one, and the previous analysis is preserved in a "Previous Analysis" section.
-
-### Creating Bug Reports
-
-From any failure card, you can create a GitHub issue or Jira ticket directly:
-
-- Click **GitHub Issue** or **Jira Ticket** in the expanded card's action bar
-- Optionally select which AI provider/model to use for generating the issue content
-- Check **Include links** to add source file links to the generated issue
-
-See [Creating Bug Reports from Analysis](creating-issues.html) for the full workflow.
-
-### Report Portal Integration
-
-When Report Portal is configured, a **Push to Report Portal** button appears in the header. After reviewing all failures, rootcoz prompts: *"All failures reviewed. Update Report Portal?"* Click "Yes" to push your classifications back to Report Portal.
-
-### Viewing Results from the CLI
-
-List all analysis results:
-
-```bash
-rootcoz results list
-```
-
-Filter by limit:
-
-```bash
-rootcoz results list --limit 10
-```
-
-Get full JSON output for scripting:
-
-```bash
-rootcoz results show <job-id> --json
-```
-
-## Troubleshooting
-
-**I can't override classifications or mark as reviewed**
-You need the **reviewer** role or higher. Viewers can only read results. See [Managing Users and Roles](managing-users.html).
-
-**The "Re-Analyze" button is missing**
-Re-analysis requires the **operator** role. Also, the button is disabled while an analysis is already running.
-
-**Comments aren't appearing in real-time**
-rootcoz uses Server-Sent Events (SSE) for real-time updates. If your network blocks SSE connections, the page falls back to polling — comments will still appear, just with a short delay.
-
-**Classification override didn't stick**
-Verify you have network connectivity — the override is saved immediately via an API call. If the save fails, a red error message appears next to the dropdown. Refresh the page to confirm the current state.
-
-## Related Pages
-
-- [Analyzing Test Failures](analyzing-failures.html)
-- [Chatting with AI About Failures](chatting-with-ai.html)
-- [Creating Bug Reports from Analysis](creating-issues.html)
-- [Tracking Failure History and Reports](tracking-history.html)
-- [Managing Users and Roles](managing-users.html)
-
----
-
-Source: chatting-with-ai.md
-
-I'll start by reading the knowledge graph and pages manifest, then explore the relevant source files.Now let me explore the chat-related source files:Now let me look at the CLI chat commands in detail and the delete endpoint:Now let me check the admin chat CLI commands and the delete chat endpoint:Now let me check the role requirements for chat:Now let me look at the delete chat endpoint and check if there's a link from results page to chat:Now let me check for chat-related components in the results page:Let me also check the admin chat page in the frontend:Let me check the navigation for how users access admin chat and check the user settings for tracker tokens:Now let me check the welcome message and what info the AI provides about resources:Now let me also check how the "mentioning" feature works in chat — do users get @mentions?Mentions are for comments, not chat. Let me check the client library for chat methods:Let me check the admin chat init endpoint and admin chat abort:
-
-## Related Pages
-
-- [Reviewing Analysis Results](reviewing-results.html)
-- [Analyzing Test Failures](analyzing-failures.html)
-- [Tracking Failure History and Reports](tracking-history.html)
-- [CLI Command Reference](cli-reference.html)
-- [Managing Users and Roles](managing-users.html)
-
----
-
-Source: creating-issues.md
-
-Let me start by reading the knowledge graph and page manifest, then explore the relevant source files.Now let me explore the bug creation related code:Now let me look at the CLI commands for issue creation:Now let me look at the models for request/response:Now let me check for the issue prompt functionality:Now let me check the issue prompt filename constant and the tokens/settings page in the frontend:Now let me check for the tracker tokens configuration in the frontend:Now let me look at how bug creation is triggered from the UI - find the button that opens the dialog:Now let me look at the tracker tokens fields component and settings page:Now let me look at the `_resolve_tracker_tokens` in the CLI, and at the `_resolve_github_repo_url`:Let me also check the CLI config for tracker tokens:Let me also check `_resolve_github_repo_url` in main.py:Now let me check the `TESTS_REPO_URL` config:Now let me check what the UI shows for capabilities:
-
-## Related Pages
-
-- [Reviewing Analysis Results](reviewing-results.html)
-- [Configuring Integrations](configuring-integrations.html)
-- [Analyzing Test Failures](analyzing-failures.html)
-- [CLI Command Reference](cli-reference.html)
-- [Tracking Failure History and Reports](tracking-history.html)
-
----
-
-Source: configuring-integrations.md
-
-# Configuring Integrations
-
-Connect rootcoz to your CI systems, issue trackers, and quality platforms so failure analysis can pull build data, search for existing bugs, create new issues, and push classifications back to your test management tools.
-
-- A running rootcoz server (see [Quickstart](quickstart.html))
-- Operator or admin role for submitting analyses; reviewer or above for using tracker features
-
-## Jenkins
-
-### Quick Start
-
-Set three environment variables and rootcoz can analyze any Jenkins job:
-
-```bash
-export JENKINS_URL="https://jenkins.example.com"
-export JENKINS_USER="ci-reader"
-export JENKINS_PASSWORD="your-api-token"
-```
-
-Then submit an analysis:
-
-```bash
-rootcoz analyze --source jenkins --job-name my-pipeline --build-number 42
-```
-
-### Authentication
-
-rootcoz uses Jenkins username + API token authentication. Generate your API token from **Jenkins → Your User → Configure → API Token**.
-
-| Environment Variable | Description | Default |
-|---|---|---|
-| `JENKINS_URL` | Jenkins server base URL | *(required)* |
-| `JENKINS_USER` | Jenkins username | *(required)* |
-| `JENKINS_PASSWORD` | Jenkins API token (not your login password) | *(required)* |
-
-### SSL Configuration
-
-By default, rootcoz verifies Jenkins SSL certificates. For Jenkins instances with self-signed certificates:
-
-```bash
-export JENKINS_SSL_VERIFY=false
-```
-
-### Timeouts and Artifacts
-
-| Environment Variable | Description | Default |
-|---|---|---|
-| `JENKINS_TIMEOUT` | HTTP request timeout in seconds | `30` |
-| `JENKINS_ARTIFACTS_MAX_SIZE_MB` | Maximum artifact download size in MB | `500` |
-| `GET_JOB_ARTIFACTS` | Download build artifacts for AI context | `true` |
-
-### Waiting for Builds
-
-rootcoz can wait for an in-progress build to finish before analyzing it:
-
-| Environment Variable | Description | Default |
-|---|---|---|
-| `WAIT_FOR_COMPLETION` | Wait for build to complete before analyzing | `true` |
-| `POLL_INTERVAL_MINUTES` | Minutes between status checks | `2` |
-| `MAX_WAIT_MINUTES` | Maximum wait time (0 = unlimited) | `0` |
-
-### Per-Request Overrides
-
-Every Jenkins setting can be overridden on a per-request basis through the CLI or API. This is useful when you work with multiple Jenkins instances or need different credentials for specific jobs.
-
-**CLI flags:**
-
-```bash
-rootcoz analyze --source jenkins \
-  --job-name my-job --build-number 100 \
-  --jenkins-url https://other-jenkins.example.com \
-  --jenkins-user other-user \
-  --jenkins-password other-token \
-  --no-jenkins-ssl-verify \
-  --jenkins-timeout 60
-```
-
-**Config file** (`~/.config/rootcoz/config.toml`):
-
-```toml
-[defaults]
-jenkins_url = "https://jenkins.example.com"
-jenkins_user = "ci-reader"
-jenkins_password = "default-token"
-
-[servers.staging]
-url = "https://rootcoz.example.com"
-jenkins_url = "https://staging-jenkins.example.com"
-jenkins_user = "staging-reader"
-jenkins_password = "staging-token"
-jenkins_ssl_verify = false
-```
-
-> **Tip:** CLI flags override config file values, which override environment variables. See [Setting Up the CLI](cli-setup.html) for full config file details.
-
-## Jira
-
-Jira integration searches for existing bug reports matching failures classified as PRODUCT BUG, helping teams avoid filing duplicates.
-
-### Quick Start
-
-```bash
-# Jira Cloud
-export JIRA_URL="https://yourteam.atlassian.net"
-export JIRA_EMAIL="you@example.com"
-export JIRA_API_TOKEN="your-api-token"
-export JIRA_PROJECT_KEY="PROJ"
-```
-
-```bash
-# Jira Server / Data Center
-export JIRA_URL="https://jira.internal.example.com"
-export JIRA_PAT="your-personal-access-token"
-export JIRA_PROJECT_KEY="PROJ"
-```
-
-rootcoz auto-detects Cloud vs. Server/DC based on whether `JIRA_EMAIL` is set.
-
-### Cloud vs. Server/DC Authentication
-
-| Deployment | Required Variables | Auth Method |
-|---|---|---|
-| **Cloud** | `JIRA_URL`, `JIRA_EMAIL`, `JIRA_API_TOKEN` | Basic auth (email + API token), REST API v3 |
-| **Server/DC** | `JIRA_URL`, `JIRA_PAT` | Bearer token, REST API v2 |
-
-> **Note:** When both `JIRA_API_TOKEN` and `JIRA_PAT` are set, the detection rule is: if `JIRA_EMAIL` is present → Cloud mode (prefers `JIRA_API_TOKEN`); if `JIRA_EMAIL` is absent → Server/DC mode (prefers `JIRA_PAT`).
-
-Generate a Jira Cloud API token at [https://id.atlassian.com/manage-profile/security/api-tokens](https://id.atlassian.com/manage-profile/security/api-tokens). For Server/DC, create a PAT under **Profile → Personal Access Tokens**.
-
-### Jira Settings
-
-| Environment Variable | Description | Default |
-|---|---|---|
-| `JIRA_URL` | Jira instance URL | *(required)* |
-| `JIRA_EMAIL` | Email address (Cloud only; triggers Cloud detection) | |
-| `JIRA_API_TOKEN` | Cloud API token or Server/DC fallback token | |
-| `JIRA_PAT` | Server/DC personal access token | |
-| `JIRA_PROJECT_KEY` | Scope bug searches to this project | *(required)* |
-| `JIRA_SSL_VERIFY` | Verify SSL certificates | `true` |
-| `JIRA_MAX_RESULTS` | Max search results returned | `5` |
-| `ENABLE_JIRA` | Explicitly enable/disable Jira integration | Auto-detected |
-
-When `ENABLE_JIRA` is not set, Jira integration is automatically enabled if `JIRA_URL`, valid credentials, and `JIRA_PROJECT_KEY` are all configured.
-
-### Enabling or Disabling Per Request
-
-Disable Jira for a single analysis:
-
-```bash
-rootcoz analyze --source jenkins \
-  --job-name my-job --build-number 100 \
-  --no-jira
-```
-
-Override Jira credentials for a single analysis:
-
-```bash
-rootcoz analyze --source jenkins \
-  --job-name my-job --build-number 100 \
-  --jira-url https://other-jira.example.com \
-  --jira-pat "other-token" \
-  --jira-project-key OTHER
-```
-
-### User-Level Jira Tokens
-
-Individual users can save their own Jira credentials in the web UI under their profile settings. When a user creates a bug from analysis results, their personal token is used instead of the server-level token, so the issue is attributed to them.
-
-> **Tip:** Verify your Jira token works by using the built-in token validation in the web UI settings, or with `rootcoz config validate-token --type jira --token YOUR_TOKEN`.
-
-### Jira Bug Creation
-
-When Jira integration is enabled, rootcoz also supports creating Jira bugs directly from analysis results. This is controlled by a separate toggle:
-
-| Environment Variable | Description | Default |
-|---|---|---|
-| `ENABLE_JIRA_ISSUES` | Enable Jira bug creation | `true` (when Jira is configured) |
-
-See [Creating Bug Reports from Analysis](creating-issues.html) for the full bug creation workflow.
-
-## GitHub
-
-GitHub integration serves two purposes: creating issues from analysis results and enriching comments with PR/issue status information.
-
-### Quick Start
-
-```bash
-export GITHUB_TOKEN="ghp_your-personal-access-token"
-export TESTS_REPO_URL="https://github.com/your-org/your-test-repo"
-```
-
-### GitHub Settings
-
-| Environment Variable | Description | Default |
-|---|---|---|
-| `GITHUB_TOKEN` | GitHub personal access token | |
-| `TESTS_REPO_URL` | Repository URL for issue creation and AI context | |
-| `TESTS_REPO_TOKEN` | Token for cloning private test repos (if different from `GITHUB_TOKEN`) | |
-| `ENABLE_GITHUB_ISSUES` | Enable GitHub issue creation | Auto-detected |
-
-GitHub issue creation is auto-enabled when both `GITHUB_TOKEN` and `TESTS_REPO_URL` are configured. Set `ENABLE_GITHUB_ISSUES=false` to explicitly disable it.
-
-### Token Permissions
-
-Your GitHub token needs these scopes:
-
-- **`repo`** — for creating issues and accessing private repositories
-- **`read:org`** — if your repository is in a GitHub Organization
-
-### Comment Enrichment
-
-When `GITHUB_TOKEN` is set, rootcoz automatically enriches user comments that contain GitHub PR or issue links with their current status (open, closed, merged). This works on any GitHub link, not just links to the configured test repo.
-
-### User-Level GitHub Tokens
-
-Like Jira, users can save their own GitHub token in the web UI. When creating issues, the user's token is used so the issue shows as created by them.
-
-### Per-Request Overrides
-
-```bash
-rootcoz analyze --source jenkins \
-  --job-name my-job --build-number 100 \
-  --github-token ghp_different-token \
-  --tests-repo-url https://github.com/other-org/other-repo \
-  --tests-repo-token ghp_private-repo-token
-```
-
-## Report Portal
-
-Report Portal integration lets you push rootcoz classifications back into your Report Portal launches, updating defect types and adding analysis links.
-
-### Quick Start
-
-```bash
-export REPORTPORTAL_URL="https://reportportal.example.com"
-export REPORTPORTAL_API_TOKEN="your-rp-api-token"
-export REPORTPORTAL_PROJECT="your-project"
-export ENABLE_REPORTPORTAL=true
-```
-
-### Report Portal Settings
-
-| Environment Variable | Description | Default |
-|---|---|---|
-| `REPORTPORTAL_URL` | Report Portal server URL | |
-| `REPORTPORTAL_API_TOKEN` | API token for authentication | |
-| `REPORTPORTAL_PROJECT` | Project name in Report Portal | |
-| `REPORTPORTAL_VERIFY_SSL` | Verify SSL certificates | `true` |
-| `ENABLE_REPORTPORTAL` | Enable the integration | Auto-detected |
-
-When `ENABLE_REPORTPORTAL` is not set, it's auto-enabled if all three required settings (`REPORTPORTAL_URL`, `REPORTPORTAL_API_TOKEN`, `REPORTPORTAL_PROJECT`) are configured.
-
-### Classification Mapping
-
-rootcoz maps its classifications to Report Portal defect types:
-
-| rootcoz Classification | Report Portal Defect Type |
-|---|---|
-| PRODUCT BUG | Product Bug |
-| CODE ISSUE | Automation Bug |
-| INFRASTRUCTURE | System Issue |
-
-### Pushing Classifications
-
-After analyzing a Jenkins job, push the results to Report Portal:
-
-```bash
-rootcoz push-reportportal <job-id>
-```
-
-For pipeline child jobs:
-
-```bash
-rootcoz push-reportportal <job-id> \
-  --child-job-name child-pipeline \
-  --child-build-number 5
-```
-
-rootcoz matches RP test items to analyzed failures by test name (exact match, then dotted-suffix match). Each matched item gets:
-
-- The mapped defect type locator
-- A comment linking back to the rootcoz analysis report
-- Jira issue links (if Jira matches were found during analysis)
-
-> **Warning:** Report Portal integration requires that the Jenkins build URL appears in the RP launch description. rootcoz uses this URL to find the matching launch.
-
-### SSL for Self-Signed Certificates
-
-```bash
-export REPORTPORTAL_VERIFY_SSL=false
-```
-
-## Config File Reference
-
-All integration settings can be stored in `~/.config/rootcoz/config.toml` to avoid passing flags on every CLI invocation. The `[defaults]` section applies to all servers, and `[servers.<name>]` sections override per server.
-
-```toml
-[defaults]
-jenkins_user = "ci-reader"
-jira_url = "https://jira.example.com"
-jira_pat = "default-jira-token"
-jira_project_key = "PROJ"
-github_token = "ghp_default-token"
-
-[servers.production]
-url = "https://rootcoz.example.com"
-jenkins_url = "https://jenkins.example.com"
-jenkins_password = "prod-jenkins-token"
-tests_repo_url = "https://github.com/org/tests"
-
-[servers.staging]
-url = "https://rootcoz-staging.example.com"
-jenkins_url = "https://staging-jenkins.example.com"
-jenkins_password = "staging-token"
-jenkins_ssl_verify = false
-jira_ssl_verify = false
-enable_jira = false
-```
-
-See [Setting Up the CLI](cli-setup.html) for full config file documentation.
-
-## Advanced Usage
-
-### Server Settings UI
-
-Admins can modify integration settings at runtime through the **Server Settings** page in the web UI without restarting the server. Navigate to **Admin → Server Settings** and update values for Jenkins, Jira, GitHub, or Report Portal categories.
-
-> **Note:** Some settings (like VAPID keys) require a server restart to take effect. The UI indicates which settings need a restart.
-
-### Override Priority
-
-Settings are resolved in this order (highest priority first):
-
-1. **Per-request** — CLI flags or API body fields
-2. **Config file** — `[servers.<name>]` section, then `[defaults]`
-3. **Server Settings DB** — values set via the admin Server Settings page
-4. **Environment variables** — set at deployment time
-
-### Additional Repositories
-
-Provide extra source code repositories for the AI to reference during analysis:
-
-```bash
-export ADDITIONAL_REPOS="infra:https://github.com/org/infra-repo,product:https://github.com/org/product"
-```
-
-With a specific branch and authentication token:
-
-```bash
-export ADDITIONAL_REPOS="infra:https://github.com/org/infra-repo:develop@ghp_token123"
-```
-
-Or per request via CLI:
-
-```bash
-rootcoz analyze --source jenkins \
-  --job-name my-job --build-number 100 \
-  --additional-repos "infra:https://github.com/org/infra,product:https://github.com/org/product"
-```
-
-### Disabling SSL Verification
-
-For environments with self-signed certificates, each integration has its own SSL toggle:
-
-| Integration | Environment Variable | CLI Flag |
-|---|---|---|
-| Jenkins | `JENKINS_SSL_VERIFY=false` | `--no-jenkins-ssl-verify` |
-| Jira | `JIRA_SSL_VERIFY=false` | `--no-jira-ssl-verify` |
-| Report Portal | `REPORTPORTAL_VERIFY_SSL=false` | *(server-level only)* |
-
-> **Warning:** Disabling SSL verification exposes connections to man-in-the-middle attacks. Only use this for development or when connecting to hosts with self-signed certificates behind trusted networks.
-
-### Sensitive Data Handling
-
-All credential fields (passwords, API tokens) are encrypted at rest when stored in the database. They are never returned in API responses or logged. The encryption key is controlled by the `ROOTCOZ_ENCRYPTION_KEY` environment variable.
-
-See [Environment Variables and Configuration](environment-variables.html) for the complete list of all settings, and [Managing Users and Roles](managing-users.html) for authentication and user management.
-
-## Troubleshooting
-
-**"Jenkins connection failed" or timeout errors**
-- Verify `JENKINS_URL` is reachable from the rootcoz server
-- Check that `JENKINS_USER` has read access to the job
-- Increase `JENKINS_TIMEOUT` for slow networks (default: 30 seconds)
-- For SSL errors, try `JENKINS_SSL_VERIFY=false`
-
-**Jira integration shows as disabled**
-- All three are required: `JIRA_URL`, credentials (`JIRA_API_TOKEN` or `JIRA_PAT`), and `JIRA_PROJECT_KEY`
-- For Cloud, `JIRA_EMAIL` must also be set
-- Check server logs for specific warnings about missing configuration
-
-**Report Portal push finds no matching launch**
-- The RP launch description must contain the full Jenkins build URL
-- Ensure `REPORTPORTAL_PROJECT` matches the exact project name in RP
-- If multiple launches match, rootcoz raises an ambiguous launch error — ensure each build URL is unique across launches
-
-**GitHub issue creation not available**
-- Both `GITHUB_TOKEN` and `TESTS_REPO_URL` must be configured
-- The token must have the `repo` scope
-- Verify the token with: `rootcoz config validate-token --type github --token YOUR_TOKEN`
-
-## Related Pages
-
-- [Environment Variables and Configuration](environment-variables.html)
-- [Setting Up the CLI](cli-setup.html)
-- [Analyzing Test Failures](analyzing-failures.html)
-- [Creating Bug Reports from Analysis](creating-issues.html)
-- [Deployment Recipes](deployment-recipes.html)
-
----
-
-Source: peer-analysis.md
-
-# Using Multi-AI Peer Analysis
-
-Improve failure classification accuracy by having multiple AI providers independently review each analysis and debate until they reach consensus. This is especially useful for ambiguous failures where a single AI might misclassify.
-
-## Prerequisites
-
-- A running rootcoz server with at least one AI provider configured (see [Quickstart](quickstart.html))
-- Access to two or more AI providers (any combination of `claude`, `gemini`, and `cursor`)
-- **Operator** or **admin** role to submit analyses (see [Managing Users and Roles](managing-users.html))
-
-## Quick Example
-
-Add the `--peers` flag to any analysis command:
-
-```bash
-rootcoz analyze my-job --build-number 42 \
-  --peers "gemini:gemini-2.5-pro,cursor:gpt-5.4-xhigh"
-```
-
-This tells rootcoz to have Gemini and Cursor independently review the primary AI's analysis and debate until they agree on a classification.
-
-## How Peer Analysis Works
-
-Peer analysis adds a structured debate loop on top of the standard single-AI analysis:
-
-1. **Primary AI analyzes** — The main AI provider (set via `--provider`/`--model` or server defaults) performs the initial failure analysis, identical to a standard single-AI run.
-2. **Peers review in parallel** — Each peer AI receives the primary AI's classification and reasoning, then independently agrees or disagrees, providing its own classification and justification.
-3. **Consensus check** — If all peers agree with the primary AI's classification, consensus is reached and the analysis is finalized.
-4. **Primary AI revises** — If peers disagree, their feedback is sent back to the primary AI, which may revise its analysis. From round 2 onwards, each peer also sees the other peers' responses from the previous round.
-5. **Repeat or finalize** — Steps 2–4 repeat until consensus is reached or the maximum number of rounds is exhausted.
-
-> **Note:** Peers are explicitly instructed to be critical and independent — not sycophantic. The prompts include anti-sycophancy framing to encourage genuine disagreement when warranted.
-
-## Step-by-Step: Enabling Peer Analysis
-
-### 1. Choose Your Peer Configuration
-
-Each peer is specified as a `provider:model` pair. Valid providers are `claude`, `gemini`, and `cursor`. Separate multiple peers with commas:
-
-```
-gemini:gemini-2.5-pro,cursor:gpt-5.4-xhigh
-claude:claude-sonnet-4-20250514,gemini:gemini-2.5-pro
-```
-
-> **Tip:** For best results, use peers from different providers. Diversity in AI models increases the chance of catching misclassifications.
-
-### 2. Run an Analysis with Peers
-
-**Via CLI:**
-
-```bash
-rootcoz analyze my-job --build-number 42 \
-  --provider claude --model claude-sonnet-4-20250514 \
-  --peers "gemini:gemini-2.5-pro,cursor:gpt-5.4-xhigh"
-```
-
-**Via environment variable (server-wide default):**
-
-```bash
-export PEER_AI_CONFIGS="gemini:gemini-2.5-pro,cursor:gpt-5.4-xhigh"
-```
-
-When set as an environment variable, every analysis automatically uses peer review unless explicitly overridden per-request.
-
-### 3. View the Debate Results
-
-After analysis completes, the report page shows a **Peer Analysis** section for each failure group:
-
-- **Consensus / No Consensus** badge — whether the AIs agreed
-- **Rounds used** — how many debate rounds occurred (e.g., "2 of 3 rounds")
-- **Per-round timeline** — expand to see each participant's classification, reasoning, and whether they agreed with the orchestrator
-
-A summary at the top of the report page shows consensus status across all failure groups and which AI models participated.
-
-See [Reviewing Analysis Results](reviewing-results.html) for more on navigating the report page.
-
-## Configuration Options
-
-### Setting Peer Configs
-
-Peers can be configured at three levels, with this priority order:
-
-| Level | How to Set | Scope |
-|-------|-----------|-------|
-| **Per-request** (highest) | `--peers` CLI flag or `peer_ai_configs` in request body | Single analysis |
-| **Config file** | `peers` field in `~/.config/rootcoz/config.toml` | All analyses for that server |
-| **Environment variable** (lowest) | `PEER_AI_CONFIGS` on the server | All analyses server-wide |
-
-**CLI config file example** (`~/.config/rootcoz/config.toml`):
-
-```toml
-[servers.production]
-url = "https://rootcoz.example.com"
-peers = "gemini:gemini-2.5-pro,cursor:gpt-5.4-xhigh"
-peer_analysis_max_rounds = 5
-```
-
-See [Setting Up the CLI](cli-setup.html) for the full config file reference.
-
-### Disabling Peers for a Single Request
-
-When peers are configured server-wide but you want to skip peer review for one analysis:
-
-```bash
-rootcoz analyze my-job --build-number 42 --peers ""
-```
-
-Sending an empty peers value disables peer analysis for that request only.
-
-### Controlling Debate Rounds
-
-The `--peer-analysis-max-rounds` flag controls how many rounds of debate are allowed before the analysis is finalized:
-
-```bash
-rootcoz analyze my-job --build-number 42 \
-  --peers "gemini:gemini-2.5-pro" \
-  --peer-analysis-max-rounds 5
-```
-
-| Setting | Default | Range | Description |
-|---------|---------|-------|-------------|
-| `--peer-analysis-max-rounds` | 3 | 1–10 | Maximum debate rounds before accepting the result |
-
-The environment variable equivalent is `PEER_ANALYSIS_MAX_ROUNDS`.
-
-> **Tip:** More rounds give AIs more chances to reach consensus, but increase analysis time and token usage. For most cases, the default of 3 rounds is sufficient.
-
-### Controlling Parallelism
-
-Peer AI calls run in parallel by default. The `MAX_CONCURRENT_AI_CALLS` environment variable (default: 3) limits how many peer calls execute simultaneously. You can also override this per-request with `--max-concurrent-ai-calls`.
-
-## Advanced Usage
-
-### Model Names with Parameters
-
-Some providers support model parameters in bracket syntax. Commas inside brackets are handled correctly:
-
-```bash
-rootcoz analyze my-job --build-number 42 \
-  --peers "cursor:gpt-5.4[context=272k,reasoning=medium],gemini:gemini-2.5-pro"
-```
-
-### Classification Values in the Debate
-
-Peers classify failures using the same three categories as the primary AI:
-
-- **CODE ISSUE** — The test itself is broken
-- **PRODUCT BUG** — The product under test has a defect
-- **INFRASTRUCTURE** — Environment or infrastructure problem
-
-Agreement is determined by matching these classifications (case-insensitive). A peer that returns an invalid classification is excluded from consensus.
-
-### What Happens When Consensus Fails
-
-When the maximum number of rounds is exhausted without consensus:
-
-- The **primary AI's latest analysis** is used as the final result.
-- The debate trail is preserved in the results so you can review each AI's reasoning.
-- If the primary AI returned an empty classification, rootcoz falls back to **peer consensus** — adopting the classification that the majority of peers agreed on. If there's no majority, the most frequent classification is used.
-
-### Fallback Behavior
-
-Peer analysis is designed to be resilient:
-
-- If a peer AI call **fails** (timeout, error, unparseable response), that peer is excluded from the consensus check. The remaining peers continue.
-- If **all peers fail** in a round, the primary AI's current analysis is used.
-- If a **revision round fails**, the primary AI keeps its previous analysis and the debate continues.
-- Peer failures never crash the overall analysis pipeline — you always get a result.
-
-### Combining with Other Features
-
-Peer analysis works with all analysis sources and features:
-
-```bash
-# With JUnit XML source
-rootcoz analyze --source file --file results.xml \
-  --peers "gemini:gemini-2.5-pro,claude:claude-sonnet-4-20250514"
-
-# With additional repos for context
-rootcoz analyze my-job --build-number 42 \
-  --peers "gemini:gemini-2.5-pro" \
-  --additional-repos "product:https://github.com/org/product"
-
-# With custom prompt
-rootcoz analyze my-job --build-number 42 \
-  --peers "cursor:gpt-5.4-xhigh,gemini:gemini-2.5-pro" \
-  --raw-prompt "Focus on network-related failures"
-```
-
-See [Analyzing Test Failures](analyzing-failures.html) for details on analysis sources and options.
-
-### Re-Analyzing with Different Peers
-
-You can re-analyze a completed job with different peer configurations from the web UI or CLI. The new peer debate replaces the previous analysis for the re-analyzed failure groups.
-
-See [Reviewing Analysis Results](reviewing-results.html) for how to trigger re-analysis.
-
-## Troubleshooting
-
-**"Unsupported provider" error when setting peers**
-Valid providers are `claude`, `gemini`, and `cursor`. Check for typos in your `--peers` value.
-
-**Consensus never reached (always uses max rounds)**
-This typically means the failure is genuinely ambiguous. Consider:
-- Providing more context with `--additional-repos` or `--raw-prompt`
-- Reducing max rounds if you're comfortable with majority-vote fallback
-- Reviewing the debate trail in the UI to understand each AI's reasoning
-
-**Peer analysis is slow**
-Each round involves parallel AI calls plus a revision call. To speed things up:
-- Reduce `--peer-analysis-max-rounds` (e.g., to 1 or 2)
-- Use fewer peers
-- Increase `MAX_CONCURRENT_AI_CALLS` if your providers support higher concurrency
-
-**Token usage is higher than expected**
-Peer analysis multiplies token usage — each round includes one call per peer plus a potential revision call by the primary AI. Monitor token usage on the admin dashboard. See [Environment Variables and Configuration](environment-variables.html) for token usage settings.
-
-## Related Pages
-
-- [Analyzing Test Failures](analyzing-failures.html)
-- [Reviewing Analysis Results](reviewing-results.html)
-- [Environment Variables and Configuration](environment-variables.html)
-- [CLI Command Reference](cli-reference.html)
-- [Configuring Integrations](configuring-integrations.html)
-
----
-
-Source: managing-users.md
-
-I'll start by reading the knowledge graph and pages manifest, then explore the relevant source files.Now let me explore the key source files related to user management, roles, auth, and admin operations.Now let me look at the CLI commands for auth and admin:Now let me look at the CLI client methods for auth and admin:Now let me look at the auth middleware to understand role checks and trusted proxy headers:Now let me look at the `_maybe_add_custom_approval_msg` function and check the VALID_USER_STATUSES:Let me also look at the frontend components for registration, login, and admin panels:Now let me look at the CLI auth commands for registration:Now let me check the config.toml format for auth:Now let me check the `_echo_api_key_warning` and `_require_api_key` helpers:Now let me check the SESSION_TTL_HOURS and SESSION_TTL_SECONDS:Let me look at the `_validate_username` function and the `create_admin_user` function:Now let me check the `_SYSTEM_TAGS` that are reserved:
-
-## Related Pages
-
-- [Setting Up the CLI](cli-setup.html)
-- [Reviewing Analysis Results](reviewing-results.html)
-- [REST API Reference](api-reference.html)
-- [Environment Variables and Configuration](environment-variables.html)
-- [Quickstart](quickstart.html)
-
----
-
-Source: tracking-history.md
-
-# Tracking Failure History and Reports
-
-Spot recurring test failures, understand per-test failure trends, and generate team-level analytics to measure classification accuracy and review progress.
-
-## Prerequisites
-
-- A rootcoz server with at least one completed analysis
-- A registered user account (see [Managing Users and Roles](managing-users.html))
-- **Admin** role to access analytics reports (the Reports page is admin-only)
-- For CLI usage, a configured server connection (see [Setting Up the CLI](cli-setup.html))
-
-## Quick Example
-
-List all recorded failures from the CLI:
-
-```bash
-rootcoz history failures --limit 10
-```
-
-Check how often a specific test has been failing:
-
-```bash
-rootcoz history test "com.example.tests.LoginTest.testTimeout"
-```
-
-Pull a summary report of all analyzed jobs, failures, and review counts:
-
-```bash
-rootcoz reports totals --from 2026-06-01 --to 2026-06-22
-```
-
-## Browsing Failure History
-
-Every completed analysis automatically records its failures into a searchable history. You can browse this history to find recurring patterns across all analyzed jobs.
-
-### Using the Web UI
-
-1. Click **History** in the navigation bar.
-2. Use the filters at the top to narrow results:
-   - **Search** — free-text search across test names, error messages, and job names
-   - **Classification** dropdown — filter by root cause (CODE ISSUE, PRODUCT BUG, INFRASTRUCTURE)
-   - **Date range** — select a preset (Last 7 days, Last 30 days) or pick custom dates
-3. Click any row to jump to the full analysis result for that job.
-4. Click a **test name** link to open its detailed timeline page.
-
-> **Tip:** The table columns (Test Name, Job, Classification, Date) are sortable — click any column header to sort.
-
-### Using the CLI
-
-Browse paginated failure history:
-
-```bash
-rootcoz history failures --limit 50 --offset 0
-```
-
-Filter by classification or job name:
-
-```bash
-rootcoz history failures --classification "PRODUCT BUG" --job-name "my-pipeline"
-```
-
-Search across test names and error messages:
-
-```bash
-rootcoz history failures --search "NullPointerException"
-```
-
-Add `--json` to any command for machine-readable output:
-
-```bash
-rootcoz history failures --search "timeout" --json
-```
-
-## Viewing Per-Test Timelines
-
-When you notice a test appearing in multiple analyses, drill into its full history to understand whether it's a one-off or a persistent problem.
-
-### Using the Web UI
-
-1. From the **History** page, click a test name to open the **Test History** page.
-2. The page shows four key metrics at a glance:
-   - **Failure Rate** — percentage of analyzed builds where this test failed
-   - **Total Runs** — number of builds analyzed
-   - **Failures** — total recorded failure count
-   - **Consecutive** — total consecutive failure records
-
-3. Below the stats, review:
-   - **Classification breakdown** — how many times the test was classified as each root cause type
-   - **Recent runs** — a table of recent failures with links to each analysis job
-   - **Comments** — related comments from reviewers across all jobs where this test appeared
-
-> **Note:** Failure history only records failures, not passes. When you filter by job name, the failure rate is calculated as failures ÷ total analyzed builds for that job. Without a job name filter, pass/fail stats are unavailable.
-
-### Using the CLI
-
-```bash
-rootcoz history test "com.example.tests.LoginTest.testTimeout"
-```
-
-Filter by a specific job to get failure rate:
-
-```bash
-rootcoz history test "com.example.tests.LoginTest.testTimeout" --job-name "my-pipeline"
-```
-
-Increase the number of recent runs returned:
-
-```bash
-rootcoz history test "com.example.tests.LoginTest.testTimeout" --limit 50
-```
-
-Example output:
-
-```
-Test: com.example.tests.LoginTest.testTimeout
-Failures: 12
-Failure rate: 40.0%
-Last classification: INFRASTRUCTURE
-
-Recent runs:
-JOB_NAME             BUILD  CLASSIFICATION   DATE
-my-pipeline          #142   INFRASTRUCTURE   2026-06-20
-my-pipeline          #138   INFRASTRUCTURE   2026-06-18
-my-pipeline          #135   CODE ISSUE       2026-06-15
-```
-
-## Searching by Error Signature
-
-Every failure has an error signature — a hash of its error message and stack trace. Use signature search to find all tests that fail with the same underlying error, even if the test names differ.
-
-### Using the CLI
-
-```bash
-rootcoz history search --signature "a1b2c3d4e5f6..."
-```
-
-The output shows:
-
-- **Total occurrences** — how many times this exact error has appeared
-- **Unique tests** — how many different test names hit this error
-- **Test list** — each affected test with its occurrence count
-
-> **Tip:** You can find error signatures in the analysis result details. When you see the same error across unrelated tests, it often points to a shared infrastructure issue.
-
-## Viewing Job-Level Statistics
-
-Get aggregate statistics for a specific job to understand its overall health and trend.
-
-```bash
-rootcoz history stats "my-pipeline"
-```
-
-This returns:
-
-- **Builds analyzed** — total completed builds for this job
-- **Builds with failures** — how many builds had at least one failure
-- **Failure rate** — ratio of failing builds to total builds
-- **Most common failures** — top 10 most frequently failing tests with their classifications
-- **Recent trend** — `improving`, `worsening`, or `stable` (compares last 7 days vs. previous 7 days)
-
-## Generating Analytics Reports
-
-Analytics reports provide team-level metrics for tracking classification trends, review progress, and AI accuracy. Reports are available to **admin** users only.
-
-### Report Types
-
-| Report | What it shows | When to use it |
-|--------|--------------|----------------|
-| **Total Failures** | Job count, failure count, review count with per-job breakdown | Track overall team throughput and review progress |
-| **Classification Overrides** | Where users changed the AI's classification, grouped by from→to transition, plus AI accuracy percentage | Measure AI reliability and identify systematic misclassification patterns |
-| **Issues Created** | GitHub issues and Jira tickets created from analyses, split by tracker type | Track how many bugs were filed from analysis results |
-
-### Using the Web UI
-
-1. Click **Reports** in the admin navigation section.
-2. Use the sidebar to switch between the three report tabs: **Total Failures**, **Classification Overrides**, and **Issues Created**.
-3. Apply filters to scope the report:
-   - **Search** — filter the detail tables by test name or job name
-   - **Team / Tier / Version** — metadata filters (requires job metadata to be configured)
-   - **Status** — filter by job status (defaults to completed)
-   - **Date range** — restrict to a time window
-   - **Labels** — include or exclude jobs by label
-
-> **Note:** Metadata filters (team, tier, version) only work when job metadata is configured. See [Reviewing Analysis Results](reviewing-results.html) for details on job metadata.
-
-#### Reading the Total Failures Report
-
-The summary cards show three numbers:
-
-- **Total Jobs** — number of analysis jobs matching your filters
-- **Total Failures** — sum of all failures across those jobs
-- **Total Reviewed** — how many failures have been marked as reviewed
-
-Expand **Job Details** to see the per-job breakdown with failure and review counts.
-
-#### Reading the Classification Overrides Report
-
-The summary cards show:
-
-- **Total Reviewed** — failures that have been reviewed
-- **AI Correct** — reviewed failures where the user kept the AI's classification
-- **Total Overrides** — reviewed failures where the user changed the classification
-- **AI Accuracy** — percentage of reviewed failures where the AI was correct
-
-Overrides are grouped by transition (e.g., "CODE ISSUE → PRODUCT BUG"). Expand any group to see individual test-level details. Each override shows its **axis** — whether the user changed the **Root Cause** (CODE ISSUE, PRODUCT BUG, INFRASTRUCTURE) or the **Pattern** (FLAKY, REGRESSION, KNOWN_BUG, etc.).
-
-#### Reading the Issues Created Report
-
-Shows all GitHub issues and Jira tickets created from analysis results, with counts split by tracker type. Each row links to the external issue and the originating analysis job.
-
-### Using the CLI
-
-All three reports support the same filter flags:
-
-| Flag | Description |
-|------|-------------|
-| `--team` | Filter by team metadata |
-| `--tier` | Filter by tier metadata |
-| `--version` | Filter by version metadata |
-| `--from` | Start date (YYYY-MM-DD) |
-| `--to` | End date (YYYY-MM-DD) |
-| `--status` | Filter by job status |
-| `--tags` | Comma-separated tags to include |
-| `--exclude-tags` | Comma-separated tags to exclude |
-
-**Total failures:**
-
-```bash
-rootcoz reports totals --from 2026-06-01 --to 2026-06-22
-```
-
-**Classification overrides:**
-
-```bash
-rootcoz reports overrides --team "platform"
-```
-
-**Issues created:**
-
-```bash
-rootcoz reports issues --from 2026-06-01
-```
-
-Add `--json` for machine-readable output suitable for dashboards or scripts:
-
-```bash
-rootcoz reports totals --from 2026-06-01 --json
-```
-
-## Advanced Usage
-
-### Sharing Report URLs
-
-The Reports page encodes all filters in the URL query string. Copy the browser URL to share a specific filtered view with teammates — they'll see the same filters pre-applied when they open the link.
-
-Filter parameters in the URL include `report`, `team`, `tier`, `version`, `from`, `to`, `status`, `label`, `exclude_label`, and `search`.
-
-### Asking AI About Reports
-
-Admins can use the **Admin Chat** to ask AI questions about failure trends. The AI has access to all three report endpoints and can query them with filters, generate summaries, and produce downloadable HTML reports.
-
-Example prompts:
-
-- "Show me the AI accuracy trend for the last month"
-- "Which teams have the most classification overrides?"
-- "Generate a report of all PRODUCT BUG failures from last week"
-
-See [Chatting with AI About Failures](chatting-with-ai.html) for more on using the chat feature.
-
-### Classifying Tests from History
-
-You can classify tests directly from the CLI. This is useful when reviewing historical failures:
-
-```bash
-rootcoz classify "com.example.tests.LoginTest.testTimeout" \
-  --type FLAKY \
-  --job-id "abc123" \
-  --reason "Intermittent network timeout in CI"
-```
-
-Valid classification types: `FLAKY`, `REGRESSION`, `INFRASTRUCTURE`, `KNOWN_BUG`, `INTERMITTENT`.
-
-> **Warning:** `KNOWN_BUG` requires a `--references` flag with bug URLs or ticket keys.
-
-See [Reviewing Analysis Results](reviewing-results.html) for the full classification workflow.
-
-### Excluding a Specific Job
-
-When investigating a test, you may want to exclude the current job's results from the history to see only *other* occurrences. All history commands support `--exclude-job-id`:
-
-```bash
-rootcoz history test "com.example.SomeTest" --exclude-job-id "current-job-uuid"
-rootcoz history stats "my-pipeline" --exclude-job-id "current-job-uuid"
-rootcoz history search --signature "abc123..." --exclude-job-id "current-job-uuid"
-```
-
-### Exporting Report Data
-
-Combine `--json` with standard tools to export report data:
-
-```bash
-# Export totals to a CSV
-rootcoz reports totals --from 2026-06-01 --json | \
-  jq -r '.jobs[] | [.job_name, .failure_count, .reviewed_count, .created_at] | @csv'
-
-# Count overrides by transition type
-rootcoz reports overrides --json | \
-  jq '.groups[] | "\(.from) → \(.to): \(.count)"'
-```
-
-See [CLI Recipes](cli-recipes.html) for more export patterns.
-
-## Troubleshooting
-
-**No failures appear in the History page**
-- History is populated automatically when analyses complete. If you just started the server, a one-time backfill runs on startup to index all previously completed jobs. Check the server logs for "Backfilling failure_history" messages.
-
-**Failure rate shows "N/A" on the test history page**
-- Failure rate requires a job name filter. Without it, the system cannot calculate total runs because it only tracks failures, not passes. Filter by job name in the CLI with `--job-name` or by clicking through from a specific job's results.
-
-**Reports page returns 403 Forbidden**
-- Analytics reports are restricted to admin users. Ask your administrator to upgrade your role. See [Managing Users and Roles](managing-users.html).
-
-**Report data seems incomplete after classification changes**
-- The Classification Overrides report only includes overrides for failures that have been marked as **reviewed**. Make sure reviewers are completing the review step after changing classifications. See [Reviewing Analysis Results](reviewing-results.html).
-
-## Related Pages
-
-- [Reviewing Analysis Results](reviewing-results.html)
-- [CLI Recipes](cli-recipes.html)
-- [Chatting with AI About Failures](chatting-with-ai.html)
-- [Analyzing Test Failures](analyzing-failures.html)
-- [CLI Command Reference](cli-reference.html)
-
----
-
-Source: pytest-integration.md
-
-Let me explore the repository to understand the pytest integration thoroughly.Now let me look at the pytest plugin and related files:Now let me look at the enriched XML functionality on the server side:Now let me look at the CLI file analysis command and the models for more details:Now let me look at the tests for the pytest integration:Now let me check the CLI analyze command details for the `--file` and `--source` options:Now let me look at what properties are injected and what the enriched XML looks like:Now let me look at the main.py to understand how `enriched_xml` is returned to clients:
-
-## Related Pages
-
-- [Analyzing Test Failures](analyzing-failures.html)
-- [Setting Up the CLI](cli-setup.html)
-- [Reviewing Analysis Results](reviewing-results.html)
-- [Configuring Integrations](configuring-integrations.html)
-- [Quickstart](quickstart.html)
-
----
-
-Source: deployment-recipes.md
-
-Let me explore the repository structure and key files to write accurate documentation.Now let me explore the key deployment-related files:
-
-## Related Pages
-
-- [Quickstart](quickstart.html)
-- [Environment Variables and Configuration](environment-variables.html)
-- [Configuring Integrations](configuring-integrations.html)
-- [Managing Users and Roles](managing-users.html)
-- [Setting Up the CLI](cli-setup.html)
-
----
-
-Source: cli-recipes.md
-
-Let me explore the repository to understand the CLI structure and capabilities.Now let me read the main CLI files to understand all available commands and their options.Now let me look at the reports commands and understand how the metadata import file format works:Now let me look at the config file example more carefully:Now let me check the output module to see how CSV/JSON output works:Now let me check what test files look like for CLI:
-
-## Related Pages
-
-- [CLI Command Reference](cli-reference.html)
-- [Setting Up the CLI](cli-setup.html)
-- [Analyzing Test Failures](analyzing-failures.html)
-- [Tracking Failure History and Reports](tracking-history.html)
-- [Reviewing Analysis Results](reviewing-results.html)
-
----
-
-Source: api-reference.md
-
-Let me start by reading the knowledge graph and the pages manifest, then explore the codebase systematically.Now let me read the main source files to understand all API endpoints:Now let me read more of main.py to get all the endpoint definitions:Now I have a comprehensive view of all endpoints. Let me also quickly check the config for settings details and authentication patterns:
-
-## Related Pages
-
-- [CLI Command Reference](cli-reference.html)
-- [Environment Variables and Configuration](environment-variables.html)
-- [Managing Users and Roles](managing-users.html)
-- [Configuring Integrations](configuring-integrations.html)
-- [Analyzing Test Failures](analyzing-failures.html)
-
----
-
-Source: cli-reference.md
-
-# CLI Command Reference
-
-Complete reference for all `rootcoz` CLI commands and subcommands. For installation and initial setup, see [Setting Up the CLI](cli-setup.html). For copy-paste workflow examples, see [CLI Recipes](cli-recipes.html).
-
-## Global Options
-
-These options apply to all commands and must appear **before** the subcommand.
-
-| Option | Type | Default | Env Var | Description |
-|--------|------|---------|---------|-------------|
-| `--server`, `-s` | string | *(from config)* | `ROOTCOZ_SERVER` | Server name from config file or full URL |
-| `--json` | flag | `false` | — | Output as JSON instead of table |
-| `--user` | string | `""` | `ROOTCOZ_USERNAME` | Username for authenticated actions |
-| `--api-key` | string | `""` | `ROOTCOZ_API_KEY` | API key for Bearer token authentication |
-| `--no-verify-ssl` | flag | *(from config)* | `ROOTCOZ_NO_VERIFY_SSL` | Disable SSL certificate verification |
-| `--verify-ssl` | flag | — | — | Force SSL verification on (overrides config) |
-| `--insecure` | flag | `false` | — | Alias for `--no-verify-ssl` |
-
-> **Note:** `--verify-ssl` and `--insecure` are mutually exclusive.
-
-```bash
-# Use a named server from config
-rootcoz -s production results list
-
-# Use a direct URL
-rootcoz -s https://rootcoz.example.com results list
-
-# JSON output with API key
-rootcoz --json --api-key sk-abc123 results list
-```
-
-Server resolution priority (highest to lowest):
-1. CLI flags / environment variables
-2. Config file (`~/.config/rootcoz/config.toml`)
-
----
-
-## analyze
-
-Submit an analysis job (Jenkins build or JUnit XML file). Requires **operator** role or higher.
-
-```
-rootcoz analyze [OPTIONS]
-```
-
-### Source Options
-
-| Option | Type | Default | Description |
-|--------|------|---------|-------------|
-| `--source` | string | `jenkins` | Analysis source: `jenkins` or `file` |
-| `--job-name`, `-j` | string | — | Jenkins job name (required for `--source jenkins`) |
-| `--build-number`, `-b` | int | — | Build number (required for `--source jenkins`) |
-| `--file`, `-f` | string | — | Path to JUnit XML file (required for `--source file`) |
-| `--name`, `-n` | string | *(job_name)* | Display name on the dashboard |
-| `--tag` | string | *(repeatable)* | Tag for categorization (can be specified multiple times) |
-
-### AI Options
-
-| Option | Type | Default | Env Var | Description |
-|--------|------|---------|---------|-------------|
-| `--provider` | string | *(server default)* | — | AI provider (`claude`, `gemini`, `cursor`) |
-| `--model` | string | *(server default)* | — | AI model to use |
-| `--ai-call-timeout` | int | *(server default)* | — | AI call timeout in minutes |
-| `--max-concurrent` | int | `0` (server default) | — | Max concurrent AI calls |
-| `--raw-prompt` | string | `""` | — | Additional AI instructions appended to prompt |
-| `--issue-prompt` | string | `""` | — | Custom issue generation prompt |
-
-### Peer Analysis Options
-
-| Option | Type | Default | Description |
-|--------|------|---------|-------------|
-| `--peers` | string | *(config)* | Peer AI configs as `provider:model,provider:model` |
-| `--peer-analysis-max-rounds` | int | `3` | Maximum debate rounds (1–10) |
-
-### Jenkins Options
-
-| Option | Type | Default | Env Var | Description |
-|--------|------|---------|---------|-------------|
-| `--jenkins-url` | string | *(config)* | `JENKINS_URL` | Jenkins server URL |
-| `--jenkins-user` | string | *(config)* | `JENKINS_USER` | Jenkins username |
-| `--jenkins-password` | string | *(config)* | `JENKINS_PASSWORD` | Jenkins password or API token |
-| `--jenkins-ssl-verify` / `--no-jenkins-ssl-verify` | bool | *(server default)* | — | Jenkins SSL verification |
-| `--jenkins-timeout` | int | *(server default)* | — | Jenkins API timeout in seconds |
-| `--jenkins-artifacts-max-size-mb` | int | *(server default)* | — | Max artifacts size in MB |
-| `--get-job-artifacts` / `--no-get-job-artifacts` | bool | *(server default)* | — | Download build artifacts for AI context |
-| `--wait` / `--no-wait` | bool | *(server default)* | — | Wait for Jenkins job to complete |
-| `--poll-interval` | int | *(server default)* | — | Minutes between Jenkins polls |
-| `--max-wait` | int | *(server default)* | — | Max minutes to wait for completion |
-| `--force` / `--no-force` | bool | *(server default)* | — | Force analysis on successful builds |
-
-### Repository Options
-
-| Option | Type | Default | Env Var | Description |
-|--------|------|---------|---------|-------------|
-| `--tests-repo-url` | string | *(config)* | `TESTS_REPO_URL` | Tests repository URL |
-| `--tests-repo-token` | string | *(config)* | `TESTS_REPO_TOKEN` | Token for private test repos |
-| `--additional-repos` | string | *(config)* | — | Additional repos as `name:url,name:url` |
-
-### Jira Options
-
-| Option | Type | Default | Env Var | Description |
-|--------|------|---------|---------|-------------|
-| `--jira` / `--no-jira` | bool | *(server default)* | — | Enable/disable Jira integration |
-| `--jira-url` | string | *(config)* | `JIRA_URL` | Jira instance URL |
-| `--jira-email` | string | *(config)* | `JIRA_EMAIL` | Jira Cloud email |
-| `--jira-api-token` | string | *(config)* | `JIRA_API_TOKEN` | Jira Cloud API token |
-| `--jira-pat` | string | *(config)* | `JIRA_PAT` | Jira Server/DC personal access token |
-| `--jira-project-key` | string | *(config)* | `JIRA_PROJECT_KEY` | Jira project key for searches |
-| `--jira-ssl-verify` / `--no-jira-ssl-verify` | bool | *(server default)* | — | Jira SSL verification |
-| `--jira-max-results` | int | *(server default)* | — | Max Jira search results |
-
-### GitHub Option
-
-| Option | Type | Default | Env Var | Description |
-|--------|------|---------|---------|-------------|
-| `--github-token` | string | *(config)* | `GITHUB_TOKEN` | GitHub API token |
-
-```bash
-# Analyze a Jenkins build
-rootcoz analyze --source jenkins --job-name my-pipeline --build-number 42
-
-# Analyze a JUnit XML file
-rootcoz analyze --source file --file results.xml --name "nightly-run"
-
-# Analyze with specific AI provider and peer review
-rootcoz analyze -j my-pipeline -b 42 \
-  --provider claude --model claude-sonnet-4-20250514 \
-  --peers "gemini:gemini-2.5-pro,cursor:gpt-5.4-xhigh"
-
-# Analyze with tags and Jira enabled
-rootcoz analyze -j my-pipeline -b 42 --tag nightly --tag release --jira
-```
-
----
-
-## re-analyze
-
-Re-analyze a previously analyzed job using the same settings. Requires **operator** role or higher.
-
-```
-rootcoz re-analyze JOB_ID [OPTIONS]
-```
-
-| Argument | Type | Description |
-|----------|------|-------------|
-| `JOB_ID` | string | Job ID of the analysis to re-run |
-
-```bash
-rootcoz re-analyze abc123-def456
-```
-
----
-
-## status
-
-Check the current analysis status for a job.
-
-```
-rootcoz status JOB_ID [OPTIONS]
-```
-
-| Argument | Type | Description |
-|----------|------|-------------|
-| `JOB_ID` | string | Job ID to check |
-
-```bash
-rootcoz status abc123-def456
-```
-
----
-
-## abort
-
-Abort a running or waiting analysis. Requires **operator** role or higher.
-
-```
-rootcoz abort JOB_ID [OPTIONS]
-```
-
-| Argument | Type | Description |
-|----------|------|-------------|
-| `JOB_ID` | string | Job ID to abort |
-
-```bash
-rootcoz abort abc123-def456
-```
-
----
-
-## health
-
-Check server health status.
-
-```
-rootcoz health [OPTIONS]
-```
-
-```bash
-rootcoz health
-# Status: healthy
-#
-# Checks:
-#   database: healthy
-#   sidecar: healthy
-#
-# Error rate: 0.0% (0/150 in 300s window)
-
-rootcoz health --json
-```
-
----
-
-## register
-
-Register a new user and receive a one-time API key.
-
-```
-rootcoz register USERNAME [OPTIONS]
-```
-
-| Argument | Type | Description |
-|----------|------|-------------|
-| `USERNAME` | string | Username to register |
-
-> **Warning:** The API key is displayed only once at registration. Save it immediately.
-
-```bash
-rootcoz register myuser
-# Registered: myuser
-# ⚠️  Save this API key — you won't see it again!
-# API Key: sk-abc123...
-```
-
----
-
-## results
-
-Manage analysis results. All subcommands require authentication.
-
-### results list
-
-List recent analyzed jobs.
-
-```
-rootcoz results list [OPTIONS]
-```
-
-| Option | Type | Default | Description |
-|--------|------|---------|-------------|
-| `--limit`, `-l` | int | `50` | Max results to return |
-
-```bash
-rootcoz results list --limit 10
-```
-
-### results dashboard
-
-List analysis jobs with dashboard metadata (failure counts, review progress).
-
-```
-rootcoz results dashboard [OPTIONS]
-```
-
-| Option | Type | Default | Description |
-|--------|------|---------|-------------|
-| `--label`, `-l` | string | *(repeatable)* | Filter by label |
-| `--exclude-tag` | string | *(repeatable)* | Exclude results with this tag |
-
-```bash
-rootcoz results dashboard
-rootcoz results dashboard --label team:platform --exclude-tag experimental
-```
-
-### results show
-
-Show the analysis result for a specific job.
-
-```
-rootcoz results show JOB_ID [OPTIONS]
-```
-
-| Argument | Type | Description |
-|----------|------|-------------|
-| `JOB_ID` | string | Job ID to show |
-
-| Option | Type | Default | Description |
-|--------|------|---------|-------------|
-| `--full`, `-f` | flag | `false` | Show complete JSON result |
-
-```bash
-rootcoz results show abc123
-rootcoz results show abc123 --full
-```
-
-### results delete
-
-Delete one or more jobs and all related data. Requires **operator** role (own jobs) or **admin** role (any job).
-
-```
-rootcoz results delete [JOB_IDS...] [OPTIONS]
-```
-
-| Argument | Type | Description |
-|----------|------|-------------|
-| `JOB_IDS` | string(s) | One or more job IDs to delete |
-
-| Option | Type | Default | Description |
-|--------|------|---------|-------------|
-| `--all` | flag | `false` | Delete all jobs |
-| `--confirm` | flag | `false` | Confirm deletion (required with `--all`) |
-
-> **Warning:** `--all` cannot be combined with explicit job IDs.
-
-```bash
-rootcoz results delete abc123
-rootcoz results delete abc123 def456 ghi789
-rootcoz results delete --all --confirm
-```
-
-### results review-status
-
-Show review status for an analysis.
-
-```
-rootcoz results review-status JOB_ID [OPTIONS]
-```
-
-| Argument | Type | Description |
-|----------|------|-------------|
-| `JOB_ID` | string | Job ID |
-
-```bash
-rootcoz results review-status abc123
-```
-
-### results set-reviewed
-
-Set or clear the reviewed state for a test failure. Requires **reviewer** role or higher.
-
-```
-rootcoz results set-reviewed JOB_ID [OPTIONS]
-```
-
-| Argument | Type | Description |
-|----------|------|-------------|
-| `JOB_ID` | string | Job ID |
-
-| Option | Type | Default | Description |
-|--------|------|---------|-------------|
-| `--test`, `-t` | string | *(required)* | Fully qualified test name |
-| `--reviewed` / `--not-reviewed` | bool | *(required)* | Mark as reviewed or not |
-| `--child-job` | string | `""` | Child job name |
-| `--child-build` | int | `0` | Child build number |
-
-```bash
-rootcoz results set-reviewed abc123 \
-  --test com.example.MyTest#testMethod --reviewed
-
-rootcoz results set-reviewed abc123 \
-  --test com.example.MyTest#testMethod --not-reviewed
-```
-
-### results enrich-comments
-
-Enrich comments with live PR/ticket statuses.
-
-```
-rootcoz results enrich-comments JOB_ID [OPTIONS]
-```
-
-| Argument | Type | Description |
-|----------|------|-------------|
-| `JOB_ID` | string | Job ID |
-
-```bash
-rootcoz results enrich-comments abc123
-# Enriched 3 comment(s).
-```
-
----
-
-## history
-
-Query failure history for tests and jobs.
-
-### history test
-
-Show failure history for a specific test.
-
-```
-rootcoz history test TEST_NAME [OPTIONS]
-```
-
-| Argument | Type | Description |
-|----------|------|-------------|
-| `TEST_NAME` | string | Fully qualified test name |
-
-| Option | Type | Default | Description |
-|--------|------|---------|-------------|
-| `--limit`, `-l` | int | `20` | Max results |
-| `--job-name`, `-j` | string | `""` | Filter by job name |
-| `--exclude-job-id` | string | `""` | Exclude results from this job ID |
-
-```bash
-rootcoz history test com.example.MyTest#testMethod --limit 10
-rootcoz history test com.example.MyTest#testMethod --job-name my-pipeline
-```
-
-### history search
-
-Find tests that failed with the same error signature.
-
-```
-rootcoz history search [OPTIONS]
-```
-
-| Option | Type | Default | Description |
-|--------|------|---------|-------------|
-| `--signature`, `-s` | string | *(required)* | Error signature hash (SHA-256) |
-| `--exclude-job-id` | string | `""` | Exclude results from this job ID |
-
-```bash
-rootcoz history search --signature a1b2c3d4e5f6...
-```
-
-### history stats
-
-Show aggregate statistics for a Jenkins job.
-
-```
-rootcoz history stats JOB_NAME [OPTIONS]
-```
-
-| Argument | Type | Description |
-|----------|------|-------------|
-| `JOB_NAME` | string | Jenkins job name |
-
-| Option | Type | Default | Description |
-|--------|------|---------|-------------|
-| `--exclude-job-id` | string | `""` | Exclude results from this job ID |
-
-```bash
-rootcoz history stats my-pipeline
-# Job: my-pipeline
-# Builds analyzed: 45
-# Builds with failures: 12
-# Failure rate: 26.7%
-```
-
-### history failures
-
-List paginated failure history.
-
-```
-rootcoz history failures [OPTIONS]
-```
-
-| Option | Type | Default | Description |
-|--------|------|---------|-------------|
-| `--limit`, `-l` | int | `50` | Max results per page |
-| `--offset`, `-o` | int | `0` | Pagination offset |
-| `--search`, `-s` | string | `""` | Search test names |
-| `--classification`, `-c` | string | `""` | Filter by classification |
-| `--job-name`, `-j` | string | `""` | Filter by job name |
-
-```bash
-rootcoz history failures --search "MyTest" --classification "PRODUCT BUG"
-rootcoz history failures --limit 100 --offset 50
-```
-
----
-
-## classify
-
-Classify a test failure. Requires **reviewer** role or higher.
-
-```
-rootcoz classify TEST_NAME [OPTIONS]
-```
-
-| Argument | Type | Description |
-|----------|------|-------------|
-| `TEST_NAME` | string | Fully qualified test name |
-
-| Option | Type | Default | Description |
-|--------|------|---------|-------------|
-| `--type`, `-t` | string | *(required)* | Classification: `FLAKY`, `REGRESSION`, `INFRASTRUCTURE`, `KNOWN_BUG`, or `INTERMITTENT` |
-| `--job-id` | string | *(required)* | Job ID this classification applies to |
-| `--reason`, `-r` | string | `""` | Reason for classification |
-| `--job-name`, `-j` | string | `""` | Job name |
-| `--references` | string | `""` | Bug URLs or ticket keys |
-| `--child-job` | string | `""` | Child job name |
-| `--child-build` | int | `0` | Child build number |
-
-```bash
-rootcoz classify com.example.MyTest#testMethod \
-  --type KNOWN_BUG --job-id abc123 \
-  --reason "Tracked in JIRA-456" --references "JIRA-456"
-```
-
----
-
-## classifications
-
-List test classifications.
-
-### classifications list
-
-```
-rootcoz classifications list [OPTIONS]
-```
-
-| Option | Type | Default | Description |
-|--------|------|---------|-------------|
-| `--job-id` | string | `""` | Filter by job ID |
-| `--test-name`, `-t` | string | `""` | Filter by test name |
-| `--type`, `-c` | string | `""` | Filter by classification type |
-| `--job-name`, `-j` | string | `""` | Filter by job name |
-| `--parent-job-name` | string | `""` | Filter by parent job name |
-
-```bash
-rootcoz classifications list --job-id abc123
-rootcoz classifications list --type FLAKY --job-name my-pipeline
-```
-
----
-
-## comments
-
-Manage comments on test failures. Requires **reviewer** role or higher.
-
-### comments list
-
-List comments for a job.
-
-```
-rootcoz comments list JOB_ID [OPTIONS]
-```
-
-| Argument | Type | Description |
-|----------|------|-------------|
-| `JOB_ID` | string | Job ID |
-
-```bash
-rootcoz comments list abc123
-```
-
-### comments add
-
-Add a comment to a test failure.
-
-```
-rootcoz comments add JOB_ID [OPTIONS]
-```
-
-| Argument | Type | Description |
-|----------|------|-------------|
-| `JOB_ID` | string | Job ID |
-
-| Option | Type | Default | Description |
-|--------|------|---------|-------------|
-| `--test`, `-t` | string | *(required)* | Test name to comment on |
-| `--message`, `-m` | string | *(required)* | Comment text |
-| `--child-job` | string | `""` | Child job name |
-| `--child-build` | int | `0` | Child build number |
-
-```bash
-rootcoz comments add abc123 \
-  --test com.example.MyTest#testMethod \
-  --message "Fixed in PR #123"
-```
-
-### comments delete
-
-Delete a comment.
-
-```
-rootcoz comments delete JOB_ID COMMENT_ID [OPTIONS]
-```
-
-| Argument | Type | Description |
-|----------|------|-------------|
-| `JOB_ID` | string | Job ID |
-| `COMMENT_ID` | int | Comment ID to delete |
-
-```bash
-rootcoz comments delete abc123 42
-```
-
----
-
-## failure
-
-Look up and re-analyze individual failures.
-
-### failure show
-
-Show a failure analysis by its UUID.
-
-```
-rootcoz failure show FAILURE_UUID [OPTIONS]
-```
-
-| Argument | Type | Description |
-|----------|------|-------------|
-| `FAILURE_UUID` | string | UUID of the failure |
-
-```bash
-rootcoz failure show 550e8400-e29b-41d4-a716-446655440000
-```
-
-### failure re-analyze
-
-Re-analyze a single failure by its UUID. Requires **operator** role or higher.
-
-```
-rootcoz failure re-analyze FAILURE_UUID [OPTIONS]
-```
-
-| Argument | Type | Description |
-|----------|------|-------------|
-| `FAILURE_UUID` | string | UUID of the failure to re-analyze |
-
-```bash
-rootcoz failure re-analyze 550e8400-e29b-41d4-a716-446655440000
-```
-
----
-
-## override-classification
-
-Override the AI-assigned classification of a failure. Requires **reviewer** role or higher.
-
-```
-rootcoz override-classification JOB_ID [OPTIONS]
-```
-
-| Argument | Type | Description |
-|----------|------|-------------|
-| `JOB_ID` | string | Job ID |
-
-| Option | Type | Default | Description |
-|--------|------|---------|-------------|
-| `--test`, `-t` | string | *(required)* | Test name |
-| `--classification`, `-c` | string | *(required)* | `CODE ISSUE`, `PRODUCT BUG`, or `INFRASTRUCTURE` |
-| `--child-job` | string | `""` | Child job name |
-| `--child-build` | int | `0` | Child build number |
-
-```bash
-rootcoz override-classification abc123 \
-  --test com.example.MyTest#testMethod \
-  --classification "PRODUCT BUG"
-```
-
----
-
-## override-pattern
-
-Override the failure pattern of a test. Requires **reviewer** role or higher.
-
-```
-rootcoz override-pattern JOB_ID [OPTIONS]
-```
-
-| Argument | Type | Description |
-|----------|------|-------------|
-| `JOB_ID` | string | Job ID |
-
-| Option | Type | Default | Description |
-|--------|------|---------|-------------|
-| `--test`, `-t` | string | *(required)* | Test name |
-| `--pattern`, `-p` | string | *(required)* | `NEW`, `REGRESSION`, `FLAKY`, `INTERMITTENT`, `KNOWN_BUG`, or `PERSISTENT` |
-| `--child-job` | string | `""` | Child job name |
-| `--child-build` | int | `0` | Child build number |
-
-```bash
-rootcoz override-pattern abc123 \
-  --test com.example.MyTest#testMethod \
-  --pattern FLAKY
-```
-
----
-
-## analyze-comment-intent
-
-Analyze whether a comment suggests a failure has been reviewed or resolved.
-
-```
-rootcoz analyze-comment-intent COMMENT [OPTIONS]
-```
-
-| Argument | Type | Description |
-|----------|------|-------------|
-| `COMMENT` | string | Comment text to analyze |
-
-| Option | Type | Default | Description |
-|--------|------|---------|-------------|
-| `--job-id` | string | `""` | Job ID to resolve AI config from |
-| `--ai-provider` | string | `""` | AI provider |
-| `--ai-model` | string | `""` | AI model |
-
-```bash
-rootcoz analyze-comment-intent "Fixed in PR #456, merging now"
-# Suggests reviewed: True
-# Reason: Comment indicates a fix has been implemented
-```
-
----
-
-## chat
-
-Chat with AI about analyzed jobs. Requires **reviewer** role or higher.
-
-### chat init
-
-Initialize chat workspace and clone repos.
-
-```
-rootcoz chat init JOB_ID [OPTIONS]
-```
-
-| Argument | Type | Description |
-|----------|------|-------------|
-| `JOB_ID` | string | Job ID to initialize chat for |
-
-```bash
-rootcoz chat init abc123
-# Ready: True
-# Repos: tests-repo, infra-repo
-```
-
-### chat send
-
-Send a chat message and wait for the AI response. Polls for up to ~2 minutes.
-
-```
-rootcoz chat send JOB_ID MESSAGE [OPTIONS]
-```
-
-| Argument | Type | Description |
-|----------|------|-------------|
-| `JOB_ID` | string | Job ID to chat about |
-| `MESSAGE` | string | Message to send |
-
-| Option | Type | Default | Description |
-|--------|------|---------|-------------|
-| `--provider`, `-p` | string | *(server default)* | AI provider |
-| `--model`, `-m` | string | *(server default)* | AI model |
-
-```bash
-rootcoz chat send abc123 "Why does testLogin fail with timeout?"
-```
-
-### chat history
-
-Show chat history for an analyzed job.
-
-```
-rootcoz chat history JOB_ID [OPTIONS]
-```
-
-| Argument | Type | Description |
-|----------|------|-------------|
-| `JOB_ID` | string | Job ID |
-
-| Option | Type | Default | Description |
-|--------|------|---------|-------------|
-| `--limit`, `-l` | int | `200` | Maximum messages to return |
-
-```bash
-rootcoz chat history abc123
-```
-
-### chat abort
-
-Abort the currently processing chat message.
-
-```
-rootcoz chat abort JOB_ID [OPTIONS]
-```
-
-| Argument | Type | Description |
-|----------|------|-------------|
-| `JOB_ID` | string | Job ID |
-
-```bash
-rootcoz chat abort abc123
-```
-
-### chat clear
-
-Clear all chat history for a job.
-
-```
-rootcoz chat clear JOB_ID [OPTIONS]
-```
-
-| Argument | Type | Description |
-|----------|------|-------------|
-| `JOB_ID` | string | Job ID |
-
-```bash
-rootcoz chat clear abc123
-# Deleted 15 message(s) for job abc123.
-```
-
-### chat close
-
-Signal that you left the chat page (frees server resources).
-
-```
-rootcoz chat close JOB_ID [OPTIONS]
-```
-
-| Argument | Type | Description |
-|----------|------|-------------|
-| `JOB_ID` | string | Job ID |
-
-```bash
-rootcoz chat close abc123
-```
-
----
-
-## metadata
-
-Manage job metadata for filtering and reporting. See [Tracking Failure History and Reports](tracking-history.html) for usage context.
-
-### metadata list
-
-List job metadata with optional filters.
-
-```
-rootcoz metadata list [OPTIONS]
-```
-
-| Option | Type | Default | Description |
-|--------|------|---------|-------------|
-| `--team` | string | `""` | Filter by team |
-| `--tier` | string | `""` | Filter by tier |
-| `--version` | string | `""` | Filter by version |
-| `--label`, `-l` | string | *(repeatable)* | Filter by label |
-
-```bash
-rootcoz metadata list --team platform
-rootcoz metadata list --label env:staging --label product:core
-```
-
-### metadata get
-
-Show metadata for a specific job.
-
-```
-rootcoz metadata get JOB_NAME [OPTIONS]
-```
-
-| Argument | Type | Description |
-|----------|------|-------------|
-| `JOB_NAME` | string | Job name |
-
-```bash
-rootcoz metadata get my-pipeline
-```
-
-### metadata set
-
-Set or update metadata for a job.
-
-```
-rootcoz metadata set JOB_NAME [OPTIONS]
-```
-
-| Argument | Type | Description |
-|----------|------|-------------|
-| `JOB_NAME` | string | Job name |
-
-| Option | Type | Default | Description |
-|--------|------|---------|-------------|
-| `--team` | string | `""` | Team owning this job |
-| `--tier` | string | `""` | Service tier |
-| `--version` | string | `""` | Version label |
-| `--label`, `-l` | string | *(repeatable)* | Label to set |
-
-```bash
-rootcoz metadata set my-pipeline --team platform --tier tier1 --label env:prod
-```
-
-### metadata delete
-
-Delete metadata for a job.
-
-```
-rootcoz metadata delete JOB_NAME [OPTIONS]
-```
-
-| Argument | Type | Description |
-|----------|------|-------------|
-| `JOB_NAME` | string | Job name |
-
-```bash
-rootcoz metadata delete my-pipeline
-```
-
-### metadata import
-
-Bulk import metadata from a JSON or YAML file.
-
-```
-rootcoz metadata import FILE_PATH [OPTIONS]
-```
-
-| Argument | Type | Description |
-|----------|------|-------------|
-| `FILE_PATH` | string | Path to JSON or YAML file |
-
-The file must contain an array of objects with fields: `job_name`, `team`, `tier`, `version`, `labels`.
-
-```bash
-# metadata.yaml
-# - job_name: pipeline-a
-#   team: platform
-#   tier: tier1
-#   labels: ["env:prod"]
-# - job_name: pipeline-b
-#   team: infra
-#   tier: tier2
-
-rootcoz metadata import metadata.yaml
-# Imported 2 metadata entries.
-```
-
-### metadata rules
-
-List configured metadata rules for auto-assignment.
-
-```
-rootcoz metadata rules [OPTIONS]
-```
-
-```bash
-rootcoz metadata rules
-# Rules file: /etc/rootcoz/metadata-rules.yaml
-# 3 rule(s):
-#   1. pattern='.*-nightly', team='platform', tier='tier1'
-#   2. pattern='smoke-.*', team='qa'
-```
-
-### metadata preview
-
-Preview what metadata rules would assign to a job name.
-
-```
-rootcoz metadata preview JOB_NAME [OPTIONS]
-```
-
-| Argument | Type | Description |
-|----------|------|-------------|
-| `JOB_NAME` | string | Job name to test rules against |
-
-```bash
-rootcoz metadata preview my-nightly-pipeline
-# Match for 'my-nightly-pipeline':
-#   team: platform
-#   tier: tier1
-```
-
----
-
-## Bug Creation Commands
-
-For details on issue creation workflows, see [Creating Bug Reports from Analysis](creating-issues.html).
-
-### preview-issue
-
-Preview AI-generated issue content (GitHub or Jira) before creating.
-
-```
-rootcoz preview-issue JOB_ID [OPTIONS]
-```
-
-| Argument | Type | Description |
-|----------|------|-------------|
-| `JOB_ID` | string | Job ID |
-
-| Option | Type | Default | Description |
-|--------|------|---------|-------------|
-| `--test`, `-t` | string | *(required)* | Test name |
-| `--type` | string | *(required)* | `github` or `jira` |
-| `--child-job` | string | `""` | Child job name |
-| `--child-build` | int | `0` | Child build number |
-| `--include-links` | flag | `false` | Include full URLs as clickable links |
-| `--ai-provider` | string | `""` | AI provider for content generation |
-| `--ai-model` | string | `""` | AI model for content generation |
-| `--github-token` | string | *(config)* | GitHub PAT |
-| `--github-repo-url` | string | *(config)* | GitHub repository URL |
-| `--jira-token` | string | *(config)* | Jira token |
-| `--jira-email` | string | *(config)* | Jira email for Cloud auth |
-| `--jira-project-key` | string | *(config)* | Jira project key |
-| `--jira-security-level` | string | *(config)* | Jira security level name |
-| `--issue-prompt` | string | `""` | Additional AI instructions |
-
-```bash
-rootcoz preview-issue abc123 \
-  --test com.example.MyTest#testMethod \
-  --type github
-```
-
-### create-issue
-
-Create a GitHub issue or Jira bug from a failure analysis.
-
-```
-rootcoz create-issue JOB_ID [OPTIONS]
-```
-
-| Argument | Type | Description |
-|----------|------|-------------|
-| `JOB_ID` | string | Job ID |
-
-| Option | Type | Default | Description |
-|--------|------|---------|-------------|
-| `--test`, `-t` | string | *(required)* | Test name |
-| `--type` | string | *(required)* | `github` or `jira` |
-| `--title` | string | *(required)* | Issue title |
-| `--body` | string | *(required)* | Issue body |
-| `--child-job` | string | `""` | Child job name |
-| `--child-build` | int | `0` | Child build number |
-| `--github-token` | string | *(config)* | GitHub PAT |
-| `--github-repo-url` | string | *(config)* | GitHub repository URL |
-| `--jira-token` | string | *(config)* | Jira token |
-| `--jira-email` | string | *(config)* | Jira email |
-| `--jira-project-key` | string | *(config)* | Jira project key |
-| `--jira-security-level` | string | *(config)* | Jira security level name |
-| `--jira-issue-type` | string | `Bug` | Jira issue type (e.g. Bug, Story, Task) |
-
-```bash
-rootcoz create-issue abc123 \
-  --test com.example.MyTest#testMethod \
-  --type github \
-  --title "testMethod fails with NullPointerException" \
-  --body "## Description\n\nTest fails intermittently..."
-```
-
-### get-issue-prompt
-
-Get the issue prompt from the test repo associated with a job.
-
-```
-rootcoz get-issue-prompt JOB_ID [OPTIONS]
-```
-
-| Argument | Type | Description |
-|----------|------|-------------|
-| `JOB_ID` | string | Job ID |
-
-```bash
-rootcoz get-issue-prompt abc123
-```
-
----
-
-## validate-token
-
-Validate a GitHub or Jira token. The token is prompted securely (hidden input).
-
-```
-rootcoz validate-token TOKEN_TYPE [OPTIONS]
-```
-
-| Argument | Type | Description |
-|----------|------|-------------|
-| `TOKEN_TYPE` | string | `github` or `jira` |
-
-| Option | Type | Default | Description |
-|--------|------|---------|-------------|
-| `--token` | string | *(prompted)* | Token value to validate |
-| `--email` | string | `""` | Email for Jira Cloud auth |
-
-```bash
-rootcoz validate-token github --token ghp_abc123
-# ✓ Valid — Token has repo scope
-
-rootcoz validate-token jira --token jira-token --email user@example.com
-# ✗ Invalid — Authentication failed
-```
-
----
-
-## push-reportportal
-
-Push rootcoz classifications into Report Portal test items. Requires Report Portal to be enabled on the server. See [Configuring Integrations](configuring-integrations.html) for setup.
-
-```
-rootcoz push-reportportal JOB_ID [OPTIONS]
-```
-
-| Argument | Type | Description |
-|----------|------|-------------|
-| `JOB_ID` | string | Job ID to push classifications for |
-
-| Option | Type | Default | Description |
-|--------|------|---------|-------------|
-| `--child-job-name` | string | — | Child job name (for pipeline child push) |
-| `--child-build-number` | int | — | Child build number |
-
-> **Tip:** `push-rp` is a hidden alias for `push-reportportal`.
-
-```bash
-rootcoz push-reportportal abc123
-# Pushed 12 classification(s) to Report Portal
-# Launch ID: 456
-```
-
----
-
-## capabilities
-
-Show which post-analysis automation features the server supports.
-
-```
-rootcoz capabilities [OPTIONS]
-```
-
-```bash
-rootcoz capabilities --json
-# {"github_issues": true, "jira_bugs": true, "reportportal": false}
-```
-
----
-
-## ai-models
-
-List available AI models by provider.
-
-```
-rootcoz ai-models [OPTIONS]
-```
-
-| Option | Type | Default | Description |
-|--------|------|---------|-------------|
-| `--provider`, `-p` | string | *(all)* | Filter by provider (`cursor`, `claude`, `gemini`) |
-
-```bash
-rootcoz ai-models
-# cursor (3 models):
-# MODEL ID              DISPLAY NAME
-# gpt-5.4-xhigh        GPT-5.4 XHigh
-# ...
-
-rootcoz ai-models --provider claude
-```
-
----
-
-## jira-projects
-
-List available Jira projects.
-
-```
-rootcoz jira-projects [OPTIONS]
-```
-
-| Option | Type | Default | Description |
-|--------|------|---------|-------------|
-| `--query` | string | `""` | Search query to filter projects |
-| `--jira-token` | string | *(config)* | Jira token |
-| `--jira-email` | string | *(config)* | Jira email |
-
-```bash
-rootcoz jira-projects --query "platform"
-```
-
----
-
-## jira-security-levels
-
-List security levels for a Jira project.
-
-```
-rootcoz jira-security-levels PROJECT_KEY [OPTIONS]
-```
-
-| Argument | Type | Description |
-|----------|------|-------------|
-| `PROJECT_KEY` | string | Jira project key |
-
-| Option | Type | Default | Description |
-|--------|------|---------|-------------|
-| `--jira-token` | string | *(config)* | Jira token |
-| `--jira-email` | string | *(config)* | Jira email |
-
-```bash
-rootcoz jira-security-levels MYPROJ
-```
-
----
-
-## Mentions
-
-### mentionable-users
-
-List users that can be @mentioned in comments.
-
-```
-rootcoz mentionable-users [OPTIONS]
-```
-
-```bash
-rootcoz mentionable-users
-# alice
-# bob
-# charlie
-```
-
-### mentions
-
-List your @mentions across all reports.
-
-```
-rootcoz mentions [OPTIONS]
-```
-
-| Option | Type | Default | Description |
-|--------|------|---------|-------------|
-| `--limit`, `-l` | int | `50` | Max mentions to return |
-| `--offset`, `-o` | int | `0` | Pagination offset |
-| `--unread` | flag | `false` | Show only unread mentions |
-
-```bash
-rootcoz mentions --unread
-```
-
-### mentions-mark-read
-
-Mark specific mentions as read.
-
-```
-rootcoz mentions-mark-read [OPTIONS]
-```
-
-| Option | Type | Default | Description |
-|--------|------|---------|-------------|
-| `--ids` | string | *(required)* | Comma-separated comment IDs |
-
-```bash
-rootcoz mentions-mark-read --ids "42,43,44"
-```
-
-### mentions-mark-all-read
-
-Mark all mentions as read.
-
-```
-rootcoz mentions-mark-all-read [OPTIONS]
-```
-
-```bash
-rootcoz mentions-mark-all-read
-```
-
----
-
-## reports
-
-Analytics reports. See [Tracking Failure History and Reports](tracking-history.html) for usage context.
-
-All report subcommands share the same filter options:
-
-| Option | Type | Default | Description |
-|--------|------|---------|-------------|
-| `--team` | string | `""` | Filter by team |
-| `--tier` | string | `""` | Filter by tier |
-| `--version` | string | `""` | Filter by version |
-| `--from` | string | `""` | From date (`YYYY-MM-DD`) |
-| `--to` | string | `""` | To date (`YYYY-MM-DD`) |
-| `--status` | string | `""` | Filter by job status |
-| `--tags` | string | `""` | Comma-separated tags filter |
-| `--exclude-tags` | string | `""` | Comma-separated tags to exclude |
-
-### reports totals
-
-Show aggregate totals: jobs, failures, reviewed.
-
-```
-rootcoz reports totals [OPTIONS]
-```
-
-```bash
-rootcoz reports totals --team platform --from 2026-06-01
-# Total jobs: 45  Failures: 120  Reviewed: 98
-```
-
-### reports overrides
-
-Show classification overrides grouped by original→new classification.
-
-```
-rootcoz reports overrides [OPTIONS]
-```
-
-```bash
-rootcoz reports overrides --from 2026-06-01
-# Total overrides: 15
-#   CODE ISSUE → PRODUCT BUG: 8
-#   INFRASTRUCTURE → CODE ISSUE: 7
-```
-
-### reports issues
-
-Show GitHub/Jira issues created from analyses.
-
-```
-rootcoz reports issues [OPTIONS]
-```
-
-```bash
-rootcoz reports issues --team platform --from 2026-06-01
-# Total issues created: 12
-```
-
----
-
-## auth
-
-Authentication commands. See [Managing Users and Roles](managing-users.html) for role details.
-
-### auth login
-
-Validate credentials. This does **not** persist a session — use `api_key` in config or `--api-key` / `ROOTCOZ_API_KEY` for persistent auth.
-
-```
-rootcoz auth login [OPTIONS]
-```
-
-| Option | Type | Default | Description |
-|--------|------|---------|-------------|
-| `--username`, `-u` | string | *(required)* | Username |
-| `--api-key`, `-k` | string | *(required)* | API key |
-
-```bash
-rootcoz auth login -u myuser -k sk-abc123
-# Logged in as myuser (role: reviewer, admin: False)
-```
-
-### auth rotate-key
-
-Rotate your own API key. The new key is displayed once.
-
-```
-rootcoz auth rotate-key [OPTIONS]
-```
-
-> **Warning:** The new key replaces the old one immediately. Save it before closing the terminal.
-
-```bash
-rootcoz auth rotate-key
-# Key rotated for: myuser
-# ⚠️  Save this API key — you won't see it again!
-# API Key: sk-newkey...
-```
-
-### auth whoami
-
-Show current authenticated user info.
-
-```
-rootcoz auth whoami [OPTIONS]
-```
-
-```bash
-rootcoz auth whoami
-# USERNAME  ROLE      IS ADMIN
-# myuser    reviewer  False
-```
-
-### auth logout
-
-Logout (clear session).
-
-```
-rootcoz auth logout [OPTIONS]
-```
-
-```bash
-rootcoz auth logout
-```
-
----
-
-## admin
-
-Admin management commands. All admin commands require **admin** role. See [Managing Users and Roles](managing-users.html) for role management details.
-
-### admin users list
-
-List all users (admin and regular).
-
-```
-rootcoz admin users list [OPTIONS]
-```
-
-```bash
-rootcoz admin users list
-```
-
-### admin users create
-
-Create a new user with the specified role.
-
-```
-rootcoz admin users create USERNAME [OPTIONS]
-```
-
-| Argument | Type | Description |
-|----------|------|-------------|
-| `USERNAME` | string | Username for the new user |
-
-| Option | Type | Default | Description |
-|--------|------|---------|-------------|
-| `--role` | string | *(required)* | `viewer`, `reviewer`, `operator`, or `admin` |
-
-```bash
-rootcoz admin users create alice --role operator
-```
-
-### admin users delete
-
-Delete a user.
-
-```
-rootcoz admin users delete USERNAME [OPTIONS]
-```
-
-| Argument | Type | Description |
-|----------|------|-------------|
-| `USERNAME` | string | Username to delete |
-
-| Option | Type | Default | Description |
-|--------|------|---------|-------------|
-| `--force`, `-f` | flag | `false` | Skip confirmation prompt |
-
-```bash
-rootcoz admin users delete alice --force
-```
-
-### admin users rotate-key
-
-Rotate a user's API key.
-
-```
-rootcoz admin users rotate-key USERNAME [OPTIONS]
-```
-
-| Argument | Type | Description |
-|----------|------|-------------|
-| `USERNAME` | string | Username to rotate key for |
-
-```bash
-rootcoz admin users rotate-key alice
-```
-
-### admin users change-role
-
-Change a user's role. Promoting to admin generates an API key.
-
-```
-rootcoz admin users change-role USERNAME ROLE [OPTIONS]
-```
-
-| Argument | Type | Description |
-|----------|------|-------------|
-| `USERNAME` | string | Username to change role for |
-| `ROLE` | string | New role: `viewer`, `reviewer`, `operator`, or `admin` |
-
-```bash
-rootcoz admin users change-role alice admin
-```
-
-### admin users pending
-
-List users awaiting admin approval.
-
-```
-rootcoz admin users pending [OPTIONS]
-```
-
-```bash
-rootcoz admin users pending
-```
-
-### admin users approve
-
-Approve a pending user registration.
-
-```
-rootcoz admin users approve USERNAME [OPTIONS]
-```
-
-| Argument | Type | Description |
-|----------|------|-------------|
-| `USERNAME` | string | Username to approve |
-
-```bash
-rootcoz admin users approve alice
-```
-
-### admin users reject
-
-Reject a pending user registration.
-
-```
-rootcoz admin users reject USERNAME [OPTIONS]
-```
-
-| Argument | Type | Description |
-|----------|------|-------------|
-| `USERNAME` | string | Username to reject |
-
-```bash
-rootcoz admin users reject spammer
-```
-
----
-
-## admin settings
-
-Manage server settings at runtime. See [Environment Variables and Configuration](environment-variables.html) for the full list of settings.
-
-### admin settings list
-
-List all server settings with current values and sources.
-
-```
-rootcoz admin settings list [OPTIONS]
-```
-
-| Option | Type | Default | Description |
-|--------|------|---------|-------------|
-| `--category`, `-c` | string | *(all)* | Filter by category |
-| `--reveal` | flag | `false` | Show sensitive values (default: masked) |
-
-```bash
-rootcoz admin settings list --category jenkins
-rootcoz admin settings list --reveal
-```
-
-### admin settings set
-
-Set a server setting (persisted to DB, overrides env var).
-
-```
-rootcoz admin settings set KEY VALUE [OPTIONS]
-```
-
-| Argument | Type | Description |
-|----------|------|-------------|
-| `KEY` | string | Setting key (e.g. `jenkins_url` or `JENKINS_URL`) |
-| `VALUE` | string | New value |
-
-```bash
-rootcoz admin settings set jenkins_url https://jenkins.example.com
-```
-
-### admin settings reset
-
-Reset a server setting to its environment variable or default value (removes DB override).
-
-```
-rootcoz admin settings reset KEY [OPTIONS]
-```
-
-| Argument | Type | Description |
-|----------|------|-------------|
-| `KEY` | string | Setting key to reset |
-
-```bash
-rootcoz admin settings reset jenkins_url
-```
-
-### admin settings history
-
-Show server settings change history.
-
-```
-rootcoz admin settings history [OPTIONS]
-```
-
-| Option | Type | Default | Description |
-|--------|------|---------|-------------|
-| `--key`, `-k` | string | *(all)* | Filter by setting key |
-| `--limit`, `-l` | int | `50` | Max entries to return |
-
-```bash
-rootcoz admin settings history --key jenkins_url --limit 10
-```
-
----
-
-## admin token-usage
-
-View AI token usage and costs. Admin only.
-
-```
-rootcoz admin token-usage [OPTIONS]
-```
-
-| Option | Type | Default | Description |
-|--------|------|---------|-------------|
-| `--period` | string | — | `today`, `week`, `month`, or `all` |
-| `--start-date` | string | — | Start date (`YYYY-MM-DD`) |
-| `--end-date` | string | — | End date (`YYYY-MM-DD`) |
-| `--provider` | string | — | Filter by AI provider |
-| `--model` | string | — | Filter by AI model |
-| `--call-type` | string | — | Filter by call type |
-| `--group-by` | string | — | Group by: `provider`, `model`, `call_type`, `day`, `week`, `month`, `job` |
-| `--job-id` | string | — | Get usage for a specific job |
-| `--format` | string | `table` | Output format: `table`, `json`, or `csv` |
-
-When invoked with no options, shows a dashboard summary (today, this week, this month).
-
-```bash
-# Dashboard summary
-rootcoz admin token-usage
-
-# Usage for this week, grouped by model
-rootcoz admin token-usage --period week --group-by model
-
-# CSV export for a date range
-rootcoz admin token-usage --start-date 2026-06-01 --end-date 2026-06-22 --format csv
-
-# Per-job token usage
-rootcoz admin token-usage --job-id abc123
-```
-
----
-
-## admin-chat
-
-Admin server-wide chat with AI. The admin chat has access to database queries and report generation tools. Requires **admin** role.
-
-### admin-chat send
-
-Send a message to the admin server chat. Polls for up to ~2 minutes for the AI response.
-
-```
-rootcoz admin-chat send MESSAGE [OPTIONS]
-```
-
-| Argument | Type | Description |
-|----------|------|-------------|
-| `MESSAGE` | string | Message to send |
-
-| Option | Type | Default | Description |
-|--------|------|---------|-------------|
-| `--provider`, `-p` | string | *(server default)* | AI provider |
-| `--model`, `-m` | string | *(server default)* | AI model |
-
-```bash
-rootcoz admin-chat send "What are the top 5 flakiest tests this month?"
-```
-
-### admin-chat history
-
-Show admin chat history.
-
-```
-rootcoz admin-chat history [OPTIONS]
-```
-
-| Option | Type | Default | Description |
-|--------|------|---------|-------------|
-| `--limit`, `-l` | int | `200` | Maximum messages to return |
-
-```bash
-rootcoz admin-chat history
-```
-
-### admin-chat clear
-
-Clear admin chat history.
-
-```
-rootcoz admin-chat clear [OPTIONS]
-```
-
-```bash
-rootcoz admin-chat clear
-# Cleared 24 messages.
-```
-
-### admin-chat save-artifact
-
-Save an HTML file as an admin chat report artifact.
-
-```
-rootcoz admin-chat save-artifact HTML_FILE [OPTIONS]
-```
-
-| Argument | Type | Description |
-|----------|------|-------------|
-| `HTML_FILE` | path | Path to the HTML file to upload |
-
-| Option | Type | Default | Description |
-|--------|------|---------|-------------|
-| `--filename`, `-f` | string | *(input file name)* | Artifact filename |
-
-```bash
-rootcoz admin-chat save-artifact report.html --filename "weekly-summary.html"
-```
-
-### admin-chat download-artifact
-
-Download an admin chat report artifact.
-
-```
-rootcoz admin-chat download-artifact ARTIFACT_ID [OPTIONS]
-```
-
-| Argument | Type | Description |
-|----------|------|-------------|
-| `ARTIFACT_ID` | string | Artifact UUID to download |
-
-| Option | Type | Default | Description |
-|--------|------|---------|-------------|
-| `--output`, `-o` | string | `report-<id>.html` | Output file path |
-
-```bash
-rootcoz admin-chat download-artifact a1b2c3d4 -o summary.html
-# Downloaded to summary.html (15234 bytes)
-```
-
----
-
-## config
-
-Manage rootcoz CLI configuration. Does not require a server connection.
-
-### config show
-
-Show current configuration (default when running `rootcoz config` with no subcommand).
-
-```
-rootcoz config show
-```
-
-```bash
-rootcoz config show
-# Config file: /home/user/.config/rootcoz/config.toml
-# Default server: dev
-#
-# Servers (2):
-#   dev *: http://localhost:8000 user=myuser
-#   prod: https://rootcoz.example.com (no-verify-ssl)
-```
-
-### config servers
-
-List configured servers.
-
-```
-rootcoz config servers [OPTIONS]
-```
-
-```bash
-rootcoz config servers
-rootcoz config servers --json
-```
-
-### config completion
-
-Show shell completion setup instructions.
-
-```
-rootcoz config completion [SHELL]
-```
-
-| Argument | Type | Default | Description |
-|----------|------|---------|-------------|
-| `SHELL` | string | `zsh` | Shell type: `bash` or `zsh` |
-
-```bash
-rootcoz config completion zsh
-# Add to ~/.zshrc:
-# if command -v rootcoz &> /dev/null; then
-#   eval "$(rootcoz --show-completion zsh)"
-# fi
-```
-
----
-
-## Configuration File Reference
-
-The CLI reads configuration from `$XDG_CONFIG_HOME/rootcoz/config.toml` (defaults to `~/.config/rootcoz/config.toml`). See [Setting Up the CLI](cli-setup.html) for setup instructions.
-
-### File Structure
-
-```toml
-[default]
-server = "dev"                    # Default server name
-
-[defaults]                         # Shared settings for all servers
-username = "myuser"
-ai_provider = "claude"
-
-[servers.dev]
-url = "http://localhost:8000"
-api_key = "sk-abc123"
-
-[servers.prod]
-url = "https://rootcoz.example.com"
-no_verify_ssl = true
-username = "produser"
-api_key = "sk-prod456"
-```
-
-### Per-Server Config Fields
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `url` | string | *(required)* | Server URL |
-| `username` | string | `""` | Username |
-| `api_key` | string | `""` | API key for authentication |
-| `no_verify_ssl` | bool | `false` | Disable SSL verification |
-| `ai_provider` | string | `""` | Default AI provider |
-| `ai_model` | string | `""` | Default AI model |
-| `ai_call_timeout` | int | `0` | AI call timeout (0 = server default) |
-| `max_concurrent_ai_calls` | int | `0` | Max concurrent AI calls (0 = server default) |
-| `jenkins_url` | string | `""` | Jenkins server URL |
-| `jenkins_user` | string | `""` | Jenkins username |
-| `jenkins_password` | string | `""` | Jenkins password/token |
-| `jenkins_ssl_verify` | bool | — | Jenkins SSL verification |
-| `jenkins_timeout` | int | `0` | Jenkins API timeout (0 = server default) |
-| `tests_repo_url` | string | `""` | Tests repository URL |
-| `tests_repo_token` | string | `""` | Private test repo token |
-| `jira_url` | string | `""` | Jira instance URL |
-| `jira_email` | string | `""` | Jira Cloud email |
-| `jira_api_token` | string | `""` | Jira Cloud API token |
-| `jira_pat` | string | `""` | Jira Server/DC PAT |
-| `jira_token` | string | `""` | Jira token (generic) |
-| `jira_project_key` | string | `""` | Jira project key |
-| `jira_security_level` | string | `""` | Jira security level name |
-| `jira_ssl_verify` | bool | — | Jira SSL verification |
-| `jira_max_results` | int | `0` | Max Jira search results (0 = server default) |
-| `enable_jira` | bool | — | Enable/disable Jira integration |
-| `github_token` | string | `""` | GitHub API token |
-| `github_repo_url` | string | `""` | GitHub repository URL |
-| `peers` | string | `""` | Peer configs: `provider:model,provider:model` |
-| `peer_analysis_max_rounds` | int | `0` | Max peer debate rounds (0 = server default) |
-| `additional_repos` | string | `""` | Additional repos: `name:url,name:url` |
-| `wait_for_completion` | bool | — | Wait for Jenkins job completion |
-| `poll_interval_minutes` | int | `0` | Jenkins poll interval (0 = server default) |
-| `max_wait_minutes` | int | `0` | Max wait time (0 = server default) |
-| `force` | bool | — | Force analysis on successful builds |
-
-> **Note:** Fields in the `[defaults]` section apply to all servers unless overridden in a specific `[servers.<name>]` section. The `server` field is only valid in `[default]`, not in `[defaults]`.
-
----
-
-## Output Formats
-
-All commands support `--json` for machine-readable output. Without `--json`, output is displayed as aligned text tables.
-
-```bash
-# Table output (default)
-rootcoz results list
-# JOB ID    STATUS     JENKINS URL                    CREATED
-# abc123    completed  https://jenkins.example.com/…  2026-06-22T10:30:00
-
-# JSON output
-rootcoz results list --json
-# [{"job_id": "abc123", "status": "completed", ...}]
-```
-
-The `admin token-usage` command additionally supports `--format csv` for CSV export.
-
----
-
-## Exit Codes
-
-| Code | Meaning |
-|------|---------|
-| `0` | Success |
-| `1` | Error (API error, validation failure, connection failure) |
-
-On HTTP 401 errors, the CLI prints a hint about API key authentication. On HTTP 403 errors, it suggests contacting an administrator for role elevation.
-
----
-
-## Role Requirements
-
-Commands require minimum roles as defined in the RBAC system. See [Managing Users and Roles](managing-users.html) for full details.
-
-| Role | Permitted Actions |
-|------|------------------|
-| **viewer** | `results list`, `results show`, `results dashboard`, `status`, `health`, `history *`, `classifications list`, `comments list`, `config *` |
-| **reviewer** | All viewer actions, plus: `comments add/delete`, `classify`, `override-classification`, `override-pattern`, `results set-reviewed`, `chat *`, `mentions *` |
-| **operator** | All reviewer actions, plus: `analyze`, `re-analyze`, `abort`, `results delete` (own jobs), `failure re-analyze` |
-| **admin** | All operator actions, plus: `admin *`, `admin-chat *`, `results delete` (any job) |
-
-## Related Pages
-
-- [Setting Up the CLI](cli-setup.html)
-- [CLI Recipes](cli-recipes.html)
-- [REST API Reference](api-reference.html)
-- [Analyzing Test Failures](analyzing-failures.html)
-- [Managing Users and Roles](managing-users.html)
-
----
-
-Source: environment-variables.md
-
-Let me start by reading the graph report and pages manifest, then explore the configuration source files.Now let me read the models, main.py (for settings categories), and ai_client.py to get the complete picture:Now let me look at the encryption, vapid, and CLI config files for additional env vars:Let me also look at the `_merge_settings` function in main.py and the `LOG_LEVEL`/`DEBUG`/`ROOTCOZ_ENCRYPTION_KEY` env var usage:Now let me check the Dockerfile and entrypoint for additional env vars:
-
-## Related Pages
-
-- [Configuring Integrations](configuring-integrations.html)
-- [Deployment Recipes](deployment-recipes.html)
-- [REST API Reference](api-reference.html)
-- [Managing Users and Roles](managing-users.html)
-- [Using Multi-AI Peer Analysis](peer-analysis.html)
+- [Configuration Reference](configuration-reference.html)
+- [Managing Users and Server Settings](manage-users-and-server-settings.html)
+- [API Endpoint Reference](api-reference.html)
+- [Submitting Analyses](submit-analyses.html)
 
 ---
