@@ -1,4 +1,6 @@
 #!/bin/bash
+set -euo pipefail
+
 # Entrypoint for OpenShift compatibility.
 # OpenShift runs containers as a random UID in GID 0. K8s subPath
 # volume mounts create intermediate directories as root, making
@@ -38,25 +40,38 @@ if [ "${DEV_MODE:-}" = "true" ] && [ -f /app/sidecar-helper/src/server.ts ]; the
     npx tsc || { echo "[sidecar] TypeScript build failed"; exit 1; }
     cd /app || { echo "[sidecar] Failed to return to /app"; exit 1; }
 fi
+
+SIDECAR_RUNNING=false
 if [ -f /app/sidecar-helper/dist/server.js ]; then
     export SIDECAR_PORT="${SIDECAR_PORT:-9100}"
-    # pi-sidecar 4.x uses monorepo-relative paths for extensions; when consumed
-    # as an npm package we must point to the hoisted pi-orchestrator-config copy.
-    _pi_ext="/app/sidecar-helper/node_modules/pi-orchestrator-config/extensions"
-    export SIDECAR_ACPX_EXTENSION_PATH="${SIDECAR_ACPX_EXTENSION_PATH:-$_pi_ext/acpx-provider/index.ts}"
-    export SIDECAR_CLI_PROVIDER_EXTENSION_PATH="${SIDECAR_CLI_PROVIDER_EXTENSION_PATH:-$_pi_ext/cli-provider/index.ts}"
     # Subagent extension falls back to spawning `pi` when argv[1] is unset;
     # keep the CLI on PATH so that path works in the container.
     export PATH="/app/sidecar-helper/node_modules/.bin:${PATH}"
     node /app/sidecar-helper/dist/server.js &
     SIDECAR_PID=$!
+    SIDECAR_RUNNING=true
     echo "[sidecar] Started Pi SDK sidecar (PID $SIDECAR_PID) on port $SIDECAR_PORT"
 
     # Kill sidecar when main process exits
     trap 'kill $SIDECAR_PID 2>/dev/null; wait $SIDECAR_PID 2>/dev/null' EXIT
 
     # Monitor sidecar — if it dies, kill the main process too
-    (while kill -0 $SIDECAR_PID 2>/dev/null; do sleep 5; done; echo "[sidecar] Sidecar died, shutting down container"; kill 1 2>/dev/null) &
+    (trap 'exit 0' TERM
+     while kill -0 $SIDECAR_PID 2>/dev/null; do sleep 5; done
+     echo "[sidecar] Sidecar died, shutting down container"
+     kill 1 2>/dev/null) &
+
+    # Wait for sidecar to be healthy
+    echo "[sidecar] Waiting for sidecar to be ready..."
+    for i in $(seq 1 30); do
+        curl -sf "http://127.0.0.1:${SIDECAR_PORT}/health" > /dev/null 2>&1 && break
+        sleep 0.5
+    done
+    if ! curl -sf "http://127.0.0.1:${SIDECAR_PORT}/health" > /dev/null 2>&1; then
+        echo "[sidecar] ERROR: not healthy after 15s — aborting" >&2
+        exit 1
+    fi
+    echo "[sidecar] Sidecar is ready"
 fi
 
 # Check if any argument contains "uvicorn" to detect all uvicorn invocations
@@ -78,8 +93,25 @@ if [ "$has_uvicorn" = true ] && [ "${DEV_MODE:-}" = "true" ]; then
     extra_args="$extra_args --reload --reload-dir /app/src --timeout-graceful-shutdown 3"
 fi
 
-if [ -n "$extra_args" ]; then
-    exec "$@" $extra_args
+# When sidecar is running, run app in background + wait so EXIT trap fires
+# for sidecar cleanup and signals are forwarded properly.
+if [ "$SIDECAR_RUNNING" = true ]; then
+    if [ -n "$extra_args" ]; then
+        "$@" $extra_args &
+    else
+        "$@" &
+    fi
+    APP_PID=$!
+
+    # Forward signals to the app (|| true guards against errexit when PID gone)
+    trap 'kill -TERM $APP_PID 2>/dev/null || true' TERM
+    trap 'kill -INT $APP_PID 2>/dev/null || true' INT
+
+    wait $APP_PID
 else
-    exec "$@"
+    if [ -n "$extra_args" ]; then
+        exec "$@" $extra_args
+    else
+        exec "$@"
+    fi
 fi
