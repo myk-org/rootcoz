@@ -22,8 +22,6 @@ FROM registry.access.redhat.com/ubi9/nodejs-22-minimal AS sidecar-builder
 USER 0
 WORKDIR /sidecar
 
-RUN microdnf install -y --nodocs --setopt=install_weak_deps=0 git && microdnf clean all
-
 COPY sidecar-helper/package.json sidecar-helper/package-lock.json* ./
 # pi-sidecar@>=4.2.0 requires Node >=22.19.0 (engines field); fail early if base image lags.
 RUN node -e "const [maj,min]=process.versions.node.split('.').map(Number); if (maj<22||(maj===22&&min<19)) { console.error('Need Node >=22.19.0, got', process.versions.node); process.exit(1); }"
@@ -61,6 +59,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     ca-certificates \
     gnupg \
+    tini \
     && rm -rf /var/lib/apt/lists/*
 
 # Pinned to 22.22.3 — Node 22.23.0+ has a keep-alive regression that breaks
@@ -97,14 +96,17 @@ RUN useradd --create-home --shell /bin/bash -g 0 appuser \
 # Switch to non-root user for CLI installs
 USER appuser
 
-# Install Cursor Agent CLI (installs to ~/.local/bin)
-# Claude and Gemini are handled by the Pi SDK sidecar — no CLI needed
+# Install AI CLI tools
+# Claude Code CLI (installs to ~/.local/bin)
+RUN /bin/bash -o pipefail -c "curl -fsSL https://claude.ai/install.sh | bash"
+
+# Cursor Agent CLI (installs to ~/.local/bin)
 RUN /bin/bash -o pipefail -c "curl -fsSL https://cursor.com/install | bash"
 
-# Configure npm for non-root global installs and install acpx CLI (needed by sidecar acpx-provider extension)
+# Gemini CLI and acpx (npm global installs)
 RUN mkdir -p /home/appuser/.npm-global \
     && npm config set prefix '/home/appuser/.npm-global' \
-    && npm install -g acpx
+    && npm install -g acpx @google/gemini-cli
 
 # Switch to root for file copies and permission fixes
 USER root
@@ -158,5 +160,5 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
 # --no-sync prevents uv from attempting to modify the venv at runtime.
 # This is required for OpenShift where containers run as an arbitrary UID
 # and may not have write access to the .venv directory.
-ENTRYPOINT ["/app/entrypoint.sh"]
+ENTRYPOINT ["tini", "--", "/app/entrypoint.sh"]
 CMD ["uv", "run", "--no-sync", "uvicorn", "rootcoz.main:app", "--host", "0.0.0.0"]
