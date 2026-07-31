@@ -25,7 +25,7 @@ WORKDIR /sidecar
 RUN microdnf install -y --nodocs --setopt=install_weak_deps=0 git && microdnf clean all
 
 COPY sidecar-helper/package.json sidecar-helper/package-lock.json* ./
-# pi-sidecar@>=1.4.0 requires Node >=22.19.0 (engines field); fail early if base image lags.
+# pi-sidecar@>=4.2.0 requires Node >=22.19.0 (engines field); fail early if base image lags.
 RUN node -e "const [maj,min]=process.versions.node.split('.').map(Number); if (maj<22||(maj===22&&min<19)) { console.error('Need Node >=22.19.0, got', process.versions.node); process.exit(1); }"
 RUN npm ci
 
