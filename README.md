@@ -67,6 +67,7 @@ Jobs can omit `gcs_prefix`; RootCoz auto-resolves it via prowjob.json or the Pro
 
 - **AI-Powered Failure Analysis** — Classifies test failures as code issues or product bugs
 - **Multi-CI Support** — Analyzes builds from Jenkins, Prow (GCS artifacts), or raw JUnit XML input with a unified pipeline
+- **Full Test Visibility** — Stores and displays all test outcomes (passed, skipped, failed) from CI sources. Zero-failure jobs are handled as a fast path with no AI overhead.
 - **AI Token Usage Tracking** — Track token consumption, costs, and duration for all AI CLI calls. Admin dashboard shows usage by provider/model/time period with CSV export.
 - **Public OpenAPI** — `/openapi.json`, `/docs`, and `/redoc` are available without authentication
 - **Sparse result fields** — `GET /results/{job_id}?fields=status,result.summary,...` returns only allowlisted paths (full values). Discover paths via `GET /api/results/fields` or `rootcoz results fields`
@@ -87,6 +88,7 @@ rootcoz analyze --source prow \
   --gcs-bucket test-platform-results \
   --gcs-prefix logs/periodic-ci-e2e-aws/1234567890
 rootcoz results list
+rootcoz results tests <job_id>         # List test entries (passed/skipped/failed)
 rootcoz admin token-usage              # Summary dashboard
 rootcoz admin token-usage --group-by model  # Grouped breakdown
 rootcoz admin token-usage --job-id <uuid>   # Per-job usage
