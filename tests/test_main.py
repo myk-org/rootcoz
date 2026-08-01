@@ -945,7 +945,7 @@ class TestAnalyzeProwEndpoint:
         gcs_error_result = CISourceResult(
             failures=[],
             console_context="",
-            build_passed=False,
+            skip_analysis=False,
             build_url="https://prow.example.com/view/gs/test-bucket/logs/my-prow-job/99",
             warnings=[
                 "GCS junit-listing returned 403: https://storage.googleapis.com/storage/v1/b/test-bucket/o"
@@ -995,7 +995,7 @@ class TestAnalyzeProwEndpoint:
     async def test_prow_build_passed_uses_prow_summary(
         self, temp_db_path: Path
     ) -> None:
-        """Successful Prow builds get a prow-specific early-exit summary."""
+        """Successful Prow builds with no failures skip AI analysis."""
         from rootcoz.main import _process_ci_source_analysis
         from rootcoz.models import UnifiedAnalyzeRequest
         from rootcoz.sources.base import CISourceResult
@@ -1017,12 +1017,8 @@ class TestAnalyzeProwEndpoint:
 
         passed_result = CISourceResult(
             failures=[],
-            build_passed=True,
+            skip_analysis=True,
             build_url="https://prow.example.com/view/gs/test-bucket/logs/my-prow-job/99",
-            build_passed_summary=(
-                "Prow build passed; analysis skipped "
-                "(use force to analyze successful builds)."
-            ),
             identity={
                 "job_name": "my-prow-job",
                 "build_id": "99",
@@ -1078,7 +1074,7 @@ class TestAnalyzeProwEndpoint:
             assert row is not None
             assert row["status"] == "completed"
             result = row["result"]
-            assert "Prow build passed" in result.get("summary", "")
+            assert "No test failures found" in result.get("summary", "")
             assert result.get("build_id") == "99"
             assert result.get("source_metadata", {}).get("job_type") == "periodic"
             params = result["request_params"]
@@ -3800,7 +3796,7 @@ class TestProcessAnalysisWaiting:
 
         passed = CISourceResult(
             failures=[],
-            build_passed=True,
+            skip_analysis=True,
             build_url="https://jenkins.example.com/job/my-job/1/",
             identity={"job_name": "my-job", "build_number": 1},
         )
@@ -3918,7 +3914,7 @@ class TestProcessAnalysisWaiting:
         )
         passed = CISourceResult(
             failures=[],
-            build_passed=True,
+            skip_analysis=True,
             build_url="https://jenkins.example.com/job/my-job/1/",
         )
 
@@ -4787,7 +4783,7 @@ class TestProgressPhaseTracking:
 
         passed = CISourceResult(
             failures=[],
-            build_passed=True,
+            skip_analysis=True,
             build_url="https://jenkins.example.com/job/my-job/1/",
         )
 
@@ -4867,7 +4863,7 @@ class TestRequestParamsPreservation:
 
         passed = CISourceResult(
             failures=[],
-            build_passed=True,
+            skip_analysis=True,
             build_url="https://jenkins.example.com/job/my-job/42/",
             identity={"job_name": "my-job", "build_number": 42},
         )
@@ -5075,8 +5071,10 @@ class TestReAnalyzeEndpoint:
         assert params["reanalyzed_from_job_name"] == "File Job"
 
     @pytest.mark.asyncio
-    async def test_re_analyze_prow_applies_force_override(self, test_client) -> None:
-        """Re-analyze accepts force/get_job_artifacts overrides for Prow jobs."""
+    async def test_re_analyze_prow_applies_artifacts_override(
+        self, test_client
+    ) -> None:
+        """Re-analyze accepts get_job_artifacts overrides for Prow jobs."""
         result_data = {
             "summary": "prow failure",
             "job_name": "pull-test",
@@ -5089,7 +5087,6 @@ class TestReAnalyzeEndpoint:
                     "build_id": "1234567890",
                     "prow_url": "https://prow.example.com",
                     "gcs_bucket": "test-bucket",
-                    "force": False,
                     "get_job_artifacts": False,
                     "ai_provider": "claude",
                     "ai_model": "opus",
@@ -5104,12 +5101,11 @@ class TestReAnalyzeEndpoint:
         with patch("rootcoz.main._process_ci_source_analysis") as mock_process:
             response = test_client.post(
                 "/re-analyze/prow-origin",
-                json={"force": True, "get_job_artifacts": True},
+                json={"get_job_artifacts": True},
             )
         assert response.status_code == 202
         mock_process.assert_called_once()
         call_kwargs = mock_process.call_args.kwargs
-        assert call_kwargs["body"].force is True
         assert call_kwargs["body"].get_job_artifacts is True
         assert call_kwargs["body"].prow_job_name == "pull-test"
         assert call_kwargs["body"].build_id == "1234567890"
@@ -5662,69 +5658,6 @@ class TestJiraSecurityLevelsEndpoint:
             assert data[0]["name"] == "Internal"
         finally:
             app.dependency_overrides.pop(get_settings, None)
-
-
-class TestMergeSettingsForce:
-    """Tests for force -> force_analysis mapping in _merge_settings."""
-
-    def test_force_true_in_request_sets_force_analysis(self) -> None:
-        """When request.force=True is explicitly set, merged settings have force_analysis=True."""
-        from rootcoz.main import _merge_settings
-        from rootcoz.models import AnalyzeRequest
-
-        body = AnalyzeRequest(
-            job_name="test",
-            build_number=1,
-            force=True,
-        )
-        settings = Settings()
-        merged = _merge_settings(body, settings)
-        assert merged.force_analysis is True
-
-    def test_force_false_in_request_sets_force_analysis_false(self) -> None:
-        """When request.force=False is explicitly set, merged settings have force_analysis=False."""
-        from rootcoz.main import _merge_settings
-        from rootcoz.models import AnalyzeRequest
-
-        body = AnalyzeRequest(
-            job_name="test",
-            build_number=1,
-            force=False,
-        )
-        # Start with settings that have force_analysis=True
-        settings_data = Settings().model_dump(mode="python")
-        settings_data["force_analysis"] = True
-        settings = Settings.model_validate(settings_data)
-        merged = _merge_settings(body, settings)
-        assert merged.force_analysis is False
-
-    def test_force_omitted_preserves_settings_default(self) -> None:
-        """When force is omitted from request, settings.force_analysis is preserved."""
-        from rootcoz.main import _merge_settings
-        from rootcoz.models import AnalyzeRequest
-
-        body = AnalyzeRequest(
-            job_name="test",
-            build_number=1,
-        )
-        settings_data = Settings().model_dump(mode="python")
-        settings_data["force_analysis"] = True
-        settings = Settings.model_validate(settings_data)
-        merged = _merge_settings(body, settings)
-        assert merged.force_analysis is True
-
-    def test_force_omitted_default_false(self) -> None:
-        """When force is omitted and settings default, force_analysis is False."""
-        from rootcoz.main import _merge_settings
-        from rootcoz.models import AnalyzeRequest
-
-        body = AnalyzeRequest(
-            job_name="test",
-            build_number=1,
-        )
-        settings = Settings()
-        merged = _merge_settings(body, settings)
-        assert merged.force_analysis is False
 
 
 @pytest.mark.asyncio

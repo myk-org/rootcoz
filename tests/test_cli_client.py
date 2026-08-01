@@ -2523,7 +2523,6 @@ class TestDefaultServerSettings:
                     "enable_jira": False,
                     "jira_url": "",
                     "jira_project_key": "",
-                    "force_analysis": False,
                     "get_job_artifacts": True,
                     "jenkins_artifacts_max_size_mb": 500,
                     "wait_for_completion": True,

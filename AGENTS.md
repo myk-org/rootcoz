@@ -99,9 +99,12 @@ src/rootcoz/
   prow_validation.py        # Canonical Prow validators (+ URL helper re-exports for compatibility)
   url_utils.py              # Cross-cutting HTTP(S) URL sanitization (strip userinfo, href)
   main.py                   # FastAPI app, unified POST /analyze endpoint, background tasks
-  models.py                 # Pydantic request/response models
+  xml_enrichment.py          # JUnit XML parsing: extract_all_tests_from_xml (pass/skip/fail),
+                            # extract_failures_from_xml/extract_test_failures wrappers,
+                            # apply_analysis_to_xml, build_enriched_xml
+  models.py                 # Pydantic request/response models (BaseTestEntry, FailedTest, etc.)
   config.py                 # Settings (env vars)
-  storage.py                # SQLite persistence
+  storage.py                # SQLite persistence (includes test_entries table)
   ai_client.py              # AI provider constants and usage recording setup
   sidecar-helper/            # Pi SDK sidecar service (Node.js/TypeScript)
     src/server.ts           # Thin wrapper calling @myk-org/pi-sidecar startSidecar()
@@ -212,7 +215,7 @@ AI chat sessions MUST use restricted tool sets — **never give bash access**.
 - **Data access**: Use HTTP-backed custom tools via pi-sidecar (pi-sidecar ≥4.2.0)
 - **Never**: `bash`, `exec`, `write`, `edit` — the AI must not execute arbitrary commands or modify files
 - Custom tools define exactly which API endpoints the AI can call — nothing else is reachable
-- Per-job chat tools: `get_job_result`, `get_job_comments`, `search_jira`, `get_jira_issue`, `search_github_issues`, `get_github_issue` (conditional on user credentials)
+- Per-job chat tools: `get_job_result`, `get_job_comments`, `get_job_tests`, `search_jira`, `get_jira_issue`, `search_github_issues`, `get_github_issue` (conditional on user credentials)
 - Admin chat tools: `db_schema`, `db_query` (read-only SQL against the database), `get_report_totals`, `get_classification_overrides`, `get_issues_created` (pre-built analytics reports), `save_report` (generate downloadable HTML report)
 
 ### CLI Parity
@@ -243,6 +246,14 @@ When not configured, error messages are role-aware: admins are pointed to Server
 ### AI System Identity
 
 `rootcoz-ai` is the reserved system identity for all AI-originated actions (auto-review, classification). The identity string is defined as `AI_SYSTEM_USERNAME` in `storage.py` — all code must use this constant instead of hardcoding the string. It is blocked from user registration. The `POST /history/classify` endpoint uses `source="ai"` in the request body to identify AI callers, and stores `created_by = "rootcoz-ai"` for attribution. A backend guard prevents AI from overriding user classifications.
+
+### Test Entries & Zero-Failure Fast Path
+
+All test outcomes (passed, skipped, failed) are stored in the `test_entries` table with `child_job_name`/`child_build_number` scoping. Counts are cached in `result_json` for dashboard display. The `BaseTestEntry` model (base class of `FailedTest`) provides the shared `test_name`/`duration`/`status` fields.
+
+- **Paginated API**: `GET /api/results/{job_id}/tests?status=passed&status=skipped&offset=0&limit=50` (viewer+ auth, CLI: `rootcoz results tests`)
+- **Zero-failure fast path**: When `CISourceResult.skip_analysis=True` (e.g. Jenkins SUCCESS, file with no failures), the pipeline skips AI analysis, repo cloning, and workspace setup. Test entries are still saved and counts cached. Metadata assignment, SSE notifications, and auth enforcement still apply.
+- **Jenkins FAILURE/UNSTABLE/ABORTED with empty test report**: NOT fast path — console-only analysis runs (preserves existing behavior).
 
 ### Failure Deduplication
 

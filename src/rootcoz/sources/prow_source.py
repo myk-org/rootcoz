@@ -22,7 +22,7 @@ from pathlib import Path
 import httpx
 from simple_logger.logger import get_logger
 
-from rootcoz.models import FailedTest
+from rootcoz.models import BaseTestEntry, FailedTest
 from rootcoz.sources.base import (
     CISource,
     CISourceResult,
@@ -30,7 +30,11 @@ from rootcoz.sources.base import (
     link_artifacts_to_workspace,
     write_console_output_file,
 )
-from rootcoz.xml_enrichment import extract_test_failures
+from rootcoz.xml_enrichment import (
+    TestExtractionResult,
+    extract_all_tests_from_xml,
+    extract_test_failures,
+)
 
 logger = get_logger(name=__name__, level=os.environ.get("LOG_LEVEL", "INFO"))
 
@@ -207,10 +211,7 @@ def _parse_junit_failures(
     warnings: list[str] | None = None,
     label: str = "",
 ) -> list[FailedTest]:
-    """Parse a JUnit XML string and extract failures.
-
-    Uses the shared ``extract_test_failures`` helper from xml_enrichment
-    to avoid duplicating XML parsing logic.
+    """Parse a JUnit XML string and extract failures only (backward compat).
 
     Args:
         raw_xml: Raw JUnit XML content.
@@ -228,6 +229,32 @@ def _parse_junit_failures(
             where = f" ({label})" if label else ""
             warnings.append(f"Failed to parse JUnit XML{where}: {exc}")
         return []
+
+
+def _parse_junit_all(
+    raw_xml: str,
+    *,
+    warnings: list[str] | None = None,
+    label: str = "",
+) -> TestExtractionResult:
+    """Parse a JUnit XML string and extract all test outcomes.
+
+    Args:
+        raw_xml: Raw JUnit XML content.
+        warnings: Optional list to append a structured warning when parsing fails.
+        label: Optional artifact path/label included in the warning message.
+
+    Returns:
+        TestExtractionResult with failures, passed, and skipped tests.
+    """
+    try:
+        return extract_all_tests_from_xml(raw_xml)
+    except Exception as exc:
+        logger.warning("Failed to parse JUnit XML: %s", exc)
+        if warnings is not None:
+            where = f" ({label})" if label else ""
+            warnings.append(f"Failed to parse JUnit XML{where}: {exc}")
+        return TestExtractionResult()
 
 
 class GCSAccessError(Exception):
@@ -921,7 +948,6 @@ class ProwSource(CISource):
         gcs_bucket: str,
         prow_url: str,
         gcs_prefix: str = "",
-        force: bool = False,
         get_job_artifacts: bool = True,
     ) -> None:
         """Store config needed to fetch from Prow/GCS.
@@ -933,7 +959,6 @@ class ProwSource(CISource):
             prow_url: Prow Deck URL.
             gcs_prefix: GCS object prefix. When empty, defaults to ``logs/{job_name}/{build_id}``.
                 For PR jobs this is ``pr-logs/pull/{org}_{repo}/{pr}/{job_name}/{build_id}``.
-            force: When True, analyze even if the build passed.
             get_job_artifacts: When True, download non-JUnit build artifacts
                 for AI exploration.
         """
@@ -945,7 +970,6 @@ class ProwSource(CISource):
         self._resolved_gcs_prefix: str | None = None
         self._prowjob_metadata: ProwJobMetadata | None = None
         self._resolution_warnings: list[str] = []
-        self.force = force
         self.get_job_artifacts = get_job_artifacts
         self._extract_path: Path | None = None
 
@@ -1255,7 +1279,6 @@ class ProwSource(CISource):
         base_params["prow_url"] = merged.prow_url
         base_params["gcs_bucket"] = merged.gcs_bucket
         base_params["gcs_prefix"] = body.gcs_prefix or ""
-        base_params["force"] = merged.force_analysis
         base_params["get_job_artifacts"] = merged.get_job_artifacts
         return base_params
 
@@ -1270,7 +1293,6 @@ class ProwSource(CISource):
             gcs_bucket=merged.gcs_bucket,
             prow_url=merged.prow_url,
             gcs_prefix=body.gcs_prefix or "",
-            force=merged.force_analysis,
             get_job_artifacts=merged.get_job_artifacts,
         )
 
@@ -1640,34 +1662,6 @@ class ProwSource(CISource):
                     self.build_id,
                 )
 
-        if build_state == "SUCCESS" and not self.force:
-            logger.info(
-                "Prow job %s build %s passed, skipping analysis",
-                self.job_name,
-                self.build_id,
-            )
-            return CISourceResult(
-                failures=[],
-                build_passed=True,
-                build_url=self.build_url,
-                build_passed_summary=(
-                    "Prow build passed; analysis skipped "
-                    "(use force to analyze successful builds)."
-                ),
-                source_metadata={
-                    **self._metadata_dict(),
-                    "resolved_gcs_prefix": self._resolved_gcs_prefix or "",
-                },
-                identity=self._identity_dict(),
-                warnings=access_warnings,
-            )
-        if build_state == "SUCCESS" and self.force:
-            logger.info(
-                "Prow job %s build %s passed but force=True, continuing",
-                self.job_name,
-                self.build_id,
-            )
-
         # ------------------------------------------------------------------
         # 2. Fetch build-log.txt for console context
         # ------------------------------------------------------------------
@@ -1702,6 +1696,8 @@ class ProwSource(CISource):
         # 4. Fetch and parse JUnit XMLs to extract failures
         # ------------------------------------------------------------------
         all_failures: list[FailedTest] = []
+        all_passed: list[BaseTestEntry] = []
+        all_skipped: list[BaseTestEntry] = []
         junit_bytes_total = 0
         junit_fetched = 0
         junit_attempts = 0
@@ -1743,17 +1739,21 @@ class ProwSource(CISource):
             if xml_content:
                 junit_fetched += 1
                 junit_bytes_total += len(xml_content.encode("utf-8"))
-                failures = _parse_junit_failures(
+                extraction = _parse_junit_all(
                     xml_content,
                     warnings=access_warnings,
                     label=junit_path,
                 )
-                all_failures.extend(failures)
+                all_failures.extend(extraction.failures)
+                all_passed.extend(extraction.passed)
+                all_skipped.extend(extraction.skipped)
 
         logger.info(
-            "Extracted %d test failure(s) from %d JUnit file(s) "
+            "Extracted %d failure(s), %d passed, %d skipped from %d JUnit file(s) "
             "(%d fetched, %d attempts, %d bytes)",
             len(all_failures),
+            len(all_passed),
+            len(all_skipped),
             len(junit_files),
             junit_fetched,
             junit_attempts,
@@ -1810,6 +1810,8 @@ class ProwSource(CISource):
 
         return CISourceResult(
             failures=all_failures,
+            passed_tests=all_passed,
+            skipped_tests=all_skipped,
             console_context=console_context,
             artifacts_context=artifacts_context,
             build_url=self.build_url,
@@ -1820,6 +1822,7 @@ class ProwSource(CISource):
             },
             identity=self._identity_dict(),
             extract_path=extract_path,
+            skip_analysis=build_state == "SUCCESS" and not all_failures,
         )
 
     async def refetch_context(self) -> CISourceResult:
@@ -1943,7 +1946,6 @@ class ProwSource(CISource):
             gcs_bucket=gcs_bucket,
             prow_url=prow_url or "",
             gcs_prefix=gcs_prefix,
-            force=True,  # reanalysis always forces
             get_job_artifacts=get_job_artifacts,
         )
 
@@ -1966,8 +1968,6 @@ class ProwSource(CISource):
         ):
             if prow_field in decrypted_params:
                 fields[prow_field] = decrypted_params[prow_field]
-        if "force" in decrypted_params:
-            fields["force"] = decrypted_params["force"]
         if not fields.get("prow_job_name") or not fields.get("build_id"):
             raise ValueError(
                 "Original prow analysis has no stored prow_job_name/build_id; "

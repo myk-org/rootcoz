@@ -39,7 +39,7 @@ import { ConfirmDialog } from '@/components/shared/ConfirmDialog'
 import { SortableHeader } from '@/components/shared/SortableHeader'
 import { DateRangePresetFilter } from '@/components/shared/DateRangePresetFilter'
 import { useTableSort } from '@/lib/useTableSort'
-import { Trash2, MessageSquare, CheckCircle2, GitFork, AlertTriangle, Github, List, ListTree, ChevronRight, User } from 'lucide-react'
+import { Trash2, MessageSquare, CheckCircle2, GitFork, AlertTriangle, Github, List, ListTree, ChevronRight, User, MinusCircle } from 'lucide-react'
 import { useAuth } from '@/lib/auth'
 import { useMetadataOptions, MetadataDropdowns, MetadataLabelChips, MetadataClearButton } from '@/components/shared/MetadataFilterBar'
 import { MetadataBadges } from '@/components/shared/MetadataBadges'
@@ -701,6 +701,8 @@ export function DashboardPage() {
                 const displayStatus = isAnalysisTimeout(job.status, job.error, job.summary) ? 'timeout' : job.status
                 const borderColor = STATUS_BORDER[displayStatus] ?? 'border-l-border-default'
                 const failureCount = job.failure_count ?? 0
+                const passedCount = job.passed_count ?? 0
+                const skippedCount = job.skipped_count ?? 0
                 const failureHint = job.summary || job.error
                 const rowDest = getJobRoute(job)
                 const buildDisplayId = resolveBuildDisplayId(job)
@@ -785,6 +787,26 @@ export function DashboardPage() {
                       tone="text-signal-red"
                       tooltipText={`${failureCount} test ${failureCount === 1 ? 'failure' : 'failures'}`}
                     />
+
+                    {/* Passed */}
+                    {passedCount > 0 && (
+                      <MetricCell
+                        value={passedCount}
+                        icon={<CheckCircle2 className="h-3 w-3" />}
+                        tone="text-signal-green"
+                        tooltipText={`${passedCount} test${passedCount === 1 ? '' : 's'} passed`}
+                      />
+                    )}
+
+                    {/* Skipped */}
+                    {skippedCount > 0 && (
+                      <MetricCell
+                        value={skippedCount}
+                        icon={<MinusCircle className="h-3 w-3" />}
+                        tone="text-signal-orange"
+                        tooltipText={`${skippedCount} test${skippedCount === 1 ? '' : 's'} skipped`}
+                      />
+                    )}
 
                     {/* Reviewed */}
                     <MetricCell
@@ -920,6 +942,8 @@ export function DashboardPage() {
                           const displayStatus = isAnalysisTimeout(job.status, job.error, job.summary) ? 'timeout' : job.status
                           const borderColor = STATUS_BORDER[displayStatus] ?? 'border-l-border-default'
                           const failureCount = job.failure_count ?? 0
+                          const passedCount = job.passed_count ?? 0
+                          const skippedCount = job.skipped_count ?? 0
                           const failureHint = job.summary || job.error
                           const rowDest = getJobRoute(job)
                           const buildDisplayId = resolveBuildDisplayId(job)
@@ -999,6 +1023,22 @@ export function DashboardPage() {
                                 tone="text-signal-red"
                                 tooltipText={`${failureCount} test ${failureCount === 1 ? 'failure' : 'failures'}`}
                               />
+                              {passedCount > 0 && (
+                                <MetricCell
+                                  value={passedCount}
+                                  icon={<CheckCircle2 className="h-3 w-3" />}
+                                  tone="text-signal-green"
+                                  tooltipText={`${passedCount} test${passedCount === 1 ? '' : 's'} passed`}
+                                />
+                              )}
+                              {skippedCount > 0 && (
+                                <MetricCell
+                                  value={skippedCount}
+                                  icon={<MinusCircle className="h-3 w-3" />}
+                                  tone="text-signal-orange"
+                                  tooltipText={`${skippedCount} test${skippedCount === 1 ? '' : 's'} skipped`}
+                                />
+                              )}
                               <MetricCell
                                 value={failureCount}
                                 displayValue={<>{job.reviewed_count}/{failureCount}</>}

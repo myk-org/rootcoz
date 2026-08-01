@@ -472,6 +472,46 @@ def build_chat_custom_tools(
     )
 
     tools.append(
+        {
+            "name": "get_job_tests",
+            "description": (
+                "Get paginated test entries (passed, skipped, failed) for this job. "
+                "Use status filter to get specific outcomes. Returns entries with "
+                "test_name, duration, status."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "status": {
+                        "type": "string",
+                        "description": "Filter by status: passed, skipped, or failed",
+                    },
+                    "offset": {
+                        "type": "string",
+                        "description": "Pagination offset (default 0)",
+                        "default": "0",
+                    },
+                    "limit": {
+                        "type": "string",
+                        "description": "Page size (default 50, max 200)",
+                        "default": "50",
+                    },
+                },
+            },
+            "http": {
+                "method": "GET",
+                "url": f"{server_url}/api/results/{job_id}/tests",
+                "headers": auth_headers,
+                "query": {
+                    "status": "{status}",
+                    "offset": "{offset}",
+                    "limit": "{limit}",
+                },
+            },
+        }
+    )
+
+    tools.append(
         _tool_get_failure_history(
             server_url=server_url,
             auth_headers=auth_headers,

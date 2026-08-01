@@ -17,7 +17,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from rootcoz.models import AdditionalRepo, FailedTest
+from rootcoz.models import AdditionalRepo, BaseTestEntry, FailedTest
 
 if TYPE_CHECKING:
     from rootcoz.repository import RepositoryManager
@@ -69,11 +69,12 @@ class CISourceResult:
 
     Attributes:
         failures: Extracted test failures — the main payload for analysis.
+        passed_tests: Extracted passed test entries.
+        skipped_tests: Extracted skipped test entries.
         console_context: Relevant console output provided as AI context.
         artifacts_context: Artifact content provided as AI context.
         build_url: URL to the CI build (e.g. Jenkins build URL).
-        build_passed: When True the core engine short-circuits with a
-            "build passed" result instead of running analysis.
+        skip_analysis: When True, skip AI analysis (e.g. SUCCESS builds with no failures).
         extract_path: Temporary directory holding fetched artifacts;
             passed to ``cleanup`` for removal.
         child_job_infos: Metadata about failed child jobs as
@@ -81,21 +82,20 @@ class CISourceResult:
         source_metadata: Optional metadata from the CI source plugin
             (e.g. Prow job type, PR number, repo info from prowjob.json).
         identity: Override fields for the result dict (e.g. job_name, build_number for Prow).
-        build_passed_summary: Human-readable summary when the build passed
-            with no failures. Each source plugin can override the default.
     """
 
     failures: list[FailedTest]
+    passed_tests: list[BaseTestEntry] = field(default_factory=list)
+    skipped_tests: list[BaseTestEntry] = field(default_factory=list)
     console_context: str = ""
     artifacts_context: str = ""
     build_url: str = ""
-    build_passed: bool = False
+    skip_analysis: bool = False
     extract_path: Path | None = None
     child_job_infos: list[tuple[str, int]] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
     source_metadata: dict = field(default_factory=dict)
     identity: dict = field(default_factory=dict)
-    build_passed_summary: str = "No test failures found in the provided input."
 
 
 class CISource(ABC):

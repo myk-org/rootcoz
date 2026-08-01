@@ -289,7 +289,6 @@ _SETTINGS_CATEGORIES: dict[str, list[str]] = {
         "max_concurrent_ai_calls",
         "peer_ai_configs",
         "peer_analysis_max_rounds",
-        "force_analysis",
     ],
     "Jira": [
         "jira_url",
@@ -1002,8 +1001,6 @@ def _reconstruct_from_params(
     ):
         if jenkins_field in params:
             unified_fields[jenkins_field] = params[jenkins_field]
-    if "force" in params:
-        unified_fields["force"] = params["force"]
 
     body = UnifiedAnalyzeRequest(**unified_fields)
 
@@ -1029,15 +1026,10 @@ def _reconstruct_from_params(
         "jenkins_artifacts_max_size_mb",
         "get_job_artifacts",
         "peer_analysis_max_rounds",
-        "force_analysis",
     ]
     for field in settings_fields:
         if field in params:
             overrides[field] = params[field]
-
-    # Map stored 'force' flag to Settings.force_analysis
-    if "force" in params:
-        overrides["force_analysis"] = params["force"]
 
     # Tests repo URL — use `is not None` so an explicit empty string
     # (clearing the field) is preserved instead of silently dropped.
@@ -2237,11 +2229,6 @@ def _merge_settings(body: BaseAnalysisRequest, settings: Settings) -> Settings:
             if field in body.model_fields_set:
                 overrides[field] = getattr(body, field)
 
-        # force has a non-None default (False); only override when
-        # explicitly sent so that omitted requests inherit from env/settings.
-        if "force" in body.model_fields_set:
-            overrides["force_analysis"] = body.force
-
     # UnifiedAnalyzeRequest-specific fields (Prow overrides)
     if isinstance(body, UnifiedAnalyzeRequest):
         if "prow_url" in body.model_fields_set and body.prow_url:
@@ -3412,7 +3399,9 @@ async def _process_ci_source_analysis(
         # Fetch failures from source
         source_result = await source.fetch()
         logger.debug(
-            f"Source fetch complete: {len(source_result.failures)} failures, build_passed={source_result.build_passed}"
+            f"Source fetch complete: {len(source_result.failures)} failures, "
+            f"{len(source_result.passed_tests)} passed, {len(source_result.skipped_tests)} skipped, "
+            f"skip_analysis={source_result.skip_analysis}"
         )
 
         # Use source-provided job identity for metadata matching
@@ -3430,19 +3419,60 @@ async def _process_ci_source_analysis(
 
         await source.persist_fetch_metadata(job_id, source_result)
 
-        if source_result.build_passed:
-            summary = source_result.build_passed_summary
+        if source_result.skip_analysis:
+            # Save test entries (passed/skipped/failed) to test_entries table
+            _all_entries = []
+            for _te in source_result.passed_tests:
+                _all_entries.append(
+                    {
+                        "test_name": _te.test_name,
+                        "duration": _te.duration,
+                        "status": "passed",
+                    }
+                )
+            for _te in source_result.skipped_tests:
+                _all_entries.append(
+                    {
+                        "test_name": _te.test_name,
+                        "duration": _te.duration,
+                        "status": "skipped",
+                    }
+                )
+            for _te in source_result.failures:
+                _all_entries.append(
+                    {
+                        "test_name": _te.test_name,
+                        "duration": _te.duration,
+                        "status": "failed",
+                    }
+                )
+            if _all_entries:
+                await storage.save_test_entries(job_id, _all_entries)
+
+            _passed_count = len(source_result.passed_tests)
+            _skipped_count = len(source_result.skipped_tests)
+            _failed_count = len(source_result.failures)
+
+            summary = "No test failures found in the provided input."
             analysis_result = FailureAnalysisResult(
                 job_id=job_id,
                 status="completed",
                 summary=summary,
                 enriched_xml=getattr(source, "raw_xml", None),
+                passed_count=_passed_count,
+                skipped_count=_skipped_count,
+                failed_count=_failed_count,
             )
             result_data = analysis_result.model_dump(mode="json")
             result_data["job_name"] = display_name
             _stamp_result_metadata(result_data, source_result)
             await _preserve_request_params(job_id, result_data)
-            logger.info(f"No failures found for job_id={job_id}, completing early")
+            logger.info(
+                "Job %s: zero failures, %d passed, %d skipped — skipping AI analysis",
+                job_id,
+                _passed_count,
+                _skipped_count,
+            )
             await update_status(job_id, "completed", result_data)
             notify_active_count_changed()
             notify_dashboard_changed()
@@ -3849,6 +3879,40 @@ async def _process_ci_source_analysis(
                 exc_info=True,
             )
 
+        # Save ALL test entries (passed/skipped/failed) to test_entries table
+        _all_test_entries: list[dict] = []
+        for _te in source_result.passed_tests:
+            _all_test_entries.append(
+                {
+                    "test_name": _te.test_name,
+                    "duration": _te.duration,
+                    "status": "passed",
+                }
+            )
+        for _te in source_result.skipped_tests:
+            _all_test_entries.append(
+                {
+                    "test_name": _te.test_name,
+                    "duration": _te.duration,
+                    "status": "skipped",
+                }
+            )
+        for _te in source_result.failures:
+            _all_test_entries.append(
+                {
+                    "test_name": _te.test_name,
+                    "duration": _te.duration,
+                    "status": "failed",
+                }
+            )
+        if _all_test_entries:
+            await storage.save_test_entries(job_id, _all_test_entries)
+
+        # Cache test counts in result_json for dashboard display
+        result_data["passed_count"] = len(source_result.passed_tests)
+        result_data["skipped_count"] = len(source_result.skipped_tests)
+        result_data["failed_count"] = len(source_result.failures)
+
         await _carry_forward_overrides(job_id, result_data)
 
         # Auto-review failures with matching signatures from previous analyses.
@@ -4216,6 +4280,53 @@ async def get_job_result(
     if field_list is not None:
         return filter_result_fields(result, field_list)
     return result
+
+
+@app.get("/api/results/{job_id}/tests", operation_id="getJobTests")
+async def get_job_tests(
+    request: Request,
+    job_id: str,
+    status: list[str] | None = Query(
+        default=None,
+        description="Filter by test status: passed, skipped, failed (repeatable)",
+    ),
+    child_job_name: str | None = Query(
+        default=None,
+        description="Filter by child job name",
+    ),
+    child_build_number: int | None = Query(
+        default=None,
+        description="Filter by child build number",
+    ),
+    offset: int = Query(default=0, ge=0, description="Pagination offset"),
+    limit: int = Query(default=50, ge=1, le=200, description="Page size"),
+):
+    """Get paginated test entries for a job (viewer+)."""
+    # Validate status values
+    valid_statuses = {"passed", "skipped", "failed"}
+    if status:
+        invalid = [s for s in status if s not in valid_statuses]
+        if invalid:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid status values: {', '.join(invalid)}. "
+                f"Valid values: {', '.join(sorted(valid_statuses))}",
+            )
+
+    # Verify job exists
+    result = await get_result(job_id)
+    if not result:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    data = await storage.get_test_entries(
+        job_id,
+        status=status,
+        child_job_name=child_job_name,
+        child_build_number=child_build_number,
+        offset=offset,
+        limit=limit,
+    )
+    return data
 
 
 @app.get("/api/failures/{failure_uuid}", operation_id="getFailureByUuid")

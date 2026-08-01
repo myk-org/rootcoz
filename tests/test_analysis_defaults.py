@@ -53,7 +53,6 @@ def client_with_full_config(temp_db_path, _init_db):
             "JIRA_EMAIL": "user@example.com",
             "JIRA_API_TOKEN": "jira-token-123",  # pragma: allowlist secret
             "JIRA_PROJECT_KEY": "PROJ",
-            "FORCE_ANALYSIS": "true",
             "GET_JOB_ARTIFACTS": "false",
             "JENKINS_ARTIFACTS_MAX_SIZE_MB": "200",
             "WAIT_FOR_COMPLETION": "false",
@@ -121,7 +120,6 @@ class TestDefaultServerSettingsResponse:
             "peer_analysis_max_rounds",
             "jira_url",
             "jira_project_key",
-            "force_analysis",
             "get_job_artifacts",
             "jenkins_artifacts_max_size_mb",
             "wait_for_completion",
@@ -233,7 +231,6 @@ class TestDefaultServerSettingsResponse:
         assert data["peer_analysis_max_rounds"] == 5
         assert data["jira_url"] == "https://jira.example.com"
         assert data["jira_project_key"] == "PROJ"
-        assert data["force_analysis"] is True
         assert data["get_job_artifacts"] is False
         assert data["jenkins_artifacts_max_size_mb"] == 200
         assert data["wait_for_completion"] is False

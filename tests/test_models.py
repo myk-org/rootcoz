@@ -1099,35 +1099,6 @@ class TestBaseAnalysisRequestPeerFields:
         assert req10.peer_analysis_max_rounds == 10
 
 
-class TestAnalyzeRequestForce:
-    """Tests for the force field on AnalyzeRequest."""
-
-    def test_force_defaults_to_false(self) -> None:
-        """force defaults to False for backward compatibility."""
-        req = AnalyzeRequest(job_name="j", build_number=1)
-        assert req.force is False
-
-    def test_force_true(self) -> None:
-        """force can be set to True."""
-        req = AnalyzeRequest(job_name="j", build_number=1, force=True)
-        assert req.force is True
-
-    def test_force_false_explicit(self) -> None:
-        """force can be explicitly set to False."""
-        req = AnalyzeRequest(job_name="j", build_number=1, force=False)
-        assert req.force is False
-
-    def test_force_in_model_fields_set_when_provided(self) -> None:
-        """force appears in model_fields_set when explicitly provided."""
-        req = AnalyzeRequest(job_name="j", build_number=1, force=True)
-        assert "force" in req.model_fields_set
-
-    def test_force_not_in_model_fields_set_when_omitted(self) -> None:
-        """force does not appear in model_fields_set when omitted."""
-        req = AnalyzeRequest(job_name="j", build_number=1)
-        assert "force" not in req.model_fields_set
-
-
 class TestFailureAnalysisUUID:
     """Tests for the UUID field on FailureAnalysis."""
 

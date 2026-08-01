@@ -989,6 +989,23 @@ async def init_db() -> None:
             "ON chat_messages (job_id, username, status)"
         )
 
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS test_entries (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                job_id TEXT NOT NULL,
+                child_job_name TEXT NOT NULL DEFAULT '',
+                child_build_number INTEGER NOT NULL DEFAULT 0,
+                test_name TEXT NOT NULL,
+                duration REAL NOT NULL DEFAULT 0.0,
+                status TEXT NOT NULL,
+                FOREIGN KEY (job_id) REFERENCES results (job_id)
+            )
+        """)
+        await db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_test_entries_job_status "
+            "ON test_entries (job_id, child_job_name, child_build_number, status)"
+        )
+
         # Migration: case-insensitive username uniqueness.
         # Lowercase all existing usernames, merge case-variant duplicates
         # (keep earliest created_at, upgrade to highest-privilege role),
@@ -3159,6 +3176,11 @@ def _parse_dashboard_row(row) -> dict:
         submitted_by = request_params.get("submitted_by", "")
         if submitted_by:
             entry["submitted_by"] = submitted_by
+        # Test counts (zero for old jobs missing these keys)
+        for count_key in ("passed_count", "skipped_count", "failed_count"):
+            val = result_data.get(count_key, 0)
+            if val:
+                entry[count_key] = val
     return with_build_url_aliases(entry)
 
 
@@ -3612,8 +3634,119 @@ async def _delete_job_rows(db: aiosqlite.Connection, job_id: str) -> bool:
     await db.execute("DELETE FROM test_classifications WHERE job_id = ?", (job_id,))
     await db.execute("DELETE FROM ai_token_usage WHERE job_id = ?", (job_id,))
     await db.execute("DELETE FROM chat_messages WHERE job_id = ?", (job_id,))
+    await db.execute("DELETE FROM test_entries WHERE job_id = ?", (job_id,))
     cursor = await db.execute("DELETE FROM results WHERE job_id = ?", (job_id,))
     return cursor.rowcount > 0
+
+
+async def save_test_entries(
+    job_id: str,
+    entries: list[dict],
+    child_job_name: str = "",
+    child_build_number: int = 0,
+) -> None:
+    """Save test entries (passed/skipped/failed) for a job.
+
+    Uses idempotent delete-then-insert pattern (same as populate_failure_history).
+
+    Args:
+        job_id: The analysis job ID.
+        entries: List of dicts with keys: test_name, duration, status.
+        child_job_name: Child job name (empty for top-level).
+        child_build_number: Child build number (0 for top-level).
+    """
+    if not entries:
+        return
+
+    async with _connect_db() as db:
+        # Delete existing entries for this scope (idempotent upsert)
+        await db.execute(
+            "DELETE FROM test_entries WHERE job_id = ? AND child_job_name = ? AND child_build_number = ?",
+            (job_id, child_job_name, child_build_number),
+        )
+        # Batch insert
+        await db.executemany(
+            "INSERT INTO test_entries (job_id, child_job_name, child_build_number, test_name, duration, status) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            [
+                (
+                    job_id,
+                    child_job_name,
+                    child_build_number,
+                    e.get("test_name", ""),
+                    e.get("duration", 0.0),
+                    e.get("status", ""),
+                )
+                for e in entries
+            ],
+        )
+        await db.commit()
+
+
+async def get_test_entries(
+    job_id: str,
+    *,
+    status: list[str] | None = None,
+    child_job_name: str | None = None,
+    child_build_number: int | None = None,
+    offset: int = 0,
+    limit: int = 50,
+) -> dict:
+    """Get paginated test entries for a job.
+
+    Args:
+        job_id: The analysis job ID.
+        status: Filter by status values (passed, skipped, failed). None = all.
+        child_job_name: Filter by child job name. None = all children.
+        child_build_number: Filter by child build number. None = all.
+        offset: Pagination offset.
+        limit: Page size (max 200).
+
+    Returns:
+        Dict with entries, total, offset, limit, has_more.
+    """
+    limit = min(limit, 200)
+    conditions = ["job_id = ?"]
+    params: list = [job_id]
+
+    if status:
+        placeholders = ", ".join("?" for _ in status)
+        conditions.append(f"status IN ({placeholders})")
+        params.extend(status)
+
+    if child_job_name is not None:
+        conditions.append("child_job_name = ?")
+        params.append(child_job_name)
+        if child_build_number is not None:
+            conditions.append("child_build_number = ?")
+            params.append(child_build_number)
+
+    where = " AND ".join(conditions)
+
+    async with _connect_db() as db:
+        # Get total count
+        cursor = await db.execute(
+            f"SELECT COUNT(*) FROM test_entries WHERE {where}", params
+        )
+        row = await cursor.fetchone()
+        total = row[0] if row else 0
+
+        # Get page
+        cursor = await db.execute(
+            f"SELECT test_name, duration, status FROM test_entries WHERE {where} "
+            f"ORDER BY id LIMIT ? OFFSET ?",
+            [*params, limit, offset],
+        )
+        rows = await cursor.fetchall()
+
+    entries = [{"test_name": r[0], "duration": r[1], "status": r[2]} for r in rows]
+    return {
+        "entries": entries,
+        "total": total,
+        "offset": offset,
+        "limit": limit,
+        "has_more": offset + limit < total,
+    }
 
 
 async def delete_job(job_id: str) -> bool:

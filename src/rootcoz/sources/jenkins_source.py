@@ -14,6 +14,7 @@ import re
 import time as _time
 from collections import defaultdict
 from collections.abc import Coroutine
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, NoReturn
 from urllib.parse import quote as _urlquote
@@ -35,6 +36,7 @@ from rootcoz.jenkins import JenkinsClient
 from rootcoz.jenkins_artifacts import process_build_artifacts
 from rootcoz.models import (
     AnalysisDetail,
+    BaseTestEntry,
     ChildJobAnalysis,
     FailedTest,
     FailureAnalysis,
@@ -287,19 +289,28 @@ def extract_failed_child_jobs_from_console(
     return failed_jobs
 
 
-def extract_failures_from_test_report(test_report: dict) -> list[FailedTest]:
-    """Extract failed test cases from Jenkins test report.
+@dataclass
+class TestReportExtraction:
+    """All test outcomes extracted from a Jenkins test report."""
+
+    failures: list[FailedTest] = field(default_factory=list)
+    passed: list[BaseTestEntry] = field(default_factory=list)
+    skipped: list[BaseTestEntry] = field(default_factory=list)
+
+
+def extract_failures_from_test_report(test_report: dict) -> TestReportExtraction:
+    """Extract all test cases from Jenkins test report.
 
     Parses the structured test report from Jenkins /testReport/api/json endpoint
-    and extracts all failed and regression tests.
+    and categorizes all tests into passed, skipped, and failed.
 
     Args:
         test_report: Jenkins test report dictionary from the API.
 
     Returns:
-        List of FailedTest objects containing test details.
+        TestReportExtraction with categorized test entries.
     """
-    failures: list[FailedTest] = []
+    result = TestReportExtraction()
 
     # Handle both top-level suites and nested childReports structure
     suites = test_report.get("suites", [])
@@ -307,34 +318,56 @@ def extract_failures_from_test_report(test_report: dict) -> list[FailedTest]:
     # Some Jenkins configurations use childReports instead of suites at top level
     child_reports = test_report.get("childReports", [])
     for child_report in child_reports:
-        result = child_report.get("result", {})
-        suites.extend(result.get("suites", []))
+        child_result = child_report.get("result", {})
+        suites.extend(child_result.get("suites", []))
 
     for suite in suites:
         for case in suite.get("cases", []):
             status = case.get("status", "")
-            if status in ("FAILED", "REGRESSION"):
-                class_name = case.get("className", "")
-                test_name = case.get("name", "")
-                full_name = f"{class_name}.{test_name}" if class_name else test_name
+            class_name = case.get("className", "")
+            test_name = case.get("name", "")
+            full_name = f"{class_name}.{test_name}" if class_name else test_name
 
+            if not full_name:
+                continue
+
+            duration = case.get("duration", 0.0) or 0.0
+
+            if status in ("FAILED", "REGRESSION"):
                 error_details = derive_error_details(
                     case.get("errorDetails", "") or "",
                     case.get("errorStackTrace", "") or "",
                 )
                 stack_trace = case.get("errorStackTrace", "") or ""
 
-                failures.append(
+                result.failures.append(
                     FailedTest(
                         test_name=full_name,
                         error_message=error_details,
                         stack_trace=stack_trace,
-                        duration=case.get("duration", 0.0) or 0.0,
+                        duration=duration,
                         status=status,
                     )
                 )
+            elif status == "SKIPPED":
+                result.skipped.append(
+                    BaseTestEntry(
+                        test_name=full_name,
+                        duration=duration,
+                        status="skipped",
+                    )
+                )
+            else:
+                # PASSED, FIXED, or any other status
+                result.passed.append(
+                    BaseTestEntry(
+                        test_name=full_name,
+                        duration=duration,
+                        status="passed",
+                    )
+                )
 
-    return failures
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -357,8 +390,6 @@ class JenkinsSource(CISource):
         job_name: str,
         build_number: int,
         settings: Settings,
-        *,
-        force: bool = False,
     ) -> None:
         """Store config needed to fetch from Jenkins.
 
@@ -366,12 +397,10 @@ class JenkinsSource(CISource):
             job_name: Full Jenkins job name (may include folder separators).
             build_number: Build number to analyze.
             settings: Application settings containing Jenkins connection info.
-            force: When True, analyze even if the build passed.
         """
         self.job_name = job_name
         self.build_number = build_number
         self.settings = settings
-        self.force = force
         self._extract_path: Path | None = None
         self._client: JenkinsClient | None = None
 
@@ -397,9 +426,8 @@ class JenkinsSource(CISource):
     async def fetch(self) -> CISourceResult:
         """Fetch build data from Jenkins and return normalized result.
 
-        Steps (extracted from former analyze_job top half):
-          1. Get build_info — check if build passed (early return if SUCCESS
-             and not force).
+        Steps:
+          1. Get build_info.
           2. Download artifacts (if ``get_job_artifacts`` is enabled).
           3. Get console output.
           4. Extract failed child jobs (from build_info, fallback to console
@@ -409,7 +437,7 @@ class JenkinsSource(CISource):
           7. Build and return ``CISourceResult``.
         """
         # ------------------------------------------------------------------
-        # 1. Get build info (quick call) to check if build passed
+        # 1. Get build info
         # ------------------------------------------------------------------
         build_info: dict = {}
         try:
@@ -419,22 +447,7 @@ class JenkinsSource(CISource):
         except Exception as e:
             handle_jenkins_exception(e, self.job_name, self.build_number)
 
-        # Check if build passed — return early unless force is set
         build_result = build_info.get("result")
-        if build_result == "SUCCESS" and not self.force:
-            return CISourceResult(
-                failures=[],
-                build_passed=True,
-                build_url=self.build_url,
-                identity={
-                    "job_name": self.job_name,
-                    "build_number": self.build_number,
-                },
-            )
-        if build_result == "SUCCESS" and self.force:
-            logger.info(
-                f"Build {self.job_name} #{self.build_number} passed but force=True, continuing analysis"
-            )
 
         # ------------------------------------------------------------------
         # 2. Download build artifacts for context
@@ -494,10 +507,18 @@ class JenkinsSource(CISource):
             )
         except Exception as exc:
             handle_jenkins_exception(exc, self.job_name, self.build_number)
-        test_failures = (
-            extract_failures_from_test_report(test_report) if test_report else []
+        extraction = (
+            extract_failures_from_test_report(test_report)
+            if test_report
+            else TestReportExtraction()
         )
-        logger.info(f"Found {len(test_failures)} test failures to analyze")
+        test_failures = extraction.failures
+        logger.info(
+            "Found %d failures, %d passed, %d skipped to analyze",
+            len(test_failures),
+            len(extraction.passed),
+            len(extraction.skipped),
+        )
 
         # ------------------------------------------------------------------
         # 6. Extract relevant console lines for context
@@ -509,11 +530,14 @@ class JenkinsSource(CISource):
         # ------------------------------------------------------------------
         return CISourceResult(
             failures=test_failures,
+            passed_tests=extraction.passed,
+            skipped_tests=extraction.skipped,
             console_context=console_context,
             artifacts_context=artifacts_context,
             build_url=self.build_url,
             extract_path=self._extract_path,
             child_job_infos=failed_child_jobs,
+            skip_analysis=build_result == "SUCCESS" and not test_failures,
             identity={
                 "job_name": self.job_name,
                 "build_number": self.build_number,
@@ -526,7 +550,6 @@ class JenkinsSource(CISource):
             job_name=job_name,
             build_number=build_number,
             settings=self.settings,
-            force=self.force,
         )
 
     async def analyze_children(
@@ -725,7 +748,6 @@ class JenkinsSource(CISource):
             job_name=job_name,
             build_number=build_number,
             settings=effective_settings,
-            force=True,  # reanalysis always forces
         )
 
     async def populate_chat_workspace(
@@ -888,7 +910,6 @@ class JenkinsSource(CISource):
         base_params["jenkins_artifacts_max_size_mb"] = (
             merged.jenkins_artifacts_max_size_mb
         )
-        base_params["force"] = merged.force_analysis
         base_params["get_job_artifacts"] = merged.get_job_artifacts
         base_params["wait_for_completion"] = merged.wait_for_completion
         base_params["poll_interval_minutes"] = merged.poll_interval_minutes
@@ -917,7 +938,6 @@ class JenkinsSource(CISource):
             job_name=body.job_name,
             build_number=body.build_number,
             settings=merged,
-            force=merged.force_analysis,
         )
 
     @classmethod
@@ -943,7 +963,6 @@ class JenkinsSource(CISource):
             "wait_for_completion",
             "poll_interval_minutes",
             "max_wait_minutes",
-            "force",
             "get_job_artifacts",
         ):
             if key in decrypted_params:
@@ -1084,7 +1103,6 @@ async def analyze_child_job(
         job_name=job_name,
         build_number=build_number,
         settings=settings,
-        force=True,  # Always analyze child jobs regardless of result
     )
     jenkins_url = source.build_url
 

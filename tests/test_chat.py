@@ -155,6 +155,7 @@ class TestBuildChatCustomTools:
         names = [t["name"] for t in tools]
         assert "get_job_result" in names
         assert "get_job_comments" in names
+        assert "get_job_tests" in names
         assert "get_failure_history" in names
         assert "get_classification_history" in names
         # No jira/github without credentials
@@ -248,7 +249,7 @@ class TestBuildChatCustomTools:
             github_repo="org/repo",
         )
         names = [t["name"] for t in tools]
-        assert len(names) == 8  # 4 base + 2 jira + 2 github
+        assert len(names) == 9  # 5 base + 2 jira + 2 github
 
     def test_no_jira_without_token(self):
         tools = build_chat_custom_tools(

@@ -3073,95 +3073,6 @@ class TestAnalyzeWaitFlags:
         assert "wait_for_completion" not in kwargs
 
 
-class TestAnalyzeForceFlag:
-    """Tests for --force/--no-force CLI flag."""
-
-    def test_force_flag(self, mock_client):
-        """--force should send force=True."""
-        mock_client.analyze.return_value = {"status": "queued", "job_id": "j1"}
-        result = runner.invoke(
-            app,
-            ["analyze", "--job-name", "my-job", "--build-number", "1", "--force"],
-        )
-        assert result.exit_code == 0
-        kwargs = mock_client.analyze.call_args[1]
-        assert kwargs["force"] is True
-
-    def test_no_force_flag(self, mock_client):
-        """--no-force should send force=False."""
-        mock_client.analyze.return_value = {"status": "queued", "job_id": "j1"}
-        result = runner.invoke(
-            app,
-            ["analyze", "--job-name", "my-job", "--build-number", "1", "--no-force"],
-        )
-        assert result.exit_code == 0
-        kwargs = mock_client.analyze.call_args[1]
-        assert kwargs["force"] is False
-
-    def test_force_omitted_not_in_extras(self, mock_client):
-        """When --force/--no-force is not given, force is not sent."""
-        mock_client.analyze.return_value = {"status": "queued", "job_id": "j1"}
-        with patch.dict(os.environ, _env_without_analyze_bindings(), clear=True):
-            result = runner.invoke(
-                app,
-                ["analyze", "--job-name", "my-job", "--build-number", "1"],
-            )
-        assert result.exit_code == 0
-        kwargs = mock_client.analyze.call_args[1]
-        assert "force" not in kwargs
-
-    def test_force_from_config(self, mock_client):
-        """Config force=true is used as default when CLI flag is absent."""
-        cfg = ServerConfig(url=_TEST_SERVER, force=True)
-        with (
-            patch(
-                "rootcoz.cli.main.get_server_config",
-                return_value=cfg,
-            ),
-            patch("rootcoz.cli.main._get_client") as mock_fn,
-            patch.dict(os.environ, {}, clear=True),
-        ):
-            client = MagicMock()
-            client.analyze.return_value = {"status": "queued", "job_id": "j1"}
-            mock_fn.return_value = client
-            result = runner.invoke(
-                app,
-                ["analyze", "--job-name", "my-job", "--build-number", "1"],
-            )
-            assert result.exit_code == 0
-            kwargs = client.analyze.call_args[1]
-            assert kwargs["force"] is True
-
-    def test_cli_force_overrides_config(self, mock_client):
-        """CLI --no-force overrides config force=true."""
-        cfg = ServerConfig(url=_TEST_SERVER, force=True)
-        with (
-            patch(
-                "rootcoz.cli.main.get_server_config",
-                return_value=cfg,
-            ),
-            patch("rootcoz.cli.main._get_client") as mock_fn,
-            patch.dict(os.environ, {}, clear=True),
-        ):
-            client = MagicMock()
-            client.analyze.return_value = {"status": "queued", "job_id": "j1"}
-            mock_fn.return_value = client
-            result = runner.invoke(
-                app,
-                [
-                    "analyze",
-                    "--job-name",
-                    "my-job",
-                    "--build-number",
-                    "1",
-                    "--no-force",
-                ],
-            )
-            assert result.exit_code == 0
-            kwargs = client.analyze.call_args[1]
-            assert kwargs["force"] is False
-
-
 class TestValidateTokenCommand:
     def test_validate_token_valid(self, mock_client):
         mock_client.validate_token.return_value = {
@@ -4940,7 +4851,6 @@ class TestConfigDefaults:
         "enable_jira": True,
         "jira_url": "https://jira.example.com",
         "jira_project_key": "PROJ",
-        "force_analysis": False,
         "get_job_artifacts": True,
         "jenkins_artifacts_max_size_mb": 500,
         "wait_for_completion": True,

@@ -35,7 +35,6 @@ from rootcoz.peer_analysis import analyze_failure_group_with_peers
 from rootcoz.repository import RepositoryManager
 from rootcoz.sources.jenkins_source import (
     JenkinsError,
-    JenkinsSource,
     analyze_child_job,
     extract_failures_from_test_report,
     handle_jenkins_exception,
@@ -47,7 +46,7 @@ _FAKE_JENKINS_PASSWORD = "test-pass"  # noqa: S105  # pragma: allowlist secret
 def _make_jenkins_settings(**overrides: object) -> Settings:
     """Build a ``Settings`` instance pre-filled with dummy Jenkins credentials.
 
-    Any extra *overrides* (e.g. ``force_analysis=True``) are merged into the
+    Any extra *overrides* (e.g. ``get_job_artifacts=True``) are merged into the
     settings dict before validation.
     """
     data = Settings().model_dump(mode="python")
@@ -1130,51 +1129,6 @@ class TestConsoleOnlyPeerAnalysis:
         assert call_kwargs["peer_ai_configs"] is None
 
 
-class TestForceAnalysisSuccessfulBuild:
-    """Tests for force-analyzing builds that passed (SUCCESS) via JenkinsSource.fetch."""
-
-    @pytest.mark.asyncio
-    async def test_success_build_returns_early_without_force(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """When build is SUCCESS and force is False, fetch returns build_passed."""
-        merged = _make_jenkins_settings()
-        mock_client = MagicMock()
-        mock_client.get_build_info_safe.return_value = {
-            "result": "SUCCESS",
-            "building": False,
-        }
-        _patch_jenkins_client(monkeypatch, mock_client)
-
-        result = await JenkinsSource("my-job", 123, merged, force=False).fetch()
-
-        assert result.build_passed is True
-        assert result.failures == []
-        mock_client.get_build_console.assert_not_called()
-
-    @pytest.mark.asyncio
-    async def test_success_build_continues_with_force(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """When build is SUCCESS and force is True, fetch continues past early return."""
-        merged = _make_jenkins_settings()
-        mock_client = MagicMock()
-        mock_client.get_build_info_safe.return_value = {
-            "result": "SUCCESS",
-            "building": False,
-            "artifacts": [],
-        }
-        mock_client.get_build_console.return_value = "Build finished successfully"
-        mock_client.get_test_report.return_value = None
-        mock_client.session = MagicMock()
-        _patch_jenkins_client(monkeypatch, mock_client)
-
-        result = await JenkinsSource("my-job", 123, merged, force=True).fetch()
-
-        assert result.build_passed is False
-        mock_client.get_build_console.assert_called_once()
-
-
 class TestResolveAdditionalRepos:
     """Tests for resolve_additional_repos."""
 
@@ -2185,7 +2139,8 @@ class TestExtractFailuresFromTestReport:
                 }
             ]
         )
-        failures = extract_failures_from_test_report(report)
+        result = extract_failures_from_test_report(report)
+        failures = result.failures
         assert len(failures) == 1
         assert failures[0].test_name == "com.example.MyTest.testFoo"
         assert failures[0].error_message == "expected 1 but got 2"
@@ -2213,7 +2168,8 @@ class TestExtractFailuresFromTestReport:
                 }
             ]
         )
-        failures = extract_failures_from_test_report(report)
+        result = extract_failures_from_test_report(report)
+        failures = result.failures
         assert len(failures) == 1
         assert (
             failures[0].error_message
@@ -2237,7 +2193,8 @@ class TestExtractFailuresFromTestReport:
                 }
             ]
         )
-        failures = extract_failures_from_test_report(report)
+        result = extract_failures_from_test_report(report)
+        failures = result.failures
         assert len(failures) == 1
         assert failures[0].test_name == "TestGoUnit"
         assert failures[0].error_message == "Expected true to be false"
@@ -2259,7 +2216,8 @@ class TestExtractFailuresFromTestReport:
                 }
             ]
         )
-        failures = extract_failures_from_test_report(report)
+        result = extract_failures_from_test_report(report)
+        failures = result.failures
         assert failures[0].error_message == "real error"
         assert failures[0].stack_trace == "tests/foo.go:10\nsome trace"
 
@@ -2276,7 +2234,8 @@ class TestExtractFailuresFromTestReport:
                 }
             ]
         )
-        failures = extract_failures_from_test_report(report)
+        result = extract_failures_from_test_report(report)
+        failures = result.failures
         assert failures[0].error_message == "existing trace with details"
         assert failures[0].stack_trace == "existing trace with details"
 
@@ -2293,7 +2252,8 @@ class TestExtractFailuresFromTestReport:
                 }
             ]
         )
-        failures = extract_failures_from_test_report(report)
+        result = extract_failures_from_test_report(report)
+        failures = result.failures
         assert len(failures) == 1
         assert failures[0].error_message == ""
         assert failures[0].stack_trace == ""
@@ -2311,7 +2271,8 @@ class TestExtractFailuresFromTestReport:
                 },
             ]
         )
-        failures = extract_failures_from_test_report(report)
+        result = extract_failures_from_test_report(report)
+        failures = result.failures
         assert len(failures) == 1
         assert failures[0].test_name == "C.bad"
 
@@ -2338,7 +2299,8 @@ class TestExtractFailuresFromTestReport:
                 }
             ]
         }
-        failures = extract_failures_from_test_report(report)
+        result = extract_failures_from_test_report(report)
+        failures = result.failures
         assert len(failures) == 1
         assert failures[0].status == "REGRESSION"
 
@@ -2356,7 +2318,8 @@ class TestExtractFailuresFromTestReport:
                 }
             ]
         )
-        failures = extract_failures_from_test_report(report)
+        result = extract_failures_from_test_report(report)
+        failures = result.failures
         assert len(failures) == 1
         assert failures[0].error_message == "Actual value did not match expected"
         assert (

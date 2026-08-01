@@ -231,13 +231,6 @@ _AdditionalReposOpt = Annotated[
         '(e.g. "infra:https://github.com/org/infra,product:https://github.com/org/product").',
     ),
 ]
-_ForceOpt = Annotated[
-    bool | None,
-    typer.Option(
-        "--force/--no-force",
-        help="Force analysis even if the build succeeded.",
-    ),
-]
 _MaxConcurrentOpt = Annotated[
     int,
     typer.Option(
@@ -945,6 +938,65 @@ def delete_tracked_in_cmd(
         typer.echo(f"Deleted tracked-in link {data.get('deleted_id', link_id)}.")
 
 
+@results_app.command("tests")
+def results_tests(
+    job_id: str = typer.Argument(help="Job ID to get test entries for."),
+    status: list[str] = typer.Option(
+        [],
+        "--status",
+        "-s",
+        help="Filter by status (passed, skipped, failed). Can repeat.",
+    ),
+    child_job_name: str = typer.Option(
+        None, "--child-job", help="Filter by child job name."
+    ),
+    child_build_number: int = typer.Option(
+        None, "--child-build", help="Filter by child build number."
+    ),
+    offset: int = typer.Option(0, "--offset", help="Pagination offset."),
+    limit: int = typer.Option(50, "--limit", help="Page size (max 200)."),
+    json_output: bool = _JSON_OPTION,
+):
+    """List test entries (passed/skipped/failed) for a job."""
+    _set_json(json_output)
+    try:
+        client = _get_client()
+        data = client.get_test_entries(
+            job_id,
+            status=status or None,
+            child_job_name=child_job_name,
+            child_build_number=child_build_number,
+            offset=offset,
+            limit=limit,
+        )
+    except RootCozError as err:
+        _handle_error(err)
+
+    if _state.get("json"):
+        print_output(data, columns=[], as_json=True)
+        return
+
+    entries = data.get("entries", [])
+    total = data.get("total", 0)
+    has_more = data.get("has_more", False)
+
+    if not entries:
+        typer.echo("No test entries found.")
+        return
+
+    typer.echo(f"Test entries ({len(entries)} of {total}):")
+    for entry in entries:
+        status_str = entry.get("status", "")
+        name = entry.get("test_name", "")
+        duration = entry.get("duration", 0.0)
+        icon = {"passed": "✓", "skipped": "⊘", "failed": "✗"}.get(status_str, "?")
+        typer.echo(f"  {icon} {name} ({duration:.2f}s)")
+
+    if has_more:
+        remaining = total - len(entries) - offset
+        typer.echo(f"\n  ... {remaining} more (use --offset {offset + limit})")
+
+
 @results_app.command("enrich-comments")
 def enrich_comments_cmd(
     job_id: str = typer.Argument(help="Job ID."),
@@ -1047,8 +1099,6 @@ def _apply_common_config_defaults(
         extras["enable_jira"] = cfg.enable_jira
     if cfg.jira_ssl_verify is not None:
         extras["jira_ssl_verify"] = cfg.jira_ssl_verify
-    if cfg.force is not None:
-        extras["force"] = cfg.force
     if include_jenkins:
         if cfg.jenkins_ssl_verify is not None:
             extras["jenkins_ssl_verify"] = cfg.jenkins_ssl_verify
@@ -1254,7 +1304,6 @@ def analyze(
     max_wait: int = typer.Option(
         None, "--max-wait", help="Maximum minutes to wait for completion."
     ),
-    force: _ForceOpt = None,
     max_concurrent: _MaxConcurrentOpt = 0,
     tags: list[str] = _TAG_OPTION,
     json_output: bool = _JSON_OPTION,
@@ -1375,7 +1424,6 @@ def analyze(
             "jira_ssl_verify": jira_ssl_verify,
             "get_job_artifacts": get_job_artifacts,
             "wait_for_completion": wait_for_completion,
-            "force": force,
         },
         max_concurrent=max_concurrent,
     )
@@ -1406,7 +1454,6 @@ def analyze(
         ):
             extras.pop(key, None)
     if source == "file":
-        extras.pop("force", None)
         extras.pop("get_job_artifacts", None)
     # Strip Prow-specific fields for non-Prow sources
     if source != "prow":
