@@ -277,6 +277,65 @@ class TestResultsCommands:
         assert result.exit_code == 0
         assert "No jobs to delete" in result.output
 
+    def test_results_tests(self, mock_client):
+        mock_client.get_test_entries.return_value = {
+            "entries": [
+                {"test_name": "test_a", "duration": 0.1, "status": "passed"},
+                {"test_name": "test_b", "duration": 0.5, "status": "failed"},
+            ],
+            "total": 2,
+            "offset": 0,
+            "limit": 50,
+            "has_more": False,
+        }
+        result = runner.invoke(app, ["results", "tests", "abc-123"])
+        assert result.exit_code == 0
+        assert "Test entries" in result.output
+        assert "test_a" in result.output
+        mock_client.get_test_entries.assert_called_once()
+
+    def test_results_tests_with_status_filter(self, mock_client):
+        mock_client.get_test_entries.return_value = {
+            "entries": [
+                {"test_name": "test_a", "duration": 0.1, "status": "passed"},
+            ],
+            "total": 1,
+            "offset": 0,
+            "limit": 50,
+            "has_more": False,
+        }
+        result = runner.invoke(
+            app, ["results", "tests", "abc-123", "--status", "passed"]
+        )
+        assert result.exit_code == 0
+        assert "test_a" in result.output
+
+    def test_results_tests_json_output(self, mock_client):
+        sample = {
+            "entries": [{"test_name": "t", "duration": 0.0, "status": "passed"}],
+            "total": 1,
+            "offset": 0,
+            "limit": 50,
+            "has_more": False,
+        }
+        mock_client.get_test_entries.return_value = sample
+        result = runner.invoke(app, ["results", "tests", "abc-123", "--json"])
+        assert result.exit_code == 0
+        parsed = json.loads(result.output)
+        assert parsed["total"] == 1
+
+    def test_results_tests_empty(self, mock_client):
+        mock_client.get_test_entries.return_value = {
+            "entries": [],
+            "total": 0,
+            "offset": 0,
+            "limit": 50,
+            "has_more": False,
+        }
+        result = runner.invoke(app, ["results", "tests", "abc-123"])
+        assert result.exit_code == 0
+        assert "No test entries" in result.output
+
 
 class TestReviewStatusCommand:
     def test_review_status(self, mock_client):
