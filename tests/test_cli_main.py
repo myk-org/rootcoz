@@ -292,7 +292,14 @@ class TestResultsCommands:
         assert result.exit_code == 0
         assert "Test entries" in result.output
         assert "test_a" in result.output
-        mock_client.get_test_entries.assert_called_once()
+        mock_client.get_test_entries.assert_called_once_with(
+            "abc-123",
+            status=None,
+            child_job_name=None,
+            child_build_number=None,
+            offset=0,
+            limit=50,
+        )
 
     def test_results_tests_with_status_filter(self, mock_client):
         mock_client.get_test_entries.return_value = {
@@ -309,6 +316,14 @@ class TestResultsCommands:
         )
         assert result.exit_code == 0
         assert "test_a" in result.output
+        mock_client.get_test_entries.assert_called_once_with(
+            "abc-123",
+            status=["passed"],
+            child_job_name=None,
+            child_build_number=None,
+            offset=0,
+            limit=50,
+        )
 
     def test_results_tests_json_output(self, mock_client):
         sample = {
@@ -323,6 +338,14 @@ class TestResultsCommands:
         assert result.exit_code == 0
         parsed = json.loads(result.output)
         assert parsed["total"] == 1
+        mock_client.get_test_entries.assert_called_once_with(
+            "abc-123",
+            status=None,
+            child_job_name=None,
+            child_build_number=None,
+            offset=0,
+            limit=50,
+        )
 
     def test_results_tests_empty(self, mock_client):
         mock_client.get_test_entries.return_value = {
@@ -335,6 +358,14 @@ class TestResultsCommands:
         result = runner.invoke(app, ["results", "tests", "abc-123"])
         assert result.exit_code == 0
         assert "No test entries" in result.output
+        mock_client.get_test_entries.assert_called_once_with(
+            "abc-123",
+            status=None,
+            child_job_name=None,
+            child_build_number=None,
+            offset=0,
+            limit=50,
+        )
 
 
 class TestReviewStatusCommand:
