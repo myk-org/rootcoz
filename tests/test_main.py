@@ -6630,6 +6630,78 @@ class TestSanitizeSidecarPlaceholder:
         assert _sanitize_sidecar_placeholder("") == ""
 
 
+class TestGetJobTestsEndpoint:
+    """Tests for GET /api/results/{job_id}/tests."""
+
+    @pytest.mark.asyncio
+    async def test_placeholder_status_treated_as_omitted(self, test_client) -> None:
+        """Sidecar `{status}` placeholder must not 400 — treat as no filter."""
+        await storage.save_result(
+            job_id="job-tests-placeholder",
+            jenkins_url="https://jenkins.example.com/job/t/1/",
+            status="completed",
+            result={"summary": "ok"},
+        )
+        await storage.save_test_entries(
+            "job-tests-placeholder",
+            [
+                {
+                    "test_name": "a.pass",
+                    "duration": 0.1,
+                    "status": "passed",
+                },
+                {
+                    "test_name": "a.fail",
+                    "duration": 0.2,
+                    "status": "failed",
+                },
+            ],
+        )
+
+        response = test_client.get(
+            "/api/results/job-tests-placeholder/tests",
+            params={"status": "{status}"},
+        )
+        assert response.status_code == 200
+        data = response.json()
+        assert data["total"] == 2
+
+    @pytest.mark.asyncio
+    async def test_child_scope_filter(self, test_client) -> None:
+        """Child filters return only that child's test entries."""
+        await storage.save_result(
+            job_id="job-tests-child",
+            jenkins_url="https://jenkins.example.com/job/pipe/1/",
+            status="completed",
+            result={"summary": "ok"},
+        )
+        await storage.save_test_entries(
+            "job-tests-child",
+            [
+                {
+                    "test_name": "child.pass",
+                    "duration": 1.0,
+                    "status": "passed",
+                }
+            ],
+            child_job_name="runner",
+            child_build_number=7,
+        )
+
+        response = test_client.get(
+            "/api/results/job-tests-child/tests",
+            params={
+                "status": "passed",
+                "child_job_name": "runner",
+                "child_build_number": 7,
+            },
+        )
+        assert response.status_code == 200
+        data = response.json()
+        assert data["total"] == 1
+        assert data["entries"][0]["test_name"] == "child.pass"
+
+
 class TestIsChildReviewKey:
     """Tests for _is_child_review_key."""
 

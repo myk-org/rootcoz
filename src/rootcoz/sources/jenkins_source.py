@@ -92,15 +92,27 @@ def _extract_build_params(build_info: dict) -> list[dict]:
     return params
 
 
+@dataclass(slots=True)
+class ChildJobResult:
+    """Child analysis plus scoped test entries for ``main.py`` persistence.
+
+    ``test_entry_scopes`` is ``(child_job_name, child_build_number, entries)``.
+    Sources never import storage — callers persist these scopes.
+    """
+
+    analysis: ChildJobAnalysis
+    test_entry_scopes: list[tuple[str, int, list[dict]]] = field(default_factory=list)
+
+
 def _normalize_child_results(
     failed_children: list[tuple[str, int]],
     child_results: list,
-) -> list[ChildJobAnalysis]:
-    """Convert parallel child-analysis results into ChildJobAnalysis objects.
+) -> list[ChildJobResult]:
+    """Convert parallel child-analysis results into ChildJobResult objects.
 
     Exceptions are turned into stub analyses with a descriptive ``note``.
     """
-    analyses: list[ChildJobAnalysis] = []
+    bundles: list[ChildJobResult] = []
     for i, result in enumerate(child_results):
         if isinstance(result, Exception):
             child_name, child_num = failed_children[i]
@@ -110,17 +122,34 @@ def _normalize_child_results(
                 child_num,
                 format_exception_with_type(result),
             )
-            analyses.append(
-                ChildJobAnalysis(
-                    job_name=child_name,
-                    build_number=child_num,
-                    jenkins_url="",
-                    note=make_user_friendly_error(result),
+            bundles.append(
+                ChildJobResult(
+                    analysis=ChildJobAnalysis(
+                        job_name=child_name,
+                        build_number=child_num,
+                        jenkins_url="",
+                        note=make_user_friendly_error(result),
+                    )
                 )
             )
         else:
-            analyses.append(result)
-    return analyses
+            bundles.append(result)
+    return bundles
+
+
+def _child_counts_kwargs(source_result: CISourceResult) -> tuple[int, int, int]:
+    """Return (passed_count, skipped_count, failed_count) from CISourceResult."""
+    return source_result.test_counts()
+
+
+def _own_test_scope(
+    job_name: str, build_number: int, source_result: CISourceResult
+) -> list[tuple[str, int, list[dict]]]:
+    """Build a single-scope list for this child's own test entries (if any)."""
+    entries = source_result.test_entry_dicts()
+    if not entries:
+        return []
+    return [(job_name, build_number, entries)]
 
 
 class JenkinsError(Exception):
@@ -566,10 +595,14 @@ class JenkinsSource(CISource):
         peer_ai_configs: list | None = None,
         cloned_repos: dict | None = None,
         auth_header: str = "",
-    ) -> list:
-        """Analyze failed Jenkins child jobs in parallel."""
+    ) -> tuple[list[ChildJobAnalysis], list[tuple[str, int, list[dict]]]]:
+        """Analyze failed Jenkins child jobs in parallel.
+
+        Returns:
+            ``(analyses, test_entry_scopes)`` for persistence in ``main.py``.
+        """
         if not source_result.child_job_infos:
-            return []
+            return [], []
         effective_settings = settings or self.settings
         child_tasks = [
             analyze_child_job(
@@ -596,7 +629,12 @@ class JenkinsSource(CISource):
         child_results = await run_parallel_with_limit(
             child_tasks, max_concurrency=effective_settings.max_concurrent_ai_calls
         )
-        return _normalize_child_results(source_result.child_job_infos, child_results)
+        bundles = _normalize_child_results(source_result.child_job_infos, child_results)
+        analyses = [b.analysis for b in bundles]
+        scopes: list[tuple[str, int, list[dict]]] = []
+        for bundle in bundles:
+            scopes.extend(bundle.test_entry_scopes)
+        return analyses, scopes
 
     async def refetch_context(self) -> CISourceResult:
         """Re-download console output and artifacts from Jenkins.
@@ -1072,7 +1110,7 @@ async def analyze_child_job(
     additional_repos: dict[str, Path] | None = None,
     max_concurrent_ai_calls: int = 3,
     auth_header: str = "",
-) -> ChildJobAnalysis:
+) -> ChildJobResult:
     """Analyze a single child job, recursively analyzing its failed children.
 
     Each child job gets its own AI call to manage context size.
@@ -1096,7 +1134,7 @@ async def analyze_child_job(
         max_concurrent_ai_calls: Maximum concurrent AI calls (default: 3).
 
     Returns:
-        ChildJobAnalysis with analysis results or nested child analyses.
+        ChildJobResult with analysis plus scoped test entry dicts for persistence.
     """
     # Use JenkinsSource to fetch build data
     source = JenkinsSource(
@@ -1107,11 +1145,13 @@ async def analyze_child_job(
     jenkins_url = source.build_url
 
     if depth >= max_depth:
-        return ChildJobAnalysis(
-            job_name=job_name,
-            build_number=build_number,
-            jenkins_url=jenkins_url,
-            note="Max depth reached - analysis stopped to prevent infinite recursion",
+        return ChildJobResult(
+            analysis=ChildJobAnalysis(
+                job_name=job_name,
+                build_number=build_number,
+                jenkins_url=jenkins_url,
+                note="Max depth reached - analysis stopped to prevent infinite recursion",
+            )
         )
 
     # Fetch build data via JenkinsSource
@@ -1122,11 +1162,13 @@ async def analyze_child_job(
             "Child job %s #%d build info fetch failed: %s", job_name, build_number, e
         )
         source.cleanup()
-        return ChildJobAnalysis(
-            job_name=job_name,
-            build_number=build_number,
-            jenkins_url=jenkins_url,
-            note=make_user_friendly_error(e),
+        return ChildJobResult(
+            analysis=ChildJobAnalysis(
+                job_name=job_name,
+                build_number=build_number,
+                jenkins_url=jenkins_url,
+                note=make_user_friendly_error(e),
+            )
         )
 
     try:
@@ -1273,10 +1315,12 @@ async def _analyze_child_job_inner(
     additional_repos: dict[str, Path] | None,
     max_concurrent_ai_calls: int,
     auth_header: str,
-) -> ChildJobAnalysis:
+) -> ChildJobResult:
     """Inner logic for analyze_child_job, separated to allow cleanup after completion."""
     child_artifacts_context = source_result.artifacts_context
     failed_children = source_result.child_job_infos
+    _passed_count, _skipped_count, _failed_count = _child_counts_kwargs(source_result)
+    own_scopes = _own_test_scope(job_name, build_number, source_result)
 
     if failed_children:
         # Recursively analyze failed children IN PARALLEL with bounded concurrency
@@ -1307,7 +1351,11 @@ async def _analyze_child_job_inner(
         )
 
         # Handle exceptions in results
-        child_analyses = _normalize_child_results(failed_children, child_results)
+        child_bundles = _normalize_child_results(failed_children, child_results)
+        child_analyses = [b.analysis for b in child_bundles]
+        scopes = list(own_scopes)
+        for bundle in child_bundles:
+            scopes.extend(bundle.test_entry_scopes)
 
         # This job failed because children failed - skip Claude CLI analysis
         # Count failures from child analyses
@@ -1316,13 +1364,19 @@ async def _analyze_child_job_inner(
         if total_failures > 0:
             summary += f" Total: {total_failures} failure(s) analyzed. See child analyses below."
 
-        return ChildJobAnalysis(
-            job_name=job_name,
-            build_number=build_number,
-            jenkins_url=jenkins_url,
-            summary=summary,
-            failures=[],  # Pipeline has no direct failures
-            failed_children=child_analyses,
+        return ChildJobResult(
+            analysis=ChildJobAnalysis(
+                job_name=job_name,
+                build_number=build_number,
+                jenkins_url=jenkins_url,
+                summary=summary,
+                failures=[],  # Pipeline has no direct failures
+                failed_children=child_analyses,
+                passed_count=_passed_count,
+                skipped_count=_skipped_count,
+                failed_count=_failed_count,
+            ),
+            test_entry_scopes=scopes,
         )
 
     # No failed children - this is a leaf failure, analyze it directly
@@ -1352,12 +1406,18 @@ async def _analyze_child_job_inner(
 
         # Propagate all-failed-groups note
         if unique_errors > 0 and failed_groups == unique_errors:
-            return ChildJobAnalysis(
-                job_name=job_name,
-                build_number=build_number,
-                jenkins_url=jenkins_url,
-                note=f"All {unique_errors} analysis group(s) failed",
-                failures=failures,
+            return ChildJobResult(
+                analysis=ChildJobAnalysis(
+                    job_name=job_name,
+                    build_number=build_number,
+                    jenkins_url=jenkins_url,
+                    note=f"All {unique_errors} analysis group(s) failed",
+                    failures=failures,
+                    passed_count=_passed_count,
+                    skipped_count=_skipped_count,
+                    failed_count=_failed_count,
+                ),
+                test_entry_scopes=own_scopes,
             )
 
         # Generate summary from parallel results
@@ -1372,12 +1432,18 @@ async def _analyze_child_job_inner(
         else:
             summary = f"{total_failures} failure(s) analyzed"
 
-        return ChildJobAnalysis(
-            job_name=job_name,
-            build_number=build_number,
-            jenkins_url=jenkins_url,
-            summary=summary,
-            failures=failures,
+        return ChildJobResult(
+            analysis=ChildJobAnalysis(
+                job_name=job_name,
+                build_number=build_number,
+                jenkins_url=jenkins_url,
+                summary=summary,
+                failures=failures,
+                passed_count=_passed_count,
+                skipped_count=_skipped_count,
+                failed_count=_failed_count,
+            ),
+            test_entry_scopes=own_scopes,
         )
 
     # No structured test failures - fall back to single AI analysis of console output
@@ -1407,19 +1473,31 @@ async def _analyze_child_job_inner(
             build_number,
             error_text,
         )
-        return ChildJobAnalysis(
+        return ChildJobResult(
+            analysis=ChildJobAnalysis(
+                job_name=job_name,
+                build_number=build_number,
+                jenkins_url=jenkins_url,
+                note=make_user_friendly_error(error_text),
+                passed_count=_passed_count,
+                skipped_count=_skipped_count,
+                failed_count=_failed_count,
+            ),
+            test_entry_scopes=own_scopes,
+        )
+
+    return ChildJobResult(
+        analysis=ChildJobAnalysis(
             job_name=job_name,
             build_number=build_number,
             jenkins_url=jenkins_url,
-            note=make_user_friendly_error(error_text),
-        )
-
-    return ChildJobAnalysis(
-        job_name=job_name,
-        build_number=build_number,
-        jenkins_url=jenkins_url,
-        summary="Analysis complete",
-        failures=failures,
+            summary="Analysis complete",
+            failures=failures,
+            passed_count=_passed_count,
+            skipped_count=_skipped_count,
+            failed_count=_failed_count,
+        ),
+        test_entry_scopes=own_scopes,
     )
 
 

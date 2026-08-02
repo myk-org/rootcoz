@@ -162,6 +162,20 @@ class TestBuildChatCustomTools:
         assert "search_jira" not in names
         assert "search_github_issues" not in names
 
+    def test_get_job_tests_tool_query(self):
+        """Optional status stays in query; server sanitizes unsubstituted placeholders."""
+        tools = build_chat_custom_tools(
+            server_url="http://localhost:8000",
+            auth_token="tok",
+            job_id="job-1",
+        )
+        tool = next(t for t in tools if t["name"] == "get_job_tests")
+        assert tool["http"]["query"]["status"] == "{status}"
+        assert tool["http"]["query"]["offset"] == "{offset}"
+        assert tool["http"]["query"]["limit"] == "{limit}"
+        assert "status" in tool["parameters"]["properties"]
+        assert "status" not in tool["parameters"].get("required", [])
+
     def test_failure_history_tool(self):
         tools = build_chat_custom_tools(
             server_url="http://localhost:8000",

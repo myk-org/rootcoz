@@ -3148,6 +3148,60 @@ def _stamp_result_metadata(data: dict, source_result: CISourceResult | None) -> 
         stamp_build_url(data, source_result.build_url)
 
 
+def _count_test_entry_statuses(entries: list[dict]) -> tuple[int, int, int]:
+    """Count passed/skipped/failed in normalized test entry dicts."""
+    passed = skipped = failed = 0
+    for entry in entries:
+        status = entry.get("status")
+        if status == "passed":
+            passed += 1
+        elif status == "skipped":
+            skipped += 1
+        elif status == "failed":
+            failed += 1
+    return passed, skipped, failed
+
+
+async def _save_test_entry_scopes(
+    job_id: str,
+    scopes: list[tuple[str, int, list[dict]]],
+) -> None:
+    """Persist child-scoped test entry batches via ``save_test_entries``."""
+    for child_job_name, child_build_number, entries in scopes:
+        if not entries:
+            continue
+        await storage.save_test_entries(
+            job_id,
+            entries,
+            child_job_name=child_job_name,
+            child_build_number=child_build_number,
+        )
+        logger.info(
+            "Job %s: saved %d test entries for child %s #%s",
+            job_id,
+            len(entries),
+            child_job_name,
+            child_build_number,
+        )
+
+
+def _apply_cached_test_counts(
+    result_data: dict,
+    top_entries: list[dict],
+    child_scopes: list[tuple[str, int, list[dict]]],
+) -> None:
+    """Cache job-level passed/skipped/failed counts on ``result_data``."""
+    passed, skipped, failed = _count_test_entry_statuses(top_entries)
+    for _, _, entries in child_scopes:
+        c_passed, c_skipped, c_failed = _count_test_entry_statuses(entries)
+        passed += c_passed
+        skipped += c_skipped
+        failed += c_failed
+    result_data["passed_count"] = passed
+    result_data["skipped_count"] = skipped
+    result_data["failed_count"] = failed
+
+
 async def _analyze_failures_or_exit(
     *,
     job_id: str,
@@ -3421,37 +3475,11 @@ async def _process_ci_source_analysis(
 
         if source_result.skip_analysis:
             # Save test entries (passed/skipped/failed) to test_entries table
-            _all_entries = []
-            for _te in source_result.passed_tests:
-                _all_entries.append(
-                    {
-                        "test_name": _te.test_name,
-                        "duration": _te.duration,
-                        "status": "passed",
-                    }
-                )
-            for _te in source_result.skipped_tests:
-                _all_entries.append(
-                    {
-                        "test_name": _te.test_name,
-                        "duration": _te.duration,
-                        "status": "skipped",
-                    }
-                )
-            for _te in source_result.failures:
-                _all_entries.append(
-                    {
-                        "test_name": _te.test_name,
-                        "duration": _te.duration,
-                        "status": "failed",
-                    }
-                )
+            _all_entries = source_result.test_entry_dicts()
             if _all_entries:
                 await storage.save_test_entries(job_id, _all_entries)
 
-            _passed_count = len(source_result.passed_tests)
-            _skipped_count = len(source_result.skipped_tests)
-            _failed_count = len(source_result.failures)
+            _passed_count, _skipped_count, _failed_count = source_result.test_counts()
 
             summary = "No test failures found in the provided input."
             analysis_result = FailureAnalysisResult(
@@ -3651,10 +3679,11 @@ async def _process_ci_source_analysis(
 
         # Handle child jobs (Jenkins pipeline sub-jobs)
         child_job_analyses: list[ChildJobAnalysis] = []
+        child_test_scopes: list[tuple[str, int, list[dict]]] = []
         if source_result.child_job_infos and source is not None:
             await safe_update_progress(job_id, "analyzing_child_jobs")
             notify_job_status_changed(job_id)
-            child_job_analyses = await source.analyze_children(
+            child_job_analyses, child_test_scopes = await source.analyze_children(
                 source_result,
                 settings=merged,
                 repo_path=repo_path,
@@ -3755,6 +3784,14 @@ async def _process_ci_source_analysis(
                         job_id,
                         exc_info=True,
                     )
+
+                # Persist top-level + child-scoped test entries
+                _top_entries = source_result.test_entry_dicts()
+                if _top_entries:
+                    await storage.save_test_entries(job_id, _top_entries)
+                await _save_test_entry_scopes(job_id, child_test_scopes)
+                _apply_cached_test_counts(result_data, _top_entries, child_test_scopes)
+
                 await _carry_forward_overrides(job_id, result_data)
                 try:
                     await _auto_review_matching_failures(
@@ -3880,38 +3917,13 @@ async def _process_ci_source_analysis(
             )
 
         # Save ALL test entries (passed/skipped/failed) to test_entries table
-        _all_test_entries: list[dict] = []
-        for _te in source_result.passed_tests:
-            _all_test_entries.append(
-                {
-                    "test_name": _te.test_name,
-                    "duration": _te.duration,
-                    "status": "passed",
-                }
-            )
-        for _te in source_result.skipped_tests:
-            _all_test_entries.append(
-                {
-                    "test_name": _te.test_name,
-                    "duration": _te.duration,
-                    "status": "skipped",
-                }
-            )
-        for _te in source_result.failures:
-            _all_test_entries.append(
-                {
-                    "test_name": _te.test_name,
-                    "duration": _te.duration,
-                    "status": "failed",
-                }
-            )
+        _all_test_entries = source_result.test_entry_dicts()
         if _all_test_entries:
             await storage.save_test_entries(job_id, _all_test_entries)
+        await _save_test_entry_scopes(job_id, child_test_scopes)
 
-        # Cache test counts in result_json for dashboard display
-        result_data["passed_count"] = len(source_result.passed_tests)
-        result_data["skipped_count"] = len(source_result.skipped_tests)
-        result_data["failed_count"] = len(source_result.failures)
+        # Cache job-level test counts in result_json for dashboard display
+        _apply_cached_test_counts(result_data, _all_test_entries, child_test_scopes)
 
         await _carry_forward_overrides(job_id, result_data)
 
@@ -4284,7 +4296,6 @@ async def get_job_result(
 
 @app.get("/api/results/{job_id}/tests", operation_id="getJobTests")
 async def get_job_tests(
-    request: Request,
     job_id: str,
     status: list[str] | None = Query(
         default=None,
@@ -4302,6 +4313,14 @@ async def get_job_tests(
     limit: int = Query(default=50, ge=1, le=200, description="Page size"),
 ):
     """Get paginated test entries for a job (viewer+)."""
+    # Sidecar may leave unsubstituted "{status}" when optional tool arg omitted
+    if status:
+        status = [
+            sanitized
+            for raw in status
+            if (sanitized := _sanitize_sidecar_placeholder(raw))
+        ] or None
+
     # Validate status values
     valid_statuses = {"passed", "skipped", "failed"}
     if status:

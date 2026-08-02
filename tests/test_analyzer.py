@@ -1128,6 +1128,89 @@ class TestConsoleOnlyPeerAnalysis:
         call_kwargs = mock_afg.call_args.kwargs
         assert call_kwargs["peer_ai_configs"] is None
 
+    @pytest.mark.asyncio
+    async def test_child_job_populates_counts_and_test_scopes(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Leaf child returns passed/skipped/failed counts + persist scopes."""
+        mock_client = MagicMock()
+        mock_client.get_build_info_safe.return_value = {
+            "result": "FAILURE",
+            "building": False,
+            "url": "https://jenkins.example.com/job/leaf/9/",
+        }
+        mock_client.get_build_console.return_value = "fail log"
+        mock_client.get_test_report.return_value = {
+            "suites": [
+                {
+                    "cases": [
+                        {
+                            "className": "pkg",
+                            "name": "test_pass",
+                            "status": "PASSED",
+                            "duration": 0.1,
+                        },
+                        {
+                            "className": "pkg",
+                            "name": "test_skip",
+                            "status": "SKIPPED",
+                            "duration": 0.0,
+                        },
+                        {
+                            "className": "pkg",
+                            "name": "test_fail",
+                            "status": "FAILED",
+                            "errorDetails": "boom",
+                            "errorStackTrace": "trace",
+                            "duration": 0.5,
+                        },
+                    ]
+                }
+            ]
+        }
+        mock_client.get_running_builds = MagicMock(return_value=[])
+        _patch_jenkins_client(monkeypatch, mock_client)
+
+        mock_afg = AsyncMock(
+            return_value=[
+                FailureAnalysis(
+                    test_name="pkg.test_fail",
+                    error="boom",
+                    analysis=AnalysisDetail(classification="CODE ISSUE", details="d"),
+                )
+            ]
+        )
+        monkeypatch.setattr(
+            "rootcoz.sources.jenkins_source.analyze_failure_group",
+            mock_afg,
+        )
+        monkeypatch.setattr(
+            "rootcoz.sources.jenkins_source.process_build_artifacts",
+            MagicMock(return_value=("", None)),
+        )
+
+        bundle = await analyze_child_job(
+            job_name="leaf",
+            build_number=9,
+            settings=_make_jenkins_settings(),
+        )
+
+        assert bundle.analysis.passed_count == 1
+        assert bundle.analysis.skipped_count == 1
+        assert bundle.analysis.failed_count == 1
+        assert len(bundle.test_entry_scopes) == 1
+        scope_name, scope_build, entries = bundle.test_entry_scopes[0]
+        assert scope_name == "leaf"
+        assert scope_build == 9
+        statuses = {e["status"] for e in entries}
+        assert statuses == {"passed", "skipped", "failed"}
+        # Counts must serialize into result_json (no ephemeral entry lists)
+        dumped = bundle.analysis.model_dump(mode="json")
+        assert dumped["passed_count"] == 1
+        assert dumped["skipped_count"] == 1
+        assert dumped["failed_count"] == 1
+        assert "test_entry_scopes" not in dumped
+
 
 class TestResolveAdditionalRepos:
     """Tests for resolve_additional_repos."""

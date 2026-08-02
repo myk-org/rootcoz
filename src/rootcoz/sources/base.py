@@ -97,6 +97,47 @@ class CISourceResult:
     source_metadata: dict = field(default_factory=dict)
     identity: dict = field(default_factory=dict)
 
+    def test_entry_dicts(self) -> list[dict]:
+        """Build normalized test_entries dicts (passed/skipped/failed).
+
+        Status values are always canonical: ``passed``, ``skipped``, ``failed``.
+        Used by ``main.py`` before ``storage.save_test_entries``.
+        """
+        entries: list[dict] = []
+        for te in self.passed_tests:
+            entries.append(
+                {
+                    "test_name": te.test_name,
+                    "duration": te.duration,
+                    "status": "passed",
+                }
+            )
+        for te in self.skipped_tests:
+            entries.append(
+                {
+                    "test_name": te.test_name,
+                    "duration": te.duration,
+                    "status": "skipped",
+                }
+            )
+        for te in self.failures:
+            entries.append(
+                {
+                    "test_name": te.test_name,
+                    "duration": te.duration,
+                    "status": "failed",
+                }
+            )
+        return entries
+
+    def test_counts(self) -> tuple[int, int, int]:
+        """Return ``(passed_count, skipped_count, failed_count)``."""
+        return (
+            len(self.passed_tests),
+            len(self.skipped_tests),
+            len(self.failures),
+        )
+
 
 class CISource(ABC):
     """Abstract base class that every CI source plugin must implement.
@@ -289,10 +330,13 @@ class CISource(ABC):
         peer_ai_configs: list | None = None,
         cloned_repos: dict | None = None,
         auth_header: str = "",
-    ) -> list:
+    ) -> tuple[list, list[tuple[str, int, list[dict]]]]:
         """Analyze failed child jobs (e.g. Jenkins pipeline sub-jobs).
 
-        Default returns empty list. Jenkins overrides for recursive analysis.
+        Returns:
+            ``(analyses, test_entry_scopes)`` where each scope is
+            ``(child_job_name, child_build_number, entry_dicts)``.
+            Default is empty analyses and no scopes. Jenkins overrides.
         """
         _ = (
             source_result,
@@ -307,7 +351,7 @@ class CISource(ABC):
             cloned_repos,
             auth_header,
         )
-        return []
+        return [], []
 
     @classmethod
     def pre_enqueue_build_url(cls, body: Any, merged: Any) -> str:
