@@ -1305,6 +1305,16 @@ def analyze(
         None, "--max-wait", help="Maximum minutes to wait for completion."
     ),
     max_concurrent: _MaxConcurrentOpt = 0,
+    passed_tests: str = typer.Option(
+        "",
+        "--passed-tests",
+        help='JSON list of passed test entries (for type=raw). Format: \'[{"test_name": "...", "duration": 0.1, "status": "passed"}]\'',
+    ),
+    skipped_tests: str = typer.Option(
+        "",
+        "--skipped-tests",
+        help='JSON list of skipped test entries (for type=raw). Format: \'[{"test_name": "...", "duration": 0.0, "status": "skipped"}]\'',
+    ),
     tags: list[str] = _TAG_OPTION,
     json_output: bool = _JSON_OPTION,
 ):
@@ -1438,6 +1448,20 @@ def analyze(
 
     if tags:
         extras["tags"] = tags
+
+    # Passed/skipped tests (type=raw only — API validates and rejects for other types)
+    if passed_tests:
+        try:
+            extras["passed_tests"] = json_mod.loads(passed_tests)
+        except json_mod.JSONDecodeError:
+            typer.echo("Error: --passed-tests must be valid JSON.", err=True)
+            raise typer.Exit(1)
+    if skipped_tests:
+        try:
+            extras["skipped_tests"] = json_mod.loads(skipped_tests)
+        except json_mod.JSONDecodeError:
+            typer.echo("Error: --skipped-tests must be valid JSON.", err=True)
+            raise typer.Exit(1)
 
     # Strip Jenkins-specific fields for non-Jenkins sources
     if source in ("file", "prow"):

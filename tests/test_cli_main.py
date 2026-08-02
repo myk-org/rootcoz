@@ -1196,6 +1196,68 @@ class TestAnalyzeAllOptions:
         kwargs = mock_client.analyze.call_args[1]
         assert "max_concurrent_ai_calls" not in kwargs
 
+    def test_passed_and_skipped_tests_forwarded(self, mock_client):
+        """--passed-tests / --skipped-tests JSON lists are parsed into extras."""
+        mock_client.analyze.return_value = self._ANALYZE_RESPONSE
+        passed = '[{"test_name": "t_pass", "duration": 0.1, "status": "passed"}]'
+        skipped = '[{"test_name": "t_skip", "duration": 0.0, "status": "skipped"}]'
+        result = runner.invoke(
+            app,
+            [
+                "analyze",
+                "--job-name",
+                "my-job",
+                "--build-number",
+                "1",
+                "--passed-tests",
+                passed,
+                "--skipped-tests",
+                skipped,
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        kwargs = mock_client.analyze.call_args[1]
+        assert kwargs["passed_tests"] == [
+            {"test_name": "t_pass", "duration": 0.1, "status": "passed"}
+        ]
+        assert kwargs["skipped_tests"] == [
+            {"test_name": "t_skip", "duration": 0.0, "status": "skipped"}
+        ]
+
+    def test_passed_tests_invalid_json(self, mock_client):
+        """Invalid --passed-tests JSON exits with error."""
+        result = runner.invoke(
+            app,
+            [
+                "analyze",
+                "--job-name",
+                "my-job",
+                "--build-number",
+                "1",
+                "--passed-tests",
+                "not-json",
+            ],
+        )
+        assert result.exit_code == 1
+        assert "--passed-tests must be valid JSON" in result.output
+
+    def test_skipped_tests_invalid_json(self, mock_client):
+        """Invalid --skipped-tests JSON exits with error."""
+        result = runner.invoke(
+            app,
+            [
+                "analyze",
+                "--job-name",
+                "my-job",
+                "--build-number",
+                "1",
+                "--skipped-tests",
+                "{bad",
+            ],
+        )
+        assert result.exit_code == 1
+        assert "--skipped-tests must be valid JSON" in result.output
+
     def test_no_optional_fields_when_not_provided(self, mock_client):
         """When no optional flags are given and no env vars set, extras should be empty."""
         mock_client.analyze.return_value = self._ANALYZE_RESPONSE
