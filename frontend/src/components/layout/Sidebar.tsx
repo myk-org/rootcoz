@@ -235,17 +235,33 @@ export function Sidebar({ badges, mobileOpen, onMobileClose }: SidebarProps) {
     </nav>
   )
 
+  const releaseUrl = `https://github.com/myk-org/rootcoz/releases/tag/v${version}`
+
   const versionFooter = version ? (
-    <div data-testid="sidebar-version" className="border-t border-border-default px-3 py-2">
+    <div data-testid="sidebar-version" className="border-t border-border-default px-3 py-3">
       {collapsed ? (
         <Tooltip>
           <TooltipTrigger asChild>
-            <span className="block text-center text-[10px] text-text-tertiary font-mono">v</span>
+            <a
+              href={releaseUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="flex items-center justify-center gap-1 text-xs text-text-tertiary font-mono opacity-70 hover:opacity-100 hover:text-text-link transition-all"
+            >
+              v
+            </a>
           </TooltipTrigger>
-          <TooltipContent side="right">v{version}</TooltipContent>
+          <TooltipContent side="right">rootcoz v{version}</TooltipContent>
         </Tooltip>
       ) : (
-        <span className="text-[10px] text-text-tertiary font-mono">v{version}</span>
+        <a
+          href={releaseUrl}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="flex items-center justify-center text-xs text-text-tertiary font-mono opacity-70 hover:opacity-100 hover:text-text-link transition-all"
+        >
+          <span className="font-semibold">RootCoz v{version}</span>
+        </a>
       )}
     </div>
   ) : null

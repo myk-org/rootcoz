@@ -224,8 +224,11 @@ describe('Sidebar', () => {
   it('shows server version in desktop sidebar', async () => {
     renderSidebar()
     await waitFor(() => {
-      expect(screen.getByTestId('sidebar-version')).toHaveTextContent('v4.5.0')
+      expect(screen.getByTestId('sidebar-version')).toHaveTextContent('RootCoz v4.5.0')
     })
+    const link = screen.getByTestId('sidebar-version').querySelector('a')
+    expect(link?.getAttribute('href')).toBe('https://github.com/myk-org/rootcoz/releases/tag/v4.5.0')
+    expect(link?.getAttribute('target')).toBe('_blank')
   })
 
   it('shows server version in mobile sidebar', async () => {
@@ -234,7 +237,7 @@ describe('Sidebar', () => {
       const footers = screen.getAllByTestId('sidebar-version')
       expect(footers.length).toBe(2)
       for (const footer of footers) {
-        expect(footer).toHaveTextContent('v4.5.0')
+        expect(footer).toHaveTextContent('RootCoz v4.5.0')
       }
     })
   })
@@ -264,13 +267,14 @@ describe('Sidebar', () => {
     await waitFor(() => {
       expect(screen.getByTestId('sidebar-version')).toBeDefined()
     })
-    // Trigger span shows exactly "v" (not the full version)
-    const trigger = screen.getByTestId('sidebar-version').querySelector('span')
+    // Trigger link shows exactly "v" (not the full version)
+    const trigger = screen.getByTestId('sidebar-version').querySelector('a')
     expect(trigger?.textContent).toBe('v')
+    expect(trigger?.getAttribute('href')).toBe('https://github.com/myk-org/rootcoz/releases/tag/v4.5.0')
     // Full version is in the tooltip content (portaled; opens on hover)
     await userEvent.hover(trigger!)
     await waitFor(() => {
-      expect(screen.getByRole('tooltip')).toHaveTextContent('v4.5.0')
+      expect(screen.getByRole('tooltip')).toHaveTextContent('rootcoz v4.5.0')
     })
   })
 })
