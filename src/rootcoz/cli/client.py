@@ -259,6 +259,10 @@ class RootCozClient:
                 return self._request("GET", "/health")
             raise
 
+    def version(self) -> dict:
+        """Get server version. GET /api/version"""
+        return self._request("GET", "/api/version")
+
     # -- Results --------------------------------------------------------------
 
     def list_results(self, limit: int = 50) -> list[dict]:

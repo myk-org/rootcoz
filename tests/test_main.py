@@ -227,6 +227,28 @@ class TestHealthEndpoint:
         response = test_client.post("/health")
         assert response.status_code == 405
 
+    def test_version_endpoint(self, test_client) -> None:
+        """Test that /api/version returns version when authenticated."""
+        response = test_client.get("/api/version")
+        assert response.status_code == 200
+        data = response.json()
+        assert "version" in data
+        assert isinstance(data["version"], str)
+        assert len(data["version"]) > 0
+
+    def test_version_endpoint_requires_auth(
+        self, mock_settings, temp_db_path: Path
+    ) -> None:
+        """Unauthenticated /api/version must not be public."""
+        with patch.object(storage, "DB_PATH", temp_db_path):
+            from starlette.testclient import TestClient
+
+            from rootcoz.main import app
+
+            with TestClient(app) as client:
+                response = client.get("/api/version")
+                assert response.status_code == 401
+
 
 class TestAnalyzeEndpoint:
     """Tests for the /analyze endpoint."""

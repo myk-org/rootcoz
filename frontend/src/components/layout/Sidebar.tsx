@@ -16,6 +16,7 @@ import {
 import { NavBadge } from '@/components/shared/NavBadge'
 import { Separator } from '@/components/ui/separator'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
+import { api } from '@/lib/api'
 import { useAuth } from '@/lib/auth'
 import { cn } from '@/lib/utils'
 
@@ -72,7 +73,7 @@ interface SidebarProps {
 
 export function Sidebar({ badges, mobileOpen, onMobileClose }: SidebarProps) {
   const location = useLocation()
-  const { isAdmin, canViewReports, role, username, loading } = useAuth()
+  const { isAdmin, canViewReports, role, username, loading, authenticated } = useAuth()
 
   // ─── Width / collapse state ─────────────────────────────────────
   const [collapsed, setCollapsed] = useState(() => {
@@ -97,6 +98,32 @@ export function Sidebar({ badges, mobileOpen, onMobileClose }: SidebarProps) {
   useEffect(() => {
     try { localStorage.setItem(LS_COLLAPSED_KEY, String(collapsed)) } catch { /* storage unavailable */ }
   }, [collapsed])
+
+  // ─── Server version ─────────────────────────────────────────────
+  const [version, setVersion] = useState('')
+
+  useEffect(() => {
+    if (loading || !authenticated) {
+      setVersion('')
+      return
+    }
+
+    const controller = new AbortController()
+
+    async function fetchVersion() {
+      try {
+        const data = await api.get<{ version: string }>('/api/version', { signal: controller.signal })
+        if (!data.version) return
+        setVersion(data.version)
+      } catch (err) {
+        if (err instanceof DOMException && err.name === 'AbortError') return
+        console.debug('Failed to fetch server version:', err)
+      }
+    }
+
+    fetchVersion()
+    return () => { controller.abort() }
+  }, [loading, authenticated])
 
   // ─── Drag resize ────────────────────────────────────────────────
   const [isDragging, setIsDragging] = useState(false)
@@ -208,6 +235,38 @@ export function Sidebar({ badges, mobileOpen, onMobileClose }: SidebarProps) {
     </nav>
   )
 
+  const isValidVersion = Boolean(version && version !== 'unknown')
+  const releaseUrl = isValidVersion
+    ? `https://github.com/myk-org/rootcoz/releases/tag/v${encodeURIComponent(version)}`
+    : undefined
+
+  const versionLink = (
+    <a
+      href={releaseUrl}
+      target="_blank"
+      rel="noopener noreferrer"
+      className={cn(
+        'flex items-center justify-center text-xs text-text-tertiary font-mono opacity-70 hover:opacity-100 hover:text-text-link transition-all',
+        collapsed && 'gap-1',
+      )}
+    >
+      {collapsed ? 'v' : <span className="font-semibold">RootCoz v{version}</span>}
+    </a>
+  )
+
+  const versionFooter = isValidVersion ? (
+    <div data-testid="sidebar-version" className="border-t border-border-default px-3 py-3">
+      {collapsed ? (
+        <Tooltip>
+          <TooltipTrigger asChild>{versionLink}</TooltipTrigger>
+          <TooltipContent side="right">rootcoz v{version}</TooltipContent>
+        </Tooltip>
+      ) : (
+        versionLink
+      )}
+    </div>
+  ) : null
+
   return (
     <TooltipProvider delayDuration={200}>
       {/* ─── Desktop sidebar ─────────────────────────────────────── */}
@@ -217,6 +276,7 @@ export function Sidebar({ badges, mobileOpen, onMobileClose }: SidebarProps) {
         style={{ width: effectiveWidth }}
       >
         {sidebarContent}
+        {versionFooter}
 
         {/* Drag handle */}
         <div
@@ -241,6 +301,7 @@ export function Sidebar({ badges, mobileOpen, onMobileClose }: SidebarProps) {
             className="fixed inset-y-0 left-0 z-50 flex w-64 flex-col border-r border-border-default bg-surface-card pt-16 md:hidden"
           >
             {sidebarContent}
+            {versionFooter}
           </aside>
         </>
       )}

@@ -87,7 +87,7 @@ const requestWithJsonBody = <T>(
   })
 
 export const api = {
-  get: <T>(path: string) => request<T>(path),
+  get: <T>(path: string, options?: RequestInit) => request<T>(path, options),
 
   post: <T>(path: string, body?: unknown) =>
     requestWithJsonBody<T>('POST', path, body),
