@@ -12,6 +12,7 @@ import { ReportProvider, useReportState, useReportDispatch, useRefreshEnrichment
 import { FailureCard } from './report/FailureCard'
 import { ChildJobSection } from './report/ChildJobSection'
 import { PeerAnalysisSummary } from './report/PeerAnalysisSummary'
+import { TestListSection } from './report/TestListSection'
 import { AllReviewedPrompt } from './report/AllReviewedPrompt'
 import { collectChildExpandKeys, expandKey } from '@/lib/childJobHash'
 import { collectAllTestKeys, countAllFailures } from '@/lib/failureKeys'
@@ -424,9 +425,11 @@ function ReportContent() {
             )
           )}
           <StatusChip status={isAnalysisTimeout(result.status, result.error, result.summary) ? 'timeout' : result.status} />
-          <Badge variant="destructive" className="font-mono">
-            {totalFailures} {totalFailures === 1 ? 'failure' : 'failures'}
-          </Badge>
+          {totalFailures > 0 && (
+            <Badge variant="destructive" className="font-mono">
+              {totalFailures} {totalFailures === 1 ? 'failure' : 'failures'}
+            </Badge>
+          )}
           {/* Review progress badge */}
           {totalFailures > 0 && (
             <span
@@ -559,6 +562,21 @@ function ReportContent() {
           )}
         </div>
 
+      {/* ---- Zero-failure banner ---- */}
+      {totalFailures === 0 && result.status === 'completed' && (
+        <div className="rounded-lg border-l-4 border-l-signal-green bg-signal-green/5 p-4 animate-slide-up">
+          <div className="flex items-center gap-2">
+            <CheckCircle2 className="h-5 w-5 text-signal-green" />
+            <h2 className="text-sm font-medium text-signal-green">All Tests Passed</h2>
+          </div>
+          <p className="mt-1 text-xs text-text-tertiary">
+            No test failures found.
+            {(result.passed_count ?? 0) > 0 && ` ${result.passed_count} test${result.passed_count === 1 ? '' : 's'} passed.`}
+            {(result.skipped_count ?? 0) > 0 && ` ${result.skipped_count} skipped.`}
+          </p>
+        </div>
+      )}
+
       {/* ---- Key takeaway ---- */}
       {result.summary && (
         <div className="rounded-lg border-l-4 border-l-signal-orange bg-glow-orange p-4 animate-slide-up">
@@ -602,6 +620,23 @@ function ReportContent() {
             ))}
           </div>
         </section>
+      )}
+
+      {/* ---- Passed/Skipped test sections ---- */}
+      {(result.passed_count ?? 0) > 0 && (
+        <TestListSection
+          jobId={result.job_id}
+          status="passed"
+          count={result.passed_count ?? 0}
+          defaultExpanded={totalFailures === 0}
+        />
+      )}
+      {(result.skipped_count ?? 0) > 0 && (
+        <TestListSection
+          jobId={result.job_id}
+          status="skipped"
+          count={result.skipped_count ?? 0}
+        />
       )}
 
       {/* ---- Child jobs ---- */}

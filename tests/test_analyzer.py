@@ -35,7 +35,6 @@ from rootcoz.peer_analysis import analyze_failure_group_with_peers
 from rootcoz.repository import RepositoryManager
 from rootcoz.sources.jenkins_source import (
     JenkinsError,
-    JenkinsSource,
     analyze_child_job,
     extract_failures_from_test_report,
     handle_jenkins_exception,
@@ -47,7 +46,7 @@ _FAKE_JENKINS_PASSWORD = "test-pass"  # noqa: S105  # pragma: allowlist secret
 def _make_jenkins_settings(**overrides: object) -> Settings:
     """Build a ``Settings`` instance pre-filled with dummy Jenkins credentials.
 
-    Any extra *overrides* (e.g. ``force_analysis=True``) are merged into the
+    Any extra *overrides* (e.g. ``get_job_artifacts=True``) are merged into the
     settings dict before validation.
     """
     data = Settings().model_dump(mode="python")
@@ -1129,50 +1128,88 @@ class TestConsoleOnlyPeerAnalysis:
         call_kwargs = mock_afg.call_args.kwargs
         assert call_kwargs["peer_ai_configs"] is None
 
-
-class TestForceAnalysisSuccessfulBuild:
-    """Tests for force-analyzing builds that passed (SUCCESS) via JenkinsSource.fetch."""
-
     @pytest.mark.asyncio
-    async def test_success_build_returns_early_without_force(
+    async def test_child_job_populates_counts_and_test_scopes(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """When build is SUCCESS and force is False, fetch returns build_passed."""
-        merged = _make_jenkins_settings()
+        """Leaf child returns passed/skipped/failed counts + persist scopes."""
         mock_client = MagicMock()
         mock_client.get_build_info_safe.return_value = {
-            "result": "SUCCESS",
+            "result": "FAILURE",
             "building": False,
+            "url": "https://jenkins.example.com/job/leaf/9/",
         }
+        mock_client.get_build_console.return_value = "fail log"
+        mock_client.get_test_report.return_value = {
+            "suites": [
+                {
+                    "cases": [
+                        {
+                            "className": "pkg",
+                            "name": "test_pass",
+                            "status": "PASSED",
+                            "duration": 0.1,
+                        },
+                        {
+                            "className": "pkg",
+                            "name": "test_skip",
+                            "status": "SKIPPED",
+                            "duration": 0.0,
+                        },
+                        {
+                            "className": "pkg",
+                            "name": "test_fail",
+                            "status": "FAILED",
+                            "errorDetails": "boom",
+                            "errorStackTrace": "trace",
+                            "duration": 0.5,
+                        },
+                    ]
+                }
+            ]
+        }
+        mock_client.get_running_builds = MagicMock(return_value=[])
         _patch_jenkins_client(monkeypatch, mock_client)
 
-        result = await JenkinsSource("my-job", 123, merged, force=False).fetch()
+        mock_afg = AsyncMock(
+            return_value=[
+                FailureAnalysis(
+                    test_name="pkg.test_fail",
+                    error="boom",
+                    analysis=AnalysisDetail(classification="CODE ISSUE", details="d"),
+                )
+            ]
+        )
+        monkeypatch.setattr(
+            "rootcoz.sources.jenkins_source.analyze_failure_group",
+            mock_afg,
+        )
+        monkeypatch.setattr(
+            "rootcoz.sources.jenkins_source.process_build_artifacts",
+            MagicMock(return_value=("", None)),
+        )
 
-        assert result.build_passed is True
-        assert result.failures == []
-        mock_client.get_build_console.assert_not_called()
+        bundle = await analyze_child_job(
+            job_name="leaf",
+            build_number=9,
+            settings=_make_jenkins_settings(),
+        )
 
-    @pytest.mark.asyncio
-    async def test_success_build_continues_with_force(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """When build is SUCCESS and force is True, fetch continues past early return."""
-        merged = _make_jenkins_settings()
-        mock_client = MagicMock()
-        mock_client.get_build_info_safe.return_value = {
-            "result": "SUCCESS",
-            "building": False,
-            "artifacts": [],
-        }
-        mock_client.get_build_console.return_value = "Build finished successfully"
-        mock_client.get_test_report.return_value = None
-        mock_client.session = MagicMock()
-        _patch_jenkins_client(monkeypatch, mock_client)
-
-        result = await JenkinsSource("my-job", 123, merged, force=True).fetch()
-
-        assert result.build_passed is False
-        mock_client.get_build_console.assert_called_once()
+        assert bundle.analysis.passed_count == 1
+        assert bundle.analysis.skipped_count == 1
+        assert bundle.analysis.failed_count == 1
+        assert len(bundle.test_entry_scopes) == 1
+        scope_name, scope_build, entries = bundle.test_entry_scopes[0]
+        assert scope_name == "leaf"
+        assert scope_build == 9
+        statuses = {e["status"] for e in entries}
+        assert statuses == {"passed", "skipped", "failed"}
+        # Counts must serialize into result_json (no ephemeral entry lists)
+        dumped = bundle.analysis.model_dump(mode="json")
+        assert dumped["passed_count"] == 1
+        assert dumped["skipped_count"] == 1
+        assert dumped["failed_count"] == 1
+        assert "test_entry_scopes" not in dumped
 
 
 class TestResolveAdditionalRepos:
@@ -2185,7 +2222,8 @@ class TestExtractFailuresFromTestReport:
                 }
             ]
         )
-        failures = extract_failures_from_test_report(report)
+        result = extract_failures_from_test_report(report)
+        failures = result.failures
         assert len(failures) == 1
         assert failures[0].test_name == "com.example.MyTest.testFoo"
         assert failures[0].error_message == "expected 1 but got 2"
@@ -2213,7 +2251,8 @@ class TestExtractFailuresFromTestReport:
                 }
             ]
         )
-        failures = extract_failures_from_test_report(report)
+        result = extract_failures_from_test_report(report)
+        failures = result.failures
         assert len(failures) == 1
         assert (
             failures[0].error_message
@@ -2237,7 +2276,8 @@ class TestExtractFailuresFromTestReport:
                 }
             ]
         )
-        failures = extract_failures_from_test_report(report)
+        result = extract_failures_from_test_report(report)
+        failures = result.failures
         assert len(failures) == 1
         assert failures[0].test_name == "TestGoUnit"
         assert failures[0].error_message == "Expected true to be false"
@@ -2259,7 +2299,8 @@ class TestExtractFailuresFromTestReport:
                 }
             ]
         )
-        failures = extract_failures_from_test_report(report)
+        result = extract_failures_from_test_report(report)
+        failures = result.failures
         assert failures[0].error_message == "real error"
         assert failures[0].stack_trace == "tests/foo.go:10\nsome trace"
 
@@ -2276,7 +2317,8 @@ class TestExtractFailuresFromTestReport:
                 }
             ]
         )
-        failures = extract_failures_from_test_report(report)
+        result = extract_failures_from_test_report(report)
+        failures = result.failures
         assert failures[0].error_message == "existing trace with details"
         assert failures[0].stack_trace == "existing trace with details"
 
@@ -2293,7 +2335,8 @@ class TestExtractFailuresFromTestReport:
                 }
             ]
         )
-        failures = extract_failures_from_test_report(report)
+        result = extract_failures_from_test_report(report)
+        failures = result.failures
         assert len(failures) == 1
         assert failures[0].error_message == ""
         assert failures[0].stack_trace == ""
@@ -2311,7 +2354,8 @@ class TestExtractFailuresFromTestReport:
                 },
             ]
         )
-        failures = extract_failures_from_test_report(report)
+        result = extract_failures_from_test_report(report)
+        failures = result.failures
         assert len(failures) == 1
         assert failures[0].test_name == "C.bad"
 
@@ -2338,7 +2382,8 @@ class TestExtractFailuresFromTestReport:
                 }
             ]
         }
-        failures = extract_failures_from_test_report(report)
+        result = extract_failures_from_test_report(report)
+        failures = result.failures
         assert len(failures) == 1
         assert failures[0].status == "REGRESSION"
 
@@ -2356,7 +2401,8 @@ class TestExtractFailuresFromTestReport:
                 }
             ]
         )
-        failures = extract_failures_from_test_report(report)
+        result = extract_failures_from_test_report(report)
+        failures = result.failures
         assert len(failures) == 1
         assert failures[0].error_message == "Actual value did not match expected"
         assert (

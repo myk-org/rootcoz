@@ -1575,6 +1575,66 @@ class TestUpdateBuildUrl:
         assert "nonexistent-id" in args
 
 
+class TestSaveTestEntriesChildScope:
+    """Child-scoped test_entries persistence and queries."""
+
+    async def test_child_scope_isolated_from_top_level(
+        self, setup_test_db: Path
+    ) -> None:
+        with patch.object(storage, "DB_PATH", setup_test_db):
+            await storage.save_result(
+                job_id="job-child-scope",
+                jenkins_url="https://jenkins.example.com/job/pipe/1/",
+                status="completed",
+            )
+            await storage.save_test_entries(
+                "job-child-scope",
+                [
+                    {
+                        "test_name": "top.pass",
+                        "duration": 0.1,
+                        "status": "passed",
+                    }
+                ],
+            )
+            await storage.save_test_entries(
+                "job-child-scope",
+                [
+                    {
+                        "test_name": "child.pass",
+                        "duration": 0.2,
+                        "status": "passed",
+                    },
+                    {
+                        "test_name": "child.skip",
+                        "duration": 0.0,
+                        "status": "skipped",
+                    },
+                ],
+                child_job_name="leaf-child",
+                child_build_number=42,
+            )
+
+            top = await storage.get_test_entries(
+                "job-child-scope",
+                status=["passed"],
+                child_job_name="",
+                child_build_number=0,
+            )
+            child = await storage.get_test_entries(
+                "job-child-scope",
+                status=["passed", "skipped"],
+                child_job_name="leaf-child",
+                child_build_number=42,
+            )
+
+            assert top["total"] == 1
+            assert top["entries"][0]["test_name"] == "top.pass"
+            assert child["total"] == 2
+            names = {e["test_name"] for e in child["entries"]}
+            assert names == {"child.pass", "child.skip"}
+
+
 class TestWithBuildUrlAliases:
     """Tests for with_build_url_aliases sanitization."""
 

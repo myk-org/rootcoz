@@ -281,9 +281,6 @@ class Settings(BaseSettings):
         description="Default GCS bucket for Prow artifacts (e.g. test-platform-results)",
     )
 
-    # Force analysis on successful builds
-    force_analysis: bool = False
-
     # Jenkins job monitoring (wait for completion before analysis)
     wait_for_completion: bool = True
     poll_interval_minutes: int = Field(default=2, gt=0)

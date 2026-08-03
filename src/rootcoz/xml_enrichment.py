@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import time
+from dataclasses import dataclass, field
 from typing import Any
 from xml.etree import ElementTree as ET
 from xml.etree.ElementTree import Element
@@ -9,9 +10,18 @@ from xml.etree.ElementTree import Element
 import httpx
 from defusedxml.ElementTree import fromstring as safe_fromstring
 
-from rootcoz.models import FailedTest
+from rootcoz.models import BaseTestEntry, FailedTest
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class TestExtractionResult:
+    """Result of extracting all test outcomes from JUnit XML."""
+
+    failures: list[FailedTest] = field(default_factory=list)
+    passed: list[BaseTestEntry] = field(default_factory=list)
+    skipped: list[BaseTestEntry] = field(default_factory=list)
 
 
 def _first_nonempty_line(text: str) -> str:
@@ -24,6 +34,85 @@ def _first_nonempty_line(text: str) -> str:
         if stripped:
             return stripped
     return ""
+
+
+def extract_all_tests_from_xml(raw_xml: str) -> TestExtractionResult:
+    """Extract all test outcomes from a JUnit XML string in a single traversal.
+
+    Categorizes each testcase:
+      - ``<failure>`` or ``<error>`` child → failure
+      - ``<skipped>`` child → skipped
+      - No such child → passed
+
+    Status values are normalized: ``failed``, ``skipped``, ``passed``.
+
+    Args:
+        raw_xml: JUnit XML content as a string.
+
+    Returns:
+        TestExtractionResult with three lists.
+
+    Raises:
+        ET.ParseError: If the XML is malformed.
+    """
+    root = safe_fromstring(raw_xml)
+    result = TestExtractionResult()
+
+    for testcase in root.iter("testcase"):
+        classname = testcase.get("classname", "")
+        name = testcase.get("name", "")
+        test_name = f"{classname}.{name}" if classname else name
+
+        if not test_name:
+            logger.warning("Skipping testcase with empty name attribute")
+            continue
+
+        # Parse duration (default 0.0)
+        raw_duration = testcase.get("time", "0")
+        try:
+            duration = float(raw_duration)
+            if duration < 0:
+                duration = 0.0
+        except (ValueError, TypeError):
+            duration = 0.0
+
+        failure_elem = testcase.find("failure")
+        error_elem = testcase.find("error")
+        skipped_elem = testcase.find("skipped")
+
+        if failure_elem is not None or error_elem is not None:
+            result_elem = failure_elem if failure_elem is not None else error_elem
+            status = (
+                "ERROR" if error_elem is not None and failure_elem is None else "FAILED"
+            )
+            result.failures.append(
+                FailedTest(
+                    test_name=test_name,
+                    error_message=(result_elem.get("message", "") or "").strip()
+                    or _first_nonempty_line(result_elem.text or ""),
+                    stack_trace=result_elem.text or "",
+                    duration=duration,
+                    status=status,
+                )
+            )
+        elif skipped_elem is not None:
+            result.skipped.append(
+                BaseTestEntry(
+                    test_name=test_name,
+                    duration=duration,
+                    status="skipped",
+                )
+            )
+        else:
+            result.passed.append(
+                BaseTestEntry(
+                    test_name=test_name,
+                    duration=duration,
+                    status="passed",
+                )
+            )
+
+    return result
 
 
 def extract_failures_from_xml(raw_xml: str) -> list[dict[str, str]]:
@@ -41,38 +130,16 @@ def extract_failures_from_xml(raw_xml: str) -> list[dict[str, str]]:
     Raises:
         ET.ParseError: If the XML is malformed.
     """
-    root = safe_fromstring(raw_xml)
-    failures: list[dict[str, str]] = []
-
-    for testcase in root.iter("testcase"):
-        failure_elem = testcase.find("failure")
-        error_elem = testcase.find("error")
-        result_elem = failure_elem if failure_elem is not None else error_elem
-
-        if result_elem is None:
-            continue
-
-        classname = testcase.get("classname", "")
-        name = testcase.get("name", "")
-        test_name = f"{classname}.{name}" if classname else name
-
-        if not test_name:
-            logger.warning("Skipping testcase with empty name attribute")
-            continue
-
-        failures.append(
-            {
-                "test_name": test_name,
-                "error_message": (result_elem.get("message", "") or "").strip()
-                or _first_nonempty_line(result_elem.text or ""),
-                "stack_trace": result_elem.text or "",
-                "status": "ERROR"
-                if error_elem is not None and failure_elem is None
-                else "FAILED",
-            }
-        )
-
-    return failures
+    result = extract_all_tests_from_xml(raw_xml)
+    return [
+        {
+            "test_name": f.test_name,
+            "error_message": f.error_message,
+            "stack_trace": f.stack_trace,
+            "status": f.status,
+        }
+        for f in result.failures
+    ]
 
 
 def extract_test_failures(raw_xml: str) -> list[FailedTest]:
@@ -90,16 +157,7 @@ def extract_test_failures(raw_xml: str) -> list[FailedTest]:
     Raises:
         xml.etree.ElementTree.ParseError: If the XML is malformed.
     """
-    raw_failures = extract_failures_from_xml(raw_xml)
-    return [
-        FailedTest(
-            test_name=f["test_name"],
-            error_message=f.get("error_message", ""),
-            stack_trace=f.get("stack_trace", ""),
-            status=f.get("status", "FAILED"),
-        )
-        for f in raw_failures
-    ]
+    return extract_all_tests_from_xml(raw_xml).failures
 
 
 def apply_analysis_to_xml(

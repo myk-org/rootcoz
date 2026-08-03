@@ -39,7 +39,7 @@ import { ConfirmDialog } from '@/components/shared/ConfirmDialog'
 import { SortableHeader } from '@/components/shared/SortableHeader'
 import { DateRangePresetFilter } from '@/components/shared/DateRangePresetFilter'
 import { useTableSort } from '@/lib/useTableSort'
-import { Trash2, MessageSquare, CheckCircle2, GitFork, AlertTriangle, Github, List, ListTree, ChevronRight, User } from 'lucide-react'
+import { Trash2, MessageSquare, CheckCircle2, GitFork, AlertTriangle, Github, List, ListTree, ChevronRight, User, MinusCircle } from 'lucide-react'
 import { useAuth } from '@/lib/auth'
 import { useMetadataOptions, MetadataDropdowns, MetadataLabelChips, MetadataClearButton } from '@/components/shared/MetadataFilterBar'
 import { MetadataBadges } from '@/components/shared/MetadataBadges'
@@ -701,6 +701,8 @@ export function DashboardPage() {
                 const displayStatus = isAnalysisTimeout(job.status, job.error, job.summary) ? 'timeout' : job.status
                 const borderColor = STATUS_BORDER[displayStatus] ?? 'border-l-border-default'
                 const failureCount = job.failure_count ?? 0
+                const passedCount = job.passed_count ?? 0
+                const skippedCount = job.skipped_count ?? 0
                 const failureHint = job.summary || job.error
                 const rowDest = getJobRoute(job)
                 const buildDisplayId = resolveBuildDisplayId(job)
@@ -778,13 +780,46 @@ export function DashboardPage() {
                       </Tooltip>
                     </TableCell>
 
-                    {/* Failures */}
-                    <MetricCell
-                      value={failureCount}
-                      icon={<AlertTriangle className="h-3 w-3" />}
-                      tone="text-signal-red"
-                      tooltipText={`${failureCount} test ${failureCount === 1 ? 'failure' : 'failures'}`}
-                    />
+                    {/* Failures + Passed/Skipped counts */}
+                    <TableCell className="text-center">
+                      <div className="inline-flex items-center gap-2">
+                        {failureCount > 0 ? (
+                          <Tooltip>
+                            <TooltipTrigger asChild>
+                              <span className="inline-flex items-center gap-1 font-mono text-xs text-signal-red">
+                                <AlertTriangle className="h-3 w-3" />
+                                {failureCount}
+                              </span>
+                            </TooltipTrigger>
+                            <TooltipContent>{`${failureCount} test ${failureCount === 1 ? 'failure' : 'failures'}`}</TooltipContent>
+                          </Tooltip>
+                        ) : (
+                          !passedCount && !skippedCount && <span className="text-xs text-text-tertiary">—</span>
+                        )}
+                        {passedCount > 0 && (
+                          <Tooltip>
+                            <TooltipTrigger asChild>
+                              <span className="inline-flex items-center gap-1 font-mono text-xs text-signal-green">
+                                <CheckCircle2 className="h-3 w-3" />
+                                {passedCount}
+                              </span>
+                            </TooltipTrigger>
+                            <TooltipContent>{`${passedCount} test${passedCount === 1 ? '' : 's'} passed`}</TooltipContent>
+                          </Tooltip>
+                        )}
+                        {skippedCount > 0 && (
+                          <Tooltip>
+                            <TooltipTrigger asChild>
+                              <span className="inline-flex items-center gap-1 font-mono text-xs text-signal-orange">
+                                <MinusCircle className="h-3 w-3" />
+                                {skippedCount}
+                              </span>
+                            </TooltipTrigger>
+                            <TooltipContent>{`${skippedCount} test${skippedCount === 1 ? '' : 's'} skipped`}</TooltipContent>
+                          </Tooltip>
+                        )}
+                      </div>
+                    </TableCell>
 
                     {/* Reviewed */}
                     <MetricCell
@@ -920,6 +955,8 @@ export function DashboardPage() {
                           const displayStatus = isAnalysisTimeout(job.status, job.error, job.summary) ? 'timeout' : job.status
                           const borderColor = STATUS_BORDER[displayStatus] ?? 'border-l-border-default'
                           const failureCount = job.failure_count ?? 0
+                          const passedCount = job.passed_count ?? 0
+                          const skippedCount = job.skipped_count ?? 0
                           const failureHint = job.summary || job.error
                           const rowDest = getJobRoute(job)
                           const buildDisplayId = resolveBuildDisplayId(job)
@@ -993,12 +1030,46 @@ export function DashboardPage() {
                                   <TooltipContent>{displayStatus === 'timeout' ? 'AI analysis timed out' : `Analysis status: ${job.status}`}</TooltipContent>
                                 </Tooltip>
                               </TableCell>
-                              <MetricCell
-                                value={failureCount}
-                                icon={<AlertTriangle className="h-3 w-3" />}
-                                tone="text-signal-red"
-                                tooltipText={`${failureCount} test ${failureCount === 1 ? 'failure' : 'failures'}`}
-                              />
+                              {/* Failures + Passed/Skipped counts */}
+                              <TableCell className="text-center">
+                                <div className="inline-flex items-center gap-2">
+                                  {failureCount > 0 ? (
+                                    <Tooltip>
+                                      <TooltipTrigger asChild>
+                                        <span className="inline-flex items-center gap-1 font-mono text-xs text-signal-red">
+                                          <AlertTriangle className="h-3 w-3" />
+                                          {failureCount}
+                                        </span>
+                                      </TooltipTrigger>
+                                      <TooltipContent>{`${failureCount} test ${failureCount === 1 ? 'failure' : 'failures'}`}</TooltipContent>
+                                    </Tooltip>
+                                  ) : (
+                                    !passedCount && !skippedCount && <span className="text-xs text-text-tertiary">—</span>
+                                  )}
+                                  {passedCount > 0 && (
+                                    <Tooltip>
+                                      <TooltipTrigger asChild>
+                                        <span className="inline-flex items-center gap-1 font-mono text-xs text-signal-green">
+                                          <CheckCircle2 className="h-3 w-3" />
+                                          {passedCount}
+                                        </span>
+                                      </TooltipTrigger>
+                                      <TooltipContent>{`${passedCount} test${passedCount === 1 ? '' : 's'} passed`}</TooltipContent>
+                                    </Tooltip>
+                                  )}
+                                  {skippedCount > 0 && (
+                                    <Tooltip>
+                                      <TooltipTrigger asChild>
+                                        <span className="inline-flex items-center gap-1 font-mono text-xs text-signal-orange">
+                                          <MinusCircle className="h-3 w-3" />
+                                          {skippedCount}
+                                        </span>
+                                      </TooltipTrigger>
+                                      <TooltipContent>{`${skippedCount} test${skippedCount === 1 ? '' : 's'} skipped`}</TooltipContent>
+                                    </Tooltip>
+                                  )}
+                                </div>
+                              </TableCell>
                               <MetricCell
                                 value={failureCount}
                                 displayValue={<>{job.reviewed_count}/{failureCount}</>}

@@ -59,8 +59,6 @@ class ServerConfig:
     wait_for_completion: bool | None = None
     poll_interval_minutes: int = 0  # 0 means use server default
     max_wait_minutes: int = 0  # 0 means use server default
-    # Force analysis on successful builds
-    force: bool | None = None
     # Prow
     prow_url: str = ""
     gcs_bucket: str = ""
@@ -254,8 +252,6 @@ def _server_config_from_dict(data: dict) -> ServerConfig:
         wait_for_completion=data.get("wait_for_completion"),
         poll_interval_minutes=data.get("poll_interval_minutes", 0),
         max_wait_minutes=data.get("max_wait_minutes", 0),
-        # Force analysis on successful builds
-        force=data.get("force"),
         # Prow
         prow_url=data.get("prow_url", ""),
         gcs_bucket=data.get("gcs_bucket", ""),

@@ -50,7 +50,6 @@ github_token = "ghp_dev123"
 wait_for_completion = true
 poll_interval_minutes = 2
 max_wait_minutes = 45
-force = true
 
 [servers.prod]
 url = "https://rootcoz.example.com"
@@ -258,7 +257,6 @@ class TestGetServerConfig:
         assert cfg.wait_for_completion is True
         assert cfg.poll_interval_minutes == 2
         assert cfg.max_wait_minutes == 45
-        assert cfg.force is True
 
     def test_defaults_for_missing_analyze_fields(self, config_file: Path):
         """Servers without analyze fields get dataclass defaults."""
@@ -278,7 +276,6 @@ class TestGetServerConfig:
         assert cfg.wait_for_completion is None
         assert cfg.poll_interval_minutes == 0
         assert cfg.max_wait_minutes == 0
-        assert cfg.force is None
 
 
 # -- list_servers --------------------------------------------------------------

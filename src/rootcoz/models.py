@@ -272,10 +272,6 @@ class _JenkinsParamsMixin(BaseModel):
                 raise ValueError("job_name cannot be blank")
         return v
 
-    force: bool = Field(
-        default=False,
-        description="Force analysis even if the build succeeded (bypass SUCCESS early-return)",
-    )
     wait_for_completion: bool = Field(
         default=True,
         description="Wait for Jenkins job to complete before analyzing",
@@ -347,7 +343,20 @@ class AnalyzeRequest(_JenkinsParamsMixin, _NameTagsMixin, BaseAnalysisRequest):
     build_number: int = Field(description="Build number to analyze")
 
 
-class FailedTest(BaseModel):
+class BaseTestEntry(BaseModel):
+    """A single test entry (passed, skipped, or failed)."""
+
+    test_name: str = Field(
+        max_length=2000,
+        description="Fully qualified test name (className.methodName)",
+    )
+    duration: float = Field(default=0.0, ge=0, description="Test duration in seconds")
+    status: str = Field(
+        max_length=50, description="Normalized test status (passed, skipped, failed)"
+    )
+
+
+class FailedTest(BaseTestEntry):
     """A single test failure extracted from Jenkins test report."""
 
     test_name: str = Field(
@@ -355,7 +364,6 @@ class FailedTest(BaseModel):
     )
     error_message: str = Field(default="", description="Error details/message")
     stack_trace: str = Field(default="", description="Full stack trace if available")
-    duration: float = Field(default=0.0, description="Test duration in seconds")
     status: str = Field(
         default="FAILED", description="Test status (FAILED, REGRESSION, etc.)"
     )
@@ -560,6 +568,9 @@ class ChildJobAnalysis(BaseModel):
     note: str | None = Field(
         default=None, description="Additional notes (e.g., max depth reached)"
     )
+    passed_count: int = Field(default=0, description="Number of passed tests")
+    skipped_count: int = Field(default=0, description="Number of skipped tests")
+    failed_count: int = Field(default=0, description="Number of failed tests")
 
     @model_validator(mode="after")
     def _sync_build_url_aliases(self) -> "ChildJobAnalysis":
@@ -634,6 +645,9 @@ class AnalysisResult(BaseModel):
         default=None,
         description="Aggregated token usage across all AI calls in this analysis",
     )
+    passed_count: int = Field(default=0, description="Number of passed tests")
+    skipped_count: int = Field(default=0, description="Number of skipped tests")
+    failed_count: int = Field(default=0, description="Number of failed tests")
 
     @model_validator(mode="after")
     def _sync_build_url_aliases(self) -> "AnalysisResult":
@@ -680,6 +694,15 @@ class UnifiedAnalyzeRequest(_JenkinsParamsMixin, _NameTagsMixin, BaseAnalysisReq
     failures: list[FailedTest] | None = Field(
         default=None,
         description="Raw test failures to analyze (required for type=raw)",
+    )
+    # Passed/skipped tests (optional for type="raw", rejected for other types)
+    passed_tests: list[BaseTestEntry] | None = Field(
+        default=None,
+        description="Passed test entries (only for type=raw)",
+    )
+    skipped_tests: list[BaseTestEntry] | None = Field(
+        default=None,
+        description="Skipped test entries (only for type=raw)",
     )
 
     # Prow-specific fields (required when type="prow")
@@ -749,6 +772,11 @@ class UnifiedAnalyzeRequest(_JenkinsParamsMixin, _NameTagsMixin, BaseAnalysisReq
                 raise ValueError("job_name is required for type=jenkins")
             if self.build_number is None:
                 raise ValueError("build_number is required for type=jenkins")
+            if self.passed_tests is not None or self.skipped_tests is not None:
+                raise ValueError(
+                    "passed_tests/skipped_tests cannot be provided for type=jenkins "
+                    "(extracted from source automatically)"
+                )
         elif self.type == "file":
             if not self.raw_xml:
                 raise ValueError("raw_xml is required for type=file")
@@ -756,9 +784,20 @@ class UnifiedAnalyzeRequest(_JenkinsParamsMixin, _NameTagsMixin, BaseAnalysisReq
                 raise ValueError(
                     "failures cannot be provided for type=file (use type=raw)"
                 )
+            if self.passed_tests is not None or self.skipped_tests is not None:
+                raise ValueError(
+                    "passed_tests/skipped_tests cannot be provided for type=file "
+                    "(extracted from source automatically)"
+                )
         elif self.type == "raw":
-            if not self.failures:
-                raise ValueError("failures is required for type=raw")
+            has_failures = bool(self.failures)
+            has_passed = bool(self.passed_tests)
+            has_skipped = bool(self.skipped_tests)
+            if not (has_failures or has_passed or has_skipped):
+                raise ValueError(
+                    "At least one test list (failures, passed_tests, or skipped_tests) "
+                    "must be provided for type=raw"
+                )
             if self.raw_xml is not None:
                 raise ValueError(
                     "raw_xml cannot be provided for type=raw (use type=file)"
@@ -768,6 +807,11 @@ class UnifiedAnalyzeRequest(_JenkinsParamsMixin, _NameTagsMixin, BaseAnalysisReq
                 raise ValueError("prow_job_name is required for type=prow")
             if not self.build_id:
                 raise ValueError("build_id is required for type=prow")
+            if self.passed_tests is not None or self.skipped_tests is not None:
+                raise ValueError(
+                    "passed_tests/skipped_tests cannot be provided for type=prow "
+                    "(extracted from source automatically)"
+                )
             if self.gcs_prefix:
                 validate_gcs_prefix_suffix(
                     self.gcs_prefix, self.prow_job_name, self.build_id
@@ -797,6 +841,9 @@ class FailureAnalysisResult(BaseModel):
     token_usage: TokenUsageSummary | None = Field(
         default=None, description="Token usage summary for this analysis"
     )
+    passed_count: int = Field(default=0, description="Number of passed tests")
+    skipped_count: int = Field(default=0, description="Number of skipped tests")
+    failed_count: int = Field(default=0, description="Number of failed tests")
 
 
 class _ChildJobFieldsValidator(BaseModel):

@@ -155,11 +155,26 @@ class TestBuildChatCustomTools:
         names = [t["name"] for t in tools]
         assert "get_job_result" in names
         assert "get_job_comments" in names
+        assert "get_job_tests" in names
         assert "get_failure_history" in names
         assert "get_classification_history" in names
         # No jira/github without credentials
         assert "search_jira" not in names
         assert "search_github_issues" not in names
+
+    def test_get_job_tests_tool_query(self):
+        """Optional status stays in query; server sanitizes unsubstituted placeholders."""
+        tools = build_chat_custom_tools(
+            server_url="http://localhost:8000",
+            auth_token="tok",
+            job_id="job-1",
+        )
+        tool = next(t for t in tools if t["name"] == "get_job_tests")
+        assert tool["http"]["query"]["status"] == "{status}"
+        assert tool["http"]["query"]["offset"] == "{offset}"
+        assert tool["http"]["query"]["limit"] == "{limit}"
+        assert "status" in tool["parameters"]["properties"]
+        assert "status" not in tool["parameters"].get("required", [])
 
     def test_failure_history_tool(self):
         tools = build_chat_custom_tools(
@@ -248,7 +263,7 @@ class TestBuildChatCustomTools:
             github_repo="org/repo",
         )
         names = [t["name"] for t in tools]
-        assert len(names) == 8  # 4 base + 2 jira + 2 github
+        assert len(names) == 9  # 5 base + 2 jira + 2 github
 
     def test_no_jira_without_token(self):
         tools = build_chat_custom_tools(

@@ -80,7 +80,6 @@ export function NewAnalysisPage() {
   const [tagInput, setTagInput] = useState('')
 
   // Advanced
-  const [force, setForce] = useState(false)
   const [getArtifacts, setGetArtifacts] = useState(true)
   const [maxArtifactsSize, setMaxArtifactsSize] = useState<number | undefined>(undefined)
   const [defaultsLoading, setDefaultsLoading] = useState(true)
@@ -130,7 +129,6 @@ export function NewAnalysisPage() {
       setEnableJira(defaults.jira_enabled)
       setJiraUrl(defaults.jira_url)
       setJiraProjectKey(defaults.jira_project_key)
-      setForce(defaults.force_analysis)
       setGetArtifacts(defaults.get_job_artifacts)
       setMaxArtifactsSize(defaults.jenkins_artifacts_max_size_mb)
       setWaitForCompletion(defaults.wait_for_completion)
@@ -229,7 +227,6 @@ export function NewAnalysisPage() {
           ...(jenkinsUrl && { jenkins_url: jenkinsUrl }),
           ...(jenkinsUser && { jenkins_user: jenkinsUser }),
           ...(jenkinsPassword && { jenkins_password: jenkinsPassword }),
-          force,
           wait_for_completion: waitForCompletion,
           poll_interval_minutes: pollInterval,
           max_wait_minutes: maxWait,
@@ -247,7 +244,6 @@ export function NewAnalysisPage() {
           ...(prowUrl && { prow_url: prowUrl }),
           ...(gcsBucket && { gcs_bucket: gcsBucket }),
           ...(gcsPrefix && { gcs_prefix: gcsPrefix }),
-          force,
           get_job_artifacts: getArtifacts,
           ...(tags.length > 0 && { tags }),
         }
@@ -278,7 +274,6 @@ export function NewAnalysisPage() {
     aiProvider,
     aiModel,
     tags,
-    force,
     waitForCompletion,
     pollInterval,
     maxWait,
@@ -734,22 +729,6 @@ export function NewAnalysisPage() {
               <p className="text-xs text-text-tertiary">Categorize this analysis (e.g. regression, flaky, nightly).</p>
             </div>
           </Section>
-
-          {(inputMode === 'jenkins' || inputMode === 'prow') && (
-          <>
-          <hr className="border-border-muted" />
-
-          {/* Advanced */}
-          <Section title="Advanced" dotColor="bg-text-tertiary">
-            <div className="flex items-center justify-between">
-              <span className="text-sm text-text-secondary">Force analysis on successful builds</span>
-              <Toggle checked={force} onChange={setForce} label="Force analysis on successful builds" />
-            </div>
-            <p className="text-[11px] text-text-tertiary">
-              When enabled, analysis runs even if the CI system reports the build as SUCCESS.
-            </p>
-          </Section>
-          </>)}
 
           {inputMode === 'jenkins' && (
           <>

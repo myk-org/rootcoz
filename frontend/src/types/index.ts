@@ -150,6 +150,9 @@ export interface ChildJobAnalysis {
   failures: FailureAnalysis[]
   failed_children: ChildJobAnalysis[]
   note: string | null
+  passed_count?: number
+  skipped_count?: number
+  failed_count?: number
 }
 
 export interface AnalysisResult {
@@ -178,9 +181,11 @@ export interface AnalysisResult {
     tests_repo_url?: string
     tests_repo_ref?: string
     additional_repos?: Array<{ name: string; url: string; ref?: string }>
-    force?: boolean
     [key: string]: unknown
   }
+  passed_count?: number
+  skipped_count?: number
+  failed_count?: number
 }
 
 // -- Dashboard ------------------------------------------------------
@@ -206,6 +211,23 @@ export interface DashboardJob {
   error?: string
   tags?: string[]
   submitted_by?: string
+  passed_count?: number
+  skipped_count?: number
+  failed_count?: number
+}
+
+export interface TestEntry {
+  test_name: string
+  duration: number
+  status: 'passed' | 'skipped' | 'failed'
+}
+
+export interface TestEntriesResponse {
+  entries: TestEntry[]
+  total: number
+  offset: number
+  limit: number
+  has_more: boolean
 }
 
 // -- Comments & Reviews ---------------------------------------------
@@ -519,7 +541,6 @@ export interface DefaultServerSettings {
   jenkins_timeout: number
   jenkins_artifacts_max_size_mb: number
   get_job_artifacts: boolean
-  force_analysis: boolean
   wait_for_completion: boolean
   poll_interval_minutes: number
   max_wait_minutes: number

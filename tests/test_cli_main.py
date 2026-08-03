@@ -277,6 +277,96 @@ class TestResultsCommands:
         assert result.exit_code == 0
         assert "No jobs to delete" in result.output
 
+    def test_results_tests(self, mock_client):
+        mock_client.get_test_entries.return_value = {
+            "entries": [
+                {"test_name": "test_a", "duration": 0.1, "status": "passed"},
+                {"test_name": "test_b", "duration": 0.5, "status": "failed"},
+            ],
+            "total": 2,
+            "offset": 0,
+            "limit": 50,
+            "has_more": False,
+        }
+        result = runner.invoke(app, ["results", "tests", "abc-123"])
+        assert result.exit_code == 0
+        assert "Test entries" in result.output
+        assert "test_a" in result.output
+        mock_client.get_test_entries.assert_called_once_with(
+            "abc-123",
+            status=None,
+            child_job_name=None,
+            child_build_number=None,
+            offset=0,
+            limit=50,
+        )
+
+    def test_results_tests_with_status_filter(self, mock_client):
+        mock_client.get_test_entries.return_value = {
+            "entries": [
+                {"test_name": "test_a", "duration": 0.1, "status": "passed"},
+            ],
+            "total": 1,
+            "offset": 0,
+            "limit": 50,
+            "has_more": False,
+        }
+        result = runner.invoke(
+            app, ["results", "tests", "abc-123", "--status", "passed"]
+        )
+        assert result.exit_code == 0
+        assert "test_a" in result.output
+        mock_client.get_test_entries.assert_called_once_with(
+            "abc-123",
+            status=["passed"],
+            child_job_name=None,
+            child_build_number=None,
+            offset=0,
+            limit=50,
+        )
+
+    def test_results_tests_json_output(self, mock_client):
+        sample = {
+            "entries": [{"test_name": "t", "duration": 0.0, "status": "passed"}],
+            "total": 1,
+            "offset": 0,
+            "limit": 50,
+            "has_more": False,
+        }
+        mock_client.get_test_entries.return_value = sample
+        result = runner.invoke(app, ["results", "tests", "abc-123", "--json"])
+        assert result.exit_code == 0
+        parsed = json.loads(result.output)
+        assert parsed["total"] == 1
+        mock_client.get_test_entries.assert_called_once_with(
+            "abc-123",
+            status=None,
+            child_job_name=None,
+            child_build_number=None,
+            offset=0,
+            limit=50,
+        )
+
+    def test_results_tests_empty(self, mock_client):
+        mock_client.get_test_entries.return_value = {
+            "entries": [],
+            "total": 0,
+            "offset": 0,
+            "limit": 50,
+            "has_more": False,
+        }
+        result = runner.invoke(app, ["results", "tests", "abc-123"])
+        assert result.exit_code == 0
+        assert "No test entries" in result.output
+        mock_client.get_test_entries.assert_called_once_with(
+            "abc-123",
+            status=None,
+            child_job_name=None,
+            child_build_number=None,
+            offset=0,
+            limit=50,
+        )
+
 
 class TestReviewStatusCommand:
     def test_review_status(self, mock_client):
@@ -1195,6 +1285,68 @@ class TestAnalyzeAllOptions:
         assert result.exit_code == 0, result.output
         kwargs = mock_client.analyze.call_args[1]
         assert "max_concurrent_ai_calls" not in kwargs
+
+    def test_passed_and_skipped_tests_forwarded(self, mock_client):
+        """--passed-tests / --skipped-tests JSON lists are parsed into extras."""
+        mock_client.analyze.return_value = self._ANALYZE_RESPONSE
+        passed = '[{"test_name": "t_pass", "duration": 0.1, "status": "passed"}]'
+        skipped = '[{"test_name": "t_skip", "duration": 0.0, "status": "skipped"}]'
+        result = runner.invoke(
+            app,
+            [
+                "analyze",
+                "--job-name",
+                "my-job",
+                "--build-number",
+                "1",
+                "--passed-tests",
+                passed,
+                "--skipped-tests",
+                skipped,
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        kwargs = mock_client.analyze.call_args[1]
+        assert kwargs["passed_tests"] == [
+            {"test_name": "t_pass", "duration": 0.1, "status": "passed"}
+        ]
+        assert kwargs["skipped_tests"] == [
+            {"test_name": "t_skip", "duration": 0.0, "status": "skipped"}
+        ]
+
+    def test_passed_tests_invalid_json(self, mock_client):
+        """Invalid --passed-tests JSON exits with error."""
+        result = runner.invoke(
+            app,
+            [
+                "analyze",
+                "--job-name",
+                "my-job",
+                "--build-number",
+                "1",
+                "--passed-tests",
+                "not-json",
+            ],
+        )
+        assert result.exit_code == 1
+        assert "--passed-tests must be valid JSON" in result.output
+
+    def test_skipped_tests_invalid_json(self, mock_client):
+        """Invalid --skipped-tests JSON exits with error."""
+        result = runner.invoke(
+            app,
+            [
+                "analyze",
+                "--job-name",
+                "my-job",
+                "--build-number",
+                "1",
+                "--skipped-tests",
+                "{bad",
+            ],
+        )
+        assert result.exit_code == 1
+        assert "--skipped-tests must be valid JSON" in result.output
 
     def test_no_optional_fields_when_not_provided(self, mock_client):
         """When no optional flags are given and no env vars set, extras should be empty."""
@@ -3073,95 +3225,6 @@ class TestAnalyzeWaitFlags:
         assert "wait_for_completion" not in kwargs
 
 
-class TestAnalyzeForceFlag:
-    """Tests for --force/--no-force CLI flag."""
-
-    def test_force_flag(self, mock_client):
-        """--force should send force=True."""
-        mock_client.analyze.return_value = {"status": "queued", "job_id": "j1"}
-        result = runner.invoke(
-            app,
-            ["analyze", "--job-name", "my-job", "--build-number", "1", "--force"],
-        )
-        assert result.exit_code == 0
-        kwargs = mock_client.analyze.call_args[1]
-        assert kwargs["force"] is True
-
-    def test_no_force_flag(self, mock_client):
-        """--no-force should send force=False."""
-        mock_client.analyze.return_value = {"status": "queued", "job_id": "j1"}
-        result = runner.invoke(
-            app,
-            ["analyze", "--job-name", "my-job", "--build-number", "1", "--no-force"],
-        )
-        assert result.exit_code == 0
-        kwargs = mock_client.analyze.call_args[1]
-        assert kwargs["force"] is False
-
-    def test_force_omitted_not_in_extras(self, mock_client):
-        """When --force/--no-force is not given, force is not sent."""
-        mock_client.analyze.return_value = {"status": "queued", "job_id": "j1"}
-        with patch.dict(os.environ, _env_without_analyze_bindings(), clear=True):
-            result = runner.invoke(
-                app,
-                ["analyze", "--job-name", "my-job", "--build-number", "1"],
-            )
-        assert result.exit_code == 0
-        kwargs = mock_client.analyze.call_args[1]
-        assert "force" not in kwargs
-
-    def test_force_from_config(self, mock_client):
-        """Config force=true is used as default when CLI flag is absent."""
-        cfg = ServerConfig(url=_TEST_SERVER, force=True)
-        with (
-            patch(
-                "rootcoz.cli.main.get_server_config",
-                return_value=cfg,
-            ),
-            patch("rootcoz.cli.main._get_client") as mock_fn,
-            patch.dict(os.environ, {}, clear=True),
-        ):
-            client = MagicMock()
-            client.analyze.return_value = {"status": "queued", "job_id": "j1"}
-            mock_fn.return_value = client
-            result = runner.invoke(
-                app,
-                ["analyze", "--job-name", "my-job", "--build-number", "1"],
-            )
-            assert result.exit_code == 0
-            kwargs = client.analyze.call_args[1]
-            assert kwargs["force"] is True
-
-    def test_cli_force_overrides_config(self, mock_client):
-        """CLI --no-force overrides config force=true."""
-        cfg = ServerConfig(url=_TEST_SERVER, force=True)
-        with (
-            patch(
-                "rootcoz.cli.main.get_server_config",
-                return_value=cfg,
-            ),
-            patch("rootcoz.cli.main._get_client") as mock_fn,
-            patch.dict(os.environ, {}, clear=True),
-        ):
-            client = MagicMock()
-            client.analyze.return_value = {"status": "queued", "job_id": "j1"}
-            mock_fn.return_value = client
-            result = runner.invoke(
-                app,
-                [
-                    "analyze",
-                    "--job-name",
-                    "my-job",
-                    "--build-number",
-                    "1",
-                    "--no-force",
-                ],
-            )
-            assert result.exit_code == 0
-            kwargs = client.analyze.call_args[1]
-            assert kwargs["force"] is False
-
-
 class TestValidateTokenCommand:
     def test_validate_token_valid(self, mock_client):
         mock_client.validate_token.return_value = {
@@ -4940,7 +5003,6 @@ class TestConfigDefaults:
         "enable_jira": True,
         "jira_url": "https://jira.example.com",
         "jira_project_key": "PROJ",
-        "force_analysis": False,
         "get_job_artifacts": True,
         "jenkins_artifacts_max_size_mb": 500,
         "wait_for_completion": True,

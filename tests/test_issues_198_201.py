@@ -114,6 +114,29 @@ class TestResultFieldsHelper:
             "result": {"summary": None, "ai_provider": "claude"},
         }
 
+    def test_test_count_fields_allowlisted(self) -> None:
+        assert "result.passed_count" in RESULT_FIELD_PATHS
+        assert "result.skipped_count" in RESULT_FIELD_PATHS
+        assert "result.failed_count" in RESULT_FIELD_PATHS
+        data = {
+            "result": {
+                "passed_count": 10,
+                "skipped_count": 2,
+                "failed_count": 1,
+            }
+        }
+        out = filter_result_fields(
+            data,
+            ["result.passed_count", "result.skipped_count", "result.failed_count"],
+        )
+        assert out == {
+            "result": {
+                "passed_count": 10,
+                "skipped_count": 2,
+                "failed_count": 1,
+            }
+        }
+
     def test_classification_alias_from_analysis(self) -> None:
         data = {
             "result": {

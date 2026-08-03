@@ -10,6 +10,7 @@ import { Badge } from '@/components/ui/badge'
 import { ExpandCollapseButtons } from '@/components/shared/ExpandCollapseButtons'
 import { ChevronDown, ChevronRight, ExternalLink, GitFork } from 'lucide-react'
 import { ReportPortalButton } from './ReportPortalButton'
+import { TestListSection } from './TestListSection'
 import { useReportState } from './ReportContext'
 
 interface ChildJobSectionProps {
@@ -155,6 +156,26 @@ export function ChildJobSection({ child, jobId, depth = 0, activeHash, parentHas
               />
             ))}
           </div>
+
+          {/* Passed/Skipped test sections */}
+          {(child.passed_count ?? 0) > 0 && (
+            <TestListSection
+              jobId={jobId}
+              status="passed"
+              count={child.passed_count ?? 0}
+              childJobName={child.job_name}
+              childBuildNumber={child.build_number}
+            />
+          )}
+          {(child.skipped_count ?? 0) > 0 && (
+            <TestListSection
+              jobId={jobId}
+              status="skipped"
+              count={child.skipped_count ?? 0}
+              childJobName={child.job_name}
+              childBuildNumber={child.build_number}
+            />
+          )}
 
           {failedChildren.length > 0 && (
             <div className="mt-1 space-y-3">

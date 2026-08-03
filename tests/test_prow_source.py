@@ -851,7 +851,7 @@ class TestGcsPrefixResolution:
         async with httpx.AsyncClient(transport=transport) as client:
             result = await source._fetch_with_client(client)
 
-        assert result.build_passed is True
+        assert result.skip_analysis is True
         assert result.failures == []
         assert result.source_metadata.get("job_type") == "periodic"
 
@@ -920,13 +920,16 @@ class TestProwSourceFetch:
             result = await source._fetch_with_client(client)
 
         assert len(result.failures) == 2
-        assert not result.build_passed
+        assert not result.skip_analysis
         assert result.build_url == _build_url(
             _TEST_PROW_URL, _TEST_GCS_BUCKET, "logs/my-job/42"
         )
 
     async def test_fetch_build_passed(self):
-        handler = _make_gcs_handler(finished_json=FINISHED_JSON_SUCCESS)
+        handler = _make_gcs_handler(
+            finished_json=FINISHED_JSON_SUCCESS,
+            junit_xml=JUNIT_XML_NO_FAILURES,
+        )
         transport = httpx.MockTransport(handler)
         source = ProwSource(
             job_name="my-job",
@@ -937,10 +940,11 @@ class TestProwSourceFetch:
         async with httpx.AsyncClient(transport=transport) as client:
             result = await source._fetch_with_client(client)
 
-        assert result.build_passed is True
+        assert result.skip_analysis is True
         assert result.failures == []
 
-    async def test_fetch_build_passed_force(self):
+    async def test_fetch_success_with_failures_still_analyzes(self):
+        """SUCCESS finished.json with JUnit failures does not skip analysis."""
         handler = _make_gcs_handler(finished_json=FINISHED_JSON_SUCCESS)
         transport = httpx.MockTransport(handler)
         source = ProwSource(
@@ -948,12 +952,11 @@ class TestProwSourceFetch:
             build_id="42",
             gcs_bucket=_TEST_GCS_BUCKET,
             prow_url=_TEST_PROW_URL,
-            force=True,
         )
         async with httpx.AsyncClient(transport=transport) as client:
             result = await source._fetch_with_client(client)
 
-        assert result.build_passed is False
+        assert result.skip_analysis is False
         assert len(result.failures) == 2
 
     async def test_fetch_no_finished_json(self):
@@ -969,7 +972,7 @@ class TestProwSourceFetch:
         async with httpx.AsyncClient(transport=transport) as client:
             result = await source._fetch_with_client(client)
 
-        assert not result.build_passed
+        assert not result.skip_analysis
         assert len(result.failures) == 2
 
     async def test_fetch_no_build_log(self):
@@ -1000,7 +1003,7 @@ class TestProwSourceFetch:
             result = await source._fetch_with_client(client)
 
         assert result.failures == []
-        assert not result.build_passed
+        assert not result.skip_analysis
 
     async def test_fetch_junit_file_budget_skips_remaining(self, monkeypatch):
         """JUnit downloads stop after `_MAX_JUNIT_FILES` with a warning."""
@@ -1146,7 +1149,7 @@ class TestProwSourceFetch:
         async with httpx.AsyncClient(transport=transport) as client:
             result = await source._fetch_with_client(client)
 
-        assert not result.build_passed
+        assert not result.skip_analysis
 
     async def test_custom_gcs_bucket(self):
         requests_seen: list[str] = []
@@ -1751,7 +1754,7 @@ class TestRegressionEdgeCases:
         async with httpx.AsyncClient(transport=transport) as client:
             result = await source._fetch_with_client(client)
 
-        assert result.build_passed is True
+        assert result.skip_analysis is True
         assert len(result.warnings) >= 1
         assert any("500" in w for w in result.warnings)
 
@@ -2306,8 +2309,11 @@ class TestProwSourceArtifacts:
         assert result.artifacts_context == ""
         assert result.extract_path is None
 
-    async def test_artifacts_not_downloaded_on_success(self):
-        handler = _make_artifact_handler(finished_json=FINISHED_JSON_SUCCESS)
+    async def test_skip_analysis_on_success_no_failures(self):
+        handler = _make_artifact_handler(
+            finished_json=FINISHED_JSON_SUCCESS,
+            junit_xml=JUNIT_XML_NO_FAILURES,
+        )
         transport = httpx.MockTransport(handler)
         source = ProwSource(
             job_name="my-job",
@@ -2318,9 +2324,8 @@ class TestProwSourceArtifacts:
         async with httpx.AsyncClient(transport=transport) as client:
             result = await source._fetch_with_client(client)
 
-        assert result.build_passed is True
-        assert result.artifacts_context == ""
-        assert result.extract_path is None
+        assert result.skip_analysis is True
+        assert result.failures == []
 
     async def test_cleanup_removes_artifacts(self, tmp_path, monkeypatch):
         monkeypatch.setattr(

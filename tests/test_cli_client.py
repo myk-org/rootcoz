@@ -129,6 +129,61 @@ class TestRootCozClientResults:
         assert result["deleted"] == ["abc", "def"]
         assert result["total"] == 2
 
+    def test_get_test_entries(self):
+        sample = {
+            "entries": [
+                {"test_name": "test_a", "duration": 0.1, "status": "passed"},
+                {"test_name": "test_b", "duration": 0.2, "status": "failed"},
+            ],
+            "total": 2,
+            "offset": 0,
+            "limit": 50,
+            "has_more": False,
+        }
+
+        def handler(request):
+            assert request.method == "GET"
+            assert "/api/results/abc-123/tests" in str(request.url)
+            return httpx.Response(200, json=sample)
+
+        client = _make_client(handler)
+        result = client.get_test_entries("abc-123")
+        assert result["total"] == 2
+        assert len(result["entries"]) == 2
+
+    def test_get_test_entries_with_filters(self):
+        def handler(request):
+            params = dict(request.url.params)
+            assert params.get("offset") == "10"
+            assert params.get("limit") == "25"
+            assert ("status", "passed") in request.url.params.multi_items()
+            return httpx.Response(
+                200,
+                json={
+                    "entries": [
+                        {"test_name": "t", "duration": 0.0, "status": "passed"}
+                    ],
+                    "total": 1,
+                    "offset": 10,
+                    "limit": 25,
+                    "has_more": False,
+                },
+            )
+
+        client = _make_client(handler)
+        result = client.get_test_entries(
+            "abc-123", status=["passed"], offset=10, limit=25
+        )
+        assert result["total"] == 1
+
+    def test_get_test_entries_not_found(self):
+        client = _make_client(
+            lambda request: httpx.Response(404, json={"detail": "Job not found"})
+        )
+        with pytest.raises(RootCozError) as exc_info:
+            client.get_test_entries("nonexistent")
+        assert exc_info.value.status_code == 404
+
 
 class TestRootCozClientDashboard:
     def test_dashboard(self):
@@ -2523,7 +2578,6 @@ class TestDefaultServerSettings:
                     "enable_jira": False,
                     "jira_url": "",
                     "jira_project_key": "",
-                    "force_analysis": False,
                     "get_job_artifacts": True,
                     "jenkins_artifacts_max_size_mb": 500,
                     "wait_for_completion": True,

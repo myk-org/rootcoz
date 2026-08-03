@@ -605,30 +605,6 @@ class TestPeerSettingsFields:
             assert settings.peer_analysis_max_rounds == 5
 
 
-class TestForceAnalysisSettings:
-    """Tests for force_analysis setting."""
-
-    def test_force_analysis_default_false(self) -> None:
-        """force_analysis defaults to False."""
-        with patch.dict(os.environ, _build_env(), clear=True):
-            settings = Settings(_env_file=None)
-            assert settings.force_analysis is False
-
-    def test_force_analysis_from_env(self) -> None:
-        """force_analysis is loaded from FORCE_ANALYSIS env var."""
-        env = _build_env(FORCE_ANALYSIS="true")
-        with patch.dict(os.environ, env, clear=True):
-            settings = Settings(_env_file=None)
-            assert settings.force_analysis is True
-
-    def test_force_analysis_env_false(self) -> None:
-        """FORCE_ANALYSIS=false sets force_analysis to False."""
-        env = _build_env(FORCE_ANALYSIS="false")
-        with patch.dict(os.environ, env, clear=True):
-            settings = Settings(_env_file=None)
-            assert settings.force_analysis is False
-
-
 class TestMaxConcurrentAiCalls:
     """Tests for max_concurrent_ai_calls setting."""
 

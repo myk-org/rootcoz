@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from rootcoz.sources.base import CISource, CISourceResult
-from rootcoz.xml_enrichment import extract_test_failures
+from rootcoz.xml_enrichment import extract_all_tests_from_xml
 
 
 class FileSource(CISource):
@@ -24,20 +24,22 @@ class FileSource(CISource):
         self._raw_xml = raw_xml
 
     async def fetch(self) -> CISourceResult:
-        """Parse XML and extract test failures.
+        """Parse XML and extract all test outcomes.
 
         Returns:
-            CISourceResult with extracted failures.
-            If XML contains no failures, returns CISourceResult with
-            empty failures list and build_passed=True.
+            CISourceResult with extracted failures, passed, and skipped tests.
+            Sets skip_analysis=True when no failures are found.
 
         Raises:
             xml.etree.ElementTree.ParseError: If the XML is malformed.
         """
-        test_failures = extract_test_failures(self._raw_xml)
-        if not test_failures:
-            return CISourceResult(failures=[], build_passed=True)
-        return CISourceResult(failures=test_failures)
+        extraction = extract_all_tests_from_xml(self._raw_xml)
+        return CISourceResult(
+            failures=extraction.failures,
+            passed_tests=extraction.passed,
+            skipped_tests=extraction.skipped,
+            skip_analysis=not extraction.failures,
+        )
 
     @property
     def raw_xml(self) -> str:
