@@ -595,6 +595,22 @@ def health(
             )
 
 
+@app.command()
+def version(
+    json_output: bool = _JSON_OPTION,
+):
+    """Show server version."""
+    _set_json(json_output)
+    try:
+        data = _get_client().version()
+    except RootCozError as exc:
+        _handle_error(exc)
+    if _state.get("json", False):
+        print_output(data, columns=[], as_json=True)
+    else:
+        typer.echo(data.get("version", "unknown"))
+
+
 # -- Results ------------------------------------------------------------------
 
 

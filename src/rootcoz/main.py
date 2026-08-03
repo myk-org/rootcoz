@@ -1523,7 +1523,6 @@ class AuthMiddleware(BaseHTTPMiddleware):
             "/login",
             "/health",
             "/api/health",
-            "/api/version",
             "/api/auth/register",
             "/api/auth/login",
             "/api/auth/needs-key",

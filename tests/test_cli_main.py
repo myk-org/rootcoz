@@ -178,6 +178,19 @@ class TestHealthCommand:
         parsed = json.loads(result.output)
         assert parsed["status"] == "healthy"
 
+    def test_version(self, mock_client):
+        mock_client.version.return_value = {"version": "4.5.0"}
+        result = runner.invoke(app, ["version"])
+        assert result.exit_code == 0
+        assert "4.5.0" in result.output
+
+    def test_version_json(self, mock_client):
+        mock_client.version.return_value = {"version": "4.5.0"}
+        result = runner.invoke(app, ["--json", "version"])
+        assert result.exit_code == 0
+        parsed = json.loads(result.output)
+        assert parsed["version"] == "4.5.0"
+
 
 class TestResultsCommands:
     def test_results_list(self, mock_client):

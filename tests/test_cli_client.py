@@ -46,6 +46,13 @@ class TestRootCozClientHealth:
             client.health()
         assert exc_info.value.status_code == 0
 
+    def test_version(self):
+        client = _make_client(
+            lambda request: httpx.Response(200, json={"version": "4.5.0"})
+        )
+        result = client.version()
+        assert result == {"version": "4.5.0"}
+
 
 class TestRootCozClientResults:
     def test_list_results(self):

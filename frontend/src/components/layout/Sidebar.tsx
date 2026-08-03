@@ -103,20 +103,21 @@ export function Sidebar({ badges, mobileOpen, onMobileClose }: SidebarProps) {
   const [version, setVersion] = useState('')
 
   useEffect(() => {
-    let cancelled = false
+    const controller = new AbortController()
 
     async function fetchVersion() {
       try {
-        const data = await api.get<{ version: string }>('/api/version')
-        if (cancelled || !data.version) return
+        const data = await api.get<{ version: string }>('/api/version', { signal: controller.signal })
+        if (!data.version) return
         setVersion(data.version)
       } catch (err) {
+        if (err instanceof DOMException && err.name === 'AbortError') return
         console.debug('Failed to fetch server version:', err)
       }
     }
 
     fetchVersion()
-    return () => { cancelled = true }
+    return () => { controller.abort() }
   }, [])
 
   // ─── Drag resize ────────────────────────────────────────────────
