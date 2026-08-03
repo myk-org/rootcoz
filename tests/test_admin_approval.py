@@ -255,54 +255,58 @@ class TestStorageFunctions:
 
     def test_register_user_with_status(self, _init_db, temp_db_path):
         """register_user_with_status creates a user with the given status."""
-        with patch.dict(
-            os.environ,
-            {
-                "ROOTCOZ_ENCRYPTION_KEY": "test-encryption-key-for-hmac"
-            },  # pragma: allowlist secret
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "ROOTCOZ_ENCRYPTION_KEY": "test-encryption-key-for-hmac"
+                },  # pragma: allowlist secret
+            ),
+            patch.object(storage, "DB_PATH", temp_db_path),
         ):
-            with patch.object(storage, "DB_PATH", temp_db_path):
-                row_id = asyncio.run(
-                    storage.register_user_with_status(
-                        "statususer", "fake_hash_abc", status="pending"
-                    )
+            row_id = asyncio.run(
+                storage.register_user_with_status(
+                    "statususer", "fake_hash_abc", status="pending"
                 )
-                assert row_id > 0
-
-                status = asyncio.run(storage.get_user_status("statususer"))
-                assert status == "pending"
+            )
+            assert row_id > 0
+            status = asyncio.run(storage.get_user_status("statususer"))
+            assert status == "pending"
 
     def test_set_user_status(self, _init_db, temp_db_path):
         """set_user_status changes user status."""
-        with patch.dict(
-            os.environ,
-            {
-                "ROOTCOZ_ENCRYPTION_KEY": "test-encryption-key-for-hmac"
-            },  # pragma: allowlist secret
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "ROOTCOZ_ENCRYPTION_KEY": "test-encryption-key-for-hmac"
+                },  # pragma: allowlist secret
+            ),
+            patch.object(storage, "DB_PATH", temp_db_path),
         ):
-            with patch.object(storage, "DB_PATH", temp_db_path):
-                asyncio.run(
-                    storage.register_user_with_status(
-                        "statuschange", "fake_hash_def", status="pending"
-                    )
+            asyncio.run(
+                storage.register_user_with_status(
+                    "statuschange", "fake_hash_def", status="pending"
                 )
-                result = asyncio.run(storage.set_user_status("statuschange", "active"))
-                assert result is True
-
-                status = asyncio.run(storage.get_user_status("statuschange"))
-                assert status == "active"
+            )
+            result = asyncio.run(storage.set_user_status("statuschange", "active"))
+            assert result is True
+            status = asyncio.run(storage.get_user_status("statuschange"))
+            assert status == "active"
 
     def test_set_user_status_invalid(self, _init_db, temp_db_path):
         """set_user_status rejects invalid status values."""
-        with patch.dict(
-            os.environ,
-            {
-                "ROOTCOZ_ENCRYPTION_KEY": "test-encryption-key-for-hmac"
-            },  # pragma: allowlist secret
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "ROOTCOZ_ENCRYPTION_KEY": "test-encryption-key-for-hmac"
+                },  # pragma: allowlist secret
+            ),
+            patch.object(storage, "DB_PATH", temp_db_path),
+            pytest.raises(ValueError, match="Invalid status"),
         ):
-            with patch.object(storage, "DB_PATH", temp_db_path):
-                with pytest.raises(ValueError, match="Invalid status"):
-                    asyncio.run(storage.set_user_status("anyone", "bogus"))
+            asyncio.run(storage.set_user_status("anyone", "bogus"))
 
     def test_get_user_status_nonexistent(self, _init_db, temp_db_path):
         """get_user_status returns None for non-existent user."""
@@ -312,48 +316,44 @@ class TestStorageFunctions:
 
     def test_list_pending_users(self, _init_db, temp_db_path):
         """list_pending_users returns only pending users."""
-        with patch.dict(
-            os.environ,
-            {
-                "ROOTCOZ_ENCRYPTION_KEY": "test-encryption-key-for-hmac"
-            },  # pragma: allowlist secret
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "ROOTCOZ_ENCRYPTION_KEY": "test-encryption-key-for-hmac"
+                },  # pragma: allowlist secret
+            ),
+            patch.object(storage, "DB_PATH", temp_db_path),
         ):
-            with patch.object(storage, "DB_PATH", temp_db_path):
-                asyncio.run(
-                    storage.register_user_with_status(
-                        "pend01", "hash01", status="pending"
-                    )
-                )
-                asyncio.run(
-                    storage.register_user_with_status(
-                        "active01", "hash02", status="active"
-                    )
-                )
-                asyncio.run(
-                    storage.register_user_with_status(
-                        "pend02", "hash03", status="pending"
-                    )
-                )
-
-                pending = asyncio.run(storage.list_pending_users())
-                usernames = [u["username"] for u in pending]
-                assert "pend01" in usernames
-                assert "pend02" in usernames
-                assert "active01" not in usernames
+            asyncio.run(
+                storage.register_user_with_status("pend01", "hash01", status="pending")
+            )
+            asyncio.run(
+                storage.register_user_with_status("active01", "hash02", status="active")
+            )
+            asyncio.run(
+                storage.register_user_with_status("pend02", "hash03", status="pending")
+            )
+            pending = asyncio.run(storage.list_pending_users())
+            usernames = [u["username"] for u in pending]
+            assert "pend01" in usernames
+            assert "pend02" in usernames
+            assert "active01" not in usernames
 
     def test_existing_users_default_to_active(self, _init_db, temp_db_path):
         """Users created before the migration default to 'active' status."""
-        with patch.dict(
-            os.environ,
-            {
-                "ROOTCOZ_ENCRYPTION_KEY": "test-encryption-key-for-hmac"
-            },  # pragma: allowlist secret
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "ROOTCOZ_ENCRYPTION_KEY": "test-encryption-key-for-hmac"
+                },  # pragma: allowlist secret
+            ),
+            patch.object(storage, "DB_PATH", temp_db_path),
         ):
-            with patch.object(storage, "DB_PATH", temp_db_path):
-                # create_user (old style) should have active status via DB default
-                asyncio.run(storage.create_user("legacyuser"))
-                status = asyncio.run(storage.get_user_status("legacyuser"))
-                assert status == "active"
+            asyncio.run(storage.create_user("legacyuser"))
+            status = asyncio.run(storage.get_user_status("legacyuser"))
+            assert status == "active"
 
 
 class TestAdminWaitApproveMsg:

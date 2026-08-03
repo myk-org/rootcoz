@@ -23,7 +23,6 @@ from rootcoz.engine.core import (
 )
 from rootcoz.models import FailedTest
 from rootcoz.storage import AI_SYSTEM_USERNAME
-
 from tests.conftest import build_test_env
 
 

@@ -3,6 +3,7 @@
 import csv
 import json as json_mod
 import sys
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Annotated, Any
@@ -11,7 +12,6 @@ import typer
 import yaml
 
 from rootcoz.cli.client import RootCozClient, RootCozError
-from rootcoz.storage import VALID_ROLES
 from rootcoz.cli.config import (
     CONFIG_FILE,
     ServerConfig,
@@ -22,6 +22,7 @@ from rootcoz.cli.config import (
 )
 from rootcoz.cli.output import print_output
 from rootcoz.config import parse_additional_repos, parse_peer_configs
+from rootcoz.storage import VALID_ROLES
 
 # -- App and sub-command groups -----------------------------------------------
 
@@ -73,7 +74,7 @@ admin_app.add_typer(admin_models_app, name="models")
 
 # -- Global state managed via app callback ------------------------------------
 
-_state: dict = {}
+_state: dict[str, Any] = {}
 
 # Shared option definition reused across leaf commands so --json works
 # both globally (before the subcommand) and per-command (after it).
@@ -242,7 +243,14 @@ _LABEL_FILTER_OPTION = typer.Option(
     [], "--label", "-l", help="Filter by label (can repeat)."
 )
 _LABEL_SET_OPTION = typer.Option([], "--label", "-l", help="Label (can repeat).")
+_STATUS_FILTER_OPTION = typer.Option(
+    [],
+    "--status",
+    "-s",
+    help="Filter by status (passed, skipped, failed). Can repeat.",
+)
 _JOB_IDS_ARGUMENT = typer.Argument(default=None, help="Job ID(s) to delete.")
+_HTML_FILE_ARGUMENT = typer.Argument(help="Path to the HTML file to upload.")
 _BULK_DELETE_BATCH_SIZE = 500
 
 
@@ -316,12 +324,12 @@ def _require_api_key(key: str, action: str = "Operation") -> None:
 
 def _run_client_command(
     json_output: bool,
-    request_fn,
+    request_fn: Callable[[RootCozClient], Any],
     *,
     columns: list[str] | None = None,
     labels: dict[str, str] | None = None,
     emit_output: bool = True,
-):
+) -> Any:
     """Execute a client request with standard json/table scaffolding.
 
     Handles ``_set_json``, ``_get_client``, ``RootCozError`` handling, and output
@@ -389,7 +397,7 @@ def _resolve_server(
     Raises:
         typer.Exit: If no server can be determined.
     """
-    if server and (server.startswith("http://") or server.startswith("https://")):
+    if server and server.startswith(("http://", "https://")):
         # Explicit URL -- treat as self-contained; do not inherit profile config.
         return server, username, no_verify_ssl or False, None
 
@@ -470,7 +478,7 @@ def main_callback(
         "--insecure",
         help="Alias for --no-verify-ssl.",
     ),
-):
+) -> None:
     """rootcoz -- CLI for the rootcoz REST API."""
     _state["json"] = json_output
 
@@ -535,7 +543,7 @@ def main_callback(
 def register(
     username: str = typer.Argument(help="Username to register."),
     json_output: bool = _JSON_OPTION,
-):
+) -> None:
     """Register a new user and get an API key."""
     result = _run_client_command(
         json_output,
@@ -555,14 +563,14 @@ def register(
 @app.command()
 def health(
     json_output: bool = _JSON_OPTION,
-):
+) -> None:
     """Check server health."""
     _set_json(json_output)
     try:
         data = _get_client().health()
     except RootCozError as exc:
         _handle_error(exc)
-    except Exception:
+    except OSError:
         if _state.get("json", False):
             print_output(
                 {"status": "unreachable", "detail": "Server is down or unreachable"},
@@ -598,7 +606,7 @@ def health(
 @app.command()
 def version(
     json_output: bool = _JSON_OPTION,
-):
+) -> None:
     """Show server version."""
     _set_json(json_output)
     try:
@@ -618,10 +626,10 @@ def version(
 def results_list(
     limit: int = typer.Option(50, "--limit", "-l", help="Max results to return."),
     json_output: bool = _JSON_OPTION,
-):
+) -> None:
     """List recent analyzed jobs."""
 
-    def _list(c):
+    def _list(c: RootCozClient) -> Any:
         data = c.list_results(limit=limit)
         if isinstance(data, list):
             for row in data:
@@ -656,13 +664,13 @@ def dashboard(
     ),
     limit: int = typer.Option(500, "--limit", help="Max results (0 = no limit)."),
     json_output: bool = _JSON_OPTION,
-):
+) -> None:
     """List analysis jobs with dashboard metadata (failure counts, review progress)."""
     use_filtered = bool(
         label or exclude_tag or search or review_status != "all" or limit != 500
     )
 
-    def _fetch(c):
+    def _fetch(c: RootCozClient) -> Any:
         if use_filtered:
             result = c.dashboard_filtered(
                 labels=label or None,
@@ -704,7 +712,7 @@ def results_show(
         ),
     ),
     json_output: bool = _JSON_OPTION,
-):
+) -> None:
     """Show analysis result for a job."""
     _set_json(json_output)
     try:
@@ -758,7 +766,7 @@ def results_show(
 @results_app.command("fields")
 def results_fields(
     json_output: bool = _JSON_OPTION,
-):
+) -> None:
     """List allowlisted field paths for sparse GET /results/{job_id}."""
     data = _run_client_command(
         json_output,
@@ -779,7 +787,7 @@ def results_delete(
         False, "--confirm", help="Confirm deleting all jobs (required with --all)."
     ),
     json_output: bool = _JSON_OPTION,
-):
+) -> None:
     """Delete one or more jobs and all related data."""
     _set_json(json_output)
     try:
@@ -820,7 +828,7 @@ def results_delete(
                 typer.echo(f"Deleted job {data.get('job_id', job_ids[0])}")
         else:
             deleted: list[str] = []
-            failed: list[dict] = []
+            failed: list[dict[str, Any]] = []
             for start in range(0, len(job_ids), _BULK_DELETE_BATCH_SIZE):
                 chunk = job_ids[start : start + _BULK_DELETE_BATCH_SIZE]
                 try:
@@ -854,7 +862,7 @@ def results_delete(
 def review_status(
     job_id: str = typer.Argument(help="Job ID."),
     json_output: bool = _JSON_OPTION,
-):
+) -> None:
     """Show review status for an analysis."""
     _run_client_command(
         json_output,
@@ -873,7 +881,7 @@ def set_reviewed_cmd(
     child_job_name: str = typer.Option("", "--child-job"),
     child_build_number: int = typer.Option(0, "--child-build"),
     json_output: bool = _JSON_OPTION,
-):
+) -> None:
     """Set or clear the reviewed state for a test failure."""
     if child_build_number < 0:
         typer.echo("Error: --child-build must be non-negative.", err=True)
@@ -915,7 +923,7 @@ def set_tracked_in_cmd(
     child_job_name: str = typer.Option("", "--child-job"),
     child_build_number: int = typer.Option(0, "--child-build"),
     json_output: bool = _JSON_OPTION,
-):
+) -> None:
     """Set or clear the tracked-in URL for a test failure."""
     data = _run_client_command(
         json_output,
@@ -943,7 +951,7 @@ def delete_tracked_in_cmd(
     job_id: str = typer.Argument(help="Job ID."),
     link_id: int = typer.Option(..., "--link-id", help="Tracked-in link ID to delete."),
     json_output: bool = _JSON_OPTION,
-):
+) -> None:
     """Delete a tracked-in link by ID."""
     data = _run_client_command(
         json_output,
@@ -957,12 +965,7 @@ def delete_tracked_in_cmd(
 @results_app.command("tests")
 def results_tests(
     job_id: str = typer.Argument(help="Job ID to get test entries for."),
-    status: list[str] = typer.Option(
-        [],
-        "--status",
-        "-s",
-        help="Filter by status (passed, skipped, failed). Can repeat.",
-    ),
+    status: list[str] = _STATUS_FILTER_OPTION,
     child_job_name: str = typer.Option(
         None, "--child-job", help="Filter by child job name."
     ),
@@ -972,7 +975,7 @@ def results_tests(
     offset: int = typer.Option(0, "--offset", help="Pagination offset."),
     limit: int = typer.Option(50, "--limit", help="Page size (max 200)."),
     json_output: bool = _JSON_OPTION,
-):
+) -> None:
     """List test entries (passed/skipped/failed) for a job."""
     _set_json(json_output)
     try:
@@ -1017,7 +1020,7 @@ def results_tests(
 def enrich_comments_cmd(
     job_id: str = typer.Argument(help="Job ID."),
     json_output: bool = _JSON_OPTION,
-):
+) -> None:
     """Enrich comments with live PR/ticket statuses."""
     data = _run_client_command(
         json_output,
@@ -1200,7 +1203,7 @@ def _apply_peer_and_repos(
             raise typer.Exit(code=1) from None
 
 
-def _emit_queued_output(data: dict) -> None:
+def _emit_queued_output(data: dict[str, Any]) -> None:
     """Print queued-job output — JSON or human-readable."""
     if _state.get("json", False):
         print_output(data, columns=[], as_json=True)
@@ -1333,7 +1336,7 @@ def analyze(
     ),
     tags: list[str] = _TAG_OPTION,
     json_output: bool = _JSON_OPTION,
-):
+) -> None:
     """Submit an analysis job (Jenkins, JUnit XML file, or Prow CI)."""
     _set_json(json_output)
 
@@ -1502,7 +1505,7 @@ def analyze(
 
     try:
         client = _get_client()
-        data: dict
+        data: dict[str, Any]
         if source == "jenkins":
             data = client.analyze(job_name, jenkins_build_number, name=name, **extras)
         elif source == "prow":
@@ -1531,7 +1534,7 @@ def analyze(
     _emit_queued_output(data)
 
 
-def _echo_queued_job(data: dict, prefix: str = "Job") -> None:
+def _echo_queued_job(data: dict[str, Any], prefix: str = "Job") -> None:
     """Print queued-job confirmation lines (shared by re-analyze commands)."""
     typer.echo(f"{prefix} queued: {data.get('job_id', '')}")
     typer.echo(f"Status: {data.get('status', '')}")
@@ -1542,7 +1545,7 @@ def _echo_queued_job(data: dict, prefix: str = "Job") -> None:
 def re_analyze_cmd(
     job_id: str = typer.Argument(help="Job ID of the analysis to re-run."),
     json_output: bool = _JSON_OPTION,
-):
+) -> None:
     """Re-analyze a previously analyzed job with the same settings."""
     data = _run_client_command(
         json_output,
@@ -1560,7 +1563,7 @@ def re_analyze_cmd(
 def failure_show(
     failure_uuid: str = typer.Argument(help="UUID of the failure to look up."),
     json_output: bool = _JSON_OPTION,
-):
+) -> None:
     """Show a failure analysis by its UUID."""
     data = _run_client_command(
         json_output,
@@ -1583,7 +1586,7 @@ def failure_show(
 def failure_re_analyze_cmd(
     failure_uuid: str = typer.Argument(help="UUID of the failure to re-analyze."),
     json_output: bool = _JSON_OPTION,
-):
+) -> None:
     """Re-analyze a single failure by its UUID."""
     data = _run_client_command(
         json_output,
@@ -1601,7 +1604,7 @@ def failure_re_analyze_cmd(
 def abort(
     job_id: str = typer.Argument(help="Job ID to abort."),
     json_output: bool = _JSON_OPTION,
-):
+) -> None:
     """Abort a running or waiting analysis."""
     data = _run_client_command(
         json_output,
@@ -1621,7 +1624,7 @@ def abort(
 def status(
     job_id: str = typer.Argument(help="Job ID to check."),
     json_output: bool = _JSON_OPTION,
-):
+) -> None:
     """Check analysis status for a job."""
     _set_json(json_output)
     try:
@@ -1660,7 +1663,7 @@ def history_test(
         "", "--exclude-job-id", help="Exclude results from this job ID."
     ),
     json_output: bool = _JSON_OPTION,
-):
+) -> None:
     """Show failure history for a specific test."""
     _set_json(json_output)
     try:
@@ -1709,7 +1712,7 @@ def history_search(
         "", "--exclude-job-id", help="Exclude results from this job ID."
     ),
     json_output: bool = _JSON_OPTION,
-):
+) -> None:
     """Find tests that failed with the same error signature."""
     _set_json(json_output)
     try:
@@ -1740,7 +1743,7 @@ def history_stats(
         "", "--exclude-job-id", help="Exclude results from this job ID."
     ),
     json_output: bool = _JSON_OPTION,
-):
+) -> None:
     """Show aggregate statistics for a job."""
     _set_json(json_output)
     try:
@@ -1776,7 +1779,7 @@ def history_failures(
     classification: str = typer.Option("", "--classification", "-c"),
     job_name: str = typer.Option("", "--job-name", "-j"),
     json_output: bool = _JSON_OPTION,
-):
+) -> None:
     """List paginated failure history."""
     _set_json(json_output)
     try:
@@ -1828,7 +1831,7 @@ def classify(
     child_job: str = typer.Option("", "--child-job", help="Child job name."),
     child_build: int = typer.Option(0, "--child-build", help="Child build number."),
     json_output: bool = _JSON_OPTION,
-):
+) -> None:
     """Classify a test failure."""
     _set_json(json_output)
     try:
@@ -1863,7 +1866,7 @@ def classifications_list(
         "", "--parent-job-name", help="Filter by parent job name."
     ),
     json_output: bool = _JSON_OPTION,
-):
+) -> None:
     """List test classifications."""
     _set_json(json_output)
     try:
@@ -1906,7 +1909,7 @@ def classifications_list(
 def comments_list(
     job_id: str = typer.Argument(help="Job ID to list comments for."),
     json_output: bool = _JSON_OPTION,
-):
+) -> None:
     """List comments for a job."""
     _set_json(json_output)
     try:
@@ -1938,7 +1941,7 @@ def comments_add(
     child_job_name: str = typer.Option("", "--child-job"),
     child_build_number: int = typer.Option(0, "--child-build"),
     json_output: bool = _JSON_OPTION,
-):
+) -> None:
     """Add a comment to a test failure."""
     _set_json(json_output)
     try:
@@ -1963,7 +1966,7 @@ def comments_delete(
     job_id: str = typer.Argument(help="Job ID."),
     comment_id: int = typer.Argument(help="Comment ID to delete."),
     json_output: bool = _JSON_OPTION,
-):
+) -> None:
     """Delete a comment."""
     _set_json(json_output)
     try:
@@ -1983,7 +1986,7 @@ def comments_delete(
 @app.command()
 def capabilities(
     json_output: bool = _JSON_OPTION,
-):
+) -> None:
     """Show which post-analysis automation features the server supports.
 
     Reports whether the server is configured to create GitHub issues
@@ -2061,7 +2064,7 @@ def jira_security_levels_cmd(
 # -- AI Models ----------------------------------------------------------------
 
 
-def _print_ai_model_rows(models: list[dict]) -> None:
+def _print_ai_model_rows(models: list[dict[str, Any]]) -> None:
     """Render an id/name table for AI model rows."""
     print_output(
         models,
@@ -2083,7 +2086,7 @@ def ai_models_cmd(
         ),
     ),
     json_output: bool = _JSON_OPTION,
-):
+) -> None:
     """List available AI models per provider."""
     _set_json(json_output)
     try:
@@ -2123,7 +2126,7 @@ def ai_models_cmd(
 @app.command("mentionable-users")
 def mentionable_users_cmd(
     json_output: bool = _JSON_OPTION,
-):
+) -> None:
     """List users that can be mentioned in comments."""
     data = _run_client_command(
         json_output,
@@ -2145,7 +2148,7 @@ def mentions_cmd(
     offset: int = typer.Option(0, "--offset", "-o", help="Offset for pagination."),
     unread: bool = typer.Option(False, "--unread", help="Show only unread mentions."),
     json_output: bool = _JSON_OPTION,
-):
+) -> None:
     """List your @mentions across all reports."""
     _set_json(json_output)
     try:
@@ -2186,7 +2189,7 @@ def mentions_mark_read_cmd(
         ..., "--ids", help="Comma-separated comment IDs to mark as read."
     ),
     json_output: bool = _JSON_OPTION,
-):
+) -> None:
     """Mark specific mentions as read."""
     raw_parts = [x.strip() for x in ids.split(",") if x.strip()]
     if not raw_parts:
@@ -2213,7 +2216,7 @@ def mentions_mark_read_cmd(
 @app.command("mentions-mark-all-read")
 def mentions_mark_all_read_cmd(
     json_output: bool = _JSON_OPTION,
-):
+) -> None:
     """Mark all mentions as read."""
     _run_client_command(
         json_output,
@@ -2308,7 +2311,7 @@ def preview_issue(
         help="Custom issue generation prompt (overrides .rootcoz/ROOTCOZ_ISSUE_PROMPT.md from test repo)",
     ),
     json_output: bool = _JSON_OPTION,
-):
+) -> None:
     """Preview generated issue content (GitHub or Jira)."""
     _set_json(json_output)
     normalized_type = _validate_issue_type(issue_type)
@@ -2377,7 +2380,7 @@ def preview_issue(
 def get_issue_prompt(
     job_id: str = typer.Argument(help="Job ID."),
     json_output: bool = _JSON_OPTION,
-):
+) -> None:
     """Get the issue prompt from the test repo associated with a job."""
     _set_json(json_output)
     try:
@@ -2439,7 +2442,7 @@ def create_issue(
         help="Jira issue type name (e.g. Bug, Story, Task). Default: Bug.",
     ),
     json_output: bool = _JSON_OPTION,
-):
+) -> None:
     """Create a GitHub issue or Jira bug from a failure analysis."""
     _set_json(json_output)
     normalized_type = _validate_issue_type(issue_type)
@@ -2537,7 +2540,7 @@ def push_rp_cmd(
         help="Child build number (for pipeline child push).",
     ),
     json_output: bool = _JSON_OPTION,
-):
+) -> None:
     """Push rootcoz classifications into Report Portal test items."""
     data = _run_client_command(
         json_output,
@@ -2577,7 +2580,7 @@ def override_classification_cmd(
     child_job_name: str = typer.Option("", "--child-job"),
     child_build_number: int = typer.Option(0, "--child-build"),
     json_output: bool = _JSON_OPTION,
-):
+) -> None:
     """Override the classification of a failure."""
     _set_json(json_output)
     try:
@@ -2611,7 +2614,7 @@ def override_pattern_cmd(
     child_job_name: str = typer.Option("", "--child-job"),
     child_build_number: int = typer.Option(0, "--child-build"),
     json_output: bool = _JSON_OPTION,
-):
+) -> None:
     """Override the pattern of a failure."""
     _set_json(json_output)
     try:
@@ -2645,7 +2648,7 @@ def analyze_comment_intent_cmd(
         "", "--ai-model", help="AI model for content generation."
     ),
     json_output: bool = _JSON_OPTION,
-):
+) -> None:
     """Analyze whether a comment suggests a failure has been reviewed/resolved."""
     _set_json(json_output)
     try:
@@ -2674,7 +2677,7 @@ def auth_login(
     username: str = typer.Option(..., "--username", "-u", help="Username."),
     api_key: str = typer.Option(..., "--api-key", "-k", help="API key."),
     json_output: bool = _JSON_OPTION,
-):
+) -> None:
     """Validate credentials. This does not persist a session.
 
     For persistent auth, set api_key in ~/.config/rootcoz/config.toml or use
@@ -2696,7 +2699,7 @@ def auth_login(
 @auth_app.command("rotate-key")
 def auth_rotate_key(
     json_output: bool = _JSON_OPTION,
-):
+) -> None:
     """Rotate your own API key. The new key is shown once \u2014 save it."""
     result = _run_client_command(
         json_output,
@@ -2713,7 +2716,7 @@ def auth_rotate_key(
 @auth_app.command("logout")
 def auth_logout(
     json_output: bool = _JSON_OPTION,
-):
+) -> None:
     """Logout (clear admin session)."""
     _run_client_command(json_output, lambda c: c.logout())
 
@@ -2721,7 +2724,7 @@ def auth_logout(
 @auth_app.command("whoami")
 def auth_whoami(
     json_output: bool = _JSON_OPTION,
-):
+) -> None:
     """Show current authenticated user info."""
     _run_client_command(
         json_output,
@@ -2736,7 +2739,7 @@ def auth_whoami(
 @admin_users_app.command("list")
 def admin_users_list(
     json_output: bool = _JSON_OPTION,
-):
+) -> None:
     """List all users (admin and regular)."""
     data = _run_client_command(
         json_output,
@@ -2778,7 +2781,7 @@ def admin_users_create(
         help="Grant access to /api/reports/* (orthogonal to role).",
     ),
     json_output: bool = _JSON_OPTION,
-):
+) -> None:
     """Create a new user with the specified role. The API key is shown once \u2014 save it."""
     if role not in VALID_ROLES:
         typer.echo(
@@ -2807,7 +2810,7 @@ def admin_users_delete(
     force: bool = typer.Option(
         False, "--force", "-f", help="Skip confirmation prompt."
     ),
-):
+) -> None:
     """Delete an admin user."""
     if not force:
         confirm = typer.confirm(f"Delete admin user '{username}'?")
@@ -2828,7 +2831,7 @@ def admin_users_rotate_key(
         ..., help="Username of the admin to rotate key for."
     ),
     json_output: bool = _JSON_OPTION,
-):
+) -> None:
     """Rotate an admin user's API key. The new key is shown once."""
     data = _run_client_command(
         json_output,
@@ -2849,7 +2852,7 @@ def admin_users_change_role(
         ..., help="New role: 'viewer', 'reviewer', 'operator', or 'admin'."
     ),
     json_output: bool = _JSON_OPTION,
-):
+) -> None:
     """Change a user's role. Promoting to admin generates an API key."""
     data = _run_client_command(
         json_output,
@@ -2868,7 +2871,7 @@ def admin_users_set_can_view_reports(
     username: str = typer.Argument(..., help="Username to update."),
     value: str = typer.Argument(..., help="true or false (also accepts 1/0, yes/no)."),
     json_output: bool = _JSON_OPTION,
-):
+) -> None:
     """Grant or revoke access to /api/reports/* for a user."""
     normalized = value.strip().lower()
     if normalized in ("true", "1", "yes", "on"):
@@ -2893,7 +2896,7 @@ def admin_users_set_can_view_reports(
 @admin_users_app.command("pending")
 def admin_users_pending(
     json_output: bool = _JSON_OPTION,
-):
+) -> None:
     """List users awaiting admin approval."""
     data = _run_client_command(
         json_output,
@@ -2917,7 +2920,7 @@ def admin_users_pending(
 def admin_users_approve(
     username: str = typer.Argument(..., help="Username to approve."),
     json_output: bool = _JSON_OPTION,
-):
+) -> None:
     """Approve a pending user registration."""
     data = _run_client_command(
         json_output,
@@ -2932,7 +2935,7 @@ def admin_users_approve(
 def admin_users_reject(
     username: str = typer.Argument(..., help="Username to reject."),
     json_output: bool = _JSON_OPTION,
-):
+) -> None:
     """Reject a pending user registration."""
     data = _run_client_command(
         json_output,
@@ -2953,10 +2956,10 @@ def admin_settings_list(
         False, "--reveal", help="Show sensitive values (default: masked)."
     ),
     json_output: bool = _JSON_OPTION,
-):
+) -> None:
     """List all server settings with current values and sources."""
 
-    def _fetch(c):
+    def _fetch(c: RootCozClient) -> Any:
         data = c.admin_list_settings(reveal=reveal)
         if category:
             data = [
@@ -2982,7 +2985,7 @@ def admin_settings_set(
     key: str = typer.Argument(help="Setting key (e.g., jenkins_url or JENKINS_URL)."),
     value: str = typer.Argument(help="New value for the setting."),
     json_output: bool = _JSON_OPTION,
-):
+) -> None:
     """Set a server setting (persisted to DB)."""
     key = key.lower()
     _run_client_command(
@@ -2999,7 +3002,7 @@ def admin_settings_history(
     key: str = typer.Option("", "--key", "-k", help="Filter by setting key."),
     limit: int = typer.Option(50, "--limit", "-l", help="Max entries to return."),
     json_output: bool = _JSON_OPTION,
-):
+) -> None:
     """Show server settings change history."""
     _run_client_command(
         json_output,
@@ -3018,7 +3021,7 @@ def admin_settings_history(
 def admin_settings_reset(
     key: str = typer.Argument(help="Setting key to reset to env/default."),
     json_output: bool = _JSON_OPTION,
-):
+) -> None:
     """Reset a server setting to env/default (removes DB override)."""
     key = key.lower()
     _run_client_command(
@@ -3059,7 +3062,7 @@ def _format_cost(value: float | None, precision: int = 2) -> str:
     return f"${value:.{precision}f}"
 
 
-def _print_token_summary(data: dict) -> None:
+def _print_token_summary(data: dict[str, Any]) -> None:
     """Print dashboard summary."""
     for period_name in ["today", "this_week", "this_month"]:
         period = data.get(period_name, {})
@@ -3078,7 +3081,7 @@ def _print_token_summary(data: dict) -> None:
             )
 
 
-def _print_token_usage_table(data: dict) -> None:
+def _print_token_usage_table(data: dict[str, Any]) -> None:
     """Print aggregated token usage."""
     typer.echo(f"Total calls: {data.get('total_calls', 0)}")
     typer.echo(f"Input tokens: {data.get('total_input_tokens', 0):,}")
@@ -3100,7 +3103,7 @@ def _print_token_usage_table(data: dict) -> None:
             )
 
 
-def _print_job_token_usage(data: dict) -> None:
+def _print_job_token_usage(data: dict[str, Any]) -> None:
     """Print per-job token usage."""
     typer.echo(f"Job: {data.get('job_id', 'N/A')}")
     records = data.get("records", [])
@@ -3118,7 +3121,7 @@ def _print_job_token_usage(data: dict) -> None:
         )
 
 
-def _print_token_usage_csv(rows: list[dict]) -> None:
+def _print_token_usage_csv(rows: list[dict[str, Any]]) -> None:
     """Print token usage as CSV."""
     if not rows:
         typer.echo("No data", err=True)
@@ -3126,7 +3129,7 @@ def _print_token_usage_csv(rows: list[dict]) -> None:
     writer = csv.DictWriter(sys.stdout, fieldnames=rows[0].keys())
     writer.writeheader()
     for row in rows:
-        writer.writerow({k: row.get(k, "") for k in rows[0].keys()})
+        writer.writerow({k: row.get(k, "") for k in rows[0]})
 
 
 @admin_app.command("token-usage")
@@ -3150,7 +3153,7 @@ def token_usage_cmd(
         "table", "--format", help="Output format: table, json, csv"
     ),
     json_output: bool = _JSON_OPTION,
-):
+) -> None:
     """View AI token usage and costs. Admin only."""
     _set_json(json_output)
     # --json flag overrides --format
@@ -3255,7 +3258,7 @@ def metadata_list(
     version: str = typer.Option("", "--version", help="Filter by version."),
     label: list[str] = _LABEL_FILTER_OPTION,
     json_output: bool = _JSON_OPTION,
-):
+) -> None:
     """List job metadata with optional filters."""
     _run_client_command(
         json_output,
@@ -3271,7 +3274,7 @@ def metadata_list(
 def metadata_get(
     job_name: str = typer.Argument(help="Job name."),
     json_output: bool = _JSON_OPTION,
-):
+) -> None:
     """Show metadata for a specific job."""
     _run_client_command(
         json_output,
@@ -3288,7 +3291,7 @@ def metadata_set(
     version: str = typer.Option("", "--version", help="Version label."),
     label: list[str] = _LABEL_SET_OPTION,
     json_output: bool = _JSON_OPTION,
-):
+) -> None:
     """Set or update metadata for a job."""
     data = _run_client_command(
         json_output,
@@ -3305,7 +3308,7 @@ def metadata_set(
 def metadata_delete(
     job_name: str = typer.Argument(help="Job name."),
     json_output: bool = _JSON_OPTION,
-):
+) -> None:
     """Delete metadata for a job."""
     data = _run_client_command(
         json_output,
@@ -3320,7 +3323,7 @@ def metadata_delete(
 def metadata_import(
     file_path: str = typer.Argument(help="Path to JSON or YAML file."),
     json_output: bool = _JSON_OPTION,
-):
+) -> None:
     """Bulk import metadata from a JSON or YAML file.
 
     File format: a list of objects with job_name, team, tier, version, labels.
@@ -3332,7 +3335,7 @@ def metadata_import(
         raise typer.Exit(code=1)
 
     content = path.read_text(encoding="utf-8")
-    items: list[dict] = []
+    items: list[dict[str, Any]] = []
 
     if path.suffix.lower() in (".yaml", ".yml"):
         try:
@@ -3366,7 +3369,7 @@ def metadata_import(
 @metadata_app.command("rules")
 def metadata_rules(
     json_output: bool = _JSON_OPTION,
-):
+) -> None:
     """List configured metadata rules for auto-assignment."""
     data = _run_client_command(
         json_output,
@@ -3396,7 +3399,7 @@ def metadata_rules(
 def metadata_preview(
     job_name: str = typer.Argument(help="Job name to preview rules against."),
     json_output: bool = _JSON_OPTION,
-):
+) -> None:
     """Preview what metadata rules would assign to a job name."""
     data = _run_client_command(
         json_output,
@@ -3518,8 +3521,8 @@ def chat_send(
                                 typer.echo(f"\n{content}")
                             return
                         break
-            except Exception:
-                pass
+            except RootCozError:
+                continue
         typer.echo(
             "\nTimed out waiting for response. "
             "Use 'rootcoz chat history' to check later."
@@ -3589,11 +3592,11 @@ def admin_chat_send(
     import time
 
     client = _get_client()
-    # Init best-effort
+    # Init best-effort — workspace may already exist; send still proceeds
     try:
         client.init_admin_chat()
-    except Exception:
-        pass
+    except RootCozError as exc:
+        _ = exc
     data = _run_client_command(
         json_output,
         lambda c: c.send_admin_chat_message(
@@ -3626,8 +3629,8 @@ def admin_chat_send(
                                 typer.echo(f"\n{content}")
                             return
                         break
-            except Exception:
-                pass
+            except RootCozError:
+                continue
         typer.echo(
             "\nTimed out waiting for response. "
             "Use 'rootcoz admin-chat history' to check later."
@@ -3681,7 +3684,7 @@ def admin_chat_clear(
 
 @admin_chat_app.command("save-artifact")
 def admin_chat_save_artifact(
-    html_file: Path = typer.Argument(help="Path to the HTML file to upload."),
+    html_file: Path = _HTML_FILE_ARGUMENT,
     filename: str = typer.Option(
         "",
         "--filename",
@@ -3770,7 +3773,7 @@ def reports_totals(
     exclude_tags: str = _REPORT_EXCLUDE_TAGS_OPTION,
     review_status: str = _REPORT_REVIEW_STATUS_OPTION,
     json_output: bool = _JSON_OPTION,
-):
+) -> None:
     """Show aggregate totals: jobs, failures, reviewed."""
     _set_json(json_output)
     tag_list = [t.strip() for t in tags.split(",") if t.strip()] if tags else None
@@ -3835,7 +3838,7 @@ def reports_overrides(
     exclude_tags: str = _REPORT_EXCLUDE_TAGS_OPTION,
     review_status: str = _REPORT_REVIEW_STATUS_OPTION,
     json_output: bool = _JSON_OPTION,
-):
+) -> None:
     """Show classification overrides grouped by from->to."""
     _set_json(json_output)
     tag_list = [t.strip() for t in tags.split(",") if t.strip()] if tags else None
@@ -3900,7 +3903,7 @@ def reports_issues(
     exclude_tags: str = _REPORT_EXCLUDE_TAGS_OPTION,
     review_status: str = _REPORT_REVIEW_STATUS_OPTION,
     json_output: bool = _JSON_OPTION,
-):
+) -> None:
     """Show GitHub/Jira issues created from analyses."""
     _set_json(json_output)
     tag_list = [t.strip() for t in tags.split(",") if t.strip()] if tags else None
@@ -3943,14 +3946,14 @@ def reports_issues(
 
 
 @config_app.callback(invoke_without_command=True)
-def config_callback(ctx: typer.Context):
+def config_callback(ctx: typer.Context) -> None:
     """Manage rootcoz configuration."""
     if ctx.invoked_subcommand is None:
         ctx.invoke(config_show)
 
 
 @config_app.command("show")
-def config_show():
+def config_show() -> None:
     """Show current configuration."""
     config = load_config()
     if not config:
@@ -3984,7 +3987,7 @@ def config_show():
 @config_app.command("completion")
 def config_completion(
     shell: str = typer.Argument("zsh", help="Shell type: bash or zsh"),
-):
+) -> None:
     """Show shell completion setup instructions."""
     if shell not in ("zsh", "bash"):
         typer.echo(f"Unsupported shell: {shell}. Use 'bash' or 'zsh'.")
@@ -4000,7 +4003,7 @@ def config_completion(
 @config_app.command("servers")
 def config_servers(
     json_output: bool = _JSON_OPTION,
-):
+) -> None:
     """List configured servers."""
     _set_json(json_output)
     config = load_config()
@@ -4008,7 +4011,7 @@ def config_servers(
     default_name = get_default_server_name(config)
 
     if _state.get("json", False):
-        out: dict = {}
+        out: dict[str, Any] = {}
         for name, cfg in servers.items():
             out[name] = {
                 "url": cfg.url,
@@ -4043,7 +4046,7 @@ def config_servers(
 @config_app.command("defaults")
 def config_defaults(
     json_output: bool = _JSON_OPTION,
-):
+) -> None:
     """Show server default settings (non-sensitive)."""
     data = _run_client_command(
         json_output,

@@ -201,7 +201,7 @@ class EffectiveRepoAnalysisSettings:
     settings: Settings
     ai_provider: str
     ai_model: str
-    peer_ai_configs: list | None
+    peer_ai_configs: list[AiConfigEntry] | None
     additional_repos: list[AdditionalRepo]
 
 
@@ -305,7 +305,7 @@ def _request_set_ai_model(body: BaseAnalysisRequest) -> bool:
     return bool(body.ai_model and str(body.ai_model).strip())
 
 
-def _peer_configs_from_repo(repo: RootcozRepoSettings) -> list | None:
+def _peer_configs_from_repo(repo: RootcozRepoSettings) -> list[AiConfigEntry] | None:
     if repo.peer_ai_configs is None:
         return None
     if not repo.peer_ai_configs:
@@ -323,7 +323,7 @@ def _additional_repos_from_repo(
         return None
     try:
         return [
-            AdditionalRepo(name=r.name, url=r.url, ref=r.ref)  # type: ignore[arg-type]
+            AdditionalRepo.model_validate({"name": r.name, "url": r.url, "ref": r.ref})
             for r in repo.additional_repos
         ]
     except ValidationError as exc:
@@ -369,7 +369,7 @@ def apply_rootcoz_repo_settings(
     *,
     ai_provider: str = "",
     ai_model: str = "",
-    peer_ai_configs: list | None = None,
+    peer_ai_configs: list[AiConfigEntry] | None = None,
     additional_repos: list[AdditionalRepo] | None = None,
 ) -> EffectiveRepoAnalysisSettings:
     """Merge request → ``settings.json`` → server into effective analysis settings.
@@ -418,13 +418,18 @@ def apply_rootcoz_repo_settings(
 
     # --- peer configs ---
     if body.peer_ai_configs is not None:
-        resolved_peers: list | None = body.peer_ai_configs or None
+        resolved_peers: list[AiConfigEntry] | None = body.peer_ai_configs or None
     elif repo is not None and repo.peer_ai_configs is not None:
         resolved_peers = _peer_configs_from_repo(repo)
     elif peer_ai_configs is not None:
         resolved_peers = peer_ai_configs
     elif settings.peer_ai_configs:
-        resolved_peers = parse_peer_configs(settings.peer_ai_configs) or None
+        parsed_peers = parse_peer_configs(settings.peer_ai_configs)
+        resolved_peers = (
+            [AiConfigEntry.model_validate(c) for c in parsed_peers]
+            if parsed_peers
+            else None
+        )
     else:
         resolved_peers = None
 
@@ -523,7 +528,7 @@ async def persist_effective_repo_settings(
         effective_repo_settings_request_params_patch(effective)
     )
 
-    def _apply(result: dict) -> None:
+    def _apply(result: dict[str, Any]) -> None:
         params = result.get("request_params")
         if not isinstance(params, dict):
             params = {}
@@ -576,7 +581,7 @@ async def resolve_repo_analysis_settings(
     *,
     ai_provider: str = "",
     ai_model: str = "",
-    peer_ai_configs: list | None = None,
+    peer_ai_configs: list[AiConfigEntry] | None = None,
     additional_repos: list[AdditionalRepo] | None = None,
 ) -> EffectiveRepoAnalysisSettings:
     """Single entrypoint: load ``settings.json``, merge, propagate, persist.

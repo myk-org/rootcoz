@@ -8,12 +8,13 @@ from attached logs, and creates the issue in myk-org/rootcoz.
 import json
 import os
 import re
+from typing import Any
 
 from simple_logger.logger import get_logger
 
+from rootcoz.ai_client import call_ai_once
 from rootcoz.bug_creation import GITHUB_AI_FOOTER, create_github_issue
 from rootcoz.config import Settings
-from rootcoz.ai_client import call_ai_once
 from rootcoz.models import (
     FeedbackPreviewResponse,
     FeedbackRequest,
@@ -176,7 +177,8 @@ Do NOT include any sensitive data (tokens, passwords, etc.) in the output."""
             ai_call_timeout=ai_call_timeout,
             tools=[],
         )
-    except Exception as exc:  # feedback formatting should fall back
+    except (TimeoutError, OSError, RuntimeError, ValueError, TypeError) as exc:
+        # feedback formatting should fall back
         logger.warning("AI call failed for feedback formatting: %s", exc)
         title, body = _build_fallback_feedback(request)
         return title, body, _derive_fallback_labels(request)
@@ -202,7 +204,7 @@ Do NOT include any sensitive data (tokens, passwords, etc.) in the output."""
     return title, body, _derive_fallback_labels(request)
 
 
-def _parse_json_response(text: str) -> dict | None:
+def _parse_json_response(text: str) -> dict[str, Any] | None:
     """Parse JSON from AI response, handling markdown code fences."""
     text = text.strip()
     # Strip markdown code fences if present

@@ -10,7 +10,7 @@ from xml.etree.ElementTree import Element
 import httpx
 from defusedxml.ElementTree import fromstring as safe_fromstring
 
-from rootcoz.models import BaseTestEntry, FailedTest
+from rootcoz.models import BaseTestEntry, FailedTest, FailureAnalysis
 
 logger = logging.getLogger(__name__)
 
@@ -218,7 +218,7 @@ def apply_analysis_to_xml(
 
 def build_enriched_xml(
     raw_xml: str,
-    analyses: list,
+    analyses: list[FailureAnalysis],
     report_url: str = "",
 ) -> str:
     """Build enriched XML from raw XML and FailureAnalysis objects.
@@ -334,9 +334,7 @@ def enrich_junit_xml_via_server(
             result_data = result_response.json()
 
             status = result_data.get("status")
-            if status == "completed":
-                return result_data.get("result", result_data)
-            elif status in ("failed", "aborted"):
+            if status == "completed" or status in ("failed", "aborted"):
                 return result_data.get("result", result_data)
 
             time.sleep(min(poll_interval, max(0.0, deadline - time.monotonic())))

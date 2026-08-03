@@ -18,8 +18,11 @@ import tempfile
 from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from pathlib import Path
+from typing import Any
+from xml.etree.ElementTree import ParseError
 
 import httpx
+from defusedxml.common import DefusedXmlException
 from simple_logger.logger import get_logger
 
 from rootcoz.models import BaseTestEntry, FailedTest
@@ -109,7 +112,7 @@ class ProwJobMetadata:
     pr_author: str = ""
     """PR author login (presubmit jobs only; first PR for batch)."""
 
-    additional_prs: list[dict] | None = None
+    additional_prs: list[dict[str, Any]] | None = None
     """Additional PRs for batch jobs: ``[{"number": N, "author": "..."}]``."""
 
     state: str = ""
@@ -223,7 +226,7 @@ def _parse_junit_failures(
     """
     try:
         return extract_test_failures(raw_xml)
-    except Exception as exc:
+    except (ParseError, DefusedXmlException, ValueError, TypeError) as exc:
         logger.warning("Failed to parse JUnit XML: %s", exc)
         if warnings is not None:
             where = f" ({label})" if label else ""
@@ -249,7 +252,7 @@ def _parse_junit_all(
     """
     try:
         return extract_all_tests_from_xml(raw_xml)
-    except Exception as exc:
+    except (ParseError, DefusedXmlException, ValueError, TypeError) as exc:
         logger.warning("Failed to parse JUnit XML: %s", exc)
         if warnings is not None:
             where = f" ({label})" if label else ""
@@ -414,9 +417,9 @@ async def _list_gcs_objects(
     bucket: str,
     prefix: str,
     *,
-    filter_fn: Callable[[dict], bool] | None = None,
+    filter_fn: Callable[[dict[str, Any]], bool] | None = None,
     warnings: list[str] | None = None,
-) -> list[dict]:
+) -> list[dict[str, Any]]:
     """List GCS objects under a prefix, optionally filtered.
 
     Listing is bounded: each JSON page is streamed with a byte budget,
@@ -435,7 +438,7 @@ async def _list_gcs_objects(
     Returns:
         List of GCS object dicts (keys: ``name``, ``size``, etc.).
     """
-    matched: list[dict] = []
+    matched: list[dict[str, Any]] = []
     page_token: str | None = None
     api_url = f"https://storage.googleapis.com/storage/v1/b/{bucket}/o"
     truncated = False
@@ -513,7 +516,7 @@ async def _list_gcs_objects(
     return matched
 
 
-def _is_junit(item: dict) -> bool:
+def _is_junit(item: dict[str, Any]) -> bool:
     """Return ``True`` if the GCS object looks like a JUnit XML file."""
     name = item.get("name", "")
     return name.endswith(".xml") and bool(re.search(r"junit", name, re.IGNORECASE))
@@ -522,7 +525,7 @@ def _is_junit(item: dict) -> bool:
 async def _download_gcs_artifacts(
     client: httpx.AsyncClient,
     bucket: str,
-    artifact_objects: list[dict],
+    artifact_objects: list[dict[str, Any]],
     artifacts_prefix: str,
     *,
     max_total_bytes: int = _MAX_SIZE_ARTIFACTS_TOTAL,
@@ -675,7 +678,7 @@ async def _download_gcs_artifacts(
     return dest_dir
 
 
-def _format_prow_context(metadata: dict | None, build_url: str = "") -> str:
+def _format_prow_context(metadata: dict[str, Any] | None, build_url: str = "") -> str:
     """Format Prow job metadata into a human-readable context file.
 
     Written to the workspace as ``prow-context.txt`` so the AI knows
@@ -789,7 +792,7 @@ async def _fetch_pr_changes(
             else httpx.AsyncClient(timeout=15)
         )
         async with client_ctx as client:
-            pr_data: dict | None = None
+            pr_data: dict[str, Any] | None = None
             async with client.stream("GET", pr_api, headers=headers) as pr_resp:
                 if pr_resp.status_code != 200:
                     logger.warning(
@@ -1029,8 +1032,8 @@ class ProwSource(CISource):
         gcs_prefix: str,
         warnings: list[str],
         *,
-        objects: list[dict] | None = None,
-    ) -> tuple[list[dict], Path | None]:
+        objects: list[dict[str, Any]] | None = None,
+    ) -> tuple[list[dict[str, Any]], Path | None]:
         """List (unless ``objects`` given) and download non-JUnit artifacts.
 
         ``objects`` may be a pre-listed GCS object set from ``fetch`` so
@@ -1209,7 +1212,7 @@ class ProwSource(CISource):
             return True
         return False
 
-    def _metadata_dict(self) -> dict:
+    def _metadata_dict(self) -> dict[str, Any]:
         """Return prowjob metadata as a dict for ``CISourceResult``."""
         if not self._prowjob_metadata:
             return {}
@@ -1219,19 +1222,19 @@ class ProwSource(CISource):
             if v is not None and v != ""
         }
 
-    def _identity_dict(self) -> dict:
+    def _identity_dict(self) -> dict[str, Any]:
         """Return identity overrides for the result dict."""
         return self.identity_fields(self.job_name, self.build_id)
 
     @staticmethod
-    def identity_fields(job_name: str, build_id: str) -> dict:
+    def identity_fields(job_name: str, build_id: str) -> dict[str, Any]:
         """Derive persisted identity fields for a Prow job.
 
         Returns:
             Dict with ``job_name``, ``build_id``, and optionally
             ``build_number`` (as int, when ``build_id`` is numeric).
         """
-        identity: dict = {}
+        identity: dict[str, Any] = {}
         if job_name:
             identity["job_name"] = job_name
         if build_id:
@@ -1244,12 +1247,12 @@ class ProwSource(CISource):
         return identity
 
     @classmethod
-    def pre_persist_identity(cls, job_name: str, build_id: str) -> dict:
+    def pre_persist_identity(cls, job_name: str, build_id: str) -> dict[str, Any]:
         """Identity fields to stamp before ``fetch()`` completes."""
         return cls.identity_fields(job_name, build_id)
 
     @classmethod
-    def pre_persist_identity_from_request(cls, body) -> dict:
+    def pre_persist_identity_from_request(cls, body: Any) -> dict[str, Any]:
         """Identity fields from an analyze request before ``fetch()``."""
         return cls.pre_persist_identity(
             getattr(body, "prow_job_name", None) or "",
@@ -1257,7 +1260,7 @@ class ProwSource(CISource):
         )
 
     @classmethod
-    def validate_request(cls, body, merged) -> None:
+    def validate_request(cls, body: Any, merged: Any) -> None:
         """Require prow_url and gcs_bucket before enqueue."""
         _ = body
         if not merged.prow_url:
@@ -1272,7 +1275,9 @@ class ProwSource(CISource):
             )
 
     @classmethod
-    def build_request_params(cls, body, merged, base_params: dict) -> dict:
+    def build_request_params(
+        cls, body: Any, merged: Any, base_params: dict[str, Any]
+    ) -> dict[str, Any]:
         """Stamp Prow-specific fields onto persisted request params."""
         base_params["prow_job_name"] = body.prow_job_name
         base_params["build_id"] = body.build_id
@@ -1283,7 +1288,7 @@ class ProwSource(CISource):
         return base_params
 
     @classmethod
-    def from_analyze_request(cls, body, merged) -> ProwSource:
+    def from_analyze_request(cls, body: Any, merged: Any) -> ProwSource:
         """Construct a ProwSource from an analyze/re-analyze request."""
         assert body.prow_job_name is not None
         assert body.build_id is not None
@@ -1310,7 +1315,7 @@ class ProwSource(CISource):
         )
         from rootcoz.storage import patch_result_json
 
-        def _patch(data: dict) -> None:
+        def _patch(data: dict[str, Any]) -> None:
             params = data.get("request_params")
             if not isinstance(params, dict):
                 return
@@ -1402,14 +1407,15 @@ class ProwSource(CISource):
                     non_junit, extract_path = await self._download_non_junit_artifacts(
                         client, gcs_prefix, self._resolution_warnings
                     )
-                    if non_junit and extract_path:
-                        if link_artifacts_to_workspace(workspace, extract_path, "chat"):
-                            # Ownership transferred to workspace symlink —
-                            # cleaned later by cleanup_chat_workspace.
-                            self._extract_path = None
-                            logger.info(
-                                "Chat: linked Prow artifacts into %s", workspace
-                            )
+                    if (
+                        non_junit
+                        and extract_path
+                        and link_artifacts_to_workspace(workspace, extract_path, "chat")
+                    ):
+                        # Ownership transferred to workspace symlink —
+                        # cleaned later by cleanup_chat_workspace.
+                        self._extract_path = None
+                        logger.info("Chat: linked Prow artifacts into %s", workspace)
                 except Exception:
                     logger.warning(
                         "Chat: failed to download Prow artifacts", exc_info=True
@@ -1490,7 +1496,14 @@ class ProwSource(CISource):
                         # callers always get a warning / pr-changes note.
                         if content is None:
                             failed_prs.append(num)
-                    except Exception as exc:
+                    except (
+                        httpx.HTTPError,
+                        OSError,
+                        ValueError,
+                        TypeError,
+                        KeyError,
+                        AttributeError,
+                    ) as exc:
                         logger.warning("PR fetch failed for #%s: %s", num, exc)
                         failed_prs.append(num)
 
@@ -1777,7 +1790,7 @@ class ProwSource(CISource):
                     # Stable workspace-relative path (symlink target is extract_path).
                     artifacts_context = "Artifacts are available under build-artifacts/"
                     logger.info("Build artifacts available at %s", extract_path)
-            except Exception as exc:
+            except (GCSAccessError, OSError) as exc:
                 logger.warning("Failed to download Prow artifacts: %s", exc)
                 access_warnings.append(f"Failed to download artifacts: {exc}")
 
@@ -1865,7 +1878,7 @@ class ProwSource(CISource):
                             "Artifacts are available under build-artifacts/"
                         )
                         logger.info("Refetched Prow artifacts to %s", extract_path)
-                except Exception as exc:
+                except (GCSAccessError, OSError) as exc:
                     warnings.append(f"Failed to refetch Prow artifacts: {exc}")
                     logger.warning("Failed to refetch Prow artifacts: %s", exc)
 
@@ -1881,11 +1894,11 @@ class ProwSource(CISource):
     @classmethod
     def from_stored_params(
         cls,
-        params: dict,
-        settings=None,
+        params: dict[str, Any],
+        settings: Any = None,
         *,
-        child_job_name: str = "",  # noqa: ARG003 — ABC parity, Prow has no child jobs
-        child_build_number: int = 0,  # noqa: ARG003
+        child_job_name: str = "",
+        child_build_number: int = 0,
     ) -> ProwSource | None:
         """Reconstruct a ProwSource from stored request params.
 
@@ -1950,14 +1963,16 @@ class ProwSource(CISource):
         )
 
     @classmethod
-    def default_display_name(cls, body) -> str:
+    def default_display_name(cls, body: Any) -> str:
         """Default display name for Prow analyses."""
         return getattr(body, "prow_job_name", None) or "prow-analysis"
 
     @classmethod
-    def restore_reanalyze_fields(cls, decrypted_params: dict) -> dict:
+    def restore_reanalyze_fields(
+        cls, decrypted_params: dict[str, Any]
+    ) -> dict[str, Any]:
         """Restore Prow fields for re-analysis from stored params."""
-        fields: dict = {}
+        fields: dict[str, Any] = {}
         for prow_field in (
             "prow_job_name",
             "build_id",

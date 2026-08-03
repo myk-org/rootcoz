@@ -217,9 +217,11 @@ class TestHealthChecks:
         return patch.dict(os.environ, env, clear=True)
 
     async def test_check_ai_provider_configured(self):
-        with patch.dict(os.environ, {"AI_PROVIDER": "claude", "AI_MODEL": "test"}):
-            with self._mock_sidecar():
-                result = await check_ai_provider()
+        with (
+            patch.dict(os.environ, {"AI_PROVIDER": "claude", "AI_MODEL": "test"}),
+            self._mock_sidecar(),
+        ):
+            result = await check_ai_provider()
         assert result["status"] == "ok"
         assert result["provider"] == "claude"
 
@@ -243,7 +245,7 @@ class TestHealthChecks:
         with self._env_without_ai():
             get_settings.cache_clear()
             try:
-                with self._mock_sidecar(side_effect=Exception("Connection refused")):
+                with self._mock_sidecar(side_effect=OSError("Connection refused")):
                     result = await check_ai_provider()
             finally:
                 get_settings.cache_clear()
@@ -306,13 +308,15 @@ class TestHealthChecks:
         settings.reportportal_enabled = False
 
         ai_ok = {"status": "ok", "provider": "claude", "model": "test"}
-        with patch.dict(os.environ, {"AI_PROVIDER": "claude", "AI_MODEL": "test"}):
-            with patch(
+        with (
+            patch.dict(os.environ, {"AI_PROVIDER": "claude", "AI_MODEL": "test"}),
+            patch(
                 "rootcoz.monitoring.check_ai_provider",
                 new_callable=AsyncMock,
                 return_value=ai_ok,
-            ):
-                result = await build_health_response(settings, str(temp_db_path))
+            ),
+        ):
+            result = await build_health_response(settings, str(temp_db_path))
 
         assert result["status"] == "healthy"
         assert "checks" in result
@@ -325,13 +329,15 @@ class TestHealthChecks:
         settings.reportportal_enabled = False
 
         ai_ok = {"status": "ok", "provider": "claude", "model": "test"}
-        with patch.dict(os.environ, {"AI_PROVIDER": "claude", "AI_MODEL": "test"}):
-            with patch(
+        with (
+            patch.dict(os.environ, {"AI_PROVIDER": "claude", "AI_MODEL": "test"}),
+            patch(
                 "rootcoz.monitoring.check_ai_provider",
                 new_callable=AsyncMock,
                 return_value=ai_ok,
-            ):
-                result = await build_health_response(settings, "/nonexistent/db.sqlite")
+            ),
+        ):
+            result = await build_health_response(settings, "/nonexistent/db.sqlite")
 
         assert result["status"] == "unhealthy"
         assert result["checks"]["database"]["status"] == "error"

@@ -56,7 +56,7 @@ def repo_name_from_url(repo_url: str | HttpUrl) -> str:
         Repository name suitable for use as a subdirectory name.
     """
     name = str(repo_url).rstrip("/").split("/")[-1]
-    return name[:-4] if name.endswith(".git") else name
+    return name.removesuffix(".git")
 
 
 def derive_test_repo_name(

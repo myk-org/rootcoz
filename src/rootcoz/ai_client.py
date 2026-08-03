@@ -7,10 +7,9 @@ import os
 import time
 from typing import Any
 
-from pi_sidecar_client import AIResult, set_usage_recorder
+from pi_sidecar_client import AIResult, get_sidecar_client, set_usage_recorder
 from pi_sidecar_client import call_ai as _call_ai
 from pi_sidecar_client import call_ai_once as _call_ai_once
-from pi_sidecar_client import get_sidecar_client
 from pi_sidecar_client import list_models as _list_models_raw
 from simple_logger.logger import get_logger
 
@@ -141,7 +140,9 @@ def map_provider_model_for_sidecar(provider: str, model: str) -> tuple[str, str]
     return sidecar_provider, _map_model_for_sidecar(sidecar_provider, model)
 
 
-def list_models_from_catalog(friendly: str, all_models: list[dict]) -> list[dict]:
+def list_models_from_catalog(
+    friendly: str, all_models: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
     """Filter a sidecar catalog into one friendly provider's models.
 
     Updates ``_model_route_cache`` for each ``(friendly, model_id)``.
@@ -156,7 +157,7 @@ def list_models_from_catalog(friendly: str, all_models: list[dict]) -> list[dict
     if cli_id:
         sidecar_order.append(cli_id)
 
-    result: list[dict] = []
+    result: list[dict[str, Any]] = []
     seen_ids: set[str] = set()
     for sidecar_id in sidecar_order:
         source = _source_for_sidecar(sidecar_id)
@@ -181,14 +182,16 @@ def list_models_from_catalog(friendly: str, all_models: list[dict]) -> list[dict
     return result
 
 
-def build_friendly_catalog(all_models: list[dict]) -> dict[str, list[dict]]:
+def build_friendly_catalog(
+    all_models: list[dict[str, Any]],
+) -> dict[str, list[dict[str, Any]]]:
     """Build per-friendly-provider catalogs from one sidecar ``get_models()`` result."""
     return {
         p: list_models_from_catalog(p, all_models) for p in sorted(VALID_AI_PROVIDERS)
     }
 
 
-async def list_models(provider: str = "") -> list[dict]:
+async def list_models(provider: str = "") -> list[dict[str, Any]]:
     """List models for a friendly provider, merging ACPX/API + CLI sources.
 
     Each entry includes ``source``: ``acpx`` | ``cli`` | ``api``.
@@ -444,7 +447,9 @@ async def _prewarm_model_routes(friendly: str, model: str = "") -> None:
         )
 
 
-async def call_ai(*args: Any, ai_provider: str = "", ai_model: str = "", **kwargs: Any):
+async def call_ai(
+    *args: Any, ai_provider: str = "", ai_model: str = "", **kwargs: Any
+) -> AIResult:
     """call_ai with rootcoz friendly→sidecar provider/model routing."""
     friendly = normalize_provider(ai_provider)
     await _prewarm_model_routes(friendly, ai_model)
@@ -458,7 +463,7 @@ async def call_ai(*args: Any, ai_provider: str = "", ai_model: str = "", **kwarg
 
 async def call_ai_once(
     *args: Any, ai_provider: str = "", ai_model: str = "", **kwargs: Any
-):
+) -> AIResult:
     """call_ai_once with rootcoz friendly→sidecar provider/model routing."""
     friendly = normalize_provider(ai_provider)
     await _prewarm_model_routes(friendly, ai_model)
@@ -503,10 +508,10 @@ def _setup_usage_recorder() -> None:
 
 
 __all__ = [
-    "AIResult",
     "ANALYSIS_BUILTIN_TOOLS",
     "CHAT_BUILTIN_TOOLS",
     "VALID_AI_PROVIDERS",
+    "AIResult",
     "_setup_usage_recorder",
     "call_ai",
     "call_ai_once",

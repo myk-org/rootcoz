@@ -9,10 +9,10 @@ import shutil
 import tempfile
 from collections.abc import Callable
 from pathlib import Path
-
-from simple_logger.logger import get_logger
+from typing import Any
 
 from pi_sidecar_client import get_sidecar_client
+from simple_logger.logger import get_logger
 
 from rootcoz.ai_client import (
     CHAT_BUILTIN_TOOLS,
@@ -85,13 +85,13 @@ def _is_github_url(url: str) -> bool:
     try:
         host = urlsplit(url).netloc.lower()
         return host.endswith("github.com") or "github" in host
-    except Exception:
+    except (TypeError, AttributeError, ValueError):
         return False
 
 
 async def clone_chat_repos(
     workspace: Path,
-    request_params: dict,
+    request_params: dict[str, Any],
     user_repo_token: str = "",
 ) -> bool:
     """Clone repos into the chat workspace.
@@ -105,8 +105,8 @@ async def clone_chat_repos(
         cleaned up when repos are deleted via cleanup_chat_repos().
     """
     from rootcoz.config import parse_repo_ref
-    from rootcoz.repository import RepositoryManager, derive_test_repo_name
     from rootcoz.models import AdditionalRepo
+    from rootcoz.repository import RepositoryManager, derive_test_repo_name
 
     tests_repo_url = request_params.get("tests_repo_url", "")
     additional_repos = request_params.get("additional_repos") or []
@@ -219,11 +219,11 @@ def _tool_get_failure_history(
     auth_headers: dict[str, str],
     description: str,
     query_params: dict[str, str],
-    properties: dict[str, dict] | None = None,
+    properties: dict[str, dict[str, Any]] | None = None,
     required: list[str] | None = None,
-) -> dict:
+) -> dict[str, Any]:
     """Shared GET /history/test/{test_name} tool definition."""
-    props: dict[str, dict] = {
+    props: dict[str, dict[str, Any]] = {
         "test_name": {"type": "string", "description": "Full test name"},
     }
     if properties:
@@ -251,10 +251,10 @@ def _tool_get_classification_history(
     auth_headers: dict[str, str],
     description: str,
     query_params: dict[str, str],
-    properties: dict[str, dict] | None = None,
-) -> dict:
+    properties: dict[str, dict[str, Any]] | None = None,
+) -> dict[str, Any]:
     """Shared GET /history/classifications tool definition."""
-    props: dict[str, dict] = {
+    props: dict[str, dict[str, Any]] = {
         "test_name": {"type": "string", "description": "Full test name"},
     }
     if properties:
@@ -281,7 +281,7 @@ def build_analysis_history_tools(
     server_url: str,
     auth_token: str,
     job_id: str,
-) -> list[dict]:
+) -> list[dict[str, Any]]:
     """HTTP-backed history tools for analysis sessions.
 
     Auth stays in tool ``http.headers`` (sidecar executes the request).
@@ -435,13 +435,13 @@ def build_chat_custom_tools(
     jira_token: str = "",
     github_token: str = "",
     github_repo: str = "",
-) -> list[dict]:
+) -> list[dict[str, Any]]:
     """Build HTTP-backed custom tools for a chat session.
 
     Returns tool definitions with 'http' configs that the sidecar
     executes directly — no bash, no scripts on disk.
     """
-    tools: list[dict] = []
+    tools: list[dict[str, Any]] = []
     server_url = server_url.rstrip("/")
     auth_headers = _bearer_headers(auth_token)
 
@@ -707,7 +707,7 @@ def build_admin_custom_tools(
     *,
     server_url: str,
     auth_token: str,
-) -> list[dict]:
+) -> list[dict[str, Any]]:
     """Build HTTP-backed custom tools for admin chat."""
     auth_headers = {"Authorization": f"Bearer {auth_token}"}
 
@@ -898,7 +898,7 @@ def cleanup_chat_workspace(job_id: str, username: str = "") -> None:
 # -- Shared prompt building helpers --
 
 
-def _build_tools_section(custom_tools: list[dict]) -> str:
+def _build_tools_section(custom_tools: list[dict[str, Any]]) -> str:
     """Build tools section from custom tool definitions."""
     if not custom_tools:
         return "(No tools available)"
@@ -908,7 +908,7 @@ def _build_tools_section(custom_tools: list[dict]) -> str:
     return "\n".join(lines)
 
 
-def _build_unavailable_section(custom_tools: list[dict]) -> str:
+def _build_unavailable_section(custom_tools: list[dict[str, Any]]) -> str:
     """Build notice about unavailable tools (Jira/GitHub not configured)."""
     tool_names = {t["name"] for t in custom_tools}
     jira_configured = "search_jira" in tool_names
@@ -979,7 +979,7 @@ def build_system_prompt(
     job_name: str,
     build_number: int | str,
     job_id: str,
-    custom_tools: list[dict],
+    custom_tools: list[dict[str, Any]],
     repos_available: bool = False,
     ci_build_data_available: bool = False,
 ) -> str:
@@ -1026,7 +1026,7 @@ You have structured tools that you can call directly:
 
 
 def build_admin_system_prompt(
-    custom_tools: list[dict],
+    custom_tools: list[dict[str, Any]],
 ) -> str:
     """Build system prompt for admin global chat — server-wide scope."""
     tools_section = _build_tools_section(custom_tools)
@@ -1083,7 +1083,7 @@ The HTML MUST be completely self-contained — no external CSS, JS, fonts, or CD
 
 def build_chat_prompt(
     system_prompt: str,
-    history: list[dict],
+    history: list[dict[str, Any]],
     new_message: str,
 ) -> str:
     """Build a complete prompt from system prompt + conversation history + new message.
@@ -1114,7 +1114,7 @@ async def _create_chat_session(
     ai_model: str,
     repo_path: Path | None = None,
     log_prefix: str = "Chat",
-    custom_tools: list[dict] | None = None,
+    custom_tools: list[dict[str, Any]] | None = None,
     restrict_tools: bool = True,
 ) -> str | None:
     """Create a sidecar session with the given system prompt. Returns session_id or None."""
@@ -1131,7 +1131,7 @@ async def _create_chat_session(
         sidecar_provider, sidecar_model = map_provider_model_for_sidecar(
             ai_provider, ai_model
         )
-        create_kwargs: dict = {
+        create_kwargs: dict[str, Any] = {
             "provider": sidecar_provider,
             "model": sidecar_model,
             "system_prompt": system_prompt,
@@ -1157,7 +1157,7 @@ async def init_chat_session(
     ai_provider: str,
     ai_model: str,
     repo_path: Path | None = None,
-    custom_tools: list[dict] | None = None,
+    custom_tools: list[dict[str, Any]] | None = None,
     repos_available: bool = False,
     ci_build_data_available: bool = False,
 ) -> str | None:
@@ -1186,7 +1186,7 @@ async def init_admin_chat_session(
     ai_provider: str,
     ai_model: str,
     repo_path: Path | None = None,
-    custom_tools: list[dict] | None = None,
+    custom_tools: list[dict[str, Any]] | None = None,
 ) -> str | None:
     """Initialize an admin chat session via the sidecar. Returns session_id or None."""
     system_prompt = build_admin_system_prompt(custom_tools=custom_tools or [])
@@ -1203,14 +1203,14 @@ async def init_admin_chat_session(
 async def _chat_with_ai_impl(
     *,
     message: str,
-    history: list[dict],
+    history: list[dict[str, Any]],
     ai_provider: str,
     ai_model: str,
     build_prompt_fn: Callable[[], str],
     repo_path: Path | None = None,
     ai_call_timeout: int | None = None,
     session_id: str | None = None,
-    custom_tools: list[dict] | None = None,
+    custom_tools: list[dict[str, Any]] | None = None,
     restrict_tools: bool = True,
     log_prefix: str = "Chat",
     request_id: str = "",
@@ -1239,7 +1239,7 @@ async def _chat_with_ai_impl(
         len(prompt),
     )
 
-    call_kwargs: dict = {
+    call_kwargs: dict[str, Any] = {
         "ai_provider": ai_provider,
         "ai_model": ai_model,
         "cwd": str(repo_path) if repo_path else None,
@@ -1264,7 +1264,7 @@ async def _chat_with_ai_impl(
         )
         system_prompt = build_prompt_fn()
         prompt = build_chat_prompt(system_prompt, history, message)
-        retry_kwargs: dict = {
+        retry_kwargs: dict[str, Any] = {
             "ai_provider": ai_provider,
             "ai_model": ai_model,
             "cwd": str(repo_path) if repo_path else None,
@@ -1298,13 +1298,13 @@ async def chat_with_ai(
     job_name: str,
     build_number: int | str,
     message: str,
-    history: list[dict],
+    history: list[dict[str, Any]],
     ai_provider: str,
     ai_model: str,
     repo_path: Path | None = None,
     ai_call_timeout: int | None = None,
     session_id: str | None = None,
-    custom_tools: list[dict] | None = None,
+    custom_tools: list[dict[str, Any]] | None = None,
     repos_available: bool = False,
     ci_build_data_available: bool = False,
 ) -> tuple[bool, str, str | None]:
@@ -1340,13 +1340,13 @@ async def chat_with_ai(
 async def admin_chat_with_ai(
     *,
     message: str,
-    history: list[dict],
+    history: list[dict[str, Any]],
     ai_provider: str,
     ai_model: str,
     repo_path: Path | None = None,
     ai_call_timeout: int | None = None,
     session_id: str | None = None,
-    custom_tools: list[dict] | None = None,
+    custom_tools: list[dict[str, Any]] | None = None,
 ) -> tuple[bool, str, str | None]:
     """Send an admin chat message and get an AI response."""
 

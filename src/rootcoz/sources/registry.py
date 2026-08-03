@@ -5,6 +5,8 @@ Single source of truth for mapping ``analysis_type`` → ``CISource`` class.
 
 from __future__ import annotations
 
+from typing import Any
+
 from rootcoz.sources.base import CISource
 from rootcoz.sources.file_source import FileSource
 from rootcoz.sources.jenkins_source import JenkinsSource
@@ -28,7 +30,7 @@ def get_source_class(analysis_type: str) -> type[CISource] | None:
     return SOURCE_REGISTRY.get(analysis_type)
 
 
-def create_source_from_request(analysis_type: str, body, merged) -> CISource:
+def create_source_from_request(analysis_type: str, body: Any, merged: Any) -> CISource:
     """Construct a CISource for analyze/re-analyze via the plugin registry."""
     source_cls = CI_SOURCE_REGISTRY.get(analysis_type)
     if source_cls is None:

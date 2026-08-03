@@ -45,6 +45,7 @@ repos:
     rev: v0.16.0
     hooks:
       - id: ruff
+        args: [--fix]
       - id: ruff-format
 
   - repo: https://github.com/gitleaks/gitleaks

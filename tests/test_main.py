@@ -3,6 +3,7 @@
 import os
 from contextlib import contextmanager
 from pathlib import Path
+from typing import ClassVar
 from unittest.mock import AsyncMock, MagicMock, PropertyMock, patch
 
 import httpx
@@ -21,8 +22,8 @@ from rootcoz.models import (
 from rootcoz.sources.jenkins_source import JenkinsError
 
 # Fake credentials for tests — annotated once to suppress Ruff S105/S106 globally.
-FAKE_JENKINS_PASSWORD = "not-a-real-password"  # noqa: S105  # pragma: allowlist secret
-FAKE_GITHUB_TOKEN = "not-a-real-token"  # noqa: S105
+FAKE_JENKINS_PASSWORD = "not-a-real-password"  # pragma: allowlist secret
+FAKE_GITHUB_TOKEN = "not-a-real-token"
 
 
 def _patch_preflight():
@@ -115,11 +116,11 @@ def _build_jenkins_request_params(
     """Build encrypted Jenkins request_params (mirrors former main helper)."""
     from rootcoz.config import parse_repo_ref
     from rootcoz.encryption import encrypt_sensitive_fields
+    from rootcoz.engine.core import resolve_additional_repos
     from rootcoz.main import (
         _apply_base_analysis_overrides,
         _build_base_request_params,
     )
-    from rootcoz.engine.core import resolve_additional_repos
     from rootcoz.request_resolution import resolve_tests_repo_token
     from rootcoz.rootcoz_repo_settings import resolve_tests_repo_url
     from rootcoz.sources.jenkins_source import JenkinsSource
@@ -1317,10 +1318,7 @@ class TestOpenAPISchema:
             if isinstance(op, dict) and "operationId" in op
         ]
         assert len(ops) == len(set(ops))
-        assert all(
-            not (o.endswith("_get") or o.endswith("_post") or o.endswith("_put"))
-            for o in ops
-        )
+        assert all(not (o.endswith(("_get", "_post", "_put"))) for o in ops)
 
     def test_docs_available(self, test_client) -> None:
         """Test that docs endpoint is available."""
@@ -2051,22 +2049,24 @@ class TestPreviewGithubIssue:
         await storage.save_result(
             "job-preview-gh", "http://jenkins", "completed", result_data
         )
-        with _enable_feature("github_issues_enabled"):
-            with patch("rootcoz.main.generate_github_issue_content") as mock_gen:
-                mock_gen.return_value = {
-                    "title": "Fix: login handler missing catch",
-                    "body": "## Test Failure\n\nDetails...",
-                }
-                with patch("rootcoz.main.search_github_duplicates") as mock_dup:
-                    mock_dup.return_value = []
-                    response = test_client.post(
-                        "/results/job-preview-gh/preview-github-issue",
-                        json={
-                            "test_name": "test_login_success",
-                            "ai_provider": "claude",
-                            "ai_model": "opus",
-                        },
-                    )
+        with (
+            _enable_feature("github_issues_enabled"),
+            patch("rootcoz.main.generate_github_issue_content") as mock_gen,
+        ):
+            mock_gen.return_value = {
+                "title": "Fix: login handler missing catch",
+                "body": "## Test Failure\n\nDetails...",
+            }
+            with patch("rootcoz.main.search_github_duplicates") as mock_dup:
+                mock_dup.return_value = []
+                response = test_client.post(
+                    "/results/job-preview-gh/preview-github-issue",
+                    json={
+                        "test_name": "test_login_success",
+                        "ai_provider": "claude",
+                        "ai_model": "opus",
+                    },
+                )
         assert response.status_code == 200
         data = response.json()
         assert data["title"] == "Fix: login handler missing catch"
@@ -2160,18 +2160,20 @@ class TestPreviewGithubIssue:
         await storage.save_result(
             "job-prompt-gh", "http://jenkins", "completed", result_data
         )
-        with _enable_feature("github_issues_enabled"):
-            with patch("rootcoz.main.generate_github_issue_content") as mock_gen:
-                mock_gen.return_value = {"title": "T", "body": "B"}
-                with patch("rootcoz.main.search_github_duplicates") as mock_dup:
-                    mock_dup.return_value = []
-                    response = test_client.post(
-                        "/results/job-prompt-gh/preview-github-issue",
-                        json={
-                            "test_name": "test_login",
-                            "issue_prompt": "Include CNV version",
-                        },
-                    )
+        with (
+            _enable_feature("github_issues_enabled"),
+            patch("rootcoz.main.generate_github_issue_content") as mock_gen,
+        ):
+            mock_gen.return_value = {"title": "T", "body": "B"}
+            with patch("rootcoz.main.search_github_duplicates") as mock_dup:
+                mock_dup.return_value = []
+                response = test_client.post(
+                    "/results/job-prompt-gh/preview-github-issue",
+                    json={
+                        "test_name": "test_login",
+                        "issue_prompt": "Include CNV version",
+                    },
+                )
         assert response.status_code == 200
         _, kwargs = mock_gen.call_args
         assert kwargs["issue_prompt"] == "Include CNV version"
@@ -2183,19 +2185,21 @@ class TestPreviewGithubIssue:
         await storage.save_result(
             "job-child-preview-gh", "http://jenkins/parent/1/", "completed", result_data
         )
-        with _enable_feature("github_issues_enabled"):
-            with patch("rootcoz.main.generate_github_issue_content") as mock_gen:
-                mock_gen.return_value = {"title": "T", "body": "B"}
-                with patch("rootcoz.main.search_github_duplicates") as mock_dup:
-                    mock_dup.return_value = []
-                    response = test_client.post(
-                        "/results/job-child-preview-gh/preview-github-issue",
-                        json={
-                            "test_name": "test_alpha",
-                            "child_job_name": "child-A",
-                            "child_build_number": 10,
-                        },
-                    )
+        with (
+            _enable_feature("github_issues_enabled"),
+            patch("rootcoz.main.generate_github_issue_content") as mock_gen,
+        ):
+            mock_gen.return_value = {"title": "T", "body": "B"}
+            with patch("rootcoz.main.search_github_duplicates") as mock_dup:
+                mock_dup.return_value = []
+                response = test_client.post(
+                    "/results/job-child-preview-gh/preview-github-issue",
+                    json={
+                        "test_name": "test_alpha",
+                        "child_job_name": "child-A",
+                        "child_build_number": 10,
+                    },
+                )
         assert response.status_code == 200
         _, kwargs = mock_gen.call_args
         # The jenkins_url should be the child's URL, not the parent's
@@ -2218,19 +2222,21 @@ class TestPreviewGithubIssue:
         await storage.save_result(
             "job-sibling-gh", "http://jenkins/parent/1/", "completed", result_data
         )
-        with _enable_feature("github_issues_enabled"):
-            with patch("rootcoz.main.generate_github_issue_content") as mock_gen:
-                mock_gen.return_value = {"title": "T", "body": "B"}
-                with patch("rootcoz.main.search_github_duplicates") as mock_dup:
-                    mock_dup.return_value = []
-                    response = test_client.post(
-                        "/results/job-sibling-gh/preview-github-issue",
-                        json={
-                            "test_name": "test_alpha",
-                            "child_job_name": "child-A",
-                            "child_build_number": 10,
-                        },
-                    )
+        with (
+            _enable_feature("github_issues_enabled"),
+            patch("rootcoz.main.generate_github_issue_content") as mock_gen,
+        ):
+            mock_gen.return_value = {"title": "T", "body": "B"}
+            with patch("rootcoz.main.search_github_duplicates") as mock_dup:
+                mock_dup.return_value = []
+                response = test_client.post(
+                    "/results/job-sibling-gh/preview-github-issue",
+                    json={
+                        "test_name": "test_alpha",
+                        "child_job_name": "child-A",
+                        "child_build_number": 10,
+                    },
+                )
         assert response.status_code == 200
         _, kwargs = mock_gen.call_args
         failure = kwargs["failure"]
@@ -2266,22 +2272,24 @@ class TestPreviewJiraBug:
         await storage.save_result(
             "job-preview-jira", "http://jenkins", "completed", result_data
         )
-        with _enable_feature("jira_enabled"):
-            with patch("rootcoz.main.generate_jira_bug_content") as mock_gen:
-                mock_gen.return_value = {
-                    "title": "DNS timeout on internal resolver",
-                    "body": "h2. Summary\n\nDNS resolution fails",
-                }
-                with patch("rootcoz.main.search_jira_duplicates") as mock_dup:
-                    mock_dup.return_value = []
-                    response = test_client.post(
-                        "/results/job-preview-jira/preview-jira-bug",
-                        json={
-                            "test_name": "test_login_success",
-                            "ai_provider": "claude",
-                            "ai_model": "opus",
-                        },
-                    )
+        with (
+            _enable_feature("jira_enabled"),
+            patch("rootcoz.main.generate_jira_bug_content") as mock_gen,
+        ):
+            mock_gen.return_value = {
+                "title": "DNS timeout on internal resolver",
+                "body": "h2. Summary\n\nDNS resolution fails",
+            }
+            with patch("rootcoz.main.search_jira_duplicates") as mock_dup:
+                mock_dup.return_value = []
+                response = test_client.post(
+                    "/results/job-preview-jira/preview-jira-bug",
+                    json={
+                        "test_name": "test_login_success",
+                        "ai_provider": "claude",
+                        "ai_model": "opus",
+                    },
+                )
         assert response.status_code == 200
         data = response.json()
         assert data["title"]
@@ -2333,18 +2341,20 @@ class TestPreviewJiraBug:
         await storage.save_result(
             "job-prompt-jira", "http://jenkins", "completed", result_data
         )
-        with _enable_feature("jira_enabled"):
-            with patch("rootcoz.main.generate_jira_bug_content") as mock_gen:
-                mock_gen.return_value = {"title": "T", "body": "B"}
-                with patch("rootcoz.main.search_jira_duplicates") as mock_dup:
-                    mock_dup.return_value = []
-                    response = test_client.post(
-                        "/results/job-prompt-jira/preview-jira-bug",
-                        json={
-                            "test_name": "test_dns",
-                            "issue_prompt": "Include OCP version",
-                        },
-                    )
+        with (
+            _enable_feature("jira_enabled"),
+            patch("rootcoz.main.generate_jira_bug_content") as mock_gen,
+        ):
+            mock_gen.return_value = {"title": "T", "body": "B"}
+            with patch("rootcoz.main.search_jira_duplicates") as mock_dup:
+                mock_dup.return_value = []
+                response = test_client.post(
+                    "/results/job-prompt-jira/preview-jira-bug",
+                    json={
+                        "test_name": "test_dns",
+                        "issue_prompt": "Include OCP version",
+                    },
+                )
         assert response.status_code == 200
         _, kwargs = mock_gen.call_args
         assert kwargs["issue_prompt"] == "Include OCP version"
@@ -2402,28 +2412,30 @@ class TestPreviewJiraBug:
             ),
         ]
 
-        with _enable_feature("jira_enabled"):
-            with patch("rootcoz.main.generate_jira_bug_content") as mock_gen:
-                mock_gen.return_value = {
-                    "title": "Connection refused",
-                    "body": "h2. Summary\n\nConnection fails",
-                }
-                with patch("rootcoz.main.search_jira_duplicates") as mock_dup:
-                    mock_dup.return_value = unfiltered_candidates
-                    with patch(
-                        "rootcoz.main.filter_matches_with_ai",
-                        new_callable=AsyncMock,
-                        return_value=ai_filtered,
-                    ):
-                        response = test_client.post(
-                            "/results/job-ai-filter/preview-jira-bug",
-                            json={
-                                "test_name": "test_network",
-                                "ai_provider": "claude",
-                                "ai_model": "opus",
-                                "jira_token": "user_jira_token",
-                            },
-                        )
+        with (
+            _enable_feature("jira_enabled"),
+            patch("rootcoz.main.generate_jira_bug_content") as mock_gen,
+        ):
+            mock_gen.return_value = {
+                "title": "Connection refused",
+                "body": "h2. Summary\n\nConnection fails",
+            }
+            with patch("rootcoz.main.search_jira_duplicates") as mock_dup:
+                mock_dup.return_value = unfiltered_candidates
+                with patch(
+                    "rootcoz.main.filter_matches_with_ai",
+                    new_callable=AsyncMock,
+                    return_value=ai_filtered,
+                ):
+                    response = test_client.post(
+                        "/results/job-ai-filter/preview-jira-bug",
+                        json={
+                            "test_name": "test_network",
+                            "ai_provider": "claude",
+                            "ai_model": "opus",
+                            "jira_token": "user_jira_token",
+                        },
+                    )
 
         assert response.status_code == 200
         data = response.json()
@@ -2451,19 +2463,21 @@ class TestPreviewJiraBug:
             "completed",
             result_data,
         )
-        with _enable_feature("jira_enabled"):
-            with patch("rootcoz.main.generate_jira_bug_content") as mock_gen:
-                mock_gen.return_value = {"title": "T", "body": "B"}
-                with patch("rootcoz.main.search_jira_duplicates") as mock_dup:
-                    mock_dup.return_value = []
-                    response = test_client.post(
-                        "/results/job-child-preview-jira/preview-jira-bug",
-                        json={
-                            "test_name": "test_alpha",
-                            "child_job_name": "child-A",
-                            "child_build_number": 10,
-                        },
-                    )
+        with (
+            _enable_feature("jira_enabled"),
+            patch("rootcoz.main.generate_jira_bug_content") as mock_gen,
+        ):
+            mock_gen.return_value = {"title": "T", "body": "B"}
+            with patch("rootcoz.main.search_jira_duplicates") as mock_dup:
+                mock_dup.return_value = []
+                response = test_client.post(
+                    "/results/job-child-preview-jira/preview-jira-bug",
+                    json={
+                        "test_name": "test_alpha",
+                        "child_job_name": "child-A",
+                        "child_build_number": 10,
+                    },
+                )
         assert response.status_code == 200
         _, kwargs = mock_gen.call_args
         # The jenkins_url should be the child's URL, not the parent's
@@ -2486,19 +2500,21 @@ class TestPreviewJiraBug:
         await storage.save_result(
             "job-sibling-jira", "http://jenkins/parent/1/", "completed", result_data
         )
-        with _enable_feature("jira_enabled"):
-            with patch("rootcoz.main.generate_jira_bug_content") as mock_gen:
-                mock_gen.return_value = {"title": "T", "body": "B"}
-                with patch("rootcoz.main.search_jira_duplicates") as mock_dup:
-                    mock_dup.return_value = []
-                    response = test_client.post(
-                        "/results/job-sibling-jira/preview-jira-bug",
-                        json={
-                            "test_name": "test_alpha",
-                            "child_job_name": "child-A",
-                            "child_build_number": 10,
-                        },
-                    )
+        with (
+            _enable_feature("jira_enabled"),
+            patch("rootcoz.main.generate_jira_bug_content") as mock_gen,
+        ):
+            mock_gen.return_value = {"title": "T", "body": "B"}
+            with patch("rootcoz.main.search_jira_duplicates") as mock_dup:
+                mock_dup.return_value = []
+                response = test_client.post(
+                    "/results/job-sibling-jira/preview-jira-bug",
+                    json={
+                        "test_name": "test_alpha",
+                        "child_job_name": "child-A",
+                        "child_build_number": 10,
+                    },
+                )
         assert response.status_code == 200
         _, kwargs = mock_gen.call_args
         failure = kwargs["failure"]
@@ -2702,7 +2718,7 @@ class TestIssueCreationRequiresUserCredentials:
     issue creation.  Only the analysis pipeline may use server tokens.
     """
 
-    _RESULT_DATA: dict = {
+    _RESULT_DATA: ClassVar[dict] = {
         "status": "completed",
         "summary": "",
         "failures": [
@@ -4251,41 +4267,43 @@ class TestLifespanResumesWaitingJobs:
             ],
         )
 
-        with patch.object(storage, "DB_PATH", temp_db_path):
-            with patch(
+        with (
+            patch.object(storage, "DB_PATH", temp_db_path),
+            patch(
                 "rootcoz.main._process_ci_source_analysis",
                 new_callable=AsyncMock,
-            ) as mock_process:
-                import threading
+            ) as mock_process,
+        ):
+            import threading
 
-                called_event = threading.Event()
-                original_side_effect = mock_process.side_effect
+            called_event = threading.Event()
+            original_side_effect = mock_process.side_effect
 
-                async def _signal_and_call(*args, **kwargs):
-                    called_event.set()
-                    if original_side_effect:
-                        return await original_side_effect(*args, **kwargs)
+            async def _signal_and_call(*args, **kwargs):
+                called_event.set()
+                if original_side_effect:
+                    return await original_side_effect(*args, **kwargs)
 
-                mock_process.side_effect = _signal_and_call
-                # Patch away the startup delay so the deferred task runs immediately
-                with patch("rootcoz.main.asyncio.sleep", new_callable=AsyncMock):
-                    from starlette.testclient import TestClient
+            mock_process.side_effect = _signal_and_call
+            # Patch away the startup delay so the deferred task runs immediately
+            with patch("rootcoz.main.asyncio.sleep", new_callable=AsyncMock):
+                from starlette.testclient import TestClient
 
-                    from rootcoz.main import app
+                from rootcoz.main import app
 
-                    with TestClient(app):
-                        called_event.wait(timeout=5)
-                    # The process_analysis_with_id should have been called via create_task
-                    assert mock_process.called
-                # Verify the waiting row was NOT flipped to failed during startup
-                import sqlite3
+                with TestClient(app):
+                    called_event.wait(timeout=5)
+                # The process_analysis_with_id should have been called via create_task
+                assert mock_process.called
+            # Verify the waiting row was NOT flipped to failed during startup
+            import sqlite3
 
-                conn = sqlite3.connect(str(temp_db_path))
-                status = conn.execute(
-                    "SELECT status FROM results WHERE job_id = 'resume-1'"
-                ).fetchone()[0]
-                conn.close()
-                assert status == "waiting"
+            conn = sqlite3.connect(str(temp_db_path))
+            status = conn.execute(
+                "SELECT status FROM results WHERE job_id = 'resume-1'"
+            ).fetchone()[0]
+            conn.close()
+            assert status == "waiting"
 
     def test_lifespan_marks_pending_running_as_failed(
         self, mock_settings, temp_db_path: Path
@@ -4480,12 +4498,14 @@ class TestPeerAnalysisParams:
         body = BaseAnalysisRequest()
         empty = Settings(ai_provider="", ai_model="")
         # Global settings appear configured; passed settings do not and no tests repo.
-        with patch(
-            "rootcoz.main.get_settings",
-            return_value=Settings(ai_provider="claude", ai_model="opus"),
+        with (
+            patch(
+                "rootcoz.main.get_settings",
+                return_value=Settings(ai_provider="claude", ai_model="opus"),
+            ),
+            pytest.raises(HTTPException) as exc_info,
         ):
-            with pytest.raises(HTTPException) as exc_info:
-                _resolve_ai_config_allow_defer(body, empty)
+            _resolve_ai_config_allow_defer(body, empty)
         assert exc_info.value.status_code == 400
         assert "AI" in exc_info.value.detail
 
@@ -5954,7 +5974,7 @@ class TestStaticAssetHeaders:
 class TestAdminSettingsEndpoints:
     """Tests for /api/admin/settings endpoints."""
 
-    _NO_ADMIN_HEADERS = {"Authorization": ""}
+    _NO_ADMIN_HEADERS: ClassVar[dict[str, str]] = {"Authorization": ""}
 
     def test_get_settings_returns_metadata(self, test_client) -> None:
         """GET /api/admin/settings returns all settings with metadata."""

@@ -313,17 +313,14 @@ class TestAnalyzeCommentIntentJobFallback:
 
             from rootcoz.main import app
 
-            with TestClient(app, headers=_ADMIN_AUTH_HEADERS) as client_env:
-                with patch(
-                    "rootcoz.main.call_ai_once", return_value=ai_response
-                ) as mock_ai:
-                    response = client_env.post(
-                        "/api/analyze-comment-intent",
-                        json={
-                            "comment": "Filed JIRA-123",
-                            "job_id": "job-789",
-                        },
-                    )
+            with (
+                TestClient(app, headers=_ADMIN_AUTH_HEADERS) as client_env,
+                patch("rootcoz.main.call_ai_once", return_value=ai_response) as mock_ai,
+            ):
+                response = client_env.post(
+                    "/api/analyze-comment-intent",
+                    json={"comment": "Filed JIRA-123", "job_id": "job-789"},
+                )
 
         assert response.status_code == 200
         call_kwargs = mock_ai.call_args

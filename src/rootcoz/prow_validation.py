@@ -17,7 +17,7 @@ def normalize_prow_url(value: object) -> str:
     if value is None:
         return ""
     if not isinstance(value, str):
-        raise ValueError("prow_url must be a string")
+        raise TypeError("prow_url must be a string")
     url = value.strip()
     if not url:
         return ""
@@ -36,7 +36,7 @@ def normalize_gcs_bucket(value: object) -> str:
     if value is None:
         return ""
     if not isinstance(value, str):
-        raise ValueError("gcs_bucket must be a string")
+        raise TypeError("gcs_bucket must be a string")
     bucket = value.strip()
     if not bucket:
         return ""
@@ -52,7 +52,7 @@ def normalize_gcs_prefix(value: object) -> str:
     if value is None:
         return ""
     if not isinstance(value, str):
-        raise ValueError("gcs_prefix must be a string")
+        raise TypeError("gcs_prefix must be a string")
     prefix = value.strip().rstrip("/")
     if not prefix:
         return ""
@@ -78,7 +78,7 @@ def validate_prow_job_name(value: object) -> str:
     if value is None:
         raise ValueError("prow_job_name is required")
     if not isinstance(value, str):
-        raise ValueError("prow_job_name must be a string")
+        raise TypeError("prow_job_name must be a string")
     name = value.strip()
     if not name:
         raise ValueError("prow_job_name cannot be blank")
@@ -94,7 +94,7 @@ def validate_prow_build_id(value: object) -> str:
     if value is None:
         raise ValueError("build_id is required")
     if not isinstance(value, str):
-        raise ValueError("build_id must be a string")
+        raise TypeError("build_id must be a string")
     build_id = value.strip()
     if not build_id:
         raise ValueError("build_id cannot be blank")
@@ -104,7 +104,7 @@ def validate_prow_build_id(value: object) -> str:
 
 
 # Re-export URL helpers for backward-compatible imports
-from rootcoz.url_utils import sanitize_http_href, strip_url_userinfo  # noqa: E402
+from rootcoz.url_utils import sanitize_http_href, strip_url_userinfo
 
 __all__ = [
     "PROW_BUILD_ID_PATTERN",

@@ -175,7 +175,7 @@ class TestLoadConfig:
 
     def test_raises_on_non_dict_server_entry(self, tmp_path: Path):
         bad_file = _write_config(tmp_path, '[servers]\nmyserver = "not-a-dict"\n')
-        with pytest.raises(ValueError, match=r"servers\.myserver must be a mapping"):
+        with pytest.raises(TypeError, match=r"servers\.myserver must be a mapping"):
             load_config(bad_file)
 
     def test_rejects_defaults_server_key(self, tmp_path: Path):
@@ -726,9 +726,9 @@ class TestServerConfigAdditionalRepos:
         assert cfg.additional_repos == "infra:https://github.com/org/infra"
 
     def test_additional_repos_non_string_raises(self) -> None:
-        """Non-string additional_repos value raises ValueError."""
+        """Non-string additional_repos value raises TypeError."""
         data = {"url": "http://test", "additional_repos": 42}
-        with pytest.raises(ValueError, match=r"additional_repos.*must be a string"):
+        with pytest.raises(TypeError, match=r"additional_repos.*must be a string"):
             _server_config_from_dict(data)
 
 
@@ -736,9 +736,9 @@ class TestServerConfigFromDictTypeValidation:
     """Type validation for peer-analysis fields in _server_config_from_dict."""
 
     def test_peers_non_string_raises(self) -> None:
-        """Non-string 'peers' value raises ValueError."""
+        """Non-string 'peers' value raises TypeError."""
         data = {"url": "http://test", "peers": 42}
-        with pytest.raises(ValueError, match=r"peers.*must be a string"):
+        with pytest.raises(TypeError, match=r"peers.*must be a string"):
             _server_config_from_dict(data)
 
     def test_peers_none_defaults_to_empty(self) -> None:
@@ -754,18 +754,18 @@ class TestServerConfigFromDictTypeValidation:
         assert cfg.peers == "claude:opus,gemini:pro"
 
     def test_peer_analysis_max_rounds_non_int_raises(self) -> None:
-        """Non-int 'peer_analysis_max_rounds' raises ValueError."""
+        """Non-int 'peer_analysis_max_rounds' raises TypeError."""
         data = {"url": "http://test", "peer_analysis_max_rounds": "five"}
         with pytest.raises(
-            ValueError, match=r"peer_analysis_max_rounds.*must be an integer"
+            TypeError, match=r"peer_analysis_max_rounds.*must be an integer"
         ):
             _server_config_from_dict(data)
 
     def test_peer_analysis_max_rounds_bool_raises(self) -> None:
-        """Boolean 'peer_analysis_max_rounds' raises ValueError (bool is subclass of int)."""
+        """Boolean 'peer_analysis_max_rounds' raises TypeError (bool is subclass of int)."""
         data = {"url": "http://test", "peer_analysis_max_rounds": True}
         with pytest.raises(
-            ValueError, match=r"peer_analysis_max_rounds.*must be an integer"
+            TypeError, match=r"peer_analysis_max_rounds.*must be an integer"
         ):
             _server_config_from_dict(data)
 
@@ -790,17 +790,17 @@ class TestServerConfigFromDictTypeValidation:
             _server_config_from_dict(data)
 
     def test_max_concurrent_ai_calls_bool_raises(self) -> None:
-        """Boolean 'max_concurrent_ai_calls' raises ValueError (bool is subclass of int)."""
+        """Boolean 'max_concurrent_ai_calls' raises TypeError (bool is subclass of int)."""
         data = {"url": "http://test", "max_concurrent_ai_calls": True}
         with pytest.raises(
-            ValueError, match=r"max_concurrent_ai_calls.*must be an integer"
+            TypeError, match=r"max_concurrent_ai_calls.*must be an integer"
         ):
             _server_config_from_dict(data)
 
     def test_max_concurrent_ai_calls_string_raises(self) -> None:
-        """String 'max_concurrent_ai_calls' raises ValueError."""
+        """String 'max_concurrent_ai_calls' raises TypeError."""
         data = {"url": "http://test", "max_concurrent_ai_calls": "five"}
         with pytest.raises(
-            ValueError, match=r"max_concurrent_ai_calls.*must be an integer"
+            TypeError, match=r"max_concurrent_ai_calls.*must be an integer"
         ):
             _server_config_from_dict(data)

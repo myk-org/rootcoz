@@ -1,7 +1,7 @@
 """Pydantic request and response models."""
 
 from datetime import datetime
-from typing import Annotated, Literal, TypeVar
+from typing import Annotated, Any, Literal, Self
 from uuid import uuid4
 
 from pydantic import (
@@ -14,8 +14,8 @@ from pydantic import (
     model_serializer,
     model_validator,
 )
+from pydantic_core.core_schema import SerializerFunctionWrapHandler
 
-from rootcoz.repository import RESERVED_REPO_NAMES
 from rootcoz.prow_validation import (
     normalize_gcs_bucket,
     normalize_gcs_prefix,
@@ -24,16 +24,15 @@ from rootcoz.prow_validation import (
     validate_prow_build_id,
     validate_prow_job_name,
 )
+from rootcoz.repository import RESERVED_REPO_NAMES
 
 _SYSTEM_TAGS: set[str] = {"re-analyze"}
 
-_TUrl = TypeVar("_TUrl", bound=HttpUrl | str | None)
 
-
-def _apply_build_url_aliases(
-    build_url: _TUrl,
-    jenkins_url: _TUrl,
-) -> tuple[_TUrl, _TUrl]:
+def _apply_build_url_aliases[T: HttpUrl | str | None](
+    build_url: T,
+    jenkins_url: T,
+) -> tuple[T, T]:
     """Keep build_url and deprecated jenkins_url alias in sync."""
     url = build_url or jenkins_url
     if url:
@@ -49,7 +48,7 @@ def _uuid_str() -> str:
 def _normalize_tags_list(tags: object) -> list[str]:
     """Strip, lowercase, deduplicate, remove blanks and reserved system tags."""
     if not isinstance(tags, (list, tuple, set)):
-        raise ValueError("tags must be a list")
+        raise TypeError("tags must be a list")
 
     seen: set[str] = set()
     result: list[str] = []
@@ -330,7 +329,7 @@ class _NameTagsMixin(BaseModel):
 
     @field_validator("tags", mode="before")
     @classmethod
-    def _normalize_tags(cls, v: list) -> list[str]:
+    def _normalize_tags(cls, v: list[Any]) -> list[str]:
         return _normalize_tags_list(v)
 
 
@@ -472,7 +471,9 @@ class AnalysisDetail(BaseModel):
         return self
 
     @model_serializer(mode="wrap")
-    def _exclude_falsy_optionals(self, handler):
+    def _exclude_falsy_optionals(
+        self, handler: SerializerFunctionWrapHandler
+    ) -> dict[str, Any]:
         d = handler(self)
         if not d.get("code_fix"):
             d.pop("code_fix", None)
@@ -857,7 +858,7 @@ class _ChildJobFieldsValidator(BaseModel):
     child_build_number: Annotated[int, Field(ge=0)] = 0
 
     @model_validator(mode="after")
-    def validate_child_fields(self):
+    def validate_child_fields(self) -> Self:
         if not self.child_job_name and self.child_build_number > 0:
             raise ValueError(
                 "child_job_name is required when child_build_number is set"
@@ -1118,13 +1119,13 @@ class ReAnalyzeFailureRequest(BaseModel):
     ai_model: str | None = None
     ai_call_timeout: int | None = None
     raw_prompt: str | None = None
-    peer_ai_configs: list[dict] | None = None
+    peer_ai_configs: list[dict[str, Any]] | None = None
     peer_analysis_max_rounds: int | None = None
     tests_repo_url: str | None = None
     enable_jira: bool | None = None
     jira_url: str | None = None
     jira_project_key: str | None = None
-    additional_repos: list[dict] | None = None
+    additional_repos: list[dict[str, Any]] | None = None
 
 
 class ReportPortalPushResult(BaseModel):

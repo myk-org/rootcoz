@@ -33,7 +33,7 @@ class TestToolConstants:
         assert "bash" not in ANALYSIS_BUILTIN_TOOLS
 
     def test_browse_hint_derived_from_fs_tools(self):
-        from rootcoz.ai_client import RESOURCE_REPO_BROWSE_HINT, _FS_BROWSE_TOOLS
+        from rootcoz.ai_client import _FS_BROWSE_TOOLS, RESOURCE_REPO_BROWSE_HINT
 
         assert CHAT_BUILTIN_TOOLS[:4] == _FS_BROWSE_TOOLS
         assert ANALYSIS_BUILTIN_TOOLS[:4] == _FS_BROWSE_TOOLS
@@ -127,7 +127,7 @@ class TestChatImplTools:
         )
 
         with patch("rootcoz.engine.chat.call_ai", mock_call_ai):
-            success, text, sid = await _chat_with_ai_impl(
+            success, _text, _sid = await _chat_with_ai_impl(
                 message="hello",
                 history=[],
                 ai_provider="gemini",
@@ -173,7 +173,7 @@ class TestChatImplTools:
         )
 
         with patch("rootcoz.engine.chat.call_ai", mock_call_ai):
-            success, text, sid = await _chat_with_ai_impl(
+            success, _text, _sid = await _chat_with_ai_impl(
                 message="hello",
                 history=[],
                 ai_provider="gemini",

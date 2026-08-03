@@ -164,7 +164,7 @@ def test_collect_ai_gemini_custom_model() -> None:
         patch("builtins.input", side_effect=user_inputs),
         patch("getpass.getpass", return_value="gem-key-456"),
     ):
-        generated, secrets = setup._collect_ai()
+        generated, _secrets = setup._collect_ai()
 
     assert generated["ai"]["model"] == "gemini-2.5-flash"
 
@@ -404,7 +404,7 @@ def test_load_values_non_dict_raises() -> None:
     with tempfile.TemporaryDirectory() as tmpdir:
         path = Path(tmpdir) / "list.yaml"
         path.write_text("- just\n- a\n- list\n", encoding="utf-8")
-        with pytest.raises(ValueError, match="Expected a YAML mapping"):
+        with pytest.raises(TypeError, match="Expected a YAML mapping"):
             setup._load_values(path)
 
 
@@ -540,9 +540,11 @@ def test_resolve_helm_returns_path_when_present() -> None:
 
 
 def test_resolve_helm_raises_when_missing() -> None:
-    with patch("shutil.which", return_value=None):
-        with pytest.raises(RuntimeError, match="helm not found in PATH"):
-            setup._resolve_helm()
+    with (
+        patch("shutil.which", return_value=None),
+        pytest.raises(RuntimeError, match="helm not found in PATH"),
+    ):
+        setup._resolve_helm()
 
 
 def test_main_fails_fast_when_helm_missing(capsys: pytest.CaptureFixture[str]) -> None:

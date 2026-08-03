@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import os
 from collections.abc import Sequence
+from typing import Any, Self
 
 import httpx
 from simple_logger.logger import get_logger
@@ -96,13 +97,13 @@ class JiraClient:
         """Close the underlying HTTP client."""
         await self._client.aclose()
 
-    async def __aenter__(self) -> "JiraClient":
+    async def __aenter__(self) -> Self:
         return self
 
-    async def __aexit__(self, *exc) -> None:
+    async def __aexit__(self, *exc: object) -> None:
         await self.close()
 
-    async def list_projects(self, query: str = "") -> list[dict]:
+    async def list_projects(self, query: str = "") -> list[dict[str, Any]]:
         """List all accessible Jira projects.
 
         Tries ``/project/search`` first (returns only projects the caller
@@ -146,14 +147,16 @@ class JiraClient:
                 )
         return []
 
-    async def _list_projects_paginated(self, path: str, query: str = "") -> list[dict]:
+    async def _list_projects_paginated(
+        self, path: str, query: str = ""
+    ) -> list[dict[str, Any]]:
         """Fetch projects via paginated /project/search endpoint."""
-        all_projects: list[dict] = []
+        all_projects: list[dict[str, Any]] = []
         start_at = 0
         page_size = 50
 
         while True:
-            params: dict = {"startAt": start_at, "maxResults": page_size}
+            params: dict[str, Any] = {"startAt": start_at, "maxResults": page_size}
             if query:
                 params["query"] = query
             response = await self._client.get(path, params=params)
@@ -179,7 +182,7 @@ class JiraClient:
 
         return all_projects
 
-    async def list_security_levels(self, project_key: str) -> list[dict]:
+    async def list_security_levels(self, project_key: str) -> list[dict[str, Any]]:
         """List available security levels for a Jira project."""
         if not project_key:
             return []
@@ -207,7 +210,7 @@ class JiraClient:
             )
             return []
 
-    async def search(self, keywords: list[str]) -> list[dict]:
+    async def search(self, keywords: list[str]) -> list[dict[str, Any]]:
         """Search Jira for Bug issues matching the given keywords.
 
         Builds a JQL query using ``summary ~ "keyword"`` clauses joined
@@ -246,7 +249,7 @@ class JiraClient:
         response.raise_for_status()
         data = response.json()
 
-        candidates: list[dict] = []
+        candidates: list[dict[str, Any]] = []
         for issue in data.get("issues", []):
             fields = issue.get("fields", {})
 
@@ -283,7 +286,7 @@ class JiraClient:
         return candidates
 
 
-def _extract_text_from_adf(adf: dict) -> str:
+def _extract_text_from_adf(adf: dict[str, Any]) -> str:
     """Extract plain text from Atlassian Document Format (ADF).
 
     Jira Cloud API v3 returns descriptions as ADF JSON.
@@ -297,7 +300,7 @@ def _extract_text_from_adf(adf: dict) -> str:
     """
     parts: list[str] = []
 
-    def _walk(node):
+    def _walk(node: Any) -> None:
         if isinstance(node, dict):
             if node.get("type") == "text":
                 parts.append(node.get("text", ""))
@@ -314,7 +317,7 @@ def _extract_text_from_adf(adf: dict) -> str:
 async def filter_matches_with_ai(
     bug_title: str,
     bug_description: str,
-    candidates: list[dict],
+    candidates: list[dict[str, Any]],
     ai_provider: str,
     ai_model: str,
     ai_call_timeout: int | None = None,
@@ -443,7 +446,7 @@ async def enrich_with_jira_matches(
     try:
         async with JiraClient(settings) as client:
             # Search Jira for each unique keyword set in parallel
-            async def _search_safe(keywords: list[str]) -> list[dict]:
+            async def _search_safe(keywords: list[str]) -> list[dict[str, Any]]:
                 try:
                     return await client.search(keywords)
                 except Exception:

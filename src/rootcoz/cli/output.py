@@ -1,10 +1,11 @@
 """Output formatting helpers for the rootcoz CLI."""
 
 import json
+from typing import Any
 
 
 def format_table(
-    data: list[dict],
+    data: list[dict[str, Any]],
     columns: list[str],
     labels: dict[str, str] | None = None,
 ) -> str:
@@ -54,7 +55,7 @@ def format_table(
     return "\n".join(lines)
 
 
-def format_json(data: dict | list) -> str:
+def format_json(data: dict[str, Any] | list[Any]) -> str:
     """Format data as pretty-printed JSON.
 
     Args:
@@ -67,7 +68,7 @@ def format_json(data: dict | list) -> str:
 
 
 def print_output(
-    data: dict | list,
+    data: dict[str, Any] | list[Any],
     columns: list[str],
     as_json: bool = False,
     labels: dict[str, str] | None = None,

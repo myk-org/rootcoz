@@ -1,6 +1,7 @@
 """Jenkins API client wrapper."""
 
 import os
+from typing import Any
 from urllib.parse import urlparse
 
 import jenkins
@@ -57,7 +58,7 @@ class JenkinsClient(jenkins.Jenkins):
         logger.debug(f"Fetching console output: {job_name} #{build_number}")
         return self.get_build_console_output(job_name, build_number)
 
-    def get_build_info_safe(self, job_name: str, build_number: int) -> dict:
+    def get_build_info_safe(self, job_name: str, build_number: int) -> dict[str, Any]:
         """Get build information safely.
 
         Args:
@@ -70,7 +71,9 @@ class JenkinsClient(jenkins.Jenkins):
         logger.debug(f"Fetching build info: {job_name} #{build_number}")
         return super().get_build_info(job_name, build_number)
 
-    def get_test_report(self, job_name: str, build_number: int) -> dict | None:
+    def get_test_report(
+        self, job_name: str, build_number: int
+    ) -> dict[str, Any] | None:
         """Get test report for a build.
 
         Uses the Jenkins /testReport/api/json endpoint which provides structured

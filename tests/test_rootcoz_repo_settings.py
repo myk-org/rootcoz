@@ -59,7 +59,7 @@ class TestRootcozRepoSettingsSchema:
             RootcozRepoSettings.model_validate({"jenkins_url": "https://x"})
 
     def test_rejects_token_in_additional_repos(self) -> None:
-        with pytest.raises(Exception):
+        with pytest.raises(ValidationError):
             RootcozRepoSettings.model_validate(
                 {
                     "additional_repos": [
@@ -419,7 +419,7 @@ class TestApplyRootcozRepoSettings:
         assert effective.ai_provider == "claude"
         assert effective.ai_model == "sonnet"
         assert effective.peer_ai_configs is not None
-        assert effective.peer_ai_configs[0]["ai_provider"] == "gemini"
+        assert effective.peer_ai_configs[0].ai_provider == "gemini"
 
     def test_persist_patch_encrypts_additional_repo_tokens(self) -> None:
         from rootcoz.encryption import encrypt_sensitive_fields

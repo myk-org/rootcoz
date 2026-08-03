@@ -653,12 +653,16 @@ class TestDefaultUserRole:
     def test_admin_rejected(self) -> None:
         """DEFAULT_USER_ROLE=admin is rejected to prevent privilege escalation."""
         env = _build_env(DEFAULT_USER_ROLE="admin")
-        with patch.dict(os.environ, env, clear=True):
-            with pytest.raises(Exception, match="DEFAULT_USER_ROLE"):
-                Settings(_env_file=None)
+        with (
+            patch.dict(os.environ, env, clear=True),
+            pytest.raises(Exception, match="DEFAULT_USER_ROLE"),
+        ):
+            Settings(_env_file=None)
 
     def test_invalid_value_rejected(self) -> None:
         env = _build_env(DEFAULT_USER_ROLE="superuser")
-        with patch.dict(os.environ, env, clear=True):
-            with pytest.raises(Exception, match="DEFAULT_USER_ROLE"):
-                Settings(_env_file=None)
+        with (
+            patch.dict(os.environ, env, clear=True),
+            pytest.raises(Exception, match="DEFAULT_USER_ROLE"),
+        ):
+            Settings(_env_file=None)

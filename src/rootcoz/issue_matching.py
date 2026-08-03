@@ -6,6 +6,7 @@ issues from any tracker match a given bug/failure description.
 
 import json
 import os
+from typing import Any
 
 from simple_logger.logger import get_logger
 
@@ -17,13 +18,13 @@ logger = get_logger(name=__name__, level=os.environ.get("LOG_LEVEL", "INFO"))
 async def filter_issue_matches_with_ai(
     bug_title: str,
     bug_description: str,
-    candidates: list[dict],
+    candidates: list[dict[str, Any]],
     ai_provider: str,
     ai_model: str,
     ai_call_timeout: int | None = None,
     job_id: str = "",
     call_type: str = "issue_filter",
-) -> list[dict]:
+) -> list[dict[str, Any]]:
     """Use AI to determine which candidate issues are relevant to a bug.
 
     Sends the bug context and all candidate issues to the AI, asking it
@@ -138,7 +139,7 @@ Respond with ONLY the JSON array, no other text."""
         logger.warning("Failed to parse AI relevance response")
         return []
 
-    relevant: list[dict] = []
+    relevant: list[dict[str, Any]] = []
     for evaluation in evaluations:
         if not isinstance(evaluation, dict):
             continue

@@ -15,13 +15,15 @@ import re
 import shutil
 from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
+from git.exc import GitCommandError
 from simple_logger.logger import get_logger
 
 from rootcoz.ai_client import (
-    AIResult,
     ANALYSIS_BUILTIN_TOOLS,
     RESOURCE_REPO_BROWSE_HINT,
+    AIResult,
     call_ai_once,
 )
 from rootcoz.config import Settings, parse_additional_repos
@@ -96,7 +98,8 @@ async def clone_additional_repos(
             )
             cloned[ar.name] = target
             logger.info(f"Cloned additional repo '{ar.name}' into {target}")
-        except Exception as e:  # non-fatal additional repo clone failure
+        except (GitCommandError, ValueError, OSError, RuntimeError) as e:
+            # non-fatal additional repo clone failure
             logger.warning(
                 "Failed to clone additional repo '%s' (%s)",
                 ar.name,
@@ -373,6 +376,9 @@ def copy_rootcoz_pi_resources(cloned_repos: dict[str, Path], workspace: Path) ->
                     dst_path: str,
                     *,
                     follow_symlinks: bool = True,
+                    subdir: str = subdir,
+                    dest: Path = dest,
+                    repo_name: str = repo_name,
                 ) -> None:
                     """copy2 wrapper that warns when overwriting existing files."""
                     if os.path.exists(dst_path):
@@ -567,7 +573,7 @@ def build_artifacts_section(artifacts_context: str) -> str:
 
 # Pre-compiled patterns for signature normalization.
 # Strips run-specific data so the same underlying failure produces identical hashes.
-_NORMALIZE_PATTERNS: list[tuple[re.Pattern, str]] = [
+_NORMALIZE_PATTERNS: list[tuple[re.Pattern[str], str]] = [
     # ISO timestamps: 2026-05-31T06:50:48.123Z, 2026-05-31T06:50:48+00:00
     (
         re.compile(
@@ -644,7 +650,7 @@ def get_failure_signature(failure: FailedTest) -> str:
     return hashlib.sha256(signature_text.encode()).hexdigest()
 
 
-def extract_json_dict(raw_text: str) -> dict | None:
+def extract_json_dict(raw_text: str) -> dict[str, Any] | None:
     """Extract a JSON object from AI response text.
 
     Tries three strategies in order:
@@ -668,7 +674,7 @@ def extract_json_dict(raw_text: str) -> dict | None:
             data = json.loads(text)
             if isinstance(data, dict):
                 return data
-        except Exception as e:
+        except json.JSONDecodeError as e:
             logger.debug("JSON parse strategy 1 (direct parse) failed: %s", e)
 
     # Strategy 2: Find the outermost JSON object using brace matching
@@ -708,7 +714,7 @@ def parse_json_response(raw_text: str) -> AnalysisDetail:
     if data is not None:
         try:
             return AnalysisDetail(**data)
-        except Exception as exc:
+        except (ValueError, TypeError) as exc:
             logger.warning(
                 "AI JSON validated as object but failed schema parsing: %s", exc
             )
@@ -918,7 +924,7 @@ def recover_from_details(result: AnalysisDetail) -> AnalysisDetail:
     )
 
 
-def _extract_json_by_braces(text: str) -> dict | None:
+def _extract_json_by_braces(text: str) -> dict[str, Any] | None:
     """Extract a JSON object dict by finding matching outermost braces.
 
     Handles cases where JSON values contain embedded code blocks
@@ -976,12 +982,12 @@ def _extract_json_by_braces(text: str) -> dict | None:
         data = json.loads(json_str)
         if isinstance(data, dict):
             return data
-    except Exception as e:
+    except json.JSONDecodeError as e:
         logger.debug("JSON parse strategy 2 (brace matching) failed: %s", e)
     return None
 
 
-def _extract_json_from_code_blocks(text: str) -> dict | None:
+def _extract_json_from_code_blocks(text: str) -> dict[str, Any] | None:
     """Extract a JSON object dict from markdown code blocks in the text.
 
     Finds code blocks (```json or ```) and attempts to parse
@@ -1008,7 +1014,7 @@ def _extract_json_from_code_blocks(text: str) -> dict | None:
             data = json.loads(block_content)
             if isinstance(data, dict):
                 return data
-        except Exception as e:
+        except json.JSONDecodeError as e:
             logger.debug("JSON parse strategy 3 (code block) failed: %s", e)
 
         # Try brace matching within the block
@@ -1155,7 +1161,7 @@ def build_prompt_sections(
         repo_history_prompt = ""
         # Scan cloned repos (not workspace root) for history prompt
         if additional_repos:
-            for _name, _path in additional_repos.items():
+            for _path in additional_repos.values():
                 repo_history_path = _path / ".rootcoz" / ROOTCOZ_HISTORY_PROMPT_FILENAME
                 logger.debug(
                     f"Repo history analysis prompt exists at {_path}: {repo_history_path.exists()}"
@@ -1594,7 +1600,7 @@ Note: Multiple tests failed with the same error. Provide ONE analysis that appli
         ai_model,
         job_id,
     )
-    custom_tools: list[dict] = []
+    custom_tools: list[dict[str, Any]] = []
     if server_url and job_id and auth_header:
         token = auth_header.removeprefix("Bearer ").strip()
         if token:
@@ -1604,7 +1610,7 @@ Note: Multiple tests failed with the same error. Provide ONE analysis that appli
                 job_id=job_id,
             )
     try:
-        call_kwargs: dict = {
+        call_kwargs: dict[str, Any] = {
             "ai_provider": ai_provider,
             "ai_model": ai_model,
             # Always set cwd to the directory containing mandatory workspace
@@ -1706,7 +1712,7 @@ async def analyze_failure_group(
     artifacts_context: str = "",
     server_url: str = "",
     job_id: str = "",
-    peer_ai_configs: list | None = None,
+    peer_ai_configs: list[AiConfigEntry] | None = None,
     peer_analysis_max_rounds: int = 3,
     group_label: str = "",
     additional_repos: dict[str, Path] | None = None,

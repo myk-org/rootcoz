@@ -18,7 +18,7 @@ from pi_sidecar_client import (
 )
 from simple_logger.logger import get_logger
 
-from rootcoz.ai_client import AIResult, ANALYSIS_BUILTIN_TOOLS, call_ai, call_ai_once
+from rootcoz.ai_client import ANALYSIS_BUILTIN_TOOLS, AIResult, call_ai, call_ai_once
 from rootcoz.engine.core import (
     JSON_RESPONSE_SCHEMA,
     TIMELINE_RULE,
@@ -176,16 +176,20 @@ def _peer_consensus_fallback(
     if top_count > total / 2:
         return (
             most_common_cls,
-            f"Orchestrator returned empty classification. "
-            f"Adopted peer consensus ({top_count}/{total} peers): {peers_desc}.",
+            (
+                f"Orchestrator returned empty classification. "
+                f"Adopted peer consensus ({top_count}/{total} peers): {peers_desc}."
+            ),
         )
 
     # No majority — adopt the most frequent classification
     return (
         most_common_cls,
-        f"Orchestrator returned empty classification. No peer majority — "
-        f"adopted most frequent classification from: {peers_desc} "
-        f"({top_count}/{total} peers).",
+        (
+            f"Orchestrator returned empty classification. No peer majority — "
+            f"adopted most frequent classification from: {peers_desc} "
+            f"({top_count}/{total} peers)."
+        ),
     )
 
 
@@ -215,7 +219,7 @@ def _check_consensus(
     )
 
 
-def _parse_peer_response(raw: str) -> dict:
+def _parse_peer_response(raw: str) -> dict[str, Any]:
     """Parse a peer's JSON response with fallback extraction.
 
     Three strategies are tried in order (direct parse, fenced code blocks,
@@ -644,7 +648,7 @@ async def analyze_failure_group_with_peers(
                     idx,
                     job_id,
                 )
-                peer_kwargs: dict = {
+                peer_kwargs: dict[str, Any] = {
                     "ai_provider": config.ai_provider,
                     "ai_model": config.ai_model,
                     "cwd": str(peer_workspace),
@@ -884,7 +888,13 @@ async def analyze_failure_group_with_peers(
                         ai_provider=main_ai_provider,
                         ai_model=main_ai_model,
                     )
-                except Exception as exc:
+                except (
+                    TimeoutError,
+                    OSError,
+                    RuntimeError,
+                    ValueError,
+                    TypeError,
+                ) as exc:
                     logger.warning(
                         f"Revision round {round_num} raised {type(exc).__name__}: {exc}; keeping prior analysis"
                     )
@@ -915,7 +925,7 @@ async def analyze_failure_group_with_peers(
                                 "code_fix",
                                 "product_bug_report",
                             )
-                            updates: dict = {}
+                            updates: dict[str, Any] = {}
                             for field in _merge_fields:
                                 revised_val = getattr(revised, field)
                                 prev_val = getattr(previous_analysis, field)
@@ -953,7 +963,7 @@ async def analyze_failure_group_with_peers(
                 )
                 existing_details = parsed_analysis.details or ""
                 separator = "\n\n" if existing_details else ""
-                update: dict = {
+                update: dict[str, Any] = {
                     "classification": fallback_cls,
                     "details": f"{existing_details}{separator}\u26a0\ufe0f FALLBACK: {fallback_note}",
                 }

@@ -40,7 +40,7 @@ from rootcoz.sources.jenkins_source import (
     handle_jenkins_exception,
 )
 
-_FAKE_JENKINS_PASSWORD = "test-pass"  # noqa: S105  # pragma: allowlist secret
+_FAKE_JENKINS_PASSWORD = "test-pass"  # pragma: allowlist secret
 
 
 def _make_jenkins_settings(**overrides: object) -> Settings:
@@ -1538,7 +1538,7 @@ class TestBuildResourcesSectionAdditionalRepos:
             "infra": tmp_path / "infra",
             "product": tmp_path / "product",
         }
-        for _name, path in additional.items():
+        for path in additional.values():
             path.mkdir()
             (path / ".git").mkdir()
 

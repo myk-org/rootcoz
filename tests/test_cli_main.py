@@ -55,14 +55,14 @@ def _env_without_analyze_bindings() -> dict[str, str]:
 _TEST_SERVER = "http://test-server:8000"
 
 # Fake credential constants used throughout tests.
-_FAKE_JENKINS_PASSWORD = "cfg-jenkins-pw"  # noqa: S105  # pragma: allowlist secret
-_FAKE_JIRA_API_TOKEN = "cfg-jira-tok"  # noqa: S105
-_FAKE_JIRA_PAT = "cfg-jira-pat"  # noqa: S105
-_FAKE_GITHUB_TOKEN = "ghp_cfg_token"  # noqa: S105
-_FAKE_GITHUB_CLI_TOKEN = "ghp_tok"  # noqa: S105
-_FAKE_GITHUB_CLI_OVERRIDE = "ghp_cli_override"  # noqa: S105  # pragma: allowlist secret
-_FAKE_JIRA_CLI_TOKEN = "jira-tok"  # noqa: S105
-_FAKE_GITHUB_TEST_TOKEN = "ghp_test"  # noqa: S105
+_FAKE_JENKINS_PASSWORD = "cfg-jenkins-pw"  # pragma: allowlist secret
+_FAKE_JIRA_API_TOKEN = "cfg-jira-tok"
+_FAKE_JIRA_PAT = "cfg-jira-pat"
+_FAKE_GITHUB_TOKEN = "ghp_cfg_token"
+_FAKE_GITHUB_CLI_TOKEN = "ghp_tok"
+_FAKE_GITHUB_CLI_OVERRIDE = "ghp_cli_override"  # pragma: allowlist secret
+_FAKE_JIRA_CLI_TOKEN = "jira-tok"
+_FAKE_GITHUB_TEST_TOKEN = "ghp_test"
 
 
 @pytest.fixture
@@ -2763,7 +2763,7 @@ class TestAnalyzePeerFlags:
 class TestAnalyzeProwCommand:
     """Tests for analyze --source prow."""
 
-    _PROW_BASE = ["analyze", "--source", "prow"]
+    _PROW_BASE: ClassVar[list[str]] = ["analyze", "--source", "prow"]
 
     def test_analyze_prow_basic(self, mock_client):
         mock_client.analyze.return_value = {
@@ -3251,8 +3251,8 @@ class TestValidateTokenCommand:
         assert result.exit_code == 0
         assert "Valid" in result.output
         mock_client.validate_token.assert_called_once_with(
-            token_type="github",  # noqa: S106
-            token=_FAKE_GITHUB_TEST_TOKEN,  # noqa: S106
+            token_type="github",
+            token=_FAKE_GITHUB_TEST_TOKEN,
             email="",
         )
 
@@ -3299,8 +3299,8 @@ class TestValidateTokenCommand:
         )
         assert result.exit_code == 0
         kwargs = mock_client.validate_token.call_args[1]
-        assert kwargs["token_type"] == "jira"  # noqa: S105
-        assert kwargs["token"] == _FAKE_JIRA_CLI_TOKEN  # noqa: S105
+        assert kwargs["token_type"] == "jira"
+        assert kwargs["token"] == _FAKE_JIRA_CLI_TOKEN
         assert kwargs["email"] == "user@example.com"
 
 

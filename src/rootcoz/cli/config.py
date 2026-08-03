@@ -8,6 +8,7 @@ import os
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 _xdg = os.environ.get("XDG_CONFIG_HOME", "")
 _XDG_CONFIG_HOME = Path(_xdg) if _xdg else Path.home() / ".config"
@@ -67,7 +68,7 @@ class ServerConfig:
 
 
 def _validate_section_server_field(
-    section: dict, section_name: str, config_path: Path
+    section: dict[str, Any], section_name: str, config_path: Path
 ) -> None:
     """Validate the ``server`` field inside a config section.
 
@@ -83,7 +84,7 @@ def _validate_section_server_field(
         )
 
 
-def load_config(path: Path | None = None) -> dict:
+def load_config(path: Path | None = None) -> dict[str, Any]:
     """Load config from TOML file.
 
     Args:
@@ -103,7 +104,7 @@ def load_config(path: Path | None = None) -> dict:
         raise ValueError(f"Invalid TOML in {config_path}: {e}") from e
 
     if not isinstance(data, dict):
-        raise ValueError(
+        raise TypeError(
             f"Invalid config in {config_path}: top-level value must be a mapping, "
             f"got {type(data).__name__}"
         )
@@ -137,7 +138,7 @@ def load_config(path: Path | None = None) -> dict:
             )
         for name, entry in servers.items():
             if not isinstance(entry, dict):
-                raise ValueError(
+                raise TypeError(
                     f"Invalid config in {config_path}: servers.{name} must be a mapping, "
                     f"got {type(entry).__name__}"
                 )
@@ -151,7 +152,7 @@ def load_config(path: Path | None = None) -> dict:
     return data
 
 
-def get_default_server_name(config: dict | None = None) -> str:
+def get_default_server_name(config: dict[str, Any] | None = None) -> str:
     """Return the default server name from config.
 
     Args:
@@ -165,7 +166,7 @@ def get_default_server_name(config: dict | None = None) -> str:
     return config.get("default", {}).get("server", "")
 
 
-def _validated_str(data: dict, key: str) -> str:
+def _validated_str(data: dict[str, Any], key: str) -> str:
     """Extract a string value from *data*, raising on type mismatch.
 
     ``None`` is treated as the empty-string default so that explicit
@@ -175,11 +176,11 @@ def _validated_str(data: dict, key: str) -> str:
     if value is None:
         return ""
     if not isinstance(value, str):
-        raise ValueError(f"Invalid config: '{key}' must be a string")
+        raise TypeError(f"Invalid config: '{key}' must be a string")
     return value
 
 
-def _validated_int(data: dict, key: str) -> int:
+def _validated_int(data: dict[str, Any], key: str) -> int:
     """Extract an integer value from *data*, raising on type mismatch.
 
     ``None`` is treated as ``0`` (server default).  Booleans are rejected
@@ -189,18 +190,18 @@ def _validated_int(data: dict, key: str) -> int:
     if value is None:
         return 0
     if isinstance(value, bool) or not isinstance(value, int):
-        raise ValueError(f"Invalid config: '{key}' must be an integer")
+        raise TypeError(f"Invalid config: '{key}' must be an integer")
     return value
 
 
-def _validated_non_negative_int(data: dict, key: str) -> int:
+def _validated_non_negative_int(data: dict[str, Any], key: str) -> int:
     value = _validated_int(data, key)
     if value < 0:
         raise ValueError(f"Invalid config: '{key}' must be a non-negative integer")
     return value
 
 
-def _server_config_from_dict(data: dict) -> ServerConfig:
+def _server_config_from_dict(data: dict[str, Any]) -> ServerConfig:
     """Build a ServerConfig from a TOML server dict.
 
     Args:
@@ -262,7 +263,7 @@ def _server_config_from_dict(data: dict) -> ServerConfig:
 
 def get_server_config(
     name: str | None = None,
-    config: dict | None = None,
+    config: dict[str, Any] | None = None,
 ) -> ServerConfig | None:
     """Look up a named server, falling back to the default.
 
@@ -292,17 +293,21 @@ def get_server_config(
     return _build_server_config(config.get("defaults", {}), server_data)
 
 
-def _merge_server_dict(defaults: dict, overrides: dict) -> dict:
+def _merge_server_dict(
+    defaults: dict[str, Any], overrides: dict[str, Any]
+) -> dict[str, Any]:
     """Merge default settings with per-server overrides."""
     return {**defaults, **overrides}
 
 
-def _build_server_config(defaults: dict, overrides: dict) -> ServerConfig:
+def _build_server_config(
+    defaults: dict[str, Any], overrides: dict[str, Any]
+) -> ServerConfig:
     """Merge defaults with per-server overrides and build a ServerConfig."""
     return _server_config_from_dict(_merge_server_dict(defaults, overrides))
 
 
-def list_servers(config: dict | None = None) -> dict[str, ServerConfig]:
+def list_servers(config: dict[str, Any] | None = None) -> dict[str, ServerConfig]:
     """Return all configured servers.
 
     Global ``[defaults]`` values are merged into each server entry.

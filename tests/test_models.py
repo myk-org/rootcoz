@@ -1,6 +1,6 @@
 """Tests for Pydantic models."""
 
-from datetime import datetime
+from datetime import UTC, datetime
 
 import pytest
 from pydantic import ValidationError
@@ -123,7 +123,7 @@ class TestAnalysisResultWaitingStatus:
         status = JobStatus(
             job_id="test-id",
             status="waiting",
-            created_at=datetime.now(),
+            created_at=datetime.now(tz=UTC),
         )
         assert status.status == "waiting"
 
@@ -372,7 +372,7 @@ class TestJobStatus:
 
     def test_job_status_creation(self) -> None:
         """Test creating a valid JobStatus."""
-        now = datetime.now()
+        now = datetime.now(tz=UTC)
         status = JobStatus(
             job_id="job-123",
             status="running",
@@ -390,7 +390,7 @@ class TestJobStatus:
         status = JobStatus(
             job_id="job-123",
             status=status_val,
-            created_at=datetime.now(),
+            created_at=datetime.now(tz=UTC),
         )
         assert status.status == status_val
 
@@ -400,7 +400,7 @@ class TestJobStatus:
             JobStatus(
                 job_id="job-123",
                 status="invalid",
-                created_at=datetime.now(),
+                created_at=datetime.now(tz=UTC),
             )
         errors = exc_info.value.errors()
         assert any("status" in str(e) for e in errors)
