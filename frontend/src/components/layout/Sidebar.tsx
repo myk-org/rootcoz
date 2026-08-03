@@ -235,33 +235,34 @@ export function Sidebar({ badges, mobileOpen, onMobileClose }: SidebarProps) {
     </nav>
   )
 
-  const releaseUrl = `https://github.com/myk-org/rootcoz/releases/tag/v${version}`
+  const isValidVersion = Boolean(version && version !== 'unknown')
+  const releaseUrl = isValidVersion
+    ? `https://github.com/myk-org/rootcoz/releases/tag/v${encodeURIComponent(version)}`
+    : undefined
 
-  const versionFooter = version ? (
+  const versionLink = (
+    <a
+      href={releaseUrl}
+      target="_blank"
+      rel="noopener noreferrer"
+      className={cn(
+        'flex items-center justify-center text-xs text-text-tertiary font-mono opacity-70 hover:opacity-100 hover:text-text-link transition-all',
+        collapsed && 'gap-1',
+      )}
+    >
+      {collapsed ? 'v' : <span className="font-semibold">RootCoz v{version}</span>}
+    </a>
+  )
+
+  const versionFooter = isValidVersion ? (
     <div data-testid="sidebar-version" className="border-t border-border-default px-3 py-3">
       {collapsed ? (
         <Tooltip>
-          <TooltipTrigger asChild>
-            <a
-              href={releaseUrl}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="flex items-center justify-center gap-1 text-xs text-text-tertiary font-mono opacity-70 hover:opacity-100 hover:text-text-link transition-all"
-            >
-              v
-            </a>
-          </TooltipTrigger>
+          <TooltipTrigger asChild>{versionLink}</TooltipTrigger>
           <TooltipContent side="right">rootcoz v{version}</TooltipContent>
         </Tooltip>
       ) : (
-        <a
-          href={releaseUrl}
-          target="_blank"
-          rel="noopener noreferrer"
-          className="flex items-center justify-center text-xs text-text-tertiary font-mono opacity-70 hover:opacity-100 hover:text-text-link transition-all"
-        >
-          <span className="font-semibold">RootCoz v{version}</span>
-        </a>
+        versionLink
       )}
     </div>
   ) : null
