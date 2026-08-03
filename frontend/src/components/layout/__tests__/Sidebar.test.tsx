@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { render, screen } from '@testing-library/react'
+import { render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { MemoryRouter } from 'react-router-dom'
 import { Sidebar } from '../Sidebar'
@@ -22,6 +22,12 @@ vi.mock('@/lib/auth', () => ({
   useAuth: () => mockAuth,
 }))
 
+vi.mock('@/lib/api', () => ({
+  api: {
+    get: vi.fn().mockResolvedValue({ version: '4.5.0' }),
+  },
+}))
+
 const zeroBadges = { activeCount: 0, unreadCount: 0, pendingCount: 0 }
 const defaultProps = { badges: zeroBadges, mobileOpen: false, onMobileClose: vi.fn() }
 
@@ -34,13 +40,16 @@ function renderSidebar(pathname = '/', props = defaultProps) {
 }
 
 describe('Sidebar', () => {
-  beforeEach(() => {
+  beforeEach(async () => {
     localStorage.clear()
     mockAuth.isAdmin = false
     mockAuth.canViewReports = false
     mockAuth.role = 'reviewer'
     mockAuth.username = 'testuser'
     mockAuth.loading = false
+    vi.clearAllMocks()
+    const { api } = vi.mocked(await import('@/lib/api'))
+    api.get.mockResolvedValue({ version: '4.5.0' })
   })
 
   it('renders the sidebar element', () => {
@@ -207,5 +216,52 @@ describe('Sidebar', () => {
     renderSidebar('/', { ...defaultProps, mobileOpen: true, onMobileClose: onClose })
     await userEvent.click(screen.getByTestId('mobile-sidebar-backdrop'))
     expect(onClose).toHaveBeenCalledOnce()
+  })
+
+  // ─── Version footer ──────────────────────────────────────────────
+
+  it('shows server version in desktop sidebar', async () => {
+    renderSidebar()
+    await waitFor(() => {
+      expect(screen.getByTestId('sidebar-version')).toHaveTextContent('v4.5.0')
+    })
+  })
+
+  it('shows server version in mobile sidebar', async () => {
+    renderSidebar('/', { ...defaultProps, mobileOpen: true })
+    await waitFor(() => {
+      const footers = screen.getAllByTestId('sidebar-version')
+      expect(footers.length).toBe(2)
+      for (const footer of footers) {
+        expect(footer).toHaveTextContent('v4.5.0')
+      }
+    })
+  })
+
+  it('hides version footer when health endpoint fails', async () => {
+    const { api } = vi.mocked(await import('@/lib/api'))
+    api.get.mockRejectedValue(new Error('unavailable'))
+    renderSidebar()
+    // Give effect time to settle; footer should stay absent
+    await waitFor(() => {
+      expect(api.get).toHaveBeenCalledWith('/api/health')
+    })
+    expect(screen.queryByTestId('sidebar-version')).toBeNull()
+  })
+
+  it('shows abbreviated version with tooltip when sidebar is collapsed', async () => {
+    localStorage.setItem('rootcoz_sidebar_collapsed', 'true')
+    renderSidebar()
+    await waitFor(() => {
+      expect(screen.getByTestId('sidebar-version')).toBeDefined()
+    })
+    // Trigger span shows exactly "v" (not the full version)
+    const trigger = screen.getByTestId('sidebar-version').querySelector('span')
+    expect(trigger?.textContent).toBe('v')
+    // Full version is in the tooltip content (portaled; opens on hover)
+    await userEvent.hover(trigger!)
+    await waitFor(() => {
+      expect(screen.getByRole('tooltip')).toHaveTextContent('v4.5.0')
+    })
   })
 })

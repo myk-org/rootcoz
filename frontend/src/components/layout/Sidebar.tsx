@@ -16,6 +16,7 @@ import {
 import { NavBadge } from '@/components/shared/NavBadge'
 import { Separator } from '@/components/ui/separator'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
+import { api } from '@/lib/api'
 import { useAuth } from '@/lib/auth'
 import { cn } from '@/lib/utils'
 
@@ -97,6 +98,26 @@ export function Sidebar({ badges, mobileOpen, onMobileClose }: SidebarProps) {
   useEffect(() => {
     try { localStorage.setItem(LS_COLLAPSED_KEY, String(collapsed)) } catch { /* storage unavailable */ }
   }, [collapsed])
+
+  // ─── Server version ─────────────────────────────────────────────
+  const [version, setVersion] = useState('')
+
+  useEffect(() => {
+    let cancelled = false
+
+    async function fetchVersion() {
+      try {
+        const data = await api.get<{ version: string }>('/api/health')
+        if (cancelled || !data.version) return
+        setVersion(data.version)
+      } catch (err) {
+        console.debug('Failed to fetch server version:', err)
+      }
+    }
+
+    fetchVersion()
+    return () => { cancelled = true }
+  }, [])
 
   // ─── Drag resize ────────────────────────────────────────────────
   const [isDragging, setIsDragging] = useState(false)
@@ -208,6 +229,21 @@ export function Sidebar({ badges, mobileOpen, onMobileClose }: SidebarProps) {
     </nav>
   )
 
+  const versionFooter = version ? (
+    <div data-testid="sidebar-version" className="border-t border-border-default px-3 py-2">
+      {collapsed ? (
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <span className="block text-center text-[10px] text-text-tertiary font-mono">v</span>
+          </TooltipTrigger>
+          <TooltipContent side="right">v{version}</TooltipContent>
+        </Tooltip>
+      ) : (
+        <span className="text-[10px] text-text-tertiary font-mono">v{version}</span>
+      )}
+    </div>
+  ) : null
+
   return (
     <TooltipProvider delayDuration={200}>
       {/* ─── Desktop sidebar ─────────────────────────────────────── */}
@@ -217,6 +253,7 @@ export function Sidebar({ badges, mobileOpen, onMobileClose }: SidebarProps) {
         style={{ width: effectiveWidth }}
       >
         {sidebarContent}
+        {versionFooter}
 
         {/* Drag handle */}
         <div
@@ -241,6 +278,7 @@ export function Sidebar({ badges, mobileOpen, onMobileClose }: SidebarProps) {
             className="fixed inset-y-0 left-0 z-50 flex w-64 flex-col border-r border-border-default bg-surface-card pt-16 md:hidden"
           >
             {sidebarContent}
+            {versionFooter}
           </aside>
         </>
       )}
