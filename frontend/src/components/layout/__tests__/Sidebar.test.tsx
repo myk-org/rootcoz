@@ -47,6 +47,7 @@ describe('Sidebar', () => {
     mockAuth.role = 'reviewer'
     mockAuth.username = 'testuser'
     mockAuth.loading = false
+    mockAuth.authenticated = true
     vi.clearAllMocks()
     const { api } = vi.mocked(await import('@/lib/api'))
     api.get.mockResolvedValue({ version: '4.5.0' })
@@ -246,6 +247,16 @@ describe('Sidebar', () => {
     await waitFor(() => {
       expect(api.get).toHaveBeenCalledWith('/api/version', expect.objectContaining({ signal: expect.any(AbortSignal) }))
     })
+    expect(screen.queryByTestId('sidebar-version')).toBeNull()
+  })
+
+  it('does not fetch version when not authenticated', async () => {
+    const { api } = vi.mocked(await import('@/lib/api'))
+    mockAuth.authenticated = false
+    renderSidebar()
+    // Give effect time to settle
+    await new Promise(r => setTimeout(r, 50))
+    expect(api.get).not.toHaveBeenCalled()
     expect(screen.queryByTestId('sidebar-version')).toBeNull()
   })
 

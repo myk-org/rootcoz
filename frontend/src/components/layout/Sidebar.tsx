@@ -73,7 +73,7 @@ interface SidebarProps {
 
 export function Sidebar({ badges, mobileOpen, onMobileClose }: SidebarProps) {
   const location = useLocation()
-  const { isAdmin, canViewReports, role, username, loading } = useAuth()
+  const { isAdmin, canViewReports, role, username, loading, authenticated } = useAuth()
 
   // ─── Width / collapse state ─────────────────────────────────────
   const [collapsed, setCollapsed] = useState(() => {
@@ -103,6 +103,8 @@ export function Sidebar({ badges, mobileOpen, onMobileClose }: SidebarProps) {
   const [version, setVersion] = useState('')
 
   useEffect(() => {
+    if (loading || !authenticated) return
+
     const controller = new AbortController()
 
     async function fetchVersion() {
@@ -118,7 +120,7 @@ export function Sidebar({ badges, mobileOpen, onMobileClose }: SidebarProps) {
 
     fetchVersion()
     return () => { controller.abort() }
-  }, [])
+  }, [loading, authenticated])
 
   // ─── Drag resize ────────────────────────────────────────────────
   const [isDragging, setIsDragging] = useState(false)
