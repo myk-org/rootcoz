@@ -244,7 +244,7 @@ describe('Sidebar', () => {
     renderSidebar()
     // Give effect time to settle; footer should stay absent
     await waitFor(() => {
-      expect(api.get).toHaveBeenCalledWith('/api/health')
+      expect(api.get).toHaveBeenCalledWith('/api/version')
     })
     expect(screen.queryByTestId('sidebar-version')).toBeNull()
   })

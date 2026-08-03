@@ -274,6 +274,10 @@ class TestAuthEnforcement:
         assert resp.status_code in (200, 503), (
             f"Expected 200 or 503 for /api/health, got {resp.status_code}"
         )
+        resp = client.get("/api/version")
+        assert resp.status_code == 200, (
+            f"Expected 200 for /api/version, got {resp.status_code}"
+        )
         # Intentional unauthenticated schema discovery (issue #200): OpenAPI +
         # Swagger/ReDoc must return 200 without auth.
         for path in ["/openapi.json", "/docs", "/redoc"]:

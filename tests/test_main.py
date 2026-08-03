@@ -227,6 +227,15 @@ class TestHealthEndpoint:
         response = test_client.post("/health")
         assert response.status_code == 405
 
+    def test_version_endpoint(self, test_client) -> None:
+        """Test that /api/version returns version without auth."""
+        response = test_client.get("/api/version")
+        assert response.status_code == 200
+        data = response.json()
+        assert "version" in data
+        assert isinstance(data["version"], str)
+        assert len(data["version"]) > 0
+
 
 class TestAnalyzeEndpoint:
     """Tests for the /analyze endpoint."""

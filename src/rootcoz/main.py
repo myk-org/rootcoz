@@ -145,6 +145,7 @@ from rootcoz.models import (
     _SYSTEM_TAGS,
 )
 from rootcoz.monitoring import (
+    _get_app_version,
     build_health_response,
     dispatch_alert,
     error_tracker,
@@ -1522,6 +1523,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
             "/login",
             "/health",
             "/api/health",
+            "/api/version",
             "/api/auth/register",
             "/api/auth/login",
             "/api/auth/needs-key",
@@ -8381,6 +8383,12 @@ async def refresh_ai_models(request: Request) -> dict:
 async def health_check() -> dict:
     """Basic health check endpoint (legacy, lightweight)."""
     return {"status": "healthy"}
+
+
+@app.get("/api/version", operation_id="getVersion")
+async def get_version() -> dict:
+    """Return the application version (lightweight, no dependency checks)."""
+    return {"version": _get_app_version()}
 
 
 @app.get("/api/health", operation_id="healthCheckDetailed")

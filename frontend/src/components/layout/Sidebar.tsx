@@ -107,7 +107,7 @@ export function Sidebar({ badges, mobileOpen, onMobileClose }: SidebarProps) {
 
     async function fetchVersion() {
       try {
-        const data = await api.get<{ version: string }>('/api/health')
+        const data = await api.get<{ version: string }>('/api/version')
         if (cancelled || !data.version) return
         setVersion(data.version)
       } catch (err) {
