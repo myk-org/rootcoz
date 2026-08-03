@@ -254,8 +254,6 @@ describe('Sidebar', () => {
     const { api } = vi.mocked(await import('@/lib/api'))
     mockAuth.authenticated = false
     renderSidebar()
-    // Give effect time to settle
-    await new Promise(r => setTimeout(r, 50))
     expect(api.get).not.toHaveBeenCalled()
     expect(screen.queryByTestId('sidebar-version')).toBeNull()
   })

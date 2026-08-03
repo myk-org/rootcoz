@@ -103,7 +103,10 @@ export function Sidebar({ badges, mobileOpen, onMobileClose }: SidebarProps) {
   const [version, setVersion] = useState('')
 
   useEffect(() => {
-    if (loading || !authenticated) return
+    if (loading || !authenticated) {
+      setVersion('')
+      return
+    }
 
     const controller = new AbortController()
 
