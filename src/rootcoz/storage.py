@@ -5114,21 +5114,41 @@ async def auto_assign_job_metadata(
             if row is not None:
                 existing = _job_metadata_row_to_dict(row)
                 if not extras:
-                    # No extras, metadata already exists — no-op.
-                    await db.rollback()
-                    logger.debug(
-                        f"auto_assign_job_metadata: job '{job_name}' already has "
-                        "metadata, skipping"
+                    if matched is None:
+                        # No extras, no rule match — true no-op.
+                        await db.rollback()
+                        logger.debug(
+                            f"auto_assign_job_metadata: job '{job_name}' already has "
+                            "metadata, skipping"
+                        )
+                        return None
+                    # Fill missing scalar fields from rules (manual values take precedence).
+                    team = existing.get("team") or matched.get("team")
+                    tier = existing.get("tier") or matched.get("tier")
+                    version = existing.get("version") or matched.get("version")
+                    existing_labels = list(existing.get("labels") or [])
+                    merged_labels = merge_labels(
+                        existing_labels,
+                        list(matched.get("labels", [])),
                     )
-                    return None
-                existing_labels = list(existing.get("labels") or [])
-                merged_labels = merge_labels(existing_labels, extras)
-                if merged_labels == existing_labels:
-                    await db.rollback()
-                    return existing
-                team = existing.get("team")
-                tier = existing.get("tier")
-                version = existing.get("version")
+                    # Check if anything actually changed.
+                    if (
+                        team == existing.get("team")
+                        and tier == existing.get("tier")
+                        and version == existing.get("version")
+                        and merged_labels == existing_labels
+                    ):
+                        await db.rollback()
+                        return None
+                else:
+                    existing_labels = list(existing.get("labels") or [])
+                    merged_labels = merge_labels(existing_labels, extras)
+                    if merged_labels == existing_labels:
+                        await db.rollback()
+                        return None
+                    team = existing.get("team")
+                    tier = existing.get("tier")
+                    version = existing.get("version")
             else:
                 # No existing metadata — use rule match if available.
                 team = matched.get("team") if matched else None

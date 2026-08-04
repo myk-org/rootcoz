@@ -276,12 +276,16 @@ class TestAutoAssignJobMetadata:
             assert stored["team"] == "storage"
 
     async def test_no_overwrite_existing_metadata(self, setup_test_db: Path) -> None:
+        """Manual non-NULL values take precedence; NULL fields may be filled from rules."""
         with patch.object(storage, "DB_PATH", setup_test_db):
             await storage.set_job_metadata("test-cnv-storage-nfs", team="manual-team")
             result = await storage.auto_assign_job_metadata(
                 "test-cnv-storage-nfs", self.RULES
             )
-            assert result is None
+            assert result is not None
+            assert result["team"] == "manual-team"
+            assert result["tier"] == "t2"
+            assert result["labels"] == ["pytest"]
 
             stored = await storage.get_job_metadata("test-cnv-storage-nfs")
             assert stored["team"] == "manual-team"
@@ -368,6 +372,38 @@ class TestAutoAssignJobMetadata:
             stored = await storage.get_job_metadata("job-a")
             assert stored is not None
             assert stored["labels"] == ["a"]
+
+    async def test_rule_fills_labels_only_row(self, setup_test_db: Path) -> None:
+        """Rules fill NULL team/tier on a labels-only row from a previous extras-only call."""
+        with patch.object(storage, "DB_PATH", setup_test_db):
+            # First call: extras only, no rule match → labels-only row
+            await storage.auto_assign_job_metadata(
+                "test-cnv-storage-nfs",
+                [],
+                extra_labels=["Nightly"],
+            )
+            meta = await storage.get_job_metadata("test-cnv-storage-nfs")
+            assert meta is not None
+            assert meta["team"] is None
+            assert meta["labels"] == ["Nightly"]
+
+            # Second call: rules match, no extras → fills team/tier/version
+            result = await storage.auto_assign_job_metadata(
+                "test-cnv-storage-nfs",
+                self.RULES,
+            )
+            assert result is not None
+            assert result["team"] == "storage"
+            assert result["labels"] == ["Nightly", "pytest"]  # merged
+
+    async def test_noop_merge_returns_none(self, setup_test_db: Path) -> None:
+        """When extras don't change labels, return None (not the existing dict)."""
+        with patch.object(storage, "DB_PATH", setup_test_db):
+            await storage.set_job_metadata("job-x", labels=["a", "b"])
+            result = await storage.auto_assign_job_metadata(
+                "job-x", [], extra_labels=["a", "b"]
+            )
+            assert result is None
 
 
 # --- API endpoint tests ---
