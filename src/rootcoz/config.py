@@ -1,15 +1,15 @@
 """Configuration settings from environment variables."""
 
 import os
-from typing import NamedTuple
 from functools import lru_cache
+from typing import Any, NamedTuple
 from urllib.parse import urlsplit, urlunsplit
 
-from rootcoz.ai_client import VALID_AI_PROVIDERS, normalize_provider
 from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from simple_logger.logger import get_logger
 
+from rootcoz.ai_client import VALID_AI_PROVIDERS, normalize_provider
 from rootcoz.metadata_rules import load_metadata_rules
 from rootcoz.vapid import get_vapid_config
 
@@ -41,7 +41,7 @@ def _split_outside_brackets(raw: str) -> list[str]:
     return parts
 
 
-def parse_peer_configs(raw: str) -> list[dict]:
+def parse_peer_configs(raw: str) -> list[dict[str, str]]:
     """Parse 'provider:model,provider:model' into list of dicts.
 
     Model names may contain commas inside square brackets
@@ -74,7 +74,7 @@ def parse_peer_configs(raw: str) -> list[dict]:
     return result
 
 
-def parse_additional_repos(raw: str) -> list[dict]:
+def parse_additional_repos(raw: str) -> list[dict[str, Any]]:
     """Parse 'name:url,name:url' or 'name:url:ref@token' into list of dicts.
 
     Token is separated from the URL (or URL:ref) by ``@token`` at the end.
@@ -107,7 +107,7 @@ def parse_additional_repos(raw: str) -> list[dict]:
             # Remove the @token suffix from url_raw
             url_raw = url_raw[: url_raw.rfind("@" + token)]
         url, ref = parse_repo_ref(url_raw)
-        entry_dict: dict = {"name": name, "url": url, "ref": ref}
+        entry_dict: dict[str, Any] = {"name": name, "url": url, "ref": ref}
         if token:
             entry_dict["token"] = token
         result.append(entry_dict)
@@ -535,9 +535,7 @@ class Settings(BaseSettings):
         or a server-level GITHUB_TOKEN since feedback uses user-scoped
         tokens and issues go to the hardcoded project repo.
         """
-        if self.enable_github_issues is False:
-            return False
-        return True
+        return self.enable_github_issues is not False
 
     @property
     def web_push_enabled(self) -> bool:
@@ -564,7 +562,7 @@ class Settings(BaseSettings):
         return result
 
     @property
-    def metadata_rules(self) -> list[dict]:
+    def metadata_rules(self) -> list[dict[str, Any]]:
         """Load and cache metadata rules from the configured file.
 
         Rules are cached for the process lifetime.  Changes to the rules
@@ -701,8 +699,13 @@ async def load_db_settings() -> None:
             # Decrypt if encrypted (sensitive values are stored encrypted)
             try:
                 value = decrypt_value(value)
-            except Exception:
-                pass  # Not encrypted or decryption failed — use as-is
+            except (RuntimeError, OSError, UnicodeDecodeError, ValueError) as exc:
+                # Not encrypted or decryption failed — use as-is
+                logger.debug(
+                    "Failed to decrypt setting %s; using raw value: %s",
+                    key,
+                    exc,
+                )
             _db_settings_cache[key] = value
 
         if _db_settings_cache:

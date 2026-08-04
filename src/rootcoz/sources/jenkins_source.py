@@ -48,7 +48,10 @@ from rootcoz.sources.base import (
     run_console_only_analysis,
     write_console_output_file,
 )
-from rootcoz.utils import is_jenkins_connectivity_error
+from rootcoz.utils import (
+    JENKINS_CONNECTIVITY_EXCEPTIONS,
+    is_jenkins_connectivity_error,
+)
 
 logger = get_logger(name=__name__, level=os.environ.get("LOG_LEVEL", "INFO"))
 
@@ -79,9 +82,9 @@ def build_jenkins_url(base_url: str, job_name: str, build_number: int) -> str:
     return f"{base_url.rstrip('/')}/job/{job_path}/{build_number}/"
 
 
-def _extract_build_params(build_info: dict) -> list[dict]:
+def _extract_build_params(build_info: dict[str, Any]) -> list[dict[str, Any]]:
     """Extract build parameters from Jenkins build info, filtering sensitive values."""
-    params: list[dict] = []
+    params: list[dict[str, Any]] = []
     for action in build_info.get("actions", []):
         if action and action.get("_class", "").endswith("ParametersAction"):
             for param in action.get("parameters", []):
@@ -101,12 +104,14 @@ class ChildJobResult:
     """
 
     analysis: ChildJobAnalysis
-    test_entry_scopes: list[tuple[str, int, list[dict]]] = field(default_factory=list)
+    test_entry_scopes: list[tuple[str, int, list[dict[str, Any]]]] = field(
+        default_factory=list
+    )
 
 
 def _normalize_child_results(
     failed_children: list[tuple[str, int]],
-    child_results: list,
+    child_results: list[Any],
 ) -> list[ChildJobResult]:
     """Convert parallel child-analysis results into ChildJobResult objects.
 
@@ -144,7 +149,7 @@ def _child_counts_kwargs(source_result: CISourceResult) -> tuple[int, int, int]:
 
 def _own_test_scope(
     job_name: str, build_number: int, source_result: CISourceResult
-) -> list[tuple[str, int, list[dict]]]:
+) -> list[tuple[str, int, list[dict[str, Any]]]]:
     """Build a single-scope list for this child's own test entries (if any)."""
     entries = source_result.test_entry_dicts()
     if not entries:
@@ -158,6 +163,19 @@ class JenkinsError(Exception):
     def __init__(self, message: str, status_code: int = 502) -> None:
         super().__init__(message)
         self.status_code = status_code
+
+
+# Jenkins API / network errors that handle_jenkins_exception understands.
+_JENKINS_FETCH_EXCEPTIONS: tuple[type[Exception], ...] = (
+    jenkins.JenkinsException,
+    JenkinsError,
+    *JENKINS_CONNECTIVITY_EXCEPTIONS,
+)
+# Same set plus OSError for artifact I/O paths (except cannot unpack inline).
+_JENKINS_FETCH_WITH_OS: tuple[type[Exception], ...] = (
+    *_JENKINS_FETCH_EXCEPTIONS,
+    OSError,
+)
 
 
 def handle_jenkins_exception(
@@ -220,7 +238,7 @@ def handle_jenkins_exception(
     )
 
 
-def extract_failed_child_jobs(build_info: dict) -> list[tuple[str, int]]:
+def extract_failed_child_jobs(build_info: dict[str, Any]) -> list[tuple[str, int]]:
     """Extract failed child job names and build numbers from pipeline build info.
 
     Looks for failed jobs in subBuilds (Pipeline plugin) and triggeredBuilds
@@ -327,7 +345,9 @@ class TestReportExtraction:
     skipped: list[BaseTestEntry] = field(default_factory=list)
 
 
-def extract_failures_from_test_report(test_report: dict) -> TestReportExtraction:
+def extract_failures_from_test_report(
+    test_report: dict[str, Any],
+) -> TestReportExtraction:
     """Extract all test cases from Jenkins test report.
 
     Parses the structured test report from Jenkins /testReport/api/json endpoint
@@ -468,12 +488,12 @@ class JenkinsSource(CISource):
         # ------------------------------------------------------------------
         # 1. Get build info
         # ------------------------------------------------------------------
-        build_info: dict = {}
+        build_info: dict[str, Any] = {}
         try:
             build_info = await asyncio.to_thread(
                 self.client.get_build_info_safe, self.job_name, self.build_number
             )
-        except Exception as e:
+        except _JENKINS_FETCH_EXCEPTIONS as e:
             handle_jenkins_exception(e, self.job_name, self.build_number)
 
         build_result = build_info.get("result")
@@ -495,7 +515,7 @@ class JenkinsSource(CISource):
                         self.settings.jenkins_artifacts_max_size_mb,
                     )
                     self._extract_path = extract_path
-                except Exception as exc:
+                except OSError as exc:
                     logger.warning(f"Failed to process artifacts: {exc}")
 
         # ------------------------------------------------------------------
@@ -506,7 +526,7 @@ class JenkinsSource(CISource):
             console_output = await asyncio.to_thread(
                 self.client.get_build_console, self.job_name, self.build_number
             )
-        except Exception as e:
+        except _JENKINS_FETCH_EXCEPTIONS as e:
             handle_jenkins_exception(e, self.job_name, self.build_number)
 
         # ------------------------------------------------------------------
@@ -534,7 +554,7 @@ class JenkinsSource(CISource):
                 self.job_name,
                 self.build_number,
             )
-        except Exception as exc:
+        except _JENKINS_FETCH_EXCEPTIONS as exc:
             handle_jenkins_exception(exc, self.job_name, self.build_number)
         extraction = (
             extract_failures_from_test_report(test_report)
@@ -592,10 +612,10 @@ class JenkinsSource(CISource):
         custom_prompt: str = "",
         server_url: str = "",
         job_id: str = "",
-        peer_ai_configs: list | None = None,
-        cloned_repos: dict | None = None,
+        peer_ai_configs: list[Any] | None = None,
+        cloned_repos: dict[str, Any] | None = None,
         auth_header: str = "",
-    ) -> tuple[list[ChildJobAnalysis], list[tuple[str, int, list[dict]]]]:
+    ) -> tuple[list[ChildJobAnalysis], list[tuple[str, int, list[dict[str, Any]]]]]:
         """Analyze failed Jenkins child jobs in parallel.
 
         Returns:
@@ -631,7 +651,7 @@ class JenkinsSource(CISource):
         )
         bundles = _normalize_child_results(source_result.child_job_infos, child_results)
         analyses = [b.analysis for b in bundles]
-        scopes: list[tuple[str, int, list[dict]]] = []
+        scopes: list[tuple[str, int, list[dict[str, Any]]]] = []
         for bundle in bundles:
             scopes.extend(bundle.test_entry_scopes)
         return analyses, scopes
@@ -659,7 +679,7 @@ class JenkinsSource(CISource):
                     len(console_output),
                     len(console_context),
                 )
-        except Exception as exc:
+        except _JENKINS_FETCH_EXCEPTIONS as exc:
             warnings.append(f"Failed to refetch Jenkins console: {exc}")
             logger.warning("Failed to refetch Jenkins console: %s", exc)
 
@@ -684,7 +704,7 @@ class JenkinsSource(CISource):
                     if extract_path:
                         self._extract_path = extract_path
                         logger.info("Refetched Jenkins artifacts to %s", extract_path)
-            except Exception as exc:
+            except _JENKINS_FETCH_WITH_OS as exc:
                 warnings.append(f"Failed to refetch Jenkins artifacts: {exc}")
                 logger.warning("Failed to refetch Jenkins artifacts: %s", exc)
 
@@ -700,8 +720,8 @@ class JenkinsSource(CISource):
     @classmethod
     def from_stored_params(
         cls,
-        params: dict,
-        settings=None,
+        params: dict[str, Any],
+        settings: Any = None,
         *,
         child_job_name: str = "",
         child_build_number: int = 0,
@@ -807,9 +827,9 @@ class JenkinsSource(CISource):
         need_build_info = not build_info_file.exists()
 
         console_output: str | None = None
-        build_info: dict = {}
+        build_info: dict[str, Any] = {}
         if need_console or need_build_info:
-            tasks: list = []
+            tasks: list[Any] = []
             if need_console:
                 tasks.append(
                     asyncio.to_thread(
@@ -847,9 +867,10 @@ class JenkinsSource(CISource):
                 else:
                     build_info = r
 
-        if console_output is not None:
-            if write_console_output_file(workspace, console_output):
-                wrote_any = True
+        if console_output is not None and write_console_output_file(
+            workspace, console_output
+        ):
+            wrote_any = True
 
         if build_info and need_build_info:
             try:
@@ -884,7 +905,7 @@ class JenkinsSource(CISource):
                         self.job_name,
                         self.build_number,
                     )
-                except Exception:
+                except _JENKINS_FETCH_EXCEPTIONS:
                     logger.warning(
                         "Chat: failed to fetch build info for artifacts",
                         exc_info=True,
@@ -915,19 +936,19 @@ class JenkinsSource(CISource):
                                 workspace,
                             )
                             wrote_any = True
-                except Exception:
+                except _JENKINS_FETCH_WITH_OS:
                     logger.warning("Chat: failed to download artifacts", exc_info=True)
                     self.cleanup()
 
         return wrote_any
 
     @classmethod
-    def default_display_name(cls, body) -> str:
+    def default_display_name(cls, body: Any) -> str:
         """Default display name for Jenkins analyses."""
         return getattr(body, "job_name", None) or "jenkins-analysis"
 
     @classmethod
-    def validate_request(cls, body, merged) -> None:
+    def validate_request(cls, body: Any, merged: Any) -> None:
         """Require Jenkins credentials before enqueue."""
         _ = body
         if not merged.jenkins_url:
@@ -936,7 +957,9 @@ class JenkinsSource(CISource):
             )
 
     @classmethod
-    def build_request_params(cls, body, merged, base_params: dict) -> dict:
+    def build_request_params(
+        cls, body: Any, merged: Any, base_params: dict[str, Any]
+    ) -> dict[str, Any]:
         """Stamp Jenkins-specific fields onto persisted params."""
         base_params["job_name"] = body.job_name
         base_params["build_number"] = body.build_number
@@ -958,9 +981,9 @@ class JenkinsSource(CISource):
         return base_params
 
     @classmethod
-    def pre_persist_identity_from_request(cls, body) -> dict:
+    def pre_persist_identity_from_request(cls, body: Any) -> dict[str, Any]:
         """Stamp job_name and build_number on initial result."""
-        result: dict = {}
+        result: dict[str, Any] = {}
         if getattr(body, "job_name", None):
             result["job_name"] = body.job_name
         if getattr(body, "build_number", None):
@@ -968,7 +991,7 @@ class JenkinsSource(CISource):
         return result
 
     @classmethod
-    def from_analyze_request(cls, body, merged) -> JenkinsSource:
+    def from_analyze_request(cls, body: Any, merged: Any) -> JenkinsSource:
         """Construct JenkinsSource from an analyze/re-analyze request."""
         assert body.job_name is not None
         assert body.build_number is not None
@@ -979,9 +1002,11 @@ class JenkinsSource(CISource):
         )
 
     @classmethod
-    def restore_reanalyze_fields(cls, decrypted_params: dict) -> dict:
+    def restore_reanalyze_fields(
+        cls, decrypted_params: dict[str, Any]
+    ) -> dict[str, Any]:
         """Restore Jenkins fields for re-analysis from stored params."""
-        fields: dict = {}
+        fields: dict[str, Any] = {}
         job_name = decrypted_params.get("job_name", "")
         build_number = decrypted_params.get("build_number", 0)
         if not job_name or not build_number:
@@ -1008,7 +1033,7 @@ class JenkinsSource(CISource):
         return fields
 
     @classmethod
-    def initial_status(cls, body, merged) -> str:
+    def initial_status(cls, body: Any, merged: Any) -> str:
         """Use waiting when wait-for-completion is enabled."""
         _ = body
         if merged.wait_for_completion and merged.jenkins_url:
@@ -1016,7 +1041,7 @@ class JenkinsSource(CISource):
         return "pending"
 
     @classmethod
-    def pre_enqueue_build_url(cls, body, merged) -> str:
+    def pre_enqueue_build_url(cls, body: Any, merged: Any) -> str:
         """Compute Jenkins build URL before fetch."""
         if (
             merged.jenkins_url
@@ -1074,7 +1099,7 @@ class JenkinsSource(CISource):
         )
         from rootcoz.storage import patch_result_json
 
-        def _patch(data: dict) -> None:
+        def _patch(data: dict[str, Any]) -> None:
             params = data.get("request_params")
             if not isinstance(params, dict):
                 return
@@ -1105,7 +1130,7 @@ async def analyze_child_job(
     custom_prompt: str = "",
     server_url: str = "",
     job_id: str = "",
-    peer_ai_configs: list | None = None,
+    peer_ai_configs: list[Any] | None = None,
     peer_analysis_max_rounds: int = 3,
     additional_repos: dict[str, Path] | None = None,
     max_concurrent_ai_calls: int = 3,
@@ -1157,7 +1182,7 @@ async def analyze_child_job(
     # Fetch build data via JenkinsSource
     try:
         source_result = await source.fetch()
-    except Exception as e:
+    except JenkinsError as e:
         logger.error(
             "Child job %s #%d build info fetch failed: %s", job_name, build_number, e
         )
@@ -1212,7 +1237,7 @@ async def _analyze_grouped_failures(
     custom_prompt: str = "",
     server_url: str = "",
     job_id: str = "",
-    peer_ai_configs: list | None = None,
+    peer_ai_configs: list[Any] | None = None,
     peer_analysis_max_rounds: int = 3,
     max_concurrent_ai_calls: int = 3,
     auth_header: str = "",
@@ -1310,7 +1335,7 @@ async def _analyze_child_job_inner(
     custom_prompt: str,
     server_url: str,
     job_id: str,
-    peer_ai_configs: list | None,
+    peer_ai_configs: list[Any] | None,
     peer_analysis_max_rounds: int,
     additional_repos: dict[str, Path] | None,
     max_concurrent_ai_calls: int,
@@ -1548,22 +1573,18 @@ async def wait_for_jenkins_completion(
 
     try:
         await asyncio.to_thread(client.get_whoami)
-    except Exception as e:
+    except _JENKINS_FETCH_EXCEPTIONS as e:
         if is_jenkins_connectivity_error(e):
-            logger.error(
-                "Cannot reach Jenkins at %s: %s", jenkins_url, e, exc_info=True
-            )
+            logger.exception("Cannot reach Jenkins at %s", jenkins_url)
             return False, (
                 "Jenkins connectivity error: unable to reach Jenkins; "
                 "please verify the Jenkins URL and network connectivity"
             )
         else:
-            logger.error(
-                "Jenkins preflight failed at %s (%s): %s",
+            logger.exception(
+                "Jenkins preflight failed at %s (%s)",
                 jenkins_url,
                 type(e).__name__,
-                e,
-                exc_info=True,
             )
             err_str = str(e).lower()
             if isinstance(e, jenkins.JenkinsException) and any(
@@ -1616,11 +1637,9 @@ async def wait_for_jenkins_completion(
             )
             return False, f"Jenkins job {job_name} #{build_number} not found (404)"
 
-        except Exception as e:
+        except _JENKINS_FETCH_EXCEPTIONS as e:
             if not is_jenkins_connectivity_error(e):
-                logger.error(
-                    "Non-transient error checking Jenkins status", exc_info=True
-                )
+                logger.exception("Non-transient error checking Jenkins status")
                 return False, "Jenkins poll failed; check server logs for details"
             consecutive_failures += 1
             logger.warning(
@@ -1630,11 +1649,10 @@ async def wait_for_jenkins_completion(
                 e,
             )
             if consecutive_failures >= max_consecutive_failures:
-                logger.error(
+                logger.exception(
                     "Cannot reach Jenkins at %s after %d consecutive failures",
                     jenkins_url,
                     consecutive_failures,
-                    exc_info=True,
                 )
                 return False, unreachable_error
 

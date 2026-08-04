@@ -5,7 +5,6 @@ from typing import Any
 
 import httpx
 
-
 # Approximate response body preview length for error messages (log readability, not data truncation)
 _ERROR_BODY_PREVIEW_LEN = 500
 
@@ -63,8 +62,8 @@ class RootCozClient:
         method: str,
         path: str,
         *,
-        params: dict | None = None,
-        json: dict | None = None,
+        params: dict[str, Any] | None = None,
+        json: dict[str, Any] | None = None,
         accept_statuses: tuple[int, ...] = (200,),
     ) -> Any:
         """Send an HTTP request and return parsed JSON.
@@ -126,7 +125,7 @@ class RootCozClient:
 
     # -- Auth -----------------------------------------------------------------
 
-    def register(self, username: str) -> dict:
+    def register(self, username: str) -> dict[str, Any]:
         """Register a new user and get an API key. POST /api/auth/register"""
         return self._request(
             "POST",
@@ -134,7 +133,7 @@ class RootCozClient:
             json={"username": username},
         )
 
-    def login(self, username: str, api_key: str) -> dict:
+    def login(self, username: str, api_key: str) -> dict[str, Any]:
         """Login with username and API key. POST /api/auth/login"""
         return self._request(
             "POST",
@@ -142,21 +141,21 @@ class RootCozClient:
             json={"username": username, "api_key": api_key},
         )
 
-    def rotate_key(self) -> dict:
+    def rotate_key(self) -> dict[str, Any]:
         """Rotate the current user's API key. POST /api/auth/rotate-key"""
         return self._request("POST", "/api/auth/rotate-key")
 
-    def logout(self) -> dict:
+    def logout(self) -> dict[str, Any]:
         """Logout (clear session). POST /api/auth/logout"""
         return self._request("POST", "/api/auth/logout")
 
-    def auth_me(self) -> dict:
+    def auth_me(self) -> dict[str, Any]:
         """Get current user info including can_view_reports. GET /api/auth/me"""
         return self._request("GET", "/api/auth/me")
 
     # -- Admin ----------------------------------------------------------------
 
-    def admin_list_users(self) -> dict:
+    def admin_list_users(self) -> dict[str, Any]:
         """List all users. GET /api/admin/users"""
         return self._request("GET", "/api/admin/users")
 
@@ -166,7 +165,7 @@ class RootCozClient:
         role: str,
         *,
         can_view_reports: bool = False,
-    ) -> dict:
+    ) -> dict[str, Any]:
         """Create a user with the specified role and optional can_view_reports.
 
         POST /api/admin/users/create. Response can_view_reports is effective
@@ -182,7 +181,9 @@ class RootCozClient:
             },
         )
 
-    def admin_set_can_view_reports(self, username: str, can_view_reports: bool) -> dict:
+    def admin_set_can_view_reports(
+        self, username: str, can_view_reports: bool
+    ) -> dict[str, Any]:
         """Set can_view_reports for a user. PUT /api/admin/users/{username}/can-view-reports"""
         return self._request(
             "PUT",
@@ -190,15 +191,15 @@ class RootCozClient:
             json={"can_view_reports": can_view_reports},
         )
 
-    def admin_delete_user(self, username: str) -> dict:
+    def admin_delete_user(self, username: str) -> dict[str, Any]:
         """Delete an admin user. DELETE /api/admin/users/{username}"""
         return self._request("DELETE", f"/api/admin/users/{username}")
 
-    def admin_rotate_key(self, username: str) -> dict:
+    def admin_rotate_key(self, username: str) -> dict[str, Any]:
         """Rotate an admin user's API key. POST /api/admin/users/{username}/rotate-key"""
         return self._request("POST", f"/api/admin/users/{username}/rotate-key")
 
-    def admin_change_role(self, username: str, role: str) -> dict:
+    def admin_change_role(self, username: str, role: str) -> dict[str, Any]:
         """Change a user's role. PUT /api/admin/users/{username}/role"""
         return self._request(
             "PUT",
@@ -206,7 +207,7 @@ class RootCozClient:
             json={"role": role},
         )
 
-    def admin_list_settings(self, reveal: bool = False) -> list[dict]:
+    def admin_list_settings(self, reveal: bool = False) -> list[dict[str, Any]]:
         """List all server settings. GET /api/admin/settings"""
         params = {}
         if reveal:
@@ -215,38 +216,40 @@ class RootCozClient:
             "GET", "/api/admin/settings", params=params if params else None
         )
 
-    def admin_set_setting(self, key: str, value: str) -> dict:
+    def admin_set_setting(self, key: str, value: str) -> dict[str, Any]:
         """Set a server setting. PUT /api/admin/settings"""
         return self._request(
             "PUT", "/api/admin/settings", json={"settings": {key: value}}
         )
 
-    def admin_reset_setting(self, key: str) -> dict:
+    def admin_reset_setting(self, key: str) -> dict[str, Any]:
         """Reset a server setting to env/default. DELETE /api/admin/settings/{key}"""
         return self._request("DELETE", f"/api/admin/settings/{key}")
 
-    def admin_settings_history(self, key: str = "", limit: int = 100) -> list[dict]:
+    def admin_settings_history(
+        self, key: str = "", limit: int = 100
+    ) -> list[dict[str, Any]]:
         """Get server settings change history."""
-        params: dict = {"limit": limit}
+        params: dict[str, Any] = {"limit": limit}
         if key:
             params["key"] = key
         return self._request("GET", "/api/admin/settings/history", params=params)
 
-    def approve_user(self, username: str) -> dict:
+    def approve_user(self, username: str) -> dict[str, Any]:
         """Approve a pending user. POST /api/admin/users/{username}/approve"""
         return self._request("POST", f"/api/admin/users/{username}/approve")
 
-    def reject_user(self, username: str) -> dict:
+    def reject_user(self, username: str) -> dict[str, Any]:
         """Reject a pending user. POST /api/admin/users/{username}/reject"""
         return self._request("POST", f"/api/admin/users/{username}/reject")
 
-    def list_pending_users(self) -> dict:
+    def list_pending_users(self) -> dict[str, Any]:
         """List users awaiting approval. GET /api/admin/users/pending"""
         return self._request("GET", "/api/admin/users/pending")
 
     # -- Health ---------------------------------------------------------------
 
-    def health(self) -> dict:
+    def health(self) -> dict[str, Any]:
         """Check server health. GET /api/health
 
         Falls back to GET /health if /api/health returns 404.
@@ -259,19 +262,19 @@ class RootCozClient:
                 return self._request("GET", "/health")
             raise
 
-    def version(self) -> dict:
+    def version(self) -> dict[str, Any]:
         """Get server version. GET /api/version"""
         return self._request("GET", "/api/version")
 
     # -- Results --------------------------------------------------------------
 
-    def list_results(self, limit: int = 50) -> list[dict]:
+    def list_results(self, limit: int = 50) -> list[dict[str, Any]]:
         """List recent analyzed jobs. GET /results?limit="""
         return self._request("GET", "/results", params={"limit": limit})
 
-    def dashboard(self, limit: int = 500) -> list[dict]:
+    def dashboard(self, limit: int = 500) -> list[dict[str, Any]]:
         """List analysis jobs with dashboard metadata. GET /api/dashboard"""
-        params: dict = {}
+        params: dict[str, Any] = {}
         if limit != 500:
             params["limit"] = limit
         return self._request("GET", "/api/dashboard", params=params or None)
@@ -291,9 +294,9 @@ class RootCozClient:
         review_status: str = "all",
         limit: int = 500,
         offset: int = 0,
-    ) -> dict:
+    ) -> dict[str, Any]:
         """List dashboard jobs filtered by metadata. GET /api/dashboard/filtered"""
-        params: dict = {
+        params: dict[str, Any] = {
             "team": team,
             "tier": tier,
             "version": version,
@@ -318,23 +321,23 @@ class RootCozClient:
             params["offset"] = offset
         return self._request("GET", "/api/dashboard/filtered", params=params)
 
-    def get_active_count(self) -> dict:
+    def get_active_count(self) -> dict[str, Any]:
         """Get count of currently active analyses. GET /api/dashboard/active-count"""
         return self._request("GET", "/api/dashboard/active-count")
 
-    def get_result(self, job_id: str, *, fields: str | None = None) -> dict:
+    def get_result(self, job_id: str, *, fields: str | None = None) -> dict[str, Any]:
         """Get a stored result by job_id. GET /results/{job_id}
 
         Optional ``fields`` is a comma-separated allowlist of paths for a
         sparse response (full values, never truncated). Discover paths with
         ``list_result_fields()`` / GET /api/results/fields.
         """
-        params: dict | None = None
+        params: dict[str, Any] | None = None
         if fields:
             params = {"fields": fields}
         return self._request("GET", f"/results/{job_id}", params=params)
 
-    def list_result_fields(self) -> dict:
+    def list_result_fields(self) -> dict[str, Any]:
         """List allowlisted sparse field paths. GET /api/results/fields"""
         return self._request("GET", "/api/results/fields")
 
@@ -347,9 +350,13 @@ class RootCozClient:
         *,
         child_job_name: str = "",
         child_build_number: int = 0,
-    ) -> dict:
+    ) -> dict[str, Any]:
         """Set tracked-in URL for a failure. PUT /results/{job_id}/tracked-in"""
-        body: dict = {"test_name": test_name, "url": url, "type": tracked_type}
+        body: dict[str, Any] = {
+            "test_name": test_name,
+            "url": url,
+            "type": tracked_type,
+        }
         if child_job_name:
             body["child_job_name"] = child_job_name
             if child_build_number:
@@ -360,23 +367,23 @@ class RootCozClient:
             json=body,
         )
 
-    def get_tracked_in(self, job_id: str) -> dict:
+    def get_tracked_in(self, job_id: str) -> dict[str, Any]:
         """Get tracked-in data for a job. GET /results/{job_id}/tracked-in"""
         return self._request("GET", f"/results/{job_id}/tracked-in")
 
-    def delete_tracked_in(self, job_id: str, link_id: int) -> dict:
+    def delete_tracked_in(self, job_id: str, link_id: int) -> dict[str, Any]:
         """Delete a tracked-in link. DELETE /results/{job_id}/tracked-in/{link_id}"""
         return self._request("DELETE", f"/results/{job_id}/tracked-in/{link_id}")
 
-    def delete_job(self, job_id: str) -> dict:
+    def delete_job(self, job_id: str) -> dict[str, Any]:
         """Delete a job and all related data. DELETE /results/{job_id}"""
         return self._request("DELETE", f"/results/{job_id}")
 
-    def abort_job(self, job_id: str) -> dict:
+    def abort_job(self, job_id: str) -> dict[str, Any]:
         """Abort a running or waiting analysis. POST /results/{job_id}/abort"""
         return self._request("POST", f"/results/{job_id}/abort")
 
-    def delete_jobs_bulk(self, job_ids: list[str]) -> dict:
+    def delete_jobs_bulk(self, job_ids: list[str]) -> dict[str, Any]:
         """Delete multiple jobs. DELETE /api/results/bulk"""
         return self._request("DELETE", "/api/results/bulk", json={"job_ids": job_ids})
 
@@ -389,8 +396,8 @@ class RootCozClient:
         *,
         name: str = "",
         tags: list[str] | None = None,
-        **kwargs,
-    ) -> dict:
+        **kwargs: Any,
+    ) -> dict[str, Any]:
         """Submit an analysis job. POST /analyze
 
         For Jenkins: ``analyze("job-name", 123)``
@@ -406,7 +413,7 @@ class RootCozClient:
         Returns:
             Queued status with job_id for polling.
         """
-        body: dict = {**kwargs}
+        body: dict[str, Any] = {**kwargs}
         body.setdefault("type", "jenkins")
         if body["type"] == "jenkins":
             if not job_name:
@@ -432,8 +439,8 @@ class RootCozClient:
         *,
         name: str = "",
         tags: list[str] | None = None,
-        **kwargs,
-    ) -> dict:
+        **kwargs: Any,
+    ) -> dict[str, Any]:
         """Submit JUnit XML for analysis. POST /analyze with type=file
 
         Args:
@@ -445,7 +452,7 @@ class RootCozClient:
         Returns:
             Queued status with job_id for polling.
         """
-        body: dict = {**kwargs}
+        body: dict[str, Any] = {**kwargs}
         body["type"] = "file"
         body["raw_xml"] = raw_xml
         if name:
@@ -459,7 +466,7 @@ class RootCozClient:
             accept_statuses=(202,),
         )
 
-    def re_analyze(self, job_id: str) -> dict:
+    def re_analyze(self, job_id: str) -> dict[str, Any]:
         """Re-analyze a previously analyzed job with the same settings. POST /re-analyze/{job_id}
 
         Args:
@@ -483,7 +490,7 @@ class RootCozClient:
         limit: int = 20,
         job_name: str = "",
         exclude_job_id: str = "",
-    ) -> dict:
+    ) -> dict[str, Any]:
         """Get pass/fail history for a test. GET /history/test/{test_name}"""
         return self._request(
             "GET",
@@ -499,7 +506,7 @@ class RootCozClient:
         self,
         signature: str,
         exclude_job_id: str = "",
-    ) -> dict:
+    ) -> dict[str, Any]:
         """Find tests by error signature. GET /history/search?signature="""
         return self._request(
             "GET",
@@ -511,7 +518,7 @@ class RootCozClient:
         self,
         job_name: str,
         exclude_job_id: str = "",
-    ) -> dict:
+    ) -> dict[str, Any]:
         """Get job-level statistics. GET /history/stats/{job_name}"""
         return self._request(
             "GET",
@@ -526,7 +533,7 @@ class RootCozClient:
         classification: str = "",
         limit: int = 50,
         offset: int = 0,
-    ) -> dict:
+    ) -> dict[str, Any]:
         """Get paginated failure history. GET /history/failures"""
         return self._request(
             "GET",
@@ -551,7 +558,7 @@ class RootCozClient:
         job_name: str = "",
         references: str = "",
         child_build_number: int = 0,
-    ) -> dict:
+    ) -> dict[str, Any]:
         """Classify a test. POST /history/classify"""
         body = {
             "test_name": test_name,
@@ -573,7 +580,7 @@ class RootCozClient:
         job_name: str = "",
         parent_job_name: str = "",
         job_id: str = "",
-    ) -> dict:
+    ) -> dict[str, Any]:
         """Get test classifications. GET /history/classifications"""
         return self._request(
             "GET",
@@ -589,7 +596,7 @@ class RootCozClient:
 
     # -- Comments -------------------------------------------------------------
 
-    def get_comments(self, job_id: str) -> dict:
+    def get_comments(self, job_id: str) -> dict[str, Any]:
         """Get comments and reviews for a job. GET /results/{job_id}/comments"""
         return self._request("GET", f"/results/{job_id}/comments")
 
@@ -600,9 +607,9 @@ class RootCozClient:
         comment: str,
         child_job_name: str = "",
         child_build_number: int = 0,
-    ) -> dict:
+    ) -> dict[str, Any]:
         """Add a comment to a test failure. POST /results/{job_id}/comments"""
-        body: dict = {
+        body: dict[str, Any] = {
             "test_name": test_name,
             "comment": comment,
         }
@@ -614,7 +621,7 @@ class RootCozClient:
             accept_statuses=(201,),
         )
 
-    def delete_comment(self, job_id: str, comment_id: int) -> dict:
+    def delete_comment(self, job_id: str, comment_id: int) -> dict[str, Any]:
         """Delete a comment. DELETE /results/{job_id}/comments/{comment_id}"""
         return self._request("DELETE", f"/results/{job_id}/comments/{comment_id}")
 
@@ -627,9 +634,9 @@ class RootCozClient:
         child_build_number: int | None = None,
         offset: int = 0,
         limit: int = 50,
-    ) -> dict:
+    ) -> dict[str, Any]:
         """Get paginated test entries. GET /api/results/{job_id}/tests"""
-        params: dict = {"offset": str(offset), "limit": str(limit)}
+        params: dict[str, Any] = {"offset": str(offset), "limit": str(limit)}
         if status:
             params["status"] = status
         if child_job_name is not None:
@@ -640,7 +647,7 @@ class RootCozClient:
 
     # -- Review ---------------------------------------------------------------
 
-    def get_review_status(self, job_id: str) -> dict:
+    def get_review_status(self, job_id: str) -> dict[str, Any]:
         """Get review summary for a job. GET /results/{job_id}/review-status"""
         return self._request("GET", f"/results/{job_id}/review-status")
 
@@ -651,13 +658,13 @@ class RootCozClient:
         reviewed: bool,
         child_job_name: str = "",
         child_build_number: int = 0,
-    ) -> dict:
+    ) -> dict[str, Any]:
         """Toggle the reviewed state for a test failure. PUT /results/{job_id}/reviewed"""
-        body: dict = {"test_name": test_name, "reviewed": reviewed}
+        body: dict[str, Any] = {"test_name": test_name, "reviewed": reviewed}
         body = self._with_child_scope(body, child_job_name, child_build_number)
         return self._request("PUT", f"/results/{job_id}/reviewed", json=body)
 
-    def enrich_comments(self, job_id: str) -> dict:
+    def enrich_comments(self, job_id: str) -> dict[str, Any]:
         """Enrich comments with live PR/ticket statuses. POST /results/{job_id}/enrich-comments"""
         return self._request("POST", f"/results/{job_id}/enrich-comments")
 
@@ -665,8 +672,8 @@ class RootCozClient:
 
     @staticmethod
     def _with_child_scope(
-        payload: dict, child_job_name: str = "", child_build_number: int = 0
-    ) -> dict:
+        payload: dict[str, Any], child_job_name: str = "", child_build_number: int = 0
+    ) -> dict[str, Any]:
         """Add child_job_name/child_build_number to *payload* when set."""
         if child_job_name:
             payload["child_job_name"] = child_job_name
@@ -693,9 +700,9 @@ class RootCozClient:
         include_github: bool = True,
         include_jira: bool = True,
         issue_prompt: str = "",
-    ) -> dict:
+    ) -> dict[str, Any]:
         """Build the common payload for tracker preview/create endpoints."""
-        payload: dict = {"test_name": test_name}
+        payload: dict[str, Any] = {"test_name": test_name}
         if title:
             payload["title"] = title
         if body_text:
@@ -722,7 +729,7 @@ class RootCozClient:
             payload["jira_security_level"] = jira_security_level
         return self._with_child_scope(payload, child_job_name, child_build_number)
 
-    def get_issue_prompt(self, job_id: str) -> dict:
+    def get_issue_prompt(self, job_id: str) -> dict[str, Any]:
         """Get issue prompt from test repo. GET /results/{job_id}/issue-prompt"""
         return self._request("GET", f"/results/{job_id}/issue-prompt")
 
@@ -738,7 +745,7 @@ class RootCozClient:
         github_token: str = "",
         github_repo_url: str = "",
         issue_prompt: str = "",
-    ) -> dict:
+    ) -> dict[str, Any]:
         """Preview a GitHub issue. POST /results/{job_id}/preview-github-issue"""
         body = self._build_tracker_body(
             test_name,
@@ -770,7 +777,7 @@ class RootCozClient:
         jira_project_key: str = "",
         jira_security_level: str = "",
         issue_prompt: str = "",
-    ) -> dict:
+    ) -> dict[str, Any]:
         """Preview a Jira bug. POST /results/{job_id}/preview-jira-bug"""
         body = self._build_tracker_body(
             test_name,
@@ -798,7 +805,7 @@ class RootCozClient:
         child_build_number: int = 0,
         github_token: str = "",
         github_repo_url: str = "",
-    ) -> dict:
+    ) -> dict[str, Any]:
         """Create a GitHub issue. POST /results/{job_id}/create-github-issue"""
         payload = self._build_tracker_body(
             test_name,
@@ -830,7 +837,7 @@ class RootCozClient:
         jira_project_key: str = "",
         jira_security_level: str = "",
         jira_issue_type: str = "Bug",
-    ) -> dict:
+    ) -> dict[str, Any]:
         """Create a Jira bug. POST /results/{job_id}/create-jira-bug"""
         payload = self._build_tracker_body(
             test_name,
@@ -855,15 +862,15 @@ class RootCozClient:
 
     # -- User Tokens ----------------------------------------------------------
 
-    def get_user_tokens(self) -> dict:
+    def get_user_tokens(self) -> dict[str, Any]:
         """Get saved user tokens. GET /api/user/tokens"""
         return self._request("GET", "/api/user/tokens")
 
     def save_user_tokens(
         self, github_token: str = "", jira_email: str = "", jira_token: str = ""
-    ) -> dict:
+    ) -> dict[str, Any]:
         """Save user tokens. PUT /api/user/tokens"""
-        body: dict = {}
+        body: dict[str, Any] = {}
         if github_token:
             body["github_token"] = github_token
         if jira_email:
@@ -879,9 +886,9 @@ class RootCozClient:
         token_type: str,
         token: str,
         email: str = "",
-    ) -> dict:
+    ) -> dict[str, Any]:
         """Validate a tracker token. POST /api/validate-token"""
-        body: dict = {"token_type": token_type, "token": token}
+        body: dict[str, Any] = {"token_type": token_type, "token": token}
         if email:
             body["email"] = email
         return self._request("POST", "/api/validate-token", json=body)
@@ -894,7 +901,7 @@ class RootCozClient:
         *,
         child_job_name: str | None = None,
         child_build_number: int | None = None,
-    ) -> dict:
+    ) -> dict[str, Any]:
         """Push classifications to Report Portal. POST /results/{job_id}/push-reportportal"""
         params: dict[str, str | int] = {}
         if child_job_name is not None:
@@ -907,7 +914,7 @@ class RootCozClient:
 
     # -- Capabilities ---------------------------------------------------------
 
-    def capabilities(self) -> dict:
+    def capabilities(self) -> dict[str, Any]:
         """Get server-level automation capabilities (GitHub issues, Jira bugs). GET /api/capabilities"""
         return self._request("GET", "/api/capabilities")
 
@@ -915,8 +922,8 @@ class RootCozClient:
 
     @staticmethod
     def _with_jira_auth_fields(
-        body: dict, jira_token: str = "", jira_email: str = ""
-    ) -> dict:
+        body: dict[str, Any], jira_token: str = "", jira_email: str = ""
+    ) -> dict[str, Any]:
         """Add jira_token/jira_email to *body* when set."""
         if jira_token and jira_token.strip():
             body["jira_token"] = jira_token.strip()
@@ -926,9 +933,9 @@ class RootCozClient:
 
     def jira_projects(
         self, jira_token: str = "", jira_email: str = "", query: str = ""
-    ) -> list[dict]:
+    ) -> list[dict[str, Any]]:
         """List Jira projects. POST /api/jira-projects"""
-        body: dict = {}
+        body: dict[str, Any] = {}
         if query:
             body["query"] = query
         body = self._with_jira_auth_fields(body, jira_token, jira_email)
@@ -936,9 +943,9 @@ class RootCozClient:
 
     def jira_security_levels(
         self, project_key: str, jira_token: str = "", jira_email: str = ""
-    ) -> list[dict]:
+    ) -> list[dict[str, Any]]:
         """List security levels for a Jira project. POST /api/jira-security-levels"""
-        body: dict = {"project_key": project_key}
+        body: dict[str, Any] = {"project_key": project_key}
         body = self._with_jira_auth_fields(body, jira_token, jira_email)
         return self._request("POST", "/api/jira-security-levels", json=body)
 
@@ -952,9 +959,9 @@ class RootCozClient:
         ai_model: str | None = None,
         call_type: str | None = None,
         group_by: str | None = None,
-    ) -> dict:
+    ) -> dict[str, Any]:
         """Get aggregated token usage with filters. GET /api/admin/token-usage"""
-        params: dict = {}
+        params: dict[str, Any] = {}
         if start_date:
             params["start_date"] = start_date
         if end_date:
@@ -969,53 +976,53 @@ class RootCozClient:
             params["group_by"] = group_by
         return self._request("GET", "/api/admin/token-usage", params=params)
 
-    def get_token_usage_summary(self) -> dict:
+    def get_token_usage_summary(self) -> dict[str, Any]:
         """Get token usage dashboard summary. GET /api/admin/token-usage/summary"""
         return self._request("GET", "/api/admin/token-usage/summary")
 
-    def get_token_usage_for_job(self, job_id: str) -> dict:
+    def get_token_usage_for_job(self, job_id: str) -> dict[str, Any]:
         """Get token usage for a specific job. GET /api/admin/token-usage/{job_id}"""
         return self._request("GET", f"/api/admin/token-usage/{job_id}")
 
     # -- Users ----------------------------------------------------------------
 
-    def get_mentionable_users(self) -> dict:
+    def get_mentionable_users(self) -> dict[str, Any]:
         """Get list of mentionable usernames. GET /api/users/mentionable"""
         return self._request("GET", "/api/users/mentionable")
 
     def get_mentions(
         self, limit: int = 50, offset: int = 0, unread_only: bool = False
-    ) -> dict:
+    ) -> dict[str, Any]:
         """Get comments that mention the current user. GET /api/users/mentions"""
-        params: dict = {"limit": limit, "offset": offset}
+        params: dict[str, Any] = {"limit": limit, "offset": offset}
         if unread_only:
             params["unread_only"] = "true"
         return self._request("GET", "/api/users/mentions", params=params)
 
-    def mark_mentions_read(self, comment_ids: list[int]) -> dict:
+    def mark_mentions_read(self, comment_ids: list[int]) -> dict[str, Any]:
         """Mark specific mentions as read. POST /api/users/mentions/read"""
         return self._request(
             "POST", "/api/users/mentions/read", json={"comment_ids": comment_ids}
         )
 
-    def mark_all_mentions_read(self) -> dict:
+    def mark_all_mentions_read(self) -> dict[str, Any]:
         """Mark all mentions as read. POST /api/users/mentions/read-all"""
         return self._request("POST", "/api/users/mentions/read-all")
 
     # -- AI Models ------------------------------------------------------------
 
-    def list_ai_models(self, provider: str = "") -> dict:
+    def list_ai_models(self, provider: str = "") -> dict[str, Any]:
         """List available AI models. GET /api/ai-models"""
-        params: dict = {}
+        params: dict[str, Any] = {}
         if provider:
             params["provider"] = provider
         return self._request("GET", "/api/ai-models", params=params)
 
-    def refresh_ai_models(self) -> dict:
+    def refresh_ai_models(self) -> dict[str, Any]:
         """Refresh AI models from sidecar. POST /api/admin/ai-models/refresh"""
         return self._request("POST", "/api/admin/ai-models/refresh")
 
-    def get_default_server_settings(self) -> dict:
+    def get_default_server_settings(self) -> dict[str, Any]:
         """Get non-sensitive server settings. GET /api/default-server-settings"""
         return self._request("GET", "/api/default-server-settings")
 
@@ -1028,7 +1035,7 @@ class RootCozClient:
         classification: str,
         child_job_name: str = "",
         child_build_number: int = 0,
-    ) -> dict:
+    ) -> dict[str, Any]:
         """Override classification. PUT /results/{job_id}/override-classification"""
         payload = self._with_child_scope(
             {"test_name": test_name, "classification": classification},
@@ -1046,7 +1053,7 @@ class RootCozClient:
         pattern: str,
         child_job_name: str = "",
         child_build_number: int = 0,
-    ) -> dict:
+    ) -> dict[str, Any]:
         """Override pattern. PUT /results/{job_id}/override-pattern"""
         payload = self._with_child_scope(
             {"test_name": test_name, "pattern": pattern},
@@ -1063,9 +1070,9 @@ class RootCozClient:
         tier: str = "",
         version: str = "",
         labels: list[str] | None = None,
-    ) -> list[dict]:
+    ) -> list[dict[str, Any]]:
         """List job metadata with optional filters. GET /api/jobs/metadata"""
-        params: dict = {
+        params: dict[str, Any] = {
             "team": team,
             "tier": tier,
             "version": version,
@@ -1074,7 +1081,7 @@ class RootCozClient:
             params["label"] = labels
         return self._request("GET", "/api/jobs/metadata", params=params)
 
-    def get_job_metadata(self, job_name: str) -> dict:
+    def get_job_metadata(self, job_name: str) -> dict[str, Any]:
         """Get metadata for a job. GET /api/jobs/{job_name}/metadata"""
         return self._request("GET", f"/api/jobs/{job_name}/metadata")
 
@@ -1086,9 +1093,9 @@ class RootCozClient:
         tier: str = "",
         version: str = "",
         labels: list[str] | None = None,
-    ) -> dict:
+    ) -> dict[str, Any]:
         """Set metadata for a job. PUT /api/jobs/{job_name}/metadata"""
-        body: dict = {}
+        body: dict[str, Any] = {}
         if team:
             body["team"] = team
         if tier:
@@ -1099,19 +1106,19 @@ class RootCozClient:
             body["labels"] = labels
         return self._request("PUT", f"/api/jobs/{job_name}/metadata", json=body)
 
-    def delete_job_metadata(self, job_name: str) -> dict:
+    def delete_job_metadata(self, job_name: str) -> dict[str, Any]:
         """Delete metadata for a job. DELETE /api/jobs/{job_name}/metadata"""
         return self._request("DELETE", f"/api/jobs/{job_name}/metadata")
 
-    def bulk_set_metadata(self, items: list[dict]) -> dict:
+    def bulk_set_metadata(self, items: list[dict[str, Any]]) -> dict[str, Any]:
         """Bulk import job metadata. PUT /api/jobs/metadata/bulk"""
         return self._request("PUT", "/api/jobs/metadata/bulk", json={"items": items})
 
-    def list_metadata_rules(self) -> dict:
+    def list_metadata_rules(self) -> dict[str, Any]:
         """List configured metadata rules. GET /api/jobs/metadata/rules"""
         return self._request("GET", "/api/jobs/metadata/rules")
 
-    def preview_metadata_rules(self, job_name: str) -> dict:
+    def preview_metadata_rules(self, job_name: str) -> dict[str, Any]:
         """Preview metadata rule match for a job name. POST /api/jobs/metadata/rules/preview"""
         return self._request(
             "POST", "/api/jobs/metadata/rules/preview", json={"job_name": job_name}
@@ -1119,11 +1126,11 @@ class RootCozClient:
 
     # -- Failures ------------------------------------------------------------
 
-    def get_failure(self, failure_uuid: str) -> dict:
+    def get_failure(self, failure_uuid: str) -> dict[str, Any]:
         """Look up a failure by UUID. GET /api/failures/{failure_uuid}"""
         return self._request("GET", f"/api/failures/{failure_uuid}")
 
-    def re_analyze_failure(self, failure_uuid: str) -> dict:
+    def re_analyze_failure(self, failure_uuid: str) -> dict[str, Any]:
         """Re-analyze a single failure by UUID. POST /api/failures/{failure_uuid}/re-analyze"""
         return self._request(
             "POST",
@@ -1141,9 +1148,9 @@ class RootCozClient:
         job_id: str = "",
         ai_provider: str = "",
         ai_model: str = "",
-    ) -> dict:
+    ) -> dict[str, Any]:
         """Analyze whether a comment suggests a failure is reviewed. POST /api/analyze-comment-intent"""
-        payload: dict = {"comment": comment}
+        payload: dict[str, Any] = {"comment": comment}
         if job_id:
             payload["job_id"] = job_id
         if ai_provider:
@@ -1154,22 +1161,24 @@ class RootCozClient:
 
     # -- Chat -----------------------------------------------------------------
 
-    def init_chat(self, job_id: str) -> dict:
+    def init_chat(self, job_id: str) -> dict[str, Any]:
         """Initialize chat workspace. POST /api/chat/{job_id}/init"""
         return self._request("POST", f"/api/chat/{job_id}/init")
 
-    def get_chat_history(self, job_id: str, limit: int = 200, offset: int = 0) -> dict:
+    def get_chat_history(
+        self, job_id: str, limit: int = 200, offset: int = 0
+    ) -> dict[str, Any]:
         """Get chat history for a job. GET /api/chat/{job_id}"""
-        params: dict = {"limit": limit}
+        params: dict[str, Any] = {"limit": limit}
         if offset:
             params["offset"] = offset
         return self._request("GET", f"/api/chat/{job_id}", params=params)
 
     def send_chat_message(
         self, job_id: str, message: str, ai_provider: str = "", ai_model: str = ""
-    ) -> dict:
+    ) -> dict[str, Any]:
         """Send a chat message and queue AI processing. POST /api/chat/{job_id}"""
-        body: dict = {"message": message}
+        body: dict[str, Any] = {"message": message}
         if ai_provider:
             body["ai_provider"] = ai_provider
         if ai_model:
@@ -1178,36 +1187,38 @@ class RootCozClient:
             "POST", f"/api/chat/{job_id}", json=body, accept_statuses=(202,)
         )
 
-    def clear_chat(self, job_id: str) -> dict:
+    def clear_chat(self, job_id: str) -> dict[str, Any]:
         """Clear chat history for a job. DELETE /api/chat/{job_id}"""
         return self._request("DELETE", f"/api/chat/{job_id}")
 
-    def abort_chat(self, job_id: str) -> dict:
+    def abort_chat(self, job_id: str) -> dict[str, Any]:
         """Abort the currently processing chat message. POST /api/chat/{job_id}/abort"""
         return self._request("POST", f"/api/chat/{job_id}/abort")
 
-    def close_chat(self, job_id: str) -> dict:
+    def close_chat(self, job_id: str) -> dict[str, Any]:
         """Signal that the user left the chat page. POST /api/chat/{job_id}/close"""
         return self._request("POST", f"/api/chat/{job_id}/close")
 
     # -- Admin Chat --------------------------------------------------------
 
-    def init_admin_chat(self) -> dict:
+    def init_admin_chat(self) -> dict[str, Any]:
         """Initialize admin chat workspace. POST /api/admin/chat/init"""
         return self._request("POST", "/api/admin/chat/init")
 
-    def get_admin_chat_history(self, limit: int = 200, offset: int = 0) -> dict:
+    def get_admin_chat_history(
+        self, limit: int = 200, offset: int = 0
+    ) -> dict[str, Any]:
         """Get admin chat history. GET /api/admin/chat"""
-        params: dict = {"limit": limit}
+        params: dict[str, Any] = {"limit": limit}
         if offset:
             params["offset"] = offset
         return self._request("GET", "/api/admin/chat", params=params)
 
     def send_admin_chat_message(
         self, message: str, ai_provider: str = "", ai_model: str = ""
-    ) -> dict:
+    ) -> dict[str, Any]:
         """Send admin chat message. POST /api/admin/chat"""
-        body: dict = {"message": message}
+        body: dict[str, Any] = {"message": message}
         if ai_provider:
             body["ai_provider"] = ai_provider
         if ai_model:
@@ -1216,19 +1227,21 @@ class RootCozClient:
             "POST", "/api/admin/chat", json=body, accept_statuses=(202,)
         )
 
-    def clear_admin_chat(self) -> dict:
+    def clear_admin_chat(self) -> dict[str, Any]:
         """Clear admin chat history. DELETE /api/admin/chat"""
         return self._request("DELETE", "/api/admin/chat")
 
-    def abort_admin_chat(self) -> dict:
+    def abort_admin_chat(self) -> dict[str, Any]:
         """Abort admin chat. POST /api/admin/chat/abort"""
         return self._request("POST", "/api/admin/chat/abort")
 
-    def close_admin_chat(self) -> dict:
+    def close_admin_chat(self) -> dict[str, Any]:
         """Signal user left admin chat page. POST /api/admin/chat/close"""
         return self._request("POST", "/api/admin/chat/close")
 
-    def save_admin_chat_artifact(self, html_content: str, filename: str) -> dict:
+    def save_admin_chat_artifact(
+        self, html_content: str, filename: str
+    ) -> dict[str, Any]:
         """Save an HTML report artifact. POST /api/admin-chat/artifacts"""
         return self._request(
             "POST",
@@ -1279,9 +1292,9 @@ class RootCozClient:
         review_status: str = "",
         limit: int = 0,
         offset: int = 0,
-    ) -> dict:
+    ) -> dict[str, Any]:
         """Build shared query params for reports endpoints."""
-        params: dict = {}
+        params: dict[str, Any] = {}
         if team:
             params["team"] = team
         if tier:
@@ -1319,7 +1332,7 @@ class RootCozClient:
         review_status: str = "",
         limit: int = 0,
         offset: int = 0,
-    ) -> dict:
+    ) -> dict[str, Any]:
         """GET /api/reports/totals"""
         params = self._build_report_params(
             team,
@@ -1349,7 +1362,7 @@ class RootCozClient:
         review_status: str = "",
         limit: int = 0,
         offset: int = 0,
-    ) -> dict:
+    ) -> dict[str, Any]:
         """GET /api/reports/classification-overrides"""
         params = self._build_report_params(
             team,
@@ -1381,7 +1394,7 @@ class RootCozClient:
         review_status: str = "",
         limit: int = 0,
         offset: int = 0,
-    ) -> dict:
+    ) -> dict[str, Any]:
         """GET /api/reports/issues-created"""
         params = self._build_report_params(
             team,

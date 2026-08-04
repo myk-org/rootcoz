@@ -17,6 +17,7 @@ import time
 from collections import deque
 from dataclasses import dataclass, field
 from email.message import EmailMessage
+from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as pkg_version
 from typing import Any
 
@@ -33,7 +34,7 @@ def _get_app_version() -> str:
     """Return the application version string."""
     try:
         return pkg_version("rootcoz")
-    except Exception:
+    except PackageNotFoundError:
         return "unknown"
 
 
@@ -47,7 +48,7 @@ class _RollingCounter:
     """Thread-safe rolling-window counter backed by a deque of timestamps."""
 
     window_seconds: float = 300.0  # 5 minutes default
-    _timestamps: deque = field(default_factory=deque)
+    _timestamps: deque[float] = field(default_factory=deque)
     _lock: threading.Lock = field(default_factory=threading.Lock)
 
     def record(self, ts: float | None = None) -> None:
@@ -185,7 +186,8 @@ async def check_db(db_path: str) -> dict[str, str]:
             await db.execute("BEGIN IMMEDIATE")
             await db.execute("ROLLBACK")
         return {"status": "ok"}
-    except Exception as exc:  # health check must return status, not raise
+    except (aiosqlite.Error, OSError) as exc:
+        # health check must return status, not raise
         return {"status": "error", "detail": str(exc)}
 
 
@@ -213,7 +215,8 @@ async def _check_http_service(
             if resp.status_code < ok_below:
                 return {"status": "ok"}
             return {"status": "degraded", "detail": f"HTTP {resp.status_code}"}
-    except Exception as exc:  # health check must return status, not raise
+    except (httpx.HTTPError, OSError, TimeoutError) as exc:
+        # health check must return status, not raise
         return {"status": "error", "detail": str(exc)}
 
 
@@ -291,7 +294,7 @@ async def build_health_response(settings: Any, db_path: str) -> dict[str, Any]:
     - checks: results from individual dependency checks
     - error_rates: current rolling-window error statistics
     """
-    checks: dict[str, dict] = {}
+    checks: dict[str, dict[str, Any]] = {}
 
     # Run all checks concurrently
     _HEALTH_CHECK_TIMEOUT = 6.0
@@ -307,10 +310,13 @@ async def build_health_response(settings: Any, db_path: str) -> dict[str, Any]:
             timeout=_HEALTH_CHECK_TIMEOUT,
         )
     except TimeoutError:
-        _timeout_result: dict = {"status": "error", "detail": "health check timed out"}
+        _timeout_result: dict[str, Any] = {
+            "status": "error",
+            "detail": "health check timed out",
+        }
         db_check = jenkins_check = ai_check = rp_check = _timeout_result
 
-    def _safe(result: Any) -> dict:
+    def _safe(result: Any) -> dict[str, Any]:
         if isinstance(result, Exception):
             return {"status": "error", "detail": str(result)}
         return result
@@ -324,9 +330,7 @@ async def build_health_response(settings: Any, db_path: str) -> dict[str, Any]:
     statuses = [c["status"] for c in checks.values()]
     if checks["database"]["status"] == "error":
         overall = "unhealthy"
-    elif any(s == "error" for s in statuses):
-        overall = "degraded"
-    elif any(s == "degraded" for s in statuses):
+    elif any(s == "error" for s in statuses) or any(s == "degraded" for s in statuses):
         overall = "degraded"
     else:
         overall = "healthy"

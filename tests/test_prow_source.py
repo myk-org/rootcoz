@@ -8,22 +8,23 @@ from pathlib import Path
 import httpx
 import pytest
 
-from rootcoz.sources.prow_source import _fetch_pr_changes, _format_prow_context
 from rootcoz.models import UnifiedAnalyzeRequest
 from rootcoz.sources.prow_source import (
+    _GCS_LIST_MAX_PAGES,
+    _MAX_SIZE_BUILD_LOG,
+    _MAX_SIZE_FINISHED,
+    _MAX_SIZE_JUNIT_XML,
     GCS_BASE_URL,
     GCSAccessError,
     GCSOversizeError,
     ProwJobMetadata,
     ProwSource,
-    _GCS_LIST_MAX_PAGES,
-    _MAX_SIZE_BUILD_LOG,
-    _MAX_SIZE_FINISHED,
-    _MAX_SIZE_JUNIT_XML,
     _build_url,
     _download_gcs_artifacts,
     _fetch_gcs_bytes,
     _fetch_gcs_text,
+    _fetch_pr_changes,
+    _format_prow_context,
     _gcs_url,
     _is_junit,
     _list_gcs_objects,

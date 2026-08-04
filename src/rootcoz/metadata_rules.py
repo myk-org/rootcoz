@@ -10,6 +10,7 @@ import json
 import os
 import re
 from pathlib import Path
+from typing import Any
 
 import yaml
 from simple_logger.logger import get_logger
@@ -17,7 +18,7 @@ from simple_logger.logger import get_logger
 logger = get_logger(name=__name__, level=os.environ.get("LOG_LEVEL", "INFO"))
 
 
-def load_metadata_rules(path: str) -> list[dict]:
+def load_metadata_rules(path: str) -> list[dict[str, Any]]:
     """Parse a YAML or JSON metadata rules file.
 
     The file must contain a top-level ``metadata_rules`` key whose value
@@ -58,15 +59,15 @@ def load_metadata_rules(path: str) -> list[dict]:
     elif isinstance(raw, list):
         rules_list = raw
     else:
-        raise ValueError("Rules file must be a dict with 'metadata_rules' or a list")
+        raise TypeError("Rules file must be a dict with 'metadata_rules' or a list")
 
     if not isinstance(rules_list, list):
-        raise ValueError("'metadata_rules' must be a list")
+        raise TypeError("'metadata_rules' must be a list")
 
-    validated: list[dict] = []
+    validated: list[dict[str, Any]] = []
     for idx, rule in enumerate(rules_list):
         if not isinstance(rule, dict):
-            raise ValueError(f"Rule at index {idx} must be a dict")
+            raise TypeError(f"Rule at index {idx} must be a dict")
         if "pattern" not in rule:
             raise ValueError(f"Rule at index {idx} is missing 'pattern'")
         validated.append(_normalize_rule(rule))
@@ -75,9 +76,9 @@ def load_metadata_rules(path: str) -> list[dict]:
     return validated
 
 
-def _normalize_rule(rule: dict) -> dict:
+def _normalize_rule(rule: dict[str, Any]) -> dict[str, Any]:
     """Normalize a single rule dict to consistent types."""
-    normalized: dict = {"pattern": str(rule["pattern"])}
+    normalized: dict[str, Any] = {"pattern": str(rule["pattern"])}
     # Pre-compile regex patterns so malformed rules are caught at load time.
     if _is_regex_pattern(normalized["pattern"]):
         try:
@@ -115,14 +116,14 @@ def _is_regex_pattern(pattern: str) -> bool:
     return "(?P<" in pattern
 
 
-def _match_single_rule(job_name: str, rule: dict) -> dict | None:
+def _match_single_rule(job_name: str, rule: dict[str, Any]) -> dict[str, Any] | None:
     """Try matching a single rule against a job name.
 
     Returns a dict of matched metadata fields (may be empty aside from
     pattern-derived values), or None if no match.
     """
     pattern = rule["pattern"]
-    matched_fields: dict = {}
+    matched_fields: dict[str, Any] = {}
 
     if _is_regex_pattern(pattern):
         m = re.fullmatch(pattern, job_name)
@@ -149,7 +150,9 @@ def _match_single_rule(job_name: str, rule: dict) -> dict | None:
     return matched_fields
 
 
-def match_job_metadata(job_name: str, rules: list[dict]) -> dict | None:
+def match_job_metadata(
+    job_name: str, rules: list[dict[str, Any]]
+) -> dict[str, Any] | None:
     """Match a job name against an ordered list of rules.
 
     Scalar fields (team, tier, version) use first-match-wins.
@@ -163,7 +166,7 @@ def match_job_metadata(job_name: str, rules: list[dict]) -> dict | None:
         A metadata dict with ``team``, ``tier``, ``version``, ``labels``
         keys, or ``None`` if no rule matched.
     """
-    result: dict = {}
+    result: dict[str, Any] = {}
     accumulated_labels: list[str] = []
     any_match = False
 

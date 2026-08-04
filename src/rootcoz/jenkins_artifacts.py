@@ -9,6 +9,7 @@ import urllib.parse
 import uuid
 import zipfile
 from pathlib import Path
+from typing import Any
 
 import requests
 from simple_logger.logger import get_logger
@@ -75,7 +76,7 @@ def download_artifact(
             return buffer.getvalue()
         finally:
             response.close()
-    except Exception as exc:
+    except (requests.RequestException, ConnectionError, OSError) as exc:
         logger.warning(f"Failed to download artifact '{relative_path}': {exc}")
         return None
 
@@ -140,8 +141,7 @@ def _extract_tar(
         tarfile.TarError: If the data is not a valid tar archive.
         _SizeLimitExceeded: If the estimated extracted size exceeds the limit.
     """
-    tar = tarfile.open(fileobj=fileobj, mode="r:*")
-    with tar:
+    with tarfile.open(fileobj=fileobj, mode="r:*") as tar:
         members = tar.getmembers()
 
         if hasattr(tarfile, "data_filter"):
@@ -155,7 +155,7 @@ def _extract_tar(
             try:
                 tar.extractall(path=extract_dir, filter="data")
                 return
-            except Exception as exc:
+            except (tarfile.FilterError, OSError) as exc:
                 logger.warning(
                     f"Tar data_filter rejected entries, falling back to manual filtering: {exc}"
                 )
@@ -283,7 +283,7 @@ def validate_and_extract_archive(
         shutil.rmtree(extract_dir, ignore_errors=True)
         logger.warning(f"Archive rejected: {exc}")
         return None
-    except Exception:
+    except (tarfile.TarError, OSError):
         fileobj.seek(0)
         try:
             _extract_zip(fileobj, extract_dir, max_extracted_bytes=max_extracted_bytes)
@@ -291,7 +291,7 @@ def validate_and_extract_archive(
             shutil.rmtree(extract_dir, ignore_errors=True)
             logger.warning(f"Archive rejected: {exc}")
             return None
-        except Exception as exc:
+        except (zipfile.BadZipFile, zipfile.LargeZipFile, OSError) as exc:
             shutil.rmtree(extract_dir, ignore_errors=True)
             logger.warning(f"Invalid archive (not a valid tar or zip file): {exc}")
             return None
@@ -362,7 +362,7 @@ def _extract_nested_archives(
                     total_extracted += 1
                 else:
                     logger.debug("Could not extract nested archive: %s", relative)
-            except Exception as exc:
+            except OSError as exc:
                 logger.debug("Failed to extract nested archive %s: %s", relative, exc)
     if total_extracted:
         logger.info("Extracted %d nested archive(s)", total_extracted)
@@ -378,7 +378,7 @@ def get_artifacts_path(extract_path: Path) -> str:
 def process_build_artifacts(
     session: requests.Session,
     build_url: str,
-    artifact_list: list[dict],
+    artifact_list: list[dict[str, Any]],
     max_size_mb: int = 500,
 ) -> tuple[str, Path | None]:
     """Download, store, and analyze all build artifacts in a single pass.

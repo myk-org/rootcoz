@@ -17,7 +17,14 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from rootcoz.models import AdditionalRepo, BaseTestEntry, FailedTest
+from rootcoz.models import (
+    AdditionalRepo,
+    AiConfigEntry,
+    BaseTestEntry,
+    ChildJobAnalysis,
+    FailedTest,
+    FailureAnalysis,
+)
 
 if TYPE_CHECKING:
     from rootcoz.repository import RepositoryManager
@@ -94,16 +101,16 @@ class CISourceResult:
     extract_path: Path | None = None
     child_job_infos: list[tuple[str, int]] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
-    source_metadata: dict = field(default_factory=dict)
-    identity: dict = field(default_factory=dict)
+    source_metadata: dict[str, Any] = field(default_factory=dict)
+    identity: dict[str, Any] = field(default_factory=dict)
 
-    def test_entry_dicts(self) -> list[dict]:
+    def test_entry_dicts(self) -> list[dict[str, Any]]:
         """Build normalized test_entries dicts (passed/skipped/failed).
 
         Status values are always canonical: ``passed``, ``skipped``, ``failed``.
         Used by ``main.py`` before ``storage.save_test_entries``.
         """
-        entries: list[dict] = []
+        entries: list[dict[str, Any]] = []
         for te in self.passed_tests:
             entries.append(
                 {
@@ -240,7 +247,7 @@ class CISource(ABC):
         Raise ``ValueError`` (or ``HTTPException``) when required config
         is missing. Default is a no-op.
         """
-        return None
+        return
 
     @classmethod
     def build_request_params(
@@ -327,10 +334,10 @@ class CISource(ABC):
         custom_prompt: str = "",
         server_url: str = "",
         job_id: str = "",
-        peer_ai_configs: list | None = None,
-        cloned_repos: dict | None = None,
+        peer_ai_configs: list[AiConfigEntry] | None = None,
+        cloned_repos: dict[str, Any] | None = None,
         auth_header: str = "",
-    ) -> tuple[list, list[tuple[str, int, list[dict]]]]:
+    ) -> tuple[list[ChildJobAnalysis], list[tuple[str, int, list[dict[str, Any]]]]]:
         """Analyze failed child jobs (e.g. Jenkins pipeline sub-jobs).
 
         Returns:
@@ -370,7 +377,7 @@ class CISource(ABC):
 
         Default is a no-op. Prow overrides to store the resolved GCS prefix.
         """
-        return None
+        return
 
     @classmethod
     def from_stored_params(
@@ -424,7 +431,7 @@ class WorkspaceSetupResult:
 
 
 async def setup_analysis_workspace(
-    repo_manager: "RepositoryManager",
+    repo_manager: RepositoryManager,
     *,
     tests_repo_url: str = "",
     tests_repo_ref: str = "",
@@ -509,9 +516,10 @@ async def setup_analysis_workspace(
     if cloned_repos:
         copy_rootcoz_pi_resources(cloned_repos, repo_path)
 
-    if extract_path:
-        if not link_artifacts_to_workspace(repo_path, extract_path, job_id):
-            artifacts_context = ""
+    if extract_path and not link_artifacts_to_workspace(
+        repo_path, extract_path, job_id
+    ):
+        artifacts_context = ""
 
     result = WorkspaceSetupResult(
         repo_path=repo_path,
@@ -667,10 +675,10 @@ async def run_console_only_analysis(
     additional_repos: dict[str, Path] | None,
     auth_header: str,
     call_type: str = "console",
-    peer_ai_configs: list | None = None,
+    peer_ai_configs: list[AiConfigEntry] | None = None,
     peer_analysis_max_rounds: int = 3,
     max_concurrent_ai_calls: int = 3,
-) -> tuple[bool, list, str]:
+) -> tuple[bool, list[FailureAnalysis], str]:
     """Run console-only AI analysis when no structured test failures exist."""
     from rootcoz.engine.core import analyze_failure_group, normalize_for_signature
     from rootcoz.models import FailedTest
@@ -705,11 +713,11 @@ async def run_console_only_analysis(
         )
         return True, results, ""
     except Exception as exc:
-        logger.error("Console-only analysis failed: %s", exc, exc_info=True)
+        logger.exception("Console-only analysis failed")
         return False, [], str(exc)
 
 
-def resolve_display_build_id(result_data: dict) -> str | int:
+def resolve_display_build_id(result_data: dict[str, Any]) -> str | int:
     """Resolve the best display identifier for a build.
 
     Returns build_id (string) when build_number is missing/zero,

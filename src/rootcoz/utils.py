@@ -19,7 +19,7 @@ from rootcoz.encryption import SENSITIVE_KEYS
 #: the base class for many non-transient errors (auth failures, 5xx,
 #: malformed responses).  Only ``jenkins.TimeoutException`` (a subclass)
 #: represents a true connectivity/timeout problem.
-JENKINS_CONNECTIVITY_EXCEPTIONS: tuple[type[BaseException], ...] = (
+JENKINS_CONNECTIVITY_EXCEPTIONS: tuple[type[Exception], ...] = (
     OSError,
     TimeoutError,
     requests.exceptions.Timeout,

@@ -694,23 +694,25 @@ class TestSetTestClassification:
         self, setup_test_db: Path
     ) -> None:
         """Invalid pattern classification raises ValueError."""
-        with patch.object(storage, "DB_PATH", setup_test_db):
-            with pytest.raises(ValueError, match="Invalid pattern classification"):
-                await storage.set_test_classification(
-                    test_name="tests.TestA.test_one",
-                    classification="INVALID",
-                    job_id="job-cls-invalid",
-                )
+        with (
+            patch.object(storage, "DB_PATH", setup_test_db),
+            pytest.raises(ValueError, match="Invalid pattern classification"),
+        ):
+            await storage.set_test_classification(
+                test_name="tests.TestA.test_one",
+                classification="INVALID",
+                job_id="job-cls-invalid",
+            )
 
     async def test_empty_job_id_raises_value_error(self, setup_test_db: Path) -> None:
         """Empty job_id raises ValueError."""
-        with patch.object(storage, "DB_PATH", setup_test_db):
-            with pytest.raises(ValueError, match="job_id is required"):
-                await storage.set_test_classification(
-                    test_name="tests.TestA.test_one",
-                    classification="FLAKY",
-                    job_id="",
-                )
+        with (
+            patch.object(storage, "DB_PATH", setup_test_db),
+            pytest.raises(ValueError, match="job_id is required"),
+        ):
+            await storage.set_test_classification(
+                test_name="tests.TestA.test_one", classification="FLAKY", job_id=""
+            )
 
 
 class TestMarkStaleResultsFailed:

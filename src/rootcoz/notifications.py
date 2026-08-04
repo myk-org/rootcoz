@@ -3,6 +3,7 @@
 import asyncio
 import json
 import os
+from typing import Any
 
 from pywebpush import WebPushException, webpush
 from simple_logger.logger import get_logger
@@ -16,7 +17,7 @@ logger = get_logger(name=__name__, level=os.environ.get("LOG_LEVEL", "INFO"))
 
 
 async def _send_one(
-    sub: dict,
+    sub: dict[str, Any],
     payload_str: str,
     vapid_private_key: str,
     vapid_claim_email: str,
@@ -61,7 +62,8 @@ async def _send_one(
             sub["username"],
             exc,
         )
-    except Exception as exc:  # best-effort delivery; log and continue
+    except (TypeError, ValueError, KeyError, OSError) as exc:
+        # best-effort delivery; log and continue
         logger.warning(
             "send_mention_notifications: unexpected error sending to %s: %s",
             sub["username"],

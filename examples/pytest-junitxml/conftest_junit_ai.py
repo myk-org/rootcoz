@@ -22,15 +22,15 @@ Requirements:
 """
 
 import logging
+from typing import Any
 
 import pytest
-
 from conftest_junit_ai_utils import enrich_junit_xml, setup_ai_analysis
 
 logger = logging.getLogger("rootcoz")
 
 
-def pytest_addoption(parser):
+def pytest_addoption(parser: Any) -> None:
     """Add --analyze-with-ai CLI option."""
     group = parser.getgroup("rootcoz", "AI-powered failure analysis")
     group.addoption(
@@ -41,14 +41,14 @@ def pytest_addoption(parser):
     )
 
 
-def pytest_sessionstart(session):
+def pytest_sessionstart(session: Any) -> None:
     """Set up AI analysis if --analyze-with-ai is passed."""
     if session.config.option.analyze_with_ai:
         setup_ai_analysis(session)
 
 
 @pytest.hookimpl(trylast=True)
-def pytest_sessionfinish(session, exitstatus):
+def pytest_sessionfinish(session: Any, exitstatus: int) -> None:
     """Enrich JUnit XML with AI analysis when tests fail.
 
     Only runs when exitstatus indicates test failures (exit code != 0).

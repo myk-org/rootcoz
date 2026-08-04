@@ -9,6 +9,7 @@ import logging
 import os
 import time
 from pathlib import Path
+from typing import Any
 
 import requests
 from dotenv import load_dotenv
@@ -16,12 +17,12 @@ from dotenv import load_dotenv
 logger = logging.getLogger("rootcoz")
 
 
-def is_dry_run(config) -> bool:
+def is_dry_run(config: Any) -> bool:
     """Check if pytest was invoked in dry-run mode (--collectonly or --setupplan)."""
     return config.option.setupplan or config.option.collectonly
 
 
-def setup_ai_analysis(session) -> None:
+def setup_ai_analysis(session: Any) -> None:
     """Configure AI analysis for test failure reporting.
 
     Loads .env, validates ROOTCOZ_SERVER, and sets defaults for AI provider/model.
@@ -59,7 +60,7 @@ def setup_ai_analysis(session) -> None:
             session.config.option.analyze_with_ai = False
 
 
-def enrich_junit_xml(session) -> None:
+def enrich_junit_xml(session: Any) -> None:
     """Read JUnit XML, send to server for analysis, write enriched XML back.
 
     Reads the JUnit XML that pytest generated, POSTs the raw content to the
@@ -144,8 +145,8 @@ def enrich_junit_xml(session) -> None:
         if result is None:
             logger.warning("Analysis timed out for %s", xml_path)
             return
-    except Exception as ex:
-        logger.exception(f"Failed to enrich JUnit XML, original preserved. {ex}")
+    except Exception:
+        logger.exception("Failed to enrich JUnit XML, original preserved.")
         return
 
     if enriched_xml := result.get("enriched_xml"):

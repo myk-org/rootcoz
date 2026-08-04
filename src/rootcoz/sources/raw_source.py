@@ -69,7 +69,7 @@ class RawSource(CISource):
         return base_params
 
     @classmethod
-    def from_analyze_request(cls, body: Any, merged: Any) -> "RawSource":
+    def from_analyze_request(cls, body: Any, merged: Any) -> RawSource:
         """Construct from an analyze request."""
         _ = merged
         return cls(

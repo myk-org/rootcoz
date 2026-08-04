@@ -155,7 +155,7 @@ def _load_values(path: Path) -> dict[str, Any]:
         if data is None:
             data = {}
         if not isinstance(data, dict):
-            raise ValueError(f"Expected a YAML mapping in {path}")
+            raise TypeError(f"Expected a YAML mapping in {path}")
         secret = path.name == _SECRETS_FILENAME
         try:
             _write_values(path, data, secret=secret)
@@ -171,7 +171,7 @@ def _load_values(path: Path) -> dict[str, Any]:
     if data is None:
         return {}
     if not isinstance(data, dict):
-        raise ValueError(f"Expected a YAML mapping in {path}")
+        raise TypeError(f"Expected a YAML mapping in {path}")
     return data
 
 
@@ -186,7 +186,7 @@ def _read_json_file(path: str) -> dict[str, Any]:
     content = _read_file(path)
     data = json.loads(content)
     if not isinstance(data, dict):
-        raise ValueError(f"Expected JSON object in {path}")
+        raise TypeError(f"Expected JSON object in {path}")
     return data
 
 
@@ -822,6 +822,7 @@ def main() -> int:
                 capture_output=True,
                 text=True,
                 timeout=10,
+                check=False,
             )
             if route_host.returncode == 0 and route_host.stdout.strip():
                 route_url = f"https://{route_host.stdout.strip()}"

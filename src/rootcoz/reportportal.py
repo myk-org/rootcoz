@@ -10,7 +10,7 @@ import os
 import threading
 import urllib.parse
 import warnings
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, Self
 
 import requests as _requests
 import urllib3
@@ -91,16 +91,18 @@ def _extract_bts_fields(url: str) -> tuple[str, str]:
     hostname = parsed.hostname or ""
     ticket_id = segments[-1] if segments else hostname
 
-    if "github" in hostname and len(segments) >= 4:
-        # github.com/org/repo/issues/123 or github.com/org/repo/pull/123/files
-        # Use segments[3] (the number), not segments[-1] (may be 'files', 'commits')
-        if segments[2] in {"issues", "pull"}:
-            return f"{segments[0]}/{segments[1]}", segments[3]
+    # github.com/org/repo/issues/123 or github.com/org/repo/pull/123/files
+    # Use segments[3] (the number), not segments[-1] (may be 'files', 'commits')
+    if (
+        "github" in hostname
+        and len(segments) >= 4
+        and segments[2] in {"issues", "pull"}
+    ):
+        return f"{segments[0]}/{segments[1]}", segments[3]
 
-    if "jira" in hostname or "atlassian" in hostname:
-        # Jira: ticketId like PROJ-123, btsProject = PROJ
-        if "-" in ticket_id:
-            return ticket_id.split("-")[0], ticket_id
+    # Jira: ticketId like PROJ-123, btsProject = PROJ
+    if ("jira" in hostname or "atlassian" in hostname) and "-" in ticket_id:
+        return ticket_id.split("-")[0], ticket_id
 
     # Fallback: hostname as project, last segment as ticket
     return hostname, ticket_id
@@ -147,7 +149,7 @@ class ReportPortalClient:
         finally:
             _RPCLIENT_INIT_LOCK.release()
 
-    def __enter__(self) -> ReportPortalClient:
+    def __enter__(self) -> Self:
         return self
 
     def __exit__(self, *args: object) -> None:
@@ -186,7 +188,9 @@ class ReportPortalClient:
             return locators[rp_category]
         return _DEFAULT_LOCATORS.get(rp_category)
 
-    def _paginate_get(self, url: str, params: dict[str, str | int]) -> list[dict]:
+    def _paginate_get(
+        self, url: str, params: dict[str, str | int]
+    ) -> list[dict[str, Any]]:
         """Paginate a GET endpoint that returns ``{content, page}``.
 
         Args:
@@ -196,7 +200,7 @@ class ReportPortalClient:
         Returns:
             Aggregated list of items from all pages.
         """
-        all_items: list[dict] = []
+        all_items: list[dict[str, Any]] = []
         params = {**params}  # avoid mutating caller's dict
         page = 1
 
@@ -275,7 +279,7 @@ class ReportPortalClient:
 
         return None
 
-    def get_failed_items(self, launch_id: int) -> list[dict]:
+    def get_failed_items(self, launch_id: int) -> list[dict[str, Any]]:
         """Get all failed test items from a launch.
 
         Handles pagination to collect all results.
@@ -300,9 +304,9 @@ class ReportPortalClient:
 
     def match_failures(
         self,
-        rp_items: list[dict],
+        rp_items: list[dict[str, Any]],
         rcz_failures: list[FailureAnalysis],
-    ) -> list[tuple[dict, FailureAnalysis]]:
+    ) -> list[tuple[dict[str, Any], FailureAnalysis]]:
         """Match RP test items to rootcoz failure analyses by test name.
 
         Multiple RP items CAN match the same rootcoz failure (e.g. when a
@@ -324,7 +328,7 @@ class ReportPortalClient:
         Returns:
             List of ``(rp_item, rcz_failure)`` tuples.
         """
-        matched: list[tuple[dict, FailureAnalysis]] = []
+        matched: list[tuple[dict[str, Any], FailureAnalysis]] = []
 
         for rp_item in rp_items:
             rp_name = rp_item.get("name", "")
@@ -355,17 +359,17 @@ class ReportPortalClient:
 
     def push_classifications(
         self,
-        matched_pairs: list[tuple[dict, FailureAnalysis]],
+        matched_pairs: list[tuple[dict[str, Any], FailureAnalysis]],
         report_url: str,
         history_classifications: dict[str, str] | None = None,
         *,
         push_classifications: bool = True,
         push_rootcoz_url: bool = True,
         push_tracker_links: bool = True,
-        tracked_in_links: dict[str, list[dict]] | None = None,
+        tracked_in_links: dict[str, list[dict[str, Any]]] | None = None,
         pushed_by: str = "",
         reviewed_by: dict[str, str] | None = None,
-    ) -> dict:
+    ) -> dict[str, Any]:
         """Push rootcoz classifications into RP test items.
 
         For each matched pair, builds an issue update with:
@@ -413,7 +417,13 @@ class ReportPortalClient:
         # Fetch actual locators from project settings
         try:
             locators = self.get_defect_type_locators()
-        except Exception:
+        except (
+            _requests.exceptions.RequestException,
+            ValueError,
+            KeyError,
+            TypeError,
+            IndexError,
+        ):
             logger.warning("Failed to fetch RP defect type locators, using defaults")
             locators = dict(_DEFAULT_LOCATORS)
 
@@ -426,7 +436,7 @@ class ReportPortalClient:
         base = self._rp_client.base_url_v1
 
         # Build batch payload — one entry per matched item
-        bulk_issues: list[dict] = []
+        bulk_issues: list[dict[str, Any]] = []
 
         for rp_item, failure in matched_pairs:
             item_id = rp_item.get("id")
@@ -455,7 +465,7 @@ class ReportPortalClient:
                 )
 
             # Build issue update payload (RP API uses camelCase)
-            issue_payload: dict = {
+            issue_payload: dict[str, Any] = {
                 "issueType": issue_type,
                 "autoAnalyzed": False,
                 "ignoreAnalyzer": True,
@@ -558,7 +568,12 @@ class ReportPortalClient:
                     f" (HTTP {status or '?'}){suffix}"
                 )
                 errors.append(error_msg)
-            except Exception as exc:
+            except (
+                _requests.exceptions.RequestException,
+                OSError,
+                ValueError,
+                TypeError,
+            ) as exc:
                 logger.error(
                     "RP batch update failed: url=%s, items=%d, error=%s",
                     url,

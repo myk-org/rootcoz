@@ -75,13 +75,13 @@ class TestLoadMetadataRules:
     def test_load_invalid_structure(self, tmp_path: Path) -> None:
         rules_file = tmp_path / "rules.json"
         rules_file.write_text('"just a string"')
-        with pytest.raises(ValueError):
+        with pytest.raises(TypeError):
             load_metadata_rules(str(rules_file))
 
     def test_load_rule_not_dict(self, tmp_path: Path) -> None:
         rules_file = tmp_path / "rules.json"
         rules_file.write_text(json_mod.dumps(["not a dict"]))
-        with pytest.raises(ValueError, match="must be a dict"):
+        with pytest.raises(TypeError, match="must be a dict"):
             load_metadata_rules(str(rules_file))
 
     def test_load_dict_missing_metadata_rules_key(self, tmp_path: Path) -> None:

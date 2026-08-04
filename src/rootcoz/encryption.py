@@ -20,6 +20,7 @@ import secrets
 import time
 from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 from cryptography.fernet import Fernet, InvalidToken
 from simple_logger.logger import get_logger
@@ -148,18 +149,18 @@ def _get_fernet() -> Fernet:
 
 
 def _map_additional_repo_entries(
-    repos: list, transform: Callable[[dict], dict]
-) -> list:
+    repos: list[Any], transform: Callable[[dict[str, Any]], dict[str, Any]]
+) -> list[Any]:
     """Apply *transform* to dict additional_repos entries, preserving non-dict items."""
     return [transform(entry) if isinstance(entry, dict) else entry for entry in repos]
 
 
 def _encrypt_additional_repos_tokens(
-    repos: list, fernet: Fernet | None
-) -> tuple[list, Fernet | None]:
+    repos: list[Any], fernet: Fernet | None
+) -> tuple[list[Any], Fernet | None]:
     """Encrypt token fields inside additional_repos entries."""
 
-    def _encrypt_entry(entry: dict) -> dict:
+    def _encrypt_entry(entry: dict[str, Any]) -> dict[str, Any]:
         nonlocal fernet
         token_val = entry.get("token")
         if (
@@ -177,11 +178,11 @@ def _encrypt_additional_repos_tokens(
 
 
 def _decrypt_additional_repos_tokens(
-    repos: list, fernet: Fernet | None
-) -> tuple[list, Fernet | None]:
+    repos: list[Any], fernet: Fernet | None
+) -> tuple[list[Any], Fernet | None]:
     """Decrypt token fields inside additional_repos entries."""
 
-    def _decrypt_entry(entry: dict) -> dict:
+    def _decrypt_entry(entry: dict[str, Any]) -> dict[str, Any]:
         nonlocal fernet
         token_val = entry.get("token")
         if (
@@ -204,7 +205,7 @@ def _decrypt_additional_repos_tokens(
     return _map_additional_repo_entries(repos, _decrypt_entry), fernet
 
 
-def _strip_additional_repos_tokens(repos: list) -> list:
+def _strip_additional_repos_tokens(repos: list[Any]) -> list[Any]:
     """Remove token fields from additional_repos entries for API responses."""
     return _map_additional_repo_entries(
         repos,
@@ -212,7 +213,7 @@ def _strip_additional_repos_tokens(repos: list) -> list:
     )
 
 
-def encrypt_sensitive_fields(params: dict) -> dict:
+def encrypt_sensitive_fields(params: dict[str, Any]) -> dict[str, Any]:
     """Return a shallow copy of *params* with sensitive values encrypted.
 
     Only non-empty string values listed in :data:`SENSITIVE_KEYS` are
@@ -250,7 +251,7 @@ def encrypt_sensitive_fields(params: dict) -> dict:
 RESPONSE_REDACTED_KEYS: frozenset[str] = frozenset(SENSITIVE_KEYS)
 
 
-def strip_sensitive_from_response(result_data: dict) -> dict:
+def strip_sensitive_from_response(result_data: dict[str, Any]) -> dict[str, Any]:
     """Remove sensitive fields from ``request_params`` before returning to API consumers.
 
     The encrypted values remain in the database for job resumption but are
@@ -307,7 +308,7 @@ def decrypt_value(value: str) -> str:
         return value  # Preserve the encrypted value instead of returning ""
 
 
-def decrypt_sensitive_fields(params: dict) -> dict:
+def decrypt_sensitive_fields(params: dict[str, Any]) -> dict[str, Any]:
     """Return a shallow copy of *params* with sensitive values decrypted.
 
     Values that do not carry the ``enc:`` prefix are assumed to be legacy

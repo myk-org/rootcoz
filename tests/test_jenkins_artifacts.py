@@ -12,9 +12,9 @@ import pytest
 
 from rootcoz import jenkins_artifacts
 from rootcoz.jenkins_artifacts import (
-    get_artifacts_path,
     cleanup_extract_dir,
     download_artifact,
+    get_artifacts_path,
     process_build_artifacts,
     store_artifact,
     validate_and_extract_archive,

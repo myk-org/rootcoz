@@ -15,6 +15,7 @@ import json
 import os
 import time
 from pathlib import Path
+from typing import Any
 
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ec
@@ -42,7 +43,7 @@ def _get_data_dir() -> Path:
     ) / "rootcoz"
 
 
-def _generate_vapid_keys() -> dict:
+def _generate_vapid_keys() -> dict[str, str]:
     """Generate a new VAPID key pair.
 
     Returns dict with ``public_key`` and ``private_key`` as URL-safe
@@ -67,7 +68,7 @@ def _generate_vapid_keys() -> dict:
 
 def _read_key_file_when_ready(
     key_file: Path, retries: int = 20, delay_seconds: float = 0.05
-) -> dict:
+) -> dict[str, Any]:
     """Read VAPID keys from file, retrying briefly for a racing writer.
 
     Another process may have created the file but not yet written the
@@ -99,7 +100,7 @@ def _ensure_private_key_file(key_file: Path) -> None:
         key_file.chmod(0o600)
 
 
-def _get_or_create_vapid_keys() -> dict:
+def _get_or_create_vapid_keys() -> dict[str, Any]:
     """Return VAPID keys from file, generating on first use.
 
     The key file is stored at ``$XDG_DATA_HOME/rootcoz/.vapid_keys.json``
@@ -137,7 +138,7 @@ def _get_or_create_vapid_keys() -> dict:
     return keys
 
 
-def get_vapid_config() -> dict:
+def get_vapid_config() -> dict[str, Any]:
     """Return the full VAPID configuration.
 
     Priority: env vars > auto-generated file.

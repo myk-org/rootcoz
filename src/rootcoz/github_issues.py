@@ -11,6 +11,8 @@ Mirrors the Jira integration pattern in ``jira.py``.
 import asyncio
 import os
 from collections.abc import Sequence
+from typing import Any
+
 import httpx
 from simple_logger.logger import get_logger
 
@@ -35,7 +37,7 @@ async def search_github_issues(
     repo_url: str,
     github_token: str = "",
     max_results: int = 10,
-) -> list[dict]:
+) -> list[dict[str, Any]]:
     """Search GitHub Issues API for issues matching the given keywords.
 
     Args:
@@ -83,7 +85,7 @@ async def search_github_issues(
                 )
                 return []
             data = resp.json()
-            candidates: list[dict] = []
+            candidates: list[dict[str, Any]] = []
             for item in data.get("items", []):
                 candidates.append(
                     {
@@ -184,7 +186,7 @@ async def enrich_with_tests_repo_matches(
     total_matches = 0
     try:
         # Search GitHub for each unique keyword set in parallel
-        async def _search_safe(keywords: list[str]) -> list[dict]:
+        async def _search_safe(keywords: list[str]) -> list[dict[str, Any]]:
             try:
                 return await search_github_issues(
                     keywords, tests_repo_url, github_token

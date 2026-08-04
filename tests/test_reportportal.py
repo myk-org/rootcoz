@@ -1,5 +1,6 @@
 """Tests for Report Portal integration module."""
 
+from typing import ClassVar
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -454,7 +455,7 @@ def _extract_put_json(mock_session):
 class TestPushClassifications:
     """Test pushing classifications to RP."""
 
-    _DEFAULT_LOCATORS = {
+    _DEFAULT_LOCATORS: ClassVar[dict[str, str]] = {
         "PRODUCT_BUG": "pb001",
         "AUTOMATION_BUG": "ab001",
         "SYSTEM_ISSUE": "si001",
@@ -698,7 +699,7 @@ class TestPushClassifications:
             return_value={"PRODUCT_BUG": "pb001"}
         )
         mock_session = MagicMock()
-        mock_session.put.side_effect = Exception("RP API error")
+        mock_session.put.side_effect = _requests.RequestException("RP API error")
         mock_rp = MagicMock()
         mock_rp.base_url_v1 = "http://rp.example.com/api/v1/proj"
         client._rp_client = mock_rp
@@ -1156,13 +1157,11 @@ class TestRPClientInitLock:
         """TimeoutError raised when lock cannot be acquired within timeout."""
         mock_lock = MagicMock()
         mock_lock.acquire.return_value = False  # Simulate timeout
-        with patch.object(rp_module, "_RPCLIENT_INIT_LOCK", mock_lock):
-            with pytest.raises(TimeoutError, match="Timed out waiting"):
-                ReportPortalClient(
-                    url="http://rp.example.com",
-                    token="tok",
-                    project="proj",
-                )
+        with (
+            patch.object(rp_module, "_RPCLIENT_INIT_LOCK", mock_lock),
+            pytest.raises(TimeoutError, match="Timed out waiting"),
+        ):
+            ReportPortalClient(url="http://rp.example.com", token="tok", project="proj")
         mock_lock.acquire.assert_called_once_with(timeout=30)
         # Lock release should NOT be called since acquire failed
         mock_lock.release.assert_not_called()

@@ -23,10 +23,14 @@ from rootcoz.sources.registry import (
 )
 
 __all__ = [
-    "CISource",
-    "CISourceResult",
     "CI_SOURCE_REGISTRY",
     "SOURCE_REGISTRY",
+    "CISource",
+    "CISourceResult",
+    "FileSource",
+    "JenkinsSource",
+    "ProwSource",
+    "RawSource",
     "WorkspaceFile",
     "WorkspaceSetupResult",
     "append_repo_context",
@@ -38,8 +42,4 @@ __all__ = [
     "run_console_only_analysis",
     "setup_analysis_workspace",
     "write_workspace_context_file",
-    "FileSource",
-    "JenkinsSource",
-    "ProwSource",
-    "RawSource",
 ]

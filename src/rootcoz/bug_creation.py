@@ -6,12 +6,13 @@ duplicates, and creates issues via the respective REST APIs.
 
 import os
 import re
+from typing import Any
 
 import httpx
 from simple_logger.logger import get_logger
 
-from rootcoz.config import Settings
 from rootcoz.ai_client import call_ai_once
+from rootcoz.config import Settings
 from rootcoz.jira import JiraClient
 from rootcoz.models import (
     AnalysisDetail,
@@ -31,7 +32,7 @@ JIRA_AI_FOOTER = (
 )
 
 
-def _build_failure_context(failure: FailureAnalysis) -> dict:
+def _build_failure_context(failure: FailureAnalysis) -> dict[str, Any]:
     """Extract structured context from a FailureAnalysis for prompt building.
 
     Returns a dict with test_name, error, classification, details,
@@ -57,7 +58,7 @@ def _build_failure_context(failure: FailureAnalysis) -> dict:
             "description": analysis.product_bug_report.description,
             "evidence": analysis.product_bug_report.evidence,
         }
-    context: dict = {
+    context: dict[str, Any] = {
         "test_name": failure.test_name or "",
         "error": failure.error or "",
         "classification": analysis.classification or "",
@@ -71,8 +72,8 @@ def _build_failure_context(failure: FailureAnalysis) -> dict:
 
 
 def _build_fallback_github_content(
-    ctx: dict, jenkins_url: str, report_url: str, include_links: bool = False
-) -> dict:
+    ctx: dict[str, Any], jenkins_url: str, report_url: str, include_links: bool = False
+) -> dict[str, Any]:
     """Build GitHub issue content from structured data when AI fails."""
     test_short = (
         ctx["test_name"].rsplit(".", 1)[-1]
@@ -123,8 +124,8 @@ def _build_fallback_github_content(
 
 
 def _build_fallback_jira_content(
-    ctx: dict, jenkins_url: str, report_url: str, include_links: bool = False
-) -> dict:
+    ctx: dict[str, Any], jenkins_url: str, report_url: str, include_links: bool = False
+) -> dict[str, Any]:
     """Build Jira bug content from structured data when AI fails."""
     test_short = (
         ctx["test_name"].rsplit(".", 1)[-1]
@@ -182,7 +183,7 @@ def _build_fallback_jira_content(
     return {"title": title, "body": "\n".join(body_parts)}
 
 
-def _parse_ai_issue_response(output: str) -> dict | None:
+def _parse_ai_issue_response(output: str) -> dict[str, Any] | None:
     """Parse AI response: first line = title, rest = body.
 
     Expects the format:
@@ -235,7 +236,7 @@ async def _generate_issue_content_via_ai(
     call_type: str,
     footer: str,
     issue_type: str,
-) -> dict | None:
+) -> dict[str, Any] | None:
     """Shared AI issue content generation with fallback handling.
 
     Returns parsed dict with footer appended if AI succeeds, None if AI fails.
@@ -306,7 +307,7 @@ async def generate_github_issue_content(
     include_links: bool = False,
     job_id: str = "",
     issue_prompt: str = "",
-) -> dict:
+) -> dict[str, Any]:
     """Generate GitHub issue title and body from a failure analysis using AI.
 
     Falls back to template-based content if AI fails.
@@ -436,7 +437,7 @@ async def generate_jira_bug_content(
     include_links: bool = False,
     job_id: str = "",
     issue_prompt: str = "",
-) -> dict:
+) -> dict[str, Any]:
     """Generate Jira bug summary and description from a failure analysis using AI.
 
     Falls back to template-based content if AI fails.
@@ -564,7 +565,7 @@ async def search_github_duplicates(
     title: str,
     repo_url: str,
     github_token: str = "",
-) -> list[dict]:
+) -> list[dict[str, Any]]:
     """Search GitHub for similar issues by title keywords.
 
     Returns list of dicts with number, title, url, status keys.
@@ -617,7 +618,7 @@ async def search_github_duplicates(
 async def search_jira_duplicates(
     title: str,
     settings: Settings,
-) -> list[dict]:
+) -> list[dict[str, Any]]:
     """Search Jira for similar bug issues by title keywords.
 
     Reuses the existing JiraClient pattern for auth and API detection.
@@ -660,7 +661,7 @@ async def create_github_issue(
     repo_url: str,
     github_token: str,
     labels: list[str] | None = None,
-) -> dict:
+) -> dict[str, Any]:
     """Create a GitHub issue via the REST API.
 
     Returns dict with url, number, and title keys.
@@ -677,7 +678,7 @@ async def create_github_issue(
         "Accept": "application/vnd.github.v3+json",
         "Authorization": f"Bearer {github_token}",
     }
-    payload: dict = {"title": title, "body": body}
+    payload: dict[str, Any] = {"title": title, "body": body}
     if labels:
         payload["labels"] = labels
 
@@ -704,7 +705,7 @@ async def create_jira_bug(
     project_key: str = "",
     security_level: str = "",
     issue_type: str = "Bug",
-) -> dict:
+) -> dict[str, Any]:
     """Create a Jira Bug issue via the REST API.
 
     Reuses the existing JiraClient auth pattern (Cloud vs Server/DC).
@@ -744,7 +745,7 @@ async def create_jira_bug(
     if JIRA_AI_FOOTER.strip() not in body:
         body += JIRA_AI_FOOTER
 
-    payload: dict = {
+    payload: dict[str, Any] = {
         "fields": {
             "project": {"key": effective_project_key},
             "summary": title,

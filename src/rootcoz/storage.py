@@ -12,7 +12,7 @@ from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import get_args
+from typing import Any, get_args
 
 import aiosqlite
 from simple_logger.logger import get_logger
@@ -26,10 +26,10 @@ from rootcoz.encryption import (
 )
 from rootcoz.metadata_rules import match_job_metadata
 from rootcoz.models import (
+    _SYSTEM_TAGS,
     HistoryClassificationLiteral,
     OverrideClassificationLiteral,
     PatternLiteral,
-    _SYSTEM_TAGS,
 )
 
 logger = get_logger(name=__name__, level=os.environ.get("LOG_LEVEL", "INFO"))
@@ -157,7 +157,7 @@ def _hash_session_token(token: str) -> str:
     return hashlib.sha256(token.encode()).hexdigest()
 
 
-def parse_result_json(raw: str | None, *, job_id: str = "") -> dict | None:
+def parse_result_json(raw: str | None, *, job_id: str = "") -> dict[str, Any] | None:
     """Decode and validate a ``result_json`` blob.
 
     Args:
@@ -275,7 +275,7 @@ async def _migrate_lowercase_usernames(db: aiosqlite.Connection) -> None:
             key=lambda r: _ROLE_PRIORITY.get(r, 0),
         )
         updates: list[str] = []
-        params: list = []
+        params: list[Any] = []
         if best_role != survivor["role"]:
             updates.append("role = ?")
             params.append(best_role)
@@ -428,7 +428,7 @@ async def _migrate_failure_history_build_id(db: aiosqlite.Connection) -> None:
     )
 
 
-async def _migrate_jenkins_url_to_build_url(db) -> None:
+async def _migrate_jenkins_url_to_build_url(db: aiosqlite.Connection) -> None:
     """Rename results.jenkins_url column to build_url (CI-agnostic naming)."""
     cursor = await db.execute("PRAGMA table_info(results)")
     columns = {row[1] for row in await cursor.fetchall()}
@@ -437,7 +437,7 @@ async def _migrate_jenkins_url_to_build_url(db) -> None:
         logger.info("Migration: renamed results.jenkins_url to build_url")
 
 
-def _row_build_url(row) -> str:
+def _row_build_url(row: aiosqlite.Row) -> str:
     """Read the build URL from a results table row."""
     keys = row.keys()
     if "build_url" in keys and row["build_url"]:
@@ -450,7 +450,7 @@ def _row_build_url(row) -> str:
     return ""
 
 
-def stamp_build_url(result: dict, build_url: str) -> None:
+def stamp_build_url(result: dict[str, Any], build_url: str) -> None:
     """Set canonical and legacy build URL fields on a result dict."""
     from rootcoz.url_utils import sanitize_http_href
 
@@ -460,7 +460,7 @@ def stamp_build_url(result: dict, build_url: str) -> None:
         result["jenkins_url"] = safe_url
 
 
-def with_build_url_aliases(record: dict) -> dict:
+def with_build_url_aliases(record: dict[str, Any]) -> dict[str, Any]:
     """Ensure API records expose both build_url and jenkins_url.
 
     Always overwrites both fields with a sanitized http(s) URL, or clears
@@ -1293,7 +1293,7 @@ def _child_scope_sql(
     child_build_number: int,
     name_column: str = "child_job_name",
     build_column: str = "child_build_number",
-) -> tuple[str, list]:
+) -> tuple[str, list[Any]]:
     """Return a SQL WHERE-clause suffix and params for child-job scoping.
 
     Three modes:
@@ -1363,7 +1363,7 @@ async def delete_comment(comment_id: int, username: str, job_id: str = "") -> bo
     async with _connect_db() as db:
         # Build query with optional scoping filters
         query = "DELETE FROM comments WHERE id = ?"
-        params: list = [comment_id]
+        params: list[Any] = [comment_id]
         if username:
             query += " AND username = ?"
             params.append(username)
@@ -1381,7 +1381,7 @@ async def delete_comment(comment_id: int, username: str, job_id: str = "") -> bo
         return deleted
 
 
-async def get_comments_for_job(job_id: str) -> list[dict]:
+async def get_comments_for_job(job_id: str) -> list[dict[str, Any]]:
     """Get all comments for a specific job."""
     logger.debug(f"get_comments_for_job: job_id={job_id}")
     async with _connect_db() as db:
@@ -1422,7 +1422,7 @@ async def set_reviewed(
         await db.commit()
 
 
-async def get_reviews_for_job(job_id: str) -> dict[str, dict]:
+async def get_reviews_for_job(job_id: str) -> dict[str, dict[str, Any]]:
     """Get all review states for a specific job."""
     logger.debug(f"get_reviews_for_job: job_id={job_id}")
     async with _connect_db() as db:
@@ -1447,7 +1447,7 @@ async def get_reviews_for_job(job_id: str) -> dict[str, dict]:
         return result
 
 
-async def get_review_status(job_id: str) -> dict:
+async def get_review_status(job_id: str) -> dict[str, Any]:
     """Get review summary for a job (used by dashboard)."""
     logger.debug(f"get_review_status: job_id={job_id}")
     async with _connect_db() as db:
@@ -1489,7 +1489,7 @@ async def get_historical_comments(
     test_names: list[str] | None = None,
     error_signatures: list[str] | None = None,
     exclude_job_id: str | None = None,
-) -> list[dict]:
+) -> list[dict[str, Any]]:
     """Get historical comments for similar failures across jobs.
 
     Matches by test name OR by error signature.
@@ -1540,7 +1540,7 @@ async def get_historical_comments(
 def _build_status_update_clause(
     status: str,
     result_json: str | None = None,
-) -> tuple[list[str], list]:
+) -> tuple[list[str], list[Any]]:
     """Build the SET clause parts and params for a status update.
 
     Returns the set-clause fragments and the corresponding parameter list.
@@ -1555,7 +1555,7 @@ def _build_status_update_clause(
         Tuple of (set_parts, params).
     """
     set_parts = ["status = ?"]
-    params: list = [status]
+    params: list[Any] = [status]
 
     if result_json is not None:
         set_parts.append("result_json = ?")
@@ -1575,7 +1575,7 @@ async def save_result(
     job_id: str,
     build_url: str = "",
     status: str = "",
-    result: dict | None = None,
+    result: dict[str, Any] | None = None,
     *,
     jenkins_url: str | None = None,
 ) -> None:
@@ -1614,7 +1614,7 @@ async def save_result(
 async def update_status(
     job_id: str,
     status: str,
-    result: dict | None = None,
+    result: dict[str, Any] | None = None,
 ) -> None:
     """Update the status of an existing analysis result.
 
@@ -1656,7 +1656,7 @@ async def update_build_url(job_id: str, build_url: str) -> None:
             logger.warning("update_build_url: no row found for job_id=%s", job_id)
 
 
-def _make_progress_phase_patcher(phase: str) -> Callable[[dict], None]:
+def _make_progress_phase_patcher(phase: str) -> Callable[[dict[str, Any]], None]:
     """Create a patch function that sets ``progress_phase`` and appends to ``progress_log``.
 
     This is a convenience wrapper for :func:`patch_result_json` so callers
@@ -1673,7 +1673,7 @@ def _make_progress_phase_patcher(phase: str) -> Callable[[dict], None]:
         A callable that mutates a dict in place, suitable for ``patch_result_json``.
     """
 
-    def _patcher(d: dict) -> None:
+    def _patcher(d: dict[str, Any]) -> None:
         d["progress_phase"] = phase
         progress_log = d.get("progress_log")
         if not isinstance(progress_log, list):
@@ -1704,7 +1704,7 @@ async def update_progress_phase(job_id: str, phase: str) -> None:
 
 async def patch_result_json(
     job_id: str,
-    patch_fn: Callable[[dict], None],
+    patch_fn: Callable[[dict[str, Any]], None],
 ) -> None:
     """Atomically read-modify-write the ``result_json`` blob for *job_id*.
 
@@ -1740,7 +1740,7 @@ async def patch_result_json(
             raise
 
 
-def _backfill_child_uuids(child: dict) -> bool:
+def _backfill_child_uuids(child: dict[str, Any]) -> bool:
     """Recursively assign UUIDs to a child job analysis and its failures.
 
     Walks ``failures`` and ``failed_children`` (nested children).
@@ -1766,7 +1766,7 @@ def _backfill_child_uuids(child: dict) -> bool:
     return changed
 
 
-async def _backfill_failure_uuids(job_id: str, result_data: dict) -> bool:
+async def _backfill_failure_uuids(job_id: str, result_data: dict[str, Any]) -> bool:
     """Assign stable UUIDs to failures and child analyses that lack them.
 
     Legacy ``result_json`` rows pre-date the ``id`` field on
@@ -1808,7 +1808,9 @@ async def _backfill_failure_uuids(job_id: str, result_data: dict) -> bool:
     return changed
 
 
-async def get_result(job_id: str, *, strip_sensitive: bool = True) -> dict | None:
+async def get_result(
+    job_id: str, *, strip_sensitive: bool = True
+) -> dict[str, Any] | None:
     """Retrieve an analysis result by job ID.
 
     Args:
@@ -1837,20 +1839,17 @@ async def get_result(job_id: str, *, strip_sensitive: bool = True) -> dict | Non
                 await _backfill_failure_uuids(job_id, parsed)
             if parsed and strip_sensitive:
                 parsed = strip_sensitive_from_response(parsed)
+            row_data = dict(row)
             return with_build_url_aliases(
                 {
-                    "job_id": row["job_id"],
+                    "job_id": row_data["job_id"],
                     "build_url": _row_build_url(row),
-                    "status": row["status"],
-                    "error": row["error"] if "error" in row.keys() else "",
+                    "status": row_data["status"],
+                    "error": row_data.get("error", ""),
                     "result": parsed,
-                    "created_at": row["created_at"],
-                    "completed_at": row["completed_at"]
-                    if "completed_at" in row.keys()
-                    else None,
-                    "analysis_started_at": row["analysis_started_at"]
-                    if "analysis_started_at" in row.keys()
-                    else None,
+                    "created_at": row_data["created_at"],
+                    "completed_at": row_data.get("completed_at"),
+                    "analysis_started_at": row_data.get("analysis_started_at"),
                 }
             )
         logger.debug(f"get_result: job_id={job_id}, found=False")
@@ -1873,8 +1872,8 @@ async def get_job_submitters(job_ids: list[str]) -> dict[str, str]:
 
 
 def _find_failure_by_uuid_in_failures(
-    failures: list[dict], failure_uuid: str
-) -> dict | None:
+    failures: list[dict[str, Any]], failure_uuid: str
+) -> dict[str, Any] | None:
     """Search a flat list of failure dicts for a matching UUID."""
     for f in failures:
         if not isinstance(f, dict):
@@ -1885,8 +1884,8 @@ def _find_failure_by_uuid_in_failures(
 
 
 def _find_failure_by_uuid_in_children(
-    children: list[dict], failure_uuid: str
-) -> tuple[dict | None, str, int]:
+    children: list[dict[str, Any]], failure_uuid: str
+) -> tuple[dict[str, Any] | None, str, int]:
     """Recursively search child job analyses for a failure with matching UUID.
 
     Returns:
@@ -1912,7 +1911,7 @@ def _find_failure_by_uuid_in_children(
 
 async def find_failure_by_uuid(
     failure_uuid: str,
-) -> dict | None:
+) -> dict[str, Any] | None:
     """Search all stored results for a failure with the given UUID.
 
     Uses SQLite ``INSTR`` to pre-filter rows that *might* contain the UUID,
@@ -1957,7 +1956,7 @@ async def find_failure_by_uuid(
     return None
 
 
-async def list_results(limit: int = 50) -> list[dict]:
+async def list_results(limit: int = 50) -> list[dict[str, Any]]:
     """List recent analysis results.
 
     Args:
@@ -1980,7 +1979,7 @@ async def list_results(limit: int = 50) -> list[dict]:
         return [with_build_url_aliases(dict(row)) for row in rows]
 
 
-def count_all_failures(result_data: dict) -> int:
+def count_all_failures(result_data: dict[str, Any]) -> int:
     """Count all failures including those in nested child job analyses.
 
     Walks the top-level ``failures`` list, then recursively counts failures in
@@ -1999,7 +1998,7 @@ def count_all_failures(result_data: dict) -> int:
     return count
 
 
-def _count_child_failures_recursive(child: dict) -> int:
+def _count_child_failures_recursive(child: dict[str, Any]) -> int:
     """Recursively count failures in a child job analysis dict.
 
     Each child has a ``failures`` list and a ``failed_children`` list that can
@@ -2017,7 +2016,7 @@ def _count_child_failures_recursive(child: dict) -> int:
     return count
 
 
-def _resolve_history_build_fields(result_data: dict) -> tuple[str, int]:
+def _resolve_history_build_fields(result_data: dict[str, Any]) -> tuple[str, int]:
     """Extract build_id and build_number for failure_history rows."""
     build_id = str(result_data.get("build_id") or "")
     request_params = result_data.get("request_params") or {}
@@ -2059,7 +2058,7 @@ def _coerce_sqlite_build_number(value: object) -> int:
 
 
 def _failure_to_history_row(
-    failure: dict,
+    failure: dict[str, Any],
     job_id: str,
     job_name: str,
     build_number: int,
@@ -2067,7 +2066,7 @@ def _failure_to_history_row(
     child_job_name: str = "",
     child_build_number: int = 0,
     analyzed_at: str = "",
-) -> tuple:
+) -> tuple[Any, ...]:
     """Convert a single failure dict to a failure_history row tuple.
 
     Args:
@@ -2096,13 +2095,13 @@ def _failure_to_history_row(
 
 
 def _extract_failures_for_history(
-    result_data: dict,
+    result_data: dict[str, Any],
     job_id: str,
     job_name: str,
     build_number: int,
     build_id: str = "",
     analyzed_at: str = "",
-) -> list[tuple]:
+) -> list[tuple[Any, ...]]:
     """Extract all failures from result_data into flat tuples for insertion.
 
     Walks top-level failures and recursively walks child_job_analyses
@@ -2122,7 +2121,7 @@ def _extract_failures_for_history(
         (job_id, job_name, build_number, build_id, test_name, error_message,
          error_signature, classification, child_job_name, child_build_number, analyzed_at)
     """
-    rows: list[tuple] = []
+    rows: list[tuple[Any, ...]] = []
 
     # Top-level failures (no child context)
     for f in result_data.get("failures", []):
@@ -2148,11 +2147,11 @@ def _extract_failures_for_history(
 
 
 def _extract_child_failures_for_history(
-    child: dict,
+    child: dict[str, Any],
     job_id: str,
     job_name: str,
     build_number: int,
-    rows: list[tuple],
+    rows: list[tuple[Any, ...]],
     build_id: str = "",
     analyzed_at: str = "",
 ) -> None:
@@ -2200,7 +2199,7 @@ async def find_matching_previous_analysis(
     test_name: str,
     current_job_id: str,
     child_job_name: str = "",
-) -> dict | None:
+) -> dict[str, Any] | None:
     """Find the most recent human-reviewed previous analysis of the same test.
 
     Searches failure_history for a row with the same job_name and test_name
@@ -2265,7 +2264,7 @@ async def find_matching_previous_analysis(
 
 
 async def populate_failure_history(
-    job_id: str, result_data: dict, analyzed_at: str = ""
+    job_id: str, result_data: dict[str, Any], analyzed_at: str = ""
 ) -> None:
     """Populate failure_history from a completed analysis result.
 
@@ -2378,7 +2377,7 @@ async def add_tracked_in_link(
         return cursor.lastrowid or 0
 
 
-async def get_tracked_in_link(link_id: int) -> dict | None:
+async def get_tracked_in_link(link_id: int) -> dict[str, Any] | None:
     """Fetch a single tracked-in link by ID.
 
     Returns:
@@ -2416,7 +2415,7 @@ def _tracked_in_key(
     return test_name
 
 
-async def get_tracked_in_for_job(job_id: str) -> dict[str, list[dict]]:
+async def get_tracked_in_for_job(job_id: str) -> dict[str, list[dict[str, Any]]]:
     """Return tracked-in links grouped by composite key.
 
     Returns:
@@ -2432,7 +2431,7 @@ async def get_tracked_in_for_job(job_id: str) -> dict[str, list[dict]]:
             (job_id,),
         )
         rows = await cursor.fetchall()
-        result: dict[str, list[dict]] = {}
+        result: dict[str, list[dict[str, Any]]] = {}
         for row in rows:
             key = _tracked_in_key(
                 row["test_name"],
@@ -2454,7 +2453,7 @@ async def get_tracked_in_for_scope(
     job_id: str,
     child_job_name: str = "",
     child_build_number: int = 0,
-) -> dict[str, list[dict]]:
+) -> dict[str, list[dict[str, Any]]]:
     """Return tracked-in links filtered to a specific push scope.
 
     Unlike :func:`get_tracked_in_for_job` which returns all links grouped
@@ -2489,7 +2488,7 @@ async def get_tracked_in_for_scope(
                 (job_id,),
             )
         rows = await cursor.fetchall()
-        result: dict[str, list[dict]] = {}
+        result: dict[str, list[dict[str, Any]]] = {}
         for row in rows:
             result.setdefault(row["test_name"], []).append(
                 {
@@ -2545,7 +2544,7 @@ async def backfill_failure_history() -> None:
     logger.info(f"Backfill complete: processed {backfilled}/{len(rows)} results")
 
 
-async def carry_forward_user_overrides(job_id: str, result_data: dict) -> int:
+async def carry_forward_user_overrides(job_id: str, result_data: dict[str, Any]) -> int:
     """Carry forward user classification overrides from previous jobs.
 
     When a test was previously classified by a user (not rootcoz-ai),
@@ -2656,7 +2655,7 @@ _TC_LATEST_JOIN = """
 async def _get_failure_stats(
     db: aiosqlite.Connection,
     job_filter: str,
-    params: list,
+    params: list[Any],
 ) -> tuple[int, str | None, str | None, str]:
     """Return (failure_count, first_seen, last_seen, last_classification).
 
@@ -2705,7 +2704,7 @@ async def _get_failure_stats(
 async def _get_classification_breakdown(
     db: aiosqlite.Connection,
     job_filter: str,
-    params: list,
+    params: list[Any],
 ) -> dict[str, int]:
     """Return a dict mapping effective classification labels to their counts.
 
@@ -2738,7 +2737,7 @@ async def _get_related_comments(
     test_name: str,
     signatures: set[str],
     exclude_job_id: str,
-) -> list[dict]:
+) -> list[dict[str, Any]]:
     """Return comments related to a test by name or error signature.
 
     Args:
@@ -2748,7 +2747,7 @@ async def _get_related_comments(
         exclude_job_id: Exclude comments from this job ID.
     """
     comment_conditions = ["test_name = ?"]
-    comment_params: list = [test_name]
+    comment_params: list[Any] = [test_name]
     if signatures:
         placeholders = ",".join("?" for _ in signatures)
         comment_conditions.append(f"error_signature IN ({placeholders})")
@@ -2770,7 +2769,7 @@ async def get_test_history(
     limit: int = 20,
     job_name: str = "",
     exclude_job_id: str = "",
-) -> dict:
+) -> dict[str, Any]:
     """Get pass/fail history for a specific test.
 
     Args:
@@ -2790,7 +2789,7 @@ async def get_test_history(
     async with _connect_db() as db:
         # Build optional job_name filter (fh-prefixed for JOINed queries)
         job_filter = ""
-        params: list = [test_name]
+        params: list[Any] = [test_name]
         if job_name:
             job_filter = " AND fh.job_name = ?"
             params.append(job_name)
@@ -2859,7 +2858,7 @@ async def get_test_history(
                 "WHERE status = 'completed' "
                 "AND json_extract(result_json, '$.job_name') = ?"
             )
-            total_params: list = [job_name]
+            total_params: list[Any] = [job_name]
         else:
             # Without job_name filtering, pass count cannot be accurately derived.
             # failure_history only records failures, not total test executions,
@@ -2913,7 +2912,9 @@ async def get_test_history(
     }
 
 
-async def search_by_signature(signature: str, exclude_job_id: str = "") -> dict:
+async def search_by_signature(
+    signature: str, exclude_job_id: str = ""
+) -> dict[str, Any]:
     """Find all tests that failed with the same error signature.
 
     Args:
@@ -2930,7 +2931,7 @@ async def search_by_signature(signature: str, exclude_job_id: str = "") -> dict:
     async with _connect_db() as db:
         # Build optional exclude filter
         exclude_filter = ""
-        base_params: list = [signature]
+        base_params: list[Any] = [signature]
         if exclude_job_id:
             exclude_filter = " AND job_id != ?"
             base_params.append(exclude_job_id)
@@ -2997,7 +2998,7 @@ async def search_by_signature(signature: str, exclude_job_id: str = "") -> dict:
     }
 
 
-async def get_job_stats(job_name: str, exclude_job_id: str = "") -> dict:
+async def get_job_stats(job_name: str, exclude_job_id: str = "") -> dict[str, Any]:
     """Get aggregate statistics for a specific job name.
 
     Args:
@@ -3012,7 +3013,7 @@ async def get_job_stats(job_name: str, exclude_job_id: str = "") -> dict:
     async with _connect_db() as db:
         # Build optional exclude filter
         exclude_filter = ""
-        exclude_params: list = []
+        exclude_params: list[Any] = []
         if exclude_job_id:
             exclude_filter = " AND job_id != ?"
             exclude_params = [exclude_job_id]
@@ -3025,7 +3026,7 @@ async def get_job_stats(job_name: str, exclude_job_id: str = "") -> dict:
             "WHERE status = 'completed' AND "
             "json_extract(result_json, '$.job_name') = ?"
         )
-        total_builds_params: list = [job_name]
+        total_builds_params: list[Any] = [job_name]
         if exclude_job_id:
             total_builds_query += " AND job_id != ?"
             total_builds_params.append(exclude_job_id)
@@ -3138,20 +3139,19 @@ async def list_distinct_job_names() -> set[str]:
         return {row[0] for row in rows if row[0]}
 
 
-def _parse_dashboard_row(row) -> dict:
+def _parse_dashboard_row(row: aiosqlite.Row) -> dict[str, Any]:
     """Parse a single dashboard result row into a dict with summary data."""
-    entry: dict = {
-        "job_id": row["job_id"],
+    row_data = dict(row)
+    entry: dict[str, Any] = {
+        "job_id": row_data["job_id"],
         "build_url": _row_build_url(row),
-        "status": row["status"],
-        "created_at": row["created_at"],
-        "completed_at": row["completed_at"] if "completed_at" in row.keys() else None,
-        "analysis_started_at": row["analysis_started_at"]
-        if "analysis_started_at" in row.keys()
-        else None,
-        "error": row["error"] if "error" in row.keys() else "",
-        "reviewed_count": row["reviewed_count"],
-        "comment_count": row["comment_count"],
+        "status": row_data["status"],
+        "created_at": row_data["created_at"],
+        "completed_at": row_data.get("completed_at"),
+        "analysis_started_at": row_data.get("analysis_started_at"),
+        "error": row_data.get("error", ""),
+        "reviewed_count": row_data["reviewed_count"],
+        "comment_count": row_data["comment_count"],
     }
     result_data = parse_result_json(row["result_json"], job_id=row["job_id"])
     if result_data:
@@ -3198,7 +3198,7 @@ _DASHBOARD_BASE_SQL = """
 async def list_results_for_dashboard(
     limit: int = DEFAULT_DASHBOARD_LIMIT,
     offset: int = 0,
-) -> list[dict]:
+) -> list[dict[str, Any]]:
     """List analysis results with summary data for dashboard display.
 
     Unlike list_results, this function also extracts key fields from result_json
@@ -3217,7 +3217,7 @@ async def list_results_for_dashboard(
 
     async with _connect_db() as db:
         sql = _DASHBOARD_BASE_SQL + " ORDER BY r.created_at DESC"
-        params: list = []
+        params: list[Any] = []
         if limit > 0:
             sql += " LIMIT ?"
             params.append(limit)
@@ -3243,7 +3243,7 @@ async def list_results_for_dashboard_filtered(
     review_status: str = "all",
     limit: int = DEFAULT_DASHBOARD_LIMIT,
     offset: int = 0,
-) -> dict:
+) -> dict[str, Any]:
     """List dashboard results with filters applied in SQL before LIMIT.
 
     Filters are pushed into the SQL query so the LIMIT applies to the
@@ -3266,7 +3266,7 @@ async def list_results_for_dashboard_filtered(
         raise ValueError("limit must be >= 0")
 
     conditions: list[str] = []
-    params: list = []
+    params: list[Any] = []
 
     if search:
         # Search job_name in result_json and job_id
@@ -3378,7 +3378,7 @@ async def get_parent_job_name_for_test(test_name: str, job_id: str = "") -> str:
                 "WHERE test_name = ? AND job_id = ? "
                 "ORDER BY analyzed_at DESC, id DESC LIMIT 1"
             )
-            params: tuple = (test_name, job_id)
+            params: tuple[Any, ...] = (test_name, job_id)
         else:
             query = (
                 "SELECT job_name FROM failure_history "
@@ -3464,7 +3464,7 @@ async def get_test_classifications(
     job_name: str = "",
     parent_job_name: str = "",
     job_id: str = "",
-) -> list[dict]:
+) -> list[dict[str, Any]]:
     """Get visible test classifications in the primary (override) domain.
 
     Only returns classifications with visible=1 **and** a primary
@@ -3551,7 +3551,7 @@ async def get_all_failures(
     offset: int = 0,
     date_from: str = "",
     date_to: str = "",
-) -> dict:
+) -> dict[str, Any]:
     """Get paginated failure history with optional filters.
 
     Returns dict with 'failures' list and 'total' count.
@@ -3641,7 +3641,7 @@ async def _delete_job_rows(db: aiosqlite.Connection, job_id: str) -> bool:
 
 async def save_test_entries(
     job_id: str,
-    entries: list[dict],
+    entries: list[dict[str, Any]],
     child_job_name: str = "",
     child_build_number: int = 0,
 ) -> None:
@@ -3691,7 +3691,7 @@ async def get_test_entries(
     child_build_number: int | None = None,
     offset: int = 0,
     limit: int = 50,
-) -> dict:
+) -> dict[str, Any]:
     """Get paginated test entries for a job.
 
     Args:
@@ -3707,7 +3707,7 @@ async def get_test_entries(
     """
     limit = min(limit, 200)
     conditions = ["job_id = ?"]
-    params: list = [job_id]
+    params: list[Any] = [job_id]
 
     if status:
         placeholders = ", ".join("?" for _ in status)
@@ -3757,7 +3757,7 @@ async def delete_job(job_id: str) -> bool:
         return job_existed
 
 
-async def delete_jobs_bulk(job_ids: list[str]) -> dict:
+async def delete_jobs_bulk(job_ids: list[str]) -> dict[str, Any]:
     """Delete multiple jobs and all their related data in a single transaction.
 
     Returns dict with 'deleted' (list of successfully deleted job_ids) and
@@ -3830,7 +3830,7 @@ async def _override_failure_field(
             "SELECT error_signature FROM failure_history "
             "WHERE job_id = ? AND test_name = ?"
         )
-        sig_params: list = [job_id, test_name, *child_params]
+        sig_params: list[Any] = [job_id, test_name, *child_params]
         sig_query += child_sql + " ORDER BY analyzed_at DESC LIMIT 1"
 
         cursor = await db.execute(sig_query, sig_params)
@@ -3910,7 +3910,7 @@ async def _override_failure_field(
         for t in group_tests:
             original = orig_values[t]
             if field == "classification":
-                extra_params: tuple = (value, original)
+                extra_params: tuple[Any, ...] = (value, original)
             else:
                 extra_params = ("", value, original)
 
@@ -4069,7 +4069,7 @@ async def get_history_classification(
             " WHERE job_id = ? AND test_name = ?"
             f" AND pattern IN {_PATTERN_CLASSIFICATIONS_SQL}"
         )
-        fh_params: list = [job_id, test_name, *child_params]
+        fh_params: list[Any] = [job_id, test_name, *child_params]
         fh_query += child_sql + " ORDER BY analyzed_at DESC, id DESC LIMIT 1"
 
         fh_row = await (await db.execute(fh_query, fh_params)).fetchone()
@@ -4128,7 +4128,7 @@ async def get_effective_classification(
             " WHERE job_id = ? AND test_name = ?"
             f" AND classification IN {_PRIMARY_CLASSIFICATIONS_SQL}"
         )
-        fh_params: list = [job_id, test_name, *child_params]
+        fh_params: list[Any] = [job_id, test_name, *child_params]
         fh_query += child_sql + " ORDER BY analyzed_at DESC, id DESC LIMIT 1"
 
         fh_row = await (await db.execute(fh_query, fh_params)).fetchone()
@@ -4167,7 +4167,9 @@ async def get_all_effective_classifications(
     return result
 
 
-async def mark_stale_results_failed() -> tuple[list[dict], list[dict]]:
+async def mark_stale_results_failed() -> tuple[
+    list[dict[str, Any]], list[dict[str, Any]]
+]:
     """Mark orphaned pending/running jobs as failed. Return waiting jobs for resumption.
 
     Pending and running jobs have lost their background task and cannot recover,
@@ -4183,8 +4185,8 @@ async def mark_stale_results_failed() -> tuple[list[dict], list[dict]]:
         - recovered_jobs: list of dicts with ``job_id`` and ``previous_status``
           for each job that was marked failed.
     """
-    waiting_jobs: list[dict] = []
-    recovered_jobs: list[dict] = []
+    waiting_jobs: list[dict[str, Any]] = []
+    recovered_jobs: list[dict[str, Any]] = []
     async with _connect_db() as db:
         # Collect orphaned job details before updating
         placeholders = ", ".join("?" for _ in ORPHAN_STATUSES)
@@ -4271,7 +4273,7 @@ async def mark_stale_results_failed() -> tuple[list[dict], list[dict]]:
 # --- Auth storage functions ---
 
 
-def _user_row_to_dict(row: aiosqlite.Row) -> dict:
+def _user_row_to_dict(row: aiosqlite.Row) -> dict[str, Any]:
     """Convert a users table row to a response dict, normalizing can_view_reports."""
     data = dict(row)
     if "can_view_reports" in data:
@@ -4314,7 +4316,7 @@ async def create_admin_user(
     return username, raw_key
 
 
-async def get_user_by_key(api_key: str) -> dict | None:
+async def get_user_by_key(api_key: str) -> dict[str, Any] | None:
     """Look up a user by their raw API key."""
     key_hash = hash_api_key(api_key)
     async with _connect_db() as db:
@@ -4327,7 +4329,7 @@ async def get_user_by_key(api_key: str) -> dict | None:
         return _user_row_to_dict(row) if row else None
 
 
-async def get_user_by_username(username: str) -> dict | None:
+async def get_user_by_username(username: str) -> dict[str, Any] | None:
     """Look up a user by username."""
     username = _normalize_username(username)
     async with _connect_db() as db:
@@ -4437,7 +4439,7 @@ async def change_user_role(username: str, new_role: str) -> tuple[str, str]:
     return username, raw_key
 
 
-async def list_users() -> list[dict]:
+async def list_users() -> list[dict[str, Any]]:
     """List all users (without key hashes).
 
     Excludes the reserved 'admin' username (bootstrap superuser
@@ -4519,7 +4521,7 @@ async def create_session(
     return token
 
 
-async def get_session(token: str) -> dict | None:
+async def get_session(token: str) -> dict[str, Any] | None:
     """Look up a session. Returns None if expired or not found."""
     token_hash = _hash_session_token(token)
     async with _connect_db() as db:
@@ -4706,10 +4708,10 @@ async def get_user_status(username: str) -> str | None:
         row = await cursor.fetchone()
         if row is None:
             return None
-        return row["status"] if "status" in row.keys() else "active"
+        return dict(row).get("status", "active")
 
 
-async def list_pending_users() -> list[dict]:
+async def list_pending_users() -> list[dict[str, Any]]:
     """List users with pending status."""
     async with _connect_db() as db:
         cursor = await db.execute(
@@ -4864,7 +4866,7 @@ async def get_user_tokens(username: str) -> dict[str, str]:
 # --- Job Metadata ---
 
 
-async def get_job_metadata(job_name: str) -> dict | None:
+async def get_job_metadata(job_name: str) -> dict[str, Any] | None:
     """Get metadata for a specific job.
 
     Args:
@@ -4884,7 +4886,7 @@ async def get_job_metadata(job_name: str) -> dict | None:
         return _job_metadata_row_to_dict(row)
 
 
-def _job_metadata_row_to_dict(row) -> dict:
+def _job_metadata_row_to_dict(row: aiosqlite.Row) -> dict[str, Any]:
     """Convert a job_metadata row to a dict, parsing the labels JSON."""
     d = dict(row)
     labels_raw = d.get("labels", "[]")
@@ -4897,7 +4899,9 @@ def _job_metadata_row_to_dict(row) -> dict:
     return d
 
 
-async def _upsert_job_metadata_row(db: aiosqlite.Connection, item: dict) -> None:
+async def _upsert_job_metadata_row(
+    db: aiosqlite.Connection, item: dict[str, Any]
+) -> None:
     """Upsert a single job metadata row."""
     labels_json = json.dumps(item.get("labels") or [])
     await db.execute(
@@ -4920,7 +4924,7 @@ async def set_job_metadata(
     tier: str | None = None,
     version: str | None = None,
     labels: list[str] | None = None,
-) -> dict:
+) -> dict[str, Any]:
     """Set or update metadata for a job.
 
     Uses INSERT OR REPLACE to upsert.
@@ -4977,7 +4981,7 @@ async def list_jobs_with_metadata(
     tier: str | list[str] = "",
     version: str | list[str] = "",
     labels: list[str] | None = None,
-) -> list[dict]:
+) -> list[dict[str, Any]]:
     """List all job metadata entries, optionally filtered.
 
     Filters combine with AND logic. Multiple labels require all to match.
@@ -5028,7 +5032,7 @@ async def list_jobs_with_metadata(
     return result
 
 
-async def bulk_set_metadata(items: list[dict]) -> dict:
+async def bulk_set_metadata(items: list[dict[str, Any]]) -> dict[str, Any]:
     """Bulk upsert job metadata.
 
     Args:
@@ -5051,8 +5055,8 @@ async def bulk_set_metadata(items: list[dict]) -> dict:
 
 async def auto_assign_job_metadata(
     job_name: str,
-    rules: list[dict],
-) -> dict | None:
+    rules: list[dict[str, Any]],
+) -> dict[str, Any] | None:
     """Auto-assign metadata to a job from name pattern rules if it has no existing metadata.
 
     This is called when a new analysis result is stored. If the job already has
@@ -5141,7 +5145,7 @@ async def record_token_usage(
     return record_id
 
 
-async def get_token_usage_for_job(job_id: str) -> list[dict]:
+async def get_token_usage_for_job(job_id: str) -> list[dict[str, Any]]:
     """Get all token usage records for a specific job."""
     async with _connect_db() as db:
         cursor = await db.execute(
@@ -5158,13 +5162,13 @@ async def get_token_usage_summary(
     ai_model: str | None = None,
     call_type: str | None = None,
     group_by: str | None = None,
-) -> dict:
+) -> dict[str, Any]:
     """Get aggregated token usage with optional filters and grouping.
 
     group_by can be: provider, model, call_type, day, week, month, job
     """
     conditions: list[str] = []
-    params: list = []
+    params: list[Any] = []
 
     if start_date:
         conditions.append("created_at >= ?")
@@ -5204,7 +5208,7 @@ async def get_token_usage_summary(
         totals = dict(await cursor.fetchone())
 
         # Breakdown by group
-        breakdown: list[dict] = []
+        breakdown: list[dict[str, Any]] = []
         if group_by:
             group_column = {
                 "provider": "ai_provider",
@@ -5242,7 +5246,7 @@ async def get_token_usage_summary(
         }
 
 
-async def get_token_usage_dashboard_summary() -> dict:
+async def get_token_usage_dashboard_summary() -> dict[str, Any]:
     """Get high-level summary for dashboard cards.
 
     Period keys use rolling windows:
@@ -5257,7 +5261,7 @@ async def get_token_usage_dashboard_summary() -> dict:
             "this_month": "created_at >= datetime('now', '-30 days')",
         }
 
-        result: dict = {}
+        result: dict[str, Any] = {}
         for period_name, condition in periods.items():
             cursor = await db.execute(
                 f"SELECT COUNT(*) as calls, "
@@ -5347,7 +5351,9 @@ async def delete_push_subscription(endpoint: str, username: str) -> bool:
         return deleted
 
 
-async def get_push_subscriptions_for_users(usernames: list[str]) -> list[dict]:
+async def get_push_subscriptions_for_users(
+    usernames: list[str],
+) -> list[dict[str, Any]]:
     """Get all push subscriptions for a list of usernames.
 
     Returns list of dicts with: username, endpoint, p256dh_key, auth_key.
@@ -5385,7 +5391,7 @@ async def delete_stale_push_subscriptions(endpoints: list[str]) -> None:
 async def _fetch_mention_candidates(
     username: str,
     unread_only: bool = False,
-) -> list[dict]:
+) -> list[dict[str, Any]]:
     """Fetch and filter mention candidates for a user.
 
     Uses SQL LIKE for initial candidate filtering, then refines
@@ -5402,7 +5408,7 @@ async def _fetch_mention_candidates(
     like_pattern = f"%@{username}%"
 
     base_where = "c.comment LIKE ?"
-    base_params: list = [like_pattern]
+    base_params: list[Any] = [like_pattern]
 
     if unread_only:
         base_where += " AND mr.id IS NULL"
@@ -5423,7 +5429,7 @@ async def _fetch_mention_candidates(
     # Python-side word-boundary filtering using detect_mentions.
     # SQL LIKE '%@user%' over-matches (e.g. '@username_extra'), so we
     # verify each candidate with regex-based detect_mentions().
-    filtered: list[dict] = []
+    filtered: list[dict[str, Any]] = []
     for row in rows:
         mentioned_users = detect_mentions(row["comment"])
         if username in mentioned_users:
@@ -5449,7 +5455,7 @@ async def get_mentions_for_user(
     offset: int = 0,
     limit: int = 50,
     unread_only: bool = False,
-) -> dict:
+) -> dict[str, Any]:
     """Get comments that mention @username.
 
     Returns dict with 'mentions' list, 'total' count, and 'unread_count'.
@@ -5525,7 +5531,7 @@ async def mark_all_mentions_read(username: str) -> int:
     return len(comment_ids)
 
 
-async def get_server_settings() -> dict[str, dict]:
+async def get_server_settings() -> dict[str, dict[str, Any]]:
     """Get all server setting overrides from DB.
 
     Returns dict of {key: {"value": str, "updated_by": str, "updated_at": str}}.
@@ -5545,7 +5551,7 @@ async def get_server_settings() -> dict[str, dict]:
         }
 
 
-async def get_server_setting(key: str) -> dict | None:
+async def get_server_setting(key: str) -> dict[str, Any] | None:
     """Get a single server setting override. Returns None if not set."""
     async with _connect_db() as db:
         cursor = await db.execute(
@@ -5615,7 +5621,7 @@ async def delete_server_setting(key: str, deleted_by: str = "") -> bool:
 
 async def get_server_settings_history(
     key: str | None = None, limit: int = 100
-) -> list[dict]:
+) -> list[dict[str, Any]]:
     """Get server settings change history, optionally filtered by key."""
     async with _connect_db() as db:
         if key:
@@ -5694,7 +5700,7 @@ async def add_chat_message_pair(
 
 async def get_chat_messages(
     job_id: str, limit: int | None = 200, offset: int = 0, username: str = ""
-) -> list[dict]:
+) -> list[dict[str, Any]]:
     """Get chat messages for a job, ordered by id ASC.
 
     Args:
@@ -5702,7 +5708,7 @@ async def get_chat_messages(
     """
     async with _connect_db() as db:
         limit_clause = "LIMIT ? OFFSET ?" if limit is not None else ""
-        params: tuple
+        params: tuple[Any, ...]
         if username:
             base = (
                 "SELECT id, job_id, role, content, username, ai_provider, ai_model, session_id, status, created_at "
@@ -5766,7 +5772,9 @@ async def delete_chat_messages(job_id: str, username: str = "") -> int:
         return cursor.rowcount
 
 
-async def get_pending_chat_messages(job_id: str, username: str = "") -> list[dict]:
+async def get_pending_chat_messages(
+    job_id: str, username: str = ""
+) -> list[dict[str, Any]]:
     """Get pending (queued) chat messages for a job."""
     async with _connect_db() as db:
         if username:
@@ -5855,7 +5863,7 @@ def _build_date_filter(
     date_from: str,
     date_to: str,
     conditions: list[str],
-    params: list,
+    params: list[Any],
 ) -> None:
     """Append date-range conditions and params in-place.
 
@@ -5875,7 +5883,7 @@ def _build_metadata_join(
     version: list[str] | None,
     job_name_col: str,
     conditions: list[str],
-    params: list,
+    params: list[Any],
 ) -> str:
     """Return a JOIN clause for job_metadata filtering.
 
@@ -5905,7 +5913,7 @@ def _build_tags_filter(
     tags: list[str] | None,
     job_name_col: str,
     conditions: list[str],
-    params: list,
+    params: list[Any],
 ) -> None:
     """Append tag-filtering conditions in-place.
 
@@ -5928,7 +5936,7 @@ def _build_exclude_tags_filter(
     exclude_tags: list[str] | None,
     job_name_col: str,
     conditions: list[str],
-    params: list,
+    params: list[Any],
 ) -> None:
     """Append tag-exclusion conditions in-place.
 
@@ -5959,14 +5967,14 @@ async def get_report_totals(
     review_status: str = "",
     limit: int = 0,
     offset: int = 0,
-) -> dict:
+) -> dict[str, Any]:
     """Aggregate totals for the reports page.
 
     Returns total jobs, total failures, total reviewed,
     plus a paginated per-job detail list.
     """
     conditions: list[str] = []
-    params: list = []
+    params: list[Any] = []
 
     _build_date_filter("r.created_at", date_from, date_to, conditions, params)
     meta_join = _build_metadata_join(
@@ -6064,7 +6072,7 @@ async def _count_reviewed_tests(
 ) -> int:
     """Count reviewed tests with the given filters."""
     conditions: list[str] = []
-    params: list = []
+    params: list[Any] = []
     _build_date_filter("fr.updated_at", date_from, date_to, conditions, params)
     needs_rdata = bool(team or tier or version or tags or exclude_tags)
     rdata_join = (
@@ -6120,14 +6128,14 @@ async def get_report_classification_overrides(
     review_status: str = "",
     limit: int = 0,
     offset: int = 0,
-) -> dict:
+) -> dict[str, Any]:
     """Count of user classification overrides grouped by from->to.
 
     Only includes overrides where created_by is non-empty (user-initiated)
     and the test also appears in failure_reviews (reviewed = 1).
     """
     conditions: list[str] = ["tc.created_by != ''"]
-    params: list = []
+    params: list[Any] = []
 
     _build_date_filter("tc.created_at", date_from, date_to, conditions, params)
     meta_join = _build_metadata_join(
@@ -6264,8 +6272,8 @@ async def get_report_classification_overrides(
         )
 
     # Group by from->to
-    groups: dict[str, dict] = {}
-    details: list[dict] = []
+    groups: dict[str, dict[str, Any]] = {}
+    details: list[dict[str, Any]] = []
     for row in rows:
         axis = row["override_axis"]
         if axis == "pattern":
@@ -6325,7 +6333,7 @@ async def get_report_issues_created(
     review_status: str = "",
     limit: int = 0,
     offset: int = 0,
-) -> dict:
+) -> dict[str, Any]:
     """Find GitHub/Jira issues created from comments.
 
     Matches comments containing 'GitHub Issue' or 'Jira Bug' patterns
@@ -6336,7 +6344,7 @@ async def get_report_issues_created(
     conditions: list[str] = [
         "(c.comment LIKE '%GitHub Issue%' OR c.comment LIKE '%Jira Bug%')"
     ]
-    params: list = []
+    params: list[Any] = []
 
     _build_date_filter("c.created_at", date_from, date_to, conditions, params)
     meta_join = _build_metadata_join(
@@ -6383,7 +6391,7 @@ async def get_report_issues_created(
         cursor = await db.execute(sql, params)
         rows = await cursor.fetchall()
 
-    issues: list[dict] = []
+    issues: list[dict[str, Any]] = []
     github_total = 0
     jira_total = 0
     for row in rows:

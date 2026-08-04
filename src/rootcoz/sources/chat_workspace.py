@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 
 def reconstruct_source(
     analysis_type: str,
-    source_params: dict,
+    source_params: dict[str, Any],
     settings: Any = None,
     *,
     child_job_name: str = "",
@@ -40,7 +40,7 @@ def reconstruct_source(
 
 async def setup_ci_build_workspace(
     workspace: Path,
-    request_params: dict,
+    request_params: dict[str, Any],
     *,
     github_token: str = "",
     settings: Any = None,

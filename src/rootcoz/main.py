@@ -1,4 +1,5 @@
 import asyncio
+import contextlib
 import copy
 import hmac
 import json
@@ -10,34 +11,19 @@ import re
 import sqlite3
 import threading
 import time as _time
-from urllib.parse import quote as _urlquote, urlparse
 import uuid
 from collections import defaultdict
-from collections.abc import Callable, Coroutine, Sequence
-import contextlib
+from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine, Sequence
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Annotated, Any, Literal
+from urllib.parse import quote as _urlquote
+from urllib.parse import urlparse
 
 import aiosqlite
 import httpx
 import uvicorn
-from pi_sidecar_client import (
-    check_sidecar_available,
-    run_parallel_with_limit,
-)
-from rootcoz.ai_client import (
-    VALID_AI_PROVIDERS,
-    _setup_usage_recorder,
-    build_friendly_catalog,
-    call_ai_once,
-    clear_cursor_auth_cache,
-    format_chat_ai_user_error,
-    list_models,
-    normalize_provider,
-    probe_cursor_auth,
-)
 from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Query, Request
 from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
@@ -49,12 +35,28 @@ from fastapi.responses import (
     StreamingResponse,
 )
 from fastapi.staticfiles import StaticFiles
+from git.exc import GitCommandError
+from pi_sidecar_client import (
+    check_sidecar_available,
+    run_parallel_with_limit,
+)
 from pydantic import BaseModel, Field, SecretStr, ValidationError
 from simple_logger.logger import get_logger
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.middleware.gzip import GZipMiddleware
 
 from rootcoz import storage
+from rootcoz.ai_client import (
+    VALID_AI_PROVIDERS,
+    _setup_usage_recorder,
+    build_friendly_catalog,
+    call_ai_once,
+    clear_cursor_auth_cache,
+    format_chat_ai_user_error,
+    list_models,
+    normalize_provider,
+    probe_cursor_auth,
+)
 from rootcoz.bug_creation import (
     create_github_issue,
     create_jira_bug,
@@ -105,19 +107,20 @@ from rootcoz.feedback import (
     generate_feedback_preview,
 )
 from rootcoz.github_issues import enrich_with_tests_repo_matches
-from rootcoz.jira import JiraClient, filter_matches_with_ai, enrich_with_jira_matches
+from rootcoz.jira import JiraClient, enrich_with_jira_matches, filter_matches_with_ai
 from rootcoz.logging_context import JobIdFilter, get_log_file, job_id_var
 from rootcoz.metadata_rules import match_job_metadata
 from rootcoz.models import (
+    _SYSTEM_TAGS,
     AddCommentRequest,
     AdditionalRepo,
     AdminCreateUserRequest,
-    ChatMessageRequest,
     AnalyzeCommentRequest,
     AnalyzeCommentResponse,
     BaseAnalysisRequest,
     BulkDeleteRequest,
     BulkJobMetadataRequest,
+    ChatMessageRequest,
     ChildJobAnalysis,
     ClassifyTestRequest,
     CreateIssueRequest,
@@ -142,7 +145,6 @@ from rootcoz.models import (
     UnifiedAnalyzeRequest,
     UnsubscribeRequest,
     _JenkinsParamsMixin,
-    _SYSTEM_TAGS,
 )
 from rootcoz.monitoring import (
     _get_app_version,
@@ -183,8 +185,8 @@ from rootcoz.sources import (
     run_console_only_analysis,
     setup_analysis_workspace,
 )
-from rootcoz.sources.base import CISourceResult, resolve_display_build_id
 from rootcoz.sources import chat_workspace as source_chat_workspace
+from rootcoz.sources.base import CISourceResult, resolve_display_build_id
 from rootcoz.storage import (
     AI_SYSTEM_USERNAME,
     DB_PATH,
@@ -192,8 +194,8 @@ from rootcoz.storage import (
     get_history_classification,
     get_result,
     init_db,
-    list_results,
     list_distinct_job_names,
+    list_results,
     list_results_for_dashboard,
     list_results_for_dashboard_filtered,
     patch_result_json,
@@ -354,7 +356,7 @@ for _cat, _fields in _SETTINGS_CATEGORIES.items():
         _FIELD_TO_CATEGORY[_f] = _cat
 
 
-def _get_settings_metadata() -> list[dict]:
+def _get_settings_metadata() -> list[dict[str, Any]]:
     """Build metadata for all Settings fields with current values and sources."""
     settings = get_settings()
 
@@ -534,9 +536,9 @@ def _make_sse_stream(
         listener_key: Key into per_key_listeners (e.g. the job_id).
     """
 
-    async def event_generator():
+    async def event_generator() -> AsyncIterator[str]:
         my_event = asyncio.Event()
-        wait_task: asyncio.Task | None = None
+        wait_task: asyncio.Task[Any] | None = None
 
         # Register
         if per_key_listeners is not None:
@@ -635,7 +637,7 @@ def _install_job_id_filter() -> None:
 _install_job_id_filter()
 
 
-async def _attach_token_usage(job_id: str, result_data: dict) -> None:
+async def _attach_token_usage(job_id: str, result_data: dict[str, Any]) -> None:
     """Attach token usage summary to result data. Best-effort \u2014 never raises."""
     try:
         token_summary = await build_token_usage_summary(job_id)
@@ -746,10 +748,10 @@ def _build_report_context(
     include_links: bool,
     base_url: str,
     job_id: str,
-    result_data: dict,
+    result_data: dict[str, Any],
     child_job_name: str = "",
     child_build_number: int = 0,
-    matched_child: dict | None = None,
+    matched_child: dict[str, Any] | None = None,
 ) -> tuple[str, str]:
     """Build report URL and Jenkins URL for bug preview endpoints.
 
@@ -776,7 +778,7 @@ def _build_report_context(
     jenkins_url = result_data.get("jenkins_url", "")
 
     # Scope to child job when specified
-    child: dict | None = matched_child
+    child: dict[str, Any] | None = matched_child
     if child_job_name and child is None:
         child = _find_child_job_in_result(
             result_data, child_job_name, child_build_number
@@ -815,7 +817,9 @@ def _build_report_context(
     return report_url, jenkins_url
 
 
-def _attach_result_links(payload: dict, base_url: str, job_id: str) -> dict:
+def _attach_result_links(
+    payload: dict[str, Any], base_url: str, job_id: str
+) -> dict[str, Any]:
     """Attach ``base_url`` and ``result_url`` to a response payload."""
     payload["base_url"] = base_url
     result_url = f"{base_url}/results/{job_id}"
@@ -823,7 +827,7 @@ def _attach_result_links(payload: dict, base_url: str, job_id: str) -> dict:
     return payload
 
 
-async def _attach_origin_job_info(result: dict) -> None:
+async def _attach_origin_job_info(result: dict[str, Any]) -> None:
     """Attach origin job reference when the result is a re-analysis.
 
     If ``request_params.reanalyzed_from_job_id`` exists, adds
@@ -872,7 +876,7 @@ def _is_encrypted_value(value: Any) -> bool:
     return isinstance(value, str) and value.startswith("enc:")
 
 
-def _validate_decrypted_sensitive_fields(decrypted_params: dict) -> None:
+def _validate_decrypted_sensitive_fields(decrypted_params: dict[str, Any]) -> None:
     """Fail fast if any sensitive field is still encrypted (key changed / corrupt)."""
     for key in SENSITIVE_KEYS:
         value = decrypted_params.get(key)
@@ -911,7 +915,9 @@ _ANALYSIS_SETTINGS_FIELDS = (
 )
 
 
-def _copy_analysis_settings(decrypted_params: dict, unified_fields: dict) -> None:
+def _copy_analysis_settings(
+    decrypted_params: dict[str, Any], unified_fields: dict[str, Any]
+) -> None:
     """Copy analysis settings from stored params to unified request fields."""
     for field in _ANALYSIS_SETTINGS_FIELDS:
         if field in decrypted_params and decrypted_params[field] is not None:
@@ -932,7 +938,7 @@ def _copy_analysis_settings(decrypted_params: dict, unified_fields: dict) -> Non
 
 
 def _reconstruct_from_params(
-    result_data: dict,
+    result_data: dict[str, Any],
 ) -> tuple[UnifiedAnalyzeRequest, Settings]:
     """Reconstruct a UnifiedAnalyzeRequest and Settings from stored request_params.
 
@@ -963,7 +969,7 @@ def _reconstruct_from_params(
                 )
 
     analysis_type = params.get("analysis_type", "jenkins")
-    unified_fields: dict = {
+    unified_fields: dict[str, Any] = {
         "type": analysis_type,
         "job_name": result_data.get("job_name") or params.get("job_name"),
         "build_number": result_data.get("build_number") or params.get("build_number"),
@@ -980,16 +986,10 @@ def _reconstruct_from_params(
             params.get("tests_repo_url", ""), params.get("tests_repo_ref", "")
         )
         or None,
-        "peer_ai_configs": (
-            params["peer_ai_configs"] if "peer_ai_configs" in params else []
-        ),
+        "peer_ai_configs": params.get("peer_ai_configs", []),
         "peer_analysis_max_rounds": params.get("peer_analysis_max_rounds", 3),
-        "additional_repos": (
-            params["additional_repos"] if "additional_repos" in params else None
-        ),
-        "tests_repo_token": (
-            params["tests_repo_token"] if "tests_repo_token" in params else None
-        ),
+        "additional_repos": params.get("additional_repos", None),
+        "tests_repo_token": params.get("tests_repo_token", None),
     }
     for jenkins_field in (
         "jenkins_url",
@@ -1007,7 +1007,7 @@ def _reconstruct_from_params(
 
     # Build Settings from env defaults, then layer stored overrides
     base_settings = get_settings()
-    overrides: dict = {}
+    overrides: dict[str, Any] = {}
     settings_fields = [
         "jenkins_url",
         "jenkins_user",
@@ -1073,10 +1073,10 @@ def _reconstruct_from_params(
     return body, merged
 
 
-_background_tasks: set[asyncio.Task] = set()
+_background_tasks: set[asyncio.Task[Any]] = set()
 
 # Track analysis background tasks by job_id for abort support
-_job_tasks: dict[str, asyncio.Task] = {}
+_job_tasks: dict[str, asyncio.Task[Any]] = {}
 
 
 def _remove_job_task(job_id: str) -> Callable[[asyncio.Task[object]], None]:
@@ -1088,7 +1088,7 @@ def _remove_job_task(job_id: str) -> Callable[[asyncio.Task[object]], None]:
     return _callback
 
 
-def _register_job_task(job_id: str, task: asyncio.Task) -> None:
+def _register_job_task(job_id: str, task: asyncio.Task[Any]) -> None:
     """Register an analysis task for tracking and abort support."""
     _background_tasks.add(task)
     task.add_done_callback(_background_tasks.discard)
@@ -1096,7 +1096,7 @@ def _register_job_task(job_id: str, task: asyncio.Task) -> None:
     _job_tasks[job_id] = task
 
 
-async def _preserve_request_params(job_id: str, result_data: dict) -> None:
+async def _preserve_request_params(job_id: str, result_data: dict[str, Any]) -> None:
     """Copy persisted enqueue-time fields from the stored result into result_data.
 
     The initial ``save_result`` persists ``request_params``, ``tags``,
@@ -1126,7 +1126,9 @@ async def _preserve_request_params(job_id: str, result_data: dict) -> None:
                 result_data[key] = stored_result[key]
 
 
-async def _fail_resumed_waiting_job(job_id: str, result_data: dict, error: str) -> None:
+async def _fail_resumed_waiting_job(
+    job_id: str, result_data: dict[str, Any], error: str
+) -> None:
     """Mark a resumed waiting job as failed with a standard payload.
 
     Args:
@@ -1151,7 +1153,7 @@ async def _fail_resumed_waiting_job(job_id: str, result_data: dict, error: str) 
     notify_job_status_changed(job_id)
 
 
-async def _resume_waiting_jobs(waiting_jobs: list[dict]) -> None:
+async def _resume_waiting_jobs(waiting_jobs: list[dict[str, Any]]) -> None:
     """Resume waiting jobs by re-creating their background tasks.
 
     Args:
@@ -1174,7 +1176,7 @@ async def _resume_waiting_jobs(waiting_jobs: list[dict]) -> None:
 
         try:
             body, merged = _reconstruct_from_params(result_data)
-        except Exception as exc:
+        except (ValueError, KeyError, TypeError, ValidationError, RuntimeError) as exc:
             logger.warning(
                 f"Failed to reconstruct params for waiting job {job['job_id']}: {exc}"
             )
@@ -1287,7 +1289,7 @@ async def _safe_preload_cursor_models() -> None:
         logger.debug("Failed to preload cursor models", exc_info=True)
 
 
-async def _backfill_job_metadata(rules: list[dict]) -> None:
+async def _backfill_job_metadata(rules: list[dict[str, Any]]) -> None:
     """Retroactively assign metadata to existing jobs missing metadata. Best-effort."""
     try:
         # Get all unique job names from results
@@ -1308,7 +1310,7 @@ async def _backfill_job_metadata(rules: list[dict]) -> None:
         logger.debug("Failed to backfill job metadata", exc_info=True)
 
 
-async def _deferred_resume_waiting_jobs(waiting_jobs: list[dict]) -> None:
+async def _deferred_resume_waiting_jobs(waiting_jobs: list[dict[str, Any]]) -> None:
     """Resume waiting jobs after startup is complete.
 
     Waits briefly so uvicorn finishes binding and the app is ready to
@@ -1320,7 +1322,7 @@ async def _deferred_resume_waiting_jobs(waiting_jobs: list[dict]) -> None:
 
 
 @asynccontextmanager
-async def lifespan(_app: FastAPI):
+async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     _install_job_id_filter()
     _install_sse_log_handler()
     _setup_usage_recorder()
@@ -1429,7 +1431,9 @@ class ErrorTrackingMiddleware(BaseHTTPMiddleware):
         except Exception:  # alert scheduling must never break request handling
             logger.debug("Failed to schedule high-error-rate alert", exc_info=True)
 
-    async def dispatch(self, request: Request, call_next):
+    async def dispatch(
+        self, request: Request, call_next: Callable[[Request], Awaitable[Response]]
+    ) -> Response:
         if request.url.path in self._SKIP_PATHS:
             return await call_next(request)
         method = request.method
@@ -1484,7 +1488,7 @@ _APPROVAL_STATUS_RESPONSES: dict[str, str] = {
 }
 
 
-def _maybe_add_custom_approval_msg(content: dict, settings: Settings) -> None:
+def _maybe_add_custom_approval_msg(content: dict[str, Any], settings: Settings) -> None:
     """Append custom admin approval message to response content if configured."""
     if settings.admin_wait_approve_msg:
         content["custom_message"] = settings.admin_wait_approve_msg
@@ -1496,7 +1500,7 @@ def _blocked_user_status_response(user_status: str | None) -> JSONResponse | Non
     if detail is None:
         return None
     settings = get_settings()
-    content: dict = {"detail": detail, "status": user_status}
+    content: dict[str, Any] = {"detail": detail, "status": user_status}
     if user_status == "pending":
         _maybe_add_custom_approval_msg(content, settings)
     return JSONResponse(
@@ -1548,11 +1552,11 @@ class AuthMiddleware(BaseHTTPMiddleware):
         if path in cls._PUBLIC_PATHS:
             return True
         # Treat /docs/ and /redoc/ (etc.) as public without turning "/" into "".
-        if path != "/" and path.rstrip("/") in cls._PUBLIC_PATHS:
-            return True
-        return False
+        return path != "/" and path.rstrip("/") in cls._PUBLIC_PATHS
 
-    async def dispatch(self, request: Request, call_next):
+    async def dispatch(
+        self, request: Request, call_next: Callable[[Request], Awaitable[Response]]
+    ) -> Response:
         # CORS preflight requests must pass through without authentication
         if request.method == "OPTIONS":
             request.state.username = ""
@@ -1623,7 +1627,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
         authenticated_admin = False
         has_valid_session = False
         # User row already loaded via Bearer key or SSO (reuse for can_view_reports).
-        fetched_user: dict | None = None
+        fetched_user: dict[str, Any] | None = None
 
         # 1. Check session cookie (rootcoz_session) — user or admin session
         session_token = _read_cookie(request, "rootcoz_session")
@@ -1698,20 +1702,19 @@ class AuthMiddleware(BaseHTTPMiddleware):
                             has_valid_session = True
 
         # 3. Check X-Forwarded-User header (SSO via trusted proxy)
-        if not username and proxy_username:
-            if proxy_username.lower() != "admin":
-                username = proxy_username
-                has_valid_session = True
-                # Resolve the user's actual role from DB
-                proxy_user = await storage.get_user_by_username(username)
-                if proxy_user:
-                    fetched_user = proxy_user
-                    resolved_role = str(proxy_user.get("role", "reviewer"))
-                    if resolved_role == "admin":
-                        is_admin = True
-                        authenticated_admin = True
-                # Flag that we need to set the rootcoz_username cookie on the response
-                request.state.set_proxy_cookie = proxy_username
+        if not username and proxy_username and proxy_username.lower() != "admin":
+            username = proxy_username
+            has_valid_session = True
+            # Resolve the user's actual role from DB
+            proxy_user = await storage.get_user_by_username(username)
+            if proxy_user:
+                fetched_user = proxy_user
+                resolved_role = str(proxy_user.get("role", "reviewer"))
+                if resolved_role == "admin":
+                    is_admin = True
+                    authenticated_admin = True
+            # Flag that we need to set the rootcoz_username cookie on the response
+            request.state.set_proxy_cookie = proxy_username
 
         # 4. Fall back to rootcoz_username cookie (regular users)
         if not username:
@@ -1746,11 +1749,10 @@ class AuthMiddleware(BaseHTTPMiddleware):
             task.add_done_callback(_background_tasks.discard)
 
         # Admin-only path enforcement
-        if path.startswith("/api/admin/"):
-            if not authenticated_admin:
-                return JSONResponse(
-                    status_code=403, content={"detail": "Admin access required"}
-                )
+        if path.startswith("/api/admin/") and not authenticated_admin:
+            return JSONResponse(
+                status_code=403, content={"detail": "Admin access required"}
+            )
 
         # Require authentication for all non-public, non-optional paths
         if not has_valid_session and not self._is_public_path(path):
@@ -1826,7 +1828,9 @@ _BODY_LOGGING_SKIP_PATHS = frozenset(
 class RequestBodyLoggingMiddleware(BaseHTTPMiddleware):
     """Log incoming request bodies at DEBUG level with sensitive data masked."""
 
-    async def dispatch(self, request: Request, call_next):
+    async def dispatch(
+        self, request: Request, call_next: Callable[[Request], Awaitable[Response]]
+    ) -> Response:
         if request.url.path in _BODY_LOGGING_SKIP_PATHS or request.url.path.startswith(
             "/api/chat/"
         ):
@@ -1866,7 +1870,9 @@ app.add_middleware(RequestBodyLoggingMiddleware)
 class CacheControlMiddleware(BaseHTTPMiddleware):
     """Add long-lived cache headers for Vite-hashed static assets."""
 
-    async def dispatch(self, request: Request, call_next):
+    async def dispatch(
+        self, request: Request, call_next: Callable[[Request], Awaitable[Response]]
+    ) -> Response:
         response = await call_next(request)
         if (
             request.url.path.startswith("/assets/")
@@ -1880,7 +1886,7 @@ app.add_middleware(CacheControlMiddleware)
 app.add_middleware(GZipMiddleware, minimum_size=500)
 
 
-def _mask_pydantic_error(error: dict) -> dict:
+def _mask_pydantic_error(error: dict[str, Any]) -> dict[str, Any]:
     """Mask sensitive input values in a Pydantic validation error dict."""
     result = dict(error)
     loc = error.get("loc") or ()
@@ -1929,7 +1935,8 @@ async def _validation_error_handler(
                 masked_body = f"<non-JSON, {size} bytes>"
             else:
                 masked_body = f"<non-JSON body: {type(exc.body).__name__}>"
-        except Exception:  # masking must never break the 422 response
+        except (TypeError, ValueError, AttributeError, RecursionError):
+            # masking must never break the 422 response
             masked_body = "<unable to mask>"
     raw_errors = jsonable_encoder(exc.errors())
     masked_errors = [_mask_pydantic_error(e) for e in raw_errors]
@@ -2096,7 +2103,7 @@ def _resolve_ai_config_allow_defer(
 
 def _resolve_peer_ai_configs(
     body: BaseAnalysisRequest, settings: Settings
-) -> list | None:
+) -> list[Any] | None:
     """Resolve peer AI configs from request body or env var default.
 
     Priority:
@@ -2117,7 +2124,7 @@ def _resolve_peer_ai_configs(
 
 def _validate_peer_configs(
     body: BaseAnalysisRequest, settings: Settings
-) -> list | None:
+) -> list[Any] | None:
     """Resolve and validate peer AI configs. Raises HTTPException(400) on invalid input."""
     try:
         return _resolve_peer_ai_configs(body, settings)
@@ -2161,7 +2168,7 @@ def _merge_settings(body: BaseAnalysisRequest, settings: Settings) -> Settings:
     Returns:
         New Settings instance with overrides applied (copy even when empty).
     """
-    overrides: dict = {}
+    overrides: dict[str, Any] = {}
 
     # Direct field mappings (request field name == settings field name).
     # Keep in sync with BaseAnalysisRequest and Settings when adding new overrides.
@@ -2317,7 +2324,7 @@ async def _apply_auto_review(
 async def _match_and_auto_review_failures(
     job_id: str,
     job_name: str,
-    failures: list[dict],
+    failures: list[dict[str, Any]],
     child_job_name: str = "",
     child_build_number: int = 0,
 ) -> tuple[int, int]:
@@ -2378,7 +2385,7 @@ async def _auto_review_matching_failures(
     job_id: str,
     job_name: str,
     build_number: int | str,
-    result_data: dict,
+    result_data: dict[str, Any],
     settings: Settings,
 ) -> None:
     """Auto-review failures with identical signatures from previous analyses.
@@ -2455,7 +2462,7 @@ async def _auto_review_matching_failures(
 async def _auto_review_child_failures(
     job_id: str,
     job_name: str,
-    child: dict,
+    child: dict[str, Any],
 ) -> tuple[int, int]:
     """Auto-review failures within a child job analysis.
 
@@ -2595,7 +2602,7 @@ _AI_SESSION_TTL_HOURS = 8  # Short-lived for AI internal API calls
 
 
 async def _auto_assign_metadata(
-    display_name: str, metadata_rules: list[dict] | None
+    display_name: str, metadata_rules: list[dict[str, Any]] | None
 ) -> None:
     """Best-effort metadata auto-assignment."""
     if not metadata_rules:
@@ -2686,7 +2693,7 @@ async def _preflight_sidecar_check(
     return False
 
 
-async def _carry_forward_overrides(job_id: str, result_data: dict) -> None:
+async def _carry_forward_overrides(job_id: str, result_data: dict[str, Any]) -> None:
     """Carry forward user classification overrides from previous jobs. Best-effort."""
     try:
         carried = await storage.carry_forward_user_overrides(job_id, result_data)
@@ -2790,7 +2797,7 @@ async def _resolve_settings_json_before_analysis(
                 token=token or None,
             )
             clone_ok = True
-        except Exception as exc:
+        except (GitCommandError, OSError, ValueError) as exc:
             logger.warning(
                 "Early settings.json clone failed (%s); "
                 "continuing until analysis workspace clone",
@@ -2834,13 +2841,13 @@ async def _resolve_settings_json_before_analysis(
 def _build_base_request_params(
     ai_provider: str,
     ai_model: str,
-    peer_ai_configs_resolved: list | None = None,
+    peer_ai_configs_resolved: list[Any] | None = None,
     *,
     tests_repo_url: str = "",
     tests_repo_token: str = "",
     tests_repo_ref: str = "",
-    additional_repos: list | None = None,
-) -> dict:
+    additional_repos: list[Any] | None = None,
+) -> dict[str, Any]:
     """Serialize the common request parameters shared by all analysis endpoints.
 
     Captures the AI configuration, peer configs, tests repo, and additional
@@ -2880,7 +2887,7 @@ def _build_base_request_params(
 
 
 def _apply_base_analysis_overrides(
-    params: dict,
+    params: dict[str, Any],
     body: "BaseAnalysisRequest",
     merged: "Settings",
 ) -> None:
@@ -2941,7 +2948,7 @@ def _apply_base_analysis_overrides(
 
 
 def _stamp_reanalysis_metadata(
-    request_params: dict,
+    request_params: dict[str, Any],
     reanalyzed_from_job_id: str,
     reanalyzed_from_job_name: str,
 ) -> None:
@@ -2965,7 +2972,7 @@ def _ensure_submitter_tag(tags: list[str] | None, username: str) -> list[str]:
     return result
 
 
-def _strip_old_submitter_tag(tags: list[str], result_data: dict) -> list[str]:
+def _strip_old_submitter_tag(tags: list[str], result_data: dict[str, Any]) -> list[str]:
     """Remove the old submitter's username tag so re-analyze adds only the new one."""
     old_submitter = (result_data.get("request_params") or {}).get("submitted_by", "")
     if not old_submitter:
@@ -2979,7 +2986,7 @@ def _strip_old_submitter_tag(tags: list[str], result_data: dict) -> list[str]:
 async def _enqueue_ci_source_analysis(
     body: "UnifiedAnalyzeRequest",
     merged: "Settings",
-    resolved_peers: list | None,
+    resolved_peers: list[Any] | None,
     display_name: str,
     analysis_type: str,
     base_url: str,
@@ -2990,7 +2997,7 @@ async def _enqueue_ci_source_analysis(
     reanalyzed_from_job_id: str = "",
     reanalyzed_from_job_name: str = "",
     is_admin: bool = False,
-) -> dict:
+) -> dict[str, Any]:
     """Build params, persist initial state, spawn task, and return response.
 
     Shared enqueue path for all CISource plugins (file/raw/prow/jenkins).
@@ -3065,7 +3072,7 @@ async def _enqueue_ci_source_analysis(
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     source_cls.build_request_params(body, merged, base_params)
 
-    initial_result: dict = {
+    initial_result: dict[str, Any] = {
         "job_name": display_name,
         "display_name": display_name,
         "request_params": encrypt_sensitive_fields(base_params),
@@ -3108,7 +3115,7 @@ async def _enqueue_ci_source_analysis(
     )
     _register_job_task(job_id, task)
 
-    response: dict = {
+    response: dict[str, Any] = {
         "status": "queued",
         "job_id": job_id,
         "message": f"{message_prefix} job queued. Poll /results/{job_id} for status.",
@@ -3120,7 +3127,9 @@ async def _enqueue_ci_source_analysis(
 _ALLOWED_IDENTITY_KEYS = {"job_name", "build_number", "build_id"}
 
 
-def _stamp_source_identity(data: dict, source_result: CISourceResult | None) -> None:
+def _stamp_source_identity(
+    data: dict[str, Any], source_result: CISourceResult | None
+) -> None:
     """Apply source identity overrides (e.g. Prow job_name/build_number)."""
     if source_result is not None and source_result.identity:
         for key, value in source_result.identity.items():
@@ -3128,19 +3137,25 @@ def _stamp_source_identity(data: dict, source_result: CISourceResult | None) -> 
                 data[key] = value
 
 
-def _stamp_source_warnings(data: dict, source_result: CISourceResult | None) -> None:
+def _stamp_source_warnings(
+    data: dict[str, Any], source_result: CISourceResult | None
+) -> None:
     """Attach source warnings (GCS errors, oversize artifacts) to result."""
     if source_result is not None and source_result.warnings:
         data["source_warnings"] = source_result.warnings
 
 
-def _stamp_source_metadata(data: dict, source_result: CISourceResult | None) -> None:
+def _stamp_source_metadata(
+    data: dict[str, Any], source_result: CISourceResult | None
+) -> None:
     """Attach Prow job metadata from the source plugin when available."""
     if source_result is not None and source_result.source_metadata:
         data["source_metadata"] = source_result.source_metadata
 
 
-def _stamp_result_metadata(data: dict, source_result: CISourceResult | None) -> None:
+def _stamp_result_metadata(
+    data: dict[str, Any], source_result: CISourceResult | None
+) -> None:
     """Apply source identity, warnings, metadata, and build URL to result dict."""
     _stamp_source_identity(data, source_result)
     _stamp_source_warnings(data, source_result)
@@ -3149,7 +3164,7 @@ def _stamp_result_metadata(data: dict, source_result: CISourceResult | None) -> 
         stamp_build_url(data, source_result.build_url)
 
 
-def _count_test_entry_statuses(entries: list[dict]) -> tuple[int, int, int]:
+def _count_test_entry_statuses(entries: list[dict[str, Any]]) -> tuple[int, int, int]:
     """Count passed/skipped/failed in normalized test entry dicts."""
     passed = skipped = failed = 0
     for entry in entries:
@@ -3165,7 +3180,7 @@ def _count_test_entry_statuses(entries: list[dict]) -> tuple[int, int, int]:
 
 async def _save_test_entry_scopes(
     job_id: str,
-    scopes: list[tuple[str, int, list[dict]]],
+    scopes: list[tuple[str, int, list[dict[str, Any]]]],
 ) -> None:
     """Persist child-scoped test entry batches via ``save_test_entries``."""
     for child_job_name, child_build_number, entries in scopes:
@@ -3187,9 +3202,9 @@ async def _save_test_entry_scopes(
 
 
 def _apply_cached_test_counts(
-    result_data: dict,
-    top_entries: list[dict],
-    child_scopes: list[tuple[str, int, list[dict]]],
+    result_data: dict[str, Any],
+    top_entries: list[dict[str, Any]],
+    child_scopes: list[tuple[str, int, list[dict[str, Any]]]],
 ) -> None:
     """Cache job-level passed/skipped/failed counts on ``result_data``."""
     passed, skipped, failed = _count_test_entry_statuses(top_entries)
@@ -3206,7 +3221,7 @@ def _apply_cached_test_counts(
 async def _analyze_failures_or_exit(
     *,
     job_id: str,
-    test_failures: list,
+    test_failures: list[Any],
     console_context: str,
     artifacts_context: str,
     metadata_job_name: str,
@@ -3217,12 +3232,12 @@ async def _analyze_failures_or_exit(
     merged: Settings,
     custom_prompt: str,
     server_url: str,
-    peer_ai_configs: list | None,
-    cloned_repos: dict,
+    peer_ai_configs: list[Any] | None,
+    cloned_repos: dict[str, Any],
     auth_header: str,
-    groups: dict[str, list],
+    groups: dict[str, list[Any]],
     source_result: CISourceResult | None,
-) -> tuple[list, list, int] | None:
+) -> tuple[list[Any], list[Any], int] | None:
     """Resolve console-only / no-failure / junit analysis paths.
 
     Returns ``(all_analyses, test_failures, unique_errors)``, or ``None`` when an
@@ -3250,7 +3265,7 @@ async def _analyze_failures_or_exit(
             call_type="console",
         )
         if not success:
-            logger.error("Console-only analysis failed: %s", error_text, exc_info=True)
+            logger.error("Console-only analysis failed: %s", error_text)
             fail_result = FailureAnalysisResult(
                 job_id=job_id,
                 status="failed",
@@ -3401,11 +3416,11 @@ async def _process_ci_source_analysis(
     display_name: str,
     ai_provider: str,
     ai_model: str,
-    peer_ai_configs: list | None,
+    peer_ai_configs: list[Any] | None,
     tests_repo_url: str,
     tests_repo_ref: str,
     resolved_tests_repo_token: str,
-    additional_repos_list: list,
+    additional_repos_list: list[Any],
     base_url: str,
     username: str = "",
     is_admin: bool = False,
@@ -3539,7 +3554,7 @@ async def _process_ci_source_analysis(
         auth_header = await _create_ai_auth_header(username)
 
         # Group failures by error signature
-        groups: dict[str, list] = defaultdict(list)
+        groups: dict[str, list[Any]] = defaultdict(list)
         for failure in test_failures:
             sig = get_failure_signature(failure)
             groups[sig].append(failure)
@@ -3680,7 +3695,7 @@ async def _process_ci_source_analysis(
 
         # Handle child jobs (Jenkins pipeline sub-jobs)
         child_job_analyses: list[ChildJobAnalysis] = []
-        child_test_scopes: list[tuple[str, int, list[dict]]] = []
+        child_test_scopes: list[tuple[str, int, list[dict[str, Any]]]] = []
         if source_result.child_job_infos and source is not None:
             await safe_update_progress(job_id, "analyzing_child_jobs")
             notify_job_status_changed(job_id)
@@ -3851,7 +3866,7 @@ async def _process_ci_source_analysis(
                 f"job(s) were analyzed recursively."
             )
 
-        enrich_targets: list = list(all_analyses) + list(child_job_analyses)
+        enrich_targets: list[Any] = list(all_analyses) + list(child_job_analyses)
 
         # Enrich with Jira matches
         logger.debug(
@@ -4005,7 +4020,7 @@ async def analyze(
     body: UnifiedAnalyzeRequest,
     *,
     settings: Settings = _SETTINGS_DEP,
-) -> dict:
+) -> dict[str, Any]:
     """Submit an analysis job.
 
     Dispatches to the appropriate CI source plugin based on the ``type`` field.
@@ -4058,7 +4073,7 @@ async def re_analyze(
     request: Request,
     body: ReAnalyzeRequest,
     _: None = Depends(_bind_job_id),
-) -> dict:
+) -> dict[str, Any]:
     """Re-analyze a previously analyzed job with the same (or overridden) settings.
 
     Loads stored request_params from the original analysis, applies any
@@ -4106,7 +4121,7 @@ async def re_analyze(
 
     # Prefer the original user-supplied name (before UUID suffix was added)
     # over the resolved display_name / job_name.
-    unified_fields: dict = {
+    unified_fields: dict[str, Any] = {
         "type": analysis_type,
     }
     # Only restore name if user explicitly provided one;
@@ -4170,7 +4185,9 @@ async def re_analyze(
     )
 
 
-async def _apply_effective_classifications(job_id: str, result_data: dict) -> None:
+async def _apply_effective_classifications(
+    job_id: str, result_data: dict[str, Any]
+) -> None:
     """Apply user classification overrides to failures in result_data.
 
     Batch-queries all overrides for the job, then walks all failures
@@ -4182,7 +4199,7 @@ async def _apply_effective_classifications(job_id: str, result_data: dict) -> No
         return
 
     def _apply_override(
-        failure: dict, child_job_name: str, child_build_number: int
+        failure: dict[str, Any], child_job_name: str, child_build_number: int
     ) -> None:
         if not isinstance(failure, dict):
             return
@@ -4211,7 +4228,7 @@ async def _apply_effective_classifications(job_id: str, result_data: dict) -> No
             analysis["product_bug_report"] = False
 
     def _walk_failures(
-        failures: list,
+        failures: list[Any],
         child_job_name: str = "",
         child_build_number: int = 0,
     ) -> None:
@@ -4223,7 +4240,7 @@ async def _apply_effective_classifications(job_id: str, result_data: dict) -> No
     _walk_failures(result_data.get("failures", []))
 
     # Child job failures (including nested failed_children)
-    def _walk_children(children: list) -> None:
+    def _walk_children(children: list[Any]) -> None:
         for child in children:
             if not isinstance(child, dict):
                 continue
@@ -4237,7 +4254,7 @@ async def _apply_effective_classifications(job_id: str, result_data: dict) -> No
 
 
 @app.get("/api/results/fields", operation_id="listResultFields")
-async def list_result_fields() -> dict:
+async def list_result_fields() -> dict[str, Any]:
     """Return the allowlist of field paths for sparse GET /results/{job_id}."""
     return {"fields": sorted(RESULT_FIELD_PATHS)}
 
@@ -4256,7 +4273,7 @@ async def get_job_result(
             "400. Discover paths via GET /api/results/fields."
         ),
     ),
-):
+) -> Any:
     """Retrieve stored result by job_id, or serve SPA for browser requests.
 
     Optional ``fields`` query selects allowlisted paths only (no truncation).
@@ -4298,10 +4315,12 @@ async def get_job_result(
 @app.get("/api/results/{job_id}/tests", operation_id="getJobTests")
 async def get_job_tests(
     job_id: str,
-    status: list[str] | None = Query(
-        default=None,
-        description="Filter by test status: passed, skipped, failed (repeatable)",
-    ),
+    status: Annotated[
+        list[str] | None,
+        Query(
+            description="Filter by test status: passed, skipped, failed (repeatable)"
+        ),
+    ] = None,
     child_job_name: str | None = Query(
         default=None,
         description="Filter by child job name",
@@ -4312,7 +4331,7 @@ async def get_job_tests(
     ),
     offset: int = Query(default=0, ge=0, description="Pagination offset"),
     limit: int = Query(default=50, ge=1, le=200, description="Page size"),
-):
+) -> dict[str, Any]:
     """Get paginated test entries for a job (viewer+)."""
     # Sidecar may leave unsubstituted "{status}" when optional tool arg omitted
     if status:
@@ -4350,7 +4369,7 @@ async def get_job_tests(
 
 
 @app.get("/api/failures/{failure_uuid}", operation_id="getFailureByUuid")
-async def get_failure_by_uuid(failure_uuid: str) -> dict:
+async def get_failure_by_uuid(failure_uuid: str) -> dict[str, Any]:
     """Look up a single failure analysis by its UUID.
 
     Searches across all stored jobs for a failure with the given UUID.
@@ -4365,21 +4384,21 @@ async def get_failure_by_uuid(failure_uuid: str) -> dict:
 async def _reanalyze_failure_background(
     job_id: str,
     failure_uuid: str,
-    failure_dict: dict,
+    failure_dict: dict[str, Any],
     ai_provider: str,
     ai_model: str,
     ai_call_timeout: int | None,
     raw_prompt: str,
-    peer_ai_configs: list | None,
+    peer_ai_configs: list[Any] | None,
     peer_analysis_max_rounds: int,
     tests_repo_url: str,
     tests_repo_ref: str,
     tests_repo_token: str,
-    additional_repos_list: list | None,
+    additional_repos_list: list[Any] | None,
     username: str,
     max_concurrent_ai_calls: int,
     analysis_type: str = "",
-    source_params: dict | None = None,
+    source_params: dict[str, Any] | None = None,
     settings: Settings | None = None,
     child_job_name: str = "",
     child_build_number: int = 0,
@@ -4425,7 +4444,7 @@ async def _reanalyze_failure_background(
         )
         # Non-empty parent/override values act as request-tier (win over settings.json).
         # Unset fields stay off the shim so settings.json can fill gaps.
-        shim_data: dict = {}
+        shim_data: dict[str, Any] = {}
         if ai_provider:
             shim_data["ai_provider"] = ai_provider
         if ai_model:
@@ -4554,7 +4573,7 @@ async def _reanalyze_failure_background(
                 )
 
         # Build a FailedTest from the failure dict
-        _ft_kwargs: dict = {
+        _ft_kwargs: dict[str, Any] = {
             "test_name": failure_dict.get("test_name", ""),
             "error_message": failure_dict.get("error", ""),
         }
@@ -4593,7 +4612,7 @@ async def _reanalyze_failure_background(
         new_analysis = analyses[0]
 
         # Patch the failure in the parent job result on success
-        def _patch_success(result_data: dict) -> None:
+        def _patch_success(result_data: dict[str, Any]) -> None:
             failure = _find_failure_by_uuid_in_result(result_data, failure_uuid)
             if not failure:
                 logger.error(
@@ -4647,17 +4666,15 @@ async def _reanalyze_failure_background(
 
     except Exception as exc:
         error_msg = "Re-analysis failed unexpectedly. Check server logs for details."
-        logger.error(
-            "Failure %s re-analysis failed in job %s: %s: %s",
+        logger.exception(
+            "Failure %s re-analysis failed in job %s: %s",
             failure_uuid,
             job_id,
             type(exc).__name__,
-            exc,
-            exc_info=True,
         )
 
         # Patch failure status to "failed" with error message
-        def _patch_error(result_data: dict) -> None:
+        def _patch_error(result_data: dict[str, Any]) -> None:
             failure = _find_failure_by_uuid_in_result(result_data, failure_uuid)
             if failure:
                 failure["reanalysis_status"] = "failed"
@@ -4666,10 +4683,9 @@ async def _reanalyze_failure_background(
         try:
             await patch_result_json(job_id, _patch_error)
         except Exception:
-            logger.error(
+            logger.exception(
                 "Failed to patch error status for failure %s",
                 failure_uuid,
-                exc_info=True,
             )
 
     finally:
@@ -4696,7 +4712,7 @@ async def _reanalyze_failure_background(
 async def re_analyze_failure(
     failure_uuid: str,
     request: Request,
-) -> dict:
+) -> dict[str, Any]:
     """Re-analyze a single failure in-place within its parent job.
 
     Patches the failure directly in the parent job's stored result instead
@@ -4707,7 +4723,7 @@ async def re_analyze_failure(
     _require_operator(request)
 
     # Parse optional body
-    body_data: dict = {}
+    body_data: dict[str, Any] = {}
     raw_body = await request.body()
     if raw_body:
         try:
@@ -4822,7 +4838,7 @@ async def re_analyze_failure(
     # Immediately patch the failure as "running"
     already_running = False
 
-    def _patch_running(result_data: dict) -> None:
+    def _patch_running(result_data: dict[str, Any]) -> None:
         nonlocal already_running
         failure = _find_failure_by_uuid_in_result(result_data, failure_uuid)
         if failure:
@@ -4881,7 +4897,7 @@ async def re_analyze_failure(
 
 
 def _find_test_in_children(
-    children: list[dict],
+    children: list[dict[str, Any]],
     test_name: str,
     child_job_name: str,
     child_build_number: int = 0,
@@ -4947,7 +4963,7 @@ async def _validate_test_name_in_result(
         )
 
 
-def _child_matches(child: dict, job_name: str, build_number: int = 0) -> bool:
+def _child_matches(child: dict[str, Any], job_name: str, build_number: int = 0) -> bool:
     """Return True if *child* matches the given job name and optional build number.
 
     When ``build_number`` is 0 the match is by name only (wildcard).
@@ -4958,11 +4974,11 @@ def _child_matches(child: dict, job_name: str, build_number: int = 0) -> bool:
 
 
 def _find_failure_in_children(
-    children: list[dict],
+    children: list[dict[str, Any]],
     test_name: str,
     child_job_name: str,
     child_build_number: int = 0,
-) -> dict | None:
+) -> dict[str, Any] | None:
     """Recursively find a failure dict in child job analyses."""
     for child in children:
         if _child_matches(child, child_job_name, child_build_number):
@@ -4981,11 +4997,11 @@ def _find_failure_in_children(
 
 
 def _find_failure_in_result(
-    result_data: dict,
+    result_data: dict[str, Any],
     test_name: str,
     child_job_name: str = "",
     child_build_number: int = 0,
-) -> dict | None:
+) -> dict[str, Any] | None:
     """Find a specific failure dict in the stored result data."""
     if child_job_name:
         return _find_failure_in_children(
@@ -5000,7 +5016,9 @@ def _find_failure_in_result(
     return None
 
 
-def _find_failure_by_uuid_in_child(child: dict, failure_uuid: str) -> dict | None:
+def _find_failure_by_uuid_in_child(
+    child: dict[str, Any], failure_uuid: str
+) -> dict[str, Any] | None:
     """Recursively search a child job dict for a failure by UUID."""
     for f in child.get("failures", []):
         if f.get("id") == failure_uuid:
@@ -5013,8 +5031,8 @@ def _find_failure_by_uuid_in_child(child: dict, failure_uuid: str) -> dict | Non
 
 
 def _find_failure_by_uuid_in_result(
-    result_data: dict, failure_uuid: str
-) -> dict | None:
+    result_data: dict[str, Any], failure_uuid: str
+) -> dict[str, Any] | None:
     """Find a failure dict by UUID in the result data (top-level + children)."""
     for f in result_data.get("failures", []):
         if f.get("id") == failure_uuid:
@@ -5027,10 +5045,10 @@ def _find_failure_by_uuid_in_result(
 
 
 def _find_child_job_in_children(
-    children: list[dict],
+    children: list[dict[str, Any]],
     child_job_name: str,
     child_build_number: int = 0,
-) -> dict | None:
+) -> dict[str, Any] | None:
     """Recursively find a child job dict by name and optional build number.
 
     Uses the same wildcard semantics as ``_find_failure_in_children``:
@@ -5050,10 +5068,10 @@ def _find_child_job_in_children(
 
 
 def _find_child_job_in_result(
-    result_data: dict,
+    result_data: dict[str, Any],
     child_job_name: str,
     child_build_number: int = 0,
-) -> dict | None:
+) -> dict[str, Any] | None:
     """Find a child job dict in the stored result data."""
     return _find_child_job_in_children(
         result_data.get("child_job_analyses", []),
@@ -5098,7 +5116,7 @@ async def _resolve_effective_failure(
     )
     if not effective_cls or effective_cls == failure.analysis.classification:
         return failure
-    updates: dict = {"classification": effective_cls}
+    updates: dict[str, Any] = {"classification": effective_cls}
     if effective_cls == "CODE ISSUE":
         updates["product_bug_report"] = False
     elif effective_cls == "PRODUCT BUG":
@@ -5112,7 +5130,7 @@ async def _resolve_effective_failure(
 
 
 @app.get("/results/{job_id}/comments", operation_id="getComments")
-async def get_comments(job_id: str, _: None = Depends(_bind_job_id)) -> dict:
+async def get_comments(job_id: str, _: None = Depends(_bind_job_id)) -> dict[str, Any]:
     """Get all comments and review states for a job."""
     logger.debug(f"GET /results/{job_id}/comments")
     comments = await storage.get_comments_for_job(job_id)
@@ -5126,7 +5144,7 @@ async def add_comment(
     body: AddCommentRequest,
     request: Request,
     _: None = Depends(_bind_job_id),
-) -> dict:
+) -> dict[str, Any]:
     """Add a comment to a test failure."""
     _check_allow_list(request)
     _require_reviewer(request)
@@ -5157,23 +5175,22 @@ async def add_comment(
     mentioned = detect_mentions(body.comment)
 
     settings = get_settings()
-    if settings.web_push_enabled and username:
-        if mentioned:
-            vapid_cfg = get_vapid_config()
-            if vapid_cfg and "private_key" in vapid_cfg and "claim_email" in vapid_cfg:
-                task = asyncio.create_task(
-                    send_mention_notifications(
-                        mentioned_usernames=mentioned,
-                        comment_author=username,
-                        job_id=job_id,
-                        test_name=body.test_name,
-                        vapid_private_key=vapid_cfg["private_key"],
-                        vapid_claim_email=vapid_cfg["claim_email"],
-                        public_base_url=settings.public_base_url,
-                    )
+    if settings.web_push_enabled and username and mentioned:
+        vapid_cfg = get_vapid_config()
+        if vapid_cfg and "private_key" in vapid_cfg and "claim_email" in vapid_cfg:
+            task = asyncio.create_task(
+                send_mention_notifications(
+                    mentioned_usernames=mentioned,
+                    comment_author=username,
+                    job_id=job_id,
+                    test_name=body.test_name,
+                    vapid_private_key=vapid_cfg["private_key"],
+                    vapid_claim_email=vapid_cfg["claim_email"],
+                    public_base_url=settings.public_base_url,
                 )
-                _background_tasks.add(task)
-                task.add_done_callback(_background_tasks.discard)
+            )
+            _background_tasks.add(task)
+            task.add_done_callback(_background_tasks.discard)
 
     # Notify mentioned users for SSE badge updates
     for mentioned_user in mentioned:
@@ -5189,7 +5206,7 @@ async def add_comment(
 )
 async def delete_comment_endpoint(
     job_id: str, comment_id: int, request: Request, _: None = Depends(_bind_job_id)
-) -> dict:
+) -> dict[str, Any]:
     """Delete a comment. Username scoping is a UI courtesy.
 
     Admin users can delete any comment. Regular users can only delete
@@ -5242,7 +5259,7 @@ async def set_reviewed(
     body: SetReviewedRequest,
     request: Request,
     _: None = Depends(_bind_job_id),
-) -> dict:
+) -> dict[str, Any]:
     """Toggle the reviewed state for a test failure."""
     _check_allow_list(request)
     logger.debug(
@@ -5276,7 +5293,7 @@ async def enrich_comments(
     request: Request,
     settings: Settings = _SETTINGS_DEP,
     _: None = Depends(_bind_job_id),
-) -> dict:
+) -> dict[str, Any]:
     """Fetch live statuses for GitHub PRs and Jira tickets found in comments."""
     _check_allow_list(request)
     logger.debug(f"POST /results/{job_id}/enrich-comments")
@@ -5313,7 +5330,7 @@ async def enrich_comments(
 
     # Collect all enrichment tasks for parallel execution
     tasks: list[Coroutine[Any, Any, Any]] = []
-    task_map: dict[int, tuple[str, dict]] = {}
+    task_map: dict[int, tuple[str, dict[str, Any]]] = {}
 
     for c in comments:
         for pr in detect_github_prs(c["comment"]):
@@ -5366,7 +5383,7 @@ async def enrich_comments(
                 )
                 task_map[idx] = (str(c["id"]), {"type": "jira", "key": key})
 
-    enrichments: dict[str, list[dict]] = {}
+    enrichments: dict[str, list[dict[str, Any]]] = {}
     logger.debug(f"enrich_comments: job_id={job_id}, enrichment_tasks={len(tasks)}")
 
     if tasks:
@@ -5388,7 +5405,7 @@ async def enrich_comments(
 
 
 def _resolve_analyzed_repo(
-    settings: Settings, result_data: dict
+    settings: Settings, result_data: dict[str, Any]
 ) -> tuple[str, str, str]:
     """Resolve tests repo URL, ref, and token from stored result and settings.
 
@@ -5465,7 +5482,7 @@ async def _load_effective_failure(
     test_name: str,
     child_job_name: str,
     child_build_number: int,
-) -> tuple[FailureAnalysis, dict, dict | None]:
+) -> tuple[FailureAnalysis, dict[str, Any], dict[str, Any] | None]:
     """Shared lookup for preview/create endpoints: validate, load, and resolve a failure.
 
     Returns:
@@ -5489,7 +5506,7 @@ async def _load_effective_failure(
             status_code=400,
             detail=f"Test '{test_name}' not found in job {job_id}",
         )
-    matched_child: dict | None = None
+    matched_child: dict[str, Any] | None = None
     if child_job_name:
         matched_child = _find_child_job_in_result(
             result_data, child_job_name, child_build_number
@@ -5507,7 +5524,7 @@ async def get_issue_prompt(
     request: Request,
     settings: Settings = _SETTINGS_DEP,
     _: None = Depends(_bind_job_id),
-) -> dict:
+) -> dict[str, Any]:
     """Return the issue generation prompt for a job.
 
     Resolution order:
@@ -5612,7 +5629,7 @@ async def preview_github_issue(
     request: Request,
     settings: Settings = _SETTINGS_DEP,
     _: None = Depends(_bind_job_id),
-) -> dict:
+) -> dict[str, Any]:
     """Generate preview content for a GitHub issue from a failure analysis."""
     _check_allow_list(request)
     logger.debug(
@@ -5659,7 +5676,7 @@ async def preview_github_issue(
     # If no user token, skip duplicate detection (preview still works).
     tests_repo_url = _resolve_github_repo_url(settings)
     github_token = (body.github_token or "").strip()
-    similar: list[dict] = []
+    similar: list[dict[str, Any]] = []
     if tests_repo_url and github_token:
         try:
             similar = await search_github_duplicates(
@@ -5688,7 +5705,7 @@ async def preview_jira_bug(
     request: Request,
     settings: Settings = _SETTINGS_DEP,
     _: None = Depends(_bind_job_id),
-) -> dict:
+) -> dict[str, Any]:
     """Generate preview content for a Jira bug from a failure analysis."""
     _check_allow_list(request)
     logger.debug(f"POST /results/{job_id}/preview-jira-bug: test_name={body.test_name}")
@@ -5736,7 +5753,7 @@ async def preview_jira_bug(
     # Duplicate detection (best-effort: failures must not break preview)
     # Uses only user-provided token — no server token fallback.
     # If no user token, skip duplicate detection (preview still works).
-    similar: list[dict] = []
+    similar: list[dict[str, Any]] = []
     user_jira_token = (body.jira_token or "").strip()
     if user_jira_token:
         effective_jira_settings = _build_effective_jira_settings(
@@ -5871,7 +5888,7 @@ def _build_effective_jira_settings(
     An optional *user_jira_project_key* overrides the server-level project key
     so that duplicate searches and bug creation target the user's chosen project.
     """
-    overrides: dict = {}
+    overrides: dict[str, Any] = {}
     if user_jira_token and user_jira_token.strip():
         overrides["jira_api_token"] = SecretStr(user_jira_token.strip())
         overrides["jira_pat"] = None
@@ -5887,7 +5904,7 @@ def _build_effective_jira_settings(
     return settings.model_copy(update=overrides)
 
 
-def _require_tracker_url(result: dict, tracker_name: str) -> str:
+def _require_tracker_url(result: dict[str, Any], tracker_name: str) -> str:
     """Extract and validate the issue URL from a tracker API response.
 
     Raises:
@@ -5906,7 +5923,7 @@ async def _add_tracker_comment(
     tracker_label: str,
     job_id: str,
     body: CreateIssueRequest,
-    result: dict,
+    result: dict[str, Any],
     username: str,
     *,
     tracked_type: str = "",
@@ -5990,7 +6007,7 @@ async def create_github_issue_endpoint(
     request: Request,
     settings: Settings = _SETTINGS_DEP,
     _: None = Depends(_bind_job_id),
-) -> dict:
+) -> dict[str, Any]:
     """Create a GitHub issue from a failure analysis."""
     _check_allow_list(request)
     logger.debug(
@@ -6083,7 +6100,7 @@ async def create_jira_bug_endpoint(
     request: Request,
     settings: Settings = _SETTINGS_DEP,
     _: None = Depends(_bind_job_id),
-) -> dict:
+) -> dict[str, Any]:
     """Create a Jira bug from a failure analysis."""
     _check_allow_list(request)
     logger.debug(f"POST /results/{job_id}/create-jira-bug: test_name={body.test_name}")
@@ -6191,7 +6208,7 @@ async def set_tracked_in_endpoint(
     body: SetTrackedInRequest,
     request: Request,
     _: None = Depends(_bind_job_id),
-) -> dict:
+) -> dict[str, Any]:
     """Add a tracked-in link for a failure.
 
     Reviewers+ can add tracked-in links. Use DELETE to remove.
@@ -6238,7 +6255,7 @@ async def get_tracked_in_endpoint(
     job_id: str,
     request: Request,
     _: None = Depends(_bind_job_id),
-) -> dict:
+) -> dict[str, Any]:
     """Return tracked-in data for all failures in a job."""
     _require_reviewer(request)
     result = await get_result(job_id)
@@ -6256,7 +6273,7 @@ async def delete_tracked_in_endpoint(
     link_id: int,
     request: Request,
     _: None = Depends(_bind_job_id),
-) -> dict:
+) -> dict[str, Any]:
     """Delete a tracked-in link by ID.
 
     Creators can delete their own links. Admins can delete any link.
@@ -6293,7 +6310,7 @@ async def push_to_reportportal(
     ),
     settings: Settings = _SETTINGS_DEP,
     _: None = Depends(_bind_job_id),
-) -> dict:
+) -> dict[str, Any]:
     """Push rootcoz classifications into Report Portal test items.
 
     Finds the matching RP launch, matches failed items to rootcoz failures,
@@ -6335,7 +6352,7 @@ def _rp_push_error_result(
     message: str,
     *,
     launch_id: int | None = None,
-) -> dict:
+) -> dict[str, Any]:
     """Build a standard RP push failure response."""
     return {
         "pushed": 0,
@@ -6353,7 +6370,7 @@ def _log_and_return_rp_error(
     build_number: int | str | None = None,
     jenkins_url: str = "",
     launch_id: int | None = None,
-) -> dict:
+) -> dict[str, Any]:
     """Log an RP push error and return the standardised error dict.
 
     Centralises the repeated log-then-return pattern so each call-site
@@ -6405,7 +6422,7 @@ def _rp_error_message(exc: Exception, operation: str) -> tuple[str, str]:
             rp_message = raw if isinstance(raw, str) else ""
             # Full response text — log only
             detail = resp.text or ""
-        except Exception:
+        except (ValueError, TypeError, json.JSONDecodeError, AttributeError):
             detail = resp.text or ""
     else:
         detail = str(exc) if str(exc) else ""
@@ -6430,13 +6447,13 @@ def _rp_error_message(exc: Exception, operation: str) -> tuple[str, str]:
 
 async def _execute_rp_push(
     job_id: str,
-    result_data: dict,
+    result_data: dict[str, Any],
     settings: Settings,
     *,
     child_job_name: str | None = None,
     child_build_number: int | None = None,
     pushed_by: str = "",
-) -> dict:
+) -> dict[str, Any]:
     """Shared logic for pushing classifications to Report Portal.
 
     Creates a ReportPortalClient, finds the matching launch, matches
@@ -6525,7 +6542,7 @@ async def _execute_rp_push(
             project=rp.project,
             verify_ssl=rp.verify_ssl,
         )
-    except Exception as exc:
+    except (TimeoutError, OSError, ValueError, TypeError, RuntimeError) as exc:
         user_msg, log_msg = _rp_error_message(
             exc,
             "connecting to Report Portal",
@@ -6541,7 +6558,7 @@ async def _execute_rp_push(
                 if rp.url
                 else "unknown"
             )
-        except Exception:
+        except (ValueError, TypeError, AttributeError):
             rp_host = "unknown"
         log_msg = f"{log_msg}, reportportal_host='{rp_host}'"
         return _log_and_return_rp_error(user_msg, log_msg=log_msg)
@@ -6570,7 +6587,7 @@ async def _execute_rp_push(
                 f"Ambiguous RP launch: found {exc.count} launches."
                 f" Remove duplicate launches to disambiguate."
             )
-        except Exception as exc:
+        except (OSError, ValueError, TypeError, RuntimeError, KeyError) as exc:
             user_msg, log_msg = _rp_error_message(exc, "searching RP launches")
             return _log_and_return_rp_error(
                 user_msg,
@@ -6593,7 +6610,7 @@ async def _execute_rp_push(
             failed_items = await asyncio.to_thread(
                 rp_client.get_failed_items, launch_id
             )
-        except Exception as exc:
+        except (OSError, ValueError, TypeError, RuntimeError, KeyError) as exc:
             user_msg, log_msg = _rp_error_message(exc, "fetching failed items from RP")
             return _log_and_return_rp_error(
                 user_msg,
@@ -6626,7 +6643,7 @@ async def _execute_rp_push(
             matched = await asyncio.to_thread(
                 rp_client.match_failures, failed_items, rcz_failures
             )
-        except Exception as exc:
+        except (OSError, ValueError, TypeError, RuntimeError, KeyError) as exc:
             user_msg, log_msg = _rp_error_message(exc, "matching RP items to failures")
             return _log_and_return_rp_error(
                 user_msg,
@@ -6681,7 +6698,7 @@ async def _execute_rp_push(
                 history_classifications[name] = result
 
         # Fetch user-tracked links scoped to the push target
-        tracked_in_data: dict[str, list[dict]] = {}
+        tracked_in_data: dict[str, list[dict[str, Any]]] = {}
         if rp.push_tracker_links:
             try:
                 tracked_in_data = await storage.get_tracked_in_for_scope(
@@ -6759,7 +6776,7 @@ async def _execute_rp_push(
                 pushed_by=pushed_by,
                 reviewed_by=reviewed_by,
             )
-        except Exception as exc:
+        except (OSError, ValueError, TypeError, RuntimeError, KeyError) as exc:
             user_msg, log_msg = _rp_error_message(
                 exc,
                 "pushing classifications to RP",
@@ -6777,12 +6794,12 @@ async def _execute_rp_push(
 
 
 def _patch_failures(
-    failures: list[dict],
+    failures: list[dict[str, Any]],
     test_name: str,
     field: str,
     value: str,
     *,
-    extra_patch: Callable[[dict], None] | None = None,
+    extra_patch: Callable[[dict[str, Any]], None] | None = None,
 ) -> None:
     """Patch ``analysis[field] = value`` for matching failures in a list.
 
@@ -6802,10 +6819,12 @@ def _patch_failures(
                     extra_patch(analysis)
 
 
-def _classification_extra_patch(classification: str) -> Callable[[dict], None] | None:
+def _classification_extra_patch(
+    classification: str,
+) -> Callable[[dict[str, Any]], None] | None:
     """Return an extra_patch callback that clears stale subtype fields."""
 
-    def _patch(analysis: dict) -> None:
+    def _patch(analysis: dict[str, Any]) -> None:
         if classification == "CODE ISSUE":
             analysis.pop("product_bug_report", None)
         elif classification == "PRODUCT BUG":
@@ -6818,14 +6837,14 @@ def _classification_extra_patch(classification: str) -> Callable[[dict], None] |
 
 
 def _apply_override_to_failures(
-    result_data: dict,
+    result_data: dict[str, Any],
     test_name: str,
     field: str,
     value: str,
     child_job_name: str,
     child_build_number: int,
     *,
-    extra_patch: Callable[[dict], None] | None = None,
+    extra_patch: Callable[[dict[str, Any]], None] | None = None,
 ) -> None:
     """Mutate *result_data* to apply an override to matching failures.
 
@@ -6862,14 +6881,14 @@ def _apply_override_to_failures(
 
 
 def _apply_override_to_children(
-    children: list[dict],
+    children: list[dict[str, Any]],
     test_name: str,
     field: str,
     value: str,
     child_job_name: str,
     child_build_number: int,
     *,
-    extra_patch: Callable[[dict], None] | None = None,
+    extra_patch: Callable[[dict[str, Any]], None] | None = None,
 ) -> None:
     """Recursively patch ``analysis[field]`` in nested children."""
     for child in children:
@@ -6893,7 +6912,7 @@ def _apply_override_to_children(
 
 
 def _apply_classification_override(
-    result_data: dict,
+    result_data: dict[str, Any],
     test_name: str,
     classification: str,
     child_job_name: str,
@@ -6912,7 +6931,7 @@ def _apply_classification_override(
 
 
 def _apply_pattern_override(
-    result_data: dict,
+    result_data: dict[str, Any],
     test_name: str,
     pattern: str,
     child_job_name: str,
@@ -6934,7 +6953,7 @@ async def update_tags(
     job_id: str,
     request: Request,
     _: None = Depends(_bind_job_id),
-) -> dict:
+) -> dict[str, Any]:
     """Update tags on an existing result. System tags (re-analyze, submitter username) cannot be removed."""
     _check_allow_list(request)
     body = await _read_json_object(request)
@@ -6981,7 +7000,7 @@ async def override_classification_endpoint(
     body: OverrideClassificationRequest,
     request: Request,
     _: None = Depends(_bind_job_id),
-) -> dict:
+) -> dict[str, Any]:
     """Override the classification of a failure (CODE ISSUE, PRODUCT BUG, or INFRASTRUCTURE)."""
     _check_allow_list(request)
     _require_reviewer(request)
@@ -7015,7 +7034,7 @@ async def override_classification_endpoint(
     # Wrapped in try/except: the authoritative override is already committed
     # above; a failure here should not turn the response into a 500.
     # Patch ALL tests in the signature group so grouped siblings also update.
-    def _patch_group(rd: dict) -> None:
+    def _patch_group(rd: dict[str, Any]) -> None:
         for t in group_tests:
             _apply_classification_override(
                 rd,
@@ -7042,7 +7061,7 @@ async def override_pattern_endpoint(
     body: OverridePatternRequest,
     request: Request,
     _: None = Depends(_bind_job_id),
-) -> dict:
+) -> dict[str, Any]:
     """Override the pattern axis of a failure (NEW, REGRESSION, FLAKY, etc.)."""
     _check_allow_list(request)
     _require_reviewer(request)
@@ -7069,7 +7088,7 @@ async def override_pattern_endpoint(
         parent_job_name=parent_job_name,
     )
 
-    def _patch_group(rd: dict) -> None:
+    def _patch_group(rd: dict[str, Any]) -> None:
         for t in group_tests:
             _apply_pattern_override(
                 rd,
@@ -7091,21 +7110,25 @@ async def override_pattern_endpoint(
 
 
 @app.get("/results/{job_id}/review-status", operation_id="getReviewStatus")
-async def get_review_status(job_id: str, _: None = Depends(_bind_job_id)) -> dict:
+async def get_review_status(
+    job_id: str, _: None = Depends(_bind_job_id)
+) -> dict[str, Any]:
     """Get review summary for a job (used by dashboard)."""
     logger.debug(f"GET /results/{job_id}/review-status")
     return await storage.get_review_status(job_id)
 
 
 @app.get("/results", operation_id="listJobResults")
-async def list_job_results(limit: int = Query(50, le=100)) -> list[dict]:
+async def list_job_results(limit: int = Query(50, le=100)) -> list[dict[str, Any]]:
     """List recent analysis jobs."""
     logger.debug(f"GET /results: limit={limit}")
     return await list_results(limit)
 
 
 @app.delete("/api/results/bulk", operation_id="bulkDeleteJobsEndpoint")
-async def bulk_delete_jobs_endpoint(body: BulkDeleteRequest, request: Request) -> dict:
+async def bulk_delete_jobs_endpoint(
+    body: BulkDeleteRequest, request: Request
+) -> dict[str, Any]:
     """Delete multiple jobs and all related data. Operator+ only.
 
     Operators can only delete their own jobs; admins can delete any.
@@ -7150,7 +7173,7 @@ async def bulk_delete_jobs_endpoint(body: BulkDeleteRequest, request: Request) -
 @app.delete("/results/{job_id}", operation_id="deleteJobEndpoint")
 async def delete_job_endpoint(
     job_id: str, request: Request, _: None = Depends(_bind_job_id)
-) -> dict:
+) -> dict[str, Any]:
     """Delete an analyzed job and all related data.
 
     Operators can delete their own jobs; admins can delete any.
@@ -7163,12 +7186,14 @@ async def delete_job_endpoint(
         raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
 
     # Operators can only delete their own jobs
-    if not request.state.is_admin:
-        if _get_job_submitter(result) != request.state.username:
-            raise HTTPException(
-                status_code=403,
-                detail="You can only delete jobs you submitted",
-            )
+    if (
+        not request.state.is_admin
+        and _get_job_submitter(result) != request.state.username
+    ):
+        raise HTTPException(
+            status_code=403,
+            detail="You can only delete jobs you submitted",
+        )
 
     await storage.delete_job(job_id)
 
@@ -7191,7 +7216,7 @@ async def abort_analysis(
     job_id: str,
     request: Request,
     _: None = Depends(_bind_job_id),
-) -> dict:
+) -> dict[str, Any]:
     """Abort a running or waiting analysis."""
     _check_allow_list(request)
     _require_reviewer(request)
@@ -7244,7 +7269,7 @@ async def abort_analysis(
         )
 
     # Update status to aborted
-    abort_data: dict = {
+    abort_data: dict[str, Any] = {
         "error": "Analysis was aborted by user",
     }
     # Preserve existing result data
@@ -7271,7 +7296,7 @@ async def abort_analysis(
 
 
 @app.get("/api/dashboard/active-count", operation_id="getActiveAnalysisCount")
-async def get_active_analysis_count() -> dict:
+async def get_active_analysis_count() -> dict[str, Any]:
     """Get count of currently active analyses (running/pending/waiting)."""
     logger.debug("GET /api/dashboard/active-count")
     try:
@@ -7291,7 +7316,7 @@ async def stream_navbar_counts(request: Request) -> StreamingResponse:
     username = request.state.username
     _check_allow_list(request)
 
-    async def event_generator():
+    async def event_generator() -> AsyncIterator[str]:
         # Per-connection events
         active_event = asyncio.Event()
         mention_event = asyncio.Event() if username else None
@@ -7307,7 +7332,7 @@ async def stream_navbar_counts(request: Request) -> StreamingResponse:
                 active = await storage.count_active_analyses()
                 last_active = active
                 yield f"event: active-count\ndata: {active}\n\n"
-            except Exception:
+            except (aiosqlite.Error, OSError, TypeError, ValueError):
                 last_active = 0
                 yield "event: active-count\ndata: 0\n\n"
 
@@ -7317,11 +7342,11 @@ async def stream_navbar_counts(request: Request) -> StreamingResponse:
                     unread = await storage.get_unread_mention_count(username)
                     last_unread = unread
                     yield f"event: unread-count\ndata: {unread}\n\n"
-                except Exception:
+                except (aiosqlite.Error, OSError, TypeError, ValueError):
                     last_unread = 0
                     yield "event: unread-count\ndata: 0\n\n"
 
-            active_wait_tasks: list[asyncio.Task] = []
+            active_wait_tasks: list[asyncio.Task[Any]] = []
             while True:
                 # Wait for either event or timeout
                 active_wait_tasks = [asyncio.create_task(active_event.wait())]
@@ -7542,7 +7567,7 @@ async def stream_multiplexed(
     if not registrations and not navbar_requested:
         raise HTTPException(status_code=400, detail="No valid topics specified")
 
-    async def event_generator():
+    async def event_generator() -> AsyncIterator[str]:
         # Register all events in their listener sets
         for _prefix, ev, global_set, per_key_dict, key in registrations:
             if per_key_dict is not None:
@@ -7563,7 +7588,7 @@ async def stream_multiplexed(
                 mention_event = asyncio.Event()
                 _mention_listeners.setdefault(username, set()).add(mention_event)
 
-        wait_tasks: list[asyncio.Task] = []
+        wait_tasks: list[asyncio.Task[Any]] = []
 
         try:
             # Send initial navbar data on connect
@@ -7572,7 +7597,7 @@ async def stream_multiplexed(
                     active = await storage.count_active_analyses()
                     last_active = active
                     yield f"event: navbar:active-count\ndata: {active}\n\n"
-                except Exception:
+                except (aiosqlite.Error, OSError, TypeError, ValueError):
                     last_active = 0
                     yield "event: navbar:active-count\ndata: 0\n\n"
                 if username:
@@ -7580,7 +7605,7 @@ async def stream_multiplexed(
                         unread = await storage.get_unread_mention_count(username)
                         last_unread = unread
                         yield f"event: navbar:unread-count\ndata: {unread}\n\n"
-                    except Exception:
+                    except (aiosqlite.Error, OSError, TypeError, ValueError):
                         last_unread = 0
                         yield "event: navbar:unread-count\ndata: 0\n\n"
 
@@ -7707,13 +7732,13 @@ async def stream_multiplexed(
 async def api_dashboard(
     limit: int = Query(default=500, ge=0, description="Max results (0 = no limit)"),
     offset: int = Query(default=0, ge=0, description="Rows to skip"),
-) -> list[dict]:
+) -> list[dict[str, Any]]:
     """Return dashboard job list as JSON for the React frontend."""
     return await list_results_for_dashboard(limit=limit, offset=offset)
 
 
 @app.get("/api/capabilities", operation_id="getCapabilities")
-async def get_capabilities(settings: Settings = _SETTINGS_DEP) -> dict:
+async def get_capabilities(settings: Settings = _SETTINGS_DEP) -> dict[str, Any]:
     """Report server-level feature toggles and credential availability.
 
     Feature toggles (ENABLE_GITHUB_ISSUES, ENABLE_JIRA_ISSUES) control
@@ -7732,7 +7757,9 @@ def _strip_url_userinfo(url: str) -> str:
 
 
 @app.get("/api/default-server-settings", operation_id="getDefaultServerSettings")
-async def get_default_server_settings(settings: Settings = _SETTINGS_DEP) -> dict:
+async def get_default_server_settings(
+    settings: Settings = _SETTINGS_DEP,
+) -> dict[str, Any]:
     """Return all non-sensitive server settings.
 
     Authenticated (any role). Iterates all Settings model fields and
@@ -7742,7 +7769,7 @@ async def get_default_server_settings(settings: Settings = _SETTINGS_DEP) -> dic
     """
     from pydantic import SecretStr as _SecretStr
 
-    result: dict = {}
+    result: dict[str, Any] = {}
     for field_name in type(settings).model_fields:
         if field_name in _SENSITIVE_SETTINGS or field_name in _SERVER_ONLY_SETTINGS:
             continue
@@ -7853,7 +7880,7 @@ def _jira_client_from_body(
 async def list_jira_projects(
     body: JiraProjectsRequest,
     settings: Settings = _SETTINGS_DEP,
-) -> list[dict]:
+) -> list[dict[str, Any]]:
     """List Jira projects accessible to the user.
 
     Uses the user's Jira token to list projects they can see.
@@ -7873,7 +7900,7 @@ async def list_jira_projects(
 
     effective_settings, _ = result
 
-    projects: list[dict] = []
+    projects: list[dict[str, Any]] = []
     try:
         async with JiraClient(effective_settings) as client:
             projects = await client.list_projects(query=body.query)
@@ -7899,7 +7926,7 @@ class JiraSecurityLevelsRequest(BaseModel):
 async def list_jira_security_levels(
     body: JiraSecurityLevelsRequest,
     settings: Settings = _SETTINGS_DEP,
-) -> list[dict]:
+) -> list[dict[str, Any]]:
     """List available security levels for a Jira project."""
     if not settings.jira_url or not body.project_key:
         return []
@@ -7930,7 +7957,7 @@ class ValidateTokenRequest(BaseModel):
 async def validate_token(
     body: ValidateTokenRequest,
     settings: Settings = _SETTINGS_DEP,
-) -> dict:
+) -> dict[str, Any]:
     """Validate a GitHub or Jira token by making a lightweight API call.
 
     GitHub: GET /user (returns authenticated user info)
@@ -7940,7 +7967,7 @@ async def validate_token(
     if not token:
         return {"valid": False, "username": "", "message": "Token is required"}
 
-    def _invalid(msg: str) -> dict:
+    def _invalid(msg: str) -> dict[str, Any]:
         return {"valid": False, "username": "", "message": msg}
 
     def _status_message(status_code: int) -> str:
@@ -8035,7 +8062,7 @@ async def get_all_failures_endpoint(
     offset: int = Query(default=0, ge=0),
     date_from: str = Query(default="", alias="from"),
     date_to: str = Query(default="", alias="to"),
-) -> dict:
+) -> dict[str, Any]:
     """Get paginated failure history."""
     logger.debug(
         f"GET /history/failures: search={search!r}, "
@@ -8062,7 +8089,7 @@ async def get_test_history_endpoint(
     exclude_job_id: str = Query(
         default="", description="Exclude results from this job ID"
     ),
-) -> dict:
+) -> dict[str, Any]:
     """Get pass/fail history for a specific test."""
     _require_authenticated(request)
     job_name = _sanitize_sidecar_placeholder(job_name)
@@ -8081,7 +8108,7 @@ async def search_by_signature_endpoint(
     exclude_job_id: str = Query(
         default="", description="Exclude results from this job ID"
     ),
-) -> dict:
+) -> dict[str, Any]:
     """Find all tests that failed with the same error signature."""
     _require_authenticated(request)
     logger.debug(f"GET /history/search: signature={signature}")
@@ -8096,7 +8123,7 @@ async def get_job_stats_endpoint(
     exclude_job_id: str = Query(
         default="", description="Exclude results from this job ID"
     ),
-) -> dict:
+) -> dict[str, Any]:
     """Get aggregate statistics for a specific job."""
     _require_authenticated(request)
     logger.debug(f"GET /history/stats/{job_name}")
@@ -8105,7 +8132,7 @@ async def get_job_stats_endpoint(
 
 
 @app.post("/history/classify", status_code=201, operation_id="classifyTest")
-async def classify_test(request: Request, body: ClassifyTestRequest) -> dict:
+async def classify_test(request: Request, body: ClassifyTestRequest) -> dict[str, Any]:
     """Classify a test as FLAKY, REGRESSION, etc. Used by AI and humans."""
     _check_allow_list(request)
     _require_reviewer(request)
@@ -8210,7 +8237,7 @@ async def get_classifications(
     job_name: str = Query(default=""),
     parent_job_name: str = Query(default=""),
     job_id: str = Query(default=""),
-) -> dict:
+) -> dict[str, Any]:
     """Get test classifications."""
     _require_authenticated(request)
     test_name = _sanitize_sidecar_placeholder(test_name)
@@ -8232,7 +8259,9 @@ async def get_classifications(
     return strip_sensitive_from_response({"classifications": classifications})
 
 
-def _cursor_status_for_client(status: dict, *, is_admin: bool) -> dict:
+def _cursor_status_for_client(
+    status: dict[str, Any], *, is_admin: bool
+) -> dict[str, Any]:
     """Return Cursor provider_status safe for the caller's role.
 
     Non-admins must not learn whether ``CURSOR_API_KEY`` is configured
@@ -8249,7 +8278,7 @@ def _cursor_status_for_client(status: dict, *, is_admin: bool) -> dict:
     return out
 
 
-def _cursor_status_from_model_count(model_count: int) -> dict:
+def _cursor_status_from_model_count(model_count: int) -> dict[str, Any]:
     """Coarse Cursor status for non-admins (no subprocess / credential probe)."""
     if model_count > 0:
         return {"ok": True, "reason": None, "hint": None, "model_count": model_count}
@@ -8271,7 +8300,7 @@ async def list_ai_models(
             "CLI models are included under the same provider when CLI_AGENTS is set."
         ),
     ),
-) -> dict:
+) -> dict[str, Any]:
     """List available AI models for one or all configured providers.
 
     When listing all providers (or cursor alone), includes ``provider_status``
@@ -8296,7 +8325,7 @@ async def list_ai_models(
                     ),
                 )
             models = await list_models(provider)
-            payload: dict = {"provider": provider, "models": models}
+            payload: dict[str, Any] = {"provider": provider, "models": models}
             if provider == "cursor":
                 if is_admin:
                     cursor_raw = await probe_cursor_auth(model_count=len(models))
@@ -8341,7 +8370,7 @@ async def list_ai_models(
 
 
 @app.post("/api/admin/ai-models/refresh", operation_id="refreshAiModels")
-async def refresh_ai_models(request: Request) -> dict:
+async def refresh_ai_models(request: Request) -> dict[str, Any]:
     """Trigger model re-discovery on the sidecar and return updated list."""
     _require_admin(request)
     logger.info("POST /api/admin/ai-models/refresh: refreshing models")
@@ -8379,13 +8408,13 @@ async def refresh_ai_models(request: Request) -> dict:
 
 
 @app.get("/health", operation_id="healthCheck")
-async def health_check() -> dict:
+async def health_check() -> dict[str, Any]:
     """Basic health check endpoint (legacy, lightweight)."""
     return {"status": "healthy"}
 
 
 @app.get("/api/version", operation_id="getVersion")
-async def get_version() -> dict:
+async def get_version() -> dict[str, Any]:
     """Return the application version (lightweight, no dependency checks)."""
     return {"version": _get_app_version()}
 
@@ -8438,7 +8467,7 @@ async def prometheus_metrics() -> Response:
 
 
 # Module-level cache for GitHub release data
-_release_cache: dict = {}
+_release_cache: dict[str, Any] = {}
 _RELEASE_CACHE_TTL = 3600  # 1 hour
 _release_cache_lock = asyncio.Lock()
 
@@ -8535,7 +8564,7 @@ def _serve_spa() -> HTMLResponse:
 # --- Auth endpoints ---
 
 
-async def _read_json_object(request: Request) -> dict:
+async def _read_json_object(request: Request) -> dict[str, Any]:
     """Parse request body as a JSON object. Raises HTTPException on invalid input."""
     try:
         body = await request.json()
@@ -8606,7 +8635,7 @@ def _require_operator(request: Request) -> None:
         )
 
 
-def _get_job_submitter(result: dict) -> str:
+def _get_job_submitter(result: dict[str, Any]) -> str:
     """Extract the submitted_by username from a stored result dict."""
     result_data = result.get("result") or {}
     return (result_data.get("request_params") or {}).get("submitted_by", "")
@@ -8862,7 +8891,7 @@ async def register_user(request: Request) -> JSONResponse:
         username, is_admin=False, role=default_role
     )
 
-    content: dict = {
+    content: dict[str, Any] = {
         "username": username,
         "api_key": raw_key,
         "role": default_role,
@@ -8963,7 +8992,7 @@ async def check_needs_key(request: Request) -> JSONResponse:
 async def pending_status(request: Request) -> JSONResponse:
     """Return pending status info for unauthenticated users."""
     settings = get_settings()
-    content: dict = {
+    content: dict[str, Any] = {
         "status": "pending",
         "message": "Your account is awaiting admin approval. Please wait for an admin to approve your registration.",
     }
@@ -9082,7 +9111,7 @@ def _install_sse_log_handler() -> None:
     This mirrors _install_job_id_filter's approach of walking
     every registered logger.
     """
-    global _sse_log_handler  # noqa: PLW0603
+    global _sse_log_handler
     if _sse_log_handler is not None:
         return
     handler = _SSELogHandler()
@@ -9160,7 +9189,7 @@ async def stream_logs(
             return True
         return level_filter in line
 
-    async def event_generator():
+    async def event_generator() -> AsyncIterator[str]:
         # Send initial tail from log file
         if _LOG_FILE:
             log_path = Path(_LOG_FILE)
@@ -9177,7 +9206,7 @@ async def stream_logs(
                     pass
 
         # Stream live logs via broadcast queue
-        queue: asyncio.Queue = asyncio.Queue(maxsize=1000)
+        queue: asyncio.Queue[Any] = asyncio.Queue(maxsize=1000)
         loop = asyncio.get_running_loop()
         listener = (loop, queue)
         with _log_listeners_lock:
@@ -9190,7 +9219,7 @@ async def stream_logs(
                     line = await asyncio.wait_for(queue.get(), timeout=30)
                     if _matches_level(line):
                         yield f"event: log\ndata: {line.replace(chr(10), '  ')}\n\n"
-                except asyncio.TimeoutError:
+                except TimeoutError:
                     yield ": keepalive\n\n"
         finally:
             with _log_listeners_lock:
@@ -9217,7 +9246,7 @@ async def get_token_usage(
     ai_model: str | None = None,
     call_type: str | None = None,
     group_by: str | None = None,
-) -> dict:
+) -> dict[str, Any]:
     """Get aggregated token usage with optional filters and grouping. Admin only."""
     _require_admin(request)
     if group_by and group_by not in _VALID_GROUP_BY:
@@ -9236,14 +9265,14 @@ async def get_token_usage(
 
 
 @app.get("/api/admin/token-usage/summary", operation_id="getTokenUsageDashboard")
-async def get_token_usage_dashboard(request: Request) -> dict:
+async def get_token_usage_dashboard(request: Request) -> dict[str, Any]:
     """Get high-level token usage summary for dashboard. Admin only."""
     _require_admin(request)
     return await storage.get_token_usage_dashboard_summary()
 
 
 @app.get("/api/admin/token-usage/{job_id}", operation_id="getTokenUsageForJob")
-async def get_token_usage_for_job(request: Request, job_id: str) -> dict:
+async def get_token_usage_for_job(request: Request, job_id: str) -> dict[str, Any]:
     """Get token usage breakdown for a specific job. Admin only."""
     _require_admin(request)
     records = await storage.get_token_usage_for_job(job_id)
@@ -9324,7 +9353,7 @@ async def admin_create_user_endpoint(
 
 
 @app.delete("/api/admin/users/{username}", operation_id="deleteUserEndpoint")
-async def delete_user_endpoint(request: Request, username: str) -> dict:
+async def delete_user_endpoint(request: Request, username: str) -> dict[str, Any]:
     """Delete a user. Bootstrap admin (ADMIN_KEY) is always available as fallback."""
     _require_admin(request)
     if username == request.state.username:
@@ -9370,7 +9399,7 @@ async def change_user_role_endpoint(request: Request, username: str) -> JSONResp
         f"[AUDIT] Admin '{request.state.username}' changed role of '{username}' to '{new_role}'"
     )
 
-    content: dict = {"username": username, "role": new_role}
+    content: dict[str, Any] = {"username": username, "role": new_role}
     if raw_key:
         content["api_key"] = raw_key
     return JSONResponse(
@@ -9407,7 +9436,7 @@ async def set_user_can_view_reports_endpoint(
 
 
 @app.get("/api/admin/users", operation_id="listUsersEndpoint")
-async def list_users_endpoint(request: Request) -> dict:
+async def list_users_endpoint(request: Request) -> dict[str, Any]:
     """List all users (admin and regular)."""
     _require_admin(request)
     users = await storage.list_users()
@@ -9415,7 +9444,7 @@ async def list_users_endpoint(request: Request) -> dict:
 
 
 @app.get("/api/admin/users/pending", operation_id="listPendingUsersEndpoint")
-async def list_pending_users_endpoint(request: Request) -> dict:
+async def list_pending_users_endpoint(request: Request) -> dict[str, Any]:
     """List users awaiting approval."""
     _require_admin(request)
     users = await storage.list_pending_users()
@@ -9423,7 +9452,7 @@ async def list_pending_users_endpoint(request: Request) -> dict:
 
 
 @app.post("/api/admin/users/{username}/approve", operation_id="approveUser")
-async def approve_user(username: str, request: Request) -> dict:
+async def approve_user(username: str, request: Request) -> dict[str, Any]:
     """Approve a pending user registration."""
     _require_admin(request)
     status = await storage.get_user_status(username)
@@ -9444,7 +9473,7 @@ async def approve_user(username: str, request: Request) -> dict:
 
 
 @app.post("/api/admin/users/{username}/reject", operation_id="rejectUser")
-async def reject_user(username: str, request: Request) -> dict:
+async def reject_user(username: str, request: Request) -> dict[str, Any]:
     """Reject a pending user registration."""
     _require_admin(request)
     status = await storage.get_user_status(username)
@@ -9524,7 +9553,7 @@ def _broadcast_settings_change() -> None:
 
 
 @app.get("/api/admin/settings/stream", operation_id="settingsStream")
-async def settings_stream(request: Request):
+async def settings_stream(request: Request) -> StreamingResponse:
     """SSE stream for server settings changes."""
     _require_admin(request)
     return _make_sse_stream(request, _settings_listeners, "settings-changed")
@@ -9557,8 +9586,10 @@ async def get_admin_settings(
                     from rootcoz.encryption import decrypt_value
 
                     db_value = decrypt_value(db_value)
-                except Exception:
-                    pass  # Use as-is if decryption fails
+                except (RuntimeError, TypeError, ValueError, UnicodeError) as exc:
+                    logger.debug(
+                        "Failed to decrypt settings value for %s: %s", key, exc
+                    )
             item["value"] = db_value
             item["updated_by"] = override.get("updated_by", "")
             item["updated_at"] = override.get("updated_at", "")
@@ -9582,9 +9613,13 @@ async def get_admin_settings(
     # Mask sensitive values — only reveal the specifically requested key
     reveal_all = reveal_key == "__all__"
     for item in metadata:
-        if item["sensitive"] and item["value"]:
-            if not reveal_all and item["key"] != reveal_key:
-                item["value"] = "••••••••"
+        if (
+            item["sensitive"]
+            and item["value"]
+            and not reveal_all
+            and item["key"] != reveal_key
+        ):
+            item["value"] = "••••••••"
 
     return JSONResponse(content=metadata)
 
@@ -9770,7 +9805,7 @@ async def _metadata_filters(
     version: Annotated[list[str] | None, Query()] = None,
     label: Annotated[list[str] | None, Query()] = None,
     exclude_label: Annotated[list[str] | None, Query()] = None,
-) -> dict:
+) -> dict[str, Any]:
     """Shared dependency for metadata filter query parameters."""
     return {
         "team": team or [],
@@ -9782,7 +9817,7 @@ async def _metadata_filters(
 
 
 def _unpack_metadata_filters(
-    filters: dict, endpoint: str
+    filters: dict[str, Any], endpoint: str
 ) -> tuple[list[str], list[str], list[str], list[str], list[str]]:
     """Unpack metadata filter dict and log at DEBUG level."""
     team, tier, version, label, exclude_label = (
@@ -9806,8 +9841,8 @@ def _unpack_metadata_filters(
 
 @app.get("/api/jobs/metadata", operation_id="listJobsMetadata")
 async def list_jobs_metadata(
-    filters: Annotated[dict, Depends(_metadata_filters)],
-) -> list[dict]:
+    filters: Annotated[dict[str, Any], Depends(_metadata_filters)],
+) -> list[dict[str, Any]]:
     """List all job metadata, optionally filtered by team, tier, version, or labels."""
     team, tier, version, label, _exclude_label = _unpack_metadata_filters(
         filters, "GET /api/jobs/metadata"
@@ -9818,7 +9853,7 @@ async def list_jobs_metadata(
 
 
 @app.get("/api/jobs/{job_name:path}/metadata", operation_id="getJobMetadataEndpoint")
-async def get_job_metadata_endpoint(job_name: str) -> dict:
+async def get_job_metadata_endpoint(job_name: str) -> dict[str, Any]:
     """Get metadata for a specific job."""
     logger.debug(f"GET /api/jobs/{job_name}/metadata")
     result = await storage.get_job_metadata(job_name)
@@ -9832,7 +9867,7 @@ async def set_job_metadata_endpoint(
     request: Request,
     job_name: str,
     body: JobMetadataInput,
-) -> dict:
+) -> dict[str, Any]:
     """Set or update metadata for a job."""
     _require_admin(request)
     logger.debug(f"PUT /api/jobs/{job_name}/metadata")
@@ -9853,7 +9888,9 @@ async def set_job_metadata_endpoint(
 @app.delete(
     "/api/jobs/{job_name:path}/metadata", operation_id="deleteJobMetadataEndpoint"
 )
-async def delete_job_metadata_endpoint(request: Request, job_name: str) -> dict:
+async def delete_job_metadata_endpoint(
+    request: Request, job_name: str
+) -> dict[str, Any]:
     """Delete metadata for a job."""
     _require_admin(request)
     logger.debug(f"DELETE /api/jobs/{job_name}/metadata")
@@ -9867,7 +9904,7 @@ async def delete_job_metadata_endpoint(request: Request, job_name: str) -> dict:
 async def bulk_set_job_metadata(
     request: Request,
     body: BulkJobMetadataRequest,
-) -> dict:
+) -> dict[str, Any]:
     """Bulk import job metadata.
 
     Unlike PUT /api/jobs/{job_name}/metadata which preserves omitted fields,
@@ -9884,7 +9921,7 @@ async def bulk_set_job_metadata(
 
 
 @app.get("/api/jobs/metadata/rules", operation_id="listMetadataRules")
-async def list_metadata_rules() -> dict:
+async def list_metadata_rules() -> dict[str, Any]:
     """List configured metadata rules for auto-assignment."""
     logger.debug("GET /api/jobs/metadata/rules")
     settings = get_settings()
@@ -9900,7 +9937,7 @@ async def list_metadata_rules() -> dict:
 
 
 @app.post("/api/jobs/metadata/rules/preview", operation_id="previewMetadataRules")
-async def preview_metadata_rules(body: dict) -> dict:
+async def preview_metadata_rules(body: dict[str, Any]) -> dict[str, Any]:
     """Preview what metadata would be assigned to a job name by rules.
 
     Request body: {"job_name": "..."}
@@ -9923,7 +9960,7 @@ async def preview_metadata_rules(body: dict) -> dict:
 
 @app.get("/api/dashboard/filtered", operation_id="apiDashboardFiltered")
 async def api_dashboard_filtered(
-    filters: Annotated[dict, Depends(_metadata_filters)],
+    filters: Annotated[dict[str, Any], Depends(_metadata_filters)],
     search: str = Query(default="", description="Search job name or ID"),
     status: Annotated[list[str] | None, Query()] = None,
     date_from: str = Query(default="", description="Start date (ISO)"),
@@ -9933,7 +9970,7 @@ async def api_dashboard_filtered(
     ),
     limit: int = Query(default=500, ge=0, description="Max results (0 = no limit)"),
     offset: int = Query(default=0, ge=0, description="Rows to skip"),
-) -> dict:
+) -> dict[str, Any]:
     """Return dashboard job list filtered by metadata.
 
     Filters are applied in SQL before LIMIT, so older jobs are reachable
@@ -9992,10 +10029,7 @@ async def api_dashboard_filtered(
     # Attach metadata to each job
     for job in jobs:
         jn = job.get("job_name", "")
-        if jn in all_metadata_by_name:
-            job["metadata"] = all_metadata_by_name[jn]
-        else:
-            job["metadata"] = None
+        job["metadata"] = all_metadata_by_name.get(jn, None)
 
     return {"jobs": jobs, "total": result["total"]}
 
@@ -10049,7 +10083,7 @@ async def reports_totals(
     review_status: str = Query(default=""),
     limit: int = Query(default=0, ge=0, le=1000),
     offset: int = Query(default=0, ge=0),
-) -> dict:
+) -> dict[str, Any]:
     """Aggregate totals: total jobs, failures, reviewed, with per-job detail list.
 
     Requires admin or can_view_reports.
@@ -10104,7 +10138,7 @@ async def reports_classification_overrides(
     review_status: str = Query(default=""),
     limit: int = Query(default=0, ge=0, le=1000),
     offset: int = Query(default=0, ge=0),
-) -> dict:
+) -> dict[str, Any]:
     """Classification overrides grouped by from→to transition.
 
     Requires admin or can_view_reports.
@@ -10156,7 +10190,7 @@ async def reports_issues_created(
     review_status: str = Query(default=""),
     limit: int = Query(default=0, ge=0, le=1000),
     offset: int = Query(default=0, ge=0),
-) -> dict:
+) -> dict[str, Any]:
     """GitHub/Jira issues created from analysis results.
 
     Requires admin or can_view_reports.
@@ -10198,7 +10232,7 @@ async def reports_issues_created(
 
 
 @app.get("/api/notifications/vapid-public-key", operation_id="getVapidPublicKey")
-async def get_vapid_public_key():
+async def get_vapid_public_key() -> dict[str, Any]:
     """Return the VAPID public key for frontend push subscription."""
     settings = get_settings()
     if not settings.web_push_enabled:
@@ -10212,7 +10246,9 @@ async def get_vapid_public_key():
 
 
 @app.post("/api/notifications/subscribe", operation_id="subscribeNotifications")
-async def subscribe_notifications(body: PushSubscriptionRequest, request: Request):
+async def subscribe_notifications(
+    body: PushSubscriptionRequest, request: Request
+) -> dict[str, Any]:
     """Register a push subscription for the current user."""
     settings = get_settings()
     if not settings.web_push_enabled:
@@ -10233,7 +10269,9 @@ async def subscribe_notifications(body: PushSubscriptionRequest, request: Reques
 
 
 @app.post("/api/notifications/unsubscribe", operation_id="unsubscribeNotifications")
-async def unsubscribe_notifications(body: UnsubscribeRequest, request: Request):
+async def unsubscribe_notifications(
+    body: UnsubscribeRequest, request: Request
+) -> dict[str, Any]:
     """Remove a push subscription."""
     settings = get_settings()
     if not settings.web_push_enabled:
@@ -10251,7 +10289,7 @@ async def unsubscribe_notifications(body: UnsubscribeRequest, request: Request):
 
 
 @app.get("/api/users/mentions", operation_id="getUserMentions")
-async def get_user_mentions(request: Request):
+async def get_user_mentions(request: Request) -> dict[str, Any]:
     """Get comments that mention the current user."""
     username = request.state.username
     if not username:
@@ -10280,7 +10318,7 @@ async def get_user_mentions(request: Request):
 
 
 @app.post("/api/users/mentions/read-all", operation_id="markAllMentionsReadEndpoint")
-async def mark_all_mentions_read_endpoint(request: Request):
+async def mark_all_mentions_read_endpoint(request: Request) -> dict[str, Any]:
     """Mark ALL mentions as read for the current user."""
     username = request.state.username
     if not username:
@@ -10292,7 +10330,7 @@ async def mark_all_mentions_read_endpoint(request: Request):
 
 
 @app.post("/api/users/mentions/read", operation_id="markMentionsAsRead")
-async def mark_mentions_as_read(request: Request):
+async def mark_mentions_as_read(request: Request) -> dict[str, Any]:
     """Mark specific mentions as read."""
     username = request.state.username
     if not username:
@@ -10317,7 +10355,7 @@ async def mark_mentions_as_read(request: Request):
 
 
 @app.get("/api/users/mentions/unread-count", operation_id="getUnreadMentionsCount")
-async def get_unread_mentions_count(request: Request):
+async def get_unread_mentions_count(request: Request) -> dict[str, Any]:
     """Get count of unread mentions for navbar badge."""
     username = request.state.username
     if not username:
@@ -10328,7 +10366,7 @@ async def get_unread_mentions_count(request: Request):
 
 
 @app.get("/api/users/mentionable", operation_id="getMentionableUsers")
-async def get_mentionable_users(request: Request):
+async def get_mentionable_users(request: Request) -> dict[str, Any]:
     """Return list of usernames that can be mentioned in comments."""
     username = request.state.username
     if not username:
@@ -10429,7 +10467,9 @@ Respond with ONLY a JSON object:
     response_model=FeedbackPreviewResponse,
     operation_id="previewFeedback",
 )
-async def preview_feedback(request: Request, body: FeedbackRequest):
+async def preview_feedback(
+    request: Request, body: FeedbackRequest
+) -> FeedbackPreviewResponse:
     """Preview user feedback as a formatted GitHub issue.
 
     Accepts bug reports or feature requests, uses AI to format them
@@ -10442,10 +10482,7 @@ async def preview_feedback(request: Request, body: FeedbackRequest):
         raise HTTPException(
             status_code=503, detail="Feedback submission is disabled on this server"
         )
-    try:
-        ai_provider, ai_model = _resolve_ai_config_values(None, None, request=request)
-    except HTTPException:
-        raise
+    ai_provider, ai_model = _resolve_ai_config_values(None, None, request=request)
     try:
         return await generate_feedback_preview(
             body, settings, ai_provider=ai_provider, ai_model=ai_model
@@ -10464,7 +10501,9 @@ async def preview_feedback(request: Request, body: FeedbackRequest):
     response_model=FeedbackResponse,
     operation_id="createFeedback",
 )
-async def create_feedback(request: Request, body: FeedbackCreateRequest):
+async def create_feedback(
+    request: Request, body: FeedbackCreateRequest
+) -> FeedbackResponse:
     """Create a GitHub issue from a previewed feedback.
 
     Takes a title, body, and labels (typically from the preview endpoint)
@@ -10526,7 +10565,9 @@ async def create_feedback(request: Request, body: FeedbackCreateRequest):
 # -- Chat helpers --
 
 
-def _build_ci_workspace_params(decrypted_params: dict, result_data: dict) -> dict:
+def _build_ci_workspace_params(
+    decrypted_params: dict[str, Any], result_data: dict[str, Any]
+) -> dict[str, Any]:
     """Build params dict for CI chat workspace setup from stored request params."""
     return {
         **decrypted_params,
@@ -10539,7 +10580,7 @@ def _build_ci_workspace_params(decrypted_params: dict, result_data: dict) -> dic
 
 
 async def _resolve_chat_credentials(
-    decrypted_params: dict, username: str
+    decrypted_params: dict[str, Any], username: str
 ) -> tuple[str, str, str, str, str]:
     """Resolve Jira and GitHub credentials for chat.
 
@@ -10585,7 +10626,7 @@ async def get_chat_history(
     request: Request,
     limit: int = Query(default=200, ge=1, le=500),
     offset: int = Query(default=0, ge=0),
-) -> dict:
+) -> dict[str, Any]:
     """Get chat message history for an analyzed job."""
     _check_allow_list(request)
     result = await get_result(job_id)
@@ -10608,15 +10649,15 @@ async def get_chat_history(
 
 
 @app.post("/api/chat/{job_id}/init", operation_id="initChat")
-async def init_chat(job_id: str, request: Request) -> dict:
+async def init_chat(job_id: str, request: Request) -> dict[str, Any]:
     """Initialize chat workspace: create directory, clone repos, and start AI session."""
     _check_allow_list(request)
     _require_reviewer(request)
     from rootcoz.engine.chat import (
-        ensure_chat_workspace,
-        clone_chat_repos,
         build_chat_custom_tools,
         build_welcome_message,
+        clone_chat_repos,
+        ensure_chat_workspace,
         init_chat_session,
     )
     from rootcoz.sources.chat_workspace import setup_ci_build_workspace
@@ -10633,7 +10674,7 @@ async def init_chat(job_id: str, request: Request) -> dict:
     workspace = ensure_chat_workspace(job_id, username=username)
 
     # Decrypt params for repo cloning
-    decrypted_params: dict = {}
+    decrypted_params: dict[str, Any] = {}
     try:
         decrypted_params = decrypt_sensitive_fields(dict(params))
     except Exception:
@@ -10686,7 +10727,7 @@ async def init_chat(job_id: str, request: Request) -> dict:
             # Build HTTP-backed custom tools for the sidecar session.
             # The auth token is short-lived — revoked after session creation since
             # _process_chat_message creates a fresh token on every message.
-            custom_tools: list[dict] = []
+            custom_tools: list[dict[str, Any]] = []
             auth_header = await _create_ai_auth_header(username)
             if auth_header:
                 server_url = _build_internal_server_url()
@@ -10773,7 +10814,7 @@ async def init_chat(job_id: str, request: Request) -> dict:
 
 
 @app.post("/api/chat/{job_id}/close", operation_id="closeChat")
-async def close_chat(job_id: str, request: Request) -> dict:
+async def close_chat(job_id: str, request: Request) -> dict[str, Any]:
     """Signal that a user left the chat page.
 
     Does NOT clean up the workspace — other users/tabs may still be active.
@@ -10786,7 +10827,7 @@ async def close_chat(job_id: str, request: Request) -> dict:
 
 
 @app.post("/api/chat/{job_id}/abort", operation_id="abortChat")
-async def abort_chat(job_id: str, request: Request) -> dict:
+async def abort_chat(job_id: str, request: Request) -> dict[str, Any]:
     """Abort the currently processing chat message for this user."""
     _check_allow_list(request)
     _require_reviewer(request)
@@ -10904,8 +10945,8 @@ def _resolve_chat_ai_config(
     override_model: str | None,
     settings_provider: str,
     settings_model: str,
-    result_data: dict | None = None,
-    request_params: dict | None = None,
+    result_data: dict[str, Any] | None = None,
+    request_params: dict[str, Any] | None = None,
     is_admin: bool = False,
 ) -> tuple[str, str]:
     """Resolve provider/model for job and admin chat background processors.
@@ -10962,7 +11003,7 @@ async def send_chat_message(
     body: ChatMessageRequest,
     request: Request,
     background_tasks: BackgroundTasks,
-) -> dict:
+) -> dict[str, Any]:
     """Queue a chat message for AI processing.
 
     Saves the user message immediately and kicks off background AI processing.
@@ -11028,10 +11069,10 @@ async def _process_chat_message(
 ) -> None:
     """Background task: process a single chat message with AI."""
     from rootcoz.engine.chat import (
-        chat_with_ai,
-        ensure_chat_workspace,
-        clone_chat_repos,
         build_chat_custom_tools,
+        chat_with_ai,
+        clone_chat_repos,
+        ensure_chat_workspace,
     )
     from rootcoz.sources.chat_workspace import setup_ci_build_workspace
 
@@ -11125,7 +11166,7 @@ async def _process_chat_message(
             auth_header = await _create_ai_auth_header(username)
 
             # Build HTTP-backed custom tools
-            custom_tools: list[dict] = []
+            custom_tools: list[dict[str, Any]] = []
             if auth_header:
                 custom_tools = build_chat_custom_tools(
                     server_url=server_url,
@@ -11228,11 +11269,10 @@ async def _process_chat_message(
             notify_chat_changed(job_id, username=username)
 
         except Exception:
-            logger.error(
+            logger.exception(
                 "Chat processing failed for job %s, msg %d",
                 job_id,
                 assistant_msg_id,
-                exc_info=True,
             )
             try:
                 await storage.update_chat_message_content(
@@ -11242,10 +11282,9 @@ async def _process_chat_message(
                 await storage.update_chat_message_status(assistant_msg_id, "failed")
                 notify_chat_changed(job_id, username=username)
             except Exception:
-                logger.error(
+                logger.exception(
                     "Failed to update error status for chat msg %d",
                     assistant_msg_id,
-                    exc_info=True,
                 )
         finally:
             _cleanup_chat_state(f"{job_id}:{username}")
@@ -11254,7 +11293,7 @@ async def _process_chat_message(
 
 
 @app.delete("/api/chat/{job_id}", operation_id="clearChatHistory")
-async def clear_chat_history(job_id: str, request: Request) -> dict:
+async def clear_chat_history(job_id: str, request: Request) -> dict[str, Any]:
     """Clear chat messages for the current user on a job."""
     _check_allow_list(request)
     _require_reviewer(request)
@@ -11293,7 +11332,7 @@ async def clear_chat_history(job_id: str, request: Request) -> dict:
 
 
 @app.get("/api/admin/db/schema", operation_id="adminDbSchema")
-async def admin_db_schema(request: Request) -> dict:
+async def admin_db_schema(request: Request) -> dict[str, Any]:
     """Get database schema — tables, columns, types, row counts. Admin only."""
     _require_admin(request)
 
@@ -11326,7 +11365,7 @@ async def admin_db_schema(request: Request) -> dict:
 
 
 @app.post("/api/admin/db/query", operation_id="adminDbQuery")
-async def admin_db_query(request: Request) -> dict:
+async def admin_db_query(request: Request) -> dict[str, Any]:
     """Execute a read-only SQL query. Admin only."""
     _require_admin(request)
 
@@ -11372,7 +11411,7 @@ async def get_admin_chat_history(
     request: Request,
     limit: int = Query(default=200, ge=1, le=500),
     offset: int = Query(default=0, ge=0),
-) -> dict:
+) -> dict[str, Any]:
     """Get admin chat history."""
     _require_admin(request)
     username = getattr(request.state, "username", "")
@@ -11389,12 +11428,12 @@ async def get_admin_chat_history(
 
 
 @app.post("/api/admin/chat/init", operation_id="initAdminChat")
-async def init_admin_chat(request: Request) -> dict:
+async def init_admin_chat(request: Request) -> dict[str, Any]:
     """Initialize admin chat workspace and AI session."""
     _require_admin(request)
     from rootcoz.engine.chat import (
-        ensure_chat_workspace,
         build_admin_custom_tools,
+        ensure_chat_workspace,
         init_admin_chat_session,
     )
 
@@ -11412,7 +11451,7 @@ async def init_admin_chat(request: Request) -> dict:
             ADMIN_CHAT_JOB_ID, limit=1, username=username
         )
         if not existing:
-            custom_tools: list[dict] = []
+            custom_tools: list[dict[str, Any]] = []
             auth_header = await _create_ai_auth_header(username, is_admin=True)
             if auth_header:
                 server_url = _build_internal_server_url()
@@ -11445,7 +11484,7 @@ async def init_admin_chat(request: Request) -> dict:
 
 
 @app.post("/api/admin/chat/close", operation_id="closeAdminChat")
-async def close_admin_chat(request: Request) -> dict:
+async def close_admin_chat(request: Request) -> dict[str, Any]:
     """Signal that a user left the admin chat page."""
     _require_admin(request)
     logger.info("Admin chat: user left admin chat page")
@@ -11453,7 +11492,7 @@ async def close_admin_chat(request: Request) -> dict:
 
 
 @app.post("/api/admin/chat/abort", operation_id="abortAdminChat")
-async def abort_admin_chat(request: Request) -> dict:
+async def abort_admin_chat(request: Request) -> dict[str, Any]:
     """Abort the currently processing admin chat message for this user."""
     _require_admin(request)
     username = request.state.username
@@ -11524,7 +11563,7 @@ async def send_admin_chat_message(
     body: ChatMessageRequest,
     request: Request,
     background_tasks: BackgroundTasks,
-) -> dict:
+) -> dict[str, Any]:
     """Queue an admin chat message for AI processing."""
     _require_admin(request)
     ai_provider, ai_model = _normalize_and_validate_ai_params(
@@ -11579,8 +11618,8 @@ async def _process_admin_chat_message(
     """Background task: process a single admin chat message with AI."""
     from rootcoz.engine.chat import (
         admin_chat_with_ai,
-        ensure_chat_workspace,
         build_admin_custom_tools,
+        ensure_chat_workspace,
     )
 
     lock = _get_chat_lock(f"{ADMIN_CHAT_JOB_ID}:{username}")
@@ -11710,10 +11749,9 @@ async def _process_admin_chat_message(
             notify_chat_changed(ADMIN_CHAT_JOB_ID, username=username)
 
         except Exception:
-            logger.error(
+            logger.exception(
                 "Admin chat processing failed for msg %d",
                 assistant_msg_id,
-                exc_info=True,
             )
             try:
                 await storage.update_chat_message_content(
@@ -11723,10 +11761,9 @@ async def _process_admin_chat_message(
                 await storage.update_chat_message_status(assistant_msg_id, "failed")
                 notify_chat_changed(ADMIN_CHAT_JOB_ID, username=username)
             except Exception:
-                logger.error(
+                logger.exception(
                     "Failed to update error status for admin chat msg %d",
                     assistant_msg_id,
-                    exc_info=True,
                 )
         finally:
             _cleanup_chat_state(f"{ADMIN_CHAT_JOB_ID}:{username}")
@@ -11770,7 +11807,7 @@ class SaveArtifactRequest(BaseModel):
 async def save_admin_chat_artifact(
     body: SaveArtifactRequest,
     request: Request,
-) -> dict:
+) -> dict[str, Any]:
     """Save an HTML report artifact from admin chat. Returns a download URL."""
     _require_admin(request)
     username = request.state.username
@@ -11796,8 +11833,8 @@ async def save_admin_chat_artifact(
             artifact_path.write_text, body.html_content, encoding="utf-8"
         )
     except OSError as exc:
-        logger.error("Failed to save artifact: %s", exc, exc_info=True)
-        raise HTTPException(status_code=500, detail="Failed to save artifact")
+        logger.exception("Failed to save artifact")
+        raise HTTPException(status_code=500, detail="Failed to save artifact") from exc
 
     logger.info(
         "Admin chat: saved artifact %s (%d chars) for %s",
@@ -11839,8 +11876,8 @@ async def get_admin_chat_artifact(
     try:
         content = await asyncio.to_thread(artifact_path.read_text, encoding="utf-8")
     except (OSError, UnicodeDecodeError) as exc:
-        logger.error("Failed to read artifact %s: %s", artifact_id, exc, exc_info=True)
-        raise HTTPException(status_code=500, detail="Failed to read artifact")
+        logger.exception("Failed to read artifact %s", artifact_id)
+        raise HTTPException(status_code=500, detail="Failed to read artifact") from exc
 
     download_filename = f"report-{artifact_id[:8]}.html"
 
@@ -11854,7 +11891,7 @@ async def get_admin_chat_artifact(
 
 
 @app.delete("/api/admin/chat", operation_id="clearAdminChatHistory")
-async def clear_admin_chat_history(request: Request) -> dict:
+async def clear_admin_chat_history(request: Request) -> dict[str, Any]:
     """Clear admin chat messages for the current user."""
     _require_admin(request)
     from rootcoz.engine.chat import cleanup_chat_repos

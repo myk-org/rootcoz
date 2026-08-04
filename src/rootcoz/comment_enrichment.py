@@ -2,6 +2,7 @@
 
 import os
 import re
+from typing import Any
 
 import httpx
 from simple_logger.logger import get_logger
@@ -17,7 +18,9 @@ _JIRA_KEY_PATTERN = re.compile(r"\b([A-Z][A-Z0-9]+-\d+)\b")
 _MENTION_PATTERN = re.compile(r"(?<![a-zA-Z0-9.])@([a-zA-Z0-9_-]+)")
 
 
-def _detect_github_links(text: str, pattern: re.Pattern, label: str) -> list[dict]:
+def _detect_github_links(
+    text: str, pattern: re.Pattern[str], label: str
+) -> list[dict[str, Any]]:
     """Detect GitHub links matching a pattern.
 
     Args:
@@ -34,12 +37,12 @@ def _detect_github_links(text: str, pattern: re.Pattern, label: str) -> list[dic
     return result
 
 
-def detect_github_prs(text: str) -> list[dict]:
+def detect_github_prs(text: str) -> list[dict[str, Any]]:
     """Detect GitHub PR URLs in text."""
     return _detect_github_links(text, _GITHUB_PR_PATTERN, "detect_github_prs")
 
 
-def detect_github_issues(text: str) -> list[dict]:
+def detect_github_issues(text: str) -> list[dict[str, Any]]:
     """Detect GitHub issue URLs in text."""
     return _detect_github_links(text, _GITHUB_ISSUE_PATTERN, "detect_github_issues")
 
@@ -178,7 +181,7 @@ async def fetch_github_issue_status(
         return None
 
 
-def _extract_status_from_issues(data: dict) -> str | None:
+def _extract_status_from_issues(data: dict[str, Any]) -> str | None:
     """Extract the status name from a Jira search response.
 
     Args:
@@ -223,7 +226,11 @@ async def fetch_jira_ticket_status(
     )
     base = jira_url.rstrip("/")
     jql = f'key = "{ticket_key}"'
-    search_params = {"jql": jql, "maxResults": 1, "fields": "status"}
+    search_params: dict[str, str | int] = {
+        "jql": jql,
+        "maxResults": 1,
+        "fields": "status",
+    }
 
     # Endpoints to try in order: Cloud v3 first, then Server/DC v2
     endpoints = [
@@ -236,7 +243,7 @@ async def fetch_jira_ticket_status(
             verify=ssl_verify, timeout=10, auth=auth, headers=auth_headers
         ) as client:
             for i, url in enumerate(endpoints):
-                resp = await client.get(url, params=search_params)  # type: ignore[arg-type]
+                resp = await client.get(url, params=search_params)
                 if resp.status_code == 200:
                     status = _extract_status_from_issues(resp.json())
                     logger.debug(
