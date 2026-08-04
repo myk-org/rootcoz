@@ -1691,3 +1691,90 @@ async def test_partial_update_status_preserves_build_id(setup_test_db):
             assert row["job_name"] == "my-job"
             assert row["build_number"] == 42
             assert row["build_id"] == "999", "build_id was clobbered by partial update"
+
+
+class TestExtractDenormalizedFields:
+    """Tests for _extract_denormalized_fields helper."""
+
+    def test_none_input(self):
+        from rootcoz.storage import _extract_denormalized_fields
+
+        assert _extract_denormalized_fields(None) == ("", 0, "")
+
+    def test_empty_dict(self):
+        from rootcoz.storage import _extract_denormalized_fields
+
+        assert _extract_denormalized_fields({}) == ("", 0, "")
+
+    def test_valid_fields(self):
+        from rootcoz.storage import _extract_denormalized_fields
+
+        result = {"job_name": "my-job", "build_number": 42, "build_id": "999"}
+        assert _extract_denormalized_fields(result) == ("my-job", 42, "999")
+
+    def test_invalid_build_number(self):
+        from rootcoz.storage import _extract_denormalized_fields
+
+        result = {"job_name": "x", "build_number": "not-a-number", "build_id": "1"}
+        assert _extract_denormalized_fields(result) == ("x", 0, "1")
+
+    def test_numeric_build_id_coerced_to_string(self):
+        from rootcoz.storage import _extract_denormalized_fields
+
+        result = {"job_name": "x", "build_number": 1, "build_id": 12345}
+        assert _extract_denormalized_fields(result) == ("x", 1, "12345")
+
+    def test_missing_fields_default(self):
+        from rootcoz.storage import _extract_denormalized_fields
+
+        result = {"other_key": "value"}
+        assert _extract_denormalized_fields(result) == ("", 0, "")
+
+
+@pytest.mark.asyncio
+async def test_save_result_populates_denorm_columns(setup_test_db):
+    """save_result writes denormalized job_name/build_number/build_id."""
+    with patch.object(storage, "DB_PATH", setup_test_db):
+        await storage.save_result(
+            job_id="denorm-test",
+            status="completed",
+            result={"job_name": "test-job", "build_number": 7, "build_id": "abc"},
+        )
+        async with storage._connect_db() as db:
+            cursor = await db.execute(
+                "SELECT job_name, build_number, build_id FROM results WHERE job_id = ?",
+                ("denorm-test",),
+            )
+            row = await cursor.fetchone()
+            assert row["job_name"] == "test-job"
+            assert row["build_number"] == 7
+            assert row["build_id"] == "abc"
+
+
+@pytest.mark.asyncio
+async def test_set_job_metadata_syncs_labels(setup_test_db):
+    """set_job_metadata inserts into job_metadata_labels."""
+    with patch.object(storage, "DB_PATH", setup_test_db):
+        await storage.set_job_metadata("sync-job", labels=["smoke", "nightly"])
+        async with storage._connect_db() as db:
+            cursor = await db.execute(
+                "SELECT label FROM job_metadata_labels WHERE job_name = ? ORDER BY label",
+                ("sync-job",),
+            )
+            labels = [row["label"] for row in await cursor.fetchall()]
+            assert labels == ["nightly", "smoke"]
+
+
+@pytest.mark.asyncio
+async def test_delete_job_metadata_cleans_labels(setup_test_db):
+    """delete_job_metadata removes job_metadata_labels rows."""
+    with patch.object(storage, "DB_PATH", setup_test_db):
+        await storage.set_job_metadata("del-job", labels=["a", "b"])
+        await storage.delete_job_metadata("del-job")
+        async with storage._connect_db() as db:
+            cursor = await db.execute(
+                "SELECT COUNT(*) FROM job_metadata_labels WHERE job_name = ?",
+                ("del-job",),
+            )
+            count = (await cursor.fetchone())[0]
+            assert count == 0

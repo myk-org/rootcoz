@@ -6126,6 +6126,15 @@ def _build_metadata_join(
     return join_sql
 
 
+def _build_labels_subquery(labels: list[str]) -> str:
+    """Return the job_metadata_labels subquery for a list of labels."""
+    placeholders = ", ".join("?" for _ in labels)
+    return (
+        f"SELECT jml.job_name FROM job_metadata_labels jml "
+        f"WHERE jml.label IN ({placeholders})"
+    )
+
+
 def _build_tags_filter(
     tags: list[str] | None,
     job_name_col: str,
@@ -6139,13 +6148,7 @@ def _build_tags_filter(
     """
     if not tags:
         return
-    placeholders = ", ".join("?" for _ in tags)
-    conditions.append(
-        f"""{job_name_col} IN (
-            SELECT jml.job_name FROM job_metadata_labels jml
-            WHERE jml.label IN ({placeholders})
-        )"""
-    )
+    conditions.append(f"{job_name_col} IN ({_build_labels_subquery(tags)})")
     params.extend(tags)
 
 
@@ -6158,15 +6161,13 @@ def _build_exclude_tags_filter(
     """Append tag-exclusion conditions in-place.
 
     Excludes jobs that have ANY of the specified tags (NOT IN semantics).
+    Empty ``job_name`` is excluded to match pre-denormalization NULL semantics
+    (``NULL NOT IN (...)`` is falsy).
     """
     if not exclude_tags:
         return
-    placeholders = ", ".join("?" for _ in exclude_tags)
     conditions.append(
-        f"""{job_name_col} NOT IN (
-            SELECT jml.job_name FROM job_metadata_labels jml
-            WHERE jml.label IN ({placeholders})
-        )"""
+        f"({job_name_col} != '' AND {job_name_col} NOT IN ({_build_labels_subquery(exclude_tags)}))"
     )
     params.extend(exclude_tags)
 
