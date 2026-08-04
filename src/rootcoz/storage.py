@@ -201,8 +201,16 @@ async def _migrate_add_column(
     cursor = await db.execute(f"PRAGMA table_info({table})")
     columns = {row[1] for row in await cursor.fetchall()}
     if column not in columns:
-        await db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {column_def}")
-        logger.info(f"Migration: added {column} column to {table}")
+        try:
+            await db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {column_def}")
+            logger.info(f"Migration: added {column} column to {table}")
+        except Exception:
+            # Handle race: concurrent init_db may have added the column already
+            cursor = await db.execute(f"PRAGMA table_info({table})")
+            columns = {row[1] for row in await cursor.fetchall()}
+            if column not in columns:
+                raise
+            logger.debug(f"Migration: {table}.{column} added by concurrent process")
     else:
         logger.debug(f"Migration: {table} already has {column} column")
 
@@ -909,20 +917,18 @@ async def init_db() -> None:
             "CREATE INDEX IF NOT EXISTS idx_jml_label ON job_metadata_labels (label)"
         )
 
-        # Backfill job_metadata_labels from existing job_metadata.labels JSON
-        cursor = await db.execute("SELECT COUNT(*) FROM job_metadata_labels")
-        jml_count = (await cursor.fetchone())[0]
-        if jml_count == 0:
-            await db.execute("""
-                INSERT OR IGNORE INTO job_metadata_labels (job_name, label)
-                SELECT jm.job_name, jt.value
-                FROM job_metadata jm,
-                     json_each(CASE WHEN json_valid(jm.labels) THEN jm.labels ELSE '[]' END) jt
-                WHERE jm.labels != '[]'
-            """)
-            logger.info(
-                "Migration: backfilled job_metadata_labels from job_metadata.labels"
-            )
+        # Backfill job_metadata_labels from existing job_metadata.labels JSON.
+        # Uses INSERT OR IGNORE so it is safe to run every startup (reconciles
+        # partial backfills without duplicating existing rows).
+        await db.execute("""
+            INSERT OR IGNORE INTO job_metadata_labels (job_name, label)
+            SELECT jm.job_name, jt.value
+            FROM job_metadata jm,
+                 json_each(
+                     CASE WHEN json_valid(jm.labels) THEN jm.labels ELSE '[]' END
+                 ) jt
+            WHERE jm.labels != '[]'
+        """)
 
         # AI token usage tracking table
         await db.execute("""
@@ -6259,7 +6265,7 @@ async def _count_reviewed_tests(
     conditions: list[str] = []
     params: list[Any] = []
     _build_date_filter("fr.updated_at", date_from, date_to, conditions, params)
-    needs_results = bool(team or tier or version or tags or exclude_tags)
+    needs_results = bool(team or tier or version or tags or exclude_tags or status)
     results_join = (
         "JOIN results r_res ON r_res.job_id = fr.job_id" if needs_results else ""
     )
@@ -6268,11 +6274,9 @@ async def _count_reviewed_tests(
     )
     _build_tags_filter(tags, "r_res.job_name", conditions, params)
     _build_exclude_tags_filter(exclude_tags, "r_res.job_name", conditions, params)
-    status_join = ""
     if status:
-        status_join = " JOIN results r_rstatus ON r_rstatus.job_id = fr.job_id"
         placeholders = ", ".join("?" for _ in status)
-        conditions.append(f"r_rstatus.status IN ({placeholders})")
+        conditions.append(f"r_res.status IN ({placeholders})")
         params.extend(status)
     if review_status == "reviewed":
         conditions.append(
@@ -6290,7 +6294,6 @@ async def _count_reviewed_tests(
         SELECT COUNT(*) AS cnt FROM failure_reviews fr
         {results_join}
         {meta_join}
-        {status_join}
         WHERE fr.reviewed = 1{where}
         """,
         params,
