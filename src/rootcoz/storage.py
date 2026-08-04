@@ -642,7 +642,9 @@ async def init_db() -> None:
         await _migrate_add_column(db, "results", "analysis_started_at", "TIMESTAMP")
         await _migrate_add_column(db, "results", "error", "TEXT NOT NULL DEFAULT ''")
         await _migrate_add_column(db, "results", "job_name", "TEXT NOT NULL DEFAULT ''")
-        await _migrate_add_column(db, "results", "build_number", "INTEGER NOT NULL DEFAULT 0")
+        await _migrate_add_column(
+            db, "results", "build_number", "INTEGER NOT NULL DEFAULT 0"
+        )
         await _migrate_add_column(db, "results", "build_id", "TEXT NOT NULL DEFAULT ''")
 
         # Backfill job_name/build_number/build_id from result_json
@@ -664,8 +666,7 @@ async def init_db() -> None:
             "ON results (status, created_at DESC)"
         )
         await db.execute(
-            "CREATE INDEX IF NOT EXISTS idx_results_job_name "
-            "ON results (job_name)"
+            "CREATE INDEX IF NOT EXISTS idx_results_job_name ON results (job_name)"
         )
 
         # failure_history: denormalized table for fast history queries
@@ -905,23 +906,23 @@ async def init_db() -> None:
             )
         """)
         await db.execute(
-            "CREATE INDEX IF NOT EXISTS idx_jml_label "
-            "ON job_metadata_labels (label)"
+            "CREATE INDEX IF NOT EXISTS idx_jml_label ON job_metadata_labels (label)"
         )
 
         # Backfill job_metadata_labels from existing job_metadata.labels JSON
-        cursor = await db.execute(
-            "SELECT COUNT(*) FROM job_metadata_labels"
-        )
+        cursor = await db.execute("SELECT COUNT(*) FROM job_metadata_labels")
         jml_count = (await cursor.fetchone())[0]
         if jml_count == 0:
             await db.execute("""
                 INSERT OR IGNORE INTO job_metadata_labels (job_name, label)
                 SELECT jm.job_name, jt.value
-                FROM job_metadata jm, json_each(jm.labels) jt
-                WHERE jm.labels != '[]' AND json_valid(jm.labels)
+                FROM job_metadata jm,
+                     json_each(CASE WHEN json_valid(jm.labels) THEN jm.labels ELSE '[]' END) jt
+                WHERE jm.labels != '[]'
             """)
-            logger.info("Migration: backfilled job_metadata_labels from job_metadata.labels")
+            logger.info(
+                "Migration: backfilled job_metadata_labels from job_metadata.labels"
+            )
 
         # AI token usage tracking table
         await db.execute("""
@@ -1684,8 +1685,15 @@ async def save_result(
                                            job_name, build_number, build_id)
             VALUES (?, ?, ?, ?, ?, ?, ?)
             """,
-            (job_id, build_url, status, result_json,
-             job_name, build_number, build_id_val),
+            (
+                job_id,
+                build_url,
+                status,
+                result_json,
+                job_name,
+                build_number,
+                build_id_val,
+            ),
         )
         # Update the row (handles both fresh inserts and existing rows).
         set_parts, params = _build_status_update_clause(status, result_json, result)
@@ -5009,9 +5017,7 @@ async def _upsert_job_metadata_row(
     # Sync labels to job_metadata_labels table
     labels = item.get("labels") or []
     job_name = item["job_name"]
-    await db.execute(
-        "DELETE FROM job_metadata_labels WHERE job_name = ?", (job_name,)
-    )
+    await db.execute("DELETE FROM job_metadata_labels WHERE job_name = ?", (job_name,))
     if labels:
         await db.executemany(
             "INSERT OR IGNORE INTO job_metadata_labels (job_name, label) VALUES (?, ?)",
@@ -6255,9 +6261,7 @@ async def _count_reviewed_tests(
     _build_date_filter("fr.updated_at", date_from, date_to, conditions, params)
     needs_results = bool(team or tier or version or tags or exclude_tags)
     results_join = (
-        "JOIN results r_res ON r_res.job_id = fr.job_id"
-        if needs_results
-        else ""
+        "JOIN results r_res ON r_res.job_id = fr.job_id" if needs_results else ""
     )
     meta_join = _build_metadata_join(
         team, tier, version, "r_res.job_name", conditions, params
