@@ -649,6 +649,10 @@ class AnalysisResult(BaseModel):
     passed_count: int = Field(default=0, description="Number of passed tests")
     skipped_count: int = Field(default=0, description="Number of skipped tests")
     failed_count: int = Field(default=0, description="Number of failed tests")
+    cross_failure_patterns: list["CrossFailurePattern"] = Field(
+        default_factory=list,
+        description="Patterns detected across multiple failure groups",
+    )
 
     @model_validator(mode="after")
     def _sync_build_url_aliases(self) -> "AnalysisResult":
@@ -824,6 +828,18 @@ class ReAnalyzeRequest(_JenkinsParamsMixin, _NameTagsMixin, BaseAnalysisRequest)
     """Override fields for ``POST /re-analyze/{job_id}``."""
 
 
+class CrossFailurePattern(BaseModel):
+    """A pattern detected across multiple failure groups in the same job."""
+
+    pattern: str = Field(description="Description of the cross-failure pattern")
+    affected_tests: list[str] = Field(
+        default_factory=list, description="Test names exhibiting this pattern"
+    )
+    suggested_root_cause: str = Field(
+        default="", description="Suggested root cause for the pattern"
+    )
+
+
 class FailureAnalysisResult(BaseModel):
     """Analysis result for direct failure analysis (no Jenkins context)."""
 
@@ -845,6 +861,10 @@ class FailureAnalysisResult(BaseModel):
     passed_count: int = Field(default=0, description="Number of passed tests")
     skipped_count: int = Field(default=0, description="Number of skipped tests")
     failed_count: int = Field(default=0, description="Number of failed tests")
+    cross_failure_patterns: list[CrossFailurePattern] = Field(
+        default_factory=list,
+        description="Patterns detected across multiple failure groups",
+    )
 
 
 class _ChildJobFieldsValidator(BaseModel):

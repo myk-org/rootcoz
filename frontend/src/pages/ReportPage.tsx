@@ -12,6 +12,7 @@ import { ReportProvider, useReportState, useReportDispatch, useRefreshEnrichment
 import { FailureCard } from './report/FailureCard'
 import { ChildJobSection } from './report/ChildJobSection'
 import { PeerAnalysisSummary } from './report/PeerAnalysisSummary'
+import { CrossFailurePatterns } from './report/CrossFailurePatterns'
 import { TestListSection } from './report/TestListSection'
 import { AllReviewedPrompt } from './report/AllReviewedPrompt'
 import { collectChildExpandKeys, expandKey } from '@/lib/childJobHash'
@@ -595,6 +596,9 @@ function ReportContent() {
           </ul>
         </div>
       )}
+
+      {/* ---- Cross-failure patterns ---- */}
+      <CrossFailurePatterns patterns={result.cross_failure_patterns ?? []} />
 
       {/* ---- Peer analysis summary ---- */}
       <PeerAnalysisSummary

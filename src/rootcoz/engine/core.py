@@ -15,7 +15,10 @@ import re
 import shutil
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from rootcoz.models import CrossFailurePattern
 
 from git.exc import GitCommandError
 from simple_logger.logger import get_logger
@@ -1424,6 +1427,119 @@ def _is_empty_ai_text(result: AIResult) -> bool:
     return bool(result.success) and not (result.text or "").strip()
 
 
+async def _call_ai_with_retry(
+    prompt: str,
+    *,
+    ai_provider: str,
+    ai_model: str,
+    workspace_dir: Path,
+    ai_call_timeout: int | None,
+    server_url: str,
+    job_id: str,
+    auth_header: str,
+    call_type: str = "primary",
+) -> AIResult:
+    """Call AI with retry on empty response and record usage.
+
+    Builds call kwargs, retries once on empty text, and records token
+    usage for each attempt. Used by both per-group and orchestrated
+    analysis paths.
+
+    Args:
+        prompt: The prompt to send.
+        ai_provider: AI provider name.
+        ai_model: AI model identifier.
+        workspace_dir: Working directory for the sidecar session.
+        ai_call_timeout: Timeout in minutes.
+        server_url: Base URL for history API access.
+        job_id: Current job ID.
+        auth_header: Bearer token for history tools.
+        call_type: Token usage call type label.
+
+    Returns:
+        The AIResult from the AI call.
+    """
+    custom_tools: list[dict[str, Any]] = []
+    if server_url and job_id and auth_header:
+        token = auth_header.removeprefix("Bearer ").strip()
+        if token:
+            custom_tools = build_analysis_history_tools(
+                server_url=server_url,
+                auth_token=token,
+                job_id=job_id,
+            )
+
+    call_kwargs: dict[str, Any] = {
+        "ai_provider": ai_provider,
+        "ai_model": ai_model,
+        "cwd": str(workspace_dir),
+        "ai_call_timeout": ai_call_timeout,
+        "tools": list(ANALYSIS_BUILTIN_TOOLS),
+    }
+    if custom_tools:
+        call_kwargs["custom_tools"] = custom_tools
+
+    max_attempts = 2
+    result = AIResult(success=False, text="AI call failed unexpectedly")
+    for attempt in range(1, max_attempts + 1):
+        try:
+            result = await call_ai_once(prompt, **call_kwargs)
+        except Exception:
+            logger.exception(
+                "AI call raised exception: provider=%s, model=%s, attempt=%d",
+                ai_provider,
+                ai_model,
+                attempt,
+            )
+            result = AIResult(success=False, text="AI call failed unexpectedly")
+
+        logger.info(
+            "AI call result: success=%s, text_length=%d, provider=%s, model=%s, "
+            "call_type=%s, attempt=%d",
+            result.success,
+            len(result.text),
+            ai_provider,
+            ai_model,
+            call_type,
+            attempt,
+        )
+
+        if not result.success:
+            logger.error(
+                "AI call failed (text_length=%d, attempt=%d)",
+                len(result.text),
+                attempt,
+            )
+
+        await result.record_usage(
+            request_id=job_id,
+            call_type=call_type,
+            prompt_chars=len(prompt),
+            ai_provider=ai_provider,
+            ai_model=ai_model,
+        )
+
+        if not result.success:
+            break
+        if not _is_empty_ai_text(result):
+            break
+
+        logger.debug(
+            "AI returned empty response (attempt=%d/%d), provider=%s, "
+            "model=%s, call_type=%s, job_id=%s",
+            attempt,
+            max_attempts,
+            ai_provider,
+            ai_model,
+            call_type,
+            job_id,
+        )
+        if attempt >= max_attempts:
+            break
+
+    return result
+
+
 async def run_single_ai_analysis(
     *,
     failures: list[FailedTest],
@@ -1600,84 +1716,18 @@ Note: Multiple tests failed with the same error. Provide ONE analysis that appli
         ai_model,
         job_id,
     )
-    custom_tools: list[dict[str, Any]] = []
-    if server_url and job_id and auth_header:
-        token = auth_header.removeprefix("Bearer ").strip()
-        if token:
-            custom_tools = build_analysis_history_tools(
-                server_url=server_url,
-                auth_token=token,
-                job_id=job_id,
-            )
     try:
-        call_kwargs: dict[str, Any] = {
-            "ai_provider": ai_provider,
-            "ai_model": ai_model,
-            # Always set cwd to the directory containing mandatory workspace
-            # files (repo or temp) so sidecar file tools can resolve them.
-            "cwd": str(workspace_dir),
-            "ai_call_timeout": ai_call_timeout,
-            "tools": list(ANALYSIS_BUILTIN_TOOLS),
-        }
-        if custom_tools:
-            call_kwargs["custom_tools"] = custom_tools
-
-        # One retry when the model reports success but returns no final text
-        # (seen with Cursor: tools/tokens used, empty assistant message).
-        max_attempts = 2
-        result = AIResult(success=False, text="AI call failed unexpectedly")
-        for attempt in range(1, max_attempts + 1):
-            try:
-                result = await call_ai_once(prompt, **call_kwargs)
-            except Exception:
-                logger.exception(
-                    "AI call raised exception: provider=%s, model=%s, attempt=%d",
-                    ai_provider,
-                    ai_model,
-                    attempt,
-                )
-                result = AIResult(success=False, text="AI call failed unexpectedly")
-            logger.info(
-                "AI call result: success=%s, text_length=%d, provider=%s, model=%s, attempt=%d",
-                result.success,
-                len(result.text),
-                ai_provider,
-                ai_model,
-                attempt,
-            )
-            if not result.success:
-                logger.error(
-                    "AI call failed (text_length=%d, attempt=%d)",
-                    len(result.text),
-                    attempt,
-                )
-
-            await result.record_usage(
-                request_id=job_id,
-                call_type="primary",
-                prompt_chars=len(prompt),
-                ai_provider=ai_provider,
-                ai_model=ai_model,
-            )
-
-            if not result.success:
-                break
-            if not _is_empty_ai_text(result):
-                break
-
-            logger.debug(
-                "AI returned empty response (attempt=%d/%d), provider=%s, "
-                "model=%s, job_id=%s, error_signature=%s, group_size=%d",
-                attempt,
-                max_attempts,
-                ai_provider,
-                ai_model,
-                job_id,
-                error_signature,
-                len(failures),
-            )
-            if attempt >= max_attempts:
-                break
+        result = await _call_ai_with_retry(
+            prompt,
+            ai_provider=ai_provider,
+            ai_model=ai_model,
+            workspace_dir=workspace_dir,
+            ai_call_timeout=ai_call_timeout,
+            server_url=server_url,
+            job_id=job_id,
+            auth_header=auth_header,
+            call_type="primary",
+        )
 
         parsed: AnalysisDetail | None = None
         if _is_empty_ai_text(result):
@@ -1797,12 +1847,475 @@ async def analyze_failure_group(
     # Apply the same analysis to all failures in the group.
     # All failures share the same signature (that's how they were grouped),
     # so reuse the already-computed value instead of calling get_failure_signature() again.
+    return _expand_group_to_analyses(error_signature, failures, parsed)
+
+
+# Path to built-in agents shipped with rootcoz
+ORCHESTRATOR_AGENTS_DIR = Path(__file__).parent.parent / "agents"
+
+
+def copy_builtin_agents_to_workspace(workspace: Path) -> None:
+    """Copy built-in rootcoz agents to workspace .pi/agents/ for sidecar discovery.
+
+    Built-in agents (e.g. test-analyzer) ship in ``src/rootcoz/agents/`` and are
+    copied to the workspace ``.pi/agents/`` directory alongside any user-provided
+    agents from ``.rootcoz/agents/``. Existing files with the same name are NOT
+    overwritten — user agents take precedence.
+
+    Args:
+        workspace: Root workspace directory.
+    """
+    if not ORCHESTRATOR_AGENTS_DIR.is_dir():
+        logger.warning(
+            "Built-in agents directory not found: %s", ORCHESTRATOR_AGENTS_DIR
+        )
+        return
+
+    dest = workspace / ".pi" / "agents"
+    dest.mkdir(parents=True, exist_ok=True)
+
+    for agent_file in sorted(ORCHESTRATOR_AGENTS_DIR.glob("*.md")):
+        target = dest / agent_file.name
+        if target.exists():
+            logger.debug(
+                "Skipping built-in agent '%s' — user agent already exists at %s",
+                agent_file.stem,
+                target,
+            )
+            continue
+        try:
+            shutil.copy2(agent_file, target)
+            logger.info("Copied built-in agent '%s' to %s", agent_file.stem, target)
+        except OSError:
+            logger.warning(
+                "Failed to copy built-in agent '%s' to workspace; continuing",
+                agent_file.stem,
+                exc_info=True,
+            )
+
+
+def prepare_orchestrator_workspace(
+    groups: dict[str, list[FailedTest]],
+    console_context: str,
+    workspace_dir: Path,
+) -> dict[str, dict[str, Path]]:
+    """Prepare workspace files for all failure groups before orchestrated analysis.
+
+    Writes failure-details and cross-reference files for every group, plus a
+    single shared console-output file. Returns a mapping of
+    ``error_signature → {"failure_details": Path, "console_output": Path | None,
+    "cross_ref": Path | None}``.
+
+    Args:
+        groups: Failure groups keyed by error signature.
+        console_context: Shared console output (written once for all groups).
+        workspace_dir: Root workspace directory.
+
+    Returns:
+        Dict mapping each error signature to its workspace file paths.
+    """
+    result: dict[str, dict[str, Path]] = {}
+
+    # Write console output once (shared across all groups)
+    console_file: Path | None = None
+    if console_context:
+        console_file = workspace_dir / "console-output.txt"
+        console_file.write_text(console_context)
+
+    for sig, failures in groups.items():
+        paths: dict[str, Path] = {}
+        paths["failure_details"] = write_failure_details_file(
+            failures, sig, workspace_dir
+        )
+        if console_file:
+            paths["console_output"] = console_file
+        if len(groups) > 1:
+            cross_ref = write_other_groups_file(groups, sig, workspace_dir)
+            if cross_ref:
+                paths["cross_ref"] = cross_ref
+        result[sig] = paths
+
+    return result
+
+
+def build_orchestrator_prompt(
+    groups: dict[str, list[FailedTest]],
+    workspace_files: dict[str, dict[str, Path]],
+    *,
+    custom_prompt: str = "",
+    artifacts_context: str = "",
+    repo_path: Path | None = None,
+    server_url: str = "",
+    job_id: str = "",
+    additional_repos: dict[str, Path] | None = None,
+    auth_header: str = "",
+) -> str:
+    """Build the orchestrator prompt for single-session AI analysis.
+
+    The orchestrator AI receives all failure groups and dispatches a
+    ``test-analyzer`` subagent for each group. After all agents complete,
+    it detects cross-failure patterns and returns a consolidated JSON response.
+
+    Args:
+        groups: Failure groups keyed by error signature.
+        workspace_files: Per-group workspace file paths from
+            ``prepare_orchestrator_workspace``.
+        custom_prompt: Additional user instructions.
+        artifacts_context: Build artifacts context string.
+        repo_path: Workspace root path.
+        server_url: Base URL for history API access.
+        job_id: Current job ID.
+        additional_repos: Extra cloned repositories.
+        auth_header: Bearer token for history tools.
+
+    Returns:
+        The complete orchestrator prompt string.
+    """
+    (
+        agent_gate_section,
+        custom_prompt_section,
+        artifacts_section,
+        resources_section,
+        query_section,
+    ) = build_prompt_sections(
+        custom_prompt,
+        artifacts_context,
+        repo_path,
+        server_url,
+        job_id,
+        additional_repos=additional_repos,
+        auth_header=auth_header,
+    )
+
+    # Filter test-analyzer from STEP 0 gate — the orchestrator dispatches
+    # it per-group via its own instructions; STEP 0 is for OTHER project agents.
+    if agent_gate_section and "test-analyzer" in agent_gate_section:
+        # Rebuild gate without test-analyzer
+        project_agent_names = discover_project_agent_names(additional_repos)
+        non_analyzer_names = [n for n in project_agent_names if n != "test-analyzer"]
+        agent_gate_section = build_agent_gate_section(non_analyzer_names)
+        # Re-add rootcoz prompt gate (not affected)
+        agent_gate_section += build_rootcoz_prompt_gate_section(
+            discover_rootcoz_prompt_paths(
+                additional_repos, history_enabled=bool(query_section)
+            )
+        )
+
+    has_git_repo = bool(
+        additional_repos
+        and any((p / ".git").exists() for p in additional_repos.values())
+    )
+    repo_sentence = (
+        "Test repositories are available in the workspace for the agents to explore."
+        if has_git_repo
+        else "No test repository is available. Agents will analyze based on console output and artifacts."
+    )
+
+    # Build the failure group listing
+    group_lines: list[str] = []
+    for i, (sig, failures) in enumerate(groups.items(), 1):
+        paths = workspace_files[sig]
+        lines = [
+            f"\n### Group {i}/{len(groups)} — signature {sig}",
+            f"Test count: {len(failures)} (names are in the failure-details file)",
+            f"Failure details: {paths['failure_details']}",
+        ]
+        if "console_output" in paths:
+            lines.append(f"Console output: {paths['console_output']}")
+        if "cross_ref" in paths:
+            lines.append(f"Cross-reference (other groups): {paths['cross_ref']}")
+        group_lines.append("\n".join(lines))
+
+    groups_listing = "\n".join(group_lines)
+
+    artifacts_instruction = ""
+    if artifacts_context:
+        artifacts_instruction = f"""
+Build artifacts are available at: {artifacts_context} (also at build-artifacts/).
+Include this path in each agent's task so they can explore artifacts.
+"""
+
+    prompt = f"""{agent_gate_section}{query_section}
+You are an orchestrator for CI/CD test failure analysis. You have {len(groups)} failure group(s) to analyze.
+
+{repo_sentence}
+
+## Failure Groups
+{groups_listing}
+{artifacts_instruction}
+{artifacts_section}
+
+## Instructions
+
+1. For EACH failure group above, dispatch a `test-analyzer` subagent with `async: true`.
+   In each agent's task, include:
+   - The path to the failure-details file
+   - The path to the console output file (if available)
+   - The path to the cross-reference file (if available)
+   - The build artifacts path (if available)
+   - Any repository paths for code exploration
+   Use `agentScope="project"` for the test-analyzer agent.
+
+2. Wait for ALL agents to complete. Do NOT produce your final response until every agent has returned.
+
+3. If an agent returns invalid JSON or fails, use the agent's raw text as the "details" field
+   with classification="" and pattern="".
+
+4. After collecting all agent results, analyze them together to detect CROSS-FAILURE PATTERNS:
+   - Do multiple groups share the same infrastructure issue?
+   - Are several failures caused by the same component?
+   - Is there a common thread (e.g., same timeout, same service down)?
+   Only report genuine patterns — do not force patterns where none exist.
+
+5. Return your FINAL response as a single JSON object with this schema:
+
+```json
+{{
+  "failures": [
+    {{
+      "error_signature": "<signature>",
+      "analysis": {{
+        "classification": "...",
+        "pattern": "...",
+        "affected_tests": ["..."],
+        "details": "...",
+        "artifacts_evidence": "...",
+        "code_fix": {{ ... }} or null,
+        "product_bug_report": {{ ... }} or null
+      }}
+    }}
+  ],
+  "cross_failure_patterns": [
+    {{
+      "pattern": "Description of the pattern",
+      "affected_tests": ["test_a", "test_b"],
+      "suggested_root_cause": "What ties these failures together"
+    }}
+  ]
+}}
+```
+
+CRITICAL: Your FINAL response must be ONLY this JSON object. No text before or after. No markdown code blocks.
+The "failures" array MUST have exactly one entry per failure group ({len(groups)} entries).
+Each entry's "error_signature" must match the group signature.
+Each entry's "analysis" must contain the agent's returned JSON (or fallback on failure).
+"cross_failure_patterns" should be an empty array if no patterns are detected.
+
+{TIMELINE_RULE}
+{custom_prompt_section}{resources_section}
+"""
+    return prompt
+
+
+def _expand_group_to_analyses(
+    sig: str,
+    failures: list[FailedTest],
+    analysis: AnalysisDetail,
+) -> list[FailureAnalysis]:
+    """Create FailureAnalysis objects for all failures in a group."""
     return [
         FailureAnalysis(
             test_name=f.test_name,
             error=f.error_message,
-            analysis=parsed,
-            error_signature=error_signature,
+            analysis=analysis,
+            error_signature=sig,
         )
         for f in failures
     ]
+
+
+def parse_orchestrator_response(
+    raw_text: str,
+    groups: dict[str, list[FailedTest]],
+) -> tuple[list[FailureAnalysis], list["CrossFailurePattern"]]:
+    """Parse the orchestrator's consolidated JSON response.
+
+    Extracts per-group ``AnalysisDetail`` objects and ``CrossFailurePattern``
+    objects from the orchestrator's response.
+
+    Args:
+        raw_text: Raw AI response text.
+        groups: Original failure groups keyed by error signature.
+
+    Returns:
+        Tuple of (list of FailureAnalysis for all failures, list of CrossFailurePattern).
+    """
+    from rootcoz.models import CrossFailurePattern
+
+    data = extract_json_dict(raw_text)
+
+    all_analyses: list[FailureAnalysis] = []
+    cross_patterns: list[CrossFailurePattern] = []
+
+    if data is None:
+        # Complete parse failure — fall back to raw text for all groups
+        logger.warning(
+            "Failed to parse orchestrator response as JSON; using raw text fallback"
+        )
+        for sig, failures in groups.items():
+            fallback = AnalysisDetail(details=raw_text)
+            all_analyses.extend(_expand_group_to_analyses(sig, failures, fallback))
+        return all_analyses, cross_patterns
+
+    # Parse per-group failures
+    response_failures = data.get("failures", [])
+    # Build a lookup from signature → analysis data
+    sig_to_analysis: dict[str, dict[str, Any]] = {}
+    for entry in response_failures:
+        if isinstance(entry, dict):
+            entry_sig = entry.get("error_signature", "")
+            analysis_data = entry.get("analysis", entry)
+            sig_to_analysis[entry_sig] = analysis_data
+
+    for sig, failures in groups.items():
+        analysis_data = sig_to_analysis.get(sig)
+        if analysis_data:
+            try:
+                parsed = AnalysisDetail(**analysis_data)
+            except (ValueError, TypeError) as exc:
+                logger.warning(
+                    "Failed to parse orchestrator analysis for sig %s: %s", sig[:8], exc
+                )
+                parsed = parse_json_response(
+                    json.dumps(analysis_data)
+                    if isinstance(analysis_data, dict)
+                    else str(analysis_data)
+                )
+        else:
+            logger.warning(
+                "Orchestrator response missing analysis for signature %s; using raw fallback",
+                sig[:8],
+            )
+            parsed = AnalysisDetail(
+                details=f"Orchestrator did not return analysis for this group (signature {sig})"
+            )
+
+        all_analyses.extend(_expand_group_to_analyses(sig, failures, parsed))
+
+    # Parse cross-failure patterns
+    raw_patterns = data.get("cross_failure_patterns", [])
+    for p in raw_patterns:
+        if isinstance(p, dict):
+            try:
+                cross_patterns.append(CrossFailurePattern(**p))
+            except (ValueError, TypeError) as exc:
+                logger.warning("Failed to parse cross-failure pattern: %s", exc)
+
+    return all_analyses, cross_patterns
+
+
+async def run_orchestrated_analysis(
+    *,
+    groups: dict[str, list[FailedTest]],
+    console_context: str,
+    repo_path: Path | None,
+    ai_provider: str,
+    ai_model: str,
+    ai_call_timeout: int | None = None,
+    custom_prompt: str = "",
+    artifacts_context: str = "",
+    server_url: str = "",
+    job_id: str = "",
+    additional_repos: dict[str, Path] | None = None,
+    auth_header: str = "",
+) -> tuple[list[FailureAnalysis], list["CrossFailurePattern"]]:
+    """Run single-session AI orchestration with subagent fan-out.
+
+    Instead of calling ``call_ai_once`` per failure group, creates ONE AI
+    session that sees all groups and dispatches ``test-analyzer`` subagents
+    for each. The orchestrator collects results and detects cross-failure
+    patterns.
+
+    When the AI call fails or returns empty text, returns fallback
+    ``AnalysisDetail`` objects for all groups with the error details.
+
+    Args:
+        groups: Failure groups keyed by error signature.
+        console_context: Console output from the CI job.
+        repo_path: Workspace root path (may be None).
+        ai_provider: AI provider name.
+        ai_model: AI model identifier.
+        ai_call_timeout: Timeout in minutes for the AI call.
+        custom_prompt: Additional user instructions.
+        artifacts_context: Build artifacts context string.
+        server_url: Base URL for history API access.
+        job_id: Current job ID.
+        additional_repos: Extra cloned repositories.
+        auth_header: Bearer token for history tools.
+
+    Returns:
+        Tuple of (list of FailureAnalysis, list of CrossFailurePattern).
+    """
+    # Determine workspace directory
+    workspace_dir = repo_path
+    temp_dir: Path | None = None
+    if workspace_dir is None:
+        import tempfile
+
+        temp_dir = Path(tempfile.mkdtemp(prefix="rootcoz-orchestrator-"))
+        workspace_dir = temp_dir
+
+    try:
+        # Copy built-in agents to workspace
+        copy_builtin_agents_to_workspace(workspace_dir)
+
+        # Prepare all workspace files
+        workspace_files = prepare_orchestrator_workspace(
+            groups, console_context, workspace_dir
+        )
+
+        # Build the orchestrator prompt
+        prompt = build_orchestrator_prompt(
+            groups,
+            workspace_files,
+            custom_prompt=custom_prompt,
+            artifacts_context=artifacts_context,
+            repo_path=repo_path,
+            server_url=server_url,
+            job_id=job_id,
+            additional_repos=additional_repos,
+            auth_header=auth_header,
+        )
+
+        logger.debug("Orchestrator prompt length: %d chars", len(prompt))
+        logger.info(
+            "Starting orchestrated analysis: %d groups, provider=%s, model=%s, job_id=%s",
+            len(groups),
+            ai_provider,
+            ai_model,
+            job_id,
+        )
+        logger.info("AI call: %s", format_timeout_log(ai_call_timeout))
+
+        result = await _call_ai_with_retry(
+            prompt,
+            ai_provider=ai_provider,
+            ai_model=ai_model,
+            workspace_dir=workspace_dir,
+            ai_call_timeout=ai_call_timeout,
+            server_url=server_url,
+            job_id=job_id,
+            auth_header=auth_header,
+            call_type="orchestrator",
+        )
+
+        if not result.success or _is_empty_ai_text(result):
+            error_msg = (
+                result.text if not result.success else "AI returned empty response"
+            )
+            logger.error("Orchestrated analysis failed: %s", error_msg)
+            # Return fallback analyses with error details
+            fallback = AnalysisDetail(
+                details=f"Orchestrated analysis failed: {error_msg}"
+            )
+            all_analyses: list[FailureAnalysis] = []
+            for sig, failures in groups.items():
+                all_analyses.extend(_expand_group_to_analyses(sig, failures, fallback))
+            return all_analyses, []
+
+        # Parse consolidated response
+        return parse_orchestrator_response(result.text, groups)
+
+    finally:
+        if temp_dir and temp_dir.exists():
+            shutil.rmtree(temp_dir, ignore_errors=True)

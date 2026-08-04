@@ -73,6 +73,123 @@ Jobs can omit `gcs_prefix`; RootCoz auto-resolves it via prowjob.json or the Pro
 - **Sparse result fields** — `GET /results/{job_id}?fields=status,result.summary,...` returns only allowlisted paths (full values). Discover paths via `GET /api/results/fields` or `rootcoz results fields`
 - **Reports access flag** — Non-admins need `can_view_reports` (admin grant / `rootcoz admin users set-can-view-reports`) to call `/api/reports/*` and `rootcoz reports`
 
+## Custom Analysis Agents
+
+rootcoz supports user-provided analysis agents that extend or customize the AI failure analysis pipeline. Agents are defined as Markdown files and are automatically discovered and executed during analysis.
+
+### How It Works
+
+1. Place agent `.md` files in `.rootcoz/agents/` in your analyzed repository
+2. When rootcoz clones the repo for analysis, it copies `.rootcoz/agents/` to the workspace `.pi/agents/`
+3. The AI orchestrator dispatches the built-in `test-analyzer` agent for each failure group via `subagent`
+4. Other project agents (non-`test-analyzer`) are called via the STEP 0 hard gate before analysis begins
+5. To override the built-in analyzer, name your agent `test-analyzer` — user agents take precedence
+
+### Creating an Agent
+
+Create a Markdown file in `.rootcoz/agents/` with YAML frontmatter:
+
+```markdown
+---
+name: my-analyzer
+description: Brief description of what this agent does.
+tools:
+  - read
+  - ls
+  - find
+  - grep
+---
+
+# My Custom Analyzer
+
+Your agent instructions here...
+```
+
+### Requirements
+
+- **Name**: Must match `^[A-Za-z0-9._-]{1,64}$` — prefer frontmatter `name:`; filename stem is used as fallback when it matches the same regex
+- **Format**: Markdown file with YAML frontmatter. `name:` is preferred (filename stem is the fallback when it matches the safe regex). `description:` and `tools:` are recommended — see below
+- **Tools**: Strongly recommended — list `tools: [read, ls, find, grep]` in frontmatter to restrict available tools. Without this, pi may grant default builtins including `bash`
+- **Discovery**: Names that don't match the regex are silently skipped (not sanitized/rewritten)
+- **Response** (test-analyzer or overrides): Return a valid JSON object matching the `AnalysisDetail` schema. Other STEP 0 agents return free-form text that gets incorporated into the analysis details:
+
+```json
+{
+  "classification": "PRODUCT BUG | CODE ISSUE | INFRASTRUCTURE",
+  "pattern": "NEW | REGRESSION | FLAKY | INTERMITTENT | KNOWN_BUG | PERSISTENT",
+  "affected_tests": ["test_name_1"],
+  "details": "Detailed analysis text",
+  "artifacts_evidence": "Evidence from build artifacts"
+}
+```
+
+For `CODE ISSUE`, include a `code_fix` object. For `PRODUCT BUG`, include a `product_bug_report` object.
+
+### Example Agent
+
+```markdown
+---
+name: k8s-analyzer
+description: Analyzes Kubernetes-related test failures including pod scheduling, networking, storage, and RBAC issues.
+tools:
+  - read
+  - ls
+  - find
+  - grep
+---
+
+# Kubernetes Failure Analyzer
+
+You specialize in analyzing Kubernetes-related test failures.
+
+## Instructions
+
+1. Read the failure details file provided by the orchestrator
+2. Look for Kubernetes-specific errors (pod scheduling, resource limits, network policies)
+3. Check build artifacts for kubectl logs, pod descriptions, and event dumps
+4. Return your findings as free-form text (STEP 0 advisory agents are not per-group classifiers)
+
+## Focus Areas
+
+- Pod scheduling failures (Insufficient CPU/memory, node affinity)
+- Network connectivity issues (DNS resolution, service endpoints)
+- Storage provisioning failures (PVC binding, StorageClass issues)
+- RBAC and security context problems
+```
+
+### Agent Discovery
+
+- Agents are discovered from `.rootcoz/agents/*.md` files
+- The `name` field in frontmatter is preferred; filename stem is used as fallback
+- User agents take precedence over built-in agents with the same name
+- Agent names are validated against `^[A-Za-z0-9._-]{1,64}$` — non-matching names/stems are silently skipped
+
+### Built-in Agents
+
+rootcoz ships a built-in `test-analyzer` agent that handles the core failure analysis. It is automatically copied to the workspace and used by the orchestrator. User agents with the same name override it.
+
+### Cross-Failure Patterns
+
+When using orchestrated analysis (default, non-peer mode), the orchestrator AI sees ALL failure groups and can detect cross-failure patterns — correlations impossible with per-group isolation.
+
+Patterns appear in the API response as `cross_failure_patterns` on the job result:
+
+```json
+{
+  "cross_failure_patterns": [
+    {
+      "pattern": "15 failures share the same NFS mount timeout",
+      "affected_tests": ["test_a", "test_b"],
+      "suggested_root_cause": "NFS server infrastructure issue"
+    }
+  ]
+}
+```
+
+On `GET /results/{job_id}`, the field lives at `result.cross_failure_patterns`. The frontend displays these patterns on the job report page between the summary and individual failure cards.
+
+**Note:** Cross-failure patterns are only detected in orchestrated mode. When `peer_ai_configs` is set, the legacy per-group analysis path is used and no cross-failure patterns are generated.
+
 ## CLI
 
 ```bash
