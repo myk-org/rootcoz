@@ -443,10 +443,10 @@ class TestDateFilterHelper:
             "col", "2025-01-01", "2025-12-31", conditions, params
         )
         assert len(conditions) == 2
-        assert "date(col) >= ?" in conditions[0]
-        assert "date(col) <= ?" in conditions[1]
+        assert conditions[0] == "col >= ?"
+        assert conditions[1] == "col <= ?"
         assert params[0] == "2025-01-01"
-        assert params[1] == "2025-12-31"
+        assert params[1] == "2025-12-31 23:59:59"
 
     def test_build_date_filter_empty(self):
         conditions: list[str] = []

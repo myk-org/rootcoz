@@ -492,7 +492,10 @@ async def init_db() -> None:
                 status TEXT,
                 result_json TEXT,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                analysis_started_at TIMESTAMP
+                analysis_started_at TIMESTAMP,
+                job_name TEXT NOT NULL DEFAULT '',
+                build_number INTEGER NOT NULL DEFAULT 0,
+                build_id TEXT NOT NULL DEFAULT ''
             )
         """)
         await db.execute("""
@@ -638,6 +641,32 @@ async def init_db() -> None:
         await _migrate_add_column(db, "results", "completed_at", "TIMESTAMP")
         await _migrate_add_column(db, "results", "analysis_started_at", "TIMESTAMP")
         await _migrate_add_column(db, "results", "error", "TEXT NOT NULL DEFAULT ''")
+        await _migrate_add_column(db, "results", "job_name", "TEXT NOT NULL DEFAULT ''")
+        await _migrate_add_column(db, "results", "build_number", "INTEGER NOT NULL DEFAULT 0")
+        await _migrate_add_column(db, "results", "build_id", "TEXT NOT NULL DEFAULT ''")
+
+        # Backfill job_name/build_number/build_id from result_json
+        cursor = await db.execute("""
+            UPDATE results
+            SET job_name = COALESCE(json_extract(result_json, '$.job_name'), ''),
+                build_number = COALESCE(json_extract(result_json, '$.build_number'), 0),
+                build_id = COALESCE(CAST(json_extract(result_json, '$.build_id') AS TEXT), '')
+            WHERE result_json IS NOT NULL AND json_valid(result_json) AND job_name = ''
+        """)
+        if cursor.rowcount:
+            logger.info(
+                "Migration: backfilled job_name/build_number/build_id on %d results row(s)",
+                cursor.rowcount,
+            )
+
+        await db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_results_status_created "
+            "ON results (status, created_at DESC)"
+        )
+        await db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_results_job_name "
+            "ON results (job_name)"
+        )
 
         # failure_history: denormalized table for fast history queries
         await db.execute("""
@@ -867,6 +896,32 @@ async def init_db() -> None:
         await db.execute(
             "CREATE INDEX IF NOT EXISTS idx_jm_tier ON job_metadata (tier)"
         )
+
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS job_metadata_labels (
+                job_name TEXT NOT NULL,
+                label TEXT NOT NULL,
+                PRIMARY KEY (job_name, label)
+            )
+        """)
+        await db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_jml_label "
+            "ON job_metadata_labels (label)"
+        )
+
+        # Backfill job_metadata_labels from existing job_metadata.labels JSON
+        cursor = await db.execute(
+            "SELECT COUNT(*) FROM job_metadata_labels"
+        )
+        jml_count = (await cursor.fetchone())[0]
+        if jml_count == 0:
+            await db.execute("""
+                INSERT OR IGNORE INTO job_metadata_labels (job_name, label)
+                SELECT jm.job_name, jt.value
+                FROM job_metadata jm, json_each(jm.labels) jt
+                WHERE jm.labels != '[]' AND json_valid(jm.labels)
+            """)
+            logger.info("Migration: backfilled job_metadata_labels from job_metadata.labels")
 
         # AI token usage tracking table
         await db.execute("""
@@ -1537,9 +1592,27 @@ async def get_historical_comments(
         return result
 
 
+def _extract_denormalized_fields(result: dict | None) -> tuple[str, int, str]:
+    """Extract job_name, build_number, build_id from a result dict.
+
+    Returns:
+        Tuple of (job_name, build_number, build_id).
+    """
+    if result is None:
+        return ("", 0, "")
+    job_name = result.get("job_name") or ""
+    try:
+        build_number = int(result.get("build_number") or 0)
+    except (ValueError, TypeError):
+        build_number = 0
+    build_id = str(result.get("build_id") or "")
+    return (job_name, build_number, build_id)
+
+
 def _build_status_update_clause(
     status: str,
     result_json: str | None = None,
+    result: dict | None = None,
 ) -> tuple[list[str], list[Any]]:
     """Build the SET clause parts and params for a status update.
 
@@ -1550,6 +1623,7 @@ def _build_status_update_clause(
         status: New status value.
         result_json: Serialized result JSON. When not None, ``result_json``
             is included in the update.
+        result: Optional result dict used to denormalize job_name/build_number/build_id.
 
     Returns:
         Tuple of (set_parts, params).
@@ -1560,6 +1634,15 @@ def _build_status_update_clause(
     if result_json is not None:
         set_parts.append("result_json = ?")
         params.append(result_json)
+
+    if result is not None:
+        job_name, build_number, build_id = _extract_denormalized_fields(result)
+        set_parts.append("job_name = ?")
+        params.append(job_name)
+        set_parts.append("build_number = ?")
+        params.append(build_number)
+        set_parts.append("build_id = ?")
+        params.append(build_id)
 
     if status == "running":
         set_parts.append(
@@ -1594,15 +1677,18 @@ async def save_result(
     result_json = json.dumps(result) if result is not None else None
     async with _connect_db() as db:
         # Insert the row if it doesn't exist yet (preserves created_at / analysis_started_at).
+        job_name, build_number, build_id_val = _extract_denormalized_fields(result)
         await db.execute(
             """
-            INSERT OR IGNORE INTO results (job_id, build_url, status, result_json)
-            VALUES (?, ?, ?, ?)
+            INSERT OR IGNORE INTO results (job_id, build_url, status, result_json,
+                                           job_name, build_number, build_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
             """,
-            (job_id, build_url, status, result_json),
+            (job_id, build_url, status, result_json,
+             job_name, build_number, build_id_val),
         )
         # Update the row (handles both fresh inserts and existing rows).
-        set_parts, params = _build_status_update_clause(status, result_json)
+        set_parts, params = _build_status_update_clause(status, result_json, result)
         set_parts.insert(0, "build_url = COALESCE(NULLIF(?, ''), build_url)")
         params.insert(0, build_url)
         params.append(job_id)
@@ -1629,7 +1715,7 @@ async def update_status(
     logger.debug(f"Updating status for job_id: {job_id} (status: {status})")
     async with _connect_db() as db:
         result_json = json.dumps(result) if result is not None else None
-        set_parts, params = _build_status_update_clause(status, result_json)
+        set_parts, params = _build_status_update_clause(status, result_json, result)
         params.append(job_id)
         sql = f"UPDATE results SET {', '.join(set_parts)} WHERE job_id = ?"
         cursor = await db.execute(sql, params)
@@ -1730,9 +1816,14 @@ async def patch_result_json(
                 await db.execute("ROLLBACK")
                 return
             patch_fn(result_data)
+            job_name, build_number, build_id_val = _extract_denormalized_fields(
+                result_data
+            )
             await db.execute(
-                "UPDATE results SET result_json = ? WHERE job_id = ?",
-                (json.dumps(result_data), job_id),
+                "UPDATE results SET result_json = ?, "
+                "job_name = ?, build_number = ?, build_id = ? "
+                "WHERE job_id = ?",
+                (json.dumps(result_data), job_name, build_number, build_id_val, job_id),
             )
             await db.commit()
         except Exception:
@@ -4915,6 +5006,17 @@ async def _upsert_job_metadata_row(
             labels_json,
         ),
     )
+    # Sync labels to job_metadata_labels table
+    labels = item.get("labels") or []
+    job_name = item["job_name"]
+    await db.execute(
+        "DELETE FROM job_metadata_labels WHERE job_name = ?", (job_name,)
+    )
+    if labels:
+        await db.executemany(
+            "INSERT OR IGNORE INTO job_metadata_labels (job_name, label) VALUES (?, ?)",
+            [(job_name, label) for label in labels],
+        )
 
 
 async def set_job_metadata(
@@ -4967,6 +5069,10 @@ async def delete_job_metadata(job_name: str) -> bool:
         True if deleted, False if not found.
     """
     async with _connect_db() as db:
+        await db.execute(
+            "DELETE FROM job_metadata_labels WHERE job_name = ?",
+            (job_name,),
+        )
         cursor = await db.execute(
             "DELETE FROM job_metadata WHERE job_name = ?",
             (job_name,),
@@ -5928,15 +6034,6 @@ async def update_chat_message_ai_fields(
 # ─── Reports queries ────────────────────────────────────────────────────────
 
 
-# Shared subquery: extracts job_name and build_number from result_json.
-_RESULT_DATA_SUBQUERY = """
-    SELECT job_id,
-           json_extract(result_json, '$.job_name') AS job_name,
-           json_extract(result_json, '$.build_number') AS build_number,
-           json_extract(result_json, '$.build_id') AS build_id
-    FROM results WHERE result_json IS NOT NULL
-"""
-
 # Regex for detecting GitHub Issue / Jira Bug links in comments.
 _ISSUE_LINK_PATTERN = re.compile(
     r"(GitHub Issue|Jira Bug)(?:\s*\[[^\]]*\])?:\s*\[([^\]]+)\]\(([^)]+)\)"
@@ -5955,11 +6052,11 @@ def _build_date_filter(
     Shared by all reports queries to avoid duplicating date filtering logic.
     """
     if date_from:
-        conditions.append(f"date({column}) >= ?")
+        conditions.append(f"{column} >= ?")
         params.append(date_from)
     if date_to:
-        conditions.append(f"date({column}) <= ?")
-        params.append(date_to)
+        conditions.append(f"{column} <= ?")
+        params.append(f"{date_to} 23:59:59")
 
 
 def _build_metadata_join(
@@ -6002,16 +6099,16 @@ def _build_tags_filter(
 ) -> None:
     """Append tag-filtering conditions in-place.
 
-    Tags are stored in ``job_metadata.labels`` as a JSON array.
-    Uses ``json_each`` to match any of the requested tags (OR semantics).
+    Tags are stored in ``job_metadata_labels`` (one row per label).
+    Matches any of the requested tags (OR semantics).
     """
     if not tags:
         return
     placeholders = ", ".join("?" for _ in tags)
     conditions.append(
         f"""{job_name_col} IN (
-            SELECT jm_tags.job_name FROM job_metadata jm_tags, json_each(jm_tags.labels) jt
-            WHERE jt.value IN ({placeholders})
+            SELECT jml.job_name FROM job_metadata_labels jml
+            WHERE jml.label IN ({placeholders})
         )"""
     )
     params.extend(tags)
@@ -6032,8 +6129,8 @@ def _build_exclude_tags_filter(
     placeholders = ", ".join("?" for _ in exclude_tags)
     conditions.append(
         f"""{job_name_col} NOT IN (
-            SELECT jm_tags.job_name FROM job_metadata jm_tags, json_each(jm_tags.labels) jt
-            WHERE jt.value IN ({placeholders})
+            SELECT jml.job_name FROM job_metadata_labels jml
+            WHERE jml.label IN ({placeholders})
         )"""
     )
     params.extend(exclude_tags)
@@ -6063,31 +6160,28 @@ async def get_report_totals(
 
     _build_date_filter("r.created_at", date_from, date_to, conditions, params)
     meta_join = _build_metadata_join(
-        team, tier, version, "r_data.job_name", conditions, params
+        team, tier, version, "r.job_name", conditions, params
     )
-    _build_tags_filter(tags, "r_data.job_name", conditions, params)
-    _build_exclude_tags_filter(exclude_tags, "r_data.job_name", conditions, params)
-
-    effective_status = status if status else ["completed"]
-    status_placeholders = ", ".join("?" for _ in effective_status)
-    # Status params feed both the subquery and outer WHERE
-    status_params = list(effective_status) + list(effective_status)
+    _build_tags_filter(tags, "r.job_name", conditions, params)
+    _build_exclude_tags_filter(exclude_tags, "r.job_name", conditions, params)
 
     where = (" AND " + " AND ".join(conditions)) if conditions else ""
 
     async with _connect_db() as db:
+        effective_status = status if status else ["completed"]
+        status_placeholders = ", ".join("?" for _ in effective_status)
+        status_params = list(effective_status)
+
         sql = f"""
             SELECT
                 r.job_id,
-                r_data.job_name,
-                r_data.build_number,
-                r_data.build_id,
+                r.job_name,
+                r.build_number,
+                r.build_id,
                 r.created_at,
                 COALESCE(fc.failure_count, 0) AS failure_count,
                 COALESCE(rv.reviewed_count, 0) AS reviewed_count
             FROM results r
-            JOIN ({_RESULT_DATA_SUBQUERY} AND status IN ({status_placeholders})
-            ) r_data ON r_data.job_id = r.job_id
             {meta_join}
             LEFT JOIN (
                 SELECT job_id, COUNT(*) AS failure_count
@@ -6159,17 +6253,17 @@ async def _count_reviewed_tests(
     conditions: list[str] = []
     params: list[Any] = []
     _build_date_filter("fr.updated_at", date_from, date_to, conditions, params)
-    needs_rdata = bool(team or tier or version or tags or exclude_tags)
-    rdata_join = (
-        f"JOIN ({_RESULT_DATA_SUBQUERY}) fr_rdata ON fr_rdata.job_id = fr.job_id"
-        if needs_rdata
+    needs_results = bool(team or tier or version or tags or exclude_tags)
+    results_join = (
+        "JOIN results r_res ON r_res.job_id = fr.job_id"
+        if needs_results
         else ""
     )
     meta_join = _build_metadata_join(
-        team, tier, version, "fr_rdata.job_name", conditions, params
+        team, tier, version, "r_res.job_name", conditions, params
     )
-    _build_tags_filter(tags, "fr_rdata.job_name", conditions, params)
-    _build_exclude_tags_filter(exclude_tags, "fr_rdata.job_name", conditions, params)
+    _build_tags_filter(tags, "r_res.job_name", conditions, params)
+    _build_exclude_tags_filter(exclude_tags, "r_res.job_name", conditions, params)
     status_join = ""
     if status:
         status_join = " JOIN results r_rstatus ON r_rstatus.job_id = fr.job_id"
@@ -6190,7 +6284,7 @@ async def _count_reviewed_tests(
     cursor = await db.execute(
         f"""
         SELECT COUNT(*) AS cnt FROM failure_reviews fr
-        {rdata_join}
+        {results_join}
         {meta_join}
         {status_join}
         WHERE fr.reviewed = 1{where}
@@ -6433,16 +6527,14 @@ async def get_report_issues_created(
 
     _build_date_filter("c.created_at", date_from, date_to, conditions, params)
     meta_join = _build_metadata_join(
-        team, tier, version, "r_data.job_name", conditions, params
+        team, tier, version, "r.job_name", conditions, params
     )
-    _build_tags_filter(tags, "r_data.job_name", conditions, params)
-    _build_exclude_tags_filter(exclude_tags, "r_data.job_name", conditions, params)
+    _build_tags_filter(tags, "r.job_name", conditions, params)
+    _build_exclude_tags_filter(exclude_tags, "r.job_name", conditions, params)
 
-    status_join = ""
     if status:
-        status_join = " JOIN results r_status ON r_status.job_id = c.job_id"
         placeholders = ", ".join("?" for _ in status)
-        conditions.append(f"r_status.status IN ({placeholders})")
+        conditions.append(f"r.status IN ({placeholders})")
         params.extend(status)
 
     if review_status == "reviewed":
@@ -6464,12 +6556,10 @@ async def get_report_issues_created(
         sql = f"""
             SELECT c.id, c.job_id, c.test_name, c.comment,
                    c.username, c.created_at,
-                   r_data.job_name, r_data.build_number, r_data.build_id
+                   r.job_name, r.build_number, r.build_id
             FROM comments c
-            {join_type} ({_RESULT_DATA_SUBQUERY}
-            ) r_data ON r_data.job_id = c.job_id
+            {join_type} results r ON r.job_id = c.job_id
             {meta_join}
-            {status_join}
             WHERE {where}
             ORDER BY c.created_at DESC
         """
