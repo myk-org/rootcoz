@@ -1625,11 +1625,8 @@ def _extract_denormalized_fields(result: dict[str, Any] | None) -> tuple[str, in
     """
     if result is None:
         return ("", 0, "")
-    job_name = result.get("job_name") or ""
-    try:
-        build_number = int(result.get("build_number") or 0)
-    except (ValueError, TypeError):
-        build_number = 0
+    job_name = str(result.get("job_name") or "")
+    build_number = _coerce_sqlite_build_number(result.get("build_number"))
     build_id = str(result.get("build_id") or "")
     return (job_name, build_number, build_id)
 
