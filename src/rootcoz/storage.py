@@ -6,6 +6,7 @@ import json
 import os
 import re
 import secrets
+import sqlite3
 import time
 import uuid
 from collections.abc import AsyncIterator, Callable
@@ -204,8 +205,11 @@ async def _migrate_add_column(
         try:
             await db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {column_def}")
             logger.info(f"Migration: added {column} column to {table}")
-        except Exception:
+        except sqlite3.OperationalError as exc:
             # Handle race: concurrent init_db may have added the column already
+            logger.debug(
+                f"Migration: ALTER TABLE {table} ADD COLUMN {column} failed: {exc}"
+            )
             cursor = await db.execute(f"PRAGMA table_info({table})")
             columns = {row[1] for row in await cursor.fetchall()}
             if column not in columns:
@@ -918,17 +922,31 @@ async def init_db() -> None:
         )
 
         # Backfill job_metadata_labels from existing job_metadata.labels JSON.
-        # Uses INSERT OR IGNORE so it is safe to run every startup (reconciles
-        # partial backfills without duplicating existing rows).
-        await db.execute("""
-            INSERT OR IGNORE INTO job_metadata_labels (job_name, label)
-            SELECT jm.job_name, jt.value
-            FROM job_metadata jm,
-                 json_each(
-                     CASE WHEN json_valid(jm.labels) THEN jm.labels ELSE '[]' END
-                 ) jt
-            WHERE jm.labels != '[]'
-        """)
+        # Tracked via _migrations_applied to avoid scanning on every startup.
+        await db.execute(
+            "CREATE TABLE IF NOT EXISTS _migrations_applied (key TEXT PRIMARY KEY)"
+        )
+        _jml_key = "backfill_job_metadata_labels_v1"
+        cursor = await db.execute(
+            "SELECT 1 FROM _migrations_applied WHERE key = ?", (_jml_key,)
+        )
+        if not await cursor.fetchone():
+            await db.execute("""
+                INSERT OR IGNORE INTO job_metadata_labels (job_name, label)
+                SELECT jm.job_name, jt.value
+                FROM job_metadata jm,
+                     json_each(
+                         CASE WHEN json_valid(jm.labels) THEN jm.labels ELSE '[]' END
+                     ) jt
+                WHERE jm.labels != '[]'
+            """)
+            await db.execute(
+                "INSERT OR IGNORE INTO _migrations_applied (key) VALUES (?)",
+                (_jml_key,),
+            )
+            logger.info(
+                "Migration: backfilled job_metadata_labels from job_metadata.labels"
+            )
 
         # AI token usage tracking table
         await db.execute("""
@@ -1599,7 +1617,7 @@ async def get_historical_comments(
         return result
 
 
-def _extract_denormalized_fields(result: dict | None) -> tuple[str, int, str]:
+def _extract_denormalized_fields(result: dict[str, Any] | None) -> tuple[str, int, str]:
     """Extract job_name, build_number, build_id from a result dict.
 
     Returns:
@@ -1619,7 +1637,7 @@ def _extract_denormalized_fields(result: dict | None) -> tuple[str, int, str]:
 def _build_status_update_clause(
     status: str,
     result_json: str | None = None,
-    result: dict | None = None,
+    result: dict[str, Any] | None = None,
 ) -> tuple[list[str], list[Any]]:
     """Build the SET clause parts and params for a status update.
 
