@@ -150,6 +150,20 @@ def _match_single_rule(job_name: str, rule: dict[str, Any]) -> dict[str, Any] | 
     return matched_fields
 
 
+def merge_labels(*label_lists: list[str] | None) -> list[str]:
+    """Append labels from each list, deduplicating while preserving order and case."""
+    seen: set[str] = set()
+    merged: list[str] = []
+    for labels in label_lists:
+        if not labels:
+            continue
+        for label in labels:
+            if label and label not in seen:
+                seen.add(label)
+                merged.append(label)
+    return merged
+
+
 def match_job_metadata(
     job_name: str, rules: list[dict[str, Any]]
 ) -> dict[str, Any] | None:
@@ -167,7 +181,7 @@ def match_job_metadata(
         keys, or ``None`` if no rule matched.
     """
     result: dict[str, Any] = {}
-    accumulated_labels: list[str] = []
+    label_lists: list[list[str]] = []
     any_match = False
 
     for rule in rules:
@@ -184,9 +198,7 @@ def match_job_metadata(
 
         # Labels accumulate
         if "labels" in matched:
-            for lbl in matched["labels"]:
-                if lbl not in accumulated_labels:
-                    accumulated_labels.append(lbl)
+            label_lists.append(matched["labels"])
 
     if not any_match:
         return None
@@ -195,5 +207,5 @@ def match_job_metadata(
         "team": result.get("team"),
         "tier": result.get("tier"),
         "version": result.get("version"),
-        "labels": accumulated_labels,
+        "labels": merge_labels(*label_lists),
     }

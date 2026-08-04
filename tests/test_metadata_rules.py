@@ -301,6 +301,74 @@ class TestAutoAssignJobMetadata:
             result = await storage.auto_assign_job_metadata("", self.RULES)
             assert result is None
 
+    async def test_merge_extras_with_rules_on_new_job(
+        self, setup_test_db: Path
+    ) -> None:
+        with patch.object(storage, "DB_PATH", setup_test_db):
+            result = await storage.auto_assign_job_metadata(
+                "test-cnv-storage-nfs",
+                self.RULES,
+                extra_labels=["Nightly", "CNV"],
+            )
+            assert result is not None
+            assert result["team"] == "storage"
+            assert result["labels"] == ["pytest", "Nightly", "CNV"]
+
+    async def test_merge_extras_into_existing_preserves_team(
+        self, setup_test_db: Path
+    ) -> None:
+        with patch.object(storage, "DB_PATH", setup_test_db):
+            await storage.set_job_metadata(
+                "test-cnv-storage-nfs",
+                team="manual-team",
+                tier="t1",
+                labels=["existing"],
+            )
+            result = await storage.auto_assign_job_metadata(
+                "test-cnv-storage-nfs",
+                self.RULES,
+                extra_labels=["Nightly"],
+            )
+            assert result is not None
+            assert result["team"] == "manual-team"
+            assert result["tier"] == "t1"
+            assert result["labels"] == ["existing", "Nightly"]
+
+    async def test_merge_extras_dedup_preserves_case(self, setup_test_db: Path) -> None:
+        with patch.object(storage, "DB_PATH", setup_test_db):
+            await storage.set_job_metadata("any-job", labels=["Nightly", "smoke"])
+            result = await storage.auto_assign_job_metadata(
+                "any-job",
+                [],
+                extra_labels=["Nightly", "CNV"],
+            )
+            assert result is not None
+            assert result["labels"] == ["Nightly", "smoke", "CNV"]
+
+    async def test_extras_only_no_rules_creates_labels_row(
+        self, setup_test_db: Path
+    ) -> None:
+        with patch.object(storage, "DB_PATH", setup_test_db):
+            result = await storage.auto_assign_job_metadata(
+                "unrelated-job",
+                [],
+                extra_labels=["Nightly"],
+            )
+            assert result is not None
+            assert result["team"] is None
+            assert result["labels"] == ["Nightly"]
+
+    async def test_empty_extras_skips_existing(self, setup_test_db: Path) -> None:
+        with patch.object(storage, "DB_PATH", setup_test_db):
+            await storage.set_job_metadata("job-a", team="t", labels=["a"])
+            result = await storage.auto_assign_job_metadata(
+                "job-a", self.RULES, extra_labels=[]
+            )
+            assert result is None
+            stored = await storage.get_job_metadata("job-a")
+            assert stored is not None
+            assert stored["labels"] == ["a"]
+
 
 # --- API endpoint tests ---
 

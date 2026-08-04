@@ -1152,3 +1152,72 @@ class TestChildJobAnalysisUUID:
         c1 = ChildJobAnalysis(job_name="a", build_number=1)
         c2 = ChildJobAnalysis(job_name="b", build_number=2)
         assert c1.id != c2.id
+
+
+class TestNormalizeStringList:
+    """Tests for the shared _normalize_string_list helper."""
+
+    def test_strips_and_deduplicates(self):
+        from rootcoz.models import _normalize_string_list
+
+        result = _normalize_string_list(["  a ", "b", " a", "c"])
+        assert result == ["a", "b", "c"]
+
+    def test_lowercase_mode(self):
+        from rootcoz.models import _normalize_string_list
+
+        result = _normalize_string_list(["Foo", "BAR", "foo"], lowercase=True)
+        assert result == ["foo", "bar"]
+
+    def test_blocked_values(self):
+        from rootcoz.models import _normalize_string_list
+
+        result = _normalize_string_list(
+            ["ok", "blocked", "fine"],
+            blocked=frozenset({"blocked"}),
+        )
+        assert result == ["ok", "fine"]
+
+    def test_lowercase_with_blocked(self):
+        from rootcoz.models import _normalize_string_list
+
+        result = _normalize_string_list(
+            ["Re-Analyze", "good"],
+            lowercase=True,
+            blocked=frozenset({"re-analyze"}),
+        )
+        assert result == ["good"]
+
+    def test_non_list_raises(self):
+        import pytest
+
+        from rootcoz.models import _normalize_string_list
+
+        with pytest.raises(TypeError, match="items must be a list"):
+            _normalize_string_list("not-a-list")
+
+    def test_non_string_items_skipped(self):
+        from rootcoz.models import _normalize_string_list
+
+        result = _normalize_string_list(["a", 42, None, "b"])
+        assert result == ["a", "b"]
+
+    def test_blanks_removed(self):
+        from rootcoz.models import _normalize_string_list
+
+        result = _normalize_string_list(["", "  ", "a", ""])
+        assert result == ["a"]
+
+    def test_preserves_case_by_default(self):
+        from rootcoz.models import _normalize_string_list
+
+        result = _normalize_string_list(["Nightly", "CNV", "nightly"])
+        assert result == ["Nightly", "CNV", "nightly"]
+
+    def test_custom_field_name_in_error(self):
+        import pytest
+
+        from rootcoz.models import _normalize_string_list
+
+        with pytest.raises(TypeError, match="my_field must be a list"):
+            _normalize_string_list("bad", field_name="my_field")

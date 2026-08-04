@@ -732,6 +732,37 @@ class TestServerConfigAdditionalRepos:
             _server_config_from_dict(data)
 
 
+class TestServerConfigMetadataLabels:
+    """Tests for metadata_labels field on ServerConfig."""
+
+    def test_metadata_labels_default_empty(self) -> None:
+        cfg = ServerConfig(url="http://test")
+        assert cfg.metadata_labels == ""
+
+    def test_metadata_labels_from_toml(self, tmp_path: Path) -> None:
+        cfg_path = tmp_path / "config.toml"
+        cfg_path.write_text(
+            '[default]\nserver = "a"\n\n'
+            "[servers.a]\n"
+            'url = "http://a"\n'
+            'metadata_labels = "Nightly,CNV"\n'
+        )
+        config = load_config(cfg_path)
+        cfg = get_server_config("a", config)
+        assert cfg is not None
+        assert cfg.metadata_labels == "Nightly,CNV"
+
+    def test_metadata_labels_from_dict(self) -> None:
+        data = {"url": "http://test", "metadata_labels": "Nightly,CNV"}
+        cfg = _server_config_from_dict(data)
+        assert cfg.metadata_labels == "Nightly,CNV"
+
+    def test_metadata_labels_non_string_raises(self) -> None:
+        data = {"url": "http://test", "metadata_labels": ["Nightly"]}
+        with pytest.raises(TypeError, match=r"metadata_labels.*must be a string"):
+            _server_config_from_dict(data)
+
+
 class TestServerConfigFromDictTypeValidation:
     """Type validation for peer-analysis fields in _server_config_from_dict."""
 

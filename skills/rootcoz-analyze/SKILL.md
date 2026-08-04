@@ -76,6 +76,7 @@ rootcoz --server <server> analyze \
   --provider <ai_provider> \
   --model <ai_model> \
   --jira  # if Jira integration needed
+  # Optional: --label Nightly --label CNV  (merge into job metadata labels)
 ```
 
 The server will:
