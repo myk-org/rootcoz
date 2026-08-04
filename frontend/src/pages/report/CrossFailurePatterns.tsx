@@ -1,5 +1,5 @@
 import { AlertTriangle, Lightbulb } from 'lucide-react'
-import type { CrossFailurePattern } from '../../types'
+import type { CrossFailurePattern } from '@/types'
 
 export function CrossFailurePatterns({ patterns }: { patterns: CrossFailurePattern[] }) {
   if (!patterns || patterns.length === 0) return null

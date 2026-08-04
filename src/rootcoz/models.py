@@ -1400,5 +1400,6 @@ class SetCanViewReportsRequest(BaseModel):
     can_view_reports: CanViewReportsFlag
 
 
-# Resolve forward references (CodeFix references SimilarIssue which is defined later)
+# Resolve forward references (AnalysisResult → CrossFailurePattern; CodeFix → SimilarIssue)
+AnalysisResult.model_rebuild()
 CodeFix.model_rebuild()

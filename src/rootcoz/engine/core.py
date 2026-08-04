@@ -2174,7 +2174,7 @@ def parse_orchestrator_response(
                 parsed = AnalysisDetail(**analysis_data)
             except (ValueError, TypeError) as exc:
                 logger.warning(
-                    "Failed to parse orchestrator analysis for sig %s: %s", sig[:8], exc
+                    "Failed to parse orchestrator analysis for sig %s: %s", sig, exc
                 )
                 parsed = parse_json_response(
                     json.dumps(analysis_data)
@@ -2184,7 +2184,7 @@ def parse_orchestrator_response(
         else:
             logger.warning(
                 "Orchestrator response missing analysis for signature %s; using raw fallback",
-                sig[:8],
+                sig,
             )
             parsed = AnalysisDetail(
                 details=f"Orchestrator did not return analysis for this group (signature {sig})"

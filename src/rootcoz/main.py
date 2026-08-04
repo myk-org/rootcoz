@@ -3220,6 +3220,77 @@ def _apply_cached_test_counts(
     result_data["failed_count"] = failed
 
 
+async def _run_per_group_analysis(
+    *,
+    groups: dict[str, list[Any]],
+    console_context: str,
+    repo_path: Path | None,
+    ai_provider: str,
+    ai_model: str,
+    ai_call_timeout: int | None,
+    custom_prompt: str,
+    artifacts_context: str,
+    server_url: str,
+    job_id: str,
+    additional_repos: dict[str, Path] | None,
+    max_concurrent_ai_calls: int,
+    auth_header: str,
+    peer_ai_configs: list[Any] | None = None,
+    peer_analysis_max_rounds: int = 3,
+) -> list[Any]:
+    """Run per-group analysis with parallel execution.
+
+    Shared by the peer analysis path and the orchestrator fallback path.
+    Creates one ``analyze_failure_group`` coroutine per failure group and
+    runs them in parallel via ``run_parallel_with_limit``.
+
+    Args:
+        groups: Failure groups keyed by error signature.
+        Other args: Forwarded to ``analyze_failure_group``.
+
+    Returns:
+        Flat list of FailureAnalysis objects from all groups.
+    """
+    coroutines: list[Coroutine[Any, Any, Any]] = [
+        analyze_failure_group(
+            failures=group_failures,
+            console_context=console_context,
+            repo_path=repo_path,
+            ai_provider=ai_provider,
+            ai_model=ai_model,
+            ai_call_timeout=ai_call_timeout,
+            custom_prompt=custom_prompt,
+            artifacts_context=artifacts_context,
+            server_url=server_url,
+            job_id=job_id,
+            peer_ai_configs=peer_ai_configs,
+            peer_analysis_max_rounds=peer_analysis_max_rounds,
+            additional_repos=additional_repos,
+            max_concurrent_ai_calls=max_concurrent_ai_calls,
+            auth_header=auth_header,
+            all_groups=groups,
+        )
+        for _sig, group_failures in groups.items()
+    ]
+
+    results = await run_parallel_with_limit(
+        coroutines, max_concurrency=max_concurrent_ai_calls
+    )
+    logger.debug(
+        "AI analysis complete: %d results from %d groups",
+        len(results),
+        len(groups),
+    )
+
+    all_analyses: list[Any] = []
+    for result in results:
+        if isinstance(result, Exception):
+            logger.error("Failed to analyze failure group: %s", result, exc_info=result)
+        else:
+            all_analyses.extend(result)
+    return all_analyses
+
+
 async def _analyze_failures_or_exit(
     *,
     job_id: str,
@@ -3361,49 +3432,51 @@ async def _analyze_failures_or_exit(
             )
         except Exception:
             logger.exception(
-                "Orchestrated analysis failed for job_id=%s",
+                "Orchestrated analysis failed for job_id=%s; "
+                "falling back to per-group analysis",
                 job_id,
             )
-            all_analyses = []
-    else:
-        # Peer analysis path — keep existing per-group approach
-        coroutines: list[Coroutine[Any, Any, Any]] = [
-            analyze_failure_group(
-                failures=group_failures,
-                console_context=console_context,
-                repo_path=repo_path,
-                ai_provider=ai_provider,
-                ai_model=ai_model,
-                ai_call_timeout=merged.ai_call_timeout,
-                custom_prompt=custom_prompt,
-                artifacts_context=artifacts_context,
-                server_url=server_url,
-                job_id=job_id,
-                peer_ai_configs=peer_ai_configs,
-                peer_analysis_max_rounds=merged.peer_analysis_max_rounds,
-                additional_repos=cloned_repos or None,
-                max_concurrent_ai_calls=merged.max_concurrent_ai_calls,
-                auth_header=auth_header,
-                all_groups=groups,
-            )
-            for sig, group_failures in groups.items()
-        ]
-
-        results = await run_parallel_with_limit(
-            coroutines, max_concurrency=merged.max_concurrent_ai_calls
-        )
-        logger.debug(
-            f"AI analysis complete: {len(results)} results from {len(groups)} groups"
-        )
-
-        all_analyses = []
-        for result in results:
-            if isinstance(result, Exception):
-                logger.error(
-                    f"Failed to analyze failure group: {result}", exc_info=result
+            try:
+                all_analyses = await _run_per_group_analysis(
+                    groups=groups,
+                    console_context=console_context,
+                    repo_path=repo_path,
+                    ai_provider=ai_provider,
+                    ai_model=ai_model,
+                    ai_call_timeout=merged.ai_call_timeout,
+                    custom_prompt=custom_prompt,
+                    artifacts_context=artifacts_context,
+                    server_url=server_url,
+                    job_id=job_id,
+                    additional_repos=cloned_repos or None,
+                    max_concurrent_ai_calls=merged.max_concurrent_ai_calls,
+                    auth_header=auth_header,
                 )
-            else:
-                all_analyses.extend(result)
+            except Exception:
+                logger.exception(
+                    "Fallback per-group analysis also failed for job_id=%s",
+                    job_id,
+                )
+                all_analyses = []
+    else:
+        # Peer analysis path — per-group approach with peer debate
+        all_analyses = await _run_per_group_analysis(
+            groups=groups,
+            console_context=console_context,
+            repo_path=repo_path,
+            ai_provider=ai_provider,
+            ai_model=ai_model,
+            ai_call_timeout=merged.ai_call_timeout,
+            custom_prompt=custom_prompt,
+            artifacts_context=artifacts_context,
+            server_url=server_url,
+            job_id=job_id,
+            peer_ai_configs=peer_ai_configs,
+            peer_analysis_max_rounds=merged.peer_analysis_max_rounds,
+            additional_repos=cloned_repos or None,
+            max_concurrent_ai_calls=merged.max_concurrent_ai_calls,
+            auth_header=auth_header,
+        )
 
     unique_errors = len(groups)
 
