@@ -1663,18 +1663,16 @@ def _build_status_update_clause(
     if result is not None:
         # Only update denormalized columns when the key is present in the
         # result dict — partial payloads must not clobber existing values.
+        job_name, build_number, build_id = _extract_denormalized_fields(result)
         if "job_name" in result:
             set_parts.append("job_name = ?")
-            params.append(result.get("job_name") or "")
+            params.append(job_name)
         if "build_number" in result:
             set_parts.append("build_number = ?")
-            try:
-                params.append(int(result.get("build_number") or 0))
-            except (ValueError, TypeError):
-                params.append(0)
+            params.append(build_number)
         if "build_id" in result:
             set_parts.append("build_id = ?")
-            params.append(str(result.get("build_id") or ""))
+            params.append(build_id)
 
     if status == "running":
         set_parts.append(

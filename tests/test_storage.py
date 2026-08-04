@@ -1663,3 +1663,31 @@ class TestWithBuildUrlAliases:
         out = storage.with_build_url_aliases(record)
         assert out["build_url"] == "https://jenkins.example.com/job/1"
         assert out["jenkins_url"] == "https://jenkins.example.com/job/1"
+
+
+@pytest.mark.asyncio
+async def test_partial_update_status_preserves_build_id(setup_test_db):
+    """Partial update_status must not clobber existing denormalized fields."""
+    with patch.object(storage, "DB_PATH", setup_test_db):
+        # Save with all identity fields
+        await storage.save_result(
+            job_id="preserve-test",
+            status="running",
+            result={"job_name": "my-job", "build_number": 42, "build_id": "999"},
+        )
+
+        # Update with partial result (no build_id key)
+        await storage.update_status(
+            "preserve-test", "failed", result={"job_name": "my-job", "error": "boom"}
+        )
+
+        # Verify build_id was preserved
+        async with storage._connect_db() as db:
+            cursor = await db.execute(
+                "SELECT job_name, build_number, build_id FROM results WHERE job_id = ?",
+                ("preserve-test",),
+            )
+            row = await cursor.fetchone()
+            assert row["job_name"] == "my-job"
+            assert row["build_number"] == 42
+            assert row["build_id"] == "999", "build_id was clobbered by partial update"
