@@ -3411,57 +3411,8 @@ async def _analyze_failures_or_exit(
 
     cross_failure_patterns: list[CrossFailurePattern] = []
 
-    # Use orchestrated analysis when peer analysis is NOT enabled
-    # (peer analysis has its own multi-AI debate loop that's incompatible
-    # with single-session orchestration)
-    if not peer_ai_configs:
-        try:
-            all_analyses, cross_failure_patterns = await run_orchestrated_analysis(
-                groups=groups,
-                console_context=console_context,
-                repo_path=repo_path,
-                ai_provider=ai_provider,
-                ai_model=ai_model,
-                ai_call_timeout=merged.ai_call_timeout,
-                custom_prompt=custom_prompt,
-                artifacts_context=artifacts_context,
-                server_url=server_url,
-                job_id=job_id,
-                additional_repos=cloned_repos or None,
-                auth_header=auth_header,
-                max_concurrent_ai_calls=merged.max_concurrent_ai_calls,
-            )
-        except Exception:
-            logger.exception(
-                "Orchestrated analysis failed for job_id=%s; "
-                "falling back to per-group analysis",
-                job_id,
-            )
-            try:
-                all_analyses = await _run_per_group_analysis(
-                    groups=groups,
-                    console_context=console_context,
-                    repo_path=repo_path,
-                    ai_provider=ai_provider,
-                    ai_model=ai_model,
-                    ai_call_timeout=merged.ai_call_timeout,
-                    custom_prompt=custom_prompt,
-                    artifacts_context=artifacts_context,
-                    server_url=server_url,
-                    job_id=job_id,
-                    additional_repos=cloned_repos or None,
-                    max_concurrent_ai_calls=merged.max_concurrent_ai_calls,
-                    auth_header=auth_header,
-                )
-            except Exception:
-                logger.exception(
-                    "Fallback per-group analysis also failed for job_id=%s",
-                    job_id,
-                )
-                all_analyses = []
-    else:
-        # Peer analysis path — per-group approach with peer debate
-        all_analyses = await _run_per_group_analysis(
+    try:
+        all_analyses, cross_failure_patterns = await run_orchestrated_analysis(
             groups=groups,
             console_context=console_context,
             repo_path=repo_path,
@@ -3472,12 +3423,42 @@ async def _analyze_failures_or_exit(
             artifacts_context=artifacts_context,
             server_url=server_url,
             job_id=job_id,
+            additional_repos=cloned_repos or None,
+            auth_header=auth_header,
+            max_concurrent_ai_calls=merged.max_concurrent_ai_calls,
             peer_ai_configs=peer_ai_configs,
             peer_analysis_max_rounds=merged.peer_analysis_max_rounds,
-            additional_repos=cloned_repos or None,
-            max_concurrent_ai_calls=merged.max_concurrent_ai_calls,
-            auth_header=auth_header,
         )
+    except Exception:
+        logger.exception(
+            "Orchestrated analysis failed for job_id=%s; "
+            "falling back to per-group analysis",
+            job_id,
+        )
+        try:
+            all_analyses = await _run_per_group_analysis(
+                groups=groups,
+                console_context=console_context,
+                repo_path=repo_path,
+                ai_provider=ai_provider,
+                ai_model=ai_model,
+                ai_call_timeout=merged.ai_call_timeout,
+                custom_prompt=custom_prompt,
+                artifacts_context=artifacts_context,
+                server_url=server_url,
+                job_id=job_id,
+                peer_ai_configs=peer_ai_configs,
+                peer_analysis_max_rounds=merged.peer_analysis_max_rounds,
+                additional_repos=cloned_repos or None,
+                max_concurrent_ai_calls=merged.max_concurrent_ai_calls,
+                auth_header=auth_header,
+            )
+        except Exception:
+            logger.exception(
+                "Fallback per-group analysis also failed for job_id=%s",
+                job_id,
+            )
+            all_analyses = []
 
     unique_errors = len(groups)
 

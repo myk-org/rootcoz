@@ -1770,6 +1770,7 @@ async def analyze_failure_group(
     max_concurrent_ai_calls: int = 3,
     auth_header: str = "",
     all_groups: dict[str, list[FailedTest]] | None = None,
+    system_prompt: str = "",
 ) -> list[FailureAnalysis]:
     """Analyze a group of failures with the same error signature.
 
@@ -1796,6 +1797,8 @@ async def analyze_failure_group(
             peer analysis parallelism (default: 3).
         all_groups: All failure groups keyed by error signature. When provided,
             cross-reference data is written to a workspace file for the AI to read.
+        system_prompt: Optional system prompt (e.g. test-analyzer agent body).
+            Passed on the non-peer path only.
 
     Returns:
         List of FailureAnalysis objects, one per failure in the group.
@@ -1827,6 +1830,7 @@ async def analyze_failure_group(
             max_concurrent_ai_calls=max_concurrent_ai_calls,
             auth_header=auth_header,
             all_groups=all_groups,
+            system_prompt=system_prompt,
         )
 
     parsed, error_signature = await run_single_ai_analysis(
@@ -1843,6 +1847,7 @@ async def analyze_failure_group(
         additional_repos=additional_repos,
         auth_header=auth_header,
         all_groups=all_groups,
+        system_prompt=system_prompt,
     )
 
     # Apply the same analysis to all failures in the group.
@@ -2211,13 +2216,16 @@ async def run_orchestrated_analysis(
     additional_repos: dict[str, Path] | None = None,
     auth_header: str = "",
     max_concurrent_ai_calls: int = 3,
+    peer_ai_configs: list[Any] | None = None,
+    peer_analysis_max_rounds: int = 3,
 ) -> tuple[list[FailureAnalysis], list[CrossFailurePattern]]:
     """Run Python-orchestrated analysis with agent prompts and cross-failure detection.
 
-    For each failure group, calls ``call_ai_once`` with the ``test-analyzer``
-    agent prompt as ``system_prompt`` and full custom tool access (history API).
-    After all groups complete, runs one more AI call to detect cross-failure
-    patterns across all results.
+    For each failure group, calls ``analyze_failure_group`` (single-AI or peer
+    debate) with the ``test-analyzer`` agent prompt as ``system_prompt`` on the
+    non-peer path, plus full custom tool access (history API). After all groups
+    complete, runs one more AI call to detect cross-failure patterns across
+    all results.
 
     When custom agents exist in the workspace, a routing call assigns
     specialist agents to groups; the AI is pointed at the agent file to read.
@@ -2239,6 +2247,8 @@ async def run_orchestrated_analysis(
         additional_repos: Extra cloned repositories.
         auth_header: Bearer token for history tools.
         max_concurrent_ai_calls: Max parallel per-group AI calls.
+        peer_ai_configs: Optional peer AI configs for multi-AI debate.
+        peer_analysis_max_rounds: Max peer debate rounds.
 
     Returns:
         Tuple of (list of FailureAnalysis, list of CrossFailurePattern).
@@ -2297,8 +2307,8 @@ async def run_orchestrated_analysis(
                     "Agent routing call failed; using base agent for all groups"
                 )
 
-        # Run per-group analysis in parallel using run_single_ai_analysis
-        # but with system_prompt from agent file and appended agent content
+        # Run per-group analysis in parallel via analyze_failure_group
+        # (single-AI or peer) with system_prompt from agent file
         logger.info(
             "Starting orchestrated analysis: %d groups, provider=%s, model=%s, job_id=%s",
             len(groups),
@@ -2309,7 +2319,7 @@ async def run_orchestrated_analysis(
 
         async def _analyze_group(
             sig: str, failures: list[FailedTest]
-        ) -> tuple[str, AnalysisDetail]:
+        ) -> list[FailureAnalysis]:
             """Analyze a single failure group with agent prompt."""
             # Point AI at specialist agent file (do not embed body)
             agent_appendix = ""
@@ -2333,9 +2343,7 @@ async def run_orchestrated_analysis(
                     else agent_appendix
                 )
 
-            # Reuse run_single_ai_analysis which builds the full per-group prompt
-            # (failure details, console, artifacts, history, resources, JSON schema)
-            parsed, error_sig = await run_single_ai_analysis(
+            results = await analyze_failure_group(
                 failures=failures,
                 console_context=console_context,
                 repo_path=repo_path,
@@ -2346,12 +2354,15 @@ async def run_orchestrated_analysis(
                 artifacts_context=artifacts_context,
                 server_url=server_url,
                 job_id=job_id,
+                peer_ai_configs=peer_ai_configs,
+                peer_analysis_max_rounds=peer_analysis_max_rounds,
                 additional_repos=additional_repos,
+                max_concurrent_ai_calls=max_concurrent_ai_calls,
                 auth_header=auth_header,
                 all_groups=groups if len(groups) > 1 else None,
                 system_prompt=system_prompt,
             )
-            return error_sig, parsed
+            return results
 
         # Run all groups in parallel
         coroutines = [_analyze_group(sig, failures) for sig, failures in groups.items()]
@@ -2371,9 +2382,14 @@ async def run_orchestrated_analysis(
                 all_analyses.extend(_expand_group_to_analyses(sig, failures, fallback))
                 group_results.append((sig, fallback))
             else:
-                _, parsed = result
-                all_analyses.extend(_expand_group_to_analyses(sig, failures, parsed))
-                group_results.append((sig, parsed))
+                # result is a list of FailureAnalysis from analyze_failure_group
+                all_analyses.extend(result)
+                # Use first result's analysis for cross-failure detection
+                if result:
+                    group_results.append((sig, result[0].analysis))
+                else:
+                    fallback = AnalysisDetail(details="No analysis returned")
+                    group_results.append((sig, fallback))
 
         # Cross-failure pattern detection (only when multiple groups)
         cross_patterns: list[CrossFailurePattern] = []
