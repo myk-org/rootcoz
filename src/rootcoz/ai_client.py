@@ -68,7 +68,7 @@ _CURSOR_KEY_SET_BUT_UNAVAILABLE_HINT = (
 # Prompts must not claim shell/git — derive browse hint from filesystem tools.
 _FS_BROWSE_TOOLS: tuple[str, ...] = ("read", "ls", "find", "grep")
 CHAT_BUILTIN_TOOLS: tuple[str, ...] = (*_FS_BROWSE_TOOLS, "subagent")
-ANALYSIS_BUILTIN_TOOLS: tuple[str, ...] = (*_FS_BROWSE_TOOLS, "subagent")
+ANALYSIS_BUILTIN_TOOLS: tuple[str, ...] = _FS_BROWSE_TOOLS
 # Prompt wording for cloned repos — must match tool policy (no shell/git).
 RESOURCE_REPO_BROWSE_HINT = (
     f"browse with {', '.join(_FS_BROWSE_TOOLS[:-1])}, and {_FS_BROWSE_TOOLS[-1]} only "

@@ -15,12 +15,10 @@ import re
 import shutil
 from collections.abc import Callable
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
-
-if TYPE_CHECKING:
-    from rootcoz.models import CrossFailurePattern
+from typing import Any
 
 from git.exc import GitCommandError
+from pi_sidecar_client import run_parallel_with_limit
 from simple_logger.logger import get_logger
 
 from rootcoz.ai_client import (
@@ -38,6 +36,7 @@ from rootcoz.models import (
     AnalysisDetail,
     BaseAnalysisRequest,
     CodeFix,
+    CrossFailurePattern,
     FailedTest,
     FailureAnalysis,
     ProductBugReport,
@@ -278,23 +277,19 @@ def discover_project_agent_names(
 
 
 def build_agent_gate_section(agent_names: list[str]) -> str:
-    """Build a top-of-prompt hard gate so models call project agents first.
+    """Build a top-of-prompt gate so models read project agent files first.
 
-    Cursor (CLI/ACPX) often skips buried agent instructions when the prompt
-    leads with history tools + JSON-only rules. Putting this gate first forces
-    ``subagent`` before analysis JSON.
+    Analysis sessions have no ``subagent`` tool — agents are guidance files
+    under ``.pi/agents/`` that must be read with the ``read`` tool.
     """
     if not agent_names:
         return ""
     names_str = ", ".join(agent_names)
     return f"""
-STEP 0 — PROJECT AGENTS (HARD GATE — DO THIS BEFORE ANY OTHER WORK):
-Before history checks, console reads, or producing JSON, you MUST call the subagent tool for EACH of these agents: {names_str}
-For every call use agentScope="both" and confirmProjectAgents=false.
-Read each agent's file / project ROOTCOZ_PROMPT.md for the task text when present.
-Do NOT produce your final JSON until every listed agent has returned.
-Include each agent's FULL response verbatim at the end of the details field.
-You do not have bash — use history HTTP tools for history steps and still satisfy this gate.
+STEP 0 — PROJECT AGENT CONTEXT (READ BEFORE ANALYSIS):
+The following project agents are available: {names_str}
+MANDATORY: Read each agent's file in .pi/agents/ to understand project-specific analysis instructions.
+Incorporate their guidance into your analysis.
 """
 
 
@@ -436,7 +431,7 @@ _ARTIFACTS_EVIDENCE_FORMAT = (
 JSON_RESPONSE_SCHEMA = (
     "CRITICAL: Your FINAL response must be ONLY a valid JSON object. No text before or after. No markdown code"
     " blocks. No explanation.\n"
-    "Tool calls (read, ls, find, grep, subagent) are required BEFORE that final JSON whenever AVAILABLE RESOURCES"
+    "Tool calls (read, ls, find, grep) are required BEFORE that final JSON whenever AVAILABLE RESOURCES"
     " or STEP 0 instruct you to use them. The JSON-only rule applies to the final answer, not to intermediate tool"
     " use.\n"
     "\n"
@@ -1289,8 +1284,7 @@ def build_resources_section(
                     names_str = ", ".join(agent_names)
                     resources.append(
                         "- Project agents (see STEP 0): "
-                        f"{names_str} — call via subagent with "
-                        'agentScope="both" and confirmProjectAgents=false'
+                        f"{names_str} — read their files in .pi/agents/ for analysis guidance"
                     )
 
     if resources:
@@ -1438,6 +1432,7 @@ async def _call_ai_with_retry(
     job_id: str,
     auth_header: str,
     call_type: str = "primary",
+    system_prompt: str = "",
 ) -> AIResult:
     """Call AI with retry on empty response and record usage.
 
@@ -1455,6 +1450,7 @@ async def _call_ai_with_retry(
         job_id: Current job ID.
         auth_header: Bearer token for history tools.
         call_type: Token usage call type label.
+        system_prompt: Optional system prompt (e.g. agent file body).
 
     Returns:
         The AIResult from the AI call.
@@ -1476,6 +1472,8 @@ async def _call_ai_with_retry(
         "ai_call_timeout": ai_call_timeout,
         "tools": list(ANALYSIS_BUILTIN_TOOLS),
     }
+    if system_prompt:
+        call_kwargs["system_prompt"] = system_prompt
     if custom_tools:
         call_kwargs["custom_tools"] = custom_tools
 
@@ -1555,10 +1553,11 @@ async def run_single_ai_analysis(
     additional_repos: dict[str, Path] | None = None,
     auth_header: str = "",
     all_groups: dict[str, list[FailedTest]] | None = None,
+    system_prompt: str = "",
 ) -> tuple[AnalysisDetail, str]:
     """Run single-AI analysis on a failure group. Returns (parsed_analysis, error_signature).
 
-    Shared by both single-AI and peer analysis paths. Builds the orchestrator
+    Shared by both single-AI and peer analysis paths. Builds the per-group
     prompt, calls the AI, and parses the response.
 
     If the AI returns success with empty text, retries once. A second empty
@@ -1578,6 +1577,7 @@ async def run_single_ai_analysis(
         job_id: Current job ID to exclude from history queries.
         all_groups: All failure groups keyed by error signature. When provided,
             cross-reference data is written to a workspace file for the AI to read.
+        system_prompt: Optional system prompt (e.g. test-analyzer agent body).
 
     Returns:
         Tuple of (parsed AnalysisDetail, error_signature string).
@@ -1727,6 +1727,7 @@ Note: Multiple tests failed with the same error. Provide ONE analysis that appli
             job_id=job_id,
             auth_header=auth_header,
             call_type="primary",
+            system_prompt=system_prompt,
         )
 
         parsed: AnalysisDetail | None = None
@@ -1894,6 +1895,160 @@ def copy_builtin_agents_to_workspace(workspace: Path) -> None:
             )
 
 
+def _strip_frontmatter(text: str) -> str:
+    """Strip YAML frontmatter from agent markdown content.
+
+    Returns the body after the closing ``---`` marker, or the
+    full text if no frontmatter is present.
+    """
+    if not text.startswith("---"):
+        return text
+    end = text.find("---", 3)
+    if end == -1:
+        return text
+    # Skip past the closing --- and any leading whitespace/newlines
+    return text[end + 3 :].lstrip("\n")
+
+
+def resolve_agent_prompt(workspace: Path | None) -> str:
+    """Resolve the test-analyzer agent prompt for use as system_prompt.
+
+    Priority:
+    1. User override: ``<workspace>/.pi/agents/test-analyzer.md``
+    2. Built-in: ``src/rootcoz/agents/test-analyzer.md``
+
+    Returns the agent file body with frontmatter stripped.
+    Returns empty string if no agent file is found.
+    """
+    # Check user override first
+    if workspace:
+        user_agent = workspace / ".pi" / "agents" / "test-analyzer.md"
+        if user_agent.is_file():
+            try:
+                content = user_agent.read_text(encoding="utf-8")
+                logger.info(
+                    "Using user-provided test-analyzer agent from %s", user_agent
+                )
+                return _strip_frontmatter(content)
+            except (OSError, UnicodeDecodeError):
+                logger.warning(
+                    "Failed to read user agent %s; falling back to built-in",
+                    user_agent,
+                    exc_info=True,
+                )
+
+    # Fall back to built-in
+    builtin = ORCHESTRATOR_AGENTS_DIR / "test-analyzer.md"
+    if builtin.is_file():
+        try:
+            content = builtin.read_text(encoding="utf-8")
+            return _strip_frontmatter(content)
+        except (OSError, UnicodeDecodeError):
+            logger.warning("Failed to read built-in agent %s", builtin, exc_info=True)
+
+    return ""
+
+
+def discover_custom_agents(workspace: Path | None) -> list[str]:
+    """Discover custom agent names in the workspace (excluding test-analyzer).
+
+    Returns a list of agent names found in ``<workspace>/.pi/agents/``.
+    The built-in ``test-analyzer`` is excluded since it's the base.
+    """
+    if not workspace:
+        return []
+    agents_dir = workspace / ".pi" / "agents"
+    if not agents_dir.is_dir():
+        return []
+
+    names: list[str] = []
+    for agent_file in sorted(agents_dir.glob("*.md")):
+        name = _extract_agent_name(agent_file)
+        if not name:
+            if _SAFE_AGENT_NAME_RE.match(agent_file.stem):
+                name = agent_file.stem
+            else:
+                continue
+        if name == "test-analyzer":
+            continue
+        names.append(name)
+    return names
+
+
+def build_agent_routing_prompt(
+    groups: dict[str, list[FailedTest]],
+    agent_names: list[str],
+    workspace_files: dict[str, dict[str, Path]],
+) -> str:
+    """Build a prompt asking the AI which agent to use for each failure group.
+
+    Returns a prompt that expects a JSON response mapping each error
+    signature to an agent name (or null for base-only analysis).
+    """
+    group_lines: list[str] = []
+    for sig, failures in groups.items():
+        paths = workspace_files.get(sig, {})
+        failure_path = paths.get("failure_details", "")
+        group_lines.append(
+            f"- signature {sig}: {len(failures)} test(s), "
+            f"failure details at {failure_path}"
+        )
+
+    groups_listing = "\n".join(group_lines)
+    agents_listing = ", ".join(agent_names)
+
+    return f"""You are a routing assistant. Given failure groups and available specialist agents, decide which agent (if any) should handle each group.
+
+Available specialist agents: {agents_listing}
+Read each agent's file in .pi/agents/ to understand what they specialize in.
+
+Failure groups:
+{groups_listing}
+
+For each group, read the failure-details file to understand the error, then decide:
+- If a specialist agent is relevant, assign it
+- If no specialist fits, assign null (base analyzer will handle it)
+
+Return ONLY a JSON object mapping each signature to an agent name or null:
+```json
+{{{{
+  "routing": {{{{
+    "<signature>": "<agent-name>" or null
+  }}}}
+}}}}
+```
+
+No text before or after. No markdown code blocks. Just the JSON."""
+
+
+def parse_agent_routing_response(
+    raw_text: str,
+    groups: dict[str, list[FailedTest]],
+) -> dict[str, str | None]:
+    """Parse the routing AI response into a signature-to-agent mapping.
+
+    Returns a dict mapping each error signature to an agent name string
+    or None (use base analyzer only). Unknown signatures are ignored;
+    missing signatures default to None.
+    """
+    data = extract_json_dict(raw_text)
+    if data is None:
+        logger.warning(
+            "Failed to parse agent routing response; using base agent for all groups"
+        )
+        return {sig: None for sig in groups}
+
+    routing = data.get("routing", data)  # accept top-level or nested
+    result: dict[str, str | None] = {}
+    for sig in groups:
+        agent = routing.get(sig)
+        if isinstance(agent, str) and agent.strip():
+            result[sig] = agent.strip()
+        else:
+            result[sig] = None
+    return result
+
+
 def prepare_orchestrator_workspace(
     groups: dict[str, list[FailedTest]],
     console_context: str,
@@ -1938,175 +2093,6 @@ def prepare_orchestrator_workspace(
     return result
 
 
-def build_orchestrator_prompt(
-    groups: dict[str, list[FailedTest]],
-    workspace_files: dict[str, dict[str, Path]],
-    *,
-    custom_prompt: str = "",
-    artifacts_context: str = "",
-    repo_path: Path | None = None,
-    server_url: str = "",
-    job_id: str = "",
-    additional_repos: dict[str, Path] | None = None,
-    auth_header: str = "",
-) -> str:
-    """Build the orchestrator prompt for single-session AI analysis.
-
-    The orchestrator AI receives all failure groups and dispatches a
-    ``test-analyzer`` subagent for each group. After all agents complete,
-    it detects cross-failure patterns and returns a consolidated JSON response.
-
-    Args:
-        groups: Failure groups keyed by error signature.
-        workspace_files: Per-group workspace file paths from
-            ``prepare_orchestrator_workspace``.
-        custom_prompt: Additional user instructions.
-        artifacts_context: Build artifacts context string.
-        repo_path: Workspace root path.
-        server_url: Base URL for history API access.
-        job_id: Current job ID.
-        additional_repos: Extra cloned repositories.
-        auth_header: Bearer token for history tools.
-
-    Returns:
-        The complete orchestrator prompt string.
-    """
-    (
-        agent_gate_section,
-        custom_prompt_section,
-        artifacts_section,
-        resources_section,
-        query_section,
-    ) = build_prompt_sections(
-        custom_prompt,
-        artifacts_context,
-        repo_path,
-        server_url,
-        job_id,
-        additional_repos=additional_repos,
-        auth_header=auth_header,
-    )
-
-    # Filter test-analyzer from STEP 0 gate — the orchestrator dispatches
-    # it per-group via its own instructions; STEP 0 is for OTHER project agents.
-    if agent_gate_section and "test-analyzer" in agent_gate_section:
-        # Rebuild gate without test-analyzer
-        project_agent_names = discover_project_agent_names(additional_repos)
-        non_analyzer_names = [n for n in project_agent_names if n != "test-analyzer"]
-        agent_gate_section = build_agent_gate_section(non_analyzer_names)
-        # Re-add rootcoz prompt gate (not affected)
-        agent_gate_section += build_rootcoz_prompt_gate_section(
-            discover_rootcoz_prompt_paths(
-                additional_repos, history_enabled=bool(query_section)
-            )
-        )
-
-    has_git_repo = bool(
-        additional_repos
-        and any((p / ".git").exists() for p in additional_repos.values())
-    )
-    repo_sentence = (
-        "Test repositories are available in the workspace for the agents to explore."
-        if has_git_repo
-        else "No test repository is available. Agents will analyze based on console output and artifacts."
-    )
-
-    # Build the failure group listing
-    group_lines: list[str] = []
-    for i, (sig, failures) in enumerate(groups.items(), 1):
-        paths = workspace_files[sig]
-        lines = [
-            f"\n### Group {i}/{len(groups)} — signature {sig}",
-            f"Test count: {len(failures)} (names are in the failure-details file)",
-            f"Failure details: {paths['failure_details']}",
-        ]
-        if "console_output" in paths:
-            lines.append(f"Console output: {paths['console_output']}")
-        if "cross_ref" in paths:
-            lines.append(f"Cross-reference (other groups): {paths['cross_ref']}")
-        group_lines.append("\n".join(lines))
-
-    groups_listing = "\n".join(group_lines)
-
-    artifacts_instruction = ""
-    if artifacts_context:
-        artifacts_instruction = f"""
-Build artifacts are available at: {artifacts_context} (also at build-artifacts/).
-Include this path in each agent's task so they can explore artifacts.
-"""
-
-    prompt = f"""{agent_gate_section}{query_section}
-You are an orchestrator for CI/CD test failure analysis. You have {len(groups)} failure group(s) to analyze.
-
-{repo_sentence}
-
-## Failure Groups
-{groups_listing}
-{artifacts_instruction}
-{artifacts_section}
-
-## Instructions
-
-1. For EACH failure group above, dispatch a `test-analyzer` subagent with `async: true`.
-   In each agent's task, include:
-   - The path to the failure-details file
-   - The path to the console output file (if available)
-   - The path to the cross-reference file (if available)
-   - The build artifacts path (if available)
-   - Any repository paths for code exploration
-   Use `agentScope="project"` for the test-analyzer agent.
-
-2. Wait for ALL agents to complete. Do NOT produce your final response until every agent has returned.
-
-3. If an agent returns invalid JSON or fails, use the agent's raw text as the "details" field
-   with classification="" and pattern="".
-
-4. After collecting all agent results, analyze them together to detect CROSS-FAILURE PATTERNS:
-   - Do multiple groups share the same infrastructure issue?
-   - Are several failures caused by the same component?
-   - Is there a common thread (e.g., same timeout, same service down)?
-   Only report genuine patterns — do not force patterns where none exist.
-
-5. Return your FINAL response as a single JSON object with this schema:
-
-```json
-{{
-  "failures": [
-    {{
-      "error_signature": "<signature>",
-      "analysis": {{
-        "classification": "...",
-        "pattern": "...",
-        "affected_tests": ["..."],
-        "details": "...",
-        "artifacts_evidence": "...",
-        "code_fix": {{ ... }} or null,
-        "product_bug_report": {{ ... }} or null
-      }}
-    }}
-  ],
-  "cross_failure_patterns": [
-    {{
-      "pattern": "Description of the pattern",
-      "affected_tests": ["test_a", "test_b"],
-      "suggested_root_cause": "What ties these failures together"
-    }}
-  ]
-}}
-```
-
-CRITICAL: Your FINAL response must be ONLY this JSON object. No text before or after. No markdown code blocks.
-The "failures" array MUST have exactly one entry per failure group ({len(groups)} entries).
-Each entry's "error_signature" must match the group signature.
-Each entry's "analysis" must contain the agent's returned JSON (or fallback on failure).
-"cross_failure_patterns" should be an empty array if no patterns are detected.
-
-{TIMELINE_RULE}
-{custom_prompt_section}{resources_section}
-"""
-    return prompt
-
-
 def _expand_group_to_analyses(
     sig: str,
     failures: list[FailedTest],
@@ -2124,84 +2110,90 @@ def _expand_group_to_analyses(
     ]
 
 
-def parse_orchestrator_response(
-    raw_text: str,
-    groups: dict[str, list[FailedTest]],
-) -> tuple[list[FailureAnalysis], list["CrossFailurePattern"]]:
-    """Parse the orchestrator's consolidated JSON response.
+def _build_cross_failure_prompt(
+    group_results: list[tuple[str, AnalysisDetail]],
+    workspace_dir: Path,
+) -> str:
+    """Build a prompt for cross-failure pattern detection.
 
-    Extracts per-group ``AnalysisDetail`` objects and ``CrossFailurePattern``
-    objects from the orchestrator's response.
+    Writes group analysis results to a workspace file and returns a prompt
+    pointing the AI to read it (AGENTS.md file-based data policy).
+
+    Args:
+        group_results: List of (error_signature, AnalysisDetail) tuples.
+        workspace_dir: Workspace directory for writing the results file.
+
+    Returns:
+        Prompt string for the cross-failure detection call.
+    """
+    results_lines: list[str] = []
+    for sig, analysis in group_results:
+        results_lines.append(
+            f"Group {sig}:\n"
+            f"  Classification: {analysis.classification}\n"
+            f"  Pattern: {analysis.pattern}\n"
+            f"  Affected tests: {analysis.affected_tests}\n"
+            f"  Details: {analysis.details}\n"
+        )
+
+    results_file = workspace_dir / "group-analyses.txt"
+    results_file.write_text("\n".join(results_lines))
+
+    return f"""You are analyzing the results of {len(group_results)} failure group analyses from a single CI job.
+Your task is to detect CROSS-FAILURE PATTERNS \u2014 correlations across groups that individual analyses cannot see.
+
+MANDATORY: Read the analysis results file at {results_file} before responding.
+It contains the classification, pattern, affected tests, and details for each failure group.
+
+Look for:
+- Multiple groups sharing the same infrastructure issue
+- Several failures caused by the same component
+- Common threads (e.g., same timeout, same service down, same resource exhaustion)
+
+Only report GENUINE patterns. Do NOT force patterns where none exist.
+If all failures are independent, return an empty array.
+
+Return ONLY a JSON object:
+```json
+{{{{
+  "cross_failure_patterns": [
+    {{{{
+      "pattern": "Description of the pattern",
+      "affected_tests": ["test_a", "test_b"],
+      "suggested_root_cause": "What ties these failures together"
+    }}}}
+  ]
+}}}}
+```
+
+No text before or after. No markdown code blocks. Just the JSON.
+"cross_failure_patterns" should be an empty array if no patterns are detected."""
+
+
+def _parse_cross_failure_response(
+    raw_text: str,
+) -> list[CrossFailurePattern]:
+    """Parse cross-failure pattern detection response.
 
     Args:
         raw_text: Raw AI response text.
-        groups: Original failure groups keyed by error signature.
 
     Returns:
-        Tuple of (list of FailureAnalysis for all failures, list of CrossFailurePattern).
+        List of CrossFailurePattern objects.
     """
-    from rootcoz.models import CrossFailurePattern
-
     data = extract_json_dict(raw_text)
-
-    all_analyses: list[FailureAnalysis] = []
-    cross_patterns: list[CrossFailurePattern] = []
-
     if data is None:
-        # Complete parse failure — fall back to raw text for all groups
-        logger.warning(
-            "Failed to parse orchestrator response as JSON; using raw text fallback"
-        )
-        for sig, failures in groups.items():
-            fallback = AnalysisDetail(details=raw_text)
-            all_analyses.extend(_expand_group_to_analyses(sig, failures, fallback))
-        return all_analyses, cross_patterns
+        logger.warning("Failed to parse cross-failure response as JSON")
+        return []
 
-    # Parse per-group failures
-    response_failures = data.get("failures", [])
-    # Build a lookup from signature → analysis data
-    sig_to_analysis: dict[str, dict[str, Any]] = {}
-    for entry in response_failures:
-        if isinstance(entry, dict):
-            entry_sig = entry.get("error_signature", "")
-            analysis_data = entry.get("analysis", entry)
-            sig_to_analysis[entry_sig] = analysis_data
-
-    for sig, failures in groups.items():
-        analysis_data = sig_to_analysis.get(sig)
-        if analysis_data:
-            try:
-                parsed = AnalysisDetail(**analysis_data)
-            except (ValueError, TypeError) as exc:
-                logger.warning(
-                    "Failed to parse orchestrator analysis for sig %s: %s", sig, exc
-                )
-                parsed = parse_json_response(
-                    json.dumps(analysis_data)
-                    if isinstance(analysis_data, dict)
-                    else str(analysis_data)
-                )
-        else:
-            logger.warning(
-                "Orchestrator response missing analysis for signature %s; using raw fallback",
-                sig,
-            )
-            parsed = AnalysisDetail(
-                details=f"Orchestrator did not return analysis for this group (signature {sig})"
-            )
-
-        all_analyses.extend(_expand_group_to_analyses(sig, failures, parsed))
-
-    # Parse cross-failure patterns
-    raw_patterns = data.get("cross_failure_patterns", [])
-    for p in raw_patterns:
+    patterns: list[CrossFailurePattern] = []
+    for p in data.get("cross_failure_patterns", []):
         if isinstance(p, dict):
             try:
-                cross_patterns.append(CrossFailurePattern(**p))
+                patterns.append(CrossFailurePattern(**p))
             except (ValueError, TypeError) as exc:
                 logger.warning("Failed to parse cross-failure pattern: %s", exc)
-
-    return all_analyses, cross_patterns
+    return patterns
 
 
 async def run_orchestrated_analysis(
@@ -2218,13 +2210,17 @@ async def run_orchestrated_analysis(
     job_id: str = "",
     additional_repos: dict[str, Path] | None = None,
     auth_header: str = "",
-) -> tuple[list[FailureAnalysis], list["CrossFailurePattern"]]:
-    """Run single-session AI orchestration with subagent fan-out.
+    max_concurrent_ai_calls: int = 3,
+) -> tuple[list[FailureAnalysis], list[CrossFailurePattern]]:
+    """Run Python-orchestrated analysis with agent prompts and cross-failure detection.
 
-    Instead of calling ``call_ai_once`` per failure group, creates ONE AI
-    session that sees all groups and dispatches ``test-analyzer`` subagents
-    for each. The orchestrator collects results and detects cross-failure
-    patterns.
+    For each failure group, calls ``call_ai_once`` with the ``test-analyzer``
+    agent prompt as ``system_prompt`` and full custom tool access (history API).
+    After all groups complete, runs one more AI call to detect cross-failure
+    patterns across all results.
+
+    When custom agents exist in the workspace, a routing call assigns
+    specialist agents to groups; the AI is pointed at the agent file to read.
 
     When the AI call fails or returns empty text, returns fallback
     ``AnalysisDetail`` objects for all groups with the error details.
@@ -2242,6 +2238,7 @@ async def run_orchestrated_analysis(
         job_id: Current job ID.
         additional_repos: Extra cloned repositories.
         auth_header: Bearer token for history tools.
+        max_concurrent_ai_calls: Max parallel per-group AI calls.
 
     Returns:
         Tuple of (list of FailureAnalysis, list of CrossFailurePattern).
@@ -2259,25 +2256,49 @@ async def run_orchestrated_analysis(
         # Copy built-in agents to workspace
         copy_builtin_agents_to_workspace(workspace_dir)
 
-        # Prepare all workspace files
-        workspace_files = prepare_orchestrator_workspace(
-            groups, console_context, workspace_dir
-        )
+        # Resolve agent system prompt
+        system_prompt = resolve_agent_prompt(workspace_dir)
 
-        # Build the orchestrator prompt
-        prompt = build_orchestrator_prompt(
-            groups,
-            workspace_files,
-            custom_prompt=custom_prompt,
-            artifacts_context=artifacts_context,
-            repo_path=repo_path,
-            server_url=server_url,
-            job_id=job_id,
-            additional_repos=additional_repos,
-            auth_header=auth_header,
-        )
+        # Discover custom agents and route if any exist
+        custom_agents = discover_custom_agents(workspace_dir)
+        agent_routing: dict[str, str | None] = {sig: None for sig in groups}
 
-        logger.debug("Orchestrator prompt length: %d chars", len(prompt))
+        if custom_agents:
+            # Prepare workspace files for routing call context
+            workspace_files = prepare_orchestrator_workspace(
+                groups, console_context, workspace_dir
+            )
+            routing_prompt = build_agent_routing_prompt(
+                groups, custom_agents, workspace_files
+            )
+            logger.info(
+                "Running agent routing call: %d groups, %d custom agents",
+                len(groups),
+                len(custom_agents),
+            )
+            routing_result = await _call_ai_with_retry(
+                routing_prompt,
+                ai_provider=ai_provider,
+                ai_model=ai_model,
+                workspace_dir=workspace_dir,
+                ai_call_timeout=ai_call_timeout,
+                server_url="",  # routing doesn't need history
+                job_id=job_id,
+                auth_header="",
+                call_type="agent_routing",
+            )
+            if routing_result.success and not _is_empty_ai_text(routing_result):
+                agent_routing = parse_agent_routing_response(
+                    routing_result.text, groups
+                )
+                logger.info("Agent routing result: %s", agent_routing)
+            else:
+                logger.warning(
+                    "Agent routing call failed; using base agent for all groups"
+                )
+
+        # Run per-group analysis in parallel using run_single_ai_analysis
+        # but with system_prompt from agent file and appended agent content
         logger.info(
             "Starting orchestrated analysis: %d groups, provider=%s, model=%s, job_id=%s",
             len(groups),
@@ -2285,36 +2306,103 @@ async def run_orchestrated_analysis(
             ai_model,
             job_id,
         )
-        logger.info("AI call: %s", format_timeout_log(ai_call_timeout))
 
-        result = await _call_ai_with_retry(
-            prompt,
-            ai_provider=ai_provider,
-            ai_model=ai_model,
-            workspace_dir=workspace_dir,
-            ai_call_timeout=ai_call_timeout,
-            server_url=server_url,
-            job_id=job_id,
-            auth_header=auth_header,
-            call_type="orchestrator",
+        async def _analyze_group(
+            sig: str, failures: list[FailedTest]
+        ) -> tuple[str, AnalysisDetail]:
+            """Analyze a single failure group with agent prompt."""
+            # Point AI at specialist agent file (do not embed body)
+            agent_appendix = ""
+            routed_agent = agent_routing.get(sig)
+            if routed_agent:
+                agent_file = workspace_dir / ".pi" / "agents" / f"{routed_agent}.md"
+                if agent_file.is_file():
+                    agent_appendix = (
+                        f"\n\n=== SPECIALIST AGENT ({routed_agent}) ===\n"
+                        f"A specialist agent has been assigned to this failure group.\n"
+                        f"MANDATORY: Read the agent instructions at {agent_file} "
+                        f"and follow them before analyzing.\n"
+                    )
+
+            # Build custom_prompt with agent appendix
+            effective_custom_prompt = custom_prompt
+            if agent_appendix:
+                effective_custom_prompt = (
+                    f"{custom_prompt}\n{agent_appendix}"
+                    if custom_prompt
+                    else agent_appendix
+                )
+
+            # Reuse run_single_ai_analysis which builds the full per-group prompt
+            # (failure details, console, artifacts, history, resources, JSON schema)
+            parsed, error_sig = await run_single_ai_analysis(
+                failures=failures,
+                console_context=console_context,
+                repo_path=repo_path,
+                ai_provider=ai_provider,
+                ai_model=ai_model,
+                ai_call_timeout=ai_call_timeout,
+                custom_prompt=effective_custom_prompt,
+                artifacts_context=artifacts_context,
+                server_url=server_url,
+                job_id=job_id,
+                additional_repos=additional_repos,
+                auth_header=auth_header,
+                all_groups=groups if len(groups) > 1 else None,
+                system_prompt=system_prompt,
+            )
+            return error_sig, parsed
+
+        # Run all groups in parallel
+        coroutines = [_analyze_group(sig, failures) for sig, failures in groups.items()]
+        results = await run_parallel_with_limit(
+            coroutines, max_concurrency=max_concurrent_ai_calls
         )
 
-        if not result.success or _is_empty_ai_text(result):
-            error_msg = (
-                result.text if not result.success else "AI returned empty response"
-            )
-            logger.error("Orchestrated analysis failed: %s", error_msg)
-            # Return fallback analyses with error details
-            fallback = AnalysisDetail(
-                details=f"Orchestrated analysis failed: {error_msg}"
-            )
-            all_analyses: list[FailureAnalysis] = []
-            for sig, failures in groups.items():
+        # Collect results
+        all_analyses: list[FailureAnalysis] = []
+        group_results: list[tuple[str, AnalysisDetail]] = []
+        for (sig, failures), result in zip(groups.items(), results):
+            if isinstance(result, Exception):
+                logger.error(
+                    "Failed to analyze group %s: %s", sig, result, exc_info=result
+                )
+                fallback = AnalysisDetail(details=f"Analysis failed: {result}")
                 all_analyses.extend(_expand_group_to_analyses(sig, failures, fallback))
-            return all_analyses, []
+                group_results.append((sig, fallback))
+            else:
+                _, parsed = result
+                all_analyses.extend(_expand_group_to_analyses(sig, failures, parsed))
+                group_results.append((sig, parsed))
 
-        # Parse consolidated response
-        return parse_orchestrator_response(result.text, groups)
+        # Cross-failure pattern detection (only when multiple groups)
+        cross_patterns: list[CrossFailurePattern] = []
+        if len(group_results) > 1:
+            logger.info(
+                "Running cross-failure pattern detection for %d groups",
+                len(group_results),
+            )
+            cross_prompt = _build_cross_failure_prompt(group_results, workspace_dir)
+            cross_result = await _call_ai_with_retry(
+                cross_prompt,
+                ai_provider=ai_provider,
+                ai_model=ai_model,
+                workspace_dir=workspace_dir,
+                ai_call_timeout=ai_call_timeout,
+                server_url="",  # cross-failure doesn't need history
+                job_id=job_id,
+                auth_header="",
+                call_type="cross_failure",
+            )
+            if cross_result.success and not _is_empty_ai_text(cross_result):
+                cross_patterns = _parse_cross_failure_response(cross_result.text)
+                logger.info("Detected %d cross-failure patterns", len(cross_patterns))
+            else:
+                logger.warning(
+                    "Cross-failure pattern detection failed or returned empty"
+                )
+
+        return all_analyses, cross_patterns
 
     finally:
         if temp_dir and temp_dir.exists():

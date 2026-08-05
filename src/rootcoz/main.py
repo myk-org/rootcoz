@@ -3429,6 +3429,7 @@ async def _analyze_failures_or_exit(
                 job_id=job_id,
                 additional_repos=cloned_repos or None,
                 auth_header=auth_header,
+                max_concurrent_ai_calls=merged.max_concurrent_ai_calls,
             )
         except Exception:
             logger.exception(
