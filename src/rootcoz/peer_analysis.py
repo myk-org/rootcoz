@@ -660,8 +660,6 @@ async def analyze_failure_group_with_peers(
                 }
                 if not session:
                     peer_kwargs["tools"] = list(ANALYSIS_BUILTIN_TOOLS)
-                if system_prompt:
-                    peer_kwargs["system_prompt"] = system_prompt
                 ai_result = await call_ai(prompt, **peer_kwargs)
                 logger.debug(
                     "Peer %d (%s/%s) AI result: success=%s, text_length=%d",

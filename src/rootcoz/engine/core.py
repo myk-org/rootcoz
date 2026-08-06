@@ -1903,16 +1903,21 @@ def copy_builtin_agents_to_workspace(workspace: Path) -> None:
 def _strip_frontmatter(text: str) -> str:
     """Strip YAML frontmatter from agent markdown content.
 
-    Returns the body after the closing ``---`` marker, or the
-    full text if no frontmatter is present.
+    Returns the body after the closing ``---`` line marker, or the
+    full text if no frontmatter is present.  Uses line-based
+    delimiter matching so that ``---`` appearing *within* a line
+    (e.g. inside content) is not mistaken for the closing marker.
     """
-    if not text.startswith("---"):
+    lines = text.splitlines(True)  # keep line endings
+    if not lines or lines[0].strip() != "---":
         return text
-    end = text.find("---", 3)
-    if end == -1:
-        return text
-    # Skip past the closing --- and any leading whitespace/newlines
-    return text[end + 3 :].lstrip("\n")
+    # Search for the closing --- on its own line (allow surrounding whitespace)
+    for idx, line in enumerate(lines[1:], start=1):
+        if line.strip() == "---":
+            # Return everything after the closing delimiter
+            return "".join(lines[idx + 1 :]).lstrip("\n")
+    # No closing delimiter found — return original text unchanged
+    return text
 
 
 def resolve_agent_prompt(workspace: Path | None) -> str:
@@ -2015,13 +2020,11 @@ For each group, read the failure-details file to understand the error, then deci
 - If no specialist fits, assign null (base analyzer will handle it)
 
 Return ONLY a JSON object mapping each signature to an agent name or null:
-```json
-{{{{
-  "routing": {{{{
+{{
+  "routing": {{
     "<signature>": "<agent-name>" or null
-  }}}}
-}}}}
-```
+  }}
+}}
 
 No text before or after. No markdown code blocks. Just the JSON."""
 
@@ -2044,6 +2047,13 @@ def parse_agent_routing_response(
         return {sig: None for sig in groups}
 
     routing = data.get("routing", data)  # accept top-level or nested
+    if not isinstance(routing, dict):
+        logger.warning(
+            "Agent routing response 'routing' is not a dict (got %s); "
+            "using base agent for all groups",
+            type(routing).__name__,
+        )
+        return {sig: None for sig in groups}
     result: dict[str, str | None] = {}
     for sig in groups:
         agent = routing.get(sig)
@@ -2159,17 +2169,15 @@ Only report GENUINE patterns. Do NOT force patterns where none exist.
 If all failures are independent, return an empty array.
 
 Return ONLY a JSON object:
-```json
-{{{{
+{{
   "cross_failure_patterns": [
-    {{{{
+    {{
       "pattern": "Description of the pattern",
       "affected_tests": ["test_a", "test_b"],
       "suggested_root_cause": "What ties these failures together"
-    }}}}
+    }}
   ]
-}}}}
-```
+}}
 
 No text before or after. No markdown code blocks. Just the JSON.
 "cross_failure_patterns" should be an empty array if no patterns are detected."""
