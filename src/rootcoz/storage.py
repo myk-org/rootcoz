@@ -663,7 +663,23 @@ async def init_db() -> None:
         cursor = await db.execute("""
             UPDATE results
             SET job_name = COALESCE(json_extract(result_json, '$.job_name'), ''),
-                build_number = COALESCE(json_extract(result_json, '$.build_number'), 0),
+                build_number = CASE
+                    WHEN json_type(result_json, '$.build_number') = 'integer'
+                         AND json_extract(result_json, '$.build_number') >= 0
+                         AND json_extract(result_json, '$.build_number') <= 9223372036854775807
+                    THEN json_extract(result_json, '$.build_number')
+                    WHEN json_type(result_json, '$.build_number') = 'text'
+                         AND json_extract(result_json, '$.build_number') NOT GLOB '*[^0-9]*'
+                         AND json_extract(result_json, '$.build_number') != ''
+                         AND (
+                             ltrim(json_extract(result_json, '$.build_number'), '0') = ''
+                             OR length(ltrim(json_extract(result_json, '$.build_number'), '0')) < 19
+                             OR (length(ltrim(json_extract(result_json, '$.build_number'), '0')) = 19
+                                 AND ltrim(json_extract(result_json, '$.build_number'), '0') <= '9223372036854775807')
+                         )
+                    THEN CAST(json_extract(result_json, '$.build_number') AS INTEGER)
+                    ELSE 0
+                END,
                 build_id = COALESCE(CAST(json_extract(result_json, '$.build_id') AS TEXT), '')
             WHERE result_json IS NOT NULL AND json_valid(result_json) AND job_name = ''
         """)
@@ -924,7 +940,15 @@ async def init_db() -> None:
         # Backfill job_metadata_labels from existing job_metadata.labels JSON.
         # Tracked via _migrations_applied to avoid scanning on every startup.
         await db.execute(
-            "CREATE TABLE IF NOT EXISTS _migrations_applied (key TEXT PRIMARY KEY)"
+            "CREATE TABLE IF NOT EXISTS _migrations_applied "
+            "(key TEXT PRIMARY KEY, applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)"
+        )
+        # Ensure legacy DBs (created before applied_at was added) get the column.
+        await _migrate_add_column(
+            db,
+            "_migrations_applied",
+            "applied_at",
+            "TIMESTAMP DEFAULT CURRENT_TIMESTAMP",
         )
         _jml_key = "backfill_job_metadata_labels_v1"
         cursor = await db.execute(
@@ -1631,6 +1655,29 @@ def _extract_denormalized_fields(result: dict[str, Any] | None) -> tuple[str, in
     return (job_name, build_number, build_id)
 
 
+def _append_denormalized_set_parts(
+    result: dict[str, Any],
+    set_parts: list[str],
+    params: list[Any],
+) -> None:
+    """Append denormalized column SET fragments for keys present in *result*.
+
+    Only includes ``job_name``, ``build_number``, or ``build_id`` when the
+    corresponding key exists in *result* — partial payloads must not clobber
+    existing column values.
+    """
+    job_name, build_number, build_id = _extract_denormalized_fields(result)
+    if "job_name" in result:
+        set_parts.append("job_name = ?")
+        params.append(job_name)
+    if "build_number" in result:
+        set_parts.append("build_number = ?")
+        params.append(build_number)
+    if "build_id" in result:
+        set_parts.append("build_id = ?")
+        params.append(build_id)
+
+
 def _build_status_update_clause(
     status: str,
     result_json: str | None = None,
@@ -1646,6 +1693,9 @@ def _build_status_update_clause(
         result_json: Serialized result JSON. When not None, ``result_json``
             is included in the update.
         result: Optional result dict used to denormalize job_name/build_number/build_id.
+            When provided, denormalized columns are updated only for keys
+            present in *result* — omitted identity keys leave existing column
+            values unchanged (key-presence semantics).
 
     Returns:
         Tuple of (set_parts, params).
@@ -1658,18 +1708,7 @@ def _build_status_update_clause(
         params.append(result_json)
 
     if result is not None:
-        # Only update denormalized columns when the key is present in the
-        # result dict — partial payloads must not clobber existing values.
-        job_name, build_number, build_id = _extract_denormalized_fields(result)
-        if "job_name" in result:
-            set_parts.append("job_name = ?")
-            params.append(job_name)
-        if "build_number" in result:
-            set_parts.append("build_number = ?")
-            params.append(build_number)
-        if "build_id" in result:
-            set_parts.append("build_id = ?")
-            params.append(build_id)
+        _append_denormalized_set_parts(result, set_parts, params)
 
     if status == "running":
         set_parts.append(
@@ -1740,6 +1779,11 @@ async def update_status(
 
     Unlike save_result, this uses UPDATE to preserve the original created_at timestamp.
     Only updates result_json when result is explicitly provided.
+
+    When *result* is provided, denormalized identity columns (``job_name``,
+    ``build_number``, ``build_id``) are synced using key-presence semantics:
+    only keys present in *result* update their columns — omitted keys leave
+    existing values unchanged.
 
     Args:
         job_id: Unique identifier for the analysis job.
@@ -1833,6 +1877,11 @@ async def patch_result_json(
     ``BEGIN IMMEDIATE`` transaction so concurrent patches are serialized
     by SQLite's write lock.
 
+    After *patch_fn* returns, denormalized identity columns (``job_name``,
+    ``build_number``, ``build_id``) are synced from the patched dict using
+    key-presence semantics: only keys present in the result update their
+    columns — missing keys leave existing column values unchanged.
+
     If the row does not exist or ``result_json`` is empty, this is a no-op.
     """
     async with _connect_db() as db:
@@ -1850,14 +1899,13 @@ async def patch_result_json(
                 await db.execute("ROLLBACK")
                 return
             patch_fn(result_data)
-            job_name, build_number, build_id_val = _extract_denormalized_fields(
-                result_data
-            )
+            set_parts = ["result_json = ?"]
+            params: list[Any] = [json.dumps(result_data)]
+            _append_denormalized_set_parts(result_data, set_parts, params)
+            params.append(job_id)
             await db.execute(
-                "UPDATE results SET result_json = ?, "
-                "job_name = ?, build_number = ?, build_id = ? "
-                "WHERE job_id = ?",
-                (json.dumps(result_data), job_name, build_number, build_id_val, job_id),
+                f"UPDATE results SET {', '.join(set_parts)} WHERE job_id = ?",
+                params,
             )
             await db.commit()
         except Exception:
@@ -6072,6 +6120,33 @@ _ISSUE_LINK_PATTERN = re.compile(
 )
 
 
+def _normalize_report_datetime(value: str) -> str:
+    """Normalize an ISO datetime string for SQLite text comparison.
+
+    Parses offset-aware datetimes and converts to UTC so absolute-time
+    semantics are preserved.  Strips fractional seconds and formats the
+    result as ``YYYY-MM-DD HH:MM:SS`` to match SQLite's
+    ``CURRENT_TIMESTAMP`` format.
+    """
+    from datetime import datetime
+
+    stripped = value.strip()
+    try:
+        dt = datetime.fromisoformat(stripped)
+    except ValueError:
+        # Not a recognizable ISO format — best-effort cleanup.
+        normalized = stripped.replace("T", " ")
+        normalized = re.sub(r"\.\d+", "", normalized)
+        return normalized.strip()
+
+    # Convert offset-aware datetimes to UTC.
+    if dt.tzinfo is not None:
+        dt = dt.astimezone(UTC)
+
+    # Truncate to second precision and format for SQLite.
+    return dt.replace(microsecond=0).strftime("%Y-%m-%d %H:%M:%S")
+
+
 def _build_date_filter(
     column: str,
     date_from: str,
@@ -6082,13 +6157,26 @@ def _build_date_filter(
     """Append date-range conditions and params in-place.
 
     Shared by all reports queries to avoid duplicating date filtering logic.
+
+    Date-only values (``YYYY-MM-DD``) are used as-is for ``date_from``;
+    for ``date_to``, ``" 23:59:59"`` is appended to make the range inclusive
+    of the entire day.  Values that already contain a time component
+    (``T`` separator or embedded space) are normalized to
+    ``YYYY-MM-DD HH:MM:SS`` (offset-aware values converted to UTC)
+    for consistent SQLite text comparison.
     """
     if date_from:
         conditions.append(f"{column} >= ?")
-        params.append(date_from)
+        if "T" in date_from or " " in date_from.strip():
+            params.append(_normalize_report_datetime(date_from))
+        else:
+            params.append(date_from)
     if date_to:
         conditions.append(f"{column} <= ?")
-        params.append(f"{date_to} 23:59:59")
+        if "T" in date_to or " " in date_to.strip():
+            params.append(_normalize_report_datetime(date_to))
+        else:
+            params.append(f"{date_to} 23:59:59")
 
 
 def _build_metadata_join(
