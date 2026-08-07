@@ -98,6 +98,7 @@ from rootcoz.engine.core import (
     extract_json_dict,
     get_failure_signature,
     resolve_additional_repos,
+    run_orchestrated_analysis,
     safe_update_progress,
     set_progress_callback,
 )
@@ -124,6 +125,7 @@ from rootcoz.models import (
     ChildJobAnalysis,
     ClassifyTestRequest,
     CreateIssueRequest,
+    CrossFailurePattern,
     FailedTest,
     FailureAnalysis,
     FailureAnalysisResult,
@@ -3218,6 +3220,77 @@ def _apply_cached_test_counts(
     result_data["failed_count"] = failed
 
 
+async def _run_per_group_analysis(
+    *,
+    groups: dict[str, list[Any]],
+    console_context: str,
+    repo_path: Path | None,
+    ai_provider: str,
+    ai_model: str,
+    ai_call_timeout: int | None,
+    custom_prompt: str,
+    artifacts_context: str,
+    server_url: str,
+    job_id: str,
+    additional_repos: dict[str, Path] | None,
+    max_concurrent_ai_calls: int,
+    auth_header: str,
+    peer_ai_configs: list[Any] | None = None,
+    peer_analysis_max_rounds: int = 3,
+) -> list[Any]:
+    """Run per-group analysis with parallel execution.
+
+    Shared by the peer analysis path and the orchestrator fallback path.
+    Creates one ``analyze_failure_group`` coroutine per failure group and
+    runs them in parallel via ``run_parallel_with_limit``.
+
+    Args:
+        groups: Failure groups keyed by error signature.
+        Other args: Forwarded to ``analyze_failure_group``.
+
+    Returns:
+        Flat list of FailureAnalysis objects from all groups.
+    """
+    coroutines: list[Coroutine[Any, Any, Any]] = [
+        analyze_failure_group(
+            failures=group_failures,
+            console_context=console_context,
+            repo_path=repo_path,
+            ai_provider=ai_provider,
+            ai_model=ai_model,
+            ai_call_timeout=ai_call_timeout,
+            custom_prompt=custom_prompt,
+            artifacts_context=artifacts_context,
+            server_url=server_url,
+            job_id=job_id,
+            peer_ai_configs=peer_ai_configs,
+            peer_analysis_max_rounds=peer_analysis_max_rounds,
+            additional_repos=additional_repos,
+            max_concurrent_ai_calls=max_concurrent_ai_calls,
+            auth_header=auth_header,
+            all_groups=groups,
+        )
+        for _sig, group_failures in groups.items()
+    ]
+
+    results = await run_parallel_with_limit(
+        coroutines, max_concurrency=max_concurrent_ai_calls
+    )
+    logger.debug(
+        "AI analysis complete: %d results from %d groups",
+        len(results),
+        len(groups),
+    )
+
+    all_analyses: list[Any] = []
+    for result in results:
+        if isinstance(result, Exception):
+            logger.error("Failed to analyze failure group: %s", result, exc_info=result)
+        else:
+            all_analyses.extend(result)
+    return all_analyses
+
+
 async def _analyze_failures_or_exit(
     *,
     job_id: str,
@@ -3237,11 +3310,11 @@ async def _analyze_failures_or_exit(
     auth_header: str,
     groups: dict[str, list[Any]],
     source_result: CISourceResult | None,
-) -> tuple[list[Any], list[Any], int] | None:
+) -> tuple[list[Any], list[Any], int, list[CrossFailurePattern]] | None:
     """Resolve console-only / no-failure / junit analysis paths.
 
-    Returns ``(all_analyses, test_failures, unique_errors)``, or ``None`` when an
-    early-exit path already updated job status.
+    Returns ``(all_analyses, test_failures, unique_errors, cross_failure_patterns)``,
+    or ``None`` when an early-exit path already updated job status.
     """
     # Console-only analysis when no JUnit failures found but console
     # context exists (e.g. Prow build with no JUnit artifacts)
@@ -3291,7 +3364,7 @@ async def _analyze_failures_or_exit(
             test_name=metadata_job_name,
             error_message=console_context,
         )
-        return all_analyses, [synthetic_failure], 1
+        return all_analyses, [synthetic_failure], 1, []
 
     if not test_failures:
         if source_result is not None and source_result.warnings and not console_context:
@@ -3336,10 +3409,11 @@ async def _analyze_failures_or_exit(
         f"Starting AI analysis for {len(groups)} failure groups (provider={ai_provider}, model={ai_model})"
     )
 
-    # Analyze each group in parallel
-    coroutines: list[Coroutine[Any, Any, Any]] = [
-        analyze_failure_group(
-            failures=group_failures,
+    cross_failure_patterns: list[CrossFailurePattern] = []
+
+    try:
+        all_analyses, cross_failure_patterns = await run_orchestrated_analysis(
+            groups=groups,
             console_context=console_context,
             repo_path=repo_path,
             ai_provider=ai_provider,
@@ -3349,39 +3423,49 @@ async def _analyze_failures_or_exit(
             artifacts_context=artifacts_context,
             server_url=server_url,
             job_id=job_id,
+            additional_repos=cloned_repos or None,
+            auth_header=auth_header,
+            max_concurrent_ai_calls=merged.max_concurrent_ai_calls,
             peer_ai_configs=peer_ai_configs,
             peer_analysis_max_rounds=merged.peer_analysis_max_rounds,
-            additional_repos=cloned_repos or None,
-            max_concurrent_ai_calls=merged.max_concurrent_ai_calls,
-            auth_header=auth_header,
-            all_groups=groups,
         )
-        for sig, group_failures in groups.items()
-    ]
-
-    results = await run_parallel_with_limit(
-        coroutines, max_concurrency=merged.max_concurrent_ai_calls
-    )
-    logger.debug(
-        f"AI analysis complete: {len(results)} results from {len(groups)} groups"
-    )
-
-    all_analyses = []
-    failed_group_count = 0
-    for result in results:
-        if isinstance(result, Exception):
-            failed_group_count += 1
-            logger.error(f"Failed to analyze failure group: {result}", exc_info=result)
-        else:
-            all_analyses.extend(result)
+    except Exception:
+        logger.exception(
+            "Orchestrated analysis failed for job_id=%s; "
+            "falling back to per-group analysis",
+            job_id,
+        )
+        try:
+            all_analyses = await _run_per_group_analysis(
+                groups=groups,
+                console_context=console_context,
+                repo_path=repo_path,
+                ai_provider=ai_provider,
+                ai_model=ai_model,
+                ai_call_timeout=merged.ai_call_timeout,
+                custom_prompt=custom_prompt,
+                artifacts_context=artifacts_context,
+                server_url=server_url,
+                job_id=job_id,
+                peer_ai_configs=peer_ai_configs,
+                peer_analysis_max_rounds=merged.peer_analysis_max_rounds,
+                additional_repos=cloned_repos or None,
+                max_concurrent_ai_calls=merged.max_concurrent_ai_calls,
+                auth_header=auth_header,
+            )
+        except Exception:
+            logger.exception(
+                "Fallback per-group analysis also failed for job_id=%s",
+                job_id,
+            )
+            all_analyses = []
 
     unique_errors = len(groups)
 
-    # If every group failed, treat the entire job as failed rather than
-    # saving a misleading "completed" result with zero findings.
-    if not all_analyses and failed_group_count == len(results):
+    # If no analyses were produced, treat the entire job as failed
+    if not all_analyses:
         error_msg = (
-            f"All {failed_group_count} failure group(s) failed during analysis "
+            f"All failure group(s) failed during analysis "
             f"({len(test_failures)} test failures, {unique_errors} unique errors)"
         )
         logger.error(f"Analysis fully failed for job_id={job_id}: {error_msg}")
@@ -3405,7 +3489,7 @@ async def _analyze_failures_or_exit(
         notify_token_usage_changed()
         return None
 
-    return all_analyses, test_failures, unique_errors
+    return all_analyses, test_failures, unique_errors, cross_failure_patterns
 
 
 async def _process_ci_source_analysis(
@@ -3853,7 +3937,9 @@ async def _process_ci_source_analysis(
         )
         if analysis_result_tuple is None:
             return
-        all_analyses, test_failures, unique_errors = analysis_result_tuple
+        all_analyses, test_failures, unique_errors, cross_failure_patterns = (
+            analysis_result_tuple
+        )
 
         summary = (
             f"Analyzed {len(test_failures)} test failures "
@@ -3907,6 +3993,7 @@ async def _process_ci_source_analysis(
             ai_model=ai_model,
             failures=all_analyses,
             enriched_xml=enriched_xml,
+            cross_failure_patterns=cross_failure_patterns,
         )
 
         result_data = analysis_result.model_dump(mode="json")

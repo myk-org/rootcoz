@@ -437,6 +437,7 @@ async def analyze_failure_group_with_peers(
     max_concurrent_ai_calls: int = 3,
     auth_header: str = "",
     all_groups: dict[str, list[FailedTest]] | None = None,
+    system_prompt: str = "",
 ) -> list[FailureAnalysis]:
     """Analyze a failure group using multi-AI peer consensus.
 
@@ -468,6 +469,7 @@ async def analyze_failure_group_with_peers(
             peer analysis parallelism (default: 3).
         all_groups: All failure groups keyed by error signature. When provided,
             cross-reference data is written to a workspace file for the AI to read.
+        system_prompt: Optional system prompt (e.g. test-analyzer agent body).
 
     Returns:
         List of FailureAnalysis objects, one per failure in the group.
@@ -491,6 +493,7 @@ async def analyze_failure_group_with_peers(
         additional_repos=additional_repos,
         auth_header=auth_header,
         all_groups=all_groups,
+        system_prompt=system_prompt,
     )
 
     # Compute other_groups_file path for peer/revision prompts
@@ -866,6 +869,7 @@ async def analyze_failure_group_with_peers(
                         cwd=str(peer_workspace),
                         ai_call_timeout=ai_call_timeout,
                         tools=list(ANALYSIS_BUILTIN_TOOLS),
+                        system_prompt=system_prompt,
                     )
                     logger.debug(
                         "Revision round %d AI result: success=%s, text_length=%d, provider=%s, model=%s",

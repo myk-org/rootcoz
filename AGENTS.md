@@ -82,7 +82,8 @@ uvx --with tox-uv tox -e chart      # Helm chart only
 ```text
 src/rootcoz/
   engine/                   # CI-agnostic analysis core
-    core.py                 # Failure grouping, AI CLI orchestration, prompt building,
+    core.py                 # Failure grouping, AI orchestration (per-group with agent
+                            # system_prompt + cross-failure detection), prompt building,
                             # JSON response parsing, deduplication. Has ZERO knowledge
                             # of any specific CI system.
     chat.py                 # Chat engine: workspace, AI session, prompt builder
@@ -105,6 +106,7 @@ src/rootcoz/
   models.py                 # Pydantic request/response models (BaseTestEntry, FailedTest, etc.)
   config.py                 # Settings (env vars)
   storage.py                # SQLite persistence (includes test_entries table)
+  agents/                    # Built-in pi agents (e.g. test-analyzer) copied to workspace .pi/agents/
   ai_client.py              # AI provider constants and usage recording setup
   sidecar-helper/            # Pi SDK sidecar service (Node.js/TypeScript)
     src/server.ts           # Thin wrapper calling @myk-org/pi-sidecar startSidecar()
@@ -172,7 +174,7 @@ Analyzed repositories can provide project-specific customization files under a `
 
 - **`settings.json`**: Optional non-sensitive analysis settings for the test repo. Validated against the JSON Schema in `src/rootcoz/schemas/rootcoz-settings.schema.json` (Pydantic model `RootcozRepoSettings`). Allowed keys only: `ai_provider`, `ai_model`, `ai_call_timeout`, `max_concurrent_ai_calls`, `peer_ai_configs`, `peer_analysis_max_rounds`, `additional_repos`. No secrets (tokens rejected). Priority for all allowed keys: request → `settings.json` → server. Loaded after the test repo is cloned (`rootcoz_repo_settings.py`).
 - **Prompt files**: `build_resources_section()` and `build_prompt_sections()` in `engine/core.py` scan `<repo>/.rootcoz/` for `ROOTCOZ_PROMPT.md` and `ROOTCOZ_HISTORY_PROMPT.md`. The issue prompt (`ROOTCOZ_ISSUE_PROMPT.md`) is fetched via the GitHub Contents API from `.rootcoz/` in `main.py`.
-- **Pi resources**: After cloning repos (analysis, re-analysis, and chat paths), `.rootcoz/{agents,skills,extensions}/` are copied into `<workspace>/.pi/` via `copy_rootcoz_pi_resources()` so pi's `DefaultResourceLoader` discovers them.
+- **Pi resources**: After cloning repos (analysis, re-analysis, and chat paths), `.rootcoz/{agents,skills,extensions}/` are copied into `<workspace>/.pi/` via `copy_rootcoz_pi_resources()` so pi's `DefaultResourceLoader` discovers them. Built-in agents from `src/rootcoz/agents/` are then copied via `copy_builtin_agents_to_workspace()` — existing user agent files with the same name are NOT overwritten (user agents take precedence). Analysis sessions use tools `["read", "ls", "find", "grep"]` only (no `subagent`); the `test-analyzer` agent file is loaded as `system_prompt`. Chat sessions still include `subagent`.
 - This is a **breaking change** — the previous legacy prompt filenames in the repo root are no longer supported. Only `.rootcoz/` is recognized.
 
 ### AI Tool Access (MANDATORY)
@@ -259,7 +261,7 @@ All test outcomes (passed, skipped, failed) are stored in the `test_entries` tab
 
 When multiple tests fail with the same error:
 1. Failures are grouped by error signature (SHA-256 hash of normalized error + stack trace)
-2. Only one AI CLI call per unique error type
+2. One `call_ai_once` per unique error with `test-analyzer` agent as system_prompt (cross-failure patterns detected in a final pass)
 3. Analysis is applied to all failures with matching signature
 4. Signatures are normalized before hashing (timestamps, UUIDs, pod name suffixes, build numbers stripped)
 

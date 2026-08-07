@@ -1,8 +1,8 @@
 """Tests for AI session tool restrictions (issue #74).
 
-Verifies that all AI sessions receive explicit tool lists (with subagent,
-without bash) and that the chat session rebuild path also enforces tool
-restrictions.
+Verifies that AI sessions receive explicit tool lists (chat keeps subagent;
+analysis is filesystem-browse only; no bash) and that the chat session
+rebuild path also enforces tool restrictions.
 """
 
 import json
@@ -23,8 +23,8 @@ class TestToolConstants:
     def test_chat_tools_include_subagent(self):
         assert "subagent" in CHAT_BUILTIN_TOOLS
 
-    def test_analysis_tools_include_subagent(self):
-        assert "subagent" in ANALYSIS_BUILTIN_TOOLS
+    def test_analysis_tools_exclude_subagent(self):
+        assert "subagent" not in ANALYSIS_BUILTIN_TOOLS
 
     def test_chat_tools_no_bash(self):
         assert "bash" not in CHAT_BUILTIN_TOOLS
@@ -36,7 +36,7 @@ class TestToolConstants:
         from rootcoz.ai_client import _FS_BROWSE_TOOLS, RESOURCE_REPO_BROWSE_HINT
 
         assert CHAT_BUILTIN_TOOLS[:4] == _FS_BROWSE_TOOLS
-        assert ANALYSIS_BUILTIN_TOOLS[:4] == _FS_BROWSE_TOOLS
+        assert ANALYSIS_BUILTIN_TOOLS == _FS_BROWSE_TOOLS
         for tool in _FS_BROWSE_TOOLS:
             assert tool in RESOURCE_REPO_BROWSE_HINT
         assert "no shell" in RESOURCE_REPO_BROWSE_HINT
@@ -394,7 +394,8 @@ class TestResourcesAgentDiscovery:
         assert "STEP 0" in result or "Project agents" in result
         assert "my-analyzer" in result
         assert "my-helper" in result
-        assert "agentScope" in result
+        assert ".pi/agents/" in result
+        assert "subagent" not in result
 
     def test_agents_fallback_to_filename(self, tmp_path):
         """Without frontmatter, falls back to filename stem."""
@@ -444,7 +445,7 @@ class TestResourcesAgentDiscovery:
 class TestAgentGateSection:
     """Front-loaded STEP 0 gate for project agents."""
 
-    def test_gate_lists_agents_and_subagent_params(self, tmp_path):
+    def test_gate_lists_agents_for_read_not_subagent(self, tmp_path):
         from rootcoz.engine.core import (
             build_agent_gate_section,
             build_prompt_sections,
@@ -463,10 +464,11 @@ class TestAgentGateSection:
 
         gate = build_agent_gate_section(names)
         assert "STEP 0" in gate
+        assert "PROJECT AGENT CONTEXT" in gate
         assert "rootcoz-test-agent" in gate
-        assert 'agentScope="both"' in gate
-        assert "confirmProjectAgents=false" in gate
-        assert "do not have bash" in gate.lower() or "You do not have bash" in gate
+        assert ".pi/agents/" in gate
+        assert "subagent" not in gate
+        assert "agentScope" not in gate
 
         agent_gate, *_rest = build_prompt_sections(
             "",
@@ -479,6 +481,7 @@ class TestAgentGateSection:
         )
         assert "STEP 0" in agent_gate
         assert "rootcoz-test-agent" in agent_gate
+        assert "subagent" not in agent_gate
 
     def test_rootcoz_prompt_gate_requires_read_without_embedding(self, tmp_path):
         from rootcoz.engine.core import build_prompt_sections

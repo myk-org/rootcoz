@@ -155,6 +155,12 @@ export interface ChildJobAnalysis {
   failed_count?: number
 }
 
+export interface CrossFailurePattern {
+  pattern: string
+  affected_tests: string[]
+  suggested_root_cause: string
+}
+
 export interface AnalysisResult {
   job_id: string
   job_name: string
@@ -171,6 +177,7 @@ export interface AnalysisResult {
   token_usage?: TokenUsageSummary
   error?: string
   source_warnings?: string[]
+  cross_failure_patterns?: CrossFailurePattern[]
   progress_log?: Array<{ phase: string; timestamp: number }>
   progress_phase?: string
   request_params?: {

@@ -13,12 +13,17 @@ from pi_sidecar_client import AIResult
 from rootcoz.config import Settings, get_settings
 from rootcoz.engine.core import (
     JSON_RESPONSE_SCHEMA,
+    _build_cross_failure_prompt,
+    _parse_cross_failure_response,
     analyze_failure_group,
     build_resources_section,
     clone_additional_repos,
+    copy_builtin_agents_to_workspace,
     parse_json_response,
+    prepare_orchestrator_workspace,
     recover_from_details,
     resolve_additional_repos,
+    run_orchestrated_analysis,
     run_single_ai_analysis,
     write_failure_details_file,
     write_other_groups_file,
@@ -28,6 +33,7 @@ from rootcoz.models import (
     AiConfigEntry,
     AnalysisDetail,
     AnalyzeRequest,
+    CrossFailurePattern,
     FailedTest,
     FailureAnalysis,
 )
@@ -2409,3 +2415,325 @@ class TestExtractFailuresFromTestReport:
             failures[0].stack_trace
             == "tests/some_test.go:99\nActual value did not match expected"
         )
+
+
+# ---- Orchestrated Analysis Tests ----
+
+
+def test_copy_builtin_agents_to_workspace(tmp_path: Path) -> None:
+    """Built-in agents are copied to workspace .pi/agents/."""
+    copy_builtin_agents_to_workspace(tmp_path)
+    dest = tmp_path / ".pi" / "agents" / "test-analyzer.md"
+    assert dest.exists()
+    content = dest.read_text()
+    assert "name: test-analyzer" in content
+
+
+def test_copy_builtin_agents_does_not_overwrite_user_agents(tmp_path: Path) -> None:
+    """User agents in .pi/agents/ take precedence over built-in ones."""
+    user_agent = tmp_path / ".pi" / "agents" / "test-analyzer.md"
+    user_agent.parent.mkdir(parents=True)
+    user_agent.write_text("custom user agent")
+
+    copy_builtin_agents_to_workspace(tmp_path)
+
+    assert user_agent.read_text() == "custom user agent"
+
+
+def test_prepare_orchestrator_workspace(tmp_path: Path) -> None:
+    """Workspace files are created for all failure groups."""
+    f1 = FailedTest(test_name="test_a", error_message="err_a", stack_trace="trace_a")
+    f2 = FailedTest(test_name="test_b", error_message="err_b", stack_trace="trace_b")
+    sig1 = "sig_aaa"
+    sig2 = "sig_bbb"
+    groups = {sig1: [f1], sig2: [f2]}
+
+    result = prepare_orchestrator_workspace(groups, "console output", tmp_path)
+
+    assert sig1 in result
+    assert sig2 in result
+    assert result[sig1]["failure_details"].exists()
+    assert result[sig1]["console_output"].exists()
+    assert "cross_ref" in result[sig1]  # 2 groups → cross-ref written
+    assert result[sig2]["failure_details"].exists()
+
+
+def test_prepare_orchestrator_workspace_single_group_no_crossref(
+    tmp_path: Path,
+) -> None:
+    """Single group has no cross-reference file."""
+    f1 = FailedTest(test_name="test_a", error_message="err_a")
+    groups = {"sig_only": [f1]}
+
+    result = prepare_orchestrator_workspace(groups, "console", tmp_path)
+
+    assert "cross_ref" not in result["sig_only"]
+
+
+def test_prepare_orchestrator_workspace_no_console(tmp_path: Path) -> None:
+    """Empty console context means no console output file."""
+    f1 = FailedTest(test_name="test_a", error_message="err_a")
+    groups = {"sig_only": [f1]}
+
+    result = prepare_orchestrator_workspace(groups, "", tmp_path)
+
+    assert "console_output" not in result["sig_only"]
+
+
+def test_build_cross_failure_prompt_includes_group_results(tmp_path: Path) -> None:
+    """Cross-failure prompt points at workspace file with group results."""
+    results = [
+        (
+            "sig_1",
+            AnalysisDetail(
+                classification="INFRASTRUCTURE",
+                pattern="NEW",
+                affected_tests=["test_a"],
+                details="infra failure",
+            ),
+        ),
+        (
+            "sig_2",
+            AnalysisDetail(
+                classification="PRODUCT BUG",
+                pattern="REGRESSION",
+                affected_tests=["test_b"],
+                details="product bug",
+            ),
+        ),
+    ]
+
+    prompt = _build_cross_failure_prompt(results, tmp_path)
+
+    results_file = tmp_path / "group-analyses.txt"
+    assert results_file.is_file()
+    file_text = results_file.read_text()
+    assert "sig_1" in file_text
+    assert "sig_2" in file_text
+    assert "INFRASTRUCTURE" in file_text
+    assert "PRODUCT BUG" in file_text
+    assert "infra failure" in file_text
+    assert str(results_file) in prompt
+    assert "MANDATORY" in prompt
+    assert "INFRASTRUCTURE" not in prompt
+    assert "cross_failure_patterns" in prompt
+
+
+def test_parse_cross_failure_response_success() -> None:
+    """Valid cross-failure JSON parses into CrossFailurePattern list."""
+    response = json.dumps(
+        {
+            "cross_failure_patterns": [
+                {
+                    "pattern": "Both failures relate to NFS",
+                    "affected_tests": ["test_a", "test_b"],
+                    "suggested_root_cause": "NFS server down",
+                }
+            ]
+        }
+    )
+
+    patterns = _parse_cross_failure_response(response)
+
+    assert len(patterns) == 1
+    assert patterns[0].pattern == "Both failures relate to NFS"
+    assert patterns[0].suggested_root_cause == "NFS server down"
+
+
+def test_parse_cross_failure_response_invalid_json() -> None:
+    """Non-JSON cross-failure response returns empty list."""
+    assert _parse_cross_failure_response("not valid json at all") == []
+
+
+def test_parse_cross_failure_response_empty_patterns() -> None:
+    """Empty cross_failure_patterns returns empty list."""
+    response = json.dumps({"cross_failure_patterns": []})
+    assert _parse_cross_failure_response(response) == []
+
+
+def test_cross_failure_pattern_model() -> None:
+    """CrossFailurePattern model validates correctly."""
+    p = CrossFailurePattern(
+        pattern="NFS mount failures",
+        affected_tests=["test_a", "test_b"],
+        suggested_root_cause="NFS server unresponsive",
+    )
+    assert p.pattern == "NFS mount failures"
+    assert len(p.affected_tests) == 2
+
+    # Default values
+    p2 = CrossFailurePattern(pattern="minimal")
+    assert p2.affected_tests == []
+    assert p2.suggested_root_cause == ""
+
+
+def test_cross_failure_pattern_on_failure_analysis_result() -> None:
+    """FailureAnalysisResult includes cross_failure_patterns."""
+    from rootcoz.models import FailureAnalysisResult
+
+    # Default empty
+    r = FailureAnalysisResult(job_id="j1", status="completed", summary="s")
+    assert r.cross_failure_patterns == []
+
+    # With patterns
+    r2 = FailureAnalysisResult(
+        job_id="j2",
+        status="completed",
+        summary="s",
+        cross_failure_patterns=[
+            CrossFailurePattern(pattern="p", suggested_root_cause="rc")
+        ],
+    )
+    assert len(r2.cross_failure_patterns) == 1
+    dumped = r2.model_dump(mode="json")
+    assert "cross_failure_patterns" in dumped
+    assert dumped["cross_failure_patterns"][0]["pattern"] == "p"
+
+
+@pytest.mark.asyncio
+async def test_run_orchestrated_analysis_success(tmp_path: Path) -> None:
+    """run_orchestrated_analysis analyzes each group via per-group AI calls."""
+    f1 = FailedTest(test_name="test_a", error_message="err_a", stack_trace="trace_a")
+    groups = {"sig_1": [f1]}
+
+    ai_response = json.dumps(
+        {
+            "classification": "INFRASTRUCTURE",
+            "pattern": "NEW",
+            "affected_tests": ["test_a"],
+            "details": "cluster issue",
+        }
+    )
+
+    mock_result = AIResult(success=True, text=ai_response)
+    mock_result.record_usage = AsyncMock()
+
+    with patch(
+        "rootcoz.engine.core.call_ai_once",
+        new_callable=AsyncMock,
+        return_value=mock_result,
+    ):
+        analyses, patterns = await run_orchestrated_analysis(
+            groups=groups,
+            console_context="console output",
+            repo_path=tmp_path,
+            ai_provider="test",
+            ai_model="test-model",
+        )
+
+    assert len(analyses) == 1
+    assert analyses[0].analysis.classification == "INFRASTRUCTURE"
+    assert len(patterns) == 0
+
+
+@pytest.mark.asyncio
+async def test_run_orchestrated_analysis_ai_failure(tmp_path: Path) -> None:
+    """run_orchestrated_analysis keeps group result details on AI failure."""
+    f1 = FailedTest(test_name="test_a", error_message="err_a")
+    groups = {"sig_1": [f1]}
+
+    mock_result = AIResult(success=False, text="connection error")
+    mock_result.record_usage = AsyncMock()
+
+    with patch(
+        "rootcoz.engine.core.call_ai_once",
+        new_callable=AsyncMock,
+        return_value=mock_result,
+    ):
+        analyses, patterns = await run_orchestrated_analysis(
+            groups=groups,
+            console_context="console",
+            repo_path=tmp_path,
+            ai_provider="test",
+            ai_model="test-model",
+        )
+
+    assert len(analyses) == 1
+    assert "connection error" in analyses[0].analysis.details.lower()
+    assert len(patterns) == 0
+
+
+@pytest.mark.asyncio
+async def test_run_orchestrated_analysis_copies_builtin_agents(tmp_path: Path) -> None:
+    """run_orchestrated_analysis copies built-in agents to workspace."""
+    f1 = FailedTest(test_name="test_a", error_message="err_a")
+    groups = {"sig_1": [f1]}
+
+    mock_result = AIResult(
+        success=True,
+        text=json.dumps(
+            {
+                "classification": "INFRASTRUCTURE",
+                "details": "d",
+            }
+        ),
+    )
+    mock_result.record_usage = AsyncMock()
+
+    with patch(
+        "rootcoz.engine.core.call_ai_once",
+        new_callable=AsyncMock,
+        return_value=mock_result,
+    ):
+        await run_orchestrated_analysis(
+            groups=groups,
+            console_context="console",
+            repo_path=tmp_path,
+            ai_provider="test",
+            ai_model="test-model",
+        )
+
+    # Built-in agent should have been copied
+    assert (tmp_path / ".pi" / "agents" / "test-analyzer.md").exists()
+
+
+@pytest.mark.asyncio
+async def test_run_orchestrated_analysis_cross_failure_patterns(
+    tmp_path: Path,
+) -> None:
+    """Multi-group runs call cross-failure detection after per-group analysis."""
+    f1 = FailedTest(test_name="test_a", error_message="err_a")
+    f2 = FailedTest(test_name="test_b", error_message="err_b")
+    groups = {"sig_1": [f1], "sig_2": [f2]}
+
+    group_response = json.dumps(
+        {
+            "classification": "INFRASTRUCTURE",
+            "pattern": "NEW",
+            "affected_tests": ["test_a"],
+            "details": "infra",
+        }
+    )
+    cross_response = json.dumps(
+        {
+            "cross_failure_patterns": [
+                {
+                    "pattern": "Shared NFS outage",
+                    "affected_tests": ["test_a", "test_b"],
+                    "suggested_root_cause": "NFS down",
+                }
+            ]
+        }
+    )
+
+    group_result = AIResult(success=True, text=group_response)
+    group_result.record_usage = AsyncMock()
+    cross_result = AIResult(success=True, text=cross_response)
+    cross_result.record_usage = AsyncMock()
+
+    with patch(
+        "rootcoz.engine.core.call_ai_once",
+        new_callable=AsyncMock,
+        side_effect=[group_result, group_result, cross_result],
+    ):
+        analyses, patterns = await run_orchestrated_analysis(
+            groups=groups,
+            console_context="console",
+            repo_path=tmp_path,
+            ai_provider="test",
+            ai_model="test-model",
+        )
+
+    assert len(analyses) == 2
+    assert len(patterns) == 1
+    assert patterns[0].pattern == "Shared NFS outage"

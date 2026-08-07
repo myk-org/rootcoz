@@ -42,6 +42,7 @@ RESULT_FIELD_PATHS: frozenset[str] = frozenset(
         "result.child_job_analyses.passed_count",
         "result.child_job_analyses.skipped_count",
         "result.child_job_analyses.failed_count",
+        "result.cross_failure_patterns",
         "result.token_usage",
         "result.passed_count",
         "result.skipped_count",
