@@ -1,6 +1,6 @@
 [project]
 name = "rootcoz"
-version = "4.4.2"
+version = "4.4.3"
 description = "AI-powered root cause analysis for CI/CD test failures"
 license = {text = "Apache-2.0"}
 requires-python = ">=3.12"

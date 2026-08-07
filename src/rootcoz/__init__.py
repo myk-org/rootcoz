@@ -1,3 +1,3 @@
 """rootcoz - AI-powered Jenkins failure analysis."""
 
-__version__ = "4.4.2"
+__version__ = "4.4.3"
