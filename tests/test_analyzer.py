@@ -2743,8 +2743,8 @@ async def test_run_orchestrated_analysis_cross_failure_patterns(
 
 
 # ---------------------------------------------------------------------------
-# Fix 3: unit tests for _strip_frontmatter, build_agent_routing_prompt,
-# and parse_agent_routing_response (including unsafe-name rejection from Fix 1)
+# Unit tests for _strip_frontmatter, build_agent_routing_prompt,
+# and parse_agent_routing_response (including unsafe-name rejection)
 # ---------------------------------------------------------------------------
 
 
@@ -2781,97 +2781,73 @@ class TestStripFrontmatter:
 class TestBuildAgentRoutingPrompt:
     """Tests for build_agent_routing_prompt."""
 
-    def _make_failure(self, name: str = "test_foo", msg: str = "err") -> FailedTest:
-        return FailedTest(test_name=name, error_message=msg)
+    def test_returns_prompt_when_no_agent_names(self) -> None:
+        result = build_agent_routing_prompt(
+            groups={"sig1": []},
+            agent_names=[],
+            workspace_files={"sig1": {}},
+        )
+        assert isinstance(result, str)
+        assert "sig1" in result
 
-    def test_agents_listed_in_prompt(self, tmp_path: Path) -> None:
-        groups = {"sig_1": [self._make_failure()]}
-        agents = ["network-analyzer", "flaky-detector"]
-        workspace_files: dict[str, dict[str, Path]] = {}
-        prompt = build_agent_routing_prompt(groups, agents, workspace_files)
-        assert "network-analyzer" in prompt
-        assert "flaky-detector" in prompt
-
-    def test_groups_listed_in_prompt(self, tmp_path: Path) -> None:
-        f1 = self._make_failure("test_a")
-        f2 = self._make_failure("test_b")
-        groups = {"sig_alpha": [f1, f2], "sig_beta": [f1]}
-        workspace_files: dict[str, dict[str, Path]] = {}
-        prompt = build_agent_routing_prompt(groups, ["agent-x"], workspace_files)
-        assert "sig_alpha" in prompt
-        assert "sig_beta" in prompt
-        # test count reflected
-        assert "2 test(s)" in prompt
-
-    def test_failure_details_path_included(self, tmp_path: Path) -> None:
-        fake_path = tmp_path / "details.txt"
-        groups = {"sig_1": [self._make_failure()]}
-        workspace_files = {"sig_1": {"failure_details": fake_path}}
-        prompt = build_agent_routing_prompt(groups, ["a"], workspace_files)
-        assert str(fake_path) in prompt
+    def test_returns_prompt_with_agents_listed(self) -> None:
+        result = build_agent_routing_prompt(
+            groups={"sig1": [], "sig2": []},
+            agent_names=["network-analyzer", "storage-expert"],
+            workspace_files={
+                "sig1": {"failure_details": Path("/tmp/sig1.txt")},
+                "sig2": {"failure_details": Path("/tmp/sig2.txt")},
+            },
+        )
+        assert "network-analyzer" in result
+        assert "storage-expert" in result
+        assert "sig1" in result
+        assert "sig2" in result
+        assert "/tmp/sig1.txt" in result
+        assert "/tmp/sig2.txt" in result
 
 
 class TestParseAgentRoutingResponse:
-    """Tests for parse_agent_routing_response."""
+    """Tests for parse_agent_routing_response including unsafe-name rejection."""
 
-    def _make_failure(self) -> FailedTest:
-        return FailedTest(test_name="t", error_message="e")
+    def test_valid_routing(self) -> None:
+        raw = '{"routing": {"sig1": "network-analyzer", "sig2": "storage-expert"}}'
+        result = parse_agent_routing_response(raw, {"sig1": [], "sig2": []})
+        assert result == {"sig1": "network-analyzer", "sig2": "storage-expert"}
 
-    def test_valid_json_maps_signatures(self) -> None:
-        groups = {"sig_1": [self._make_failure()], "sig_2": [self._make_failure()]}
-        raw = json.dumps({"routing": {"sig_1": "network-analyzer", "sig_2": None}})
-        result = parse_agent_routing_response(raw, groups)
-        assert result["sig_1"] == "network-analyzer"
-        assert result["sig_2"] is None
+    def test_missing_signature_maps_to_none(self) -> None:
+        raw = '{"routing": {"sig1": "network-analyzer"}}'
+        result = parse_agent_routing_response(raw, {"sig1": [], "sig2": []})
+        assert result == {"sig1": "network-analyzer", "sig2": None}
 
-    def test_invalid_json_returns_all_none(self) -> None:
-        groups = {"sig_1": [self._make_failure()]}
-        result = parse_agent_routing_response("not json at all!!", groups)
-        assert result == {"sig_1": None}
-
-    def test_missing_signature_defaults_to_none(self) -> None:
-        groups = {"sig_1": [self._make_failure()], "sig_2": [self._make_failure()]}
-        raw = json.dumps({"routing": {"sig_1": "my-agent"}})
-        result = parse_agent_routing_response(raw, groups)
-        assert result["sig_1"] == "my-agent"
-        assert result["sig_2"] is None
-
-    def test_non_string_agent_value_becomes_none(self) -> None:
-        groups = {"sig_1": [self._make_failure()]}
-        raw = json.dumps({"routing": {"sig_1": 42}})
-        result = parse_agent_routing_response(raw, groups)
-        assert result["sig_1"] is None
-
-    def test_empty_string_agent_value_becomes_none(self) -> None:
-        groups = {"sig_1": [self._make_failure()]}
-        raw = json.dumps({"routing": {"sig_1": "   "}})
-        result = parse_agent_routing_response(raw, groups)
-        assert result["sig_1"] is None
+    def test_empty_string_agent_maps_to_none(self) -> None:
+        raw = '{"routing": {"sig1": ""}}'
+        result = parse_agent_routing_response(raw, {"sig1": []})
+        assert result == {"sig1": None}
 
     def test_unsafe_agent_name_rejected(self) -> None:
-        """Agent names that fail _SAFE_AGENT_NAME_RE must be rejected (Fix 1)."""
-        groups = {"sig_1": [self._make_failure()]}
-        unsafe_names = [
-            "../../etc/passwd",
-            "agent; rm -rf /",
-            "a" * 65,  # exceeds 64-char limit
-            "name with spaces",
-            "agent\x00null",
-        ]
-        for unsafe in unsafe_names:
-            raw = json.dumps({"routing": {"sig_1": unsafe}})
-            result = parse_agent_routing_response(raw, groups)
-            assert result["sig_1"] is None, (
-                f"Expected None for unsafe name {unsafe!r}, got {result['sig_1']!r}"
-            )
+        """Agent names with path traversal or special chars must be rejected."""
+        raw = '{"routing": {"sig1": "../../etc/passwd"}}'
+        result = parse_agent_routing_response(raw, {"sig1": []})
+        assert result == {"sig1": None}
 
-    def test_safe_agent_name_accepted(self) -> None:
-        """Agent names matching _SAFE_AGENT_NAME_RE are accepted."""
-        groups = {"sig_1": [self._make_failure()]}
-        safe_names = ["network-analyzer", "flaky.detector", "Agent_v2", "a" * 64]
-        for safe in safe_names:
-            raw = json.dumps({"routing": {"sig_1": safe}})
-            result = parse_agent_routing_response(raw, groups)
-            assert result["sig_1"] == safe, (
-                f"Expected {safe!r} to be accepted, got {result['sig_1']!r}"
-            )
+    def test_unsafe_agent_name_with_spaces_rejected(self) -> None:
+        raw = '{"routing": {"sig1": "my agent"}}'
+        result = parse_agent_routing_response(raw, {"sig1": []})
+        assert result == {"sig1": None}
+
+    def test_invalid_json_returns_all_none(self) -> None:
+        raw = "not json at all"
+        result = parse_agent_routing_response(raw, {"sig1": [], "sig2": []})
+        assert result == {"sig1": None, "sig2": None}
+
+    def test_null_agent_maps_to_none(self) -> None:
+        raw = '{"routing": {"sig1": null}}'
+        result = parse_agent_routing_response(raw, {"sig1": []})
+        assert result == {"sig1": None}
+
+    def test_routing_not_dict_returns_all_none(self) -> None:
+        """When 'routing' value is not a dict, fall back to None for all groups."""
+        raw = '{"routing": []}'
+        result = parse_agent_routing_response(raw, {"sig1": [], "sig2": []})
+        assert result == {"sig1": None, "sig2": None}

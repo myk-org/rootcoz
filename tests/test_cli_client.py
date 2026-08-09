@@ -1134,9 +1134,7 @@ class TestRootCozClientAnalyzeFile:
             return httpx.Response(202, json={"status": "queued", "job_id": "f-labels"})
 
         client = _make_client(handler)
-        result = client.analyze_file(
-            "<testsuites/>", labels=["Nightly", "CNV"]
-        )
+        result = client.analyze_file("<testsuites/>", labels=["Nightly", "CNV"])
         assert result["status"] == "queued"
 
     def test_analyze_file_minimal_body(self):
