@@ -2854,7 +2854,7 @@ class TestParseAgentRoutingResponse:
         unsafe_names = [
             "../../etc/passwd",
             "agent; rm -rf /",
-            "a" * 65,          # exceeds 64-char limit
+            "a" * 65,  # exceeds 64-char limit
             "name with spaces",
             "agent\x00null",
         ]

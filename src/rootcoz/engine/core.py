@@ -243,7 +243,7 @@ def _extract_agent_name(agent_file: Path) -> str | None:
 
 def _discover_agents_in_dir(
     agents_dir: Path,
-    exclude: frozenset[str] = frozenset(),
+    exclude: frozenset[str] | None = None,
 ) -> list[str]:
     """Return agent names discovered in *agents_dir*, skipping names in *exclude*.
 
@@ -251,6 +251,8 @@ def _discover_agents_in_dir(
     to the filename stem when it matches ``_SAFE_AGENT_NAME_RE``.  Files whose
     stem is unsafe are logged and skipped.
     """
+    if exclude is None:
+        exclude = frozenset()
     names: list[str] = []
     for agent_file in sorted(agents_dir.glob("*.md")):
         name = _extract_agent_name(agent_file)
