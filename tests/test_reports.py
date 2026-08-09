@@ -345,6 +345,21 @@ class TestReportOverrides:
             )
             assert result["total"] == 0
 
+    @pytest.mark.asyncio
+    async def test_exclude_tags_preserves_empty_job_name(self, populated_db: Path):
+        """exclude_tags must not drop overrides with empty job_name (top-level)."""
+        with patch.object(storage, "DB_PATH", populated_db):
+            result = await storage.get_report_classification_overrides(
+                exclude_tags=["nonexistent-tag"]
+            )
+            # The populated_db has a top-level override (job_name="") for test_foo.
+            # exclude_tags must not silently drop it.
+            assert result["total"] >= 1
+            test_foo = [d for d in result["details"] if d["test_name"] == "test_foo"]
+            assert len(test_foo) >= 1, (
+                "Top-level override (empty job_name) was dropped by exclude_tags"
+            )
+
 
 class TestReportIssues:
     @pytest.mark.asyncio

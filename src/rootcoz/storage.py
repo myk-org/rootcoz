@@ -219,6 +219,28 @@ async def _migrate_add_column(
         logger.debug(f"Migration: {table} already has {column} column")
 
 
+async def _ensure_migrations_table(db: aiosqlite.Connection) -> None:
+    """Create the ``_migrations_applied`` tracking table if it does not exist."""
+    await db.execute(
+        "CREATE TABLE IF NOT EXISTS _migrations_applied "
+        "(key TEXT PRIMARY KEY, applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)"
+    )
+
+
+async def _migration_applied(db: aiosqlite.Connection, key: str) -> bool:
+    """Return True if the migration *key* has already been applied."""
+    await _ensure_migrations_table(db)
+    cursor = await db.execute("SELECT 1 FROM _migrations_applied WHERE key = ?", (key,))
+    return await cursor.fetchone() is not None
+
+
+async def _mark_migration_applied(db: aiosqlite.Connection, key: str) -> None:
+    """Record that migration *key* has been applied."""
+    await db.execute(
+        "INSERT OR IGNORE INTO _migrations_applied (key) VALUES (?)", (key,)
+    )
+
+
 _ROLE_PRIORITY = {"viewer": 0, "reviewer": 1, "operator": 2, "admin": 3}
 
 # Tables that store a ``username`` column which must be lowercased during
@@ -939,10 +961,7 @@ async def init_db() -> None:
 
         # Backfill job_metadata_labels from existing job_metadata.labels JSON.
         # Tracked via _migrations_applied to avoid scanning on every startup.
-        await db.execute(
-            "CREATE TABLE IF NOT EXISTS _migrations_applied "
-            "(key TEXT PRIMARY KEY, applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)"
-        )
+        await _ensure_migrations_table(db)
         # Ensure legacy DBs (created before applied_at was added) get the column.
         await _migrate_add_column(
             db,
@@ -951,10 +970,7 @@ async def init_db() -> None:
             "TIMESTAMP DEFAULT CURRENT_TIMESTAMP",
         )
         _jml_key = "backfill_job_metadata_labels_v1"
-        cursor = await db.execute(
-            "SELECT 1 FROM _migrations_applied WHERE key = ?", (_jml_key,)
-        )
-        if not await cursor.fetchone():
+        if not await _migration_applied(db, _jml_key):
             await db.execute("""
                 INSERT OR IGNORE INTO job_metadata_labels (job_name, label)
                 SELECT jm.job_name, jt.value
@@ -964,10 +980,7 @@ async def init_db() -> None:
                      ) jt
                 WHERE jm.labels != '[]'
             """)
-            await db.execute(
-                "INSERT OR IGNORE INTO _migrations_applied (key) VALUES (?)",
-                (_jml_key,),
-            )
+            await _mark_migration_applied(db, _jml_key)
             logger.info(
                 "Migration: backfilled job_metadata_labels from job_metadata.labels"
             )
@@ -1151,14 +1164,7 @@ async def _migrate_restore_ai_classifications() -> None:
     """
     migration_key = "restore_ai_classifications_v1"
     async with _connect_db() as db:
-        await db.execute(
-            "CREATE TABLE IF NOT EXISTS _migrations_applied "
-            "(key TEXT PRIMARY KEY, applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)"
-        )
-        cursor = await db.execute(
-            "SELECT 1 FROM _migrations_applied WHERE key = ?", (migration_key,)
-        )
-        if await cursor.fetchone():
+        if await _migration_applied(db, migration_key):
             return  # Already applied
 
         cursor = await db.execute(
@@ -1171,10 +1177,7 @@ async def _migrate_restore_ai_classifications() -> None:
         needs_restore = (await cursor.fetchone())[0] > 0
 
         if not needs_restore:
-            await db.execute(
-                "INSERT OR IGNORE INTO _migrations_applied (key) VALUES (?)",
-                (migration_key,),
-            )
+            await _mark_migration_applied(db, migration_key)
             await db.commit()
             return
 
@@ -1199,10 +1202,7 @@ async def _migrate_restore_ai_classifications() -> None:
 
     if restored > 0:
         async with _connect_db() as db:
-            await db.execute(
-                "INSERT OR IGNORE INTO _migrations_applied (key) VALUES (?)",
-                (migration_key,),
-            )
+            await _mark_migration_applied(db, migration_key)
             await db.commit()
         logger.info("Migration: restored AI classifications for %d jobs", restored)
     else:
@@ -1241,14 +1241,7 @@ async def _migrate_backfill_pattern_axis() -> None:
     """
     migration_key = "backfill_pattern_axis_v1"
     async with _connect_db() as db:
-        await db.execute(
-            "CREATE TABLE IF NOT EXISTS _migrations_applied "
-            "(key TEXT PRIMARY KEY, applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)"
-        )
-        cursor = await db.execute(
-            "SELECT 1 FROM _migrations_applied WHERE key = ?", (migration_key,)
-        )
-        if await cursor.fetchone():
+        if await _migration_applied(db, migration_key):
             return  # Already applied
 
     logger.info("Migration: backfilling pattern axis in failure_history...")
@@ -1322,10 +1315,7 @@ async def _migrate_backfill_pattern_axis() -> None:
             f"WHERE classification IN ({pattern_placeholders}) AND pattern = ''"
         )
 
-        await db.execute(
-            "INSERT OR IGNORE INTO _migrations_applied (key) VALUES (?)",
-            (migration_key,),
-        )
+        await _mark_migration_applied(db, migration_key)
         await db.commit()
     logger.info("Migration: pattern axis backfill complete")
 
@@ -1345,14 +1335,7 @@ async def _migrate_recompute_normalized_signatures() -> None:
     """
     migration_key = "recompute_normalized_signatures_v1"
     async with _connect_db() as db:
-        await db.execute(
-            "CREATE TABLE IF NOT EXISTS _migrations_applied "
-            "(key TEXT PRIMARY KEY, applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)"
-        )
-        cursor = await db.execute(
-            "SELECT 1 FROM _migrations_applied WHERE key = ?", (migration_key,)
-        )
-        if await cursor.fetchone():
+        if await _migration_applied(db, migration_key):
             return
 
         logger.info(
@@ -1361,10 +1344,7 @@ async def _migrate_recompute_normalized_signatures() -> None:
         )
 
         await db.execute("DELETE FROM failure_history")
-        await db.execute(
-            "INSERT OR IGNORE INTO _migrations_applied (key) VALUES (?)",
-            (migration_key,),
-        )
+        await _mark_migration_applied(db, migration_key)
         await db.commit()
 
 
@@ -6244,14 +6224,12 @@ def _build_exclude_tags_filter(
     """Append tag-exclusion conditions in-place.
 
     Excludes jobs that have ANY of the specified tags (NOT IN semantics).
-    Empty ``job_name`` is excluded to match pre-denormalization NULL semantics
-    (``NULL NOT IN (...)`` is falsy).
+    Rows with empty ``job_name`` pass through — they have no label
+    associations and will never appear in the labels subquery.
     """
     if not exclude_tags:
         return
-    conditions.append(
-        f"({job_name_col} != '' AND {job_name_col} NOT IN ({_build_labels_subquery(exclude_tags)}))"
-    )
+    conditions.append(f"{job_name_col} NOT IN ({_build_labels_subquery(exclude_tags)})")
     params.extend(exclude_tags)
 
 
