@@ -253,6 +253,22 @@ async def _mark_migration_applied(db: aiosqlite.Connection, key: str) -> None:
     )
 
 
+async def _claim_migration(db: aiosqlite.Connection, key: str) -> bool:
+    """Atomically claim a migration key so only one process runs the backfill.
+
+    Uses INSERT OR IGNORE + changes() to serialize concurrent init_db() calls.
+    Returns True if this caller won the claim (should run the backfill),
+    False if another process already claimed/applied it.
+    """
+    await _ensure_migrations_table(db)
+    await db.execute(
+        "INSERT OR IGNORE INTO _migrations_applied (key) VALUES (?)", (key,)
+    )
+    cursor = await db.execute("SELECT changes()")
+    row = await cursor.fetchone()
+    return row is not None and row[0] == 1
+
+
 _ROLE_PRIORITY = {"viewer": 0, "reviewer": 1, "operator": 2, "admin": 3}
 
 # Tables that store a ``username`` column which must be lowercased during
@@ -694,10 +710,9 @@ async def init_db() -> None:
         await _migrate_add_column(db, "results", "build_id", "TEXT NOT NULL DEFAULT ''")
 
         # Backfill job_name/build_number/build_id from result_json.
-        # Gated via _migrations_applied so the expensive JSON-extract scan
-        # runs only once, not on every init_db() startup.
+        # Uses atomic claim so only one concurrent init_db() runs the scan.
         _results_denorm_key = "backfill_results_denorm_v1"
-        if not await _migration_applied(db, _results_denorm_key):
+        if await _claim_migration(db, _results_denorm_key):
             cursor = await db.execute("""
                 UPDATE results
                 SET job_name = COALESCE(json_extract(result_json, '$.job_name'), ''),
@@ -726,7 +741,6 @@ async def init_db() -> None:
                     "Migration: backfilled job_name/build_number/build_id on %d results row(s)",
                     cursor.rowcount,
                 )
-            await _mark_migration_applied(db, _results_denorm_key)
 
         await db.execute(
             "CREATE INDEX IF NOT EXISTS idx_results_status_created "
@@ -980,7 +994,7 @@ async def init_db() -> None:
         # Tracked via _migrations_applied to avoid scanning on every startup.
         await _ensure_migrations_table(db)
         _jml_key = "backfill_job_metadata_labels_v1"
-        if not await _migration_applied(db, _jml_key):
+        if await _claim_migration(db, _jml_key):
             await db.execute("""
                 INSERT OR IGNORE INTO job_metadata_labels (job_name, label)
                 SELECT jm.job_name, jt.value
@@ -990,7 +1004,6 @@ async def init_db() -> None:
                      ) jt
                 WHERE jm.labels != '[]'
             """)
-            await _mark_migration_applied(db, _jml_key)
             logger.info(
                 "Migration: backfilled job_metadata_labels from job_metadata.labels"
             )
