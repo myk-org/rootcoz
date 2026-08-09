@@ -40,8 +40,9 @@ jira_max_results = 50
 enable_jira = true
 # GitHub
 github_token = "ghp_your-github-token"
-# Metadata labels (comma-separated); merged into job_metadata.labels on analyze
-# metadata_labels = "Nightly,CNV"
+
+# Job metadata labels (comma-separated); merged into job_metadata.labels on analyze
+# labels = "Nightly,CNV"
 
 [servers.dev]
 url = "http://localhost:8000"

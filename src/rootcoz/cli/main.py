@@ -1497,9 +1497,9 @@ def analyze(
             raise typer.Exit(1)
 
     if label:
-        extras["metadata_labels"] = label
-    elif cfg and cfg.metadata_labels.strip():
-        extras["metadata_labels"] = _split_csv(cfg.metadata_labels)
+        extras["labels"] = label
+    elif cfg and cfg.labels.strip():
+        extras["labels"] = _split_csv(cfg.labels)
 
     # Strip Jenkins-specific fields for non-Jenkins sources
     if source in ("file", "prow"):
@@ -2210,7 +2210,7 @@ def mentions_mark_read_cmd(
     json_output: bool = _JSON_OPTION,
 ) -> None:
     """Mark specific mentions as read."""
-    raw_parts = [x.strip() for x in ids.split(",") if x.strip()]
+    raw_parts = _split_csv(ids)
     if not raw_parts:
         typer.echo("Error: --ids must contain at least one integer ID.", err=True)
         raise typer.Exit(1)
@@ -3795,12 +3795,8 @@ def reports_totals(
 ) -> None:
     """Show aggregate totals: jobs, failures, reviewed."""
     _set_json(json_output)
-    tag_list = [t.strip() for t in tags.split(",") if t.strip()] if tags else None
-    exclude_tag_list = (
-        [t.strip() for t in exclude_tags.split(",") if t.strip()]
-        if exclude_tags
-        else None
-    )
+    tag_list = _split_csv(tags) if tags else None
+    exclude_tag_list = _split_csv(exclude_tags) if exclude_tags else None
     client = _get_client()
     try:
         data = client.report_totals(
@@ -3860,12 +3856,8 @@ def reports_overrides(
 ) -> None:
     """Show classification overrides grouped by from->to."""
     _set_json(json_output)
-    tag_list = [t.strip() for t in tags.split(",") if t.strip()] if tags else None
-    exclude_tag_list = (
-        [t.strip() for t in exclude_tags.split(",") if t.strip()]
-        if exclude_tags
-        else None
-    )
+    tag_list = _split_csv(tags) if tags else None
+    exclude_tag_list = _split_csv(exclude_tags) if exclude_tags else None
     client = _get_client()
     try:
         data = client.report_classification_overrides(
@@ -3925,12 +3917,8 @@ def reports_issues(
 ) -> None:
     """Show GitHub/Jira issues created from analyses."""
     _set_json(json_output)
-    tag_list = [t.strip() for t in tags.split(",") if t.strip()] if tags else None
-    exclude_tag_list = (
-        [t.strip() for t in exclude_tags.split(",") if t.strip()]
-        if exclude_tags
-        else None
-    )
+    tag_list = _split_csv(tags) if tags else None
+    exclude_tag_list = _split_csv(exclude_tags) if exclude_tags else None
     client = _get_client()
     try:
         data = client.report_issues_created(

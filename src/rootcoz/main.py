@@ -98,6 +98,7 @@ from rootcoz.engine.core import (
     extract_json_dict,
     get_failure_signature,
     resolve_additional_repos,
+    resolve_agent_prompt,
     run_orchestrated_analysis,
     safe_update_progress,
     set_progress_callback,
@@ -914,7 +915,7 @@ _ANALYSIS_SETTINGS_FIELDS = (
     "github_token",
     "ai_call_timeout",
     "max_concurrent_ai_calls",
-    "metadata_labels",
+    "labels",
 )
 
 
@@ -938,6 +939,12 @@ def _copy_analysis_settings(
         and decrypted_params["additional_repos"] is not None
     ):
         unified_fields["additional_repos"] = decrypted_params["additional_repos"]
+
+    # Legacy fallback: old stored params may use metadata_labels instead of labels
+    if "labels" not in unified_fields and "metadata_labels" in decrypted_params:
+        val = decrypted_params["metadata_labels"]
+        if val is not None:
+            unified_fields["labels"] = val
 
 
 def _reconstruct_from_params(
@@ -993,7 +1000,7 @@ def _reconstruct_from_params(
         "peer_analysis_max_rounds": params.get("peer_analysis_max_rounds", 3),
         "additional_repos": params.get("additional_repos", None),
         "tests_repo_token": params.get("tests_repo_token", None),
-        "metadata_labels": params.get("metadata_labels", []),
+        "labels": params.get("labels", params.get("metadata_labels", [])),
     }
     for jenkins_field in (
         "jenkins_url",
@@ -2955,9 +2962,9 @@ def _apply_base_analysis_overrides(
     # Always persist peer_analysis_max_rounds so non-default values survive
     # re-analyze round-trips.
     params["peer_analysis_max_rounds"] = merged.peer_analysis_max_rounds
-    # Persist metadata_labels for resume/re-analyze round-trips
-    if body.metadata_labels:
-        params["metadata_labels"] = body.metadata_labels
+    # Persist labels for resume/re-analyze round-trips
+    if body.labels:
+        params["labels"] = body.labels
 
 
 def _stamp_reanalysis_metadata(
@@ -3248,15 +3255,18 @@ async def _run_per_group_analysis(
     auth_header: str,
     peer_ai_configs: list[Any] | None = None,
     peer_analysis_max_rounds: int = 3,
+    system_prompt: str = "",
 ) -> list[Any]:
     """Run per-group analysis with parallel execution.
 
-    Shared by the peer analysis path and the orchestrator fallback path.
-    Creates one ``analyze_failure_group`` coroutine per failure group and
-    runs them in parallel via ``run_parallel_with_limit``.
+    Used as the fallback path when ``run_orchestrated_analysis`` fails (e.g.
+    due to an exception in the orchestrator).  Creates one
+    ``analyze_failure_group`` coroutine per failure group and runs them in
+    parallel via ``run_parallel_with_limit``.
 
     Args:
         groups: Failure groups keyed by error signature.
+        system_prompt: Agent system prompt (e.g. test-analyzer body).
         Other args: Forwarded to ``analyze_failure_group``.
 
     Returns:
@@ -3280,6 +3290,7 @@ async def _run_per_group_analysis(
             max_concurrent_ai_calls=max_concurrent_ai_calls,
             auth_header=auth_header,
             all_groups=groups,
+            system_prompt=system_prompt,
         )
         for _sig, group_failures in groups.items()
     ]
@@ -3423,6 +3434,7 @@ async def _analyze_failures_or_exit(
         f"Starting AI analysis for {len(groups)} failure groups (provider={ai_provider}, model={ai_model})"
     )
 
+    agent_system_prompt = resolve_agent_prompt(repo_path)
     cross_failure_patterns: list[CrossFailurePattern] = []
 
     try:
@@ -3466,6 +3478,7 @@ async def _analyze_failures_or_exit(
                 additional_repos=cloned_repos or None,
                 max_concurrent_ai_calls=merged.max_concurrent_ai_calls,
                 auth_header=auth_header,
+                system_prompt=agent_system_prompt,
             )
         except Exception:
             logger.exception(
@@ -3531,7 +3544,7 @@ async def _process_ci_source_analysis(
     source: CISource | None = None  # set after source creation; used by cleanup
     source_result = None  # set after source.fetch(); used by _stamp_source_warnings
     metadata_job_name = display_name  # updated from source_result.identity after fetch
-    extra_labels = body.metadata_labels or None
+    extra_labels = body.labels or None
 
     try:
         logger.info(

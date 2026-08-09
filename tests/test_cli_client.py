@@ -227,14 +227,14 @@ class TestRootCozClientAnalyze:
         assert result["status"] == "queued"
         assert result["job_id"] == "new-job-1"
 
-    def test_analyze_with_metadata_labels(self):
+    def test_analyze_with_labels(self):
         def handler(request):
             body = json.loads(request.content)
-            assert body["metadata_labels"] == ["Nightly", "CNV"]
+            assert body["labels"] == ["Nightly", "CNV"]
             return httpx.Response(202, json={"status": "queued", "job_id": "ml-1"})
 
         client = _make_client(handler)
-        result = client.analyze("my-job", 1, metadata_labels=["Nightly", "CNV"])
+        result = client.analyze("my-job", 1, labels=["Nightly", "CNV"])
         assert result["status"] == "queued"
 
 
@@ -1125,17 +1125,17 @@ class TestRootCozClientAnalyzeFile:
         )
         assert result["status"] == "queued"
 
-    def test_analyze_file_with_metadata_labels(self):
+    def test_analyze_file_with_labels(self):
         def handler(request):
             body = json.loads(request.content)
             assert body["type"] == "file"
-            assert body["metadata_labels"] == ["Nightly", "CNV"]
+            assert body["labels"] == ["Nightly", "CNV"]
             assert "tags" not in body
             return httpx.Response(202, json={"status": "queued", "job_id": "f-labels"})
 
         client = _make_client(handler)
         result = client.analyze_file(
-            "<testsuites/>", metadata_labels=["Nightly", "CNV"]
+            "<testsuites/>", labels=["Nightly", "CNV"]
         )
         assert result["status"] == "queued"
 

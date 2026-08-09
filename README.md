@@ -72,6 +72,7 @@ Jobs can omit `gcs_prefix`; RootCoz auto-resolves it via prowjob.json or the Pro
 - **Public OpenAPI** — `/openapi.json`, `/docs`, and `/redoc` are available without authentication
 - **Sparse result fields** — `GET /results/{job_id}?fields=status,result.summary,...` returns only allowlisted paths (full values). Discover paths via `GET /api/results/fields` or `rootcoz results fields`
 - **Reports access flag** — Non-admins need `can_view_reports` (admin grant / `rootcoz admin users set-can-view-reports`) to call `/api/reports/*` and `rootcoz reports`
+- **Analyze-time labels** — Pass `--label` / `-l` on `rootcoz analyze` (or `labels` in the API / config.toml) to merge job metadata labels at submit time
 
 ## Custom Analysis Agents
 
@@ -81,8 +82,8 @@ rootcoz supports user-provided analysis agents that extend or customize the AI f
 
 1. Place agent `.md` files in `.rootcoz/agents/` in your analyzed repository
 2. When rootcoz clones the repo for analysis, it copies `.rootcoz/agents/` to the workspace `.pi/agents/`
-3. The AI orchestrator dispatches the built-in `test-analyzer` agent for each failure group via `subagent`
-4. Other project agents (non-`test-analyzer`) are called via the STEP 0 hard gate before analysis begins
+3. The AI orchestrator loads the built-in `test-analyzer` agent body as the `system_prompt` for per-group AI calls (read via the `read` tool, not dispatched as a subagent)
+4. Other project agents (non-`test-analyzer`) are read via the STEP 0 hard gate before analysis begins — the AI reads each agent file using the `read` tool to incorporate their guidance
 5. To override the built-in analyzer, name your agent `test-analyzer` — user agents take precedence
 
 ### Creating an Agent
@@ -198,6 +199,7 @@ export ROOTCOZ_SERVER=http://localhost:8000
 
 rootcoz health
 rootcoz analyze --job-name my-job --build-number 42
+rootcoz analyze --job-name my-job --build-number 42 --label Nightly -l CNV
 rootcoz analyze --source prow \
   --job-name periodic-ci-e2e-aws \
   --build-number 1234567890 \

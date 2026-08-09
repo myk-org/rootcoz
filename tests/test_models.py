@@ -25,6 +25,7 @@ from rootcoz.models import (
     PreviewIssueResponse,
     ProductBugReport,
     SimilarIssue,
+    UnifiedAnalyzeRequest,
 )
 
 
@@ -1050,6 +1051,21 @@ class TestAdditionalReposOnRequest:
     def test_additional_repos_empty_list(self) -> None:
         request = AnalyzeRequest(job_name="test", build_number=1, additional_repos=[])
         assert request.additional_repos == []
+
+
+class TestBaseAnalysisRequestLabels:
+    """Tests for labels field and legacy metadata_labels alias."""
+
+    def test_metadata_labels_alias_migrated(self) -> None:
+        """Legacy ``metadata_labels`` key is accepted and mapped to ``labels``."""
+        req = UnifiedAnalyzeRequest(
+            type="jenkins",
+            jenkins_url="http://j",
+            job_name="j",
+            build_number="1",
+            metadata_labels=["a", "b"],
+        )
+        assert req.labels == ["a", "b"]
 
 
 class TestBaseAnalysisRequestPeerFields:

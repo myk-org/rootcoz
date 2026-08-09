@@ -45,6 +45,8 @@ ai_model = "claude-sonnet-4-20250514"
 wait_for_completion = true
 poll_interval_minutes = 2
 max_wait_minutes = 0  # 0 = no limit (wait forever)
+# Job metadata labels (comma-separated); merged into job_metadata.labels on analyze
+# labels = "Nightly,CNV"
 
 [servers.dev]
 url = "http://localhost:8000"
@@ -54,6 +56,15 @@ url = "https://rootcoz.example.com"
 ```
 
 Priority: CLI flags / environment variables > config file.
+
+### Labels (`--label` / `-l`) vs tags (`--tag`)
+
+| Option | Purpose |
+|--------|---------|
+| `--label` / `-l` | Job metadata labels (also `labels` in config.toml / API). Merged into `job_metadata.labels`. |
+| `--tag` | Analysis-run categorization tags on the analyze request (not job metadata). |
+
+**Merge semantics:** labels from CLI/config/API are appended and deduplicated into `job_metadata.labels`. They never replace rule-assigned labels.
 
 ## Workflow
 

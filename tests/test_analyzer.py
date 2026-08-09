@@ -15,10 +15,13 @@ from rootcoz.engine.core import (
     JSON_RESPONSE_SCHEMA,
     _build_cross_failure_prompt,
     _parse_cross_failure_response,
+    _strip_frontmatter,
     analyze_failure_group,
+    build_agent_routing_prompt,
     build_resources_section,
     clone_additional_repos,
     copy_builtin_agents_to_workspace,
+    parse_agent_routing_response,
     parse_json_response,
     prepare_orchestrator_workspace,
     recover_from_details,
@@ -2737,3 +2740,138 @@ async def test_run_orchestrated_analysis_cross_failure_patterns(
     assert len(analyses) == 2
     assert len(patterns) == 1
     assert patterns[0].pattern == "Shared NFS outage"
+
+
+# ---------------------------------------------------------------------------
+# Fix 3: unit tests for _strip_frontmatter, build_agent_routing_prompt,
+# and parse_agent_routing_response (including unsafe-name rejection from Fix 1)
+# ---------------------------------------------------------------------------
+
+
+class TestStripFrontmatter:
+    """Tests for the _strip_frontmatter pure helper."""
+
+    def test_no_frontmatter_returns_text_unchanged(self) -> None:
+        text = "Just plain content\nwith multiple lines."
+        assert _strip_frontmatter(text) == text
+
+    def test_missing_closing_delimiter_returns_original(self) -> None:
+        """If the opening --- has no matching closing ---, return original."""
+        text = "---\nname: foo\ndescription: bar\n"
+        assert _strip_frontmatter(text) == text
+
+    def test_body_with_embedded_dashes_is_preserved(self) -> None:
+        """--- appearing inside body content should not be treated as frontmatter."""
+        text = "---\nname: agent\n---\nBody text\n---\nMore body\n"
+        result = _strip_frontmatter(text)
+        assert result == "Body text\n---\nMore body\n"
+
+    def test_normal_frontmatter_stripped(self) -> None:
+        text = "---\nname: my-agent\ndescription: test\n---\nActual content here."
+        assert _strip_frontmatter(text) == "Actual content here."
+
+    def test_empty_body_after_frontmatter(self) -> None:
+        text = "---\nname: x\n---\n"
+        assert _strip_frontmatter(text) == ""
+
+    def test_empty_string_returned_unchanged(self) -> None:
+        assert _strip_frontmatter("") == ""
+
+
+class TestBuildAgentRoutingPrompt:
+    """Tests for build_agent_routing_prompt."""
+
+    def _make_failure(self, name: str = "test_foo", msg: str = "err") -> FailedTest:
+        return FailedTest(test_name=name, error_message=msg)
+
+    def test_agents_listed_in_prompt(self, tmp_path: Path) -> None:
+        groups = {"sig_1": [self._make_failure()]}
+        agents = ["network-analyzer", "flaky-detector"]
+        workspace_files: dict[str, dict[str, Path]] = {}
+        prompt = build_agent_routing_prompt(groups, agents, workspace_files)
+        assert "network-analyzer" in prompt
+        assert "flaky-detector" in prompt
+
+    def test_groups_listed_in_prompt(self, tmp_path: Path) -> None:
+        f1 = self._make_failure("test_a")
+        f2 = self._make_failure("test_b")
+        groups = {"sig_alpha": [f1, f2], "sig_beta": [f1]}
+        workspace_files: dict[str, dict[str, Path]] = {}
+        prompt = build_agent_routing_prompt(groups, ["agent-x"], workspace_files)
+        assert "sig_alpha" in prompt
+        assert "sig_beta" in prompt
+        # test count reflected
+        assert "2 test(s)" in prompt
+
+    def test_failure_details_path_included(self, tmp_path: Path) -> None:
+        fake_path = tmp_path / "details.txt"
+        groups = {"sig_1": [self._make_failure()]}
+        workspace_files = {"sig_1": {"failure_details": fake_path}}
+        prompt = build_agent_routing_prompt(groups, ["a"], workspace_files)
+        assert str(fake_path) in prompt
+
+
+class TestParseAgentRoutingResponse:
+    """Tests for parse_agent_routing_response."""
+
+    def _make_failure(self) -> FailedTest:
+        return FailedTest(test_name="t", error_message="e")
+
+    def test_valid_json_maps_signatures(self) -> None:
+        groups = {"sig_1": [self._make_failure()], "sig_2": [self._make_failure()]}
+        raw = json.dumps({"routing": {"sig_1": "network-analyzer", "sig_2": None}})
+        result = parse_agent_routing_response(raw, groups)
+        assert result["sig_1"] == "network-analyzer"
+        assert result["sig_2"] is None
+
+    def test_invalid_json_returns_all_none(self) -> None:
+        groups = {"sig_1": [self._make_failure()]}
+        result = parse_agent_routing_response("not json at all!!", groups)
+        assert result == {"sig_1": None}
+
+    def test_missing_signature_defaults_to_none(self) -> None:
+        groups = {"sig_1": [self._make_failure()], "sig_2": [self._make_failure()]}
+        raw = json.dumps({"routing": {"sig_1": "my-agent"}})
+        result = parse_agent_routing_response(raw, groups)
+        assert result["sig_1"] == "my-agent"
+        assert result["sig_2"] is None
+
+    def test_non_string_agent_value_becomes_none(self) -> None:
+        groups = {"sig_1": [self._make_failure()]}
+        raw = json.dumps({"routing": {"sig_1": 42}})
+        result = parse_agent_routing_response(raw, groups)
+        assert result["sig_1"] is None
+
+    def test_empty_string_agent_value_becomes_none(self) -> None:
+        groups = {"sig_1": [self._make_failure()]}
+        raw = json.dumps({"routing": {"sig_1": "   "}})
+        result = parse_agent_routing_response(raw, groups)
+        assert result["sig_1"] is None
+
+    def test_unsafe_agent_name_rejected(self) -> None:
+        """Agent names that fail _SAFE_AGENT_NAME_RE must be rejected (Fix 1)."""
+        groups = {"sig_1": [self._make_failure()]}
+        unsafe_names = [
+            "../../etc/passwd",
+            "agent; rm -rf /",
+            "a" * 65,          # exceeds 64-char limit
+            "name with spaces",
+            "agent\x00null",
+        ]
+        for unsafe in unsafe_names:
+            raw = json.dumps({"routing": {"sig_1": unsafe}})
+            result = parse_agent_routing_response(raw, groups)
+            assert result["sig_1"] is None, (
+                f"Expected None for unsafe name {unsafe!r}, got {result['sig_1']!r}"
+            )
+
+    def test_safe_agent_name_accepted(self) -> None:
+        """Agent names matching _SAFE_AGENT_NAME_RE are accepted."""
+        groups = {"sig_1": [self._make_failure()]}
+        safe_names = ["network-analyzer", "flaky.detector", "Agent_v2", "a" * 64]
+        for safe in safe_names:
+            raw = json.dumps({"routing": {"sig_1": safe}})
+            result = parse_agent_routing_response(raw, groups)
+            assert result["sig_1"] == safe, (
+                f"Expected {safe!r} to be accepted, got {result['sig_1']!r}"
+            )

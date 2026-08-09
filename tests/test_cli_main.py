@@ -2448,24 +2448,24 @@ class TestAnalyzeConfigDefaults:
         kwargs = client.analyze.call_args[1]
         assert kwargs["max_wait_minutes"] == 90
 
-    def test_config_metadata_labels_used_as_default(self):
-        """metadata_labels from config are sent when --label is absent."""
+    def test_config_labels_used_as_default(self):
+        """labels from config are sent when --label is absent."""
         cfg = ServerConfig(
             url="http://localhost:8000",
-            metadata_labels="Nightly,CNV",
+            labels="Nightly,CNV",
         )
         result, client = self._invoke_analyze(
             ["analyze", "--job-name", "my-job", "--build-number", "1"], cfg=cfg
         )
         assert result.exit_code == 0
         kwargs = client.analyze.call_args[1]
-        assert kwargs["metadata_labels"] == ["Nightly", "CNV"]
+        assert kwargs["labels"] == ["Nightly", "CNV"]
 
-    def test_cli_label_overrides_config_metadata_labels(self):
-        """CLI --label replaces config metadata_labels (does not merge)."""
+    def test_cli_label_overrides_config_labels(self):
+        """CLI --label replaces config labels (does not merge)."""
         cfg = ServerConfig(
             url="http://localhost:8000",
-            metadata_labels="Nightly,CNV",
+            labels="Nightly,CNV",
         )
         result, client = self._invoke_analyze(
             [
@@ -2481,7 +2481,7 @@ class TestAnalyzeConfigDefaults:
         )
         assert result.exit_code == 0
         kwargs = client.analyze.call_args[1]
-        assert kwargs["metadata_labels"] == ["OnlyCLI"]
+        assert kwargs["labels"] == ["OnlyCLI"]
 
 
 class TestAnalyzePeerFlags:
@@ -3019,7 +3019,7 @@ class TestAnalyzeProwCommand:
         )
         assert result.exit_code == 0
         call_kwargs = mock_client.analyze.call_args[1]
-        assert call_kwargs.get("metadata_labels") == ["Nightly", "CNV"]
+        assert call_kwargs.get("labels") == ["Nightly", "CNV"]
         assert "regression" in call_kwargs.get("tags", [])
 
     def test_analyze_prow_missing_job_name(self, mock_client):

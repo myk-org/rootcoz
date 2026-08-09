@@ -87,9 +87,9 @@ def _normalize_tags_list(tags: object) -> list[str]:
     )
 
 
-def _normalize_metadata_labels(labels: object) -> list[str]:
+def _normalize_labels(labels: object) -> list[str]:
     """Strip, deduplicate, remove blanks; preserve case (job-side labels)."""
-    return _normalize_string_list(labels, field_name="metadata_labels")
+    return _normalize_string_list(labels, field_name="labels")
 
 
 AiProviderName = Literal[
@@ -263,13 +263,21 @@ class BaseAnalysisRequest(BaseModel):
             "Omit to inherit the server default; send [] to disable."
         ),
     )
-    metadata_labels: list[str] = Field(
+    labels: list[str] = Field(
         default_factory=list,
         description=(
             "Job-side metadata labels to merge into job_metadata.labels "
             "(appended and deduplicated; does not replace rule-assigned labels)."
         ),
     )
+
+    @model_validator(mode="before")
+    @classmethod
+    def _migrate_metadata_labels(cls, data: Any) -> Any:
+        """Accept legacy ``metadata_labels`` as alias for ``labels``."""
+        if isinstance(data, dict) and "metadata_labels" in data:
+            data.setdefault("labels", data.pop("metadata_labels"))
+        return data
 
     @field_validator("tests_repo_token")
     @classmethod
@@ -279,10 +287,10 @@ class BaseAnalysisRequest(BaseModel):
         stripped = v.strip()
         return stripped or None
 
-    @field_validator("metadata_labels", mode="before")
+    @field_validator("labels", mode="before")
     @classmethod
-    def _normalize_metadata_labels_field(cls, v: object) -> list[str]:
-        return _normalize_metadata_labels(v)
+    def _normalize_labels_field(cls, v: object) -> list[str]:
+        return _normalize_labels(v)
 
     @field_validator("additional_repos")
     @classmethod

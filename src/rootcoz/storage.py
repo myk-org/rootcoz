@@ -5062,12 +5062,16 @@ async def auto_assign_job_metadata(
 
     Called when a new analysis result is stored.
 
-    - Without ``extra_labels``: if the job already has metadata, this is a no-op
-      (manual metadata takes precedence for team/tier/version). If no metadata
-      exists, rules are applied when they match.
-    - With ``extra_labels``: labels are appended (deduplicated) whether or not
-      metadata already exists. Existing team/tier/version are preserved. When
-      no metadata exists and no rule matches, a labels-only row is created.
+    - When a metadata row already exists and ``extra_labels`` is empty: NULL
+      scalar fields (team/tier/version) are filled from matching rules
+      (non-NULL existing values are preserved). Rule labels are merged into
+      existing labels. Returns None only if nothing actually changed.
+    - When a metadata row already exists and ``extra_labels`` is present:
+      NULL scalar fields are filled from matching rules the same way, and
+      labels are merged from existing + rule labels + extras. Returns None
+      only if the resulting row is identical to the existing one.
+    - When no metadata exists: rules are applied when they match. With
+      extras and no rule match, a labels-only row is created.
 
     All write paths use ``BEGIN IMMEDIATE`` so concurrent analyses of the
     same job cannot overwrite each other's labels.
@@ -5113,42 +5117,31 @@ async def auto_assign_job_metadata(
 
             if row is not None:
                 existing = _job_metadata_row_to_dict(row)
-                if not extras:
-                    if matched is None:
-                        # No extras, no rule match — true no-op.
-                        await db.rollback()
-                        logger.debug(
-                            f"auto_assign_job_metadata: job '{job_name}' already has "
-                            "metadata, skipping"
-                        )
-                        return None
-                    # Fill missing scalar fields from rules (manual values take precedence).
+                existing_labels = list(existing.get("labels") or [])
+                if matched is not None:
+                    # Fill NULL scalars from rules; preserve non-NULL existing values.
                     team = existing.get("team") or matched.get("team")
                     tier = existing.get("tier") or matched.get("tier")
                     version = existing.get("version") or matched.get("version")
-                    existing_labels = list(existing.get("labels") or [])
                     merged_labels = merge_labels(
                         existing_labels,
                         list(matched.get("labels", [])),
+                        extras,
                     )
-                    # Check if anything actually changed.
-                    if (
-                        team == existing.get("team")
-                        and tier == existing.get("tier")
-                        and version == existing.get("version")
-                        and merged_labels == existing_labels
-                    ):
-                        await db.rollback()
-                        return None
                 else:
-                    existing_labels = list(existing.get("labels") or [])
-                    merged_labels = merge_labels(existing_labels, extras)
-                    if merged_labels == existing_labels:
-                        await db.rollback()
-                        return None
+                    # No rule match — only merge extras into labels.
                     team = existing.get("team")
                     tier = existing.get("tier")
                     version = existing.get("version")
+                    merged_labels = merge_labels(existing_labels, extras)
+                if (
+                    team == existing.get("team")
+                    and tier == existing.get("tier")
+                    and version == existing.get("version")
+                    and merged_labels == existing_labels
+                ):
+                    await db.rollback()
+                    return None
             else:
                 # No existing metadata — use rule match if available.
                 team = matched.get("team") if matched else None

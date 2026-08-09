@@ -733,34 +733,58 @@ class TestServerConfigAdditionalRepos:
 
 
 class TestServerConfigMetadataLabels:
-    """Tests for metadata_labels field on ServerConfig."""
+    """Tests for labels field on ServerConfig."""
 
-    def test_metadata_labels_default_empty(self) -> None:
+    def test_labels_default_empty(self) -> None:
         cfg = ServerConfig(url="http://test")
-        assert cfg.metadata_labels == ""
+        assert cfg.labels == ""
 
-    def test_metadata_labels_from_toml(self, tmp_path: Path) -> None:
+    def test_labels_from_toml(self, tmp_path: Path) -> None:
         cfg_path = tmp_path / "config.toml"
         cfg_path.write_text(
             '[default]\nserver = "a"\n\n'
             "[servers.a]\n"
             'url = "http://a"\n'
-            'metadata_labels = "Nightly,CNV"\n'
+            'labels = "Nightly,CNV"\n'
         )
         config = load_config(cfg_path)
         cfg = get_server_config("a", config)
         assert cfg is not None
-        assert cfg.metadata_labels == "Nightly,CNV"
+        assert cfg.labels == "Nightly,CNV"
 
-    def test_metadata_labels_from_dict(self) -> None:
-        data = {"url": "http://test", "metadata_labels": "Nightly,CNV"}
+    def test_labels_from_dict(self) -> None:
+        data = {"url": "http://test", "labels": "Nightly,CNV"}
         cfg = _server_config_from_dict(data)
-        assert cfg.metadata_labels == "Nightly,CNV"
+        assert cfg.labels == "Nightly,CNV"
 
-    def test_metadata_labels_non_string_raises(self) -> None:
-        data = {"url": "http://test", "metadata_labels": ["Nightly"]}
-        with pytest.raises(TypeError, match=r"metadata_labels.*must be a string"):
+    def test_labels_non_string_raises(self) -> None:
+        data = {"url": "http://test", "labels": ["Nightly"]}
+        with pytest.raises(TypeError, match=r"labels.*must be a string"):
             _server_config_from_dict(data)
+
+    def test_legacy_metadata_labels_key_read(self, tmp_path: Path) -> None:
+        """Old config files with metadata_labels key still work."""
+        cfg_path = tmp_path / "config.toml"
+        cfg_path.write_text(
+            '[default]\nserver = "test"\n\n'
+            "[servers.test]\n"
+            'url = "http://test"\n'
+            'metadata_labels = "Nightly,CNV"\n'
+        )
+        config = load_config(cfg_path)
+        cfg = get_server_config("test", config)
+        assert cfg is not None
+        assert cfg.labels == "Nightly,CNV"
+
+    def test_empty_labels_does_not_fall_back_to_metadata_labels(self) -> None:
+        """Explicit empty labels must not fall back to metadata_labels."""
+        data = {
+            "url": "http://test",
+            "labels": "",
+            "metadata_labels": "Nightly,CNV",
+        }
+        cfg = _server_config_from_dict(data)
+        assert cfg.labels == ""
 
 
 class TestServerConfigFromDictTypeValidation:
