@@ -220,11 +220,23 @@ async def _migrate_add_column(
 
 
 async def _ensure_migrations_table(db: aiosqlite.Connection) -> None:
-    """Create the ``_migrations_applied`` tracking table if it does not exist."""
+    """Create the ``_migrations_applied`` tracking table if it does not exist.
+
+    Also handles legacy DBs that created the table without ``applied_at``
+    by adding the column when missing.
+    """
     await db.execute(
         "CREATE TABLE IF NOT EXISTS _migrations_applied "
         "(key TEXT PRIMARY KEY, applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)"
     )
+    # Legacy DBs may have the table without the applied_at column.
+    # Use a plain DEFAULT (no CURRENT_TIMESTAMP) for ALTER TABLE compatibility.
+    cursor = await db.execute("PRAGMA table_info(_migrations_applied)")
+    columns = {row[1] for row in await cursor.fetchall()}
+    if "applied_at" not in columns:
+        await db.execute(
+            "ALTER TABLE _migrations_applied ADD COLUMN applied_at TIMESTAMP"
+        )
 
 
 async def _migration_applied(db: aiosqlite.Connection, key: str) -> bool:
@@ -681,35 +693,40 @@ async def init_db() -> None:
         )
         await _migrate_add_column(db, "results", "build_id", "TEXT NOT NULL DEFAULT ''")
 
-        # Backfill job_name/build_number/build_id from result_json
-        cursor = await db.execute("""
-            UPDATE results
-            SET job_name = COALESCE(json_extract(result_json, '$.job_name'), ''),
-                build_number = CASE
-                    WHEN json_type(result_json, '$.build_number') = 'integer'
-                         AND json_extract(result_json, '$.build_number') >= 0
-                         AND json_extract(result_json, '$.build_number') <= 9223372036854775807
-                    THEN json_extract(result_json, '$.build_number')
-                    WHEN json_type(result_json, '$.build_number') = 'text'
-                         AND json_extract(result_json, '$.build_number') NOT GLOB '*[^0-9]*'
-                         AND json_extract(result_json, '$.build_number') != ''
-                         AND (
-                             ltrim(json_extract(result_json, '$.build_number'), '0') = ''
-                             OR length(ltrim(json_extract(result_json, '$.build_number'), '0')) < 19
-                             OR (length(ltrim(json_extract(result_json, '$.build_number'), '0')) = 19
-                                 AND ltrim(json_extract(result_json, '$.build_number'), '0') <= '9223372036854775807')
-                         )
-                    THEN CAST(json_extract(result_json, '$.build_number') AS INTEGER)
-                    ELSE 0
-                END,
-                build_id = COALESCE(CAST(json_extract(result_json, '$.build_id') AS TEXT), '')
-            WHERE result_json IS NOT NULL AND json_valid(result_json) AND job_name = ''
-        """)
-        if cursor.rowcount:
-            logger.info(
-                "Migration: backfilled job_name/build_number/build_id on %d results row(s)",
-                cursor.rowcount,
-            )
+        # Backfill job_name/build_number/build_id from result_json.
+        # Gated via _migrations_applied so the expensive JSON-extract scan
+        # runs only once, not on every init_db() startup.
+        _results_denorm_key = "backfill_results_denorm_v1"
+        if not await _migration_applied(db, _results_denorm_key):
+            cursor = await db.execute("""
+                UPDATE results
+                SET job_name = COALESCE(json_extract(result_json, '$.job_name'), ''),
+                    build_number = CASE
+                        WHEN json_type(result_json, '$.build_number') = 'integer'
+                             AND json_extract(result_json, '$.build_number') >= 0
+                             AND json_extract(result_json, '$.build_number') <= 9223372036854775807
+                        THEN json_extract(result_json, '$.build_number')
+                        WHEN json_type(result_json, '$.build_number') = 'text'
+                             AND json_extract(result_json, '$.build_number') NOT GLOB '*[^0-9]*'
+                             AND json_extract(result_json, '$.build_number') != ''
+                             AND (
+                                 ltrim(json_extract(result_json, '$.build_number'), '0') = ''
+                                 OR length(ltrim(json_extract(result_json, '$.build_number'), '0')) < 19
+                                 OR (length(ltrim(json_extract(result_json, '$.build_number'), '0')) = 19
+                                     AND ltrim(json_extract(result_json, '$.build_number'), '0') <= '9223372036854775807')
+                             )
+                        THEN CAST(json_extract(result_json, '$.build_number') AS INTEGER)
+                        ELSE 0
+                    END,
+                    build_id = COALESCE(CAST(json_extract(result_json, '$.build_id') AS TEXT), '')
+                WHERE result_json IS NOT NULL AND json_valid(result_json) AND job_name = ''
+            """)
+            if cursor.rowcount:
+                logger.info(
+                    "Migration: backfilled job_name/build_number/build_id on %d results row(s)",
+                    cursor.rowcount,
+                )
+            await _mark_migration_applied(db, _results_denorm_key)
 
         await db.execute(
             "CREATE INDEX IF NOT EXISTS idx_results_status_created "
@@ -962,13 +979,6 @@ async def init_db() -> None:
         # Backfill job_metadata_labels from existing job_metadata.labels JSON.
         # Tracked via _migrations_applied to avoid scanning on every startup.
         await _ensure_migrations_table(db)
-        # Ensure legacy DBs (created before applied_at was added) get the column.
-        await _migrate_add_column(
-            db,
-            "_migrations_applied",
-            "applied_at",
-            "TIMESTAMP DEFAULT CURRENT_TIMESTAMP",
-        )
         _jml_key = "backfill_job_metadata_labels_v1"
         if not await _migration_applied(db, _jml_key):
             await db.execute("""
