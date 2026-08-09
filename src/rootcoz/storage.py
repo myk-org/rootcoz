@@ -991,8 +991,7 @@ async def init_db() -> None:
         )
 
         # Backfill job_metadata_labels from existing job_metadata.labels JSON.
-        # Tracked via _migrations_applied to avoid scanning on every startup.
-        await _ensure_migrations_table(db)
+        # Uses atomic claim so only one concurrent init_db() runs the scan.
         _jml_key = "backfill_job_metadata_labels_v1"
         if await _claim_migration(db, _jml_key):
             await db.execute("""
