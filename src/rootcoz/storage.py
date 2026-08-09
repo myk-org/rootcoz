@@ -6128,8 +6128,6 @@ def _normalize_report_datetime(value: str) -> str:
     result as ``YYYY-MM-DD HH:MM:SS`` to match SQLite's
     ``CURRENT_TIMESTAMP`` format.
     """
-    from datetime import datetime
-
     stripped = value.strip()
     try:
         dt = datetime.fromisoformat(stripped)
