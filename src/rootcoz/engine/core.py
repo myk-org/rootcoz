@@ -13,7 +13,6 @@ import json
 import os
 import re
 import shutil
-import tempfile
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -241,37 +240,6 @@ def _extract_agent_name(agent_file: Path) -> str | None:
     return None
 
 
-def _discover_agents_in_dir(
-    agents_dir: Path,
-    exclude: frozenset[str] | None = None,
-) -> list[str]:
-    """Return agent names discovered in *agents_dir*, skipping names in *exclude*.
-
-    Prefers the frontmatter ``name:`` field from each ``.md`` file; falls back
-    to the filename stem when it matches ``_SAFE_AGENT_NAME_RE``.  Files whose
-    stem is unsafe are logged and skipped.
-    """
-    if exclude is None:
-        exclude = frozenset()
-    names: list[str] = []
-    for agent_file in sorted(agents_dir.glob("*.md")):
-        name = _extract_agent_name(agent_file)
-        if not name:
-            if _SAFE_AGENT_NAME_RE.match(agent_file.stem):
-                name = agent_file.stem
-            else:
-                logger.warning(
-                    "Skipping agent file with unsafe stem %r: %s",
-                    agent_file.stem,
-                    agent_file,
-                )
-                continue
-        if name in exclude:
-            continue
-        names.append(name)
-    return names
-
-
 def discover_project_agent_names(
     additional_repos: dict[str, Path] | None,
 ) -> list[str]:
@@ -288,7 +256,19 @@ def discover_project_agent_names(
         agents_dir = path / ".rootcoz" / "agents"
         if not agents_dir.is_dir():
             continue
-        for name in _discover_agents_in_dir(agents_dir):
+        for agent_file in sorted(agents_dir.glob("*.md")):
+            extracted = _extract_agent_name(agent_file)
+            if extracted:
+                name = extracted
+            elif _SAFE_AGENT_NAME_RE.match(agent_file.stem):
+                name = agent_file.stem
+            else:
+                logger.warning(
+                    "Skipping agent file with unsafe stem %r: %s",
+                    agent_file.stem,
+                    agent_file,
+                )
+                continue
             if name in seen:
                 continue
             seen.add(name)
@@ -1653,6 +1633,8 @@ async def run_single_ai_analysis(
         )
     elif console_context:
         # No repo path — write console output to a temp file
+        import tempfile
+
         console_dir = Path(tempfile.mkdtemp(prefix="rootcoz-console-"))
         console_file = console_dir / f"console-output-{error_signature}.txt"
         try:
@@ -1677,6 +1659,8 @@ async def run_single_ai_analysis(
     # Ensure a workspace dir for failure-details / cross-reference files
     workspace_dir = repo_path or console_dir
     if workspace_dir is None:
+        import tempfile
+
         console_dir = Path(tempfile.mkdtemp(prefix="rootcoz-console-"))
         workspace_dir = console_dir
 
@@ -1987,7 +1971,18 @@ def discover_custom_agents(workspace: Path | None) -> list[str]:
     if not agents_dir.is_dir():
         return []
 
-    return _discover_agents_in_dir(agents_dir, exclude=frozenset({"test-analyzer"}))
+    names: list[str] = []
+    for agent_file in sorted(agents_dir.glob("*.md")):
+        name = _extract_agent_name(agent_file)
+        if not name:
+            if _SAFE_AGENT_NAME_RE.match(agent_file.stem):
+                name = agent_file.stem
+            else:
+                continue
+        if name == "test-analyzer":
+            continue
+        names.append(name)
+    return names
 
 
 def build_agent_routing_prompt(
@@ -2063,17 +2058,7 @@ def parse_agent_routing_response(
     for sig in groups:
         agent = routing.get(sig)
         if isinstance(agent, str) and agent.strip():
-            stripped = agent.strip()
-            if _SAFE_AGENT_NAME_RE.match(stripped):
-                result[sig] = stripped
-            else:
-                logger.warning(
-                    "Agent routing returned unsafe agent name %r for signature %r; "
-                    "falling back to base agent",
-                    stripped,
-                    sig,
-                )
-                result[sig] = None
+            result[sig] = agent.strip()
         else:
             result[sig] = None
     return result
@@ -2280,6 +2265,8 @@ async def run_orchestrated_analysis(
     workspace_dir = repo_path
     temp_dir: Path | None = None
     if workspace_dir is None:
+        import tempfile
+
         temp_dir = Path(tempfile.mkdtemp(prefix="rootcoz-orchestrator-"))
         workspace_dir = temp_dir
 

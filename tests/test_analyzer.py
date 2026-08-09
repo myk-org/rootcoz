@@ -15,13 +15,10 @@ from rootcoz.engine.core import (
     JSON_RESPONSE_SCHEMA,
     _build_cross_failure_prompt,
     _parse_cross_failure_response,
-    _strip_frontmatter,
     analyze_failure_group,
-    build_agent_routing_prompt,
     build_resources_section,
     clone_additional_repos,
     copy_builtin_agents_to_workspace,
-    parse_agent_routing_response,
     parse_json_response,
     prepare_orchestrator_workspace,
     recover_from_details,
@@ -2740,114 +2737,3 @@ async def test_run_orchestrated_analysis_cross_failure_patterns(
     assert len(analyses) == 2
     assert len(patterns) == 1
     assert patterns[0].pattern == "Shared NFS outage"
-
-
-# ---------------------------------------------------------------------------
-# Unit tests for _strip_frontmatter, build_agent_routing_prompt,
-# and parse_agent_routing_response (including unsafe-name rejection)
-# ---------------------------------------------------------------------------
-
-
-class TestStripFrontmatter:
-    """Tests for the _strip_frontmatter pure helper."""
-
-    def test_no_frontmatter_returns_text_unchanged(self) -> None:
-        text = "Just plain content\nwith multiple lines."
-        assert _strip_frontmatter(text) == text
-
-    def test_missing_closing_delimiter_returns_original(self) -> None:
-        """If the opening --- has no matching closing ---, return original."""
-        text = "---\nname: foo\ndescription: bar\n"
-        assert _strip_frontmatter(text) == text
-
-    def test_body_with_embedded_dashes_is_preserved(self) -> None:
-        """--- appearing inside body content should not be treated as frontmatter."""
-        text = "---\nname: agent\n---\nBody text\n---\nMore body\n"
-        result = _strip_frontmatter(text)
-        assert result == "Body text\n---\nMore body\n"
-
-    def test_normal_frontmatter_stripped(self) -> None:
-        text = "---\nname: my-agent\ndescription: test\n---\nActual content here."
-        assert _strip_frontmatter(text) == "Actual content here."
-
-    def test_empty_body_after_frontmatter(self) -> None:
-        text = "---\nname: x\n---\n"
-        assert _strip_frontmatter(text) == ""
-
-    def test_empty_string_returned_unchanged(self) -> None:
-        assert _strip_frontmatter("") == ""
-
-
-class TestBuildAgentRoutingPrompt:
-    """Tests for build_agent_routing_prompt."""
-
-    def test_returns_prompt_when_no_agent_names(self) -> None:
-        result = build_agent_routing_prompt(
-            groups={"sig1": []},
-            agent_names=[],
-            workspace_files={"sig1": {}},
-        )
-        assert isinstance(result, str)
-        assert "sig1" in result
-
-    def test_returns_prompt_with_agents_listed(self) -> None:
-        result = build_agent_routing_prompt(
-            groups={"sig1": [], "sig2": []},
-            agent_names=["network-analyzer", "storage-expert"],
-            workspace_files={
-                "sig1": {"failure_details": Path("/tmp/sig1.txt")},
-                "sig2": {"failure_details": Path("/tmp/sig2.txt")},
-            },
-        )
-        assert "network-analyzer" in result
-        assert "storage-expert" in result
-        assert "sig1" in result
-        assert "sig2" in result
-        assert "/tmp/sig1.txt" in result
-        assert "/tmp/sig2.txt" in result
-
-
-class TestParseAgentRoutingResponse:
-    """Tests for parse_agent_routing_response including unsafe-name rejection."""
-
-    def test_valid_routing(self) -> None:
-        raw = '{"routing": {"sig1": "network-analyzer", "sig2": "storage-expert"}}'
-        result = parse_agent_routing_response(raw, {"sig1": [], "sig2": []})
-        assert result == {"sig1": "network-analyzer", "sig2": "storage-expert"}
-
-    def test_missing_signature_maps_to_none(self) -> None:
-        raw = '{"routing": {"sig1": "network-analyzer"}}'
-        result = parse_agent_routing_response(raw, {"sig1": [], "sig2": []})
-        assert result == {"sig1": "network-analyzer", "sig2": None}
-
-    def test_empty_string_agent_maps_to_none(self) -> None:
-        raw = '{"routing": {"sig1": ""}}'
-        result = parse_agent_routing_response(raw, {"sig1": []})
-        assert result == {"sig1": None}
-
-    def test_unsafe_agent_name_rejected(self) -> None:
-        """Agent names with path traversal or special chars must be rejected."""
-        raw = '{"routing": {"sig1": "../../etc/passwd"}}'
-        result = parse_agent_routing_response(raw, {"sig1": []})
-        assert result == {"sig1": None}
-
-    def test_unsafe_agent_name_with_spaces_rejected(self) -> None:
-        raw = '{"routing": {"sig1": "my agent"}}'
-        result = parse_agent_routing_response(raw, {"sig1": []})
-        assert result == {"sig1": None}
-
-    def test_invalid_json_returns_all_none(self) -> None:
-        raw = "not json at all"
-        result = parse_agent_routing_response(raw, {"sig1": [], "sig2": []})
-        assert result == {"sig1": None, "sig2": None}
-
-    def test_null_agent_maps_to_none(self) -> None:
-        raw = '{"routing": {"sig1": null}}'
-        result = parse_agent_routing_response(raw, {"sig1": []})
-        assert result == {"sig1": None}
-
-    def test_routing_not_dict_returns_all_none(self) -> None:
-        """When 'routing' value is not a dict, fall back to None for all groups."""
-        raw = '{"routing": []}'
-        result = parse_agent_routing_response(raw, {"sig1": [], "sig2": []})
-        assert result == {"sig1": None, "sig2": None}

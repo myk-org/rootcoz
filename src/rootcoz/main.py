@@ -98,7 +98,6 @@ from rootcoz.engine.core import (
     extract_json_dict,
     get_failure_signature,
     resolve_additional_repos,
-    resolve_agent_prompt,
     run_orchestrated_analysis,
     safe_update_progress,
     set_progress_callback,
@@ -3255,18 +3254,15 @@ async def _run_per_group_analysis(
     auth_header: str,
     peer_ai_configs: list[Any] | None = None,
     peer_analysis_max_rounds: int = 3,
-    system_prompt: str = "",
 ) -> list[Any]:
     """Run per-group analysis with parallel execution.
 
-    Used as the fallback path when ``run_orchestrated_analysis`` fails (e.g.
-    due to an exception in the orchestrator).  Creates one
-    ``analyze_failure_group`` coroutine per failure group and runs them in
-    parallel via ``run_parallel_with_limit``.
+    Shared by the peer analysis path and the orchestrator fallback path.
+    Creates one ``analyze_failure_group`` coroutine per failure group and
+    runs them in parallel via ``run_parallel_with_limit``.
 
     Args:
         groups: Failure groups keyed by error signature.
-        system_prompt: Agent system prompt (e.g. test-analyzer body).
         Other args: Forwarded to ``analyze_failure_group``.
 
     Returns:
@@ -3290,7 +3286,6 @@ async def _run_per_group_analysis(
             max_concurrent_ai_calls=max_concurrent_ai_calls,
             auth_header=auth_header,
             all_groups=groups,
-            system_prompt=system_prompt,
         )
         for _sig, group_failures in groups.items()
     ]
@@ -3434,7 +3429,6 @@ async def _analyze_failures_or_exit(
         f"Starting AI analysis for {len(groups)} failure groups (provider={ai_provider}, model={ai_model})"
     )
 
-    agent_system_prompt = resolve_agent_prompt(repo_path)
     cross_failure_patterns: list[CrossFailurePattern] = []
 
     try:
@@ -3478,7 +3472,6 @@ async def _analyze_failures_or_exit(
                 additional_repos=cloned_repos or None,
                 max_concurrent_ai_calls=merged.max_concurrent_ai_calls,
                 auth_header=auth_header,
-                system_prompt=agent_system_prompt,
             )
         except Exception:
             logger.exception(
