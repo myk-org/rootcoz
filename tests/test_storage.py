@@ -1663,3 +1663,249 @@ class TestWithBuildUrlAliases:
         out = storage.with_build_url_aliases(record)
         assert out["build_url"] == "https://jenkins.example.com/job/1"
         assert out["jenkins_url"] == "https://jenkins.example.com/job/1"
+
+
+@pytest.mark.asyncio
+async def test_partial_update_status_preserves_build_id(setup_test_db):
+    """Partial update_status must not clobber existing denormalized fields."""
+    with patch.object(storage, "DB_PATH", setup_test_db):
+        # Save with all identity fields
+        await storage.save_result(
+            job_id="preserve-test",
+            status="running",
+            result={"job_name": "my-job", "build_number": 42, "build_id": "999"},
+        )
+
+        # Update with partial result (no build_id key)
+        await storage.update_status(
+            "preserve-test", "failed", result={"job_name": "my-job", "error": "boom"}
+        )
+
+        # Verify build_id was preserved
+        async with storage._connect_db() as db:
+            cursor = await db.execute(
+                "SELECT job_name, build_number, build_id FROM results WHERE job_id = ?",
+                ("preserve-test",),
+            )
+            row = await cursor.fetchone()
+            assert row["job_name"] == "my-job"
+            assert row["build_number"] == 42
+            assert row["build_id"] == "999", "build_id was clobbered by partial update"
+
+
+class TestExtractDenormalizedFields:
+    """Tests for _extract_denormalized_fields helper."""
+
+    def test_none_input(self):
+        from rootcoz.storage import _extract_denormalized_fields
+
+        assert _extract_denormalized_fields(None) == ("", 0, "")
+
+    def test_empty_dict(self):
+        from rootcoz.storage import _extract_denormalized_fields
+
+        assert _extract_denormalized_fields({}) == ("", 0, "")
+
+    def test_valid_fields(self):
+        from rootcoz.storage import _extract_denormalized_fields
+
+        result = {"job_name": "my-job", "build_number": 42, "build_id": "999"}
+        assert _extract_denormalized_fields(result) == ("my-job", 42, "999")
+
+    def test_invalid_build_number(self):
+        from rootcoz.storage import _extract_denormalized_fields
+
+        result = {"job_name": "x", "build_number": "not-a-number", "build_id": "1"}
+        assert _extract_denormalized_fields(result) == ("x", 0, "1")
+
+    def test_numeric_build_id_coerced_to_string(self):
+        from rootcoz.storage import _extract_denormalized_fields
+
+        result = {"job_name": "x", "build_number": 1, "build_id": 12345}
+        assert _extract_denormalized_fields(result) == ("x", 1, "12345")
+
+    def test_missing_fields_default(self):
+        from rootcoz.storage import _extract_denormalized_fields
+
+        result = {"other_key": "value"}
+        assert _extract_denormalized_fields(result) == ("", 0, "")
+
+
+@pytest.mark.asyncio
+async def test_save_result_populates_denorm_columns(setup_test_db):
+    """save_result writes denormalized job_name/build_number/build_id."""
+    with patch.object(storage, "DB_PATH", setup_test_db):
+        await storage.save_result(
+            job_id="denorm-test",
+            status="completed",
+            result={"job_name": "test-job", "build_number": 7, "build_id": "abc"},
+        )
+        async with storage._connect_db() as db:
+            cursor = await db.execute(
+                "SELECT job_name, build_number, build_id FROM results WHERE job_id = ?",
+                ("denorm-test",),
+            )
+            row = await cursor.fetchone()
+            assert row["job_name"] == "test-job"
+            assert row["build_number"] == 7
+            assert row["build_id"] == "abc"
+
+
+@pytest.mark.asyncio
+async def test_set_job_metadata_syncs_labels(setup_test_db):
+    """set_job_metadata inserts into job_metadata_labels."""
+    with patch.object(storage, "DB_PATH", setup_test_db):
+        await storage.set_job_metadata("sync-job", labels=["smoke", "nightly"])
+        async with storage._connect_db() as db:
+            cursor = await db.execute(
+                "SELECT label FROM job_metadata_labels WHERE job_name = ? ORDER BY label",
+                ("sync-job",),
+            )
+            labels = [row["label"] for row in await cursor.fetchall()]
+            assert labels == ["nightly", "smoke"]
+
+
+@pytest.mark.asyncio
+async def test_delete_job_metadata_cleans_labels(setup_test_db):
+    """delete_job_metadata removes job_metadata_labels rows."""
+    with patch.object(storage, "DB_PATH", setup_test_db):
+        await storage.set_job_metadata("del-job", labels=["a", "b"])
+        await storage.delete_job_metadata("del-job")
+        async with storage._connect_db() as db:
+            cursor = await db.execute(
+                "SELECT COUNT(*) FROM job_metadata_labels WHERE job_name = ?",
+                ("del-job",),
+            )
+            count = (await cursor.fetchone())[0]
+            assert count == 0
+
+
+class TestPatchResultJsonKeyPresence:
+    """Regression: patch_result_json must not clobber denorm columns on partial patches."""
+
+    async def test_partial_patch_preserves_denorm_columns(
+        self, setup_test_db: Path
+    ) -> None:
+        """Patching non-identity keys (tags) leaves job_name/build_number/build_id unchanged."""
+        with patch.object(storage, "DB_PATH", setup_test_db):
+            await storage.save_result(
+                job_id="patch-preserve",
+                status="completed",
+                result={
+                    "job_name": "original-job",
+                    "build_number": 42,
+                    "build_id": "bid-1",
+                    "tags": ["old"],
+                },
+            )
+
+            def _set_tags(result_data: dict) -> None:
+                result_data["tags"] = ["new-tag"]
+
+            await storage.patch_result_json("patch-preserve", _set_tags)
+
+            async with storage._connect_db() as db:
+                cursor = await db.execute(
+                    "SELECT job_name, build_number, build_id, result_json "
+                    "FROM results WHERE job_id = ?",
+                    ("patch-preserve",),
+                )
+                row = await cursor.fetchone()
+            assert row["job_name"] == "original-job"
+            assert row["build_number"] == 42
+            assert row["build_id"] == "bid-1"
+            parsed = storage.parse_result_json(row["result_json"])
+            assert parsed is not None
+            assert parsed["tags"] == ["new-tag"]
+            assert parsed["job_name"] == "original-job"
+
+    async def test_patch_updating_job_name_updates_denorm_column(
+        self, setup_test_db: Path
+    ) -> None:
+        """When patch_fn modifies job_name, the denormalized column is updated."""
+        with patch.object(storage, "DB_PATH", setup_test_db):
+            await storage.save_result(
+                job_id="patch-rename",
+                status="completed",
+                result={
+                    "job_name": "old-name",
+                    "build_number": 7,
+                    "build_id": "bid-2",
+                },
+            )
+
+            def _rename(result_data: dict) -> None:
+                result_data["job_name"] = "new-name"
+
+            await storage.patch_result_json("patch-rename", _rename)
+
+            async with storage._connect_db() as db:
+                cursor = await db.execute(
+                    "SELECT job_name, build_number, build_id FROM results WHERE job_id = ?",
+                    ("patch-rename",),
+                )
+                row = await cursor.fetchone()
+            assert row["job_name"] == "new-name"
+            assert row["build_number"] == 7
+            assert row["build_id"] == "bid-2"
+
+
+class TestCoerceSqliteBuildNumber:
+    """Unit tests for _coerce_sqlite_build_number edge cases."""
+
+    def test_numeric_string(self) -> None:
+        from rootcoz.storage import _coerce_sqlite_build_number
+
+        assert _coerce_sqlite_build_number("123") == 123
+
+    def test_non_numeric_string(self) -> None:
+        from rootcoz.storage import _coerce_sqlite_build_number
+
+        assert _coerce_sqlite_build_number("abc") == 0
+
+    def test_negative_int(self) -> None:
+        from rootcoz.storage import _coerce_sqlite_build_number
+
+        assert _coerce_sqlite_build_number(-5) == 0
+
+    def test_over_sqlite_int_max(self) -> None:
+        from rootcoz.storage import SQLITE_INT_MAX, _coerce_sqlite_build_number
+
+        assert _coerce_sqlite_build_number(SQLITE_INT_MAX + 1) == 0
+
+    def test_none(self) -> None:
+        from rootcoz.storage import _coerce_sqlite_build_number
+
+        assert _coerce_sqlite_build_number(None) == 0
+
+
+class TestMigrationsAppliedSchema:
+    """Regression: _migrations_applied must include applied_at."""
+
+    async def test_migrations_applied_has_applied_at_column(
+        self, temp_db_path: Path
+    ) -> None:
+        """After init_db(), _migrations_applied has both key and applied_at."""
+        with patch.object(storage, "DB_PATH", temp_db_path):
+            await storage.init_db()
+            async with aiosqlite.connect(temp_db_path) as db:
+                cursor = await db.execute("PRAGMA table_info(_migrations_applied)")
+                columns = {row[1] for row in await cursor.fetchall()}
+            assert "key" in columns
+            assert "applied_at" in columns
+
+    async def test_legacy_migrations_applied_gets_applied_at(
+        self, temp_db_path: Path
+    ) -> None:
+        """Legacy DBs with only 'key' column get applied_at added."""
+        # Create legacy table without applied_at
+        async with aiosqlite.connect(temp_db_path) as db:
+            await db.execute("CREATE TABLE _migrations_applied (key TEXT PRIMARY KEY)")
+            await db.commit()
+        with patch.object(storage, "DB_PATH", temp_db_path):
+            await storage.init_db()
+            async with aiosqlite.connect(temp_db_path) as db:
+                cursor = await db.execute("PRAGMA table_info(_migrations_applied)")
+                columns = {row[1] for row in await cursor.fetchall()}
+            assert "key" in columns
+            assert "applied_at" in columns

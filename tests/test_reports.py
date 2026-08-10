@@ -345,6 +345,21 @@ class TestReportOverrides:
             )
             assert result["total"] == 0
 
+    @pytest.mark.asyncio
+    async def test_exclude_tags_preserves_empty_job_name(self, populated_db: Path):
+        """exclude_tags must not drop overrides with empty job_name (top-level)."""
+        with patch.object(storage, "DB_PATH", populated_db):
+            result = await storage.get_report_classification_overrides(
+                exclude_tags=["nonexistent-tag"]
+            )
+            # The populated_db has a top-level override (job_name="") for test_foo.
+            # exclude_tags must not silently drop it.
+            assert result["total"] >= 1
+            test_foo = [d for d in result["details"] if d["test_name"] == "test_foo"]
+            assert len(test_foo) >= 1, (
+                "Top-level override (empty job_name) was dropped by exclude_tags"
+            )
+
 
 class TestReportIssues:
     @pytest.mark.asyncio
@@ -443,10 +458,10 @@ class TestDateFilterHelper:
             "col", "2025-01-01", "2025-12-31", conditions, params
         )
         assert len(conditions) == 2
-        assert "date(col) >= ?" in conditions[0]
-        assert "date(col) <= ?" in conditions[1]
+        assert conditions[0] == "col >= ?"
+        assert conditions[1] == "col <= ?"
         assert params[0] == "2025-01-01"
-        assert params[1] == "2025-12-31"
+        assert params[1] == "2025-12-31 23:59:59"
 
     def test_build_date_filter_empty(self):
         conditions: list[str] = []
@@ -454,6 +469,69 @@ class TestDateFilterHelper:
         storage._build_date_filter("col", "", "", conditions, params)
         assert conditions == []
         assert params == []
+
+    def test_build_date_filter_iso_datetime_normalized(self):
+        """ISO datetimes are normalized to 'YYYY-MM-DD HH:MM:SS' for SQLite."""
+        from rootcoz.storage import _build_date_filter
+
+        conditions: list[str] = []
+        params: list = []
+        _build_date_filter("col", "", "2025-12-31T12:00:00Z", conditions, params)
+        assert conditions == ["col <= ?"]
+        assert params == ["2025-12-31 12:00:00"]  # normalized from ISO
+
+    def test_build_date_filter_strips_timezone_offset(self):
+        """Timezone offsets are converted to UTC for ISO datetimes."""
+        from rootcoz.storage import _build_date_filter
+
+        conditions: list[str] = []
+        params: list = []
+        _build_date_filter(
+            "col",
+            "2025-01-01T00:00:00+00:00",
+            "2025-12-31T23:59:59+05:30",
+            conditions,
+            params,
+        )
+        assert conditions == ["col >= ?", "col <= ?"]
+        assert params == ["2025-01-01 00:00:00", "2025-12-31 18:29:59"]
+
+    def test_normalize_report_datetime(self):
+        """Unit tests for _normalize_report_datetime helper."""
+        from rootcoz.storage import _normalize_report_datetime
+
+        assert (
+            _normalize_report_datetime("2025-12-31T12:00:00Z") == "2025-12-31 12:00:00"
+        )
+        assert (
+            _normalize_report_datetime("2025-12-31T12:00:00+05:30")
+            == "2025-12-31 06:30:00"
+        )
+        assert (
+            _normalize_report_datetime("2025-12-31T12:00:00-08:00")
+            == "2025-12-31 20:00:00"
+        )
+        assert (
+            _normalize_report_datetime("2025-12-31 12:00:00") == "2025-12-31 12:00:00"
+        )
+        assert (
+            _normalize_report_datetime("2025-12-31T12:00:00.123Z")
+            == "2025-12-31 12:00:00"
+        )
+        assert (
+            _normalize_report_datetime("2025-12-31T12:00:00.123456+05:30")
+            == "2025-12-31 06:30:00"
+        )
+
+    def test_build_date_filter_datetime_with_space_as_is(self):
+        """Datetimes with a space separator must not get end-of-day appended."""
+        from rootcoz.storage import _build_date_filter
+
+        conditions: list[str] = []
+        params: list = []
+        _build_date_filter("col", "", "2025-12-31 12:00:00", conditions, params)
+        assert conditions == ["col <= ?"]
+        assert params == ["2025-12-31 12:00:00"]
 
     def test_build_metadata_join_empty(self):
         conditions: list[str] = []

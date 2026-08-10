@@ -6,6 +6,7 @@ import json
 import os
 import re
 import secrets
+import sqlite3
 import time
 import uuid
 from collections.abc import AsyncIterator, Callable
@@ -201,10 +202,71 @@ async def _migrate_add_column(
     cursor = await db.execute(f"PRAGMA table_info({table})")
     columns = {row[1] for row in await cursor.fetchall()}
     if column not in columns:
-        await db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {column_def}")
-        logger.info(f"Migration: added {column} column to {table}")
+        try:
+            await db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {column_def}")
+            logger.info(f"Migration: added {column} column to {table}")
+        except sqlite3.OperationalError as exc:
+            # Handle race: concurrent init_db may have added the column already
+            logger.debug(
+                f"Migration: ALTER TABLE {table} ADD COLUMN {column} failed: {exc}"
+            )
+            cursor = await db.execute(f"PRAGMA table_info({table})")
+            columns = {row[1] for row in await cursor.fetchall()}
+            if column not in columns:
+                raise
+            logger.debug(f"Migration: {table}.{column} added by concurrent process")
     else:
         logger.debug(f"Migration: {table} already has {column} column")
+
+
+async def _ensure_migrations_table(db: aiosqlite.Connection) -> None:
+    """Create the ``_migrations_applied`` tracking table if it does not exist.
+
+    Also handles legacy DBs that created the table without ``applied_at``
+    by adding the column when missing.
+    """
+    await db.execute(
+        "CREATE TABLE IF NOT EXISTS _migrations_applied "
+        "(key TEXT PRIMARY KEY, applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)"
+    )
+    # Legacy DBs may have the table without the applied_at column.
+    # Use a plain DEFAULT (no CURRENT_TIMESTAMP) for ALTER TABLE compatibility.
+    cursor = await db.execute("PRAGMA table_info(_migrations_applied)")
+    columns = {row[1] for row in await cursor.fetchall()}
+    if "applied_at" not in columns:
+        await db.execute(
+            "ALTER TABLE _migrations_applied ADD COLUMN applied_at TIMESTAMP"
+        )
+
+
+async def _migration_applied(db: aiosqlite.Connection, key: str) -> bool:
+    """Return True if the migration *key* has already been applied."""
+    await _ensure_migrations_table(db)
+    cursor = await db.execute("SELECT 1 FROM _migrations_applied WHERE key = ?", (key,))
+    return await cursor.fetchone() is not None
+
+
+async def _mark_migration_applied(db: aiosqlite.Connection, key: str) -> None:
+    """Record that migration *key* has been applied."""
+    await db.execute(
+        "INSERT OR IGNORE INTO _migrations_applied (key) VALUES (?)", (key,)
+    )
+
+
+async def _claim_migration(db: aiosqlite.Connection, key: str) -> bool:
+    """Atomically claim a migration key so only one process runs the backfill.
+
+    Uses INSERT OR IGNORE + changes() to serialize concurrent init_db() calls.
+    Returns True if this caller won the claim (should run the backfill),
+    False if another process already claimed/applied it.
+    """
+    await _ensure_migrations_table(db)
+    await db.execute(
+        "INSERT OR IGNORE INTO _migrations_applied (key) VALUES (?)", (key,)
+    )
+    cursor = await db.execute("SELECT changes()")
+    row = await cursor.fetchone()
+    return row is not None and row[0] == 1
 
 
 _ROLE_PRIORITY = {"viewer": 0, "reviewer": 1, "operator": 2, "admin": 3}
@@ -492,7 +554,10 @@ async def init_db() -> None:
                 status TEXT,
                 result_json TEXT,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                analysis_started_at TIMESTAMP
+                analysis_started_at TIMESTAMP,
+                job_name TEXT NOT NULL DEFAULT '',
+                build_number INTEGER NOT NULL DEFAULT 0,
+                build_id TEXT NOT NULL DEFAULT ''
             )
         """)
         await db.execute("""
@@ -638,6 +703,52 @@ async def init_db() -> None:
         await _migrate_add_column(db, "results", "completed_at", "TIMESTAMP")
         await _migrate_add_column(db, "results", "analysis_started_at", "TIMESTAMP")
         await _migrate_add_column(db, "results", "error", "TEXT NOT NULL DEFAULT ''")
+        await _migrate_add_column(db, "results", "job_name", "TEXT NOT NULL DEFAULT ''")
+        await _migrate_add_column(
+            db, "results", "build_number", "INTEGER NOT NULL DEFAULT 0"
+        )
+        await _migrate_add_column(db, "results", "build_id", "TEXT NOT NULL DEFAULT ''")
+
+        # Backfill job_name/build_number/build_id from result_json.
+        # Uses atomic claim so only one concurrent init_db() runs the scan.
+        _results_denorm_key = "backfill_results_denorm_v1"
+        if await _claim_migration(db, _results_denorm_key):
+            cursor = await db.execute("""
+                UPDATE results
+                SET job_name = COALESCE(json_extract(result_json, '$.job_name'), ''),
+                    build_number = CASE
+                        WHEN json_type(result_json, '$.build_number') = 'integer'
+                             AND json_extract(result_json, '$.build_number') >= 0
+                             AND json_extract(result_json, '$.build_number') <= 9223372036854775807
+                        THEN json_extract(result_json, '$.build_number')
+                        WHEN json_type(result_json, '$.build_number') = 'text'
+                             AND json_extract(result_json, '$.build_number') NOT GLOB '*[^0-9]*'
+                             AND json_extract(result_json, '$.build_number') != ''
+                             AND (
+                                 ltrim(json_extract(result_json, '$.build_number'), '0') = ''
+                                 OR length(ltrim(json_extract(result_json, '$.build_number'), '0')) < 19
+                                 OR (length(ltrim(json_extract(result_json, '$.build_number'), '0')) = 19
+                                     AND ltrim(json_extract(result_json, '$.build_number'), '0') <= '9223372036854775807')
+                             )
+                        THEN CAST(json_extract(result_json, '$.build_number') AS INTEGER)
+                        ELSE 0
+                    END,
+                    build_id = COALESCE(CAST(json_extract(result_json, '$.build_id') AS TEXT), '')
+                WHERE result_json IS NOT NULL AND json_valid(result_json) AND job_name = ''
+            """)
+            if cursor.rowcount:
+                logger.info(
+                    "Migration: backfilled job_name/build_number/build_id on %d results row(s)",
+                    cursor.rowcount,
+                )
+
+        await db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_results_status_created "
+            "ON results (status, created_at DESC)"
+        )
+        await db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_results_job_name ON results (job_name)"
+        )
 
         # failure_history: denormalized table for fast history queries
         await db.execute("""
@@ -868,6 +979,34 @@ async def init_db() -> None:
             "CREATE INDEX IF NOT EXISTS idx_jm_tier ON job_metadata (tier)"
         )
 
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS job_metadata_labels (
+                job_name TEXT NOT NULL,
+                label TEXT NOT NULL,
+                PRIMARY KEY (job_name, label)
+            )
+        """)
+        await db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_jml_label ON job_metadata_labels (label)"
+        )
+
+        # Backfill job_metadata_labels from existing job_metadata.labels JSON.
+        # Uses atomic claim so only one concurrent init_db() runs the scan.
+        _jml_key = "backfill_job_metadata_labels_v1"
+        if await _claim_migration(db, _jml_key):
+            await db.execute("""
+                INSERT OR IGNORE INTO job_metadata_labels (job_name, label)
+                SELECT jm.job_name, jt.value
+                FROM job_metadata jm,
+                     json_each(
+                         CASE WHEN json_valid(jm.labels) THEN jm.labels ELSE '[]' END
+                     ) jt
+                WHERE jm.labels != '[]'
+            """)
+            logger.info(
+                "Migration: backfilled job_metadata_labels from job_metadata.labels"
+            )
+
         # AI token usage tracking table
         await db.execute("""
             CREATE TABLE IF NOT EXISTS ai_token_usage (
@@ -1047,14 +1186,7 @@ async def _migrate_restore_ai_classifications() -> None:
     """
     migration_key = "restore_ai_classifications_v1"
     async with _connect_db() as db:
-        await db.execute(
-            "CREATE TABLE IF NOT EXISTS _migrations_applied "
-            "(key TEXT PRIMARY KEY, applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)"
-        )
-        cursor = await db.execute(
-            "SELECT 1 FROM _migrations_applied WHERE key = ?", (migration_key,)
-        )
-        if await cursor.fetchone():
+        if await _migration_applied(db, migration_key):
             return  # Already applied
 
         cursor = await db.execute(
@@ -1067,10 +1199,7 @@ async def _migrate_restore_ai_classifications() -> None:
         needs_restore = (await cursor.fetchone())[0] > 0
 
         if not needs_restore:
-            await db.execute(
-                "INSERT OR IGNORE INTO _migrations_applied (key) VALUES (?)",
-                (migration_key,),
-            )
+            await _mark_migration_applied(db, migration_key)
             await db.commit()
             return
 
@@ -1095,10 +1224,7 @@ async def _migrate_restore_ai_classifications() -> None:
 
     if restored > 0:
         async with _connect_db() as db:
-            await db.execute(
-                "INSERT OR IGNORE INTO _migrations_applied (key) VALUES (?)",
-                (migration_key,),
-            )
+            await _mark_migration_applied(db, migration_key)
             await db.commit()
         logger.info("Migration: restored AI classifications for %d jobs", restored)
     else:
@@ -1137,14 +1263,7 @@ async def _migrate_backfill_pattern_axis() -> None:
     """
     migration_key = "backfill_pattern_axis_v1"
     async with _connect_db() as db:
-        await db.execute(
-            "CREATE TABLE IF NOT EXISTS _migrations_applied "
-            "(key TEXT PRIMARY KEY, applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)"
-        )
-        cursor = await db.execute(
-            "SELECT 1 FROM _migrations_applied WHERE key = ?", (migration_key,)
-        )
-        if await cursor.fetchone():
+        if await _migration_applied(db, migration_key):
             return  # Already applied
 
     logger.info("Migration: backfilling pattern axis in failure_history...")
@@ -1218,10 +1337,7 @@ async def _migrate_backfill_pattern_axis() -> None:
             f"WHERE classification IN ({pattern_placeholders}) AND pattern = ''"
         )
 
-        await db.execute(
-            "INSERT OR IGNORE INTO _migrations_applied (key) VALUES (?)",
-            (migration_key,),
-        )
+        await _mark_migration_applied(db, migration_key)
         await db.commit()
     logger.info("Migration: pattern axis backfill complete")
 
@@ -1241,14 +1357,7 @@ async def _migrate_recompute_normalized_signatures() -> None:
     """
     migration_key = "recompute_normalized_signatures_v1"
     async with _connect_db() as db:
-        await db.execute(
-            "CREATE TABLE IF NOT EXISTS _migrations_applied "
-            "(key TEXT PRIMARY KEY, applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)"
-        )
-        cursor = await db.execute(
-            "SELECT 1 FROM _migrations_applied WHERE key = ?", (migration_key,)
-        )
-        if await cursor.fetchone():
+        if await _migration_applied(db, migration_key):
             return
 
         logger.info(
@@ -1257,10 +1366,7 @@ async def _migrate_recompute_normalized_signatures() -> None:
         )
 
         await db.execute("DELETE FROM failure_history")
-        await db.execute(
-            "INSERT OR IGNORE INTO _migrations_applied (key) VALUES (?)",
-            (migration_key,),
-        )
+        await _mark_migration_applied(db, migration_key)
         await db.commit()
 
 
@@ -1537,9 +1643,47 @@ async def get_historical_comments(
         return result
 
 
+def _extract_denormalized_fields(result: dict[str, Any] | None) -> tuple[str, int, str]:
+    """Extract job_name, build_number, build_id from a result dict.
+
+    Returns:
+        Tuple of (job_name, build_number, build_id).
+    """
+    if result is None:
+        return ("", 0, "")
+    job_name = str(result.get("job_name") or "")
+    build_number = _coerce_sqlite_build_number(result.get("build_number"))
+    build_id = str(result.get("build_id") or "")
+    return (job_name, build_number, build_id)
+
+
+def _append_denormalized_set_parts(
+    result: dict[str, Any],
+    set_parts: list[str],
+    params: list[Any],
+) -> None:
+    """Append denormalized column SET fragments for keys present in *result*.
+
+    Only includes ``job_name``, ``build_number``, or ``build_id`` when the
+    corresponding key exists in *result* — partial payloads must not clobber
+    existing column values.
+    """
+    job_name, build_number, build_id = _extract_denormalized_fields(result)
+    if "job_name" in result:
+        set_parts.append("job_name = ?")
+        params.append(job_name)
+    if "build_number" in result:
+        set_parts.append("build_number = ?")
+        params.append(build_number)
+    if "build_id" in result:
+        set_parts.append("build_id = ?")
+        params.append(build_id)
+
+
 def _build_status_update_clause(
     status: str,
     result_json: str | None = None,
+    result: dict[str, Any] | None = None,
 ) -> tuple[list[str], list[Any]]:
     """Build the SET clause parts and params for a status update.
 
@@ -1550,6 +1694,10 @@ def _build_status_update_clause(
         status: New status value.
         result_json: Serialized result JSON. When not None, ``result_json``
             is included in the update.
+        result: Optional result dict used to denormalize job_name/build_number/build_id.
+            When provided, denormalized columns are updated only for keys
+            present in *result* — omitted identity keys leave existing column
+            values unchanged (key-presence semantics).
 
     Returns:
         Tuple of (set_parts, params).
@@ -1560,6 +1708,9 @@ def _build_status_update_clause(
     if result_json is not None:
         set_parts.append("result_json = ?")
         params.append(result_json)
+
+    if result is not None:
+        _append_denormalized_set_parts(result, set_parts, params)
 
     if status == "running":
         set_parts.append(
@@ -1594,15 +1745,25 @@ async def save_result(
     result_json = json.dumps(result) if result is not None else None
     async with _connect_db() as db:
         # Insert the row if it doesn't exist yet (preserves created_at / analysis_started_at).
+        job_name, build_number, build_id_val = _extract_denormalized_fields(result)
         await db.execute(
             """
-            INSERT OR IGNORE INTO results (job_id, build_url, status, result_json)
-            VALUES (?, ?, ?, ?)
+            INSERT OR IGNORE INTO results (job_id, build_url, status, result_json,
+                                           job_name, build_number, build_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
             """,
-            (job_id, build_url, status, result_json),
+            (
+                job_id,
+                build_url,
+                status,
+                result_json,
+                job_name,
+                build_number,
+                build_id_val,
+            ),
         )
         # Update the row (handles both fresh inserts and existing rows).
-        set_parts, params = _build_status_update_clause(status, result_json)
+        set_parts, params = _build_status_update_clause(status, result_json, result)
         set_parts.insert(0, "build_url = COALESCE(NULLIF(?, ''), build_url)")
         params.insert(0, build_url)
         params.append(job_id)
@@ -1621,6 +1782,11 @@ async def update_status(
     Unlike save_result, this uses UPDATE to preserve the original created_at timestamp.
     Only updates result_json when result is explicitly provided.
 
+    When *result* is provided, denormalized identity columns (``job_name``,
+    ``build_number``, ``build_id``) are synced using key-presence semantics:
+    only keys present in *result* update their columns — omitted keys leave
+    existing values unchanged.
+
     Args:
         job_id: Unique identifier for the analysis job.
         status: New status for the analysis.
@@ -1629,7 +1795,7 @@ async def update_status(
     logger.debug(f"Updating status for job_id: {job_id} (status: {status})")
     async with _connect_db() as db:
         result_json = json.dumps(result) if result is not None else None
-        set_parts, params = _build_status_update_clause(status, result_json)
+        set_parts, params = _build_status_update_clause(status, result_json, result)
         params.append(job_id)
         sql = f"UPDATE results SET {', '.join(set_parts)} WHERE job_id = ?"
         cursor = await db.execute(sql, params)
@@ -1713,6 +1879,11 @@ async def patch_result_json(
     ``BEGIN IMMEDIATE`` transaction so concurrent patches are serialized
     by SQLite's write lock.
 
+    After *patch_fn* returns, denormalized identity columns (``job_name``,
+    ``build_number``, ``build_id``) are synced from the patched dict using
+    key-presence semantics: only keys present in the result update their
+    columns — missing keys leave existing column values unchanged.
+
     If the row does not exist or ``result_json`` is empty, this is a no-op.
     """
     async with _connect_db() as db:
@@ -1730,9 +1901,13 @@ async def patch_result_json(
                 await db.execute("ROLLBACK")
                 return
             patch_fn(result_data)
+            set_parts = ["result_json = ?"]
+            params: list[Any] = [json.dumps(result_data)]
+            _append_denormalized_set_parts(result_data, set_parts, params)
+            params.append(job_id)
             await db.execute(
-                "UPDATE results SET result_json = ? WHERE job_id = ?",
-                (json.dumps(result_data), job_id),
+                f"UPDATE results SET {', '.join(set_parts)} WHERE job_id = ?",
+                params,
             )
             await db.commit()
         except Exception:
@@ -4915,6 +5090,15 @@ async def _upsert_job_metadata_row(
             labels_json,
         ),
     )
+    # Sync labels to job_metadata_labels table
+    labels = item.get("labels") or []
+    job_name = item["job_name"]
+    await db.execute("DELETE FROM job_metadata_labels WHERE job_name = ?", (job_name,))
+    if labels:
+        await db.executemany(
+            "INSERT OR IGNORE INTO job_metadata_labels (job_name, label) VALUES (?, ?)",
+            [(job_name, label) for label in labels],
+        )
 
 
 async def set_job_metadata(
@@ -4967,6 +5151,10 @@ async def delete_job_metadata(job_name: str) -> bool:
         True if deleted, False if not found.
     """
     async with _connect_db() as db:
+        await db.execute(
+            "DELETE FROM job_metadata_labels WHERE job_name = ?",
+            (job_name,),
+        )
         cursor = await db.execute(
             "DELETE FROM job_metadata WHERE job_name = ?",
             (job_name,),
@@ -5928,19 +6116,35 @@ async def update_chat_message_ai_fields(
 # ─── Reports queries ────────────────────────────────────────────────────────
 
 
-# Shared subquery: extracts job_name and build_number from result_json.
-_RESULT_DATA_SUBQUERY = """
-    SELECT job_id,
-           json_extract(result_json, '$.job_name') AS job_name,
-           json_extract(result_json, '$.build_number') AS build_number,
-           json_extract(result_json, '$.build_id') AS build_id
-    FROM results WHERE result_json IS NOT NULL
-"""
-
 # Regex for detecting GitHub Issue / Jira Bug links in comments.
 _ISSUE_LINK_PATTERN = re.compile(
     r"(GitHub Issue|Jira Bug)(?:\s*\[[^\]]*\])?:\s*\[([^\]]+)\]\(([^)]+)\)"
 )
+
+
+def _normalize_report_datetime(value: str) -> str:
+    """Normalize an ISO datetime string for SQLite text comparison.
+
+    Parses offset-aware datetimes and converts to UTC so absolute-time
+    semantics are preserved.  Strips fractional seconds and formats the
+    result as ``YYYY-MM-DD HH:MM:SS`` to match SQLite's
+    ``CURRENT_TIMESTAMP`` format.
+    """
+    stripped = value.strip()
+    try:
+        dt = datetime.fromisoformat(stripped)
+    except ValueError:
+        # Not a recognizable ISO format — best-effort cleanup.
+        normalized = stripped.replace("T", " ")
+        normalized = re.sub(r"\.\d+", "", normalized)
+        return normalized.strip()
+
+    # Convert offset-aware datetimes to UTC.
+    if dt.tzinfo is not None:
+        dt = dt.astimezone(UTC)
+
+    # Truncate to second precision and format for SQLite.
+    return dt.replace(microsecond=0).strftime("%Y-%m-%d %H:%M:%S")
 
 
 def _build_date_filter(
@@ -5953,13 +6157,26 @@ def _build_date_filter(
     """Append date-range conditions and params in-place.
 
     Shared by all reports queries to avoid duplicating date filtering logic.
+
+    Date-only values (``YYYY-MM-DD``) are used as-is for ``date_from``;
+    for ``date_to``, ``" 23:59:59"`` is appended to make the range inclusive
+    of the entire day.  Values that already contain a time component
+    (``T`` separator or embedded space) are normalized to
+    ``YYYY-MM-DD HH:MM:SS`` (offset-aware values converted to UTC)
+    for consistent SQLite text comparison.
     """
     if date_from:
-        conditions.append(f"date({column}) >= ?")
-        params.append(date_from)
+        conditions.append(f"{column} >= ?")
+        if "T" in date_from or " " in date_from.strip():
+            params.append(_normalize_report_datetime(date_from))
+        else:
+            params.append(date_from)
     if date_to:
-        conditions.append(f"date({column}) <= ?")
-        params.append(date_to)
+        conditions.append(f"{column} <= ?")
+        if "T" in date_to or " " in date_to.strip():
+            params.append(_normalize_report_datetime(date_to))
+        else:
+            params.append(f"{date_to} 23:59:59")
 
 
 def _build_metadata_join(
@@ -5994,6 +6211,15 @@ def _build_metadata_join(
     return join_sql
 
 
+def _build_labels_subquery(labels: list[str]) -> str:
+    """Return the job_metadata_labels subquery for a list of labels."""
+    placeholders = ", ".join("?" for _ in labels)
+    return (
+        f"SELECT jml.job_name FROM job_metadata_labels jml "
+        f"WHERE jml.label IN ({placeholders})"
+    )
+
+
 def _build_tags_filter(
     tags: list[str] | None,
     job_name_col: str,
@@ -6002,18 +6228,12 @@ def _build_tags_filter(
 ) -> None:
     """Append tag-filtering conditions in-place.
 
-    Tags are stored in ``job_metadata.labels`` as a JSON array.
-    Uses ``json_each`` to match any of the requested tags (OR semantics).
+    Tags are stored in ``job_metadata_labels`` (one row per label).
+    Matches any of the requested tags (OR semantics).
     """
     if not tags:
         return
-    placeholders = ", ".join("?" for _ in tags)
-    conditions.append(
-        f"""{job_name_col} IN (
-            SELECT jm_tags.job_name FROM job_metadata jm_tags, json_each(jm_tags.labels) jt
-            WHERE jt.value IN ({placeholders})
-        )"""
-    )
+    conditions.append(f"{job_name_col} IN ({_build_labels_subquery(tags)})")
     params.extend(tags)
 
 
@@ -6026,16 +6246,12 @@ def _build_exclude_tags_filter(
     """Append tag-exclusion conditions in-place.
 
     Excludes jobs that have ANY of the specified tags (NOT IN semantics).
+    Rows with empty ``job_name`` pass through — they have no label
+    associations and will never appear in the labels subquery.
     """
     if not exclude_tags:
         return
-    placeholders = ", ".join("?" for _ in exclude_tags)
-    conditions.append(
-        f"""{job_name_col} NOT IN (
-            SELECT jm_tags.job_name FROM job_metadata jm_tags, json_each(jm_tags.labels) jt
-            WHERE jt.value IN ({placeholders})
-        )"""
-    )
+    conditions.append(f"{job_name_col} NOT IN ({_build_labels_subquery(exclude_tags)})")
     params.extend(exclude_tags)
 
 
@@ -6063,31 +6279,28 @@ async def get_report_totals(
 
     _build_date_filter("r.created_at", date_from, date_to, conditions, params)
     meta_join = _build_metadata_join(
-        team, tier, version, "r_data.job_name", conditions, params
+        team, tier, version, "r.job_name", conditions, params
     )
-    _build_tags_filter(tags, "r_data.job_name", conditions, params)
-    _build_exclude_tags_filter(exclude_tags, "r_data.job_name", conditions, params)
-
-    effective_status = status if status else ["completed"]
-    status_placeholders = ", ".join("?" for _ in effective_status)
-    # Status params feed both the subquery and outer WHERE
-    status_params = list(effective_status) + list(effective_status)
+    _build_tags_filter(tags, "r.job_name", conditions, params)
+    _build_exclude_tags_filter(exclude_tags, "r.job_name", conditions, params)
 
     where = (" AND " + " AND ".join(conditions)) if conditions else ""
 
     async with _connect_db() as db:
+        effective_status = status if status else ["completed"]
+        status_placeholders = ", ".join("?" for _ in effective_status)
+        status_params = list(effective_status)
+
         sql = f"""
             SELECT
                 r.job_id,
-                r_data.job_name,
-                r_data.build_number,
-                r_data.build_id,
+                r.job_name,
+                r.build_number,
+                r.build_id,
                 r.created_at,
                 COALESCE(fc.failure_count, 0) AS failure_count,
                 COALESCE(rv.reviewed_count, 0) AS reviewed_count
             FROM results r
-            JOIN ({_RESULT_DATA_SUBQUERY} AND status IN ({status_placeholders})
-            ) r_data ON r_data.job_id = r.job_id
             {meta_join}
             LEFT JOIN (
                 SELECT job_id, COUNT(*) AS failure_count
@@ -6159,22 +6372,18 @@ async def _count_reviewed_tests(
     conditions: list[str] = []
     params: list[Any] = []
     _build_date_filter("fr.updated_at", date_from, date_to, conditions, params)
-    needs_rdata = bool(team or tier or version or tags or exclude_tags)
-    rdata_join = (
-        f"JOIN ({_RESULT_DATA_SUBQUERY}) fr_rdata ON fr_rdata.job_id = fr.job_id"
-        if needs_rdata
-        else ""
+    needs_results = bool(team or tier or version or tags or exclude_tags or status)
+    results_join = (
+        "JOIN results r_res ON r_res.job_id = fr.job_id" if needs_results else ""
     )
     meta_join = _build_metadata_join(
-        team, tier, version, "fr_rdata.job_name", conditions, params
+        team, tier, version, "r_res.job_name", conditions, params
     )
-    _build_tags_filter(tags, "fr_rdata.job_name", conditions, params)
-    _build_exclude_tags_filter(exclude_tags, "fr_rdata.job_name", conditions, params)
-    status_join = ""
+    _build_tags_filter(tags, "r_res.job_name", conditions, params)
+    _build_exclude_tags_filter(exclude_tags, "r_res.job_name", conditions, params)
     if status:
-        status_join = " JOIN results r_rstatus ON r_rstatus.job_id = fr.job_id"
         placeholders = ", ".join("?" for _ in status)
-        conditions.append(f"r_rstatus.status IN ({placeholders})")
+        conditions.append(f"r_res.status IN ({placeholders})")
         params.extend(status)
     if review_status == "reviewed":
         conditions.append(
@@ -6190,9 +6399,8 @@ async def _count_reviewed_tests(
     cursor = await db.execute(
         f"""
         SELECT COUNT(*) AS cnt FROM failure_reviews fr
-        {rdata_join}
+        {results_join}
         {meta_join}
-        {status_join}
         WHERE fr.reviewed = 1{where}
         """,
         params,
@@ -6433,16 +6641,14 @@ async def get_report_issues_created(
 
     _build_date_filter("c.created_at", date_from, date_to, conditions, params)
     meta_join = _build_metadata_join(
-        team, tier, version, "r_data.job_name", conditions, params
+        team, tier, version, "r.job_name", conditions, params
     )
-    _build_tags_filter(tags, "r_data.job_name", conditions, params)
-    _build_exclude_tags_filter(exclude_tags, "r_data.job_name", conditions, params)
+    _build_tags_filter(tags, "r.job_name", conditions, params)
+    _build_exclude_tags_filter(exclude_tags, "r.job_name", conditions, params)
 
-    status_join = ""
     if status:
-        status_join = " JOIN results r_status ON r_status.job_id = c.job_id"
         placeholders = ", ".join("?" for _ in status)
-        conditions.append(f"r_status.status IN ({placeholders})")
+        conditions.append(f"r.status IN ({placeholders})")
         params.extend(status)
 
     if review_status == "reviewed":
@@ -6464,12 +6670,10 @@ async def get_report_issues_created(
         sql = f"""
             SELECT c.id, c.job_id, c.test_name, c.comment,
                    c.username, c.created_at,
-                   r_data.job_name, r_data.build_number, r_data.build_id
+                   r.job_name, r.build_number, r.build_id
             FROM comments c
-            {join_type} ({_RESULT_DATA_SUBQUERY}
-            ) r_data ON r_data.job_id = c.job_id
+            {join_type} results r ON r.job_id = c.job_id
             {meta_join}
-            {status_join}
             WHERE {where}
             ORDER BY c.created_at DESC
         """
