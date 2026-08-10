@@ -63,6 +63,8 @@ class ServerConfig:
     # Prow
     prow_url: str = ""
     gcs_bucket: str = ""
+    # Job metadata labels (comma-separated); merged into job_metadata.labels on analyze
+    labels: str = ""
     # Authentication
     api_key: str = ""  # API key for authentication (user or admin)
 
@@ -256,6 +258,10 @@ def _server_config_from_dict(data: dict[str, Any]) -> ServerConfig:
         # Prow
         prow_url=data.get("prow_url", ""),
         gcs_bucket=data.get("gcs_bucket", ""),
+        # Job metadata labels (fall back to legacy metadata_labels key)
+        labels=_validated_str(data, "labels")
+        if "labels" in data
+        else _validated_str(data, "metadata_labels"),
         # Admin authentication
         api_key=data.get("api_key", ""),
     )

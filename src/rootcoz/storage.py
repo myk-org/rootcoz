@@ -24,7 +24,7 @@ from rootcoz.encryption import (
     get_hmac_secret,
     strip_sensitive_from_response,
 )
-from rootcoz.metadata_rules import match_job_metadata
+from rootcoz.metadata_rules import match_job_metadata, merge_labels
 from rootcoz.models import (
     _SYSTEM_TAGS,
     HistoryClassificationLiteral,
@@ -5056,46 +5056,131 @@ async def bulk_set_metadata(items: list[dict[str, Any]]) -> dict[str, Any]:
 async def auto_assign_job_metadata(
     job_name: str,
     rules: list[dict[str, Any]],
+    extra_labels: list[str] | None = None,
 ) -> dict[str, Any] | None:
-    """Auto-assign metadata to a job from name pattern rules if it has no existing metadata.
+    """Auto-assign metadata from name pattern rules and/or merge extra labels.
 
-    This is called when a new analysis result is stored. If the job already has
-    metadata, this is a no-op (manual metadata always takes precedence).
+    Called when a new analysis result is stored.
+
+    - When a metadata row already exists and ``extra_labels`` is empty: NULL
+      scalar fields (team/tier/version) are filled from matching rules
+      (non-NULL existing values are preserved). Rule labels are merged into
+      existing labels. Returns None only if nothing actually changed.
+    - When a metadata row already exists and ``extra_labels`` is present:
+      NULL scalar fields are filled from matching rules the same way, and
+      labels are merged from existing + rule labels + extras. Returns None
+      only if the resulting row is identical to the existing one.
+    - When no metadata exists: rules are applied when they match. With
+      extras and no rule match, a labels-only row is created.
+
+    All write paths use ``BEGIN IMMEDIATE`` so concurrent analyses of the
+    same job cannot overwrite each other's labels.
 
     Args:
-        job_name: The Jenkins job name.
+        job_name: The CI job name.
         rules: Ordered list of metadata rule dicts.
+        extra_labels: Optional caller-supplied labels to merge into
+            ``job_metadata.labels`` (case preserved).
 
     Returns:
-        The assigned metadata dict, or None if no match or metadata already exists.
+        The assigned/updated metadata dict, or None when nothing changed.
     """
-    if not rules or not job_name:
+    if not job_name:
         return None
 
-    # Note: small TOCTOU window between check and set. Duplicate
-    # auto-assignment is idempotent (same values), so this is acceptable.
-    existing = await get_job_metadata(job_name)
-    if existing is not None:
-        logger.debug(
-            f"auto_assign_job_metadata: job '{job_name}' already has metadata, skipping"
-        )
+    extras = merge_labels(extra_labels)
+    rules = rules or []
+
+    # Nothing to do — no extras and no rules to apply.
+    if not extras and not rules:
         return None
 
-    matched = match_job_metadata(job_name, rules)
-    if matched is None:
+    # Resolve rule match outside the transaction (pure, no DB).
+    matched = match_job_metadata(job_name, rules) if rules else None
+
+    # Early exit: nothing to write.
+    if not extras and matched is None:
         logger.debug(f"auto_assign_job_metadata: no rule matched job '{job_name}'")
         return None
 
-    result = await set_job_metadata(
-        job_name,
-        team=matched.get("team"),
-        tier=matched.get("tier"),
-        version=matched.get("version"),
-        labels=matched.get("labels", []),
+    # All writes go through BEGIN IMMEDIATE to prevent concurrent analyses
+    # from overwriting each other's labels.
+    async with _connect_db() as db:
+        await db.execute("BEGIN IMMEDIATE")
+        try:
+            cursor = await db.execute(
+                "SELECT job_name, team, tier, version, labels "
+                "FROM job_metadata WHERE job_name = ?",
+                (job_name,),
+            )
+            row = await cursor.fetchone()
+
+            if row is not None:
+                existing = _job_metadata_row_to_dict(row)
+                existing_labels = list(existing.get("labels") or [])
+                if matched is not None:
+                    # Fill NULL scalars from rules; preserve non-NULL existing values.
+                    team = existing.get("team") or matched.get("team")
+                    tier = existing.get("tier") or matched.get("tier")
+                    version = existing.get("version") or matched.get("version")
+                    merged_labels = merge_labels(
+                        existing_labels,
+                        list(matched.get("labels", [])),
+                        extras,
+                    )
+                else:
+                    # No rule match — only merge extras into labels.
+                    team = existing.get("team")
+                    tier = existing.get("tier")
+                    version = existing.get("version")
+                    merged_labels = merge_labels(existing_labels, extras)
+                if (
+                    team == existing.get("team")
+                    and tier == existing.get("tier")
+                    and version == existing.get("version")
+                    and merged_labels == existing_labels
+                ):
+                    await db.rollback()
+                    return None
+            else:
+                # No existing metadata — use rule match if available.
+                team = matched.get("team") if matched else None
+                tier = matched.get("tier") if matched else None
+                version = matched.get("version") if matched else None
+                merged_labels = merge_labels(
+                    list(matched.get("labels", [])) if matched else None,
+                    extras,
+                )
+
+            await _upsert_job_metadata_row(
+                db,
+                {
+                    "job_name": job_name,
+                    "team": team,
+                    "tier": tier,
+                    "version": version,
+                    "labels": merged_labels,
+                },
+            )
+            await db.commit()
+        except Exception:
+            await db.rollback()
+            raise
+
+    result = {
+        "job_name": job_name,
+        "team": team,
+        "tier": tier,
+        "version": version,
+        "labels": merged_labels,
+    }
+    action = (
+        "Merged metadata labels into"
+        if row is not None
+        else "Auto-assigned metadata to"
     )
     logger.info(
-        f"Auto-assigned metadata to job '{job_name}': "
-        f"team={matched.get('team')}, tier={matched.get('tier')}"
+        f"{action} job '{job_name}': team={team}, tier={tier}, labels={merged_labels}"
     )
     return result
 

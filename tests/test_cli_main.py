@@ -2448,6 +2448,41 @@ class TestAnalyzeConfigDefaults:
         kwargs = client.analyze.call_args[1]
         assert kwargs["max_wait_minutes"] == 90
 
+    def test_config_labels_used_as_default(self):
+        """labels from config are sent when --label is absent."""
+        cfg = ServerConfig(
+            url="http://localhost:8000",
+            labels="Nightly,CNV",
+        )
+        result, client = self._invoke_analyze(
+            ["analyze", "--job-name", "my-job", "--build-number", "1"], cfg=cfg
+        )
+        assert result.exit_code == 0
+        kwargs = client.analyze.call_args[1]
+        assert kwargs["labels"] == ["Nightly", "CNV"]
+
+    def test_cli_label_overrides_config_labels(self):
+        """CLI --label replaces config labels (does not merge)."""
+        cfg = ServerConfig(
+            url="http://localhost:8000",
+            labels="Nightly,CNV",
+        )
+        result, client = self._invoke_analyze(
+            [
+                "analyze",
+                "--job-name",
+                "my-job",
+                "--build-number",
+                "1",
+                "--label",
+                "OnlyCLI",
+            ],
+            cfg=cfg,
+        )
+        assert result.exit_code == 0
+        kwargs = client.analyze.call_args[1]
+        assert kwargs["labels"] == ["OnlyCLI"]
+
 
 class TestAnalyzePeerFlags:
     """Tests for --peers and --peer-analysis-max-rounds CLI flags."""
@@ -2958,6 +2993,33 @@ class TestAnalyzeProwCommand:
         assert result.exit_code == 0
         call_kwargs = mock_client.analyze.call_args[1]
         assert "nightly" in call_kwargs.get("tags", [])
+        assert "regression" in call_kwargs.get("tags", [])
+
+    def test_analyze_prow_with_labels(self, mock_client):
+        mock_client.analyze.return_value = {
+            "status": "queued",
+            "job_id": "prow-labels",
+            "result_url": "/results/prow-labels",
+        }
+        result = runner.invoke(
+            app,
+            [
+                *self._PROW_BASE,
+                "--job-name",
+                "my-job",
+                "--build-number",
+                "42",
+                "--label",
+                "Nightly",
+                "--label",
+                "CNV",
+                "--tag",
+                "regression",
+            ],
+        )
+        assert result.exit_code == 0
+        call_kwargs = mock_client.analyze.call_args[1]
+        assert call_kwargs.get("labels") == ["Nightly", "CNV"]
         assert "regression" in call_kwargs.get("tags", [])
 
     def test_analyze_prow_missing_job_name(self, mock_client):

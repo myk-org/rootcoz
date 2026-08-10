@@ -4037,6 +4037,24 @@ class TestBuildRequestParams:
         assert params["github_token"] != FAKE_GITHUB_TOKEN
         assert params["github_token"].startswith(_ENCRYPTED_PREFIX)
 
+    def test_build_params_persists_labels(self, mock_settings) -> None:
+        """labels are persisted in request_params."""
+        from rootcoz.config import get_settings
+        from rootcoz.main import _merge_settings
+        from rootcoz.models import AnalyzeRequest
+
+        settings = get_settings()
+        body = AnalyzeRequest(
+            job_name="my-job",
+            build_number=42,
+            ai_provider="claude",
+            ai_model="opus",
+            labels=["Nightly", "CNV"],
+        )
+        merged = _merge_settings(body, settings)
+        params = _build_jenkins_request_params(body, merged, "claude", "opus")
+        assert params.get("labels") == ["Nightly", "CNV"]
+
 
 class TestReconstructFromParams:
     """Tests for _reconstruct_from_params helper."""
@@ -4121,6 +4139,64 @@ class TestReconstructFromParams:
         assert body.tests_repo_url == "https://github.com/org/repo:feature/bar"
         # Settings should also have the recomposed format
         assert merged.tests_repo_url == "https://github.com/org/repo:feature/bar"
+
+    def test_reconstruct_preserves_labels(self, mock_settings) -> None:
+        """labels survive persist → reconstruct round-trip."""
+        from rootcoz.main import _reconstruct_from_params
+
+        result_data = {
+            "job_name": "j",
+            "build_number": 1,
+            "request_params": {
+                "ai_provider": "claude",
+                "ai_model": "m",
+                "labels": ["Nightly", "CNV"],
+            },
+        }
+        body, _ = _reconstruct_from_params(result_data)
+        assert body.labels == ["Nightly", "CNV"]
+
+    def test_reconstruct_defaults_empty_labels(self, mock_settings) -> None:
+        """Missing labels in params defaults to empty list."""
+        from rootcoz.main import _reconstruct_from_params
+
+        result_data = {
+            "job_name": "j",
+            "build_number": 1,
+            "request_params": {
+                "ai_provider": "claude",
+                "ai_model": "m",
+            },
+        }
+        body, _ = _reconstruct_from_params(result_data)
+        assert body.labels == []
+
+    def test_reconstruct_reads_legacy_metadata_labels(self, mock_settings) -> None:
+        """Legacy request_params with metadata_labels key are read correctly."""
+        from rootcoz.main import _reconstruct_from_params
+
+        result_data = {
+            "job_name": "j",
+            "build_number": 1,
+            "request_params": {
+                "ai_provider": "claude",
+                "ai_model": "m",
+                "metadata_labels": ["Nightly", "CNV"],
+            },
+        }
+        body, _ = _reconstruct_from_params(result_data)
+        assert body.labels == ["Nightly", "CNV"]
+
+    def test_copy_analysis_settings_legacy_metadata_labels(self, mock_settings) -> None:
+        """Old params with metadata_labels are copied as labels for re-analyze."""
+        from rootcoz.main import _copy_analysis_settings
+
+        unified_fields: dict = {}
+        _copy_analysis_settings(
+            {"metadata_labels": ["Nightly", "CNV"]},
+            unified_fields,
+        )
+        assert unified_fields["labels"] == ["Nightly", "CNV"]
 
 
 class TestResumeWaitingJobs:

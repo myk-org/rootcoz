@@ -14,6 +14,7 @@ from rootcoz.cli.main import app as cli_app
 from rootcoz.metadata_rules import (
     load_metadata_rules,
     match_job_metadata,
+    merge_labels,
 )
 from tests.conftest import make_test_client
 
@@ -236,6 +237,26 @@ class TestMatchJobMetadata:
         assert result["labels"] == ["dev"]
 
 
+class TestMergeLabels:
+    """Unit tests for merge_labels."""
+
+    def test_order_preservation_first_occurrence_wins(self) -> None:
+        assert merge_labels(["a", "b"], ["b", "c"], ["a", "d"]) == ["a", "b", "c", "d"]
+
+    def test_case_sensitive_dedup(self) -> None:
+        assert merge_labels(["Nightly"], ["nightly"]) == ["Nightly", "nightly"]
+
+    def test_empty_and_none_inputs(self) -> None:
+        assert merge_labels() == []
+        assert merge_labels(None) == []
+        assert merge_labels([]) == []
+        assert merge_labels(None, [], ["a"], None, []) == ["a"]
+
+    def test_blank_labels_skipped(self) -> None:
+        """Empty / falsy labels are skipped (``if label`` guard)."""
+        assert merge_labels(["a", "", "b"], [""]) == ["a", "b"]
+
+
 # --- Storage integration tests ---
 
 
@@ -276,12 +297,16 @@ class TestAutoAssignJobMetadata:
             assert stored["team"] == "storage"
 
     async def test_no_overwrite_existing_metadata(self, setup_test_db: Path) -> None:
+        """Manual non-NULL values take precedence; NULL fields may be filled from rules."""
         with patch.object(storage, "DB_PATH", setup_test_db):
             await storage.set_job_metadata("test-cnv-storage-nfs", team="manual-team")
             result = await storage.auto_assign_job_metadata(
                 "test-cnv-storage-nfs", self.RULES
             )
-            assert result is None
+            assert result is not None
+            assert result["team"] == "manual-team"
+            assert result["tier"] == "t2"
+            assert result["labels"] == ["pytest"]
 
             stored = await storage.get_job_metadata("test-cnv-storage-nfs")
             assert stored["team"] == "manual-team"
@@ -299,6 +324,133 @@ class TestAutoAssignJobMetadata:
     async def test_empty_job_name_returns_none(self, setup_test_db: Path) -> None:
         with patch.object(storage, "DB_PATH", setup_test_db):
             result = await storage.auto_assign_job_metadata("", self.RULES)
+            assert result is None
+
+    async def test_merge_extras_with_rules_on_new_job(
+        self, setup_test_db: Path
+    ) -> None:
+        with patch.object(storage, "DB_PATH", setup_test_db):
+            result = await storage.auto_assign_job_metadata(
+                "test-cnv-storage-nfs",
+                self.RULES,
+                extra_labels=["Nightly", "CNV"],
+            )
+            assert result is not None
+            assert result["team"] == "storage"
+            assert result["labels"] == ["pytest", "Nightly", "CNV"]
+
+    async def test_merge_extras_into_existing_preserves_team(
+        self, setup_test_db: Path
+    ) -> None:
+        with patch.object(storage, "DB_PATH", setup_test_db):
+            await storage.set_job_metadata(
+                "test-cnv-storage-nfs",
+                team="manual-team",
+                tier="t1",
+                labels=["existing"],
+            )
+            result = await storage.auto_assign_job_metadata(
+                "test-cnv-storage-nfs",
+                self.RULES,
+                extra_labels=["Nightly"],
+            )
+            assert result is not None
+            assert result["team"] == "manual-team"
+            assert result["tier"] == "t1"
+            assert result["labels"] == ["existing", "pytest", "Nightly"]
+
+    async def test_merge_extras_dedup_preserves_case(self, setup_test_db: Path) -> None:
+        with patch.object(storage, "DB_PATH", setup_test_db):
+            await storage.set_job_metadata("any-job", labels=["Nightly", "smoke"])
+            result = await storage.auto_assign_job_metadata(
+                "any-job",
+                [],
+                extra_labels=["Nightly", "CNV"],
+            )
+            assert result is not None
+            assert result["labels"] == ["Nightly", "smoke", "CNV"]
+
+    async def test_extras_only_no_rules_creates_labels_row(
+        self, setup_test_db: Path
+    ) -> None:
+        with patch.object(storage, "DB_PATH", setup_test_db):
+            result = await storage.auto_assign_job_metadata(
+                "unrelated-job",
+                [],
+                extra_labels=["Nightly"],
+            )
+            assert result is not None
+            assert result["team"] is None
+            assert result["labels"] == ["Nightly"]
+
+    async def test_empty_extras_skips_existing(self, setup_test_db: Path) -> None:
+        with patch.object(storage, "DB_PATH", setup_test_db):
+            await storage.set_job_metadata("job-a", team="t", labels=["a"])
+            result = await storage.auto_assign_job_metadata(
+                "job-a", self.RULES, extra_labels=[]
+            )
+            assert result is None
+            stored = await storage.get_job_metadata("job-a")
+            assert stored is not None
+            assert stored["labels"] == ["a"]
+
+    async def test_rule_fills_labels_only_row(self, setup_test_db: Path) -> None:
+        """Rules fill NULL team/tier on a labels-only row from a previous extras-only call."""
+        with patch.object(storage, "DB_PATH", setup_test_db):
+            # First call: extras only, no rule match → labels-only row
+            await storage.auto_assign_job_metadata(
+                "test-cnv-storage-nfs",
+                [],
+                extra_labels=["Nightly"],
+            )
+            meta = await storage.get_job_metadata("test-cnv-storage-nfs")
+            assert meta is not None
+            assert meta["team"] is None
+            assert meta["labels"] == ["Nightly"]
+
+            # Second call: rules match, no extras → fills team/tier/version
+            result = await storage.auto_assign_job_metadata(
+                "test-cnv-storage-nfs",
+                self.RULES,
+            )
+            assert result is not None
+            assert result["team"] == "storage"
+            assert result["labels"] == ["Nightly", "pytest"]  # merged
+
+    async def test_rules_and_extras_fill_labels_only_row(
+        self, setup_test_db: Path
+    ) -> None:
+        """Rules + extras on a labels-only row fill NULL scalars and merge all labels."""
+        with patch.object(storage, "DB_PATH", setup_test_db):
+            await storage.set_job_metadata(
+                "test-cnv-storage-nfs",
+                labels=["existing"],
+            )
+            meta = await storage.get_job_metadata("test-cnv-storage-nfs")
+            assert meta is not None
+            assert meta["team"] is None
+            assert meta["tier"] is None
+            assert meta["version"] is None
+            assert meta["labels"] == ["existing"]
+
+            result = await storage.auto_assign_job_metadata(
+                "test-cnv-storage-nfs",
+                self.RULES,
+                extra_labels=["Nightly", "CNV"],
+            )
+            assert result is not None
+            assert result["team"] == "storage"
+            assert result["tier"] == "t2"
+            assert result["version"] is None
+            assert result["labels"] == ["existing", "pytest", "Nightly", "CNV"]
+
+    async def test_noop_merge_returns_none(self, setup_test_db: Path) -> None:
+        """When extras don't change labels, return None (not the existing dict)."""
+        with patch.object(storage, "DB_PATH", setup_test_db):
+            await storage.set_job_metadata("job-x", labels=["a", "b"])
+            result = await storage.auto_assign_job_metadata(
+                "job-x", [], extra_labels=["a", "b"]
+            )
             assert result is None
 
 

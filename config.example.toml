@@ -41,6 +41,9 @@ enable_jira = true
 # GitHub
 github_token = "ghp_your-github-token"
 
+# Job metadata labels (comma-separated); merged into job_metadata.labels on analyze
+# labels = "Nightly,CNV"
+
 [servers.dev]
 url = "http://localhost:8000"
 username = "your-username"
