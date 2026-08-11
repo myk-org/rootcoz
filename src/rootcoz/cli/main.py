@@ -2586,6 +2586,66 @@ def push_rp_cmd(
                 typer.echo(f"  - {err}")
 
 
+@app.command("push")
+def push_cmd(
+    job_id: str = typer.Argument(help="Job ID to push results for."),
+    plugin: str = typer.Option(
+        ..., "--plugin", "-p", help="Exporter plugin name (e.g. 'reportportal')."
+    ),
+    child_job_name: str | None = typer.Option(
+        None, "--child-job-name", help="Child job name (for pipeline child push)."
+    ),
+    child_build_number: int | None = typer.Option(
+        None,
+        "--child-build-number",
+        help="Child build number (for pipeline child push).",
+    ),
+    json_output: bool = _JSON_OPTION,
+) -> None:
+    """Push analysis results to an exporter plugin."""
+    data = _run_client_command(
+        json_output,
+        lambda c: c.push_to_exporter(
+            job_id,
+            plugin,
+            child_job_name=child_job_name,
+            child_build_number=child_build_number,
+        ),
+        emit_output=False,
+    )
+    if not _state.get("json", False):
+        # Generic output for any exporter
+        message = data.get("message", "")
+        if message:
+            typer.echo(message)
+        errors = data.get("errors", [])
+        if errors:
+            typer.echo(f"Errors: {len(errors)}")
+            for err in errors:
+                typer.echo(f"  - {err}")
+
+
+@app.command("exporters")
+def exporters_cmd(
+    json_output: bool = _JSON_OPTION,
+) -> None:
+    """List available exporter plugins and their status."""
+    data = _run_client_command(
+        json_output,
+        lambda c: c.list_exporters(),
+        emit_output=False,
+    )
+    if not _state.get("json", False):
+        if not data:
+            typer.echo("No exporters available.")
+            return
+        for exporter in data:
+            status = "enabled" if exporter.get("enabled") else "disabled"
+            typer.echo(
+                f"  {exporter['name']}: {exporter.get('display_name', '')} [{status}]"
+            )
+
+
 @app.command("override-classification")
 def override_classification_cmd(
     job_id: str = typer.Argument(help="Job ID."),

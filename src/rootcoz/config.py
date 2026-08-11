@@ -396,6 +396,15 @@ class Settings(BaseSettings):
         ),
     )
 
+    auto_push_exporters: str = Field(
+        default="",
+        description=(
+            "Comma-separated list of exporter plugin names to auto-push to when all "
+            "failures are reviewed. Example: 'reportportal'. Empty string disables "
+            "auto-push. Only takes effect when enable_auto_review is also enabled."
+        ),
+    )
+
     # Metadata rules file path (optional, server-only)
     metadata_rules_file: str = Field(
         default="",

@@ -6,8 +6,8 @@ from unittest.mock import MagicMock, patch
 import pytest
 import requests as _requests
 
-import rootcoz.reportportal as rp_module
-from rootcoz.reportportal import ReportPortalClient, _extract_bts_fields
+import rootcoz.exporters.reportportal as rp_module
+from rootcoz.exporters.reportportal import ReportPortalClient, _extract_bts_fields
 
 # -- Classification mapping tests -------------------------------------------
 
@@ -249,7 +249,7 @@ class TestFindLaunch:
         assert result == 20
 
     def test_raises_ambiguous_launch_error(self):
-        from rootcoz.reportportal import AmbiguousLaunchError
+        from rootcoz.exporters.reportportal import AmbiguousLaunchError
 
         client = ReportPortalClient(
             url="http://rp.example.com", token="tok", project="proj"
@@ -726,7 +726,7 @@ class TestPushClassifications:
         assert result["errors"] == []
         assert result["unmatched"] == []
 
-    @patch("rootcoz.reportportal.logger")
+    @patch("rootcoz.exporters.reportportal.logger")
     def test_http_error_extracts_rp_message(self, mock_logger):
         """HTTPError responses extract the RP JSON message field into errors."""
         mock_error_response = MagicMock()
@@ -766,7 +766,7 @@ class TestPushClassifications:
         # Response body included in ERROR log (not separate DEBUG)
         assert '{"message": "Not a launch owner"}' in log_msg
 
-    @patch("rootcoz.reportportal.logger")
+    @patch("rootcoz.exporters.reportportal.logger")
     def test_generic_exception_uses_type_name(self, mock_logger):
         """Non-HTTP exceptions use type(exc).__name__ in the error."""
         client, _ = self._setup_push_client(
