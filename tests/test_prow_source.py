@@ -11,6 +11,7 @@ import pytest
 from rootcoz.models import UnifiedAnalyzeRequest
 from rootcoz.sources.prow_source import (
     _GCS_LIST_MAX_PAGES,
+    _GCS_LIST_PAGE_SIZE,
     _MAX_SIZE_BUILD_LOG,
     _MAX_SIZE_FINISHED,
     _MAX_SIZE_JUNIT_XML,
@@ -1979,6 +1980,25 @@ class TestListGcsObjects:
         async with httpx.AsyncClient(transport=transport) as client:
             items = await _list_gcs_objects(client, "bucket", "p/")
         assert [i["name"] for i in items] == ["p/ok.txt", "p/ok2.txt"]
+
+    async def test_fields_projection_sends_correct_params(self):
+        """GCS listing request includes fields projection for name and size only."""
+        captured_params: dict[str, str] = {}
+
+        def handler(request: httpx.Request):
+            captured_params.update(dict(request.url.params))
+            return httpx.Response(
+                200,
+                json={"items": [{"name": "prefix/file.xml", "size": "1234"}]},
+            )
+
+        transport = httpx.MockTransport(handler)
+        async with httpx.AsyncClient(transport=transport) as client:
+            result = await _list_gcs_objects(client, "bucket", "prefix/")
+
+        assert captured_params.get("fields") == "items(name,size),nextPageToken"
+        assert captured_params.get("maxResults") == str(_GCS_LIST_PAGE_SIZE)
+        assert result == [{"name": "prefix/file.xml", "size": "1234"}]
 
 
 # ---------------------------------------------------------------------------
