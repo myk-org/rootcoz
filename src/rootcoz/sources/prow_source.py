@@ -73,10 +73,13 @@ _MAX_SIZE_ARTIFACTS_TOTAL = 50_000_000  # 50 MB
 # Maximum size for a single non-JUnit artifact file (bytes)
 _MAX_SIZE_SINGLE_ARTIFACT = 10_000_000  # 10 MB
 
-# GCS object listing budgets (JSON API pages + accumulated matches)
+# GCS object listing budgets (JSON API pages + accumulated matches).
+# Field projection (items(name,size) only) keeps pages small; page size
+# halved from 1000→500 as defense-in-depth against 2 MB oversize (#219).
+# Budget: 100 pages × 500 = 50k scannable objects (10× the hard cap).
 _MAX_GCS_LIST_PAGE_BYTES = 2_000_000  # 2 MB per listing response page
 _MAX_GCS_LIST_OBJECTS = 5_000  # hard cap on matched objects returned
-_GCS_LIST_PAGE_SIZE = 1_000  # maxResults sent to GCS JSON API
+_GCS_LIST_PAGE_SIZE = 500  # maxResults per GCS JSON API page
 _GCS_LIST_MAX_PAGES = 100
 
 # Maximum number of concurrent PR-change fetches and overall wait budget.
@@ -423,8 +426,9 @@ async def _list_gcs_objects(
     """List GCS objects under a prefix, optionally filtered.
 
     Listing is bounded: each JSON page is streamed with a byte budget,
-    ``maxResults`` is set, and accumulation stops at
-    ``_MAX_GCS_LIST_OBJECTS`` matched items.
+    ``maxResults`` is set, field projection limits responses to ``name``
+    and ``size`` only, and accumulation stops at ``_MAX_GCS_LIST_OBJECTS``
+    matched items.
 
     Args:
         client: httpx async client.
@@ -436,7 +440,7 @@ async def _list_gcs_objects(
         warnings: Optional list to append truncation warnings to.
 
     Returns:
-        List of GCS object dicts (keys: ``name``, ``size``, etc.).
+        List of GCS object dicts (keys: ``name``, ``size``).
     """
     matched: list[dict[str, Any]] = []
     page_token: str | None = None
@@ -447,6 +451,7 @@ async def _list_gcs_objects(
         params: dict[str, str | int] = {
             "prefix": prefix,
             "maxResults": _GCS_LIST_PAGE_SIZE,
+            "fields": "items(name,size),nextPageToken",
         }
         if page_token:
             params["pageToken"] = page_token
