@@ -405,6 +405,132 @@ class TestExporterEndpoints:
             # Details field is still present
             assert data["pushed"] == 1
 
+    def test_push_to_exporter_unexpected_error_returns_502(
+        self, _init_db, temp_db_path
+    ):
+        """An unexpected exporter.push() failure surfaces as a controlled 502."""
+        from tests.conftest import admin_login, make_app_client
+
+        mock_exporter = MagicMock()
+        mock_exporter.push = AsyncMock(side_effect=RuntimeError("boom"))
+        mock_exporter.__enter__ = MagicMock(return_value=mock_exporter)
+        mock_exporter.__exit__ = MagicMock(return_value=False)
+
+        for client in make_app_client(temp_db_path):
+            admin_login(client)
+            with (
+                patch("rootcoz.main.get_result", new_callable=AsyncMock) as mock_get,
+                patch("rootcoz.main._create_exporter", return_value=mock_exporter),
+                patch(
+                    "rootcoz.main._build_export_context", new_callable=AsyncMock
+                ) as mock_ctx,
+            ):
+                mock_get.return_value = {"result": {"failures": [{"test_name": "t"}]}}
+                mock_ctx.return_value = ExportContext(
+                    job_id="job-1",
+                    job_name="test-job",
+                    build_number="1",
+                    jenkins_url="https://jenkins.example.com/job/test-job/1/",
+                    failures=[{"test_name": "t"}],
+                    report_url="https://rootcoz.example.com/results/job-1",
+                )
+                response = client.post("/results/job-1/push/reportportal")
+
+            assert response.status_code == 502
+            assert "failed unexpectedly" in response.json()["detail"]
+
+
+class TestExporterNeedsHistory:
+    """Tests for the needs_history_classifications capability + gating."""
+
+    def test_base_default_is_false(self):
+        assert Exporter.needs_history_classifications is False
+
+    def test_reportportal_needs_history(self):
+        from rootcoz.exporters.reportportal import ReportPortalClient
+
+        assert ReportPortalClient.needs_history_classifications is True
+
+    def test_helper_true_for_reportportal(self):
+        from rootcoz.main import _exporter_needs_history_classifications
+
+        assert _exporter_needs_history_classifications(["reportportal"]) is True
+
+    def test_helper_false_for_unknown(self):
+        from rootcoz.main import _exporter_needs_history_classifications
+
+        assert _exporter_needs_history_classifications(["nonexistent"]) is False
+
+    def test_helper_false_for_empty(self):
+        from rootcoz.main import _exporter_needs_history_classifications
+
+        assert _exporter_needs_history_classifications([]) is False
+
+    def test_helper_true_if_any_matches(self):
+        from rootcoz.main import _exporter_needs_history_classifications
+
+        assert (
+            _exporter_needs_history_classifications(["nonexistent", "reportportal"])
+            is True
+        )
+
+
+class TestBuildExportContextFetchHistory:
+    """_build_export_context honours the fetch_history flag."""
+
+    def _run_build(self, fetch_history):
+        import asyncio
+
+        from rootcoz.main import _build_export_context
+
+        result_data = {
+            "job_name": "j",
+            "jenkins_url": "https://jenkins.example.com/job/j/1/",
+            "failures": [{"test_name": "t1"}, {"test_name": "t2"}],
+        }
+        with (
+            patch(
+                "rootcoz.main._extract_base_url",
+                return_value="https://rc.example.com",
+            ),
+            patch(
+                "rootcoz.main.get_history_classification", new_callable=AsyncMock
+            ) as mock_hist,
+            patch(
+                "rootcoz.storage.get_tracked_in_for_scope",
+                new_callable=AsyncMock,
+                return_value={},
+            ),
+            patch(
+                "rootcoz.storage.get_reviews_for_job",
+                new_callable=AsyncMock,
+                return_value={},
+            ),
+        ):
+            mock_hist.return_value = "PRODUCT BUG"
+            ctx = asyncio.run(
+                _build_export_context(
+                    job_id="job-1",
+                    result_data=result_data,
+                    settings=MagicMock(),
+                    fetch_history=fetch_history,
+                )
+            )
+        return ctx, mock_hist
+
+    def test_fetch_history_true_populates_classifications(self):
+        ctx, mock_hist = self._run_build(True)
+        assert mock_hist.await_count == 2
+        assert ctx.history_classifications == {
+            "t1": "PRODUCT BUG",
+            "t2": "PRODUCT BUG",
+        }
+
+    def test_fetch_history_false_skips_lookups(self):
+        ctx, mock_hist = self._run_build(False)
+        assert mock_hist.await_count == 0
+        assert ctx.history_classifications == {}
+
 
 class TestExporterModel:
     """Tests for ExporterInfo Pydantic model."""

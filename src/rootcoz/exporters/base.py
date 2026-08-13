@@ -70,6 +70,13 @@ class Exporter(ABC):
     the metadata needed to push results to the external system.
     """
 
+    #: Whether this exporter consumes per-test history classifications.
+    #: When ``False`` (the default), the push pipeline skips the per-test,
+    #: DB-backed history classification lookups when building the
+    #: :class:`ExportContext`.  Subclasses that read
+    #: :attr:`ExportContext.history_classifications` must set this to ``True``.
+    needs_history_classifications: bool = False
+
     @property
     @abstractmethod
     def name(self) -> str:

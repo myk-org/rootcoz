@@ -213,6 +213,7 @@ class ReportPortalClient(Exporter):
 
     NAME = "reportportal"
     DISPLAY_NAME = "Report Portal"
+    needs_history_classifications = True
 
     @property
     def name(self) -> str:

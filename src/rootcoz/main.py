@@ -13,7 +13,14 @@ import threading
 import time as _time
 import uuid
 from collections import defaultdict
-from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine, Sequence
+from collections.abc import (
+    AsyncIterator,
+    Awaitable,
+    Callable,
+    Coroutine,
+    Iterable,
+    Sequence,
+)
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -2466,6 +2473,9 @@ async def _auto_review_matching_failures(
                     result_data=result_data,
                     settings=settings,
                     pushed_by=AI_SYSTEM_USERNAME,
+                    fetch_history=_exporter_needs_history_classifications(
+                        auto_push_names
+                    ),
                 )
                 for plugin_name in auto_push_names:
                     logger.info(
@@ -6566,6 +6576,7 @@ async def push_to_exporter(
             child_job_name=child_job_name,
             child_build_number=child_build_number,
             pushed_by=safe_username,
+            fetch_history=_exporter_needs_history_classifications([plugin_name]),
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -6575,8 +6586,22 @@ async def push_to_exporter(
     except (ValueError, TimeoutError, OSError, TypeError, RuntimeError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    with exporter:
-        result = await exporter.push(context)
+    try:
+        with exporter:
+            result = await exporter.push(context)
+    except Exception as exc:
+        # Guard against unexpected exporter failures leaking as raw 500s.
+        # Expected error modes are already returned inside push() as a
+        # failed ExporterResult; this catches genuinely unforeseen faults.
+        logger.exception(
+            "Exporter '%s' push raised unexpectedly for job %s",
+            plugin_name,
+            job_id,
+        )
+        raise HTTPException(
+            status_code=502,
+            detail=f"Exporter '{plugin_name}' failed unexpectedly",
+        ) from exc
 
     return {**result.details, "success": result.success, "message": result.message}
 
@@ -6651,6 +6676,7 @@ async def _build_export_context(
     child_job_name: str | None = None,
     child_build_number: int | None = None,
     pushed_by: str = "",
+    fetch_history: bool = True,
 ) -> ExportContext:
     """Build an ExportContext from stored result data.
 
@@ -6664,6 +6690,11 @@ async def _build_export_context(
         child_job_name: Optional child job name for scoped push.
         child_build_number: Optional child build number.
         pushed_by: Username of the user who triggered the push.
+        fetch_history: When ``False``, skip the per-test history classification
+            lookups (they hit the DB once per unique test name).  Set to
+            ``False`` when no target exporter reads
+            ``ExportContext.history_classifications`` — see
+            :func:`_exporter_needs_history_classifications`.
 
     Returns:
         Populated ExportContext.
@@ -6703,36 +6734,37 @@ async def _build_export_context(
     reviewed_by: dict[str, str] = {}
 
     if failures_data:
-        seen: set[str] = set()
-        test_names: list[str] = []
-        for f in failures_data:
-            if not isinstance(f, dict):
-                continue
-            tn = f.get("test_name", "")
-            if tn and tn not in seen:
-                seen.add(tn)
-                test_names.append(tn)
+        if fetch_history:
+            seen: set[str] = set()
+            test_names: list[str] = []
+            for f in failures_data:
+                if not isinstance(f, dict):
+                    continue
+                tn = f.get("test_name", "")
+                if tn and tn not in seen:
+                    seen.add(tn)
+                    test_names.append(tn)
 
-        scope_name = child_job_name or ""
-        scope_build = child_build_number or 0
-        classification_results = await run_parallel_with_limit(
-            [
-                get_history_classification(job_id, name, scope_name, scope_build)
-                for name in test_names
-            ]
-        )
-        for name, result in zip(test_names, classification_results, strict=True):
-            if isinstance(result, BaseException):
-                logger.debug(
-                    "Export: failed to fetch history classification"
-                    " for test='%s', job_id='%s'",
-                    name,
-                    job_id,
-                    exc_info=result,
-                )
-                continue
-            if result:
-                history_classifications[name] = result
+            scope_name = child_job_name or ""
+            scope_build = child_build_number or 0
+            classification_results = await run_parallel_with_limit(
+                [
+                    get_history_classification(job_id, name, scope_name, scope_build)
+                    for name in test_names
+                ]
+            )
+            for name, result in zip(test_names, classification_results, strict=True):
+                if isinstance(result, BaseException):
+                    logger.debug(
+                        "Export: failed to fetch history classification"
+                        " for test='%s', job_id='%s'",
+                        name,
+                        job_id,
+                        exc_info=result,
+                    )
+                    continue
+                if result:
+                    history_classifications[name] = result
 
         try:
             tracked_in_data = await storage.get_tracked_in_for_scope(
@@ -6797,6 +6829,36 @@ async def _build_export_context(
         history_classifications=history_classifications,
         tracked_in_links=tracked_in_data,
         reviewed_by=reviewed_by,
+    )
+
+
+# Exporter plugin classes by machine name, used to read static capabilities
+# (e.g. ``needs_history_classifications``) without instantiating an exporter.
+# Instance construction with per-exporter config validation lives in
+# ``_create_exporter()``.
+_EXPORTER_CLASSES: dict[str, type[Exporter]] = {
+    ReportPortalClient.NAME: ReportPortalClient,
+}
+
+
+def _exporter_needs_history_classifications(plugin_names: Iterable[str]) -> bool:
+    """Whether any named exporter consumes per-test history classifications.
+
+    Lets the push pipeline skip the per-test, DB-backed history classification
+    lookups in :func:`_build_export_context` when no target exporter will use
+    them.  Unknown names are ignored here — :func:`_create_exporter` raises for
+    them when the push is actually attempted.
+
+    Args:
+        plugin_names: Exporter identifiers to check.
+
+    Returns:
+        ``True`` if at least one known exporter needs history classifications.
+    """
+    return any(
+        name in _EXPORTER_CLASSES
+        and _EXPORTER_CLASSES[name].needs_history_classifications
+        for name in plugin_names
     )
 
 
@@ -6871,6 +6933,7 @@ async def _execute_rp_push(
         child_job_name=child_job_name,
         child_build_number=child_build_number,
         pushed_by=pushed_by,
+        fetch_history=_exporter_needs_history_classifications(["reportportal"]),
     )
 
     try:
