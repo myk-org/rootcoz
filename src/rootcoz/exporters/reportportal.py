@@ -25,6 +25,17 @@ from rootcoz.exporters.base import ExportContext, Exporter, ExporterResult
 if TYPE_CHECKING:
     from rootcoz.models import FailureAnalysis
 
+# Exception types caught around each RP API call in ReportPortalClient.push().
+# OSError covers raw socket errors (builtin ConnectionError) and all
+# requests-level transport faults (RequestException is a subclass of OSError).
+_RP_PUSH_ERRORS: tuple[type[Exception], ...] = (
+    OSError,
+    ValueError,
+    TypeError,
+    RuntimeError,
+    KeyError,
+)
+
 logger = get_logger(name=__name__, level=os.environ.get("LOG_LEVEL", "INFO"))
 _RPCLIENT_INIT_LOCK = threading.Lock()
 
@@ -295,7 +306,7 @@ class ReportPortalClient(Exporter):
             logger.warning("RP push: %s", exc)
             msg = f"Ambiguous RP launch: found {exc.count} launches. Remove duplicate launches to disambiguate."
             return self._failure_result(msg)
-        except (OSError, ValueError, TypeError, RuntimeError, KeyError) as exc:
+        except _RP_PUSH_ERRORS as exc:
             msg, log_msg = format_rp_error(exc, "searching RP launches")
             logger.error(
                 "RP push failed: %s, job='%s' #%s, jenkins_url='%s'",
@@ -319,7 +330,7 @@ class ReportPortalClient(Exporter):
 
         try:
             failed_items = await asyncio.to_thread(self.get_failed_items, launch_id)
-        except (OSError, ValueError, TypeError, RuntimeError, KeyError) as exc:
+        except _RP_PUSH_ERRORS as exc:
             msg, log_msg = format_rp_error(exc, "fetching failed items from RP")
             logger.error(
                 "RP push failed: %s, job='%s' #%s, launch_id=%s",
@@ -357,7 +368,7 @@ class ReportPortalClient(Exporter):
             matched = await asyncio.to_thread(
                 self.match_failures, failed_items, rcz_failures
             )
-        except (OSError, ValueError, TypeError, RuntimeError, KeyError) as exc:
+        except _RP_PUSH_ERRORS as exc:
             msg, log_msg = format_rp_error(exc, "matching RP items to failures")
             logger.error(
                 "RP push failed: %s, job='%s' #%s, launch_id=%s",
@@ -395,7 +406,7 @@ class ReportPortalClient(Exporter):
                 pushed_by=context.pushed_by,
                 reviewed_by=context.reviewed_by,
             )
-        except (OSError, ValueError, TypeError, RuntimeError, KeyError) as exc:
+        except _RP_PUSH_ERRORS as exc:
             msg, log_msg = format_rp_error(exc, "pushing classifications to RP")
             logger.error(
                 "RP push failed: %s, job='%s' #%s, launch_id=%s",
