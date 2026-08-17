@@ -111,8 +111,8 @@ export function ciSourceLabel(requestParams?: { [key: string]: unknown }): strin
 export const PROW_JOB_NAME_RE = /^[a-zA-Z0-9][a-zA-Z0-9._-]*$/
 export const PROW_BUILD_ID_RE = /^[0-9]+$/
 
-/** Sanitize a single URL candidate; returns null if missing or not http(s). */
-function sanitizeBuildUrlCandidate(raw: string | null | undefined): string | null {
+/** Sanitize an http(s) URL: strip userinfo, reject other schemes. */
+export function sanitizeHttpHref(raw: string | null | undefined): string | null {
   if (!raw) return null
   try {
     const url = new URL(raw)
@@ -129,8 +129,8 @@ function sanitizeBuildUrlCandidate(raw: string | null | undefined): string | nul
 export function resolveBuildUrl(data?: { build_url?: string | null; jenkins_url?: string | null } | null): string | null {
   if (!data) return null
   return (
-    sanitizeBuildUrlCandidate(data.build_url) ??
-    sanitizeBuildUrlCandidate(data.jenkins_url)
+    sanitizeHttpHref(data.build_url) ??
+    sanitizeHttpHref(data.jenkins_url)
   )
 }
 

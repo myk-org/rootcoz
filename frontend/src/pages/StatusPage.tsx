@@ -2,7 +2,8 @@ import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
 import { useSSE } from '@/lib/SSEProvider'
 import { api, ApiError } from '@/lib/api'
-import { formatTimestamp, isAnalysisTimeout, INVALID_DATE_FALLBACK, ciSourceLabel, resolveBuildUrl, resolveBuildDisplayId } from '@/lib/utils'
+import { isSafeHref } from '@/lib/autoLink'
+import { formatTimestamp, isAnalysisTimeout, INVALID_DATE_FALLBACK, ciSourceLabel, resolveBuildUrl, resolveBuildDisplayId, sanitizeHttpHref } from '@/lib/utils'
 import type { ResultResponse } from '@/types'
 import { Card, CardContent } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
@@ -241,6 +242,14 @@ export function StatusPage() {
     : null
   const peers = params?.peer_ai_configs
   const hasPeers = !!peers?.length
+  const testsRepoUrl = (params?.tests_repo_url ?? '').trim()
+  const testsRepoHref = sanitizeHttpHref(testsRepoUrl)
+  const testsRepoRef = (params?.tests_repo_ref ?? '').trim()
+  const testsRepoDisplay = testsRepoHref ?? testsRepoUrl
+  const testsRepoLabel = testsRepoDisplay
+    ? (testsRepoRef ? `${testsRepoDisplay}:${testsRepoRef}` : testsRepoDisplay)
+    : '—'
+  const canLink = !!testsRepoHref && isSafeHref(testsRepoHref)
   const progressPhase = data?.result?.progress_phase
   const isRunning = displayStatus === 'running'
   const isWaiting = displayStatus === 'waiting'
@@ -471,6 +480,24 @@ export function StatusPage() {
                   }
                 />
               )}
+              <Row
+                label="TEST REPO"
+                value={
+                  canLink && testsRepoHref ? (
+                    <a
+                      href={testsRepoHref}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="text-text-link hover:underline"
+                    >
+                      {testsRepoLabel}
+                    </a>
+                  ) : (
+                    testsRepoLabel
+                  )
+                }
+                mono
+              />
               {queuedAtDisplay && queuedAtDisplay !== INVALID_DATE_FALLBACK && (
                 <Row
                   label="QUEUED"
