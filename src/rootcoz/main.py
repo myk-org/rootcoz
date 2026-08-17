@@ -2460,7 +2460,7 @@ async def _auto_review_matching_failures(
 
         # Check if ALL failures are now reviewed → auto-push to configured exporters
         auto_push_names = [
-            n.strip()
+            _sanitize_control_chars(n.strip())
             for n in (settings.auto_push_exporters or "").split(",")
             if n.strip()
         ]
