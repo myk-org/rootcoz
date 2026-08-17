@@ -2503,7 +2503,14 @@ async def _auto_review_matching_failures(
                         continue
                     try:
                         with exporter:
-                            await exporter.push(context)
+                            result = await exporter.push(context)
+                        if not result.success:
+                            logger.warning(
+                                "Auto-push to '%s' returned failure for job_id=%s: %s",
+                                plugin_name,
+                                job_id,
+                                result.message,
+                            )
                     except Exception:
                         logger.warning(
                             "Auto-push to '%s' failed for job_id=%s",
@@ -6785,7 +6792,7 @@ async def _build_export_context(
                 exact_prefix = f"{child_job_name}#{child_build_number}::"
                 wildcard_prefix = f"{child_job_name}#0::"
                 # Two passes: exact build first, then wildcard fallback.
-                # Exact-build reviews win since reviewed_by uses setdefault.
+                # Exact-build reviews take precedence (checked first; duplicates skipped).
                 for pfx in (exact_prefix, wildcard_prefix):
                     for key, review_data in reviews.items():
                         if not (
