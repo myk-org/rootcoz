@@ -241,6 +241,11 @@ export function StatusPage() {
     : null
   const peers = params?.peer_ai_configs
   const hasPeers = !!peers?.length
+  const testsRepoUrl = (params?.tests_repo_url ?? '').trim()
+  const testsRepoRef = (params?.tests_repo_ref ?? '').trim()
+  const testsRepoLabel = testsRepoUrl
+    ? (testsRepoRef ? `${testsRepoUrl}:${testsRepoRef}` : testsRepoUrl)
+    : '—'
   const progressPhase = data?.result?.progress_phase
   const isRunning = displayStatus === 'running'
   const isWaiting = displayStatus === 'waiting'
@@ -471,6 +476,24 @@ export function StatusPage() {
                   }
                 />
               )}
+              <Row
+                label="TEST REPO"
+                value={
+                  testsRepoUrl ? (
+                    <a
+                      href={testsRepoUrl}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="text-text-link hover:underline"
+                    >
+                      {testsRepoLabel}
+                    </a>
+                  ) : (
+                    '—'
+                  )
+                }
+                mono
+              />
               {queuedAtDisplay && queuedAtDisplay !== INVALID_DATE_FALLBACK && (
                 <Row
                   label="QUEUED"
