@@ -247,6 +247,7 @@ export function StatusPage() {
   const testsRepoLabel = testsRepoUrl
     ? (testsRepoRef ? `${testsRepoUrl}:${testsRepoRef}` : testsRepoUrl)
     : '—'
+  const canLink = /^https?:\/\//i.test(testsRepoUrl) && isSafeHref(testsRepoUrl)
   const progressPhase = data?.result?.progress_phase
   const isRunning = displayStatus === 'running'
   const isWaiting = displayStatus === 'waiting'
@@ -480,7 +481,7 @@ export function StatusPage() {
               <Row
                 label="TEST REPO"
                 value={
-                  testsRepoUrl && isSafeHref(testsRepoUrl) ? (
+                  canLink ? (
                     <a
                       href={testsRepoUrl}
                       target="_blank"
