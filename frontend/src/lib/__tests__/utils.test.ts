@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { ciSourceLabel, resolveBuildUrl, resolveBuildDisplayId } from '../utils'
+import { ciSourceLabel, resolveBuildUrl, resolveBuildDisplayId, sanitizeHttpHref } from '../utils'
 
 describe('ciSourceLabel', () => {
   it('returns "Prow" for prow analysis_type', () => {
@@ -32,6 +32,23 @@ describe('ciSourceLabel', () => {
 
   it('defaults to "Jenkins" for unknown analysis_type', () => {
     expect(ciSourceLabel({ analysis_type: 'unknown_ci' })).toBe('Jenkins')
+  })
+})
+
+describe('sanitizeHttpHref', () => {
+  it('strips userinfo from http(s) URLs', () => {
+    expect(sanitizeHttpHref('https://token@github.com/org/repo')).toBe(
+      'https://github.com/org/repo',
+    )
+    expect(sanitizeHttpHref('https://user:pass@host.example/path')).toBe( // pragma: allowlist secret
+      'https://host.example/path',
+    )
+  })
+
+  it('rejects non-http schemes and invalid values', () => {
+    expect(sanitizeHttpHref('javascript:alert(1)')).toBeNull()
+    expect(sanitizeHttpHref('github.com/org/repo')).toBeNull()
+    expect(sanitizeHttpHref('')).toBeNull()
   })
 })
 

@@ -3,7 +3,7 @@ import { useNavigate, useParams } from 'react-router-dom'
 import { useSSE } from '@/lib/SSEProvider'
 import { api, ApiError } from '@/lib/api'
 import { isSafeHref } from '@/lib/autoLink'
-import { formatTimestamp, isAnalysisTimeout, INVALID_DATE_FALLBACK, ciSourceLabel, resolveBuildUrl, resolveBuildDisplayId } from '@/lib/utils'
+import { formatTimestamp, isAnalysisTimeout, INVALID_DATE_FALLBACK, ciSourceLabel, resolveBuildUrl, resolveBuildDisplayId, sanitizeHttpHref } from '@/lib/utils'
 import type { ResultResponse } from '@/types'
 import { Card, CardContent } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
@@ -243,11 +243,13 @@ export function StatusPage() {
   const peers = params?.peer_ai_configs
   const hasPeers = !!peers?.length
   const testsRepoUrl = (params?.tests_repo_url ?? '').trim()
+  const testsRepoHref = sanitizeHttpHref(testsRepoUrl)
   const testsRepoRef = (params?.tests_repo_ref ?? '').trim()
-  const testsRepoLabel = testsRepoUrl
-    ? (testsRepoRef ? `${testsRepoUrl}:${testsRepoRef}` : testsRepoUrl)
+  const testsRepoDisplay = testsRepoHref ?? testsRepoUrl
+  const testsRepoLabel = testsRepoDisplay
+    ? (testsRepoRef ? `${testsRepoDisplay}:${testsRepoRef}` : testsRepoDisplay)
     : '—'
-  const canLink = /^https?:\/\//i.test(testsRepoUrl) && isSafeHref(testsRepoUrl)
+  const canLink = !!testsRepoHref && isSafeHref(testsRepoHref)
   const progressPhase = data?.result?.progress_phase
   const isRunning = displayStatus === 'running'
   const isWaiting = displayStatus === 'waiting'
@@ -481,9 +483,9 @@ export function StatusPage() {
               <Row
                 label="TEST REPO"
                 value={
-                  canLink ? (
+                  canLink && testsRepoHref ? (
                     <a
-                      href={testsRepoUrl}
+                      href={testsRepoHref}
                       target="_blank"
                       rel="noopener noreferrer"
                       className="text-text-link hover:underline"
