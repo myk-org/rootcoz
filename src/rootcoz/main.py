@@ -9821,6 +9821,14 @@ async def update_admin_settings(request: Request) -> JSONResponse:
             detail=f"Unknown settings: {', '.join(sorted(invalid_keys))}",
         )
 
+    # Block writes to server-only settings — these are env-only toggles
+    server_only_keys = set(settings_updates.keys()) & _SERVER_ONLY_SETTINGS
+    if server_only_keys:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Server-only settings (env var only): {', '.join(sorted(server_only_keys))}",
+        )
+
     # Validate values against Settings field types and constraints
     errors = []
 
