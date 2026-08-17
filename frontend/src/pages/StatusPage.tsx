@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
 import { useSSE } from '@/lib/SSEProvider'
 import { api, ApiError } from '@/lib/api'
+import { isSafeHref } from '@/lib/autoLink'
 import { formatTimestamp, isAnalysisTimeout, INVALID_DATE_FALLBACK, ciSourceLabel, resolveBuildUrl, resolveBuildDisplayId } from '@/lib/utils'
 import type { ResultResponse } from '@/types'
 import { Card, CardContent } from '@/components/ui/card'
@@ -479,7 +480,7 @@ export function StatusPage() {
               <Row
                 label="TEST REPO"
                 value={
-                  testsRepoUrl ? (
+                  testsRepoUrl && isSafeHref(testsRepoUrl) ? (
                     <a
                       href={testsRepoUrl}
                       target="_blank"
@@ -489,7 +490,7 @@ export function StatusPage() {
                       {testsRepoLabel}
                     </a>
                   ) : (
-                    '—'
+                    testsRepoLabel
                   )
                 }
                 mono
