@@ -2460,9 +2460,9 @@ async def _auto_review_matching_failures(
 
         # Check if ALL failures are now reviewed → auto-push to configured exporters
         auto_push_names = [
-            _sanitize_control_chars(n.strip())
+            sanitized
             for n in (settings.auto_push_exporters or "").split(",")
-            if n.strip()
+            if (sanitized := _sanitize_control_chars(n.strip()))
         ]
         if auto_push_names and total_failures > 0:
             reviews = await storage.get_reviews_for_job(job_id)
