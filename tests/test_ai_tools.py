@@ -262,6 +262,9 @@ class TestAnalysisTools:
 
         monkeypatch.setattr("rootcoz.engine.core.call_ai_once", mock_ai_once)
         monkeypatch.setattr("rootcoz.engine.core.update_progress_phase", AsyncMock())
+        mcp_js = tmp_path / "http-tools-mcp.js"
+        mcp_js.write_text("// stub\n", encoding="utf-8")
+        monkeypatch.setenv("ROOTCOZ_HTTP_TOOLS_MCP", str(mcp_js))
 
         # Ensure history prompt file is discoverable
         failures = [
@@ -295,6 +298,11 @@ class TestAnalysisTools:
         # Token only in tool headers
         for t in tools:
             assert t["http"]["headers"]["Authorization"] == "Bearer super-secret-token"
+        mcp_blob = (tmp_path / ".mcp.json").read_text(encoding="utf-8")
+        assert "super-secret-token" not in mcp_blob
+        dump = tmp_path.parent / f".{tmp_path.name}.rootcoz-http-tools.json"
+        dumped_names = [t["name"] for t in json.loads(dump.read_text(encoding="utf-8"))]
+        assert "get_failure_history" in dumped_names
 
 
 class TestPeerAnalysisTools:
@@ -349,6 +357,10 @@ class TestPeerAnalysisTools:
         ]
         peer_configs = [AiConfigEntry(ai_provider="gemini", ai_model="pro")]
 
+        mcp_js = tmp_path / "http-tools-mcp.js"
+        mcp_js.write_text("// stub\n", encoding="utf-8")
+        monkeypatch.setenv("ROOTCOZ_HTTP_TOOLS_MCP", str(mcp_js))
+
         await analyze_failure_group_with_peers(
             failures=failures,
             console_context="some console output",
@@ -359,14 +371,24 @@ class TestPeerAnalysisTools:
             ai_call_timeout=None,
             custom_prompt="",
             artifacts_context="",
-            server_url="",
+            server_url="http://localhost:8000",
             job_id="peer-job",
+            auth_header="Bearer peer-secret",
         )
 
         assert any(
             kw.get("tools") == list(ANALYSIS_BUILTIN_TOOLS)
             for kw in captured_call_ai_kwargs
         ), f"No call_ai call had tools={list(ANALYSIS_BUILTIN_TOOLS)}"
+        tool_lists = [
+            [t["name"] for t in kw["custom_tools"]]
+            for kw in captured_call_ai_kwargs
+            if kw.get("custom_tools")
+        ]
+        assert tool_lists, "peer call_ai must pass HTTP custom_tools"
+        assert "get_failure_history" in tool_lists[0]
+        mcp_blob = (tmp_path / ".cursor" / "mcp.json").read_text(encoding="utf-8")
+        assert "peer-secret" not in mcp_blob
 
 
 class TestResourcesAgentDiscovery:

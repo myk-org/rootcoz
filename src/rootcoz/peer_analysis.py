@@ -19,6 +19,7 @@ from pi_sidecar_client import (
 from simple_logger.logger import get_logger
 
 from rootcoz.ai_client import ANALYSIS_BUILTIN_TOOLS, AIResult, call_ai, call_ai_once
+from rootcoz.engine.chat import analysis_http_tools
 from rootcoz.engine.core import (
     JSON_RESPONSE_SCHEMA,
     TIMELINE_RULE,
@@ -31,6 +32,7 @@ from rootcoz.engine.core import (
     write_failure_details_file,
     write_other_groups_file,
 )
+from rootcoz.engine.http_mcp import install_http_tools_mcp
 from rootcoz.models import (
     AiConfigEntry,
     FailedTest,
@@ -531,6 +533,13 @@ async def analyze_failure_group_with_peers(
         peer_workspace = Path(tempfile.mkdtemp(prefix="rootcoz-peer-"))
         ephemeral_dirs.append(peer_workspace)
     failure_summary = _build_failure_summary(failures, error_signature, peer_workspace)
+    peer_custom_tools = analysis_http_tools(
+        server_url=server_url,
+        job_id=job_id,
+        auth_header=auth_header,
+    )
+    if peer_custom_tools:
+        install_http_tools_mcp(peer_workspace, peer_custom_tools)
     _, _, _, resources_section, _ = build_prompt_sections(
         custom_prompt,
         artifacts_context,
@@ -660,6 +669,8 @@ async def analyze_failure_group_with_peers(
                 }
                 if not session:
                     peer_kwargs["tools"] = list(ANALYSIS_BUILTIN_TOOLS)
+                    if peer_custom_tools:
+                        peer_kwargs["custom_tools"] = peer_custom_tools
                 ai_result = await call_ai(prompt, **peer_kwargs)
                 logger.debug(
                     "Peer %d (%s/%s) AI result: success=%s, text_length=%d",
@@ -862,14 +873,19 @@ async def analyze_failure_group_with_peers(
                         round_num,
                         job_id,
                     )
+                    rev_kwargs: dict[str, Any] = {
+                        "ai_provider": main_ai_provider,
+                        "ai_model": main_ai_model,
+                        "cwd": str(peer_workspace),
+                        "ai_call_timeout": ai_call_timeout,
+                        "tools": list(ANALYSIS_BUILTIN_TOOLS),
+                        "system_prompt": system_prompt,
+                    }
+                    if peer_custom_tools:
+                        rev_kwargs["custom_tools"] = peer_custom_tools
                     rev_result = await call_ai_once(
                         revision_prompt,
-                        ai_provider=main_ai_provider,
-                        ai_model=main_ai_model,
-                        cwd=str(peer_workspace),
-                        ai_call_timeout=ai_call_timeout,
-                        tools=list(ANALYSIS_BUILTIN_TOOLS),
-                        system_prompt=system_prompt,
+                        **rev_kwargs,
                     )
                     logger.debug(
                         "Revision round %d AI result: success=%s, text_length=%d, provider=%s, model=%s",

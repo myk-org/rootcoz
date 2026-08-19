@@ -21,6 +21,7 @@ from rootcoz.ai_client import (
     map_provider_model_for_sidecar,
     normalize_provider,
 )
+from rootcoz.engine.http_mcp import install_http_tools_mcp
 from rootcoz.storage import AI_SYSTEM_USERNAME
 
 logger = get_logger(name=__name__)
@@ -423,6 +424,25 @@ def build_analysis_history_tools(
             },
         },
     ]
+
+
+def analysis_http_tools(
+    *,
+    server_url: str,
+    job_id: str,
+    auth_header: str,
+) -> list[dict[str, Any]]:
+    """HTTP history tools for analysis when server, job, and Bearer token exist."""
+    if not (server_url and job_id and auth_header):
+        return []
+    token = auth_header.removeprefix("Bearer ").strip()
+    if not token:
+        return []
+    return build_analysis_history_tools(
+        server_url=server_url,
+        auth_token=token,
+        job_id=job_id,
+    )
 
 
 def build_chat_custom_tools(
@@ -1141,6 +1161,8 @@ async def _create_chat_session(
             create_kwargs["custom_tools"] = custom_tools
         if restrict_tools:
             create_kwargs["tools"] = list(CHAT_BUILTIN_TOOLS)
+        if repo_path is not None and custom_tools:
+            install_http_tools_mcp(repo_path, custom_tools)
         session_id = await client.create_session(**create_kwargs)
         logger.info("%s: session created: %s", log_prefix, session_id)
         return session_id
@@ -1250,6 +1272,8 @@ async def _chat_with_ai_impl(
         call_kwargs["custom_tools"] = custom_tools
     if not session_id and restrict_tools:
         call_kwargs["tools"] = list(CHAT_BUILTIN_TOOLS)
+    if repo_path is not None and custom_tools:
+        install_http_tools_mcp(repo_path, custom_tools)
     result = await call_ai(prompt, **call_kwargs)
 
     # If session was lost, retry with fresh session
@@ -1275,6 +1299,8 @@ async def _chat_with_ai_impl(
             retry_kwargs["custom_tools"] = custom_tools
         if restrict_tools:
             retry_kwargs["tools"] = list(CHAT_BUILTIN_TOOLS)
+        if repo_path is not None and custom_tools:
+            install_http_tools_mcp(repo_path, custom_tools)
         result = await call_ai(prompt, **retry_kwargs)
 
     await result.record_usage(
