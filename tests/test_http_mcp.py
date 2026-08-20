@@ -358,6 +358,39 @@ def test_install_failure_restores_config_symlink(tmp_path: Path, monkeypatch) ->
     assert not http_tools_dump_path(workspace).exists()
 
 
+def test_install_failure_does_not_restore_escaped_parent(
+    tmp_path: Path, monkeypatch
+) -> None:
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    outside_dir = tmp_path / "outside-dir"
+    outside_dir.mkdir()
+    outside_file = outside_dir / "mcp.json"
+    original = '{"keep": true}\n'
+    outside_file.write_text(original, encoding="utf-8")
+    inode = outside_file.stat().st_ino
+    (workspace / ".cursor").symlink_to(outside_dir)
+    tools = [{"name": "get_job_result", "http": {"method": "GET", "url": "http://x"}}]
+
+    real_write = http_mcp_mod._write_merged_json
+
+    def boom_after_mcp_json(dest, payload):
+        if dest.name == "settings.json" and dest.parent.name == ".gemini":
+            raise OSError("disk full")
+        return real_write(dest, payload)
+
+    monkeypatch.setattr(http_mcp_mod, "_write_merged_json", boom_after_mcp_json)
+    try:
+        install_http_tools_mcp(workspace, tools, mcp_js=_mcp_js(tmp_path))
+    except OSError:
+        pass
+    else:
+        raise AssertionError("expected OSError")
+    assert outside_file.read_text(encoding="utf-8") == original
+    assert outside_file.stat().st_ino == inode
+    assert not http_tools_dump_path(workspace).exists()
+
+
 def test_install_failure_rolls_back_new_dump(tmp_path: Path, monkeypatch) -> None:
     workspace = tmp_path / "ws"
     workspace.mkdir()

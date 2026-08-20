@@ -239,19 +239,72 @@ class _PathSnapshot:
     link_target: str | None
     data: bytes | None
     mode: int | None
+    skipped: bool
+    require_inside: bool
 
 
-def _snapshot_file(path: Path) -> _PathSnapshot:
+def _destination_parent_in_workspace(path: Path, workspace: Path) -> bool:
+    """True when each existing parent component stays inside *workspace*.
+
+    Missing intermediate directories are allowed. A parent symlink that
+    resolves outside the workspace is not.
+    """
+    try:
+        workspace_resolved = workspace.resolve()
+        relative = path.parent.relative_to(workspace)
+    except (OSError, ValueError):
+        return False
+    current = workspace_resolved
+    for part in relative.parts:
+        candidate = current / part
+        if candidate.is_symlink() or candidate.exists():
+            try:
+                resolved = candidate.resolve()
+            except OSError:
+                return False
+            if resolved != workspace_resolved and not resolved.is_relative_to(
+                workspace_resolved
+            ):
+                return False
+            current = resolved
+        else:
+            current = candidate
+    return True
+
+
+def _snapshot_file(
+    path: Path, workspace: Path, *, require_inside: bool
+) -> _PathSnapshot:
+    empty = _PathSnapshot(path, False, False, None, None, None, False, require_inside)
+    if require_inside and not _destination_parent_in_workspace(path, workspace):
+        logger.warning("Skipping MCP snapshot outside workspace: %s", path)
+        return _PathSnapshot(path, False, False, None, None, None, True, True)
     if path.is_symlink():
-        return _PathSnapshot(path, True, True, os.readlink(path), None, None)
+        return _PathSnapshot(
+            path, True, True, os.readlink(path), None, None, False, require_inside
+        )
     if not path.is_file():
-        return _PathSnapshot(path, False, False, None, None, None)
+        return empty
     return _PathSnapshot(
-        path, True, False, None, path.read_bytes(), path.stat().st_mode & 0o777
+        path,
+        True,
+        False,
+        None,
+        path.read_bytes(),
+        path.stat().st_mode & 0o777,
+        False,
+        require_inside,
     )
 
 
-def _restore_file(snap: _PathSnapshot) -> None:
+def _restore_file(snap: _PathSnapshot, workspace: Path) -> None:
+    if snap.skipped:
+        return
+    if snap.require_inside and not _destination_parent_in_workspace(
+        snap.path, workspace
+    ):
+        logger.warning("Skipping MCP restore outside workspace: %s", snap.path)
+        return
     if snap.path.is_symlink() or snap.path.is_file():
         snap.path.unlink(missing_ok=True)
     if not snap.existed:
@@ -269,8 +322,13 @@ def _restore_file(snap: _PathSnapshot) -> None:
 
 def _snapshot_install_paths(workspace: Path) -> list[_PathSnapshot]:
     return [
-        _snapshot_file(http_tools_dump_path(workspace)),
-        *(_snapshot_file(workspace / relative) for relative in _MCP_RELATIVES),
+        _snapshot_file(
+            http_tools_dump_path(workspace), workspace, require_inside=False
+        ),
+        *(
+            _snapshot_file(workspace / relative, workspace, require_inside=True)
+            for relative in _MCP_RELATIVES
+        ),
     ]
 
 
@@ -412,7 +470,7 @@ def install_http_tools_mcp(
         _install_mcp_configs(workspace, cursor_entry, claude_entry, gemini_entry)
     except Exception:
         for snap in reversed(snapshots):
-            _restore_file(snap)
+            _restore_file(snap, workspace)
         raise
     logger.info(
         "Installed HTTP MCP (%d tools) for CLI/acpx in %s",
