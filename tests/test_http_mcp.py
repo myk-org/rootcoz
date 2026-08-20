@@ -1,9 +1,11 @@
 """Tests for CLI/acpx HTTP MCP install from path-specific custom_tools."""
 
 import json
+import os
 import stat
 from pathlib import Path
 
+from rootcoz.engine import http_mcp as http_mcp_mod
 from rootcoz.engine.chat import (
     analysis_http_tools,
     build_admin_custom_tools,
@@ -323,6 +325,36 @@ def test_install_failure_restores_prior_rootcoz_entry(
         raise AssertionError("expected OSError")
     restored = _read(mcp)
     assert restored == prior
+    assert not http_tools_dump_path(workspace).exists()
+
+
+def test_install_failure_restores_config_symlink(tmp_path: Path, monkeypatch) -> None:
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    outside = tmp_path / "outside.json"
+    outside.write_text('{"secret": true}\n', encoding="utf-8")
+    link = workspace / ".mcp.json"
+    link.symlink_to(outside)
+    original_target = os.readlink(link)
+    tools = [{"name": "get_job_result", "http": {"method": "GET", "url": "http://x"}}]
+
+    real_write = http_mcp_mod._write_merged_json
+
+    def boom_after_mcp_json(dest, payload):
+        if dest.name == "settings.json" and dest.parent.name == ".gemini":
+            raise OSError("disk full")
+        return real_write(dest, payload)
+
+    monkeypatch.setattr(http_mcp_mod, "_write_merged_json", boom_after_mcp_json)
+    try:
+        install_http_tools_mcp(workspace, tools, mcp_js=_mcp_js(tmp_path))
+    except OSError:
+        pass
+    else:
+        raise AssertionError("expected OSError")
+    assert link.is_symlink()
+    assert os.readlink(link) == original_target
+    assert json.loads(outside.read_text(encoding="utf-8")) == {"secret": True}
     assert not http_tools_dump_path(workspace).exists()
 
 

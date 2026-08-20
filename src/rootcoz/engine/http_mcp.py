@@ -235,20 +235,31 @@ def _write_merged_json(dest: Path, payload: dict[str, Any]) -> None:
 class _PathSnapshot:
     path: Path
     existed: bool
+    is_symlink: bool
+    link_target: str | None
     data: bytes | None
     mode: int | None
 
 
 def _snapshot_file(path: Path) -> _PathSnapshot:
-    if path.is_symlink() or not path.is_file():
-        return _PathSnapshot(path, False, None, None)
-    return _PathSnapshot(path, True, path.read_bytes(), path.stat().st_mode & 0o777)
+    if path.is_symlink():
+        return _PathSnapshot(path, True, True, os.readlink(path), None, None)
+    if not path.is_file():
+        return _PathSnapshot(path, False, False, None, None, None)
+    return _PathSnapshot(
+        path, True, False, None, path.read_bytes(), path.stat().st_mode & 0o777
+    )
 
 
 def _restore_file(snap: _PathSnapshot) -> None:
+    if snap.path.is_symlink() or snap.path.is_file():
+        snap.path.unlink(missing_ok=True)
     if not snap.existed:
-        if snap.path.is_symlink() or snap.path.is_file():
-            snap.path.unlink(missing_ok=True)
+        return
+    if snap.is_symlink:
+        if snap.link_target is None:
+            return
+        snap.path.symlink_to(snap.link_target)
         return
     if snap.data is None:
         return
