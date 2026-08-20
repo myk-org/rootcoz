@@ -12,6 +12,8 @@ import os
 import shutil
 import stat
 import tempfile
+from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -25,6 +27,12 @@ _MCP_JS_ENV = "ROOTCOZ_HTTP_TOOLS_MCP"
 _MAX_CONFIG_MODE = 0o644
 _NEW_CONFIG_MODE = stat.S_IRUSR | stat.S_IWUSR
 _DUMP_MODE = stat.S_IRUSR | stat.S_IWUSR
+_MCP_RELATIVES = (
+    Path(".cursor") / "mcp.json",
+    Path(".mcp.json"),
+    Path(".claude") / "settings.json",
+    Path(".gemini") / "settings.json",
+)
 
 
 def resolve_http_tools_mcp_js() -> Path | None:
@@ -98,7 +106,7 @@ def _dir_inside_workspace(
     return None
 
 
-def _atomic_write_text(dest: Path, text: str, *, mode: int, parent: Path) -> None:
+def _atomic_write_bytes(dest: Path, data: bytes, *, mode: int, parent: Path) -> None:
     """Write *dest* via rename in *parent* so readers never see a truncated file.
 
     ``os.replace`` replaces a destination symlink instead of following it.
@@ -107,8 +115,8 @@ def _atomic_write_text(dest: Path, text: str, *, mode: int, parent: Path) -> Non
     fd, tmp_name = tempfile.mkstemp(prefix=".rootcoz-mcp-", dir=str(parent))
     tmp_path = Path(tmp_name)
     try:
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            handle.write(text)
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(data)
             handle.flush()
             os.fsync(handle.fileno())
         os.chmod(tmp_path, mode)
@@ -116,6 +124,10 @@ def _atomic_write_text(dest: Path, text: str, *, mode: int, parent: Path) -> Non
     except Exception:
         tmp_path.unlink(missing_ok=True)
         raise
+
+
+def _atomic_write_text(dest: Path, text: str, *, mode: int, parent: Path) -> None:
+    _atomic_write_bytes(dest, text.encode("utf-8"), mode=mode, parent=parent)
 
 
 def _unlink_if_symlink(path: Path) -> None:
@@ -143,10 +155,9 @@ def _load_json_object(path: Path) -> tuple[dict[str, Any], bool]:
 
 
 def _config_file_mode(dest: Path) -> int:
-    """Keep an existing file's mode, capped at 0644. New files are 0600."""
+    """Keep an existing file's mode, with bits outside 0644 stripped. New files are 0600."""
     if dest.is_file() and not dest.is_symlink():
-        existing = dest.stat().st_mode & 0o777
-        return min(existing, _MAX_CONFIG_MODE)
+        return dest.stat().st_mode & _MAX_CONFIG_MODE
     return _NEW_CONFIG_MODE
 
 
@@ -220,6 +231,51 @@ def _write_merged_json(dest: Path, payload: dict[str, Any]) -> None:
     )
 
 
+@dataclass(frozen=True)
+class _PathSnapshot:
+    path: Path
+    existed: bool
+    data: bytes | None
+    mode: int | None
+
+
+def _snapshot_file(path: Path) -> _PathSnapshot:
+    if path.is_symlink() or not path.is_file():
+        return _PathSnapshot(path, False, None, None)
+    return _PathSnapshot(path, True, path.read_bytes(), path.stat().st_mode & 0o777)
+
+
+def _restore_file(snap: _PathSnapshot) -> None:
+    if not snap.existed:
+        if snap.path.is_symlink() or snap.path.is_file():
+            snap.path.unlink(missing_ok=True)
+        return
+    if snap.data is None:
+        return
+    mode = snap.mode if snap.mode is not None else _NEW_CONFIG_MODE
+    _atomic_write_bytes(snap.path, snap.data, mode=mode, parent=snap.path.parent)
+
+
+def _snapshot_install_paths(workspace: Path) -> list[_PathSnapshot]:
+    return [
+        _snapshot_file(http_tools_dump_path(workspace)),
+        *(_snapshot_file(workspace / relative) for relative in _MCP_RELATIVES),
+    ]
+
+
+def _write_merged_if_valid(
+    dest: Path | None,
+    payload_from: Callable[[dict[str, Any]], dict[str, Any]],
+) -> None:
+    if dest is None:
+        return
+    existing, malformed = _load_json_object(dest)
+    if malformed:
+        logger.warning("Skipping MCP merge; malformed JSON at %s", dest)
+        return
+    _write_merged_json(dest, payload_from(existing))
+
+
 def _install_mcp_configs(
     workspace: Path,
     cursor_entry: dict[str, Any],
@@ -227,28 +283,26 @@ def _install_mcp_configs(
     gemini_entry: dict[str, Any],
 ) -> None:
     cursor_dest = _config_dest(workspace, Path(".cursor") / "mcp.json", create=True)
-    if cursor_dest is not None:
-        existing, _malformed = _load_json_object(cursor_dest)
-        _write_merged_json(cursor_dest, _merge_mcp_servers(existing, cursor_entry))
+    _write_merged_if_valid(
+        cursor_dest, lambda existing: _merge_mcp_servers(existing, cursor_entry)
+    )
 
     claude_dest = _config_dest(workspace, Path(".mcp.json"), create=True)
-    if claude_dest is not None:
-        existing, _malformed = _load_json_object(claude_dest)
-        _write_merged_json(claude_dest, _merge_mcp_servers(existing, claude_entry))
+    _write_merged_if_valid(
+        claude_dest, lambda existing: _merge_mcp_servers(existing, claude_entry)
+    )
 
     claude_settings = _config_dest(
         workspace, Path(".claude") / "settings.json", create=True
     )
-    if claude_settings is not None:
-        settings, _malformed = _load_json_object(claude_settings)
-        _write_merged_json(claude_settings, _with_enabled_rootcoz_server(settings))
+    _write_merged_if_valid(claude_settings, _with_enabled_rootcoz_server)
 
     gemini_dest = _config_dest(
         workspace, Path(".gemini") / "settings.json", create=True
     )
-    if gemini_dest is not None:
-        existing, _malformed = _load_json_object(gemini_dest)
-        _write_merged_json(gemini_dest, _merge_mcp_servers(existing, gemini_entry))
+    _write_merged_if_valid(
+        gemini_dest, lambda existing: _merge_mcp_servers(existing, gemini_entry)
+    )
 
 
 def _remove_managed_mcp_configs(workspace: Path) -> None:
@@ -327,6 +381,7 @@ def install_http_tools_mcp(
         return None
 
     tools_file = http_tools_dump_path(workspace)
+    snapshots = _snapshot_install_paths(workspace)
     try:
         _unlink_if_symlink(tools_file)
         _atomic_write_text(
@@ -345,7 +400,8 @@ def install_http_tools_mcp(
         gemini_entry = _server_entry(resolved_js, tools_file, include_tools=names)
         _install_mcp_configs(workspace, cursor_entry, claude_entry, gemini_entry)
     except Exception:
-        cleanup_http_tools_mcp(workspace)
+        for snap in reversed(snapshots):
+            _restore_file(snap)
         raise
     logger.info(
         "Installed HTTP MCP (%d tools) for CLI/acpx in %s",

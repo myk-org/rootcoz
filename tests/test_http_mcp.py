@@ -257,14 +257,16 @@ def test_cleanup_removes_sibling_dump(tmp_path: Path) -> None:
     assert not (workspace / ".mcp.json").exists()
 
 
-def test_malformed_existing_json_is_replaced(tmp_path: Path) -> None:
+def test_install_preserves_malformed_config(tmp_path: Path) -> None:
     workspace = tmp_path / "ws"
     workspace.mkdir()
-    (workspace / ".mcp.json").write_text("not-json", encoding="utf-8")
+    malformed = workspace / ".mcp.json"
+    malformed.write_text("not-json", encoding="utf-8")
     tools = [{"name": "get_job_result", "http": {"method": "GET", "url": "http://x"}}]
-    install_http_tools_mcp(workspace, tools, mcp_js=_mcp_js(tmp_path))
-    claude = _read(workspace / ".mcp.json")
-    assert MCP_SERVER_NAME in claude["mcpServers"]
+    dump = install_http_tools_mcp(workspace, tools, mcp_js=_mcp_js(tmp_path))
+    assert dump is not None
+    assert malformed.read_text(encoding="utf-8") == "not-json"
+    assert MCP_SERVER_NAME in _read(workspace / ".cursor" / "mcp.json")["mcpServers"]
 
 
 def test_cleanup_preserves_malformed_config(tmp_path: Path) -> None:
@@ -276,15 +278,16 @@ def test_cleanup_preserves_malformed_config(tmp_path: Path) -> None:
     assert malformed.read_text(encoding="utf-8") == "not-json"
 
 
-def test_install_preserves_restrictive_config_mode(tmp_path: Path) -> None:
+def test_install_strips_group_world_write_from_mode(tmp_path: Path) -> None:
     workspace = tmp_path / "ws"
     workspace.mkdir()
     mcp = workspace / ".mcp.json"
     mcp.write_text("{}", encoding="utf-8")
-    mcp.chmod(0o600)
+    mcp.chmod(0o622)
     tools = [{"name": "get_job_result", "http": {"method": "GET", "url": "http://x"}}]
     install_http_tools_mcp(workspace, tools, mcp_js=_mcp_js(tmp_path))
     assert mcp.stat().st_mode & 0o777 == 0o600
+    assert mcp.stat().st_mode & 0o022 == 0
 
 
 def test_new_config_files_are_private(tmp_path: Path) -> None:
@@ -295,7 +298,35 @@ def test_new_config_files_are_private(tmp_path: Path) -> None:
     assert (workspace / ".mcp.json").stat().st_mode & 0o777 == 0o600
 
 
-def test_install_failure_rolls_back_dump(tmp_path: Path, monkeypatch) -> None:
+def test_install_failure_restores_prior_rootcoz_entry(
+    tmp_path: Path, monkeypatch
+) -> None:
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    prior = {
+        "mcpServers": {MCP_SERVER_NAME: {"command": "old-http"}},
+        "keep": True,
+    }
+    mcp = workspace / ".mcp.json"
+    mcp.write_text(json.dumps(prior), encoding="utf-8")
+    tools = [{"name": "get_job_result", "http": {"method": "GET", "url": "http://x"}}]
+
+    def boom(*_args, **_kwargs):
+        raise OSError("disk full")
+
+    monkeypatch.setattr("rootcoz.engine.http_mcp._install_mcp_configs", boom)
+    try:
+        install_http_tools_mcp(workspace, tools, mcp_js=_mcp_js(tmp_path))
+    except OSError:
+        pass
+    else:
+        raise AssertionError("expected OSError")
+    restored = _read(mcp)
+    assert restored == prior
+    assert not http_tools_dump_path(workspace).exists()
+
+
+def test_install_failure_rolls_back_new_dump(tmp_path: Path, monkeypatch) -> None:
     workspace = tmp_path / "ws"
     workspace.mkdir()
     tools = [{"name": "get_job_result", "http": {"method": "GET", "url": "http://x"}}]
