@@ -22,7 +22,8 @@ logger = get_logger(name=__name__)
 MCP_SERVER_NAME = "rootcoz-http"
 _TOOLS_FILE_ENV = "ROOTCOZ_HTTP_TOOLS_FILE"
 _MCP_JS_ENV = "ROOTCOZ_HTTP_TOOLS_MCP"
-_CONFIG_MODE = 0o644
+_MAX_CONFIG_MODE = 0o644
+_NEW_CONFIG_MODE = stat.S_IRUSR | stat.S_IWUSR
 _DUMP_MODE = stat.S_IRUSR | stat.S_IWUSR
 
 
@@ -122,17 +123,57 @@ def _unlink_if_symlink(path: Path) -> None:
         path.unlink()
 
 
-def _read_json_object(path: Path) -> dict[str, Any]:
-    """Load a JSON object from a regular file. Symlinks are unlinked, not followed."""
+def _load_json_object(path: Path) -> tuple[dict[str, Any], bool]:
+    """Load a JSON object. Returns ``(data, malformed)``.
+
+    Missing files are ``({}, False)``. Unreadable, non-object, or invalid JSON
+    is ``({}, True)`` so cleanup can leave the original file in place.
+    """
     _unlink_if_symlink(path)
     if not path.is_file():
-        return {}
+        return {}, False
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError, UnicodeDecodeError):
         logger.warning("Ignoring malformed MCP JSON at %s", path)
-        return {}
-    return data if isinstance(data, dict) else {}
+        return {}, True
+    if not isinstance(data, dict):
+        return {}, True
+    return data, False
+
+
+def _config_file_mode(dest: Path) -> int:
+    """Keep an existing file's mode, capped at 0644. New files are 0600."""
+    if dest.is_file() and not dest.is_symlink():
+        existing = dest.stat().st_mode & 0o777
+        return min(existing, _MAX_CONFIG_MODE)
+    return _NEW_CONFIG_MODE
+
+
+def _with_enabled_rootcoz_server(settings: dict[str, Any]) -> dict[str, Any]:
+    merged = dict(settings)
+    enabled = merged.get("enabledMcpjsonServers")
+    names = (
+        [item for item in enabled if isinstance(item, str)]
+        if isinstance(enabled, list)
+        else []
+    )
+    if MCP_SERVER_NAME not in names:
+        names.append(MCP_SERVER_NAME)
+    merged["enabledMcpjsonServers"] = names
+    return merged
+
+
+def _without_enabled_rootcoz_server(settings: dict[str, Any]) -> dict[str, Any]:
+    merged = dict(settings)
+    enabled = merged.get("enabledMcpjsonServers")
+    if isinstance(enabled, list):
+        names = [item for item in enabled if item != MCP_SERVER_NAME]
+        if names:
+            merged["enabledMcpjsonServers"] = names
+        else:
+            merged.pop("enabledMcpjsonServers", None)
+    return merged
 
 
 def _merge_mcp_servers(
@@ -174,7 +215,7 @@ def _write_merged_json(dest: Path, payload: dict[str, Any]) -> None:
     _atomic_write_text(
         dest,
         json.dumps(payload, indent=2) + "\n",
-        mode=_CONFIG_MODE,
+        mode=_config_file_mode(dest),
         parent=dest.parent,
     )
 
@@ -187,34 +228,27 @@ def _install_mcp_configs(
 ) -> None:
     cursor_dest = _config_dest(workspace, Path(".cursor") / "mcp.json", create=True)
     if cursor_dest is not None:
-        _write_merged_json(
-            cursor_dest,
-            _merge_mcp_servers(_read_json_object(cursor_dest), cursor_entry),
-        )
+        existing, _malformed = _load_json_object(cursor_dest)
+        _write_merged_json(cursor_dest, _merge_mcp_servers(existing, cursor_entry))
 
     claude_dest = _config_dest(workspace, Path(".mcp.json"), create=True)
     if claude_dest is not None:
-        _write_merged_json(
-            claude_dest,
-            _merge_mcp_servers(_read_json_object(claude_dest), claude_entry),
-        )
+        existing, _malformed = _load_json_object(claude_dest)
+        _write_merged_json(claude_dest, _merge_mcp_servers(existing, claude_entry))
 
     claude_settings = _config_dest(
         workspace, Path(".claude") / "settings.json", create=True
     )
     if claude_settings is not None:
-        settings = _read_json_object(claude_settings)
-        settings["enableAllProjectMcpServers"] = True
-        _write_merged_json(claude_settings, settings)
+        settings, _malformed = _load_json_object(claude_settings)
+        _write_merged_json(claude_settings, _with_enabled_rootcoz_server(settings))
 
     gemini_dest = _config_dest(
         workspace, Path(".gemini") / "settings.json", create=True
     )
     if gemini_dest is not None:
-        _write_merged_json(
-            gemini_dest,
-            _merge_mcp_servers(_read_json_object(gemini_dest), gemini_entry),
-        )
+        existing, _malformed = _load_json_object(gemini_dest)
+        _write_merged_json(gemini_dest, _merge_mcp_servers(existing, gemini_entry))
 
 
 def _remove_managed_mcp_configs(workspace: Path) -> None:
@@ -226,11 +260,28 @@ def _remove_managed_mcp_configs(workspace: Path) -> None:
         dest = _config_dest(workspace, relative, create=False)
         if dest is None or not dest.is_file():
             continue
-        remaining = _drop_rootcoz_server(_read_json_object(dest))
+        existing, malformed = _load_json_object(dest)
+        if malformed:
+            continue
+        remaining = _drop_rootcoz_server(existing)
         if remaining:
             _write_merged_json(dest, remaining)
         else:
             dest.unlink(missing_ok=True)
+
+    claude_settings = _config_dest(
+        workspace, Path(".claude") / "settings.json", create=False
+    )
+    if claude_settings is None or not claude_settings.is_file():
+        return
+    settings, malformed = _load_json_object(claude_settings)
+    if malformed:
+        return
+    remaining = _without_enabled_rootcoz_server(settings)
+    if remaining:
+        _write_merged_json(claude_settings, remaining)
+    else:
+        claude_settings.unlink(missing_ok=True)
 
 
 def _remove_tools_dump(workspace: Path) -> None:
@@ -276,22 +327,26 @@ def install_http_tools_mcp(
         return None
 
     tools_file = http_tools_dump_path(workspace)
-    _unlink_if_symlink(tools_file)
-    _atomic_write_text(
-        tools_file,
-        json.dumps(http_tools),
-        mode=_DUMP_MODE,
-        parent=tools_file.parent,
-    )
+    try:
+        _unlink_if_symlink(tools_file)
+        _atomic_write_text(
+            tools_file,
+            json.dumps(http_tools),
+            mode=_DUMP_MODE,
+            parent=tools_file.parent,
+        )
 
-    names = [str(t["name"]) for t in http_tools]
-    cursor_entry = _server_entry(resolved_js, tools_file)
-    claude_entry = {
-        "type": "stdio",
-        **_server_entry(resolved_js, tools_file),
-    }
-    gemini_entry = _server_entry(resolved_js, tools_file, include_tools=names)
-    _install_mcp_configs(workspace, cursor_entry, claude_entry, gemini_entry)
+        names = [str(t["name"]) for t in http_tools]
+        cursor_entry = _server_entry(resolved_js, tools_file)
+        claude_entry = {
+            "type": "stdio",
+            **_server_entry(resolved_js, tools_file),
+        }
+        gemini_entry = _server_entry(resolved_js, tools_file, include_tools=names)
+        _install_mcp_configs(workspace, cursor_entry, claude_entry, gemini_entry)
+    except Exception:
+        cleanup_http_tools_mcp(workspace)
+        raise
     logger.info(
         "Installed HTTP MCP (%d tools) for CLI/acpx in %s",
         len(http_tools),

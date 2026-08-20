@@ -90,7 +90,8 @@ def test_install_writes_cursor_claude_gemini_configs(tmp_path: Path) -> None:
     assert claude["mcpServers"][MCP_SERVER_NAME]["type"] == "stdio"
     assert gemini["mcpServers"][MCP_SERVER_NAME]["trust"] is True
     assert set(gemini["mcpServers"][MCP_SERVER_NAME]["includeTools"]) == names
-    assert claude_settings["enableAllProjectMcpServers"] is True
+    assert "enableAllProjectMcpServers" not in claude_settings
+    assert claude_settings["enabledMcpjsonServers"] == [MCP_SERVER_NAME]
 
 
 def test_chat_mcp_omits_jira_without_creds(tmp_path: Path) -> None:
@@ -213,7 +214,8 @@ def test_install_merges_existing_mcp_servers(tmp_path: Path) -> None:
     assert MCP_SERVER_NAME in cursor["mcpServers"]
     claude_settings = _read(workspace / ".claude" / "settings.json")
     assert claude_settings["permissions"] == {"allow": ["Read"]}
-    assert claude_settings["enableAllProjectMcpServers"] is True
+    assert "enableAllProjectMcpServers" not in claude_settings
+    assert claude_settings["enabledMcpjsonServers"] == [MCP_SERVER_NAME]
 
 
 def test_install_does_not_follow_config_symlink(tmp_path: Path) -> None:
@@ -263,3 +265,69 @@ def test_malformed_existing_json_is_replaced(tmp_path: Path) -> None:
     install_http_tools_mcp(workspace, tools, mcp_js=_mcp_js(tmp_path))
     claude = _read(workspace / ".mcp.json")
     assert MCP_SERVER_NAME in claude["mcpServers"]
+
+
+def test_cleanup_preserves_malformed_config(tmp_path: Path) -> None:
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    malformed = workspace / ".mcp.json"
+    malformed.write_text("not-json", encoding="utf-8")
+    assert install_http_tools_mcp(workspace, [], mcp_js=_mcp_js(tmp_path)) is None
+    assert malformed.read_text(encoding="utf-8") == "not-json"
+
+
+def test_install_preserves_restrictive_config_mode(tmp_path: Path) -> None:
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    mcp = workspace / ".mcp.json"
+    mcp.write_text("{}", encoding="utf-8")
+    mcp.chmod(0o600)
+    tools = [{"name": "get_job_result", "http": {"method": "GET", "url": "http://x"}}]
+    install_http_tools_mcp(workspace, tools, mcp_js=_mcp_js(tmp_path))
+    assert mcp.stat().st_mode & 0o777 == 0o600
+
+
+def test_new_config_files_are_private(tmp_path: Path) -> None:
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    tools = [{"name": "get_job_result", "http": {"method": "GET", "url": "http://x"}}]
+    install_http_tools_mcp(workspace, tools, mcp_js=_mcp_js(tmp_path))
+    assert (workspace / ".mcp.json").stat().st_mode & 0o777 == 0o600
+
+
+def test_install_failure_rolls_back_dump(tmp_path: Path, monkeypatch) -> None:
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    tools = [{"name": "get_job_result", "http": {"method": "GET", "url": "http://x"}}]
+
+    def boom(*_args, **_kwargs):
+        raise OSError("disk full")
+
+    monkeypatch.setattr("rootcoz.engine.http_mcp._install_mcp_configs", boom)
+    try:
+        install_http_tools_mcp(workspace, tools, mcp_js=_mcp_js(tmp_path))
+    except OSError:
+        pass
+    else:
+        raise AssertionError("expected OSError")
+    assert not http_tools_dump_path(workspace).exists()
+    assert not (workspace / ".mcp.json").exists()
+
+
+def test_cleanup_removes_claude_enabled_server_keeps_other_settings(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    (workspace / ".claude").mkdir()
+    (workspace / ".claude" / "settings.json").write_text(
+        json.dumps({"permissions": {"allow": ["Read"]}}),
+        encoding="utf-8",
+    )
+    tools = [{"name": "get_job_result", "http": {"method": "GET", "url": "http://x"}}]
+    install_http_tools_mcp(workspace, tools, mcp_js=_mcp_js(tmp_path))
+    cleanup_http_tools_mcp(workspace)
+    settings = _read(workspace / ".claude" / "settings.json")
+    assert settings["permissions"] == {"allow": ["Read"]}
+    assert "enabledMcpjsonServers" not in settings
+    assert "enableAllProjectMcpServers" not in settings
