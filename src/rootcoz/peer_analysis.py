@@ -32,7 +32,7 @@ from rootcoz.engine.core import (
     write_failure_details_file,
     write_other_groups_file,
 )
-from rootcoz.engine.http_mcp import install_http_tools_mcp
+from rootcoz.engine.http_mcp import cleanup_http_tools_mcp, install_http_tools_mcp
 from rootcoz.models import (
     AiConfigEntry,
     FailedTest,
@@ -538,8 +538,7 @@ async def analyze_failure_group_with_peers(
         job_id=job_id,
         auth_header=auth_header,
     )
-    if peer_custom_tools:
-        install_http_tools_mcp(peer_workspace, peer_custom_tools)
+    install_http_tools_mcp(peer_workspace, peer_custom_tools)
     _, _, _, resources_section, _ = build_prompt_sections(
         custom_prompt,
         artifacts_context,
@@ -1041,6 +1040,7 @@ async def analyze_failure_group_with_peers(
 
         for temp_dir in ephemeral_dirs:
             try:
+                cleanup_http_tools_mcp(temp_dir)
                 shutil.rmtree(temp_dir, ignore_errors=True)
                 logger.debug("Removed peer ephemeral workspace %s", temp_dir)
             except Exception:

@@ -21,7 +21,7 @@ from rootcoz.ai_client import (
     map_provider_model_for_sidecar,
     normalize_provider,
 )
-from rootcoz.engine.http_mcp import install_http_tools_mcp
+from rootcoz.engine.http_mcp import cleanup_http_tools_mcp, install_http_tools_mcp
 from rootcoz.storage import AI_SYSTEM_USERNAME
 
 logger = get_logger(name=__name__)
@@ -912,6 +912,7 @@ def cleanup_chat_workspace(job_id: str, username: str = "") -> None:
             _safe_remove_symlink(item)
 
     shutil.rmtree(workspace, ignore_errors=True)
+    cleanup_http_tools_mcp(workspace)
     logger.info(f"Deleted chat workspace for job {job_id}")
 
 
@@ -1161,8 +1162,8 @@ async def _create_chat_session(
             create_kwargs["custom_tools"] = custom_tools
         if restrict_tools:
             create_kwargs["tools"] = list(CHAT_BUILTIN_TOOLS)
-        if repo_path is not None and custom_tools:
-            install_http_tools_mcp(repo_path, custom_tools)
+        if repo_path is not None:
+            install_http_tools_mcp(repo_path, custom_tools or [])
         session_id = await client.create_session(**create_kwargs)
         logger.info("%s: session created: %s", log_prefix, session_id)
         return session_id
@@ -1272,8 +1273,8 @@ async def _chat_with_ai_impl(
         call_kwargs["custom_tools"] = custom_tools
     if not session_id and restrict_tools:
         call_kwargs["tools"] = list(CHAT_BUILTIN_TOOLS)
-    if repo_path is not None and custom_tools:
-        install_http_tools_mcp(repo_path, custom_tools)
+    if repo_path is not None:
+        install_http_tools_mcp(repo_path, custom_tools or [])
     result = await call_ai(prompt, **call_kwargs)
 
     # If session was lost, retry with fresh session
@@ -1299,8 +1300,8 @@ async def _chat_with_ai_impl(
             retry_kwargs["custom_tools"] = custom_tools
         if restrict_tools:
             retry_kwargs["tools"] = list(CHAT_BUILTIN_TOOLS)
-        if repo_path is not None and custom_tools:
-            install_http_tools_mcp(repo_path, custom_tools)
+        if repo_path is not None:
+            install_http_tools_mcp(repo_path, custom_tools or [])
         result = await call_ai(prompt, **retry_kwargs)
 
     await result.record_usage(

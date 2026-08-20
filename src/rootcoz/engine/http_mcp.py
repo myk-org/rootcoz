@@ -11,6 +11,7 @@ import json
 import os
 import shutil
 import stat
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -21,6 +22,8 @@ logger = get_logger(name=__name__)
 MCP_SERVER_NAME = "rootcoz-http"
 _TOOLS_FILE_ENV = "ROOTCOZ_HTTP_TOOLS_FILE"
 _MCP_JS_ENV = "ROOTCOZ_HTTP_TOOLS_MCP"
+_CONFIG_MODE = 0o644
+_DUMP_MODE = stat.S_IRUSR | stat.S_IWUSR
 
 
 def resolve_http_tools_mcp_js() -> Path | None:
@@ -43,7 +46,7 @@ def resolve_http_tools_mcp_js() -> Path | None:
     return None
 
 
-def _tools_dump_path(workspace: Path) -> Path:
+def http_tools_dump_path(workspace: Path) -> Path:
     """Sidecar file next to the workspace (not inside cwd — AI can ``read`` cwd)."""
     return workspace.parent / f".{workspace.name}.rootcoz-http-tools.json"
 
@@ -68,9 +71,181 @@ def _server_entry(
     return entry
 
 
-def _write_json(path: Path, payload: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+def _dir_inside_workspace(
+    directory: Path, workspace: Path, *, create: bool
+) -> Path | None:
+    """Resolve *directory* if it is inside *workspace*; otherwise None."""
+    try:
+        workspace_resolved = workspace.resolve()
+        if directory.exists():
+            resolved = directory.resolve()
+        elif create:
+            directory.mkdir(parents=True, exist_ok=True)
+            resolved = directory.resolve()
+        else:
+            return None
+    except OSError:
+        return None
+    if resolved == workspace_resolved or resolved.is_relative_to(workspace_resolved):
+        return resolved
+    logger.warning(
+        "Refusing MCP path outside workspace %s: %s -> %s",
+        workspace,
+        directory,
+        resolved,
+    )
+    return None
+
+
+def _atomic_write_text(dest: Path, text: str, *, mode: int, parent: Path) -> None:
+    """Write *dest* via rename in *parent* so readers never see a truncated file.
+
+    ``os.replace`` replaces a destination symlink instead of following it.
+    """
+    parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(prefix=".rootcoz-mcp-", dir=str(parent))
+    tmp_path = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(tmp_path, mode)
+        os.replace(tmp_path, dest)
+    except Exception:
+        tmp_path.unlink(missing_ok=True)
+        raise
+
+
+def _unlink_if_symlink(path: Path) -> None:
+    if path.is_symlink():
+        path.unlink()
+
+
+def _read_json_object(path: Path) -> dict[str, Any]:
+    """Load a JSON object from a regular file. Symlinks are unlinked, not followed."""
+    _unlink_if_symlink(path)
+    if not path.is_file():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+        logger.warning("Ignoring malformed MCP JSON at %s", path)
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _merge_mcp_servers(
+    existing: dict[str, Any], server_entry: dict[str, Any]
+) -> dict[str, Any]:
+    merged = dict(existing)
+    servers = merged.get("mcpServers")
+    servers = dict(servers) if isinstance(servers, dict) else {}
+    servers[MCP_SERVER_NAME] = server_entry
+    merged["mcpServers"] = servers
+    return merged
+
+
+def _drop_rootcoz_server(existing: dict[str, Any]) -> dict[str, Any]:
+    merged = dict(existing)
+    servers = merged.get("mcpServers")
+    if isinstance(servers, dict) and MCP_SERVER_NAME in servers:
+        servers = dict(servers)
+        del servers[MCP_SERVER_NAME]
+        if servers:
+            merged["mcpServers"] = servers
+        else:
+            merged.pop("mcpServers", None)
+    return merged
+
+
+def _config_dest(workspace: Path, relative: Path, *, create: bool) -> Path | None:
+    parent = _dir_inside_workspace(
+        workspace / relative.parent, workspace, create=create
+    )
+    if parent is None:
+        return None
+    dest = parent / relative.name
+    _unlink_if_symlink(dest)
+    return dest
+
+
+def _write_merged_json(dest: Path, payload: dict[str, Any]) -> None:
+    _atomic_write_text(
+        dest,
+        json.dumps(payload, indent=2) + "\n",
+        mode=_CONFIG_MODE,
+        parent=dest.parent,
+    )
+
+
+def _install_mcp_configs(
+    workspace: Path,
+    cursor_entry: dict[str, Any],
+    claude_entry: dict[str, Any],
+    gemini_entry: dict[str, Any],
+) -> None:
+    cursor_dest = _config_dest(workspace, Path(".cursor") / "mcp.json", create=True)
+    if cursor_dest is not None:
+        _write_merged_json(
+            cursor_dest,
+            _merge_mcp_servers(_read_json_object(cursor_dest), cursor_entry),
+        )
+
+    claude_dest = _config_dest(workspace, Path(".mcp.json"), create=True)
+    if claude_dest is not None:
+        _write_merged_json(
+            claude_dest,
+            _merge_mcp_servers(_read_json_object(claude_dest), claude_entry),
+        )
+
+    claude_settings = _config_dest(
+        workspace, Path(".claude") / "settings.json", create=True
+    )
+    if claude_settings is not None:
+        settings = _read_json_object(claude_settings)
+        settings["enableAllProjectMcpServers"] = True
+        _write_merged_json(claude_settings, settings)
+
+    gemini_dest = _config_dest(
+        workspace, Path(".gemini") / "settings.json", create=True
+    )
+    if gemini_dest is not None:
+        _write_merged_json(
+            gemini_dest,
+            _merge_mcp_servers(_read_json_object(gemini_dest), gemini_entry),
+        )
+
+
+def _remove_managed_mcp_configs(workspace: Path) -> None:
+    for relative in (
+        Path(".cursor") / "mcp.json",
+        Path(".mcp.json"),
+        Path(".gemini") / "settings.json",
+    ):
+        dest = _config_dest(workspace, relative, create=False)
+        if dest is None or not dest.is_file():
+            continue
+        remaining = _drop_rootcoz_server(_read_json_object(dest))
+        if remaining:
+            _write_merged_json(dest, remaining)
+        else:
+            dest.unlink(missing_ok=True)
+
+
+def _remove_tools_dump(workspace: Path) -> None:
+    dump = http_tools_dump_path(workspace)
+    _unlink_if_symlink(dump)
+    dump.unlink(missing_ok=True)
+
+
+def cleanup_http_tools_mcp(workspace: Path | None) -> None:
+    """Remove the credential dump and managed ``rootcoz-http`` MCP entries."""
+    if workspace is None:
+        return
+    _remove_tools_dump(workspace)
+    if workspace.exists():
+        _remove_managed_mcp_configs(workspace)
 
 
 def install_http_tools_mcp(
@@ -81,29 +256,33 @@ def install_http_tools_mcp(
 ) -> Path | None:
     """Write per-CLI MCP configs for this session's HTTP ``custom_tools``.
 
-    Empty tool lists skip install (no MCP server advertised). Workspace MCP
-    JSON never embeds Bearer tokens — only a path to the tools dump.
+    Empty or unusable tool lists remove a previous Rootcoz MCP install.
+    Workspace MCP JSON never embeds Bearer tokens — only a path to the dump.
 
     Returns:
         Path to the tools dump, or None when install was skipped.
     """
-    if workspace is None or not custom_tools:
+    if workspace is None:
         return None
     resolved_js = mcp_js if mcp_js is not None else resolve_http_tools_mcp_js()
-    if resolved_js is None:
-        logger.warning(
-            "HTTP MCP server binary not found; CLI/acpx sessions will not "
-            "see sidecar HTTP tools"
-        )
+    http_tools = [t for t in (custom_tools or []) if t.get("name") and t.get("http")]
+    if not http_tools or resolved_js is None:
+        if resolved_js is None and http_tools:
+            logger.warning(
+                "HTTP MCP server binary not found; CLI/acpx sessions will not "
+                "see sidecar HTTP tools"
+            )
+        cleanup_http_tools_mcp(workspace)
         return None
 
-    http_tools = [t for t in custom_tools if t.get("name") and t.get("http")]
-    if not http_tools:
-        return None
-
-    tools_file = _tools_dump_path(workspace)
-    tools_file.write_text(json.dumps(http_tools), encoding="utf-8")
-    tools_file.chmod(stat.S_IRUSR | stat.S_IWUSR)
+    tools_file = http_tools_dump_path(workspace)
+    _unlink_if_symlink(tools_file)
+    _atomic_write_text(
+        tools_file,
+        json.dumps(http_tools),
+        mode=_DUMP_MODE,
+        parent=tools_file.parent,
+    )
 
     names = [str(t["name"]) for t in http_tools]
     cursor_entry = _server_entry(resolved_js, tools_file)
@@ -112,22 +291,7 @@ def install_http_tools_mcp(
         **_server_entry(resolved_js, tools_file),
     }
     gemini_entry = _server_entry(resolved_js, tools_file, include_tools=names)
-
-    _write_json(
-        workspace / ".cursor" / "mcp.json",
-        {"mcpServers": {MCP_SERVER_NAME: cursor_entry}},
-    )
-    _write_json(
-        workspace / ".mcp.json", {"mcpServers": {MCP_SERVER_NAME: claude_entry}}
-    )
-    _write_json(
-        workspace / ".claude" / "settings.json",
-        {"enableAllProjectMcpServers": True},
-    )
-    _write_json(
-        workspace / ".gemini" / "settings.json",
-        {"mcpServers": {MCP_SERVER_NAME: gemini_entry}},
-    )
+    _install_mcp_configs(workspace, cursor_entry, claude_entry, gemini_entry)
     logger.info(
         "Installed HTTP MCP (%d tools) for CLI/acpx in %s",
         len(http_tools),

@@ -9,7 +9,12 @@ from rootcoz.engine.chat import (
     build_admin_custom_tools,
     build_chat_custom_tools,
 )
-from rootcoz.engine.http_mcp import MCP_SERVER_NAME, install_http_tools_mcp
+from rootcoz.engine.http_mcp import (
+    MCP_SERVER_NAME,
+    cleanup_http_tools_mcp,
+    http_tools_dump_path,
+    install_http_tools_mcp,
+)
 
 
 def _mcp_js(tmp_path: Path) -> Path:
@@ -52,8 +57,8 @@ def test_install_writes_cursor_claude_gemini_configs(tmp_path: Path) -> None:
     )
     dump = install_http_tools_mcp(workspace, tools, mcp_js=js)
     assert dump is not None
+    assert dump == http_tools_dump_path(workspace)
     assert dump.parent == tmp_path
-    assert dump.name == ".ws.rootcoz-http-tools.json"
     mode = dump.stat().st_mode
     assert mode & stat.S_IRUSR
     assert not mode & stat.S_IRGRP
@@ -150,3 +155,111 @@ def test_admin_mcp_uses_admin_builder_tools(tmp_path: Path) -> None:
 def test_analysis_http_tools_empty_without_auth() -> None:
     assert analysis_http_tools(server_url="http://x", job_id="j", auth_header="") == []
     assert analysis_http_tools(server_url="", job_id="j", auth_header="Bearer t") == []
+
+
+def test_empty_install_removes_prior_rootcoz_keeps_others(tmp_path: Path) -> None:
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    cursor_dir = workspace / ".cursor"
+    cursor_dir.mkdir()
+    (cursor_dir / "mcp.json").write_text(
+        json.dumps({"mcpServers": {"other": {"command": "echo"}}, "keep": True}),
+        encoding="utf-8",
+    )
+    tools = [{"name": "get_job_result", "http": {"method": "GET", "url": "http://x"}}]
+    dump = install_http_tools_mcp(workspace, tools, mcp_js=_mcp_js(tmp_path))
+    assert dump is not None
+    assert dump.exists()
+    assert install_http_tools_mcp(workspace, [], mcp_js=_mcp_js(tmp_path)) is None
+    assert not dump.exists()
+    cursor = _read(workspace / ".cursor" / "mcp.json")
+    assert cursor["keep"] is True
+    assert cursor["mcpServers"] == {"other": {"command": "echo"}}
+    assert MCP_SERVER_NAME not in cursor["mcpServers"]
+
+
+def test_missing_binary_removes_prior_install(tmp_path: Path, monkeypatch) -> None:
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    tools = [{"name": "get_job_result", "http": {"method": "GET", "url": "http://x"}}]
+    dump = install_http_tools_mcp(workspace, tools, mcp_js=_mcp_js(tmp_path))
+    assert dump is not None
+    monkeypatch.setattr(
+        "rootcoz.engine.http_mcp.resolve_http_tools_mcp_js", lambda: None
+    )
+    assert install_http_tools_mcp(workspace, tools) is None
+    assert not dump.exists()
+    assert not (workspace / ".mcp.json").exists()
+
+
+def test_install_merges_existing_mcp_servers(tmp_path: Path) -> None:
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    (workspace / ".cursor").mkdir()
+    (workspace / ".cursor" / "mcp.json").write_text(
+        json.dumps({"mcpServers": {"other": {"command": "echo"}}, "keep": True}),
+        encoding="utf-8",
+    )
+    (workspace / ".claude").mkdir()
+    (workspace / ".claude" / "settings.json").write_text(
+        json.dumps({"permissions": {"allow": ["Read"]}}),
+        encoding="utf-8",
+    )
+    tools = [{"name": "get_job_result", "http": {"method": "GET", "url": "http://x"}}]
+    install_http_tools_mcp(workspace, tools, mcp_js=_mcp_js(tmp_path))
+    cursor = _read(workspace / ".cursor" / "mcp.json")
+    assert cursor["keep"] is True
+    assert "other" in cursor["mcpServers"]
+    assert MCP_SERVER_NAME in cursor["mcpServers"]
+    claude_settings = _read(workspace / ".claude" / "settings.json")
+    assert claude_settings["permissions"] == {"allow": ["Read"]}
+    assert claude_settings["enableAllProjectMcpServers"] is True
+
+
+def test_install_does_not_follow_config_symlink(tmp_path: Path) -> None:
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    outside = tmp_path / "outside.json"
+    outside.write_text('{"secret": true}\n', encoding="utf-8")
+    link = workspace / ".mcp.json"
+    link.symlink_to(outside)
+    tools = [{"name": "get_job_result", "http": {"method": "GET", "url": "http://x"}}]
+    install_http_tools_mcp(workspace, tools, mcp_js=_mcp_js(tmp_path))
+    assert json.loads(outside.read_text(encoding="utf-8")) == {"secret": True}
+    assert not link.is_symlink()
+    claude = _read(link)
+    assert MCP_SERVER_NAME in claude["mcpServers"]
+    assert "secret" not in claude
+
+
+def test_install_skips_escaped_parent_symlink(tmp_path: Path) -> None:
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    outside_dir = tmp_path / "outside-dir"
+    outside_dir.mkdir()
+    (workspace / ".cursor").symlink_to(outside_dir)
+    tools = [{"name": "get_job_result", "http": {"method": "GET", "url": "http://x"}}]
+    install_http_tools_mcp(workspace, tools, mcp_js=_mcp_js(tmp_path))
+    assert not (outside_dir / "mcp.json").exists()
+    assert (workspace / ".mcp.json").is_file()
+
+
+def test_cleanup_removes_sibling_dump(tmp_path: Path) -> None:
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    tools = [{"name": "get_job_result", "http": {"method": "GET", "url": "http://x"}}]
+    dump = install_http_tools_mcp(workspace, tools, mcp_js=_mcp_js(tmp_path))
+    assert dump is not None
+    cleanup_http_tools_mcp(workspace)
+    assert not dump.exists()
+    assert not (workspace / ".mcp.json").exists()
+
+
+def test_malformed_existing_json_is_replaced(tmp_path: Path) -> None:
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    (workspace / ".mcp.json").write_text("not-json", encoding="utf-8")
+    tools = [{"name": "get_job_result", "http": {"method": "GET", "url": "http://x"}}]
+    install_http_tools_mcp(workspace, tools, mcp_js=_mcp_js(tmp_path))
+    claude = _read(workspace / ".mcp.json")
+    assert MCP_SERVER_NAME in claude["mcpServers"]

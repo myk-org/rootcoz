@@ -63,10 +63,7 @@ function expandHttpConfig(
 }
 
 function send(message: Record<string, unknown>): void {
-  const json = JSON.stringify(message);
-  const payload = Buffer.from(json, "utf8");
-  process.stdout.write(`Content-Length: ${payload.length}\r\n\r\n`);
-  process.stdout.write(payload);
+  process.stdout.write(`${JSON.stringify(message)}\n`);
 }
 
 function respond(

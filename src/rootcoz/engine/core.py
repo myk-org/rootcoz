@@ -29,7 +29,7 @@ from rootcoz.ai_client import (
 )
 from rootcoz.config import Settings, parse_additional_repos
 from rootcoz.engine.chat import analysis_http_tools
-from rootcoz.engine.http_mcp import install_http_tools_mcp
+from rootcoz.engine.http_mcp import cleanup_http_tools_mcp, install_http_tools_mcp
 from rootcoz.logging_context import get_log_file
 from rootcoz.models import (
     AdditionalRepo,
@@ -1461,8 +1461,7 @@ async def _call_ai_with_retry(
         job_id=job_id,
         auth_header=auth_header,
     )
-    if custom_tools:
-        install_http_tools_mcp(workspace_dir, custom_tools)
+    install_http_tools_mcp(workspace_dir, custom_tools)
 
     call_kwargs: dict[str, Any] = {
         "ai_provider": ai_provider,
@@ -2429,4 +2428,5 @@ async def run_orchestrated_analysis(
 
     finally:
         if temp_dir and temp_dir.exists():
+            cleanup_http_tools_mcp(temp_dir)
             shutil.rmtree(temp_dir, ignore_errors=True)
