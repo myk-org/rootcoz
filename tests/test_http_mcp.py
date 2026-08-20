@@ -248,6 +248,20 @@ def test_install_skips_escaped_parent_symlink(tmp_path: Path) -> None:
     assert (workspace / ".mcp.json").is_file()
 
 
+def test_install_skips_symlink_loop_parent(tmp_path: Path) -> None:
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    cursor = workspace / ".cursor"
+    cursor.symlink_to(".cursor")
+    tools = [{"name": "get_job_result", "http": {"method": "GET", "url": "http://x"}}]
+    dump = install_http_tools_mcp(workspace, tools, mcp_js=_mcp_js(tmp_path))
+    assert dump is not None
+    assert (workspace / ".mcp.json").is_file()
+    assert MCP_SERVER_NAME in _read(workspace / ".mcp.json")["mcpServers"]
+    assert cursor.is_symlink()
+    assert not (cursor / "mcp.json").exists()
+
+
 def test_cleanup_removes_sibling_dump(tmp_path: Path) -> None:
     workspace = tmp_path / "ws"
     workspace.mkdir()

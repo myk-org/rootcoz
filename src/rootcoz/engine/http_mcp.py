@@ -27,6 +27,7 @@ _MCP_JS_ENV = "ROOTCOZ_HTTP_TOOLS_MCP"
 _MAX_CONFIG_MODE = 0o644
 _NEW_CONFIG_MODE = stat.S_IRUSR | stat.S_IWUSR
 _DUMP_MODE = stat.S_IRUSR | stat.S_IWUSR
+_UNRESOLVABLE_PATH = (OSError, RuntimeError)
 _MCP_RELATIVES = (
     Path(".cursor") / "mcp.json",
     Path(".mcp.json"),
@@ -93,7 +94,7 @@ def _dir_inside_workspace(
             resolved = directory.resolve()
         else:
             return None
-    except OSError:
+    except _UNRESOLVABLE_PATH:
         return None
     if resolved == workspace_resolved or resolved.is_relative_to(workspace_resolved):
         return resolved
@@ -252,7 +253,7 @@ def _destination_parent_in_workspace(path: Path, workspace: Path) -> bool:
     try:
         workspace_resolved = workspace.resolve()
         relative = path.parent.relative_to(workspace)
-    except (OSError, ValueError):
+    except (ValueError, *_UNRESOLVABLE_PATH):
         return False
     current = workspace_resolved
     for part in relative.parts:
@@ -260,7 +261,7 @@ def _destination_parent_in_workspace(path: Path, workspace: Path) -> bool:
         if candidate.is_symlink() or candidate.exists():
             try:
                 resolved = candidate.resolve()
-            except OSError:
+            except _UNRESOLVABLE_PATH:
                 return False
             if resolved != workspace_resolved and not resolved.is_relative_to(
                 workspace_resolved
