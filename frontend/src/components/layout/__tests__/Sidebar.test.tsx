@@ -28,6 +28,10 @@ vi.mock('@/lib/api', () => ({
   },
 }))
 
+import { api } from '@/lib/api'
+
+const mockApiGet = api.get as unknown as ReturnType<typeof vi.fn>
+
 const zeroBadges = { activeCount: 0, unreadCount: 0, pendingCount: 0 }
 const defaultProps = { badges: zeroBadges, mobileOpen: false, onMobileClose: vi.fn() }
 
@@ -49,8 +53,7 @@ describe('Sidebar', () => {
     mockAuth.loading = false
     mockAuth.authenticated = true
     vi.clearAllMocks()
-    const { api } = vi.mocked(await import('@/lib/api'))
-    api.get.mockResolvedValue({ version: '4.5.0' })
+    mockApiGet.mockResolvedValue({ version: '4.5.0' })
   })
 
   it('renders the sidebar element', () => {
@@ -243,21 +246,19 @@ describe('Sidebar', () => {
   })
 
   it('hides version footer when health endpoint fails', async () => {
-    const { api } = vi.mocked(await import('@/lib/api'))
-    api.get.mockRejectedValue(new Error('unavailable'))
+    mockApiGet.mockRejectedValue(new Error('unavailable'))
     renderSidebar()
     // Give effect time to settle; footer should stay absent
     await waitFor(() => {
-      expect(api.get).toHaveBeenCalledWith('/api/version', expect.objectContaining({ signal: expect.any(AbortSignal) }))
+      expect(mockApiGet).toHaveBeenCalledWith('/api/version', expect.objectContaining({ signal: expect.any(AbortSignal) }))
     })
     expect(screen.queryByTestId('sidebar-version')).toBeNull()
   })
 
   it('does not fetch version when not authenticated', async () => {
-    const { api } = vi.mocked(await import('@/lib/api'))
     mockAuth.authenticated = false
     renderSidebar()
-    expect(api.get).not.toHaveBeenCalled()
+    expect(mockApiGet).not.toHaveBeenCalled()
     expect(screen.queryByTestId('sidebar-version')).toBeNull()
   })
 

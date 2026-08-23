@@ -9,6 +9,7 @@ function makeFailure(testName: string, errorSig: string): FailureAnalysis {
     error: 'some error',
     analysis: {
       classification: 'CODE ISSUE',
+      pattern: '',
       affected_tests: [],
       details: '',
       artifacts_evidence: '',

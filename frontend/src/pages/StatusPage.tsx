@@ -258,8 +258,7 @@ export function StatusPage() {
   const msg = statusMessages[displayStatus] ?? statusMessages.running
   const statusBadgeLabel = displayStatus.replace(/_/g, ' ').toUpperCase()
 
-  const { isAdmin, username, role, isOperator } = useAuth()
-  const isViewer = role === 'viewer'
+  const { isAdmin, username, isOperator } = useAuth()
   const submitter = data?.result?.request_params?.submitted_by ?? ''
   const canAbort = isAdmin || (!!username && username === submitter)
   const buildUrl = resolveBuildUrl(data?.result) ?? resolveBuildUrl(data)

@@ -222,16 +222,17 @@ function splitOutsideBrackets(raw: string): string[] {
 
 function parsePeerConfigString(raw: string): PeerConfigWithId[] {
   if (!raw || !raw.trim()) return []
-  return splitOutsideBrackets(raw).map(entry => {
+  const result: PeerConfigWithId[] = []
+  for (const entry of splitOutsideBrackets(raw)) {
     const trimmed = entry.trim()
-    if (!trimmed.includes(':')) return null
+    if (!trimmed.includes(':')) continue
     const [provider, ...modelParts] = trimmed.split(':')
-    return {
-      id: crypto.randomUUID(),
-      ai_provider: provider.trim(),
-      ai_model: modelParts.join(':').trim(),
-    }
-  }).filter((p): p is PeerConfigWithId => p !== null && !!p.ai_provider && !!p.ai_model)
+    const ai_provider = provider.trim()
+    const ai_model = modelParts.join(':').trim()
+    if (!ai_provider || !ai_model) continue
+    result.push({ id: crypto.randomUUID(), ai_provider, ai_model })
+  }
+  return result
 }
 
 function serializePeerConfigs(configs: PeerConfigWithId[]): string {
@@ -243,11 +244,13 @@ function serializePeerConfigs(configs: PeerConfigWithId[]): string {
 
 function parseAdditionalReposString(raw: string): RepoWithId[] {
   if (!raw || !raw.trim()) return []
-  return raw.split(',').map(entry => {
+  const result: RepoWithId[] = []
+  for (const entry of raw.split(',')) {
     const trimmed = entry.trim()
-    if (!trimmed.includes(':')) return null
+    if (!trimmed.includes(':')) continue
     const colonIdx = trimmed.indexOf(':')
     const name = trimmed.slice(0, colonIdx).trim()
+    if (!name) continue
     const urlAndRef = trimmed.slice(colonIdx + 1).trim()
 
     // URL contains :// — find the path portion after the netloc
@@ -271,8 +274,9 @@ function parseAdditionalReposString(raw: string): RepoWithId[] {
       }
     }
 
-    return { id: crypto.randomUUID(), name, url, ref }
-  }).filter((r): r is RepoWithId => r !== null && !!r.name)
+    result.push({ id: crypto.randomUUID(), name, url, ref })
+  }
+  return result
 }
 
 function serializeAdditionalRepos(repos: RepoWithId[]): string {
