@@ -193,10 +193,9 @@ class TestPushReportPortalEndpoint:
             headers={"Authorization": "Bearer test-admin-key-16chars"},
         )
         response = client.post("/results/corrupt-job/push-reportportal")
-        assert response.status_code == 200
-        body = response.json()
-        assert body["pushed"] == 0
-        assert any("validation error" in e.lower() for e in body["errors"])
+        assert response.status_code == 422
+        detail = response.json()["detail"]
+        assert "validation error" in detail.lower()
 
     @patch("rootcoz.main.get_history_classification", new_callable=AsyncMock)
     @patch("rootcoz.main.get_result")

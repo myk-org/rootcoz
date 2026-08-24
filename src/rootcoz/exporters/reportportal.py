@@ -28,6 +28,8 @@ if TYPE_CHECKING:
 # Exception types caught around each RP API call in ReportPortalClient.push().
 # OSError covers raw socket errors (builtin ConnectionError) and all
 # requests-level transport faults (RequestException is a subclass of OSError).
+# Machine-readable ExporterResult.details["error_type"] for corrupt stored failures.
+INVALID_STORED_FAILURES = "invalid_stored_failures"
 _RP_PUSH_ERRORS: tuple[type[Exception], ...] = (
     OSError,
     ValueError,
@@ -247,20 +249,29 @@ class ReportPortalClient(Exporter):
         """
         return True
 
+    #: Stable machine-readable code for corrupt stored failure payloads.
+    INVALID_STORED_FAILURES = INVALID_STORED_FAILURES
+
     @staticmethod
     def _failure_result(
-        message: str, *, launch_id: int | None = None
+        message: str,
+        *,
+        launch_id: int | None = None,
+        error_type: str | None = None,
     ) -> ExporterResult:
         """Build a standard failure ExporterResult."""
+        details: dict[str, Any] = {
+            "pushed": 0,
+            "unmatched": [],
+            "errors": [message],
+            "launch_id": launch_id,
+        }
+        if error_type is not None:
+            details["error_type"] = error_type
         return ExporterResult(
             success=False,
             message=message,
-            details={
-                "pushed": 0,
-                "unmatched": [],
-                "errors": [message],
-                "launch_id": launch_id,
-            },
+            details=details,
         )
 
     async def push(self, context: ExportContext) -> ExporterResult:
@@ -362,7 +373,11 @@ class ReportPortalClient(Exporter):
                 job_name,
                 context.build_number,
             )
-            return self._failure_result(msg, launch_id=launch_id)
+            return self._failure_result(
+                msg,
+                launch_id=launch_id,
+                error_type=INVALID_STORED_FAILURES,
+            )
 
         try:
             matched = await asyncio.to_thread(

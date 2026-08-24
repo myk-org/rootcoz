@@ -112,7 +112,11 @@ from rootcoz.engine.core import (
 )
 from rootcoz.error_messages import make_user_friendly_error
 from rootcoz.exporters.base import ExportContext, Exporter
-from rootcoz.exporters.reportportal import ReportPortalClient, format_rp_error
+from rootcoz.exporters.reportportal import (
+    INVALID_STORED_FAILURES,
+    ReportPortalClient,
+    format_rp_error,
+)
 from rootcoz.feedback import (
     create_feedback_from_preview,
     generate_feedback_preview,
@@ -6543,6 +6547,12 @@ async def push_to_reportportal(
             child_build_number=child_build_number,
             pushed_by=safe_username,
         )
+        if push_result.get("error_type") == INVALID_STORED_FAILURES:
+            errors = push_result.get("errors") or []
+            detail = errors[0] if errors else push_result.get("message", "")
+            raise HTTPException(
+                status_code=422, detail=detail or "Invalid stored failures"
+            )
         return push_result
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
