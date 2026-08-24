@@ -8,12 +8,12 @@ existing builder output — no second allowlist.
 from __future__ import annotations
 
 import asyncio
-import fcntl
 import json
 import os
 import shutil
 import stat
 import tempfile
+import threading
 from collections.abc import Callable
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -21,6 +21,11 @@ from pathlib import Path
 from typing import Any
 
 from simple_logger.logger import get_logger
+
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - non-POSIX platforms only
+    fcntl = None
 
 logger = get_logger(name=__name__)
 
@@ -522,7 +527,13 @@ def _workspace_install_lock(workspace: Path):
     one workspace can clobber each other's configs and tools dump (parallel
     failure-group analysis shares ``workspace_dir``). The lock covers the
     whole snapshot-write-rollback cycle so exactly one install runs at a time.
+    POSIX platforms use an flock'd lock file; without :mod:`fcntl` (Windows),
+    falls back to process-local serialization keyed by workspace.
     """
+    if fcntl is None:
+        with _fallback_workspace_lock(workspace):
+            yield
+        return
     path = _install_lock_path(workspace)
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "a+") as fh:
@@ -531,6 +542,23 @@ def _workspace_install_lock(workspace: Path):
             yield
         finally:
             fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+
+
+# Process-local fallback locks for platforms without :mod:`fcntl` (Windows).
+# Weaker than flock — no cross-process protection — but still serializes the
+# concurrent thread-offloaded installs that make rollback race.
+_fallback_locks_guard = threading.Lock()
+_fallback_locks: dict[str, threading.Lock] = {}
+
+
+def _fallback_workspace_lock(workspace: Path) -> threading.Lock:
+    key = str(workspace.resolve())
+    with _fallback_locks_guard:
+        lock = _fallback_locks.get(key)
+        if lock is None:
+            lock = threading.Lock()
+            _fallback_locks[key] = lock
+        return lock
 
 
 async def install_http_tools_mcp_best_effort_async(

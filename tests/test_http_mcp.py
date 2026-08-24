@@ -603,3 +603,27 @@ async def test_concurrent_failed_install_preserves_successful_state(
     assert MCP_SERVER_NAME in _read(workspace / ".mcp.json")["mcpServers"]
     dump = json.loads(http_tools_dump_path(workspace).read_text(encoding="utf-8"))
     assert dump and all(t.get("name") for t in dump)
+
+
+async def test_best_effort_async_fallback_lock_without_fcntl(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Without fcntl (Windows), installs still serialize process-locally."""
+    monkeypatch.setattr(http_mcp_mod, "fcntl", None)
+    events: list[str] = []
+    real = http_mcp_mod.install_http_tools_mcp
+
+    def tracking_install(ws, ct, **kwargs):
+        events.append("start")
+        time.sleep(0.02)
+        try:
+            return real(ws, ct, **kwargs)
+        finally:
+            events.append("end")
+
+    monkeypatch.setattr(http_mcp_mod, "install_http_tools_mcp", tracking_install)
+    await asyncio.gather(*[
+        http_mcp_mod.install_http_tools_mcp_best_effort_async(tmp_path / "ws", [])
+        for _ in range(3)
+    ])
+    assert events == ["start", "end"] * 3
