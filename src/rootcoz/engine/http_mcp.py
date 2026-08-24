@@ -7,6 +7,7 @@ existing builder output — no second allowlist.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import shutil
@@ -488,17 +489,11 @@ def install_http_tools_mcp(
     return tools_file
 
 
-def install_http_tools_mcp_best_effort(
+def _best_effort_install(
     workspace: Path | None,
     custom_tools: list[dict[str, Any]] | None,
 ) -> None:
-    """Install HTTP tools MCP configs without failing the calling flow.
-
-    MCP config writing is a supplemental integration; filesystem errors are
-    logged and swallowed so analysis/chat continues without MCP.
-    Use :func:`install_http_tools_mcp` directly when failures must propagate
-    (e.g. rollback correctness tests).
-    """
+    """Run the installer, logging instead of propagating failures."""
     if workspace is None:
         return
     try:
@@ -509,3 +504,19 @@ def install_http_tools_mcp_best_effort(
             workspace,
             exc_info=True,
         )
+
+
+async def install_http_tools_mcp_best_effort_async(
+    workspace: Path | None,
+    custom_tools: list[dict[str, Any]] | None,
+) -> None:
+    """Awaitable best-effort install that keeps blocking I/O off the loop.
+
+    The installer performs synchronous filesystem work (JSON writes with
+    ``fsync``), so async analysis/chat flows offload it to a worker thread.
+    The work is awaited — MCP configs must exist before sessions start —
+    never fire-and-forget.
+    """
+    if workspace is None:
+        return
+    await asyncio.to_thread(_best_effort_install, workspace, custom_tools)

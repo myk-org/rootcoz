@@ -34,7 +34,7 @@ from rootcoz.engine.core import (
 )
 from rootcoz.engine.http_mcp import (
     cleanup_http_tools_mcp,
-    install_http_tools_mcp_best_effort,
+    install_http_tools_mcp_best_effort_async,
 )
 from rootcoz.models import (
     AiConfigEntry,
@@ -541,7 +541,7 @@ async def analyze_failure_group_with_peers(
         job_id=job_id,
         auth_header=auth_header,
     )
-    install_http_tools_mcp_best_effort(peer_workspace, peer_custom_tools)
+    await install_http_tools_mcp_best_effort_async(peer_workspace, peer_custom_tools)
     _, _, _, resources_section, _ = build_prompt_sections(
         custom_prompt,
         artifacts_context,

@@ -482,7 +482,7 @@ def test_best_effort_install_swallows_errors(tmp_path: Path, monkeypatch) -> Non
 
     monkeypatch.setattr(http_mcp_mod, "install_http_tools_mcp", boom)
     # Must not raise — analysis/chat continue without MCP.
-    http_mcp_mod.install_http_tools_mcp_best_effort(tmp_path, [])
+    http_mcp_mod._best_effort_install(tmp_path, [])
 
 
 def test_best_effort_install_noop_on_none_workspace(monkeypatch) -> None:
@@ -490,7 +490,7 @@ def test_best_effort_install_noop_on_none_workspace(monkeypatch) -> None:
         raise AssertionError("must not be called for None workspace")
 
     monkeypatch.setattr(http_mcp_mod, "install_http_tools_mcp", fail)
-    http_mcp_mod.install_http_tools_mcp_best_effort(None, [])
+    http_mcp_mod._best_effort_install(None, [])
 
 
 def test_best_effort_install_delegates_on_success(tmp_path: Path, monkeypatch) -> None:
@@ -502,5 +502,38 @@ def test_best_effort_install_delegates_on_success(tmp_path: Path, monkeypatch) -
 
     monkeypatch.setattr(http_mcp_mod, "install_http_tools_mcp", fake_install)
     tools = [{"name": "t", "http": {"method": "GET", "url": "http://x"}}]
-    http_mcp_mod.install_http_tools_mcp_best_effort(tmp_path, tools)
+    http_mcp_mod._best_effort_install(tmp_path, tools)
+    assert seen == [(tmp_path, tools)]
+
+
+async def test_best_effort_async_install_swallows_errors(
+    tmp_path: Path, monkeypatch
+) -> None:
+    def boom(workspace, custom_tools):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(http_mcp_mod, "install_http_tools_mcp", boom)
+    # Must not raise — analysis/chat continue without MCP.
+    await http_mcp_mod.install_http_tools_mcp_best_effort_async(tmp_path, [])
+
+
+async def test_best_effort_async_install_noop_on_none_workspace(monkeypatch) -> None:
+    def fail(workspace, custom_tools):
+        raise AssertionError("must not be called for None workspace")
+
+    monkeypatch.setattr(http_mcp_mod, "_best_effort_install", fail)
+    await http_mcp_mod.install_http_tools_mcp_best_effort_async(None, [])
+
+
+async def test_best_effort_async_install_delegates_on_success(
+    tmp_path: Path, monkeypatch
+) -> None:
+    seen: list[tuple[Path, list | None]] = []
+
+    def fake_install(workspace, custom_tools):
+        seen.append((workspace, custom_tools))
+
+    monkeypatch.setattr(http_mcp_mod, "_best_effort_install", fake_install)
+    tools = [{"name": "t", "http": {"method": "GET", "url": "http://x"}}]
+    await http_mcp_mod.install_http_tools_mcp_best_effort_async(tmp_path, tools)
     assert seen == [(tmp_path, tools)]

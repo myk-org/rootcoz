@@ -23,7 +23,7 @@ from rootcoz.ai_client import (
 )
 from rootcoz.engine.http_mcp import (
     cleanup_http_tools_mcp,
-    install_http_tools_mcp_best_effort,
+    install_http_tools_mcp_best_effort_async,
 )
 from rootcoz.storage import AI_SYSTEM_USERNAME
 
@@ -1165,7 +1165,7 @@ async def _create_chat_session(
             create_kwargs["custom_tools"] = custom_tools
         if restrict_tools:
             create_kwargs["tools"] = list(CHAT_BUILTIN_TOOLS)
-        install_http_tools_mcp_best_effort(repo_path, custom_tools or [])
+        await install_http_tools_mcp_best_effort_async(repo_path, custom_tools or [])
         session_id = await client.create_session(**create_kwargs)
         logger.info("%s: session created: %s", log_prefix, session_id)
         return session_id
@@ -1275,7 +1275,7 @@ async def _chat_with_ai_impl(
         call_kwargs["custom_tools"] = custom_tools
     if not session_id and restrict_tools:
         call_kwargs["tools"] = list(CHAT_BUILTIN_TOOLS)
-    install_http_tools_mcp_best_effort(repo_path, custom_tools or [])
+    await install_http_tools_mcp_best_effort_async(repo_path, custom_tools or [])
     result = await call_ai(prompt, **call_kwargs)
 
     # If session was lost, retry with fresh session
@@ -1301,7 +1301,7 @@ async def _chat_with_ai_impl(
             retry_kwargs["custom_tools"] = custom_tools
         if restrict_tools:
             retry_kwargs["tools"] = list(CHAT_BUILTIN_TOOLS)
-        install_http_tools_mcp_best_effort(repo_path, custom_tools or [])
+        await install_http_tools_mcp_best_effort_async(repo_path, custom_tools or [])
         result = await call_ai(prompt, **retry_kwargs)
 
     await result.record_usage(
