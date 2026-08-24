@@ -8692,9 +8692,7 @@ async def health_check_detailed() -> Response:
     return JSONResponse(content=result, status_code=status_code)
 
 
-@app.get(
-    "/api/admin/component-versions", operation_id="adminGetComponentVersions"
-)
+@app.get("/api/admin/component-versions", operation_id="adminGetComponentVersions")
 async def admin_get_component_versions(request: Request) -> dict[str, Any]:
     """Installed AI-sidecar component versions (admin only).
 

@@ -1,6 +1,7 @@
 """Tests for CLI/acpx HTTP MCP install from path-specific custom_tools."""
 
 import asyncio
+import builtins
 import json
 import os
 import stat
@@ -500,7 +501,6 @@ def test_best_effort_install_delegates_on_success(tmp_path: Path, monkeypatch) -
 
     def fake_install(workspace, custom_tools):
         seen.append((workspace, custom_tools))
-        return None
 
     monkeypatch.setattr(http_mcp_mod, "install_http_tools_mcp", fake_install)
     tools = [{"name": "t", "http": {"method": "GET", "url": "http://x"}}]
@@ -557,10 +557,12 @@ async def test_best_effort_async_serializes_per_workspace(
             events.append("end")
 
     monkeypatch.setattr(http_mcp_mod, "install_http_tools_mcp", tracking_install)
-    await asyncio.gather(*[
-        http_mcp_mod.install_http_tools_mcp_best_effort_async(tmp_path / "ws", [])
-        for _ in range(4)
-    ])
+    await asyncio.gather(
+        *[
+            http_mcp_mod.install_http_tools_mcp_best_effort_async(tmp_path / "ws", [])
+            for _ in range(4)
+        ]
+    )
     # Strict alternation proves exactly one install ran at a time.
     assert events == ["start", "end"] * 4
 
@@ -591,10 +593,12 @@ async def test_concurrent_failed_install_preserves_successful_state(
 
     monkeypatch.setattr(http_mcp_mod, "_write_merged_json", boom_on_first_gemini_write)
 
-    await asyncio.gather(*[
-        http_mcp_mod.install_http_tools_mcp_best_effort_async(workspace, tools)
-        for _ in range(2)
-    ])
+    await asyncio.gather(
+        *[
+            http_mcp_mod.install_http_tools_mcp_best_effort_async(workspace, tools)
+            for _ in range(2)
+        ]
+    )
 
     assert gemini_writes["n"] >= 1
     # Final state is a fully valid successful install regardless of ordering:
@@ -609,7 +613,14 @@ async def test_best_effort_async_fallback_lock_without_fcntl(
     tmp_path: Path, monkeypatch
 ) -> None:
     """Without fcntl (Windows), installs still serialize process-locally."""
-    monkeypatch.setattr(http_mcp_mod, "fcntl", None)
+    real_import = builtins.__import__
+
+    def fake_import(name, *args, **kwargs):
+        if name == "fcntl":
+            raise ImportError("fcntl blocked for test")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", fake_import)
     events: list[str] = []
     real = http_mcp_mod.install_http_tools_mcp
 
@@ -622,8 +633,10 @@ async def test_best_effort_async_fallback_lock_without_fcntl(
             events.append("end")
 
     monkeypatch.setattr(http_mcp_mod, "install_http_tools_mcp", tracking_install)
-    await asyncio.gather(*[
-        http_mcp_mod.install_http_tools_mcp_best_effort_async(tmp_path / "ws", [])
-        for _ in range(3)
-    ])
+    await asyncio.gather(
+        *[
+            http_mcp_mod.install_http_tools_mcp_best_effort_async(tmp_path / "ws", [])
+            for _ in range(3)
+        ]
+    )
     assert events == ["start", "end"] * 3

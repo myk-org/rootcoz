@@ -14,18 +14,13 @@ import shutil
 import stat
 import tempfile
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from simple_logger.logger import get_logger
-
-try:
-    import fcntl
-except ImportError:  # pragma: no cover - non-POSIX platforms only
-    fcntl = None
 
 logger = get_logger(name=__name__)
 
@@ -520,7 +515,7 @@ def _install_lock_path(workspace: Path) -> Path:
 
 
 @contextmanager
-def _workspace_install_lock(workspace: Path):
+def _workspace_install_lock(workspace: Path) -> Iterator[None]:
     """Serialize MCP installs per workspace across threads and processes.
 
     Install rollback restores snapshot contents, so overlapping installs on
@@ -530,7 +525,9 @@ def _workspace_install_lock(workspace: Path):
     POSIX platforms use an flock'd lock file; without :mod:`fcntl` (Windows),
     falls back to process-local serialization keyed by workspace.
     """
-    if fcntl is None:
+    try:
+        import fcntl
+    except ImportError:  # pragma: no cover - non-POSIX platforms only
         with _fallback_workspace_lock(workspace):
             yield
         return

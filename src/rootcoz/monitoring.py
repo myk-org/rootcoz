@@ -315,13 +315,19 @@ def _compute_component_versions() -> dict[str, Any]:
     """Read installed sidecar component versions from manifests and PATH."""
     versions: dict[str, Any] = {}
     node_modules = next(
-        (d / "node_modules" for d in _SIDECAR_DIR_CANDIDATES if (d / "node_modules").is_dir()),
+        (
+            d / "node_modules"
+            for d in _SIDECAR_DIR_CANDIDATES
+            if (d / "node_modules").is_dir()
+        ),
         None,
     )
     if node_modules is not None:
         for key, pkg_name in _SIDECAR_COMPONENT_PACKAGES.items():
             try:
-                manifest = json.loads((node_modules / pkg_name / "package.json").read_text())
+                manifest = json.loads(
+                    (node_modules / pkg_name / "package.json").read_text()
+                )
                 versions[key] = manifest.get("version")
             except (OSError, ValueError):
                 versions[key] = None
