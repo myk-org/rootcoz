@@ -8,12 +8,14 @@ existing builder output — no second allowlist.
 from __future__ import annotations
 
 import asyncio
+import fcntl
 import json
 import os
 import shutil
 import stat
 import tempfile
 from collections.abc import Callable
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -493,17 +495,42 @@ def _best_effort_install(
     workspace: Path | None,
     custom_tools: list[dict[str, Any]] | None,
 ) -> None:
-    """Run the installer, logging instead of propagating failures."""
+    """Run the installer under a per-workspace lock, logging failures."""
     if workspace is None:
         return
     try:
-        install_http_tools_mcp(workspace, custom_tools)
+        with _workspace_install_lock(workspace):
+            install_http_tools_mcp(workspace, custom_tools)
     except Exception:
         logger.warning(
             "HTTP tools MCP install failed for %s; continuing without MCP",
             workspace,
             exc_info=True,
         )
+
+
+def _install_lock_path(workspace: Path) -> Path:
+    """Lock file next to the tools dump; serializes installs per workspace."""
+    return workspace.parent / f".{workspace.name}.rootcoz-http-mcp.lock"
+
+
+@contextmanager
+def _workspace_install_lock(workspace: Path):
+    """Serialize MCP installs per workspace across threads and processes.
+
+    Install rollback restores snapshot contents, so overlapping installs on
+    one workspace can clobber each other's configs and tools dump (parallel
+    failure-group analysis shares ``workspace_dir``). The lock covers the
+    whole snapshot-write-rollback cycle so exactly one install runs at a time.
+    """
+    path = _install_lock_path(workspace)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "a+") as fh:
+        fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
 
 
 async def install_http_tools_mcp_best_effort_async(

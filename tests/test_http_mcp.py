@@ -1,8 +1,10 @@
 """Tests for CLI/acpx HTTP MCP install from path-specific custom_tools."""
 
+import asyncio
 import json
 import os
 import stat
+import time
 from pathlib import Path
 
 import pytest
@@ -537,3 +539,67 @@ async def test_best_effort_async_install_delegates_on_success(
     tools = [{"name": "t", "http": {"method": "GET", "url": "http://x"}}]
     await http_mcp_mod.install_http_tools_mcp_best_effort_async(tmp_path, tools)
     assert seen == [(tmp_path, tools)]
+
+
+async def test_best_effort_async_serializes_per_workspace(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Concurrent installs on one workspace must not overlap."""
+    events: list[str] = []
+    real = http_mcp_mod.install_http_tools_mcp
+
+    def tracking_install(ws, ct, **kwargs):
+        events.append("start")
+        time.sleep(0.05)
+        try:
+            return real(ws, ct, **kwargs)
+        finally:
+            events.append("end")
+
+    monkeypatch.setattr(http_mcp_mod, "install_http_tools_mcp", tracking_install)
+    await asyncio.gather(*[
+        http_mcp_mod.install_http_tools_mcp_best_effort_async(tmp_path / "ws", [])
+        for _ in range(4)
+    ])
+    # Strict alternation proves exactly one install ran at a time.
+    assert events == ["start", "end"] * 4
+
+
+async def test_concurrent_failed_install_preserves_successful_state(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A failing install must not clobber a concurrent successful install."""
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    tools = analysis_http_tools(
+        server_url="http://localhost:8000",
+        job_id="job-1",
+        auth_header="Bearer super-secret-token",
+    )
+
+    real_write = http_mcp_mod._write_merged_json
+    gemini_writes = {"n": 0}
+
+    def boom_on_first_gemini_write(dest, payload):
+        # Exactly one of the two concurrent installs fails mid-way (at its
+        # Gemini config write), regardless of execution order.
+        if dest.name == "settings.json" and dest.parent.name == ".gemini":
+            gemini_writes["n"] += 1
+            if gemini_writes["n"] == 1:
+                raise OSError("disk full")
+        return real_write(dest, payload)
+
+    monkeypatch.setattr(http_mcp_mod, "_write_merged_json", boom_on_first_gemini_write)
+
+    await asyncio.gather(*[
+        http_mcp_mod.install_http_tools_mcp_best_effort_async(workspace, tools)
+        for _ in range(2)
+    ])
+
+    assert gemini_writes["n"] >= 1
+    # Final state is a fully valid successful install regardless of ordering:
+    # the lock serializes the two installs, so the failing one snapshots and
+    # rolls back to the successful one's state instead of clobbering it.
+    assert MCP_SERVER_NAME in _read(workspace / ".mcp.json")["mcpServers"]
+    dump = json.loads(http_tools_dump_path(workspace).read_text(encoding="utf-8"))
+    assert dump and all(t.get("name") for t in dump)
