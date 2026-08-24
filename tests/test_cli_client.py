@@ -1715,6 +1715,16 @@ class TestRootCozClientAdminUsers:
         assert "users" in result
         assert result["users"][0]["username"] == "admin"
 
+    def test_admin_component_versions(self):
+        def handler(request):
+            assert request.method == "GET"
+            assert request.url.path == "/api/admin/component-versions"
+            return httpx.Response(200, json={"components": {"pi": "1.0.0"}})
+
+        client = _make_client(handler)
+        result = client.admin_component_versions()
+        assert result["components"]["pi"] == "1.0.0"
+
     def test_admin_create_user(self):
         def handler(request):
             assert request.method == "POST"

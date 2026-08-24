@@ -5,6 +5,8 @@ import os
 import stat
 from pathlib import Path
 
+import pytest
+
 from rootcoz.engine import http_mcp as http_mcp_mod
 from rootcoz.engine.chat import (
     analysis_http_tools,
@@ -441,3 +443,64 @@ def test_cleanup_removes_claude_enabled_server_keeps_other_settings(
     assert settings["permissions"] == {"allow": ["Read"]}
     assert "enabledMcpjsonServers" not in settings
     assert "enableAllProjectMcpServers" not in settings
+
+
+# ---------------------------------------------------------------------------
+# Non-directory parents and best-effort installs
+# ---------------------------------------------------------------------------
+
+
+def test_install_skips_file_where_directory_expected(tmp_path: Path) -> None:
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    (workspace / ".cursor").write_text("regular file", encoding="utf-8")
+    tools = analysis_http_tools(
+        server_url="http://localhost:8000",
+        job_id="job-1",
+        auth_header="Bearer super-secret-token",
+    )
+    dump = install_http_tools_mcp(workspace, tools, mcp_js=_mcp_js(tmp_path))
+    assert dump is not None
+    # The blocking file is preserved untouched; no config is written inside it.
+    assert (workspace / ".cursor").is_file()
+    # Other configs still install.
+    assert MCP_SERVER_NAME in _read(workspace / ".mcp.json")["mcpServers"]
+
+
+def test_atomic_write_raises_not_a_directory(tmp_path: Path) -> None:
+    parent = tmp_path / "blocker"
+    parent.write_text("regular file", encoding="utf-8")
+    with pytest.raises(NotADirectoryError):
+        http_mcp_mod._atomic_write_bytes(
+            tmp_path / "dest.json", b"{}", mode=0o600, parent=parent
+        )
+
+
+def test_best_effort_install_swallows_errors(tmp_path: Path, monkeypatch) -> None:
+    def boom(workspace, custom_tools):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(http_mcp_mod, "install_http_tools_mcp", boom)
+    # Must not raise — analysis/chat continue without MCP.
+    http_mcp_mod.install_http_tools_mcp_best_effort(tmp_path, [])
+
+
+def test_best_effort_install_noop_on_none_workspace(monkeypatch) -> None:
+    def fail(workspace, custom_tools):
+        raise AssertionError("must not be called for None workspace")
+
+    monkeypatch.setattr(http_mcp_mod, "install_http_tools_mcp", fail)
+    http_mcp_mod.install_http_tools_mcp_best_effort(None, [])
+
+
+def test_best_effort_install_delegates_on_success(tmp_path: Path, monkeypatch) -> None:
+    seen: list[tuple[Path, list | None]] = []
+
+    def fake_install(workspace, custom_tools):
+        seen.append((workspace, custom_tools))
+        return None
+
+    monkeypatch.setattr(http_mcp_mod, "install_http_tools_mcp", fake_install)
+    tools = [{"name": "t", "http": {"method": "GET", "url": "http://x"}}]
+    http_mcp_mod.install_http_tools_mcp_best_effort(tmp_path, tools)
+    assert seen == [(tmp_path, tools)]

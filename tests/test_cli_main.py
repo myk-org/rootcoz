@@ -3816,6 +3816,26 @@ class TestAuthWhoamiCommand:
         assert parsed["is_admin"] is False
 
 
+class TestAdminComponentVersionsCommand:
+    def test_component_versions(self, mock_client):
+        mock_client.admin_component_versions.return_value = {
+            "components": {"pi": "1.0.0", "acpx": None}
+        }
+        result = runner.invoke(app, ["admin", "component-versions"])
+        assert result.exit_code == 0
+        assert "pi: 1.0.0" in result.output
+        assert "acpx: not installed" in result.output
+
+    def test_component_versions_json(self, mock_client):
+        mock_client.admin_component_versions.return_value = {
+            "components": {"pi": "1.0.0"}
+        }
+        result = runner.invoke(app, ["--json", "admin", "component-versions"])
+        assert result.exit_code == 0
+        parsed = json.loads(result.output)
+        assert parsed["components"] == {"pi": "1.0.0"}
+
+
 class TestAdminUsersListCommand:
     def test_admin_users_list(self, mock_client):
         mock_client.admin_list_users.return_value = {

@@ -168,6 +168,7 @@ from rootcoz.monitoring import (
     build_health_response,
     dispatch_alert,
     error_tracker,
+    get_component_versions,
     render_prometheus_metrics,
     validate_startup_config,
 )
@@ -8689,6 +8690,19 @@ async def health_check_detailed() -> Response:
     result = await build_health_response(settings, db_path)
     status_code = 503 if result["status"] == "unhealthy" else 200
     return JSONResponse(content=result, status_code=status_code)
+
+
+@app.get(
+    "/api/admin/component-versions", operation_id="adminGetComponentVersions"
+)
+async def admin_get_component_versions(request: Request) -> dict[str, Any]:
+    """Installed AI-sidecar component versions (admin only).
+
+    Split from the public /api/health response so exact versions are never
+    disclosed without authentication (fingerprinting surface).
+    """
+    _require_admin(request)
+    return {"components": await get_component_versions()}
 
 
 @app.get("/metrics", operation_id="prometheusMetrics")

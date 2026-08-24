@@ -361,8 +361,10 @@ async def build_health_response(settings: Any, db_path: str) -> dict[str, Any]:
     - status: "healthy", "degraded", or "unhealthy"
     - checks: results from individual dependency checks
     - error_rates: current rolling-window error statistics
-    - components: installed AI-sidecar component versions (pi, pi_sidecar,
-      pi_orchestrator_config, pi_vertex_claude, node, acpx)
+
+    Component versions are intentionally NOT included here: /api/health is
+    public (unauthenticated) and exact versions aid fingerprinting. Admins
+    get them via GET /api/admin/component-versions.
     """
     checks: dict[str, dict[str, Any]] = {}
 
@@ -409,7 +411,6 @@ async def build_health_response(settings: Any, db_path: str) -> dict[str, Any]:
         "status": overall,
         "uptime_seconds": round(time.monotonic() - _APP_STARTED_AT, 3),
         "version": _get_app_version(),
-        "components": await get_component_versions(),
         "checks": checks,
         "error_rates": error_tracker.snapshot_all(),
     }

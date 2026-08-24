@@ -669,6 +669,12 @@ class TestHealthEndpointIntegration:
         assert "error_rates" in data
         assert "database" in data["checks"]
 
+    def test_api_health_omits_component_versions(self, test_client):
+        """Exact component versions must not leak via the public endpoint."""
+        response = test_client.get("/api/health")
+        assert response.status_code == 200
+        assert "components" not in response.json()
+
     def test_legacy_health_still_works(self, test_client):
         response = test_client.get("/health")
         assert response.status_code == 200
@@ -679,3 +685,75 @@ class TestHealthEndpointIntegration:
         assert response.status_code == 200
         assert "rootcoz_requests_total" in response.text
         assert "text/plain" in response.headers["content-type"]
+
+
+# ---------------------------------------------------------------------------
+# Admin component-versions endpoint
+# ---------------------------------------------------------------------------
+
+
+class TestComponentVersionsEndpoint:
+    """Tests for GET /api/admin/component-versions (admin only)."""
+
+    @pytest.fixture
+    def client(self, temp_db_path):
+        from rootcoz import storage
+
+        env = {
+            "ADMIN_KEY": "test-admin-key-16chars",  # pragma: allowlist secret
+            "ROOTCOZ_ENCRYPTION_KEY": "test-encryption-key-for-hmac",  # pragma: allowlist secret
+            "SECURE_COOKIES": "false",
+            "DB_PATH": str(temp_db_path),
+            "REQUIRE_APPROVAL": "false",
+        }
+        with patch.dict(os.environ, env, clear=True):
+            from rootcoz.config import get_settings
+
+            get_settings.cache_clear()
+            try:
+                with patch.object(storage, "DB_PATH", temp_db_path):
+                    from starlette.testclient import TestClient
+
+                    from rootcoz.main import app
+
+                    with TestClient(app) as test_client:
+                        yield test_client
+            finally:
+                get_settings.cache_clear()
+
+    def _admin_login(self, client):
+        resp = client.post(
+            "/api/auth/login",
+            json={
+                "username": "admin",
+                "api_key": "test-admin-key-16chars",  # pragma: allowlist secret
+            },
+        )
+        assert resp.status_code == 200
+        return resp.cookies
+
+    def test_admin_gets_component_versions(self, client):
+        cookies = self._admin_login(client)
+        with patch(
+            "rootcoz.main.get_component_versions",
+            new_callable=AsyncMock,
+            return_value={"pi": "1.2.3", "node": None},
+        ):
+            resp = client.get("/api/admin/component-versions", cookies=cookies)
+        assert resp.status_code == 200
+        assert resp.json() == {"components": {"pi": "1.2.3", "node": None}}
+
+    def test_forbidden_without_auth(self, client):
+        resp = client.get("/api/admin/component-versions")
+        assert resp.status_code == 403
+
+    def test_forbidden_for_non_admin(self, client):
+        reg = client.post("/api/auth/register", json={"username": "viewer1"})
+        assert reg.status_code == 200
+        session = reg.cookies.get("rootcoz_session")
+        assert session
+        resp = client.get(
+            "/api/admin/component-versions",
+            cookies={"rootcoz_session": session},
+        )
+        assert resp.status_code == 403

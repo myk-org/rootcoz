@@ -88,6 +88,11 @@ def _dir_inside_workspace(
     try:
         workspace_resolved = workspace.resolve()
         if directory.exists():
+            if not directory.is_dir():
+                logger.warning(
+                    "Refusing MCP path that is not a directory: %s", directory
+                )
+                return None
             resolved = directory.resolve()
         elif create:
             directory.mkdir(parents=True, exist_ok=True)
@@ -112,6 +117,8 @@ def _atomic_write_bytes(dest: Path, data: bytes, *, mode: int, parent: Path) -> 
 
     ``os.replace`` replaces a destination symlink instead of following it.
     """
+    if parent.exists() and not parent.is_dir():
+        raise NotADirectoryError(f"MCP config parent is not a directory: {parent}")
     parent.mkdir(parents=True, exist_ok=True)
     fd, tmp_name = tempfile.mkstemp(prefix=".rootcoz-mcp-", dir=str(parent))
     tmp_path = Path(tmp_name)
@@ -479,3 +486,26 @@ def install_http_tools_mcp(
         workspace,
     )
     return tools_file
+
+
+def install_http_tools_mcp_best_effort(
+    workspace: Path | None,
+    custom_tools: list[dict[str, Any]] | None,
+) -> None:
+    """Install HTTP tools MCP configs without failing the calling flow.
+
+    MCP config writing is a supplemental integration; filesystem errors are
+    logged and swallowed so analysis/chat continues without MCP.
+    Use :func:`install_http_tools_mcp` directly when failures must propagate
+    (e.g. rollback correctness tests).
+    """
+    if workspace is None:
+        return
+    try:
+        install_http_tools_mcp(workspace, custom_tools)
+    except Exception:
+        logger.warning(
+            "HTTP tools MCP install failed for %s; continuing without MCP",
+            workspace,
+            exc_info=True,
+        )

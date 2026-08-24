@@ -614,11 +614,23 @@ def health(
                 f"{error_rates.get('total_requests', 0)} in "
                 f"{error_rates.get('window_seconds', 0):.0f}s window)"
             )
-        components = data.get("components", {})
-        if components:
-            typer.echo("\nComponents:")
-            for name, version in components.items():
-                typer.echo(f"  {name}: {version if version else 'not installed'}")
+
+
+@admin_app.command("component-versions")
+def component_versions_cmd(json_output: bool = _JSON_OPTION) -> None:
+    """Show installed AI-sidecar component versions. Admin only."""
+    _set_json(json_output)
+    try:
+        data = _get_client().admin_component_versions()
+    except RootCozError as exc:
+        _handle_error(exc)
+    components = data.get("components", {})
+    if _state.get("json", False):
+        print_output(data, columns=[], as_json=True)
+        return
+    typer.echo("Components:")
+    for name, version in components.items():
+        typer.echo(f"  {name}: {version if version else 'not installed'}")
 
 
 @app.command()
