@@ -6017,10 +6017,20 @@ def _jira_issue_creation_enabled(settings: Settings) -> bool:
     return settings.enable_jira_issues is not False
 
 
+def _rp_has_push_content(settings: Settings) -> bool:
+    """True when at least one Report Portal push content toggle is enabled."""
+    rp = settings.rp
+    return bool(rp.push_classifications or rp.push_rootcoz_url or rp.push_tracker_links)
+
+
 def _available_exporters(settings: Settings) -> list[ExporterInfo]:
     """Build the list of available exporter plugins with their status."""
     rp_enabled = settings.reportportal_enabled
     if rp_enabled and settings.rp.push_rootcoz_url and not _extract_base_url():
+        rp_enabled = False
+    if rp_enabled and not _rp_has_push_content(settings):
+        # Match ReportPortalClient.push() readiness — avoid advertising a
+        # plugin that will hard-fail every push due to all toggles off.
         rp_enabled = False
     return [
         ExporterInfo(
@@ -6592,8 +6602,11 @@ async def push_to_exporter(
 
     try:
         exporter = _create_exporter(plugin_name, settings)
-    except (ValueError, TimeoutError, OSError, TypeError, RuntimeError) as exc:
+    except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except (TimeoutError, OSError, TypeError, RuntimeError) as exc:
+        # Constructor/transport failures are server-side, not bad client input.
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
 
     try:
         with exporter:
@@ -6888,6 +6901,12 @@ def _create_exporter(plugin_name: str, settings: Settings) -> Exporter:
         if not settings.reportportal_enabled:
             raise ValueError("Report Portal integration is disabled or not configured")
         rp = settings.rp
+        if not _rp_has_push_content(settings):
+            raise ValueError(
+                "All Report Portal push content toggles are disabled. "
+                "Enable at least one of: rp_push_classifications, "
+                "rp_push_rootcoz_url, rp_push_tracker_links."
+            )
         if rp.push_rootcoz_url and not _extract_base_url():
             raise ValueError(
                 "PUBLIC_BASE_URL must be set to push rootcoz URL to Report Portal"

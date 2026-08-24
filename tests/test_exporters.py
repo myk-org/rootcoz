@@ -223,6 +223,31 @@ class TestCreateExporter:
         with pytest.raises(ValueError, match="reportportal_project is required"):
             _create_exporter("reportportal", settings)
 
+    def test_create_reportportal_all_toggles_disabled(self):
+        """Factory raises when RP is configured but all push content toggles are off."""
+        from rootcoz.main import _create_exporter
+
+        settings = MagicMock()
+        settings.reportportal_enabled = True
+        settings.rp.push_classifications = False
+        settings.rp.push_rootcoz_url = False
+        settings.rp.push_tracker_links = False
+        with pytest.raises(ValueError, match="push content toggles are disabled"):
+            _create_exporter("reportportal", settings)
+
+    def test_available_exporters_disabled_when_all_toggles_off(self):
+        """List exporters reports RP disabled when all content toggles are off."""
+        from rootcoz.main import _available_exporters
+
+        settings = MagicMock()
+        settings.reportportal_enabled = True
+        settings.rp.push_classifications = False
+        settings.rp.push_rootcoz_url = False
+        settings.rp.push_tracker_links = False
+        exporters = _available_exporters(settings)
+        rp = next(e for e in exporters if e.name == "reportportal")
+        assert rp.enabled is False
+
 
 class TestExporterEndpoints:
     """Tests for the generic exporter API endpoints."""
@@ -438,6 +463,38 @@ class TestExporterEndpoints:
 
             assert response.status_code == 502
             assert "failed unexpectedly" in response.json()["detail"]
+
+    def test_push_to_exporter_constructor_oserror_returns_502(
+        self, _init_db, temp_db_path
+    ):
+        """Transport/constructor failures from _create_exporter map to 502."""
+        from tests.conftest import admin_login, make_app_client
+
+        for client in make_app_client(temp_db_path):
+            admin_login(client)
+            with (
+                patch("rootcoz.main.get_result", new_callable=AsyncMock) as mock_get,
+                patch(
+                    "rootcoz.main._create_exporter",
+                    side_effect=OSError("connection refused"),
+                ),
+                patch(
+                    "rootcoz.main._build_export_context", new_callable=AsyncMock
+                ) as mock_ctx,
+            ):
+                mock_get.return_value = {"result": {"failures": [{"test_name": "t"}]}}
+                mock_ctx.return_value = ExportContext(
+                    job_id="job-1",
+                    job_name="test-job",
+                    build_number="1",
+                    jenkins_url="https://jenkins.example.com/job/test-job/1/",
+                    failures=[{"test_name": "t"}],
+                    report_url="https://rootcoz.example.com/results/job-1",
+                )
+                response = client.post("/results/job-1/push/reportportal")
+
+            assert response.status_code == 502
+            assert "connection refused" in response.json()["detail"]
 
 
 class TestExporterNeedsHistory:
