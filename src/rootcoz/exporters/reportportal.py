@@ -227,6 +227,7 @@ class ReportPortalClient(Exporter):
     NAME = "reportportal"
     DISPLAY_NAME = "Report Portal"
     needs_history_classifications = True
+    needs_tracked_in_links = True
 
     @property
     def name(self) -> str:

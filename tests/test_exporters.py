@@ -589,6 +589,95 @@ class TestBuildExportContextFetchHistory:
         assert ctx.history_classifications == {}
 
 
+class TestExporterNeedsTrackedInLinks:
+    """Tests for the needs_tracked_in_links capability + gating."""
+
+    def test_base_default_is_false(self):
+        assert Exporter.needs_tracked_in_links is False
+
+    def test_reportportal_needs_tracked_in(self):
+        from rootcoz.exporters.reportportal import ReportPortalClient
+
+        assert ReportPortalClient.needs_tracked_in_links is True
+
+    def test_helper_true_when_rp_toggle_on(self):
+        from rootcoz.main import _exporter_needs_tracked_in_links
+
+        settings = MagicMock()
+        settings.rp.push_tracker_links = True
+        assert _exporter_needs_tracked_in_links(["reportportal"], settings) is True
+
+    def test_helper_false_when_rp_toggle_off(self):
+        from rootcoz.main import _exporter_needs_tracked_in_links
+
+        settings = MagicMock()
+        settings.rp.push_tracker_links = False
+        assert _exporter_needs_tracked_in_links(["reportportal"], settings) is False
+
+    def test_helper_false_for_unknown(self):
+        from rootcoz.main import _exporter_needs_tracked_in_links
+
+        settings = MagicMock()
+        settings.rp.push_tracker_links = True
+        assert _exporter_needs_tracked_in_links(["nonexistent"], settings) is False
+
+
+class TestBuildExportContextFetchTrackedIn:
+    """_build_export_context honours the fetch_tracked_in_links flag."""
+
+    def _run_build(self, fetch_tracked_in_links):
+        import asyncio
+
+        from rootcoz.main import _build_export_context
+
+        result_data = {
+            "job_name": "j",
+            "jenkins_url": "https://jenkins.example.com/job/j/1/",
+            "failures": [{"test_name": "t1"}],
+        }
+        with (
+            patch(
+                "rootcoz.main._extract_base_url",
+                return_value="https://rc.example.com",
+            ),
+            patch(
+                "rootcoz.main.get_history_classification",
+                new_callable=AsyncMock,
+                return_value="",
+            ),
+            patch(
+                "rootcoz.main.storage.get_tracked_in_for_scope",
+                new_callable=AsyncMock,
+            ) as mock_tracked,
+            patch(
+                "rootcoz.main.storage.get_reviews_for_job",
+                new_callable=AsyncMock,
+                return_value={},
+            ),
+        ):
+            mock_tracked.return_value = {"t1": [{"url": "https://example.com/1"}]}
+            ctx = asyncio.run(
+                _build_export_context(
+                    job_id="job-1",
+                    result_data=result_data,
+                    settings=MagicMock(),
+                    fetch_history=False,
+                    fetch_tracked_in_links=fetch_tracked_in_links,
+                )
+            )
+        return ctx, mock_tracked
+
+    def test_fetch_tracked_in_true_calls_storage(self):
+        ctx, mock_tracked = self._run_build(True)
+        assert mock_tracked.await_count == 1
+        assert "t1" in ctx.tracked_in_links
+
+    def test_fetch_tracked_in_false_skips_storage(self):
+        ctx, mock_tracked = self._run_build(False)
+        assert mock_tracked.await_count == 0
+        assert ctx.tracked_in_links == {}
+
+
 class TestExporterModel:
     """Tests for ExporterInfo Pydantic model."""
 

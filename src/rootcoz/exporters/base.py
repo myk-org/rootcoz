@@ -77,6 +77,13 @@ class Exporter(ABC):
     #: :attr:`ExportContext.history_classifications` must set this to ``True``.
     needs_history_classifications: bool = False
 
+    #: Whether this exporter consumes tracked-in links from storage.
+    #: When ``False`` (the default), the push pipeline skips
+    #: ``storage.get_tracked_in_for_scope`` when building the
+    #: :class:`ExportContext`.  Subclasses that read
+    #: :attr:`ExportContext.tracked_in_links` must set this to ``True``.
+    needs_tracked_in_links: bool = False
+
     @property
     @abstractmethod
     def name(self) -> str:

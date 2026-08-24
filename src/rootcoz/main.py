@@ -2482,6 +2482,9 @@ async def _auto_review_matching_failures(
                     fetch_history=_exporter_needs_history_classifications(
                         auto_push_names
                     ),
+                    fetch_tracked_in_links=_exporter_needs_tracked_in_links(
+                        auto_push_names, settings
+                    ),
                 )
                 for plugin_name in auto_push_names:
                     logger.info(
@@ -6606,6 +6609,9 @@ async def push_to_exporter(
             child_build_number=child_build_number,
             pushed_by=safe_username,
             fetch_history=_exporter_needs_history_classifications([plugin_name]),
+            fetch_tracked_in_links=_exporter_needs_tracked_in_links(
+                [plugin_name], settings
+            ),
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -6709,6 +6715,7 @@ async def _build_export_context(
     child_build_number: int | None = None,
     pushed_by: str = "",
     fetch_history: bool = True,
+    fetch_tracked_in_links: bool = True,
 ) -> ExportContext:
     """Build an ExportContext from stored result data.
 
@@ -6727,6 +6734,10 @@ async def _build_export_context(
             ``False`` when no target exporter reads
             ``ExportContext.history_classifications`` — see
             :func:`_exporter_needs_history_classifications`.
+        fetch_tracked_in_links: When ``False``, skip
+            ``storage.get_tracked_in_for_scope``.  Set to ``False`` when no
+            target exporter will read ``ExportContext.tracked_in_links`` —
+            see :func:`_exporter_needs_tracked_in_links`.
 
     Returns:
         Populated ExportContext.
@@ -6798,18 +6809,19 @@ async def _build_export_context(
                 if result:
                     history_classifications[name] = result
 
-        try:
-            tracked_in_data = await storage.get_tracked_in_for_scope(
-                job_id,
-                child_job_name=child_job_name or "",
-                child_build_number=child_build_number or 0,
-            )
-        except Exception:
-            logger.warning(
-                "Failed to fetch tracked-in links for export push, job_id=%s",
-                job_id,
-                exc_info=True,
-            )
+        if fetch_tracked_in_links:
+            try:
+                tracked_in_data = await storage.get_tracked_in_for_scope(
+                    job_id,
+                    child_job_name=child_job_name or "",
+                    child_build_number=child_build_number or 0,
+                )
+            except Exception:
+                logger.warning(
+                    "Failed to fetch tracked-in links for export push, job_id=%s",
+                    job_id,
+                    exc_info=True,
+                )
 
         try:
             reviews = await storage.get_reviews_for_job(job_id)
@@ -6894,6 +6906,33 @@ def _exporter_needs_history_classifications(plugin_names: Iterable[str]) -> bool
     )
 
 
+def _exporter_needs_tracked_in_links(
+    plugin_names: Iterable[str], settings: Settings
+) -> bool:
+    """Whether any named exporter consumes tracked-in link lookups.
+
+    Lets the push pipeline skip ``storage.get_tracked_in_for_scope`` when no
+    target exporter will read ``ExportContext.tracked_in_links``.  Report
+    Portal additionally requires ``settings.rp.push_tracker_links``.
+
+    Args:
+        plugin_names: Exporter identifiers to check.
+        settings: Application settings (RP content toggles).
+
+    Returns:
+        ``True`` if at least one target exporter needs tracked-in links.
+    """
+    for name in plugin_names:
+        if name not in _EXPORTER_CLASSES:
+            continue
+        if not _EXPORTER_CLASSES[name].needs_tracked_in_links:
+            continue
+        if name == "reportportal" and not settings.rp.push_tracker_links:
+            continue
+        return True
+    return False
+
+
 def _create_exporter(plugin_name: str, settings: Settings) -> Exporter:
     """Create an exporter instance by plugin name.
 
@@ -6972,6 +7011,9 @@ async def _execute_rp_push(
         child_build_number=child_build_number,
         pushed_by=pushed_by,
         fetch_history=_exporter_needs_history_classifications(["reportportal"]),
+        fetch_tracked_in_links=_exporter_needs_tracked_in_links(
+            ["reportportal"], settings
+        ),
     )
 
     try:
