@@ -8,17 +8,7 @@
     "build": "tsc"
   },
   "dependencies": {
-    "@earendil-works/pi-coding-agent": "^0.84.3",
-    "@myk-org/pi-sidecar": ">=4.3.4",
-    "@myk-org/pi-vertex-claude": ">=4.3.4",
-    "pi-orchestrator-config": ">=4.3.4"
-  },
-  "overrides": {
-    "pi-orchestrator-config": ">=4.3.4",
-    "@earendil-works/pi-coding-agent": "^0.84.3",
-    "@earendil-works/pi-ai": ">=0.84.0",
-    "@earendil-works/pi-agent-core": ">=0.84.0",
-    "@myk-org/pi-vertex-claude": ">=4.3.4"
+    "@myk-org/pi-sidecar": ">=4.3.5"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
