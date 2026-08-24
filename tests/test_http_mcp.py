@@ -557,6 +557,10 @@ async def test_best_effort_async_serializes_per_workspace(
             events.append("end")
 
     monkeypatch.setattr(http_mcp_mod, "install_http_tools_mcp", tracking_install)
+    # Keep the test hermetic: never depend on a locally built sidecar dist.
+    monkeypatch.setattr(
+        http_mcp_mod, "resolve_http_tools_mcp_js", lambda: _mcp_js(tmp_path)
+    )
     await asyncio.gather(
         *[
             http_mcp_mod.install_http_tools_mcp_best_effort_async(tmp_path / "ws", [])
@@ -592,6 +596,11 @@ async def test_concurrent_failed_install_preserves_successful_state(
         return real_write(dest, payload)
 
     monkeypatch.setattr(http_mcp_mod, "_write_merged_json", boom_on_first_gemini_write)
+    # Hermetic: the real installer must find a stub binary, not whatever
+    # happens to exist in the developer's sidecar-helper/dist.
+    monkeypatch.setattr(
+        http_mcp_mod, "resolve_http_tools_mcp_js", lambda: _mcp_js(tmp_path)
+    )
 
     await asyncio.gather(
         *[
@@ -633,6 +642,9 @@ async def test_best_effort_async_fallback_lock_without_fcntl(
             events.append("end")
 
     monkeypatch.setattr(http_mcp_mod, "install_http_tools_mcp", tracking_install)
+    monkeypatch.setattr(
+        http_mcp_mod, "resolve_http_tools_mcp_js", lambda: _mcp_js(tmp_path)
+    )
     await asyncio.gather(
         *[
             http_mcp_mod.install_http_tools_mcp_best_effort_async(tmp_path / "ws", [])
