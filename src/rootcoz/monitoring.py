@@ -328,7 +328,11 @@ def _compute_component_versions() -> dict[str, Any]:
                 manifest = json.loads(
                     (node_modules / pkg_name / "package.json").read_text()
                 )
-                versions[key] = manifest.get("version")
+                # Valid JSON that is not an object (null, [], "...") has no
+                # version mapping — report the component as unavailable.
+                versions[key] = (
+                    manifest.get("version") if isinstance(manifest, dict) else None
+                )
             except (OSError, ValueError):
                 versions[key] = None
     else:

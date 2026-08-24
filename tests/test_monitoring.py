@@ -757,3 +757,29 @@ class TestComponentVersionsEndpoint:
             cookies={"rootcoz_session": session},
         )
         assert resp.status_code == 403
+
+
+# ---------------------------------------------------------------------------
+# Component version manifest parsing
+# ---------------------------------------------------------------------------
+
+
+def test_compute_component_versions_handles_non_object_manifests(tmp_path, monkeypatch):
+    """A valid-but-non-object package.json reports None instead of raising."""
+    from rootcoz import monitoring as monitoring_module
+
+    node_modules = tmp_path / "node_modules"
+    broken = node_modules / "@myk-org" / "pi-sidecar"
+    broken.mkdir(parents=True)
+    (broken / "package.json").write_text("null")
+    good = node_modules / "@earendil-works" / "pi-coding-agent"
+    good.mkdir(parents=True)
+    (good / "package.json").write_text('{"version": "1.2.3"}')
+
+    monkeypatch.setattr(monitoring_module, "_SIDECAR_DIR_CANDIDATES", (tmp_path,))
+    monkeypatch.setattr(monitoring_module, "_component_versions_cache", None)
+
+    versions = monitoring_module._compute_component_versions()
+
+    assert versions["pi_sidecar"] is None
+    assert versions["pi"] == "1.2.3"
