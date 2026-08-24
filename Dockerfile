@@ -23,9 +23,11 @@ USER 0
 WORKDIR /sidecar
 
 COPY sidecar-helper/package.json sidecar-helper/package-lock.json* ./
-# pi-sidecar@>=4.3.4 requires Node >=22.19.0 (engines field); fail early if base image lags.
+# pi-sidecar@>=4.2.0 requires Node >=22.19.0 (engines field); fail early if base image lags.
 RUN node -e "const [maj,min]=process.versions.node.split('.').map(Number); if (maj<22||(maj===22&&min<19)) { console.error('Need Node >=22.19.0, got', process.versions.node); process.exit(1); }"
-RUN npm ci
+# --foreground-scripts: nested pi-sidecar/pi-coding-agent trees make parallel reify
+# delete package dirs while their postinstall runs (ENOENT uv_cwd). Sequential scripts avoid it.
+RUN npm ci --foreground-scripts
 
 COPY sidecar-helper/ .
 RUN npx tsc

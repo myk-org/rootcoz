@@ -614,6 +614,11 @@ def health(
                 f"{error_rates.get('total_requests', 0)} in "
                 f"{error_rates.get('window_seconds', 0):.0f}s window)"
             )
+        components = data.get("components", {})
+        if components:
+            typer.echo("\nComponents:")
+            for name, version in components.items():
+                typer.echo(f"  {name}: {version if version else 'not installed'}")
 
 
 @app.command()

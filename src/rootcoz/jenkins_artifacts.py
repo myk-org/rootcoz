@@ -4,7 +4,6 @@ import io
 import os
 import shutil
 import tarfile
-import tempfile
 import urllib.parse
 import uuid
 import zipfile
@@ -14,10 +13,12 @@ from typing import Any
 import requests
 from simple_logger.logger import get_logger
 
+from rootcoz.temp_paths import rootcoz_temp_base
+
 logger = get_logger(name=__name__, level=os.environ.get("LOG_LEVEL", "INFO"))
 
 # Under process temp root so chat symlink cleanup (honors TMPDIR) can delete it.
-EXTRACT_BASE = Path(tempfile.gettempdir()) / "jenkins-insight"
+EXTRACT_BASE = rootcoz_temp_base()
 
 # Maximum ratio of extracted size to compressed size. Typical compression ratios
 # for Jenkins artifacts (logs, YAML, JSON) range from 3-8x; 10x provides safe

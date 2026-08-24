@@ -1008,7 +1008,7 @@ class TestChatCleanup:
         monkeypatch.setenv("TMPDIR", str(custom_tmp))
         monkeypatch.setattr(tempfile, "gettempdir", lambda: str(custom_tmp))
 
-        extract_base = Path(tempfile.gettempdir()) / "jenkins-insight"
+        extract_base = Path(tempfile.gettempdir()) / "rootcoz"
         monkeypatch.setattr(jenkins_artifacts, "EXTRACT_BASE", extract_base)
 
         artifacts_dir = extract_base / "artifacts-testhash"

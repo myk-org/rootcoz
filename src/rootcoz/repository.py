@@ -6,7 +6,6 @@ import os
 import re
 import shutil
 import subprocess
-import tempfile
 import uuid
 from pathlib import Path
 from typing import TYPE_CHECKING, Self
@@ -16,6 +15,8 @@ from git import Repo
 from git.exc import GitCommandError
 from pydantic import HttpUrl
 from simple_logger.logger import get_logger
+
+from rootcoz.temp_paths import rootcoz_temp_base
 
 if TYPE_CHECKING:
     from rootcoz.models import AdditionalRepo
@@ -227,7 +228,7 @@ class RepositoryManager:
 
     def __init__(self) -> None:
         """Initialize repository manager."""
-        self.base_path = Path(tempfile.gettempdir()) / "jenkins-insight"
+        self.base_path = rootcoz_temp_base()
         self.base_path.mkdir(parents=True, exist_ok=True)
         self.temp_dirs: list[Path] = []
 
