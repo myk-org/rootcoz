@@ -7399,16 +7399,8 @@ async def bulk_delete_jobs_endpoint(
     result = await storage.delete_jobs_bulk(job_ids)
     result["unauthorized"] = unauthorized_ids
 
-    # Clean up chat workspaces for all deleted jobs
-    from rootcoz.engine.chat import cleanup_chat_workspace
-
     for job_id in result["deleted"]:
-        try:
-            cleanup_chat_workspace(job_id)
-        except Exception:
-            logger.warning(
-                "Failed to cleanup chat workspace for %s", job_id, exc_info=True
-            )
+        await _cleanup_deleted_job_chat_workspaces(job_id)
 
     notify_active_count_changed()
     notify_dashboard_changed()
@@ -7447,14 +7439,7 @@ async def delete_job_endpoint(
         )
 
     await storage.delete_job(job_id)
-
-    # Clean up chat workspace (files, tokens, sessions)
-    try:
-        from rootcoz.engine.chat import cleanup_chat_workspace
-
-        cleanup_chat_workspace(job_id)
-    except Exception:
-        logger.warning("Failed to cleanup chat workspace for %s", job_id, exc_info=True)
+    await _cleanup_deleted_job_chat_workspaces(job_id)
 
     notify_active_count_changed()
     notify_dashboard_changed()
@@ -8700,7 +8685,7 @@ async def admin_get_component_versions(request: Request) -> dict[str, Any]:
     disclosed without authentication (fingerprinting surface).
     """
     _require_admin(request)
-    return {"components": await get_component_versions()}
+    return strip_sensitive_from_response({"components": await get_component_versions()})
 
 
 @app.get("/metrics", operation_id="prometheusMetrics")
@@ -11168,6 +11153,25 @@ def _get_chat_lock(job_id: str) -> asyncio.Lock:
     if job_id not in _chat_locks:
         _chat_locks[job_id] = asyncio.Lock()
     return _chat_locks[job_id]
+
+
+async def _cleanup_deleted_job_chat_workspaces(job_id: str) -> None:
+    """Remove chat MCP state after a job delete, serialized with in-flight chat.
+
+    Background chat holds ``{job_id}:{username}`` while installing MCP. Full
+    job deletion waits on those locks (and a bare ``job_id`` lock) so a
+    worker-thread install cannot recreate the bearer dump after rmtree.
+    """
+    from rootcoz.engine.chat import cleanup_chat_workspace
+
+    keys = sorted(k for k in _chat_locks if k == job_id or k.startswith(f"{job_id}:"))
+    try:
+        async with contextlib.AsyncExitStack() as stack:
+            for key in keys:
+                await stack.enter_async_context(_get_chat_lock(key))
+            cleanup_chat_workspace(job_id)
+    except Exception:
+        logger.warning("Failed to cleanup chat workspace for %s", job_id, exc_info=True)
 
 
 # Per-job:user abort signals — set to cancel in-progress chat processing

@@ -8,6 +8,7 @@ import base64
 import shutil
 import tempfile
 from collections.abc import Callable
+from contextlib import ExitStack
 from pathlib import Path
 from typing import Any
 
@@ -22,6 +23,7 @@ from rootcoz.ai_client import (
     normalize_provider,
 )
 from rootcoz.engine.http_mcp import (
+    _workspace_install_lock,
     cleanup_http_tools_mcp,
     install_http_tools_mcp_best_effort_async,
 )
@@ -901,21 +903,37 @@ def cleanup_chat_repos(job_id: str, username: str = "") -> None:
     logger.info(f"Cleaned up chat repos for job {job_id} (kept sessions)")
 
 
+def _chat_mcp_lock_targets(workspace: Path) -> list[Path]:
+    """Job workspace plus nested per-user dirs that have their own MCP dumps."""
+    targets: list[Path] = []
+    if workspace.exists() and workspace.is_dir():
+        for child in workspace.iterdir():
+            if child.is_dir() and not child.is_symlink():
+                targets.append(child)
+    targets.append(workspace)
+    return list(dict.fromkeys(targets))
+
+
 def cleanup_chat_workspace(job_id: str, username: str = "") -> None:
     """Delete the entire chat workspace including sessions."""
     workspace = get_chat_workspace(job_id, username)
-    if not workspace.exists():
-        return
-
-    # Resolve symlinks before removing workspace tree — symlinked
-    # artifact dirs live outside the workspace and won't be cleaned
-    # by shutil.rmtree (which removes the symlink, not its target).
-    for item in workspace.iterdir():
-        if item.is_symlink():
-            _safe_remove_symlink(item)
-
-    shutil.rmtree(workspace, ignore_errors=True)
-    cleanup_http_tools_mcp(workspace)
+    targets = _chat_mcp_lock_targets(workspace)
+    # Hold each workspace's MCP install lock for the whole rmtree + dump
+    # unlink so an in-flight installer cannot recreate credentials after
+    # the job (or nested user dir) was removed.
+    with ExitStack() as stack:
+        for target in sorted(targets, key=lambda p: str(p)):
+            stack.enter_context(_workspace_install_lock(target))
+        if workspace.exists():
+            # Resolve symlinks before removing workspace tree — symlinked
+            # artifact dirs live outside the workspace and won't be cleaned
+            # by shutil.rmtree (which removes the symlink, not its target).
+            for item in workspace.iterdir():
+                if item.is_symlink():
+                    _safe_remove_symlink(item)
+            shutil.rmtree(workspace, ignore_errors=True)
+        for target in targets:
+            cleanup_http_tools_mcp(target)
     logger.info(f"Deleted chat workspace for job {job_id}")
 
 

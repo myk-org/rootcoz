@@ -1026,6 +1026,68 @@ class TestChatCleanup:
         assert not workspace.exists()
         assert not artifacts_dir.exists()
 
+    def test_cleanup_workspace_removes_nested_user_mcp_dumps(self, tmp_path):
+        from rootcoz.engine.chat import cleanup_chat_workspace
+        from rootcoz.engine.http_mcp import http_tools_dump_path
+
+        workspace = tmp_path / "rootcoz-chat-job"
+        user_ws = workspace / "alice"
+        user_ws.mkdir(parents=True)
+        dump = http_tools_dump_path(user_ws)
+        dump.write_text("[]")
+        (user_ws / "session.txt").write_text("x")
+
+        with patch("rootcoz.engine.chat.get_chat_workspace", return_value=workspace):
+            cleanup_chat_workspace("job")
+
+        assert not workspace.exists()
+        assert not dump.exists()
+
+    def test_cleanup_workspace_waits_for_mcp_install_lock(self, tmp_path):
+        import threading
+        import time
+
+        from rootcoz.engine import http_mcp as http_mcp_mod
+        from rootcoz.engine.chat import cleanup_chat_workspace
+
+        workspace = tmp_path / "ws"
+        workspace.mkdir()
+        dump = http_mcp_mod.http_tools_dump_path(workspace)
+        order: list[str] = []
+        started = threading.Event()
+        release = threading.Event()
+
+        def hold_lock():
+            with http_mcp_mod._workspace_install_lock(workspace):
+                order.append("install")
+                started.set()
+                release.wait(timeout=5)
+                dump.write_text("secret")
+
+        holder = threading.Thread(target=hold_lock)
+        holder.start()
+        assert started.wait(timeout=5)
+
+        def run_cleanup():
+            order.append("cleanup-start")
+            with patch(
+                "rootcoz.engine.chat.get_chat_workspace", return_value=workspace
+            ):
+                cleanup_chat_workspace("locked-job")
+            order.append("cleanup-end")
+
+        cleaner = threading.Thread(target=run_cleanup)
+        cleaner.start()
+        time.sleep(0.1)
+        assert "cleanup-end" not in order
+        release.set()
+        holder.join(timeout=5)
+        cleaner.join(timeout=5)
+        assert order[:2] == ["install", "cleanup-start"]
+        assert order[-1] == "cleanup-end"
+        assert not workspace.exists()
+        assert not dump.exists()
+
 
 # ---------------------------------------------------------------------------
 # Chat storage tests

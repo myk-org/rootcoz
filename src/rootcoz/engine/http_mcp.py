@@ -520,8 +520,11 @@ def _workspace_install_lock(workspace: Path) -> Iterator[None]:
 
     Install rollback restores snapshot contents, so overlapping installs on
     one workspace can clobber each other's configs and tools dump (parallel
-    failure-group analysis shares ``workspace_dir``). The lock covers the
-    whole snapshot-write-rollback cycle so exactly one install runs at a time.
+    failure-group analysis shares ``workspace_dir``). Chat workspace deletion
+    takes the same lock around rmtree + dump unlink so a worker-thread
+    install cannot recreate credentials after the job was removed. The lock
+    covers the whole snapshot-write-rollback cycle so exactly one install
+    (or cleanup) runs at a time.
     POSIX platforms use an flock'd lock file; without :mod:`fcntl` (Windows),
     falls back to process-local serialization keyed by workspace.
     """

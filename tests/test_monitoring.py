@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import httpx
 import pytest
 
+from rootcoz.encryption import strip_sensitive_from_response
 from rootcoz.monitoring import (
     AlertThrottler,
     ErrorRateTracker,
@@ -742,6 +743,24 @@ class TestComponentVersionsEndpoint:
             resp = client.get("/api/admin/component-versions", cookies=cookies)
         assert resp.status_code == 200
         assert resp.json() == {"components": {"pi": "1.2.3", "node": None}}
+
+    def test_admin_component_versions_uses_response_stripping(self, client):
+        cookies = self._admin_login(client)
+        with (
+            patch(
+                "rootcoz.main.get_component_versions",
+                new_callable=AsyncMock,
+                return_value={"pi": "9.9.9"},
+            ),
+            patch(
+                "rootcoz.main.strip_sensitive_from_response",
+                wraps=strip_sensitive_from_response,
+            ) as strip_fn,
+        ):
+            resp = client.get("/api/admin/component-versions", cookies=cookies)
+        assert resp.status_code == 200
+        strip_fn.assert_called_once_with({"components": {"pi": "9.9.9"}})
+        assert resp.json() == {"components": {"pi": "9.9.9"}}
 
     def test_forbidden_without_auth(self, client):
         resp = client.get("/api/admin/component-versions")
