@@ -1560,6 +1560,65 @@ class TestRootCozClientPushReportPortal:
         assert exc_info.value.status_code == 400
 
 
+class TestRootCozClientExporters:
+    def test_push_to_exporter(self):
+        response_data = {
+            "pushed": 3,
+            "unmatched": [],
+            "errors": [],
+            "message": "Pushed 3 item(s)",
+        }
+
+        def handler(request):
+            assert request.method == "POST"
+            assert "/results/job-123/push/reportportal" in str(request.url)
+            return httpx.Response(200, json=response_data)
+
+        client = _make_client(handler)
+        result = client.push_to_exporter("job-123", "reportportal")
+        assert result["pushed"] == 3
+        assert result["message"] == "Pushed 3 item(s)"
+
+    def test_push_to_exporter_child_job(self):
+        response_data = {"pushed": 1, "errors": []}
+
+        def handler(request):
+            assert request.method == "POST"
+            assert "/results/job-123/push/reportportal" in str(request.url)
+            assert request.url.params.get("child_job_name") == "my-child"
+            assert request.url.params.get("child_build_number") == "42"
+            return httpx.Response(200, json=response_data)
+
+        client = _make_client(handler)
+        result = client.push_to_exporter(
+            "job-123",
+            "reportportal",
+            child_job_name="my-child",
+            child_build_number=42,
+        )
+        assert result["pushed"] == 1
+
+    def test_list_exporters(self):
+        response_data = [
+            {
+                "name": "reportportal",
+                "display_name": "Report Portal",
+                "enabled": True,
+            }
+        ]
+
+        def handler(request):
+            assert request.method == "GET"
+            assert request.url.path == "/api/exporters"
+            return httpx.Response(200, json=response_data)
+
+        client = _make_client(handler)
+        result = client.list_exporters()
+        assert len(result) == 1
+        assert result[0]["name"] == "reportportal"
+        assert result[0]["enabled"] is True
+
+
 class TestRootCozClientRegister:
     def test_register(self):
         def handler(request):

@@ -1,19 +1,57 @@
 """Tests for Report Portal API endpoint and auto-push hook."""
 
 import os
+from types import MethodType
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from fastapi.testclient import TestClient
 
+from rootcoz.exporters.reportportal import ReportPortalClient
+
+
+def _install_rp_client_mock(mock_rp_class, mock_rp=None):
+    """Wire a mocked ReportPortalClient so real push() orchestration runs.
+
+    Sets constructor side_effect to copy push-* toggle kwargs onto the mock
+    and binds :meth:`ReportPortalClient.push` for end-to-end endpoint tests.
+    """
+    if mock_rp is None:
+        mock_rp = MagicMock()
+    mock_rp.__enter__ = MagicMock(return_value=mock_rp)
+    mock_rp.__exit__ = MagicMock(return_value=False)
+    mock_rp.push = MethodType(ReportPortalClient.push, mock_rp)
+    mock_rp._failure_result = ReportPortalClient._failure_result
+
+    def _factory(*_args, **kwargs):
+        mock_rp._push_classifications = kwargs.get("push_classifications", True)
+        mock_rp._push_rootcoz_url = kwargs.get("push_rootcoz_url", True)
+        mock_rp._push_tracker_links = kwargs.get("push_tracker_links", True)
+        return mock_rp
+
+    mock_rp_class.side_effect = _factory
+    return mock_rp
+
 
 @pytest.fixture(autouse=True)
 def _mock_storage_reviews():
-    """Auto-mock storage.get_reviews_for_job for all RP endpoint tests."""
-    with patch(
-        "rootcoz.main.storage.get_reviews_for_job",
-        new_callable=AsyncMock,
-        return_value={},
+    """Auto-mock storage helpers used during RP push context building."""
+    with (
+        patch(
+            "rootcoz.main.storage.get_reviews_for_job",
+            new_callable=AsyncMock,
+            return_value={},
+        ),
+        patch(
+            "rootcoz.main.storage.get_tracked_in_for_scope",
+            new_callable=AsyncMock,
+            return_value={},
+        ),
+        patch(
+            "rootcoz.main.get_history_classification",
+            new_callable=AsyncMock,
+            return_value="",
+        ),
     ):
         yield
 
@@ -143,12 +181,9 @@ class TestPushReportPortalEndpoint:
                 "job_name": "test-job",
             }
         }
-        mock_rp = MagicMock()
+        mock_rp = _install_rp_client_mock(mock_rp_class)
         mock_rp.find_launch.return_value = 42
         mock_rp.get_failed_items.return_value = [{"id": 1, "name": "test_a"}]
-        mock_rp.__enter__ = MagicMock(return_value=mock_rp)
-        mock_rp.__exit__ = MagicMock(return_value=False)
-        mock_rp_class.return_value = mock_rp
 
         from rootcoz.main import app
 
@@ -159,7 +194,8 @@ class TestPushReportPortalEndpoint:
         )
         response = client.post("/results/corrupt-job/push-reportportal")
         assert response.status_code == 422
-        assert "validation error" in response.json()["detail"].lower()
+        detail = response.json()["detail"]
+        assert "validation error" in detail.lower()
 
     @patch("rootcoz.main.get_history_classification", new_callable=AsyncMock)
     @patch("rootcoz.main.get_result")
@@ -188,9 +224,7 @@ class TestPushReportPortalEndpoint:
             },
         }
         # Mock RP client (supports context manager protocol)
-        mock_rp = MagicMock()
-        mock_rp.__enter__ = MagicMock(return_value=mock_rp)
-        mock_rp.__exit__ = MagicMock(return_value=False)
+        mock_rp = _install_rp_client_mock(mock_rp_class)
         mock_rp.find_launch.return_value = 100
         mock_rp.get_failed_items.return_value = [
             {"id": 1, "name": "test_a", "status": "FAILED"}
@@ -204,7 +238,6 @@ class TestPushReportPortalEndpoint:
             "errors": [],
             "launch_id": 100,
         }
-        mock_rp_class.return_value = mock_rp
 
         from rootcoz.main import app
 
@@ -245,9 +278,7 @@ class TestPushReportPortalEndpoint:
                 ],
             },
         }
-        mock_rp = MagicMock()
-        mock_rp.__enter__ = MagicMock(return_value=mock_rp)
-        mock_rp.__exit__ = MagicMock(return_value=False)
+        mock_rp = _install_rp_client_mock(mock_rp_class)
         mock_rp.find_launch.return_value = 200
         mock_rp.get_failed_items.return_value = [
             {"id": 10, "name": "test_infra", "status": "FAILED"}
@@ -264,7 +295,6 @@ class TestPushReportPortalEndpoint:
             "errors": [],
             "launch_id": 200,
         }
-        mock_rp_class.return_value = mock_rp
 
         from rootcoz.main import app
 
@@ -309,15 +339,12 @@ class TestPushReportPortalEndpoint:
                 ],
             },
         }
-        mock_rp = MagicMock()
-        mock_rp.__enter__ = MagicMock(return_value=mock_rp)
-        mock_rp.__exit__ = MagicMock(return_value=False)
+        mock_rp = _install_rp_client_mock(mock_rp_class)
         mock_rp.find_launch.return_value = 99
         mock_rp.get_failed_items.return_value = [
             {"id": 1, "name": "test_beta", "status": "FAILED"}
         ]
         mock_rp.match_failures.return_value = []  # no overlap
-        mock_rp_class.return_value = mock_rp
 
         from rootcoz.main import app
 
@@ -361,9 +388,7 @@ class TestPushReportPortalEndpoint:
                     ],
                 }
             }
-            mock_rp = MagicMock()
-            mock_rp.__enter__ = MagicMock(return_value=mock_rp)
-            mock_rp.__exit__ = MagicMock(return_value=False)
+            mock_rp = _install_rp_client_mock(mock_rp_class)
             mock_rp.find_launch.return_value = 1
             mock_rp.get_failed_items.return_value = []
             mock_rp.push_classifications.return_value = {
@@ -372,7 +397,6 @@ class TestPushReportPortalEndpoint:
                 "errors": [],
                 "launch_id": 1,
             }
-            mock_rp_class.return_value = mock_rp
 
             from rootcoz.main import app
 
@@ -424,9 +448,7 @@ class TestPushReportPortalEndpoint:
                 ],
             },
         }
-        mock_rp = MagicMock()
-        mock_rp.__enter__ = MagicMock(return_value=mock_rp)
-        mock_rp.__exit__ = MagicMock(return_value=False)
+        mock_rp = _install_rp_client_mock(mock_rp_class)
         mock_rp.find_launch.return_value = 300
         mock_rp.get_failed_items.return_value = [
             {"id": 5, "name": "test_child_a", "status": "FAILED"}
@@ -442,7 +464,6 @@ class TestPushReportPortalEndpoint:
             "errors": [],
             "launch_id": 300,
         }
-        mock_rp_class.return_value = mock_rp
 
         from rootcoz.main import app
 
@@ -526,9 +547,7 @@ class TestPushReportPortalEndpoint:
                 ],
             },
         }
-        mock_rp = MagicMock()
-        mock_rp.__enter__ = MagicMock(return_value=mock_rp)
-        mock_rp.__exit__ = MagicMock(return_value=False)
+        mock_rp = _install_rp_client_mock(mock_rp_class)
         mock_rp.find_launch.return_value = 400
         mock_rp.get_failed_items.return_value = [
             {"id": 7, "name": "test_x", "status": "FAILED"}
@@ -544,7 +563,6 @@ class TestPushReportPortalEndpoint:
             "errors": [],
             "launch_id": 400,
         }
-        mock_rp_class.return_value = mock_rp
 
         from rootcoz.main import app
 
@@ -606,9 +624,7 @@ class TestPushReportPortalEndpoint:
                 ],
             },
         }
-        mock_rp = MagicMock()
-        mock_rp.__enter__ = MagicMock(return_value=mock_rp)
-        mock_rp.__exit__ = MagicMock(return_value=False)
+        mock_rp = _install_rp_client_mock(mock_rp_class)
         mock_rp.find_launch.return_value = 500
         mock_rp.get_failed_items.return_value = [
             {"id": 9, "name": "test_nested", "status": "FAILED"}
@@ -624,7 +640,6 @@ class TestPushReportPortalEndpoint:
             "errors": [],
             "launch_id": 500,
         }
-        mock_rp_class.return_value = mock_rp
 
         from rootcoz.main import app
 
@@ -674,13 +689,10 @@ class TestRPPushHTTPErrors:
         mock_response.status_code = 401
         mock_response.text = '{"message": "Full authentication is required"}'
         mock_response.json.return_value = {"message": "Full authentication is required"}
-        mock_rp = MagicMock()
-        mock_rp.__enter__ = MagicMock(return_value=mock_rp)
-        mock_rp.__exit__ = MagicMock(return_value=False)
+        mock_rp = _install_rp_client_mock(mock_rp_class)
         mock_rp.find_launch.side_effect = _requests.exceptions.HTTPError(
             response=mock_response
         )
-        mock_rp_class.return_value = mock_rp
 
         from rootcoz.main import app
 
@@ -716,11 +728,8 @@ class TestRPPushHTTPErrors:
                 ],
             }
         }
-        mock_rp = MagicMock()
-        mock_rp.__enter__ = MagicMock(return_value=mock_rp)
-        mock_rp.__exit__ = MagicMock(return_value=False)
+        mock_rp = _install_rp_client_mock(mock_rp_class)
         mock_rp.find_launch.side_effect = ConnectionError("connection refused")
-        mock_rp_class.return_value = mock_rp
 
         from rootcoz.main import app
 
@@ -762,14 +771,11 @@ class TestRPPushHTTPErrors:
         mock_response.status_code = 403
         mock_response.text = '{"message": "Access denied"}'
         mock_response.json.return_value = {"message": "Access denied"}
-        mock_rp = MagicMock()
-        mock_rp.__enter__ = MagicMock(return_value=mock_rp)
-        mock_rp.__exit__ = MagicMock(return_value=False)
+        mock_rp = _install_rp_client_mock(mock_rp_class)
         mock_rp.find_launch.return_value = 42
         mock_rp.get_failed_items.side_effect = _requests.exceptions.HTTPError(
             response=mock_response
         )
-        mock_rp_class.return_value = mock_rp
 
         from rootcoz.main import app
 
@@ -807,13 +813,10 @@ class TestRPPushHTTPErrors:
                 ],
             }
         }
-        mock_rp = MagicMock()
-        mock_rp.__enter__ = MagicMock(return_value=mock_rp)
-        mock_rp.__exit__ = MagicMock(return_value=False)
+        mock_rp = _install_rp_client_mock(mock_rp_class)
         mock_rp.find_launch.return_value = 42
         mock_rp.get_failed_items.return_value = [{"id": 1, "name": "test_a"}]
         mock_rp.match_failures.side_effect = TypeError("unexpected None")
-        mock_rp_class.return_value = mock_rp
 
         from rootcoz.main import app
 
@@ -831,7 +834,7 @@ class TestRPPushHTTPErrors:
         assert "Error" in body["errors"][0]
         assert "matching RP items" in body["errors"][0]
 
-    @patch("rootcoz.main.logger")
+    @patch("rootcoz.exporters.reportportal.logger")
     @patch("rootcoz.main.ReportPortalClient")
     @patch("rootcoz.main.get_result")
     def test_get_failed_items_error_log_includes_build_number(
@@ -858,14 +861,11 @@ class TestRPPushHTTPErrors:
         mock_response.status_code = 403
         mock_response.text = '{"message": "Access denied"}'
         mock_response.json.return_value = {"message": "Access denied"}
-        mock_rp = MagicMock()
-        mock_rp.__enter__ = MagicMock(return_value=mock_rp)
-        mock_rp.__exit__ = MagicMock(return_value=False)
+        mock_rp = _install_rp_client_mock(mock_rp_class)
         mock_rp.find_launch.return_value = 42
         mock_rp.get_failed_items.side_effect = _requests.exceptions.HTTPError(
             response=mock_response
         )
-        mock_rp_class.return_value = mock_rp
 
         from rootcoz.main import app
 
@@ -887,7 +887,7 @@ class TestRPPushHTTPErrors:
         rendered = log_fmt % log_args
         assert "77" in rendered, f"build_number (77) missing from error log: {rendered}"
 
-    @patch("rootcoz.main.logger")
+    @patch("rootcoz.exporters.reportportal.logger")
     @patch("rootcoz.main.ReportPortalClient")
     @patch("rootcoz.main.get_result")
     def test_match_failures_error_log_includes_build_number(
@@ -908,13 +908,10 @@ class TestRPPushHTTPErrors:
                 ],
             }
         }
-        mock_rp = MagicMock()
-        mock_rp.__enter__ = MagicMock(return_value=mock_rp)
-        mock_rp.__exit__ = MagicMock(return_value=False)
+        mock_rp = _install_rp_client_mock(mock_rp_class)
         mock_rp.find_launch.return_value = 42
         mock_rp.get_failed_items.return_value = [{"id": 1, "name": "test_a"}]
         mock_rp.match_failures.side_effect = TypeError("unexpected None")
-        mock_rp_class.return_value = mock_rp
 
         from rootcoz.main import app
 
@@ -936,7 +933,7 @@ class TestRPPushHTTPErrors:
         rendered = log_fmt % log_args
         assert "88" in rendered, f"build_number (88) missing from error log: {rendered}"
 
-    @patch("rootcoz.main.logger")
+    @patch("rootcoz.exporters.reportportal.logger")
     @patch("rootcoz.main.get_history_classification", new_callable=AsyncMock)
     @patch("rootcoz.main.ReportPortalClient")
     @patch("rootcoz.main.get_result")
@@ -959,9 +956,7 @@ class TestRPPushHTTPErrors:
                 ],
             }
         }
-        mock_rp = MagicMock()
-        mock_rp.__enter__ = MagicMock(return_value=mock_rp)
-        mock_rp.__exit__ = MagicMock(return_value=False)
+        mock_rp = _install_rp_client_mock(mock_rp_class)
         mock_rp.find_launch.return_value = 42
         mock_rp.get_failed_items.return_value = [
             {"id": 1, "name": "test_a", "status": "FAILED"}
@@ -972,7 +967,6 @@ class TestRPPushHTTPErrors:
             ({"id": 1, "name": "test_a"}, mock_failure)
         ]
         mock_rp.push_classifications.side_effect = RuntimeError("network timeout")
-        mock_rp_class.return_value = mock_rp
 
         from rootcoz.main import app
 
@@ -994,14 +988,14 @@ class TestRPPushHTTPErrors:
         rendered = log_fmt % log_args
         assert "99" in rendered, f"build_number (99) missing from error log: {rendered}"
 
-    @patch("rootcoz.main.logger")
+    @patch("rootcoz.exporters.reportportal.logger")
     @patch("rootcoz.main.ReportPortalClient")
     @patch("rootcoz.main.get_result")
     def test_ambiguous_launch_returns_200_with_error(
         self, mock_get_result, mock_rp_class, mock_logger, _rp_enabled_env
     ):
         """AmbiguousLaunchError from find_launch returns errors and logs WARNING."""
-        from rootcoz.reportportal import AmbiguousLaunchError
+        from rootcoz.exporters.reportportal import AmbiguousLaunchError
 
         mock_get_result.return_value = {
             "result": {
@@ -1016,15 +1010,12 @@ class TestRPPushHTTPErrors:
                 ],
             }
         }
-        mock_rp = MagicMock()
-        mock_rp.__enter__ = MagicMock(return_value=mock_rp)
-        mock_rp.__exit__ = MagicMock(return_value=False)
+        mock_rp = _install_rp_client_mock(mock_rp_class)
         mock_rp.find_launch.side_effect = AmbiguousLaunchError(
             count=3,
             job_name="my-job",
             jenkins_url="https://jenkins.example.com/job/my-job/1/",
         )
-        mock_rp_class.return_value = mock_rp
 
         from rootcoz.main import app
 
@@ -1111,7 +1102,7 @@ class TestRPPushEarlyGuard:
     def test_empty_failures_skips_rp_calls(
         self, mock_get_result, mock_rp_class, _rp_enabled_env
     ):
-        """When failures list is empty, return early without connecting to RP."""
+        """When failures list is empty, push() returns early without RP API calls."""
         mock_get_result.return_value = {
             "result": {
                 "job_name": "my-job",
@@ -1119,6 +1110,7 @@ class TestRPPushEarlyGuard:
                 "failures": [],
             }
         }
+        mock_rp = _install_rp_client_mock(mock_rp_class)
 
         from rootcoz.main import app
 
@@ -1133,20 +1125,21 @@ class TestRPPushEarlyGuard:
         assert body["pushed"] == 0
         assert len(body["errors"]) == 1
         assert "No failures to push" in body["errors"][0]
-        mock_rp_class.assert_not_called()
+        mock_rp.find_launch.assert_not_called()
 
     @patch("rootcoz.main.ReportPortalClient")
     @patch("rootcoz.main.get_result")
     def test_missing_failures_key_skips_rp_calls(
         self, mock_get_result, mock_rp_class, _rp_enabled_env
     ):
-        """When failures key is absent, return early without connecting to RP."""
+        """When failures key is absent, push() returns early without RP API calls."""
         mock_get_result.return_value = {
             "result": {
                 "job_name": "my-job",
                 "jenkins_url": "https://jenkins.example.com/job/my-job/1/",
             }
         }
+        mock_rp = _install_rp_client_mock(mock_rp_class)
 
         from rootcoz.main import app
 
@@ -1161,14 +1154,14 @@ class TestRPPushEarlyGuard:
         assert body["pushed"] == 0
         assert len(body["errors"]) == 1
         assert "No failures to push" in body["errors"][0]
-        mock_rp_class.assert_not_called()
+        mock_rp.find_launch.assert_not_called()
 
     @patch("rootcoz.main.ReportPortalClient")
     @patch("rootcoz.main.get_result")
     def test_child_job_empty_failures_skips_rp_calls(
         self, mock_get_result, mock_rp_class, _rp_enabled_env
     ):
-        """When scoped child job has empty failures, return early."""
+        """When scoped child job has empty failures, push() returns early."""
         mock_get_result.return_value = {
             "status": "completed",
             "result": {
@@ -1196,6 +1189,7 @@ class TestRPPushEarlyGuard:
                 ],
             },
         }
+        mock_rp = _install_rp_client_mock(mock_rp_class)
 
         from rootcoz.main import app
 
@@ -1213,13 +1207,13 @@ class TestRPPushEarlyGuard:
         assert body["pushed"] == 0
         assert len(body["errors"]) == 1
         assert "No failures to push" in body["errors"][0]
-        mock_rp_class.assert_not_called()
+        mock_rp.find_launch.assert_not_called()
 
 
 class TestRPPushDebugLogging:
     """Verify normal-state RP paths log at DEBUG, not ERROR."""
 
-    @patch("rootcoz.main.logger")
+    @patch("rootcoz.exporters.reportportal.logger")
     @patch("rootcoz.main.ReportPortalClient")
     @patch("rootcoz.main.get_result")
     def test_no_failed_items_logs_debug(
@@ -1238,12 +1232,9 @@ class TestRPPushDebugLogging:
                 ],
             }
         }
-        mock_rp = MagicMock()
-        mock_rp.__enter__ = MagicMock(return_value=mock_rp)
-        mock_rp.__exit__ = MagicMock(return_value=False)
+        mock_rp = _install_rp_client_mock(mock_rp_class)
         mock_rp.find_launch.return_value = 42
         mock_rp.get_failed_items.return_value = []
-        mock_rp_class.return_value = mock_rp
 
         from rootcoz.main import app
 
@@ -1276,7 +1267,7 @@ class TestRPPushDebugLogging:
     def test_empty_failures_early_guard_does_not_log_error(
         self, mock_get_result, mock_rp_class, mock_logger, _rp_enabled_env
     ):
-        """Empty failures triggers early guard without ERROR logs."""
+        """Empty failures guard in push() does not produce ERROR logs."""
         mock_get_result.return_value = {
             "result": {
                 "job_name": "my-job",
@@ -1284,6 +1275,7 @@ class TestRPPushDebugLogging:
                 "failures": [],
             }
         }
+        _install_rp_client_mock(mock_rp_class)
 
         from rootcoz.main import app
 
@@ -1297,10 +1289,7 @@ class TestRPPushDebugLogging:
         assert response.json()["pushed"] == 0
 
         error_calls = mock_logger.error.call_args_list
-        assert not error_calls, (
-            "Early guard for empty failures should not produce ERROR logs"
-        )
-        mock_rp_class.assert_not_called()
+        assert not error_calls, "Empty-failures guard should not produce ERROR logs"
 
 
 class TestRPPushContentToggles:
@@ -1311,7 +1300,7 @@ class TestRPPushContentToggles:
     def test_all_toggles_disabled_returns_error(
         self, mock_get_result, mock_rp_class, _rp_enabled_all_push_disabled_env
     ):
-        """When all 3 push toggles are disabled, return error without connecting to RP."""
+        """When all 3 push toggles are disabled, push() returns error without RP API calls."""
         mock_get_result.return_value = {
             "result": {
                 "job_name": "my-job",
@@ -1328,6 +1317,7 @@ class TestRPPushContentToggles:
                 ],
             }
         }
+        mock_rp = _install_rp_client_mock(mock_rp_class)
 
         from rootcoz.main import app
 
@@ -1344,8 +1334,7 @@ class TestRPPushContentToggles:
             "All Report Portal push content toggles are disabled" in e
             for e in data["errors"]
         )
-        # RP client should never be instantiated
-        mock_rp_class.assert_not_called()
+        mock_rp.find_launch.assert_not_called()
 
     @patch("rootcoz.main.get_history_classification", new_callable=AsyncMock)
     @patch("rootcoz.main.ReportPortalClient")
@@ -1374,9 +1363,7 @@ class TestRPPushContentToggles:
         }
 
         # Setup RP client mock
-        mock_rp_instance = MagicMock()
-        mock_rp_class.return_value.__enter__ = MagicMock(return_value=mock_rp_instance)
-        mock_rp_class.return_value.__exit__ = MagicMock(return_value=False)
+        mock_rp_instance = _install_rp_client_mock(mock_rp_class)
         mock_rp_instance.find_launch.return_value = 42
         mock_rp_instance.get_failed_items.return_value = [
             {"id": 100, "name": "test_example", "launchId": 42}
@@ -1451,9 +1438,7 @@ class TestRPPushContentToggles:
             }
         }
 
-        mock_rp_instance = MagicMock()
-        mock_rp_class.return_value.__enter__ = MagicMock(return_value=mock_rp_instance)
-        mock_rp_class.return_value.__exit__ = MagicMock(return_value=False)
+        mock_rp_instance = _install_rp_client_mock(mock_rp_class)
         mock_rp_instance.find_launch.return_value = 42
         mock_rp_instance.get_failed_items.return_value = [
             {"id": 100, "name": "test_example", "launchId": 42}
@@ -1529,9 +1514,7 @@ class TestRPPushContentToggles:
             }
         }
 
-        mock_rp_instance = MagicMock()
-        mock_rp_class.return_value.__enter__ = MagicMock(return_value=mock_rp_instance)
-        mock_rp_class.return_value.__exit__ = MagicMock(return_value=False)
+        mock_rp_instance = _install_rp_client_mock(mock_rp_class)
         mock_rp_instance.find_launch.return_value = 42
         mock_rp_instance.get_failed_items.return_value = [
             {"id": 200, "name": "test_child", "launchId": 42}
@@ -1597,9 +1580,7 @@ class TestRPPushContentToggles:
             }
         }
 
-        mock_rp_instance = MagicMock()
-        mock_rp_class.return_value.__enter__ = MagicMock(return_value=mock_rp_instance)
-        mock_rp_class.return_value.__exit__ = MagicMock(return_value=False)
+        mock_rp_instance = _install_rp_client_mock(mock_rp_class)
         mock_rp_instance.find_launch.return_value = 42
         mock_rp_instance.get_failed_items.return_value = [
             {"id": 100, "name": "test_example", "launchId": 42}
@@ -1796,7 +1777,7 @@ class TestRpPushErrorResult:
     def test_early_guard_error_is_clean(
         self, mock_get_result, mock_rp_class, _rp_enabled_env
     ):
-        """Early guard (no failures) returns a short error without context suffix."""
+        """Empty-failures guard returns a short error without context suffix."""
         mock_get_result.return_value = {
             "result": {
                 "job_name": "context-job",
@@ -1805,6 +1786,7 @@ class TestRpPushErrorResult:
                 "failures": [],
             }
         }
+        _install_rp_client_mock(mock_rp_class)
 
         from rootcoz.main import app
 
@@ -1840,11 +1822,8 @@ class TestRpPushErrorResult:
                 ],
             }
         }
-        mock_rp = MagicMock()
-        mock_rp.__enter__ = MagicMock(return_value=mock_rp)
-        mock_rp.__exit__ = MagicMock(return_value=False)
+        mock_rp = _install_rp_client_mock(mock_rp_class)
         mock_rp.find_launch.side_effect = ConnectionError("refused")
-        mock_rp_class.return_value = mock_rp
 
         from rootcoz.main import app
 
@@ -1878,11 +1857,8 @@ class TestRpPushErrorResult:
                 ],
             }
         }
-        mock_rp = MagicMock()
-        mock_rp.__enter__ = MagicMock(return_value=mock_rp)
-        mock_rp.__exit__ = MagicMock(return_value=False)
+        mock_rp = _install_rp_client_mock(mock_rp_class)
         mock_rp.find_launch.return_value = None
-        mock_rp_class.return_value = mock_rp
 
         from rootcoz.main import app
 
@@ -1920,12 +1896,9 @@ class TestRpPushErrorResult:
                 ],
             }
         }
-        mock_rp = MagicMock()
-        mock_rp.__enter__ = MagicMock(return_value=mock_rp)
-        mock_rp.__exit__ = MagicMock(return_value=False)
+        mock_rp = _install_rp_client_mock(mock_rp_class)
         mock_rp.find_launch.return_value = 42
         mock_rp.get_failed_items.side_effect = RuntimeError("network err")
-        mock_rp_class.return_value = mock_rp
 
         from rootcoz.main import app
 
@@ -1959,13 +1932,10 @@ class TestRpPushErrorResult:
                 ],
             }
         }
-        mock_rp = MagicMock()
-        mock_rp.__enter__ = MagicMock(return_value=mock_rp)
-        mock_rp.__exit__ = MagicMock(return_value=False)
+        mock_rp = _install_rp_client_mock(mock_rp_class)
         mock_rp.find_launch.return_value = 42
         mock_rp.get_failed_items.return_value = [{"id": 1, "name": "test_a"}]
         mock_rp.match_failures.side_effect = TypeError("boom")
-        mock_rp_class.return_value = mock_rp
 
         from rootcoz.main import app
 
@@ -1999,15 +1969,12 @@ class TestRpPushErrorResult:
                 ],
             }
         }
-        mock_rp = MagicMock()
-        mock_rp.__enter__ = MagicMock(return_value=mock_rp)
-        mock_rp.__exit__ = MagicMock(return_value=False)
+        mock_rp = _install_rp_client_mock(mock_rp_class)
         mock_rp.find_launch.return_value = 42
         mock_rp.get_failed_items.return_value = [
             {"id": 1, "name": "test_beta", "status": "FAILED"}
         ]
         mock_rp.match_failures.return_value = []
-        mock_rp_class.return_value = mock_rp
 
         from rootcoz.main import app
 
@@ -2043,9 +2010,7 @@ class TestRpPushErrorResult:
                 ],
             }
         }
-        mock_rp = MagicMock()
-        mock_rp.__enter__ = MagicMock(return_value=mock_rp)
-        mock_rp.__exit__ = MagicMock(return_value=False)
+        mock_rp = _install_rp_client_mock(mock_rp_class)
         mock_rp.find_launch.return_value = 42
         mock_rp.get_failed_items.return_value = [
             {"id": 1, "name": "test_a", "status": "FAILED"}
@@ -2056,7 +2021,6 @@ class TestRpPushErrorResult:
             ({"id": 1, "name": "test_a"}, mock_failure)
         ]
         mock_rp.push_classifications.side_effect = RuntimeError("timeout")
-        mock_rp_class.return_value = mock_rp
 
         from rootcoz.main import app
 
@@ -2239,9 +2203,7 @@ class TestPushedByForwarding:
                 ],
             },
         }
-        mock_rp = MagicMock()
-        mock_rp.__enter__ = MagicMock(return_value=mock_rp)
-        mock_rp.__exit__ = MagicMock(return_value=False)
+        mock_rp = _install_rp_client_mock(mock_rp_class)
         mock_rp.find_launch.return_value = 100
         mock_rp.get_failed_items.return_value = [
             {"id": 1, "name": "test_a", "status": "FAILED"}
@@ -2255,7 +2217,6 @@ class TestPushedByForwarding:
             "errors": [],
             "launch_id": 100,
         }
-        mock_rp_class.return_value = mock_rp
 
         client = TestClient(
             app,
@@ -2421,9 +2382,7 @@ class TestPushedByForwarding:
                 ],
             },
         }
-        mock_rp = MagicMock()
-        mock_rp.__enter__ = MagicMock(return_value=mock_rp)
-        mock_rp.__exit__ = MagicMock(return_value=False)
+        mock_rp = _install_rp_client_mock(mock_rp_class)
         mock_rp.find_launch.return_value = 100
         mock_rp.get_failed_items.return_value = [
             {"id": 1, "name": "test_a", "status": "FAILED"}
@@ -2437,7 +2396,6 @@ class TestPushedByForwarding:
             "errors": [],
             "launch_id": 100,
         }
-        mock_rp_class.return_value = mock_rp
 
         from rootcoz.main import app
 
@@ -2504,9 +2462,7 @@ class TestPushedByForwarding:
                 ],
             },
         }
-        mock_rp = MagicMock()
-        mock_rp.__enter__ = MagicMock(return_value=mock_rp)
-        mock_rp.__exit__ = MagicMock(return_value=False)
+        mock_rp = _install_rp_client_mock(mock_rp_class)
         mock_rp.find_launch.return_value = 100
         mock_rp.get_failed_items.return_value = [
             {"id": 1, "name": "test_a", "status": "FAILED"}
@@ -2520,7 +2476,6 @@ class TestPushedByForwarding:
             "errors": [],
             "launch_id": 100,
         }
-        mock_rp_class.return_value = mock_rp
 
         from rootcoz.main import app
 
@@ -2591,9 +2546,7 @@ class TestPushedByForwarding:
                 ],
             },
         }
-        mock_rp = MagicMock()
-        mock_rp.__enter__ = MagicMock(return_value=mock_rp)
-        mock_rp.__exit__ = MagicMock(return_value=False)
+        mock_rp = _install_rp_client_mock(mock_rp_class)
         mock_rp.find_launch.return_value = 100
         mock_rp.get_failed_items.return_value = [
             {"id": 1, "name": "test_a", "status": "FAILED"}
@@ -2607,7 +2560,6 @@ class TestPushedByForwarding:
             "errors": [],
             "launch_id": 100,
         }
-        mock_rp_class.return_value = mock_rp
 
         from rootcoz.main import app
 

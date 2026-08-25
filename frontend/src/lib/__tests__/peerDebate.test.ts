@@ -9,6 +9,7 @@ function makeRound(round: number, role: 'orchestrator' | 'peer', provider = 'cla
     ai_model: 'test-model',
     role,
     classification: 'CODE ISSUE',
+    pattern: '',
     details: 'some details',
     agrees_with_orchestrator: role === 'orchestrator' ? null : true,
   }

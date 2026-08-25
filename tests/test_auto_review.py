@@ -9,7 +9,7 @@ Tests cover:
 
 import os
 from pathlib import Path
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import aiosqlite
 import pytest
@@ -830,22 +830,30 @@ class TestAutoReviewMatchingFailures:
                         REPORTPORTAL_URL="https://rp.example.com",
                         REPORTPORTAL_API_TOKEN="test-token",
                         REPORTPORTAL_PROJECT="test-project",
+                        AUTO_PUSH_EXPORTERS="reportportal",
                     ).items()
                 }
             )
 
             from rootcoz.main import _auto_review_matching_failures
 
-            with patch(
-                "rootcoz.main._execute_rp_push", new_callable=AsyncMock
-            ) as mock_push:
+            mock_exporter = MagicMock()
+            mock_exporter.push = AsyncMock(
+                return_value=MagicMock(details={"pushed": 1})
+            )
+            mock_exporter.__enter__ = MagicMock(return_value=mock_exporter)
+            mock_exporter.__exit__ = MagicMock(return_value=False)
+            with (
+                patch(
+                    "rootcoz.main._create_exporter", return_value=mock_exporter
+                ) as mock_create,
+                patch("rootcoz.main._build_export_context", new_callable=AsyncMock),
+            ):
                 await _auto_review_matching_failures(
                     "current-job", "my-job", 101, result_data, settings
                 )
 
-                mock_push.assert_called_once_with(
-                    "current-job", result_data, settings, pushed_by=AI_SYSTEM_USERNAME
-                )
+                mock_create.assert_called_once_with("reportportal", settings)
 
     @patch("rootcoz.main.logger")
     async def test_auto_push_log_includes_system_username(
@@ -886,11 +894,21 @@ class TestAutoReviewMatchingFailures:
                 reportportal_url="http://rp.example.com",
                 reportportal_api_token="rp-token",
                 reportportal_project="proj",
+                auto_push_exporters="reportportal",
             )
 
             from rootcoz.main import _auto_review_matching_failures
 
-            with patch("rootcoz.main._execute_rp_push", new_callable=AsyncMock):
+            mock_exporter = MagicMock()
+            mock_exporter.push = AsyncMock(
+                return_value=MagicMock(details={"pushed": 1})
+            )
+            mock_exporter.__enter__ = MagicMock(return_value=mock_exporter)
+            mock_exporter.__exit__ = MagicMock(return_value=False)
+            with (
+                patch("rootcoz.main._create_exporter", return_value=mock_exporter),
+                patch("rootcoz.main._build_export_context", new_callable=AsyncMock),
+            ):
                 await _auto_review_matching_failures(
                     "current-job", "my-job", 101, result_data, settings
                 )
@@ -900,21 +918,24 @@ class TestAutoReviewMatchingFailures:
                 for c in mock_logger.info.call_args_list
                 if c.args
                 and "auto-reviewed" in c.args[0].lower()
-                and "Report Portal" in c.args[0]
+                and "pushing to" in c.args[0].lower()
             ]
             assert info_calls, "Expected INFO log for auto-push trigger"
             log_args = info_calls[0].args
-            # Format: "All failures auto-reviewed for job %s, pushing ... (pushed_by=%s)"
-            # args[0] = format string, args[1] = job_id, args[2] = AI_SYSTEM_USERNAME
+            # Format: "All failures auto-reviewed for job %s, pushing to '%s' (pushed_by=%s)"
+            # args[0] = format string, args[1] = job_id, args[2] = plugin_name, args[3] = AI_SYSTEM_USERNAME
             assert log_args[1] == "current-job", (
                 f"Expected job_id 'current-job', got '{log_args[1]}'"
             )
-            assert log_args[2] == AI_SYSTEM_USERNAME, (
-                f"Expected AI_SYSTEM_USERNAME, got '{log_args[2]}'"
+            assert log_args[2] == "reportportal", (
+                f"Expected plugin_name 'reportportal', got '{log_args[2]}'"
+            )
+            assert log_args[3] == AI_SYSTEM_USERNAME, (
+                f"Expected AI_SYSTEM_USERNAME, got '{log_args[3]}'"
             )
 
-    async def test_no_push_when_reportportal_disabled(self, setup_test_db):
-        """Should NOT push to RP when ENABLE_REPORTPORTAL is disabled."""
+    async def test_no_push_when_auto_push_exporters_empty(self, setup_test_db):
+        """Should NOT push when AUTO_PUSH_EXPORTERS is empty (default)."""
         with patch.object(storage, "DB_PATH", setup_test_db):
             async with storage._connect_db() as db:
                 await db.execute(
@@ -944,13 +965,59 @@ class TestAutoReviewMatchingFailures:
 
             from rootcoz.main import _auto_review_matching_failures
 
-            with patch(
-                "rootcoz.main._execute_rp_push", new_callable=AsyncMock
-            ) as mock_push:
+            with patch("rootcoz.main._create_exporter") as mock_create:
                 await _auto_review_matching_failures(
                     "current-job", "my-job", 101, result_data, settings
                 )
-                mock_push.assert_not_called()
+                mock_create.assert_not_called()
+
+    async def test_auto_push_skipped_when_rp_disabled(self, setup_test_db):
+        """Auto-push to 'reportportal' is skipped when RP integration is disabled."""
+        with patch.object(storage, "DB_PATH", setup_test_db):
+            async with storage._connect_db() as db:
+                await db.execute(
+                    "INSERT INTO failure_history "
+                    "(job_id, job_name, build_number, test_name, error_message, "
+                    "error_signature, classification, pattern) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    ("prev-job", "my-job", 100, "test_a", "", "sig-a", "", ""),
+                )
+                await _insert_human_review(db, "prev-job", "test_a")
+                await db.commit()
+
+            result_data = {
+                "job_name": "my-job",
+                "build_number": 101,
+                "failures": [
+                    {
+                        "test_name": "test_a",
+                        "error": "err",
+                        "error_signature": "sig-a",
+                        "analysis": {"classification": "INFRASTRUCTURE"},
+                    }
+                ],
+            }
+
+            # AUTO_PUSH_EXPORTERS=reportportal but RP itself is disabled
+            settings = Settings(
+                **{
+                    k.lower(): v
+                    for k, v in build_test_env(
+                        AUTO_PUSH_EXPORTERS="reportportal",
+                    ).items()
+                }
+            )
+
+            from rootcoz.main import _auto_review_matching_failures
+
+            with patch("rootcoz.main._create_exporter") as mock_create:
+                mock_create.side_effect = ValueError(
+                    "Report Portal integration is disabled"
+                )
+                await _auto_review_matching_failures(
+                    "current-job", "my-job", 101, result_data, settings
+                )
+                mock_create.assert_called_once_with("reportportal", settings)
 
     async def test_skipped_when_enable_auto_review_false(self, setup_test_db):
         """Should NOT auto-review when enable_auto_review is False."""

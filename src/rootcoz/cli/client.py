@@ -922,6 +922,28 @@ class RootCozClient:
             "POST", f"/results/{job_id}/push-reportportal", params=params
         )
 
+    def push_to_exporter(
+        self,
+        job_id: str,
+        plugin_name: str,
+        *,
+        child_job_name: str | None = None,
+        child_build_number: int | None = None,
+    ) -> dict[str, Any]:
+        """Push results to an exporter plugin. POST /results/{job_id}/push/{plugin_name}"""
+        params: dict[str, str | int] = {}
+        if child_job_name is not None:
+            params["child_job_name"] = child_job_name
+        if child_build_number is not None:
+            params["child_build_number"] = child_build_number
+        return self._request(
+            "POST", f"/results/{job_id}/push/{plugin_name}", params=params
+        )
+
+    def list_exporters(self) -> list[dict[str, Any]]:
+        """List available exporter plugins. GET /api/exporters"""
+        return self._request("GET", "/api/exporters")
+
     # -- Capabilities ---------------------------------------------------------
 
     def capabilities(self) -> dict[str, Any]:

@@ -30,7 +30,6 @@ import { TokenUsageBadge } from './report/TokenUsageBadge'
 import { OriginJobBanner } from '@/components/shared/OriginJobBanner'
 import { originJobLabel } from '@/lib/originJobLabel'
 import { reviewKey } from './report/ReportContext'
-import type { ChildJobAnalysis } from '@/types'
 import { useAuth } from '@/lib/auth'
 
 
@@ -135,6 +134,7 @@ function ReportContent() {
 
   useEffect(() => {
     if (!jobId) return
+    const id = jobId
 
     let cancelled = false
 
@@ -142,17 +142,17 @@ function ReportContent() {
       dispatch({ type: 'SET_LOADING', payload: true })
       try {
         // Result is required
-        const resultRes = await api.get<ResultResponse>(`/results/${jobId}`)
+        const resultRes = await api.get<ResultResponse>(`/results/${id}`)
         if (cancelled) return
 
         // Check status first to avoid flash of wrong state
         if (resultRes.status === 'pending' || resultRes.status === 'running' || resultRes.status === 'waiting') {
-          navigate(`/status/${jobId}`, { replace: true })
+          navigate(`/status/${id}`, { replace: true })
           return
         }
 
         if (resultRes.status === 'failed') {
-          navigate(`/status/${jobId}`, { replace: true })
+          navigate(`/status/${id}`, { replace: true })
           return
         }
 
@@ -176,13 +176,13 @@ function ReportContent() {
         }
 
         // Initial comment fetch via the shared single-flight helper
-        fetchComments(jobId)
+        fetchComments(id)
 
         // AI configs and classifications are best-effort
         const [aiModelsResult, classificationsResult] = await Promise.allSettled([
           api.get<AiModelsResponse>('/api/ai-models'),
           api.get<{ classifications: Array<{ test_name: string; classification: string; job_name: string; parent_job_name: string; reason: string; references_info: string; created_by: string; job_id: string; child_build_number: number; created_at: string }> }>(
-            `/history/classifications?job_id=${jobId}`,
+            `/history/classifications?job_id=${id}`,
           ),
         ])
         if (cancelled) return
@@ -504,10 +504,10 @@ function ReportContent() {
 
       {/* ---- Metadata detail row ---- */}
       <div className="flex flex-wrap items-center gap-x-5 gap-y-1 text-xs text-text-tertiary animate-slide-up">
-          {result.request_params?.submitted_by && (
+          {typeof result.request_params?.submitted_by === 'string' && result.request_params.submitted_by && (
             <span className="inline-flex items-center gap-1">
               <User className="h-3 w-3" />
-              {String(result.request_params.submitted_by)}
+              {result.request_params.submitted_by}
             </span>
           )}
           {state.createdAt && (

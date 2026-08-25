@@ -34,7 +34,7 @@ export async function subscribeToPush(): Promise<{ ok: boolean; error?: string }
     try {
       subscription = await registration.pushManager.subscribe({
         userVisibleOnly: true,
-        applicationServerKey: urlBase64ToUint8Array(vapidKey),
+        applicationServerKey: urlBase64ToUint8Array(vapidKey) as BufferSource,
       });
     } catch (firstErr) {
       // Only retry with unsubscribe for VAPID key mismatch errors
@@ -47,7 +47,7 @@ export async function subscribeToPush(): Promise<{ ok: boolean; error?: string }
       if (existing) await existing.unsubscribe();
       subscription = await registration.pushManager.subscribe({
         userVisibleOnly: true,
-        applicationServerKey: urlBase64ToUint8Array(vapidKey),
+        applicationServerKey: urlBase64ToUint8Array(vapidKey) as BufferSource,
       });
     }
 

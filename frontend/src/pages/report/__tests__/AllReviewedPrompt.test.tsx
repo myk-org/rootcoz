@@ -21,6 +21,19 @@ vi.mock('@/lib/api', () => ({
 /*  Helpers                                                            */
 /* ------------------------------------------------------------------ */
 
+function makeAnalysis(
+  classification: string,
+  affected: string[],
+): AnalysisResult['failures'][number]['analysis'] {
+  return {
+    classification,
+    pattern: '',
+    affected_tests: affected,
+    details: '',
+    artifacts_evidence: '',
+  }
+}
+
 function makeResult(overrides: Partial<AnalysisResult> = {}): AnalysisResult {
   return {
     job_id: 'job-1',
@@ -33,15 +46,17 @@ function makeResult(overrides: Partial<AnalysisResult> = {}): AnalysisResult {
     ai_model: 'test-model',
     failures: [
       {
+        id: 'f-a',
         test_name: 'test-a',
         error: 'error-a',
-        analysis: { classification: 'PRODUCT BUG', affected_tests: ['test-a'], details: '', artifacts_evidence: '' },
+        analysis: makeAnalysis('PRODUCT BUG', ['test-a']),
         error_signature: 'sig-a',
       },
       {
+        id: 'f-b',
         test_name: 'test-b',
         error: 'error-b',
-        analysis: { classification: 'CODE ISSUE', affected_tests: ['test-b'], details: '', artifacts_evidence: '' },
+        analysis: makeAnalysis('CODE ISSUE', ['test-b']),
         error_signature: 'sig-b',
       },
     ],
@@ -249,23 +264,26 @@ describe('AllReviewedPrompt', () => {
     const result = makeResult({
       failures: [
         {
+          id: 'f-parent',
           test_name: 'parent-test',
           error: 'err',
-          analysis: { classification: 'PRODUCT BUG', affected_tests: ['parent-test'], details: '', artifacts_evidence: '' },
+          analysis: makeAnalysis('PRODUCT BUG', ['parent-test']),
           error_signature: 'sig-p',
         },
       ],
       child_job_analyses: [
         {
+          id: 'child-1',
           job_name: 'child-job',
           build_number: 42,
           jenkins_url: null,
           summary: null,
           failures: [
             {
+              id: 'f-child',
               test_name: 'child-test',
               error: 'err',
-              analysis: { classification: 'CODE ISSUE', affected_tests: ['child-test'], details: '', artifacts_evidence: '' },
+              analysis: makeAnalysis('CODE ISSUE', ['child-test']),
               error_signature: 'sig-c',
             },
           ],

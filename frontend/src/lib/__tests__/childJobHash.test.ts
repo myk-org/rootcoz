@@ -10,6 +10,7 @@ function makeFailure(testName: string, errorSig: string): FailureAnalysis {
     error: 'some error',
     analysis: {
       classification: 'CODE ISSUE',
+      pattern: '',
       affected_tests: [],
       details: '',
       artifacts_evidence: '',
@@ -57,8 +58,12 @@ describe('collectChildExpandKeys', () => {
 
   it('produces keys using expandKey format', () => {
     const child: ChildJobAnalysis = {
+      id: 'child-1',
       job_name: 'child-job',
       build_number: 10,
+      jenkins_url: null,
+      summary: null,
+      note: null,
       failures: [makeFailure('test1', 'sig-a')],
       failed_children: [],
     }
@@ -82,14 +87,22 @@ describe('collectChildExpandKeys', () => {
 
   it('recurses into nested children', () => {
     const nested: ChildJobAnalysis = {
+      id: 'grandchild-1',
       job_name: 'grandchild',
       build_number: 3,
+      jenkins_url: null,
+      summary: null,
+      note: null,
       failures: [makeFailure('test-deep', 'sig-deep')],
       failed_children: [],
     }
     const child: ChildJobAnalysis = {
+      id: 'child-1',
       job_name: 'child-job',
       build_number: 10,
+      jenkins_url: null,
+      summary: null,
+      note: null,
       failures: [],
       failed_children: [nested],
     }
@@ -144,8 +157,12 @@ describe('key consistency', () => {
     // This test exercises the real collectChildExpandKeys function and
     // verifies its output matches what expandKey would produce.
     const child: ChildJobAnalysis = {
+      id: 'child-5',
       job_name: 'child-job',
       build_number: 5,
+      jenkins_url: null,
+      summary: null,
+      note: null,
       failures: [makeFailure('test1', 'sig-c'), makeFailure('test2', 'sig-c')],
       failed_children: [],
     }
