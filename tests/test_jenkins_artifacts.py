@@ -24,9 +24,7 @@ from rootcoz.jenkins_artifacts import (
 def test_extract_base_uses_process_tempdir() -> None:
     """EXTRACT_BASE must live under tempfile.gettempdir() for chat cleanup."""
     tmp_root = Path(tempfile.gettempdir()).resolve()
-    assert jenkins_artifacts.EXTRACT_BASE == (
-        Path(tempfile.gettempdir()) / "jenkins-insight"
-    )
+    assert jenkins_artifacts.EXTRACT_BASE == (Path(tempfile.gettempdir()) / "rootcoz")
     assert jenkins_artifacts.EXTRACT_BASE.resolve().is_relative_to(tmp_root)
 
 

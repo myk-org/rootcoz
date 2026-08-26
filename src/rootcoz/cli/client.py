@@ -247,6 +247,12 @@ class RootCozClient:
         """List users awaiting approval. GET /api/admin/users/pending"""
         return self._request("GET", "/api/admin/users/pending")
 
+    def admin_component_versions(self) -> dict[str, Any]:
+        """Get installed AI-sidecar component versions.
+        GET /api/admin/component-versions
+        """
+        return self._request("GET", "/api/admin/component-versions")
+
     # -- Health ---------------------------------------------------------------
 
     def health(self) -> dict[str, Any]:

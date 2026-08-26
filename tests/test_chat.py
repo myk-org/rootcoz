@@ -1,5 +1,6 @@
 """Tests for the chat feature."""
 
+import asyncio
 import os
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
@@ -1008,7 +1009,7 @@ class TestChatCleanup:
         monkeypatch.setenv("TMPDIR", str(custom_tmp))
         monkeypatch.setattr(tempfile, "gettempdir", lambda: str(custom_tmp))
 
-        extract_base = Path(tempfile.gettempdir()) / "jenkins-insight"
+        extract_base = Path(tempfile.gettempdir()) / "rootcoz"
         monkeypatch.setattr(jenkins_artifacts, "EXTRACT_BASE", extract_base)
 
         artifacts_dir = extract_base / "artifacts-testhash"
@@ -1025,6 +1026,362 @@ class TestChatCleanup:
 
         assert not workspace.exists()
         assert not artifacts_dir.exists()
+
+    def test_cleanup_workspace_removes_nested_user_mcp_dumps(self, tmp_path):
+        from rootcoz.engine.chat import cleanup_chat_workspace
+        from rootcoz.engine.http_mcp import http_tools_dump_path
+
+        workspace = tmp_path / "rootcoz-chat-job"
+        user_ws = workspace / "alice"
+        user_ws.mkdir(parents=True)
+        dump = http_tools_dump_path(user_ws)
+        dump.write_text("[]")
+        (user_ws / "session.txt").write_text("x")
+
+        with patch("rootcoz.engine.chat.get_chat_workspace", return_value=workspace):
+            cleanup_chat_workspace("job")
+
+        assert not workspace.exists()
+        assert not dump.exists()
+
+    def test_cleanup_workspace_waits_for_mcp_install_lock(self, tmp_path):
+        import threading
+        import time
+
+        from rootcoz.engine import http_mcp as http_mcp_mod
+        from rootcoz.engine.chat import cleanup_chat_workspace
+
+        workspace = tmp_path / "ws"
+        workspace.mkdir()
+        dump = http_mcp_mod.http_tools_dump_path(workspace)
+        order: list[str] = []
+        started = threading.Event()
+        release = threading.Event()
+
+        def hold_lock():
+            with http_mcp_mod._workspace_install_lock(workspace):
+                order.append("install")
+                started.set()
+                release.wait(timeout=5)
+                dump.write_text("secret")
+
+        holder = threading.Thread(target=hold_lock)
+        holder.start()
+        assert started.wait(timeout=5)
+
+        def run_cleanup():
+            order.append("cleanup-start")
+            with patch(
+                "rootcoz.engine.chat.get_chat_workspace", return_value=workspace
+            ):
+                cleanup_chat_workspace("locked-job")
+            order.append("cleanup-end")
+
+        cleaner = threading.Thread(target=run_cleanup)
+        cleaner.start()
+        time.sleep(0.1)
+        assert "cleanup-end" not in order
+        release.set()
+        holder.join(timeout=5)
+        cleaner.join(timeout=5)
+        assert order[:2] == ["install", "cleanup-start"]
+        assert order[-1] == "cleanup-end"
+        assert not workspace.exists()
+        assert not dump.exists()
+
+
+@pytest.mark.asyncio
+async def test_cleanup_deleted_job_offloads_blocking_cleanup(monkeypatch):
+    """Filesystem MCP locks must not run on the event loop."""
+    from rootcoz import main as main_mod
+
+    seen: list[str] = []
+
+    def fake_cleanup(job_id: str, username: str = "") -> None:
+        seen.append(f"cleanup:{job_id}")
+
+    monkeypatch.setattr("rootcoz.engine.chat.cleanup_chat_workspace", fake_cleanup)
+    orig_to_thread = main_mod.asyncio.to_thread
+
+    async def tracking_to_thread(fn, *args, **kwargs):
+        seen.append("to_thread")
+        return await orig_to_thread(fn, *args, **kwargs)
+
+    monkeypatch.setattr(main_mod.asyncio, "to_thread", tracking_to_thread)
+    main_mod._chat_jobs_deleting.clear()
+    await main_mod._cleanup_deleted_job_chat_workspaces("job-offload")
+    assert seen == ["to_thread", "cleanup:job-offload"]
+    assert "job-offload" not in main_mod._chat_jobs_deleting
+    assert "job-offload" not in main_mod._chat_job_barriers
+
+
+@pytest.mark.asyncio
+async def test_init_chat_under_barrier_rejects_deleting_job():
+    from fastapi import HTTPException
+
+    from rootcoz import main as main_mod
+
+    main_mod._chat_jobs_deleting.add("gone-job")
+    try:
+        with pytest.raises(HTTPException) as exc:
+            await main_mod._init_chat_under_barrier("gone-job", "alice")
+        assert exc.value.status_code == 404
+    finally:
+        main_mod._chat_jobs_deleting.discard("gone-job")
+
+
+@pytest.mark.asyncio
+async def test_cleanup_deleted_job_does_not_block_event_loop(tmp_path, monkeypatch):
+    """A contended MCP flock during cleanup must not stall asyncio."""
+    import threading
+    import time
+
+    from rootcoz import main as main_mod
+    from rootcoz.engine import http_mcp as http_mcp_mod
+
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    started = threading.Event()
+    release = threading.Event()
+
+    def hold_lock():
+        with http_mcp_mod._workspace_install_lock(workspace):
+            started.set()
+            release.wait(timeout=5)
+
+    holder = threading.Thread(target=hold_lock)
+    holder.start()
+    assert started.wait(timeout=5)
+
+    monkeypatch.setattr(
+        "rootcoz.engine.chat.get_chat_workspace", lambda job_id, username="": workspace
+    )
+    main_mod._chat_jobs_deleting.clear()
+    cleanup_task = asyncio.create_task(
+        main_mod._cleanup_deleted_job_chat_workspaces("job-block")
+    )
+    t0 = time.monotonic()
+    await asyncio.sleep(0.05)
+    elapsed = time.monotonic() - t0
+    assert elapsed < 0.2
+    assert not cleanup_task.done()
+    release.set()
+    holder.join(timeout=5)
+    await cleanup_task
+    assert "job-block" not in main_mod._chat_job_barriers
+
+
+@pytest.mark.asyncio
+async def test_process_chat_cancel_while_waiting_barrier_marks_failed(
+    setup_test_db, monkeypatch
+):
+    """Cancellation during the lifecycle wait must not leave the placeholder pending."""
+    from rootcoz import main as main_mod
+
+    job_id = "chat-cancel-job"
+    await storage.save_result(
+        job_id, "", "completed", {"status": "completed", "summary": "t", "failures": []}
+    )
+    _user_id, assistant_id = await storage.add_chat_message_pair(
+        job_id, "hello", username="alice", ai_provider="claude", ai_model="sonnet-4"
+    )
+    barrier = main_mod._get_chat_job_barrier(job_id)
+    await barrier.acquire()
+    task = asyncio.create_task(
+        main_mod._process_chat_message(
+            job_id=job_id,
+            user_msg_id=_user_id,
+            assistant_msg_id=assistant_id,
+            message="hello",
+            ai_provider_override="claude",
+            ai_model_override="sonnet-4",
+            username="alice",
+        )
+    )
+    await asyncio.sleep(0.05)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    barrier.release()
+    assert await storage.get_chat_message_status(assistant_id) == "failed"
+
+
+@pytest.mark.asyncio
+async def test_process_chat_releases_barrier_before_ai(setup_test_db, monkeypatch):
+    """Job deletion must not wait behind chat_with_ai."""
+    from rootcoz import main as main_mod
+
+    job_id = "chat-barrier-ai-job"
+    held_during_ai: list[bool] = []
+
+    async def fake_chat(**kwargs):
+        held_during_ai.append(main_mod._get_chat_job_barrier(job_id).locked())
+        assert kwargs.get("install_mcp") is False
+        return True, "ok", "sess"
+
+    monkeypatch.setattr("rootcoz.engine.chat.chat_with_ai", fake_chat)
+    monkeypatch.setattr(
+        "rootcoz.engine.chat.ensure_chat_workspace",
+        lambda job_id, username="": setup_test_db,
+    )
+    monkeypatch.setattr(
+        "rootcoz.engine.chat.clone_chat_repos",
+        AsyncMock(return_value=False),
+    )
+    monkeypatch.setattr(
+        "rootcoz.engine.chat.install_http_tools_mcp_best_effort_async",
+        AsyncMock(),
+    )
+    monkeypatch.setattr(
+        "rootcoz.sources.chat_workspace.setup_ci_build_workspace",
+        AsyncMock(return_value=False),
+    )
+    monkeypatch.setattr(
+        main_mod,
+        "_resolve_chat_credentials",
+        AsyncMock(return_value=("", "", "", "", "")),
+    )
+    monkeypatch.setattr(main_mod, "_create_ai_auth_header", AsyncMock(return_value=""))
+
+    await storage.save_result(
+        job_id,
+        "",
+        "completed",
+        {
+            "status": "completed",
+            "summary": "t",
+            "failures": [],
+            "ai_provider": "claude",
+            "ai_model": "sonnet-4",
+        },
+    )
+    _user_id, assistant_id = await storage.add_chat_message_pair(
+        job_id, "hello", username="alice", ai_provider="claude", ai_model="sonnet-4"
+    )
+    await main_mod._process_chat_message(
+        job_id=job_id,
+        user_msg_id=_user_id,
+        assistant_msg_id=assistant_id,
+        message="hello",
+        ai_provider_override="claude",
+        ai_model_override="sonnet-4",
+        username="alice",
+    )
+    assert held_during_ai == [False]
+    assert await storage.get_chat_message_status(assistant_id) == "completed"
+
+
+@pytest.mark.asyncio
+async def test_process_chat_skip_deleting_marks_failed(setup_test_db):
+    from rootcoz import main as main_mod
+
+    job_id = "chat-deleting-job"
+    await storage.save_result(
+        job_id, "", "completed", {"status": "completed", "summary": "t", "failures": []}
+    )
+    _user_id, assistant_id = await storage.add_chat_message_pair(
+        job_id, "hello", username="alice"
+    )
+    main_mod._chat_jobs_deleting.add(job_id)
+    try:
+        await main_mod._process_chat_message(
+            job_id=job_id,
+            user_msg_id=_user_id,
+            assistant_msg_id=assistant_id,
+            message="hello",
+            ai_provider_override="claude",
+            ai_model_override="sonnet-4",
+            username="alice",
+        )
+    finally:
+        main_mod._chat_jobs_deleting.discard(job_id)
+    assert await storage.get_chat_message_status(assistant_id) == "failed"
+
+
+@pytest.mark.asyncio
+async def test_cleanup_cancels_in_flight_chat_task(monkeypatch):
+    """Deletion must cancel active chat work instead of racing the workspace."""
+    from rootcoz import main as main_mod
+
+    started = asyncio.Event()
+
+    async def hang() -> None:
+        async with main_mod._track_chat_job_task("job-cancel-ai"):
+            started.set()
+            await asyncio.sleep(30)
+
+    monkeypatch.setattr(
+        "rootcoz.engine.chat.cleanup_chat_workspace", lambda job_id, username="": None
+    )
+    task = asyncio.create_task(hang())
+    await started.wait()
+    t0 = asyncio.get_running_loop().time()
+    await main_mod._cleanup_deleted_job_chat_workspaces("job-cancel-ai")
+    elapsed = asyncio.get_running_loop().time() - t0
+    assert elapsed < 1
+    assert task.cancelled() or task.done()
+    assert "job-cancel-ai" not in main_mod._chat_job_tasks
+
+
+@pytest.mark.asyncio
+async def test_chat_init_releases_barrier_before_clone(setup_test_db, monkeypatch):
+    """Job deletion must not wait behind clone/session initialization I/O."""
+    from rootcoz import main as main_mod
+
+    job_id = "chat-init-barrier-job"
+    clone_started = asyncio.Event()
+    barrier_held_during_clone: list[bool] = []
+
+    async def fake_clone(*args, **kwargs):
+        clone_started.set()
+        barrier_held_during_clone.append(
+            main_mod._get_chat_job_barrier(job_id).locked()
+        )
+        await asyncio.sleep(30)
+        return False
+
+    monkeypatch.setattr("rootcoz.engine.chat.clone_chat_repos", fake_clone)
+    monkeypatch.setattr(
+        "rootcoz.engine.chat.ensure_chat_workspace",
+        lambda job_id, username="": setup_test_db,
+    )
+    await storage.save_result(
+        job_id, "", "completed", {"status": "completed", "summary": "t", "failures": []}
+    )
+    init_task = asyncio.create_task(main_mod._init_chat_under_barrier(job_id, "alice"))
+    await clone_started.wait()
+    assert barrier_held_during_clone == [False]
+    init_task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await init_task
+
+
+@pytest.mark.asyncio
+async def test_chat_lock_keeps_identity_for_waiters():
+    """A queued message must not get a new lock after the holder releases."""
+    from rootcoz import main as main_mod
+
+    key = "lock-id-job:alice"
+    seen: list[asyncio.Lock] = []
+    second_started = asyncio.Event()
+
+    async def holder() -> None:
+        async with main_mod._hold_chat_lock(key) as lock:
+            seen.append(lock)
+            await second_started.wait()
+            await asyncio.sleep(0.05)
+
+    async def waiter() -> None:
+        await asyncio.sleep(0.01)
+        second_started.set()
+        waiting_lock = main_mod._chat_locks[key]
+        async with main_mod._hold_chat_lock(key) as lock:
+            seen.append(lock)
+            assert lock is waiting_lock
+
+    await asyncio.gather(holder(), waiter())
+    assert seen[0] is seen[1]
+    assert key not in main_mod._chat_locks
 
 
 # ---------------------------------------------------------------------------

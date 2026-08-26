@@ -9,9 +9,12 @@ Provides:
 """
 
 import asyncio
+import json
 import os
 import pathlib
+import shutil
 import smtplib
+import subprocess
 import threading
 import time
 from collections import deque
@@ -286,6 +289,81 @@ async def check_reportportal(settings: Any) -> dict[str, str]:
     )
 
 
+# ---------------------------------------------------------------------------
+# Sidecar component versions
+# ---------------------------------------------------------------------------
+
+# The sidecar runs in the same container as the backend, with its npm tree at a
+# fixed path. Outside the container (dev), fall back to the repo checkout copy.
+_SIDECAR_DIR_CANDIDATES = (
+    pathlib.Path("/app/sidecar-helper"),
+    pathlib.Path(__file__).resolve().parents[2] / "sidecar-helper",
+)
+
+# npm package name -> key exposed under /api/health "components"
+_SIDECAR_COMPONENT_PACKAGES = {
+    "pi": "@earendil-works/pi-coding-agent",
+    "pi_sidecar": "@myk-org/pi-sidecar",
+    "pi_orchestrator_config": "pi-orchestrator-config",
+    "pi_vertex_claude": "@myk-org/pi-vertex-claude",
+}
+
+_component_versions_cache: dict[str, Any] | None = None
+
+
+def _compute_component_versions() -> dict[str, Any]:
+    """Read installed sidecar component versions from manifests and PATH."""
+    versions: dict[str, Any] = {}
+    node_modules = next(
+        (
+            d / "node_modules"
+            for d in _SIDECAR_DIR_CANDIDATES
+            if (d / "node_modules").is_dir()
+        ),
+        None,
+    )
+    if node_modules is not None:
+        for key, pkg_name in _SIDECAR_COMPONENT_PACKAGES.items():
+            try:
+                manifest = json.loads(
+                    (node_modules / pkg_name / "package.json").read_text()
+                )
+                # Valid JSON that is not an object (null, [], "...") has no
+                # version mapping — report the component as unavailable.
+                versions[key] = (
+                    manifest.get("version") if isinstance(manifest, dict) else None
+                )
+            except (OSError, ValueError):
+                versions[key] = None
+    else:
+        versions.update(dict.fromkeys(_SIDECAR_COMPONENT_PACKAGES))
+
+    for key, binary in (("node", "node"), ("acpx", "acpx")):
+        if shutil.which(binary) is None:
+            versions[key] = None
+            continue
+        try:
+            out = subprocess.run(
+                [binary, "--version"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                check=False,
+            ).stdout.strip()
+            versions[key] = out.removeprefix("v") or None
+        except (OSError, subprocess.TimeoutExpired):
+            versions[key] = None
+    return versions
+
+
+async def get_component_versions() -> dict[str, Any]:
+    """Return installed AI-sidecar component versions (cached for process lifetime)."""
+    global _component_versions_cache
+    if _component_versions_cache is None:
+        _component_versions_cache = await asyncio.to_thread(_compute_component_versions)
+    return _component_versions_cache
+
+
 async def build_health_response(settings: Any, db_path: str) -> dict[str, Any]:
     """Build full health response with checks and error rates.
 
@@ -293,6 +371,10 @@ async def build_health_response(settings: Any, db_path: str) -> dict[str, Any]:
     - status: "healthy", "degraded", or "unhealthy"
     - checks: results from individual dependency checks
     - error_rates: current rolling-window error statistics
+
+    Component versions are intentionally NOT included here: /api/health is
+    public (unauthenticated) and exact versions aid fingerprinting. Admins
+    get them via GET /api/admin/component-versions.
     """
     checks: dict[str, dict[str, Any]] = {}
 
