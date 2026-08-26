@@ -1,5 +1,6 @@
 """Tests for the chat feature."""
 
+import asyncio
 import os
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
@@ -1087,6 +1088,87 @@ class TestChatCleanup:
         assert order[-1] == "cleanup-end"
         assert not workspace.exists()
         assert not dump.exists()
+
+
+@pytest.mark.asyncio
+async def test_cleanup_deleted_job_offloads_blocking_cleanup(monkeypatch):
+    """Filesystem MCP locks must not run on the event loop."""
+    from rootcoz import main as main_mod
+
+    seen: list[str] = []
+
+    def fake_cleanup(job_id: str, username: str = "") -> None:
+        seen.append(f"cleanup:{job_id}")
+
+    monkeypatch.setattr("rootcoz.engine.chat.cleanup_chat_workspace", fake_cleanup)
+    orig_to_thread = main_mod.asyncio.to_thread
+
+    async def tracking_to_thread(fn, *args, **kwargs):
+        seen.append("to_thread")
+        return await orig_to_thread(fn, *args, **kwargs)
+
+    monkeypatch.setattr(main_mod.asyncio, "to_thread", tracking_to_thread)
+    main_mod._chat_jobs_deleting.clear()
+    await main_mod._cleanup_deleted_job_chat_workspaces("job-offload")
+    assert seen == ["to_thread", "cleanup:job-offload"]
+    assert "job-offload" in main_mod._chat_jobs_deleting
+    main_mod._chat_jobs_deleting.discard("job-offload")
+
+
+@pytest.mark.asyncio
+async def test_init_chat_under_barrier_rejects_deleting_job():
+    from fastapi import HTTPException
+
+    from rootcoz import main as main_mod
+
+    main_mod._chat_jobs_deleting.add("gone-job")
+    try:
+        with pytest.raises(HTTPException) as exc:
+            await main_mod._init_chat_under_barrier("gone-job", "alice")
+        assert exc.value.status_code == 404
+    finally:
+        main_mod._chat_jobs_deleting.discard("gone-job")
+
+
+@pytest.mark.asyncio
+async def test_cleanup_deleted_job_does_not_block_event_loop(tmp_path, monkeypatch):
+    """A contended MCP flock during cleanup must not stall asyncio."""
+    import threading
+    import time
+
+    from rootcoz import main as main_mod
+    from rootcoz.engine import http_mcp as http_mcp_mod
+
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    started = threading.Event()
+    release = threading.Event()
+
+    def hold_lock():
+        with http_mcp_mod._workspace_install_lock(workspace):
+            started.set()
+            release.wait(timeout=5)
+
+    holder = threading.Thread(target=hold_lock)
+    holder.start()
+    assert started.wait(timeout=5)
+
+    monkeypatch.setattr(
+        "rootcoz.engine.chat.get_chat_workspace", lambda job_id, username="": workspace
+    )
+    main_mod._chat_jobs_deleting.clear()
+    cleanup_task = asyncio.create_task(
+        main_mod._cleanup_deleted_job_chat_workspaces("job-block")
+    )
+    t0 = time.monotonic()
+    await asyncio.sleep(0.05)
+    elapsed = time.monotonic() - t0
+    assert elapsed < 0.2
+    assert not cleanup_task.done()
+    release.set()
+    holder.join(timeout=5)
+    await cleanup_task
+    main_mod._chat_jobs_deleting.discard("job-block")
 
 
 # ---------------------------------------------------------------------------
