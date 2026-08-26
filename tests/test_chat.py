@@ -1356,6 +1356,34 @@ async def test_chat_init_releases_barrier_before_clone(setup_test_db, monkeypatc
         await init_task
 
 
+@pytest.mark.asyncio
+async def test_chat_lock_keeps_identity_for_waiters():
+    """A queued message must not get a new lock after the holder releases."""
+    from rootcoz import main as main_mod
+
+    key = "lock-id-job:alice"
+    seen: list[asyncio.Lock] = []
+    second_started = asyncio.Event()
+
+    async def holder() -> None:
+        async with main_mod._hold_chat_lock(key) as lock:
+            seen.append(lock)
+            await second_started.wait()
+            await asyncio.sleep(0.05)
+
+    async def waiter() -> None:
+        await asyncio.sleep(0.01)
+        second_started.set()
+        waiting_lock = main_mod._chat_locks[key]
+        async with main_mod._hold_chat_lock(key) as lock:
+            seen.append(lock)
+            assert lock is waiting_lock
+
+    await asyncio.gather(holder(), waiter())
+    assert seen[0] is seen[1]
+    assert key not in main_mod._chat_locks
+
+
 # ---------------------------------------------------------------------------
 # Chat storage tests
 # ---------------------------------------------------------------------------

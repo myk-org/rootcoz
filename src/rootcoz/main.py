@@ -11066,7 +11066,7 @@ async def init_chat(job_id: str, request: Request) -> dict[str, Any]:
     _check_allow_list(request)
     _require_reviewer(request)
     username = getattr(request.state, "username", "")
-    async with _track_chat_job_task(job_id), _get_chat_lock(f"{job_id}:{username}"):
+    async with _track_chat_job_task(job_id), _hold_chat_lock(f"{job_id}:{username}"):
         return await _init_chat_under_barrier(job_id, username)
 
 
@@ -11138,6 +11138,7 @@ async def abort_chat(job_id: str, request: Request) -> dict[str, Any]:
 
 # Per-job chat processing locks — ensures sequential message processing
 _chat_locks: dict[str, asyncio.Lock] = {}
+_chat_lock_refs: dict[str, int] = {}
 # Per-job lifecycle barrier: init, message processing, and deletion share this
 # so a late init cannot create MCP state after job deletion has begun.
 _chat_job_barriers: dict[str, asyncio.Lock] = {}
@@ -11151,7 +11152,31 @@ def _get_chat_lock(job_id: str) -> asyncio.Lock:
     """Get or create a per-job chat processing lock."""
     if job_id not in _chat_locks:
         _chat_locks[job_id] = asyncio.Lock()
+        _chat_lock_refs[job_id] = 0
     return _chat_locks[job_id]
+
+
+@asynccontextmanager
+async def _hold_chat_lock(key: str) -> AsyncIterator[asyncio.Lock]:
+    """Acquire the per-user chat lock without dropping waiters from the registry.
+
+    Callers increment the refcount before ``acquire``, so a later ``_get_chat_lock``
+    cannot replace the lock object while another task is queued on it.
+    """
+    lock = _get_chat_lock(key)
+    _chat_lock_refs[key] = _chat_lock_refs.get(key, 0) + 1
+    try:
+        async with lock:
+            yield lock
+    finally:
+        refs = _chat_lock_refs.get(key, 1) - 1
+        if refs > 0:
+            _chat_lock_refs[key] = refs
+        else:
+            _chat_lock_refs.pop(key, None)
+            stored = _chat_locks.get(key)
+            if stored is lock and not lock.locked():
+                _chat_locks.pop(key, None)
 
 
 def _get_chat_job_barrier(job_id: str) -> asyncio.Lock:
@@ -11261,12 +11286,12 @@ def _get_chat_abort_signal(key: str) -> asyncio.Event:
 
 
 def _cleanup_chat_state(key: str) -> None:
-    """Remove chat lock and abort signal for a key to prevent unbounded dict growth."""
+    """Remove the abort signal for a key to prevent unbounded dict growth.
+
+    Per-user locks stay in ``_chat_locks`` until ``_hold_chat_lock`` refcount
+    hits zero, so waiters keep the same lock object.
+    """
     _chat_abort_signals.pop(key, None)
-    # Only remove locks that are NOT currently held
-    lock = _chat_locks.get(key)
-    if lock and not lock.locked():
-        _chat_locks.pop(key, None)
 
 
 def _normalize_and_validate_ai_params(
@@ -11434,12 +11459,11 @@ async def _process_chat_message(
     )
     from rootcoz.sources.chat_workspace import setup_ci_build_workspace
 
-    lock = _get_chat_lock(f"{job_id}:{username}")
     auth_header = ""
 
     async with _track_chat_job_task(job_id):
         try:
-            async with lock:
+            async with _hold_chat_lock(f"{job_id}:{username}"):
                 try:
                     async with _get_chat_job_barrier(job_id):
                         if job_id in _chat_jobs_deleting:
@@ -11713,8 +11737,7 @@ async def clear_chat_history(job_id: str, request: Request) -> dict[str, Any]:
 
     # Acquire the per-user chat lock to prevent tearing down workspace
     # while a background worker is still processing
-    lock = _get_chat_lock(f"{job_id}:{username}")
-    async with lock:
+    async with _hold_chat_lock(f"{job_id}:{username}"):
         count = await storage.delete_chat_messages(job_id, username=username)
         notify_chat_changed(job_id, username=username)
         try:
@@ -11851,8 +11874,7 @@ async def init_admin_chat(request: Request) -> dict[str, Any]:
     workspace = ensure_chat_workspace(ADMIN_CHAT_JOB_ID, username=username)
 
     session_id: str | None = ""
-    lock = _get_chat_lock(f"{ADMIN_CHAT_JOB_ID}:{username}")
-    async with lock:
+    async with _hold_chat_lock(f"{ADMIN_CHAT_JOB_ID}:{username}"):
         existing = await storage.get_chat_messages(
             ADMIN_CHAT_JOB_ID, limit=1, username=username
         )
@@ -12028,10 +12050,9 @@ async def _process_admin_chat_message(
         ensure_chat_workspace,
     )
 
-    lock = _get_chat_lock(f"{ADMIN_CHAT_JOB_ID}:{username}")
     auth_header = ""
 
-    async with lock:
+    async with _hold_chat_lock(f"{ADMIN_CHAT_JOB_ID}:{username}"):
         try:
             _admin_settings = get_settings()
             ai_provider, ai_model = _resolve_chat_ai_config(
@@ -12304,8 +12325,7 @@ async def clear_admin_chat_history(request: Request) -> dict[str, Any]:
 
     username = request.state.username
 
-    lock = _get_chat_lock(f"{ADMIN_CHAT_JOB_ID}:{username}")
-    async with lock:
+    async with _hold_chat_lock(f"{ADMIN_CHAT_JOB_ID}:{username}"):
         count = await storage.delete_chat_messages(ADMIN_CHAT_JOB_ID, username=username)
         notify_chat_changed(ADMIN_CHAT_JOB_ID, username=username)
         try:
