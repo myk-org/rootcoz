@@ -10912,7 +10912,12 @@ async def get_chat_history(
 
 
 async def _init_chat_under_barrier(job_id: str, username: str) -> dict[str, Any]:
-    """Run chat init after the per-job lifecycle barrier is held."""
+    """Initialize chat workspace; hold the lifecycle barrier only for short checks.
+
+    Slow clone/session work runs without the barrier so job deletion can cancel
+    this task instead of waiting for I/O. Recheck deletion before filesystem
+    commits so a late init cannot recreate MCP state after cleanup.
+    """
     from rootcoz.engine.chat import (
         build_chat_custom_tools,
         build_welcome_message,
@@ -10922,15 +10927,14 @@ async def _init_chat_under_barrier(job_id: str, username: str) -> dict[str, Any]
     )
     from rootcoz.sources.chat_workspace import setup_ci_build_workspace
 
-    if job_id in _chat_jobs_deleting:
-        raise HTTPException(status_code=404, detail="Job not found")
-    stored = await get_result(job_id, strip_sensitive=False)
-    if not stored or not stored.get("result"):
-        raise HTTPException(status_code=404, detail="Job not found")
-
-    result_data = stored["result"]
-    params = result_data.get("request_params", {})
-    workspace = ensure_chat_workspace(job_id, username=username)
+    async with _get_chat_job_barrier(job_id):
+        _raise_if_chat_job_deleted(job_id)
+        stored = await get_result(job_id, strip_sensitive=False)
+        if not stored or not stored.get("result"):
+            raise HTTPException(status_code=404, detail="Job not found")
+        result_data = stored["result"]
+        params = result_data.get("request_params", {})
+        workspace = ensure_chat_workspace(job_id, username=username)
 
     decrypted_params: dict[str, Any] = {}
     try:
@@ -10959,15 +10963,18 @@ async def _init_chat_under_barrier(job_id: str, username: str) -> dict[str, Any]
     ) = await _resolve_chat_credentials(decrypted_params, username)
 
     session_id: str | None = ""
+    _raise_if_chat_job_deleted(job_id)
     repos_available = await clone_chat_repos(
         workspace, decrypted_params, user_repo_token=github_token
     )
+    _raise_if_chat_job_deleted(job_id)
     ci_build_data_available = await setup_ci_build_workspace(
         workspace,
         _build_ci_workspace_params(decrypted_params, result_data),
         github_token=github_token,
         settings=_settings,
     )
+    _raise_if_chat_job_deleted(job_id)
     existing = await storage.get_chat_messages(job_id, limit=1, username=username)
     if not existing:
         custom_tools: list[dict[str, Any]] = []
@@ -10990,6 +10997,7 @@ async def _init_chat_under_barrier(job_id: str, username: str) -> dict[str, Any]
                 username,
             )
 
+        _raise_if_chat_job_deleted(job_id)
         session_id = await init_chat_session(
             job_id=job_id,
             job_name=result_data.get("job_name", "unknown"),
@@ -11001,6 +11009,7 @@ async def _init_chat_under_barrier(job_id: str, username: str) -> dict[str, Any]
             repos_available=repos_available,
             ci_build_data_available=ci_build_data_available,
         )
+        _raise_if_chat_job_deleted(job_id)
         if session_id:
             await storage.add_chat_message(
                 job_id=job_id,
@@ -11057,10 +11066,7 @@ async def init_chat(job_id: str, request: Request) -> dict[str, Any]:
     _check_allow_list(request)
     _require_reviewer(request)
     username = getattr(request.state, "username", "")
-    async with (
-        _get_chat_lock(f"{job_id}:{username}"),
-        _get_chat_job_barrier(job_id),
-    ):
+    async with _track_chat_job_task(job_id), _get_chat_lock(f"{job_id}:{username}"):
         return await _init_chat_under_barrier(job_id, username)
 
 
@@ -11136,6 +11142,7 @@ _chat_locks: dict[str, asyncio.Lock] = {}
 # so a late init cannot create MCP state after job deletion has begun.
 _chat_job_barriers: dict[str, asyncio.Lock] = {}
 _chat_jobs_deleting: set[str] = set()
+_chat_job_tasks: dict[str, set[asyncio.Task[Any]]] = {}
 
 ADMIN_CHAT_JOB_ID = "__admin_chat__"
 
@@ -11161,6 +11168,43 @@ def _discard_idle_chat_job_barrier(job_id: str) -> None:
         _chat_job_barriers.pop(job_id, None)
 
 
+def _raise_if_chat_job_deleted(job_id: str) -> None:
+    if job_id in _chat_jobs_deleting:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+
+@asynccontextmanager
+async def _track_chat_job_task(job_id: str) -> AsyncIterator[None]:
+    """Register the current task so job deletion can cancel in-flight chat work."""
+    task = asyncio.current_task()
+    if task is None:
+        yield
+        return
+    _chat_job_tasks.setdefault(job_id, set()).add(task)
+    try:
+        yield
+    finally:
+        remaining = _chat_job_tasks.get(job_id)
+        if remaining is not None:
+            remaining.discard(task)
+            if not remaining:
+                _chat_job_tasks.pop(job_id, None)
+
+
+async def _cancel_tracked_chat_job_tasks(job_id: str) -> None:
+    """Cancel in-flight chat init/message tasks so deletion is not blocked."""
+    current = asyncio.current_task()
+    tasks = [
+        task
+        for task in tuple(_chat_job_tasks.get(job_id, ()))
+        if task is not current and not task.done()
+    ]
+    for task in tasks:
+        task.cancel()
+    if tasks:
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+
 async def _fail_chat_assistant_placeholder(
     assistant_msg_id: int,
     job_id: str,
@@ -11183,22 +11227,25 @@ async def _cleanup_deleted_job_chat_workspaces(job_id: str) -> None:
     """Remove chat MCP state after a job delete, serialized with in-flight chat.
 
     Marks the job as deleting first so init/message work that has not yet
-    entered the lifecycle barrier will 404. Work already inside the barrier
-    finishes, then filesystem cleanup runs in a worker thread so contended
-    MCP ``flock`` does not block the event loop. After cleanup the deleting
-    marker and idle barrier are dropped; the job row is already gone so a
-    later init cannot recreate workspace state.
+    entered the lifecycle barrier will 404. In-flight init and AI tasks are
+    cancelled (instead of holding the barrier across clone/AI timeouts), then
+    filesystem cleanup runs in a worker thread so contended MCP ``flock`` does
+    not block the event loop. After cleanup the deleting marker and idle
+    barrier are dropped; the job row is already gone so a later init cannot
+    recreate workspace state.
     """
     from rootcoz.engine.chat import cleanup_chat_workspace
 
     _chat_jobs_deleting.add(job_id)
     try:
+        await _cancel_tracked_chat_job_tasks(job_id)
         async with _get_chat_job_barrier(job_id):
             await asyncio.to_thread(cleanup_chat_workspace, job_id)
     except Exception:
         logger.warning("Failed to cleanup chat workspace for %s", job_id, exc_info=True)
     finally:
         _chat_jobs_deleting.discard(job_id)
+        _chat_job_tasks.pop(job_id, None)
         _discard_idle_chat_job_barrier(job_id)
 
 
@@ -11390,16 +11437,155 @@ async def _process_chat_message(
     lock = _get_chat_lock(f"{job_id}:{username}")
     auth_header = ""
 
-    try:
-        async with lock:
-            try:
-                async with _get_chat_job_barrier(job_id):
-                    if job_id in _chat_jobs_deleting:
-                        logger.info(
-                            "Chat: skip processing for deleted job %s user %s",
-                            job_id,
-                            username,
+    async with _track_chat_job_task(job_id):
+        try:
+            async with lock:
+                try:
+                    async with _get_chat_job_barrier(job_id):
+                        if job_id in _chat_jobs_deleting:
+                            logger.info(
+                                "Chat: skip processing for deleted job %s user %s",
+                                job_id,
+                                username,
+                            )
+                            await _fail_chat_assistant_placeholder(
+                                assistant_msg_id,
+                                job_id,
+                                username,
+                                "Job was deleted.",
+                            )
+                            return
+                        stored = await get_result(job_id, strip_sensitive=False)
+                        if not stored or not stored.get("result"):
+                            raise RuntimeError(
+                                f"Job {job_id} not found during chat processing"
+                            )
+
+                        result_data = stored["result"]
+                        params = result_data.get("request_params", {})
+
+                        _chat_settings = get_settings()
+                        ai_provider, ai_model = _resolve_chat_ai_config(
+                            override_provider=ai_provider_override,
+                            override_model=ai_model_override,
+                            settings_provider=_chat_settings.ai_provider,
+                            settings_model=_chat_settings.ai_model,
+                            result_data=result_data,
+                            request_params=params,
+                            is_admin=is_admin,
                         )
+
+                        # Get conversation history
+                        msg_count = await storage.count_chat_messages(
+                            job_id, username=username
+                        )
+                        all_history = await storage.get_chat_messages(
+                            job_id, username=username, limit=max(msg_count, 1)
+                        )
+                        # Filter to only completed messages for context
+                        history = [
+                            m
+                            for m in all_history
+                            if m.get("status") != "pending" and m.get("content")
+                        ]
+
+                        # Find session_id from the last completed assistant message
+                        # Scan all_history (not filtered history) because the init
+                        # message has empty content but carries the session_id
+                        last_session_id = None
+                        for msg in reversed(all_history):
+                            if (
+                                msg.get("role") == "assistant"
+                                and msg.get("session_id")
+                                and msg.get("ai_provider") == ai_provider
+                                and msg.get("ai_model") == ai_model
+                            ):
+                                last_session_id = msg["session_id"]
+                                logger.debug(
+                                    "Chat: found session %s from history (provider=%s, model=%s)",
+                                    last_session_id,
+                                    ai_provider,
+                                    ai_model,
+                                )
+                                break
+
+                        workspace = ensure_chat_workspace(job_id, username=username)
+
+                        decrypted_params = {}
+                        try:
+                            decrypted_params = decrypt_sensitive_fields(dict(params))
+                        except Exception:
+                            logger.warning(
+                                "Failed to decrypt request_params for chat context",
+                                exc_info=True,
+                            )
+                        (
+                            jira_url,
+                            jira_email,
+                            jira_token,
+                            github_token,
+                            github_repo,
+                        ) = await _resolve_chat_credentials(decrypted_params, username)
+
+                        repos_available = await clone_chat_repos(
+                            workspace, decrypted_params, user_repo_token=github_token
+                        )
+
+                        settings = get_settings()
+
+                        # Populate workspace with CI build data
+                        ci_build_data_available = await setup_ci_build_workspace(
+                            workspace,
+                            _build_ci_workspace_params(decrypted_params, result_data),
+                            github_token=github_token,
+                            settings=settings,
+                        )
+
+                        server_url = _build_internal_server_url()
+                        auth_header = await _create_ai_auth_header(username)
+
+                        custom_tools: list[dict[str, Any]] = []
+                        if auth_header:
+                            custom_tools = build_chat_custom_tools(
+                                server_url=server_url,
+                                auth_token=auth_header.removeprefix("Bearer ").strip(),
+                                job_id=job_id,
+                                jira_url=jira_url,
+                                jira_email=jira_email,
+                                jira_token=jira_token,
+                                github_token=github_token,
+                                github_repo=github_repo,
+                            )
+                        else:
+                            logger.warning(
+                                "Chat: no auth token for %s — tools unavailable",
+                                username,
+                            )
+
+                        await install_http_tools_mcp_best_effort_async(
+                            workspace, custom_tools
+                        )
+
+                        abort_key = f"{job_id}:{username}"
+                        abort_signal = _get_chat_abort_signal(abort_key)
+                        if abort_signal.is_set():
+                            abort_signal.clear()
+                            await _fail_chat_assistant_placeholder(
+                                assistant_msg_id,
+                                job_id,
+                                username,
+                                "Aborted by user.",
+                            )
+                            logger.info(
+                                "Chat: aborted before AI call for job %s, user %s",
+                                job_id,
+                                username,
+                            )
+                            return
+
+                    # Lifecycle barrier is released before the AI call so job
+                    # deletion is not blocked behind chat_with_ai timeouts.
+                    if job_id in _chat_jobs_deleting:
                         await _fail_chat_assistant_placeholder(
                             assistant_msg_id,
                             job_id,
@@ -11407,119 +11593,24 @@ async def _process_chat_message(
                             "Job was deleted.",
                         )
                         return
-                    stored = await get_result(job_id, strip_sensitive=False)
-                    if not stored or not stored.get("result"):
-                        raise RuntimeError(
-                            f"Job {job_id} not found during chat processing"
-                        )
 
-                    result_data = stored["result"]
-                    params = result_data.get("request_params", {})
-
-                    _chat_settings = get_settings()
-                    ai_provider, ai_model = _resolve_chat_ai_config(
-                        override_provider=ai_provider_override,
-                        override_model=ai_model_override,
-                        settings_provider=_chat_settings.ai_provider,
-                        settings_model=_chat_settings.ai_model,
-                        result_data=result_data,
-                        request_params=params,
-                        is_admin=is_admin,
+                    success, response_text, new_session_id = await chat_with_ai(
+                        job_id=job_id,
+                        job_name=result_data.get("job_name", "unknown"),
+                        build_number=resolve_display_build_id(result_data),
+                        message=message,
+                        history=history,
+                        ai_provider=ai_provider,
+                        ai_model=ai_model,
+                        repo_path=workspace,
+                        ai_call_timeout=settings.ai_call_timeout,
+                        session_id=last_session_id,
+                        custom_tools=custom_tools,
+                        repos_available=repos_available,
+                        ci_build_data_available=ci_build_data_available,
+                        install_mcp=False,
                     )
 
-                    # Get conversation history
-                    msg_count = await storage.count_chat_messages(
-                        job_id, username=username
-                    )
-                    all_history = await storage.get_chat_messages(
-                        job_id, username=username, limit=max(msg_count, 1)
-                    )
-                    # Filter to only completed messages for context
-                    history = [
-                        m
-                        for m in all_history
-                        if m.get("status") != "pending" and m.get("content")
-                    ]
-
-                    # Find session_id from the last completed assistant message
-                    # Scan all_history (not filtered history) because the init
-                    # message has empty content but carries the session_id
-                    last_session_id = None
-                    for msg in reversed(all_history):
-                        if (
-                            msg.get("role") == "assistant"
-                            and msg.get("session_id")
-                            and msg.get("ai_provider") == ai_provider
-                            and msg.get("ai_model") == ai_model
-                        ):
-                            last_session_id = msg["session_id"]
-                            logger.debug(
-                                "Chat: found session %s from history (provider=%s, model=%s)",
-                                last_session_id,
-                                ai_provider,
-                                ai_model,
-                            )
-                            break
-
-                    workspace = ensure_chat_workspace(job_id, username=username)
-
-                    decrypted_params = {}
-                    try:
-                        decrypted_params = decrypt_sensitive_fields(dict(params))
-                    except Exception:
-                        logger.warning(
-                            "Failed to decrypt request_params for chat context",
-                            exc_info=True,
-                        )
-                    (
-                        jira_url,
-                        jira_email,
-                        jira_token,
-                        github_token,
-                        github_repo,
-                    ) = await _resolve_chat_credentials(decrypted_params, username)
-
-                    repos_available = await clone_chat_repos(
-                        workspace, decrypted_params, user_repo_token=github_token
-                    )
-
-                    settings = get_settings()
-
-                    # Populate workspace with CI build data
-                    ci_build_data_available = await setup_ci_build_workspace(
-                        workspace,
-                        _build_ci_workspace_params(decrypted_params, result_data),
-                        github_token=github_token,
-                        settings=settings,
-                    )
-
-                    server_url = _build_internal_server_url()
-                    auth_header = await _create_ai_auth_header(username)
-
-                    custom_tools: list[dict[str, Any]] = []
-                    if auth_header:
-                        custom_tools = build_chat_custom_tools(
-                            server_url=server_url,
-                            auth_token=auth_header.removeprefix("Bearer ").strip(),
-                            job_id=job_id,
-                            jira_url=jira_url,
-                            jira_email=jira_email,
-                            jira_token=jira_token,
-                            github_token=github_token,
-                            github_repo=github_repo,
-                        )
-                    else:
-                        logger.warning(
-                            "Chat: no auth token for %s — tools unavailable",
-                            username,
-                        )
-
-                    await install_http_tools_mcp_best_effort_async(
-                        workspace, custom_tools
-                    )
-
-                    abort_key = f"{job_id}:{username}"
-                    abort_signal = _get_chat_abort_signal(abort_key)
                     if abort_signal.is_set():
                         abort_signal.clear()
                         await _fail_chat_assistant_placeholder(
@@ -11529,121 +11620,82 @@ async def _process_chat_message(
                             "Aborted by user.",
                         )
                         logger.info(
-                            "Chat: aborted before AI call for job %s, user %s",
+                            "Chat: aborted after AI call for job %s, user %s",
                             job_id,
                             username,
                         )
                         return
 
-                # Lifecycle barrier is released before the AI call so job
-                # deletion is not blocked behind chat_with_ai timeouts.
-                if job_id in _chat_jobs_deleting:
-                    await _fail_chat_assistant_placeholder(
-                        assistant_msg_id,
-                        job_id,
-                        username,
-                        "Job was deleted.",
+                    if not success:
+                        logger.error(
+                            "Chat AI call failed for job %s: %s", job_id, response_text
+                        )
+                        user_error = format_chat_ai_user_error(
+                            response_text, is_admin=is_admin, ai_provider=ai_provider
+                        )
+                        await _fail_chat_assistant_placeholder(
+                            assistant_msg_id,
+                            job_id,
+                            username,
+                            f"Error: {user_error}",
+                        )
+                        return
+
+                    current_status = await storage.get_chat_message_status(
+                        assistant_msg_id
                     )
-                    return
+                    if current_status == "failed":
+                        logger.info(
+                            "Chat: message %d was aborted during processing, discarding response",
+                            assistant_msg_id,
+                        )
+                        return
 
-                success, response_text, new_session_id = await chat_with_ai(
-                    job_id=job_id,
-                    job_name=result_data.get("job_name", "unknown"),
-                    build_number=resolve_display_build_id(result_data),
-                    message=message,
-                    history=history,
-                    ai_provider=ai_provider,
-                    ai_model=ai_model,
-                    repo_path=workspace,
-                    ai_call_timeout=settings.ai_call_timeout,
-                    session_id=last_session_id,
-                    custom_tools=custom_tools,
-                    repos_available=repos_available,
-                    ci_build_data_available=ci_build_data_available,
-                    install_mcp=False,
-                )
-
-                if abort_signal.is_set():
-                    abort_signal.clear()
-                    await _fail_chat_assistant_placeholder(
+                    await storage.update_chat_message_content(
+                        assistant_msg_id, response_text
+                    )
+                    await storage.update_chat_message_status(
+                        assistant_msg_id, "completed"
+                    )
+                    await storage.update_chat_message_ai_fields(
                         assistant_msg_id,
-                        job_id,
-                        username,
-                        "Aborted by user.",
+                        ai_provider=ai_provider,
+                        ai_model=ai_model,
+                        session_id=new_session_id or "",
                     )
                     logger.info(
-                        "Chat: aborted after AI call for job %s, user %s",
+                        "Chat: message %d processed for job %s (session=%s)",
+                        assistant_msg_id,
                         job_id,
-                        username,
+                        new_session_id,
                     )
-                    return
+                    notify_chat_changed(job_id, username=username)
 
-                if not success:
-                    logger.error(
-                        "Chat AI call failed for job %s: %s", job_id, response_text
-                    )
-                    user_error = format_chat_ai_user_error(
-                        response_text, is_admin=is_admin, ai_provider=ai_provider
+                except Exception:
+                    logger.exception(
+                        "Chat processing failed for job %s, msg %d",
+                        job_id,
+                        assistant_msg_id,
                     )
                     await _fail_chat_assistant_placeholder(
                         assistant_msg_id,
                         job_id,
                         username,
-                        f"Error: {user_error}",
+                        "An error occurred while processing your message. Please try again.",
                     )
-                    return
-
-                current_status = await storage.get_chat_message_status(assistant_msg_id)
-                if current_status == "failed":
-                    logger.info(
-                        "Chat: message %d was aborted during processing, discarding response",
-                        assistant_msg_id,
-                    )
-                    return
-
-                await storage.update_chat_message_content(
-                    assistant_msg_id, response_text
-                )
-                await storage.update_chat_message_status(assistant_msg_id, "completed")
-                await storage.update_chat_message_ai_fields(
-                    assistant_msg_id,
-                    ai_provider=ai_provider,
-                    ai_model=ai_model,
-                    session_id=new_session_id or "",
-                )
-                logger.info(
-                    "Chat: message %d processed for job %s (session=%s)",
-                    assistant_msg_id,
-                    job_id,
-                    new_session_id,
-                )
-                notify_chat_changed(job_id, username=username)
-
-            except Exception:
-                logger.exception(
-                    "Chat processing failed for job %s, msg %d",
-                    job_id,
-                    assistant_msg_id,
-                )
-                await _fail_chat_assistant_placeholder(
-                    assistant_msg_id,
-                    job_id,
-                    username,
-                    "An error occurred while processing your message. Please try again.",
-                )
-    except asyncio.CancelledError:
-        await _fail_chat_assistant_placeholder(
-            assistant_msg_id,
-            job_id,
-            username,
-            "Chat processing was cancelled.",
-        )
-        raise
-    finally:
-        _cleanup_chat_state(f"{job_id}:{username}")
-        _discard_idle_chat_job_barrier(job_id)
-        # Do NOT revoke auth_header — it's embedded in custom tool HTTP headers
-        # and must stay alive for the sidecar session lifetime
+        except asyncio.CancelledError:
+            await _fail_chat_assistant_placeholder(
+                assistant_msg_id,
+                job_id,
+                username,
+                "Chat processing was cancelled.",
+            )
+            raise
+        finally:
+            _cleanup_chat_state(f"{job_id}:{username}")
+            _discard_idle_chat_job_barrier(job_id)
+            # Do NOT revoke auth_header — it's embedded in custom tool HTTP headers
+            # and must stay alive for the sidecar session lifetime
 
 
 @app.delete("/api/chat/{job_id}", operation_id="clearChatHistory")

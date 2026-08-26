@@ -1298,6 +1298,64 @@ async def test_process_chat_skip_deleting_marks_failed(setup_test_db):
     assert await storage.get_chat_message_status(assistant_id) == "failed"
 
 
+@pytest.mark.asyncio
+async def test_cleanup_cancels_in_flight_chat_task(monkeypatch):
+    """Deletion must cancel active chat work instead of racing the workspace."""
+    from rootcoz import main as main_mod
+
+    started = asyncio.Event()
+
+    async def hang() -> None:
+        async with main_mod._track_chat_job_task("job-cancel-ai"):
+            started.set()
+            await asyncio.sleep(30)
+
+    monkeypatch.setattr(
+        "rootcoz.engine.chat.cleanup_chat_workspace", lambda job_id, username="": None
+    )
+    task = asyncio.create_task(hang())
+    await started.wait()
+    t0 = asyncio.get_running_loop().time()
+    await main_mod._cleanup_deleted_job_chat_workspaces("job-cancel-ai")
+    elapsed = asyncio.get_running_loop().time() - t0
+    assert elapsed < 1
+    assert task.cancelled() or task.done()
+    assert "job-cancel-ai" not in main_mod._chat_job_tasks
+
+
+@pytest.mark.asyncio
+async def test_chat_init_releases_barrier_before_clone(setup_test_db, monkeypatch):
+    """Job deletion must not wait behind clone/session initialization I/O."""
+    from rootcoz import main as main_mod
+
+    job_id = "chat-init-barrier-job"
+    clone_started = asyncio.Event()
+    barrier_held_during_clone: list[bool] = []
+
+    async def fake_clone(*args, **kwargs):
+        clone_started.set()
+        barrier_held_during_clone.append(
+            main_mod._get_chat_job_barrier(job_id).locked()
+        )
+        await asyncio.sleep(30)
+        return False
+
+    monkeypatch.setattr("rootcoz.engine.chat.clone_chat_repos", fake_clone)
+    monkeypatch.setattr(
+        "rootcoz.engine.chat.ensure_chat_workspace",
+        lambda job_id, username="": setup_test_db,
+    )
+    await storage.save_result(
+        job_id, "", "completed", {"status": "completed", "summary": "t", "failures": []}
+    )
+    init_task = asyncio.create_task(main_mod._init_chat_under_barrier(job_id, "alice"))
+    await clone_started.wait()
+    assert barrier_held_during_clone == [False]
+    init_task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await init_task
+
+
 # ---------------------------------------------------------------------------
 # Chat storage tests
 # ---------------------------------------------------------------------------
