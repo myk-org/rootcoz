@@ -1111,8 +1111,8 @@ async def test_cleanup_deleted_job_offloads_blocking_cleanup(monkeypatch):
     main_mod._chat_jobs_deleting.clear()
     await main_mod._cleanup_deleted_job_chat_workspaces("job-offload")
     assert seen == ["to_thread", "cleanup:job-offload"]
-    assert "job-offload" in main_mod._chat_jobs_deleting
-    main_mod._chat_jobs_deleting.discard("job-offload")
+    assert "job-offload" not in main_mod._chat_jobs_deleting
+    assert "job-offload" not in main_mod._chat_job_barriers
 
 
 @pytest.mark.asyncio
@@ -1168,7 +1168,134 @@ async def test_cleanup_deleted_job_does_not_block_event_loop(tmp_path, monkeypat
     release.set()
     holder.join(timeout=5)
     await cleanup_task
-    main_mod._chat_jobs_deleting.discard("job-block")
+    assert "job-block" not in main_mod._chat_job_barriers
+
+
+@pytest.mark.asyncio
+async def test_process_chat_cancel_while_waiting_barrier_marks_failed(
+    setup_test_db, monkeypatch
+):
+    """Cancellation during the lifecycle wait must not leave the placeholder pending."""
+    from rootcoz import main as main_mod
+
+    job_id = "chat-cancel-job"
+    await storage.save_result(
+        job_id, "", "completed", {"status": "completed", "summary": "t", "failures": []}
+    )
+    _user_id, assistant_id = await storage.add_chat_message_pair(
+        job_id, "hello", username="alice", ai_provider="claude", ai_model="sonnet-4"
+    )
+    barrier = main_mod._get_chat_job_barrier(job_id)
+    await barrier.acquire()
+    task = asyncio.create_task(
+        main_mod._process_chat_message(
+            job_id=job_id,
+            user_msg_id=_user_id,
+            assistant_msg_id=assistant_id,
+            message="hello",
+            ai_provider_override="claude",
+            ai_model_override="sonnet-4",
+            username="alice",
+        )
+    )
+    await asyncio.sleep(0.05)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    barrier.release()
+    assert await storage.get_chat_message_status(assistant_id) == "failed"
+
+
+@pytest.mark.asyncio
+async def test_process_chat_releases_barrier_before_ai(setup_test_db, monkeypatch):
+    """Job deletion must not wait behind chat_with_ai."""
+    from rootcoz import main as main_mod
+
+    job_id = "chat-barrier-ai-job"
+    held_during_ai: list[bool] = []
+
+    async def fake_chat(**kwargs):
+        held_during_ai.append(main_mod._get_chat_job_barrier(job_id).locked())
+        assert kwargs.get("install_mcp") is False
+        return True, "ok", "sess"
+
+    monkeypatch.setattr("rootcoz.engine.chat.chat_with_ai", fake_chat)
+    monkeypatch.setattr(
+        "rootcoz.engine.chat.ensure_chat_workspace",
+        lambda job_id, username="": setup_test_db,
+    )
+    monkeypatch.setattr(
+        "rootcoz.engine.chat.clone_chat_repos",
+        AsyncMock(return_value=False),
+    )
+    monkeypatch.setattr(
+        "rootcoz.engine.chat.install_http_tools_mcp_best_effort_async",
+        AsyncMock(),
+    )
+    monkeypatch.setattr(
+        "rootcoz.sources.chat_workspace.setup_ci_build_workspace",
+        AsyncMock(return_value=False),
+    )
+    monkeypatch.setattr(
+        main_mod,
+        "_resolve_chat_credentials",
+        AsyncMock(return_value=("", "", "", "", "")),
+    )
+    monkeypatch.setattr(main_mod, "_create_ai_auth_header", AsyncMock(return_value=""))
+
+    await storage.save_result(
+        job_id,
+        "",
+        "completed",
+        {
+            "status": "completed",
+            "summary": "t",
+            "failures": [],
+            "ai_provider": "claude",
+            "ai_model": "sonnet-4",
+        },
+    )
+    _user_id, assistant_id = await storage.add_chat_message_pair(
+        job_id, "hello", username="alice", ai_provider="claude", ai_model="sonnet-4"
+    )
+    await main_mod._process_chat_message(
+        job_id=job_id,
+        user_msg_id=_user_id,
+        assistant_msg_id=assistant_id,
+        message="hello",
+        ai_provider_override="claude",
+        ai_model_override="sonnet-4",
+        username="alice",
+    )
+    assert held_during_ai == [False]
+    assert await storage.get_chat_message_status(assistant_id) == "completed"
+
+
+@pytest.mark.asyncio
+async def test_process_chat_skip_deleting_marks_failed(setup_test_db):
+    from rootcoz import main as main_mod
+
+    job_id = "chat-deleting-job"
+    await storage.save_result(
+        job_id, "", "completed", {"status": "completed", "summary": "t", "failures": []}
+    )
+    _user_id, assistant_id = await storage.add_chat_message_pair(
+        job_id, "hello", username="alice"
+    )
+    main_mod._chat_jobs_deleting.add(job_id)
+    try:
+        await main_mod._process_chat_message(
+            job_id=job_id,
+            user_msg_id=_user_id,
+            assistant_msg_id=assistant_id,
+            message="hello",
+            ai_provider_override="claude",
+            ai_model_override="sonnet-4",
+            username="alice",
+        )
+    finally:
+        main_mod._chat_jobs_deleting.discard(job_id)
+    assert await storage.get_chat_message_status(assistant_id) == "failed"
 
 
 # ---------------------------------------------------------------------------

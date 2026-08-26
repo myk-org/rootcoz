@@ -1258,6 +1258,7 @@ async def _chat_with_ai_impl(
     log_prefix: str = "Chat",
     request_id: str = "",
     call_type: str = "chat",
+    install_mcp: bool = True,
 ) -> tuple[bool, str, str | None]:
     """Shared AI chat implementation used by both job and admin chat."""
     logger.info(
@@ -1293,7 +1294,8 @@ async def _chat_with_ai_impl(
         call_kwargs["custom_tools"] = custom_tools
     if not session_id and restrict_tools:
         call_kwargs["tools"] = list(CHAT_BUILTIN_TOOLS)
-    await install_http_tools_mcp_best_effort_async(repo_path, custom_tools or [])
+    if install_mcp:
+        await install_http_tools_mcp_best_effort_async(repo_path, custom_tools or [])
     result = await call_ai(prompt, **call_kwargs)
 
     # If session was lost, retry with fresh session
@@ -1319,7 +1321,10 @@ async def _chat_with_ai_impl(
             retry_kwargs["custom_tools"] = custom_tools
         if restrict_tools:
             retry_kwargs["tools"] = list(CHAT_BUILTIN_TOOLS)
-        await install_http_tools_mcp_best_effort_async(repo_path, custom_tools or [])
+        if install_mcp:
+            await install_http_tools_mcp_best_effort_async(
+                repo_path, custom_tools or []
+            )
         result = await call_ai(prompt, **retry_kwargs)
 
     await result.record_usage(
@@ -1352,6 +1357,7 @@ async def chat_with_ai(
     custom_tools: list[dict[str, Any]] | None = None,
     repos_available: bool = False,
     ci_build_data_available: bool = False,
+    install_mcp: bool = True,
 ) -> tuple[bool, str, str | None]:
     """Send a chat message and get an AI response via the sidecar."""
 
@@ -1379,6 +1385,7 @@ async def chat_with_ai(
         log_prefix=f"Chat(job={job_id})",
         request_id=job_id,
         call_type="chat",
+        install_mcp=install_mcp,
     )
 
 
