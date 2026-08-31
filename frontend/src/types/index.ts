@@ -11,7 +11,7 @@
 /* ------------------------------------------------------------------ */
 
 /** Shared status union matching the backend contract. */
-export type AnalysisStatus = 'waiting' | 'pending' | 'running' | 'completed' | 'failed'
+export type AnalysisStatus = 'waiting' | 'pending' | 'running' | 'completed' | 'failed' | 'aborted'
 
 // -- Auth -----------------------------------------------------------
 

@@ -41,7 +41,7 @@ vi.mock('@/lib/errorCapture', () => ({
 // Mock cookies
 const mockGetGithubToken = vi.fn(() => 'ghp_test_token')
 vi.mock('@/lib/cookies', () => ({
-  getGithubToken: (...args: unknown[]) => mockGetGithubToken(...args),
+  getGithubToken: () => mockGetGithubToken(),
 }))
 
 import { api, getRecentFailedCalls } from '@/lib/api'

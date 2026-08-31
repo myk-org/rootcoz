@@ -727,15 +727,15 @@ wheels = [
 
 [[package]]
 name = "pi-sidecar-client"
-version = "4.3.4"
+version = "4.3.5"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "httpx" },
     { name = "python-simple-logger" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/85/48/bb3403956dddcd22d02842f3c47cc726aa4517b63ab4b2fc80f97723ded9/pi_sidecar_client-4.3.4.tar.gz", hash = "sha256:1004ea7d66dc973cb2ee85c46ca6c20a2ce28d76a895f4937b65398e7faf5bc3", size = 13246, upload-time = "2026-08-19T08:23:29.665Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/d6/fc/ee456b96ab72abda08b600ec311776c5067e23fa17ae9bbbae67c898d442/pi_sidecar_client-4.3.5.tar.gz", hash = "sha256:ba42560b9234ae536795cb9df1c60122ef387bff4ea167ba9cd6406d47c805cf", size = 13234, upload-time = "2026-08-24T17:59:43.263Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/5d/d4/b607d4763da744ca556f49db72893cc9dd72ddb9be24e8336450b55a3de5/pi_sidecar_client-4.3.4-py3-none-any.whl", hash = "sha256:935119c4e545f1c1d11da28ebd42b2408d14c27e14f5f87c3d13fbd79fce68fd", size = 11576, upload-time = "2026-08-19T08:23:28.298Z" },
+    { url = "https://files.pythonhosted.org/packages/ba/82/650a65ab23ec5efb63380aef1ff1df9c929039c431abf3c42cbada7279f2/pi_sidecar_client-4.3.5-py3-none-any.whl", hash = "sha256:1f49c9959c6e81e8eeb4eddcef47756755a65a909552bbdc28e579482ce6d299", size = 11577, upload-time = "2026-08-24T17:59:42.252Z" },
 ]
 
 [[package]]
@@ -1151,7 +1151,7 @@ wheels = [
 
 [[package]]
 name = "rootcoz"
-version = "4.4.4"
+version = "4.4.5"
 source = { editable = "." }
 dependencies = [
     { name = "aiosqlite" },
@@ -1192,7 +1192,7 @@ requires-dist = [
     { name = "fastapi" },
     { name = "gitpython" },
     { name = "httpx" },
-    { name = "pi-sidecar-client", specifier = ">=4.2.0" },
+    { name = "pi-sidecar-client", specifier = ">=4.3.5" },
     { name = "pydantic-settings" },
     { name = "pytest", marker = "extra == 'tests'" },
     { name = "pytest-asyncio", marker = "extra == 'tests'" },

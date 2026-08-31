@@ -12,23 +12,24 @@ interface JobInfo {
   job_name: string
   build_number?: number | string
   build_id?: string
-  request_params?: Record<string, unknown>
   summary: string
   ai_provider: string
   ai_model: string
   request_params?: {
     ai_provider?: string
     ai_model?: string
+    [key: string]: unknown
   }
 }
 
 /** Provider/model used for the job analysis — top-level result, then request_params. */
 function analysisAiDefaults(job: JobInfo | null): { provider: string; model: string } {
   if (!job) return { provider: '', model: '' }
-  const provider = normalizeProvider(
-    job.ai_provider || job.request_params?.ai_provider || '',
-  )
-  const model = (job.ai_model || job.request_params?.ai_model || '').trim()
+  const rp = job.request_params
+  const rpProvider = typeof rp?.ai_provider === 'string' ? rp.ai_provider : ''
+  const rpModel = typeof rp?.ai_model === 'string' ? rp.ai_model : ''
+  const provider = normalizeProvider(job.ai_provider || rpProvider || '')
+  const model = (job.ai_model || rpModel || '').trim()
   return { provider, model }
 }
 

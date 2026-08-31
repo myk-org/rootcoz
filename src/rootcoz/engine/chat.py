@@ -8,6 +8,7 @@ import base64
 import shutil
 import tempfile
 from collections.abc import Callable
+from contextlib import ExitStack
 from pathlib import Path
 from typing import Any
 
@@ -20,6 +21,11 @@ from rootcoz.ai_client import (
     call_ai,
     map_provider_model_for_sidecar,
     normalize_provider,
+)
+from rootcoz.engine.http_mcp import (
+    _workspace_install_lock,
+    cleanup_http_tools_mcp,
+    install_http_tools_mcp_best_effort_async,
 )
 from rootcoz.storage import AI_SYSTEM_USERNAME
 
@@ -423,6 +429,25 @@ def build_analysis_history_tools(
             },
         },
     ]
+
+
+def analysis_http_tools(
+    *,
+    server_url: str,
+    job_id: str,
+    auth_header: str,
+) -> list[dict[str, Any]]:
+    """HTTP history tools for analysis when server, job, and Bearer token exist."""
+    if not (server_url and job_id and auth_header):
+        return []
+    token = auth_header.removeprefix("Bearer ").strip()
+    if not token:
+        return []
+    return build_analysis_history_tools(
+        server_url=server_url,
+        auth_token=token,
+        job_id=job_id,
+    )
 
 
 def build_chat_custom_tools(
@@ -878,20 +903,37 @@ def cleanup_chat_repos(job_id: str, username: str = "") -> None:
     logger.info(f"Cleaned up chat repos for job {job_id} (kept sessions)")
 
 
+def _chat_mcp_lock_targets(workspace: Path) -> list[Path]:
+    """Job workspace plus nested per-user dirs that have their own MCP dumps."""
+    targets: list[Path] = []
+    if workspace.exists() and workspace.is_dir():
+        for child in workspace.iterdir():
+            if child.is_dir() and not child.is_symlink():
+                targets.append(child)
+    targets.append(workspace)
+    return list(dict.fromkeys(targets))
+
+
 def cleanup_chat_workspace(job_id: str, username: str = "") -> None:
     """Delete the entire chat workspace including sessions."""
     workspace = get_chat_workspace(job_id, username)
-    if not workspace.exists():
-        return
-
-    # Resolve symlinks before removing workspace tree — symlinked
-    # artifact dirs live outside the workspace and won't be cleaned
-    # by shutil.rmtree (which removes the symlink, not its target).
-    for item in workspace.iterdir():
-        if item.is_symlink():
-            _safe_remove_symlink(item)
-
-    shutil.rmtree(workspace, ignore_errors=True)
+    targets = _chat_mcp_lock_targets(workspace)
+    # Hold each workspace's MCP install lock for the whole rmtree + dump
+    # unlink so an in-flight installer cannot recreate credentials after
+    # the job (or nested user dir) was removed.
+    with ExitStack() as stack:
+        for target in sorted(targets, key=lambda p: str(p)):
+            stack.enter_context(_workspace_install_lock(target))
+        if workspace.exists():
+            # Resolve symlinks before removing workspace tree — symlinked
+            # artifact dirs live outside the workspace and won't be cleaned
+            # by shutil.rmtree (which removes the symlink, not its target).
+            for item in workspace.iterdir():
+                if item.is_symlink():
+                    _safe_remove_symlink(item)
+            shutil.rmtree(workspace, ignore_errors=True)
+        for target in targets:
+            cleanup_http_tools_mcp(target)
     logger.info(f"Deleted chat workspace for job {job_id}")
 
 
@@ -1141,6 +1183,7 @@ async def _create_chat_session(
             create_kwargs["custom_tools"] = custom_tools
         if restrict_tools:
             create_kwargs["tools"] = list(CHAT_BUILTIN_TOOLS)
+        await install_http_tools_mcp_best_effort_async(repo_path, custom_tools or [])
         session_id = await client.create_session(**create_kwargs)
         logger.info("%s: session created: %s", log_prefix, session_id)
         return session_id
@@ -1215,6 +1258,7 @@ async def _chat_with_ai_impl(
     log_prefix: str = "Chat",
     request_id: str = "",
     call_type: str = "chat",
+    install_mcp: bool = True,
 ) -> tuple[bool, str, str | None]:
     """Shared AI chat implementation used by both job and admin chat."""
     logger.info(
@@ -1250,6 +1294,8 @@ async def _chat_with_ai_impl(
         call_kwargs["custom_tools"] = custom_tools
     if not session_id and restrict_tools:
         call_kwargs["tools"] = list(CHAT_BUILTIN_TOOLS)
+    if install_mcp:
+        await install_http_tools_mcp_best_effort_async(repo_path, custom_tools or [])
     result = await call_ai(prompt, **call_kwargs)
 
     # If session was lost, retry with fresh session
@@ -1275,6 +1321,10 @@ async def _chat_with_ai_impl(
             retry_kwargs["custom_tools"] = custom_tools
         if restrict_tools:
             retry_kwargs["tools"] = list(CHAT_BUILTIN_TOOLS)
+        if install_mcp:
+            await install_http_tools_mcp_best_effort_async(
+                repo_path, custom_tools or []
+            )
         result = await call_ai(prompt, **retry_kwargs)
 
     await result.record_usage(
@@ -1307,6 +1357,7 @@ async def chat_with_ai(
     custom_tools: list[dict[str, Any]] | None = None,
     repos_available: bool = False,
     ci_build_data_available: bool = False,
+    install_mcp: bool = True,
 ) -> tuple[bool, str, str | None]:
     """Send a chat message and get an AI response via the sidecar."""
 
@@ -1334,6 +1385,7 @@ async def chat_with_ai(
         log_prefix=f"Chat(job={job_id})",
         request_id=job_id,
         call_type="chat",
+        install_mcp=install_mcp,
     )
 
 

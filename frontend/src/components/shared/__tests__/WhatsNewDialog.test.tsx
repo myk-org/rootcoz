@@ -19,12 +19,15 @@ vi.mock('@/lib/api', () => ({
   },
 }))
 
+import { api } from '@/lib/api'
+
+const mockApiGet = api.get as unknown as ReturnType<typeof vi.fn>
+
 describe('WhatsNewDialog', () => {
-  beforeEach(async () => {
+  beforeEach(() => {
     localStorage.clear()
     vi.clearAllMocks()
-    const { api } = vi.mocked(await import('@/lib/api'))
-    api.get.mockResolvedValue(mockRelease)
+    mockApiGet.mockResolvedValue(mockRelease)
   })
 
   it('shows the dialog when version has not been seen', async () => {

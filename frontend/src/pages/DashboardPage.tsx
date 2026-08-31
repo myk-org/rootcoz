@@ -112,7 +112,7 @@ function getJobDisplayName(job: DashboardJob | null | undefined): string {
 
 export function DashboardPage() {
   const navigate = useNavigate()
-  const { isAdmin, isOperator, role, username } = useAuth()
+  const { isAdmin, isOperator, username } = useAuth()
   const canDelete = isOperator
   const [jobs, setJobs] = useState<DashboardJobWithMetadata[]>([])
   const [totalJobs, setTotalJobs] = useState(0)
@@ -400,7 +400,6 @@ export function DashboardPage() {
   const safePage = Math.min(page, totalPages)
   const pageJobs = sorted
 
-  const pageJobIds = useMemo(() => pageJobs.map(j => j.job_id), [pageJobs])
   const deletablePageJobIds = useMemo(() => pageJobs.filter(j => canDeleteJob(j)).map(j => j.job_id), [pageJobs, isAdmin, username, canDelete])
   const allPageSelected = deletablePageJobIds.length > 0 && deletablePageJobIds.every(id => selectedIds.has(id))
   const somePageSelected = deletablePageJobIds.some(id => selectedIds.has(id))

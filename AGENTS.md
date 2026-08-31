@@ -97,6 +97,9 @@ src/rootcoz/
     chat_workspace.py       # CI-source chat workspace population dispatcher
     prow_validation.py      # Re-export shim of rootcoz.prow_validation for plugin imports
     registry.py             # CI source plugin registry: analysis_type → CISource class mapping
+  exporters/                # Exporter plugins (push results to external systems)
+    base.py                 # Exporter ABC, ExportContext, ExporterResult
+    reportportal.py         # Report Portal exporter: ReportPortalClient
   prow_validation.py        # Canonical Prow validators (+ URL helper re-exports for compatibility)
   url_utils.py              # Cross-cutting HTTP(S) URL sanitization (strip userinfo, href)
   main.py                   # FastAPI app, unified POST /analyze endpoint, background tasks
@@ -110,12 +113,13 @@ src/rootcoz/
   ai_client.py              # AI provider constants and usage recording setup
   sidecar-helper/            # Pi SDK sidecar service (Node.js/TypeScript)
     src/server.ts           # Thin wrapper calling @myk-org/pi-sidecar startSidecar()
+    src/http-tools-mcp.ts   # Stdio MCP server wrapping HTTP custom tools for CLI/acpx
   cli/                      # CLI client (rootcoz command)
   peer_analysis.py          # Multi-AI peer debate loop
   ...                       # Other modules (jira, github_issues, monitoring, etc.)
 ```
 
-**Dependency direction:** `main` → `sources/` + `engine/`. `sources/` → `engine/`. `engine/` does NOT import `sources/`. `engine/core.py` has a lazy import of `peer_analysis` (only when `peer_ai_configs` is set). Adding a new CI plugin means adding a file under `sources/` and registering it in `sources/registry.py` — `engine/core.py` stays untouched.
+**Dependency direction:** `main` → `sources/` + `engine/` + `exporters/`. `sources/` → `engine/`. `engine/` does NOT import `sources/` or `exporters/`. `engine/core.py` has a lazy import of `peer_analysis` (only when `peer_ai_configs` is set). Adding a new CI plugin means adding a file under `sources/` and registering it in `sources/registry.py`. Adding a new exporter means adding a file under `exporters/` and updating `_create_exporter()` in `main.py`. `engine/core.py` stays untouched.
 
 ### Frontend Patterns
 
@@ -214,7 +218,7 @@ prompt = f"Here is the data: {content}"
 AI chat sessions MUST use restricted tool sets — **never give bash access**.
 
 - **Allowed builtin tools**: `["read", "ls", "find", "grep", "subagent"]` — filesystem browsing + delegating to project-provided agents
-- **Data access**: Use HTTP-backed custom tools via pi-sidecar (pi-sidecar ≥4.2.0)
+- **Data access**: Use HTTP-backed custom tools via pi-sidecar (pi-sidecar ≥4.3.4). CLI/acpx nested agents do not inherit those tools — rootcoz writes the same path-specific HTTP tool list as cwd MCP (`.cursor/mcp.json`, `.mcp.json`, `.gemini/settings.json`) executed by `sidecar-helper` `http-tools-mcp.js`. Sidecar 4.3.4+ points nested CLI `--workspace` at the session cwd so those files load. These are runtime CLI discovery files, not `.rootcoz/` repo customization. Analysis builtins stay `read`/`ls`/`find`/`grep`; history HTTP tools are the existing analysis `custom_tools`, also advertised via MCP so CLI/acpx can call them. Empty or unusable tool lists remove the managed `rootcoz-http` entry and credential dump. Analysis, job chat, and admin chat each pass their existing builder output (Jira/GitHub only when credentials exist).
 - **Never**: `bash`, `exec`, `write`, `edit` — the AI must not execute arbitrary commands or modify files
 - Custom tools define exactly which API endpoints the AI can call — nothing else is reachable
 - Per-job chat tools: `get_job_result`, `get_job_comments`, `get_job_tests`, `search_jira`, `get_jira_issue`, `search_github_issues`, `get_github_issue` (conditional on user credentials)
@@ -274,9 +278,19 @@ When configured, searches Jira for existing bugs matching PRODUCT BUG failures:
 4. Only relevant matches are attached to the result
 5. Jira errors never crash the pipeline — all failures are swallowed gracefully
 
+### Exporter Plugin Architecture
+
+Exporters push analysis results to external systems. Each exporter implements the `Exporter` ABC in `exporters/base.py`.
+
+- **Generic push endpoint**: `POST /results/{job_id}/push/{plugin_name}` (operator+ role)
+- **Legacy endpoint**: `POST /results/{job_id}/push-reportportal` (backward compatible)
+- **Exporters list**: `GET /api/exporters` — lists available exporters with enabled status
+- **Auto-push**: When `AUTO_PUSH_EXPORTERS` is set and all failures are auto-reviewed, results are pushed to configured exporters
+- **CLI**: `rootcoz push --plugin <name>`, `rootcoz exporters`, `rootcoz push-reportportal` (backward compat)
+
 ### Report Portal Integration (Optional)
 
-When `ENABLE_REPORTPORTAL=true`, users can push test classifications back to Report Portal via the `push-reportportal` endpoint and CLI command.
+When `ENABLE_REPORTPORTAL=true`, users can push test classifications back to Report Portal via the `push-reportportal` endpoint, the generic `push --plugin reportportal` CLI command, or the generic push endpoint.
 
 ### Auto-Review
 
@@ -371,6 +385,7 @@ Exceptions (server-level only, no payload equivalent):
 - `RP_PUSH_ROOTCOZ_URL` — server-only toggle for including rootcoz analysis URL comment in Report Portal pushes (default: True)
 - `RP_PUSH_TRACKER_LINKS` — server-only toggle for including Jira/GitHub issue links as external system issues in Report Portal pushes (default: True)
 - `ENABLE_AUTO_REVIEW` — server capability toggle for auto-review of matching failures; when disabled, failures are never automatically marked as reviewed
+- `AUTO_PUSH_EXPORTERS` — server-only comma-separated list of exporter plugins to auto-push to when all failures are reviewed (e.g. `reportportal`); empty disables auto-push; requires `ENABLE_AUTO_REVIEW` to also be enabled
 - `ROOTCOZ_ENCRYPTION_KEY` — server-only secret for at-rest encryption AND HMAC secret for all API key hashes (admin and user); never expose via request payloads, CLI flags, or shared config files. **Rotating this key invalidates both encrypted data (tokens) and all stored API key hashes (admin and user)** — operators must re-issue all API keys after rotation. Stored sessions use plain SHA-256 hashing (no HMAC) and are NOT affected by key rotation.
 - `LOG_LEVEL` — server log verbosity
 - `PUBLIC_BASE_URL` — trusted server-only origin for building absolute links; never derive from request headers to prevent host-header injection

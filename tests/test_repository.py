@@ -138,15 +138,13 @@ class TestRepositoryManager:
         assert not path.exists()
 
     @patch("rootcoz.repository.Repo")
-    def test_clone_uses_jenkins_insight_prefix(self, _mock_repo: MagicMock) -> None:
-        """Test that cloned directories are under jenkins-insight base path."""
+    def test_clone_uses_rootcoz_temp_prefix(self, _mock_repo: MagicMock) -> None:
+        """Test that cloned directories are under the rootcoz temp base path."""
         manager = RepositoryManager()
 
         path = manager.clone("https://github.com/example/repo")
 
-        # The path should be under the jenkins-insight base directory
-        assert "jenkins-insight" in str(path)
-        assert path.parent.name == "jenkins-insight"
+        assert path.parent.name == "rootcoz"
 
         # Cleanup
         manager.cleanup()

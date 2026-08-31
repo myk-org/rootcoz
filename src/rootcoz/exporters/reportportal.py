@@ -6,19 +6,37 @@ classification results, analysis text, and Jira matches into RP launches.
 
 from __future__ import annotations
 
+import asyncio
+import json
 import os
 import threading
 import urllib.parse
 import warnings
-from typing import TYPE_CHECKING, Any, Literal, Self
+from typing import TYPE_CHECKING, Any, Literal
 
 import requests as _requests
 import urllib3
+from pydantic import ValidationError
 from reportportal_client import RPClient
 from simple_logger.logger import get_logger
 
+from rootcoz.exporters.base import ExportContext, Exporter, ExporterResult
+
 if TYPE_CHECKING:
     from rootcoz.models import FailureAnalysis
+
+# Exception types caught around each RP API call in ReportPortalClient.push().
+# OSError covers raw socket errors (builtin ConnectionError) and all
+# requests-level transport faults (RequestException is a subclass of OSError).
+# Machine-readable ExporterResult.details["error_type"] for corrupt stored failures.
+INVALID_STORED_FAILURES = "invalid_stored_failures"
+_RP_PUSH_ERRORS: tuple[type[Exception], ...] = (
+    OSError,
+    ValueError,
+    TypeError,
+    RuntimeError,
+    KeyError,
+)
 
 logger = get_logger(name=__name__, level=os.environ.get("LOG_LEVEL", "INFO"))
 _RPCLIENT_INIT_LOCK = threading.Lock()
@@ -47,6 +65,50 @@ def _noop_prefetch(self: Any) -> None:
 
 
 setattr(RPClient, _PREFETCH_ATTR, _noop_prefetch)
+
+
+def format_rp_error(exc: Exception, operation: str) -> tuple[str, str]:
+    """Build a short user-facing message and a detailed log message.
+
+    Returns:
+        Tuple of ``(user_message, log_detail)``.
+        *user_message* is short and suitable for API responses.
+        *log_detail* contains the full exception context for server logs.
+    """
+    detail = ""
+    rp_message = ""
+    status = ""
+    resp = getattr(exc, "response", None)
+    if resp is not None:
+        status = str(resp.status_code)
+        try:
+            rp_body = resp.json()
+            raw = rp_body.get("message") if isinstance(rp_body, dict) else None
+            # RP JSON "message" field — short, user-friendly
+            rp_message = raw if isinstance(raw, str) else ""
+            # Full response text — log only
+            detail = resp.text or ""
+        except (ValueError, TypeError, json.JSONDecodeError, AttributeError):
+            detail = resp.text or ""
+    else:
+        detail = str(exc) if str(exc) else ""
+
+    # User message: short — operation + status + RP message (if any)
+    if status:
+        user_msg = f"Error {operation} (HTTP {status})"
+        if rp_message:
+            user_msg += f": {rp_message}"
+    else:
+        user_msg = f"Error {operation}"
+
+    # Log message: full technical detail
+    log_msg = f"{type(exc).__name__} {operation}"
+    if status:
+        log_msg = f"{status} ({type(exc).__name__}) {operation}"
+    if detail:
+        log_msg += f": {detail}"
+
+    return user_msg, log_msg
 
 
 class AmbiguousLaunchError(Exception):
@@ -108,7 +170,7 @@ def _extract_bts_fields(url: str) -> tuple[str, str]:
     return hostname, ticket_id
 
 
-class ReportPortalClient:
+class ReportPortalClient(Exporter):
     """Client for pushing rootcoz classifications into Report Portal.
 
     Uses the ``reportportal-client`` package to communicate with the RP API.
@@ -123,7 +185,15 @@ class ReportPortalClient:
     """
 
     def __init__(
-        self, url: str, token: str, project: str, *, verify_ssl: bool = True
+        self,
+        url: str,
+        token: str,
+        project: str,
+        *,
+        verify_ssl: bool = True,
+        push_classifications: bool = True,
+        push_rootcoz_url: bool = True,
+        push_tracker_links: bool = True,
     ) -> None:
         # Build our own requests.Session for custom API calls instead of
         # relying on RPClient.session, which may not honour verify_ssl
@@ -148,12 +218,236 @@ class ReportPortalClient:
             raise
         finally:
             _RPCLIENT_INIT_LOCK.release()
+        self._push_classifications = push_classifications
+        self._push_rootcoz_url = push_rootcoz_url
+        self._push_tracker_links = push_tracker_links
 
-    def __enter__(self) -> Self:
-        return self
+    # -- Exporter ABC ---------------------------------------------------------
 
-    def __exit__(self, *args: object) -> None:
-        self.close()
+    NAME = "reportportal"
+    DISPLAY_NAME = "Report Portal"
+    needs_history_classifications = True
+    needs_tracked_in_links = True
+
+    @property
+    def name(self) -> str:
+        """Machine-readable exporter identifier."""
+        return self.NAME
+
+    @property
+    def display_name(self) -> str:
+        """Human-readable exporter name."""
+        return self.DISPLAY_NAME
+
+    @property
+    def is_enabled(self) -> bool:
+        """Whether this client instance is ready to use.
+
+        Always ``True`` for an instantiated client — construction requires
+        valid URL, token, and project.  Enablement gating is handled by
+        ``_create_exporter()`` which checks ``Settings.reportportal_enabled``
+        and ``PUBLIC_BASE_URL`` before constructing the client.
+        """
+        return True
+
+    #: Stable machine-readable code for corrupt stored failure payloads.
+    INVALID_STORED_FAILURES = INVALID_STORED_FAILURES
+
+    @staticmethod
+    def _failure_result(
+        message: str,
+        *,
+        launch_id: int | None = None,
+        error_type: str | None = None,
+    ) -> ExporterResult:
+        """Build a standard failure ExporterResult."""
+        details: dict[str, Any] = {
+            "pushed": 0,
+            "unmatched": [],
+            "errors": [message],
+            "launch_id": launch_id,
+        }
+        if error_type is not None:
+            details["error_type"] = error_type
+        return ExporterResult(
+            success=False,
+            message=message,
+            details=details,
+        )
+
+    async def push(self, context: ExportContext) -> ExporterResult:
+        """Push analysis results to Report Portal.
+
+        Finds the matching RP launch, matches failed items to rootcoz
+        failures, and pushes classifications with optional comments
+        and tracker links.
+        """
+        from rootcoz.models import FailureAnalysis
+
+        failures_data = context.failures
+        if not failures_data:
+            return self._failure_result("No failures to push to Report Portal.")
+
+        # Validate at least one push content toggle is enabled
+        if not any(
+            (
+                self._push_classifications,
+                self._push_rootcoz_url,
+                self._push_tracker_links,
+            )
+        ):
+            msg = (
+                "All Report Portal push content toggles are disabled. "
+                "Enable at least one of: rp_push_classifications, rp_push_rootcoz_url, rp_push_tracker_links."
+            )
+            return self._failure_result(msg)
+
+        jenkins_url = context.jenkins_url
+        job_name = context.job_name
+
+        logger.debug(
+            "RP push: searching for launch job='%s' #%s, jenkins_url='%s'",
+            job_name,
+            context.build_number,
+            jenkins_url,
+        )
+
+        try:
+            launch_id = await asyncio.to_thread(self.find_launch, job_name, jenkins_url)
+        except AmbiguousLaunchError as exc:
+            logger.warning("RP push: %s", exc)
+            msg = f"Ambiguous RP launch: found {exc.count} launches. Remove duplicate launches to disambiguate."
+            return self._failure_result(msg)
+        except _RP_PUSH_ERRORS as exc:
+            msg, log_msg = format_rp_error(exc, "searching RP launches")
+            logger.error(
+                "RP push failed: %s, job='%s' #%s, jenkins_url='%s'",
+                log_msg,
+                job_name,
+                context.build_number,
+                jenkins_url,
+            )
+            return self._failure_result(msg)
+
+        if launch_id is None:
+            msg = "No Report Portal launch found. Ensure the Jenkins build URL is in the RP launch description."
+            logger.error(
+                "RP push failed: %s, job='%s' #%s, jenkins_url='%s'",
+                msg,
+                job_name,
+                context.build_number,
+                jenkins_url,
+            )
+            return self._failure_result(msg)
+
+        try:
+            failed_items = await asyncio.to_thread(self.get_failed_items, launch_id)
+        except _RP_PUSH_ERRORS as exc:
+            msg, log_msg = format_rp_error(exc, "fetching failed items from RP")
+            logger.error(
+                "RP push failed: %s, job='%s' #%s, launch_id=%s",
+                log_msg,
+                job_name,
+                context.build_number,
+                launch_id,
+            )
+            return self._failure_result(msg, launch_id=launch_id)
+
+        if not failed_items:
+            logger.debug(
+                "RP push: no failed items in launch_id=%d for job='%s'",
+                launch_id,
+                job_name,
+            )
+            return self._failure_result(
+                "No failed test items found in RP launch.", launch_id=launch_id
+            )
+
+        # Build FailureAnalysis objects from stored result
+        try:
+            rcz_failures = [FailureAnalysis.model_validate(f) for f in failures_data]
+        except ValidationError as exc:
+            msg = f"Stored result contains invalid failure data: {exc.error_count()} validation error(s)"
+            logger.warning(
+                "RP push: %s, job='%s' #%s",
+                msg,
+                job_name,
+                context.build_number,
+            )
+            return self._failure_result(
+                msg,
+                launch_id=launch_id,
+                error_type=INVALID_STORED_FAILURES,
+            )
+
+        try:
+            matched = await asyncio.to_thread(
+                self.match_failures, failed_items, rcz_failures
+            )
+        except _RP_PUSH_ERRORS as exc:
+            msg, log_msg = format_rp_error(exc, "matching RP items to failures")
+            logger.error(
+                "RP push failed: %s, job='%s' #%s, launch_id=%s",
+                log_msg,
+                job_name,
+                context.build_number,
+                launch_id,
+            )
+            return self._failure_result(msg, launch_id=launch_id)
+
+        if not matched and failed_items and rcz_failures:
+            rp_names = [item.get("name", "") for item in failed_items]
+            rcz_names = [f.test_name for f in rcz_failures]
+            msg = f"No overlap between {len(failed_items)} RP item(s) and {len(rcz_failures)} rootcoz failure(s)."
+            log_detail = f"{msg} RP items: {', '.join(rp_names)}. rootcoz tests: {', '.join(rcz_names)}."
+            logger.error(
+                "RP push failed: %s, job='%s' #%s, launch_id=%s",
+                log_detail,
+                job_name,
+                context.build_number,
+                launch_id,
+            )
+            return self._failure_result(msg, launch_id=launch_id)
+
+        try:
+            push_result = await asyncio.to_thread(
+                self.push_classifications,
+                matched,
+                context.report_url,
+                context.history_classifications,
+                push_classifications=self._push_classifications,
+                push_rootcoz_url=self._push_rootcoz_url,
+                push_tracker_links=self._push_tracker_links,
+                tracked_in_links=context.tracked_in_links,
+                pushed_by=context.pushed_by,
+                reviewed_by=context.reviewed_by,
+            )
+        except _RP_PUSH_ERRORS as exc:
+            msg, log_msg = format_rp_error(exc, "pushing classifications to RP")
+            logger.error(
+                "RP push failed: %s, job='%s' #%s, launch_id=%s",
+                log_msg,
+                job_name,
+                context.build_number,
+                launch_id,
+            )
+            return self._failure_result(msg, launch_id=launch_id)
+
+        push_result["launch_id"] = launch_id
+        pushed = push_result.get("pushed", 0)
+        errors = push_result.get("errors", [])
+        success = pushed > 0 and not errors
+        message = (
+            f"Pushed {pushed} classification(s) to Report Portal"
+            if success
+            else (errors[0] if errors else "Push completed with no items")
+        )
+
+        return ExporterResult(
+            success=success,
+            message=message,
+            details=push_result,
+        )
 
     def _map_classification(
         self,

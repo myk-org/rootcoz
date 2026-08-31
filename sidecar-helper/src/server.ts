@@ -5,7 +5,7 @@
 // Clearing argv[1] falls through to `{ command: "pi" }`, but `pi` is not on
 // PATH inside the container unless entrypoint adds node_modules/.bin.
 import { createRequire } from "node:module";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -45,6 +45,53 @@ function resolvePiCli(): string {
 }
 
 process.argv[1] = resolvePiCli();
+
+// rootcoz requires pi-coding-agent >= 0.84.0 (http-tools MCP contract).
+// pi-sidecar's own MIN_PI_VERSION floor may be lower, so enforce ours here.
+const MIN_PI_VERSION = "0.84.0";
+
+function findNearestManifest(startDir: string): string {
+  // Walk up from a resolved file to the nearest package.json whose name is the
+  // pi coding agent. Plain fs reads are used on purpose: requiring
+  // "@earendil-works/pi-coding-agent/package.json" fails with
+  // ERR_PACKAGE_PATH_NOT_EXPORTED because the package's "exports" map does
+  // not expose "./package.json".
+  let dir = path.dirname(startDir);
+  while (dir !== path.dirname(dir)) {
+    const candidate = path.join(dir, "package.json");
+    if (existsSync(candidate)) {
+      try {
+        const manifest = JSON.parse(readFileSync(candidate, "utf8"));
+        if (manifest.name === "@earendil-works/pi-coding-agent") {
+          return candidate;
+        }
+      } catch {
+        // Unreadable/invalid manifest — keep walking up.
+      }
+    }
+    dir = path.dirname(dir);
+  }
+  throw new Error("no package.json for @earendil-works/pi-coding-agent found");
+}
+
+function assertPiVersion(): void {
+  // resolvePiCli() already located the installed pi CLI (now process.argv[1]).
+  // Walking up from that file sidesteps the package's "exports" map entirely:
+  // both "pi-coding-agent/package.json" and the bare specifier are refused
+  // under require() because the package is ESM-only (no CJS main exported).
+  const manifestPath = findNearestManifest(process.argv[1]);
+  const version: string = JSON.parse(readFileSync(manifestPath, "utf8")).version;
+  const [maj, min] = version.split(".").map(Number);
+  const [wantMaj, wantMin] = MIN_PI_VERSION.split(".").map(Number);
+  if (maj < wantMaj || (maj === wantMaj && min < wantMin)) {
+    throw new Error(
+      `pi-coding-agent ${version} is too old; rootcoz requires >=${MIN_PI_VERSION}`,
+    );
+  }
+  console.log(`[sidecar] pi-coding-agent ${version} >= ${MIN_PI_VERSION}: ok`);
+}
+
+assertPiVersion();
 
 import { startSidecar } from "@myk-org/pi-sidecar";
 

@@ -6,6 +6,13 @@ from collections.abc import Awaitable, Callable, Generator
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
+# pi_sidecar_client reads PI_SIDECAR_LOG_LEVEL at import time and passes the
+# raw value to logging.setLevel(); Python >=3.12 rejects lowercase level names
+# such as "debug". Normalize before that import runs.
+os.environ["PI_SIDECAR_LOG_LEVEL"] = (
+    os.environ.get("PI_SIDECAR_LOG_LEVEL", "INFO").upper() or "INFO"
+)
+
 import httpx
 import pytest
 from fastapi.testclient import TestClient

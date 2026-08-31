@@ -3631,6 +3631,113 @@ class TestPushRpCommand:
         )
 
 
+class TestPushCommand:
+    def test_push(self, mock_client):
+        mock_client.push_to_exporter.return_value = {
+            "pushed": 3,
+            "errors": [],
+            "message": "Pushed 3 item(s) to reportportal",
+        }
+        result = runner.invoke(app, ["push", "job-123", "--plugin", "reportportal"])
+        assert result.exit_code == 0
+        assert "Pushed 3 item(s) to reportportal" in result.output
+        mock_client.push_to_exporter.assert_called_once_with(
+            "job-123",
+            "reportportal",
+            child_job_name=None,
+            child_build_number=None,
+        )
+
+    def test_push_json(self, mock_client):
+        mock_client.push_to_exporter.return_value = {
+            "pushed": 3,
+            "errors": [],
+            "message": "Pushed 3 item(s)",
+        }
+        result = runner.invoke(app, ["--json", "push", "job-123", "-p", "reportportal"])
+        assert result.exit_code == 0
+        parsed = json.loads(result.output)
+        assert parsed["pushed"] == 3
+
+    def test_push_with_errors(self, mock_client):
+        mock_client.push_to_exporter.return_value = {
+            "pushed": 1,
+            "errors": ["Failed to update item 99"],
+            "message": "Pushed 1 item(s)",
+        }
+        result = runner.invoke(app, ["push", "job-123", "--plugin", "reportportal"])
+        assert result.exit_code == 0
+        assert "Errors: 1" in result.output
+        assert "Failed to update item 99" in result.output
+
+    def test_push_child_job_flags(self, mock_client):
+        mock_client.push_to_exporter.return_value = {
+            "pushed": 2,
+            "errors": [],
+            "message": "Pushed 2 item(s)",
+        }
+        result = runner.invoke(
+            app,
+            [
+                "push",
+                "job-123",
+                "--plugin",
+                "reportportal",
+                "--child-job-name",
+                "my-child",
+                "--child-build-number",
+                "42",
+            ],
+        )
+        assert result.exit_code == 0
+        mock_client.push_to_exporter.assert_called_once_with(
+            "job-123",
+            "reportportal",
+            child_job_name="my-child",
+            child_build_number=42,
+        )
+
+
+class TestExportersCommand:
+    def test_exporters(self, mock_client):
+        mock_client.list_exporters.return_value = [
+            {
+                "name": "reportportal",
+                "display_name": "Report Portal",
+                "enabled": True,
+            },
+            {
+                "name": "other",
+                "display_name": "Other",
+                "enabled": False,
+            },
+        ]
+        result = runner.invoke(app, ["exporters"])
+        assert result.exit_code == 0
+        assert "reportportal: Report Portal [enabled]" in result.output
+        assert "other: Other [disabled]" in result.output
+        mock_client.list_exporters.assert_called_once_with()
+
+    def test_exporters_empty(self, mock_client):
+        mock_client.list_exporters.return_value = []
+        result = runner.invoke(app, ["exporters"])
+        assert result.exit_code == 0
+        assert "No exporters available." in result.output
+
+    def test_exporters_json(self, mock_client):
+        mock_client.list_exporters.return_value = [
+            {
+                "name": "reportportal",
+                "display_name": "Report Portal",
+                "enabled": True,
+            }
+        ]
+        result = runner.invoke(app, ["--json", "exporters"])
+        assert result.exit_code == 0
+        parsed = json.loads(result.output)
+        assert parsed[0]["name"] == "reportportal"
+
+
 class TestAuthLoginCommand:
     def test_auth_login(self, mock_client):
         mock_client.login.return_value = {
@@ -3707,6 +3814,26 @@ class TestAuthWhoamiCommand:
         parsed = json.loads(result.output)
         assert parsed["username"] == "testuser"
         assert parsed["is_admin"] is False
+
+
+class TestAdminComponentVersionsCommand:
+    def test_component_versions(self, mock_client):
+        mock_client.admin_component_versions.return_value = {
+            "components": {"pi": "1.0.0", "acpx": None}
+        }
+        result = runner.invoke(app, ["admin", "component-versions"])
+        assert result.exit_code == 0
+        assert "pi: 1.0.0" in result.output
+        assert "acpx: not installed" in result.output
+
+    def test_component_versions_json(self, mock_client):
+        mock_client.admin_component_versions.return_value = {
+            "components": {"pi": "1.0.0"}
+        }
+        result = runner.invoke(app, ["--json", "admin", "component-versions"])
+        assert result.exit_code == 0
+        parsed = json.loads(result.output)
+        assert parsed["components"] == {"pi": "1.0.0"}
 
 
 class TestAdminUsersListCommand:

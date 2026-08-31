@@ -1213,6 +1213,14 @@ class ReportPortalPushResult(BaseModel):
     launch_id: int | None = Field(default=None, description="Report Portal launch ID")
 
 
+class ExporterInfo(BaseModel):
+    """Metadata for an available exporter plugin."""
+
+    name: str = Field(description="Machine-readable exporter identifier")
+    display_name: str = Field(description="Human-readable exporter name")
+    enabled: bool = Field(description="Whether this exporter is configured and ready")
+
+
 class _PushEndpointMixin(BaseModel):
     """Shared validation for Web Push endpoint URLs (HTTPS-only, length-bounded)."""
 

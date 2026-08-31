@@ -6109,6 +6109,16 @@ class TestAdminSettingsEndpoints:
         assert response.status_code == 400
         assert "Unknown settings" in response.json()["detail"]
 
+    def test_put_settings_server_only_rejected(self, test_client) -> None:
+        """PUT rejects server-only settings (env-only toggles)."""
+        response = test_client.put(
+            "/api/admin/settings",
+            json={"settings": {"auto_push_exporters": "reportportal"}},
+        )
+        assert response.status_code == 400
+        assert "Server-only" in response.json()["detail"]
+        assert "auto_push_exporters" in response.json()["detail"]
+
     def test_put_settings_empty_body(self, test_client) -> None:
         """PUT with no settings returns 400."""
         response = test_client.put(

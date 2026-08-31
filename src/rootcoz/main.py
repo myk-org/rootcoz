@@ -13,7 +13,14 @@ import threading
 import time as _time
 import uuid
 from collections import defaultdict
-from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine, Sequence
+from collections.abc import (
+    AsyncIterator,
+    Awaitable,
+    Callable,
+    Coroutine,
+    Iterable,
+    Sequence,
+)
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -25,6 +32,7 @@ import aiosqlite
 import httpx
 import uvicorn
 from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Query, Request
+from fastapi import Path as ApiPath
 from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import (
@@ -103,6 +111,12 @@ from rootcoz.engine.core import (
     set_progress_callback,
 )
 from rootcoz.error_messages import make_user_friendly_error
+from rootcoz.exporters.base import ExportContext, Exporter
+from rootcoz.exporters.reportportal import (
+    INVALID_STORED_FAILURES,
+    ReportPortalClient,
+    format_rp_error,
+)
 from rootcoz.feedback import (
     create_feedback_from_preview,
     generate_feedback_preview,
@@ -126,6 +140,7 @@ from rootcoz.models import (
     ClassifyTestRequest,
     CreateIssueRequest,
     CrossFailurePattern,
+    ExporterInfo,
     FailedTest,
     FailureAnalysis,
     FailureAnalysisResult,
@@ -153,11 +168,11 @@ from rootcoz.monitoring import (
     build_health_response,
     dispatch_alert,
     error_tracker,
+    get_component_versions,
     render_prometheus_metrics,
     validate_startup_config,
 )
 from rootcoz.notifications import send_mention_notifications
-from rootcoz.reportportal import AmbiguousLaunchError, ReportPortalClient
 from rootcoz.repository import (
     RepositoryManager,
     derive_test_repo_name,
@@ -253,6 +268,7 @@ _SERVER_ONLY_SETTINGS: frozenset[str] = frozenset(
         "enable_github_issues",
         "enable_reportportal",
         "enable_auto_review",
+        "auto_push_exporters",
         "metadata_rules_file",
         "public_base_url",
         "rp_push_classifications",
@@ -343,6 +359,7 @@ _SETTINGS_CATEGORIES: dict[str, list[str]] = {
         "max_wait_minutes",
         "metadata_rules_file",
         "enable_auto_review",  # runtime toggle, no restart required
+        "auto_push_exporters",  # runtime toggle, no restart required
     ],
     "Web Push": [
         "vapid_public_key",
@@ -2405,8 +2422,8 @@ async def _auto_review_matching_failures(
     marks the failure as reviewed with username=AI_SYSTEM_USERNAME and adds an
     explanatory comment.
 
-    If all failures end up reviewed, triggers Report Portal push when
-    ENABLE_REPORTPORTAL is enabled and configured.
+    If all failures end up reviewed, pushes to exporters configured in
+    AUTO_PUSH_EXPORTERS.
 
     Args:
         job_id: Current analysis job ID.
@@ -2446,27 +2463,71 @@ async def _auto_review_matching_failures(
         )
         notify_job_status_changed(job_id)
 
-        # Check if ALL failures are now reviewed → auto-push to Report Portal
-        if settings.reportportal_enabled and total_failures > 0:
+        # Check if ALL failures are now reviewed → auto-push to configured exporters
+        _raw_names = [
+            _sanitize_control_chars(n.strip())
+            for n in (settings.auto_push_exporters or "").split(",")
+        ]
+        auto_push_names = list(
+            dict.fromkeys(n for n in _raw_names if n and n in _EXPORTER_CLASSES)
+        )
+        if auto_push_names and total_failures > 0:
             reviews = await storage.get_reviews_for_job(job_id)
             reviewed_count = sum(1 for r in reviews.values() if r.get("reviewed"))
             if reviewed_count >= total_failures:
-                logger.info(
-                    "All failures auto-reviewed for job %s, pushing classifications "
-                    "to Report Portal (pushed_by=%s)",
-                    job_id,
-                    AI_SYSTEM_USERNAME,
+                context = await _build_export_context(
+                    job_id=job_id,
+                    result_data=result_data,
+                    settings=settings,
+                    pushed_by=AI_SYSTEM_USERNAME,
+                    fetch_history=_exporter_needs_history_classifications(
+                        auto_push_names
+                    ),
+                    fetch_tracked_in_links=_exporter_needs_tracked_in_links(
+                        auto_push_names, settings
+                    ),
                 )
-                try:
-                    await _execute_rp_push(
-                        job_id, result_data, settings, pushed_by=AI_SYSTEM_USERNAME
-                    )
-                except Exception:
-                    logger.warning(
-                        "Auto-push to Report Portal failed for job_id=%s",
+                for plugin_name in auto_push_names:
+                    logger.info(
+                        "All failures auto-reviewed for job %s, pushing to "
+                        "'%s' (pushed_by=%s)",
                         job_id,
-                        exc_info=True,
+                        plugin_name,
+                        AI_SYSTEM_USERNAME,
                     )
+                    try:
+                        exporter = _create_exporter(plugin_name, settings)
+                    except (
+                        ValueError,
+                        TimeoutError,
+                        OSError,
+                        TypeError,
+                        RuntimeError,
+                    ) as exc:
+                        logger.warning(
+                            "Auto-push skipped for exporter '%s', job_id=%s: %s",
+                            plugin_name,
+                            job_id,
+                            exc,
+                        )
+                        continue
+                    try:
+                        with exporter:
+                            result = await exporter.push(context)
+                        if not result.success:
+                            logger.warning(
+                                "Auto-push to '%s' returned failure for job_id=%s: %s",
+                                plugin_name,
+                                job_id,
+                                result.message,
+                            )
+                    except Exception:
+                        logger.warning(
+                            "Auto-push to '%s' failed for job_id=%s",
+                            plugin_name,
+                            job_id,
+                            exc_info=True,
+                        )
 
 
 async def _auto_review_child_failures(
@@ -5964,7 +6025,31 @@ def _jira_issue_creation_enabled(settings: Settings) -> bool:
     return settings.enable_jira_issues is not False
 
 
-def _build_capabilities(settings: Settings) -> dict[str, bool | str]:
+def _rp_has_push_content(settings: Settings) -> bool:
+    """True when at least one Report Portal push content toggle is enabled."""
+    rp = settings.rp
+    return bool(rp.push_classifications or rp.push_rootcoz_url or rp.push_tracker_links)
+
+
+def _available_exporters(settings: Settings) -> list[ExporterInfo]:
+    """Build the list of available exporter plugins with their status."""
+    rp_enabled = settings.reportportal_enabled
+    if rp_enabled and settings.rp.push_rootcoz_url and not _extract_base_url():
+        rp_enabled = False
+    if rp_enabled and not _rp_has_push_content(settings):
+        # Match ReportPortalClient.push() readiness — avoid advertising a
+        # plugin that will hard-fail every push due to all toggles off.
+        rp_enabled = False
+    return [
+        ExporterInfo(
+            name=ReportPortalClient.NAME,
+            display_name=ReportPortalClient.DISPLAY_NAME,
+            enabled=rp_enabled,
+        ),
+    ]
+
+
+def _build_capabilities(settings: Settings) -> dict[str, Any]:
     """Build the capabilities dict for API responses."""
     return {
         "github_issues_enabled": settings.enable_github_issues is not False,
@@ -5979,6 +6064,7 @@ def _build_capabilities(settings: Settings) -> dict[str, bool | str]:
         "server_jira_email": bool(settings.jira_email),
         "server_jira_project_key": settings.jira_project_key or "",
         "reportportal": settings.reportportal_enabled,
+        "exporters": _available_exporters(settings),
         "reportportal_project": settings.reportportal_project or "",
         "feedback_enabled": settings.feedback_enabled
         and bool(settings.ai_provider)
@@ -6437,6 +6523,7 @@ async def push_to_reportportal(
     Finds the matching RP launch, matches failed items to rootcoz failures,
     and updates each item's defect type and comment.
     """
+    _require_operator(request)
     _check_allow_list(request)
     username = getattr(request.state, "username", "")
     # Sanitize control characters to prevent log forging (trusted-proxy
@@ -6464,9 +6551,98 @@ async def push_to_reportportal(
             child_build_number=child_build_number,
             pushed_by=safe_username,
         )
+        if push_result.get("error_type") == INVALID_STORED_FAILURES:
+            errors = push_result.get("errors") or []
+            detail = errors[0] if errors else push_result.get("message", "")
+            raise HTTPException(
+                status_code=422, detail=detail or "Invalid stored failures"
+            )
         return push_result
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post(
+    "/results/{job_id}/push/{plugin_name}",
+    operation_id="pushToExporter",
+)
+async def push_to_exporter(
+    job_id: str,
+    request: Request,
+    plugin_name: str = ApiPath(pattern=r"^[a-z][a-z0-9_-]{0,49}$"),
+    child_job_name: str | None = Query(
+        default=None, description="Child job name for pipeline child push"
+    ),
+    child_build_number: int | None = Query(
+        default=None, description="Child build number for pipeline child push"
+    ),
+    settings: Settings = _SETTINGS_DEP,
+    _job: None = Depends(_bind_job_id),
+) -> dict[str, Any]:
+    """Push analysis results to an exporter plugin.
+
+    Generic endpoint that dispatches to the named exporter.
+    Requires operator role.
+    """
+    _require_operator(request)
+    _check_allow_list(request)
+    username = getattr(request.state, "username", "")
+    safe_username = _sanitize_control_chars(username)
+    logger.info(
+        "Exporter push requested by '%s' for job %s, plugin=%s",
+        safe_username,
+        job_id,
+        plugin_name,
+    )
+
+    stored = await get_result(job_id)
+    if not stored or not stored.get("result"):
+        raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
+
+    result_data = stored["result"]
+
+    try:
+        context = await _build_export_context(
+            job_id=job_id,
+            result_data=result_data,
+            settings=settings,
+            child_job_name=child_job_name,
+            child_build_number=child_build_number,
+            pushed_by=safe_username,
+            fetch_history=_exporter_needs_history_classifications([plugin_name]),
+            fetch_tracked_in_links=_exporter_needs_tracked_in_links(
+                [plugin_name], settings
+            ),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    try:
+        exporter = _create_exporter(plugin_name, settings)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except (TimeoutError, OSError, TypeError, RuntimeError) as exc:
+        # Constructor/transport failures are server-side, not bad client input.
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    try:
+        with exporter:
+            result = await exporter.push(context)
+    except Exception as exc:
+        # Guard against unexpected exporter failures leaking as raw 500s.
+        # Expected error modes are already returned inside push() as a
+        # failed ExporterResult; this catches genuinely unforeseen faults.
+        logger.exception(
+            "Exporter '%s' push raised unexpectedly for job %s",
+            plugin_name,
+            job_id,
+        )
+        raise HTTPException(
+            status_code=502,
+            detail=f"Exporter '{plugin_name}' failed unexpectedly",
+        ) from exc
+
+    return {**result.details, "success": result.success, "message": result.message}
 
 
 def _rp_push_error_result(
@@ -6525,79 +6701,52 @@ def _log_and_return_rp_error(
 def _rp_error_message(exc: Exception, operation: str) -> tuple[str, str]:
     """Build a short user-facing message and a detailed log message.
 
-    Returns:
-        Tuple of ``(user_message, log_detail)``.
-        *user_message* is short and suitable for API responses.
-        *log_detail* contains the full exception context for server logs.
+    Thin wrapper around :func:`rootcoz.exporters.reportportal.format_rp_error`
+    kept for call-sites and unit tests in ``main``.
     """
-    detail = ""
-    rp_message = ""
-    status = ""
-    resp = getattr(exc, "response", None)
-    if resp is not None:
-        status = str(resp.status_code)
-        try:
-            rp_body = resp.json()
-            raw = rp_body.get("message") if isinstance(rp_body, dict) else None
-            # RP JSON "message" field — short, user-friendly
-            rp_message = raw if isinstance(raw, str) else ""
-            # Full response text — log only
-            detail = resp.text or ""
-        except (ValueError, TypeError, json.JSONDecodeError, AttributeError):
-            detail = resp.text or ""
-    else:
-        detail = str(exc) if str(exc) else ""
-
-    # User message: short — operation + status + RP message (if any)
-    if status:
-        user_msg = f"Error {operation} (HTTP {status})"
-        if rp_message:
-            user_msg += f": {rp_message}"
-    else:
-        user_msg = f"Error {operation}"
-
-    # Log message: full technical detail
-    log_msg = f"{type(exc).__name__} {operation}"
-    if status:
-        log_msg = f"{status} ({type(exc).__name__}) {operation}"
-    if detail:
-        log_msg += f": {detail}"
-
-    return user_msg, log_msg
+    return format_rp_error(exc, operation)
 
 
-async def _execute_rp_push(
+async def _build_export_context(
+    *,
     job_id: str,
     result_data: dict[str, Any],
     settings: Settings,
-    *,
     child_job_name: str | None = None,
     child_build_number: int | None = None,
     pushed_by: str = "",
-) -> dict[str, Any]:
-    """Shared logic for pushing classifications to Report Portal.
+    fetch_history: bool = True,
+    fetch_tracked_in_links: bool = True,
+) -> ExportContext:
+    """Build an ExportContext from stored result data.
 
-    Creates a ReportPortalClient, finds the matching launch, matches
-    failed items to rootcoz failures, and pushes classifications.
+    Handles child job scoping, report URL, history classifications,
+    tracked-in links, and reviewer resolution.
 
     Args:
         job_id: The analysis job identifier.
         result_data: Stored result dict containing failures and Jenkins metadata.
-        settings: Application settings with Report Portal configuration.
-        child_job_name: Optional child job name for scoping push to a child.
-        child_build_number: Optional child build number (required with child_job_name).
+        settings: Application settings.
+        child_job_name: Optional child job name for scoped push.
+        child_build_number: Optional child build number.
         pushed_by: Username of the user who triggered the push.
+        fetch_history: When ``False``, skip the per-test history classification
+            lookups (they hit the DB once per unique test name).  Set to
+            ``False`` when no target exporter reads
+            ``ExportContext.history_classifications`` — see
+            :func:`_exporter_needs_history_classifications`.
+        fetch_tracked_in_links: When ``False``, skip
+            ``storage.get_tracked_in_for_scope``.  Set to ``False`` when no
+            target exporter will read ``ExportContext.tracked_in_links`` —
+            see :func:`_exporter_needs_tracked_in_links`.
 
     Returns:
-        Dict with keys: ``pushed``, ``unmatched``, ``errors``, ``launch_id``.
+        Populated ExportContext.
+
+    Raises:
+        ValueError: Invalid child job parameters.
     """
-    rp = settings.rp
     base_url = _extract_base_url()
-    if rp.push_rootcoz_url and not base_url:
-        raise ValueError(
-            "PUBLIC_BASE_URL must be set to push rootcoz URL to Report Portal"
-            " (relative URLs resolve against the RP domain)"
-        )
     report_url = f"{base_url}/results/{job_id}" if base_url else ""
 
     # Scope to child job when requested
@@ -6615,212 +6764,53 @@ async def _execute_rp_push(
             raise ValueError(
                 f"Child job '{child_job_name}' #{child_build_number} not found"
             )
-        # Use child job's data for RP push
         result_data = child
-        # Build anchor fragment for the child section (URL-encoded job name)
         anchor = f"child-{_urlquote(child_job_name, safe='')}-{child_build_number}"
         report_url = f"{report_url}#{anchor}"
     elif child_build_number is not None:
         raise ValueError("child_build_number requires child_job_name to be set")
 
     failures_data = result_data.get("failures", [])
-    if not failures_data:
-        return _rp_push_error_result(
-            "No failures to push to Report Portal.",
-        )
 
-    # Validate at least one push content toggle is enabled
-    if not any(
-        (
-            rp.push_classifications,
-            rp.push_rootcoz_url,
-            rp.push_tracker_links,
-        )
-    ):
-        return _rp_push_error_result(
-            "All Report Portal push content toggles are disabled. "
-            "Enable at least one of: rp_push_classifications, rp_push_rootcoz_url, rp_push_tracker_links.",
-        )
+    # Build history classifications, tracked-in links, and reviewer data
+    history_classifications: dict[str, str] = {}
+    tracked_in_data: dict[str, list[dict[str, Any]]] = {}
+    reviewed_by: dict[str, str] = {}
 
-    # Called only when reportportal_enabled is True, which guarantees these
-    # fields are set (see Settings.reportportal_enabled property).  Explicit
-    # checks narrow the Optional types for mypy and survive python -O.
-    if rp.url is None:
-        raise RuntimeError("reportportal_url is required when Report Portal is enabled")
-    if rp.api_token is None or not rp.api_token.get_secret_value():
-        raise RuntimeError(
-            "reportportal_api_token is required when Report Portal is enabled"
-        )
-    if rp.project is None:
-        raise RuntimeError(
-            "reportportal_project is required when Report Portal is enabled"
-        )
+    if failures_data:
+        if fetch_history:
+            seen: set[str] = set()
+            test_names: list[str] = []
+            for f in failures_data:
+                if not isinstance(f, dict):
+                    continue
+                tn = f.get("test_name", "")
+                if tn and tn not in seen:
+                    seen.add(tn)
+                    test_names.append(tn)
 
-    try:
-        rp_client_ctx = ReportPortalClient(
-            url=rp.url,
-            token=rp.api_token.get_secret_value(),
-            project=rp.project,
-            verify_ssl=rp.verify_ssl,
-        )
-    except (TimeoutError, OSError, ValueError, TypeError, RuntimeError) as exc:
-        user_msg, log_msg = _rp_error_message(
-            exc,
-            "connecting to Report Portal",
-        )
-        # Include the RP host in the log message (not user-facing) so
-        # operators can identify which RP instance failed.
-        # Strip any embedded credentials but keep host:port.
-        # Use netloc with userinfo stripping — avoids ValueError from
-        # urlparse().port on malformed ports.
-        try:
-            rp_host = (
-                urlparse(rp.url).netloc.rsplit("@", 1)[-1] or "unknown"
-                if rp.url
-                else "unknown"
+            scope_name = child_job_name or ""
+            scope_build = child_build_number or 0
+            classification_results = await run_parallel_with_limit(
+                [
+                    get_history_classification(job_id, name, scope_name, scope_build)
+                    for name in test_names
+                ]
             )
-        except (ValueError, TypeError, AttributeError):
-            rp_host = "unknown"
-        log_msg = f"{log_msg}, reportportal_host='{rp_host}'"
-        return _log_and_return_rp_error(user_msg, log_msg=log_msg)
+            for name, result in zip(test_names, classification_results, strict=True):
+                if isinstance(result, BaseException):
+                    logger.debug(
+                        "Export: failed to fetch history classification"
+                        " for test='%s', job_id='%s'",
+                        name,
+                        job_id,
+                        exc_info=result,
+                    )
+                    continue
+                if result:
+                    history_classifications[name] = result
 
-    with rp_client_ctx as rp_client:
-        jenkins_url = result_data.get("jenkins_url", "")
-        job_name = result_data.get("job_name", "")
-        build_number = resolve_display_build_id(result_data)
-
-        logger.debug(
-            "RP push: searching for launch job='%s' #%s, jenkins_url='%s'",
-            job_name,
-            build_number,
-            jenkins_url,
-        )
-        try:
-            launch_id = await asyncio.to_thread(
-                rp_client.find_launch, job_name, jenkins_url
-            )
-        except AmbiguousLaunchError as exc:
-            logger.warning(
-                "RP push: %s",
-                exc,
-            )
-            return _rp_push_error_result(
-                f"Ambiguous RP launch: found {exc.count} launches."
-                f" Remove duplicate launches to disambiguate."
-            )
-        except (OSError, ValueError, TypeError, RuntimeError, KeyError) as exc:
-            user_msg, log_msg = _rp_error_message(exc, "searching RP launches")
-            return _log_and_return_rp_error(
-                user_msg,
-                log_msg=log_msg,
-                job_name=job_name,
-                build_number=build_number,
-                jenkins_url=jenkins_url,
-            )
-
-        if launch_id is None:
-            return _log_and_return_rp_error(
-                "No Report Portal launch found. "
-                "Ensure the Jenkins build URL is in the RP launch description.",
-                job_name=job_name,
-                build_number=build_number,
-                jenkins_url=jenkins_url,
-            )
-
-        try:
-            failed_items = await asyncio.to_thread(
-                rp_client.get_failed_items, launch_id
-            )
-        except (OSError, ValueError, TypeError, RuntimeError, KeyError) as exc:
-            user_msg, log_msg = _rp_error_message(exc, "fetching failed items from RP")
-            return _log_and_return_rp_error(
-                user_msg,
-                log_msg=log_msg,
-                job_name=job_name,
-                build_number=build_number,
-                launch_id=launch_id,
-            )
-        if not failed_items:
-            logger.debug(
-                "RP push: no failed items in launch_id=%d for job='%s'",
-                launch_id,
-                job_name,
-            )
-            return _rp_push_error_result(
-                "No failed test items found in RP launch.",
-                launch_id=launch_id,
-            )
-
-        # Build FailureAnalysis objects from stored result
-        try:
-            rcz_failures = [FailureAnalysis.model_validate(f) for f in failures_data]
-        except ValidationError as exc:
-            raise HTTPException(
-                status_code=422,
-                detail=f"Stored result contains invalid failure data: {exc.error_count()} validation error(s)",
-            ) from exc
-
-        try:
-            matched = await asyncio.to_thread(
-                rp_client.match_failures, failed_items, rcz_failures
-            )
-        except (OSError, ValueError, TypeError, RuntimeError, KeyError) as exc:
-            user_msg, log_msg = _rp_error_message(exc, "matching RP items to failures")
-            return _log_and_return_rp_error(
-                user_msg,
-                log_msg=log_msg,
-                job_name=job_name,
-                build_number=build_number,
-                launch_id=launch_id,
-            )
-
-        if not matched and failed_items and rcz_failures:
-            rp_names = [item.get("name", "") for item in failed_items]
-            rcz_names = [f.test_name for f in rcz_failures]
-            # Full diagnostic detail for server logs only
-            log_detail = (
-                f"No overlap between {len(failed_items)} RP item(s)"
-                f" and {len(rcz_failures)} rootcoz failure(s)."
-                f" RP items: {', '.join(rp_names)}."
-                f" rootcoz tests: {', '.join(rcz_names)}."
-            )
-            return _log_and_return_rp_error(
-                f"No overlap between {len(failed_items)} RP item(s)"
-                f" and {len(rcz_failures)} rootcoz failure(s).",
-                log_msg=log_detail,
-                job_name=job_name,
-                build_number=build_number,
-                launch_id=launch_id,
-            )
-
-        # Get history classifications for matched tests (concurrent queries)
-        unique_test_names = list(
-            dict.fromkeys(failure.test_name for _, failure in matched)
-        )
-        scope_name = child_job_name or ""
-        scope_build = child_build_number or 0
-        classification_results = await run_parallel_with_limit(
-            [
-                get_history_classification(job_id, name, scope_name, scope_build)
-                for name in unique_test_names
-            ]
-        )
-        history_classifications: dict[str, str] = {}
-        for name, result in zip(unique_test_names, classification_results, strict=True):
-            if isinstance(result, BaseException):
-                logger.debug(
-                    "RP push: failed to fetch history classification"
-                    " for test='%s', job='%s'",
-                    name,
-                    job_name,
-                )
-                continue
-            if result:
-                history_classifications[name] = result
-
-        # Fetch user-tracked links scoped to the push target
-        tracked_in_data: dict[str, list[dict[str, Any]]] = {}
-        if rp.push_tracker_links:
+        if fetch_tracked_in_links:
             try:
                 tracked_in_data = await storage.get_tracked_in_for_scope(
                     job_id,
@@ -6829,27 +6819,19 @@ async def _execute_rp_push(
                 )
             except Exception:
                 logger.warning(
-                    "Failed to fetch tracked-in links for RP push, job_id=%s",
+                    "Failed to fetch tracked-in links for export push, job_id=%s",
                     job_id,
                     exc_info=True,
                 )
-        # Get reviewer usernames for matched failures
-        reviewed_by: dict[str, str] = {}
+
         try:
             reviews = await storage.get_reviews_for_job(job_id)
-            # Build the expected key prefix for child-scoped pushes so we
-            # only pick up reviews from the matching child job, avoiding
-            # collisions when different children share test names.
             if child_job_name is not None:
                 exact_prefix = f"{child_job_name}#{child_build_number}::"
                 wildcard_prefix = f"{child_job_name}#0::"
-                # Two passes: exact first, then wildcard fallback.
-                # This guarantees exact-build reviews win regardless
-                # of dict iteration order.
+                # Two passes: exact build first, then wildcard fallback.
+                # Exact-build reviews take precedence (checked first; duplicates skipped).
                 for pfx in (exact_prefix, wildcard_prefix):
-                    if pfx == exact_prefix and pfx == wildcard_prefix:
-                        # build_number is already 0 — single pass
-                        pass
                     for key, review_data in reviews.items():
                         if not (
                             review_data.get("reviewed") and review_data.get("username")
@@ -6862,17 +6844,12 @@ async def _execute_rp_push(
                             safe = _sanitize_control_chars(review_data["username"])
                             if safe:
                                 reviewed_by[bare_name] = safe
-                    if pfx == exact_prefix and pfx == wildcard_prefix:
-                        break  # already covered both in one pass
             else:
                 for key, review_data in reviews.items():
                     if not (
                         review_data.get("reviewed") and review_data.get("username")
                     ):
                         continue
-                    # Top-level push: skip child-scoped composite keys
-                    # (format: "child_name#build_num::test_name" where
-                    # build_num is numeric). Test names may contain "::".
                     if _is_child_review_key(key):
                         continue
                     safe = _sanitize_control_chars(review_data["username"])
@@ -6882,36 +6859,189 @@ async def _execute_rp_push(
             logger.debug("Failed to fetch reviews for job %s", job_id, exc_info=True)
 
         if reviewed_by:
-            logger.debug("RP push reviewed_by for job %s: %s", job_id, reviewed_by)
+            logger.debug("Export push reviewed_by for job %s: %s", job_id, reviewed_by)
 
+    return ExportContext(
+        job_id=job_id,
+        job_name=result_data.get("job_name", ""),
+        build_number=str(resolve_display_build_id(result_data)),
+        jenkins_url=result_data.get("jenkins_url", ""),
+        failures=failures_data,
+        report_url=report_url,
+        child_job_name=child_job_name,
+        child_build_number=child_build_number,
+        pushed_by=pushed_by,
+        history_classifications=history_classifications,
+        tracked_in_links=tracked_in_data,
+        reviewed_by=reviewed_by,
+    )
+
+
+# Exporter plugin classes by machine name, used to read static capabilities
+# (e.g. ``needs_history_classifications``) without instantiating an exporter.
+# Instance construction with per-exporter config validation lives in
+# ``_create_exporter()``.
+_EXPORTER_CLASSES: dict[str, type[Exporter]] = {
+    ReportPortalClient.NAME: ReportPortalClient,
+}
+
+
+def _exporter_needs_history_classifications(plugin_names: Iterable[str]) -> bool:
+    """Whether any named exporter consumes per-test history classifications.
+
+    Lets the push pipeline skip the per-test, DB-backed history classification
+    lookups in :func:`_build_export_context` when no target exporter will use
+    them.  Unknown names are ignored here — :func:`_create_exporter` raises for
+    them when the push is actually attempted.
+
+    Args:
+        plugin_names: Exporter identifiers to check.
+
+    Returns:
+        ``True`` if at least one known exporter needs history classifications.
+    """
+    return any(
+        name in _EXPORTER_CLASSES
+        and _EXPORTER_CLASSES[name].needs_history_classifications
+        for name in plugin_names
+    )
+
+
+def _exporter_needs_tracked_in_links(
+    plugin_names: Iterable[str], settings: Settings
+) -> bool:
+    """Whether any named exporter consumes tracked-in link lookups.
+
+    Lets the push pipeline skip ``storage.get_tracked_in_for_scope`` when no
+    target exporter will read ``ExportContext.tracked_in_links``.  Report
+    Portal additionally requires ``settings.rp.push_tracker_links``.
+
+    Args:
+        plugin_names: Exporter identifiers to check.
+        settings: Application settings (RP content toggles).
+
+    Returns:
+        ``True`` if at least one target exporter needs tracked-in links.
+    """
+    for name in plugin_names:
+        if name not in _EXPORTER_CLASSES:
+            continue
+        if not _EXPORTER_CLASSES[name].needs_tracked_in_links:
+            continue
+        if name == "reportportal" and not settings.rp.push_tracker_links:
+            continue
+        return True
+    return False
+
+
+def _create_exporter(plugin_name: str, settings: Settings) -> Exporter:
+    """Create an exporter instance by plugin name.
+
+    Args:
+        plugin_name: Exporter identifier (e.g. ``'reportportal'``).
+        settings: Application settings for exporter configuration.
+
+    Returns:
+        Configured exporter instance.
+
+    Raises:
+        ValueError: Unknown plugin name or missing configuration.
+    """
+    if plugin_name == "reportportal":
+        if not settings.reportportal_enabled:
+            raise ValueError("Report Portal integration is disabled or not configured")
+        rp = settings.rp
+        if not _rp_has_push_content(settings):
+            raise ValueError(
+                "All Report Portal push content toggles are disabled. "
+                "Enable at least one of: rp_push_classifications, "
+                "rp_push_rootcoz_url, rp_push_tracker_links."
+            )
+        if rp.push_rootcoz_url and not _extract_base_url():
+            raise ValueError(
+                "PUBLIC_BASE_URL must be set to push rootcoz URL to Report Portal"
+                " (relative URLs resolve against the RP domain)"
+            )
+        if rp.url is None:
+            raise ValueError("reportportal_url is required")
+        if rp.api_token is None or not rp.api_token.get_secret_value():
+            raise ValueError("reportportal_api_token is required")
+        if rp.project is None:
+            raise ValueError("reportportal_project is required")
+        return ReportPortalClient(
+            url=rp.url,
+            token=rp.api_token.get_secret_value(),
+            project=rp.project,
+            verify_ssl=rp.verify_ssl,
+            push_classifications=rp.push_classifications,
+            push_rootcoz_url=rp.push_rootcoz_url,
+            push_tracker_links=rp.push_tracker_links,
+        )
+    raise ValueError(f"Unknown exporter plugin: '{plugin_name}'")
+
+
+async def _execute_rp_push(
+    job_id: str,
+    result_data: dict[str, Any],
+    settings: Settings,
+    *,
+    child_job_name: str | None = None,
+    child_build_number: int | None = None,
+    pushed_by: str = "",
+) -> dict[str, Any]:
+    """Shared logic for pushing classifications to Report Portal.
+
+    Builds an ExportContext and delegates to ReportPortalClient.push().
+
+    Args:
+        job_id: The analysis job identifier.
+        result_data: Stored result dict containing failures and Jenkins metadata.
+        settings: Application settings with Report Portal configuration.
+        child_job_name: Optional child job name for scoping push to a child.
+        child_build_number: Optional child build number (required with child_job_name).
+        pushed_by: Username of the user who triggered the push.
+
+    Returns:
+        Dict with keys: ``pushed``, ``unmatched``, ``errors``, ``launch_id``.
+    """
+    context = await _build_export_context(
+        job_id=job_id,
+        result_data=result_data,
+        settings=settings,
+        child_job_name=child_job_name,
+        child_build_number=child_build_number,
+        pushed_by=pushed_by,
+        fetch_history=_exporter_needs_history_classifications(["reportportal"]),
+        fetch_tracked_in_links=_exporter_needs_tracked_in_links(
+            ["reportportal"], settings
+        ),
+    )
+
+    try:
+        exporter = _create_exporter("reportportal", settings)
+    except ValueError as exc:
+        return _log_and_return_rp_error(str(exc))
+    except (TimeoutError, OSError, TypeError, RuntimeError) as exc:
+        # Preserve legacy constructor-failure shaping for the RP endpoint.
+        user_msg, log_msg = _rp_error_message(
+            exc,
+            "connecting to Report Portal",
+        )
         try:
-            push_result = await asyncio.to_thread(
-                rp_client.push_classifications,
-                matched,
-                report_url,
-                history_classifications,
-                push_classifications=rp.push_classifications,
-                push_rootcoz_url=rp.push_rootcoz_url,
-                push_tracker_links=rp.push_tracker_links,
-                tracked_in_links=tracked_in_data,
-                pushed_by=pushed_by,
-                reviewed_by=reviewed_by,
+            rp_host = (
+                urlparse(settings.rp.url).netloc.rsplit("@", 1)[-1] or "unknown"
+                if settings.rp.url
+                else "unknown"
             )
-        except (OSError, ValueError, TypeError, RuntimeError, KeyError) as exc:
-            user_msg, log_msg = _rp_error_message(
-                exc,
-                "pushing classifications to RP",
-            )
-            return _log_and_return_rp_error(
-                user_msg,
-                log_msg=log_msg,
-                job_name=job_name,
-                build_number=build_number,
-                launch_id=launch_id,
-            )
+        except (ValueError, TypeError, AttributeError):
+            rp_host = "unknown"
+        log_msg = f"{log_msg}, reportportal_host='{rp_host}'"
+        return _log_and_return_rp_error(user_msg, log_msg=log_msg)
 
-        push_result["launch_id"] = launch_id
-        return push_result
+    with exporter:
+        exporter_result = await exporter.push(context)
+
+    return exporter_result.details
 
 
 def _patch_failures(
@@ -7269,16 +7399,8 @@ async def bulk_delete_jobs_endpoint(
     result = await storage.delete_jobs_bulk(job_ids)
     result["unauthorized"] = unauthorized_ids
 
-    # Clean up chat workspaces for all deleted jobs
-    from rootcoz.engine.chat import cleanup_chat_workspace
-
     for job_id in result["deleted"]:
-        try:
-            cleanup_chat_workspace(job_id)
-        except Exception:
-            logger.warning(
-                "Failed to cleanup chat workspace for %s", job_id, exc_info=True
-            )
+        await _cleanup_deleted_job_chat_workspaces(job_id)
 
     notify_active_count_changed()
     notify_dashboard_changed()
@@ -7317,14 +7439,7 @@ async def delete_job_endpoint(
         )
 
     await storage.delete_job(job_id)
-
-    # Clean up chat workspace (files, tokens, sessions)
-    try:
-        from rootcoz.engine.chat import cleanup_chat_workspace
-
-        cleanup_chat_workspace(job_id)
-    except Exception:
-        logger.warning("Failed to cleanup chat workspace for %s", job_id, exc_info=True)
+    await _cleanup_deleted_job_chat_workspaces(job_id)
 
     notify_active_count_changed()
     notify_dashboard_changed()
@@ -7856,6 +7971,14 @@ async def api_dashboard(
 ) -> list[dict[str, Any]]:
     """Return dashboard job list as JSON for the React frontend."""
     return await list_results_for_dashboard(limit=limit, offset=offset)
+
+
+@app.get("/api/exporters", operation_id="listExporters")
+async def list_exporters(
+    settings: Settings = _SETTINGS_DEP,
+) -> list[ExporterInfo]:
+    """List available exporter plugins and their status."""
+    return _available_exporters(settings)
 
 
 @app.get("/api/capabilities", operation_id="getCapabilities")
@@ -8552,6 +8675,17 @@ async def health_check_detailed() -> Response:
     result = await build_health_response(settings, db_path)
     status_code = 503 if result["status"] == "unhealthy" else 200
     return JSONResponse(content=result, status_code=status_code)
+
+
+@app.get("/api/admin/component-versions", operation_id="adminGetComponentVersions")
+async def admin_get_component_versions(request: Request) -> dict[str, Any]:
+    """Installed AI-sidecar component versions (admin only).
+
+    Split from the public /api/health response so exact versions are never
+    disclosed without authentication (fingerprinting surface).
+    """
+    _require_admin(request)
+    return strip_sensitive_from_response({"components": await get_component_versions()})
 
 
 @app.get("/metrics", operation_id="prometheusMetrics")
@@ -9764,6 +9898,14 @@ async def update_admin_settings(request: Request) -> JSONResponse:
             detail=f"Unknown settings: {', '.join(sorted(invalid_keys))}",
         )
 
+    # Block writes to server-only settings — these are env-only toggles
+    server_only_keys = set(settings_updates.keys()) & _SERVER_ONLY_SETTINGS
+    if server_only_keys:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Server-only settings (env var only): {', '.join(sorted(server_only_keys))}",
+        )
+
     # Validate values against Settings field types and constraints
     errors = []
 
@@ -10769,11 +10911,13 @@ async def get_chat_history(
     return {"messages": messages, "total": total}
 
 
-@app.post("/api/chat/{job_id}/init", operation_id="initChat")
-async def init_chat(job_id: str, request: Request) -> dict[str, Any]:
-    """Initialize chat workspace: create directory, clone repos, and start AI session."""
-    _check_allow_list(request)
-    _require_reviewer(request)
+async def _init_chat_under_barrier(job_id: str, username: str) -> dict[str, Any]:
+    """Initialize chat workspace; hold the lifecycle barrier only for short checks.
+
+    Slow clone/session work runs without the barrier so job deletion can cancel
+    this task instead of waiting for I/O. Recheck deletion before filesystem
+    commits so a late init cannot recreate MCP state after cleanup.
+    """
     from rootcoz.engine.chat import (
         build_chat_custom_tools,
         build_welcome_message,
@@ -10783,25 +10927,21 @@ async def init_chat(job_id: str, request: Request) -> dict[str, Any]:
     )
     from rootcoz.sources.chat_workspace import setup_ci_build_workspace
 
-    stored = await get_result(job_id, strip_sensitive=False)
-    if not stored or not stored.get("result"):
-        raise HTTPException(status_code=404, detail="Job not found")
+    async with _get_chat_job_barrier(job_id):
+        _raise_if_chat_job_deleted(job_id)
+        stored = await get_result(job_id, strip_sensitive=False)
+        if not stored or not stored.get("result"):
+            raise HTTPException(status_code=404, detail="Job not found")
+        result_data = stored["result"]
+        params = result_data.get("request_params", {})
+        workspace = ensure_chat_workspace(job_id, username=username)
 
-    result_data = stored["result"]
-    params = result_data.get("request_params", {})
-    username = getattr(request.state, "username", "")
-
-    # Create workspace
-    workspace = ensure_chat_workspace(job_id, username=username)
-
-    # Decrypt params for repo cloning
     decrypted_params: dict[str, Any] = {}
     try:
         decrypted_params = decrypt_sensitive_fields(dict(params))
     except Exception:
         logger.warning("Failed to decrypt request_params for chat init", exc_info=True)
 
-    # Resolve AI provider/model
     _settings = get_settings()
     ai_provider = (
         result_data.get("ai_provider", "")
@@ -10822,91 +10962,80 @@ async def init_chat(job_id: str, request: Request) -> dict[str, Any]:
         github_repo,
     ) = await _resolve_chat_credentials(decrypted_params, username)
 
-    # Only create sidecar session on first init (avoid wasting sessions on re-init)
-    # Use per-user lock to serialize cloning and session creation with _process_chat_message
     session_id: str | None = ""
-    lock = _get_chat_lock(f"{job_id}:{username}")
-    async with lock:
-        # Clone repos inside lock to prevent concurrent clones with _process_chat_message.
-        # Tradeoff: this blocks message processing until cloning finishes, but the frontend
-        # init has a 10s timeout so user input is never blocked indefinitely. Without the lock,
-        # concurrent init + message can clone into the same workspace causing corruption.
-        repos_available = await clone_chat_repos(
-            workspace, decrypted_params, user_repo_token=github_token
-        )
-
-        # Populate workspace with CI build data: console output, metadata, artifacts
-        ci_build_data_available = await setup_ci_build_workspace(
-            workspace,
-            _build_ci_workspace_params(decrypted_params, result_data),
-            github_token=github_token,
-            settings=_settings,
-        )
-
-        existing = await storage.get_chat_messages(job_id, limit=1, username=username)
-        if not existing:
-            # Build HTTP-backed custom tools for the sidecar session.
-            # The auth token is short-lived — revoked after session creation since
-            # _process_chat_message creates a fresh token on every message.
-            custom_tools: list[dict[str, Any]] = []
-            auth_header = await _create_ai_auth_header(username)
-            if auth_header:
-                server_url = _build_internal_server_url()
-                custom_tools = build_chat_custom_tools(
-                    server_url=server_url,
-                    auth_token=auth_header.removeprefix("Bearer ").strip(),
-                    job_id=job_id,
-                    jira_url=jira_url,
-                    jira_email=jira_email,
-                    jira_token=jira_token,
-                    github_token=github_token,
-                    github_repo=github_repo,
-                )
-            else:
-                logger.warning(
-                    "Chat init: no auth token for %s — tools unavailable in system prompt",
-                    username,
-                )
-
-            session_id = await init_chat_session(
+    _raise_if_chat_job_deleted(job_id)
+    repos_available = await clone_chat_repos(
+        workspace, decrypted_params, user_repo_token=github_token
+    )
+    _raise_if_chat_job_deleted(job_id)
+    ci_build_data_available = await setup_ci_build_workspace(
+        workspace,
+        _build_ci_workspace_params(decrypted_params, result_data),
+        github_token=github_token,
+        settings=_settings,
+    )
+    _raise_if_chat_job_deleted(job_id)
+    existing = await storage.get_chat_messages(job_id, limit=1, username=username)
+    if not existing:
+        custom_tools: list[dict[str, Any]] = []
+        auth_header = await _create_ai_auth_header(username)
+        if auth_header:
+            server_url = _build_internal_server_url()
+            custom_tools = build_chat_custom_tools(
+                server_url=server_url,
+                auth_token=auth_header.removeprefix("Bearer ").strip(),
                 job_id=job_id,
-                job_name=result_data.get("job_name", "unknown"),
-                build_number=resolve_display_build_id(result_data),
-                ai_provider=ai_provider,
-                ai_model=ai_model,
-                repo_path=workspace,
-                custom_tools=custom_tools,
-                repos_available=repos_available,
-                ci_build_data_available=ci_build_data_available,
+                jira_url=jira_url,
+                jira_email=jira_email,
+                jira_token=jira_token,
+                github_token=github_token,
+                github_repo=github_repo,
             )
-            if session_id:
-                await storage.add_chat_message(
-                    job_id=job_id,
-                    role="assistant",
-                    content="",  # Hidden init message
-                    username=username,
-                    ai_provider=ai_provider,
-                    ai_model=ai_model,
-                    session_id=session_id,
-                    status="completed",
-                )
+        else:
+            logger.warning(
+                "Chat init: no auth token for %s — tools unavailable in system prompt",
+                username,
+            )
 
-            # Insert welcome message as first visible assistant message
-            welcome_text = build_welcome_message(
-                job_name=result_data.get("job_name", "unknown"),
-                build_number=resolve_display_build_id(result_data),
-                repos_available=repos_available,
-                ci_build_data_available=ci_build_data_available,
-                jira_available=bool(jira_url and jira_token),
-                github_available=bool(github_token and github_repo),
-            )
+        _raise_if_chat_job_deleted(job_id)
+        session_id = await init_chat_session(
+            job_id=job_id,
+            job_name=result_data.get("job_name", "unknown"),
+            build_number=resolve_display_build_id(result_data),
+            ai_provider=ai_provider,
+            ai_model=ai_model,
+            repo_path=workspace,
+            custom_tools=custom_tools,
+            repos_available=repos_available,
+            ci_build_data_available=ci_build_data_available,
+        )
+        _raise_if_chat_job_deleted(job_id)
+        if session_id:
             await storage.add_chat_message(
                 job_id=job_id,
                 role="assistant",
-                content=welcome_text,
+                content="",
                 username=username,
+                ai_provider=ai_provider,
+                ai_model=ai_model,
+                session_id=session_id,
                 status="completed",
             )
+        welcome_text = build_welcome_message(
+            job_name=result_data.get("job_name", "unknown"),
+            build_number=resolve_display_build_id(result_data),
+            repos_available=repos_available,
+            ci_build_data_available=ci_build_data_available,
+            jira_available=bool(jira_url and jira_token),
+            github_available=bool(github_token and github_repo),
+        )
+        await storage.add_chat_message(
+            job_id=job_id,
+            role="assistant",
+            content=welcome_text,
+            username=username,
+            status="completed",
+        )
 
     logger.info(
         "Chat init for job %s: workspace=%s, repos=%s, session=%s",
@@ -10915,14 +11044,11 @@ async def init_chat(job_id: str, request: Request) -> dict[str, Any]:
         repos_available,
         session_id,
     )
-
-    # Collect repo names that were cloned
     repo_names = []
     if workspace.exists():
         for item in workspace.iterdir():
             if item.is_dir() and not item.name.startswith("."):
                 repo_names.append(item.name)
-
     return {
         "ready": True,
         "repos_cloned": repos_available,
@@ -10932,6 +11058,16 @@ async def init_chat(job_id: str, request: Request) -> dict[str, Any]:
         "build_number": resolve_display_build_id(result_data),
         "session_id": session_id or "",
     }
+
+
+@app.post("/api/chat/{job_id}/init", operation_id="initChat")
+async def init_chat(job_id: str, request: Request) -> dict[str, Any]:
+    """Initialize chat workspace: create directory, clone repos, and start AI session."""
+    _check_allow_list(request)
+    _require_reviewer(request)
+    username = getattr(request.state, "username", "")
+    async with _track_chat_job_task(job_id), _hold_chat_lock(f"{job_id}:{username}"):
+        return await _init_chat_under_barrier(job_id, username)
 
 
 @app.post("/api/chat/{job_id}/close", operation_id="closeChat")
@@ -11002,6 +11138,12 @@ async def abort_chat(job_id: str, request: Request) -> dict[str, Any]:
 
 # Per-job chat processing locks — ensures sequential message processing
 _chat_locks: dict[str, asyncio.Lock] = {}
+_chat_lock_refs: dict[str, int] = {}
+# Per-job lifecycle barrier: init, message processing, and deletion share this
+# so a late init cannot create MCP state after job deletion has begun.
+_chat_job_barriers: dict[str, asyncio.Lock] = {}
+_chat_jobs_deleting: set[str] = set()
+_chat_job_tasks: dict[str, set[asyncio.Task[Any]]] = {}
 
 ADMIN_CHAT_JOB_ID = "__admin_chat__"
 
@@ -11010,7 +11152,126 @@ def _get_chat_lock(job_id: str) -> asyncio.Lock:
     """Get or create a per-job chat processing lock."""
     if job_id not in _chat_locks:
         _chat_locks[job_id] = asyncio.Lock()
+        _chat_lock_refs[job_id] = 0
     return _chat_locks[job_id]
+
+
+@asynccontextmanager
+async def _hold_chat_lock(key: str) -> AsyncIterator[asyncio.Lock]:
+    """Acquire the per-user chat lock without dropping waiters from the registry.
+
+    Callers increment the refcount before ``acquire``, so a later ``_get_chat_lock``
+    cannot replace the lock object while another task is queued on it.
+    """
+    lock = _get_chat_lock(key)
+    _chat_lock_refs[key] = _chat_lock_refs.get(key, 0) + 1
+    try:
+        async with lock:
+            yield lock
+    finally:
+        refs = _chat_lock_refs.get(key, 1) - 1
+        if refs > 0:
+            _chat_lock_refs[key] = refs
+        else:
+            _chat_lock_refs.pop(key, None)
+            stored = _chat_locks.get(key)
+            if stored is lock and not lock.locked():
+                _chat_locks.pop(key, None)
+
+
+def _get_chat_job_barrier(job_id: str) -> asyncio.Lock:
+    """Lock that serializes chat init/messages against job deletion."""
+    if job_id not in _chat_job_barriers:
+        _chat_job_barriers[job_id] = asyncio.Lock()
+    return _chat_job_barriers[job_id]
+
+
+def _discard_idle_chat_job_barrier(job_id: str) -> None:
+    """Drop unused per-job barriers so the registry cannot grow forever."""
+    lock = _chat_job_barriers.get(job_id)
+    if lock is not None and not lock.locked():
+        _chat_job_barriers.pop(job_id, None)
+
+
+def _raise_if_chat_job_deleted(job_id: str) -> None:
+    if job_id in _chat_jobs_deleting:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+
+@asynccontextmanager
+async def _track_chat_job_task(job_id: str) -> AsyncIterator[None]:
+    """Register the current task so job deletion can cancel in-flight chat work."""
+    task = asyncio.current_task()
+    if task is None:
+        yield
+        return
+    _chat_job_tasks.setdefault(job_id, set()).add(task)
+    try:
+        yield
+    finally:
+        remaining = _chat_job_tasks.get(job_id)
+        if remaining is not None:
+            remaining.discard(task)
+            if not remaining:
+                _chat_job_tasks.pop(job_id, None)
+
+
+async def _cancel_tracked_chat_job_tasks(job_id: str) -> None:
+    """Cancel in-flight chat init/message tasks so deletion is not blocked."""
+    current = asyncio.current_task()
+    tasks = [
+        task
+        for task in tuple(_chat_job_tasks.get(job_id, ()))
+        if task is not current and not task.done()
+    ]
+    for task in tasks:
+        task.cancel()
+    if tasks:
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+
+async def _fail_chat_assistant_placeholder(
+    assistant_msg_id: int,
+    job_id: str,
+    username: str,
+    content: str,
+) -> None:
+    """Best-effort: mark a pending assistant row failed so it is never left pending."""
+    try:
+        await storage.update_chat_message_content(assistant_msg_id, content)
+        await storage.update_chat_message_status(assistant_msg_id, "failed")
+        notify_chat_changed(job_id, username=username)
+    except Exception:
+        logger.exception(
+            "Failed to update error status for chat msg %d",
+            assistant_msg_id,
+        )
+
+
+async def _cleanup_deleted_job_chat_workspaces(job_id: str) -> None:
+    """Remove chat MCP state after a job delete, serialized with in-flight chat.
+
+    Marks the job as deleting first so init/message work that has not yet
+    entered the lifecycle barrier will 404. In-flight init and AI tasks are
+    cancelled (instead of holding the barrier across clone/AI timeouts), then
+    filesystem cleanup runs in a worker thread so contended MCP ``flock`` does
+    not block the event loop. After cleanup the deleting marker and idle
+    barrier are dropped; the job row is already gone so a later init cannot
+    recreate workspace state.
+    """
+    from rootcoz.engine.chat import cleanup_chat_workspace
+
+    _chat_jobs_deleting.add(job_id)
+    try:
+        await _cancel_tracked_chat_job_tasks(job_id)
+        async with _get_chat_job_barrier(job_id):
+            await asyncio.to_thread(cleanup_chat_workspace, job_id)
+    except Exception:
+        logger.warning("Failed to cleanup chat workspace for %s", job_id, exc_info=True)
+    finally:
+        _chat_jobs_deleting.discard(job_id)
+        _chat_job_tasks.pop(job_id, None)
+        _discard_idle_chat_job_barrier(job_id)
 
 
 # Per-job:user abort signals — set to cancel in-progress chat processing
@@ -11025,12 +11286,12 @@ def _get_chat_abort_signal(key: str) -> asyncio.Event:
 
 
 def _cleanup_chat_state(key: str) -> None:
-    """Remove chat lock and abort signal for a key to prevent unbounded dict growth."""
+    """Remove the abort signal for a key to prevent unbounded dict growth.
+
+    Per-user locks stay in ``_chat_locks`` until ``_hold_chat_lock`` refcount
+    hits zero, so waiters keep the same lock object.
+    """
     _chat_abort_signals.pop(key, None)
-    # Only remove locks that are NOT currently held
-    lock = _chat_locks.get(key)
-    if lock and not lock.locked():
-        _chat_locks.pop(key, None)
 
 
 def _normalize_and_validate_ai_params(
@@ -11194,221 +11455,269 @@ async def _process_chat_message(
         chat_with_ai,
         clone_chat_repos,
         ensure_chat_workspace,
+        install_http_tools_mcp_best_effort_async,
     )
     from rootcoz.sources.chat_workspace import setup_ci_build_workspace
 
-    lock = _get_chat_lock(f"{job_id}:{username}")
     auth_header = ""
 
-    async with lock:
+    async with _track_chat_job_task(job_id):
         try:
-            stored = await get_result(job_id, strip_sensitive=False)
-            if not stored or not stored.get("result"):
-                raise RuntimeError(f"Job {job_id} not found during chat processing")
+            async with _hold_chat_lock(f"{job_id}:{username}"):
+                try:
+                    async with _get_chat_job_barrier(job_id):
+                        if job_id in _chat_jobs_deleting:
+                            logger.info(
+                                "Chat: skip processing for deleted job %s user %s",
+                                job_id,
+                                username,
+                            )
+                            await _fail_chat_assistant_placeholder(
+                                assistant_msg_id,
+                                job_id,
+                                username,
+                                "Job was deleted.",
+                            )
+                            return
+                        stored = await get_result(job_id, strip_sensitive=False)
+                        if not stored or not stored.get("result"):
+                            raise RuntimeError(
+                                f"Job {job_id} not found during chat processing"
+                            )
 
-            result_data = stored["result"]
-            params = result_data.get("request_params", {})
+                        result_data = stored["result"]
+                        params = result_data.get("request_params", {})
 
-            _chat_settings = get_settings()
-            ai_provider, ai_model = _resolve_chat_ai_config(
-                override_provider=ai_provider_override,
-                override_model=ai_model_override,
-                settings_provider=_chat_settings.ai_provider,
-                settings_model=_chat_settings.ai_model,
-                result_data=result_data,
-                request_params=params,
-                is_admin=is_admin,
-            )
+                        _chat_settings = get_settings()
+                        ai_provider, ai_model = _resolve_chat_ai_config(
+                            override_provider=ai_provider_override,
+                            override_model=ai_model_override,
+                            settings_provider=_chat_settings.ai_provider,
+                            settings_model=_chat_settings.ai_model,
+                            result_data=result_data,
+                            request_params=params,
+                            is_admin=is_admin,
+                        )
 
-            # Get conversation history
-            msg_count = await storage.count_chat_messages(job_id, username=username)
-            all_history = await storage.get_chat_messages(
-                job_id, username=username, limit=max(msg_count, 1)
-            )
-            # Filter to only completed messages for context
-            history = [
-                m
-                for m in all_history
-                if m.get("status") != "pending" and m.get("content")
-            ]
+                        # Get conversation history
+                        msg_count = await storage.count_chat_messages(
+                            job_id, username=username
+                        )
+                        all_history = await storage.get_chat_messages(
+                            job_id, username=username, limit=max(msg_count, 1)
+                        )
+                        # Filter to only completed messages for context
+                        history = [
+                            m
+                            for m in all_history
+                            if m.get("status") != "pending" and m.get("content")
+                        ]
 
-            # Find session_id from the last completed assistant message
-            # Scan all_history (not filtered history) because the init message
-            # has empty content but carries the session_id
-            last_session_id = None
-            for msg in reversed(all_history):
-                if (
-                    msg.get("role") == "assistant"
-                    and msg.get("session_id")
-                    and msg.get("ai_provider") == ai_provider
-                    and msg.get("ai_model") == ai_model
-                ):
-                    last_session_id = msg["session_id"]
-                    logger.debug(
-                        "Chat: found session %s from history (provider=%s, model=%s)",
-                        last_session_id,
-                        ai_provider,
-                        ai_model,
+                        # Find session_id from the last completed assistant message
+                        # Scan all_history (not filtered history) because the init
+                        # message has empty content but carries the session_id
+                        last_session_id = None
+                        for msg in reversed(all_history):
+                            if (
+                                msg.get("role") == "assistant"
+                                and msg.get("session_id")
+                                and msg.get("ai_provider") == ai_provider
+                                and msg.get("ai_model") == ai_model
+                            ):
+                                last_session_id = msg["session_id"]
+                                logger.debug(
+                                    "Chat: found session %s from history (provider=%s, model=%s)",
+                                    last_session_id,
+                                    ai_provider,
+                                    ai_model,
+                                )
+                                break
+
+                        workspace = ensure_chat_workspace(job_id, username=username)
+
+                        decrypted_params = {}
+                        try:
+                            decrypted_params = decrypt_sensitive_fields(dict(params))
+                        except Exception:
+                            logger.warning(
+                                "Failed to decrypt request_params for chat context",
+                                exc_info=True,
+                            )
+                        (
+                            jira_url,
+                            jira_email,
+                            jira_token,
+                            github_token,
+                            github_repo,
+                        ) = await _resolve_chat_credentials(decrypted_params, username)
+
+                        repos_available = await clone_chat_repos(
+                            workspace, decrypted_params, user_repo_token=github_token
+                        )
+
+                        settings = get_settings()
+
+                        # Populate workspace with CI build data
+                        ci_build_data_available = await setup_ci_build_workspace(
+                            workspace,
+                            _build_ci_workspace_params(decrypted_params, result_data),
+                            github_token=github_token,
+                            settings=settings,
+                        )
+
+                        server_url = _build_internal_server_url()
+                        auth_header = await _create_ai_auth_header(username)
+
+                        custom_tools: list[dict[str, Any]] = []
+                        if auth_header:
+                            custom_tools = build_chat_custom_tools(
+                                server_url=server_url,
+                                auth_token=auth_header.removeprefix("Bearer ").strip(),
+                                job_id=job_id,
+                                jira_url=jira_url,
+                                jira_email=jira_email,
+                                jira_token=jira_token,
+                                github_token=github_token,
+                                github_repo=github_repo,
+                            )
+                        else:
+                            logger.warning(
+                                "Chat: no auth token for %s — tools unavailable",
+                                username,
+                            )
+
+                        await install_http_tools_mcp_best_effort_async(
+                            workspace, custom_tools
+                        )
+
+                        abort_key = f"{job_id}:{username}"
+                        abort_signal = _get_chat_abort_signal(abort_key)
+                        if abort_signal.is_set():
+                            abort_signal.clear()
+                            await _fail_chat_assistant_placeholder(
+                                assistant_msg_id,
+                                job_id,
+                                username,
+                                "Aborted by user.",
+                            )
+                            logger.info(
+                                "Chat: aborted before AI call for job %s, user %s",
+                                job_id,
+                                username,
+                            )
+                            return
+
+                    # Lifecycle barrier is released before the AI call so job
+                    # deletion is not blocked behind chat_with_ai timeouts.
+                    if job_id in _chat_jobs_deleting:
+                        await _fail_chat_assistant_placeholder(
+                            assistant_msg_id,
+                            job_id,
+                            username,
+                            "Job was deleted.",
+                        )
+                        return
+
+                    success, response_text, new_session_id = await chat_with_ai(
+                        job_id=job_id,
+                        job_name=result_data.get("job_name", "unknown"),
+                        build_number=resolve_display_build_id(result_data),
+                        message=message,
+                        history=history,
+                        ai_provider=ai_provider,
+                        ai_model=ai_model,
+                        repo_path=workspace,
+                        ai_call_timeout=settings.ai_call_timeout,
+                        session_id=last_session_id,
+                        custom_tools=custom_tools,
+                        repos_available=repos_available,
+                        ci_build_data_available=ci_build_data_available,
+                        install_mcp=False,
                     )
-                    break
 
-            workspace = ensure_chat_workspace(job_id, username=username)
+                    if abort_signal.is_set():
+                        abort_signal.clear()
+                        await _fail_chat_assistant_placeholder(
+                            assistant_msg_id,
+                            job_id,
+                            username,
+                            "Aborted by user.",
+                        )
+                        logger.info(
+                            "Chat: aborted after AI call for job %s, user %s",
+                            job_id,
+                            username,
+                        )
+                        return
 
-            decrypted_params = {}
-            try:
-                decrypted_params = decrypt_sensitive_fields(dict(params))
-            except Exception:
-                logger.warning(
-                    "Failed to decrypt request_params for chat context", exc_info=True
-                )
-            (
-                jira_url,
-                jira_email,
-                jira_token,
-                github_token,
-                github_repo,
-            ) = await _resolve_chat_credentials(decrypted_params, username)
+                    if not success:
+                        logger.error(
+                            "Chat AI call failed for job %s: %s", job_id, response_text
+                        )
+                        user_error = format_chat_ai_user_error(
+                            response_text, is_admin=is_admin, ai_provider=ai_provider
+                        )
+                        await _fail_chat_assistant_placeholder(
+                            assistant_msg_id,
+                            job_id,
+                            username,
+                            f"Error: {user_error}",
+                        )
+                        return
 
-            repos_available = await clone_chat_repos(
-                workspace, decrypted_params, user_repo_token=github_token
-            )
+                    current_status = await storage.get_chat_message_status(
+                        assistant_msg_id
+                    )
+                    if current_status == "failed":
+                        logger.info(
+                            "Chat: message %d was aborted during processing, discarding response",
+                            assistant_msg_id,
+                        )
+                        return
 
-            settings = get_settings()
+                    await storage.update_chat_message_content(
+                        assistant_msg_id, response_text
+                    )
+                    await storage.update_chat_message_status(
+                        assistant_msg_id, "completed"
+                    )
+                    await storage.update_chat_message_ai_fields(
+                        assistant_msg_id,
+                        ai_provider=ai_provider,
+                        ai_model=ai_model,
+                        session_id=new_session_id or "",
+                    )
+                    logger.info(
+                        "Chat: message %d processed for job %s (session=%s)",
+                        assistant_msg_id,
+                        job_id,
+                        new_session_id,
+                    )
+                    notify_chat_changed(job_id, username=username)
 
-            # Populate workspace with CI build data: console output, metadata, artifacts
-            ci_build_data_available = await setup_ci_build_workspace(
-                workspace,
-                _build_ci_workspace_params(decrypted_params, result_data),
-                github_token=github_token,
-                settings=settings,
-            )
-
-            server_url = _build_internal_server_url()
-            auth_header = await _create_ai_auth_header(username)
-
-            # Build HTTP-backed custom tools
-            custom_tools: list[dict[str, Any]] = []
-            if auth_header:
-                custom_tools = build_chat_custom_tools(
-                    server_url=server_url,
-                    auth_token=auth_header.removeprefix("Bearer ").strip(),
-                    job_id=job_id,
-                    jira_url=jira_url,
-                    jira_email=jira_email,
-                    jira_token=jira_token,
-                    github_token=github_token,
-                    github_repo=github_repo,
-                )
-            else:
-                logger.warning(
-                    "Chat: no auth token for %s — tools unavailable", username
-                )
-
-            # Check if aborted before starting AI call
-            abort_key = f"{job_id}:{username}"
-            abort_signal = _get_chat_abort_signal(abort_key)
-            if abort_signal.is_set():
-                abort_signal.clear()
-                await storage.update_chat_message_content(
-                    assistant_msg_id, "Aborted by user."
-                )
-                await storage.update_chat_message_status(assistant_msg_id, "failed")
-                notify_chat_changed(job_id, username=username)
-                logger.info(
-                    "Chat: aborted before AI call for job %s, user %s", job_id, username
-                )
-                return
-
-            success, response_text, new_session_id = await chat_with_ai(
-                job_id=job_id,
-                job_name=result_data.get("job_name", "unknown"),
-                build_number=resolve_display_build_id(result_data),
-                message=message,
-                history=history,
-                ai_provider=ai_provider,
-                ai_model=ai_model,
-                repo_path=workspace,
-                ai_call_timeout=settings.ai_call_timeout,
-                session_id=last_session_id,
-                custom_tools=custom_tools,
-                repos_available=repos_available,
-                ci_build_data_available=ci_build_data_available,
-            )
-
-            # Check if aborted during AI call
-            if abort_signal.is_set():
-                abort_signal.clear()
-                await storage.update_chat_message_content(
-                    assistant_msg_id, "Aborted by user."
-                )
-                await storage.update_chat_message_status(assistant_msg_id, "failed")
-                notify_chat_changed(job_id, username=username)
-                logger.info(
-                    "Chat: aborted after AI call for job %s, user %s", job_id, username
-                )
-                return
-
-            if not success:
-                logger.error(
-                    "Chat AI call failed for job %s: %s", job_id, response_text
-                )
-                user_error = format_chat_ai_user_error(
-                    response_text, is_admin=is_admin, ai_provider=ai_provider
-                )
-                await storage.update_chat_message_content(
-                    assistant_msg_id, f"Error: {user_error}"
-                )
-                await storage.update_chat_message_status(assistant_msg_id, "failed")
-                notify_chat_changed(job_id, username=username)
-                return
-
-            # Check if message was aborted while AI was processing
-            current_status = await storage.get_chat_message_status(assistant_msg_id)
-            if current_status == "failed":
-                logger.info(
-                    "Chat: message %d was aborted during processing, discarding response",
-                    assistant_msg_id,
-                )
-                return
-
-            # Update the pending assistant message with the real response
-            await storage.update_chat_message_content(assistant_msg_id, response_text)
-            await storage.update_chat_message_status(assistant_msg_id, "completed")
-            # Update provider/model/session_id on the assistant message
-            await storage.update_chat_message_ai_fields(
-                assistant_msg_id,
-                ai_provider=ai_provider,
-                ai_model=ai_model,
-                session_id=new_session_id or "",
-            )
-            logger.info(
-                "Chat: message %d processed for job %s (session=%s)",
+                except Exception:
+                    logger.exception(
+                        "Chat processing failed for job %s, msg %d",
+                        job_id,
+                        assistant_msg_id,
+                    )
+                    await _fail_chat_assistant_placeholder(
+                        assistant_msg_id,
+                        job_id,
+                        username,
+                        "An error occurred while processing your message. Please try again.",
+                    )
+        except asyncio.CancelledError:
+            await _fail_chat_assistant_placeholder(
                 assistant_msg_id,
                 job_id,
-                new_session_id,
+                username,
+                "Chat processing was cancelled.",
             )
-            notify_chat_changed(job_id, username=username)
-
-        except Exception:
-            logger.exception(
-                "Chat processing failed for job %s, msg %d",
-                job_id,
-                assistant_msg_id,
-            )
-            try:
-                await storage.update_chat_message_content(
-                    assistant_msg_id,
-                    "An error occurred while processing your message. Please try again.",
-                )
-                await storage.update_chat_message_status(assistant_msg_id, "failed")
-                notify_chat_changed(job_id, username=username)
-            except Exception:
-                logger.exception(
-                    "Failed to update error status for chat msg %d",
-                    assistant_msg_id,
-                )
+            raise
         finally:
             _cleanup_chat_state(f"{job_id}:{username}")
+            _discard_idle_chat_job_barrier(job_id)
             # Do NOT revoke auth_header — it's embedded in custom tool HTTP headers
             # and must stay alive for the sidecar session lifetime
 
@@ -11428,8 +11737,7 @@ async def clear_chat_history(job_id: str, request: Request) -> dict[str, Any]:
 
     # Acquire the per-user chat lock to prevent tearing down workspace
     # while a background worker is still processing
-    lock = _get_chat_lock(f"{job_id}:{username}")
-    async with lock:
+    async with _hold_chat_lock(f"{job_id}:{username}"):
         count = await storage.delete_chat_messages(job_id, username=username)
         notify_chat_changed(job_id, username=username)
         try:
@@ -11566,8 +11874,7 @@ async def init_admin_chat(request: Request) -> dict[str, Any]:
     workspace = ensure_chat_workspace(ADMIN_CHAT_JOB_ID, username=username)
 
     session_id: str | None = ""
-    lock = _get_chat_lock(f"{ADMIN_CHAT_JOB_ID}:{username}")
-    async with lock:
+    async with _hold_chat_lock(f"{ADMIN_CHAT_JOB_ID}:{username}"):
         existing = await storage.get_chat_messages(
             ADMIN_CHAT_JOB_ID, limit=1, username=username
         )
@@ -11743,10 +12050,9 @@ async def _process_admin_chat_message(
         ensure_chat_workspace,
     )
 
-    lock = _get_chat_lock(f"{ADMIN_CHAT_JOB_ID}:{username}")
     auth_header = ""
 
-    async with lock:
+    async with _hold_chat_lock(f"{ADMIN_CHAT_JOB_ID}:{username}"):
         try:
             _admin_settings = get_settings()
             ai_provider, ai_model = _resolve_chat_ai_config(
@@ -12019,8 +12325,7 @@ async def clear_admin_chat_history(request: Request) -> dict[str, Any]:
 
     username = request.state.username
 
-    lock = _get_chat_lock(f"{ADMIN_CHAT_JOB_ID}:{username}")
-    async with lock:
+    async with _hold_chat_lock(f"{ADMIN_CHAT_JOB_ID}:{username}"):
         count = await storage.delete_chat_messages(ADMIN_CHAT_JOB_ID, username=username)
         notify_chat_changed(ADMIN_CHAT_JOB_ID, username=username)
         try:
