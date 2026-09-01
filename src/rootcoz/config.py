@@ -1,6 +1,8 @@
 """Configuration settings from environment variables."""
 
 import os
+import string
+from collections.abc import Mapping
 from functools import lru_cache
 from typing import Any, NamedTuple
 from urllib.parse import urlsplit, urlunsplit
@@ -10,7 +12,13 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 from simple_logger.logger import get_logger
 
 from rootcoz.ai_client import VALID_AI_PROVIDERS, normalize_provider
+from rootcoz.greenwave import (
+    evaluate_greenwave_transport,
+    normalize_greenwave_outcome_map,
+    referenced_placeholders,
+)
 from rootcoz.metadata_rules import load_metadata_rules
+from rootcoz.utils import parse_exporter_names, sanitize_control_chars
 from rootcoz.vapid import get_vapid_config
 
 logger = get_logger(name=__name__, level=os.environ.get("LOG_LEVEL", "INFO"))
@@ -172,6 +180,94 @@ def parse_repo_ref(raw: str) -> tuple[str, str]:
         )
         return (clean_url, ref)
     return (raw, "")
+
+
+_GREENWAVE_VALID_OUTCOMES = frozenset({"PASSED", "FAILED", "INFO", "NEEDS_INSPECTION"})
+
+
+def parse_greenwave_outcome_map(raw: str, *, strict: bool = False) -> dict[str, str]:
+    """Parse ``CLASS:OUTCOME,...`` into a normalized Greenwave outcome map.
+
+    Args:
+        raw: Comma-separated classification-to-outcome mapping.
+        strict: Raise :class:`ValueError` for malformed entries or unsupported
+            outcomes. Non-strict parsing skips malformed entries for backwards
+            compatibility; :class:`Settings` always uses strict parsing.
+
+    Duplicate classification keys are rejected after case-insensitive
+    normalization in both modes because accepting them would be ambiguous.
+    """
+    entries: list[tuple[str, str]] = []
+    if not raw:
+        return {}
+    for segment in raw.split(","):
+        entry = segment.strip()
+        if not entry:
+            continue
+        classification, separator, raw_outcome = entry.partition(":")
+        classification = classification.strip()
+        outcome = raw_outcome.strip().upper()
+        if not separator or not classification or not outcome:
+            if strict:
+                raise ValueError(
+                    f"Invalid GREENWAVE_OUTCOME_MAP entry '{entry}'. "
+                    "Both class and outcome must be non-empty "
+                    "(format 'CLASS:OUTCOME')."
+                )
+            continue
+        if outcome not in _GREENWAVE_VALID_OUTCOMES:
+            if strict:
+                valid = ", ".join(sorted(_GREENWAVE_VALID_OUTCOMES))
+                raise ValueError(
+                    f"Invalid GREENWAVE_OUTCOME_MAP outcome '{raw_outcome.strip()}' "
+                    f"for classification '{classification}'. Valid outcomes: {valid}"
+                )
+            continue
+        entries.append((classification, outcome))
+    # validates: raises ValueError on duplicate casefolded classification keys
+    normalize_greenwave_outcome_map(entries)
+    return dict(entries)
+
+
+def parse_greenwave_classifications(raw: str) -> frozenset[str]:
+    """Parse a comma-separated classification list for case-insensitive matching."""
+    return frozenset(
+        classification.strip().casefold()
+        for classification in raw.split(",")
+        if classification.strip()
+    )
+
+
+def _validate_greenwave_template_placeholders(
+    template: str,
+    *,
+    allowed: set[str],
+    field_name: str,
+) -> None:
+    """Validate that all placeholders in *template* are in *allowed* and use no
+    conversions or format specifications, and that the template literal itself
+    contains no control characters.
+
+    Raises ValueError with a message that includes *field_name* so callers get
+    a field-specific error message without duplicating the parsing logic.
+    """
+    if template != sanitize_control_chars(template):
+        raise ValueError(f"{field_name} must not contain control characters")
+    for _, placeholder_name, format_spec, conversion in string.Formatter().parse(
+        template
+    ):
+        if placeholder_name is None:
+            continue
+        if not placeholder_name or placeholder_name not in allowed:
+            raise ValueError(
+                f"Invalid placeholder '{placeholder_name}' in {field_name}. "
+                f"Allowed: {', '.join(sorted(allowed))}"
+            )
+        if conversion or format_spec:
+            raise ValueError(
+                f"{field_name} placeholders must not use "
+                "conversions or format specifications"
+            )
 
 
 class ReportPortalConfig(NamedTuple):
@@ -380,6 +476,130 @@ class Settings(BaseSettings):
         description="Include Jira/GitHub issue links as external system issues on Report Portal test items.",
     )
 
+    # Greenwave / ResultsDB / WaiverDB integration (optional, server-only)
+    enable_greenwave: bool = Field(
+        default=False,
+        description=(
+            "Explicit deployment safety gate for the Greenwave "
+            "(ResultsDB/WaiverDB) exporter. Must be true; configuring URLs or "
+            "credentials alone never enables gating writes."
+        ),
+    )
+    greenwave_url: str | None = Field(
+        default=None,
+        description="ResultsDB API base URL (e.g. https://resultsdb.example.com/api/v2.0).",
+    )
+    greenwave_api_token: SecretStr | None = Field(
+        default=None,
+        description="ResultsDB API authentication token.",
+    )
+    greenwave_waiver_url: str | None = Field(
+        default=None,
+        description="WaiverDB API base URL (required when waiver submission is enabled).",
+    )
+    greenwave_waiver_token: SecretStr | None = Field(
+        default=None,
+        description=(
+            "WaiverDB OIDC bearer or service-account token (required when "
+            "waiver submission uses OIDC authentication)."
+        ),
+    )
+    greenwave_push_waivers: bool = Field(
+        default=False,
+        description="Enable waiver submission to WaiverDB.",
+    )
+    greenwave_waivable_classifications: str = Field(
+        default="INFRASTRUCTURE",
+        description=(
+            "Comma-separated rootcoz classifications that generate WaiverDB waivers. "
+            "Whitespace-trimmed, matched case-insensitively (e.g. 'INFRASTRUCTURE,CODE ISSUE')."
+        ),
+    )
+    greenwave_allow_ai_waivers: bool = Field(
+        default=False,
+        description=(
+            "Allow auto-reviewed failures (rootcoz-ai) to generate WaiverDB waivers. "
+            "Default: only human-reviewed failures generate waivers."
+        ),
+    )
+    greenwave_outcome_map: str = Field(
+        default="PRODUCT BUG:FAILED,CODE ISSUE:FAILED,INFRASTRUCTURE:INFO",
+        description=(
+            "Classification -> ResultsDB outcome mapping. Format: 'CLASS:OUTCOME,...'. "
+            "Valid outcomes: PASSED, FAILED, INFO, NEEDS_INSPECTION. "
+            "Classification keys must be unique when matched case-insensitively. "
+            "Classifications not in the map are skipped (not exported)."
+        ),
+    )
+    greenwave_subject_type: str = Field(
+        default="koji_build",
+        description="ResultsDB subject type (e.g. koji_build).",
+    )
+    greenwave_product_version: str | None = Field(
+        default=None,
+        description=(
+            "Product version for WaiverDB waivers (required when "
+            "GREENWAVE_PUSH_WAIVERS=true)."
+        ),
+    )
+    greenwave_verify_ssl: bool = Field(
+        default=True,
+        description=(
+            "Verify TLS certificates for ResultsDB and WaiverDB connections. "
+            "False permits HTTP only for unauthenticated (none) auth in isolated local "
+            "development when no CA bundle is set; all authenticated methods "
+            "(token, oidc, kerberos, ssl) always require HTTPS. Never disable verification in production."
+        ),
+    )
+
+    # Greenwave auth method selection (admin-configurable)
+    greenwave_resultsdb_auth_method: str = Field(
+        default="token",
+        description="Auth for ResultsDB writes: 'none', 'token' (Bearer), 'kerberos' (SPNEGO via keytab), or 'ssl' (client cert).",
+    )
+    greenwave_waiver_auth_method: str = Field(
+        default="oidc",
+        description="Auth for WaiverDB: 'oidc' (Bearer), 'kerberos' (SPNEGO via keytab), or 'ssl' (client cert).",
+    )
+    greenwave_kerberos_keytab: str | None = Field(
+        default=None,
+        description="Path to Kerberos keytab for Greenwave auth (e.g. /etc/rootcoz/gw.keytab).",
+    )
+    greenwave_kerberos_principal: str | None = Field(
+        default=None,
+        description="Kerberos service principal for the keytab (e.g. svc-rootcoz@EXAMPLE.COM).",
+    )
+    greenwave_ssl_cert: str | None = Field(
+        default=None,
+        description="Path to client SSL cert (PEM) for Greenwave 'ssl' auth.",
+    )
+    greenwave_ssl_key: str | None = Field(
+        default=None,
+        description="Path to client SSL private key (PEM) for Greenwave 'ssl' auth.",
+    )
+    greenwave_ca_bundle: str | None = Field(
+        default=None,
+        description="Path to a CA bundle PEM for verifying ResultsDB/WaiverDB TLS. When set, overrides greenwave_verify_ssl.",
+    )
+    greenwave_testcase_template: str = Field(
+        default="rootcoz.{job_name}.{test_name}",
+        description="Template for testcase names. Placeholders: {job_name},{test_name},{tier},{subject_identifier}. Example: myproduct.product-build.{tier}.{test_name}",
+    )
+    greenwave_subject_template: str | None = Field(
+        default=None,
+        description=(
+            "Template for constructing the ResultsDB/WaiverDB subject identifier "
+            "when no explicit subject is provided at push time. "
+            "Required to use AUTO_PUSH_EXPORTERS=greenwave. "
+            "Placeholders: {job_name}, {build_number}, {tier}, {product_version}. "
+            "Example: 'hco-bundle-registry-container-{product_version}.rhel9-{build_number}'"
+        ),
+    )
+    greenwave_tier: str | None = Field(
+        default=None,
+        description="Value for the {tier} placeholder in the testcase template (e.g. tier-1).",
+    )
+
     # Web Push (VAPID) configuration (optional, server-only)
     vapid_public_key: str = ""
     vapid_private_key: str = Field(default="", repr=False)
@@ -400,8 +620,12 @@ class Settings(BaseSettings):
         default="",
         description=(
             "Comma-separated list of exporter plugin names to auto-push to when all "
-            "failures are reviewed. Example: 'reportportal'. Empty string disables "
-            "auto-push. Only takes effect when enable_auto_review is also enabled."
+            "failures are reviewed. Example: 'reportportal,greenwave'. Empty string "
+            "disables auto-push. Only takes effect when enable_auto_review is also "
+            "enabled. 'greenwave' requires GREENWAVE_SUBJECT_TEMPLATE to be set so "
+            "the subject (build NVR) can be constructed from runtime context; rejected "
+            "at config load when the template is absent or references an unconfigured "
+            "server-side placeholder."
         ),
     )
 
@@ -439,6 +663,16 @@ class Settings(BaseSettings):
             "public_base_url",
             "reportportal_url",
             "reportportal_project",
+            "greenwave_url",
+            "greenwave_waiver_url",
+            "greenwave_product_version",
+            "greenwave_kerberos_keytab",
+            "greenwave_kerberos_principal",
+            "greenwave_ssl_cert",
+            "greenwave_ssl_key",
+            "greenwave_ca_bundle",
+            "greenwave_subject_template",
+            "greenwave_tier",
         ):
             value = getattr(self, field_name)
             if isinstance(value, str):
@@ -454,6 +688,10 @@ class Settings(BaseSettings):
             "ai_model",
             "prow_url",
             "gcs_bucket",
+            "greenwave_subject_type",
+            "greenwave_resultsdb_auth_method",
+            "greenwave_waiver_auth_method",
+            "greenwave_testcase_template",
         ):
             value = getattr(self, field_name)
             if isinstance(value, str):
@@ -470,6 +708,8 @@ class Settings(BaseSettings):
             "jira_api_token",
             "jira_pat",
             "reportportal_api_token",
+            "greenwave_api_token",
+            "greenwave_waiver_token",
         ):
             secret = getattr(self, field_name)
             if secret is not None:
@@ -479,7 +719,175 @@ class Settings(BaseSettings):
                     field_name,
                     SecretStr(stripped) if stripped else None,
                 )
+        for _amf in ("greenwave_resultsdb_auth_method", "greenwave_waiver_auth_method"):
+            v = getattr(self, _amf)
+            object.__setattr__(self, _amf, v.lower() if isinstance(v, str) else v)
         return self
+
+    @model_validator(mode="after")
+    def _validate_greenwave_config(self) -> "Settings":
+        """Validate Greenwave mapping, URLs, authentication, and templates."""
+        # Reject 'greenwave' in AUTO_PUSH_EXPORTERS when no subject template is set.
+        # GreenwaveExporter.push() requires a subject_identifier (build NVR); without
+        # GREENWAVE_SUBJECT_TEMPLATE auto-push cannot construct one.  When the template
+        # IS set, auto-push is allowed and the NVR is rendered from runtime context.
+        # Server-config placeholders referenced in the template are further validated
+        # below to prevent malformed NVRs at render time.
+        if (
+            "greenwave" in parse_exporter_names(self.auto_push_exporters)
+            and not self.greenwave_subject_template
+        ):
+            raise ValueError(
+                "AUTO_PUSH_EXPORTERS cannot include 'greenwave' without "
+                "GREENWAVE_SUBJECT_TEMPLATE: Greenwave is a gating exporter "
+                "that requires a subject_identifier (build NVR). Set "
+                "GREENWAVE_SUBJECT_TEMPLATE (e.g. "
+                "'my-build-{product_version}-{build_number}') to enable "
+                "auto-push, or remove 'greenwave' from AUTO_PUSH_EXPORTERS "
+                "and push to Greenwave manually via the "
+                "API/CLI/report-page with a subject_identifier."
+            )
+
+        outcome_map = parse_greenwave_outcome_map(
+            self.greenwave_outcome_map, strict=True
+        )
+
+        transports = [
+            (
+                "greenwave_url",
+                "ResultsDB",
+                self.greenwave_resultsdb_auth_method,
+            ),
+            (
+                "greenwave_waiver_url",
+                "WaiverDB",
+                self.greenwave_waiver_auth_method
+                if self.greenwave_push_waivers
+                else "none",
+            ),
+        ]
+        for field_name, service, auth_method in transports:
+            url = getattr(self, field_name)
+            if not url:
+                continue
+            policy = evaluate_greenwave_transport(
+                url,
+                service=service,
+                auth_method=auth_method,
+                verify=self.greenwave_effective_verify,
+            )
+            if policy.error:
+                raise ValueError(policy.error)
+            object.__setattr__(self, field_name, policy.base_url)
+
+        # Warn (do not fail) for waivable classifications missing from the outcome map
+        if self.greenwave_waivable_classifications:
+            outcome_map_keys_cf = {key.casefold() for key in outcome_map}
+            for classification in self.greenwave_waivable_classifications_parsed:
+                if classification not in outcome_map_keys_cf:
+                    logger.warning(
+                        "GREENWAVE_WAIVABLE_CLASSIFICATIONS entry '%s' is not a key "
+                        "in GREENWAVE_OUTCOME_MAP; it will not be exported",
+                        classification,
+                    )
+
+        if self.greenwave_resultsdb_auth_method not in {
+            "none",
+            "token",
+            "kerberos",
+            "ssl",
+        }:
+            raise ValueError(
+                f"Invalid greenwave_resultsdb_auth_method: '{self.greenwave_resultsdb_auth_method}'. Valid values: 'none', 'token', 'kerberos', 'ssl'"
+            )
+        if self.greenwave_waiver_auth_method not in {"oidc", "kerberos", "ssl"}:
+            raise ValueError(
+                f"Invalid greenwave_waiver_auth_method: '{self.greenwave_waiver_auth_method}'. Valid values: 'oidc', 'kerberos', 'ssl'"
+            )
+
+        if self.greenwave_testcase_template:
+            _validate_greenwave_template_placeholders(
+                self.greenwave_testcase_template,
+                allowed={"job_name", "test_name", "tier", "subject_identifier"},
+                field_name="greenwave_testcase_template",
+            )
+
+        if self.greenwave_subject_template:
+            _validate_greenwave_template_placeholders(
+                self.greenwave_subject_template,
+                allowed={"job_name", "build_number", "tier", "product_version"},
+                field_name="greenwave_subject_template",
+            )
+
+        # When greenwave is in AUTO_PUSH_EXPORTERS, all server-config placeholders
+        # referenced in greenwave_subject_template must resolve to non-empty
+        # configured values.  A missing value would render a malformed NVR such
+        # as 'hco-...-.rhel9-240'.  {job_name} and {build_number} come from
+        # runtime context and cannot be validated at config-load time.
+        if (
+            "greenwave" in parse_exporter_names(self.auto_push_exporters)
+            and self.greenwave_subject_template
+        ):
+            used_placeholders = referenced_placeholders(self.greenwave_subject_template)
+            _server_cfg_placeholders: dict[str, tuple[str, str | None]] = {
+                "tier": ("GREENWAVE_TIER", self.greenwave_tier),
+                "product_version": (
+                    "GREENWAVE_PRODUCT_VERSION",
+                    self.greenwave_product_version,
+                ),
+            }
+            for placeholder, (env_var, value) in _server_cfg_placeholders.items():
+                if (
+                    placeholder in used_placeholders
+                    and not sanitize_control_chars(value or "").strip()
+                ):
+                    raise ValueError(
+                        f"GREENWAVE_SUBJECT_TEMPLATE references '{{{placeholder}}}' "
+                        f"but {env_var} is not configured; the rendered subject would "
+                        "be malformed. Set the missing env var or remove the "
+                        "placeholder from GREENWAVE_SUBJECT_TEMPLATE."
+                    )
+
+        active_auth_methods = {self.greenwave_resultsdb_auth_method}
+        if self.greenwave_push_waivers:
+            active_auth_methods.add(self.greenwave_waiver_auth_method)
+
+        if "kerberos" in active_auth_methods and not self.greenwave_kerberos_keytab:
+            raise ValueError(
+                "GREENWAVE_KERBEROS_KEYTAB is required when an active Greenwave auth method is 'kerberos'"
+            )
+
+        if "ssl" in active_auth_methods and (
+            not self.greenwave_ssl_cert or not self.greenwave_ssl_key
+        ):
+            raise ValueError(
+                "GREENWAVE_SSL_CERT and GREENWAVE_SSL_KEY are required when an active Greenwave auth method is 'ssl'"
+            )
+
+        if (
+            "{tier}" in (self.greenwave_testcase_template or "")
+            and not self.greenwave_tier
+        ):
+            logger.warning(
+                "greenwave_testcase_template contains '{tier}' but GREENWAVE_TIER is not set; it will render empty."
+            )
+
+        return self
+
+    @property
+    def greenwave_effective_verify(self) -> bool | str:
+        """Return the effective httpx verification value for all write URLs."""
+        return self.greenwave_ca_bundle or self.greenwave_verify_ssl
+
+    @property
+    def greenwave_outcome_map_parsed(self) -> dict[str, str]:
+        """Parsed GREENWAVE_OUTCOME_MAP as {classification: OUTCOME}."""
+        return parse_greenwave_outcome_map(self.greenwave_outcome_map)
+
+    @property
+    def greenwave_waivable_classifications_parsed(self) -> frozenset[str]:
+        """Normalized classifications eligible for WaiverDB submission."""
+        return parse_greenwave_classifications(self.greenwave_waivable_classifications)
 
     @property
     def allowed_users_set(self) -> frozenset[str]:
@@ -515,6 +923,89 @@ class Settings(BaseSettings):
                     "enable_jira is True but JIRA_PROJECT_KEY is not configured"
                 )
             return False
+        return True
+
+    @property
+    def greenwave_enabled(self) -> bool:
+        """Check the safety gate, ResultsDB prerequisites, transport policy, and WaiverDB prerequisites when push_waivers is enabled."""
+        if not self.enable_greenwave:
+            return False
+        if not self.greenwave_url:
+            logger.warning(
+                "enable_greenwave is True but GREENWAVE_URL is not configured"
+            )
+            return False
+        policy = evaluate_greenwave_transport(
+            self.greenwave_url,
+            service="ResultsDB",
+            auth_method=self.greenwave_resultsdb_auth_method,
+            verify=self.greenwave_effective_verify,
+        )
+        if policy.error:
+            logger.warning(
+                "Greenwave ResultsDB transport is not ready: %s", policy.error
+            )
+            return False
+        if self.greenwave_resultsdb_auth_method == "token" and (
+            not self.greenwave_api_token
+            or not self.greenwave_api_token.get_secret_value()
+        ):
+            logger.warning(
+                "enable_greenwave is True but GREENWAVE_API_TOKEN is not configured "
+                "(required for greenwave_resultsdb_auth_method='token')"
+            )
+            return False
+        if self.greenwave_push_waivers:
+            if not self.greenwave_waiver_url:
+                logger.warning(
+                    "enable_greenwave is True and GREENWAVE_PUSH_WAIVERS is True "
+                    "but GREENWAVE_WAIVER_URL is not configured"
+                )
+                return False
+            waiver_policy = evaluate_greenwave_transport(
+                self.greenwave_waiver_url,
+                service="WaiverDB",
+                auth_method=self.greenwave_waiver_auth_method,
+                verify=self.greenwave_effective_verify,
+            )
+            if waiver_policy.error:
+                logger.warning(
+                    "Greenwave WaiverDB transport is not ready: %s", waiver_policy.error
+                )
+                return False
+            if not self.greenwave_product_version:
+                logger.warning(
+                    "enable_greenwave is True and GREENWAVE_PUSH_WAIVERS is True "
+                    "but GREENWAVE_PRODUCT_VERSION is not configured"
+                )
+                return False
+            waiver_method = self.greenwave_waiver_auth_method
+            if waiver_method == "oidc" and (
+                not self.greenwave_waiver_token
+                or not self.greenwave_waiver_token.get_secret_value()
+            ):
+                logger.warning(
+                    "enable_greenwave is True and GREENWAVE_PUSH_WAIVERS is True "
+                    "but GREENWAVE_WAIVER_TOKEN is not configured "
+                    "(required for greenwave_waiver_auth_method='oidc')"
+                )
+                return False
+            if waiver_method == "kerberos" and not self.greenwave_kerberos_keytab:
+                logger.warning(
+                    "enable_greenwave is True and GREENWAVE_PUSH_WAIVERS is True "
+                    "but GREENWAVE_KERBEROS_KEYTAB is not configured "
+                    "(required for greenwave_waiver_auth_method='kerberos')"
+                )
+                return False
+            if waiver_method == "ssl" and (
+                not self.greenwave_ssl_cert or not self.greenwave_ssl_key
+            ):
+                logger.warning(
+                    "enable_greenwave is True and GREENWAVE_PUSH_WAIVERS is True "
+                    "but GREENWAVE_SSL_CERT and GREENWAVE_SSL_KEY are required "
+                    "for greenwave_waiver_auth_method='ssl'"
+                )
+                return False
         return True
 
     @property
@@ -727,6 +1218,28 @@ async def load_db_settings() -> None:
         logger.warning("Failed to load server settings from DB", exc_info=True)
 
 
+def validate_db_settings_candidate(updates: Mapping[str, Any]) -> Settings:
+    """Validate merged settings after applying updates and reset values.
+
+    ``None`` and empty-string values remove a DB override, allowing the
+    environment/default value to participate in cross-field validation. This
+    helper is the single candidate-construction path for both PUT resets and
+    DELETE resets.
+    """
+    reset_keys = {key for key, value in updates.items() if value in (None, "")}
+    candidate_overrides = {
+        key: value for key, value in _db_settings_cache.items() if key not in reset_keys
+    }
+    candidate_overrides.update(
+        {key: value for key, value in updates.items() if value not in (None, "")}
+    )
+    # Init kwargs have higher priority than environment values in BaseSettings.
+    # Passing only DB overrides lets reset fields fall through to the environment
+    # before one complete validation pass; constructing Settings() first would
+    # incorrectly validate a lower-priority, incomplete environment configuration.
+    return Settings(**candidate_overrides)
+
+
 def update_db_settings_cache(updates: dict[str, str]) -> None:
     """Update in-memory cache when admin changes settings via the API."""
     _db_settings_cache.update(updates)
@@ -750,20 +1263,17 @@ def clear_db_settings_cache() -> None:
 def get_settings() -> Settings:
     """Get merged settings: env vars (base) + DB overrides.
 
-    DB cache values are strings (same format as env vars).  Using
-    ``Settings(**merged_data)`` triggers full pydantic validation and
-    type coercion (str→int, str→bool, str→SecretStr, etc.).
+    DB cache values are strings (same format as env vars). BaseSettings init
+    values override environment values, so passing the overrides directly
+    performs type coercion and one complete cross-field validation pass.
     """
-    base = Settings()
     if not _db_settings_cache:
-        return base
-    merged_data = base.model_dump()
-    merged_data.update(_db_settings_cache)
+        return Settings()
     try:
-        return Settings(**merged_data)
+        return Settings(**_db_settings_cache)
     except Exception:
         logger.warning(
             "Failed to validate merged settings with DB overrides",
             exc_info=True,
         )
-        return base
+        return Settings()

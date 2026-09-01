@@ -1,5 +1,7 @@
 /** Centralized fetch wrapper for the RootCoz API. */
 
+import { captureClientError } from './errorCapture'
+
 // -- Failed API call tracking ------------------------------------
 
 interface FailedApiCall {
@@ -10,6 +12,7 @@ interface FailedApiCall {
 }
 
 const MAX_FAILED_CALLS = 10
+const INVALID_ENDPOINT = '<invalid-endpoint>'
 const recentFailedCalls: FailedApiCall[] = []
 
 function trackFailedCall(entry: FailedApiCall) {
@@ -17,6 +20,15 @@ function trackFailedCall(entry: FailedApiCall) {
     recentFailedCalls.shift()
   }
   recentFailedCalls.push(entry)
+}
+
+function endpointWithoutQuery(path: string): string {
+  try {
+    return new URL(path, window.location.origin).pathname
+  } catch {
+    captureClientError('Failed to normalize API endpoint')
+    return INVALID_ENDPOINT
+  }
 }
 
 /** Return a snapshot of the recent failed API calls (status >= 400). */
@@ -63,7 +75,7 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
     }
     trackFailedCall({
       status: res.status,
-      endpoint: path,
+      endpoint: endpointWithoutQuery(path),
       error: typeof body === 'string' ? body : body != null ? JSON.stringify(body) : '',
       timestamp: Date.now(),
     })

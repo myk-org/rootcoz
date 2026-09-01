@@ -73,6 +73,7 @@ Jobs can omit `gcs_prefix`; RootCoz auto-resolves it via prowjob.json or the Pro
 - **Sparse result fields** — `GET /results/{job_id}?fields=status,result.summary,...` returns only allowlisted paths (full values). Discover paths via `GET /api/results/fields` or `rootcoz results fields`
 - **Reports access flag** — Non-admins need `can_view_reports` (admin grant / `rootcoz admin users set-can-view-reports`) to call `/api/reports/*` and `rootcoz reports`
 - **Analyze-time labels** — Pass `--label` / `-l` on `rootcoz analyze` (or `labels` in the API / config.toml) to merge job metadata labels at submit time
+- **Greenwave release gating** — Operators can publish current effective classifications to ResultsDB and, when explicitly enabled by administrators, submit human-reviewed waivers to WaiverDB. Results and waivers are isolated per test so partial success is reported without losing successful writes.
 
 ## Custom Analysis Agents
 
@@ -208,6 +209,10 @@ rootcoz analyze --source prow \
   --gcs-prefix logs/periodic-ci-e2e-aws/1234567890
 rootcoz results list
 rootcoz results tests <job_id>         # List test entries (passed/skipped/failed)
+rootcoz exporters                      # List exporter availability
+rootcoz push <job_id> --plugin greenwave \
+  --subject-identifier <build-nvr> \
+  --waiver-comment "Known infrastructure outage"
 rootcoz admin token-usage              # Summary dashboard
 rootcoz admin token-usage --group-by model  # Grouped breakdown
 rootcoz admin token-usage --job-id <uuid>   # Per-job usage
@@ -215,6 +220,10 @@ rootcoz admin token-usage --period month --format csv  # CSV export
 ```
 
 Run `rootcoz --help` for all commands.
+
+Greenwave is disabled unless the deployment explicitly sets `ENABLE_GREENWAVE=true`; URLs or credentials alone do not enable it. `--subject-identifier` selects the ResultsDB/WaiverDB artifact. When omitted on a manual push, the subject is derived from `GREENWAVE_SUBJECT_TEMPLATE` if configured; ResultsDB-only manual pushes fall back to the analyzed job name only when `GREENWAVE_SUBJECT_TEMPLATE` is not configured; if a template is configured but renders an invalid, empty, or overlong subject, the push is rejected with HTTP 422 (fail-closed). Waiver-enabled manual pushes accept either an explicit `--subject-identifier` or a rendered `GREENWAVE_SUBJECT_TEMPLATE` value; a 422 is returned when neither yields a valid subject. `AUTO_PUSH_EXPORTERS=greenwave` is supported when `GREENWAVE_SUBJECT_TEMPLATE` is configured — the template constructs the build NVR from push context (placeholders: `{job_name}`, `{build_number}`, `{tier}`, `{product_version}`; example: `hco-bundle-registry-container-{product_version}.rhel9-{build_number}`). Without the template, auto-push is rejected at config load. The optional waiver comment is limited to 500 characters and includes reviewer attribution: human by default, or `rootcoz-ai` only when the explicit `GREENWAVE_ALLOW_AI_WAIVERS=true` safety toggle is enabled. ResultsDB pushes do not require review, while WaiverDB only receives configured waivable classifications that have a qualifying review. Successful ResultsDB and WaiverDB writes are reconciled from a positive integer top-level `id`; accepted responses without one remain counted, are not retried, and are reported as partial errors. Operators and administrators may invoke exporter pushes; WaiverDB separately enforces the service account's testcase permissions. The report-page action is shown for operator/admin top-level jobs; pipeline children can be pushed with the API or CLI `--child-job-name` and `--child-build-number` options.
+
+See the generated [review workflow](https://myk-org.github.io/rootcoz/review-and-classify-failures.html), [server settings](https://myk-org.github.io/rootcoz/manage-users-and-server-settings.html), [API reference](https://myk-org.github.io/rootcoz/api-reference.html), and [deployment guide](https://myk-org.github.io/rootcoz/deploy-rootcoz.html). Helm-specific Greenwave setup is documented in [`chart/README.md`](chart/README.md).
 
 ## API
 

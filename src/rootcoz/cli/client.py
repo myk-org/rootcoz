@@ -935,15 +935,25 @@ class RootCozClient:
         *,
         child_job_name: str | None = None,
         child_build_number: int | None = None,
+        subject_identifier: str | None = None,
+        waiver_comment: str | None = None,
     ) -> dict[str, Any]:
-        """Push results to an exporter plugin. POST /results/{job_id}/push/{plugin_name}"""
+        """Push results with JSON options. POST /results/{job_id}/push/{plugin_name}"""
         params: dict[str, str | int] = {}
         if child_job_name is not None:
             params["child_job_name"] = child_job_name
         if child_build_number is not None:
             params["child_build_number"] = child_build_number
+        body: dict[str, str] = {}
+        if subject_identifier is not None:
+            body["subject_identifier"] = subject_identifier
+        if waiver_comment is not None:
+            body["waiver_comment"] = waiver_comment
         return self._request(
-            "POST", f"/results/{job_id}/push/{plugin_name}", params=params
+            "POST",
+            f"/results/{job_id}/push/{plugin_name}",
+            params=params,
+            json=body,
         )
 
     def list_exporters(self) -> list[dict[str, Any]]:

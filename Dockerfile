@@ -40,6 +40,8 @@ WORKDIR /app
 # Install git (needed for gitpython dependency)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
+    libkrb5-dev \
+    krb5-config \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy project files
@@ -47,7 +49,7 @@ COPY pyproject.toml uv.lock ./
 COPY src/ src/
 
 # Create venv and install dependencies
-RUN uv sync --frozen --no-dev
+RUN uv sync --frozen --no-dev --extra kerberos
 
 # Production stage
 FROM ghcr.io/astral-sh/uv:python3.14-bookworm-slim
@@ -62,6 +64,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     gnupg \
     tini \
+    libkrb5-3 \
+    libgssapi-krb5-2 \
+    krb5-user \
     && rm -rf /var/lib/apt/lists/*
 
 # Pinned to 22.22.3 — Node 22.23.0+ has a keep-alive regression that breaks
@@ -90,10 +95,18 @@ SHELL ["/bin/sh", "-c"]
 
 # Create non-root user, data directory, and set permissions
 # OpenShift runs containers as a random UID in the root group (GID 0)
+# Also create /etc/rootcoz/greenwave so the Kerberos keytab subPath mount has
+# a pre-existing parent directory (subPath requires the parent dir to exist in
+# the image).  0550 (owner+group read/execute, no world) restricts directory
+# traversal to appuser and GID-0 processes — matching the 0440 keytab filemode.
 RUN useradd --create-home --shell /bin/bash -g 0 appuser \
     && mkdir -p /data \
     && chown appuser:0 /data \
-    && chmod -R g+w /data
+    && chmod -R g+w /data \
+    && mkdir -p /etc/rootcoz/greenwave \
+    && chown -R appuser:0 /etc/rootcoz \
+    && chmod 0550 /etc/rootcoz \
+    && chmod 0550 /etc/rootcoz/greenwave
 
 # Switch to non-root user for CLI installs
 USER appuser

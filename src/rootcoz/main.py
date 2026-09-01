@@ -91,6 +91,7 @@ from rootcoz.config import (
     parse_repo_ref,
     remove_from_db_settings_cache,
     update_db_settings_cache,
+    validate_db_settings_candidate,
 )
 from rootcoz.encryption import (
     SENSITIVE_KEYS,
@@ -111,7 +112,8 @@ from rootcoz.engine.core import (
     set_progress_callback,
 )
 from rootcoz.error_messages import make_user_friendly_error
-from rootcoz.exporters.base import ExportContext, Exporter
+from rootcoz.exporters.base import ExportContext, Exporter, ExporterPrerequisiteError
+from rootcoz.exporters.greenwave_exporter import GreenwaveExporter
 from rootcoz.exporters.reportportal import (
     INVALID_STORED_FAILURES,
     ReportPortalClient,
@@ -141,6 +143,7 @@ from rootcoz.models import (
     CreateIssueRequest,
     CrossFailurePattern,
     ExporterInfo,
+    ExporterPushOptions,
     FailedTest,
     FailureAnalysis,
     FailureAnalysisResult,
@@ -225,6 +228,9 @@ from rootcoz.token_tracking import build_token_usage_summary
 from rootcoz.utils import (
     is_sensitive_key,
     mask_sensitive_fields,
+    normalize_optional_text,
+    parse_exporter_names,
+    sanitize_control_chars,
 )
 from rootcoz.vapid import get_vapid_config
 from rootcoz.xml_enrichment import (
@@ -247,6 +253,8 @@ _SENSITIVE_SETTINGS: frozenset[str] = frozenset(
         "github_token",
         "tests_repo_token",
         "reportportal_api_token",
+        "greenwave_api_token",
+        "greenwave_waiver_token",
         "admin_key",
         "vapid_private_key",
     }
@@ -274,6 +282,9 @@ _SERVER_ONLY_SETTINGS: frozenset[str] = frozenset(
         "rp_push_classifications",
         "rp_push_rootcoz_url",
         "rp_push_tracker_links",
+        "enable_greenwave",
+        "greenwave_push_waivers",
+        "greenwave_allow_ai_waivers",
         "vapid_claim_email",
         "vapid_public_key",
     }
@@ -286,6 +297,9 @@ _RESTART_REQUIRED_SETTINGS: frozenset[str] = frozenset(
         "secure_cookies",
         "trust_proxy_headers",
         "metadata_rules_file",
+        "enable_greenwave",
+        "greenwave_push_waivers",
+        "greenwave_allow_ai_waivers",
         "vapid_public_key",
         "vapid_private_key",
         "vapid_claim_email",
@@ -326,45 +340,57 @@ _SETTINGS_CATEGORIES: dict[str, list[str]] = {
         "github_token",
         "tests_repo_url",
         "tests_repo_token",
-        "enable_github_issues",
+        # enable_github_issues is server-only (env-only toggle)
     ],
     "Report Portal": [
         "reportportal_url",
         "reportportal_api_token",
         "reportportal_project",
         "reportportal_verify_ssl",
-        "enable_reportportal",
-        "rp_push_classifications",
-        "rp_push_rootcoz_url",
-        "rp_push_tracker_links",
+        # enable_reportportal, rp_push_* are server-only (env-only toggles)
+    ],
+    "Greenwave": [
+        "greenwave_url",
+        "greenwave_api_token",
+        "greenwave_resultsdb_auth_method",
+        "greenwave_kerberos_keytab",
+        "greenwave_kerberos_principal",
+        "greenwave_ssl_cert",
+        "greenwave_ssl_key",
+        "greenwave_ca_bundle",
+        "greenwave_waiver_url",
+        "greenwave_waiver_token",
+        "greenwave_waiver_auth_method",
+        "greenwave_subject_type",
+        "greenwave_product_version",
+        "greenwave_outcome_map",
+        "greenwave_waivable_classifications",
+        "greenwave_testcase_template",
+        "greenwave_subject_template",
+        "greenwave_tier",
+        "greenwave_verify_ssl",
     ],
     "Auth & Security": [
         "admin_key",
-        "secure_cookies",
-        "trust_proxy_headers",
-        "require_approval",
-        "admin_wait_approve_msg",
-        "allowed_users",
-        "default_user_role",
+        # secure_cookies, trust_proxy_headers, require_approval,
+        # admin_wait_approve_msg, allowed_users, default_user_role
+        # are all server-only (env-only toggles)
     ],
     "Prow": [
         "prow_url",
         "gcs_bucket",
     ],
     "Server": [
-        "public_base_url",
+        # public_base_url, metadata_rules_file, enable_auto_review,
+        # auto_push_exporters are server-only (env-only toggles)
         "additional_repos",
         "wait_for_completion",
         "poll_interval_minutes",
         "max_wait_minutes",
-        "metadata_rules_file",
-        "enable_auto_review",  # runtime toggle, no restart required
-        "auto_push_exporters",  # runtime toggle, no restart required
     ],
     "Web Push": [
-        "vapid_public_key",
+        # vapid_public_key, vapid_claim_email are server-only (env-only toggles)
         "vapid_private_key",
-        "vapid_claim_email",
     ],
 }
 
@@ -381,6 +407,11 @@ def _get_settings_metadata() -> list[dict[str, Any]]:
 
     result = []
     for field_name, field_info in Settings.model_fields.items():
+        # Server-only fields are env-only toggles: exclude from UI-visible metadata
+        # so they cannot be read or edited via the settings API.
+        if field_name in _SERVER_ONLY_SETTINGS:
+            continue
+
         # Get the current value
         value = getattr(settings, field_name)
 
@@ -716,12 +747,8 @@ def _build_internal_server_url() -> str:
     return url
 
 
-_CONTROL_CHAR_RE = re.compile(r"[\x00-\x1f\x7f]")
-
-
-def _sanitize_control_chars(value: str) -> str:
-    """Strip control characters from a string."""
-    return _CONTROL_CHAR_RE.sub("", value)
+# Alias so existing callers inside this module are unchanged.
+_sanitize_control_chars = sanitize_control_chars
 
 
 def _is_child_review_key(key: str) -> bool:
@@ -2464,13 +2491,11 @@ async def _auto_review_matching_failures(
         notify_job_status_changed(job_id)
 
         # Check if ALL failures are now reviewed → auto-push to configured exporters
-        _raw_names = [
-            _sanitize_control_chars(n.strip())
-            for n in (settings.auto_push_exporters or "").split(",")
+        auto_push_names = [
+            n
+            for n in parse_exporter_names(settings.auto_push_exporters)
+            if n in _EXPORTER_CLASSES
         ]
-        auto_push_names = list(
-            dict.fromkeys(n for n in _raw_names if n and n in _EXPORTER_CLASSES)
-        )
         if auto_push_names and total_failures > 0:
             reviews = await storage.get_reviews_for_job(job_id)
             reviewed_count = sum(1 for r in reviews.values() if r.get("reviewed"))
@@ -2478,7 +2503,6 @@ async def _auto_review_matching_failures(
                 context = await _build_export_context(
                     job_id=job_id,
                     result_data=result_data,
-                    settings=settings,
                     pushed_by=AI_SYSTEM_USERNAME,
                     fetch_history=_exporter_needs_history_classifications(
                         auto_push_names
@@ -6046,6 +6070,11 @@ def _available_exporters(settings: Settings) -> list[ExporterInfo]:
             display_name=ReportPortalClient.DISPLAY_NAME,
             enabled=rp_enabled,
         ),
+        ExporterInfo(
+            name=GreenwaveExporter.NAME,
+            display_name=GreenwaveExporter.DISPLAY_NAME,
+            enabled=settings.greenwave_enabled,
+        ),
     ]
 
 
@@ -6576,16 +6605,35 @@ async def push_to_exporter(
     child_build_number: int | None = Query(
         default=None, description="Child build number for pipeline child push"
     ),
+    options: ExporterPushOptions | None = None,
     settings: Settings = _SETTINGS_DEP,
     _job: None = Depends(_bind_job_id),
 ) -> dict[str, Any]:
     """Push analysis results to an exporter plugin.
 
-    Generic endpoint that dispatches to the named exporter.
-    Requires operator role.
+    Requires the operator role. Greenwave uses ``subject_identifier`` as the
+    ResultsDB/WaiverDB artifact: either an explicit value from the request body
+    or a value rendered from ``GREENWAVE_SUBJECT_TEMPLATE``. ResultsDB-only
+    manual pushes fall back to the job name only when no subject template is
+    configured; a configured template that renders an invalid or empty subject
+    is rejected with 422 (fail-closed). Waiver-enabled manual pushes accept
+    either an explicit ``subject_identifier`` or a rendered template value;
+    a 422 is returned when neither yields a valid subject. The optional
+    500-character ``waiver_comment`` from the JSON body is applied only to
+    eligible waivers. A 422 response identifies missing enabled-operation
+    prerequisites. Successful item writes are preserved and returned with
+    item-level errors as partial success.
     """
     _require_operator(request)
     _check_allow_list(request)
+    if {"subject_identifier", "waiver_comment"} & set(request.query_params):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "subject_identifier and waiver_comment must be sent in the JSON "
+                "request body, not the query string"
+            ),
+        )
     username = getattr(request.state, "username", "")
     safe_username = _sanitize_control_chars(username)
     logger.info(
@@ -6601,13 +6649,16 @@ async def push_to_exporter(
 
     result_data = stored["result"]
 
+    push_options = options or ExporterPushOptions()
+
     try:
         context = await _build_export_context(
             job_id=job_id,
             result_data=result_data,
-            settings=settings,
             child_job_name=child_job_name,
             child_build_number=child_build_number,
+            subject_identifier=push_options.subject_identifier,
+            waiver_comment=push_options.waiver_comment,
             pushed_by=safe_username,
             fetch_history=_exporter_needs_history_classifications([plugin_name]),
             fetch_tracked_in_links=_exporter_needs_tracked_in_links(
@@ -6619,30 +6670,46 @@ async def push_to_exporter(
 
     try:
         exporter = _create_exporter(plugin_name, settings)
+    except ExporterPrerequisiteError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except (TimeoutError, OSError, TypeError, RuntimeError) as exc:
         # Constructor/transport failures are server-side, not bad client input.
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
+        logger.error(
+            "Exporter '%s' initialization failed for job %s: %s",
+            plugin_name,
+            job_id,
+            type(exc).__name__,
+        )
+        raise HTTPException(
+            status_code=502,
+            detail=f"Exporter '{plugin_name}' could not be initialized",
+        ) from exc
 
     try:
         with exporter:
             result = await exporter.push(context)
+    except ExporterPrerequisiteError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     except Exception as exc:
         # Guard against unexpected exporter failures leaking as raw 500s.
         # Expected error modes are already returned inside push() as a
         # failed ExporterResult; this catches genuinely unforeseen faults.
-        logger.exception(
-            "Exporter '%s' push raised unexpectedly for job %s",
+        logger.error(
+            "Exporter '%s' push raised unexpectedly for job %s: %s",
             plugin_name,
             job_id,
+            type(exc).__name__,
         )
         raise HTTPException(
             status_code=502,
             detail=f"Exporter '{plugin_name}' failed unexpectedly",
         ) from exc
 
-    return {**result.details, "success": result.success, "message": result.message}
+    return strip_sensitive_from_response(
+        {**result.details, "success": result.success, "message": result.message}
+    )
 
 
 def _rp_push_error_result(
@@ -6711,9 +6778,10 @@ async def _build_export_context(
     *,
     job_id: str,
     result_data: dict[str, Any],
-    settings: Settings,
     child_job_name: str | None = None,
     child_build_number: int | None = None,
+    subject_identifier: str | None = None,
+    waiver_comment: str | None = None,
     pushed_by: str = "",
     fetch_history: bool = True,
     fetch_tracked_in_links: bool = True,
@@ -6726,7 +6794,6 @@ async def _build_export_context(
     Args:
         job_id: The analysis job identifier.
         result_data: Stored result dict containing failures and Jenkins metadata.
-        settings: Application settings.
         child_job_name: Optional child job name for scoped push.
         child_build_number: Optional child build number.
         pushed_by: Username of the user who triggered the push.
@@ -6746,6 +6813,14 @@ async def _build_export_context(
     Raises:
         ValueError: Invalid child job parameters.
     """
+    subject_identifier = normalize_optional_text(subject_identifier)
+    waiver_comment = normalize_optional_text(waiver_comment)
+
+    # result_json is a denormalized snapshot. Apply authoritative, visible
+    # test_classifications overrides before selecting a top-level/child scope so
+    # exporters never publish or waive a stale classification.
+    await _apply_effective_classifications(job_id, result_data)
+
     base_url = _extract_base_url()
     report_url = f"{base_url}/results/{job_id}" if base_url else ""
 
@@ -6870,6 +6945,8 @@ async def _build_export_context(
         report_url=report_url,
         child_job_name=child_job_name,
         child_build_number=child_build_number,
+        subject_identifier=subject_identifier,
+        waiver_comment=waiver_comment,
         pushed_by=pushed_by,
         history_classifications=history_classifications,
         tracked_in_links=tracked_in_data,
@@ -6883,6 +6960,7 @@ async def _build_export_context(
 # ``_create_exporter()``.
 _EXPORTER_CLASSES: dict[str, type[Exporter]] = {
     ReportPortalClient.NAME: ReportPortalClient,
+    GreenwaveExporter.NAME: GreenwaveExporter,
 }
 
 
@@ -6977,6 +7055,41 @@ def _create_exporter(plugin_name: str, settings: Settings) -> Exporter:
             push_rootcoz_url=rp.push_rootcoz_url,
             push_tracker_links=rp.push_tracker_links,
         )
+    if plugin_name == "greenwave":
+        if not settings.greenwave_enabled:
+            raise ValueError("Greenwave integration is disabled or not configured")
+        if settings.greenwave_url is None:
+            raise ValueError("greenwave_url is required")
+        return GreenwaveExporter(
+            url=settings.greenwave_url,
+            outcome_map=settings.greenwave_outcome_map_parsed,
+            subject_type=settings.greenwave_subject_type,
+            testcase_template=settings.greenwave_testcase_template,
+            subject_template=settings.greenwave_subject_template,
+            tier=settings.greenwave_tier,
+            resultsdb_auth_method=settings.greenwave_resultsdb_auth_method,
+            api_token=(
+                settings.greenwave_api_token.get_secret_value()
+                if settings.greenwave_api_token
+                else None
+            ),
+            waiver_url=settings.greenwave_waiver_url,
+            waiver_auth_method=settings.greenwave_waiver_auth_method,
+            waiver_token=(
+                settings.greenwave_waiver_token.get_secret_value()
+                if settings.greenwave_waiver_token
+                else None
+            ),
+            push_waivers=settings.greenwave_push_waivers,
+            waivable_classifications=settings.greenwave_waivable_classifications_parsed,
+            allow_ai_waivers=settings.greenwave_allow_ai_waivers,
+            product_version=settings.greenwave_product_version,
+            kerberos_keytab=settings.greenwave_kerberos_keytab,
+            kerberos_principal=settings.greenwave_kerberos_principal,
+            ssl_cert=settings.greenwave_ssl_cert,
+            ssl_key=settings.greenwave_ssl_key,
+            verify=settings.greenwave_effective_verify,
+        )
     raise ValueError(f"Unknown exporter plugin: '{plugin_name}'")
 
 
@@ -7007,7 +7120,6 @@ async def _execute_rp_push(
     context = await _build_export_context(
         job_id=job_id,
         result_data=result_data,
-        settings=settings,
         child_job_name=child_job_name,
         child_build_number=child_build_number,
         pushed_by=pushed_by,
@@ -9879,6 +9991,17 @@ async def get_admin_settings(
     return JSONResponse(content=metadata)
 
 
+def _pydantic_validation_messages(exc: ValidationError) -> list[str]:
+    """Extract stable messages from a Pydantic validation failure."""
+    messages: list[str] = []
+    for error in exc.errors():
+        context_error = error.get("ctx", {}).get("error")
+        messages.append(
+            str(context_error) if context_error else error.get("msg", str(error))
+        )
+    return messages
+
+
 @app.put("/api/admin/settings", operation_id="updateAdminSettings")
 async def update_admin_settings(request: Request) -> JSONResponse:
     """Update one or more server settings. Body: {"settings": {"key": "value", ...}}"""
@@ -9920,9 +10043,7 @@ async def update_admin_settings(request: Request) -> JSONResponse:
             validated = Settings.model_validate({key: value})
             settings_updates[key] = getattr(validated, key)
         except ValidationError as exc:
-            for err in exc.errors():
-                ctx_err = err.get("ctx", {}).get("error")
-                errors.append(str(ctx_err) if ctx_err else err.get("msg", str(err)))
+            errors.extend(_pydantic_validation_messages(exc))
 
     for key, value in settings_updates.items():
         field_info = Settings.model_fields[key]
@@ -9963,6 +10084,17 @@ async def update_admin_settings(request: Request) -> JSONResponse:
                         errors.append(f"{key}: must be <= {meta.le}")
             except (ValueError, TypeError):
                 errors.append(f"{key}: must be an integer")
+
+    # Full merged-settings validation: catch cross-field/model_validator errors
+    # (e.g. greenwave auth/template rules) BEFORE persisting, so invalid values
+    # don't silently drop all DB overrides at get_settings() time.
+    try:
+        validate_db_settings_candidate(settings_updates)
+    except ValidationError as exc:
+        errors.extend(_pydantic_validation_messages(exc))
+
+    errors = list(dict.fromkeys(errors))
+
     if errors:
         raise HTTPException(
             status_code=400, detail=f"Invalid settings: {'; '.join(errors)}"
@@ -10040,6 +10172,15 @@ async def reset_admin_setting(request: Request, key: str) -> JSONResponse:
     _require_admin(request)
     if key not in Settings.model_fields:
         raise HTTPException(status_code=404, detail=f"Unknown setting: {key}")
+
+    try:
+        validate_db_settings_candidate({key: None})
+    except ValidationError as exc:
+        candidate_errors = _pydantic_validation_messages(exc)
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid settings: {'; '.join(candidate_errors)}",
+        ) from exc
 
     deleted = await storage.delete_server_setting(
         key, deleted_by=request.state.username or "admin"

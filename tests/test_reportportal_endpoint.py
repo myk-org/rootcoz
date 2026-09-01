@@ -48,6 +48,11 @@ def _mock_storage_reviews():
             return_value={},
         ),
         patch(
+            "rootcoz.main.storage.get_all_effective_classifications",
+            new_callable=AsyncMock,
+            return_value={},
+        ),
+        patch(
             "rootcoz.main.get_history_classification",
             new_callable=AsyncMock,
             return_value="",

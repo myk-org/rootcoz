@@ -1,6 +1,9 @@
 {{- include "rootcoz.validate" . -}}
 {{- $gcloudKey := include "rootcoz.gcloudServiceAccountKey" . -}}
 {{- $cursorAuth := include "rootcoz.cursorAuthJson" . -}}
+{{- $keytab := include "rootcoz.greenwaveKeytab" . -}}
+{{- $greenwaveApiToken := include "rootcoz.greenwaveApiToken" . -}}
+{{- $greenwaveWaiverToken := include "rootcoz.greenwaveWaiverToken" . -}}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -28,6 +31,7 @@ spec:
         {{- /* Salt with Release.Name: constant across upgrades, unique per installation. */}}
         checksum/credentials: {{ printf "%s\n%s\n%s\n%s\n%s" .Values.admin.key .Values.ai.geminiApiKey .Values.ai.anthropicApiKey .Values.ai.cursor.apiKey .Release.Name | sha256sum }}
         checksum/encryption: {{ printf "%s\n%s" .Values.encryptionKey .Release.Name | sha256sum }}
+        checksum/greenwave-credentials: {{ printf "%s\n%s\n%s" $greenwaveApiToken $greenwaveWaiverToken $keytab | sha256sum }}
         {{- if and .Values.ai.vertex.enabled $gcloudKey }}
         checksum/gcloud: {{ $gcloudKey | sha256sum }}
         {{- end }}
@@ -122,6 +126,12 @@ spec:
               mountPath: /gcloud-credentials
               readOnly: true
             {{- end }}
+            {{- if $keytab }}
+            - name: greenwave-keytab
+              mountPath: {{ .Values.greenwave.kerberosKeytabPath }}
+              subPath: greenwave-krb5-keytab
+              readOnly: true
+            {{- end }}
             {{- if $cursorAuth }}
             - name: cursor-auth
               mountPath: /home/appuser/.cursor-auth
@@ -140,6 +150,12 @@ spec:
         - name: gcloud-credentials
           secret:
             secretName: {{ include "rootcoz.gcloudSecretName" . }}
+        {{- end }}
+        {{- if $keytab }}
+        - name: greenwave-keytab
+          secret:
+            secretName: {{ include "rootcoz.fullname" . }}-greenwave-keytab
+            defaultMode: 0440
         {{- end }}
         {{- if $cursorAuth }}
         - name: cursor-auth

@@ -39,6 +39,20 @@ class TestMaskSensitiveFields:
         # Non-sensitive field preserved
         assert result["job_name"] == "my-job"
 
+    def test_masks_exporter_options_as_log_sensitive(self):
+        result = mask_sensitive_fields(
+            {
+                "subject_identifier": "private-build-nvr",
+                "waiver_comment": "private release justification",
+                "job_name": "job",
+            }
+        )
+        assert result == {
+            "subject_identifier": "***",
+            "waiver_comment": "***",
+            "job_name": "job",
+        }
+
     def test_masks_generic_pattern_fields(self):
         data = {
             "custom_password": "hidden",  # pragma: allowlist secret

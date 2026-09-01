@@ -2607,7 +2607,10 @@ def push_rp_cmd(
 def push_cmd(
     job_id: str = typer.Argument(help="Job ID to push results for."),
     plugin: str = typer.Option(
-        ..., "--plugin", "-p", help="Exporter plugin name (e.g. 'reportportal')."
+        ...,
+        "--plugin",
+        "-p",
+        help="Exporter plugin name (e.g. 'reportportal' or 'greenwave').",
     ),
     child_job_name: str | None = typer.Option(
         None, "--child-job-name", help="Child job name (for pipeline child push)."
@@ -2616,6 +2619,16 @@ def push_cmd(
         None,
         "--child-build-number",
         help="Child build number (for pipeline child push).",
+    ),
+    subject_identifier: str | None = typer.Option(
+        None,
+        "--subject-identifier",
+        help="Build artifact identifier (e.g. NVR) for gating exporters (Greenwave).",
+    ),
+    waiver_comment: str | None = typer.Option(
+        None,
+        "--waiver-comment",
+        help="Optional justification for waivers (max 500 chars; Greenwave).",
     ),
     json_output: bool = _JSON_OPTION,
 ) -> None:
@@ -2627,6 +2640,8 @@ def push_cmd(
             plugin,
             child_job_name=child_job_name,
             child_build_number=child_build_number,
+            subject_identifier=subject_identifier,
+            waiver_comment=waiver_comment,
         ),
         emit_output=False,
     )
