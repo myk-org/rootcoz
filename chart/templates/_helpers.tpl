@@ -230,6 +230,14 @@ ANTHROPIC_API_KEY: {{ $anthropic | b64enc | quote }}
 {{- if $cursor }}
 CURSOR_API_KEY: {{ $cursor | b64enc | quote }}
 {{- end -}}
+{{- $gwToken := include "rootcoz.greenwaveApiToken" . -}}
+{{- if $gwToken }}
+GREENWAVE_API_TOKEN: {{ $gwToken | b64enc | quote }}
+{{- end -}}
+{{- $gwWaiverToken := include "rootcoz.greenwaveWaiverToken" . -}}
+{{- if $gwWaiverToken }}
+GREENWAVE_WAIVER_TOKEN: {{ $gwWaiverToken | b64enc | quote }}
+{{- end -}}
 {{- end }}
 
 {{/*
@@ -256,6 +264,19 @@ Call via: include "rootcoz.resolveSecretPayload" (dict "value" <val> "secretName
 {{- end }}
 
 {{/*
+Resolve Greenwave bearer tokens: values override, else preserve the existing
+credentials Secret on upgrade. These helpers are also used by the Deployment
+checksum so rotations roll the pod.
+*/}}
+{{- define "rootcoz.greenwaveApiToken" -}}
+{{- include "rootcoz.resolveSecretPayload" (dict "value" .Values.greenwave.apiToken "secretName" (include "rootcoz.credentialsSecretName" .) "secretKey" "GREENWAVE_API_TOKEN" "Release" .Release) -}}
+{{- end }}
+
+{{- define "rootcoz.greenwaveWaiverToken" -}}
+{{- include "rootcoz.resolveSecretPayload" (dict "value" .Values.greenwave.waiverToken "secretName" (include "rootcoz.credentialsSecretName" .) "secretKey" "GREENWAVE_WAIVER_TOKEN" "Release" .Release) -}}
+{{- end }}
+
+{{/*
 Resolve Vertex SA JSON: values override, else preserve existing secret on upgrade.
 Accepts a non-empty string or map in values.
 */}}
@@ -268,6 +289,22 @@ Resolve Cursor auth.json: values override, else preserve existing secret on upgr
 */}}
 {{- define "rootcoz.cursorAuthJson" -}}
 {{- include "rootcoz.resolveSecretPayload" (dict "value" .Values.ai.cursor.authJson "secretName" (include "rootcoz.cursorAuthSecretName" .) "secretKey" "auth.json" "Release" .Release) -}}
+{{- end }}
+
+{{/*
+Resolve Greenwave Kerberos Keytab: values override, else preserve existing secret on upgrade.
+Returns the base64-encoded keytab string.
+*/}}
+{{- define "rootcoz.greenwaveKeytab" -}}
+{{- if .Values.greenwave.kerberosKeytab -}}
+{{- .Values.greenwave.kerberosKeytab -}}
+{{- else -}}
+{{- $secretName := printf "%s-greenwave-keytab" (include "rootcoz.fullname" .) -}}
+{{- $secret := lookup "v1" "Secret" .Release.Namespace $secretName -}}
+{{- if and $secret (index $secret.data "greenwave-krb5-keytab") -}}
+{{- index $secret.data "greenwave-krb5-keytab" -}}
+{{- end -}}
+{{- end -}}
 {{- end }}
 
 {{/*
@@ -304,6 +341,56 @@ CLOUD_ML_REGION: {{ .Values.ai.vertex.region | quote }}
 {{- end }}
 {{- if .Values.ai.vertex.projectId }}
 ANTHROPIC_VERTEX_PROJECT_ID: {{ .Values.ai.vertex.projectId | quote }}
+{{- end }}
+{{- end }}
+{{- if .Values.greenwave.enabled }}
+ENABLE_GREENWAVE: "true"
+{{- if .Values.greenwave.url }}
+GREENWAVE_URL: {{ .Values.greenwave.url | quote }}
+{{- end }}
+{{- if .Values.greenwave.waiverUrl }}
+GREENWAVE_WAIVER_URL: {{ .Values.greenwave.waiverUrl | quote }}
+{{- end }}
+GREENWAVE_PUSH_WAIVERS: {{ .Values.greenwave.pushWaivers | quote }}
+GREENWAVE_ALLOW_AI_WAIVERS: {{ .Values.greenwave.allowAiWaivers | quote }}
+{{- if .Values.greenwave.waivableClassifications }}
+GREENWAVE_WAIVABLE_CLASSIFICATIONS: {{ .Values.greenwave.waivableClassifications | quote }}
+{{- end }}
+{{- if .Values.greenwave.outcomeMap }}
+GREENWAVE_OUTCOME_MAP: {{ .Values.greenwave.outcomeMap | quote }}
+{{- end }}
+{{- if .Values.greenwave.subjectType }}
+GREENWAVE_SUBJECT_TYPE: {{ .Values.greenwave.subjectType | quote }}
+{{- end }}
+{{- if .Values.greenwave.productVersion }}
+GREENWAVE_PRODUCT_VERSION: {{ .Values.greenwave.productVersion | quote }}
+{{- end }}
+GREENWAVE_VERIFY_SSL: {{ .Values.greenwave.verifySsl | quote }}
+GREENWAVE_RESULTSDB_AUTH_METHOD: {{ .Values.greenwave.resultsdbAuthMethod | quote }}
+GREENWAVE_WAIVER_AUTH_METHOD: {{ .Values.greenwave.waiverAuthMethod | quote }}
+{{- if .Values.greenwave.testcaseTemplate }}
+GREENWAVE_TESTCASE_TEMPLATE: {{ .Values.greenwave.testcaseTemplate | quote }}
+{{- end }}
+{{- if .Values.greenwave.subjectTemplate }}
+GREENWAVE_SUBJECT_TEMPLATE: {{ .Values.greenwave.subjectTemplate | quote }}
+{{- end }}
+{{- if .Values.greenwave.tier }}
+GREENWAVE_TIER: {{ .Values.greenwave.tier | quote }}
+{{- end }}
+{{- if .Values.greenwave.kerberosPrincipal }}
+GREENWAVE_KERBEROS_PRINCIPAL: {{ .Values.greenwave.kerberosPrincipal | quote }}
+{{- end }}
+{{- if include "rootcoz.greenwaveKeytab" . }}
+GREENWAVE_KERBEROS_KEYTAB: {{ .Values.greenwave.kerberosKeytabPath | quote }}
+{{- end }}
+{{- if .Values.greenwave.sslCert }}
+GREENWAVE_SSL_CERT: {{ .Values.greenwave.sslCert | quote }}
+{{- end }}
+{{- if .Values.greenwave.sslKey }}
+GREENWAVE_SSL_KEY: {{ .Values.greenwave.sslKey | quote }}
+{{- end }}
+{{- if .Values.greenwave.caBundle }}
+GREENWAVE_CA_BUNDLE: {{ .Values.greenwave.caBundle | quote }}
 {{- end }}
 {{- end }}
 {{- end }}

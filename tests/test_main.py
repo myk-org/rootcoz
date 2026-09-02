@@ -6076,6 +6076,31 @@ class TestAdminSettingsEndpoints:
                 f"Sensitive field {si['key']} not masked by default"
             )
 
+    def test_get_settings_excludes_server_only_fields(self, test_client) -> None:
+        """GET /api/admin/settings must NOT expose server-only (env-only) toggle fields."""
+        response = test_client.get("/api/admin/settings")
+        assert response.status_code == 200
+        returned_keys = {s["key"] for s in response.json()}
+        # Greenwave gating-safety toggles are env-only: must be absent from metadata.
+        for field in (
+            "enable_greenwave",
+            "greenwave_push_waivers",
+            "greenwave_allow_ai_waivers",
+        ):
+            assert field not in returned_keys, (
+                f"Server-only field {field!r} must not appear in settings metadata"
+            )
+        # Other well-known server-only fields must also be absent.
+        for field in (
+            "auto_push_exporters",
+            "enable_reportportal",
+            "debug",
+            "log_level",
+        ):
+            assert field not in returned_keys, (
+                f"Server-only field {field!r} must not appear in settings metadata"
+            )
+
     def test_get_settings_non_admin_forbidden(self, test_client) -> None:
         """Non-admin users cannot access settings."""
         response = test_client.get(
@@ -6274,6 +6299,56 @@ class TestAdminSettingsEndpoints:
         settings = get_resp.json()
         ai_timeout = next(s for s in settings if s["key"] == "ai_call_timeout")
         assert ai_timeout["source"] != "db"
+
+    def test_reset_cross_field_prerequisite_validates_without_stale_override(
+        self, test_client
+    ) -> None:
+        """Reset validation uses env/default, not the value being removed."""
+        configured = test_client.put(
+            "/api/admin/settings",
+            json={
+                "settings": {
+                    "greenwave_resultsdb_auth_method": "kerberos",
+                    "greenwave_kerberos_keytab": "/etc/rootcoz/test.keytab",
+                }
+            },
+        )
+        assert configured.status_code == 200
+
+        response = test_client.put(
+            "/api/admin/settings",
+            json={"settings": {"greenwave_kerberos_keytab": ""}},
+        )
+        assert response.status_code == 400
+        assert "GREENWAVE_KERBEROS_KEYTAB" in response.json()["detail"]
+
+        settings = test_client.get("/api/admin/settings").json()
+        keytab = next(s for s in settings if s["key"] == "greenwave_kerberos_keytab")
+        assert keytab["source"] == "db"
+        assert keytab["value"] == "/etc/rootcoz/test.keytab"
+
+    def test_delete_cross_field_prerequisite_validates_before_deletion(
+        self, test_client
+    ) -> None:
+        configured = test_client.put(
+            "/api/admin/settings",
+            json={
+                "settings": {
+                    "greenwave_resultsdb_auth_method": "kerberos",
+                    "greenwave_kerberos_keytab": "/etc/rootcoz/test.keytab",
+                }
+            },
+        )
+        assert configured.status_code == 200
+
+        response = test_client.delete("/api/admin/settings/greenwave_kerberos_keytab")
+        assert response.status_code == 400
+        assert "GREENWAVE_KERBEROS_KEYTAB" in response.json()["detail"]
+
+        settings = test_client.get("/api/admin/settings").json()
+        keytab = next(s for s in settings if s["key"] == "greenwave_kerberos_keytab")
+        assert keytab["source"] == "db"
+        assert keytab["value"] == "/etc/rootcoz/test.keytab"
 
     def test_put_settings_non_admin_forbidden(self, test_client) -> None:
         """Non-admin users cannot update settings."""
@@ -6565,35 +6640,14 @@ class TestSubmitterAutoTag:
 
 
 class TestSanitizeControlChars:
-    """Tests for _sanitize_control_chars."""
+    """Alias-identity test for _sanitize_control_chars in rootcoz.main."""
 
-    @pytest.mark.parametrize(
-        "input_val, expected",
-        [
-            ("alice", "alice"),
-            ("", ""),
-            ("alice\nfake", "alicefake"),
-            ("bob\r\nINFO", "bobINFO"),
-            ("tab\there", "tabhere"),
-            ("null\x00here", "nullhere"),
-            ("del\x7fhere", "delhere"),
-            ("\x01\x02test\x1f", "test"),
-        ],
-        ids=[
-            "normal",
-            "empty",
-            "newline",
-            "crlf",
-            "tab",
-            "null_byte",
-            "del_char",
-            "mixed_control",
-        ],
-    )
-    def test_sanitize_control_chars(self, input_val: str, expected: str) -> None:
+    def test_main_alias_matches_utils(self) -> None:
+        """main._sanitize_control_chars is the same object as utils.sanitize_control_chars."""
         from rootcoz.main import _sanitize_control_chars
+        from rootcoz.utils import sanitize_control_chars
 
-        assert _sanitize_control_chars(input_val) == expected
+        assert _sanitize_control_chars is sanitize_control_chars
 
 
 class TestRefreshAiModelsEndpoint:

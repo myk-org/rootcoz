@@ -12,6 +12,7 @@ dependencies = [
   "fastapi",
   "gitpython",
   "httpx",
+  "pyspnego",
   "pydantic-settings",
   "python-jenkins",
   "python-multipart",
@@ -32,6 +33,9 @@ tests = [
     "pytest",
     "pytest-asyncio",
     "pytest-xdist>=3.8.0",
+]
+kerberos = [
+    "pyspnego[kerberos]",
 ]
 
 [build-system]

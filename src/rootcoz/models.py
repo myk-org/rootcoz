@@ -7,6 +7,7 @@ from uuid import uuid4
 from pydantic import (
     BaseModel,
     BeforeValidator,
+    ConfigDict,
     Field,
     HttpUrl,
     Strict,
@@ -25,6 +26,7 @@ from rootcoz.prow_validation import (
     validate_prow_job_name,
 )
 from rootcoz.repository import RESERVED_REPO_NAMES
+from rootcoz.utils import normalize_optional_text
 
 _SYSTEM_TAGS: frozenset[str] = frozenset({"re-analyze"})
 
@@ -1219,6 +1221,42 @@ class ExporterInfo(BaseModel):
     name: str = Field(description="Machine-readable exporter identifier")
     display_name: str = Field(description="Human-readable exporter name")
     enabled: bool = Field(description="Whether this exporter is configured and ready")
+
+
+class ExporterPushOptions(BaseModel):
+    """Validated per-request options for exporter pushes.
+
+    Browser and CLI clients send this model as JSON so potentially sensitive
+    values never appear in request URLs.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    subject_identifier: str | None = Field(
+        default=None,
+        max_length=500,
+        description=(
+            "Build artifact identifier for gating exporters. On a manual push, "
+            "an explicit value takes priority; if absent, the subject is rendered "
+            "from GREENWAVE_SUBJECT_TEMPLATE when configured. ResultsDB-only "
+            "manual pushes fall back to the job name only when no template is "
+            "configured; a configured template must render a valid subject or "
+            "the push fails with HTTP 422. Waiver-enabled manual pushes require "
+            "an explicit value or a valid rendered template; HTTP 422 is returned "
+            "when neither yields a subject."
+        ),
+    )
+    waiver_comment: str | None = Field(
+        default=None,
+        max_length=500,
+        description="Optional waiver justification combined with generated context",
+    )
+
+    @field_validator("subject_identifier", "waiver_comment")
+    @classmethod
+    def normalize_optional_text_validator(cls, value: str | None) -> str | None:
+        """Strip control chars and whitespace; delegates to the shared normalizer."""
+        return normalize_optional_text(value)
 
 
 class _PushEndpointMixin(BaseModel):

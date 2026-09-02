@@ -71,6 +71,60 @@ admin:
 # → ROOTCOZ_ENCRYPTION_KEY (separate secret). Auto-generated on first install if empty.
 encryptionKey: ""
 
+# Greenwave / ResultsDB / WaiverDB exporter (optional).
+# The URL/tokens/mapping/template/auth/etc. are admin-editable in Server Settings
+# (values here provide bootstrap/defaults). Only gating-safety toggles
+# (enable/pushWaivers/allowAiWaivers) are strictly env-only. Leave enabled=false to disable.
+greenwave:
+  # → ENABLE_GREENWAVE (configmap). Set true to enable the exporter.
+  enabled: false
+  # → GREENWAVE_URL (configmap). ResultsDB API base URL.
+  url: ""
+  # → GREENWAVE_API_TOKEN (secret). ResultsDB API token.
+  apiToken: ""
+  # → GREENWAVE_WAIVER_URL (configmap). Required when pushWaivers=true.
+  waiverUrl: ""
+  # → GREENWAVE_WAIVER_TOKEN (secret). Required when pushWaivers=true and waiverAuthMethod=oidc.
+  waiverToken: ""
+  # → GREENWAVE_PUSH_WAIVERS (configmap). Enable waiver submission to WaiverDB.
+  pushWaivers: false
+  # → GREENWAVE_ALLOW_AI_WAIVERS (configmap). Allow rootcoz-ai reviews to waive.
+  allowAiWaivers: false
+  # → GREENWAVE_WAIVABLE_CLASSIFICATIONS (configmap). Comma-separated list.
+  waivableClassifications: "INFRASTRUCTURE"
+  # → GREENWAVE_OUTCOME_MAP (configmap). CLASS:OUTCOME,... mapping.
+  outcomeMap: "PRODUCT BUG:FAILED,CODE ISSUE:FAILED,INFRASTRUCTURE:INFO"
+  # → GREENWAVE_SUBJECT_TYPE (configmap). ResultsDB subject type.
+  subjectType: "koji_build"
+  # → GREENWAVE_PRODUCT_VERSION (configmap). Required when pushWaivers=true.
+  productVersion: ""
+  # → GREENWAVE_VERIFY_SSL (configmap). False permits isolated-dev HTTP only for unauthenticated (none) auth when caBundle is empty; all authenticated methods (token, oidc, kerberos, ssl) always require HTTPS.
+  verifySsl: true
+  # → GREENWAVE_RESULTSDB_AUTH_METHOD (configmap): none|token|kerberos|ssl
+  resultsdbAuthMethod: "token"
+  # → GREENWAVE_WAIVER_AUTH_METHOD (configmap): oidc|kerberos|ssl
+  waiverAuthMethod: "oidc"
+  # → GREENWAVE_TESTCASE_TEMPLATE (configmap). Example: myproduct.product-build.{tier}.{test_name}
+  testcaseTemplate: "rootcoz.{job_name}.{test_name}"
+  # → GREENWAVE_SUBJECT_TEMPLATE (configmap). Template for constructing the subject
+  # identifier when no explicit subject is provided. Required for AUTO_PUSH_EXPORTERS=greenwave.
+  # Placeholders: {job_name},{build_number},{tier},{product_version}.
+  # Example: hco-bundle-registry-container-{product_version}.rhel9-{build_number}
+  subjectTemplate: ""
+  # → GREENWAVE_TIER (configmap). Value for {tier} placeholder (e.g. tier-1).
+  tier: ""
+  # → GREENWAVE_KERBEROS_PRINCIPAL (configmap). e.g. svc-rootcoz@EXAMPLE.COM
+  kerberosPrincipal: ""
+  # Base64-encoded keytab file content (run: base64 -w0 krb5.keytab). Stored as-is in a Secret and mounted read-only at kerberosKeytabPath.
+  kerberosKeytab: ""
+  # → GREENWAVE_KERBEROS_KEYTAB (configmap): in-pod mount path of the keytab file.
+  kerberosKeytabPath: "/etc/rootcoz/greenwave/krb5.keytab"
+  # → GREENWAVE_SSL_CERT / GREENWAVE_SSL_KEY (configmap): in-pod paths (mount separately if used)
+  sslCert: ""
+  sslKey: ""
+  # → GREENWAVE_CA_BUNDLE (configmap). Path to CA PEM for TLS verification.
+  caBundle: ""
+
 persistence:
   enabled: true
   # PVC size for SQLite database and app data

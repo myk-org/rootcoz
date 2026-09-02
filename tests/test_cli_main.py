@@ -3632,6 +3632,12 @@ class TestPushRpCommand:
 
 
 class TestPushCommand:
+    def test_help_lists_greenwave_plugin(self):
+        result = runner.invoke(app, ["push", "--help"])
+        assert result.exit_code == 0
+        assert "reportportal" in result.output
+        assert "greenwave" in result.output
+
     def test_push(self, mock_client):
         mock_client.push_to_exporter.return_value = {
             "pushed": 3,
@@ -3646,6 +3652,8 @@ class TestPushCommand:
             "reportportal",
             child_job_name=None,
             child_build_number=None,
+            subject_identifier=None,
+            waiver_comment=None,
         )
 
     def test_push_json(self, mock_client):
@@ -3695,6 +3703,79 @@ class TestPushCommand:
             "reportportal",
             child_job_name="my-child",
             child_build_number=42,
+            subject_identifier=None,
+            waiver_comment=None,
+        )
+
+    def test_push_greenwave_subject_identifier(self, mock_client):
+        mock_client.push_to_exporter.return_value = {
+            "pushed": 1,
+            "errors": [],
+            "message": "Pushed 1 item(s)",
+        }
+        result = runner.invoke(
+            app,
+            [
+                "push",
+                "job-123",
+                "--plugin",
+                "greenwave",
+                "--subject-identifier",
+                "build-nvr-1",
+            ],
+        )
+        assert result.exit_code == 0
+        mock_client.push_to_exporter.assert_called_once_with(
+            "job-123",
+            "greenwave",
+            child_job_name=None,
+            child_build_number=None,
+            subject_identifier="build-nvr-1",
+            waiver_comment=None,
+        )
+
+    def test_push_greenwave_default_subject_none(self, mock_client):
+        mock_client.push_to_exporter.return_value = {
+            "pushed": 1,
+            "errors": [],
+            "message": "Pushed 1 item(s)",
+        }
+        result = runner.invoke(app, ["push", "job-123", "--plugin", "greenwave"])
+        assert result.exit_code == 0
+        mock_client.push_to_exporter.assert_called_once_with(
+            "job-123",
+            "greenwave",
+            child_job_name=None,
+            child_build_number=None,
+            subject_identifier=None,
+            waiver_comment=None,
+        )
+
+    def test_push_greenwave_waiver_comment(self, mock_client):
+        mock_client.push_to_exporter.return_value = {
+            "pushed": 1,
+            "errors": [],
+            "message": "Pushed 1 item(s)",
+        }
+        result = runner.invoke(
+            app,
+            [
+                "push",
+                "job-123",
+                "--plugin",
+                "greenwave",
+                "--waiver-comment",
+                "known flake",
+            ],
+        )
+        assert result.exit_code == 0
+        mock_client.push_to_exporter.assert_called_once_with(
+            "job-123",
+            "greenwave",
+            child_job_name=None,
+            child_build_number=None,
+            subject_identifier=None,
+            waiver_comment="known flake",
         )
 
 

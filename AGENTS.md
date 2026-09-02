@@ -100,7 +100,9 @@ src/rootcoz/
   exporters/                # Exporter plugins (push results to external systems)
     base.py                 # Exporter ABC, ExportContext, ExporterResult
     reportportal.py         # Report Portal exporter: ReportPortalClient
+    greenwave_exporter.py   # Greenwave exporter: GreenwaveExporter (ResultsDB results + WaiverDB waivers)
   prow_validation.py        # Canonical Prow validators (+ URL helper re-exports for compatibility)
+  greenwave.py              # Shared Greenwave transport-policy evaluation and outcome-map normalization helpers
   url_utils.py              # Cross-cutting HTTP(S) URL sanitization (strip userinfo, href)
   main.py                   # FastAPI app, unified POST /analyze endpoint, background tasks
   xml_enrichment.py          # JUnit XML parsing: extract_all_tests_from_xml (pass/skip/fail),
@@ -285,12 +287,32 @@ Exporters push analysis results to external systems. Each exporter implements th
 - **Generic push endpoint**: `POST /results/{job_id}/push/{plugin_name}` (operator+ role)
 - **Legacy endpoint**: `POST /results/{job_id}/push-reportportal` (backward compatible)
 - **Exporters list**: `GET /api/exporters` — lists available exporters with enabled status
-- **Auto-push**: When `AUTO_PUSH_EXPORTERS` is set and all failures are auto-reviewed, results are pushed to configured exporters
-- **CLI**: `rootcoz push --plugin <name>`, `rootcoz exporters`, `rootcoz push-reportportal` (backward compat)
+- **Auto-push**: When `AUTO_PUSH_EXPORTERS` is set and all failures are auto-reviewed, results are pushed to configured exporters. `AUTO_PUSH_EXPORTERS=greenwave` is supported when `GREENWAVE_SUBJECT_TEMPLATE` is configured (the template constructs the NVR from push context); without it the combination is rejected at config load.
+- **CLI**: `rootcoz push <job_id> --plugin <name>` (e.g. `reportportal`, `greenwave`; `--subject-identifier` and `--waiver-comment` for gating exporters), `rootcoz exporters`, `rootcoz push-reportportal` (backward compat)
 
 ### Report Portal Integration (Optional)
 
-When `ENABLE_REPORTPORTAL=true`, users can push test classifications back to Report Portal via the `push-reportportal` endpoint, the generic `push --plugin reportportal` CLI command, or the generic push endpoint.
+When `ENABLE_REPORTPORTAL=true`, users can push test classifications back to Report Portal via the `push-reportportal` endpoint, `rootcoz push <job_id> --plugin reportportal`, or the generic push endpoint.
+
+### Greenwave Integration (Optional)
+
+When `ENABLE_GREENWAVE=true`, rootcoz can push test classifications into **ResultsDB** (as test results) and optionally submit **waivers** to **WaiverDB** — the data stores that Greenwave reads to make release-gating decisions. Push via `rootcoz push <job_id> --plugin greenwave` or the generic push endpoint. Implemented by `GreenwaveExporter` in `exporters/greenwave_exporter.py`.
+
+- **Classification → outcome mapping**: `GREENWAVE_OUTCOME_MAP` maps rootcoz classifications to ResultsDB outcomes (`PASSED`/`FAILED`/`INFO`/`NEEDS_INSPECTION`). Defaults: `PRODUCT BUG:FAILED,CODE ISSUE:FAILED,INFRASTRUCTURE:INFO`. Classification keys are matched case-insensitively and duplicates after casefold are rejected; unmapped classifications are skipped.
+- **Testcase naming**: `GREENWAVE_TESTCASE_TEMPLATE` (default `rootcoz.{job_name}.{test_name}`) builds ResultsDB testcase names. Placeholders: `{job_name}`, `{test_name}`, `{tier}` (from `GREENWAVE_TIER`), `{subject_identifier}`. For a product-specific policy, set `myproduct.product-build.{tier}.{test_name}` so results match its Greenwave rules.
+- **Subject identifier and trust boundary**: `POST /results/{job_id}/push/greenwave` accepts `{"subject_identifier": "<build-nvr>"}` in its JSON body and sets the ResultsDB `item`/waiver subject; falls back to `job_name` only for ResultsDB-only manual pushes. When waiver submission is enabled (`GREENWAVE_PUSH_WAIVERS=true`) or the push is triggered by auto-push (`rootcoz-ai`), a subject identifier is required: either explicit or rendered from `GREENWAVE_SUBJECT_TEMPLATE`. The `job_name` fallback is rejected in both cases (ExporterPrerequisiteError). Operators are trusted to select the target artifact because they can already submit analyses and gating results; WaiverDB must independently restrict the rootcoz service account to approved testcase globs. CLI: `--subject-identifier`. Query options are rejected so artifact identifiers and waiver comments do not enter URL logs/history/tracing.
+- **Subject template**: `GREENWAVE_SUBJECT_TEMPLATE` allows auto-push (and push without explicit subject) to construct the build NVR from push context. Placeholders: `{job_name}`, `{build_number}`, `{tier}` (from `GREENWAVE_TIER`), `{product_version}` (from `GREENWAVE_PRODUCT_VERSION`). Example: `hco-bundle-registry-container-{product_version}.rhel9-{build_number}` → `hco-bundle-registry-container-v4.20.0.rhel9-240`. Required to use `AUTO_PUSH_EXPORTERS=greenwave`; without it that combination is rejected at config load. Rendered values are sanitized for control characters.
+- **Auth methods (admin-selectable)**: `GREENWAVE_RESULTSDB_AUTH_METHOD` (`none`|`token`|`kerberos`|`ssl`) and `GREENWAVE_WAIVER_AUTH_METHOD` (`oidc`|`kerberos`|`ssl`). Kerberos uses `pyspnego` with a keytab (`GREENWAVE_KERBEROS_KEYTAB`, `GREENWAVE_KERBEROS_PRINCIPAL`) and performs a SPNEGO Negotiate challenge-response. SSL uses `GREENWAVE_SSL_CERT`/`GREENWAVE_SSL_KEY`. TLS verification via `GREENWAVE_VERIFY_SSL` or a `GREENWAVE_CA_BUNDLE` path.
+- **Waivers**: gated by `GREENWAVE_PUSH_WAIVERS`; only classifications in `GREENWAVE_WAIVABLE_CLASSIFICATIONS` are waived, and only for human-reviewed failures unless `GREENWAVE_ALLOW_AI_WAIVERS=true` (the `rootcoz-ai` guard). `GREENWAVE_PRODUCT_VERSION` is required when waivers are enabled. The human reviewer is embedded in the waiver comment for attribution.
+- **Waiver justification**: an optional user-provided free-text comment (max 500 chars) can be supplied as `waiver_comment` in the JSON push body (CLI `--waiver-comment`, or the report-page "Push to Greenwave" dialog). Push options are masked from request diagnostics, and the comment is never logged. When provided, the WaiverDB comment is formatted as `{pushed_by}: {user_comment} — rootcoz: {classification}, {details}, reviewed by {reviewer}`; when omitted it falls back to the auto-generated attribution comment, which carries the same reviewer attribution. Whitespace-only values are treated as omitted.
+- **Report UI**: operator/admin users see a "Push to Greenwave" button for top-level non-pipeline reports. It opens a dialog for an optional subject identifier (build NVR) and waiver justification, then calls `POST /results/{job_id}/push/greenwave`. Use API/CLI child-scope parameters for pipeline children.
+- **UI-editable**: Greenwave settings (including `GREENWAVE_SUBJECT_TEMPLATE`) appear in the admin Server Settings UI (like Report Portal); tokens are stored encrypted. The gating-safety toggles `ENABLE_GREENWAVE`, `GREENWAVE_PUSH_WAIVERS`, and `GREENWAVE_ALLOW_AI_WAIVERS` remain env-only and do not appear in the UI settings list.
+- **Enablement**: `ENABLE_GREENWAVE=true` is mandatory. Configuring URLs or tokens alone never enables gating writes.
+- **Transport safety**: every ResultsDB/WaiverDB write URL requires HTTPS by default, including unauthenticated writes. Plain HTTP is allowed only for unauthenticated (`none`) auth in isolated local development when the effective verify value is exactly false (`GREENWAVE_VERIFY_SSL=false` and no `GREENWAVE_CA_BUNDLE`); all authenticated methods (`token`, `oidc`, `kerberos`, `ssl`) always require HTTPS. Never use the HTTP escape hatch in production.
+- **Result semantics**: `success=true` means at least one ResultsDB write landed. Successful ResultsDB `/results` and WaiverDB `/waivers/` responses must expose a positive integer in the top-level `id` field for reconciliation. A 2xx response with a malformed body or missing/invalid `id` still counts as an accepted external write, is not retried, and adds a sanitized partial-operation error. Any group, per-result, or waiver errors remain in `errors` and must be presented as partial success. ResultsDB group creation is best-effort and successful ungrouped results are preserved.
+- **Errors never crash the pipeline**: ResultsDB/WaiverDB failures are isolated per-failure, logged with sanitized job and stable failure-index context, and collected in the result; rendered testcase names, push options, tokens, and keytabs are never logged.
+
+**Deployment prerequisites**: the rootcoz service account must have the required organization identity-management/group permissions in WaiverDB's `permissions.yml` for testcases matching the configured prefix, and hold ResultsDB write access; supply a Kerberos keytab (Helm mounts it as a read-only Secret) and the organization internal CA bundle. Without these, ResultsDB/WaiverDB reject writes with `403`.
 
 ### Auto-Review
 
@@ -384,8 +406,12 @@ Exceptions (server-level only, no payload equivalent):
 - `RP_PUSH_CLASSIFICATIONS` — server-only toggle for including classification (defect type mapping) in Report Portal pushes (default: True)
 - `RP_PUSH_ROOTCOZ_URL` — server-only toggle for including rootcoz analysis URL comment in Report Portal pushes (default: True)
 - `RP_PUSH_TRACKER_LINKS` — server-only toggle for including Jira/GitHub issue links as external system issues in Report Portal pushes (default: True)
+- `ENABLE_GREENWAVE` — server capability + gating-safety toggle for the Greenwave (ResultsDB/WaiverDB) exporter; env-only
+- `GREENWAVE_PUSH_WAIVERS` — server-only gating-safety toggle to enable WaiverDB waiver submission; env-only
+- `GREENWAVE_ALLOW_AI_WAIVERS` — server-only gating-safety toggle allowing auto-reviewed (`rootcoz-ai`) failures to generate waivers (default: False); env-only
+- Remaining `GREENWAVE_*` URLs, credentials, auth, TLS, mapping, and waiver policy fields are server deployment/admin settings (environment, Helm bootstrap, or Server Settings DB), not client transport/analysis defaults; they intentionally do not belong in CLI `ServerConfig`. The CLI exposes only per-push `--subject-identifier` and `--waiver-comment`.
 - `ENABLE_AUTO_REVIEW` — server capability toggle for auto-review of matching failures; when disabled, failures are never automatically marked as reviewed
-- `AUTO_PUSH_EXPORTERS` — server-only comma-separated list of exporter plugins to auto-push to when all failures are reviewed (e.g. `reportportal`); empty disables auto-push; requires `ENABLE_AUTO_REVIEW` to also be enabled
+- `AUTO_PUSH_EXPORTERS` — server-only comma-separated list of exporter plugins to auto-push to when all failures are reviewed (e.g. `reportportal`); empty disables auto-push; requires `ENABLE_AUTO_REVIEW` to also be enabled. `AUTO_PUSH_EXPORTERS=greenwave` requires `GREENWAVE_SUBJECT_TEMPLATE` to be set so the exporter can construct the subject identifier from push context; without it the combination is rejected at config load.
 - `ROOTCOZ_ENCRYPTION_KEY` — server-only secret for at-rest encryption AND HMAC secret for all API key hashes (admin and user); never expose via request payloads, CLI flags, or shared config files. **Rotating this key invalidates both encrypted data (tokens) and all stored API key hashes (admin and user)** — operators must re-issue all API keys after rotation. Stored sessions use plain SHA-256 hashing (no HMAC) and are NOT affected by key rotation.
 - `LOG_LEVEL` — server log verbosity
 - `PUBLIC_BASE_URL` — trusted server-only origin for building absolute links; never derive from request headers to prevent host-header injection
@@ -415,7 +441,7 @@ Sensitive data (passwords, API tokens, credentials) must be:
 2. **Stripped from responses** — use `strip_sensitive_from_response()` before returning to API consumers
 3. **Never logged** — do not log passwords, tokens, or credentials at any log level
 
-Sensitive fields: `jenkins_password`, `jenkins_user`, `jira_api_token`, `jira_pat`, `jira_email`, `github_token`, `tests_repo_token`, `reportportal_api_token`, `vapid_private_key`
+Sensitive fields: `jenkins_password`, `jenkins_user`, `jira_api_token`, `jira_pat`, `jira_email`, `github_token`, `tests_repo_token`, `reportportal_api_token`, `greenwave_api_token`, `greenwave_waiver_token`, `vapid_private_key`
 
 Encryption uses Fernet (AES-128-CBC + HMAC-SHA256). Set `ROOTCOZ_ENCRYPTION_KEY` env var for production; falls back to an auto-generated file-based key under `$XDG_DATA_HOME/rootcoz/.encryption_key` (default: `~/.local/share/rootcoz/.encryption_key`) for development.
 

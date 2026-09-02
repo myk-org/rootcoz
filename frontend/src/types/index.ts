@@ -401,7 +401,21 @@ export interface ResultResponse {
     reportportal?: boolean
     reportportal_project?: string
     feedback_enabled?: boolean
+    exporters?: { name: string; display_name: string; enabled: boolean }[]
   }
+}
+
+// -- Greenwave ------------------------------------------------------
+
+export interface GreenwavePushResult {
+  pushed: number
+  skipped: number
+  waived: number
+  errors: string[]
+  details: { resultsdb_ids: number[]; waiver_ids: number[]; group_uuid: string | null }
+  /** True when at least one ResultsDB result landed; inspect errors for partial success. */
+  success: boolean
+  message: string
 }
 
 // -- Report Portal --------------------------------------------------

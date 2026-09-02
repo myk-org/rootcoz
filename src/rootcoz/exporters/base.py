@@ -27,6 +27,8 @@ class ExportContext:
         report_url: Public URL to the rootcoz report page.
         child_job_name: Optional child job name for scoped push.
         child_build_number: Optional child build number.
+        subject_identifier: Build artifact identifier (e.g. NVR) for exporters that gate on a subject; falls back to job_name when None for exporters that permit it. Gating exporters (e.g. Greenwave with waivers enabled or auto-push) require a non-empty subject and raise ExporterPrerequisiteError instead of falling back. For Greenwave auto-push the value may also be rendered from GREENWAVE_SUBJECT_TEMPLATE at push time rather than supplied explicitly.
+        waiver_comment: Optional user-provided free-text justification for waivers; combined with auto-context.
         pushed_by: Username of the user who triggered the push.
         history_classifications: Mapping of test name to history classification.
         tracked_in_links: Mapping of test name to tracked-in link dicts.
@@ -37,14 +39,26 @@ class ExportContext:
     job_name: str
     build_number: str
     jenkins_url: str
-    failures: list[dict[str, Any]]
+    failures: list[Any]
     report_url: str
     child_job_name: str | None = None
     child_build_number: int | None = None
+    subject_identifier: str | None = None
+    waiver_comment: str | None = None
     pushed_by: str = ""
     history_classifications: dict[str, str] = field(default_factory=dict)
     tracked_in_links: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
     reviewed_by: dict[str, str] = field(default_factory=dict)
+
+
+class ExporterPrerequisiteError(ValueError):
+    """Exporter configuration prerequisite missing at push time.
+
+    API endpoints map this to HTTP 422 (both at exporter construction and when
+    raised inside push() via the generic push endpoint handler) because the
+    exporter exists and is enabled, but the requested operation cannot run with
+    its current settings.
+    """
 
 
 @dataclass
@@ -52,7 +66,8 @@ class ExporterResult:
     """Generic result from an exporter push operation.
 
     Attributes:
-        success: Whether the push completed without errors.
+        success: Exporter-defined operation status. Callers must also inspect
+            exporter-specific item counts and errors for partial success.
         message: Human-readable summary of the push result.
         details: Exporter-specific result data (e.g. pushed count, errors).
     """

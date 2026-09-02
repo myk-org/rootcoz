@@ -13,6 +13,11 @@ function pushError(msg: string) {
   recentErrors.push(msg)
 }
 
+/** Record a sanitized client error without attaching request or exception data. */
+export function captureClientError(message: string): void {
+  pushError(message)
+}
+
 /** Return a snapshot of the recent console errors. */
 export function getRecentErrors(): string[] {
   return [...recentErrors]

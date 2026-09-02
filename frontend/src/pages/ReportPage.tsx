@@ -26,6 +26,7 @@ import { Button } from '@/components/ui/button'
 import { ExternalLink, CheckCircle2, Clock, Calendar, Cpu, Timer, FolderGit2, RotateCw, Copy, Check, MessageCircle, User } from 'lucide-react'
 import { ReAnalyzeDialog } from './report/ReAnalyzeDialog'
 import { ReportPortalButton } from './report/ReportPortalButton'
+import { GreenwaveButton } from './report/GreenwaveButton'
 import { TokenUsageBadge } from './report/TokenUsageBadge'
 import { OriginJobBanner } from '@/components/shared/OriginJobBanner'
 import { originJobLabel } from '@/lib/originJobLabel'
@@ -171,6 +172,7 @@ function ReportContent() {
           dispatch({ type: 'SET_GITHUB_ISSUES_ENABLED', payload: resultRes.capabilities?.github_issues_enabled ?? false })
           dispatch({ type: 'SET_JIRA_ISSUES_ENABLED', payload: resultRes.capabilities?.jira_issues_enabled ?? false })
           dispatch({ type: 'SET_REPORTPORTAL_AVAILABLE', payload: resultRes.capabilities?.reportportal ?? false })
+          dispatch({ type: 'SET_GREENWAVE_AVAILABLE', payload: (resultRes.capabilities?.exporters ?? []).some(e => e.name === 'greenwave' && e.enabled) })
           dispatch({ type: 'SET_REPORTPORTAL_PROJECT', payload: resultRes.capabilities?.reportportal_project ?? '' })
           dispatch({ type: 'SET_SERVER_JIRA_PROJECT_KEY', payload: resultRes.capabilities?.server_jira_project_key ?? '' })
         }
@@ -460,8 +462,11 @@ function ReportContent() {
             <TokenUsageBadge usage={result.token_usage} />
           )}
           <div className="ml-auto flex items-center gap-3">
-            {state.reportportalAvailable && (result.child_job_analyses ?? []).length === 0 && (
+            {isOperator && state.reportportalAvailable && (result.child_job_analyses ?? []).length === 0 && (
               <ReportPortalButton jobId={result.job_id} jobName={result.job_name ?? result.job_id} buildNumber={resolveBuildDisplayId(result) ?? result.build_number} hasFailures={(result.failures ?? []).length > 0} />
+            )}
+            {isOperator && state.greenwaveAvailable && (result.child_job_analyses ?? []).length === 0 && (
+              <GreenwaveButton jobId={result.job_id} hasFailures={(result.failures ?? []).length > 0} />
             )}
             {!isViewer && (
               <Button variant="ghost" size="sm" className="gap-1.5 text-xs" asChild>

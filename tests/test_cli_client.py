@@ -1598,6 +1598,55 @@ class TestRootCozClientExporters:
         )
         assert result["pushed"] == 1
 
+    def test_push_to_exporter_subject_identifier(self):
+        response_data = {"pushed": 1, "errors": []}
+
+        def handler(request):
+            assert request.method == "POST"
+            assert "/results/job-123/push/greenwave" in str(request.url)
+            assert "subject_identifier" not in request.url.params
+            assert json.loads(request.content) == {"subject_identifier": "build-nvr-1"}
+            return httpx.Response(200, json=response_data)
+
+        client = _make_client(handler)
+        result = client.push_to_exporter(
+            "job-123",
+            "greenwave",
+            subject_identifier="build-nvr-1",
+        )
+        assert result["pushed"] == 1
+
+    def test_push_to_exporter_waiver_comment(self):
+        response_data = {"pushed": 1, "errors": []}
+
+        def handler(request):
+            assert request.method == "POST"
+            assert "/results/job-123/push/greenwave" in str(request.url)
+            assert "waiver_comment" not in request.url.params
+            assert json.loads(request.content) == {"waiver_comment": "known flake"}
+            return httpx.Response(200, json=response_data)
+
+        client = _make_client(handler)
+        result = client.push_to_exporter(
+            "job-123", "greenwave", waiver_comment="known flake"
+        )
+        assert result["pushed"] == 1
+
+    def test_push_to_exporter_no_optional_params(self):
+        response_data = {"pushed": 1, "errors": []}
+
+        def handler(request):
+            assert request.method == "POST"
+            assert "/results/job-123/push/greenwave" in str(request.url)
+            assert "subject_identifier" not in request.url.params
+            assert "waiver_comment" not in request.url.params
+            assert json.loads(request.content) == {}
+            return httpx.Response(200, json=response_data)
+
+        client = _make_client(handler)
+        result = client.push_to_exporter("job-123", "greenwave")
+        assert result["pushed"] == 1
+
     def test_list_exporters(self):
         response_data = [
             {

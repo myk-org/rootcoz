@@ -128,6 +128,52 @@ Login: username `admin`, password = API key above.
 
 AI API keys, Vertex SA JSON, and Cursor `auth.json` supplied via values are stored in Kubernetes Secrets **and** in the Helm release Secret (`sh.helm.release.v1.*`). For stricter environments, inject credentials with External Secrets / Sealed Secrets and omit plaintext keys from Helm values where possible. On upgrade, omitting a previously set AI key / mount credential preserves the existing Secret via Helm `lookup`.
 
+## Greenwave / ResultsDB / WaiverDB
+
+Greenwave is a release-gating integration and remains disabled until `greenwave.enabled: true` sets the environment-only `ENABLE_GREENWAVE=true` safety gate. Configuring a URL or credential in Server Settings does **not** enable it. `greenwave.pushWaivers` and `greenwave.allowAiWaivers` are also environment-only safety controls; the remaining fields can be bootstrapped with Helm and later managed in **Server Settings**.
+
+To use `AUTO_PUSH_EXPORTERS=greenwave`, set `subjectTemplate` so the exporter can construct the build NVR from push context. Without it, auto-push is rejected at config load. Manual pushes via the API/CLI/report-page can always supply an explicit `--subject-identifier` instead.
+
+Minimal token-authenticated ResultsDB setup:
+
+```yaml
+greenwave:
+  enabled: true
+  url: https://resultsdb.example.com/api/v2.0
+  resultsdbAuthMethod: token
+  apiToken: "..." # keep in a mode-0600 secrets values file
+```
+
+WaiverDB must be configured explicitly. A missing URL or product version causes `greenwave_enabled` to return `False` (HTTP 400 from the push endpoint) rather than silently skipping waivers. A missing OIDC/bearer token follows the same path. A missing Kerberos keytab or SSL cert/key pair is caught earlier — at Settings validation (config load) — before `greenwave_enabled` is evaluated:
+
+```yaml
+greenwave:
+  enabled: true
+  pushWaivers: true
+  waiverUrl: https://waiverdb.example.com/api/v1.0
+  waiverAuthMethod: oidc
+  waiverToken: "..."
+  productVersion: myproduct-1
+  waivableClassifications: INFRASTRUCTURE
+```
+
+Supported ResultsDB auth methods are `none`, `token`, `kerberos`, and `ssl`; WaiverDB supports `oidc`, `kerberos`, and `ssl`. Authenticated URLs require HTTPS by default. Plain HTTP is permitted only for unauthenticated (`none`) auth in isolated local development when the effective verify value is exactly false (`verifySsl: false` with no `caBundle`); all authenticated methods (`token`, `oidc`, `kerberos`, `ssl`) always require HTTPS. Never use the HTTP escape hatch in production. Prefer `caBundle` for private CAs. `caBundle`, `sslCert`, and `sslKey` are paths inside the container: the referenced files must already be supplied by the image, a cluster-side injector, or a separately managed mount because this chart does not create those mounts.
+
+For Kerberos, provide the base64-encoded keytab payload and principal:
+
+```yaml
+greenwave:
+  resultsdbAuthMethod: kerberos
+  waiverAuthMethod: kerberos
+  kerberosPrincipal: svc-rootcoz@EXAMPLE.COM
+  kerberosKeytab: "<base64-without-line-breaks>"
+  kerberosKeytabPath: /etc/rootcoz/greenwave/krb5.keytab
+```
+
+The chart stores the payload unchanged in a Kubernetes Secret and mounts it read-only. The container image includes the native Kerberos libraries and the optional pyspnego Kerberos backend. Do not place raw keytab bytes in YAML. Greenwave token and resolved keytab checksums are part of the pod template, so changing Helm values rolls the Deployment. Values omitted during upgrade are preserved with Helm `lookup`; an out-of-band Secret edit alone still requires `kubectl rollout restart`, or a subsequent `helm upgrade` so the resolved checksum is rendered again.
+
+The rootcoz service identity also needs ResultsDB write access and the required organization identity-management/group permissions in WaiverDB's `permissions.yml` for the configured testcase prefix. Authentication without those service-side permissions returns `403`. Supply the organization internal CA bundle when the services use a private CA. Operators are trusted to choose the subject identifier passed to ResultsDB/WaiverDB; keep WaiverDB testcase globs narrow and grant the rootcoz operator role only to users authorized to affect release gating.
+
 ## Production Sizing
 
 Default resources (`1 CPU / 4Gi` request, `2 CPU / 8Gi` limit) suit evaluation clusters. For concurrent AI analysis workloads, use:
@@ -156,7 +202,7 @@ helm upgrade rootcoz ./chart -n rootcoz \
   -f ~/.config/rootcoz/helm/values.secrets.yaml
 ```
 
-AI credential keys in values apply on upgrade. Auto-generated `ADMIN_KEY` and `ROOTCOZ_ENCRYPTION_KEY` are never rotated by Helm upgrade. Vertex SA JSON and Cursor `auth.json` are also preserved via `lookup` when omitted from values. Deployment pod-template checksums track values changes (salted with the release revision). Out-of-band Secret edits (e.g. via External Secrets) require `kubectl rollout restart`.
+AI and Greenwave credential keys in values apply on upgrade. Auto-generated `ADMIN_KEY` and `ROOTCOZ_ENCRYPTION_KEY` are never rotated by Helm upgrade. Vertex SA JSON, Cursor `auth.json`, Greenwave bearer tokens, and the Greenwave keytab are preserved via `lookup` when omitted from values. Deployment pod-template checksums track rendered configuration and mounted credential changes. Out-of-band Secret edits (e.g. via External Secrets) require `kubectl rollout restart` unless a subsequent Helm upgrade renders the changed resolved checksum.
 
 To rotate encryption key: delete the secret manually, then reinstall (destroys encrypted DB credentials — re-issue API keys).
 
