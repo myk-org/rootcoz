@@ -17,10 +17,8 @@ from simple_logger.logger import get_logger
 
 from rootcoz.ai_client import (
     CHAT_BUILTIN_TOOLS,
-    _prewarm_model_routes,
     call_ai,
-    map_provider_model_for_sidecar,
-    normalize_provider,
+    resolve_catalog_pair,
 )
 from rootcoz.engine.http_mcp import (
     _workspace_install_lock,
@@ -1168,9 +1166,7 @@ async def _create_chat_session(
     )
     try:
         client = get_sidecar_client()
-        # Best-effort catalog warm; heuristic routing still works if this fails.
-        await _prewarm_model_routes(normalize_provider(ai_provider), ai_model)
-        sidecar_provider, sidecar_model = map_provider_model_for_sidecar(
+        sidecar_provider, sidecar_model = await resolve_catalog_pair(
             ai_provider, ai_model
         )
         create_kwargs: dict[str, Any] = {

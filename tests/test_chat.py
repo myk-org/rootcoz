@@ -1658,7 +1658,9 @@ class TestChatEndpoints:
         )
         assert response.status_code == 404
 
-    async def test_send_message_invalid_provider(self, test_client, temp_db_path: Path):
+    async def test_send_message_retains_provider_for_catalog_validation(
+        self, test_client, temp_db_path: Path
+    ):
         await _save_job(temp_db_path, "chat-badprov-job")
         response = test_client.post(
             "/api/chat/chat-badprov-job",
@@ -1668,13 +1670,15 @@ class TestChatEndpoints:
                 "ai_model": "x",
             },
         )
-        assert response.status_code == 422
-        assert "Invalid AI provider" in response.json()["detail"]
+        assert response.status_code == 202
+        history = test_client.get("/api/chat/chat-badprov-job").json()
+        assistant_msgs = [m for m in history["messages"] if m["role"] == "assistant"]
+        assert assistant_msgs[0]["status"] == "failed"
 
     async def test_send_message_normalizes_legacy_provider_alias(
         self, test_client, temp_db_path: Path
     ):
-        """Legacy aliases (cursor-cli) must normalize to cursor before validation."""
+        """Legacy aliases retain their exact CLI sidecar provider route."""
         await _save_job(temp_db_path, "chat-alias-job")
         with patch(
             "rootcoz.engine.chat.chat_with_ai", new_callable=AsyncMock
@@ -1691,7 +1695,7 @@ class TestChatEndpoints:
         assert response.status_code == 202
         history = test_client.get("/api/chat/chat-alias-job").json()
         assistant_msgs = [m for m in history["messages"] if m["role"] == "assistant"]
-        assert assistant_msgs[0]["ai_provider"] == "cursor"
+        assert assistant_msgs[0]["ai_provider"] == "cli-cursor"
         assert assistant_msgs[0]["ai_model"] == "composer-1"
 
     async def test_send_message_normalizes_provider_case(

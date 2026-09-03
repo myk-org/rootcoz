@@ -7,7 +7,7 @@ import os
 import time
 from typing import Any
 
-from pi_sidecar_client import AIResult, get_sidecar_client, set_usage_recorder
+from pi_sidecar_client import AIResult, set_usage_recorder
 from pi_sidecar_client import call_ai as _call_ai
 from pi_sidecar_client import call_ai_once as _call_ai_once
 from pi_sidecar_client import list_models as _list_models_raw
@@ -15,36 +15,14 @@ from simple_logger.logger import get_logger
 
 logger = get_logger(name=__name__)
 
-# Public provider names only — CLI is a model source under these, not a provider.
-VALID_AI_PROVIDERS = {
-    "claude",
-    "cursor",
-    "gemini",
-}
-
-# Accepted on input; normalized to the canonical names above.
+# Pi-sidecar's catalog is the provider/model contract.  These aliases only
+# preserve unambiguous legacy spelling; friendly provider names are resolved
+# against the selected model below and never choose a default route.
 _LEGACY_PROVIDER_ALIASES: dict[str, str] = {
-    "cursor-cli": "cursor",
-    "claude-cli": "claude",
-    "gemini-cli": "gemini",
+    "cursor-cli": "cli-cursor",
+    "claude-cli": "cli-claude",
+    "gemini-cli": "cli-gemini",
 }
-
-# Friendly → default sidecar (ACPX / Vertex / Google API)
-_DEFAULT_SIDECAR: dict[str, str] = {
-    "cursor": "acpx-cursor",
-    "claude": "google-vertex-claude",
-    "gemini": "google",
-}
-
-# Friendly → CLI sidecar (only populated in lists when CLI_AGENTS enables the agent)
-_CLI_SIDECAR: dict[str, str] = {
-    "cursor": "cli-cursor",
-    "claude": "cli-claude",
-    "gemini": "cli-gemini",
-}
-
-# (friendly_provider, model_id) → sidecar provider id (filled by list_models)
-_model_route_cache: dict[tuple[str, str], str] = {}
 
 # Cached cursor auth probe: (monotonic_ts, status_dict)
 _cursor_auth_cache: tuple[float, dict[str, Any]] | None = None
@@ -82,131 +60,62 @@ def normalize_provider(provider: str) -> str:
     return _LEGACY_PROVIDER_ALIASES.get(p, p)
 
 
-def _source_for_sidecar(sidecar_provider: str) -> str:
-    if sidecar_provider.startswith("cli-"):
+def _source_for_sidecar(provider: str) -> str:
+    if provider.startswith("cli-"):
         return "cli"
-    if sidecar_provider.startswith("acpx-"):
+    if provider.startswith("acpx-"):
         return "acpx"
     return "api"
 
 
-def _friendly_provider_from_sidecar(provider: str) -> str:
-    """Map sidecar provider ids back to rootcoz friendly names for usage logs."""
-    if not provider:
-        return provider
-    if provider.startswith("cli-"):
-        agent = provider.removeprefix("cli-")
-        return agent if agent in VALID_AI_PROVIDERS else provider
-    if provider.startswith("acpx-"):
-        agent = provider.removeprefix("acpx-")
-        return agent if agent in VALID_AI_PROVIDERS else provider
-    reverse = {v: k for k, v in _DEFAULT_SIDECAR.items()}
-    return reverse.get(provider, provider)
-
-
-def _resolve_sidecar_for_model(friendly: str, model: str) -> str:
-    """Pick ACPX/API vs CLI sidecar for a friendly provider + model id."""
-    cached = _model_route_cache.get((friendly, model))
-    if cached:
-        return cached
-
-    # Cursor id shapes: ACPX uses bracket params; CLI uses plain cursor:… ids.
-    if friendly == "cursor":
-        if "[" in model:
-            return _DEFAULT_SIDECAR["cursor"]
-        if model.startswith("cursor:"):
-            return _CLI_SIDECAR["cursor"]
-        return _DEFAULT_SIDECAR["cursor"]
-
-    return _DEFAULT_SIDECAR.get(friendly, friendly)
-
-
-def _map_model_for_sidecar(sidecar_provider: str, model: str) -> str:
-    """Ensure cursor models keep the cursor: prefix expected by ACPX/CLI."""
-    if (
-        sidecar_provider in ("acpx-cursor", "cli-cursor")
-        and model
-        and not model.startswith("cursor:")
-    ):
-        return f"cursor:{model}"
-    return model
-
-
-def map_provider_model_for_sidecar(provider: str, model: str) -> tuple[str, str]:
-    """Map friendly provider/model to sidecar ids for session create / AI calls."""
-    friendly = normalize_provider(provider)
-    model = (model or "").strip()
-    sidecar_provider = _resolve_sidecar_for_model(friendly, model)
-    return sidecar_provider, _map_model_for_sidecar(sidecar_provider, model)
-
-
-def list_models_from_catalog(
-    friendly: str, all_models: list[dict[str, Any]]
-) -> list[dict[str, Any]]:
-    """Filter a sidecar catalog into one friendly provider's models.
-
-    Updates ``_model_route_cache`` for each ``(friendly, model_id)``.
-    Deduplicates by model id (first source wins: default/ACPX/API before CLI).
-    """
-    friendly = normalize_provider(friendly)
-    if friendly not in VALID_AI_PROVIDERS:
-        return []
-
-    sidecar_order = [_DEFAULT_SIDECAR[friendly]]
-    cli_id = _CLI_SIDECAR.get(friendly)
-    if cli_id:
-        sidecar_order.append(cli_id)
-
-    result: list[dict[str, Any]] = []
-    seen_ids: set[str] = set()
-    for sidecar_id in sidecar_order:
-        source = _source_for_sidecar(sidecar_id)
-        for m in all_models:
-            if m.get("provider") != sidecar_id:
-                continue
-            mid = m.get("id") or ""
-            if not mid:
-                continue
-            if mid in seen_ids:
-                continue
-            seen_ids.add(mid)
-            _model_route_cache[(friendly, mid)] = sidecar_id
-            result.append(
-                {
-                    "id": mid,
-                    "name": m.get("name") or mid,
-                    "provider": friendly,
-                    "source": source,
-                }
-            )
-    return result
+def is_cursor_provider(provider: str) -> bool:
+    """Whether a sidecar provider uses Cursor diagnostics."""
+    return provider == "cursor" or provider.endswith("-cursor")
 
 
 def build_friendly_catalog(
     all_models: list[dict[str, Any]],
 ) -> dict[str, list[dict[str, Any]]]:
-    """Build per-friendly-provider catalogs from one sidecar ``get_models()`` result."""
-    return {
-        p: list_models_from_catalog(p, all_models) for p in sorted(VALID_AI_PROVIDERS)
-    }
+    """Group the sidecar catalog by its exact provider identifiers."""
+    result: dict[str, list[dict[str, Any]]] = {}
+    for entry in all_models:
+        provider, model = entry.get("provider"), entry.get("id")
+        if not isinstance(provider, str) or not isinstance(model, str) or not model:
+            continue
+        result.setdefault(provider, []).append(
+            {
+                "id": model,
+                "name": entry.get("name") or model,
+                "provider": provider,
+                "source": _source_for_sidecar(provider),
+            }
+        )
+    return result
 
 
 async def list_models(provider: str = "") -> list[dict[str, Any]]:
-    """List models for a friendly provider, merging ACPX/API + CLI sources.
+    """List sidecar catalog models, optionally for an exact provider ID."""
+    catalog = await _list_models_raw("")
+    provider = normalize_provider(provider)
+    return [
+        entry for entry in catalog if not provider or entry.get("provider") == provider
+    ]
 
-    Each entry includes ``source``: ``acpx`` | ``cli`` | ``api``.
-    Deduplicates by model id (first source wins: default/ACPX/API before CLI).
-    """
-    if not provider:
-        return await _list_models_raw("")
 
-    friendly = normalize_provider(provider)
-    if friendly not in VALID_AI_PROVIDERS:
-        return []
+async def resolve_catalog_pair(provider: str, model: str) -> tuple[str, str]:
+    """Validate and return an exact catalog pair, with safe legacy aliases only."""
+    provider, model = normalize_provider(provider), (model or "").strip()
+    catalog = await _list_models_raw("")
+    pairs = {(entry.get("provider"), entry.get("id")) for entry in catalog}
+    if (provider, model) in pairs:
+        return provider, model
 
-    client = get_sidecar_client()
-    all_models = await client.get_models()
-    return list_models_from_catalog(friendly, all_models)
+    # Old friendly values can be retained only when this model identifies one
+    # catalog route.  In particular, never guess between google and vertex.
+    legacy_matches = [p for p, m in pairs if m == model and p and p.endswith(provider)]
+    if provider in {"claude", "cursor", "gemini"} and len(legacy_matches) == 1:
+        return legacy_matches[0], model
+    raise ValueError(f"Unknown Pi-sidecar provider/model pair: {provider}/{model}")
 
 
 def _parse_agent_status_text(text: str) -> str | None:
@@ -268,8 +177,10 @@ async def probe_cursor_auth(
 
     has_api_key = bool(os.environ.get("CURSOR_API_KEY", "").strip())
     if model_count is None:
-        models = await list_models("cursor")
-        model_count = len(models)
+        models = await list_models()
+        model_count = sum(
+            is_cursor_provider(str(model.get("provider", ""))) for model in models
+        )
     if model_count > 0:
         status: dict[str, Any] = {
             "ok": True,
@@ -354,7 +265,7 @@ def format_chat_ai_user_error(
     """Map raw sidecar/AI errors to user-friendly chat messages.
 
     Avoid matching the URL path ``/sessions`` as a lost chat session.
-    Cursor-specific remediation applies only when ``ai_provider`` is cursor
+    Cursor-specific remediation applies only to Cursor sidecar providers
     (or Cursor-only markers like ``agent login`` / ``cursor_api_key`` appear).
     Credential-state hints (whether ``CURSOR_API_KEY`` is set) are admin-only.
     """
@@ -373,7 +284,7 @@ def format_chat_ai_user_error(
     is_cursor_marker = any(s in lower for s in cursor_only_markers)
     is_generic_auth = any(s in lower for s in generic_auth_markers)
 
-    if is_cursor_marker or (is_generic_auth and friendly == "cursor"):
+    if is_cursor_marker or (is_generic_auth and is_cursor_provider(friendly)):
         if not is_admin:
             return "Cursor is unavailable. Contact an administrator."
         has_api_key = bool(os.environ.get("CURSOR_API_KEY", "").strip())
@@ -391,7 +302,7 @@ def format_chat_ai_user_error(
         )
 
     if "400" in lower and "/sessions" in lower:
-        if friendly == "cursor":
+        if is_cursor_provider(friendly):
             if not is_admin:
                 return (
                     "Failed to create AI session. Select a valid provider and model, "
@@ -422,57 +333,20 @@ def format_chat_ai_user_error(
     return text
 
 
-async def _prewarm_model_routes(friendly: str, model: str = "") -> None:
-    """Best-effort catalog fetch to populate ``_model_route_cache``.
-
-    When ``model`` is set, skip only if that exact ``(friendly, model)`` route
-    is already cached — so newly available CLI models are still discovered in
-    long-lived processes. Failures are non-fatal: heuristic defaults still apply.
-    """
-    if not friendly:
-        return
-    model = (model or "").strip()
-    if model:
-        if (friendly, model) in _model_route_cache:
-            return
-    elif any(fp == friendly for fp, _ in _model_route_cache):
-        return
-    try:
-        await list_models(friendly)
-    except Exception:
-        logger.debug(
-            "Model catalog prewarm failed for provider=%s; using heuristic routes",
-            friendly,
-            exc_info=True,
-        )
-
-
 async def call_ai(
     *args: Any, ai_provider: str = "", ai_model: str = "", **kwargs: Any
 ) -> AIResult:
-    """call_ai with rootcoz friendly→sidecar provider/model routing."""
-    friendly = normalize_provider(ai_provider)
-    await _prewarm_model_routes(friendly, ai_model)
-    sidecar_provider, sidecar_model = map_provider_model_for_sidecar(
-        ai_provider, ai_model
-    )
-    return await _call_ai(
-        *args, ai_provider=sidecar_provider, ai_model=sidecar_model, **kwargs
-    )
+    """Call Pi-sidecar with a validated, unchanged catalog pair."""
+    provider, model = await resolve_catalog_pair(ai_provider, ai_model)
+    return await _call_ai(*args, ai_provider=provider, ai_model=model, **kwargs)
 
 
 async def call_ai_once(
     *args: Any, ai_provider: str = "", ai_model: str = "", **kwargs: Any
 ) -> AIResult:
-    """call_ai_once with rootcoz friendly→sidecar provider/model routing."""
-    friendly = normalize_provider(ai_provider)
-    await _prewarm_model_routes(friendly, ai_model)
-    sidecar_provider, sidecar_model = map_provider_model_for_sidecar(
-        ai_provider, ai_model
-    )
-    return await _call_ai_once(
-        *args, ai_provider=sidecar_provider, ai_model=sidecar_model, **kwargs
-    )
+    """Call Pi-sidecar once with a validated, unchanged catalog pair."""
+    provider, model = await resolve_catalog_pair(ai_provider, ai_model)
+    return await _call_ai_once(*args, ai_provider=provider, ai_model=model, **kwargs)
 
 
 def _setup_usage_recorder() -> None:
@@ -500,7 +374,7 @@ def _setup_usage_recorder() -> None:
             result=result,
             call_type=call_type,
             prompt_chars=prompt_chars,
-            ai_provider=_friendly_provider_from_sidecar(ai_provider),
+            ai_provider=ai_provider,
             ai_model=ai_model,
         )
 
@@ -510,7 +384,6 @@ def _setup_usage_recorder() -> None:
 __all__ = [
     "ANALYSIS_BUILTIN_TOOLS",
     "CHAT_BUILTIN_TOOLS",
-    "VALID_AI_PROVIDERS",
     "AIResult",
     "_setup_usage_recorder",
     "call_ai",
@@ -518,7 +391,7 @@ __all__ = [
     "clear_cursor_auth_cache",
     "format_chat_ai_user_error",
     "list_models",
-    "map_provider_model_for_sidecar",
     "normalize_provider",
     "probe_cursor_auth",
+    "resolve_catalog_pair",
 ]

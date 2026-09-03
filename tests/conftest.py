@@ -311,7 +311,6 @@ def _mock_sidecar_calls():
     with (
         # --- clients (bound imports + package) ---
         patch("pi_sidecar_client.get_sidecar_client", return_value=mock_client),
-        patch("rootcoz.ai_client.get_sidecar_client", return_value=mock_client),
         patch("rootcoz.engine.chat.get_sidecar_client", return_value=mock_client),
         patch("rootcoz.peer_analysis.get_sidecar_client", return_value=mock_client),
         # list_models is NOT stubbed: it runs against the mock client above

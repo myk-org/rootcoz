@@ -55,12 +55,12 @@ from starlette.middleware.gzip import GZipMiddleware
 
 from rootcoz import storage
 from rootcoz.ai_client import (
-    VALID_AI_PROVIDERS,
     _setup_usage_recorder,
     build_friendly_catalog,
     call_ai_once,
     clear_cursor_auth_cache,
     format_chat_ai_user_error,
+    is_cursor_provider,
     list_models,
     normalize_provider,
     probe_cursor_auth,
@@ -1309,11 +1309,11 @@ async def _resume_waiting_jobs(waiting_jobs: list[dict[str, Any]]) -> None:
 
 
 async def _safe_preload_cursor_models() -> None:
-    """Pre-populate cursor model list in background. Best-effort."""
+    """Pre-populate the sidecar model catalog in background. Best-effort."""
     try:
-        await list_models("cursor")
+        await list_models()
     except Exception:
-        logger.debug("Failed to preload cursor models", exc_info=True)
+        logger.debug("Failed to preload sidecar models", exc_info=True)
 
 
 async def _backfill_job_metadata(rules: list[dict[str, Any]]) -> None:
@@ -2057,14 +2057,6 @@ def _resolve_ai_config_values(
             status_code=400,
             detail=_ai_not_configured_message(request, "AI provider"),
         )
-    if provider not in VALID_AI_PROVIDERS:
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                f"Unsupported AI provider: {provider}. "
-                f"Valid providers: {', '.join(sorted(VALID_AI_PROVIDERS))}"
-            ),
-        )
     if not model:
         raise HTTPException(
             status_code=400,
@@ -2097,14 +2089,6 @@ def _resolve_ai_config_allow_defer(
     provider, model = _resolve_ai_provider_model(
         body.ai_provider, body.ai_model, settings=settings
     )
-    if provider and provider not in VALID_AI_PROVIDERS:
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                f"Unsupported AI provider: {provider}. "
-                f"Valid providers: {', '.join(sorted(VALID_AI_PROVIDERS))}"
-            ),
-        )
     if provider and model:
         return provider, model
     if tests_repo_available(body, settings):
@@ -8539,15 +8523,12 @@ async def list_ai_models(
     request: Request,
     provider: str = Query(
         "",
-        description=(
-            "Filter by AI provider (claude, gemini, or cursor). "
-            "CLI models are included under the same provider when CLI_AGENTS is set."
-        ),
+        description="Filter by an exact Pi-sidecar provider identifier.",
     ),
 ) -> dict[str, Any]:
     """List available AI models for one or all configured providers.
 
-    When listing all providers (or cursor alone), includes ``provider_status``
+    When listing all providers (or a Cursor provider), includes ``provider_status``
     with a Cursor auth probe (browser ``agent login`` expires; ``CURSOR_API_KEY``
     does not expire and always works when set in the server env).
     Credential-state fields (``has_api_key``) are admin-only.
@@ -8560,17 +8541,14 @@ async def list_ai_models(
     try:
         if provider:
             provider = normalize_provider(provider)
-            if provider not in VALID_AI_PROVIDERS:
+            models = await list_models(provider)
+            if not models:
                 raise HTTPException(
                     status_code=400,
-                    detail=(
-                        f"Unsupported AI provider: {provider}. "
-                        f"Valid providers: {', '.join(sorted(VALID_AI_PROVIDERS))}"
-                    ),
+                    detail=f"Unknown Pi-sidecar provider: {provider}",
                 )
-            models = await list_models(provider)
             payload: dict[str, Any] = {"provider": provider, "models": models}
-            if provider == "cursor":
+            if is_cursor_provider(provider):
                 if is_admin:
                     cursor_raw = await probe_cursor_auth(model_count=len(models))
                     cursor_status = _cursor_status_for_client(cursor_raw, is_admin=True)
@@ -8579,7 +8557,7 @@ async def list_ai_models(
                 payload["provider_status"] = {"cursor": cursor_status}
             return strip_sensitive_from_response(payload)
 
-        # No provider specified — one sidecar catalog, then split per friendly provider
+        # No provider specified — get the sidecar catalog grouped by provider ID.
         from pi_sidecar_client import get_sidecar_client
 
         try:
@@ -8587,8 +8565,12 @@ async def list_ai_models(
             all_models = build_friendly_catalog(raw_catalog)
         except Exception:
             logger.warning("Failed to list models for all providers", exc_info=True)
-            all_models = {p: [] for p in sorted(VALID_AI_PROVIDERS)}
-        cursor_count = len(all_models.get("cursor", []))
+            all_models = {}
+        cursor_count = sum(
+            len(models)
+            for provider_id, models in all_models.items()
+            if is_cursor_provider(provider_id)
+        )
         if is_admin:
             cursor_status = _cursor_status_for_client(
                 await probe_cursor_auth(model_count=cursor_count),
@@ -8621,16 +8603,9 @@ async def refresh_ai_models(request: Request) -> dict[str, Any]:
     try:
         from pi_sidecar_client import get_sidecar_client
 
-        import rootcoz.ai_client as ai_client_mod
-
         client = get_sidecar_client()
-        # Keep the previous route cache until refresh succeeds so concurrent AI
-        # calls (and refresh failures) do not fall back to default sidecars.
         models = await client.refresh_models()
-        ai_client_mod._model_route_cache.clear()
         clear_cursor_auth_cache()
-        # Rebuild friendly provider catalogs + route cache from one catalog
-        build_friendly_catalog(models)
         cursor_status = await probe_cursor_auth(force=True)
         logger.info(
             "Model refresh complete: %d models available (cursor_ok=%s)",
@@ -11308,11 +11283,6 @@ def _normalize_and_validate_ai_params(
     provider_raw = (ai_provider or "").strip()
     provider = (normalize_provider(provider_raw) or None) if provider_raw else None
     model = (ai_model or "").strip() or None
-    if provider and provider not in VALID_AI_PROVIDERS:
-        raise HTTPException(
-            status_code=422,
-            detail=f"Invalid AI provider '{provider}'. Valid providers: {', '.join(sorted(VALID_AI_PROVIDERS))}",
-        )
     if (provider and not model) or (model and not provider):
         raise HTTPException(
             status_code=422,

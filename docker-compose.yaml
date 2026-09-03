@@ -77,7 +77,7 @@ services:
       # ===================
       # AI CLI Configuration
       # ===================
-      # AI_PROVIDER: claude, gemini, or cursor (CLI models use the same name when CLI_AGENTS is set)
+      # AI_PROVIDER and AI_MODEL: exact provider ID/model pair discovered from Pi-sidecar
       # *-cli requires CLI_AGENTS (same ops pattern as ACPX_AGENTS; nothing enabled by default)
       - AI_PROVIDER=${AI_PROVIDER:?AI_PROVIDER is required}
       - AI_MODEL=${AI_MODEL:?AI_MODEL is required}

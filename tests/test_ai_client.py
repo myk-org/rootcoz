@@ -1,182 +1,100 @@
-"""Tests for rootcoz.ai_client provider mapping and model listing."""
+"""Tests for rootcoz.ai_client catalog provider handling."""
 
 from __future__ import annotations
+
+from unittest.mock import AsyncMock
 
 import pytest
 
 from rootcoz import ai_client
-from rootcoz.ai_client import (
-    VALID_AI_PROVIDERS,
-    map_provider_model_for_sidecar,
-    normalize_provider,
-)
-
-
-@pytest.fixture(autouse=True)
-def _clear_route_cache():
-    ai_client._model_route_cache.clear()
-    yield
-    ai_client._model_route_cache.clear()
-
-
-def test_valid_providers_are_canonical_only() -> None:
-    assert VALID_AI_PROVIDERS == {"claude", "cursor", "gemini"}
+from rootcoz.ai_client import call_ai as call_ai_under_test
+from rootcoz.ai_client import normalize_provider
 
 
 @pytest.mark.parametrize(
     ("raw", "canonical"),
     [
-        ("cursor-cli", "cursor"),
-        ("claude-cli", "claude"),
-        ("gemini-cli", "gemini"),
-        ("CURSOR", "cursor"),
-        ("cursor", "cursor"),
+        ("cursor-cli", "cli-cursor"),
+        ("claude-cli", "cli-claude"),
+        ("gemini-cli", "cli-gemini"),
+        (" OPENAI ", "openai"),
+        ("cli-cursor", "cli-cursor"),
     ],
 )
 def test_normalize_provider(raw: str, canonical: str) -> None:
     assert normalize_provider(raw) == canonical
 
 
-def test_default_sidecar_mapping() -> None:
-    assert map_provider_model_for_sidecar("cursor", "")[0] == "acpx-cursor"
-    assert map_provider_model_for_sidecar("claude", "")[0] == "google-vertex-claude"
-    assert map_provider_model_for_sidecar("gemini", "")[0] == "google"
-    assert map_provider_model_for_sidecar("cursor-cli", "")[0] == "acpx-cursor"
-
-
-def test_map_from_sidecar() -> None:
-    assert ai_client._friendly_provider_from_sidecar("acpx-cursor") == "cursor"
-    assert ai_client._friendly_provider_from_sidecar("cli-cursor") == "cursor"
-    assert ai_client._friendly_provider_from_sidecar("google-vertex-claude") == "claude"
-    assert ai_client._friendly_provider_from_sidecar("cli-claude") == "claude"
-    assert ai_client._friendly_provider_from_sidecar("google") == "gemini"
-
-
-def test_cursor_acpx_model_routes_to_acpx() -> None:
-    provider, model = map_provider_model_for_sidecar(
-        "cursor", "cursor:grok-4.5[effort=high,fast=true]"
-    )
-    assert provider == "acpx-cursor"
-    assert model == "cursor:grok-4.5[effort=high,fast=true]"
-
-
-def test_cursor_cli_model_routes_to_cli() -> None:
-    provider, model = map_provider_model_for_sidecar("cursor", "cursor:composer-2")
-    assert provider == "cli-cursor"
-    assert model == "cursor:composer-2"
-
-
-def test_cursor_cli_model_adds_prefix() -> None:
-    provider, model = map_provider_model_for_sidecar("cursor", "composer-2")
-    # No brackets and no cursor: prefix → treated as default ACPX after prefix add…
-    # Actually: model becomes cursor:composer-2 only AFTER sidecar chosen.
-    # Heuristic runs on raw model "composer-2" which doesn't start with cursor:
-    # and has no [, so → acpx-cursor, then prefix added.
-    assert provider == "acpx-cursor"
-    assert model == "cursor:composer-2"
-
-
-def test_legacy_cursor_cli_provider_with_cli_model() -> None:
-    provider, model = map_provider_model_for_sidecar("cursor-cli", "cursor:composer-2")
-    assert provider == "cli-cursor"
-    assert model == "cursor:composer-2"
-
-
-def test_cache_overrides_heuristic() -> None:
-    ai_client._model_route_cache[("cursor", "cursor:composer-2")] = "cli-cursor"
-    provider, model = map_provider_model_for_sidecar("cursor", "cursor:composer-2")
-    assert provider == "cli-cursor"
-    assert model == "cursor:composer-2"
-
-
-@pytest.mark.asyncio
-async def test_list_models_merges_and_tags_source(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    class FakeClient:
-        async def get_models(self):
-            return [
-                {
-                    "id": "cursor:default[]",
-                    "name": "Default",
-                    "provider": "acpx-cursor",
-                },
-                {
-                    "id": "cursor:composer-2",
-                    "name": "Composer",
-                    "provider": "cli-cursor",
-                },
-                {
-                    "id": "claude-opus-4-6",
-                    "name": "Opus",
-                    "provider": "google-vertex-claude",
-                },
-            ]
-
-    monkeypatch.setattr(ai_client, "get_sidecar_client", lambda: FakeClient())
-    models = await ai_client.list_models("cursor")
-    assert len(models) == 2
-    by_id = {m["id"]: m for m in models}
-    assert by_id["cursor:default[]"]["source"] == "acpx"
-    assert by_id["cursor:default[]"]["provider"] == "cursor"
-    assert by_id["cursor:composer-2"]["source"] == "cli"
-    assert ai_client._model_route_cache[("cursor", "cursor:composer-2")] == "cli-cursor"
-
-
-@pytest.mark.asyncio
-async def test_build_friendly_catalog_single_pass() -> None:
-    """One sidecar catalog builds all friendly providers without re-fetching."""
+def test_build_catalog_groups_duplicate_model_ids_by_exact_provider() -> None:
     catalog = [
-        {
-            "id": "cursor:default[]",
-            "name": "Default",
-            "provider": "acpx-cursor",
-        },
-        {
-            "id": "claude-opus-4-6",
-            "name": "Opus",
-            "provider": "google-vertex-claude",
-        },
-        {
-            "id": "gemini-2.5-pro",
-            "name": "Gemini",
-            "provider": "google",
-        },
+        {"id": "shared-model", "name": "OpenAI", "provider": "openai"},
+        {"id": "shared-model", "name": "Cursor", "provider": "cli-cursor"},
     ]
-    result = ai_client.build_friendly_catalog(catalog)
-    assert set(result) == VALID_AI_PROVIDERS
-    assert [m["id"] for m in result["cursor"]] == ["cursor:default[]"]
-    assert [m["id"] for m in result["claude"]] == ["claude-opus-4-6"]
-    assert [m["id"] for m in result["gemini"]] == ["gemini-2.5-pro"]
-    assert ai_client._model_route_cache[("cursor", "cursor:default[]")] == "acpx-cursor"
+
+    assert ai_client.build_friendly_catalog(catalog) == {
+        "openai": [
+            {
+                "id": "shared-model",
+                "name": "OpenAI",
+                "provider": "openai",
+                "source": "api",
+            }
+        ],
+        "cli-cursor": [
+            {
+                "id": "shared-model",
+                "name": "Cursor",
+                "provider": "cli-cursor",
+                "source": "cli",
+            }
+        ],
+    }
 
 
 @pytest.mark.asyncio
-async def test_list_models_route_cache_first_source_wins(
+@pytest.mark.parametrize(
+    ("provider", "model"),
+    [("openai", "gpt-5.4"), ("cli-cursor", "cursor:cursor-grok-4.6-high")],
+)
+async def test_call_ai_passes_exact_catalog_pair_to_sidecar(
+    monkeypatch: pytest.MonkeyPatch, provider: str, model: str
+) -> None:
+    monkeypatch.setattr(
+        ai_client,
+        "_list_models_raw",
+        AsyncMock(return_value=[{"provider": provider, "id": model}]),
+    )
+    call = AsyncMock(return_value="result")
+    monkeypatch.setattr(ai_client, "_call_ai", call)
+
+    assert (
+        await call_ai_under_test("prompt", ai_provider=provider, ai_model=model)
+        == "result"
+    )
+    call.assert_awaited_once_with("prompt", ai_provider=provider, ai_model=model)
+
+
+@pytest.mark.asyncio
+async def test_resolve_catalog_pair_rejects_model_from_another_provider(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Duplicate model ids keep the first sidecar route (ACPX before CLI)."""
-
-    class FakeClient:
-        async def get_models(self):
-            return [
-                {
-                    "id": "cursor:shared",
-                    "name": "Shared ACPX",
-                    "provider": "acpx-cursor",
-                },
-                {
-                    "id": "cursor:shared",
-                    "name": "Shared CLI",
-                    "provider": "cli-cursor",
-                },
+    monkeypatch.setattr(
+        ai_client,
+        "_list_models_raw",
+        AsyncMock(
+            return_value=[
+                {"provider": "openai", "id": "shared-model"},
+                {"provider": "cli-cursor", "id": "shared-model"},
             ]
+        ),
+    )
 
-    monkeypatch.setattr(ai_client, "get_sidecar_client", lambda: FakeClient())
-    models = await ai_client.list_models("cursor")
-    assert len(models) == 1
-    assert models[0]["source"] == "acpx"
-    assert ai_client._model_route_cache[("cursor", "cursor:shared")] == "acpx-cursor"
+    assert await ai_client.resolve_catalog_pair("openai", "shared-model") == (
+        "openai",
+        "shared-model",
+    )
+    with pytest.raises(ValueError, match="Unknown Pi-sidecar provider/model pair"):
+        await ai_client.resolve_catalog_pair("openai", "cursor-only-model")
 
 
 def test_format_chat_ai_user_error_session_url_not_expired() -> None:
@@ -364,41 +282,3 @@ async def test_probe_cursor_auth_key_set_never_auth_expired(
     assert status["reason"] == "api_key_not_applied"
     assert status["has_api_key"] is True
     assert "does not expire" in status["hint"]
-
-
-@pytest.mark.asyncio
-async def test_prewarm_model_routes_swallows_catalog_errors(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Catalog prewarm errors must not raise (AI call can still proceed)."""
-
-    async def boom(_provider: str = "") -> list:
-        raise RuntimeError("sidecar catalog unavailable")
-
-    monkeypatch.setattr(ai_client, "list_models", boom)
-    # Should not raise
-    await ai_client._prewarm_model_routes("cursor")
-
-
-@pytest.mark.asyncio
-async def test_prewarm_model_routes_refetches_when_model_uncached(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Do not skip prewarm when the requested model is missing from the cache."""
-    ai_client._model_route_cache.clear()
-    ai_client._model_route_cache[("claude", "old-model")] = "google-vertex-claude"
-    calls: list[str] = []
-
-    async def fake_list(provider: str = "") -> list:
-        calls.append(provider)
-        return [{"id": "new-cli-model", "provider": "claude", "source": "cli"}]
-
-    monkeypatch.setattr(ai_client, "list_models", fake_list)
-    await ai_client._prewarm_model_routes("claude", "new-cli-model")
-    assert calls == ["claude"]
-
-    # Exact key now present (or still skipped after another populate attempt)
-    calls.clear()
-    ai_client._model_route_cache[("claude", "new-cli-model")] = "cli-claude"
-    await ai_client._prewarm_model_routes("claude", "new-cli-model")
-    assert calls == []

@@ -112,7 +112,7 @@ _ProviderOpt = Annotated[
     str,
     typer.Option(
         "--provider",
-        help="AI provider (e.g. claude, gemini, cursor).",
+        help="Exact AI provider ID discovered from Pi-sidecar.",
     ),
 ]
 _ModelOpt = Annotated[str, typer.Option("--model", help="AI model to use.")]
@@ -2116,10 +2116,7 @@ def ai_models_cmd(
         "",
         "--provider",
         "-p",
-        help=(
-            "Filter by AI provider (claude, gemini, or cursor). "
-            "CLI models are listed under the same provider when enabled."
-        ),
+        help="Filter by an exact Pi-sidecar provider identifier.",
     ),
     json_output: bool = _JSON_OPTION,
 ) -> None:

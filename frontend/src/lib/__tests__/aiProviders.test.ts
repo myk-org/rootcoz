@@ -10,10 +10,11 @@ describe('normalizeProvider', () => {
 })
 
 describe('buildProviderOptions', () => {
-  it('includes only providers with models', () => {
+  it('includes exact catalog provider ids, including OpenAI and CLI Cursor', () => {
     expect(buildProviderOptions([]).map((o) => o.value)).toEqual([])
-    expect(buildProviderOptions(['cursor']).map((o) => o.value)).toEqual([
-      'cursor',
+    expect(buildProviderOptions(['openai', 'cli-cursor']).map((o) => o.value)).toEqual([
+      'cli-cursor',
+      'openai',
     ])
   })
 

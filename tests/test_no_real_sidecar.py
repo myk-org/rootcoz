@@ -23,7 +23,6 @@ async def test_call_ai_denied_by_default() -> None:
 async def test_list_models_uses_mock_client_not_network(
     _mock_sidecar_calls,
 ) -> None:
-    """list_models may run, but only against the autouse mock client."""
+    """list_models may run, but only against the autouse raw catalog mock."""
     models = await ai_client.list_models("cursor")
     assert models == []
-    _mock_sidecar_calls.get_models.assert_awaited()

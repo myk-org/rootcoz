@@ -308,18 +308,18 @@ class TestLoadRootcozRepoSettings:
         with pytest.raises(RootcozSettingsError, match="collides"):
             assert_no_tests_repo_name_collision("my-tests", repos)
 
-    def test_unsupported_provider_rejected(self) -> None:
+    def test_catalog_provider_is_retained_for_later_sidecar_validation(self) -> None:
         body = BaseAnalysisRequest()
         settings = Settings(ai_provider="", ai_model="")
-        # Force an unsupported provider via pre-resolved args when repo unset
-        with pytest.raises(RootcozSettingsError, match="Unsupported AI provider"):
-            apply_rootcoz_repo_settings(
-                body,
-                settings,
-                None,
-                ai_provider="not-a-provider",
-                ai_model="x",
-            )
+        effective = apply_rootcoz_repo_settings(
+            body,
+            settings,
+            None,
+            ai_provider="not-a-provider",
+            ai_model="x",
+        )
+        assert effective.ai_provider == "not-a-provider"
+        assert effective.ai_model == "x"
 
 
 class TestApplyRootcozRepoSettings:

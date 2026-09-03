@@ -267,7 +267,7 @@ def enrich_junit_xml_via_server(
     Args:
         server_url: Base URL of the rootcoz server (e.g., "http://localhost:8000").
         raw_xml: JUnit XML content as a string.
-        ai_provider: AI provider to use (claude, gemini, or cursor).
+        ai_provider: Exact AI provider ID discovered from Pi-sidecar.
         ai_model: AI model name.
         timeout: Total timeout in seconds for submission + polling (default: 600).
         api_key: Optional Bearer token for authenticated endpoints.

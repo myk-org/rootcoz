@@ -6,7 +6,7 @@ AI-powered CI failure analysis -- classifies test failures as code issues or pro
 
 ## Prerequisites
 
-An AI provider CLI must be installed and authenticated: [Claude](https://docs.anthropic.com/en/docs/claude-code), [Gemini](https://github.com/google-gemini/gemini-cli), or [Cursor](https://docs.cursor.com/agent). See [docs](https://myk-org.github.io/rootcoz/ai-provider-setup.html) for setup details.
+Provider IDs and models are discovered from Pi-sidecar. Install and authenticate the corresponding provider CLI or API credentials; see [docs](https://myk-org.github.io/rootcoz/ai-provider-setup.html) for setup details.
 
 ## Quick Start
 

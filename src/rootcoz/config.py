@@ -9,7 +9,7 @@ from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from simple_logger.logger import get_logger
 
-from rootcoz.ai_client import VALID_AI_PROVIDERS, normalize_provider
+from rootcoz.ai_client import normalize_provider
 from rootcoz.metadata_rules import load_metadata_rules
 from rootcoz.vapid import get_vapid_config
 
@@ -66,10 +66,6 @@ def parse_peer_configs(raw: str) -> list[dict[str, str]]:
             raise ValueError(f"Empty provider at position {i + 1}: '{entry}'")
         if not model:
             raise ValueError(f"Empty model at position {i + 1}: '{entry}'")
-        if provider not in VALID_AI_PROVIDERS:
-            raise ValueError(
-                f"Unsupported provider '{provider}' at position {i + 1}. Valid: {', '.join(sorted(VALID_AI_PROVIDERS))}"
-            )
         result.append({"ai_provider": provider, "ai_model": model})
     return result
 
