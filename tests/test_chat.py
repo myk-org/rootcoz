@@ -56,10 +56,19 @@ def test_client(mock_settings, temp_db_path: Path):
     with patch.object(storage, "DB_PATH", temp_db_path):
         from starlette.testclient import TestClient
 
+        from rootcoz import ai_client
         from rootcoz.main import app
 
+        ai_client.update_model_catalog(
+            [
+                {"provider": "claude", "id": "sonnet-4"},
+                {"provider": "cli-cursor", "id": "composer-1"},
+                {"provider": "cursor", "id": "composer-1"},
+            ]
+        )
         with TestClient(app, headers=_ADMIN_AUTH_HEADERS) as client:
             yield client
+        ai_client.update_model_catalog(None)
 
 
 @pytest.fixture
@@ -1658,7 +1667,7 @@ class TestChatEndpoints:
         )
         assert response.status_code == 404
 
-    async def test_send_message_retains_provider_for_catalog_validation(
+    async def test_send_message_rejects_unknown_catalog_pair(
         self, test_client, temp_db_path: Path
     ):
         await _save_job(temp_db_path, "chat-badprov-job")
@@ -1670,10 +1679,8 @@ class TestChatEndpoints:
                 "ai_model": "x",
             },
         )
-        assert response.status_code == 202
-        history = test_client.get("/api/chat/chat-badprov-job").json()
-        assistant_msgs = [m for m in history["messages"] if m["role"] == "assistant"]
-        assert assistant_msgs[0]["status"] == "failed"
+        assert response.status_code == 422
+        assert "Unknown Pi-sidecar provider/model pair" in response.json()["detail"]
 
     async def test_send_message_normalizes_legacy_provider_alias(
         self, test_client, temp_db_path: Path

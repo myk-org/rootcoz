@@ -145,8 +145,9 @@ export function useProviderOptions(
 
   return useMemo(() => {
     const current = currentKey ? currentKey.split('\0') : []
+    const knownProviders = new Set([...providerKeys, ...current])
     const keepVisible = Object.entries(providerStatus)
-      .filter(([, st]) => st && st.ok === false)
+      .filter(([id, st]) => st && st.ok === false && knownProviders.has(id))
       .map(([id]) => id)
     return buildProviderOptions(providerKeys, [...current, ...keepVisible])
   }, [providerKeys, currentKey, providerStatus])

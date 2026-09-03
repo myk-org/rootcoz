@@ -24,6 +24,11 @@ _LEGACY_PROVIDER_ALIASES: dict[str, str] = {
     "gemini-cli": "cli-gemini",
 }
 
+# Last successful sidecar catalog.  AI calls share this with the catalog API so
+# a transient refresh failure never rejects a pair already known to be valid.
+_model_catalog_cache: list[dict[str, Any]] | None = None
+_model_catalog_lock = asyncio.Lock()
+
 # Cached cursor auth probe: (monotonic_ts, status_dict)
 _cursor_auth_cache: tuple[float, dict[str, Any]] | None = None
 _CURSOR_AUTH_CACHE_TTL_SEC = 60.0
@@ -93,9 +98,35 @@ def build_friendly_catalog(
     return result
 
 
+async def _get_model_catalog(*, refresh: bool = False) -> list[dict[str, Any]]:
+    """Return the shared successful sidecar catalog, refreshing only when asked."""
+    global _model_catalog_cache
+    if _model_catalog_cache is not None and not refresh:
+        return _model_catalog_cache
+    async with _model_catalog_lock:
+        if _model_catalog_cache is not None and not refresh:
+            return _model_catalog_cache
+        try:
+            catalog = await _list_models_raw("")
+        except Exception:
+            if _model_catalog_cache is not None:
+                logger.warning("Sidecar catalog refresh failed; using warm catalog")
+                return _model_catalog_cache
+            raise
+        _model_catalog_cache = catalog
+        logger.debug("Loaded Pi-sidecar model catalog: %d models", len(catalog))
+        return catalog
+
+
+def update_model_catalog(models: list[dict[str, Any]] | None = None) -> None:
+    """Replace or clear the successful catalog after model discovery refresh."""
+    global _model_catalog_cache
+    _model_catalog_cache = models
+
+
 async def list_models(provider: str = "") -> list[dict[str, Any]]:
     """List sidecar catalog models, optionally for an exact provider ID."""
-    catalog = await _list_models_raw("")
+    catalog = await _get_model_catalog()
     provider = normalize_provider(provider)
     return [
         entry for entry in catalog if not provider or entry.get("provider") == provider
@@ -103,18 +134,32 @@ async def list_models(provider: str = "") -> list[dict[str, Any]]:
 
 
 async def resolve_catalog_pair(provider: str, model: str) -> tuple[str, str]:
-    """Validate and return an exact catalog pair, with safe legacy aliases only."""
+    """Validate an exact pair, retaining only unambiguous legacy routes."""
     provider, model = normalize_provider(provider), (model or "").strip()
-    catalog = await _list_models_raw("")
+    catalog = await _get_model_catalog()
     pairs = {(entry.get("provider"), entry.get("id")) for entry in catalog}
     if (provider, model) in pairs:
         return provider, model
 
-    # Old friendly values can be retained only when this model identifies one
-    # catalog route.  In particular, never guess between google and vertex.
-    legacy_matches = [p for p, m in pairs if m == model and p and p.endswith(provider)]
-    if provider in {"claude", "cursor", "gemini"} and len(legacy_matches) == 1:
-        return legacy_matches[0], model
+    # A stale catalog may not yet contain a newly discovered pair. Refresh once;
+    # a warm catalog remains usable if that refresh is temporarily unavailable.
+    catalog = await _get_model_catalog(refresh=True)
+    pairs = {(entry.get("provider"), entry.get("id")) for entry in catalog}
+    if (provider, model) in pairs:
+        return provider, model
+
+    # Legacy friendly IDs have one explicit destination each.  Mapping only when
+    # precisely one catalog provider has this model prevents google/Vertex guesses.
+    targets = {
+        "gemini": lambda p: p == "google",
+        "claude": lambda p: p == "google-vertex-claude",
+        "cursor": lambda p: p.endswith("-cursor"),
+    }
+    target = targets.get(provider)
+    providers_for_model = {p for p, m in pairs if p and m == model}
+    matches = [p for p in providers_for_model if target and target(p)]
+    if len(providers_for_model) == 1 and len(matches) == 1:
+        return matches[0], model
     raise ValueError(f"Unknown Pi-sidecar provider/model pair: {provider}/{model}")
 
 

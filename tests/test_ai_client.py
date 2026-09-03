@@ -11,6 +11,11 @@ from rootcoz.ai_client import call_ai as call_ai_under_test
 from rootcoz.ai_client import normalize_provider
 
 
+@pytest.fixture(autouse=True)
+def _clear_model_catalog() -> None:
+    ai_client.update_model_catalog(None)
+
+
 @pytest.mark.parametrize(
     ("raw", "canonical"),
     [
@@ -72,6 +77,58 @@ async def test_call_ai_passes_exact_catalog_pair_to_sidecar(
         == "result"
     )
     call.assert_awaited_once_with("prompt", ai_provider=provider, ai_model=model)
+
+
+@pytest.mark.asyncio
+async def test_resolve_catalog_pair_maps_unambiguous_legacy_gemini(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ai_client.update_model_catalog(None)
+    monkeypatch.setattr(
+        ai_client,
+        "_list_models_raw",
+        AsyncMock(return_value=[{"provider": "google", "id": "gemini-2.5"}]),
+    )
+
+    assert await ai_client.resolve_catalog_pair("gemini", "gemini-2.5") == (
+        "google",
+        "gemini-2.5",
+    )
+
+
+@pytest.mark.asyncio
+async def test_resolve_catalog_pair_rejects_ambiguous_legacy_gemini(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ai_client.update_model_catalog(None)
+    monkeypatch.setattr(
+        ai_client,
+        "_list_models_raw",
+        AsyncMock(
+            return_value=[
+                {"provider": "google", "id": "gemini-2.5"},
+                {"provider": "google-vertex", "id": "gemini-2.5"},
+            ]
+        ),
+    )
+
+    with pytest.raises(ValueError, match="Unknown Pi-sidecar provider/model pair"):
+        await ai_client.resolve_catalog_pair("gemini", "gemini-2.5")
+
+
+@pytest.mark.asyncio
+async def test_resolve_catalog_pair_uses_warm_catalog_when_refresh_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ai_client.update_model_catalog([{"provider": "openai", "id": "gpt-5"}])
+    fetch = AsyncMock(side_effect=RuntimeError("temporary sidecar failure"))
+    monkeypatch.setattr(ai_client, "_list_models_raw", fetch)
+
+    assert await ai_client.resolve_catalog_pair("openai", "gpt-5") == (
+        "openai",
+        "gpt-5",
+    )
+    assert fetch.await_count == 0
 
 
 @pytest.mark.asyncio

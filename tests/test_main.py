@@ -208,10 +208,18 @@ def test_client(mock_settings, temp_db_path: Path):
     with patch.object(storage, "DB_PATH", temp_db_path):
         from starlette.testclient import TestClient
 
+        from rootcoz import ai_client
         from rootcoz.main import app
 
+        ai_client.update_model_catalog(
+            [
+                {"provider": "claude", "id": "test-model"},
+                {"provider": "claude", "id": "opus"},
+            ]
+        )
         with TestClient(app, headers=_ADMIN_AUTH_HEADERS) as client:
             yield client
+        ai_client.update_model_catalog(None)
 
 
 class TestHealthEndpoint:
@@ -4564,7 +4572,8 @@ class TestPeerAnalysisParams:
         assert settings.peer_analysis_max_rounds == 3
         assert merged.ai_call_timeout == 99
 
-    def test_resolve_ai_config_allow_defer_respects_passed_settings(self) -> None:
+    @pytest.mark.asyncio
+    async def test_resolve_ai_config_allow_defer_respects_passed_settings(self) -> None:
         """allow_defer uses the passed Settings, not global get_settings()."""
         from fastapi import HTTPException
 
@@ -4581,7 +4590,7 @@ class TestPeerAnalysisParams:
             ),
             pytest.raises(HTTPException) as exc_info,
         ):
-            _resolve_ai_config_allow_defer(body, empty)
+            await _resolve_ai_config_allow_defer(body, empty)
         assert exc_info.value.status_code == 400
         assert "AI" in exc_info.value.detail
 
@@ -4590,11 +4599,12 @@ class TestPeerAnalysisParams:
             "rootcoz.main.get_settings",
             return_value=Settings(ai_provider="", ai_model=""),
         ):
-            provider, model = _resolve_ai_config_allow_defer(body, configured)
+            provider, model = await _resolve_ai_config_allow_defer(body, configured)
         assert provider == "gemini"
         assert model == "flash"
 
-    def test_resolve_ai_config_allow_defer_no_defer_on_explicit_empty_tests_repo(
+    @pytest.mark.asyncio
+    async def test_resolve_ai_config_allow_defer_no_defer_on_explicit_empty_tests_repo(
         self,
     ) -> None:
         """Explicit tests_repo_url='' must not defer via server tests_repo_url."""
@@ -4610,7 +4620,7 @@ class TestPeerAnalysisParams:
             tests_repo_url="https://github.com/org/tests",
         )
         with pytest.raises(HTTPException) as exc_info:
-            _resolve_ai_config_allow_defer(body, settings)
+            await _resolve_ai_config_allow_defer(body, settings)
         assert exc_info.value.status_code == 400
         assert "AI" in exc_info.value.detail
 

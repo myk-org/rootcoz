@@ -25,4 +25,4 @@ async def test_list_models_uses_mock_client_not_network(
 ) -> None:
     """list_models may run, but only against the autouse raw catalog mock."""
     models = await ai_client.list_models("cursor")
-    assert models == []
+    assert models == [{"provider": "cursor", "id": "test-model"}]

@@ -64,6 +64,8 @@ from rootcoz.ai_client import (
     list_models,
     normalize_provider,
     probe_cursor_auth,
+    resolve_catalog_pair,
+    update_model_catalog,
 )
 from rootcoz.bug_creation import (
     create_github_issue,
@@ -1269,7 +1271,7 @@ async def _resume_waiting_jobs(waiting_jobs: list[dict[str, Any]]) -> None:
                 job["job_id"],
             )
 
-        ai_provider, ai_model = _resolve_ai_config_allow_defer(body, merged)
+        ai_provider, ai_model = await _resolve_ai_config_allow_defer(body, merged)
         tests_repo_url_raw = resolve_tests_repo_url(body, merged)
         tests_repo_url, tests_repo_ref = parse_repo_ref(tests_repo_url_raw)
         resolved_tests_repo_token = (
@@ -1282,7 +1284,7 @@ async def _resume_waiting_jobs(waiting_jobs: list[dict[str, Any]]) -> None:
             or body.job_name
             or ""
         )
-        resolved_peers = _validate_peer_configs(body, merged)
+        resolved_peers = await _validate_peer_configs(body, merged)
 
         task = asyncio.create_task(
             _process_ci_source_analysis(
@@ -1345,7 +1347,10 @@ async def _deferred_resume_waiting_jobs(waiting_jobs: list[dict[str, Any]]) -> N
     the "running" phase.
     """
     await asyncio.sleep(1)
-    await _resume_waiting_jobs(waiting_jobs)
+    try:
+        await _resume_waiting_jobs(waiting_jobs)
+    except Exception:
+        logger.exception("Failed to resume waiting jobs after startup")
 
 
 @asynccontextmanager
@@ -2065,14 +2070,31 @@ def _resolve_ai_config_values(
     return provider, model
 
 
-def _resolve_ai_config(
+async def _validate_catalog_pair(provider: str, model: str) -> tuple[str, str]:
+    """Return a catalog-backed AI pair or a clear client error."""
+    try:
+        return await resolve_catalog_pair(provider, model)
+    except ValueError as exc:
+        logger.info("Rejected unknown AI provider/model pair: %s/%s", provider, model)
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.warning("Unable to validate AI provider/model pair", exc_info=True)
+        raise HTTPException(
+            status_code=503, detail="AI model catalog is temporarily unavailable"
+        ) from exc
+
+
+async def _resolve_ai_config(
     body: BaseAnalysisRequest, request: Request | None = None
 ) -> tuple[str, str]:
     """Resolve AI config from an AnalyzeRequest."""
-    return _resolve_ai_config_values(body.ai_provider, body.ai_model, request=request)
+    provider, model = _resolve_ai_config_values(
+        body.ai_provider, body.ai_model, request=request
+    )
+    return await _validate_catalog_pair(provider, model)
 
 
-def _resolve_ai_config_allow_defer(
+async def _resolve_ai_config_allow_defer(
     body: BaseAnalysisRequest,
     settings: Settings,
     request: Request | None = None,
@@ -2090,7 +2112,7 @@ def _resolve_ai_config_allow_defer(
         body.ai_provider, body.ai_model, settings=settings
     )
     if provider and model:
-        return provider, model
+        return await _validate_catalog_pair(provider, model)
     if tests_repo_available(body, settings):
         logger.info(
             "AI provider/model not set on request/server; "
@@ -2133,14 +2155,21 @@ def _resolve_peer_ai_configs(
     return None
 
 
-def _validate_peer_configs(
+async def _validate_peer_configs(
     body: BaseAnalysisRequest, settings: Settings
 ) -> list[Any] | None:
-    """Resolve and validate peer AI configs. Raises HTTPException(400) on invalid input."""
+    """Resolve and catalog-validate peer AI configs."""
     try:
-        return _resolve_peer_ai_configs(body, settings)
+        peers = _resolve_peer_ai_configs(body, settings)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    for peer in peers or []:
+        provider = (
+            peer.ai_provider if hasattr(peer, "ai_provider") else peer["ai_provider"]
+        )
+        model = peer.ai_model if hasattr(peer, "ai_model") else peer["ai_model"]
+        await _validate_catalog_pair(provider, model)
+    return peers
 
 
 def _resolve_enable_jira(body: BaseAnalysisRequest, settings: Settings) -> bool:
@@ -3082,7 +3111,9 @@ async def _enqueue_ci_source_analysis(
     Returns:
         JSON-serialisable response dict with ``status``, ``job_id``, links.
     """
-    ai_provider, ai_model = _resolve_ai_config_allow_defer(body, merged, request=None)
+    ai_provider, ai_model = await _resolve_ai_config_allow_defer(
+        body, merged, request=None
+    )
 
     # Resolve repos
     tests_repo_url_raw = resolve_tests_repo_url(body, merged)
@@ -4198,7 +4229,7 @@ async def analyze(
     base_url = _extract_base_url()
 
     # Validate AI config early (may defer when tests repo can supply settings.json)
-    _resolve_ai_config_allow_defer(body, settings, request)
+    await _resolve_ai_config_allow_defer(body, settings, request)
 
     # Resolve display name via plugin registry (source-agnostic)
     display_name: str = body.name or ""
@@ -4214,7 +4245,7 @@ async def analyze(
 
     # All sources — enqueue as async background task
     merged = _merge_settings(body, settings)
-    resolved_peers = _validate_peer_configs(body, merged)
+    resolved_peers = await _validate_peer_configs(body, merged)
     return await _enqueue_ci_source_analysis(
         body=body,
         merged=merged,
@@ -4328,9 +4359,9 @@ async def re_analyze(
     unified_body.tags = existing_tags
 
     # Validate and merge settings
-    _resolve_ai_config_allow_defer(unified_body, get_settings(), request)
+    await _resolve_ai_config_allow_defer(unified_body, get_settings(), request)
     merged = _merge_settings(unified_body, get_settings())
-    resolved_peers = _validate_peer_configs(unified_body, merged)
+    resolved_peers = await _validate_peer_configs(unified_body, merged)
 
     # Resolve display name — prefer original name, then plugin fallback
     display_name = unified_body.name or source_cls.default_display_name(unified_body)
@@ -4972,7 +5003,7 @@ async def re_analyze_failure(
     # Defer AI validation when a tests repo can supply .rootcoz/settings.json
     # (same as submit-time deferred AI). Background applies settings.json after clone.
     settings = get_settings()
-    ai_provider, ai_model = _resolve_ai_config_allow_defer(
+    ai_provider, ai_model = await _resolve_ai_config_allow_defer(
         BaseAnalysisRequest(
             ai_provider=ai_provider or None,
             ai_model=ai_model or None,
@@ -8557,12 +8588,9 @@ async def list_ai_models(
                 payload["provider_status"] = {"cursor": cursor_status}
             return strip_sensitive_from_response(payload)
 
-        # No provider specified — get the sidecar catalog grouped by provider ID.
-        from pi_sidecar_client import get_sidecar_client
-
+        # No provider specified — use the shared successful sidecar catalog.
         try:
-            raw_catalog = await get_sidecar_client().get_models()
-            all_models = build_friendly_catalog(raw_catalog)
+            all_models = build_friendly_catalog(await list_models())
         except Exception:
             logger.warning("Failed to list models for all providers", exc_info=True)
             all_models = {}
@@ -8605,6 +8633,7 @@ async def refresh_ai_models(request: Request) -> dict[str, Any]:
 
         client = get_sidecar_client()
         models = await client.refresh_models()
+        update_model_catalog(models)
         clear_cursor_auth_cache()
         cursor_status = await probe_cursor_auth(force=True)
         logger.info(
@@ -10639,6 +10668,7 @@ async def analyze_comment_intent(
     ai_provider, ai_model = _resolve_ai_config_values(
         ai_provider, ai_model, request=request
     )
+    ai_provider, ai_model = await _validate_catalog_pair(ai_provider, ai_model)
 
     prompt = """You are analyzing a comment left on a test failure report.
 Does this comment imply the failure has been reviewed or resolved?
@@ -10721,6 +10751,7 @@ async def preview_feedback(
             status_code=503, detail="Feedback submission is disabled on this server"
         )
     ai_provider, ai_model = _resolve_ai_config_values(None, None, request=request)
+    ai_provider, ai_model = await _validate_catalog_pair(ai_provider, ai_model)
     try:
         return await generate_feedback_preview(
             body, settings, ai_provider=ai_provider, ai_model=ai_model
@@ -11269,7 +11300,7 @@ def _cleanup_chat_state(key: str) -> None:
     _chat_abort_signals.pop(key, None)
 
 
-def _normalize_and_validate_ai_params(
+async def _normalize_and_validate_ai_params(
     ai_provider: str | None, ai_model: str | None
 ) -> tuple[str | None, str | None]:
     """Normalize and validate AI provider/model from request body.
@@ -11288,6 +11319,8 @@ def _normalize_and_validate_ai_params(
             status_code=422,
             detail="Both ai_provider and ai_model are required when either is set",
         )
+    if provider and model:
+        return await _validate_catalog_pair(provider, model)
     return provider, model
 
 
@@ -11363,7 +11396,7 @@ async def send_chat_message(
     """
     _check_allow_list(request)
     _require_reviewer(request)
-    ai_provider, ai_model = _normalize_and_validate_ai_params(
+    ai_provider, ai_model = await _normalize_and_validate_ai_params(
         body.ai_provider, body.ai_model
     )
 
@@ -11964,7 +11997,7 @@ async def send_admin_chat_message(
 ) -> dict[str, Any]:
     """Queue an admin chat message for AI processing."""
     _require_admin(request)
-    ai_provider, ai_model = _normalize_and_validate_ai_params(
+    ai_provider, ai_model = await _normalize_and_validate_ai_params(
         body.ai_provider, body.ai_model
     )
 
