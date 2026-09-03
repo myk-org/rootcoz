@@ -92,22 +92,16 @@ def _normalize_labels(labels: object) -> list[str]:
     return _normalize_string_list(labels, field_name="labels")
 
 
-AiProviderName = Literal[
-    "claude",
-    "gemini",
-    "cursor",
-]
-
-
 def _coerce_ai_provider(v: object) -> object:
+    """Normalize provider spelling; Pi-sidecar validates catalog membership."""
     if not isinstance(v, str):
         return v
     from rootcoz.ai_client import normalize_provider
 
-    return normalize_provider(v)
+    return normalize_provider(v).strip()
 
 
-NormalizedAiProvider = Annotated[AiProviderName, BeforeValidator(_coerce_ai_provider)]
+NormalizedAiProvider = Annotated[str, BeforeValidator(_coerce_ai_provider)]
 
 
 class AiConfigEntry(BaseModel):
@@ -179,9 +173,8 @@ class BaseAnalysisRequest(BaseModel):
     ai_provider: NormalizedAiProvider | None = Field(
         default=None,
         description=(
-            "AI provider to use: claude, gemini, or cursor "
-            "(overrides env var default). CLI models use the same provider "
-            "names when CLI_AGENTS is set."
+            "Exact Pi-sidecar-discovered provider ID to use "
+            "(overrides env var default)."
         ),
     )
     ai_model: str | None = Field(

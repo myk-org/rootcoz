@@ -40,7 +40,7 @@ ingress:
     secretName: ""
 
 ai:
-  # Required: gemini | claude | cursor → AI_PROVIDER
+  # Required: Pi-sidecar-discovered provider ID → AI_PROVIDER
   provider: ""
   # Required → AI_MODEL
   model: ""

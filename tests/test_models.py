@@ -673,21 +673,21 @@ class TestAiConfigEntry:
         assert entry.ai_provider == provider
 
     @pytest.mark.parametrize(
-        ("legacy", "canonical"),
+        ("legacy", "provider"),
         [
-            ("cursor-cli", "cursor"),
-            ("claude-cli", "claude"),
-            ("gemini-cli", "gemini"),
+            ("cursor-cli", "cli-cursor"),
+            ("claude-cli", "cli-claude"),
+            ("gemini-cli", "cli-gemini"),
         ],
     )
-    def test_legacy_cli_providers_normalize(self, legacy: str, canonical: str) -> None:
+    def test_legacy_cli_providers_normalize(self, legacy: str, provider: str) -> None:
         entry = AiConfigEntry(ai_provider=legacy, ai_model="model-1")
-        assert entry.ai_provider == canonical
+        assert entry.ai_provider == provider
 
-    def test_invalid_provider(self) -> None:
-        """Test that invalid AI provider is rejected."""
-        with pytest.raises(ValidationError):
-            AiConfigEntry(ai_provider="openai", ai_model="gpt4")
+    def test_catalog_provider_is_retained_for_sidecar_validation(self) -> None:
+        """Provider/model membership is validated against the live sidecar catalog."""
+        entry = AiConfigEntry(ai_provider="openai", ai_model="gpt4")
+        assert entry.ai_provider == "openai"
 
     def test_empty_model_rejected(self) -> None:
         """Test that empty ai_model string is rejected (min_length=1)."""
@@ -779,16 +779,16 @@ class TestPeerDebate:
         assert d.ai_configs[0].ai_provider == "claude"
         assert d.ai_configs[0].ai_model == "opus"
 
-    def test_ai_configs_reject_invalid_provider(self) -> None:
-        """Test that ai_configs rejects invalid AI provider."""
-        with pytest.raises(ValidationError):
-            PeerDebate(
-                consensus_reached=True,
-                rounds_used=1,
-                max_rounds=3,
-                ai_configs=[{"ai_provider": "openai", "ai_model": "gpt4"}],
-                rounds=[],
-            )
+    def test_ai_configs_retain_catalog_provider_for_sidecar_validation(self) -> None:
+        """Peer config provider/model membership is checked against the sidecar catalog."""
+        debate = PeerDebate(
+            consensus_reached=True,
+            rounds_used=1,
+            max_rounds=3,
+            ai_configs=[{"ai_provider": "openai", "ai_model": "gpt4"}],
+            rounds=[],
+        )
+        assert debate.ai_configs[0].ai_provider == "openai"
 
     def test_ai_configs_reject_empty_model(self) -> None:
         """Test that ai_configs rejects empty ai_model."""

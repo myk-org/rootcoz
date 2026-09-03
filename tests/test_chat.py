@@ -56,10 +56,19 @@ def test_client(mock_settings, temp_db_path: Path):
     with patch.object(storage, "DB_PATH", temp_db_path):
         from starlette.testclient import TestClient
 
+        from rootcoz import ai_client
         from rootcoz.main import app
 
+        ai_client.update_model_catalog(
+            [
+                {"provider": "claude", "id": "sonnet-4"},
+                {"provider": "cli-cursor", "id": "composer-1"},
+                {"provider": "cursor", "id": "composer-1"},
+            ]
+        )
         with TestClient(app, headers=_ADMIN_AUTH_HEADERS) as client:
             yield client
+        ai_client.update_model_catalog(None)
 
 
 @pytest.fixture
@@ -1658,7 +1667,9 @@ class TestChatEndpoints:
         )
         assert response.status_code == 404
 
-    async def test_send_message_invalid_provider(self, test_client, temp_db_path: Path):
+    async def test_send_message_rejects_unknown_catalog_pair(
+        self, test_client, temp_db_path: Path
+    ):
         await _save_job(temp_db_path, "chat-badprov-job")
         response = test_client.post(
             "/api/chat/chat-badprov-job",
@@ -1669,12 +1680,12 @@ class TestChatEndpoints:
             },
         )
         assert response.status_code == 422
-        assert "Invalid AI provider" in response.json()["detail"]
+        assert "Unknown Pi-sidecar provider/model pair" in response.json()["detail"]
 
     async def test_send_message_normalizes_legacy_provider_alias(
         self, test_client, temp_db_path: Path
     ):
-        """Legacy aliases (cursor-cli) must normalize to cursor before validation."""
+        """Legacy aliases retain their exact CLI sidecar provider route."""
         await _save_job(temp_db_path, "chat-alias-job")
         with patch(
             "rootcoz.engine.chat.chat_with_ai", new_callable=AsyncMock
@@ -1691,7 +1702,7 @@ class TestChatEndpoints:
         assert response.status_code == 202
         history = test_client.get("/api/chat/chat-alias-job").json()
         assistant_msgs = [m for m in history["messages"] if m["role"] == "assistant"]
-        assert assistant_msgs[0]["ai_provider"] == "cursor"
+        assert assistant_msgs[0]["ai_provider"] == "cli-cursor"
         assert assistant_msgs[0]["ai_model"] == "composer-1"
 
     async def test_send_message_normalizes_provider_case(

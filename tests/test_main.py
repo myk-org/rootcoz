@@ -208,10 +208,18 @@ def test_client(mock_settings, temp_db_path: Path):
     with patch.object(storage, "DB_PATH", temp_db_path):
         from starlette.testclient import TestClient
 
+        from rootcoz import ai_client
         from rootcoz.main import app
 
+        ai_client.update_model_catalog(
+            [
+                {"provider": "claude", "id": "test-model"},
+                {"provider": "claude", "id": "opus"},
+            ]
+        )
         with TestClient(app, headers=_ADMIN_AUTH_HEADERS) as client:
             yield client
+        ai_client.update_model_catalog(None)
 
 
 class TestHealthEndpoint:
@@ -4564,7 +4572,8 @@ class TestPeerAnalysisParams:
         assert settings.peer_analysis_max_rounds == 3
         assert merged.ai_call_timeout == 99
 
-    def test_resolve_ai_config_allow_defer_respects_passed_settings(self) -> None:
+    @pytest.mark.asyncio
+    async def test_resolve_ai_config_allow_defer_respects_passed_settings(self) -> None:
         """allow_defer uses the passed Settings, not global get_settings()."""
         from fastapi import HTTPException
 
@@ -4581,7 +4590,7 @@ class TestPeerAnalysisParams:
             ),
             pytest.raises(HTTPException) as exc_info,
         ):
-            _resolve_ai_config_allow_defer(body, empty)
+            await _resolve_ai_config_allow_defer(body, empty)
         assert exc_info.value.status_code == 400
         assert "AI" in exc_info.value.detail
 
@@ -4590,11 +4599,66 @@ class TestPeerAnalysisParams:
             "rootcoz.main.get_settings",
             return_value=Settings(ai_provider="", ai_model=""),
         ):
-            provider, model = _resolve_ai_config_allow_defer(body, configured)
+            provider, model = await _resolve_ai_config_allow_defer(body, configured)
         assert provider == "gemini"
         assert model == "flash"
 
-    def test_resolve_ai_config_allow_defer_no_defer_on_explicit_empty_tests_repo(
+    @pytest.mark.asyncio
+    async def test_validate_catalog_pair_returns_503_when_uncached_refresh_fails(
+        self,
+    ) -> None:
+        """A failed authoritative refresh is not an unknown-pair response."""
+        from fastapi import HTTPException
+
+        from rootcoz import ai_client
+        from rootcoz.main import _validate_catalog_pair
+
+        ai_client.update_model_catalog([{"provider": "openai", "id": "gpt-5"}])
+        with (
+            patch(
+                "rootcoz.ai_client._list_models_raw",
+                new_callable=AsyncMock,
+                side_effect=RuntimeError("sidecar unavailable"),
+            ),
+            pytest.raises(HTTPException) as exc_info,
+        ):
+            await _validate_catalog_pair("openai", "gpt-5.4")
+        assert exc_info.value.status_code == 503
+
+    @pytest.mark.asyncio
+    async def test_resolve_ai_config_allow_defer_defers_server_defaults_for_tests_repo(
+        self,
+    ) -> None:
+        """Repository settings must beat unvalidated server defaults."""
+        from rootcoz.main import _resolve_ai_config_allow_defer
+        from rootcoz.models import BaseAnalysisRequest
+
+        body = BaseAnalysisRequest(tests_repo_url="https://github.com/org/tests")
+        settings = Settings(ai_provider="missing", ai_model="missing")
+
+        assert await _resolve_ai_config_allow_defer(body, settings) == ("", "")
+
+    @pytest.mark.asyncio
+    async def test_resolve_ai_config_allow_defer_validates_explicit_pair_with_tests_repo(
+        self,
+    ) -> None:
+        """An explicit request pair never waits for repository settings."""
+        from fastapi import HTTPException
+
+        from rootcoz.main import _resolve_ai_config_allow_defer
+        from rootcoz.models import BaseAnalysisRequest
+
+        body = BaseAnalysisRequest(
+            tests_repo_url="https://github.com/org/tests",
+            ai_provider="missing",
+            ai_model="missing",
+        )
+        with pytest.raises(HTTPException) as exc_info:
+            await _resolve_ai_config_allow_defer(body, Settings())
+        assert exc_info.value.status_code == 422
+
+    @pytest.mark.asyncio
+    async def test_resolve_ai_config_allow_defer_no_defer_on_explicit_empty_tests_repo(
         self,
     ) -> None:
         """Explicit tests_repo_url='' must not defer via server tests_repo_url."""
@@ -4610,7 +4674,7 @@ class TestPeerAnalysisParams:
             tests_repo_url="https://github.com/org/tests",
         )
         with pytest.raises(HTTPException) as exc_info:
-            _resolve_ai_config_allow_defer(body, settings)
+            await _resolve_ai_config_allow_defer(body, settings)
         assert exc_info.value.status_code == 400
         assert "AI" in exc_info.value.detail
 
@@ -4677,6 +4741,46 @@ class TestPeerAnalysisParams:
         merged = Settings.model_validate(settings_data)
         result = _resolve_peer_ai_configs(body, merged)
         assert result is None
+
+    @pytest.mark.asyncio
+    async def test_validate_peer_configs_defers_malformed_server_default_for_tests_repo(
+        self,
+    ) -> None:
+        """A repo overlay takes priority over malformed server peer defaults."""
+        from rootcoz.main import _validate_peer_configs
+        from rootcoz.models import AnalyzeRequest
+
+        body = AnalyzeRequest(
+            job_name="test",
+            build_number=1,
+            ai_provider="claude",
+            ai_model="test-model",
+            tests_repo_url="https://github.com/org/tests",
+        )
+        settings = Settings(peer_ai_configs="malformed")
+
+        assert await _validate_peer_configs(body, settings) is None
+
+    @pytest.mark.asyncio
+    async def test_validate_peer_configs_accepts_server_peer_dicts(self) -> None:
+        """Server PEER_AI_CONFIGS dictionaries are catalog-validated."""
+        from rootcoz.main import _validate_peer_configs
+        from rootcoz.models import AnalyzeRequest
+
+        body = AnalyzeRequest(
+            job_name="test",
+            build_number=1,
+            ai_provider="claude",
+            ai_model="test-model",
+        )
+        settings = Settings(peer_ai_configs="gemini:pro")
+        with patch(
+            "rootcoz.main._validate_catalog_pair", new_callable=AsyncMock
+        ) as validate:
+            peers = await _validate_peer_configs(body, settings)
+
+        assert peers == [{"ai_provider": "gemini", "ai_model": "pro"}]
+        validate.assert_awaited_once_with("gemini", "pro")
 
     def test_build_reconstruct_roundtrip_peer_params(self, mock_settings) -> None:
         """peer_ai_configs and peer_analysis_max_rounds round-trip through build/reconstruct."""
@@ -6630,11 +6734,10 @@ class TestRefreshAiModelsEndpoint:
         assert response.status_code == 502
         assert "Failed to refresh" in response.json()["detail"]
 
-    def test_refresh_ai_models_failure_preserves_route_cache(self, test_client) -> None:
-        """Failed refresh must not clear CLI routing cache mid-flight."""
-        import rootcoz.ai_client as ai_client_mod
-
-        ai_client_mod._model_route_cache[("claude", "cli-model")] = "cli-claude"
+    def test_refresh_ai_models_sidecar_failure_returns_502_without_route_cache(
+        self, test_client
+    ) -> None:
+        """Catalog refresh failure does not rely on a local provider route cache."""
         with patch(
             "pi_sidecar_client.get_sidecar_client",
         ) as mock_get_client:
@@ -6644,7 +6747,6 @@ class TestRefreshAiModelsEndpoint:
             response = test_client.post("/api/admin/ai-models/refresh")
 
         assert response.status_code == 502
-        assert ai_client_mod._model_route_cache[("claude", "cli-model")] == "cli-claude"
 
 
 class TestCursorStatusForClient:

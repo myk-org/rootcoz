@@ -6,6 +6,7 @@ import {
   useCursorAuthStatus,
   useEnabledProviders,
   useProviderCatalog,
+  useProviderOptions,
 } from '@/lib/useProviderOptions'
 
 const getMock = vi.fn()
@@ -76,6 +77,16 @@ describe('useProviderCatalog shared fetch', () => {
     a.unmount()
     b.unmount()
     c.unmount()
+  })
+
+  it('does not add diagnostic-only cursor to provider options', async () => {
+    getMock.mockResolvedValue({
+      providers: { openai: [{ id: 'gpt-5', name: 'GPT 5' }] },
+      provider_status: { cursor: { ok: false, reason: 'unavailable', hint: 'down' } },
+    })
+    const { result } = renderHook(() => useProviderOptions())
+
+    await waitFor(() => expect(result.current.map((option) => option.value)).toEqual(['openai']))
   })
 
   it('refetches mounted catalog consumers after resetProviderCatalogCache', async () => {

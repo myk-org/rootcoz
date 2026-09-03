@@ -63,13 +63,17 @@ class TestChatSessionTools:
 
         mock_client = _mock_sidecar_calls
         mock_client.create_session = AsyncMock(return_value="sess-123")
-
-        session_id = await _create_chat_session(
-            system_prompt="test",
-            ai_provider="gemini",
-            ai_model="pro",
-            restrict_tools=True,
-        )
+        with patch(
+            "rootcoz.ai_client._list_models_raw",
+            new_callable=AsyncMock,
+            return_value=[{"provider": "gemini", "id": "pro"}],
+        ):
+            session_id = await _create_chat_session(
+                system_prompt="test",
+                ai_provider="gemini",
+                ai_model="pro",
+                restrict_tools=True,
+            )
 
         assert session_id == "sess-123"
         passed_kwargs = mock_client.create_session.call_args.kwargs
@@ -81,38 +85,36 @@ class TestChatSessionTools:
 
         mock_client = _mock_sidecar_calls
         mock_client.create_session = AsyncMock(return_value="sess-456")
-
-        await _create_chat_session(
-            system_prompt="test",
-            ai_provider="gemini",
-            ai_model="pro",
-            restrict_tools=False,
-        )
+        with patch(
+            "rootcoz.ai_client._list_models_raw",
+            new_callable=AsyncMock,
+            return_value=[{"provider": "gemini", "id": "pro"}],
+        ):
+            await _create_chat_session(
+                system_prompt="test",
+                ai_provider="gemini",
+                ai_model="pro",
+                restrict_tools=False,
+            )
 
         passed_kwargs = mock_client.create_session.call_args.kwargs
         assert "tools" not in passed_kwargs
 
     @pytest.mark.asyncio
-    async def test_create_chat_session_survives_prewarm_failure(
-        self, _mock_sidecar_calls, monkeypatch: pytest.MonkeyPatch
+    async def test_create_chat_session_rejects_unresolved_catalog_pair(
+        self, _mock_sidecar_calls
     ):
         from rootcoz.engine.chat import _create_chat_session
 
-        mock_client = _mock_sidecar_calls
-        mock_client.create_session = AsyncMock(return_value="sess-prewarm")
-
-        async def boom(_provider: str = "") -> list:
-            raise RuntimeError("catalog down")
-
-        monkeypatch.setattr("rootcoz.ai_client.list_models", boom)
         session_id = await _create_chat_session(
             system_prompt="test",
             ai_provider="cursor",
             ai_model="cursor:default[]",
             restrict_tools=True,
         )
-        assert session_id == "sess-prewarm"
-        assert mock_client.create_session.await_count == 1
+
+        assert session_id is None
+        _mock_sidecar_calls.create_session.assert_not_awaited()
 
 
 class TestChatImplTools:

@@ -26,7 +26,7 @@ from pydantic import (
 )
 from simple_logger.logger import get_logger
 
-from rootcoz.ai_client import VALID_AI_PROVIDERS, normalize_provider
+from rootcoz.ai_client import normalize_provider
 from rootcoz.config import Settings, parse_additional_repos, parse_peer_configs
 from rootcoz.models import (
     AdditionalRepo,
@@ -351,17 +351,6 @@ def assert_no_tests_repo_name_collision(
             )
 
 
-def validate_effective_ai_provider(provider: str) -> None:
-    """Reject unsupported AI providers after settings overlay."""
-    if not provider:
-        return
-    if provider not in VALID_AI_PROVIDERS:
-        raise RootcozSettingsError(
-            f"Unsupported AI provider: {provider}. "
-            f"Valid providers: {', '.join(sorted(VALID_AI_PROVIDERS))}"
-        )
-
-
 def apply_rootcoz_repo_settings(
     body: BaseAnalysisRequest,
     settings: Settings,
@@ -448,8 +437,6 @@ def apply_rootcoz_repo_settings(
     if overrides:
         merged_data = settings.model_dump(mode="python") | overrides
         merged = Settings(**merged_data)
-
-    validate_effective_ai_provider(resolved_provider)
 
     return EffectiveRepoAnalysisSettings(
         settings=merged,

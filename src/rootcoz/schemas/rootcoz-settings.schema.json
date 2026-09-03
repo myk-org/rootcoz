@@ -32,11 +32,6 @@
       "description": "Peer AI entry for ``.rootcoz/settings.json`` (no secrets / unknown keys).",
       "properties": {
         "ai_provider": {
-          "enum": [
-            "claude",
-            "gemini",
-            "cursor"
-          ],
           "title": "Ai Provider",
           "type": "string"
         },
@@ -60,11 +55,6 @@
     "ai_provider": {
       "anyOf": [
         {
-          "enum": [
-            "claude",
-            "gemini",
-            "cursor"
-          ],
           "type": "string"
         },
         {

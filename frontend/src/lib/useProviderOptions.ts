@@ -2,20 +2,18 @@ import { useEffect, useMemo, useState } from 'react'
 import { api } from '@/lib/api'
 import { useAuth } from '@/lib/auth'
 import type { AiModelsResponse, ProviderStatus } from '@/types'
-import {
-  AI_PROVIDER_OPTIONS,
-  buildProviderOptions,
-  type AiProviderOption,
-} from '@/lib/aiProviders'
+import { buildProviderOptions, type AiProviderOption } from '@/lib/aiProviders'
 
 export type { ProviderStatus }
 
 type CatalogState = {
+  providerKeys: string[]
+  /** @deprecated Use providerKeys. */
   enabled: string[]
   providerStatus: Record<string, ProviderStatus>
 }
 
-const EMPTY_CATALOG: CatalogState = { enabled: [], providerStatus: {} }
+const EMPTY_CATALOG: CatalogState = { providerKeys: [], enabled: [], providerStatus: {} }
 
 /** Shared in-flight / completed catalog so concurrent hook mounts share one fetch. */
 let catalogInflight: Promise<CatalogState> | null = null
@@ -43,10 +41,10 @@ function loadProviderCatalog(cacheKey: string): Promise<CatalogState> {
     .get<AiModelsResponse>('/api/ai-models')
     .then((res) => {
       const providers = res.providers ?? {}
+      const providerKeys = Object.keys(providers)
       const next: CatalogState = {
-        enabled: AI_PROVIDER_OPTIONS.map((o) => o.value).filter(
-          (p) => (providers[p] ?? []).length > 0,
-        ),
+        providerKeys,
+        enabled: providerKeys.filter((p) => (providers[p] ?? []).length > 0),
         providerStatus: res.provider_status ?? {},
       }
       // Only commit if this response still matches the active auth scope.
@@ -96,6 +94,8 @@ export function useEnabledProviders(): string[] {
 
 /** Models catalog + provider_status (e.g. cursor auth). */
 export function useProviderCatalog(): {
+  providerKeys: string[]
+  /** @deprecated Use providerKeys. */
   enabled: string[]
   providerStatus: Record<string, ProviderStatus>
 } {
@@ -138,18 +138,19 @@ export function useProviderCatalog(): {
 export function useProviderOptions(
   currentValues: string | string[] | undefined = undefined,
 ): AiProviderOption[] {
-  const { enabled, providerStatus } = useProviderCatalog()
+  const { providerKeys, providerStatus } = useProviderCatalog()
   const currentKey = Array.isArray(currentValues)
     ? currentValues.join('\0')
     : (currentValues ?? '')
 
   return useMemo(() => {
     const current = currentKey ? currentKey.split('\0') : []
+    const knownProviders = new Set([...providerKeys, ...current])
     const keepVisible = Object.entries(providerStatus)
-      .filter(([, st]) => st && st.ok === false)
+      .filter(([id, st]) => st && st.ok === false && knownProviders.has(id))
       .map(([id]) => id)
-    return buildProviderOptions(enabled, [...current, ...keepVisible])
-  }, [enabled, currentKey, providerStatus])
+    return buildProviderOptions(providerKeys, [...current, ...keepVisible])
+  }, [providerKeys, currentKey, providerStatus])
 }
 
 /** Cursor auth banner copy when provider_status.cursor.ok === false. */

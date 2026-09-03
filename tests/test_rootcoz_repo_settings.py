@@ -9,7 +9,7 @@ import pytest
 from pydantic import ValidationError
 
 from rootcoz.config import Settings
-from rootcoz.models import AdditionalRepo, BaseAnalysisRequest
+from rootcoz.models import AdditionalRepo, AiConfigEntry, BaseAnalysisRequest
 from rootcoz.rootcoz_repo_settings import (
     ROOTCOZ_SETTINGS_SCHEMA_PATH,
     RootcozRepoSettings,
@@ -308,18 +308,18 @@ class TestLoadRootcozRepoSettings:
         with pytest.raises(RootcozSettingsError, match="collides"):
             assert_no_tests_repo_name_collision("my-tests", repos)
 
-    def test_unsupported_provider_rejected(self) -> None:
+    def test_catalog_provider_is_retained_for_later_sidecar_validation(self) -> None:
         body = BaseAnalysisRequest()
         settings = Settings(ai_provider="", ai_model="")
-        # Force an unsupported provider via pre-resolved args when repo unset
-        with pytest.raises(RootcozSettingsError, match="Unsupported AI provider"):
-            apply_rootcoz_repo_settings(
-                body,
-                settings,
-                None,
-                ai_provider="not-a-provider",
-                ai_model="x",
-            )
+        effective = apply_rootcoz_repo_settings(
+            body,
+            settings,
+            None,
+            ai_provider="not-a-provider",
+            ai_model="x",
+        )
+        assert effective.ai_provider == "not-a-provider"
+        assert effective.ai_model == "x"
 
 
 class TestApplyRootcozRepoSettings:
@@ -401,6 +401,19 @@ class TestApplyRootcozRepoSettings:
         )
         effective = apply_rootcoz_repo_settings(body, settings, repo)
         assert effective.additional_repos == []
+
+    def test_repo_peer_settings_skip_malformed_server_default(self) -> None:
+        body = BaseAnalysisRequest()
+        settings = Settings(peer_ai_configs="malformed")
+        repo = RootcozRepoSettings(
+            peer_ai_configs=[{"ai_provider": "gemini", "ai_model": "flash"}]
+        )
+
+        effective = apply_rootcoz_repo_settings(body, settings, repo)
+
+        assert effective.peer_ai_configs == [
+            AiConfigEntry(ai_provider="gemini", ai_model="flash")
+        ]
 
     def test_server_used_when_no_repo_file(self) -> None:
         body = BaseAnalysisRequest()

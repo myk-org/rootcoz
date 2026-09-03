@@ -283,6 +283,22 @@ def _clear_db_settings_cache():
     clear_db_settings_cache()
 
 
+_TEST_SIDECAR_CATALOG = [
+    {"provider": provider, "id": model}
+    for provider, model in (
+        ("claude", "test-model"),
+        ("claude", "opus"),
+        ("claude", "claude-sonnet-4-20250514"),
+        ("gemini", "test-model"),
+        ("gemini", "m"),
+        ("gemini", "pro"),
+        ("gemini", "flash"),
+        ("gemini", "gemini-2.5-flash"),
+        ("cursor", "test-model"),
+    )
+]
+
+
 @pytest.fixture(autouse=True)
 def _mock_sidecar_calls():
     """Prevent ALL tests from hitting a real sidecar or any AI HTTP client.
@@ -297,10 +313,13 @@ def _mock_sidecar_calls():
             "Unexpected real sidecar/AI call in unit test — mock it explicitly"
         )
 
+    from rootcoz import ai_client
+
+    ai_client.update_model_catalog(_TEST_SIDECAR_CATALOG)
     mock_client = MagicMock()
     mock_client.delete_session = AsyncMock()
-    mock_client.get_models = AsyncMock(return_value=[])
-    mock_client.refresh_models = AsyncMock(return_value=[])
+    mock_client.get_models = AsyncMock(return_value=_TEST_SIDECAR_CATALOG)
+    mock_client.refresh_models = AsyncMock(return_value=_TEST_SIDECAR_CATALOG)
     mock_client.health = AsyncMock(return_value={"status": "ok"})
     mock_client.create_session = AsyncMock(return_value="mock-session")
     mock_client.prompt = AsyncMock(side_effect=_deny_sidecar)
@@ -311,7 +330,6 @@ def _mock_sidecar_calls():
     with (
         # --- clients (bound imports + package) ---
         patch("pi_sidecar_client.get_sidecar_client", return_value=mock_client),
-        patch("rootcoz.ai_client.get_sidecar_client", return_value=mock_client),
         patch("rootcoz.engine.chat.get_sidecar_client", return_value=mock_client),
         patch("rootcoz.peer_analysis.get_sidecar_client", return_value=mock_client),
         # list_models is NOT stubbed: it runs against the mock client above
@@ -322,7 +340,7 @@ def _mock_sidecar_calls():
         patch(
             "rootcoz.ai_client._list_models_raw",
             new_callable=AsyncMock,
-            return_value=[],
+            return_value=_TEST_SIDECAR_CATALOG,
         ),
         patch("rootcoz.ai_client.call_ai", deny_ai),
         patch("rootcoz.ai_client.call_ai_once", deny_ai),
@@ -346,3 +364,4 @@ def _mock_sidecar_calls():
         ),
     ):
         yield mock_client
+    ai_client.update_model_catalog(None)

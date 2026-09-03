@@ -317,10 +317,12 @@ class TestParsePeerConfigs:
         with pytest.raises(ValueError, match="Empty model"):
             parse_peer_configs("claude:")
 
-    def test_parse_peer_configs_invalid_provider(self) -> None:
-        """Unsupported provider raises ValueError."""
-        with pytest.raises(ValueError, match="Unsupported provider 'openai'"):
-            parse_peer_configs("openai:gpt")
+    def test_parse_peer_configs_accepts_catalog_provider_ids(self) -> None:
+        """Catalog validation is deferred to the async sidecar resolution path."""
+        assert parse_peer_configs("openai:gpt-5.4,cli-cursor:cursor:composer-2") == [
+            {"ai_provider": "openai", "ai_model": "gpt-5.4"},
+            {"ai_provider": "cli-cursor", "ai_model": "cursor:composer-2"},
+        ]
 
     def test_parse_peer_configs_trailing_comma(self) -> None:
         """Trailing comma results in empty entry ValueError."""
