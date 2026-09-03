@@ -110,7 +110,7 @@ async def _get_model_catalog(*, refresh: bool = False) -> list[dict[str, Any]]:
         generation = _model_catalog_generation
         catalog = await _list_models_raw("")
         if generation != _model_catalog_generation:
-            return _model_catalog_cache or catalog
+            return _model_catalog_cache if _model_catalog_cache is not None else catalog
         _model_catalog_cache = catalog
         logger.debug("Loaded Pi-sidecar model catalog: %d models", len(catalog))
         return catalog

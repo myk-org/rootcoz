@@ -172,6 +172,28 @@ async def test_admin_catalog_update_wins_over_inflight_discovery(
 
 
 @pytest.mark.asyncio
+async def test_admin_empty_catalog_update_wins_over_inflight_discovery(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def discover(_provider: str) -> list[dict[str, str]]:
+        started.set()
+        await release.wait()
+        return [{"provider": "openai", "id": "stale"}]
+
+    monkeypatch.setattr(ai_client, "_list_models_raw", discover)
+    discovery = asyncio.create_task(ai_client._get_model_catalog(refresh=True))
+    await started.wait()
+    ai_client.update_model_catalog([])
+    release.set()
+
+    assert await discovery == []
+    assert await ai_client._get_model_catalog() == []
+
+
+@pytest.mark.asyncio
 async def test_resolve_catalog_pair_rejects_model_from_another_provider(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

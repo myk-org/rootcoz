@@ -2158,25 +2158,28 @@ def _resolve_peer_ai_configs(
     return None
 
 
+def _peer_catalog_pair(peer: Any) -> tuple[str, str]:
+    """Return a peer provider/model pair from request models or server dictionaries."""
+    if hasattr(peer, "ai_provider"):
+        return peer.ai_provider, peer.ai_model
+    return peer["ai_provider"], peer["ai_model"]
+
+
 async def _validate_peer_configs(
     body: BaseAnalysisRequest, settings: Settings
 ) -> list[Any] | None:
     """Resolve and catalog-validate peer AI configs."""
-    try:
-        peers = _resolve_peer_ai_configs(body, settings)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
     if tests_repo_available(body, settings) and body.peer_ai_configs is None:
         logger.info(
             "Deferring server peer validation to .rootcoz/settings.json overlay"
         )
-        return peers
+        return None
+    try:
+        peers = _resolve_peer_ai_configs(body, settings)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     for peer in peers or []:
-        provider = (
-            peer.ai_provider if hasattr(peer, "ai_provider") else peer["ai_provider"]
-        )
-        model = peer.ai_model if hasattr(peer, "ai_model") else peer["ai_model"]
-        await _validate_catalog_pair(provider, model)
+        await _validate_catalog_pair(*_peer_catalog_pair(peer))
     return peers
 
 
@@ -3841,7 +3844,7 @@ async def _process_ci_source_analysis(
 
         ai_provider, ai_model = await _validate_catalog_pair(ai_provider, ai_model)
         for peer in peer_ai_configs or []:
-            await _validate_catalog_pair(peer.ai_provider, peer.ai_model)
+            await _validate_catalog_pair(*_peer_catalog_pair(peer))
 
         # Post-overlay preflight only when AI was deferred / changed by settings.json
         if not ai_resolved_before_overlay and not await _preflight_sidecar_check(

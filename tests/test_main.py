@@ -4742,6 +4742,46 @@ class TestPeerAnalysisParams:
         result = _resolve_peer_ai_configs(body, merged)
         assert result is None
 
+    @pytest.mark.asyncio
+    async def test_validate_peer_configs_defers_malformed_server_default_for_tests_repo(
+        self,
+    ) -> None:
+        """A repo overlay takes priority over malformed server peer defaults."""
+        from rootcoz.main import _validate_peer_configs
+        from rootcoz.models import AnalyzeRequest
+
+        body = AnalyzeRequest(
+            job_name="test",
+            build_number=1,
+            ai_provider="claude",
+            ai_model="test-model",
+            tests_repo_url="https://github.com/org/tests",
+        )
+        settings = Settings(peer_ai_configs="malformed")
+
+        assert await _validate_peer_configs(body, settings) is None
+
+    @pytest.mark.asyncio
+    async def test_validate_peer_configs_accepts_server_peer_dicts(self) -> None:
+        """Server PEER_AI_CONFIGS dictionaries are catalog-validated."""
+        from rootcoz.main import _validate_peer_configs
+        from rootcoz.models import AnalyzeRequest
+
+        body = AnalyzeRequest(
+            job_name="test",
+            build_number=1,
+            ai_provider="claude",
+            ai_model="test-model",
+        )
+        settings = Settings(peer_ai_configs="gemini:pro")
+        with patch(
+            "rootcoz.main._validate_catalog_pair", new_callable=AsyncMock
+        ) as validate:
+            peers = await _validate_peer_configs(body, settings)
+
+        assert peers == [{"ai_provider": "gemini", "ai_model": "pro"}]
+        validate.assert_awaited_once_with("gemini", "pro")
+
     def test_build_reconstruct_roundtrip_peer_params(self, mock_settings) -> None:
         """peer_ai_configs and peer_analysis_max_rounds round-trip through build/reconstruct."""
         from rootcoz.config import get_settings
