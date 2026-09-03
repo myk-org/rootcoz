@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from unittest.mock import AsyncMock
 
 import pytest
@@ -129,6 +130,45 @@ async def test_resolve_catalog_pair_uses_warm_catalog_when_refresh_fails(
         "gpt-5",
     )
     assert fetch.await_count == 0
+
+
+@pytest.mark.asyncio
+async def test_resolve_catalog_pair_propagates_refresh_failure_for_uncached_pair(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ai_client.update_model_catalog([{"provider": "openai", "id": "gpt-5"}])
+    monkeypatch.setattr(
+        ai_client,
+        "_list_models_raw",
+        AsyncMock(side_effect=RuntimeError("temporary sidecar failure")),
+    )
+
+    with pytest.raises(RuntimeError, match="temporary sidecar failure"):
+        await ai_client.resolve_catalog_pair("openai", "gpt-5.4")
+
+
+@pytest.mark.asyncio
+async def test_admin_catalog_update_wins_over_inflight_discovery(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def discover(_provider: str) -> list[dict[str, str]]:
+        started.set()
+        await release.wait()
+        return [{"provider": "openai", "id": "stale"}]
+
+    monkeypatch.setattr(ai_client, "_list_models_raw", discover)
+    discovery = asyncio.create_task(ai_client._get_model_catalog(refresh=True))
+    await started.wait()
+    ai_client.update_model_catalog([{"provider": "openai", "id": "fresh"}])
+    release.set()
+
+    assert await discovery == [{"provider": "openai", "id": "fresh"}]
+    assert await ai_client._get_model_catalog() == [
+        {"provider": "openai", "id": "fresh"}
+    ]
 
 
 @pytest.mark.asyncio

@@ -27,6 +27,7 @@ _LEGACY_PROVIDER_ALIASES: dict[str, str] = {
 # Last successful sidecar catalog.  AI calls share this with the catalog API so
 # a transient refresh failure never rejects a pair already known to be valid.
 _model_catalog_cache: list[dict[str, Any]] | None = None
+_model_catalog_generation = 0
 _model_catalog_lock = asyncio.Lock()
 
 # Cached cursor auth probe: (monotonic_ts, status_dict)
@@ -106,13 +107,10 @@ async def _get_model_catalog(*, refresh: bool = False) -> list[dict[str, Any]]:
     async with _model_catalog_lock:
         if _model_catalog_cache is not None and not refresh:
             return _model_catalog_cache
-        try:
-            catalog = await _list_models_raw("")
-        except Exception:
-            if _model_catalog_cache is not None:
-                logger.warning("Sidecar catalog refresh failed; using warm catalog")
-                return _model_catalog_cache
-            raise
+        generation = _model_catalog_generation
+        catalog = await _list_models_raw("")
+        if generation != _model_catalog_generation:
+            return _model_catalog_cache or catalog
         _model_catalog_cache = catalog
         logger.debug("Loaded Pi-sidecar model catalog: %d models", len(catalog))
         return catalog
@@ -120,7 +118,8 @@ async def _get_model_catalog(*, refresh: bool = False) -> list[dict[str, Any]]:
 
 def update_model_catalog(models: list[dict[str, Any]] | None = None) -> None:
     """Replace or clear the successful catalog after model discovery refresh."""
-    global _model_catalog_cache
+    global _model_catalog_cache, _model_catalog_generation
+    _model_catalog_generation += 1
     _model_catalog_cache = models
 
 

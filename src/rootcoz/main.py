@@ -2111,14 +2111,17 @@ async def _resolve_ai_config_allow_defer(
     provider, model = _resolve_ai_provider_model(
         body.ai_provider, body.ai_model, settings=settings
     )
-    if provider and model:
+    request_pair = bool(body.ai_provider and body.ai_model)
+    if request_pair:
         return await _validate_catalog_pair(provider, model)
     if tests_repo_available(body, settings):
         logger.info(
-            "AI provider/model not set on request/server; "
+            "AI provider/model not explicitly set; "
             "deferring to .rootcoz/settings.json after tests repo clone"
         )
         return "", ""
+    if provider and model:
+        return await _validate_catalog_pair(provider, model)
     # Validate using the already-resolved values from *settings* — do not
     # re-resolve via _resolve_ai_config_values (that uses global get_settings()).
     if not provider:
@@ -2163,6 +2166,11 @@ async def _validate_peer_configs(
         peers = _resolve_peer_ai_configs(body, settings)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if tests_repo_available(body, settings) and body.peer_ai_configs is None:
+        logger.info(
+            "Deferring server peer validation to .rootcoz/settings.json overlay"
+        )
+        return peers
     for peer in peers or []:
         provider = (
             peer.ai_provider if hasattr(peer, "ai_provider") else peer["ai_provider"]
@@ -3830,6 +3838,10 @@ async def _process_ci_source_analysis(
                 _ai_not_configured_message(None, "AI provider/model", is_admin=is_admin)
             )
             return
+
+        ai_provider, ai_model = await _validate_catalog_pair(ai_provider, ai_model)
+        for peer in peer_ai_configs or []:
+            await _validate_catalog_pair(peer.ai_provider, peer.ai_model)
 
         # Post-overlay preflight only when AI was deferred / changed by settings.json
         if not ai_resolved_before_overlay and not await _preflight_sidecar_check(

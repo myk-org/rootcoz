@@ -4604,6 +4604,60 @@ class TestPeerAnalysisParams:
         assert model == "flash"
 
     @pytest.mark.asyncio
+    async def test_validate_catalog_pair_returns_503_when_uncached_refresh_fails(
+        self,
+    ) -> None:
+        """A failed authoritative refresh is not an unknown-pair response."""
+        from fastapi import HTTPException
+
+        from rootcoz import ai_client
+        from rootcoz.main import _validate_catalog_pair
+
+        ai_client.update_model_catalog([{"provider": "openai", "id": "gpt-5"}])
+        with (
+            patch(
+                "rootcoz.ai_client._list_models_raw",
+                new_callable=AsyncMock,
+                side_effect=RuntimeError("sidecar unavailable"),
+            ),
+            pytest.raises(HTTPException) as exc_info,
+        ):
+            await _validate_catalog_pair("openai", "gpt-5.4")
+        assert exc_info.value.status_code == 503
+
+    @pytest.mark.asyncio
+    async def test_resolve_ai_config_allow_defer_defers_server_defaults_for_tests_repo(
+        self,
+    ) -> None:
+        """Repository settings must beat unvalidated server defaults."""
+        from rootcoz.main import _resolve_ai_config_allow_defer
+        from rootcoz.models import BaseAnalysisRequest
+
+        body = BaseAnalysisRequest(tests_repo_url="https://github.com/org/tests")
+        settings = Settings(ai_provider="missing", ai_model="missing")
+
+        assert await _resolve_ai_config_allow_defer(body, settings) == ("", "")
+
+    @pytest.mark.asyncio
+    async def test_resolve_ai_config_allow_defer_validates_explicit_pair_with_tests_repo(
+        self,
+    ) -> None:
+        """An explicit request pair never waits for repository settings."""
+        from fastapi import HTTPException
+
+        from rootcoz.main import _resolve_ai_config_allow_defer
+        from rootcoz.models import BaseAnalysisRequest
+
+        body = BaseAnalysisRequest(
+            tests_repo_url="https://github.com/org/tests",
+            ai_provider="missing",
+            ai_model="missing",
+        )
+        with pytest.raises(HTTPException) as exc_info:
+            await _resolve_ai_config_allow_defer(body, Settings())
+        assert exc_info.value.status_code == 422
+
+    @pytest.mark.asyncio
     async def test_resolve_ai_config_allow_defer_no_defer_on_explicit_empty_tests_repo(
         self,
     ) -> None:
