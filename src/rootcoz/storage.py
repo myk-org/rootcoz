@@ -1863,6 +1863,22 @@ async def claim_submitted_job_for_analyze(job_id: str) -> bool:
         return cursor.rowcount == 1
 
 
+async def release_submitted_job_analyze_claim(job_id: str) -> None:
+    """Restore a submitted job if analyze enqueue failed after claiming."""
+    async with _connect_db() as db:
+        await db.execute(
+            """
+            UPDATE results
+            SET status = 'completed'
+            WHERE job_id = ?
+              AND status = 'pending'
+              AND COALESCE(analysis_state, 'analyzed') = ?
+            """,
+            (job_id, ANALYSIS_STATE_SUBMITTED),
+        )
+        await db.commit()
+
+
 async def update_build_url(job_id: str, build_url: str) -> None:
     """Update the build_url DB column for an existing result."""
     from rootcoz.url_utils import sanitize_http_href

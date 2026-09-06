@@ -228,6 +228,7 @@ from rootcoz.storage import (
     list_results_for_dashboard_filtered,
     patch_result_json,
     populate_failure_history,
+    release_submitted_job_analyze_claim,
     replace_job_test_entries,
     save_result,
     stamp_build_url,
@@ -4423,9 +4424,7 @@ async def analyze_submitted_job(
     if body is not None:
         for field_name in body.model_fields_set:
             unified_fields[field_name] = getattr(body, field_name)
-    if body is None or "get_job_artifacts" not in body.model_fields_set:
-        # Submit ingest skips artifacts; in-place analyze should still fetch
-        # them unless the caller explicitly turns them off.
+    if "get_job_artifacts" not in unified_fields:
         unified_fields["get_job_artifacts"] = True
     unified_body = UnifiedAnalyzeRequest(**unified_fields)
     source_cls = CI_SOURCE_REGISTRY.get(analysis_type)
@@ -4450,19 +4449,23 @@ async def analyze_submitted_job(
             status_code=409,
             detail="Job is already being analyzed or is no longer submitted.",
         )
-    return await _enqueue_ci_source_analysis(
-        body=unified_body,
-        merged=merged,
-        resolved_peers=resolved_peers,
-        display_name=display_name,
-        analysis_type=analysis_type,
-        base_url=_extract_base_url(),
-        username=request.state.username,
-        tags=list(result_data.get("tags") or []),
-        message_prefix="Analysis",
-        is_admin=bool(request.state.is_admin),
-        existing_job_id=job_id,
-    )
+    try:
+        return await _enqueue_ci_source_analysis(
+            body=unified_body,
+            merged=merged,
+            resolved_peers=resolved_peers,
+            display_name=display_name,
+            analysis_type=analysis_type,
+            base_url=_extract_base_url(),
+            username=request.state.username,
+            tags=list(result_data.get("tags") or []),
+            message_prefix="Analysis",
+            is_admin=bool(request.state.is_admin),
+            existing_job_id=job_id,
+        )
+    except Exception:
+        await release_submitted_job_analyze_claim(job_id)
+        raise
 
 
 def _unified_fields_from_stored_params(
