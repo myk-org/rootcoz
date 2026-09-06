@@ -404,6 +404,8 @@ function ReportContent() {
   // After early returns, result is guaranteed to be non-null
   if (!result) return null
 
+  const submitted = result.analysis_state === 'submitted'
+
   const buildUrl = resolveBuildUrl(result)
   const buildDisplayId = resolveBuildDisplayId(result)
 
@@ -480,7 +482,7 @@ function ReportContent() {
                 disabled={result.status === 'running' || result.status === 'pending' || result.status === 'waiting'}
               >
                 <RotateCw className="h-3.5 w-3.5" />
-                Re-Analyze
+                {submitted ? 'Analyze' : 'Re-Analyze'}
               </Button>
             )}
             {buildUrl && (
@@ -495,7 +497,6 @@ function ReportContent() {
             )}
           </div>
         </div>
-      </div>
 
       {/* ---- Origin job reference for re-analyses ---- */}
       {state.reanalyzedFromJobId && (
@@ -562,9 +563,19 @@ function ReportContent() {
             </span>
           )}
         </div>
+      </div>
+
+      {submitted && result.status === 'completed' && (
+        <div className="rounded-lg border-l-4 border-l-signal-amber bg-signal-amber/5 p-4 animate-slide-up">
+          <h2 className="text-sm font-medium text-signal-amber">Awaiting AI analysis</h2>
+          <p className="mt-1 text-xs text-text-tertiary">
+            CI results are stored. Use Analyze in the header to classify failures.
+          </p>
+        </div>
+      )}
 
       {/* ---- Zero-failure banner ---- */}
-      {totalFailures === 0 && result.status === 'completed' && (
+      {totalFailures === 0 && result.status === 'completed' && !submitted && (
         <div className="rounded-lg border-l-4 border-l-signal-green bg-signal-green/5 p-4 animate-slide-up">
           <div className="flex items-center gap-2">
             <CheckCircle2 className="h-5 w-5 text-signal-green" />
@@ -682,6 +693,7 @@ function ReportContent() {
           onOpenChange={(v) => dispatch({ type: 'SET_RE_ANALYZE_OPEN', payload: v })}
           result={result}
           jobId={jobId!}
+          inPlaceAnalyze={submitted}
         />
       )}
     </TooltipProvider>

@@ -6987,3 +6987,63 @@ class TestReadLogTail:
         result = _read_log_tail(path, 50, max_bytes=250, chunk_size=100)
         assert 0 < len(result) < 50
         assert all(line.startswith("y") for line in result)
+
+
+class TestSubmitIntake:
+    def test_submit_raw_does_not_require_ai(self, test_client) -> None:
+        data, mock_process = _post_submit_queued(
+            test_client,
+            {
+                "type": "raw",
+                "failures": [
+                    {"test_name": "test_foo", "error_message": "assert False"},
+                ],
+            },
+        )
+        assert "job_id" in data
+        assert mock_process.await_args.kwargs["ingest_only"] is True
+
+    def test_submit_sets_submitted_state(self, test_client) -> None:
+        data, _ = _post_submit_queued(
+            test_client,
+            {
+                "type": "raw",
+                "failures": [{"test_name": "t", "error_message": "e"}],
+            },
+        )
+        stored = test_client.get(f"/results/{data['job_id']}").json()
+        assert stored["result"]["analysis_state"] == "submitted"
+
+    def test_in_place_analyze_requires_submitted(self, test_client) -> None:
+        data, _ = _post_analyze_queued(
+            test_client,
+            {
+                "type": "raw",
+                "failures": [{"test_name": "t", "error_message": "e"}],
+                "ai_provider": "claude",
+                "ai_model": "test-model",
+            },
+        )
+        response = test_client.post(f"/results/{data['job_id']}/analyze")
+        assert response.status_code == 409
+
+    def test_dashboard_analysis_state_filter(self, test_client) -> None:
+        ok = test_client.get(
+            "/api/dashboard/filtered", params={"analysis_state": "submitted"}
+        )
+        assert ok.status_code == 200
+        bad = test_client.get(
+            "/api/dashboard/filtered", params={"analysis_state": "nope"}
+        )
+        assert bad.status_code == 400
+
+
+def _post_submit_queued(test_client, payload: dict) -> tuple[dict, AsyncMock]:
+    with patch(
+        "rootcoz.main._process_ci_source_analysis", new_callable=AsyncMock
+    ) as mock_process:
+        response = test_client.post("/submit", json=payload)
+        assert response.status_code == 202
+        data = response.json()
+        assert data["status"] == "queued"
+        return data, mock_process

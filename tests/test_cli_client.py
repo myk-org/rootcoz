@@ -237,6 +237,25 @@ class TestRootCozClientAnalyze:
         result = client.analyze("my-job", 1, labels=["Nightly", "CNV"])
         assert result["status"] == "queued"
 
+    def test_submit_posts_submit_path(self):
+        def handler(request):
+            assert request.url.path == "/submit"
+            return httpx.Response(202, json={"status": "queued", "job_id": "s-1"})
+
+        client = _make_client(handler)
+        result = client.submit("my-job", 42)
+        assert result["job_id"] == "s-1"
+
+    def test_analyze_submitted(self):
+        def handler(request):
+            assert request.method == "POST"
+            assert request.url.path == "/results/job-1/analyze"
+            return httpx.Response(202, json={"status": "queued", "job_id": "job-1"})
+
+        client = _make_client(handler)
+        result = client.analyze_submitted("job-1")
+        assert result["job_id"] == "job-1"
+
 
 class TestRootCozClientHistory:
     def test_get_test_history(self):

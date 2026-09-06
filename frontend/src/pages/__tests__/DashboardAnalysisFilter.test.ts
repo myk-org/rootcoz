@@ -107,3 +107,13 @@ describe('DashboardReviewStatusFilter', () => {
     })
   })
 })
+
+describe('parseAnalysisState', () => {
+  it('parses submitted and analyzed', async () => {
+    const { parseAnalysisState } = await import('@/lib/analysis-state')
+    expect(parseAnalysisState(null)).toBe('all')
+    expect(parseAnalysisState('submitted')).toBe('submitted')
+    expect(parseAnalysisState('analyzed')).toBe('analyzed')
+    expect(parseAnalysisState('bogus')).toBe('all')
+  })
+})

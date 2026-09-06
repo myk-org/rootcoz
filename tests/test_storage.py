@@ -49,6 +49,21 @@ class TestInitDb:
             await storage.init_db()
             await storage.init_db()  # Should not raise
 
+    def test_resolve_db_path_falls_back_when_unwritable(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        blocked = tmp_path / "blocked"
+        blocked.mkdir()
+        monkeypatch.setenv("DB_PATH", str(blocked / "results.db"))
+        fallback_root = tmp_path / "xdg"
+        monkeypatch.setenv("XDG_DATA_HOME", str(fallback_root))
+        blocked.chmod(0o555)
+        try:
+            resolved = storage._resolve_db_path()
+        finally:
+            blocked.chmod(0o755)
+        assert resolved == fallback_root / "rootcoz" / "results.db"
+
 
 class TestSaveResult:
     """Tests for the save_result function."""
@@ -1663,6 +1678,217 @@ class TestWithBuildUrlAliases:
         out = storage.with_build_url_aliases(record)
         assert out["build_url"] == "https://jenkins.example.com/job/1"
         assert out["jenkins_url"] == "https://jenkins.example.com/job/1"
+
+
+@pytest.mark.anyio
+async def test_submit_ingest_persists_failures(setup_test_db):
+    from unittest.mock import AsyncMock
+
+    from rootcoz.config import Settings
+    from rootcoz.main import _process_ci_source_analysis
+    from rootcoz.models import FailedTest, UnifiedAnalyzeRequest
+    from rootcoz.sources.base import CISourceResult
+    from rootcoz.storage import ANALYSIS_STATE_SUBMITTED
+
+    job_id = "submit-ingest-1"
+    with patch.object(storage, "DB_PATH", setup_test_db):
+        await storage.save_result(
+            job_id,
+            "",
+            "pending",
+            {"analysis_state": ANALYSIS_STATE_SUBMITTED, "job_name": "raw"},
+        )
+        body = UnifiedAnalyzeRequest(
+            type="raw",
+            failures=[FailedTest(test_name="t1", error_message="boom")],
+        )
+        source_result = CISourceResult(
+            failures=list(body.failures),
+            skip_analysis=False,
+            identity={"job_name": "raw"},
+        )
+        with patch(
+            "rootcoz.sources.raw_source.RawSource.fetch",
+            new_callable=AsyncMock,
+            return_value=source_result,
+        ):
+            await _process_ci_source_analysis(
+                job_id=job_id,
+                body=body,
+                merged=Settings(),
+                display_name="raw",
+                ai_provider="",
+                ai_model="",
+                peer_ai_configs=None,
+                tests_repo_url="",
+                tests_repo_ref="",
+                resolved_tests_repo_token="",
+                additional_repos_list=[],
+                base_url="",
+                ingest_only=True,
+            )
+        row = await storage.get_result(job_id)
+        assert row is not None
+        result = row["result"]
+        assert result["analysis_state"] == ANALYSIS_STATE_SUBMITTED
+        assert result["failed_count"] == 1
+        assert result["failures"][0]["test_name"] == "t1"
+        assert row["status"] == "completed"
+
+
+@pytest.mark.anyio
+async def test_submit_ingest_fetch_error_keeps_submitted_state(setup_test_db):
+    from unittest.mock import AsyncMock
+
+    from rootcoz.config import Settings
+    from rootcoz.main import _process_ci_source_analysis
+    from rootcoz.models import FailedTest, UnifiedAnalyzeRequest
+    from rootcoz.storage import ANALYSIS_STATE_SUBMITTED
+
+    job_id = "submit-ingest-fail-1"
+    with patch.object(storage, "DB_PATH", setup_test_db):
+        await storage.save_result(
+            job_id,
+            "",
+            "pending",
+            {"analysis_state": ANALYSIS_STATE_SUBMITTED, "job_name": "raw"},
+        )
+        body = UnifiedAnalyzeRequest(
+            type="raw",
+            failures=[FailedTest(test_name="t1", error_message="boom")],
+        )
+        with patch(
+            "rootcoz.sources.raw_source.RawSource.fetch",
+            new_callable=AsyncMock,
+            side_effect=RuntimeError("fetch boom"),
+        ):
+            await _process_ci_source_analysis(
+                job_id=job_id,
+                body=body,
+                merged=Settings(),
+                display_name="raw",
+                ai_provider="",
+                ai_model="",
+                peer_ai_configs=None,
+                tests_repo_url="",
+                tests_repo_ref="",
+                resolved_tests_repo_token="",
+                additional_repos_list=[],
+                base_url="",
+                ingest_only=True,
+            )
+        row = await storage.get_result(job_id)
+        assert row is not None
+        assert row["status"] == "failed"
+        assert row["result"]["analysis_state"] == ANALYSIS_STATE_SUBMITTED
+
+
+@pytest.mark.anyio
+async def test_submit_ingest_persists_pipeline_children(setup_test_db):
+    from unittest.mock import AsyncMock
+
+    from rootcoz.config import Settings
+    from rootcoz.main import _process_ci_source_analysis
+    from rootcoz.models import (
+        AnalysisDetail,
+        ChildJobAnalysis,
+        FailureAnalysis,
+        UnifiedAnalyzeRequest,
+    )
+    from rootcoz.sources.base import CISourceResult
+    from rootcoz.storage import ANALYSIS_STATE_SUBMITTED
+
+    job_id = "submit-ingest-pipe-1"
+    child = ChildJobAnalysis(
+        job_name="leaf",
+        build_number=2,
+        summary="collected",
+        failures=[
+            FailureAnalysis(
+                test_name="pkg.test_fail",
+                error="boom",
+                analysis=AnalysisDetail(),
+            )
+        ],
+        failed_count=1,
+    )
+    source_result = CISourceResult(
+        failures=[],
+        child_job_infos=[("leaf", 2)],
+        identity={"job_name": "pipe", "build_number": 1},
+    )
+    with patch.object(storage, "DB_PATH", setup_test_db):
+        await storage.save_result(
+            job_id,
+            "",
+            "pending",
+            {"analysis_state": ANALYSIS_STATE_SUBMITTED, "job_name": "pipe"},
+        )
+        body = UnifiedAnalyzeRequest(
+            type="jenkins",
+            job_name="pipe",
+            build_number=1,
+            jenkins_url="https://jenkins.example.com",
+        )
+        with (
+            patch(
+                "rootcoz.sources.jenkins_source.JenkinsSource.requires_pre_fetch",
+                return_value=False,
+            ),
+            patch(
+                "rootcoz.sources.jenkins_source.JenkinsSource.fetch",
+                new_callable=AsyncMock,
+                return_value=source_result,
+            ),
+            patch(
+                "rootcoz.sources.jenkins_source.JenkinsSource.analyze_children",
+                new_callable=AsyncMock,
+                return_value=(
+                    [child],
+                    [
+                        (
+                            "leaf",
+                            2,
+                            [
+                                {
+                                    "test_name": "pkg.test_fail",
+                                    "duration": 0.5,
+                                    "status": "failed",
+                                }
+                            ],
+                        )
+                    ],
+                ),
+            ) as mock_children,
+        ):
+            await _process_ci_source_analysis(
+                job_id=job_id,
+                body=body,
+                merged=Settings(
+                    jenkins_url="https://jenkins.example.com",
+                    jenkins_user="u",
+                    jenkins_password="p",
+                ),
+                display_name="pipe",
+                ai_provider="",
+                ai_model="",
+                peer_ai_configs=None,
+                tests_repo_url="",
+                tests_repo_ref="",
+                resolved_tests_repo_token="",
+                additional_repos_list=[],
+                base_url="",
+                ingest_only=True,
+            )
+        mock_children.assert_awaited()
+        assert mock_children.await_args.kwargs["ingest_only"] is True
+        row = await storage.get_result(job_id)
+        assert row is not None
+        result = row["result"]
+        assert result["analysis_state"] == ANALYSIS_STATE_SUBMITTED
+        assert result["failed_count"] == 1
+        assert result["child_job_analyses"][0]["job_name"] == "leaf"
+        assert row["status"] == "completed"
 
 
 @pytest.mark.asyncio

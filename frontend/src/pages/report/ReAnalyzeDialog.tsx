@@ -40,6 +40,7 @@ interface ReAnalyzeDialogProps {
   result: AnalysisResult
   jobId: string
   failureUuid?: string
+  inPlaceAnalyze?: boolean
 }
 
 function initFormState(p: AnalysisResult['request_params']) {
@@ -71,7 +72,7 @@ function initFormState(p: AnalysisResult['request_params']) {
   }
 }
 
-export function ReAnalyzeDialog({ open, onOpenChange, result, jobId, failureUuid }: ReAnalyzeDialogProps) {
+export function ReAnalyzeDialog({ open, onOpenChange, result, jobId, failureUuid, inPlaceAnalyze }: ReAnalyzeDialogProps) {
   const navigate = useNavigate()
   const params = result.request_params
   const isProwJob = ciSourceLabel(result.request_params) === 'Prow'
@@ -155,6 +156,10 @@ export function ReAnalyzeDialog({ open, onOpenChange, result, jobId, failureUuid
       if (failureUuid) {
         await api.post(`/api/failures/${failureUuid}/re-analyze`, body)
         onOpenChange(false)
+      } else if (inPlaceAnalyze) {
+        await api.post(`/results/${jobId}/analyze`, body)
+        onOpenChange(false)
+        navigate(`/status/${jobId}`)
       } else {
         const data = await api.post<{ job_id: string }>(`/re-analyze/${jobId}`, body)
         onOpenChange(false)
@@ -185,17 +190,31 @@ export function ReAnalyzeDialog({ open, onOpenChange, result, jobId, failureUuid
     onOpenChange,
     navigate,
     failureUuid,
+    inPlaceAnalyze,
   ])
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="sm:max-w-[600px] max-h-[85vh] flex flex-col bg-surface-card border-border-default p-0">
         <DialogHeader className="px-6 pt-5 pb-4 border-b border-border-default flex-shrink-0">
-          <DialogTitle>🔄 {failureUuid ? 'Re-Analyze Test' : isProwJob ? 'Re-Analyze Prow Job' : 'Re-Analyze Job'}</DialogTitle>
+          <DialogTitle>
+            🔄{' '}
+            {failureUuid
+              ? 'Re-Analyze Test'
+              : inPlaceAnalyze
+                ? isProwJob
+                  ? 'Analyze Prow Job'
+                  : 'Analyze Job'
+                : isProwJob
+                  ? 'Re-Analyze Prow Job'
+                  : 'Re-Analyze Job'}
+          </DialogTitle>
           <DialogDescription>
             {failureUuid
               ? 'Adjust settings and re-run analysis for this test failure. The result will update in-place.'
-              : 'Adjust settings and re-run analysis. A new analysis will be created.'}
+              : inPlaceAnalyze
+                ? 'Adjust settings (prompts, repos, models) stored from submit, then run AI on this job.'
+                : 'Adjust settings and re-run analysis. A new analysis will be created.'}
           </DialogDescription>
         </DialogHeader>
 
@@ -405,7 +424,7 @@ export function ReAnalyzeDialog({ open, onOpenChange, result, jobId, failureUuid
           </Button>
           <Button onClick={handleSubmit} disabled={submitting} className="gap-1.5">
             <RotateCw className={`h-3.5 w-3.5 ${submitting ? 'animate-spin' : ''}`} />
-            Re-Analyze
+            {inPlaceAnalyze ? 'Analyze' : 'Re-Analyze'}
           </Button>
         </DialogFooter>
       </DialogContent>

@@ -570,6 +570,7 @@ class TestDashboardCommand:
             exclude_labels=["nightly"],
             search="",
             review_status="all",
+            analysis_state="",
             limit=500,
         )
         assert "pr-check-job" in result.output
@@ -606,6 +607,7 @@ class TestDashboardCommand:
             exclude_labels=["nightly", "smoke"],
             search="",
             review_status="all",
+            analysis_state="",
             limit=500,
         )
         assert "unit-test-job" in result.output
@@ -623,6 +625,31 @@ class TestAnalyzeCommand:
         )
         assert result.exit_code == 0
         assert "queued" in result.output.lower() or "new-1" in result.output
+
+    def test_submit_async(self, mock_client):
+        mock_client.submit.return_value = {
+            "status": "queued",
+            "job_id": "sub-1",
+            "message": "Submit job queued.",
+        }
+        result = runner.invoke(
+            app, ["submit", "--job-name", "my-job", "--build-number", "42"]
+        )
+        assert result.exit_code == 0
+        mock_client.submit.assert_called_once()
+        assert not mock_client.analyze.called
+
+
+class TestResultsAnalyzeCommand:
+    def test_results_analyze(self, mock_client):
+        mock_client.analyze_submitted.return_value = {
+            "status": "queued",
+            "job_id": "job-1",
+            "result_url": "/results/job-1",
+        }
+        result = runner.invoke(app, ["results", "analyze", "job-1"])
+        assert result.exit_code == 0
+        mock_client.analyze_submitted.assert_called_once_with("job-1")
 
 
 class TestStatusCommand:

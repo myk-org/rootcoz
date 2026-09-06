@@ -17,13 +17,20 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from rootcoz.engine.core import get_failure_signature
 from rootcoz.models import (
     AdditionalRepo,
     AiConfigEntry,
+    AnalysisDetail,
     BaseTestEntry,
     ChildJobAnalysis,
     FailedTest,
     FailureAnalysis,
+)
+
+INGEST_COMPLETE_SUMMARY = (
+    "CI results have been collected and stored. AI analysis has not run. "
+    "Select Analyze to investigate the recorded failures."
 )
 
 if TYPE_CHECKING:
@@ -144,6 +151,18 @@ class CISourceResult:
             len(self.skipped_tests),
             len(self.failures),
         )
+
+    def unanalyzed_failure_analyses(self) -> list[FailureAnalysis]:
+        """Build FailureAnalysis rows from fetch data with empty AI fields."""
+        return [
+            FailureAnalysis(
+                test_name=failure.test_name,
+                error=failure.error_message or failure.stack_trace,
+                analysis=AnalysisDetail(),
+                error_signature=get_failure_signature(failure),
+            )
+            for failure in self.failures
+        ]
 
 
 class CISource(ABC):
@@ -337,6 +356,7 @@ class CISource(ABC):
         peer_ai_configs: list[AiConfigEntry] | None = None,
         cloned_repos: dict[str, Any] | None = None,
         auth_header: str = "",
+        ingest_only: bool = False,
     ) -> tuple[list[ChildJobAnalysis], list[tuple[str, int, list[dict[str, Any]]]]]:
         """Analyze failed child jobs (e.g. Jenkins pipeline sub-jobs).
 
@@ -344,6 +364,7 @@ class CISource(ABC):
             ``(analyses, test_entry_scopes)`` where each scope is
             ``(child_job_name, child_build_number, entry_dicts)``.
             Default is empty analyses and no scopes. Jenkins overrides.
+            When ``ingest_only`` is True, fetch child tests without AI.
         """
         _ = (
             source_result,
@@ -357,6 +378,7 @@ class CISource(ABC):
             peer_ai_configs,
             cloned_repos,
             auth_header,
+            ingest_only,
         )
         return [], []
 

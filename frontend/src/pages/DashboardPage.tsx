@@ -15,6 +15,8 @@ import {
 } from '@/components/ui/select'
 import { ReviewStatusFilter } from '@/components/shared/ReviewStatusFilter'
 import { parseReviewStatus, type ReviewStatusFilter as ReviewStatusValue } from '@/lib/review-status'
+import { AnalysisStateFilterControl } from '@/components/shared/AnalysisStateFilter'
+import { analysisStateLabel, parseAnalysisState, type AnalysisStateFilter } from '@/lib/analysis-state'
 import { MultiSelectFilter } from '@/components/shared/MultiSelectFilter'
 import {
   Table,
@@ -176,6 +178,19 @@ export function DashboardPage() {
     }, { replace: true })
   }, [setSearchParams])
 
+  const analysisState = useMemo<AnalysisStateFilter>(() => {
+    return parseAnalysisState(searchParams.get('analysis_state'))
+  }, [searchParams])
+
+  const setAnalysisState = useCallback((value: AnalysisStateFilter) => {
+    setSearchParams((prev) => {
+      const next = new URLSearchParams(prev)
+      if (value === 'all') next.delete('analysis_state')
+      else next.set('analysis_state', value)
+      return next
+    }, { replace: true })
+  }, [setSearchParams])
+
   // Metadata filter state — persisted in URL query params (multi-select)
   const teamParam = searchParams.getAll('team').sort().join(',')
   const tierParam = searchParams.getAll('tier').sort().join(',')
@@ -239,10 +254,11 @@ export function DashboardPage() {
       next.delete('exclude_label')
       next.delete('status')
       next.delete('review_status')
+      next.delete('analysis_state')
       return next
     }, { replace: true })
   }, [setSearchParams])
-  const hasMetadataFilters = !!(metaTeams.size > 0 || metaTiers.size > 0 || metaVersions.size > 0 || metaLabels.length > 0 || metaExcludeLabels.length > 0 || selectedStatuses.size > 0 || reviewStatus !== 'all')
+  const hasMetadataFilters = !!(metaTeams.size > 0 || metaTiers.size > 0 || metaVersions.size > 0 || metaLabels.length > 0 || metaExcludeLabels.length > 0 || selectedStatuses.size > 0 || reviewStatus !== 'all' || analysisState !== 'all')
   const { options: metadataOptions } = useMetadataOptions()
   const setDateRange = useCallback((from: string, to: string) => {
     setSearchParams((prev) => {
@@ -300,6 +316,7 @@ export function DashboardPage() {
       if (dateFrom) params.set('date_from', dateFrom)
       if (dateTo) params.set('date_to', dateTo)
       if (reviewStatus !== 'all') params.set('review_status', reviewStatus)
+      if (analysisState !== 'all') params.set('analysis_state', analysisState)
       // Server-side pagination
       params.set('limit', String(perPage))
       params.set('offset', String((page - 1) * perPage))
@@ -320,7 +337,7 @@ export function DashboardPage() {
         setLoading(false)
       }
     }
-  }, [metaTeams, metaTiers, metaVersions, metaLabels, metaExcludeLabels, debouncedSearch, selectedStatuses, dateFrom, dateTo, reviewStatus, perPage, page])
+  }, [metaTeams, metaTiers, metaVersions, metaLabels, metaExcludeLabels, debouncedSearch, selectedStatuses, dateFrom, dateTo, reviewStatus, analysisState, perPage, page])
 
   const fetchJobsRef = useLatestRef(fetchJobs)
 
@@ -338,12 +355,12 @@ export function DashboardPage() {
   // Reset page when filters change (but not when page itself changes)
   const prevFiltersRef = useRef('')
   useEffect(() => {
-    const filterKey = [debouncedSearch, statusParam, reviewStatus, perPage, dateFrom, dateTo, teamParam, tierParam, versionParam, labelParam, excludeLabelParam].join('|')
+    const filterKey = [debouncedSearch, statusParam, reviewStatus, analysisState, perPage, dateFrom, dateTo, teamParam, tierParam, versionParam, labelParam, excludeLabelParam].join('|')
     if (prevFiltersRef.current && prevFiltersRef.current !== filterKey) {
       setPage(1)
     }
     prevFiltersRef.current = filterKey
-  }, [debouncedSearch, statusParam, reviewStatus, perPage, dateFrom, dateTo, teamParam, tierParam, versionParam, labelParam, excludeLabelParam])
+  }, [debouncedSearch, statusParam, reviewStatus, analysisState, perPage, dateFrom, dateTo, teamParam, tierParam, versionParam, labelParam, excludeLabelParam])
 
   const sorted = useMemo(() => {
     const copy = [...jobs]
@@ -538,6 +555,7 @@ export function DashboardPage() {
             className="w-full sm:w-40"
           />
           <ReviewStatusFilter value={reviewStatus} onChange={setReviewStatus} />
+          <AnalysisStateFilterControl value={analysisState} onChange={setAnalysisState} />
           <DateRangePresetFilter from={dateFrom} to={dateTo} onChange={setDateRange} />
           <Select value={String(perPage)} onValueChange={(v) => setPerPage(Number(v))}>
             <SelectTrigger aria-label="Rows per page" className="w-full sm:w-20">
@@ -660,7 +678,7 @@ export function DashboardPage() {
         ) : (viewMode === 'flat' ? pageJobs.length === 0 : sorted.length === 0) && (!error || jobs.length > 0) ? (
           <div className="flex flex-col items-center justify-center rounded-lg border border-border-muted bg-surface-card py-16 text-center animate-fade-in">
             <p className="text-text-secondary">
-              {search || selectedStatuses.size > 0 || reviewStatus !== 'all' || dateFrom || dateTo || hasMetadataFilters
+              {search || selectedStatuses.size > 0 || reviewStatus !== 'all' || analysisState !== 'all' || dateFrom || dateTo || hasMetadataFilters
                 ? 'No jobs match your filters.'
                 : 'No analysis runs yet.'}
             </p>
@@ -683,6 +701,7 @@ export function DashboardPage() {
                 )}
                 <SortableHeader label="Job" sortKey="job_name" currentSort={sortKey} currentDirection={sortDir} onSort={handleSort} className="w-[40%]" />
                 <SortableHeader label="Status" sortKey="status" currentSort={sortKey} currentDirection={sortDir} onSort={handleSort} />
+                <TableHead>Mode</TableHead>
                 <SortableHeader label="Failures" sortKey="failure_count" currentSort={sortKey} currentDirection={sortDir} onSort={handleSort} className="text-center" />
                 <SortableHeader label="Reviewed" sortKey="reviewed_count" currentSort={sortKey} currentDirection={sortDir} onSort={handleSort} className="text-center" />
                 <SortableHeader label="Comments" sortKey="comment_count" currentSort={sortKey} currentDirection={sortDir} onSort={handleSort} className="text-center" />
@@ -777,6 +796,13 @@ export function DashboardPage() {
                         </TooltipTrigger>
                         <TooltipContent>{displayStatus === 'timeout' ? 'AI analysis timed out' : `Analysis status: ${job.status}`}</TooltipContent>
                       </Tooltip>
+                    </TableCell>
+
+                    {/* Mode: submitted vs analyzed */}
+                    <TableCell>
+                      <span className="text-xs text-text-tertiary">
+                        {analysisStateLabel(job.analysis_state)}
+                      </span>
                     </TableCell>
 
                     {/* Failures + Passed/Skipped counts */}
@@ -937,6 +963,7 @@ export function DashboardPage() {
                           )}
                           <TableHead className="w-[40%]">Job</TableHead>
                           <TableHead>Status</TableHead>
+                          <TableHead>Mode</TableHead>
                           <TableHead className="text-center">Failures</TableHead>
                           <TableHead className="text-center">Reviewed</TableHead>
                           <TableHead className="text-center">Comments</TableHead>
@@ -1028,6 +1055,11 @@ export function DashboardPage() {
                                   </TooltipTrigger>
                                   <TooltipContent>{displayStatus === 'timeout' ? 'AI analysis timed out' : `Analysis status: ${job.status}`}</TooltipContent>
                                 </Tooltip>
+                              </TableCell>
+                              <TableCell>
+                                <span className="text-xs text-text-tertiary">
+                                  {analysisStateLabel(job.analysis_state)}
+                                </span>
                               </TableCell>
                               {/* Failures + Passed/Skipped counts */}
                               <TableCell className="text-center">

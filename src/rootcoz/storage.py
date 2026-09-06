@@ -13,7 +13,7 @@ from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any, get_args
+from typing import Any, Literal, get_args
 
 import aiosqlite
 from simple_logger.logger import get_logger
@@ -35,7 +35,42 @@ from rootcoz.models import (
 
 logger = get_logger(name=__name__, level=os.environ.get("LOG_LEVEL", "INFO"))
 
-DB_PATH = Path(os.getenv("DB_PATH", "/data/results.db"))
+
+def _resolve_db_path() -> Path:
+    """Use ``DB_PATH`` when its directory is writable, else XDG data home.
+
+    Bind-mounted ``/data`` is often owned by the host user, so the container
+    ``appuser`` cannot create WAL files next to the SQLite database.
+    """
+    configured = Path(os.getenv("DB_PATH", "/data/results.db"))
+    parent = configured.parent
+    try:
+        parent.mkdir(parents=True, exist_ok=True)
+        probe = parent / ".rootcoz-write-probe"
+        probe.write_bytes(b"")
+        probe.unlink(missing_ok=True)
+        if configured.exists() and not os.access(configured, os.W_OK):
+            raise OSError(f"{configured} is not writable")
+        return configured
+    except OSError as exc:
+        xdg = os.environ.get("XDG_DATA_HOME")
+        fallback_root = Path(xdg) if xdg else Path.home() / ".local" / "share"
+        fallback = fallback_root / "rootcoz" / "results.db"
+        fallback.parent.mkdir(parents=True, exist_ok=True)
+        logger.warning(
+            "Database path %s is not writable (%s); using %s",
+            configured,
+            exc,
+            fallback,
+        )
+        return fallback
+
+
+DB_PATH = _resolve_db_path()
+
+ANALYSIS_STATE_SUBMITTED: Literal["submitted"] = "submitted"
+ANALYSIS_STATE_ANALYZED: Literal["analyzed"] = "analyzed"
+VALID_ANALYSIS_STATES = frozenset({ANALYSIS_STATE_SUBMITTED, ANALYSIS_STATE_ANALYZED})
 
 
 @asynccontextmanager
@@ -557,7 +592,8 @@ async def init_db() -> None:
                 analysis_started_at TIMESTAMP,
                 job_name TEXT NOT NULL DEFAULT '',
                 build_number INTEGER NOT NULL DEFAULT 0,
-                build_id TEXT NOT NULL DEFAULT ''
+                build_id TEXT NOT NULL DEFAULT '',
+                analysis_state TEXT NOT NULL DEFAULT 'analyzed'
             )
         """)
         await db.execute("""
@@ -708,6 +744,12 @@ async def init_db() -> None:
             db, "results", "build_number", "INTEGER NOT NULL DEFAULT 0"
         )
         await _migrate_add_column(db, "results", "build_id", "TEXT NOT NULL DEFAULT ''")
+        await _migrate_add_column(
+            db,
+            "results",
+            "analysis_state",
+            "TEXT NOT NULL DEFAULT 'analyzed'",
+        )
 
         # Backfill job_name/build_number/build_id from result_json.
         # Uses atomic claim so only one concurrent init_db() runs the scan.
@@ -1657,6 +1699,26 @@ def _extract_denormalized_fields(result: dict[str, Any] | None) -> tuple[str, in
     return (job_name, build_number, build_id)
 
 
+def _coerce_analysis_state(value: Any) -> str:
+    """Return a valid analysis_state, defaulting unknown/empty to analyzed."""
+    state = str(value or ANALYSIS_STATE_ANALYZED)
+    return state if state in VALID_ANALYSIS_STATES else ANALYSIS_STATE_ANALYZED
+
+
+def _analysis_state_filter_sql(
+    analysis_state: str, *, column: str
+) -> tuple[str, list[Any]]:
+    """SQL fragment and params for an optional analysis_state filter."""
+    if not analysis_state:
+        return "", []
+    if analysis_state not in VALID_ANALYSIS_STATES:
+        raise ValueError(
+            f"Invalid analysis_state '{analysis_state}'. "
+            f"Must be {', '.join(sorted(VALID_ANALYSIS_STATES))}."
+        )
+    return f"COALESCE({column}, 'analyzed') = ?", [analysis_state]
+
+
 def _append_denormalized_set_parts(
     result: dict[str, Any],
     set_parts: list[str],
@@ -1678,6 +1740,9 @@ def _append_denormalized_set_parts(
     if "build_id" in result:
         set_parts.append("build_id = ?")
         params.append(build_id)
+    if "analysis_state" in result:
+        set_parts.append("analysis_state = ?")
+        params.append(_coerce_analysis_state(result.get("analysis_state")))
 
 
 def _build_status_update_clause(
@@ -1746,11 +1811,12 @@ async def save_result(
     async with _connect_db() as db:
         # Insert the row if it doesn't exist yet (preserves created_at / analysis_started_at).
         job_name, build_number, build_id_val = _extract_denormalized_fields(result)
+        insert_state = _coerce_analysis_state((result or {}).get("analysis_state"))
         await db.execute(
             """
             INSERT OR IGNORE INTO results (job_id, build_url, status, result_json,
-                                           job_name, build_number, build_id)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+                                           job_name, build_number, build_id, analysis_state)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 job_id,
@@ -1760,6 +1826,7 @@ async def save_result(
                 job_name,
                 build_number,
                 build_id_val,
+                insert_state,
             ),
         )
         # Update the row (handles both fresh inserts and existing rows).
@@ -2131,24 +2198,37 @@ async def find_failure_by_uuid(
     return None
 
 
-async def list_results(limit: int = 50) -> list[dict[str, Any]]:
+async def list_results(
+    limit: int = 50, *, analysis_state: str = ""
+) -> list[dict[str, Any]]:
     """List recent analysis results.
 
     Args:
         limit: Maximum number of results to return.
+        analysis_state: Optional ``submitted`` / ``analyzed`` filter.
 
     Returns:
         List of result summary dictionaries.
     """
+    conditions: list[str] = []
+    params: list[Any] = []
+    clause, extra = _analysis_state_filter_sql(analysis_state, column="analysis_state")
+    if clause:
+        conditions.append(clause)
+        params.extend(extra)
+    where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+    params.append(limit)
     async with _connect_db() as db:
         cursor = await db.execute(
-            """
-            SELECT job_id, build_url, status, created_at
+            f"""
+            SELECT job_id, build_url, status, created_at,
+                   COALESCE(analysis_state, 'analyzed') AS analysis_state
             FROM results
+            {where}
             ORDER BY created_at DESC
             LIMIT ?
             """,
-            (limit,),
+            params,
         )
         rows = await cursor.fetchall()
         return [with_build_url_aliases(dict(row)) for row in rows]
@@ -3327,6 +3407,7 @@ def _parse_dashboard_row(row: aiosqlite.Row) -> dict[str, Any]:
         "error": row_data.get("error", ""),
         "reviewed_count": row_data["reviewed_count"],
         "comment_count": row_data["comment_count"],
+        "analysis_state": row_data.get("analysis_state") or ANALYSIS_STATE_ANALYZED,
     }
     result_data = parse_result_json(row["result_json"], job_id=row["job_id"])
     if result_data:
@@ -3362,6 +3443,7 @@ def _parse_dashboard_row(row: aiosqlite.Row) -> dict[str, Any]:
 _DASHBOARD_BASE_SQL = """
     SELECT r.job_id, r.build_url, r.status, r.result_json,
         r.created_at, r.completed_at, r.analysis_started_at, r.error,
+        COALESCE(r.analysis_state, 'analyzed') AS analysis_state,
         (SELECT COUNT(*) FROM failure_reviews fr
          WHERE fr.job_id = r.job_id AND fr.reviewed = 1) AS reviewed_count,
         (SELECT COUNT(*) FROM comments c
@@ -3416,6 +3498,7 @@ async def list_results_for_dashboard_filtered(
     date_from: str = "",
     date_to: str = "",
     review_status: str = "all",
+    analysis_state: str = "",
     limit: int = DEFAULT_DASHBOARD_LIMIT,
     offset: int = 0,
 ) -> dict[str, Any]:
@@ -3491,6 +3574,13 @@ async def list_results_for_dashboard_filtered(
             "NOT EXISTS (SELECT 1 FROM failure_reviews fr "
             "WHERE fr.job_id = r.job_id AND fr.reviewed = 1)"
         )
+
+    clause, extra = _analysis_state_filter_sql(
+        analysis_state, column="r.analysis_state"
+    )
+    if clause:
+        conditions.append(clause)
+        params.extend(extra)
 
     if job_names is not None:
         if not job_names:
